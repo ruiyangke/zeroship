@@ -3,7 +3,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
-use crate::server::http_response;
+use crate::server::{http_response, rpc_error_response};
 use crate::v8::{RpcResult, create_v8_runtime, handle_rpc};
 
 pub async fn dev(entry: &str, port: u16, compiler_bin: &str, minify: bool) -> Result<(), deno_error::JsErrorBox> {
@@ -80,12 +80,7 @@ pub async fn dev(entry: &str, port: u16, compiler_bin: &str, minify: bool) -> Re
             if headers.starts_with("POST /rpc") && !body.is_empty() {
                 match handle_rpc(&mut runtime, &rpc_result, body).await {
                     Ok(json) => http_response(200, "application/json", json.as_bytes()),
-                    Err(e) => {
-                        let err_body = format!(
-                            r#"{{"jsonrpc":"2.0","error":{{"code":-32603,"message":"{}"}},"id":null}}"#, e
-                        );
-                        http_response(500, "application/json", err_body.as_bytes())
-                    }
+                    Err(e) => rpc_error_response(500, &e.to_string(), None),
                 }
             } else if headers.starts_with("POST /__dev/save") {
                 // Save + recompile
