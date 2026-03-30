@@ -12,10 +12,23 @@ pub enum DbError {
     Sqlite(#[from] rusqlite::Error),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("Invalid collection name: {0}")]
+    InvalidName(String),
+}
+
+fn validate_collection_name(name: &str) -> Result<(), DbError> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(DbError::InvalidName("must be 1-64 characters".into()));
+    }
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return Err(DbError::InvalidName("only alphanumeric and underscore allowed".into()));
+    }
+    Ok(())
 }
 
 #[op2(fast)]
 pub fn op_db_ensure_table(state: &mut OpState, #[string] name: &str) -> Result<(), DbError> {
+    validate_collection_name(name)?;
     let db = state.borrow::<Rc<Connection>>().clone();
     db.execute(
         &format!(
@@ -38,6 +51,7 @@ pub fn op_db_insert(
     #[string] collection: &str,
     #[string] doc_json: &str,
 ) -> Result<String, DbError> {
+    validate_collection_name(collection)?;
     let db = state.borrow::<Rc<Connection>>().clone();
 
     let id = Uuid::new_v4().to_string();
@@ -62,6 +76,7 @@ pub fn op_db_find(
     #[string] collection: &str,
     #[string] filter_json: &str,
 ) -> Result<String, DbError> {
+    validate_collection_name(collection)?;
     let db = state.borrow::<Rc<Connection>>().clone();
 
     let mut stmt = db.prepare(&format!(r#"SELECT data FROM "{collection}""#))?;
@@ -100,6 +115,7 @@ pub fn op_db_update(
     #[string] id: &str,
     #[string] updates_json: &str,
 ) -> Result<String, DbError> {
+    validate_collection_name(collection)?;
     let db = state.borrow::<Rc<Connection>>().clone();
 
     let existing: String = db.query_row(
@@ -132,6 +148,7 @@ pub fn op_db_delete(
     #[string] collection: &str,
     #[string] id: &str,
 ) -> Result<(), DbError> {
+    validate_collection_name(collection)?;
     let db = state.borrow::<Rc<Connection>>().clone();
     db.execute(
         &format!(r#"DELETE FROM "{collection}" WHERE id = ?1"#),
