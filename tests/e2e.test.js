@@ -4,6 +4,14 @@ import { compile } from '../packages/appbase/src/compiler/plugin.js'
 import { createDb } from '../packages/appbase/src/db.js'
 import { createServer } from '../packages/appbase/src/runtime/server.js'
 
+function rpc(address, method, params = [], id = 1) {
+  return fetch(`${address}/rpc`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', method, params, id })
+  }).then(r => r.json())
+}
+
 describe('e2e: single file to running app', () => {
   let server, address, db
 
@@ -27,7 +35,8 @@ serve(App)
 
     // Verify compilation produced valid output
     assert.ok(serverCode.includes('addTodo'))
-    assert.ok(clientCode.includes('fetch'))
+    assert.ok(clientCode.includes("fetch('/rpc'"))
+    assert.ok(clientCode.includes('jsonrpc'))
     assert.equal(entryComponent, 'App')
 
     // Set up real server with compiled functions
@@ -48,24 +57,12 @@ serve(App)
     db.close()
   })
 
-  it('compiles and the API works end to end', async () => {
-    // Add a todo via the compiled API
-    let res = await fetch(`${address}/api/addTodo`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ args: ['hello world'] })
-    })
-    const todo = await res.json()
-    assert.equal(todo.text, 'hello world')
+  it('compiles and the JSON-RPC API works end to end', async () => {
+    const add = await rpc(address, 'addTodo', ['hello world'], 1)
+    assert.equal(add.result.text, 'hello world')
 
-    // Fetch all todos
-    res = await fetch(`${address}/api/getTodos`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ args: [] })
-    })
-    const todos = await res.json()
-    assert.equal(todos.length, 1)
-    assert.equal(todos[0].text, 'hello world')
+    const list = await rpc(address, 'getTodos', [], 2)
+    assert.equal(list.result.length, 1)
+    assert.equal(list.result[0].text, 'hello world')
   })
 })

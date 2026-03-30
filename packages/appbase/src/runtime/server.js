@@ -1,22 +1,25 @@
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
+import { JSONRPCServer } from 'json-rpc-2.0'
 
 export function createServer({ functions, port = 3000, staticDir = null }) {
   const app = new Hono()
+  const rpcServer = new JSONRPCServer()
 
-  // Register RPC routes for each server function
-  app.post('/api/:name', async (c) => {
-    const name = c.req.param('name')
-    const fn = functions[name]
-    if (!fn) {
-      return c.json({ error: `Function '${name}' not found` }, 404)
+  // Register all functions as JSON-RPC methods
+  for (const [name, fn] of Object.entries(functions)) {
+    rpcServer.addMethod(name, (params) => fn(...(params || [])))
+  }
+
+  // Single JSON-RPC endpoint
+  app.post('/rpc', async (c) => {
+    const request = await c.req.json()
+    const response = await rpcServer.receive(request)
+    if (response) {
+      return c.json(response)
     }
-
-    const body = await c.req.json()
-    const args = body.args || []
-    const result = await fn(...args)
-    return c.json(result)
+    return c.body(null, 204)
   })
 
   // Serve static client files if dir is provided
@@ -30,5 +33,5 @@ export function createServer({ functions, port = 3000, staticDir = null }) {
 
   const address = `http://localhost:${httpServer.address().port}`
 
-  return { server: httpServer, address, app }
+  return { server: httpServer, address, app, rpcServer }
 }

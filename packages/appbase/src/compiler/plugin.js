@@ -127,20 +127,28 @@ export function compile(source) {
       }
     },
     FunctionDeclaration(path) {
-      if (serverFunctions.has(path.node.id.name)) {
-        // Replace server function with RPC stub
+      if (serverFunctions.has(path.node.id.name) && !path.node.__rpcReplaced) {
+        // Replace server function with JSON-RPC 2.0 stub
         const name = path.node.id.name
         const params = path.node.params.map(p => p.name)
         const rpcFn = parse(`
           async function ${name}(${params.join(', ')}) {
-            const res = await fetch('/api/${name}', {
+            const res = await fetch('/rpc', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ args: [${params.join(', ')}] })
+              body: JSON.stringify({
+                jsonrpc: '2.0',
+                method: '${name}',
+                params: [${params.join(', ')}],
+                id: Date.now()
+              })
             });
-            return res.json();
+            const data = await res.json();
+            if (data.error) throw new Error(data.error.message);
+            return data.result;
           }
         `, { sourceType: 'module' }).program.body[0]
+        rpcFn.__rpcReplaced = true
         path.replaceWith(rpcFn)
         path.skip()
       }

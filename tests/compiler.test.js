@@ -37,9 +37,10 @@ describe('compiler', () => {
     assert.ok(result.server.includes('todos.insert'))
   })
 
-  it('client code replaces calls with fetch', () => {
+  it('client code replaces calls with JSON-RPC fetch', () => {
     const result = compile(input)
-    assert.ok(result.client.includes('fetch'))
+    assert.ok(result.client.includes("fetch('/rpc'"))
+    assert.ok(result.client.includes('jsonrpc'))
     assert.ok(!result.client.includes('db.collection'))
   })
 

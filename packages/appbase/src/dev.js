@@ -93,24 +93,28 @@ ${nonExportedFns.map(name => `export { ${name} };`).join('\n')}
   // - Everything else goes to Vite (client bundle + HMR)
   const { createServer: createHttpServer } = await import('node:http')
   const { Hono } = await import('hono')
+  const { JSONRPCServer } = await import('json-rpc-2.0')
 
   const app = new Hono()
+  const rpcServer = new JSONRPCServer()
 
-  // API routes
-  app.post('/api/:name', async (c) => {
-    const name = c.req.param('name')
-    const fn = functions[name]
-    if (!fn) return c.json({ error: `Function '${name}' not found` }, 404)
-    const body = await c.req.json()
-    const args = body.args || []
-    const result = await fn(...args)
-    return c.json(result)
+  // Register all functions as JSON-RPC methods
+  for (const [name, fn] of Object.entries(functions)) {
+    rpcServer.addMethod(name, (params) => fn(...(params || [])))
+  }
+
+  // Single JSON-RPC endpoint
+  app.post('/rpc', async (c) => {
+    const request = await c.req.json()
+    const response = await rpcServer.receive(request)
+    if (response) return c.json(response)
+    return c.body(null, 204)
   })
 
   // Create Node.js HTTP server
   const httpServer = createHttpServer(async (req, res) => {
     // Try Hono first for API routes
-    if (req.url.startsWith('/api/')) {
+    if (req.url === '/rpc') {
       const response = await app.fetch(new Request(`http://localhost${req.url}`, {
         method: req.method,
         headers: req.headers,

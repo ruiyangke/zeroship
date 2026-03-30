@@ -3,6 +3,14 @@ import assert from 'node:assert/strict'
 import { createServer } from '../packages/appbase/src/runtime/server.js'
 import { createDb } from '../packages/appbase/src/db.js'
 
+function rpc(address, method, params = [], id = 1) {
+  return fetch(`${address}/rpc`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', method, params, id })
+  }).then(r => r.json())
+}
+
 describe('server runtime', () => {
   let server, address, db
 
@@ -29,34 +37,44 @@ describe('server runtime', () => {
     db.close()
   })
 
-  it('calls a server function via POST /api/:name', async () => {
-    const res = await fetch(`${address}/api/addTodo`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ args: ['buy milk'] })
-    })
-    const data = await res.json()
-    assert.ok(data.id)
-    assert.equal(data.text, 'buy milk')
+  it('calls a method via JSON-RPC', async () => {
+    const res = await rpc(address, 'addTodo', ['buy milk'])
+    assert.equal(res.jsonrpc, '2.0')
+    assert.equal(res.id, 1)
+    assert.ok(res.result.id)
+    assert.equal(res.result.text, 'buy milk')
   })
 
   it('returns results from getTodos', async () => {
-    const res = await fetch(`${address}/api/getTodos`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ args: [] })
-    })
-    const data = await res.json()
-    assert.ok(Array.isArray(data))
-    assert.ok(data.length > 0)
+    const res = await rpc(address, 'getTodos', [], 2)
+    assert.equal(res.jsonrpc, '2.0')
+    assert.ok(Array.isArray(res.result))
+    assert.ok(res.result.length > 0)
   })
 
-  it('returns 404 for unknown function', async () => {
-    const res = await fetch(`${address}/api/noSuchFn`, {
+  it('returns error for unknown method', async () => {
+    const res = await rpc(address, 'noSuchFn', [], 3)
+    assert.equal(res.jsonrpc, '2.0')
+    assert.ok(res.error)
+    assert.equal(res.error.code, -32601) // Method not found
+  })
+
+  it('supports batch requests', async () => {
+    const batch = [
+      { jsonrpc: '2.0', method: 'addTodo', params: ['item 1'], id: 10 },
+      { jsonrpc: '2.0', method: 'addTodo', params: ['item 2'], id: 11 },
+      { jsonrpc: '2.0', method: 'getTodos', params: [], id: 12 },
+    ]
+    const res = await fetch(`${address}/rpc`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ args: [] })
-    })
-    assert.equal(res.status, 404)
+      body: JSON.stringify(batch)
+    }).then(r => r.json())
+
+    assert.ok(Array.isArray(res))
+    assert.equal(res.length, 3)
+    assert.equal(res[0].result.text, 'item 1')
+    assert.equal(res[1].result.text, 'item 2')
+    assert.ok(res[2].result.length >= 3) // at least the 3 we added
   })
 })
