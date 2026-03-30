@@ -12,16 +12,31 @@ use std::time::Duration;
 
 use crate::cpu;
 
-/// Internal holder for RPC result strings.
-/// Used to pass results from JS to Rust via an op (avoids V8 HandleScope complexity).
+/// Bidirectional string holder for Rust ↔ JS communication.
+/// - Rust sets `request` before calling JS
+/// - JS reads `request` via op, processes it, writes `response` via op
+/// - Rust reads `response` after JS completes
+/// This avoids embedding JSON in script strings (no compilation per request,
+/// no template literal injection risk).
 #[derive(Debug)]
-pub struct RpcResultHolder(pub RefCell<String>);
+pub struct RpcBridge {
+    pub request: RefCell<String>,
+    pub response: RefCell<String>,
+}
 
-/// Op that JS calls to pass the RPC result back to Rust.
+/// Op: JS reads the RPC request JSON set by Rust.
+#[op2]
+#[string]
+pub fn op_rpc_get_request(state: &mut OpState) -> String {
+    let bridge = state.borrow::<Rc<RpcBridge>>();
+    bridge.request.borrow().clone()
+}
+
+/// Op: JS writes the RPC response JSON back to Rust.
 #[op2(fast)]
-pub fn op_set_rpc_result(state: &mut OpState, #[string] result: &str) {
-    let holder = state.borrow::<Rc<RpcResultHolder>>();
-    *holder.0.borrow_mut() = result.to_string();
+pub fn op_rpc_set_response(state: &mut OpState, #[string] result: &str) {
+    let bridge = state.borrow::<Rc<RpcBridge>>();
+    *bridge.response.borrow_mut() = result.to_string();
 }
 
 /// Core runtime JS — console + RPC dispatch. Plugins' JS bridges are appended.
@@ -29,14 +44,14 @@ static CORE_RUNTIME_JS: &str = include_str!("embed/runtime.js");
 
 /// Create a V8 isolate with plugins loaded.
 ///
-/// Returns the `JsRuntime` and the `RpcResultHolder` for extracting RPC responses.
+/// Returns the `JsRuntime` and the `RpcBridge` for extracting RPC responses.
 pub fn create(
     plugins: &[Box<dyn Plugin>],
     app_id: &str,
     data_dir: &Path,
-) -> Result<(JsRuntime, Rc<RpcResultHolder>), String> {
-    // Collect ops from all plugins + core op
-    let mut all_ops = vec![op_set_rpc_result()];
+) -> Result<(JsRuntime, Rc<RpcBridge>), String> {
+    // Collect ops from all plugins + core ops
+    let mut all_ops = vec![op_rpc_get_request(), op_rpc_set_response()];
     for plugin in plugins {
         all_ops.extend(plugin.ops());
     }
@@ -68,11 +83,14 @@ pub fn create(
         ..Default::default()
     });
 
-    let rpc_holder = Rc::new(RpcResultHolder(RefCell::new(String::new())));
+    let rpc_bridge = Rc::new(RpcBridge {
+        request: RefCell::new(String::new()),
+        response: RefCell::new(String::new()),
+    });
     {
         let op_state = runtime.op_state();
         let mut state = op_state.borrow_mut();
-        state.put(rpc_holder.clone());
+        state.put(rpc_bridge.clone());
 
         // Initialize each plugin's state
         let mut ctx = PluginContext {
@@ -85,13 +103,29 @@ pub fn create(
         }
     }
 
-    Ok((runtime, rpc_holder))
+    Ok((runtime, rpc_bridge))
 }
 
+/// Fixed RPC dispatch script — compiled ONCE by V8, reused for all requests.
+/// Reads request JSON from Rust via op, dispatches, writes response back via op.
+static RPC_DISPATCH_SCRIPT: &str = r#"(async () => {
+    const requestJson = Deno.core.ops.op_rpc_get_request();
+    const result = await globalThis.__handleRpc(requestJson);
+    Deno.core.ops.op_rpc_set_response(result);
+})()"#;
+
 /// Execute an RPC request in the isolate and return the result with CPU timing.
+///
+/// Flow:
+/// 1. Rust writes request JSON to RpcBridge.request
+/// 2. V8 executes the fixed dispatch script (compiled once, reused)
+/// 3. JS reads request via op_rpc_get_request, dispatches, writes via op_rpc_set_response
+/// 4. Rust reads response from RpcBridge.response
+///
+/// No per-request script compilation. No JSON embedding in JS strings.
 pub async fn handle_rpc(
     runtime: &mut JsRuntime,
-    rpc_holder: &Rc<RpcResultHolder>,
+    rpc_bridge: &Rc<RpcBridge>,
     request_json: &str,
     cpu_limit: Option<Duration>,
 ) -> Result<RpcResult, deno_error::JsErrorBox> {
@@ -99,17 +133,15 @@ pub async fn handle_rpc(
         deno_error::JsErrorBox::generic(e.to_string())
     }
 
-    let escaped = request_json.replace('\\', "\\\\").replace('`', "\\`");
-    let script = format!(
-        r#"(async () => {{
-            const result = await globalThis.__handleRpc(`{escaped}`);
-            Deno.core.ops.op_set_rpc_result(result);
-        }})()"#
-    );
+    // Step 1: Set request JSON in bridge (Rust → JS)
+    *rpc_bridge.request.borrow_mut() = request_json.to_string();
 
     let cpu_before = cpu::thread_cpu_time();
 
-    runtime.execute_script("<rpc>", script).map_err(err)?;
+    // Step 2: Execute the fixed dispatch script (no compilation — V8 caches it)
+    runtime
+        .execute_script("<rpc>", RPC_DISPATCH_SCRIPT)
+        .map_err(err)?;
     runtime
         .run_event_loop(Default::default())
         .await
@@ -117,7 +149,7 @@ pub async fn handle_rpc(
 
     let cpu_time = cpu::thread_cpu_time().saturating_sub(cpu_before);
 
-    // Check CPU limit
+    // Step 3: Check CPU limit
     if let Some(max) = cpu_limit {
         if cpu_time > max {
             return Err(deno_error::JsErrorBox::generic(format!(
@@ -128,8 +160,9 @@ pub async fn handle_rpc(
         }
     }
 
+    // Step 4: Read response from bridge (JS → Rust)
     Ok(RpcResult {
-        json: rpc_holder.0.borrow().clone(),
+        json: rpc_bridge.response.borrow().clone(),
         cpu_time,
     })
 }

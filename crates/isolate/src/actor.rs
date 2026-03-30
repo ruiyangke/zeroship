@@ -114,7 +114,7 @@ async fn actor_loop(
     // Ensure data directory exists
     let _ = std::fs::create_dir_all(data_dir);
 
-    let (mut runtime, mut rpc_holder) = match isolate::create(&plugins, app_id, data_dir) {
+    let (mut runtime, mut rpc_bridge) = match isolate::create(&plugins, app_id, data_dir) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("[isolate] [{app_id}] Failed to create V8 runtime: {e}");
@@ -141,7 +141,7 @@ async fn actor_loop(
         match msg {
             IsolateMessage::Rpc { body, reply } => {
                 let result =
-                    isolate::handle_rpc(&mut runtime, &rpc_holder, &body, cpu_limit).await;
+                    isolate::handle_rpc(&mut runtime, &rpc_bridge, &body, cpu_limit).await;
                 let mapped = match result {
                     Ok(rpc_result) => {
                         cpu_usage.lock().unwrap().record(rpc_result.cpu_time);
@@ -156,7 +156,7 @@ async fn actor_loop(
                 match isolate::create(&plugins, app_id, data_dir) {
                     Ok((new_runtime, new_holder)) => {
                         runtime = new_runtime;
-                        rpc_holder = new_holder;
+                        rpc_bridge = new_holder;
                         if let Err(e) = runtime.execute_script("<server>", server_js) {
                             eprintln!("[isolate] [{app_id}] Reload script error: {e}");
                             let _ = reply.send(Err(e.to_string()));
