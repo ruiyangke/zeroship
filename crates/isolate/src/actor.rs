@@ -114,7 +114,7 @@ async fn actor_loop(
     // Ensure data directory exists
     let _ = std::fs::create_dir_all(data_dir);
 
-    let (mut runtime, rpc_holder) = match isolate::create(&plugins, app_id, data_dir) {
+    let (mut runtime, mut rpc_holder) = match isolate::create(&plugins, app_id, data_dir) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("[isolate] [{app_id}] Failed to create V8 runtime: {e}");
@@ -152,13 +152,16 @@ async fn actor_loop(
                 let _ = reply.send(mapped);
             }
             IsolateMessage::Reload { server_js, reply } => {
-                // Create fresh isolate
+                // Create fresh isolate — old one is dropped (V8 cleanup)
                 match isolate::create(&plugins, app_id, data_dir) {
                     Ok((new_runtime, new_holder)) => {
                         runtime = new_runtime;
-                        // rpc_holder can't be reassigned (Rc), but we create a new one
-                        // For simplicity, reload creates a new isolate entirely
-                        let _ = runtime.execute_script("<server>", server_js);
+                        rpc_holder = new_holder;
+                        if let Err(e) = runtime.execute_script("<server>", server_js) {
+                            eprintln!("[isolate] [{app_id}] Reload script error: {e}");
+                            let _ = reply.send(Err(e.to_string()));
+                            continue;
+                        }
                         let _ = runtime.run_event_loop(Default::default()).await;
                         eprintln!("[isolate] [{app_id}] Reloaded");
                         let _ = reply.send(Ok(()));
