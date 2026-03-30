@@ -107,13 +107,16 @@ export function compile(source) {
   traverse.default(clientAst, {
     ImportDeclaration(path) {
       if (path.node.source.value === 'appbase') {
-        // Remove server imports from client, keep serve
-        path.node.specifiers = path.node.specifiers.filter(
-          s => s.imported.name === 'serve'
-        )
-        if (path.node.specifiers.length === 0) {
-          path.remove()
-        }
+        // Remove all appbase imports from client (both server primitives and serve)
+        path.remove()
+      }
+    },
+    ExpressionStatement(path) {
+      // Remove serve() call from client code
+      if (t.isCallExpression(path.node.expression) &&
+          t.isIdentifier(path.node.expression.callee) &&
+          path.node.expression.callee.name === 'serve') {
+        path.remove()
       }
     },
     VariableDeclaration(path) {

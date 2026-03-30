@@ -52,4 +52,10 @@ describe('compiler', () => {
     const result = compile(input)
     assert.ok(result.entryComponent === 'App')
   })
+
+  it('client code removes serve() call and appbase imports', () => {
+    const result = compile(input)
+    assert.ok(!result.client.includes('serve(App)'))
+    assert.ok(!result.client.includes("from 'appbase'"))
+  })
 })
