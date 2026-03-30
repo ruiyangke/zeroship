@@ -25,25 +25,26 @@ pub enum Target {
 }
 
 pub fn compile(source: &str, target: Target) -> CompileResult {
+    compile_with_options(source, target, false)
+}
+
+pub fn compile_with_options(source: &str, target: Target, minify: bool) -> CompileResult {
     swc_core::common::GLOBALS.set(&Default::default(), || {
-        compile_inner(source, target)
+        compile_inner(source, target, minify)
     })
 }
 
-fn compile_inner(source: &str, target: Target) -> CompileResult {
+fn compile_inner(source: &str, target: Target, minify: bool) -> CompileResult {
     let cm: Lrc<SourceMap> = Default::default();
 
-    // --- Analysis passes (read-only) ---
     let module = parse(source, &cm);
     let analysis = analyze(&module);
 
-    // --- Generate server code ---
     let server_module = parse(source, &cm);
-    let server = generate_server(server_module, &analysis, target, &cm);
+    let server = generate_server(server_module, &analysis, target, &cm, minify);
 
-    // --- Generate client code ---
     let client_module = parse(source, &cm);
-    let client = generate_client(client_module, &analysis, &cm);
+    let client = generate_client(client_module, &analysis, &cm, minify);
 
     CompileResult {
         server,
@@ -69,9 +70,17 @@ fn parse(source: &str, cm: &Lrc<SourceMap>) -> Module {
 }
 
 fn emit(module: &Module, cm: &Lrc<SourceMap>) -> String {
+    emit_with_minify(module, cm, false)
+}
+
+fn emit_minified(module: &Module, cm: &Lrc<SourceMap>) -> String {
+    emit_with_minify(module, cm, true)
+}
+
+fn emit_with_minify(module: &Module, cm: &Lrc<SourceMap>, minify: bool) -> String {
     let mut buf = Vec::new();
     let mut emitter = Emitter {
-        cfg: Default::default(),
+        cfg: swc_core::ecma::codegen::Config::default().with_minify(minify),
         comments: None,
         cm: cm.clone(),
         wr: Box::new(JsWriter::new(cm.clone(), "\n", &mut buf, None)),
@@ -312,7 +321,7 @@ impl Visit for ServeFinder {
 
 // --- Server code generation ---
 
-fn generate_server(mut module: Module, analysis: &Analysis, target: Target, cm: &Lrc<SourceMap>) -> String {
+fn generate_server(mut module: Module, analysis: &Analysis, target: Target, cm: &Lrc<SourceMap>, minify: bool) -> String {
     if analysis.server_functions.is_empty() {
         return String::new();
     }
@@ -326,7 +335,7 @@ fn generate_server(mut module: Module, analysis: &Analysis, target: Target, cm: 
     // Remove empty items
     module.body.retain(|item| !is_empty_item(item));
 
-    let mut code = emit(&module, cm);
+    let mut code = emit_with_minify(&module, cm, minify);
 
     // Append globalThis.__rpc for Rust target
     if target == Target::Rust && !analysis.exported_server_fns.is_empty() {
@@ -450,7 +459,7 @@ fn strip_use_server(func: &mut Function) {
 
 // --- Client code generation ---
 
-fn generate_client(mut module: Module, analysis: &Analysis, cm: &Lrc<SourceMap>) -> String {
+fn generate_client(mut module: Module, analysis: &Analysis, cm: &Lrc<SourceMap>, minify: bool) -> String {
     let mut transformer = ClientTransformer { analysis };
     module.visit_mut_with(&mut transformer);
     module.body.retain(|item| !is_empty_item(item));
@@ -475,7 +484,7 @@ fn generate_client(mut module: Module, analysis: &Analysis, cm: &Lrc<SourceMap>)
         _ => unreachable!(),
     };
 
-    emit(&module, cm)
+    emit_with_minify(&module, cm, minify)
 }
 
 struct ClientTransformer<'a> {

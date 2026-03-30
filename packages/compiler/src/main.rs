@@ -1,4 +1,4 @@
-use appbase_compiler::{compile, Target};
+use appbase_compiler::{compile_with_options, Target};
 use std::fs;
 use std::path::Path;
 
@@ -21,6 +21,7 @@ fn main() {
         .and_then(|a| a.strip_prefix("--cdn="))
         .unwrap_or("esm.sh");
     let json_mode = args.iter().any(|a| a == "--json");
+    let minify = args.iter().any(|a| a == "--minify");
 
     let target = match target {
         "rust" => Target::Rust,
@@ -36,7 +37,7 @@ fn main() {
         std::process::exit(1);
     });
 
-    let result = compile(&source, target);
+    let result = compile_with_options(&source, target, minify);
 
     if json_mode {
         println!("{}", serde_json::to_string_pretty(&result).unwrap());
