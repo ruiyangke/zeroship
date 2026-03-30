@@ -5,10 +5,10 @@ use appbase_core::plugin::PluginFactory;
 use appbase_core::types::AppBundle;
 use appbase_isolate::pool::IsolatePool;
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::Response;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use bytes::Bytes;
 use std::collections::HashMap;
@@ -38,6 +38,7 @@ pub fn build(state: AppState) -> Router {
         .route("/rpc", post(handle_rpc))
         .route("/_stats", get(handle_stats))
         .route("/_health", get(handle_health))
+        .route("/_apps/{app_id}", delete(handle_evict_app))
         .fallback(get(handle_static))
         .layer(cors)
         .with_state(state)
@@ -131,6 +132,18 @@ async fn handle_stats(State(state): State<AppState>) -> Response {
         StatusCode::OK,
         &serde_json::to_string(&stats).unwrap_or_default(),
     )
+}
+
+/// DELETE /_apps/{app_id} — manually evict an app's isolate.
+async fn handle_evict_app(
+    State(state): State<AppState>,
+    Path(app_id): Path<String>,
+) -> Response {
+    if state.pool.evict_app(&app_id) {
+        json_response(StatusCode::OK, &format!(r#"{{"evicted":"{app_id}"}}"#))
+    } else {
+        json_response(StatusCode::NOT_FOUND, &format!(r#"{{"error":"App '{app_id}' not found"}}"#))
+    }
 }
 
 /// GET /_health — health check.

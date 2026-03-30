@@ -55,6 +55,17 @@ pub struct IsolateConfig {
     /// None = unlimited (dev mode).
     #[serde(default = "default_cpu_limit")]
     pub cpu_limit_ms: Option<u64>,
+
+    /// Maximum total CPU time per app in milliseconds.
+    /// Apps exceeding this are evicted. None = unlimited.
+    #[serde(default)]
+    pub cpu_quota_ms: Option<u64>,
+
+    /// Maximum total RSS (in MB) for the pool.
+    /// When exceeded, least-recently-used isolates are evicted.
+    /// None = no memory-based eviction.
+    #[serde(default)]
+    pub max_memory_mb: Option<usize>,
 }
 
 impl IsolateConfig {
@@ -63,9 +74,14 @@ impl IsolateConfig {
         Duration::from_secs(self.idle_timeout_secs)
     }
 
-    /// Convert `cpu_limit_ms` to an `Option<Duration>`.
+    /// Maximum CPU time allowed per request.
     pub fn cpu_limit(&self) -> Option<Duration> {
         self.cpu_limit_ms.map(Duration::from_millis)
+    }
+
+    /// Maximum total CPU time allowed per app before eviction.
+    pub fn cpu_quota(&self) -> Option<Duration> {
+        self.cpu_quota_ms.map(Duration::from_millis)
     }
 }
 
@@ -96,6 +112,8 @@ impl Default for IsolateConfig {
             max: default_max_isolates(),
             idle_timeout_secs: default_idle_timeout(),
             cpu_limit_ms: default_cpu_limit(),
+            cpu_quota_ms: None,
+            max_memory_mb: None,
         }
     }
 }
