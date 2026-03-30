@@ -6,7 +6,6 @@ members = [
     "crates/appbase-server",
     "crates/appbase",
     "crates/compiler",
-    "crates/runtime",
 ]
 resolver = "3"
 
