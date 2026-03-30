@@ -7,7 +7,8 @@ use swc_core::common::{sync::Lrc, FileName, SourceMap};
 use swc_core::ecma::ast::*;
 use swc_core::ecma::codegen::{text_writer::JsWriter, Emitter};
 use swc_core::ecma::parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
-use swc_core::ecma::visit::{VisitMut, VisitMutWith, Visit, VisitWith};
+use swc_core::ecma::transforms::react::{react, Options as ReactOptions, Runtime};
+use swc_core::ecma::visit::{VisitMut, VisitMutWith, Visit, VisitWith, visit_mut_pass};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CompileResult {
@@ -24,6 +25,12 @@ pub enum Target {
 }
 
 pub fn compile(source: &str, target: Target) -> CompileResult {
+    swc_core::common::GLOBALS.set(&Default::default(), || {
+        compile_inner(source, target)
+    })
+}
+
+fn compile_inner(source: &str, target: Target) -> CompileResult {
     let cm: Lrc<SourceMap> = Default::default();
 
     // --- Analysis passes (read-only) ---
@@ -447,6 +454,27 @@ fn generate_client(mut module: Module, analysis: &Analysis, cm: &Lrc<SourceMap>)
     let mut transformer = ClientTransformer { analysis };
     module.visit_mut_with(&mut transformer);
     module.body.retain(|item| !is_empty_item(item));
+
+    // Transform JSX to React.createElement calls
+    let unresolved = swc_core::common::Mark::new();
+    let top_level = swc_core::common::Mark::new();
+    let jsx_transform = react::<swc_core::common::comments::SingleThreadedComments>(
+        cm.clone(),
+        None,
+        ReactOptions {
+            runtime: Some(Runtime::Classic),
+            ..Default::default()
+        },
+        top_level,
+        unresolved,
+    );
+    let mut program = Program::Module(module);
+    program.mutate(jsx_transform);
+    let module = match program {
+        Program::Module(m) => m,
+        _ => unreachable!(),
+    };
+
     emit(&module, cm)
 }
 
