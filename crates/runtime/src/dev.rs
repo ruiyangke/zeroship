@@ -23,7 +23,7 @@ pub async fn dev(entry: &str, port: u16, compiler_bin: &str, minify: bool) -> Re
     ));
 
     // V8 runtime
-    let (mut runtime, rpc_result) = create_v8_runtime("appbase.db").map_err(err)?;
+    let (mut runtime, mut rpc_result) = create_v8_runtime("appbase.db").map_err(err)?;
 
     if !server_js.is_empty() {
         runtime.execute_script("<server>", server_js).map_err(err)?;
@@ -89,7 +89,7 @@ pub async fn dev(entry: &str, port: u16, compiler_bin: &str, minify: bool) -> Re
                 }
             } else if headers.starts_with("POST /__dev/save") {
                 // Save + recompile
-                match handle_save(body, &entry_path, compiler_bin, outdir, minify, &html, &mut runtime, &rpc_result, &reload_tx2).await {
+                match handle_save(body, &entry_path, compiler_bin, outdir, minify, &html, &mut runtime, &mut rpc_result, &reload_tx2, &source).await {
                     Ok(resp) => http_response(200, "application/json", resp.as_bytes()),
                     Err(e) => http_response(400, "application/json",
                         format!(r#"{{"error":"{}"}}"#, e).as_bytes()),
@@ -120,15 +120,16 @@ async fn handle_save(
     minify: bool,
     html: &Arc<Mutex<Vec<u8>>>,
     runtime: &mut JsRuntime,
-    _rpc_result: &Rc<RpcResult>,
+    rpc_result: &mut Rc<RpcResult>,
     reload_tx: &broadcast::Sender<()>,
+    source: &Arc<Mutex<String>>,
 ) -> Result<String, String> {
-    // Parse body to get source
     let parsed: serde_json::Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
     let new_source = parsed["source"].as_str().ok_or("missing source field")?;
 
-    // Write to disk
+    // Write to disk + update source cache
     std::fs::write(entry_path, new_source).map_err(|e| e.to_string())?;
+    *source.lock().unwrap() = new_source.to_string();
 
     // Recompile
     run_compiler(compiler_bin, entry_path, outdir, minify).map_err(|e| e.to_string())?;
@@ -137,21 +138,23 @@ async fn handle_save(
     let new_html = std::fs::read(format!("{}/index.html", outdir)).map_err(|e| e.to_string())?;
     *html.lock().unwrap() = new_html;
 
-    // Reload server functions in V8
+    // Create fresh V8 isolate (don't re-use old one with stale state)
+    let (new_runtime, new_rpc_result) = create_v8_runtime("appbase.db").map_err(|e| e.to_string())?;
+    *runtime = new_runtime;
+    *rpc_result = new_rpc_result;
+
     let server_js = std::fs::read_to_string(format!("{}/server.js", outdir)).unwrap_or_default();
     if !server_js.is_empty() {
         runtime.execute_script("<reload>", server_js).map_err(|e| e.to_string())?;
         runtime.run_event_loop(Default::default()).await.map_err(|e| e.to_string())?;
     }
 
-    // Read metadata
     let meta = std::fs::read_to_string(format!("{}/meta.json", outdir)).unwrap_or_default();
     let meta: serde_json::Value = serde_json::from_str(&meta).unwrap_or(serde_json::json!({}));
 
-    // Notify WebSocket clients to reload
     let _ = reload_tx.send(());
 
-    eprintln!("[appbase] Recompiled + reloaded");
+    eprintln!("[appbase] Recompiled + reloaded (fresh isolate)");
     Ok(serde_json::json!({
         "ok": true,
         "functions": meta["server_functions"],
