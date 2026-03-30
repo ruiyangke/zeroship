@@ -1,4 +1,4 @@
-use appbase_runtime::v8::{create_v8_runtime, handle_rpc};
+use appbase_runtime::v8::{create_v8_runtime, create_v8_runtime_with_snapshot, handle_rpc};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 fn setup_runtime() -> (deno_core::JsRuntime, std::rc::Rc<appbase_runtime::v8::RpcResult>) {
@@ -146,9 +146,33 @@ fn rand_id() -> u64 {
         .as_nanos() as u64
 }
 
+fn bench_runtime_startup_with_snapshot(c: &mut Criterion) {
+    // Load snapshot if available
+    let snapshot_path = "/tmp/appbase-snapshot.bin";
+    let snapshot_data = match std::fs::read(snapshot_path) {
+        Ok(data) => data,
+        Err(_) => {
+            eprintln!("Snapshot not found at {snapshot_path}. Run `cargo run --features snapshot --bin appbase-snapshot -- {snapshot_path}` first.");
+            return;
+        }
+    };
+    // Leak the data to get a 'static reference (fine for benchmarks)
+    let snapshot: &'static [u8] = Box::leak(snapshot_data.into_boxed_slice());
+
+    c.bench_function("runtime_startup_with_snapshot", |b| {
+        b.iter(|| {
+            let db_path = format!("/tmp/appbase-bench-snap-{}.db", rand_id());
+            let (runtime, _) = create_v8_runtime_with_snapshot(&db_path, snapshot).unwrap();
+            black_box(runtime);
+            let _ = std::fs::remove_file(&db_path);
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_runtime_startup,
+    bench_runtime_startup_with_snapshot,
     bench_rpc_noop,
     bench_rpc_insert,
     bench_rpc_find,

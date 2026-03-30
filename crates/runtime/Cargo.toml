@@ -7,6 +7,11 @@ edition = "2024"
 name = "appbase-rt"
 path = "src/main.rs"
 
+[[bin]]
+name = "appbase-snapshot"
+path = "src/snapshot_gen.rs"
+required-features = ["snapshot"]
+
 [lib]
 name = "appbase_runtime"
 path = "src/lib.rs"
@@ -23,6 +28,9 @@ thiserror = "2"
 tokio-tungstenite = "0.26"
 notify = "7"
 futures-util = "0.3"
+
+[features]
+snapshot = []
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
