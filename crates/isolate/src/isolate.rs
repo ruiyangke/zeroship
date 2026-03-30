@@ -42,9 +42,14 @@ pub fn op_rpc_set_response(state: &mut OpState, #[string] result: &str) {
 /// Core runtime JS — console + RPC dispatch. Plugins' JS bridges are appended.
 static CORE_RUNTIME_JS: &str = include_str!("embed/runtime.js");
 
+/// Default V8 heap limit per isolate: 128MB.
+/// Prevents a single app from consuming all memory and crashing the process.
+const DEFAULT_HEAP_LIMIT_MB: usize = 128;
+
 /// Create a V8 isolate with plugins loaded.
 ///
 /// Returns the `JsRuntime` and the `RpcBridge` for extracting RPC responses.
+/// V8 heap is limited to 128MB by default to prevent runaway memory usage.
 pub fn create(
     plugins: &[Box<dyn Plugin>],
     app_id: &str,
@@ -78,9 +83,26 @@ pub fn create(
         ..Default::default()
     };
 
-    let runtime = JsRuntime::new(RuntimeOptions {
+    let heap_limit = DEFAULT_HEAP_LIMIT_MB * 1024 * 1024;
+    let create_params = v8::CreateParams::default()
+        .heap_limits(0, heap_limit);
+
+    let mut runtime = JsRuntime::new(RuntimeOptions {
         extensions: vec![ext],
+        create_params: Some(create_params),
         ..Default::default()
+    });
+
+    // Register near-heap-limit callback: log warning before V8 crashes
+    let app_id_for_cb = app_id.to_string();
+    runtime.add_near_heap_limit_callback(move |current, initial| {
+        eprintln!(
+            "[isolate] [{app_id_for_cb}] WARN: V8 heap near limit — current={:.1}MB initial={:.1}MB",
+            current as f64 / 1_048_576.0,
+            initial as f64 / 1_048_576.0,
+        );
+        // Give V8 a small buffer to finish current operation before failing
+        current + 5 * 1024 * 1024
     });
 
     let rpc_bridge = Rc::new(RpcBridge {
