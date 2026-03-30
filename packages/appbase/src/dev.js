@@ -24,7 +24,17 @@ export async function dev(entryFile, options = {}) {
   // Write client index.html in .dist/client/
   writeFileSync(resolve(distDir, 'client/index.html'), `<!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"><title>appbase app</title></head>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>appbase app</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+    input:focus { border-color: #646cff !important; }
+    button:hover { opacity: 0.85; }
+  </style>
+</head>
 <body>
   <div id="root"></div>
   <script type="module" src="/main.jsx"></script>
