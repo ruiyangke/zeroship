@@ -5,7 +5,9 @@ use std::path::Path;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    let input = args.get(1).expect("Usage: appbase-compile <file> [--target=rust|node] [--outdir=.dist] [--json]");
+    let input = args.get(1).expect(
+        "Usage: appbase-compile <file> [--target=rust|node] [--outdir=.dist] [--cdn=esm.sh|jsdelivr|skypack|none] [--json]"
+    );
     let target = args.iter()
         .find(|a| a.starts_with("--target="))
         .and_then(|a| a.strip_prefix("--target="))
@@ -14,6 +16,10 @@ fn main() {
         .find(|a| a.starts_with("--outdir="))
         .and_then(|a| a.strip_prefix("--outdir="))
         .unwrap_or(".dist");
+    let cdn = args.iter()
+        .find(|a| a.starts_with("--cdn="))
+        .and_then(|a| a.strip_prefix("--cdn="))
+        .unwrap_or("esm.sh");
     let json_mode = args.iter().any(|a| a == "--json");
 
     let target = match target {
@@ -41,22 +47,20 @@ fn main() {
     let out = Path::new(outdir);
     fs::create_dir_all(out).unwrap();
 
-    // Server code
     if !result.server.is_empty() {
         fs::write(out.join("server.js"), &result.server).unwrap();
         eprintln!("[compile] Wrote {}/server.js", outdir);
     }
 
-    // Client HTML (self-contained with esm.sh import maps)
     let entry = result.entry_component.as_deref().unwrap_or("App");
-    let html = generate_html(&result.client, entry);
+    let html = generate_html(&result.client, entry, cdn);
     fs::write(out.join("index.html"), &html).unwrap();
-    eprintln!("[compile] Wrote {}/index.html", outdir);
+    eprintln!("[compile] Wrote {}/index.html (cdn: {})", outdir, cdn);
 
-    // Metadata
     let meta = serde_json::json!({
         "entry_component": result.entry_component,
         "server_functions": result.server_functions,
+        "cdn": cdn,
     });
     fs::write(out.join("meta.json"), serde_json::to_string_pretty(&meta).unwrap()).unwrap();
     eprintln!("[compile] Wrote {}/meta.json", outdir);
@@ -66,7 +70,37 @@ fn main() {
         result.server_functions.join(", "));
 }
 
-fn generate_html(client_js: &str, entry: &str) -> String {
+fn cdn_url(cdn: &str, pkg: &str) -> String {
+    match cdn {
+        "esm.sh" => format!("https://esm.sh/{}", pkg),
+        "jsdelivr" => format!("https://esm.run/{}", pkg),
+        "skypack" => format!("https://cdn.skypack.dev/{}", pkg),
+        _ => String::new(),
+    }
+}
+
+fn generate_html(client_js: &str, entry: &str, cdn: &str) -> String {
+    let import_map = if cdn == "none" {
+        String::new()
+    } else {
+        format!(
+            r#"<script type="importmap">
+  {{
+    "imports": {{
+      "react": "{}",
+      "react/": "{}/",
+      "react-dom": "{}",
+      "react-dom/": "{}/"
+    }}
+  }}
+  </script>"#,
+            cdn_url(cdn, "react@19"),
+            cdn_url(cdn, "react@19"),
+            cdn_url(cdn, "react-dom@19"),
+            cdn_url(cdn, "react-dom@19"),
+        )
+    };
+
     format!(
         r#"<!DOCTYPE html>
 <html>
@@ -74,16 +108,7 @@ fn generate_html(client_js: &str, entry: &str) -> String {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>appbase</title>
-  <script type="importmap">
-  {{
-    "imports": {{
-      "react": "https://esm.sh/react@19",
-      "react/": "https://esm.sh/react@19/",
-      "react-dom": "https://esm.sh/react-dom@19",
-      "react-dom/": "https://esm.sh/react-dom@19/"
-    }}
-  }}
-  </script>
+  {import_map}
   <style>
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{ -webkit-font-smoothing: antialiased; }}
