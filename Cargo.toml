@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/appbase-core",
+    "crates/appbase-isolate",
     "crates/compiler",
     "crates/runtime",
 ]
