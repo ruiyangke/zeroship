@@ -1,12 +1,16 @@
-//! Axum router for appbase — RPC dispatch, static serving, health/stats endpoints.
+//! Axum router for appbase — RPC dispatch with metering, quota enforcement, and admin API.
 
 use appbase_core::config::AppbaseConfig;
 use appbase_core::plugin::PluginFactory;
 use appbase_core::types::AppBundle;
 use appbase_isolate::pool::IsolatePool;
+use appbase_metering::enforcer::{self, QuotaDecision};
+use appbase_metering::meter::{MeterRegistry, UsageDelta};
+use appbase_metering::plan::QuotaPlan;
+use appbase_metering::rate_limit::RateLimiter;
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::routing::{delete, get, post};
 use axum::Router;
@@ -20,14 +24,14 @@ use crate::middleware;
 /// Shared state for all axum handlers.
 #[derive(Clone)]
 pub struct AppState {
-    /// Isolate pool — manages V8 workers, one per app.
     pub pool: Arc<IsolatePool>,
-    /// App bundles keyed by app ID.
     pub bundles: Arc<Mutex<HashMap<String, AppBundle>>>,
-    /// Default app ID for single-app mode.
     pub default_app: String,
-    /// Pre-loaded static HTML (zero-copy via Bytes).
     pub static_html: Option<Bytes>,
+    /// Metering: per-app usage counters.
+    pub meters: Arc<MeterRegistry>,
+    /// Rate limiter: per-app requests/second.
+    pub rate_limiter: Arc<RateLimiter>,
 }
 
 /// Build the axum router with all routes and middleware.
@@ -39,6 +43,8 @@ pub fn build(state: AppState) -> Router {
         .route("/_stats", get(handle_stats))
         .route("/_health", get(handle_health))
         .route("/_apps/{app_id}", delete(handle_evict_app))
+        .route("/_apps/{app_id}/usage", get(handle_app_usage))
+        .route("/_usage", get(handle_all_usage))
         .fallback(get(handle_static))
         .layer(cors)
         .with_state(state)
@@ -52,11 +58,7 @@ pub fn single_app_state(
     data_dir: PathBuf,
     plugin_factory: PluginFactory,
 ) -> AppState {
-    let pool = IsolatePool::new(
-        config.isolates.clone(),
-        data_dir,
-        plugin_factory,
-    );
+    let pool = IsolatePool::new(config.isolates.clone(), data_dir, plugin_factory);
 
     let mut bundles = HashMap::new();
     bundles.insert(
@@ -67,11 +69,17 @@ pub fn single_app_state(
         },
     );
 
+    // Default plan for single-app mode: unlimited (dev-friendly)
+    let meters = Arc::new(MeterRegistry::new(QuotaPlan::unlimited()));
+    let rate_limiter = Arc::new(RateLimiter::new(10000, 50000));
+
     AppState {
         pool,
         bundles: Arc::new(Mutex::new(bundles)),
         default_app: "default".to_string(),
         static_html: client_html.map(Bytes::from),
+        meters,
+        rate_limiter,
     }
 }
 
@@ -92,34 +100,111 @@ pub async fn serve(state: AppState, host: &str, port: u16) -> Result<(), String>
 
 // --- Handlers ---
 
-/// POST /rpc — dispatch JSON-RPC to the app's V8 isolate.
+/// POST /rpc — dispatch with quota check + metering + response headers.
 async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
-    // TODO: extract app_id from header/subdomain for multi-tenant
     let app_id = state.default_app.clone();
 
-    // Clone bundle and drop lock before any .await
+    // 1. Rate limit check
+    if !state.rate_limiter.check(&app_id) {
+        return json_response_with_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            r#"{"jsonrpc":"2.0","error":{"code":-32429,"message":"Rate limit exceeded"},"id":null}"#,
+        );
+    }
+
+    // 2. Quota check
+    let meter = state.meters.get_or_create(&app_id);
+    match enforcer::check_quota(&meter) {
+        QuotaDecision::Deny(denial) => {
+            return json_response_with_status(
+                StatusCode::TOO_MANY_REQUESTS,
+                &format!(
+                    r#"{{"jsonrpc":"2.0","error":{{"code":-32429,"message":"{}","data":{{"dimension":"{}","used":{},"limit":{}}}}},"id":null}}"#,
+                    denial.message, denial.dimension, denial.used, denial.limit
+                ),
+            );
+        }
+        QuotaDecision::Allow | QuotaDecision::Warn(_) => {} // proceed
+    }
+
+    // 3. Get app bundle
     let bundle = {
         let bundles = state.bundles.lock().unwrap();
         match bundles.get(&app_id) {
             Some(b) => b.clone(),
-            None => return json_response(StatusCode::NOT_FOUND, r#"{"error":"App not found"}"#),
+            None => {
+                return json_response(
+                    StatusCode::NOT_FOUND,
+                    r#"{"error":"App not found"}"#,
+                )
+            }
         }
     };
 
-    match state.pool.dispatch(&app_id, &bundle.server_js, body).await {
-        Ok(result) => {
-            tracing::info!(
-                app = app_id,
-                cpu_ms = format!("{:.2}", result.cpu_time.as_secs_f64() * 1000.0),
-                "RPC"
+    // 4. Dispatch to V8
+    let wall_start = std::time::Instant::now();
+    let result = state
+        .pool
+        .dispatch(&app_id, &bundle.server_js, body)
+        .await;
+    let wall_time = wall_start.elapsed();
+
+    match result {
+        Ok(rpc_result) => {
+            let cpu_ms = rpc_result.cpu_time.as_secs_f64() * 1000.0;
+            let response_bytes = rpc_result.json.len() as u64;
+
+            // 5. Record usage
+            meter.record(&UsageDelta {
+                cpu_time: rpc_result.cpu_time,
+                wall_time,
+                egress_bytes: response_bytes,
+                ..UsageDelta::default()
+            });
+
+            // 6. Build response with quota headers
+            let snapshot = meter.snapshot();
+            let mut headers = HeaderMap::new();
+            add_header(&mut headers, "x-cpu-time-ms", &format!("{cpu_ms:.2}"));
+            add_header(
+                &mut headers,
+                "x-wall-time-ms",
+                &format!("{:.2}", wall_time.as_secs_f64() * 1000.0),
             );
-            json_response(StatusCode::OK, &result.json)
+            add_header(
+                &mut headers,
+                "x-requests-used",
+                &snapshot.requests.to_string(),
+            );
+
+            if let Some(limit) = meter.plan.monthly_requests {
+                add_header(
+                    &mut headers,
+                    "x-requests-limit",
+                    &limit.to_string(),
+                );
+                add_header(
+                    &mut headers,
+                    "x-requests-remaining",
+                    &limit.saturating_sub(snapshot.requests).to_string(),
+                );
+            }
+
+            let mut response = Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(rpc_result.json))
+                .unwrap();
+            response.headers_mut().extend(headers);
+            response
         }
         Err(e) => {
             let safe = sanitize_error(&e);
             json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &format!(r#"{{"jsonrpc":"2.0","error":{{"code":-32603,"message":"{safe}"}},"id":null}}"#),
+                &format!(
+                    r#"{{"jsonrpc":"2.0","error":{{"code":-32603,"message":"{safe}"}},"id":null}}"#
+                ),
             )
         }
     }
@@ -134,16 +219,44 @@ async fn handle_stats(State(state): State<AppState>) -> Response {
     )
 }
 
-/// DELETE /_apps/{app_id} — manually evict an app's isolate.
+/// GET /_usage — all apps' usage.
+async fn handle_all_usage(State(state): State<AppState>) -> Response {
+    let usage = state.meters.all_usage();
+    json_response(
+        StatusCode::OK,
+        &serde_json::to_string(&usage).unwrap_or_default(),
+    )
+}
+
+/// GET /_apps/{app_id}/usage — single app's usage.
+async fn handle_app_usage(
+    State(state): State<AppState>,
+    Path(app_id): Path<String>,
+) -> Response {
+    match state.meters.get_usage(&app_id) {
+        Some(usage) => json_response(
+            StatusCode::OK,
+            &serde_json::to_string(&usage).unwrap_or_default(),
+        ),
+        None => json_response(
+            StatusCode::NOT_FOUND,
+            &format!(r#"{{"error":"No usage data for '{app_id}'"}}"#),
+        ),
+    }
+}
+
+/// DELETE /_apps/{app_id} — manually evict + clear meter.
 async fn handle_evict_app(
     State(state): State<AppState>,
     Path(app_id): Path<String>,
 ) -> Response {
-    if state.pool.evict_app(&app_id) {
-        json_response(StatusCode::OK, &format!(r#"{{"evicted":"{app_id}"}}"#))
-    } else {
-        json_response(StatusCode::NOT_FOUND, &format!(r#"{{"error":"App '{app_id}' not found"}}"#))
-    }
+    state.pool.evict_app(&app_id);
+    state.meters.remove(&app_id);
+    state.rate_limiter.remove(&app_id);
+    json_response(
+        StatusCode::OK,
+        &format!(r#"{{"evicted":"{app_id}"}}"#),
+    )
 }
 
 /// GET /_health — health check.
@@ -172,6 +285,22 @@ fn json_response(status: StatusCode, body: &str) -> Response {
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body.to_string()))
         .unwrap()
+}
+
+fn json_response_with_status(status: StatusCode, body: &str) -> Response {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("Retry-After", "1")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn add_header(headers: &mut HeaderMap, name: &'static str, value: &str) {
+    let n = axum::http::header::HeaderName::from_static(name);
+    if let Ok(v) = HeaderValue::from_str(value) {
+        headers.insert(n, v);
+    }
 }
 
 fn sanitize_error(msg: &str) -> String {

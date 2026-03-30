@@ -85,6 +85,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "appbase-metering"
+version = "0.1.0"
+dependencies = [
+ "appbase-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "appbase-plugins"
 version = "0.1.0"
 dependencies = [
@@ -103,6 +112,7 @@ version = "0.1.0"
 dependencies = [
  "appbase-core",
  "appbase-isolate",
+ "appbase-metering",
  "axum",
  "bytes",
  "serde_json",
