@@ -16,7 +16,15 @@
           buildInputs = with pkgs; [
             nodejs_22
             nodePackages.npm
+            rustc
+            cargo
+            pkg-config
+            openssl
+            sqlite
           ];
+
+          RUSQLITE_USE_BUNDLED = "1";
+          RUST_BACKTRACE = "1";
         };
       });
 }
