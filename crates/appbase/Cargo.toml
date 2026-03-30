@@ -1,0 +1,20 @@
+[package]
+name = "appbase"
+version = "0.1.0"
+edition = "2024"
+description = "The appbase CLI — compile, serve, and develop full-stack apps"
+
+[[bin]]
+name = "appbase"
+path = "src/main.rs"
+
+[dependencies]
+appbase-core = { path = "../appbase-core" }
+appbase-isolate = { path = "../appbase-isolate" }
+appbase-plugins = { path = "../appbase-plugins" }
+appbase-server = { path = "../appbase-server" }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+
+[lints]
+workspace = true
