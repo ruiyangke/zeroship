@@ -2,6 +2,7 @@
 members = [
     "crates/appbase-core",
     "crates/appbase-isolate",
+    "crates/appbase-plugins",
     "crates/compiler",
     "crates/runtime",
 ]

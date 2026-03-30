@@ -1,0 +1,25 @@
+[package]
+name = "appbase-plugins"
+version = "0.1.0"
+edition = "2024"
+description = "Built-in plugins for appbase — db, kv, env"
+
+[features]
+default = ["db", "kv", "env"]
+db = ["dep:rusqlite", "dep:uuid"]
+kv = []
+env = []
+
+[dependencies]
+appbase-core = { path = "../appbase-core" }
+deno_core = "0.395"
+deno_error = "0.7"
+serde_json = "1"
+thiserror = "2"
+
+# db plugin only
+rusqlite = { version = "0.38", features = ["bundled"], optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
+
+[lints]
+workspace = true
