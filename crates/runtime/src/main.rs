@@ -1,5 +1,5 @@
 use appbase_runtime::{dev, plugins, server};
-use appbase_runtime::v8::Plugin;
+use appbase_runtime::plugin::Plugin;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -12,9 +12,11 @@ fn main() {
             let db_path = parse_flag_str(&args, "--db=").unwrap_or("appbase.db".into());
             let static_file = parse_flag_str(&args, "--static=");
 
-            // Build plugins from CLI flags
+            // Build plugins
             let plugin_list: Vec<Box<dyn Plugin>> = vec![
                 Box::new(plugins::db::DbPlugin::new(&db_path)),
+                Box::new(plugins::kv::KvPlugin::new()),
+                Box::new(plugins::env::EnvPlugin::from_system("APPBASE_")),
             ];
 
             let rt = tokio::runtime::Runtime::new().unwrap();
@@ -34,7 +36,15 @@ fn main() {
                 .build()
                 .unwrap();
 
-            if let Err(e) = rt.block_on(dev::dev(entry, port, &compiler, minify)) {
+            let plugin_factory = Box::new(|| -> Vec<Box<dyn Plugin>> {
+                vec![
+                    Box::new(plugins::db::DbPlugin::new("appbase.db")),
+                    Box::new(plugins::kv::KvPlugin::new()),
+                    Box::new(plugins::env::EnvPlugin::from_system("APPBASE_")),
+                ]
+            });
+
+            if let Err(e) = rt.block_on(dev::dev(entry, port, &compiler, minify, plugin_factory)) {
                 eprintln!("[appbase-rt] Error: {e}");
                 std::process::exit(1);
             }

@@ -14,18 +14,10 @@ pub fn op_set_rpc_result(state: &mut OpState, #[string] result: &str) {
     *rpc.0.borrow_mut() = result.to_string();
 }
 
+use crate::plugin::Plugin;
+
 /// Core runtime JS — console + RPC dispatch. No db or other primitives.
 static CORE_RUNTIME_JS: &str = include_str!("embed/runtime.js");
-
-/// Plugin interface: ops + JS bridge + state initialization.
-pub trait Plugin: Send {
-    fn name(&self) -> &str;
-    fn ops(&self) -> Vec<OpDecl>;
-    /// JS code injected into the V8 global scope (defines globals like `db`, `auth`, etc.)
-    fn js_bridge(&self) -> &str;
-    /// Called after runtime creation to inject plugin state into OpState.
-    fn init_state(&self, state: &mut OpState);
-}
 
 /// Create a V8 runtime with the core RPC infrastructure + any plugins.
 pub fn create_v8_runtime(

@@ -10,7 +10,8 @@ use tokio::sync::{mpsc, oneshot};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::cpu_timer::CpuLimits;
-use crate::v8::{create_v8_runtime, handle_rpc, Plugin};
+use crate::plugin::Plugin;
+use crate::v8::{create_v8_runtime, handle_rpc};
 
 struct RpcRequest {
     body: String,

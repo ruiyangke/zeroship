@@ -10,7 +10,7 @@
 //!   kv.has(key)        → boolean
 //!   kv.list(prefix)    → string[] (matching keys)
 
-use crate::v8::Plugin;
+use crate::plugin::Plugin;
 use deno_core::op2;
 use deno_core::{OpDecl, OpState};
 use std::cell::RefCell;

@@ -4,7 +4,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cpu_timer::{CpuLimits, CpuUsage};
-use crate::v8::{create_v8_runtime, handle_rpc, Plugin};
+use crate::plugin::Plugin;
+use crate::v8::{create_v8_runtime, handle_rpc};
 
 /// Request sent from HTTP layer to an isolate worker.
 pub struct IsolateRequest {

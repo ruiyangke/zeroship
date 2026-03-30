@@ -3,12 +3,12 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
-use crate::plugins::db::DbPlugin;
-use crate::v8::{Plugin, RpcResult, create_v8_runtime, handle_rpc};
+use crate::plugin::Plugin;
+use crate::v8::{RpcResult, create_v8_runtime, handle_rpc};
 
-fn default_plugins() -> Vec<Box<dyn Plugin>> {
-    vec![Box::new(DbPlugin::new("appbase.db"))]
-}
+/// Factory function that creates plugins for each isolate.
+/// Called on reload to create fresh plugins for the new V8 isolate.
+pub type PluginFactory = Box<dyn Fn() -> Vec<Box<dyn Plugin>> + Send>;
 
 fn http_response(status: u16, content_type: &str, body: &[u8]) -> Vec<u8> {
     let status_text = match status {
@@ -38,7 +38,7 @@ fn rpc_error_response(status: u16, message: &str, _id: Option<&str>) -> Vec<u8> 
     http_response(status, "application/json", body.as_bytes())
 }
 
-pub async fn dev(entry: &str, port: u16, compiler_bin: &str, minify: bool) -> Result<(), deno_error::JsErrorBox> {
+pub async fn dev(entry: &str, port: u16, compiler_bin: &str, minify: bool, plugin_factory: PluginFactory) -> Result<(), deno_error::JsErrorBox> {
     fn err(e: impl std::fmt::Display) -> deno_error::JsErrorBox {
         deno_error::JsErrorBox::generic(e.to_string())
     }
@@ -55,7 +55,7 @@ pub async fn dev(entry: &str, port: u16, compiler_bin: &str, minify: bool) -> Re
     ));
 
     // V8 runtime
-    let (mut runtime, mut rpc_result) = create_v8_runtime(&default_plugins()).map_err(err)?;
+    let (mut runtime, mut rpc_result) = create_v8_runtime(&plugin_factory()).map_err(err)?;
     let cpu_limits = crate::cpu_timer::CpuLimits::unlimited(); // no limits in dev mode
 
     if !server_js.is_empty() {
@@ -120,7 +120,7 @@ pub async fn dev(entry: &str, port: u16, compiler_bin: &str, minify: bool) -> Re
                 }
             } else if headers.starts_with("POST /__dev/save") {
                 // Save + recompile
-                match handle_save(body, &entry_path, compiler_bin, outdir, minify, &html, &mut runtime, &mut rpc_result, &reload_tx2, &source).await {
+                match handle_save(body, &entry_path, compiler_bin, outdir, minify, &html, &mut runtime, &mut rpc_result, &reload_tx2, &source, &plugin_factory).await {
                     Ok(resp) => http_response(200, "application/json", resp.as_bytes()),
                     Err(e) => http_response(400, "application/json",
                         format!(r#"{{"error":"{}"}}"#, e).as_bytes()),
@@ -154,6 +154,7 @@ async fn handle_save(
     rpc_result: &mut Rc<RpcResult>,
     reload_tx: &broadcast::Sender<()>,
     source: &Arc<Mutex<String>>,
+    plugin_factory: &PluginFactory,
 ) -> Result<String, String> {
     let parsed: serde_json::Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
     let new_source = parsed["source"].as_str().ok_or("missing source field")?;
@@ -170,7 +171,7 @@ async fn handle_save(
     *html.lock().unwrap() = new_html;
 
     // Create fresh V8 isolate (don't re-use old one with stale state)
-    let (new_runtime, new_rpc_result) = create_v8_runtime(&default_plugins()).map_err(|e| e.to_string())?;
+    let (new_runtime, new_rpc_result) = create_v8_runtime(&plugin_factory()).map_err(|e| e.to_string())?;
     *runtime = new_runtime;
     *rpc_result = new_rpc_result;
 
