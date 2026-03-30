@@ -1,5 +1,5 @@
-// Appbase runtime - injected before user code
-// Bridges JS calls to Rust ops via serde_v8 (no manual JSON serialization)
+// Appbase core runtime - injected before user code and plugin bridges
+// Contains: console, RPC dispatch. No primitives (db, auth, etc.)
 
 const { core } = Deno;
 
@@ -13,24 +13,10 @@ globalThis.console = {
   },
 };
 
-// DB primitive - ops use serde_v8, objects pass directly without JSON round-trip
-globalThis.db = {
-  collection(name) {
-    core.ops.op_db_ensure_table(name);
-    return {
-      insert: (doc) => core.ops.op_db_insert(name, doc),
-      find: (filter) => core.ops.op_db_find(name, filter || {}),
-      update: (id, updates) => core.ops.op_db_update(name, id, updates),
-      delete: (id) => core.ops.op_db_delete(name, id),
-    };
-  },
-};
-
 // RPC dispatcher - user code registers functions here
 globalThis.__rpc = {};
 
-// Pre-compiled RPC dispatch function - called from Rust via op, NOT via execute_script
-// This avoids V8 re-parsing/compiling JS on every request
+// Pre-compiled RPC dispatch function - called from Rust
 globalThis.__handleRpc = async function(requestJson) {
   const request = JSON.parse(requestJson);
   if (Array.isArray(request)) {

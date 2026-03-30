@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::cpu_timer::CpuLimits;
-use crate::v8::{create_v8_runtime, handle_rpc};
+use crate::v8::{create_v8_runtime, handle_rpc, Plugin};
 
 struct RpcRequest {
     body: String,
@@ -34,9 +34,9 @@ struct AppState {
 
 pub async fn serve(
     script_path: &str,
-    db_path: &str,
     port: u16,
     static_file: Option<&str>,
+    plugins: Vec<Box<dyn Plugin>>,
 ) -> Result<(), deno_error::JsErrorBox> {
     fn err(e: impl std::fmt::Display) -> deno_error::JsErrorBox {
         deno_error::JsErrorBox::generic(e.to_string())
@@ -50,7 +50,6 @@ pub async fn serve(
     });
 
     let script_path = script_path.to_string();
-    let db_path = db_path.to_string();
 
     // Channel for HTTP → V8 communication
     let (rpc_tx, rpc_rx) = mpsc::channel::<RpcRequest>(256);
@@ -62,7 +61,7 @@ pub async fn serve(
             .build()
             .unwrap();
 
-        rt.block_on(v8_worker(&script_path, &db_path, rpc_rx))
+        rt.block_on(v8_worker(&script_path, rpc_rx, plugins))
     });
 
     let state = AppState {
@@ -95,10 +94,10 @@ pub async fn serve(
 /// V8 worker loop — runs on its own thread with a single-threaded tokio runtime.
 async fn v8_worker(
     script_path: &str,
-    db_path: &str,
     mut rpc_rx: mpsc::Receiver<RpcRequest>,
+    plugins: Vec<Box<dyn Plugin>>,
 ) {
-    let (mut runtime, rpc_result) = match create_v8_runtime(db_path) {
+    let (mut runtime, rpc_result) = match create_v8_runtime(&plugins) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("[appbase-rt] Failed to create V8 runtime: {e}");

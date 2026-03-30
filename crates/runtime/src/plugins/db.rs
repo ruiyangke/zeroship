@@ -1,9 +1,68 @@
+use crate::v8::Plugin;
 use deno_core::op2;
-use deno_core::OpState;
+use deno_core::{OpDecl, OpState};
 use rusqlite::Connection;
 use serde_json;
 use std::rc::Rc;
 use uuid::Uuid;
+
+/// SQLite-backed document database plugin.
+pub struct DbPlugin {
+    db_path: String,
+}
+
+impl DbPlugin {
+    pub fn new(db_path: &str) -> Self {
+        Self {
+            db_path: db_path.to_string(),
+        }
+    }
+}
+
+impl Plugin for DbPlugin {
+    fn name(&self) -> &str {
+        "db"
+    }
+
+    fn ops(&self) -> Vec<OpDecl> {
+        vec![
+            op_db_ensure_table(),
+            op_db_insert(),
+            op_db_find(),
+            op_db_update(),
+            op_db_delete(),
+        ]
+    }
+
+    fn js_bridge(&self) -> &str {
+        r#"
+globalThis.db = {
+  collection(name) {
+    Deno.core.ops.op_db_ensure_table(name);
+    return {
+      insert: (doc) => Deno.core.ops.op_db_insert(name, doc),
+      find: (filter) => Deno.core.ops.op_db_find(name, filter || {}),
+      update: (id, updates) => Deno.core.ops.op_db_update(name, id, updates),
+      delete: (id) => Deno.core.ops.op_db_delete(name, id),
+    };
+  },
+};
+"#
+    }
+
+    fn init_state(&self, state: &mut OpState) {
+        if let Some(parent) = std::path::Path::new(&self.db_path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let conn = Rc::new(
+            Connection::open(&self.db_path)
+                .unwrap_or_else(|e| panic!("Failed to open db {}: {e}", self.db_path)),
+        );
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+            .unwrap();
+        state.put(conn);
+    }
+}
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 #[class(generic)]

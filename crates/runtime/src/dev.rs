@@ -3,7 +3,12 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
-use crate::v8::{RpcResult, create_v8_runtime, handle_rpc};
+use crate::plugins::db::DbPlugin;
+use crate::v8::{Plugin, RpcResult, create_v8_runtime, handle_rpc};
+
+fn default_plugins() -> Vec<Box<dyn Plugin>> {
+    vec![Box::new(DbPlugin::new("appbase.db"))]
+}
 
 fn http_response(status: u16, content_type: &str, body: &[u8]) -> Vec<u8> {
     let status_text = match status {
@@ -50,7 +55,7 @@ pub async fn dev(entry: &str, port: u16, compiler_bin: &str, minify: bool) -> Re
     ));
 
     // V8 runtime
-    let (mut runtime, mut rpc_result) = create_v8_runtime("appbase.db").map_err(err)?;
+    let (mut runtime, mut rpc_result) = create_v8_runtime(&default_plugins()).map_err(err)?;
     let cpu_limits = crate::cpu_timer::CpuLimits::unlimited(); // no limits in dev mode
 
     if !server_js.is_empty() {
@@ -165,7 +170,7 @@ async fn handle_save(
     *html.lock().unwrap() = new_html;
 
     // Create fresh V8 isolate (don't re-use old one with stale state)
-    let (new_runtime, new_rpc_result) = create_v8_runtime("appbase.db").map_err(|e| e.to_string())?;
+    let (new_runtime, new_rpc_result) = create_v8_runtime(&default_plugins()).map_err(|e| e.to_string())?;
     *runtime = new_runtime;
     *rpc_result = new_rpc_result;
 
