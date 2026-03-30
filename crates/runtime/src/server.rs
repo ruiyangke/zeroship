@@ -1,9 +1,10 @@
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{header, Method, StatusCode};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
+use bytes::Bytes;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tower_http::cors::{Any, CorsLayer};
@@ -11,7 +12,6 @@ use tower_http::cors::{Any, CorsLayer};
 use crate::cpu_timer::CpuLimits;
 use crate::v8::{create_v8_runtime, handle_rpc};
 
-/// Message sent from HTTP handlers to the V8 thread.
 struct RpcRequest {
     body: String,
     reply: oneshot::Sender<Result<RpcReply, String>>,
@@ -25,10 +25,11 @@ struct RpcReply {
 }
 
 /// Shared state for axum handlers (Send + Sync).
+/// static_html is Bytes — zero-copy, no allocation per request.
 #[derive(Clone)]
 struct AppState {
     rpc_tx: mpsc::Sender<RpcRequest>,
-    static_html: Arc<Option<Vec<u8>>>,
+    static_html: Option<Bytes>,
 }
 
 pub async fn serve(
@@ -66,7 +67,7 @@ pub async fn serve(
 
     let state = AppState {
         rpc_tx,
-        static_html: Arc::new(static_html),
+        static_html: static_html.map(Bytes::from),
     };
 
     let cors = CorsLayer::new()
@@ -191,8 +192,13 @@ async fn handle_rpc_endpoint(
 }
 
 async fn handle_static(State(state): State<AppState>) -> Response {
-    if let Some(ref html) = *state.static_html {
-        Html(html.clone()).into_response()
+    if let Some(ref html) = state.static_html {
+        // Zero-copy: Bytes::clone is just an Arc refcount bump, no data copy
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(Body::from(html.clone()))
+            .unwrap()
     } else {
         json_response(StatusCode::OK, r#"{"status":"appbase-rt running"}"#)
     }
