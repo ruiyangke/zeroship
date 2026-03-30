@@ -2,7 +2,9 @@ import { readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { compile } from './compiler/plugin.js'
 import { createDb } from './db.js'
-import { createServer } from './runtime/server.js'
+import { createServer as createHonoServer } from './runtime/server.js'
+import { createServer as createViteDevServer } from 'vite'
+import react from '@vitejs/plugin-react'
 
 export async function dev(entryFile, options = {}) {
   const port = options.port || 3000
@@ -19,7 +21,7 @@ export async function dev(entryFile, options = {}) {
   writeFileSync(resolve(distDir, 'server/functions.js'), serverCode)
   writeFileSync(resolve(distDir, 'client/App.jsx'), clientCode)
 
-  // Write client index.html
+  // Write client index.html in .dist/client/
   writeFileSync(resolve(distDir, 'client/index.html'), `<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>appbase app</title></head>
@@ -29,59 +31,102 @@ export async function dev(entryFile, options = {}) {
 </body>
 </html>`)
 
-  // Write client entry that mounts the component
+  // Write client entry
   writeFileSync(resolve(distDir, 'client/main.jsx'), `
 import React from 'react'
+import { useState, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
-${clientCode}
+
+${clientCode.replace(/import\s*\{[^}]*\}\s*from\s*['"]appbase['"];?/g, '')}
 
 const root = createRoot(document.getElementById('root'))
 root.render(React.createElement(${entryComponent}))
 `)
 
-  console.log(`[appbase] Server code:\n${serverCode}\n`)
-  console.log(`[appbase] Client code:\n${clientCode}\n`)
+  console.log(`[appbase] Compiled. Loading server functions...`)
 
   // Create db and dynamically load server functions
   const db = createDb('appbase.db')
-
-  // Build server functions by writing a proper ES module and importing it
-  // Rewrite the server code to replace `import { db } from 'appbase'` with actual db import
   const serverModulePath = resolve(distDir, 'server/_runtime.js')
-
   const rewrittenServer = serverCode
     .replace(/import\s*\{[^}]*\}\s*from\s*['"]appbase['"];?/g, '')
 
-  // Extract function names from the rewritten server code
-  const functionNames = Array.from(rewrittenServer.matchAll(/(?:export\s+)?async\s+function\s+(\w+)/g))
+  // Extract non-exported function names that need explicit exports
+  const nonExportedFns = Array.from(rewrittenServer.matchAll(/(?<!export\s)async\s+function\s+(\w+)/g))
     .map(m => m[1])
 
   writeFileSync(serverModulePath, `
 import { createDb } from '${resolve('packages/appbase/src/db.js')}';
 const db = createDb('${resolve('appbase.db')}');
 ${rewrittenServer}
-${functionNames.map(name => `export { ${name} };`).join('\n')}
+${nonExportedFns.map(name => `export { ${name} };`).join('\n')}
 `)
 
-  const serverModule = await import(serverModulePath)
-
-  // Collect all exported functions
+  const serverModule = await import(serverModulePath + '?t=' + Date.now())
   const functions = {}
   for (const [key, val] of Object.entries(serverModule)) {
-    if (typeof val === 'function') {
-      functions[key] = val
-    }
+    if (typeof val === 'function') functions[key] = val
   }
 
   console.log(`[appbase] Loaded server functions: ${Object.keys(functions).join(', ')}`)
 
-  // Start server
-  const { address } = createServer({
-    functions,
-    port,
-    staticDir: resolve(distDir, 'client')
+  // Create Vite dev server in middleware mode
+  const vite = await createViteDevServer({
+    root: resolve(distDir, 'client'),
+    server: { middlewareMode: true },
+    plugins: [react()],
+    appType: 'spa',
   })
 
-  console.log(`[appbase] Dev server running at ${address}`)
-  return { address }
+  // Create a combined HTTP server:
+  // - /api/* goes to Hono (RPC routes)
+  // - Everything else goes to Vite (client bundle + HMR)
+  const { createServer: createHttpServer } = await import('node:http')
+  const { Hono } = await import('hono')
+
+  const app = new Hono()
+
+  // API routes
+  app.post('/api/:name', async (c) => {
+    const name = c.req.param('name')
+    const fn = functions[name]
+    if (!fn) return c.json({ error: `Function '${name}' not found` }, 404)
+    const body = await c.req.json()
+    const args = body.args || []
+    const result = await fn(...args)
+    return c.json(result)
+  })
+
+  // Create Node.js HTTP server
+  const httpServer = createHttpServer(async (req, res) => {
+    // Try Hono first for API routes
+    if (req.url.startsWith('/api/')) {
+      const response = await app.fetch(new Request(`http://localhost${req.url}`, {
+        method: req.method,
+        headers: req.headers,
+        body: req.method !== 'GET' && req.method !== 'HEAD'
+          ? await new Promise((resolve) => {
+              let data = ''
+              req.on('data', chunk => data += chunk)
+              req.on('end', () => resolve(data))
+            })
+          : undefined,
+      }))
+
+      res.writeHead(response.status, Object.fromEntries(response.headers.entries()))
+      const body = await response.text()
+      res.end(body)
+      return
+    }
+
+    // Everything else goes to Vite
+    vite.middlewares(req, res)
+  })
+
+  httpServer.listen(port, () => {
+    console.log(`[appbase] Dev server running at http://localhost:${port}`)
+    console.log(`[appbase] Vite HMR enabled`)
+  })
+
+  return { server: httpServer, vite }
 }

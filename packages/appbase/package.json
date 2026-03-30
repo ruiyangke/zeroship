@@ -18,7 +18,11 @@
     "@babel/traverse": "^7.29.0",
     "@babel/types": "^7.29.0",
     "@hono/node-server": "^1.19.12",
+    "@vitejs/plugin-react": "^6.0.1",
     "better-sqlite3": "^11.0.0",
-    "hono": "^4.12.9"
+    "hono": "^4.12.9",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "vite": "^8.0.3"
   }
 }
