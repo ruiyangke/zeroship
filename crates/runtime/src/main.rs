@@ -1,7 +1,4 @@
-mod ops;
-mod v8;
-mod server;
-mod dev;
+use appbase_runtime::{dev, server};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

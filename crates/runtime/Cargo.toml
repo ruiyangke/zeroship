@@ -7,6 +7,10 @@ edition = "2024"
 name = "appbase-rt"
 path = "src/main.rs"
 
+[lib]
+name = "appbase_runtime"
+path = "src/lib.rs"
+
 [dependencies]
 deno_core = "0.395"
 deno_error = "0.7"
@@ -19,6 +23,13 @@ thiserror = "2"
 tokio-tungstenite = "0.26"
 notify = "7"
 futures-util = "0.3"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "rpc"
+harness = false
 
 [lints]
 workspace = true
