@@ -21,6 +21,8 @@
             pkg-config
             openssl
             sqlite
+            wrk
+            hey
           ];
 
           RUSQLITE_USE_BUNDLED = "1";

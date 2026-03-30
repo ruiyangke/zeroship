@@ -3,8 +3,35 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
-use crate::server::{http_response, rpc_error_response};
 use crate::v8::{RpcResult, create_v8_runtime, handle_rpc};
+
+fn http_response(status: u16, content_type: &str, body: &[u8]) -> Vec<u8> {
+    let status_text = match status {
+        200 => "OK",
+        204 => "No Content",
+        400 => "Bad Request",
+        500 => "Internal Server Error",
+        _ => "Unknown",
+    };
+    let header = format!(
+        "HTTP/1.1 {status} {status_text}\r\n\
+         Content-Type: {content_type}\r\n\
+         Content-Length: {}\r\n\
+         Access-Control-Allow-Origin: *\r\n\
+         Connection: close\r\n\r\n",
+        body.len()
+    );
+    let mut resp = header.into_bytes();
+    resp.extend_from_slice(body);
+    resp
+}
+
+fn rpc_error_response(status: u16, message: &str, _id: Option<&str>) -> Vec<u8> {
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","error":{{"code":-32603,"message":"{message}"}},"id":null}}"#
+    );
+    http_response(status, "application/json", body.as_bytes())
+}
 
 pub async fn dev(entry: &str, port: u16, compiler_bin: &str, minify: bool) -> Result<(), deno_error::JsErrorBox> {
     fn err(e: impl std::fmt::Display) -> deno_error::JsErrorBox {

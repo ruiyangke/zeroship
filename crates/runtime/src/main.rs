@@ -6,16 +6,13 @@ fn main() {
 
     match command {
         "serve" => {
-            // Production: serve pre-compiled files
+            // Production: axum on multi-threaded runtime, V8 on dedicated thread
             let script = args.get(2).expect("Usage: appbase-rt serve <server.js> [--static=index.html] [--port=3000] [--db=appbase.db]");
             let port = parse_flag(&args, "--port=").unwrap_or(3000);
             let db_path = parse_flag_str(&args, "--db=").unwrap_or("appbase.db".into());
             let static_file = parse_flag_str(&args, "--static=");
 
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
+            let rt = tokio::runtime::Runtime::new().unwrap();
 
             if let Err(e) = rt.block_on(server::serve(script, &db_path, port, static_file.as_deref())) {
                 eprintln!("[appbase-rt] Error: {}", e);

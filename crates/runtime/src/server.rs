@@ -1,53 +1,34 @@
-use crate::cpu_timer::{CpuLimits, CpuUsage};
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{header, Method, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::Router;
+use std::sync::Arc;
+use tokio::sync::{mpsc, oneshot};
+use tower_http::cors::{Any, CorsLayer};
+
+use crate::cpu_timer::CpuLimits;
 use crate::v8::{create_v8_runtime, handle_rpc};
 
-pub fn http_response(status: u16, content_type: &str, body: &[u8]) -> Vec<u8> {
-    let status_text = match status {
-        200 => "OK",
-        400 => "Bad Request",
-        500 => "Internal Server Error",
-        _ => "Unknown",
-    };
-    let header = format!(
-        "HTTP/1.1 {status} {status_text}\r\n\
-         Content-Type: {content_type}\r\n\
-         Content-Length: {}\r\n\
-         Access-Control-Allow-Origin: *\r\n\
-         Access-Control-Allow-Methods: POST, GET, OPTIONS\r\n\
-         Access-Control-Allow-Headers: Content-Type\r\n\
-         Connection: close\r\n\r\n",
-        body.len()
-    );
-    let mut resp = header.into_bytes();
-    resp.extend_from_slice(body);
-    resp
+/// Message sent from HTTP handlers to the V8 thread.
+struct RpcRequest {
+    body: String,
+    reply: oneshot::Sender<Result<RpcReply, String>>,
 }
 
-pub fn sanitize_error(msg: &str) -> String {
-    // Strip file paths, stack traces, and internal details
-    let sanitized = msg
-        .lines()
-        .next()
-        .unwrap_or("Internal error");
-    // Remove absolute paths
-    let sanitized = if sanitized.contains('/') {
-        sanitized
-            .split('/')
-            .last()
-            .unwrap_or(sanitized)
-    } else {
-        sanitized
-    };
-    sanitized.to_string()
+struct RpcReply {
+    json: String,
+    cpu_ms: f64,
+    total_cpu_ms: f64,
+    request_count: u64,
 }
 
-pub fn rpc_error_response(status: u16, message: &str, id: Option<&str>) -> Vec<u8> {
-    let safe_msg = sanitize_error(message);
-    let id_value = id.map_or("null".to_string(), |i| format!("\"{i}\""));
-    let body = format!(
-        r#"{{"jsonrpc":"2.0","error":{{"code":-32603,"message":"{safe_msg}"}},"id":{id_value}}}"#
-    );
-    http_response(status, "application/json", body.as_bytes())
+/// Shared state for axum handlers (Send + Sync).
+#[derive(Clone)]
+struct AppState {
+    rpc_tx: mpsc::Sender<RpcRequest>,
+    static_html: Arc<Option<Vec<u8>>>,
 }
 
 pub async fn serve(
@@ -67,62 +48,169 @@ pub async fn serve(
         })
     });
 
-    let (mut runtime, rpc_result) = create_v8_runtime(db_path).map_err(err)?;
-    let cpu_limits = CpuLimits::default(); // 50ms per request
-    let mut cpu_usage = CpuUsage::default();
+    let script_path = script_path.to_string();
+    let db_path = db_path.to_string();
 
-    let user_code = std::fs::read_to_string(script_path)
-        .map_err(|e| err(format!("Failed to read {script_path}: {e}")))?;
-    runtime.execute_script("<user>", user_code).map_err(err)?;
-    runtime.run_event_loop(Default::default()).await.map_err(err)?;
+    // Channel for HTTP → V8 communication
+    let (rpc_tx, rpc_rx) = mpsc::channel::<RpcRequest>(256);
+
+    // Spawn V8 on a dedicated thread (JsRuntime is !Send, needs its own thread)
+    let v8_handle = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(v8_worker(&script_path, &db_path, rpc_rx))
+    });
+
+    let state = AppState {
+        rpc_tx,
+        static_html: Arc::new(static_html),
+    };
+
+    let cors = CorsLayer::new()
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers(Any)
+        .allow_origin(Any);
+
+    let app = Router::new()
+        .route("/rpc", post(handle_rpc_endpoint))
+        .fallback(get(handle_static))
+        .layer(cors)
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
+        .await
+        .map_err(err)?;
+    eprintln!("[appbase-rt] http://localhost:{port}");
+
+    axum::serve(listener, app).await.map_err(err)?;
+
+    let _ = v8_handle.join();
+    Ok(())
+}
+
+/// V8 worker loop — runs on its own thread with a single-threaded tokio runtime.
+async fn v8_worker(
+    script_path: &str,
+    db_path: &str,
+    mut rpc_rx: mpsc::Receiver<RpcRequest>,
+) {
+    let (mut runtime, rpc_result) = match create_v8_runtime(db_path) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[appbase-rt] Failed to create V8 runtime: {e}");
+            return;
+        }
+    };
+
+    let user_code = match std::fs::read_to_string(script_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[appbase-rt] Failed to read {script_path}: {e}");
+            return;
+        }
+    };
+
+    if let Err(e) = runtime.execute_script("<user>", user_code) {
+        eprintln!("[appbase-rt] Failed to execute script: {e}");
+        return;
+    }
+    if let Err(e) = runtime.run_event_loop(Default::default()).await {
+        eprintln!("[appbase-rt] Event loop error: {e}");
+        return;
+    }
 
     eprintln!("[appbase-rt] Loaded: {script_path}");
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await.map_err(err)?;
-    eprintln!("[appbase-rt] http://localhost:{port}");
+    let cpu_limits = CpuLimits::default();
+    let mut cpu_usage = crate::cpu_timer::CpuUsage::default();
 
-    loop {
-        let (mut stream, addr) = listener.accept().await.map_err(err)?;
-        use tokio::io::AsyncWriteExt;
+    while let Some(req) = rpc_rx.recv().await {
+        let result = handle_rpc(&mut runtime, &rpc_result, &req.body, &cpu_limits).await;
 
-        let mut buf = vec![0u8; 65536];
-        stream.readable().await.map_err(err)?;
-        let n = stream.try_read(&mut buf).map_err(err)?;
-        if n == 0 { continue; }
-        let request_str = String::from_utf8_lossy(&buf[..n]);
-
-        // Parse request line for logging
-        let request_line = request_str.lines().next().unwrap_or("");
-
-        let response = if let Some(body_start) = request_str.find("\r\n\r\n") {
-            let headers = &request_str[..body_start];
-            let body = &request_str[body_start + 4..];
-
-            // Handle CORS preflight
-            if headers.starts_with("OPTIONS ") {
-                http_response(204, "text/plain", b"")
-            } else if headers.starts_with("POST /rpc") && !body.is_empty() {
-                match handle_rpc(&mut runtime, &rpc_result, body, &cpu_limits).await {
-                    Ok(rpc_resp) => {
-                        cpu_usage.record(rpc_resp.cpu_time);
-                        eprintln!("[appbase-rt] {addr} {request_line} cpu={:.2}ms total={:.2}ms reqs={}",
-                            rpc_resp.cpu_time.as_secs_f64() * 1000.0,
-                            cpu_usage.total.as_secs_f64() * 1000.0,
-                            cpu_usage.request_count);
-                        http_response(200, "application/json", rpc_resp.json.as_bytes())
-                    }
-                    Err(e) => rpc_error_response(500, &e.to_string(), None),
-                }
-            } else if let Some(ref html) = static_html {
-                http_response(200, "text/html", html)
-            } else {
-                http_response(200, "application/json", br#"{"status":"appbase-rt running"}"#)
+        let reply = match result {
+            Ok(rpc_resp) => {
+                cpu_usage.record(rpc_resp.cpu_time);
+                Ok(RpcReply {
+                    json: rpc_resp.json,
+                    cpu_ms: rpc_resp.cpu_time.as_secs_f64() * 1000.0,
+                    total_cpu_ms: cpu_usage.total.as_secs_f64() * 1000.0,
+                    request_count: cpu_usage.request_count,
+                })
             }
-        } else {
-            http_response(400, "text/plain", b"Bad Request")
+            Err(e) => Err(e.to_string()),
         };
 
-        eprintln!("[appbase-rt] {addr} {request_line}");
-        stream.write_all(&response).await.map_err(err)?;
+        let _ = req.reply.send(reply);
+    }
+}
+
+async fn handle_rpc_endpoint(
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    let (reply_tx, reply_rx) = oneshot::channel();
+
+    if state
+        .rpc_tx
+        .send(RpcRequest {
+            body,
+            reply: reply_tx,
+        })
+        .await
+        .is_err()
+    {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"V8 worker unavailable"},"id":null}"#,
+        );
+    }
+
+    match reply_rx.await {
+        Ok(Ok(reply)) => {
+            eprintln!(
+                "[appbase-rt] POST /rpc cpu={:.2}ms total={:.2}ms reqs={}",
+                reply.cpu_ms, reply.total_cpu_ms, reply.request_count
+            );
+            json_response(StatusCode::OK, &reply.json)
+        }
+        Ok(Err(e)) => {
+            let safe = sanitize_error(&e);
+            let err_body = format!(
+                r#"{{"jsonrpc":"2.0","error":{{"code":-32603,"message":"{safe}"}},"id":null}}"#
+            );
+            json_response(StatusCode::INTERNAL_SERVER_ERROR, &err_body)
+        }
+        Err(_) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"V8 worker crashed"},"id":null}"#,
+        ),
+    }
+}
+
+async fn handle_static(State(state): State<AppState>) -> Response {
+    if let Some(ref html) = *state.static_html {
+        Html(html.clone()).into_response()
+    } else {
+        json_response(StatusCode::OK, r#"{"status":"appbase-rt running"}"#)
+    }
+}
+
+fn json_response(status: StatusCode, body: &str) -> Response {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn sanitize_error(msg: &str) -> String {
+    let sanitized = msg.lines().next().unwrap_or("Internal error");
+    if sanitized.contains('/') {
+        sanitized.split('/').last().unwrap_or(sanitized).to_string()
+    } else {
+        sanitized.to_string()
     }
 }
