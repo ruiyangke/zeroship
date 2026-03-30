@@ -415,3 +415,198 @@ export async function dev(entryFile, options = {}) {
 
   return { server: httpServer, vite }
 }
+
+export async function devDirectory(appDir, options = {}) {
+  const port = options.port || 3000
+
+  // Dynamic imports
+  const { compileDirectory } = await import('./compiler/directory.js')
+  const { createServer: createHttpServer } = await import('node:http')
+  const { Hono } = await import('hono')
+  const { JSONRPCServer } = await import('json-rpc-2.0')
+
+  const resolvedAppDir = resolve(appDir)
+
+  console.log(`[appbase] Compiling directory: ${appDir}/`)
+  let compiled = compileDirectory(resolvedAppDir, { target: 'node' })
+  console.log(`[appbase] Routes: ${compiled.routes.map(r => r.path).join(', ')}`)
+  console.log(`[appbase] Server functions: ${compiled.serverFunctions.join(', ')}`)
+
+  // Write compiled output
+  const distDir = resolve('.dist')
+  mkdirSync(resolve(distDir, 'server'), { recursive: true })
+  mkdirSync(resolve(distDir, 'client'), { recursive: true })
+
+  // Write server bundle
+  const dbPath = resolve('appbase.db')
+  const rewrittenServer = compiled.serverBundle
+    .replace(/import\s*\{[^}]*\}\s*from\s*['"]appbase['"];?/g, '')
+  const nonExportedFns = Array.from(rewrittenServer.matchAll(/(?<!export\s)async\s+function\s+(\w+)/g))
+    .map(m => m[1])
+
+  const serverModulePath = resolve(distDir, 'server/_runtime.js')
+  writeFileSync(serverModulePath, `
+import { createDb } from '${resolve('packages/appbase/src/db.js')}';
+const db = createDb('${dbPath}');
+${rewrittenServer}
+${nonExportedFns.map(name => `export { ${name} };`).join('\n')}
+`)
+
+  // Load server functions
+  const serverModule = await import(serverModulePath + '?t=' + Date.now())
+  let functions = {}
+  for (const [key, val] of Object.entries(serverModule)) {
+    if (typeof val === 'function') functions[key] = val
+  }
+
+  // Generate client entry with inline routing
+  const routeEntries = compiled.routes.map((route, i) => {
+    const pageFnName = `Page_${i}`
+    return { ...route, pageFnName }
+  })
+
+  // Build the main.jsx that includes all pages and routing
+  let clientEntry = `
+import React, { useState, useEffect } from 'react'
+import { createRoot } from 'react-dom/client'
+
+`
+  // Include each page's client code
+  for (const route of routeEntries) {
+    if (route.page) {
+      // Wrap each page in a unique scope to avoid name collisions
+      clientEntry += `// Route: ${route.path}\n`
+      // Extract the default export name or wrap it
+      const pageCode = route.page
+        .replace(/export default function (\w+)/, `function ${route.pageFnName}`)
+        .replace(/export default /, `const ${route.pageFnName} = `)
+      clientEntry += pageCode + '\n\n'
+    }
+  }
+
+  // Simple client-side router
+  clientEntry += `
+function matchRoute(pattern, pathname) {
+  const pp = pattern.split('/').filter(Boolean)
+  const up = pathname.split('/').filter(Boolean)
+  if (pp.length === 0 && up.length === 0) return {}
+  if (pp.length !== up.length) return null
+  const params = {}
+  for (let i = 0; i < pp.length; i++) {
+    if (pp[i].startsWith(':')) params[pp[i].slice(1)] = up[i]
+    else if (pp[i] !== up[i]) return null
+  }
+  return params
+}
+
+const routes = [
+${routeEntries.map(r => `  { path: ${JSON.stringify(r.path)}, component: ${r.pageFnName} }`).join(',\n')}
+]
+
+function App() {
+  const [pathname, setPathname] = useState(window.location.pathname)
+
+  useEffect(() => {
+    const onPop = () => setPathname(window.location.pathname)
+    window.addEventListener('popstate', onPop)
+
+    // Intercept link clicks for client-side navigation
+    const onClick = (e) => {
+      const a = e.target.closest('a')
+      if (a && a.href && a.origin === window.location.origin) {
+        e.preventDefault()
+        window.history.pushState({}, '', a.pathname)
+        setPathname(a.pathname)
+      }
+    }
+    document.addEventListener('click', onClick)
+
+    return () => {
+      window.removeEventListener('popstate', onPop)
+      document.removeEventListener('click', onClick)
+    }
+  }, [])
+
+  const sorted = [...routes].sort((a, b) => b.path.length - a.path.length)
+  for (const route of sorted) {
+    const params = matchRoute(route.path, pathname)
+    if (params !== null) {
+      const Page = route.component
+      return React.createElement(Page, { params })
+    }
+  }
+  return React.createElement('div', null, '404 Not Found')
+}
+
+const root = createRoot(document.getElementById('root'))
+root.render(React.createElement(App))
+`
+
+  writeFileSync(resolve(distDir, 'client/main.jsx'), clientEntry)
+  writeFileSync(resolve(distDir, 'client/index.html'), `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>appbase app</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { -webkit-font-smoothing: antialiased; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/main.jsx"></script>
+</body>
+</html>`)
+
+  // Vite dev server
+  const vite = await createViteDevServer({
+    root: resolve(distDir, 'client'),
+    server: { middlewareMode: true },
+    plugins: [react()],
+    appType: 'spa',
+  })
+
+  // Hono + JSON-RPC
+  const app = new Hono()
+  let rpcServer = new JSONRPCServer()
+  for (const [name, fn] of Object.entries(functions)) {
+    rpcServer.addMethod(name, (params) => fn(...(params || [])))
+  }
+
+  app.post('/rpc', async (c) => {
+    const request = await c.req.json()
+    const response = await rpcServer.receive(request)
+    if (response) return c.json(response)
+    return c.body(null, 204)
+  })
+
+  // HTTP server
+  const httpServer = createHttpServer(async (req, res) => {
+    if (req.url === '/rpc' && req.method === 'POST') {
+      const body = await new Promise((resolve) => {
+        let data = ''
+        req.on('data', chunk => data += chunk)
+        req.on('end', () => resolve(data))
+      })
+      const response = await app.fetch(new Request(`http://localhost${req.url}`, {
+        method: 'POST',
+        headers: req.headers,
+        body,
+      }))
+      res.writeHead(response.status, Object.fromEntries(response.headers.entries()))
+      res.end(await response.text())
+      return
+    }
+    vite.middlewares(req, res)
+  })
+
+  httpServer.listen(port, () => {
+    console.log(`[appbase] Dev server running at http://localhost:${port}`)
+    console.log(`[appbase] Routes:`)
+    compiled.routes.forEach(r => console.log(`  ${r.path}`))
+  })
+
+  return { server: httpServer, vite }
+}

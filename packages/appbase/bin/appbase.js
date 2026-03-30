@@ -1,12 +1,19 @@
 #!/usr/bin/env node
-import { dev } from '../src/dev.js'
+import { dev, devDirectory } from '../src/dev.js'
+import { statSync } from 'node:fs'
 
 const [,, command, ...args] = process.argv
 
 if (command === 'dev') {
-  const entry = args[0] || 'app.jsx'
+  const entry = args[0] || 'app'
   const port = parseInt(args.find(a => a.startsWith('--port='))?.split('=')[1] || '3000')
-  dev(entry, { port })
+
+  const stat = statSync(entry, { throwIfNoEntry: false })
+  if (stat?.isDirectory()) {
+    devDirectory(entry, { port })
+  } else {
+    dev(entry, { port })
+  }
 } else {
-  console.log('Usage: appbase dev [file.jsx] [--port=3000]')
+  console.log('Usage: appbase dev [file.jsx|directory] [--port=3000]')
 }
