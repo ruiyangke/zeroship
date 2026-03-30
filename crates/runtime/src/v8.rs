@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::ops;
 
+// Holds the RPC result string, set by JS via op
 pub struct RpcResult(pub RefCell<String>);
 
 #[op2(fast)]
@@ -15,11 +16,15 @@ pub fn op_set_rpc_result(state: &mut OpState, #[string] result: &str) {
     *rpc.0.borrow_mut() = result.to_string();
 }
 
+// Static runtime JS — loaded once, shared across all runtime instances
+static RUNTIME_JS: &str = include_str!("embed/runtime.js");
+
 pub fn create_v8_runtime(db_path: &str) -> Result<(JsRuntime, Rc<RpcResult>), String> {
     let conn = Rc::new(Connection::open(db_path).map_err(|e| e.to_string())?);
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;").map_err(|e| e.to_string())?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+        .map_err(|e| e.to_string())?;
 
-    let runtime_code: Arc<str> = Arc::from(include_str!("embed/runtime.js"));
+    let runtime_code: Arc<str> = Arc::from(RUNTIME_JS);
     let runtime_js = ExtensionFileSource::new_computed("ext:appbase/runtime.js", runtime_code);
 
     let ext = Extension {
@@ -53,6 +58,12 @@ pub fn create_v8_runtime(db_path: &str) -> Result<(JsRuntime, Rc<RpcResult>), St
     Ok((runtime, rpc_result))
 }
 
+/// Handle an RPC request by calling the pre-compiled __handleRpc function in JS.
+/// The JS function parses the JSON, dispatches to user functions, and returns
+/// the result via op_set_rpc_result (avoiding V8 value extraction complexity).
+///
+/// This is faster than execute_script because __handleRpc is already compiled
+/// by V8 — we only compile a minimal call expression, not the full dispatch logic.
 pub async fn handle_rpc(
     runtime: &mut JsRuntime,
     rpc_result: &Rc<RpcResult>,
@@ -62,22 +73,24 @@ pub async fn handle_rpc(
         deno_error::JsErrorBox::generic(e.to_string())
     }
 
+    // Escape the JSON string for embedding in JS — only need to handle
+    // backslashes and backticks since we use template literals
+    let escaped = request_json.replace('\\', "\\\\").replace('`', "\\`");
+
+    // Minimal JS: call the pre-compiled function with the request string
+    // __handleRpc is defined in runtime.js and already compiled by V8
     let script = format!(
         r#"(async () => {{
-            const request = {};
-            let result;
-            if (Array.isArray(request)) {{
-                result = JSON.stringify(await Promise.all(request.map(__dispatch)));
-            }} else {{
-                result = JSON.stringify(await __dispatch(request));
-            }}
+            const result = await globalThis.__handleRpc(`{escaped}`);
             Deno.core.ops.op_set_rpc_result(result);
-        }})()"#,
-        request_json
+        }})()"#
     );
 
     runtime.execute_script("<rpc>", script).map_err(err)?;
-    runtime.run_event_loop(Default::default()).await.map_err(err)?;
+    runtime
+        .run_event_loop(Default::default())
+        .await
+        .map_err(err)?;
 
     Ok(rpc_result.0.borrow().clone())
 }

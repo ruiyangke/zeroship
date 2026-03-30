@@ -1,7 +1,7 @@
 use deno_core::op2;
 use deno_core::OpState;
 use rusqlite::Connection;
-use serde_json::Value;
+use serde_json;
 use std::rc::Rc;
 use uuid::Uuid;
 
@@ -21,7 +21,9 @@ fn validate_collection_name(name: &str) -> Result<(), DbError> {
         return Err(DbError::InvalidName("must be 1-64 characters".into()));
     }
     if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return Err(DbError::InvalidName("only alphanumeric and underscore allowed".into()));
+        return Err(DbError::InvalidName(
+            "only alphanumeric and underscore allowed".into(),
+        ));
     }
     Ok(())
 }
@@ -45,19 +47,18 @@ pub fn op_db_ensure_table(state: &mut OpState, #[string] name: &str) -> Result<(
 }
 
 #[op2]
-#[string]
+#[serde]
 pub fn op_db_insert(
     state: &mut OpState,
     #[string] collection: &str,
-    #[string] doc_json: &str,
-) -> Result<String, DbError> {
+    #[serde] mut doc: serde_json::Value,
+) -> Result<serde_json::Value, DbError> {
     validate_collection_name(collection)?;
     let db = state.borrow::<Rc<Connection>>().clone();
 
     let id = Uuid::new_v4().to_string();
-    let mut doc: Value = serde_json::from_str(doc_json)?;
     if let Some(obj) = doc.as_object_mut() {
-        obj.insert("id".to_string(), Value::String(id.clone()));
+        obj.insert("id".to_string(), serde_json::Value::String(id.clone()));
     }
 
     let data = serde_json::to_string(&doc)?;
@@ -66,55 +67,52 @@ pub fn op_db_insert(
         rusqlite::params![id, data],
     )?;
 
-    Ok(data)
+    Ok(doc)
 }
 
 #[op2]
-#[string]
+#[serde]
 pub fn op_db_find(
     state: &mut OpState,
     #[string] collection: &str,
-    #[string] filter_json: &str,
-) -> Result<String, DbError> {
+    #[serde] filter: serde_json::Value,
+) -> Result<Vec<serde_json::Value>, DbError> {
     validate_collection_name(collection)?;
     let db = state.borrow::<Rc<Connection>>().clone();
 
     let mut stmt = db.prepare(&format!(r#"SELECT data FROM "{collection}""#))?;
-    let rows: Vec<Value> = stmt
+    let rows: Vec<serde_json::Value> = stmt
         .query_map([], |row| {
             let data: String = row.get(0)?;
             Ok(data)
         })?
         .filter_map(|r| r.ok())
-        .filter_map(|data| serde_json::from_str::<Value>(&data).ok())
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
         .collect();
 
-    let filter: Value = serde_json::from_str(filter_json)?;
-    let results: Vec<&Value> = if filter.as_object().is_none_or(|o| o.is_empty()) {
-        rows.iter().collect()
+    if filter.as_object().is_none_or(|o| o.is_empty()) {
+        Ok(rows)
     } else {
-        rows.iter()
+        let filter_obj = filter.as_object().unwrap();
+        Ok(rows
+            .into_iter()
             .filter(|doc| {
-                filter
-                    .as_object()
-                    .unwrap()
+                filter_obj
                     .iter()
                     .all(|(k, v)| doc.get(k).is_some_and(|dv| dv == v))
             })
-            .collect()
-    };
-
-    Ok(serde_json::to_string(&results)?)
+            .collect())
+    }
 }
 
 #[op2]
-#[string]
+#[serde]
 pub fn op_db_update(
     state: &mut OpState,
     #[string] collection: &str,
     #[string] id: &str,
-    #[string] updates_json: &str,
-) -> Result<String, DbError> {
+    #[serde] updates: serde_json::Value,
+) -> Result<serde_json::Value, DbError> {
     validate_collection_name(collection)?;
     let db = state.borrow::<Rc<Connection>>().clone();
 
@@ -124,9 +122,7 @@ pub fn op_db_update(
         |row| row.get(0),
     )?;
 
-    let mut doc: Value = serde_json::from_str(&existing)?;
-    let updates: Value = serde_json::from_str(updates_json)?;
-
+    let mut doc: serde_json::Value = serde_json::from_str(&existing)?;
     if let (Some(doc_obj), Some(upd_obj)) = (doc.as_object_mut(), updates.as_object()) {
         for (k, v) in upd_obj {
             doc_obj.insert(k.clone(), v.clone());
@@ -135,11 +131,13 @@ pub fn op_db_update(
 
     let data = serde_json::to_string(&doc)?;
     db.execute(
-        &format!(r#"UPDATE "{collection}" SET data = ?1, updated_at = datetime('now') WHERE id = ?2"#),
+        &format!(
+            r#"UPDATE "{collection}" SET data = ?1, updated_at = datetime('now') WHERE id = ?2"#
+        ),
         rusqlite::params![data, id],
     )?;
 
-    Ok(data)
+    Ok(doc)
 }
 
 #[op2(fast)]
