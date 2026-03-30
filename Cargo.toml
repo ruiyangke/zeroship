@@ -14,10 +14,3 @@ missing_debug_implementations = "warn"
 all = { level = "deny", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
-# Allow these common patterns
-module_name_repetitions = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-must_use_candidate = "allow"
-too_many_arguments = "allow"
-too_many_lines = "allow"
