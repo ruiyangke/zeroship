@@ -24,6 +24,7 @@ pub async fn dev(entry: &str, port: u16, compiler_bin: &str, minify: bool) -> Re
 
     // V8 runtime
     let (mut runtime, mut rpc_result) = create_v8_runtime("appbase.db").map_err(err)?;
+    let cpu_limits = crate::cpu_timer::CpuLimits::unlimited(); // no limits in dev mode
 
     if !server_js.is_empty() {
         runtime.execute_script("<server>", server_js).map_err(err)?;
@@ -78,8 +79,11 @@ pub async fn dev(entry: &str, port: u16, compiler_bin: &str, minify: bool) -> Re
             let body = &request_str[body_start + 4..];
 
             if headers.starts_with("POST /rpc") && !body.is_empty() {
-                match handle_rpc(&mut runtime, &rpc_result, body).await {
-                    Ok(json) => http_response(200, "application/json", json.as_bytes()),
+                match handle_rpc(&mut runtime, &rpc_result, body, &cpu_limits).await {
+                    Ok(rpc_resp) => {
+                        eprintln!("[appbase] RPC cpu={:.2}ms", rpc_resp.cpu_time.as_secs_f64() * 1000.0);
+                        http_response(200, "application/json", rpc_resp.json.as_bytes())
+                    }
                     Err(e) => rpc_error_response(500, &e.to_string(), None),
                 }
             } else if headers.starts_with("POST /__dev/save") {

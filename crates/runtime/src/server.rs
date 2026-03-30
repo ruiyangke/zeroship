@@ -1,3 +1,4 @@
+use crate::cpu_timer::{CpuLimits, CpuUsage};
 use crate::v8::{create_v8_runtime, handle_rpc};
 
 pub fn http_response(status: u16, content_type: &str, body: &[u8]) -> Vec<u8> {
@@ -67,6 +68,8 @@ pub async fn serve(
     });
 
     let (mut runtime, rpc_result) = create_v8_runtime(db_path).map_err(err)?;
+    let cpu_limits = CpuLimits::default(); // 50ms per request
+    let mut cpu_usage = CpuUsage::default();
 
     let user_code = std::fs::read_to_string(script_path)
         .map_err(|e| err(format!("Failed to read {script_path}: {e}")))?;
@@ -99,8 +102,15 @@ pub async fn serve(
             if headers.starts_with("OPTIONS ") {
                 http_response(204, "text/plain", b"")
             } else if headers.starts_with("POST /rpc") && !body.is_empty() {
-                match handle_rpc(&mut runtime, &rpc_result, body).await {
-                    Ok(json) => http_response(200, "application/json", json.as_bytes()),
+                match handle_rpc(&mut runtime, &rpc_result, body, &cpu_limits).await {
+                    Ok(rpc_resp) => {
+                        cpu_usage.record(rpc_resp.cpu_time);
+                        eprintln!("[appbase-rt] {addr} {request_line} cpu={:.2}ms total={:.2}ms reqs={}",
+                            rpc_resp.cpu_time.as_secs_f64() * 1000.0,
+                            cpu_usage.total.as_secs_f64() * 1000.0,
+                            cpu_usage.request_count);
+                        http_response(200, "application/json", rpc_resp.json.as_bytes())
+                    }
                     Err(e) => rpc_error_response(500, &e.to_string(), None),
                 }
             } else if let Some(ref html) = static_html {

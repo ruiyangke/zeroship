@@ -28,6 +28,8 @@ thiserror = "2"
 tokio-tungstenite = "0.26"
 notify = "7"
 futures-util = "0.3"
+libc = "0.2"
+cpu-time = "1"
 
 [features]
 snapshot = []

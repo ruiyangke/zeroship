@@ -1,5 +1,8 @@
+use appbase_runtime::cpu_timer::CpuLimits;
 use appbase_runtime::v8::{create_v8_runtime, create_v8_runtime_with_snapshot, handle_rpc};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+
+static CPU_LIMITS: CpuLimits = CpuLimits { max_cpu_per_request: None, max_cpu_total: None };
 
 fn setup_runtime() -> (deno_core::JsRuntime, std::rc::Rc<appbase_runtime::v8::RpcResult>) {
     let db_path = format!("/tmp/appbase-bench-{}.db", std::process::id());
@@ -52,6 +55,7 @@ fn bench_rpc_insert(c: &mut Criterion) {
             let result = rt.block_on(handle_rpc(
                 &mut runtime,
                 &rpc_result,
+                &CPU_LIMITS,
                 black_box(r#"{"jsonrpc":"2.0","method":"addTodo","params":["bench"],"id":1}"#),
             ));
             black_box(result.unwrap());
@@ -81,6 +85,7 @@ fn bench_rpc_find(c: &mut Criterion) {
             let result = rt.block_on(handle_rpc(
                 &mut runtime,
                 &rpc_result,
+                &CPU_LIMITS,
                 black_box(r#"{"jsonrpc":"2.0","method":"getTodos","params":[],"id":1}"#),
             ));
             black_box(result.unwrap());
@@ -107,6 +112,7 @@ fn bench_rpc_batch(c: &mut Criterion) {
             let result = rt.block_on(handle_rpc(
                 &mut runtime,
                 &rpc_result,
+                &CPU_LIMITS,
                 black_box(batch),
             ));
             black_box(result.unwrap());
@@ -131,6 +137,7 @@ fn bench_rpc_noop(c: &mut Criterion) {
             let result = rt.block_on(handle_rpc(
                 &mut runtime,
                 &rpc_result,
+                &CPU_LIMITS,
                 black_box(r#"{"jsonrpc":"2.0","method":"noop","params":[],"id":1}"#),
             ));
             black_box(result.unwrap());

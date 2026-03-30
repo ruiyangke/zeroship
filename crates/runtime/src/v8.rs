@@ -110,11 +110,19 @@ fn create_v8_runtime_inner(
     Ok((runtime, rpc_result))
 }
 
+/// Result of an RPC call including CPU time consumed.
+#[derive(Debug)]
+pub struct RpcResponse {
+    pub json: String,
+    pub cpu_time: std::time::Duration,
+}
+
 pub async fn handle_rpc(
     runtime: &mut JsRuntime,
     rpc_result: &Rc<RpcResult>,
     request_json: &str,
-) -> Result<String, deno_error::JsErrorBox> {
+    cpu_limits: &crate::cpu_timer::CpuLimits,
+) -> Result<RpcResponse, deno_error::JsErrorBox> {
     fn err(e: impl std::fmt::Display) -> deno_error::JsErrorBox {
         deno_error::JsErrorBox::generic(e.to_string())
     }
@@ -128,11 +136,31 @@ pub async fn handle_rpc(
         }})()"#
     );
 
+    // Measure CPU time (only counts actual CPU cycles, not I/O wait)
+    let cpu_before = crate::cpu_timer::thread_cpu_time();
+
     runtime.execute_script("<rpc>", script).map_err(err)?;
     runtime
         .run_event_loop(Default::default())
         .await
         .map_err(err)?;
 
-    Ok(rpc_result.0.borrow().clone())
+    let cpu_after = crate::cpu_timer::thread_cpu_time();
+    let cpu_time = cpu_after.saturating_sub(cpu_before);
+
+    // Check per-request CPU limit
+    if let Some(max) = cpu_limits.max_cpu_per_request {
+        if cpu_time > max {
+            return Err(deno_error::JsErrorBox::generic(format!(
+                "CPU time limit exceeded: {:.1}ms used, {:.1}ms allowed",
+                cpu_time.as_secs_f64() * 1000.0,
+                max.as_secs_f64() * 1000.0,
+            )));
+        }
+    }
+
+    Ok(RpcResponse {
+        json: rpc_result.0.borrow().clone(),
+        cpu_time,
+    })
 }
