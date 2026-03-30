@@ -37,7 +37,7 @@ pub fn create_v8_runtime(db_path: &str) -> Result<(JsRuntime, Rc<RpcResult>), St
         ..Default::default()
     };
 
-    let mut runtime = JsRuntime::new(RuntimeOptions {
+    let runtime = JsRuntime::new(RuntimeOptions {
         extensions: vec![ext],
         ..Default::default()
     });

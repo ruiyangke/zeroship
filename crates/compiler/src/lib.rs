@@ -8,7 +8,7 @@ use swc_core::ecma::ast::*;
 use swc_core::ecma::codegen::{text_writer::JsWriter, Emitter};
 use swc_core::ecma::parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
 use swc_core::ecma::transforms::react::{react, Options as ReactOptions, Runtime};
-use swc_core::ecma::visit::{VisitMut, VisitMutWith, Visit, VisitWith, visit_mut_pass};
+use swc_core::ecma::visit::{VisitMut, VisitMutWith, Visit, VisitWith};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CompileResult {
@@ -67,14 +67,6 @@ fn parse(source: &str, cm: &Lrc<SourceMap>) -> Module {
     );
     let mut parser = Parser::new_from(lexer);
     parser.parse_module().expect("Failed to parse module")
-}
-
-fn emit(module: &Module, cm: &Lrc<SourceMap>) -> String {
-    emit_with_minify(module, cm, false)
-}
-
-fn emit_minified(module: &Module, cm: &Lrc<SourceMap>) -> String {
-    emit_with_minify(module, cm, true)
 }
 
 fn emit_with_minify(module: &Module, cm: &Lrc<SourceMap>, minify: bool) -> String {

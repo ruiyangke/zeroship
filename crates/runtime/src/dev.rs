@@ -120,7 +120,7 @@ async fn handle_save(
     minify: bool,
     html: &Arc<Mutex<Vec<u8>>>,
     runtime: &mut JsRuntime,
-    rpc_result: &Rc<RpcResult>,
+    _rpc_result: &Rc<RpcResult>,
     reload_tx: &broadcast::Sender<()>,
 ) -> Result<String, String> {
     // Parse body to get source
@@ -181,7 +181,7 @@ fn run_compiler(compiler_bin: &str, entry: &str, outdir: &str, minify: bool) -> 
     Ok(())
 }
 
-fn inject_ws_reload(html: &[u8], port: u16) -> Vec<u8> {
+fn inject_ws_reload(html: &[u8], _port: u16) -> Vec<u8> {
     let html_str = String::from_utf8_lossy(html);
     let ws_script = format!(r#"
 <script>

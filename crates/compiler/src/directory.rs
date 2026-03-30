@@ -1,4 +1,4 @@
-use crate::scanner::{scan_routes, ScannedRoute};
+use crate::scanner::scan_routes;
 use crate::{compile, Target};
 use serde::Serialize;
 use std::collections::HashSet;
