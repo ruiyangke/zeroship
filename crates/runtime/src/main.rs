@@ -344,7 +344,7 @@ fn create_v8_runtime(db_path: &str) -> Result<(JsRuntime, Rc<RpcResult>), String
     let conn = Rc::new(Connection::open(db_path).map_err(|e| e.to_string())?);
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;").map_err(|e| e.to_string())?;
 
-    let runtime_code: Arc<str> = Arc::from(include_str!("runtime.js"));
+    let runtime_code: Arc<str> = Arc::from(include_str!("embed/runtime.js"));
     let runtime_js = ExtensionFileSource::new_computed("ext:appbase/runtime.js", runtime_code);
 
     let ext = Extension {

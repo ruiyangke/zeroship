@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/compiler",
+    "crates/runtime",
+]
+resolver = "3"
