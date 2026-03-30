@@ -1,3 +1,6 @@
+pub mod scanner;
+pub mod directory;
+
 use serde::Serialize;
 use std::collections::HashSet;
 use swc_core::common::{sync::Lrc, FileName, SourceMap};
