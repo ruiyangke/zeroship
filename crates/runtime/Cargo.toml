@@ -12,6 +12,10 @@ name = "appbase-snapshot"
 path = "src/snapshot_gen.rs"
 required-features = ["snapshot"]
 
+[[bin]]
+name = "bench-isolates"
+path = "src/bench_isolates.rs"
+
 [lib]
 name = "appbase_runtime"
 path = "src/lib.rs"
