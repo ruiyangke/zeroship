@@ -5,8 +5,8 @@ edition = "2024"
 description = "HTTP server for appbase — axum, Tower middleware, multi-tenant routing"
 
 [dependencies]
-appbase-core = { path = "../appbase-core" }
-appbase-isolate = { path = "../appbase-isolate" }
+appbase-core = { path = "../core" }
+appbase-isolate = { path = "../isolate" }
 axum = { version = "0.8", features = ["ws", "macros"] }
 bytes = "1"
 serde_json = "1"

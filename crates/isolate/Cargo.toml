@@ -5,7 +5,7 @@ edition = "2024"
 description = "V8 isolate management for appbase — actor model, pool, CPU metering"
 
 [dependencies]
-appbase-core = { path = "../appbase-core" }
+appbase-core = { path = "../core" }
 deno_core = "0.395"
 deno_error = "0.7"
 tokio = { version = "1", features = ["full"] }

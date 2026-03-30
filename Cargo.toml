@@ -1,10 +1,10 @@
 [workspace]
 members = [
-    "crates/appbase-core",
-    "crates/appbase-isolate",
-    "crates/appbase-plugins",
-    "crates/appbase-server",
-    "crates/appbase",
+    "crates/core",
+    "crates/isolate",
+    "crates/plugins",
+    "crates/server",
+    "crates/cli",
     "crates/compiler",
 ]
 resolver = "3"

@@ -11,7 +11,7 @@ kv = []
 env = []
 
 [dependencies]
-appbase-core = { path = "../appbase-core" }
+appbase-core = { path = "../core" }
 deno_core = "0.395"
 deno_error = "0.7"
 serde_json = "1"
