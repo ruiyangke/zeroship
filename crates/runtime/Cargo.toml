@@ -19,3 +19,6 @@ thiserror = "2"
 tokio-tungstenite = "0.26"
 notify = "7"
 futures-util = "0.3"
+
+[lints]
+workspace = true
