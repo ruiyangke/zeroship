@@ -76,7 +76,7 @@ pub fn create(
         Arc::from(full_js.as_str()),
     );
     let ext = Extension {
-        name: "appbase",
+        name: "appbase_core_runtime",
         ops: Cow::Owned(all_ops),
         esm_files: Cow::Owned(vec![runtime_js]),
         esm_entry_point: Some("ext:appbase/runtime.js"),

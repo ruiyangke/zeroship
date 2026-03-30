@@ -1,5 +1,5 @@
 // Appbase core runtime - injected before user code and plugin bridges
-// Contains: console, RPC dispatch. No primitives (db, auth, etc.)
+// Contains: console, error handling, RPC dispatch. No primitives (db, auth, etc.)
 
 const { core } = Deno;
 
@@ -13,10 +13,22 @@ globalThis.console = {
   },
 };
 
+// Unhandled promise rejection handler - prevents silent failures
+// Without this, rejected promises with no .catch() would be silently swallowed
+core.setUnhandledPromiseRejectionHandler((promise, reason) => {
+  console.error('[appbase] Unhandled promise rejection:', reason);
+});
+
+// Report uncaught exceptions so they surface in Rust
+core.setReportExceptionCallback((error) => {
+  console.error('[appbase] Uncaught exception:', error.message || error);
+});
+
 // RPC dispatcher - user code registers functions here
 globalThis.__rpc = {};
 
-// Pre-compiled RPC dispatch function - called from Rust
+// Pre-compiled RPC dispatch function - called from Rust via op bridge
+// Reads request JSON from Rust op, dispatches to user function, writes response back
 globalThis.__handleRpc = async function(requestJson) {
   const request = JSON.parse(requestJson);
   if (Array.isArray(request)) {
