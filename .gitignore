@@ -4,3 +4,6 @@ dist/
 .direnv/
 result
 *.db
+*.db-shm
+*.db-wal
+target/
