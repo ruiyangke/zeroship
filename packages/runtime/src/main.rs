@@ -44,13 +44,14 @@ fn main() {
             let entry = args.get(2).expect("Usage: appbase-rt dev <app.jsx> [--port=3000] [--compiler=appbase-compile]");
             let port = parse_flag(&args, "--port=").unwrap_or(3000);
             let compiler = parse_flag_str(&args, "--compiler=").unwrap_or("appbase-compile".into());
+            let minify = args.iter().any(|a| a == "--minify");
 
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
 
-            if let Err(e) = rt.block_on(dev(entry, port, &compiler)) {
+            if let Err(e) = rt.block_on(dev(entry, port, &compiler, minify)) {
                 eprintln!("[appbase-rt] Error: {}", e);
                 std::process::exit(1);
             }
@@ -77,7 +78,7 @@ fn parse_flag_str(args: &[String], prefix: &str) -> Option<String> {
 
 // --- Dev mode ---
 
-async fn dev(entry: &str, port: u16, compiler_bin: &str) -> Result<(), deno_error::JsErrorBox> {
+async fn dev(entry: &str, port: u16, compiler_bin: &str, minify: bool) -> Result<(), deno_error::JsErrorBox> {
     fn err(e: impl std::fmt::Display) -> deno_error::JsErrorBox {
         deno_error::JsErrorBox::generic(e.to_string())
     }
@@ -86,7 +87,7 @@ async fn dev(entry: &str, port: u16, compiler_bin: &str) -> Result<(), deno_erro
 
     // Initial compile
     eprintln!("[appbase] Compiling {}...", entry);
-    run_compiler(compiler_bin, entry, outdir).map_err(err)?;
+    run_compiler(compiler_bin, entry, outdir, minify).map_err(err)?;
 
     let server_js = std::fs::read_to_string(format!("{}/server.js", outdir)).unwrap_or_default();
     let html = Arc::new(Mutex::new(
@@ -160,7 +161,7 @@ async fn dev(entry: &str, port: u16, compiler_bin: &str) -> Result<(), deno_erro
                 }
             } else if headers.starts_with("POST /__dev/save") {
                 // Save + recompile
-                match handle_save(body, &entry_path, compiler_bin, outdir, &html, &mut runtime, &rpc_result, &reload_tx2).await {
+                match handle_save(body, &entry_path, compiler_bin, outdir, minify, &html, &mut runtime, &rpc_result, &reload_tx2).await {
                     Ok(resp) => http_response(200, "application/json", resp.as_bytes()),
                     Err(e) => http_response(400, "application/json",
                         format!(r#"{{"error":"{}"}}"#, e).as_bytes()),
@@ -188,6 +189,7 @@ async fn handle_save(
     entry_path: &str,
     compiler_bin: &str,
     outdir: &str,
+    minify: bool,
     html: &Arc<Mutex<Vec<u8>>>,
     runtime: &mut JsRuntime,
     rpc_result: &Rc<RpcResult>,
@@ -201,7 +203,7 @@ async fn handle_save(
     std::fs::write(entry_path, new_source).map_err(|e| e.to_string())?;
 
     // Recompile
-    run_compiler(compiler_bin, entry_path, outdir).map_err(|e| e.to_string())?;
+    run_compiler(compiler_bin, entry_path, outdir, minify).map_err(|e| e.to_string())?;
 
     // Reload HTML
     let new_html = std::fs::read(format!("{}/index.html", outdir)).map_err(|e| e.to_string())?;
@@ -228,9 +230,13 @@ async fn handle_save(
     }).to_string())
 }
 
-fn run_compiler(compiler_bin: &str, entry: &str, outdir: &str) -> Result<(), String> {
+fn run_compiler(compiler_bin: &str, entry: &str, outdir: &str, minify: bool) -> Result<(), String> {
+    let mut cmd_args = vec![entry.to_string(), "--target=rust".to_string(), format!("--outdir={}", outdir)];
+    if minify {
+        cmd_args.push("--minify".to_string());
+    }
     let output = std::process::Command::new(compiler_bin)
-        .args([entry, "--target=rust", &format!("--outdir={}", outdir)])
+        .args(&cmd_args)
         .output()
         .map_err(|e| format!("Failed to run compiler '{}': {}", compiler_bin, e))?;
 
