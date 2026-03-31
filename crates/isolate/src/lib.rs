@@ -10,4 +10,5 @@
 pub mod actor;
 pub mod cpu;
 pub mod isolate;
+mod permissions;
 pub mod pool;

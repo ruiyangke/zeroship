@@ -12,7 +12,7 @@ env = []
 
 [dependencies]
 appbase-core = { path = "../core" }
-deno_core = "0.395"
+deno_core = "0.396.0"
 deno_error = "0.7"
 serde_json = "1"
 thiserror = "2"

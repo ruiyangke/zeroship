@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::cpu;
+use crate::permissions::appbase_permissions_container;
 
 /// Bidirectional string holder for Rust ↔ JS communication.
 /// - Rust sets `request` before calling JS
@@ -85,12 +86,27 @@ pub fn create(
         ..Default::default()
     };
 
+    // Deno web platform extensions — order matters (deps before dependents).
+    // These provide globalThis.fetch(), Request, Response, Headers, URL, etc.
+    let mut extensions = vec![
+        deno_webidl::deno_webidl::init(),
+        deno_web::deno_web::init(
+            Arc::new(deno_web::BlobStore::default()),
+            None, // no base location URL
+            deno_web::InMemoryBroadcastChannel::default(),
+        ),
+        deno_net::deno_net::init(None, None),
+        deno_fetch::deno_fetch::init(deno_fetch::Options::default()),
+    ];
+    // Our own extension must come after deno's since our JS may reference fetch.
+    extensions.push(ext);
+
     let heap_limit = DEFAULT_HEAP_LIMIT_MB * 1024 * 1024;
     let create_params = v8::CreateParams::default()
         .heap_limits(0, heap_limit);
 
     let mut runtime = JsRuntime::new(RuntimeOptions {
-        extensions: vec![ext],
+        extensions,
         create_params: Some(create_params),
         ..Default::default()
     });
@@ -115,6 +131,8 @@ pub fn create(
         let op_state = runtime.op_state();
         let mut state = op_state.borrow_mut();
         state.put(rpc_bridge.clone());
+        // Provide an allow-all PermissionsContainer so deno_fetch ops can check permissions.
+        state.put(appbase_permissions_container());
 
         // Initialize each plugin's state
         let mut ctx = PluginContext {
