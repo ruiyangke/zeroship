@@ -151,7 +151,14 @@ impl QuotaPlan {
             name: "free".into(),
             version: 1,
             description: "Free tier".into(),
-            entitlements: HashMap::new(),
+            entitlements: {
+                let mut e = HashMap::new();
+                e.insert("custom_domains".into(), serde_json::Value::Bool(false));
+                e.insert("cron_jobs".into(), serde_json::Value::Bool(false));
+                e.insert("analytics".into(), serde_json::Value::Bool(false));
+                e.insert("priority_support".into(), serde_json::Value::Bool(false));
+                e
+            },
             quotas,
             rate_limits,
             spending_limit_cents: Some(500), // $5.00 spending cap for free tier
@@ -172,7 +179,14 @@ impl QuotaPlan {
             name: "pro".into(),
             version: 1,
             description: "Pro tier".into(),
-            entitlements: HashMap::new(),
+            entitlements: {
+                let mut e = HashMap::new();
+                e.insert("custom_domains".into(), serde_json::Value::Bool(true));
+                e.insert("cron_jobs".into(), serde_json::Value::Bool(true));
+                e.insert("analytics".into(), serde_json::Value::Bool(true));
+                e.insert("priority_support".into(), serde_json::Value::Bool(true));
+                e
+            },
             quotas,
             rate_limits,
             spending_limit_cents: None, // no spending limit for pro

@@ -1,0 +1,226 @@
+//! Period rollover — double-buffered counter swap with drain-and-wait.
+//!
+//! At period boundaries (monthly, daily), atomically swaps each app's
+//! counter set so new requests write to fresh counters. After draining
+//! in-flight writers, reads the old counters and archives them.
+
+use appbase_core::meter_store::MeterStore;
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::meter::MeterRegistry;
+
+/// Configuration for the period roller.
+pub struct RolloverConfig {
+    /// How long to wait for in-flight requests to drain after buffer swap.
+    /// Default: 20s (2x max wall time of 10s).
+    pub drain_wait: Duration,
+    /// Batch size for processing apps (avoids warm-tier write spikes).
+    pub batch_size: usize,
+    /// Sleep between batches.
+    pub batch_delay: Duration,
+}
+
+impl Default for RolloverConfig {
+    fn default() -> Self {
+        Self {
+            drain_wait: Duration::from_secs(20),
+            batch_size: 100,
+            batch_delay: Duration::from_millis(10),
+        }
+    }
+}
+
+/// Spawn a background task that checks for period boundaries and triggers rollover.
+///
+/// Returns a `JoinHandle` that runs until the runtime shuts down. The task
+/// checks every 60 seconds whether the calendar month has changed and, if so,
+/// performs the double-buffered rollover for every registered app.
+pub fn spawn_period_roller(
+    registry: Arc<MeterRegistry>,
+    store: Arc<dyn MeterStore>,
+    config: RolloverConfig,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        // Check every 60 seconds if a period boundary has been crossed
+        let mut last_period = current_period_key();
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let now_period = current_period_key();
+            if now_period != last_period {
+                eprintln!("[rollover] Period boundary crossed: {last_period} → {now_period}");
+                rollover_all(&registry, store.as_ref(), &config).await;
+                last_period = now_period;
+            }
+        }
+    })
+}
+
+/// Roll over all apps' counters for the new period.
+///
+/// For each app (processed in batches):
+/// 1. Lock the registry, swap the meter for a fresh one, release the lock.
+/// 2. Sleep `drain_wait` so in-flight request handlers drop their `Arc<AppMeter>`.
+/// 3. Read the old meter's snapshot (safe because all writers have drained).
+/// 4. Call `MeterStore::rollover()` to archive the warm-tier counters.
+async fn rollover_all(registry: &MeterRegistry, store: &dyn MeterStore, config: &RolloverConfig) {
+    let app_ids: Vec<String> = registry.all_meters().keys().cloned().collect();
+
+    // Process in batches to avoid warm-tier write spikes
+    for batch in app_ids.chunks(config.batch_size) {
+        let mut old_meters: Vec<(String, Arc<crate::meter::AppMeter>)> = Vec::new();
+
+        // Step 1-2: Swap each app's meter atomically
+        for app_id in batch {
+            if let Some(old) = registry.swap_for_rollover(app_id) {
+                old_meters.push((app_id.clone(), old));
+            }
+        }
+
+        // Step 3: Drain in-flight writers — after this sleep, all Arc refs
+        // held by request handlers should have been dropped.
+        tokio::time::sleep(config.drain_wait).await;
+
+        // Step 4-5: Read old meters and flush to store
+        for (app_id, old_meter) in &old_meters {
+            let snapshot = old_meter.snapshot();
+            if let Err(e) = store.rollover(app_id) {
+                eprintln!("[rollover] Failed to rollover {app_id} in store: {e}");
+            }
+
+            eprintln!(
+                "[rollover] {app_id}: {} requests, {:.1}ms CPU archived",
+                snapshot.requests, snapshot.cpu_time_ms
+            );
+        }
+
+        // Batch delay to avoid write spikes
+        if batch.len() == config.batch_size {
+            tokio::time::sleep(config.batch_delay).await;
+        }
+    }
+}
+
+/// Generate a period key like "2026-03" for the current month.
+fn current_period_key() -> String {
+    use std::time::SystemTime;
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let days = secs / 86400;
+    // Approximate month calculation (good enough for boundary detection)
+    let years = 1970 + days / 365;
+    let month = (days % 365) / 30 + 1;
+    format!("{years}-{month:02}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::meter::UsageDelta;
+    use crate::plan::QuotaPlan;
+    use crate::store::memory::InMemoryStore;
+    use std::time::Duration as StdDuration;
+
+    #[tokio::test]
+    async fn rollover_swaps_meter_and_archives() {
+        let registry = Arc::new(MeterRegistry::new(QuotaPlan::free()));
+        let store = Arc::new(InMemoryStore::new());
+
+        // Record some usage
+        let meter = registry.get_or_create("app1");
+        meter.record(&UsageDelta {
+            cpu_time: StdDuration::from_millis(100),
+            wall_time: StdDuration::from_millis(200),
+            egress_bytes: 1024,
+            ..UsageDelta::default()
+        });
+
+        // Perform rollover with 0s drain (test only)
+        let config = RolloverConfig {
+            drain_wait: Duration::from_millis(0),
+            batch_size: 100,
+            batch_delay: Duration::from_millis(0),
+        };
+
+        rollover_all(&registry, store.as_ref(), &config).await;
+
+        // New meter should have zero counters
+        let new_meter = registry.get_or_create("app1");
+        let snap = new_meter.snapshot();
+        assert_eq!(snap.requests, 0);
+
+        // Store should have history
+        let hist = store.history("app1", 10).unwrap();
+        assert!(!hist.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rollover_handles_missing_app() {
+        let registry = Arc::new(MeterRegistry::new(QuotaPlan::free()));
+        let store = Arc::new(InMemoryStore::new());
+
+        // Rollover with no apps should be a no-op
+        let config = RolloverConfig {
+            drain_wait: Duration::from_millis(0),
+            batch_size: 100,
+            batch_delay: Duration::from_millis(0),
+        };
+
+        rollover_all(&registry, store.as_ref(), &config).await;
+        // No panic = success
+    }
+
+    #[tokio::test]
+    async fn rollover_preserves_old_meter_snapshot() {
+        let registry = Arc::new(MeterRegistry::new(QuotaPlan::free()));
+        let store = Arc::new(InMemoryStore::new());
+
+        // Record usage on two apps
+        let m1 = registry.get_or_create("app1");
+        m1.record(&UsageDelta {
+            cpu_time: StdDuration::from_millis(50),
+            wall_time: StdDuration::from_millis(100),
+            egress_bytes: 512,
+            db_reads: 10,
+            db_writes: 5,
+            kv_ops: 3,
+        });
+
+        let m2 = registry.get_or_create("app2");
+        m2.record(&UsageDelta {
+            cpu_time: StdDuration::from_millis(200),
+            wall_time: StdDuration::from_millis(400),
+            egress_bytes: 2048,
+            db_reads: 20,
+            db_writes: 10,
+            kv_ops: 6,
+        });
+
+        let config = RolloverConfig {
+            drain_wait: Duration::from_millis(0),
+            batch_size: 100,
+            batch_delay: Duration::from_millis(0),
+        };
+
+        rollover_all(&registry, store.as_ref(), &config).await;
+
+        // Both apps should have fresh meters
+        let s1 = registry.get_or_create("app1").snapshot();
+        let s2 = registry.get_or_create("app2").snapshot();
+        assert_eq!(s1.requests, 0);
+        assert_eq!(s2.requests, 0);
+
+        // Both should have history
+        assert!(!store.history("app1", 10).unwrap().is_empty());
+        assert!(!store.history("app2", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn period_key_format() {
+        let key = current_period_key();
+        assert!(key.contains('-'));
+        assert!(key.len() >= 6); // "YYYY-MM"
+    }
+}

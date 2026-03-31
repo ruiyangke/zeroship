@@ -29,6 +29,14 @@ pub struct QuotaWarning {
     pub usage_pct: f64,
 }
 
+/// Denial: a required entitlement is not available.
+#[derive(Debug, Clone, Serialize)]
+pub struct EntitlementDenial {
+    pub feature: String,
+    pub message: String,
+    pub error_code: i32,
+}
+
 /// Denial: a dimension has exceeded 100% usage.
 #[derive(Debug, Clone, Serialize)]
 pub struct QuotaDenial {
@@ -107,6 +115,29 @@ pub fn check_quota(meter: &AppMeter, plan: &QuotaPlan) -> QuotaDecision {
     }
 }
 
+/// Check if an app has a specific entitlement (boolean feature gate).
+/// Returns Ok(()) if the entitlement is granted, Err with denial details if not.
+pub fn check_entitlement(plan: &QuotaPlan, feature: &str) -> Result<(), EntitlementDenial> {
+    match plan.entitlements.get(feature) {
+        Some(val) => {
+            if val.as_bool().unwrap_or(false) {
+                Ok(())
+            } else {
+                Err(EntitlementDenial {
+                    feature: feature.to_string(),
+                    message: format!("Feature '{feature}' is not enabled on the {plan_name} plan", plan_name = plan.name),
+                    error_code: -32028,
+                })
+            }
+        }
+        None => Err(EntitlementDenial {
+            feature: feature.to_string(),
+            message: format!("Feature '{feature}' is not available on the {plan_name} plan", plan_name = plan.name),
+            error_code: -32028,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +187,28 @@ mod tests {
         meter.requests.store(999_999_999, Ordering::Relaxed);
         let decision = check_quota(&meter, &plan);
         assert!(matches!(decision, QuotaDecision::Allow));
+    }
+
+    #[test]
+    fn entitlement_granted() {
+        let plan = QuotaPlan::pro();
+        assert!(check_entitlement(&plan, "custom_domains").is_ok());
+    }
+
+    #[test]
+    fn entitlement_denied() {
+        let plan = QuotaPlan::free();
+        let result = check_entitlement(&plan, "custom_domains");
+        assert!(result.is_err());
+        let denial = result.unwrap_err();
+        assert_eq!(denial.feature, "custom_domains");
+        assert_eq!(denial.error_code, -32028);
+    }
+
+    #[test]
+    fn entitlement_missing_is_denied() {
+        let plan = QuotaPlan::free();
+        let result = check_entitlement(&plan, "nonexistent_feature");
+        assert!(result.is_err());
     }
 }

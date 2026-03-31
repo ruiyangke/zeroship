@@ -18,6 +18,7 @@
 //! ```
 
 pub mod config;
+pub mod event_log;
 pub mod meter_store;
 pub mod plugin;
 pub mod types;

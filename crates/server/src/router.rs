@@ -136,9 +136,8 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
                 ),
             );
         }
-        QuotaDecision::Warn(ref warnings) => {
-            // Warnings are captured and added to response headers later
-            // (stored in a local var for the response-building phase)
+        QuotaDecision::Warn(_) => {
+            // Warnings captured below for response headers
         }
         QuotaDecision::Allow => {}
     }

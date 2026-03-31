@@ -219,6 +219,16 @@ impl MeterRegistry {
         meters.clone()
     }
 
+    /// Atomically swap an app's meter for a fresh one (period rollover).
+    /// Returns the old meter (for draining and reading), or None if app not found.
+    pub fn swap_for_rollover(&self, app_id: &str) -> Option<Arc<AppMeter>> {
+        let mut meters = self.meters.lock().unwrap();
+        let old = meters.remove(app_id)?;
+        let new = Arc::new(AppMeter::new(old.plan.clone()));
+        meters.insert(app_id.to_string(), new);
+        Some(old)
+    }
+
     /// Recover counters from the warm tier after a restart (spec §4.6).
     /// For each app in the store, loads the stored counters and populates
     /// the hot-tier atomics so enforcement resumes from the last-flushed state.
