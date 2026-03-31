@@ -1,8 +1,18 @@
 # Appbase Quota, Metering & Billing System — v2 Design
 
-> **Status:** Draft v2.0 | **Last Updated:** 2026-03-30 | **Author:** Platform Team
+> **Status:** Draft v2.1 | **Last Updated:** 2026-03-30 | **Author:** Platform Team
 >
 > **Revision History:**
+> - v2.1 (2026-03-30): Address review feedback. Fix TOCTOU in ConcurrencyGuard (CAS loop),
+>   pack token bucket state into single AtomicU64, correct memory orderings for ARM,
+>   add SQLite write batching strategy, remove hash chain in favor of external anchoring,
+>   add inline spend tracking, add RBAC with scoped API keys, specify webhook idempotency
+>   contract, add double-buffered period rollover, add dunning/payment failure handling,
+>   fix type safety (`Option<u64>` instead of `-1`), fix JSON examples, add NTP jump
+>   handling for daily reset, fix event correction negative counter issue, correct
+>   comparison table, add API versioning. Add missing concepts: multi-currency,
+>   committed use discounts, usage backfill tooling, package/bundle pricing,
+>   per-endpoint metering, cron/background job metering.
 > - v2.0 (2026-03-30): Complete rewrite. Adds entitlements, spending limits, credits,
 >   event log, webhook system, enforcement modes, tiered pricing, and operational guidance.
 > - v1.0: Initial quota system design (see `quota-system.md`).
@@ -18,17 +28,23 @@
 7. [Credits & Prepaid Wallets](#7-credits--prepaid-wallets)
 8. [Response Headers & Error Responses](#8-response-headers--error-responses)
 9. [Admin API](#9-admin-api)
-10. [Monitoring & Observability](#10-monitoring--observability)
-11. [Billing Integration](#11-billing-integration)
-12. [Webhook Notifications](#12-webhook-notifications)
-13. [Security & Abuse Prevention](#13-security--abuse-prevention)
-14. [Developer Experience](#14-developer-experience)
-15. [Testing Strategy](#15-testing-strategy)
-16. [Implementation Plan](#16-implementation-plan)
-17. [Operational Guidance](#17-operational-guidance)
-18. [Future Considerations](#18-future-considerations)
-19. [Glossary](#19-glossary)
-20. [References](#20-references)
+10. [Access Control & API Key Management](#10-access-control--api-key-management)
+11. [Monitoring & Observability](#11-monitoring--observability)
+12. [Billing Integration](#12-billing-integration)
+13. [Webhook Notifications](#13-webhook-notifications)
+14. [Security & Abuse Prevention](#14-security--abuse-prevention)
+15. [Developer Experience](#15-developer-experience)
+16. [Testing Strategy](#16-testing-strategy)
+17. [Implementation Plan](#17-implementation-plan)
+18. [Operational Guidance](#18-operational-guidance)
+19. [Multi-Currency Support](#19-multi-currency-support)
+20. [Package & Bundle Pricing](#20-package--bundle-pricing)
+21. [Per-Endpoint Metering](#21-per-endpoint-metering)
+22. [Metering for Cron & Background Jobs](#22-metering-for-cron--background-jobs)
+23. [Usage Data Backfill Tooling](#23-usage-data-backfill-tooling)
+24. [Future Considerations](#24-future-considerations)
+25. [Glossary](#25-glossary)
+26. [References](#26-references)
 
 ---
 
@@ -40,11 +56,11 @@ limit enforcement, plan management, spending controls, billing integration, and
 operational observability.
 
 **TL;DR:** The system uses three layers — (1) in-memory atomic counters for real-time
-enforcement at sub-microsecond latency, (2) periodic SQLite flushes for durability, and
-(3) an append-only event log for audit/billing. Plans bundle entitlements, quotas, rate
-limits, and policies. Spending limits prevent bill shock. The platform meters everything
-automatically; no SDK is needed for app developers. External billing systems (Stripe,
-Lago) consume the usage data via Admin API and webhooks.
+enforcement at sub-microsecond latency, (2) periodic batched SQLite flushes for durability,
+and (3) an append-only event log for audit/billing. Plans bundle entitlements, quotas, rate
+limits, and policies. Spending limits prevent bill shock with inline per-request tracking.
+The platform meters everything automatically; no SDK is needed for app developers. External
+billing systems (Stripe, Lago) consume the usage data via Admin API and webhooks.
 
 ### 1.1 Design Goals
 
@@ -61,7 +77,7 @@ Lago) consume the usage data via Admin API and webhooks.
 
 ### 1.2 Non-Goals (v2)
 
-- Multi-region distributed metering (single-node; see Section 18 for future direction)
+- Multi-region distributed metering (single-node; see Section 24 for future direction)
 - Real-time payment processing (invoices are generated; payment is external)
 - Self-service plan creation by app developers (platform owner only in v2)
 - Tax calculation (delegated to payment processor)
@@ -74,35 +90,35 @@ Lago) consume the usage data via Admin API and webhooks.
 ### 2.1 Concept Map
 
 ```
-                    ┌──────────┐
-                    │   PLAN   │  A named, versioned bundle
-                    └────┬─────┘
-                         │ contains
-          ┌──────────────┼──────────────┐
-          ▼              ▼              ▼
-   ┌─────────────┐ ┌──────────┐ ┌────────────┐
-   │ ENTITLEMENT │ │  QUOTA   │ │ RATE LIMIT │
-   │ (boolean)   │ │ (cap/    │ │ (throughput │
-   │             │ │  window) │ │  cap)       │
-   └─────────────┘ └────┬─────┘ └─────┬──────┘
-                         │             │
+                    +----------+
+                    |   PLAN   |  A named, versioned bundle
+                    +----+-----+
+                         | contains
+          +--------------+--------------+
+          v              v              v
+   +-------------+ +----------+ +------------+
+   | ENTITLEMENT | |  QUOTA   | | RATE LIMIT |
+   | (boolean)   | | (cap/    | | (throughput |
+   |             | |  window) | |  cap)       |
+   +-------------+ +----+-----+ +-----+------+
+                         |             |
                     references    references
-                         │             │
-                    ┌────▼─────┐       │
-                    │ RESOURCE │◄──────┘
-                    │ (what is │
-                    │ consumed)│
-                    └────┬─────┘
-                         │
+                         |             |
+                    +----v-----+       |
+                    | RESOURCE |<------+
+                    | (what is |
+                    | consumed)|
+                    +----+-----+
+                         |
                     measured by
-                         │
-                    ┌────▼─────┐
-                    │ METERING │  Always on, independent
-                    │ (events  │  of plans
-                    │ +counters│
-                    └──────────┘
+                         |
+                    +----v-----+
+                    | METERING |  Always on, independent
+                    | (events  |  of plans
+                    | +counters|
+                    +----------+
 
-   When a quota or rate limit is crossed → POLICY defines what happens
+   When a quota or rate limit is crossed -> POLICY defines what happens
 ```
 
 ### 2.2 Seven Distinct Concerns
@@ -158,11 +174,26 @@ A resource is a measurable dimension of consumption with the following attribute
 | `max` | `fetch_max` | Keeps highest value seen | Peak memory |
 | `latest` | `store` | Overwrites with newest value | Storage size (sampled) |
 | `count_unique` | HyperLogLog | Approximate distinct count | Unique users, IPs |
-| `gauge` | AtomicU32 inc/dec | Current instantaneous value | Concurrent connections |
+| `gauge` | CAS loop inc/dec | Current instantaneous value | Concurrent connections |
 
-Note: `latest` uses `AtomicU64::store(value, Ordering::Release)` with a separate
-timestamp-guarded compare to ensure only newer values overwrite older ones. `count_unique`
-uses a probabilistic HyperLogLog sketch, not an atomic counter.
+**Memory ordering rules (ARM-correct):**
+
+All atomic operations use explicit orderings for correctness on weakly-ordered
+architectures (ARM/AArch64, e.g., AWS Graviton):
+
+| Operation | Ordering | Rationale |
+|---|---|---|
+| Counter writes (`fetch_add`, `store`) | `Release` | Visible to subsequent `Acquire` loads on other cores |
+| Counter reads (enforcement checks) | `Acquire` | See all prior `Release` writes from other cores |
+| CAS loops (token bucket, concurrency) | `AcqRel` success, `Acquire` failure | Standard CAS read-modify-write |
+
+`Relaxed` is insufficient on ARM: stores can be reordered with loads on other cores,
+causing a quota check to see a stale value and incorrectly allow a blocked request.
+`Acquire`/`Release` guarantees happens-before. The cost difference vs `Relaxed` is
+negligible on x86 (strong ordering by default) and a few nanoseconds on ARM.
+
+Note: `latest` uses `store(value, Release)` with a timestamp-guarded CAS for
+newest-wins semantics. `count_unique` uses a HyperLogLog sketch, not an atomic counter.
 
 **Built-in resources:**
 
@@ -172,7 +203,7 @@ uses a probabilistic HyperLogLog sketch, not an atomic counter.
 | `wall_ms` | ms | compute | sum | `Instant::now()` delta |
 | `memory_peak_mb` | MB | compute | max | V8 `GetHeapStatistics()` after execution |
 | `requests` | count | compute | sum | +1 per RPC call |
-| `concurrent_requests` | count | compute | gauge | RAII guard: inc on entry, dec on exit (see 17.5) |
+| `concurrent_requests` | count | compute | gauge | RAII guard: CAS on entry, dec on exit (see 18.5) |
 | `egress_bytes` | bytes | network | sum | `Content-Length` or chunked body byte count |
 | `ingress_bytes` | bytes | network | sum | Request body byte count |
 | `subrequests` | count | network | sum | `op_fetch` call counter |
@@ -249,7 +280,7 @@ Behavior:
   - Bucket starts full (50 tokens)
   - Each request consumes 1 token
   - Tokens refill at 10/second
-  - When empty → policy applies (usually "block" → 429)
+  - When empty -> policy applies (usually "block" -> 429)
   - Bucket can never exceed capacity
 ```
 
@@ -257,15 +288,45 @@ Behavior:
 Used by Cloudflare Workers, AWS API Gateway, and nginx. Simpler than sliding window log
 with comparable fairness properties.
 
-**Implementation:** Per-app `TokenBucket` struct with atomic state:
+**Implementation — packed single-AtomicU64 design:**
+
+Two separate atomics (`tokens` and `last_refill`) cannot be updated atomically together,
+creating a race where two threads double-refill. The solution packs state into one word:
+
 ```rust
+/// Bit layout: [63..32] tokens (fixed-point *1000), [31..0] last_refill (epoch secs)
 struct TokenBucket {
-    tokens: AtomicU64,        // Fixed-point: tokens * 1000 for sub-token precision
-    last_refill: AtomicU64,   // Timestamp in microseconds
-    capacity: u64,            // = burst * 1000
-    refill_rate: u64,         // = max_per_second * 1000
+    state: AtomicU64,         // Packed: (tokens_fp << 32) | timestamp_secs
+    capacity_fp: u32,         // = burst * 1000
+    refill_rate_fp: u32,      // = max_per_second * 1000
+}
+
+impl TokenBucket {
+    fn try_acquire(&self) -> bool {
+        loop {
+            let current = self.state.load(Ordering::Acquire);
+            let tokens_fp = (current >> 32) as u32;
+            let last_refill = current as u32;
+            let now_secs = current_time_secs() as u32;
+            let elapsed = now_secs.saturating_sub(last_refill);
+            let refilled = (tokens_fp as u64)
+                .saturating_add(elapsed as u64 * self.refill_rate_fp as u64)
+                .min(self.capacity_fp as u64) as u32;
+            if refilled < 1000 { return false; }
+            let new_state = (((refilled - 1000) as u64) << 32) | (now_secs as u64);
+            match self.state.compare_exchange_weak(
+                current, new_state, Ordering::AcqRel, Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(_) => continue,
+            }
+        }
+    }
 }
 ```
+
+Refill-and-consume is a single CAS, eliminating the TOCTOU race. This follows
+Cloudflare's rate limiter and Linux kernel token bucket patterns.
 
 ### 2.8 Policies
 
@@ -326,6 +387,8 @@ A plan is a named, versioned bundle:
 | `quotas` | Map\<String, Quota\> | Resource caps with windows and policies |
 | `rate_limits` | Map\<String, RateLimit\> | Throughput caps with burst |
 | `overage` | Option\<OverageConfig\> | Per-resource overage pricing |
+| `packages` | Option\<Vec\<PackageRef\>\> | Included package bundles (see Section 20) |
+| `commitment` | Option\<CommitmentConfig\> | Minimum commitment terms (see Section 12.7) |
 
 **Plan versioning:** Plans have a `version` field. When a plan definition changes in
 config, the version must be explicitly incremented. Existing apps remain on their assigned
@@ -333,15 +396,15 @@ version until migrated via admin API. This prevents surprise behavior changes. M
 can be done per-app or in bulk:
 
 ```
-PUT  /_admin/apps/{id}/plan         — Single app migration
-POST /_admin/plans/{name}/migrate   — Bulk: migrate all apps on this plan to new version
+PUT  /v1/_admin/apps/{id}/plan         -- Single app migration
+POST /v1/_admin/plans/{name}/migrate   -- Bulk: migrate all apps on this plan to new version
 ```
 
 **Per-app overrides:** Individual quotas can be overridden without creating a custom plan:
 
 ```toml
 [apps.my_blog.overrides.quotas]
-requests = { max = 200_000 }    # Override only this quota
+requests = { max = 200000 }    # Override only this quota
 ```
 
 Overrides are merged at enforcement time: override values replace plan values for the
@@ -402,6 +465,8 @@ Shadow mode emits Prometheus metrics with a `shadow="true"` label for A/B analys
 
 ### 3.1 Complete Example
 
+All API endpoints are versioned under the `/v1/` prefix. See Section 9 for details.
+
 ```toml
 # appbase.toml
 
@@ -411,75 +476,77 @@ host = "0.0.0.0"
 graceful_shutdown_timeout_secs = 30   # Drain in-flight requests before exit
 
 [admin]
-api_key_env = "APPBASE_ADMIN_API_KEY"  # Env var containing the API key
 cors_origins = ["https://dashboard.example.com"]  # CORS for browser dashboard
 rate_limit = 100                      # Admin API rate limit (req/s)
 read_only = false                     # Set true for monitoring-only instances
+
+# ---- Access Control (RBAC) ----
+# See Section 10 for full RBAC documentation
+[admin.keys.root]
+secret_env = "APPBASE_ROOT_KEY"       # Env var containing the key
+role = "super_admin"
+
+[admin.keys.billing_service]
+secret_env = "APPBASE_BILLING_KEY"
+role = "billing"
+scopes = ["read:usage", "read:invoices", "write:wallets"]
+
+[admin.keys.monitoring]
+secret_env = "APPBASE_MONITORING_KEY"
+role = "viewer"
+scopes = ["read:usage", "read:health", "read:metrics"]
+
+[admin.keys.team_ops]
+secret_env = "APPBASE_OPS_KEY"
+role = "operator"
+scopes = ["read:*", "write:apps", "write:overrides"]
+app_filter = ["team_a_*", "team_b_*"]  # Glob pattern: only these apps
 
 [isolates]
 max = 1000
 idle_timeout_secs = 60
 
-# ── Billing ──
+# ---- Billing ----
 
 [billing]
 period = "calendar_month"       # "calendar_month" | "anniversary"
-currency = "usd"
+default_currency = "usd"        # Default currency (see Section 19 for multi-currency)
 timezone = "UTC"                # For daily resets and period boundaries
 overage_enabled = false         # Global default; per-plan override
 
-# ── Spending Controls ──
+# ---- Spending Controls ----
 
 [spending]
 enabled = true
-check_interval_secs = 60
+check_interval_secs = 10       # Background reconciliation interval
+inline_tracking = true         # Per-request spend estimation (see Section 6)
 default_alert_thresholds = [50, 75, 90, 100]
 alert_channels = ["webhook"]
 
-# ── Pricing (for spend calculation and invoice preview) ──
-# Standard pricing: flat per-unit rate
-# Tiered pricing: volume-based brackets (see commented example)
-
+# ---- Pricing (flat per-unit; tiered pricing uses [[pricing.X.tiers]] array) ----
 [pricing.requests]
 per_million = 0.30
-
 [pricing.cpu_ms]
 per_million = 0.02
-
 [pricing.egress]
 per_gb = 0.09
-
-[pricing.ingress]
-per_gb = 0.00               # Free inbound
-
 [pricing.db_reads]
 per_million = 0.50
-
 [pricing.db_writes]
 per_million = 1.00
-
 [pricing.db_storage]
 per_gb_month = 0.25
-
 [pricing.kv_reads]
 per_million = 0.50
-
 [pricing.kv_writes]
 per_million = 1.00
-
 [pricing.kv_storage]
 per_gb_month = 0.10
-
 [pricing.ai_tokens]
 per_million = 3.00
+# Tiered: [[pricing.requests.tiers]] with { up_to, per_million }. Final tier omits up_to.
 
-# ── Tiered Pricing Example (for pro plan overage) ──
-# [pricing.requests.tiers]
-# 1 = { up_to = 10_000_000,  per_million = 0.00 }    # Included in plan
-# 2 = { up_to = 50_000_000,  per_million = 0.25 }    # First overage tier
-# 3 = { up_to = -1,          per_million = 0.15 }    # Volume discount tier (-1 = unlimited)
-
-# ── Resources ──
+# ---- Resources ----
 # Built-in resources are auto-registered. Only custom resources need declaration.
 
 [resources.ai_tokens]
@@ -494,7 +561,7 @@ description = "Transactional emails sent"
 aggregation = "sum"
 category = "custom"
 
-# ── Policies ──
+# ---- Policies ----
 
 [policies.warn_then_block]
 at_80_pct = "warn"
@@ -516,103 +583,77 @@ at_100_pct = "block_writes"
 [policies.soft_block]
 at_100_pct = "block"
 
-# ── Plans ──
+# ---- Plans ----
 
 [plans.free]
-description = "Free tier — development and small projects"
+description = "Free tier -- development and small projects"
 version = 1
-
 [plans.free.entitlements]
 custom_domains = false
 cron_jobs = false
 websockets = false
-priority_support = false
 max_apps = 3
-
 [plans.free.quotas]
-cpu_ms              = { max = 10_000,          period = "monthly",      policy = "warn_then_block" }  # 10s total
-cpu_ms_per_request  = { resource = "cpu_ms",   max = 10,               period = "per_request",  policy = "hard_kill" }  # 10ms safety cap
-wall_ms_per_request = { resource = "wall_ms",  max = 30_000,           period = "per_request",  policy = "hard_kill" }
-requests            = { max = 100_000,         period = "monthly",     policy = "warn_then_block" }
-requests_daily      = { resource = "requests", max = 10_000,           period = "daily",        policy = "warn_then_block" }
-egress_bytes        = { max = 1_000_000_000,   period = "monthly",     policy = "warn_then_block" }
-ingress_bytes       = { max = 500_000_000,     period = "monthly",     policy = "warn_then_block" }
-db_reads            = { max = 500_000,         period = "monthly",     policy = "warn_then_block" }
-db_writes           = { max = 50_000,          period = "monthly",     policy = "warn_then_block" }
-db_storage_bytes    = { max = 500_000_000,     period = "absolute",    policy = "block_writes_only" }
-kv_reads            = { max = 100_000,         period = "monthly",     policy = "warn_then_block" }
-kv_writes           = { max = 50_000,          period = "monthly",     policy = "warn_then_block" }
-kv_storage_bytes    = { max = 100_000_000,     period = "absolute",    policy = "block_writes_only" }
-memory_peak_mb      = { max = 128,             period = "absolute",    policy = "hard_kill" }
-subrequests         = { max = 50,              period = "per_request", policy = "soft_block" }
-concurrent          = { resource = "concurrent_requests", max = 5,     period = "absolute",    policy = "soft_block" }
-
+cpu_ms              = { max = 10000,          period = "monthly",      policy = "warn_then_block" }
+cpu_ms_per_request  = { resource = "cpu_ms",  max = 10,               period = "per_request",  policy = "hard_kill" }
+wall_ms_per_request = { resource = "wall_ms", max = 30000,            period = "per_request",  policy = "hard_kill" }
+requests            = { max = 100000,         period = "monthly",     policy = "warn_then_block" }
+requests_daily      = { resource = "requests", max = 10000,           period = "daily",        policy = "warn_then_block" }
+egress_bytes        = { max = 1000000000,     period = "monthly",     policy = "warn_then_block" }
+db_storage_bytes    = { max = 500000000,      period = "absolute",    policy = "block_writes_only" }
+memory_peak_mb      = { max = 128,            period = "absolute",    policy = "hard_kill" }
+concurrent          = { resource = "concurrent_requests", max = 5,    period = "absolute",    policy = "soft_block" }
+# ... (additional resource quotas follow same pattern for ingress, db_reads/writes, kv_*)
 [plans.free.rate_limits]
 requests = { max_per_second = 10, burst = 50, policy = "soft_block" }
 
 [plans.pro]
-description = "Pro tier — production apps"
+description = "Pro tier -- production apps"
 version = 1
-
 [plans.pro.entitlements]
 custom_domains = true
 cron_jobs = true
 websockets = true
-priority_support = false
 max_apps = 25
-
 [plans.pro.quotas]
-cpu_ms              = { max = 30_000_000,       period = "monthly",     policy = "progressive" }
-cpu_ms_per_request  = { resource = "cpu_ms",    max = 30_000,           period = "per_request", policy = "hard_kill" }
-wall_ms_per_request = { resource = "wall_ms",   max = 60_000,           period = "per_request", policy = "hard_kill" }
-requests            = { max = 10_000_000,       period = "monthly",     policy = "progressive" }
-egress_bytes        = { max = 100_000_000_000,  period = "monthly",     policy = "progressive" }
-db_storage_bytes    = { max = 10_000_000_000,   period = "absolute",    policy = "block_writes_only" }
-kv_storage_bytes    = { max = 5_000_000_000,    period = "absolute",    policy = "block_writes_only" }
-memory_peak_mb      = { max = 128,              period = "absolute",    policy = "hard_kill" }
-subrequests         = { max = 1_000,            period = "per_request", policy = "soft_block" }
-concurrent          = { resource = "concurrent_requests", max = 50,     period = "absolute",    policy = "soft_block" }
-
+cpu_ms              = { max = 30000000,       period = "monthly",     policy = "progressive" }
+cpu_ms_per_request  = { resource = "cpu_ms",  max = 30000,            period = "per_request", policy = "hard_kill" }
+requests            = { max = 10000000,       period = "monthly",     policy = "progressive" }
+egress_bytes        = { max = 100000000000,   period = "monthly",     policy = "progressive" }
+db_storage_bytes    = { max = 10000000000,    period = "absolute",    policy = "block_writes_only" }
+concurrent          = { resource = "concurrent_requests", max = 50,   period = "absolute",    policy = "soft_block" }
 [plans.pro.rate_limits]
-requests = { max_per_second = 1_000, burst = 5_000, policy = "soft_block" }
-
+requests = { max_per_second = 1000, burst = 5000, policy = "soft_block" }
 [plans.pro.overage]
 enabled = true
-requests   = { per_million = 0.30 }
-cpu_ms     = { per_million = 0.02 }
-egress     = { per_gb = 0.09 }
-db_reads   = { per_million = 0.50 }
-db_writes  = { per_million = 1.00 }
+requests = { per_million = 0.30 }
+cpu_ms = { per_million = 0.02 }
+egress = { per_gb = 0.09 }
 
 [plans.enterprise]
-description = "Enterprise tier — custom limits, SLA"
+description = "Enterprise tier -- custom limits, SLA"
 version = 1
-
 [plans.enterprise.entitlements]
 custom_domains = true
 cron_jobs = true
 websockets = true
 priority_support = true
-max_apps = -1                   # -1 = unlimited
-
+# max_apps omitted = unlimited (Option<u64>, absence means no limit)
 [plans.enterprise.quotas]
-cpu_ms_per_request  = { resource = "cpu_ms",   max = 300_000,  period = "per_request", policy = "hard_kill" }
-wall_ms_per_request = { resource = "wall_ms",  max = 300_000,  period = "per_request", policy = "hard_kill" }
-memory_peak_mb      = { max = 256,             period = "absolute",    policy = "hard_kill" }
-subrequests         = { max = 10_000,          period = "per_request", policy = "soft_block" }
-concurrent          = { resource = "concurrent_requests", max = 500,   period = "absolute",    policy = "soft_block" }
-# No monthly quotas — governed by contract + spending limits
-
+cpu_ms_per_request = { resource = "cpu_ms", max = 300000, period = "per_request", policy = "hard_kill" }
+memory_peak_mb     = { max = 256, period = "absolute", policy = "hard_kill" }
+concurrent = { resource = "concurrent_requests", max = 500, period = "absolute", policy = "soft_block" }
+# No monthly quotas -- governed by contract + spending limits
 [plans.enterprise.rate_limits]
-requests = { max_per_second = 10_000, burst = 50_000, policy = "soft_block" }
+requests = { max_per_second = 10000, burst = 50000, policy = "soft_block" }
 
-# ── Defaults ──
+# ---- Defaults ----
 
 [defaults]
 plan = "free"
 enforcement_mode = "enforce"    # "enforce" | "dry_run" | "shadow"
 
-# ── Apps ──
+# ---- Apps ----
 
 [apps.my_todo]
 plan = "pro"
@@ -623,37 +664,37 @@ plan = "enterprise"
 [apps.my_blog]
 plan = "free"
 [apps.my_blog.overrides.quotas]
-requests = { max = 200_000 }
+requests = { max = 200000 }
 
 [apps.my_blog.spending]
 limit_usd = 0.00
 action = "block"
 auto_resume = true
 
-# ── Webhooks ──
+# ---- Webhooks ----
 
 [webhooks]
 url = "https://example.com/appbase-events"
 secret = "whsec_..."                           # HMAC-SHA256 signing secret
 events = ["quota.*", "spending.*", "billing.*"] # Event name prefix matching
-timeout_ms = 10_000
+timeout_ms = 10000
 max_retries = 5
 
-# ── Metering ──
+# ---- Metering ----
 
 [metering]
-flush_interval_secs = 5        # Counter → SQLite flush interval
-dedup_capacity = 1_000_000     # Max entries in dedup LRU set
+flush_interval_secs = 5        # Counter -> SQLite flush interval
+dedup_capacity = 1000000       # Max entries in dedup LRU set
 dedup_ttl_hours = 24           # TTL for dedup entries
 
-# ── Event Log ──
+# ---- Event Log ----
 
 [event_log]
 enabled = true
 retention_days = 90
 max_size_mb = 1024
 flush_interval_ms = 100        # Batch write interval
-channel_capacity = 10_000      # Bounded async channel size
+channel_capacity = 10000       # Bounded async channel size
 ```
 
 ### 3.2 Configuration Validation Rules
@@ -661,7 +702,7 @@ channel_capacity = 10_000      # Bounded async channel size
 Validated at startup and on hot reload. Failures are fatal at startup; rejected on reload
 with a warning log (old config remains active).
 
-**Hot reload behavior** (`POST /_admin/config/reload` or `SIGHUP`):
+**Hot reload behavior** (`POST /v1/_admin/config/reload` or `SIGHUP`):
 - New plans: added to the registry immediately
 - Changed plans: new version required; existing apps stay on old version until migrated
 - Removed plans: rejected if any app references them
@@ -674,7 +715,7 @@ with a warning log (old config remains active).
 |---|---|---|
 | V1 | Every policy in a quota must reference a defined `[policies.*]` | Unknown policy "{name}" |
 | V2 | Every `resource` field in a quota must match a built-in or custom resource | Unknown resource "{name}" |
-| V3 | Quota `max` must be a positive integer (or -1 for unlimited) | Invalid max value |
+| V3 | Quota `max` must be a positive integer | Invalid max value |
 | V4 | Rate limit `burst` must be >= `max_per_second` | Burst must be >= sustained rate |
 | V5 | Plan `version` must be a positive integer | Invalid plan version |
 | V6 | `spending.limit_usd` must be >= 0 | Negative spending limit |
@@ -686,12 +727,20 @@ with a warning log (old config remains active).
 | V12 | Override quotas must reference resources that exist in the plan or globally | Unknown resource in override |
 | V13 | Webhook URL must be valid HTTPS (HTTP allowed only for localhost) | Insecure webhook URL |
 | V14 | `[pricing]` entries must reference defined resources | Unknown resource in pricing |
+| V15 | Tiered pricing final tier must omit `up_to` (unlimited) | Final tier must be unbounded |
+| V16 | API key roles must be one of: `super_admin`, `admin`, `operator`, `billing`, `viewer` | Invalid role |
+
+**Type safety note:** Unlimited values (e.g., `max_apps` on enterprise) are represented
+as `Option<u64>` in Rust. Omitting a field means unlimited. The previous convention of
+using `-1` for unlimited is **removed** as it is type-unsafe (mixing signed semantics
+into unsigned fields). Configuration using `-1` will fail validation with:
+`"Use Option<u64> (omit field) instead of -1 for unlimited"`.
 
 Admin API endpoint for pre-flight validation:
 ```
-POST /_admin/config/validate
+POST /v1/_admin/config/validate
 Body: raw TOML content
-Response: { valid: bool, errors: [{ rule: "V1", message: "...", location: "..." }] }
+Response: { "valid": true, "errors": [{ "rule": "V1", "message": "...", "location": "..." }] }
 ```
 
 ---
@@ -701,145 +750,86 @@ Response: { valid: bool, errors: [{ rule: "V1", message: "...", location: "..." 
 ### 4.1 System Overview
 
 ```
-┌───────────────────────────────────────────────────────────────────────┐
-│                           REQUEST PATH                                │
-│                                                                       │
-│   HTTP Request                                                        │
-│        │                                                              │
-│        ▼                                                              │
-│   ┌──────────────┐  Fail-fast. No V8 cost. Per-app token bucket.     │
-│   │ Rate Limiter  │──→ 429 + RateLimit-* headers + Retry-After       │
-│   └──────┬───────┘                                                    │
-│          │ pass                                                       │
-│          ▼                                                            │
-│   ┌──────────────────┐  Atomic gauge: increment on entry.            │
-│   │ Concurrency Guard │──→ 429 "Max concurrent requests"             │
-│   └──────┬───────────┘                                                │
-│          │ pass                                                       │
-│          ▼                                                            │
-│   ┌─────────────────────┐  Boolean check from plan entitlements.     │
-│   │ Entitlement Checker  │──→ 403 "Feature not available"            │
-│   └──────┬──────────────┘                                             │
-│          │ pass                                                       │
-│          ▼                                                            │
-│   ┌────────────────┐  Check all plan quotas. Return highest-severity │
-│   │ Quota Enforcer  │  triggered action. Spending limit check here.  │
-│   │                 │──→ 429 "Quota exceeded" / warn headers         │
-│   └──────┬─────────┘                                                  │
-│          │ allow / warn                                               │
-│          ▼                                                            │
-│   ┌───────────────────────────────────────────────────┐               │
-│   │ V8 ISOLATE EXECUTION                               │              │
-│   │  • Per-request CPU watchdog (V8 interrupt API)     │              │
-│   │  • Per-request wall watchdog (async timer)         │              │
-│   │  • Plugin ops increment per-request counters       │              │
-│   │  • On CPU/wall limit → terminate → 503             │              │
-│   └──────┬────────────────────────────────────────────┘               │
-│          │ result + per-request op counters (accumulated in OpState)    │
-│          ▼                                                            │
-│   ┌────────────────┐                                                  │
-│   │ Meter Recorder  │  Read per-request op counters from OpState     │
-│   │                 │  Atomic update to per-app counters (hot)      │
-│   │                 │  Event log enqueue (warm/cold, async)          │
-│   └──────┬─────────┘                                                  │
-│          │                                                            │
-│          ▼                                                            │
-│   ┌──────────────────────────┐                                        │
-│   │ Response Header Injector  │  X-Quota-*, RateLimit-*, X-CPU-*     │
-│   └──────┬───────────────────┘                                        │
-│          │                                                            │
-│          ▼                                                            │
-│   ┌──────────────────┐                                                │
-│   │ Concurrency Guard │  Decrement gauge                             │
-│   └──────┬───────────┘                                                │
-│          ▼                                                            │
-│   HTTP Response                                                       │
-│                                                                       │
-├───────────────────────────────────────────────────────────────────────┤
-│                       BACKGROUND SERVICES                             │
-│                                                                       │
-│   Usage Flusher      Every 5s: atomic swap + batch INSERT to SQLite  │
-│   Event Logger       Batched fsync writes to append-only log file    │
-│   Period Roller      At period boundaries: archive → reset counters  │
-│   Storage Sampler    Every 60s: stat() db/kv files → update counters │
-│   Spending Monitor   Every 60s: calculate spend, check limits        │
-│   Alert Dispatcher   Webhook delivery with exponential backoff       │
-│   Dedup Janitor      Every hour: evict expired keys from dedup set   │
-│                                                                       │
-├───────────────────────────────────────────────────────────────────────┤
-│                         STORAGE LAYER                                 │
-│                                                                       │
-│   Atomic Counters ── In-memory, per-app per-resource                 │
-│   Token Buckets ──── In-memory, per-app rate limit state             │
-│   Concurrency Gauge ─ AtomicU32 per app (increment/decrement)        │
-│   Dedup LRU Set ──── Bounded (1M entries), 24h TTL                   │
-│   Usage Store ────── SQLite: period aggregates, history               │
-│   Event Log ──────── Append-only file: raw events with hash chain    │
-│   Plan Registry ──── Parsed from TOML, immutable per reload          │
-│   Webhook Queue ──── In-memory bounded queue + dead letter table     │
-│                                                                       │
-└───────────────────────────────────────────────────────────────────────┘
+REQUEST PATH (top to bottom):
+  HTTP Request
+    -> Rate Limiter (single-AtomicU64 CAS, 2.7) -> 429
+    -> Concurrency Guard (CAS loop, 18.5)        -> 429
+    -> Entitlement Checker                        -> 403
+    -> Quota Enforcer + inline spend check        -> 429 / warn headers
+    -> V8 Isolate Execution (CPU/wall watchdog)   -> 503 on limit
+    -> Meter Recorder (atomic counters + inline spend + event log enqueue)
+    -> Response Header Injector (X-Quota-*, RateLimit-*, X-CPU-*)
+    -> Concurrency Guard Drop (decrement gauge)
+  HTTP Response
+
+BACKGROUND SERVICES:
+  Usage Flusher (5s), Event Logger, Period Roller (double-buffered),
+  Storage Sampler (60s), Spending Reconciler (10s), Alert Dispatcher,
+  Dedup Janitor (hourly), Dunning Manager (12.8)
+
+STORAGE LAYER:
+  Atomic Counters (per-app per-resource), Token Buckets (packed AtomicU64),
+  Concurrency Gauges (AtomicU32 CAS), Spend Accumulators (AtomicU64),
+  Dedup LRU (1M, 24h TTL), SQLite (usage history), Event Log (append-only,
+  externally anchored), Plan Registry, Webhook Queue + dead letter
 ```
 
 ### 4.2 Metering Pipeline
 
 ```
-Request completes → Build UsageDelta
-┌──────────────────────────────────────────────────────────────┐
-│  UsageDelta {                                                │
-│    request_id: "req_01JQRA7XYZ",                             │
-│    app_id: "my_todo",                                        │
-│    timestamp: "2026-03-30T14:22:01.123Z",                    │
-│    deltas: [                                                 │
-│      (cpu_ms, 4.2),   (wall_ms, 27.0),  (requests, 1),      │
-│      (egress_bytes, 1024), (db_reads, 3), (subrequests, 1),  │
-│    ]                                                         │
-│  }                                                           │
-└──────────────┬───────────────────────────────────────────────┘
-               │
-               ▼
-   ┌─── For each (resource, value): ───┐
-   │                                    │
-   │  1. idempotency_key = "{req_id}_{resource}"
-   │  2. if dedup_set.contains(key) → skip
-   │  3. dedup_set.insert(key)
-   │  4. counter[app][resource].fetch_add(value)  ←── ~10ns, lock-free
-   │                                    │
-   └────────────────────────────────────┘
-               │
-               ▼
-   Enqueue full UsageDelta to event_log_channel
-   (bounded mpsc, capacity 10,000; drop + count on full)
-               │
-               ▼ (async, background)
-   EventLogger: batch write to append-only file
-   UsageFlusher: every 5s, swap counters → INSERT to SQLite
+Request completes -> Build UsageDelta { request_id, app_id, timestamp, deltas[] }
+  For each (resource, value):
+    1. Dedup check: idempotency_key = "{req_id}_{resource}"
+    2. counter[app][resource].fetch_add(value, Release)      ~10ns
+    3. spend_accumulator[app].fetch_add(delta_cents, Release)
+  Enqueue UsageDelta to event_log_channel (bounded mpsc, 10K; drop on full)
+  Background: EventLogger batch-writes to file; UsageFlusher batch-upserts to SQLite
 ```
 
-### 4.3 Period Rollover
+### 4.3 Period Rollover — Double-Buffered Design
 
-```
-PeriodRoller (timer-driven)
-   │
-   ├── 1. Check: current_time > period_end for any app?
-   │
-   ├── 2. For each affected app (brief per-app lock, <1ms):
-   │       a. Snapshot current atomic counters
-   │       b. INSERT snapshot into usage_history table
-   │       c. Zero monthly/daily counters (atomic store 0)
-   │       d. Update period_start/period_end
-   │
-   ├── 3. Dispatch webhook: billing.period_end
-   │
-   └── 4. If app was spend-blocked and auto_resume=true: unblock
-```
+The naive approach of locking per-app counters during rollover causes a brief 503 for
+all apps whose periods end at the same time (e.g., all calendar_month apps at midnight
+UTC on the 1st). This is unacceptable at scale.
 
-**Race condition:** During the brief per-app lock (step 2), incoming requests for that
-app see a `QuotaDecision::Retry` and receive `503 Service Unavailable` with
-`Retry-After: 1`. This happens at most once per billing period per app and lasts <1ms.
-Other apps are unaffected.
+**Double-buffered counters** eliminate this:
 
-### 4.4 Counter Overflow
+For each affected app (lock-free):
+1. Allocate new counter set ("buffer B") for the new period
+2. Atomically swap the active buffer pointer (`AtomicPtr` CAS) -- new requests
+   immediately write to buffer B. No 503, no pause, no lock.
+3. Read final values from old buffer A (safe: no new writes after swap)
+4. INSERT snapshot into usage_history, update period metadata
+5. Dispatch `billing.period_end` webhook
+6. If spend-blocked and `auto_resume=true`: unblock
+
+The `AtomicPtr` swap is a single instruction. In-flight requests may write to old or
+new buffer -- both are handled correctly. For `calendar_month`, rollover processes apps
+in batches of 100 with 10ms sleep to avoid SQLite write spikes.
+
+### 4.4 SQLite Write Strategy at Scale
+
+**Problem:** At 10K apps with 15 resources, a naive per-row INSERT every 5 seconds
+produces 150K individual writes, which saturates SQLite's single-writer lock.
+
+**Solution: Write coalescing with batched transactions.**
+
+1. Snapshot all per-app counters (skip zero-delta entries -- typically 60-80%)
+2. Single transaction with prepared statement reuse:
+   ```sql
+   BEGIN IMMEDIATE;
+   INSERT INTO usage_current (app_id, resource, value, updated_at)
+     VALUES (?1, ?2, ?3, ?4)
+     ON CONFLICT(app_id, resource) DO UPDATE SET value = value + excluded.value,
+       updated_at = excluded.updated_at;
+   COMMIT;
+   ```
+3. One WAL fsync per flush. ~50ms for 60K upserts on NVMe SSD.
+
+**Extreme scale (>10K apps):** Shard by app_id hash across multiple SQLite databases
+(~2K apps per shard), or store per-app counter snapshots as single MessagePack BLOBs.
+
+### 4.5 Counter Overflow
 
 All atomic counters are `AtomicU64`. Overflow analysis:
 - At 1B requests/second: 584 years to overflow
@@ -848,7 +838,7 @@ All atomic counters are `AtomicU64`. Overflow analysis:
 Defensive handling: counters saturate at `u64::MAX - 1` (using `fetch_update` with
 checked addition). A `counter_overflow` alert fires if saturation is reached.
 
-### 4.5 Crash Recovery
+### 4.6 Crash Recovery
 
 On startup after an unclean shutdown:
 1. Load last-flushed counters from SQLite (warm tier)
@@ -876,6 +866,8 @@ Data loss window: at most `flush_interval` (5 seconds) of counter updates. The e
   "period": "2026-03",
   "plan": "pro",
   "plan_version": 1,
+  "endpoint": "todos.list",
+  "source": "request",
   "metadata": {
     "request_id": "req_01JQRA7XYZ",
     "method": "todos.list"
@@ -894,19 +886,37 @@ Data loss window: at most `flush_interval` (5 seconds) of counter updates. The e
 | `period` | String | Yes | Billing period (YYYY-MM) |
 | `plan` | String | Yes | Plan name at time of event |
 | `plan_version` | u32 | Yes | Plan version at time of event |
+| `endpoint` | String | No | RPC method name for per-endpoint metering (see Section 21) |
+| `source` | String | Yes | Event source: `"request"`, `"cron"`, `"background"` (see Section 22) |
 | `metadata` | Object | No | Arbitrary context for debugging |
 
 ### 5.2 Event Log Integrity
 
 Each event log entry includes:
 - The event payload (JSON)
-- A SHA-256 hash: `H(n) = SHA256(H(n-1) || event_payload_bytes)`
 - Entry sequence number
 
-This hash chain makes tampering with historical events detectable. The chain is seeded
-with `H(0) = SHA256("appbase-event-log-v2")`. Verification via
-`GET /_admin/event_log/verify` scans the chain and reports any breaks (returns the
-first broken entry and total entries verified).
+**Integrity via periodic external digest anchoring:**
+
+The event log uses **periodic external digest anchoring** rather than an internal hash
+chain. An internal chain (`H(n) = SHA256(H(n-1) || payload)`) is security theater: an
+attacker with write access can rewrite the entire chain. External anchoring provides
+genuine tamper evidence, following AWS CloudTrail (S3 digest files) and Sigstore/Rekor.
+
+Every 10,000 entries or 300 seconds, a SHA-256 digest of recent entries is computed and
+posted to a configured external store (S3 Object Lock, Rekor, or a read-only-mounted
+file). Anchors are also cached locally in SQLite for fast verification.
+
+```toml
+[event_log.anchoring]
+enabled = true
+interval_entries = 10000
+interval_secs = 300
+destinations = ["file:///var/appbase/anchors/", "https://rekor.example.com/api/v1/log"]
+```
+
+`GET /v1/_admin/event_log/verify` recomputes digests per anchor range and cross-checks
+against external records.
 
 ### 5.3 Late-Arriving Events
 
@@ -914,8 +924,8 @@ Events with timestamps in a closed billing period:
 1. Accepted into the event log (never rejected)
 2. Flagged with `"late_arrival": true`
 3. Do NOT update the archived period's counters automatically
-4. Visible via `GET /_admin/reconciliation`
-5. Can be applied via `POST /_admin/reconciliation/apply` (admin action, audit-logged)
+4. Visible via `GET /v1/_admin/reconciliation`
+5. Can be applied via `POST /v1/_admin/reconciliation/apply` (admin action, audit-logged)
 
 ### 5.4 Event Corrections
 
@@ -927,13 +937,26 @@ To correct a previously recorded event:
   "correction_for": "evt_01JQRA7XYZABC123",
   "app_id": "my_todo",
   "resource": "cpu_ms",
-  "value": 3.8,
+  "value": 3,
+  "original_value": 4,
   "reason": "Measurement included system overhead"
 }
 ```
 
-Corrections create a new event that supersedes the original. The net effect is
-`new_value - original_value` applied to counters. Requires admin privilege.
+**Correction semantics:** The correction event records both the new value and the original
+value explicitly. The counter adjustment is `new_value - original_value`. This prevents
+negative counter drift that can occur when the original event was deduplicated or already
+corrected.
+
+**Safeguards:**
+- If `original_value` does not match the value in the referenced event, the correction
+  is rejected with a 409 Conflict error. The operator must re-fetch the current value.
+- If the referenced event was already corrected, the correction is rejected (only one
+  correction per event; create a new correction referencing the correction event instead).
+- Counter floor: counters are clamped to zero. If a correction would produce a negative
+  value, the counter is set to zero and a `counter_floor_clamped` warning is logged.
+
+Corrections require admin privilege and are audit-logged.
 
 ---
 
@@ -946,23 +969,21 @@ bills of thousands of dollars. Their eventual spend management system (2024) sti
 requires manual per-project unpausing after the limit is hit. Appbase addresses cost
 predictability from day one.
 
-### 6.2 How Spend Is Calculated
+### 6.2 Inline Spend Tracking
 
-```
-For each app, every check_interval_secs:
+**Problem:** Checking spending only every 60 seconds creates a blind spot where up to
+60K requests (at 1K req/s) can accumulate unbilled. For high-throughput apps, this means
+significant overshoot before the spending monitor catches up.
 
-  spend_estimate_cents = 0
-  for each resource with overage pricing:
-    included = plan.quotas[resource].max  (or 0 if no quota)
-    usage = current_counters[resource]
-    overage = max(0, usage - included)
-    spend_estimate_cents += overage * price_per_unit_cents
+**Solution:** Each request atomically updates a per-app spend accumulator
+(`AtomicU64::fetch_add(delta_cents, Release)`). Pre-request, the Quota Enforcer checks
+`spend_blocked[app].load(Acquire)`. When the accumulator exceeds the limit, the app is
+blocked and a `spending.blocked` webhook fires.
 
-  spend_estimate_cents is stored and compared against limit
-```
-
-**Precision:** All monetary values are stored in integer cents to avoid floating-point
-rounding errors. Displayed as dollars with 2 decimal places.
+The background SpendingReconciler (every 10s) recomputes exact spend from counter
+snapshots and corrects drift. Inline tracking uses fixed-point integer arithmetic
+(tenths of a cent, always under-counts -- safe direction). Max drift per 10s window:
+~$6 at 1K req/s, corrected at next reconciliation.
 
 ### 6.3 Configuration
 
@@ -970,7 +991,8 @@ rounding errors. Displayed as dollars with 2 decimal places.
 # Platform-level defaults
 [spending]
 enabled = true
-check_interval_secs = 60
+check_interval_secs = 10           # Background reconciliation interval
+inline_tracking = true             # Per-request spend estimation
 default_alert_thresholds = [50, 75, 90, 100]
 
 # Per-app override
@@ -994,17 +1016,17 @@ webhook_url = "https://..."       # Per-app webhook for spend alerts
 ### 6.5 Alert Flow
 
 ```
-SpendingMonitor tick (every 60s)
-   │
-   ├── For each app with spending limit:
-   │     calculate spend_estimate
-   │     for each threshold [50, 75, 90, 100]:
-   │       if spend >= threshold% of limit:
-   │         if not already_alerted[app][threshold]:
-   │           dispatch: spending.threshold webhook
-   │           already_alerted[app][threshold] = true
-   │
-   └── At 100%:
+SpendingReconciler tick (every 10s)
+   |
+   +-- For each app with spending limit:
+   |     reconcile spend_accumulator with calculated spend
+   |     for each threshold [50, 75, 90, 100]:
+   |       if spend >= threshold% of limit:
+   |         if not already_alerted[app][threshold]:
+   |           dispatch: spending.threshold webhook
+   |           already_alerted[app][threshold] = true
+   |
+   +-- At 100%:
          execute configured action (block/degrade/warn/webhook)
          dispatch: spending.blocked webhook
 ```
@@ -1014,7 +1036,7 @@ SpendingMonitor tick (every 60s)
 | Config | At Period Boundary |
 |---|---|
 | `auto_resume = true` | Automatically unblocked, counters reset |
-| `auto_resume = false` | Stays blocked until `POST /_admin/apps/{id}/spending/resume` |
+| `auto_resume = false` | Stays blocked until `POST /v1/_admin/apps/{id}/spending/resume` |
 
 ---
 
@@ -1036,16 +1058,11 @@ Inspired by Lago's wallet system:
   "app_id": "my_todo",
   "balance_cents": 10000,
   "currency": "usd",
-  "auto_topup": {
-    "enabled": true,
-    "threshold_cents": 1000,
-    "amount_cents": 10000
-  },
+  "auto_topup": { "enabled": true, "threshold_cents": 1000, "amount_cents": 10000 },
   "expires_at": null,
-  "created_at": "2026-01-15T00:00:00Z",
   "transactions": [
     { "type": "topup", "amount_cents": 10000, "timestamp": "...", "note": "Initial deposit" },
-    { "type": "deduction", "amount_cents": -2500, "timestamp": "...", "period": "2026-02", "note": "February usage" }
+    { "type": "deduction", "amount_cents": -2500, "period": "2026-02", "note": "Feb usage" }
   ]
 }
 ```
@@ -1054,7 +1071,7 @@ Inspired by Lago's wallet system:
 
 When calculating an invoice:
 1. Calculate total usage charges (overage beyond included amounts)
-2. Subtract credits from wallet (oldest transactions first)
+2. Subtract credits from wallet (oldest transactions first — FIFO)
 3. Remaining amount = billable to payment method
 
 Expired credits are skipped during application and logged as `credit.expired`.
@@ -1062,10 +1079,10 @@ Expired credits are skipped during application and logged as `credit.expired`.
 ### 7.4 Admin API
 
 ```
-GET    /_admin/apps/{id}/wallet                — Balance and config
-POST   /_admin/apps/{id}/wallet/topup          — Add credits { amount_cents, note }
-POST   /_admin/apps/{id}/wallet/deduct         — Deduct credits { amount_cents, note }
-GET    /_admin/apps/{id}/wallet/transactions   — Transaction history (paginated)
+GET    /v1/_admin/apps/{id}/wallet                -- Balance and config
+POST   /v1/_admin/apps/{id}/wallet/topup          -- Add credits { amount_cents, note }
+POST   /v1/_admin/apps/{id}/wallet/deduct         -- Deduct credits { amount_cents, note }
+GET    /v1/_admin/apps/{id}/wallet/transactions   -- Transaction history (paginated)
 ```
 
 ---
@@ -1077,37 +1094,17 @@ GET    /_admin/apps/{id}/wallet/transactions   — Transaction history (paginate
 Present on every successful response:
 
 ```http
-HTTP/1.1 200 OK
-
-# Request identity
 X-Request-Id: req_01JQRA7XYZ
-
-# Timing
-X-CPU-Time-Ms: 0.67
-X-Wall-Time-Ms: 27.01
-
-# Plan
-X-Plan: pro
-X-Plan-Version: 1
-
-# Quota (most constrained resource — lowest remaining percentage)
-X-Quota-Resource: requests
-X-Quota-Used: 42
-X-Quota-Limit: 10000000
-X-Quota-Remaining: 9999958
+X-CPU-Time-Ms: 0.67              X-Wall-Time-Ms: 27.01
+X-Plan: pro                       X-Plan-Version: 1
+X-Quota-Resource: requests        X-Quota-Used: 42
+X-Quota-Limit: 10000000          X-Quota-Remaining: 9999958
 X-Quota-Reset: 2026-04-01T00:00:00Z
-
-# Rate Limit (IETF draft-ietf-httpapi-ratelimit-headers)
-RateLimit-Limit: 1000
-RateLimit-Remaining: 997
-RateLimit-Reset: 3
-
-# Enforcement mode (only present if not "enforce")
-X-Enforcement-Mode: dry_run
+RateLimit-Limit: 1000            RateLimit-Remaining: 997      RateLimit-Reset: 3
+X-Enforcement-Mode: dry_run      # Only present if not "enforce"
 ```
 
-**Most constrained resource:** The `X-Quota-*` headers show whichever quota has the
-lowest `remaining / limit` ratio. This gives developers a single signal to watch.
+`X-Quota-*` shows the most constrained resource (lowest `remaining / limit` ratio).
 
 ### 8.2 Warning Headers
 
@@ -1165,61 +1162,10 @@ HTTP headers: `Retry-After: 86400` (seconds until period reset)
 ```
 HTTP headers: `Retry-After: 1`
 
-**Spending limit (429):**
-```json
-{
-  "jsonrpc": "2.0",
-  "error": {
-    "code": -32029,
-    "message": "Spending limit reached",
-    "data": {
-      "type": "spending_limit",
-      "current_spend_usd": "50.00",
-      "limit_usd": "50.00",
-      "auto_resume": true,
-      "period_end": "2026-04-01T00:00:00Z"
-    }
-  },
-  "id": 1
-}
-```
-
-**Entitlement denied (403):**
-```json
-{
-  "jsonrpc": "2.0",
-  "error": {
-    "code": -32030,
-    "message": "Feature not available on your plan",
-    "data": {
-      "type": "entitlement_denied",
-      "feature": "cron_jobs",
-      "plan": "free",
-      "required_plans": ["pro", "enterprise"],
-      "upgrade_url": "https://appbase.dev/pricing"
-    }
-  },
-  "id": 1
-}
-```
-
-**Per-request limit (503):**
-```json
-{
-  "jsonrpc": "2.0",
-  "error": {
-    "code": -32031,
-    "message": "CPU time limit exceeded (10ms)",
-    "data": {
-      "type": "execution_limit",
-      "resource": "cpu_ms",
-      "used_ms": 10.2,
-      "limit_ms": 10
-    }
-  },
-  "id": 1
-}
-```
+Other error types follow the same JSON-RPC 2.0 structure with `data.type` discriminator:
+- **Spending limit (429):** `data.type = "spending_limit"` with `current_spend_usd`, `limit_usd`, `auto_resume`, `period_end`
+- **Entitlement denied (403):** `data.type = "entitlement_denied"` with `feature`, `plan`, `required_plans`, `upgrade_url`
+- **Per-request limit (503):** `data.type = "execution_limit"` with `resource`, `used_ms`, `limit_ms`
 
 ### 8.4 Error Code Catalog
 
@@ -1233,7 +1179,10 @@ All error codes used by the quota/metering system:
 | `-32029` | 429 | `concurrency_limit` | Max concurrent requests |
 | `-32030` | 403 | `entitlement_denied` | Feature not available on plan |
 | `-32031` | 503 | `execution_limit` | Per-request CPU/wall limit (kill) |
-| `-32031` | 503 | `period_rollover` | Brief unavailability during counter reset |
+
+Note: The previous `period_rollover` error code (-32031/503) is eliminated by the
+double-buffered rollover design (Section 4.3). Rollover no longer causes any
+request failures.
 
 All codes are within the JSON-RPC 2.0 implementation-defined server error range
 (-32000 to -32099). The `data.type` field disambiguates errors sharing the same code.
@@ -1257,28 +1206,29 @@ reported. All violated resources are listed in `data.all_violations`:
 }
 ```
 
-The `data.type` field in the error response disambiguates errors sharing the same code.
-Clients should use `data.type` (not just the numeric code) for programmatic error handling.
-
 ---
 
 ## 9. Admin API
 
-All admin endpoints require authentication (`Authorization: Bearer <api_key>` or mTLS).
+All admin endpoints are served under the `/v1/` prefix for API versioning. Future
+breaking changes will use `/v2/`, with the previous version supported for at least
+12 months after deprecation.
+
+All admin endpoints require authentication via scoped API keys (see Section 10).
 Destructive operations require `X-Confirm: true` header. Responses are JSON with a
 standard envelope:
 
 ```json
 {
-  "data": { ... },           // Response payload (object or array)
-  "meta": {                  // Present on list endpoints
+  "data": {},
+  "meta": {
     "total": 42,
     "limit": 20,
     "offset": 0,
-    "next_cursor": "...",    // For cursor-based pagination
+    "next_cursor": "...",
     "has_more": true
   },
-  "warnings": [              // Present when action has side effects
+  "warnings": [
     "App my_blog is now over quota for requests (200000/100000)"
   ]
 }
@@ -1287,185 +1237,199 @@ standard envelope:
 **Concurrency control:** Mutating endpoints use optimistic concurrency via `ETag`/
 `If-Match` headers. Example:
 ```
-GET /_admin/apps/my_blog → ETag: "v3"
-PUT /_admin/apps/my_blog/plan  If-Match: "v3"  → 200 OK (or 409 Conflict if changed)
+GET /v1/_admin/apps/my_blog -> ETag: "v3"
+PUT /v1/_admin/apps/my_blog/plan  If-Match: "v3"  -> 200 OK (or 409 Conflict if changed)
 ```
 
 ### 9.1 Apps
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/_admin/apps` | List apps with plan and usage summary |
-| GET | `/_admin/apps/{id}` | App details (plan, entitlements, quotas, usage) |
-| PUT | `/_admin/apps/{id}/plan` | Change plan `{ "plan": "pro", "version": 1 }` |
-| PATCH | `/_admin/apps/{id}/overrides` | Set per-app quota overrides |
-| DELETE | `/_admin/apps/{id}/overrides` | Remove all overrides |
-| POST | `/_admin/apps/{id}/reset` | Reset current period counters (X-Confirm required) |
-| DELETE | `/_admin/apps/{id}` | Evict isolate + clear all state (X-Confirm required) |
-| PUT | `/_admin/apps/{id}/enforcement_mode` | Set mode `{ "mode": "dry_run" }` |
+| Method | Path | Required Scope | Description |
+|---|---|---|---|
+| GET | `/v1/_admin/apps` | `read:apps` | List apps with plan and usage summary |
+| GET | `/v1/_admin/apps/{id}` | `read:apps` | App details (plan, entitlements, quotas, usage) |
+| PUT | `/v1/_admin/apps/{id}/plan` | `write:apps` | Change plan `{ "plan": "pro", "version": 1 }` |
+| PATCH | `/v1/_admin/apps/{id}/overrides` | `write:overrides` | Set per-app quota overrides |
+| DELETE | `/v1/_admin/apps/{id}/overrides` | `write:overrides` | Remove all overrides |
+| POST | `/v1/_admin/apps/{id}/reset` | `write:apps` | Reset current period counters (X-Confirm required) |
+| DELETE | `/v1/_admin/apps/{id}` | `admin:apps` | Evict isolate + clear all state (X-Confirm required) |
+| PUT | `/v1/_admin/apps/{id}/enforcement_mode` | `write:apps` | Set mode `{ "mode": "dry_run" }` |
 
 ### 9.2 Usage & Metering
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/_admin/apps/{id}/usage` | Current period usage (all resources) |
-| GET | `/_admin/apps/{id}/usage?resource=cpu_ms` | Single resource breakdown |
-| GET | `/_admin/apps/{id}/usage/history` | Historical periods (paginated) |
-| GET | `/_admin/apps/{id}/usage/history/{period}` | Specific period detail |
-| GET | `/_admin/apps/{id}/events` | Raw events (paginated, filterable) |
-| GET | `/_admin/usage/summary` | Platform-wide current period summary |
-| GET | `/_admin/usage/top?resource=cpu_ms&limit=10` | Top N apps by resource |
+| Method | Path | Required Scope | Description |
+|---|---|---|---|
+| GET | `/v1/_admin/apps/{id}/usage` | `read:usage` | Current period usage (all resources) |
+| GET | `/v1/_admin/apps/{id}/usage?resource=cpu_ms` | `read:usage` | Single resource breakdown |
+| GET | `/v1/_admin/apps/{id}/usage/history` | `read:usage` | Historical periods (paginated) |
+| GET | `/v1/_admin/apps/{id}/usage/history/{period}` | `read:usage` | Specific period detail |
+| GET | `/v1/_admin/apps/{id}/events` | `read:events` | Raw events (paginated, filterable) |
+| GET | `/v1/_admin/usage/summary` | `read:usage` | Platform-wide current period summary |
+| GET | `/v1/_admin/usage/top?resource=cpu_ms&limit=10` | `read:usage` | Top N apps by resource |
 
 Query parameters for list endpoints: `?limit=N&offset=M&sort=field&order=asc|desc`
-Event filtering: `?resource=X&from=ISO8601&to=ISO8601&method=X`
+Event filtering: `?resource=X&from=ISO8601&to=ISO8601&method=X&source=request|cron|background`
 
 ### 9.3 Plans
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/_admin/plans` | List all plans |
-| GET | `/_admin/plans/{name}` | Plan details (current version) |
-| GET | `/_admin/plans/{name}/apps` | Apps on this plan |
-| POST | `/_admin/plans/{name}/migrate` | Bulk migrate apps to latest version |
-| POST | `/_admin/plans/{name}/simulate` | Simulate effect of plan on an app's current usage |
+| Method | Path | Required Scope | Description |
+|---|---|---|---|
+| GET | `/v1/_admin/plans` | `read:plans` | List all plans |
+| GET | `/v1/_admin/plans/{name}` | `read:plans` | Plan details (current version) |
+| GET | `/v1/_admin/plans/{name}/apps` | `read:plans` | Apps on this plan |
+| POST | `/v1/_admin/plans/{name}/migrate` | `admin:plans` | Bulk migrate apps to latest version |
+| POST | `/v1/_admin/plans/{name}/simulate` | `read:plans` | Simulate effect of plan on an app's current usage |
 
 ### 9.4 Spending & Billing
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/_admin/apps/{id}/spending` | Current spend estimate |
-| PUT | `/_admin/apps/{id}/spending` | Set spending config |
-| POST | `/_admin/apps/{id}/spending/resume` | Resume spend-paused app |
-| GET | `/_admin/apps/{id}/invoice/preview` | Preview next invoice |
-| GET | `/_admin/apps/{id}/invoice/history` | Historical invoice snapshots (generated at period end) |
+| Method | Path | Required Scope | Description |
+|---|---|---|---|
+| GET | `/v1/_admin/apps/{id}/spending` | `read:usage` | Current spend estimate |
+| PUT | `/v1/_admin/apps/{id}/spending` | `write:apps` | Set spending config |
+| POST | `/v1/_admin/apps/{id}/spending/resume` | `write:apps` | Resume spend-paused app |
+| GET | `/v1/_admin/apps/{id}/invoice/preview` | `read:invoices` | Preview next invoice |
+| GET | `/v1/_admin/apps/{id}/invoice/history` | `read:invoices` | Historical invoice snapshots |
 
 ### 9.5 Credits
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/_admin/apps/{id}/wallet` | Wallet balance and config |
-| POST | `/_admin/apps/{id}/wallet/topup` | Add credits `{ amount_cents, note }` |
-| POST | `/_admin/apps/{id}/wallet/deduct` | Deduct credits `{ amount_cents, note }` |
-| GET | `/_admin/apps/{id}/wallet/transactions` | Transaction history |
+| Method | Path | Required Scope | Description |
+|---|---|---|---|
+| GET | `/v1/_admin/apps/{id}/wallet` | `read:wallets` | Wallet balance and config |
+| POST | `/v1/_admin/apps/{id}/wallet/topup` | `write:wallets` | Add credits `{ amount_cents, note }` |
+| POST | `/v1/_admin/apps/{id}/wallet/deduct` | `write:wallets` | Deduct credits `{ amount_cents, note }` |
+| GET | `/v1/_admin/apps/{id}/wallet/transactions` | `read:wallets` | Transaction history |
 
 ### 9.6 Operations
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/_admin/health` | System health (components: rate_limiter, flusher, event_log, ...) |
-| GET | `/_admin/metrics` | Prometheus-format metrics |
-| POST | `/_admin/flush` | Force flush counters to SQLite |
-| POST | `/_admin/config/validate` | Validate TOML without applying |
-| POST | `/_admin/config/reload` | Hot reload configuration |
-| GET | `/_admin/event_log/verify` | Verify event log hash chain integrity |
-| GET | `/_admin/reconciliation` | Late-arriving events report |
-| POST | `/_admin/reconciliation/apply` | Apply late events to closed period |
-| GET | `/_admin/webhooks/failed` | Failed webhook deliveries |
-| POST | `/_admin/webhooks/{id}/replay` | Re-send a failed webhook |
-| POST | `/_admin/webhooks/test` | Send a test event to verify connectivity |
+| Method | Path | Required Scope | Description |
+|---|---|---|---|
+| GET | `/v1/_admin/health` | `read:health` | System health |
+| GET | `/v1/_admin/metrics` | `read:metrics` | Prometheus-format metrics |
+| POST | `/v1/_admin/flush` | `admin:ops` | Force flush counters to SQLite |
+| POST | `/v1/_admin/config/validate` | `admin:config` | Validate TOML without applying |
+| POST | `/v1/_admin/config/reload` | `admin:config` | Hot reload configuration |
+| GET | `/v1/_admin/event_log/verify` | `read:events` | Verify event log integrity |
+| GET | `/v1/_admin/reconciliation` | `read:events` | Late-arriving events report |
+| POST | `/v1/_admin/reconciliation/apply` | `admin:events` | Apply late events to closed period |
+| GET | `/v1/_admin/webhooks/failed` | `read:webhooks` | Failed webhook deliveries |
+| POST | `/v1/_admin/webhooks/{id}/replay` | `write:webhooks` | Re-send a failed webhook |
+| POST | `/v1/_admin/webhooks/test` | `write:webhooks` | Send a test event |
 
-### 9.7 Data Export
+### 9.7 API Key Management
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/_admin/export/usage?from=...&to=...&format=csv` | Export usage data |
-| GET | `/_admin/export/events?from=...&to=...&format=jsonl` | Export raw events |
+| Method | Path | Required Scope | Description |
+|---|---|---|---|
+| GET | `/v1/_admin/keys` | `admin:keys` | List all API keys (secrets redacted) |
+| POST | `/v1/_admin/keys` | `admin:keys` | Create new API key |
+| DELETE | `/v1/_admin/keys/{id}` | `admin:keys` | Revoke an API key |
+| POST | `/v1/_admin/keys/{id}/rotate` | `admin:keys` | Rotate key (old key valid for grace period) |
+
+### 9.8 Data Export
+
+| Method | Path | Required Scope | Description |
+|---|---|---|---|
+| GET | `/v1/_admin/export/usage?from=...&to=...&format=csv` | `read:usage` | Export usage data |
+| GET | `/v1/_admin/export/events?from=...&to=...&format=jsonl` | `read:events` | Export raw events |
 
 Supported formats: `csv`, `json`, `jsonl` (newline-delimited JSON).
 
-### 9.8 Pagination
+### 9.9 Pagination
 
 List endpoints support two pagination modes:
 
 **Offset-based** (simple, for small datasets):
 ```
-GET /_admin/apps?limit=20&offset=40&sort=app_id&order=asc
+GET /v1/_admin/apps?limit=20&offset=40&sort=app_id&order=asc
 ```
 
 **Cursor-based** (stable, for large/streaming datasets):
 ```
-GET /_admin/apps/{id}/events?limit=100&cursor=evt_01JQRA7XYZ
-→ Response includes: { "data": [...], "next_cursor": "evt_01JQRB8ABC", "has_more": true }
+GET /v1/_admin/apps/{id}/events?limit=100&cursor=evt_01JQRA7XYZ
+Response: { "data": [...], "next_cursor": "evt_01JQRB8ABC", "has_more": true }
 ```
 
 Event log queries always use cursor-based pagination (offset is unreliable on append-only
 data). The cursor is an opaque string (typically the last event_id).
 
-### 9.9 Health Check Response
+### 9.10 Health Check Response
 
-```json
-{
-  "status": "healthy",
-  "version": "0.2.0",
-  "uptime_seconds": 86423,
-  "components": {
-    "rate_limiter": { "status": "healthy", "apps_tracked": 42 },
-    "usage_flusher": { "status": "healthy", "last_flush": "2026-03-30T14:21:56Z", "flush_lag_ms": 12 },
-    "event_logger": { "status": "healthy", "queue_depth": 234, "queue_capacity": 10000 },
-    "period_roller": { "status": "healthy", "next_rollover": "2026-04-01T00:00:00Z" },
-    "spending_monitor": { "status": "healthy", "last_check": "2026-03-30T14:21:55Z" },
-    "storage_sampler": { "status": "healthy", "last_sample": "2026-03-30T14:21:30Z" },
-    "webhook_dispatcher": { "status": "healthy", "queue_depth": 0, "failed_count": 1 }
-  }
-}
-```
+Returns `status`, `version`, `uptime_seconds`, and per-component health (rate_limiter,
+usage_flusher, event_logger, period_roller, spending_monitor, storage_sampler,
+webhook_dispatcher, dunning_manager) each with `status` and component-specific metrics.
 
 ---
 
-## 10. Monitoring & Observability
+## 10. Access Control & API Key Management
 
-### 10.1 Prometheus Metrics
+### 10.1 Motivation
 
-Exported at `GET /_admin/metrics`:
+A single admin API key is insufficient for production use. Different services and team
+members need different levels of access. This follows the principle of least privilege,
+as implemented by Stripe (restricted keys), Cloudflare (API tokens with permissions),
+and AWS (IAM policies).
+
+### 10.2 Roles
+
+| Role | Description | Default Scopes |
+|---|---|---|
+| `super_admin` | Full access, can manage keys | `*` (all scopes) |
+| `admin` | Full access except key management | `read:*`, `write:*`, `admin:*` except `admin:keys` |
+| `operator` | Manage apps and quotas, no billing | `read:*`, `write:apps`, `write:overrides` |
+| `billing` | Read usage, manage wallets and invoices | `read:usage`, `read:invoices`, `write:wallets` |
+| `viewer` | Read-only access | `read:*` |
+
+### 10.3 Scopes
+
+Scopes follow `action:resource` pattern. **Read:** `read:apps`, `read:usage`,
+`read:events`, `read:plans`, `read:invoices`, `read:wallets`, `read:health`,
+`read:metrics`, `read:webhooks`. **Write:** `write:apps`, `write:overrides`,
+`write:wallets`, `write:webhooks`. **Admin:** `admin:apps`, `admin:plans`,
+`admin:config`, `admin:events`, `admin:ops`, `admin:keys`.
+Wildcard: `read:*` = all reads, `*` = everything.
+
+### 10.4 App Filtering
+
+Keys can be restricted to apps matching glob patterns via `app_filter = ["frontend_*"]`.
+Non-matching apps: 404 on detail, 403 on write, omitted from lists.
+
+### 10.5 Key Rotation
+
+`POST /v1/_admin/keys/{id}/rotate` returns new key. Both old and new keys valid for
+grace period (default: 24h, configurable via `key_rotation_grace_hours`).
+
+### 10.6 Key Format
+
+Prefix `abk_` + 32 random bytes (base62). Stored as bcrypt hashes. Plaintext shown
+once at creation. Every admin API call is audit-logged (timestamp, key ID, role,
+endpoint, parameters, status, IP).
+
+---
+
+## 11. Monitoring & Observability
+
+### 11.1 Prometheus Metrics
+
+Exported at `GET /v1/_admin/metrics`:
+
+Key metric families (labels: app, plan, resource, decision, status as applicable):
 
 ```prometheus
-# ── Per-app usage (labels: app, plan, resource) ──
-appbase_resource_usage_total{app="my_todo",plan="pro",resource="requests"} 4231
-appbase_resource_usage_total{app="my_todo",plan="pro",resource="cpu_ms"} 12400
-
-# ── Enforcement decisions (labels: app, resource, decision) ──
-appbase_enforcement_total{app="my_todo",resource="requests",decision="allow"} 4200
-appbase_enforcement_total{app="my_todo",resource="requests",decision="warn"} 31
-appbase_enforcement_total{app="my_todo",resource="requests",decision="block"} 0
-
-# ── Rate limiting ──
-appbase_rate_limited_total{app="my_todo"} 12
-appbase_rate_limit_tokens{app="my_todo"} 47
-
-# ── Spending ──
-appbase_spend_estimate_cents{app="my_todo"} 2000
-appbase_spend_limit_cents{app="my_todo"} 5000
-appbase_spend_blocked{app="my_todo"} 0
-
-# ── Metering pipeline health ──
-appbase_meter_flush_duration_seconds{quantile="0.50"} 0.001
-appbase_meter_flush_duration_seconds{quantile="0.99"} 0.008
-appbase_meter_flush_errors_total 0
-appbase_event_log_writes_total 98234
-appbase_event_log_write_errors_total 0
-appbase_event_log_size_bytes 1234567
-appbase_event_log_drops_total 0
-appbase_dedup_set_size 45000
-appbase_dedup_set_evictions_total 1200
-
-# ── Quota enforcement latency ──
-appbase_quota_check_duration_seconds{quantile="0.50"} 0.000003
-appbase_quota_check_duration_seconds{quantile="0.99"} 0.000012
-
-# ── System ──
-appbase_active_isolates 42
-appbase_active_apps 15
-appbase_counter_overflow_total 0
-appbase_period_rollover_duration_seconds{quantile="0.99"} 0.0004
-
-# ── Webhooks ──
-appbase_webhook_sent_total{status="success"} 42
-appbase_webhook_sent_total{status="failed"} 1
-appbase_webhook_retry_total 3
-appbase_webhook_dead_letter_total 0
+appbase_resource_usage_total          # Per-app per-resource usage counters
+appbase_enforcement_total             # Per-app enforcement decisions (allow/warn/block)
+appbase_rate_limited_total            # Rate limit rejections per app
+appbase_spend_estimate_cents          # Current spend estimate per app
+appbase_spend_blocked                 # Whether app is spend-blocked (0/1)
+appbase_meter_flush_duration_seconds  # Flush latency histogram (p50, p99)
+appbase_event_log_drops_total         # Events dropped due to backpressure
+appbase_quota_check_duration_seconds  # Enforcement check latency (p50, p99)
+appbase_active_isolates               # Current V8 isolate count
+appbase_webhook_sent_total            # Webhook delivery by status (success/failed)
+appbase_admin_api_requests_total      # Admin API calls by key_id, method, path
+appbase_admin_api_auth_failures_total # Auth failures by reason (invalid_key/insufficient_scope)
+appbase_dunning_apps_in_grace_total   # Apps in dunning grace period
+appbase_dunning_apps_suspended_total  # Apps suspended for non-payment
 ```
 
-### 10.2 Structured Logging
+### 11.2 Structured Logging
 
 All enforcement decisions produce structured log entries:
 
@@ -1501,7 +1465,7 @@ All enforcement decisions produce structured log entries:
 | `warn` | Warning thresholds reached, throttling applied, event log drops |
 | `error` | Quota exceeded (block), rate limited, spend blocked, system errors |
 
-### 10.3 Alert Rules
+### 11.3 Alert Rules
 
 | Alert | Condition | Severity | Action |
 |---|---|---|---|
@@ -1517,12 +1481,13 @@ All enforcement decisions produce structured log entries:
 | `storage_high` | Storage > 90% of quota | Warning | Webhook |
 | `counter_overflow` | Counter saturated at u64::MAX | Critical | Log + webhook |
 | `webhook_failure` | Webhook delivery failed after all retries | Warning | Log |
+| `payment_failed` | Payment attempt failed (dunning) | Error | Webhook |
 
 ---
 
-## 11. Billing Integration
+## 12. Billing Integration
 
-### 11.1 Supported Billing Models
+### 12.1 Supported Billing Models
 
 | Model | Base Fee | Usage Charges | Hard Caps | Example |
 |---|---|---|---|---|
@@ -1531,65 +1496,38 @@ All enforcement decisions produce structured log entries:
 | Pure usage-based | No | All usage | Optional | API-only tier |
 | Tiered (graduated) | Yes/No | Per-tier rates | Optional | Volume discount |
 | Committed use (credits) | Prepaid | Deducted from wallet | Optional | Enterprise |
+| Package bundles | Add-on | Included in package | Yes | Feature packs (see Section 20) |
 
-### 11.2 Invoice Preview
+### 12.2 Invoice Preview
 
 ```json
 {
   "app_id": "my_todo",
-  "period": {
-    "start": "2026-03-01T00:00:00Z",
-    "end": "2026-03-31T23:59:59Z"
-  },
+  "period": { "start": "2026-03-01T00:00:00Z", "end": "2026-03-31T23:59:59Z" },
   "plan": { "name": "pro", "version": 1 },
+  "currency": "usd",
   "line_items": [
-    {
-      "type": "subscription",
-      "description": "Pro plan — March 2026",
-      "amount_cents": 2000
-    },
-    {
-      "type": "overage",
-      "resource": "requests",
-      "quantity": 12_500_000,
-      "included": 10_000_000,
-      "overage_quantity": 2_500_000,
-      "unit_price": "$0.30/million",
-      "amount_cents": 75
-    },
-    {
-      "type": "overage",
-      "resource": "egress_bytes",
-      "quantity_bytes": 150_000_000_000,
-      "included_bytes": 100_000_000_000,
-      "overage_bytes": 50_000_000_000,
-      "unit_price": "$0.09/GB",
-      "amount_cents": 450
-    },
-    {
-      "type": "credit",
-      "description": "Wallet credit applied",
-      "amount_cents": -525
-    }
+    { "type": "subscription", "description": "Pro plan -- March 2026", "amount_cents": 2000 },
+    { "type": "commitment_base", "amount_cents": 5000, "note": "Usage below commitment floor" },
+    { "type": "overage", "resource": "requests", "overage_quantity": 2500000, "amount_cents": 75 },
+    { "type": "overage", "resource": "egress_bytes", "overage_bytes": 50000000000, "amount_cents": 450 },
+    { "type": "credit", "description": "Wallet credit applied", "amount_cents": -525 }
   ],
   "subtotal_cents": 2525,
   "credits_applied_cents": 525,
-  "tax_cents": 0,
-  "tax_note": "Tax calculation delegated to payment processor",
   "total_cents": 2000,
-  "generated_at": "2026-03-30T14:30:00Z",
   "status": "preview"
 }
 ```
 
-### 11.3 Billing Period Configuration
+### 12.3 Billing Period Configuration
 
 | Type | When Counters Reset | Best For |
 |---|---|---|
 | `calendar_month` | 1st at 00:00 UTC | Simplicity, standard SaaS |
 | `anniversary` | Signup day each month | Per-customer billing dates |
 
-### 11.4 Plan Changes (Proration)
+### 12.4 Plan Changes (Proration)
 
 | Scenario | Effective Limits | Billing |
 |---|---|---|
@@ -1597,7 +1535,7 @@ All enforcement decisions produce structured log entries:
 | Downgrade mid-period | Old limits until period end | New price starts next period, no refund |
 | Cancel | Drops to free-tier limits | No refund for current period |
 
-### 11.5 Overage
+### 12.5 Overage
 
 When `overage.enabled = true` on a plan:
 - Monthly quotas become **soft limits** (usage beyond max is allowed)
@@ -1605,42 +1543,122 @@ When `overage.enabled = true` on a plan:
 - Overage is billed at the configured per-unit rate
 - Spending limits still apply as a hard ceiling on total cost
 
-### 11.6 External Billing System Integration
+### 12.6 External Billing System Integration
 
 Appbase generates usage data; external systems handle payment:
 
 ```
                     Appbase                      External
-                  ┌──────────┐               ┌─────────────┐
-  billing.period  │          │  GET /invoice  │             │
-  _end webhook ──→│ Admin API│──→ preview ──→│ Stripe/Lago │
-                  │          │               │             │
-                  │ GET      │  usage data   │ Create      │
-                  │ /export  │──→──→──→──→──→│ invoice     │
-                  │          │               │             │
-                  │ POST     │  on payment   │ Process     │
-                  │ /wallet  │←──←──←──←──←──│ payment     │
-                  │ /topup   │               │             │
-                  └──────────┘               └─────────────┘
+                  +----------+               +-------------+
+  billing.period  |          |  GET /invoice  |             |
+  _end webhook -->| Admin API|-->  preview -->| Stripe/Lago |
+                  |          |               |             |
+                  | GET      |  usage data   | Create      |
+                  | /export  |-->-->-->-->-->-| invoice     |
+                  |          |               |             |
+                  | POST     |  on payment   | Process     |
+                  | /wallet  |<--<--<--<--<--| payment     |
+                  | /topup   |               |             |
+                  +----------+               +-------------+
 ```
 
 **Stripe integration pattern:**
 1. `billing.period_end` webhook fires
-2. Your service calls `GET /_admin/apps/{id}/invoice/preview`
+2. Your service calls `GET /v1/_admin/apps/{id}/invoice/preview`
 3. Creates Stripe invoice with line items from preview
 4. Stripe processes payment
-5. Optionally: `POST /_admin/apps/{id}/wallet/topup` for credit-based model
+5. On success: `POST /v1/_admin/apps/{id}/wallet/topup` for credit-based model
+6. On failure: Stripe fires `invoice.payment_failed` -> your service calls
+   `POST /v1/_admin/apps/{id}/dunning/start` (see Section 12.8)
 
 **Lago integration pattern:**
 1. During the period: forward usage events to Lago's event API
 2. Lago handles aggregation, invoice generation, and payment
 3. Appbase handles enforcement; Lago handles billing
 
+### 12.7 Minimum Commitment / Committed Use Discounts
+
+Enterprise customers often commit to a minimum monthly spend in exchange for lower
+per-unit rates. This follows the model used by AWS Reserved Instances, GCP Committed
+Use Discounts, and Orb's minimum commitments.
+
+**Configuration:**
+
+```toml
+[plans.enterprise_committed]
+description = "Enterprise with $500/mo minimum commitment"
+version = 1
+
+[plans.enterprise_committed.commitment]
+minimum_cents = 50000               # $500/month minimum
+term_months = 12                    # Contract duration
+start_date = "2026-01-01"          # Contract start
+discount_pct = 20                   # 20% discount on all usage rates
+rollover = false                    # Unused commitment does NOT roll over
+```
+
+**Invoice behavior:**
+- If usage charges >= `minimum_cents`: bill usage charges (with discount applied)
+- If usage charges < `minimum_cents`: bill `minimum_cents` (the commitment floor)
+- The invoice preview shows a `commitment_adjustment_cents` line item when the
+  floor applies
+
+**Tracking:**
+- `GET /v1/_admin/apps/{id}/commitment` returns commitment status, remaining term,
+  utilization percentage
+- `commitment.underutilized` webhook fires if utilization < 50% at mid-period
+
+### 12.8 Dunning — Payment Failure Handling
+
+When payment fails, the platform needs a clear escalation path. This follows Stripe's
+dunning model (retry schedule + grace period + eventual suspension).
+
+**Flow:** `payment_failed -> grace_period (3d) -> retry_1 (d3) -> retry_2 (d7) -> retry_3 (d14) -> suspended`
+
+```toml
+[billing.dunning]
+enabled = true
+grace_period_days = 3               # App runs normally during grace
+retry_schedule_days = [3, 7, 14]    # Days after failure to retry
+suspension_action = "degrade"       # "degrade" | "block" | "webhook"
+auto_reinstate_on_payment = true    # Restore plan when payment succeeds
+```
+
+At each stage, webhooks fire (`payment.failed`, `payment.retry`, `payment.suspended`).
+Suspension actions: `degrade` (free-tier limits), `block` (429 all requests), or
+`webhook` (external system decides). On payment success,
+`POST /v1/_admin/apps/{id}/dunning/resolve` reinstates the original plan.
+
+**Admin API:** `GET/POST /v1/_admin/apps/{id}/dunning` (state), `/dunning/start`,
+`/dunning/resolve`, `/dunning/override` (extend grace, skip to suspend).
+
+### 12.9 Graduated (Tiered) Pricing Calculation
+
+When tiered pricing is configured:
+
+```
+tiers = [
+  { up_to: 10000000,  per_million: 0.00 },   # Included
+  { up_to: 50000000,  per_million: 0.25 },   # Tier 2
+  { per_million: 0.15 },                      # Tier 3 (unlimited, no up_to)
+]
+
+For usage = 75,000,000:
+  Tier 1: min(75M, 10M) = 10M  ->  10M * $0.00/M = $0.00
+  Tier 2: min(75M - 10M, 50M - 10M) = 40M  ->  40M * $0.25/M = $10.00
+  Tier 3: 75M - 50M = 25M  ->  25M * $0.15/M = $3.75
+  Total: $13.75
+```
+
+Each tier is calculated independently (graduated model), not the entire volume at a
+single tier rate (volume model). This matches Lago's graduated charge model and is the
+most common approach in SaaS billing.
+
 ---
 
-## 12. Webhook Notifications
+## 13. Webhook Notifications
 
-### 12.1 Event Catalog
+### 13.1 Event Catalog
 
 | Event | Trigger | Payload Data |
 |---|---|---|
@@ -1653,14 +1671,19 @@ Appbase generates usage data; external systems handle payment:
 | `spending.resumed` | Spend-blocked app resumed | method (auto/manual) |
 | `billing.period_end` | Billing period ended | period, usage_summary |
 | `billing.invoice_ready` | Invoice preview available | period, total_cents |
+| `payment.failed` | Payment attempt failed | period, amount_cents, reason |
+| `payment.retry` | Payment retry attempted | attempt, final, amount_cents |
+| `payment.suspended` | App suspended for non-payment | action, period |
+| `payment.resolved` | Payment received after dunning | period, amount_cents |
 | `plan.changed` | Plan changed | old_plan, new_plan, old_version, new_version |
 | `app.created` | New app registered | app_id, plan |
 | `app.deleted` | App removed | app_id |
 | `credit.applied` | Credits deducted for usage | amount_cents, remaining_cents |
 | `credit.expired` | Credits expired unused | amount_cents |
+| `commitment.underutilized` | Commitment < 50% utilized at mid-period | utilization_pct |
 | `system.flush_error` | Counter flush failed | error_message |
 
-### 12.2 Payload Format
+### 13.2 Payload Format
 
 ```json
 {
@@ -1679,26 +1702,43 @@ Appbase generates usage data; external systems handle payment:
 }
 ```
 
-### 12.3 Delivery & Security
+### 13.3 Delivery & Security
 
 - **Transport:** HTTPS POST with `Content-Type: application/json`
 - **Signature:** `X-Appbase-Signature: sha256=<hex>` computed as `HMAC-SHA256(secret, body)`
 - **Verification:** Receiver computes HMAC and compares (constant-time) to header
-- **Secret rotation:** `POST /_admin/webhooks/rotate_secret` generates a new secret. Both old and new secrets are valid for a configurable grace period (default: 24 hours).
+- **Secret rotation:** `POST /v1/_admin/webhooks/rotate_secret` generates a new secret.
+  Both old and new secrets are valid for a configurable grace period (default: 24 hours).
 - **Timeout:** 10 seconds per attempt
 - **Retries:** 5 attempts with exponential backoff (1s, 5s, 30s, 5m, 30m)
 - **Dead letter:** After 5 failures, event stored in dead letter queue
-- **Replay:** `POST /_admin/webhooks/{id}/replay`
+- **Replay:** `POST /v1/_admin/webhooks/{id}/replay`
 - **Dedup:** Same event type + app + threshold fires at most once per billing period
 - **Event filtering:** The `events` config uses prefix matching with `*` wildcard.
   `"quota.*"` matches `quota.warning`, `quota.exceeded`, `quota.recovered`.
   `"*"` matches all events. Exact names (e.g., `"quota.warning"`) match only that event.
 
+### 13.4 Receiver Idempotency Contract
+
+Webhook receivers **must** handle duplicate deliveries idempotently. Appbase guarantees
+at-least-once delivery but not exactly-once. Duplicates can occur due to:
+- Network timeouts where the receiver processed the event but Appbase did not see the 2xx
+- Retries after transient failures
+- Manual replay via admin API
+
+**Contract for receivers:**
+
+1. **Use the `id` field as idempotency key.** Store processed IDs and skip duplicates.
+2. **Respond 2xx within 10 seconds.** Non-2xx or timeout triggers retry.
+3. **Process async if needed.** Return 200 immediately, process in background.
+4. **Track IDs for 48+ hours** (covers retry window + manual replays).
+5. **Verify HMAC signature** before processing (`X-Appbase-Signature` header).
+
 ---
 
-## 13. Security & Abuse Prevention
+## 14. Security & Abuse Prevention
 
-### 13.1 Tenant Isolation
+### 14.1 Tenant Isolation
 
 | Vector | Mitigation |
 |---|---|
@@ -1709,15 +1749,17 @@ Appbase generates usage data; external systems handle payment:
 | One app filling disk | Per-app storage quota (block_writes policy) |
 | Cross-app counter contamination | Independent counter maps per app_id |
 
-### 13.2 Admin API Security
+### 14.2 Admin API Security
 
-- **Authentication:** API key (`Authorization: Bearer <key>`) or mTLS
+- **Authentication:** Scoped API keys (see Section 10) or mTLS
+- **Authorization:** RBAC with per-key scopes and optional app filtering
 - **Rate limiting:** Admin API has its own rate limit (default: 100 req/s)
-- **Audit log:** Every admin action is recorded with timestamp, API key identity, action, parameters, and result
+- **Audit log:** Every admin action is recorded with timestamp, key ID, key role,
+  action, parameters, and result
 - **Destructive safeguards:** DELETE and reset endpoints require `X-Confirm: true`
 - **Read-only mode:** Can run admin API in read-only mode for monitoring without risk
 
-### 13.3 Anti-Gaming
+### 14.3 Anti-Gaming
 
 | Attack | Prevention |
 |---|---|
@@ -1727,7 +1769,7 @@ Appbase generates usage data; external systems handle payment:
 | Replay events to deflate usage | Idempotency keys prevent duplicate processing |
 | Forge event timestamps | Timestamps set by platform, not user |
 
-### 13.4 Denial-of-Wallet Prevention
+### 14.4 Denial-of-Wallet Prevention
 
 An attacker targeting another user's app could exhaust their quota or spending limit:
 
@@ -1739,35 +1781,38 @@ An attacker targeting another user's app could exhaust their quota or spending l
 | 4. Spending limit | Caps total financial exposure per period |
 | 5. Anomaly alerts | `usage_spike` alert on >3x baseline |
 
-### 13.5 Data Integrity
+### 14.5 Data Integrity
 
 | Mechanism | Purpose |
 |---|---|
-| `AtomicU64::fetch_add(Relaxed)` | Lock-free concurrent counter updates |
+| `Acquire`/`Release` atomic ordering | Correct lock-free counter updates on ARM and x86 |
+| CAS loops for token bucket and concurrency | Race-free state transitions |
 | SQLite WAL + `PRAGMA synchronous=NORMAL` | Durable flush with good performance |
-| Event log hash chain | Tamper detection on historical records |
+| Event log with external digest anchoring | Tamper detection backed by external trust root |
 | Idempotency dedup set | Prevent double-counting |
 | Checksums on exported data | Verify export integrity |
 
 ---
 
-## 14. Developer Experience
+## 15. Developer Experience
 
-### 14.1 For Platform Owners
+### 15.1 For Platform Owners
 
 | Capability | How |
 |---|---|
 | Define plans | TOML config: `[plans.X]` sections |
 | Per-app customization | `[apps.X.overrides.quotas]` without new plan |
-| Validate changes before deploy | `POST /_admin/config/validate` with TOML body |
+| Scoped access control | RBAC with per-key scopes and app filters (Section 10) |
+| Validate changes before deploy | `POST /v1/_admin/config/validate` with TOML body |
 | Test new limits safely | `enforcement_mode = "dry_run"` per app |
-| Simulate plan effects | `POST /_admin/plans/{name}/simulate` |
-| Hot reload | `POST /_admin/config/reload` or `kill -HUP <pid>` |
+| Simulate plan effects | `POST /v1/_admin/plans/{name}/simulate` |
+| Hot reload | `POST /v1/_admin/config/reload` or `kill -HUP <pid>` |
 | Monitor everything | Prometheus metrics + structured logs |
 | Export for analytics | CSV/JSONL export endpoints |
 | Integrate billing | Invoice preview API + webhook events |
+| Handle payment failures | Dunning system with configurable escalation (Section 12.8) |
 
-### 14.2 For App Developers
+### 15.2 For App Developers
 
 | Need | Solution |
 |---|---|
@@ -1778,133 +1823,80 @@ An attacker targeting another user's app could exhaust their quota or spending l
 | Avoid surprise bills | Spending limits, budget alerts, hard caps on free tier |
 | Access gated features | Clear entitlement error with required plan name |
 
-### 14.3 Plugin Metering SDK
+### 15.3 Plugin Metering SDK
 
 ```rust
-// Report usage for a custom resource
-state.meter("email_sends", 1);
-
-// Report multiple resources
-state.meter("ai_tokens", 150);
-state.meter("egress_bytes", result.size_bytes as u64);
-
-// Pre-check quota before expensive work
-match state.quota_available("ai_tokens") {
+state.meter("ai_tokens", 150);                // Never fails, panics, or blocks
+state.meter("egress_bytes", size as u64);     // Thread-safe, any async context
+match state.quota_available("ai_tokens") {    // Atomic load (Acquire), no I/O
     QuotaAvailable::Yes(remaining) => { /* proceed */ },
-    QuotaAvailable::No { used, limit } => {
-        return Err(quota_exceeded_error("ai_tokens", used, limit));
-    },
-    QuotaAvailable::Unlimited => { /* no quota defined, proceed */ },
+    QuotaAvailable::No { used, limit } => { /* reject */ },
+    QuotaAvailable::Unlimited => { /* no quota */ },
 }
 ```
 
-**SDK guarantees:**
-- `meter()` never fails, never panics, never blocks
-- Unknown resource names are silently ignored (with debug log)
-- Thread-safe: safe to call from any async context
-- `quota_available()` reads atomic counter — no I/O, no lock
+---
+
+## 16. Testing Strategy
+
+**Unit:** Policy evaluation, token bucket CAS (no double-refill), concurrency guard CAS
+(no slot leaks), quota enforcer decisions, config validation (V1-V16), invoice
+calculation (overage, credits, commitments), event correction (original_value matching,
+counter floor), RBAC (scopes, app filtering, key rotation).
+
+**Integration:** Full request flow with headers, double-buffered rollover (no 503),
+inline spend tracking, crash recovery, hot reload, dunning flow, SQLite batching.
+
+**Load:** Enforcement < 1us p99, 100 concurrent atomic correctness, 10K events/s no
+drops, 60K row flush < 100ms, token bucket CAS under 1K concurrent requests.
+
+**Utilities:** Mock clock, dry-run mode, shadow mode, `_test` app with 1-minute periods.
 
 ---
 
-## 15. Testing Strategy
+## 17. Implementation Plan
 
-### 15.1 Unit Tests
-
-- Policy evaluation: verify correct action at each threshold
-- Token bucket: verify rate/burst behavior, refill timing
-- Quota enforcer: verify allow/warn/block decisions against counter values
-- Config parser: verify validation rules (V1-V14) with valid and invalid inputs
-- Invoice calculation: verify line items, overage, credit application, proration
-- Idempotency: verify dedup set insert/lookup/eviction behavior
-
-### 15.2 Integration Tests
-
-- Full request flow: send requests through middleware stack, verify headers and enforcement
-- Period rollover: advance clock, verify counter reset and archive
-- Spending monitor: simulate usage growth, verify alert dispatch and blocking
-- Crash recovery: kill process, restart, verify counters restored from SQLite + event log
-- Hot reload: change config, reload, verify new limits applied (old apps unchanged)
-
-### 15.3 Load Tests
-
-- Throughput: verify quota enforcement adds < 1 microsecond to request latency at p99
-- Counter contention: 100 concurrent requests to same app, verify atomic correctness
-- Event log throughput: verify no drops under sustained 10K events/second
-- Memory: verify dedup set stays within bounds under sustained traffic
-
-### 15.4 Testing Utilities
-
-- **Clock override:** Inject a mock clock for deterministic period rollover testing
-- **Dry-run mode:** Test new quota configurations without affecting production traffic
-- **Shadow mode:** Run two quota configs simultaneously, compare decisions
-- **Test app:** A special `_test` app with short periods (1-minute) for rapid iteration
-
----
-
-## 16. Implementation Plan
-
-| Phase | Deliverable | Dependencies | Effort |
+| Phase | Deliverable | Deps | Effort |
 |---|---|---|---|
-| **1** | Core types + config parser | — | S |
-| **2** | Atomic counters (`MeterRegistry`) | Phase 1 | S |
-| **3** | Token bucket rate limiter | Phase 1 | S |
-| **4** | Quota enforcer | Phase 1, 2 | M |
-| **5** | Tower middleware (full request path) | Phase 2, 3, 4 | M |
-| **6** | Response headers | Phase 5 | S |
-| **7** | Entitlement checker | Phase 1, 5 | S |
-| **8** | SQLite persistent store + flush | Phase 2 | M |
-| **9** | Event log (append-only + hash chain) | Phase 2 | M |
-| **10** | Period rollover service | Phase 8 | S |
-| **11** | Admin API (core endpoints) | Phase 2, 4, 8 | L |
-| **12** | Spending monitor + alerts | Phase 8, 11 | M |
-| **13** | Webhook dispatcher + delivery | Phase 12 | M |
-| **14** | Prometheus metrics | Phase 2-12 | M |
-| **15** | Invoice preview + billing | Phase 8, 12 | M |
-| **16** | Credits/wallets | Phase 15 | M |
-| **17** | Plugin metering SDK | Phase 2, 4 | S |
-| **18** | Data export (CSV/JSONL) | Phase 8, 9 | S |
-| **19** | Config hot reload | Phase 1 | S |
-| **20** | Dry-run/shadow enforcement modes | Phase 4, 5 | S |
-| **21** | Crash recovery | Phase 8, 9 | M |
+| 1 | Core types + config parser (Option<u64> for unlimited) | — | S |
+| 2 | Atomic counters (correct orderings) + concurrency guard (CAS) | 1 | S |
+| 3 | Token bucket (packed AtomicU64 CAS) | 1 | M |
+| 4 | Quota enforcer + inline spend tracking | 1,2 | M |
+| 5 | Tower middleware (full request path) + response headers | 2,3,4 | M |
+| 6 | Entitlement checker | 1,5 | S |
+| 7 | SQLite store + batched flush + crash recovery | 2 | M |
+| 8 | Event log (append-only + external anchoring) | 2 | M |
+| 9 | Period rollover (double-buffered) | 7 | M |
+| 10 | Admin API (versioned /v1/) + RBAC + scoped keys | 2,4,7 | L |
+| 11 | Spending monitor + alerts + webhooks | 7,10 | M |
+| 12 | Invoice preview + billing + credits/wallets | 7,11 | M |
+| 13 | Dunning + packages + commitments | 11,12 | M |
+| 14 | Per-endpoint + cron/background metering | 2,4 | M |
+| 15 | Multi-currency + backfill tooling + data export | 12 | M |
+| 16 | Prometheus metrics + dry-run/shadow modes | all | M |
 
-Effort: S = 1-2 days, M = 3-5 days, L = 1-2 weeks
-
-**Critical path:** Phases 1 → 2 → 4 → 5 → 8 → 11 (core enforcement + persistence + admin)
+Effort: S = 1-2 days, M = 3-5 days, L = 1-2 weeks.
+**Critical path:** 1 -> 2 -> 4 -> 5 -> 7 -> 10 (core enforcement + persistence + admin)
 
 ---
 
-## 17. Operational Guidance
+## 18. Operational Guidance
 
-### 17.1 Capacity Planning
+### 18.1 Capacity Planning
 
-| Component | Memory Formula | Disk Formula |
-|---|---|---|
-| Atomic counters | `num_apps * num_resources * 8 bytes` (e.g., 1000 apps * 15 resources = 120 KB) | N/A |
-| Token buckets | `num_apps * 32 bytes` (e.g., 1000 apps = 32 KB) | N/A |
-| Dedup LRU set | `capacity * ~80 bytes` (1M entries = ~80 MB) | N/A |
-| Usage store (SQLite) | Minimal (read cache) | `num_apps * num_resources * num_periods * ~100 bytes` |
-| Event log | Bounded channel: `capacity * ~512 bytes` (10K = ~5 MB) | `events_per_day * ~200 bytes * retention_days` |
-| Webhook queue | `capacity * ~1 KB` | Dead letter: `failed_count * ~1 KB` |
+**Example:** 1000 apps, 15 resources, 10K req/s, 90-day retention:
+- Memory: ~100 MB (dominated by 1M-entry dedup set at ~80 bytes/entry)
+- Disk: ~50 GB/year event log (~10 GB compressed), ~500 MB SQLite history
+- Per-app overhead: 120B counters + 16B token bucket + 8B spend accumulator
 
-**Example:** 1000 apps, 15 resources, 10K req/s aggregate, 90-day retention:
-- Memory: ~100 MB (dominated by dedup set)
-- Disk: ~50 GB/year event log (with compression: ~10 GB/year)
-- SQLite: ~500 MB for usage history
+### 18.2 Data Retention
 
-### 17.2 Data Retention
+Atomic counters: current period. Usage history: 24 months (configurable). Event log:
+90 days (configurable). Dead letters: 30 days. Audit log: permanent. Dedup set: 24h TTL.
 
-| Data | Default Retention | Configurable | Cleanup |
-|---|---|---|---|
-| Atomic counters | Current period only | No | Reset at period rollover |
-| Usage history (SQLite) | 24 months | `[storage] history_retention_months` | Background job, monthly |
-| Event log | 90 days | `[event_log] retention_days` | Background job, daily |
-| Webhook dead letters | 30 days | `[webhooks] dead_letter_retention_days` | Background job, daily |
-| Audit log (admin actions) | Permanent | No | Manual export + purge |
-| Dedup set | 24 hours (TTL) | `[metering] dedup_ttl_hours` | Janitor, hourly |
+### 18.3 Deleted App Behavior
 
-### 17.3 Deleted App Behavior
-
-When an app is deleted via `DELETE /_admin/apps/{id}`:
+When an app is deleted via `DELETE /v1/_admin/apps/{id}`:
 1. V8 isolate is evicted immediately
 2. Atomic counters are dropped
 3. Usage history is **retained** for billing purposes (marked `deleted = true`)
@@ -1912,70 +1904,60 @@ When an app is deleted via `DELETE /_admin/apps/{id}`:
 5. Webhooks for the deleted app are cancelled
 6. The app_id cannot be reused for 30 days (prevents confusion in billing data)
 
-### 17.4 Clock and Time Handling
+### 18.4 Clock and Time Handling
 
 - All internal timestamps use `Instant::now()` (monotonic) for duration measurement
 - All external timestamps use `SystemTime` in UTC with millisecond precision
 - Daily resets occur at 00:00 UTC regardless of server timezone
-- NTP jumps: `Instant` is immune to clock adjustments. For `SystemTime`-based events,
-  the system detects backward jumps > 5 seconds and logs a warning. Events with
-  timestamps in the future (> 60 seconds ahead) are rejected.
+- **NTP jump handling for daily reset:**
+  - Forward jumps: If `SystemTime` jumps forward by more than 5 minutes, the daily
+    reset timer recomputes the next reset time. If the jump skips past a reset point,
+    the system performs an immediate catch-up reset with a `daily_reset_catchup` log
+    entry. Counters are snapshotted at the jump-detected time (not the skipped time).
+  - Backward jumps: If `SystemTime` jumps backward by > 5 seconds, a warning is logged.
+    The daily reset timer uses the monotonic clock (`Instant`) as the primary trigger,
+    with `SystemTime` only for labeling. This means a backward NTP adjustment does NOT
+    cause a duplicate daily reset.
+  - Events with timestamps > 60 seconds in the future are rejected.
 - Monthly period boundaries are calculated using calendar arithmetic (e.g., March billing
   period = March 1 00:00:00 UTC to March 31 23:59:59.999 UTC)
 
-### 17.5 Concurrency Gauge Correctness
+### 18.5 Concurrency Guard — CAS-Based Acquire
 
-The `concurrent_requests` gauge uses a RAII-style guard:
+The `concurrent_requests` gauge uses a compare-and-swap loop instead of
+`fetch_add` + `fetch_sub`, eliminating the TOCTOU race where a slot could be
+temporarily "leaked" between the add and the limit check.
+
+**Problem with fetch_add:** `fetch_add(1)` then checking `if prev >= limit` and doing
+`fetch_sub(1)` creates a TOCTOU race -- the gauge is transiently over-limit, causing
+other threads to incorrectly reject requests.
+
+**CAS-based solution:**
 
 ```rust
-struct ConcurrencyGuard {
-    gauge: Arc<AtomicU32>,
-}
-
 impl ConcurrencyGuard {
     fn acquire(gauge: Arc<AtomicU32>, limit: u32) -> Result<Self, ConcurrencyExceeded> {
-        let prev = gauge.fetch_add(1, Ordering::AcqRel);
-        if prev >= limit {
-            gauge.fetch_sub(1, Ordering::Release);
-            return Err(ConcurrencyExceeded);
+        loop {
+            let current = gauge.load(Ordering::Acquire);
+            if current >= limit { return Err(ConcurrencyExceeded); }
+            match gauge.compare_exchange_weak(
+                current, current + 1, Ordering::AcqRel, Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(Self { gauge }),
+                Err(_) => continue,
+            }
         }
-        Ok(Self { gauge })
     }
 }
-
 impl Drop for ConcurrencyGuard {
-    fn drop(&mut self) {
-        self.gauge.fetch_sub(1, Ordering::Release);
-    }
+    fn drop(&mut self) { self.gauge.fetch_sub(1, Ordering::Release); }
 }
 ```
 
-The `Drop` implementation ensures the gauge is decremented even if the request handler
-panics or the future is cancelled. This prevents gauge drift.
+`compare_exchange_weak` ensures increment only succeeds if gauge unchanged since the
+limit check -- no transient over-limit state. `Drop` ensures decrement on panic/cancel.
 
-### 17.6 Graduated (Tiered) Pricing Calculation
-
-When tiered pricing is configured:
-
-```
-tiers = [
-  { up_to = 10_000_000,  per_million = 0.00 },   # Included
-  { up_to = 50_000_000,  per_million = 0.25 },   # Tier 2
-  { up_to = -1,          per_million = 0.15 },   # Tier 3
-]
-
-For usage = 75_000_000:
-  Tier 1: min(75M, 10M) = 10M  → 10M * $0.00/M = $0.00
-  Tier 2: min(75M - 10M, 50M - 10M) = 40M  → 40M * $0.25/M = $10.00
-  Tier 3: 75M - 50M = 25M  → 25M * $0.15/M = $3.75
-  Total: $13.75
-```
-
-Each tier is calculated independently (graduated model), not the entire volume at a
-single tier rate (volume model). This matches Lago's graduated charge model and is the
-most common approach in SaaS billing.
-
-### 17.7 First Boot
+### 18.6 First Boot
 
 On first startup with no existing database:
 1. SQLite database is created with schema migrations
@@ -1984,17 +1966,18 @@ On first startup with no existing database:
 4. Event log file is created
 5. No history exists — `usage/history` endpoints return empty results
 
-### 17.8 Accuracy vs Performance Trade-offs
+### 18.7 Accuracy vs Performance Trade-offs
 
 | Decision | Trade-off | Rationale |
 |---|---|---|
 | Atomic counters (in-memory) | Fast but volatile | Sub-microsecond enforcement; 5s data loss window acceptable |
 | 5-second flush interval | Slight staleness | Balance between disk I/O and durability |
 | LRU dedup with 24h TTL | May miss duplicates after eviction | 1M capacity handles 11K distinct events/second |
-| Relaxed atomic ordering | No sequential consistency | Monotonic counters only need eventual visibility |
+| Acquire/Release atomic ordering | Slightly more expensive than Relaxed on ARM | Required for correctness on weakly-ordered CPUs; negligible cost on x86 |
 | Event log async enqueue | May drop events under backpressure | Counters are source of truth; event log is supplementary |
+| Inline spend tracking | ~10ns overhead per request | Eliminates 60-second blind spot; negligible vs V8 execution time |
 
-### 17.9 Graceful Shutdown
+### 18.8 Graceful Shutdown
 
 On SIGTERM or SIGINT:
 
@@ -2009,16 +1992,18 @@ On SIGTERM or SIGINT:
 If the timeout expires before drain completes, remaining requests are dropped and
 a warning is logged. Counter data up to the last flush is preserved.
 
-### 17.10 Performance Budget
+### 18.9 Performance Budget
 
 The quota/metering system must impose minimal overhead on the request hot path:
 
 | Operation | Budget | Mechanism |
 |---|---|---|
-| Rate limit check | < 100 ns | Atomic CAS on token bucket |
-| Concurrency check | < 50 ns | Atomic fetch_add |
-| Quota enforcement (all resources) | < 1 us | Sequential atomic loads |
-| Meter recording (all resources) | < 500 ns | Sequential atomic fetch_add |
+| Rate limit check | < 100 ns | Single AtomicU64 CAS on token bucket |
+| Concurrency check | < 50 ns | AtomicU32 CAS loop |
+| Quota enforcement (all resources) | < 1 us | Sequential atomic loads (Acquire) |
+| Inline spend check | < 20 ns | Single AtomicU64 load (Acquire) |
+| Meter recording (all resources) | < 500 ns | Sequential atomic fetch_add (Release) |
+| Inline spend update | < 20 ns | Single AtomicU64 fetch_add (Release) |
 | Event log enqueue | < 200 ns | mpsc channel send (non-blocking) |
 | Response header injection | < 500 ns | String formatting |
 | **Total overhead per request** | **< 3 us** | |
@@ -2026,7 +2011,7 @@ The quota/metering system must impose minimal overhead on the request hot path:
 For context: V8 isolate dispatch typically takes 50-500 us, and actual JS execution
 takes 1-100 ms. The metering overhead is < 0.1% of request latency.
 
-### 17.11 Trial Periods
+### 18.10 Trial Periods
 
 Trial periods are supported via time-limited plan assignments:
 
@@ -2042,30 +2027,156 @@ When `trial_ends_at` passes, the PeriodRoller automatically:
 2. Dispatches a `plan.changed` webhook with `reason: "trial_expired"`
 3. Logs the transition
 
----
+### 18.11 Comparison with Industry Platforms
 
-### 17.12 Comparison with Industry Platforms
-
-| Capability | Appbase v2 | Cloudflare Workers | AWS Lambda | Vercel |
+| Capability | Appbase v2 | CF Workers | AWS Lambda | Vercel |
 |---|---|---|---|---|
-| Per-request CPU limit | Yes (kill) | Yes (10ms free, 30s paid) | No (billed) | No |
-| Monthly quotas | Yes (configurable) | Daily (100K free) | Monthly (1M free) | Monthly |
-| Rate limiting | Yes (token bucket) | No (handled by WAF) | Per-region concurrency | No |
-| Spending limits | Yes (block/degrade) | No | No (use AWS Budgets) | Yes (added 2024) |
-| Budget alerts | Yes (50/75/90/100%) | No | Via CloudWatch | Yes (50/75/100%) |
-| Overage billing | Yes (configurable) | Automatic | Automatic | Automatic |
-| Hard cap option | Yes (free tier) | Yes (free tier daily) | No | No (without spend mgmt) |
-| Feature entitlements | Yes (per-plan) | Via plan tier | Via IAM | Via plan tier |
-| Prepaid credits | Yes (wallets) | No | No | No |
-| Usage event log | Yes (hash chain) | No (only analytics) | Via CloudWatch | No |
+| Per-request CPU limit | Yes (kill) | Yes | No (billed) | No |
+| Spending limits | Yes (inline, real-time) | No | Budgets (~6h delay) | Yes (manual resume) |
+| Hard cap option | Yes (any plan) | Free tier only | No | With spend mgmt |
+| Prepaid credits | Yes (wallets) | No | Reserved pricing | No |
+| Dunning | Yes | N/A | N/A | Automatic |
+| Usage event log | Yes (ext. anchored) | Analytics only | CloudWatch | No |
 | Custom resources | Yes (plugin SDK) | No | No | No |
-| Dry-run mode | Yes | No | No | No |
+| RBAC for admin API | Yes (scoped keys) | API tokens | IAM | Team roles |
+| Per-endpoint metering | Yes | No | No | No |
+| Committed use discounts | Yes | No | Savings Plans | No |
+| Dry-run/shadow mode | Yes | No | No | No |
 
 ---
 
-## 18. Future Considerations (Out of Scope for v2)
+## 19. Multi-Currency Support
 
-### 18.1 Distributed Metering (Multi-Node)
+### 19.1 Motivation
+
+Customers in different regions expect to see prices and invoices in their local currency.
+Stripe, Lago, and Orb all support multi-currency billing.
+
+### 19.2 Design
+
+Internal accounting uses the default currency (USD cents). Conversion happens at display
+time (invoices, spend estimates) using the rate at generation time, and at payment time
+(handled by Stripe/Lago). Per-app currency: `[apps.eu_customer] currency = "eur"`.
+Exchange rates managed via `[billing.exchange_rates]` in config or
+`PUT /v1/_admin/exchange_rates`.
+
+Invoices record the `exchange_rate` used. Spend limits and credits are denominated in
+the app's currency. Rate updates do not retroactively change existing invoices.
+Cross-currency credit transfers are not supported in v2.
+
+---
+
+## 20. Package & Bundle Pricing
+
+### 20.1 Motivation
+
+Many SaaS platforms (AWS, Cloudflare, Vercel) offer add-on packages that bundle
+additional quota or features for a fixed price, independent of the base plan.
+Examples: "AI Package" ($10/mo for 1M AI tokens), "Storage Pack" ($5/mo for 10GB).
+
+### 20.2 Configuration
+
+```toml
+[packages.ai_starter]
+description = "AI Starter Pack"
+price_cents = 1000
+[packages.ai_starter.quotas]
+ai_tokens = { max = 1000000 }
+[packages.ai_starter.entitlements]
+ai_models_v2 = true
+
+[packages.storage_10gb]
+description = "Extra 10GB Storage"
+price_cents = 500
+stackable = true                      # Can purchase multiple
+[packages.storage_10gb.quotas]
+db_storage_bytes = { max = 10000000000 }
+```
+
+Apps assign packages: `packages = ["ai_starter", "storage_10gb", "storage_10gb"]`.
+Quotas are **additive** with plan quotas. Entitlements are **OR-merged**. Packages
+appear as separate invoice line items. Admin API: `GET/PUT /v1/_admin/apps/{id}/packages`.
+
+---
+
+## 21. Per-Endpoint Metering
+
+### 21.1 Motivation
+
+Operators need visibility into which RPC methods consume the most resources, for
+cost attribution, optimization, and potential per-endpoint pricing. This follows
+the per-route analytics offered by Cloudflare Workers and AWS API Gateway.
+
+### 21.2 How It Works
+
+Every usage event includes an `endpoint` field (auto-populated from JSON-RPC `method`).
+Per-endpoint aggregates are stored in SQLite (`endpoint_usage` table, keyed by
+`app_id, endpoint, resource, period`). Flushed alongside per-app counters using
+in-memory HashMaps (informational, not enforcement-critical).
+
+**Admin API:** `GET /v1/_admin/apps/{id}/usage/endpoints` (all, filtered, or top N).
+Per-endpoint pricing is a future consideration (see Section 24).
+
+---
+
+## 22. Metering for Cron & Background Jobs
+
+### 22.1 Motivation
+
+Apps may run scheduled tasks (cron jobs) or background processes that consume resources
+outside of the request-response cycle. These must be metered with the same accuracy
+as HTTP requests.
+
+### 22.2 Event Source Tagging
+
+Every usage event has a `source` field:
+
+| Source | Description | Trigger |
+|---|---|---|
+| `request` | Normal HTTP request-response | RPC call from client |
+| `cron` | Scheduled job execution | Timer-triggered by platform |
+| `background` | Background task (e.g., webhooks, async processing) | Platform-initiated |
+
+### 22.3 Cron Job Metering
+
+Cron jobs get a synthetic `request_id` (`cron_{app_id}_{job_name}_{timestamp}`), run
+through the same V8 + metering pipeline, and tag events with `source: "cron"`. Quota
+enforcement applies identically -- cron usage counts toward monthly quotas.
+
+### 22.4 Background Jobs
+
+Background work (webhooks, async processing) is tagged `source: "background"` and
+metered identically. All sources share the same quota pool (prevents gaming). Operators
+can filter by source in per-endpoint analytics (Section 21).
+
+---
+
+## 23. Usage Data Backfill Tooling
+
+### 23.1 Motivation
+
+When new resources are defined, pricing changes, or events are missed due to system
+issues, operators need to backfill or re-derive usage data. This follows the pattern
+used by Orb (invoice void + re-rate) and Lago (event replay).
+
+### 23.2 Backfill API
+
+`POST /v1/_admin/backfill/events` accepts an array of events with `source: "backfill"`,
+each with idempotency keys. Options: `apply_to_counters` (default: false for dry-run),
+`apply_to_invoices` (default: false). Closed-period events handled per Section 5.3.
+Requires `admin:events` scope.
+
+### 23.3 Re-Rating
+
+`POST /v1/_admin/apps/{id}/invoice/rerate` with `period` and optional `pricing_override`
+returns a preview diff (original vs rerated totals). Confirm with
+`POST .../invoice/rerate/apply` using the returned preview token.
+
+---
+
+## 24. Future Considerations (Out of Scope for v2)
+
+### 24.1 Distributed Metering (Multi-Node)
 
 When Appbase scales beyond a single node:
 - Each node maintains local atomic counters
@@ -2073,73 +2184,77 @@ When Appbase scales beyond a single node:
 - Quota enforcement uses local counters (slightly stale) with periodic reconciliation
 - Trade-off: up to `sync_interval` seconds of over-quota usage spread across nodes
 
-### 18.2 Usage-Based Autoscaling
+### 24.2 Usage-Based Autoscaling
 
 Auto-adjust plan limits based on patterns. Scale up during spikes, scale down during
 quiet periods. Requires predictive modeling.
 
-### 18.3 Cost Allocation Tags
+### 24.3 Cost Allocation Tags
 
 Request-level labels (`team`, `environment`, `feature`) for internal chargeback:
 ```
 X-Cost-Tags: team=backend,env=prod,feature=search
 ```
 
-### 18.4 SLA Monitoring
+### 24.4 SLA Monitoring
 
 Track uptime and latency SLAs per enterprise app. Auto-issue credits on SLA violations.
 
-### 18.5 Marketplace Billing
+### 24.5 Marketplace Billing
 
 Third-party plugin creators billing for their plugin usage through the platform.
 
-### 18.6 Real-Time Usage Dashboard
+### 24.6 Real-Time Usage Dashboard
 
 WebSocket-based live usage dashboard for app developers, consuming the same atomic
 counters used for enforcement.
 
+### 24.7 Per-Endpoint Pricing
+
+Extend per-endpoint metering (Section 21) with configurable per-endpoint pricing rules.
+
 ---
 
-## 19. Glossary
+## 25. Glossary
 
 | Term | Definition |
 |---|---|
-| **App** | A tenant's deployed application, identified by `app_id` |
-| **Billing period** | Time window for usage accumulation and invoicing |
-| **Concurrency limit** | Maximum simultaneous in-flight requests per app |
-| **Credit** | Prepaid monetary unit applied against usage charges |
-| **Dead letter** | Webhook event that failed all delivery attempts |
-| **Dedup set** | Bounded LRU cache of idempotency keys for duplicate prevention |
-| **Dry run** | Enforcement mode that logs decisions but does not block |
+| **Backfill** | Retroactive insertion of usage events for missed data |
+| **Commitment** | Minimum monthly spend guarantee for discounted rates |
+| **Dedup set** | Bounded LRU cache of idempotency keys |
+| **Digest anchor** | SHA-256 digest stored externally for tamper detection |
+| **Double buffer** | Two counter sets swapped atomically during rollover |
+| **Dunning** | Payment failure recovery: grace period, retries, escalation |
 | **Entitlement** | Boolean flag controlling access to a feature |
-| **Event log** | Append-only record of all usage events (audit trail) |
-| **Flush** | Periodic write of in-memory counters to persistent storage |
-| **Grace period** | Time during which in-flight requests complete after limit is hit |
-| **Hash chain** | Sequential SHA-256 linking of event log entries for tamper detection |
-| **Idempotency key** | Unique string ensuring an event is processed at most once |
-| **Metering** | Measuring and recording resource consumption |
-| **Overage** | Usage beyond plan-included amounts, billed at per-unit rate |
-| **Plan** | Named bundle of entitlements, quotas, rate limits, and policies |
-| **Policy** | Set of threshold-action pairs defining enforcement behavior |
-| **Proration** | Proportional charge adjustment for mid-period plan changes |
-| **Quota** | Numeric cap on accumulated resource usage over a time window |
-| **Rate limit** | Throughput cap enforced via token bucket algorithm |
-| **Resource** | Measurable dimension of consumption (CPU, requests, storage, etc.) |
-| **Shadow mode** | Run two configs simultaneously, compare enforcement decisions |
-| **Token bucket** | Algorithm: bucket of N tokens, refilled at R/second, 1 consumed per request |
-| **Wallet** | Container holding prepaid credit balance for an app |
+| **Inline spend tracking** | Per-request spend estimation via atomic accumulator |
+| **Overage** | Usage beyond included amounts, billed per-unit |
+| **Package** | Add-on bundle of quota/entitlements at fixed price |
+| **Plan** | Named bundle of entitlements, quotas, rate limits, policies |
+| **Policy** | Threshold-action pairs defining enforcement behavior |
+| **Scope** | RBAC permission unit (e.g., `read:usage`) |
+| **Token bucket** | Packed AtomicU64, CAS-based refill + consume |
 
 ---
 
-## 20. References
+## 26. References
 
 - [Cloudflare Workers Pricing](https://developers.cloudflare.com/workers/platform/pricing/)
 - [Cloudflare Workers Limits](https://developers.cloudflare.com/workers/platform/limits/)
+- [Cloudflare Rate Limiting Rules](https://developers.cloudflare.com/waf/rate-limiting-rules/)
 - [AWS Lambda Pricing](https://aws.amazon.com/lambda/pricing/)
+- [AWS Savings Plans](https://aws.amazon.com/savingsplans/)
+- [AWS CloudTrail Log File Integrity](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-log-file-validation-intro.html)
 - [Vercel Spend Management](https://vercel.com/docs/spend-management)
 - [Lago — Ingesting Usage Events](https://docs.getlago.com/guide/events/ingesting-usage)
 - [Lago — Wallets & Prepaid Credits](https://docs.getlago.com/guide/wallet-and-prepaid-credits)
+- [Lago — Graduated Charges](https://docs.getlago.com/guide/plans/charges/graduated)
 - [Lago — Why Billing Systems Are a Nightmare](https://www.getlago.com/blog/why-billing-systems-are-a-nightmare-for-engineers)
 - [Stripe — Usage-Based Billing](https://docs.stripe.com/billing/subscriptions/usage-based)
+- [Stripe — Restricted API Keys](https://docs.stripe.com/keys#limit-access)
+- [Stripe — Smart Retries (Dunning)](https://docs.stripe.com/billing/revenue-recovery/smart-retries)
+- [Orb — Minimum Commitments](https://docs.withorb.com/guides/concepts/minimum-commitments)
+- [Orb — Event Backfill](https://docs.withorb.com/guides/events-and-metrics/backfill)
+- [Sigstore Rekor Transparency Log](https://docs.sigstore.dev/logging/overview/)
 - [IETF — RateLimit Header Fields (draft-ietf-httpapi-ratelimit-headers)](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/)
 - [RFC 7231 Section 7.1.3 — Retry-After](https://www.rfc-editor.org/rfc/rfc7231#section-7.1.3)
+- [Rust Atomics and Locks (Mara Bos) — Chapter 3: Memory Ordering](https://marabos.nl/atomics/memory-ordering.html)
