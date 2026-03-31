@@ -162,32 +162,33 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
                 ..UsageDelta::default()
             });
 
-            // 6. Build response with quota headers
+            // 6. Build response with metering + IETF RateLimit headers
             let snapshot = meter.snapshot();
             let mut headers = HeaderMap::new();
+
+            // Custom metering headers
             add_header(&mut headers, "x-cpu-time-ms", &format!("{cpu_ms:.2}"));
             add_header(
                 &mut headers,
                 "x-wall-time-ms",
                 &format!("{:.2}", wall_time.as_secs_f64() * 1000.0),
             );
-            add_header(
-                &mut headers,
-                "x-requests-used",
-                &snapshot.requests.to_string(),
-            );
 
+            // IETF RateLimit headers (draft-ietf-httpapi-ratelimit-headers-10)
             if let Some(quota) = meter.plan.quotas.get("requests") {
                 if let Some(limit) = quota.max {
+                    let remaining = limit.saturating_sub(snapshot.requests);
+                    // Approximate seconds until monthly reset (simplified)
+                    let reset = 30 * 24 * 3600; // ~30 days
                     add_header(
                         &mut headers,
-                        "x-requests-limit",
-                        &limit.to_string(),
+                        "ratelimit",
+                        &format!("limit={limit}, remaining={remaining}, reset={reset}"),
                     );
                     add_header(
                         &mut headers,
-                        "x-requests-remaining",
-                        &limit.saturating_sub(snapshot.requests).to_string(),
+                        "ratelimit-policy",
+                        &format!("{limit};w={reset}"),
                     );
                 }
             }
