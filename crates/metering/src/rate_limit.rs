@@ -1,19 +1,24 @@
 //! Token bucket rate limiter — per-app requests/second limiting.
 //!
-//! Each app gets a bucket that refills at `rate` tokens/second,
-//! with a maximum burst capacity. A request consumes one token.
-//! If no tokens available, the request is rejected (429).
+//! Implementation packs tokens (upper 32 bits, fixed-point ×1000) and
+//! last_refill (lower 32 bits, epoch seconds) into a single AtomicU64.
+//! Uses compare_exchange CAS loop for lock-free atomic refill+consume.
 //!
-//! Implementation packs tokens (32-bit fixed-point x1000) and
-//! last_refill (32-bit epoch seconds) into a single AtomicU64.
-//! Uses compare_exchange (strong) CAS loop for atomic refill+consume.
+//! The RateLimiter registry uses Arc<TokenBucket> per app so that
+//! the Mutex is only held briefly during bucket lookup, NOT during the
+//! CAS loop. This preserves the lock-free property on the hot path.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Max burst value: tokens are stored in upper 32 bits as tokens×1000.
+/// u32::MAX / 1000 = 4,294,967 max burst tokens.
+const MAX_BURST: u32 = u32::MAX / 1000;
+
 fn pack(tokens: u64, timestamp: u32) -> u64 {
+    debug_assert!(tokens <= u32::MAX as u64, "tokens overflow 32-bit field");
     (tokens << 32) | timestamp as u64
 }
 
@@ -22,38 +27,44 @@ fn unpack(state: u64) -> (u64, u32) {
 }
 
 fn now_secs() -> u32 {
-    SystemTime::now()
+    let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_secs() as u32
+        .as_secs();
+    debug_assert!(secs <= u64::from(u32::MAX), "timestamp overflow: year 2106+");
+    secs as u32
 }
 
-/// Token bucket with packed atomic state — no locks, no races.
-/// Upper 32 bits: tokens x 1000 (fixed-point for sub-token precision)
+/// Token bucket with packed atomic state — lock-free, no races.
+/// Upper 32 bits: tokens × 1000 (fixed-point for sub-token precision)
 /// Lower 32 bits: last_refill timestamp (epoch seconds)
+///
+/// Max supported burst: 4,294,967 tokens (u32::MAX / 1000).
 pub struct TokenBucket {
     state: AtomicU64,
-    capacity: u64,    // max tokens x 1000
-    refill_rate: u64, // tokens per second x 1000
+    capacity: u64,     // max tokens × 1000, clamped to u32::MAX
+    refill_rate: u64,  // tokens per second × 1000
 }
 
 impl TokenBucket {
     pub fn new(rate_per_second: u32, burst: u32) -> Self {
-        let capacity = burst as u64 * 1000;
+        let clamped_burst = burst.min(MAX_BURST);
+        let capacity = u64::from(clamped_burst) * 1000;
+        let refill_rate = u64::from(rate_per_second.min(MAX_BURST)) * 1000;
         Self {
             state: AtomicU64::new(pack(capacity, now_secs())),
             capacity,
-            refill_rate: rate_per_second as u64 * 1000,
+            refill_rate,
         }
     }
 
-    /// Try to consume one token. Returns true if allowed.
+    /// Try to consume one token. Returns true if allowed. Lock-free.
     pub fn try_acquire(&self) -> bool {
         loop {
             let state = self.state.load(Ordering::Acquire);
             let (tokens, last_refill) = unpack(state);
             let now = now_secs();
-            let elapsed = now.saturating_sub(last_refill) as u64;
+            let elapsed = u64::from(now.saturating_sub(last_refill));
             let refilled = (tokens + elapsed * self.refill_rate).min(self.capacity);
 
             if refilled < 1000 {
@@ -74,42 +85,69 @@ impl TokenBucket {
 }
 
 /// Rate limiter registry — one bucket per app.
+///
+/// Uses RwLock<HashMap<String, Arc<TokenBucket>>> so that:
+/// - Bucket creation/removal takes a write lock (rare)
+/// - Bucket lookup takes a read lock (common), clones the Arc, releases lock
+/// - try_acquire runs OUTSIDE any lock (truly lock-free on hot path)
 pub struct RateLimiter {
-    buckets: Mutex<HashMap<String, TokenBucket>>,
+    buckets: RwLock<HashMap<String, Arc<TokenBucket>>>,
     default_rate: u32,
     default_burst: u32,
+    /// Mutex for insert-if-absent (prevents double-creation race)
+    insert_lock: Mutex<()>,
 }
 
 impl RateLimiter {
-    /// Create a new rate limiter with default rate/burst for unknown apps.
     pub fn new(default_rate: u32, default_burst: u32) -> Self {
         Self {
-            buckets: Mutex::new(HashMap::new()),
+            buckets: RwLock::new(HashMap::new()),
             default_rate,
             default_burst,
+            insert_lock: Mutex::new(()),
         }
     }
 
-    /// Try to allow a request for the given app.
-    /// Returns `true` if allowed, `false` if rate-limited.
+    /// Try to allow a request. Lock-free on hot path (bucket already exists).
     pub fn check(&self, app_id: &str) -> bool {
-        let mut buckets = self.buckets.lock().unwrap();
-        let bucket = buckets
-            .entry(app_id.to_string())
-            .or_insert_with(|| TokenBucket::new(self.default_rate, self.default_burst));
-        bucket.try_acquire()
+        // Fast path: read lock to get existing bucket
+        {
+            let buckets = self.buckets.read().unwrap();
+            if let Some(bucket) = buckets.get(app_id) {
+                let bucket = bucket.clone(); // Arc clone, cheap
+                drop(buckets); // release read lock BEFORE CAS
+                return bucket.try_acquire();
+            }
+        }
+
+        // Slow path: create bucket (rare, first request per app)
+        let _insert = self.insert_lock.lock().unwrap();
+        // Double-check after acquiring insert lock
+        {
+            let buckets = self.buckets.read().unwrap();
+            if let Some(bucket) = buckets.get(app_id) {
+                let bucket = bucket.clone();
+                drop(buckets);
+                return bucket.try_acquire();
+            }
+        }
+        let bucket = Arc::new(TokenBucket::new(self.default_rate, self.default_burst));
+        let result = bucket.try_acquire();
+        self.buckets.write().unwrap().insert(app_id.to_string(), bucket);
+        result
     }
 
     /// Set a custom rate for a specific app.
     pub fn set_rate(&self, app_id: &str, rate: u32, burst: u32) {
-        let mut buckets = self.buckets.lock().unwrap();
-        buckets.insert(app_id.to_string(), TokenBucket::new(rate, burst));
+        self.buckets.write().unwrap().insert(
+            app_id.to_string(),
+            Arc::new(TokenBucket::new(rate, burst)),
+        );
     }
 
-    /// Remove an app's bucket (e.g., on eviction).
+    /// Remove an app's bucket.
     pub fn remove(&self, app_id: &str) {
-        let mut buckets = self.buckets.lock().unwrap();
-        buckets.remove(app_id);
+        self.buckets.write().unwrap().remove(app_id);
     }
 }
 
@@ -145,10 +183,25 @@ mod tests {
     #[test]
     fn pack_unpack_roundtrip() {
         let tokens = 42_000u64;
-        let ts = 1711843200u32;
+        let ts = 1_711_843_200u32;
         let packed = pack(tokens, ts);
         let (t, s) = unpack(packed);
         assert_eq!(t, tokens);
         assert_eq!(s, ts);
+    }
+
+    #[test]
+    fn burst_clamped_to_max() {
+        // burst > MAX_BURST should not panic or overflow
+        let bucket = TokenBucket::new(10, u32::MAX);
+        assert!(bucket.try_acquire()); // should work, not corrupt
+    }
+
+    #[test]
+    fn capacity_within_32_bits() {
+        let bucket = TokenBucket::new(MAX_BURST, MAX_BURST);
+        let state = bucket.state.load(Ordering::Relaxed);
+        let (tokens, _) = unpack(state);
+        assert!(tokens <= u32::MAX as u64, "tokens must fit in 32 bits");
     }
 }

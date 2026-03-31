@@ -3,7 +3,7 @@
 //! Stores counters in a HashMap behind a Mutex. No persistence — data is
 //! lost on restart. Fast, zero external dependencies.
 
-use appbase_core::meter_store::{MeterStore, PeriodSnapshot, ResourceDelta};
+use appbase_core::meter_store::{MeterStore, MeterStoreError, PeriodSnapshot, ResourceDelta};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -25,7 +25,7 @@ impl InMemoryStore {
 }
 
 impl MeterStore for InMemoryStore {
-    fn flush(&self, app_id: &str, deltas: &[ResourceDelta]) -> Result<(), String> {
+    fn flush(&self, app_id: &str, deltas: &[ResourceDelta]) -> Result<(), MeterStoreError> {
         let mut counters = self.counters.lock().unwrap();
         let app = counters.entry(app_id.to_string()).or_default();
         for delta in deltas {
@@ -34,12 +34,12 @@ impl MeterStore for InMemoryStore {
         Ok(())
     }
 
-    fn load(&self, app_id: &str) -> Result<HashMap<String, u64>, String> {
+    fn load(&self, app_id: &str) -> Result<HashMap<String, u64>, MeterStoreError> {
         let counters = self.counters.lock().unwrap();
         Ok(counters.get(app_id).cloned().unwrap_or_default())
     }
 
-    fn rollover(&self, app_id: &str) -> Result<PeriodSnapshot, String> {
+    fn rollover(&self, app_id: &str) -> Result<PeriodSnapshot, MeterStoreError> {
         let mut counters = self.counters.lock().unwrap();
         let current = counters.remove(app_id).unwrap_or_default();
 
@@ -60,14 +60,14 @@ impl MeterStore for InMemoryStore {
         Ok(snapshot)
     }
 
-    fn history(&self, app_id: &str, periods: u32) -> Result<Vec<PeriodSnapshot>, String> {
+    fn history(&self, app_id: &str, periods: u32) -> Result<Vec<PeriodSnapshot>, MeterStoreError> {
         let history = self.history.lock().unwrap();
         let all = history.get(app_id).cloned().unwrap_or_default();
         let start = all.len().saturating_sub(periods as usize);
         Ok(all[start..].to_vec())
     }
 
-    fn close(&self) -> Result<(), String> {
+    fn close(&self) -> Result<(), MeterStoreError> {
         Ok(()) // nothing to clean up
     }
 }
