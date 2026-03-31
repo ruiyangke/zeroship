@@ -16,12 +16,12 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cpu::CpuUsage;
 use crate::isolate::{self, RpcPendingReplies, SharedRpcReceiver};
-use deno_core::v8;
+use crate::watchdog::{ExecutionLimits, GlobalWatchdog, OpWatchdogEntry, WatchdogEntry};
 
 /// Messages that can be sent to an isolate actor.
 pub enum IsolateMessage {
@@ -93,24 +93,47 @@ pub fn spawn(
     cpu_limit: Option<Duration>,
     meter: Arc<dyn PluginMeter>,
     quota: Arc<dyn PluginQuota>,
+    watchdog: &GlobalWatchdog,
+    limits: ExecutionLimits,
 ) -> Result<SpawnResult, String> {
     let (tx, rx) = mpsc::channel::<IsolateMessage>(64);
     let cpu_usage = Arc::new(Mutex::new(CpuUsage::default()));
     let cpu_usage_clone = cpu_usage.clone();
 
-    let app_id = app_id.to_string();
+    let app_id_owned = app_id.to_string();
     let server_js = server_js.to_string();
     let data_dir = data_dir.clone();
+
+    // We register with the watchdog from inside the actor thread
+    // (to get the correct pthread_t for cross-thread CPU measurement).
+    let watchdog_ref = watchdog.entries_ref();
 
     let thread_handle = std::thread::Builder::new()
         .name(format!("v8-{app_id}"))
         .spawn(move || {
+            // Get pthread_t for this thread and register with watchdog
+            #[allow(unsafe_code)]
+            let thread_id = unsafe { libc::pthread_self() };
+
+            // We need the v8 handle, but we don't have it yet — it's created in actor_loop.
+            // So we pass thread_id + limits into actor_loop and let it register after runtime creation.
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
             rt.block_on(actor_loop(
-                &app_id, &server_js, &data_dir, plugins, rx, cpu_limit, cpu_usage_clone, meter, quota,
+                &app_id_owned,
+                &server_js,
+                &data_dir,
+                plugins,
+                rx,
+                cpu_limit,
+                cpu_usage_clone,
+                meter,
+                quota,
+                thread_id,
+                limits,
+                watchdog_ref,
             ));
         })
         .map_err(|e| format!("Failed to spawn V8 thread: {e}"))?;
@@ -129,36 +152,6 @@ pub fn spawn(
 ///
 /// Requests are injected into JS via `rpc_tx` → `op_rpc_recv()`.
 /// Responses come back via `op_rpc_respond()` → oneshot senders in `pending_replies`.
-/// Default wall-time limit per isolate: 30 seconds of no completed work.
-const DEFAULT_WALL_LIMIT: Duration = Duration::from_secs(30);
-
-/// Watchdog thread: terminates V8 execution if no activity for `wall_limit`.
-///
-/// Runs on a separate OS thread (not tokio) so it can fire even when V8
-/// blocks the actor thread in a tight JS loop.
-fn watchdog_loop(
-    watchdog_rx: tokio::sync::watch::Receiver<Instant>,
-    v8_handle: v8::IsolateHandle,
-    wall_limit: Duration,
-    app_id: &str,
-) {
-    loop {
-        std::thread::sleep(Duration::from_secs(1));
-        let last_activity = *watchdog_rx.borrow();
-        if last_activity.elapsed() > wall_limit {
-            eprintln!(
-                "[isolate] [{app_id}] Wall-time limit exceeded ({wall_limit:?}), terminating V8"
-            );
-            v8_handle.terminate_execution();
-            break;
-        }
-        // If the sender is dropped (actor exited), stop the watchdog.
-        if watchdog_rx.has_changed().is_err() {
-            break;
-        }
-    }
-}
-
 async fn actor_loop(
     app_id: &str,
     server_js: &str,
@@ -169,6 +162,9 @@ async fn actor_loop(
     cpu_usage: Arc<Mutex<CpuUsage>>,
     meter: Arc<dyn PluginMeter>,
     quota: Arc<dyn PluginQuota>,
+    thread_id: libc::pthread_t,
+    limits: ExecutionLimits,
+    watchdog_entries: Arc<Mutex<HashMap<String, Arc<WatchdogEntry>>>>,
 ) {
     // Ensure data directory exists
     let _ = std::fs::create_dir_all(data_dir);
@@ -181,19 +177,32 @@ async fn actor_loop(
         }
     };
 
-    // --- Wall-time watchdog (Issue 1) ---
-    // V8's IsolateHandle is Send and can terminate execution from another thread.
-    // If V8 is stuck in a tight JS loop (e.g. `while(true){}`), the poll_fn
-    // never gets polled, so we MUST use a separate OS thread for the watchdog.
+    // --- Global watchdog registration ---
+    // Register this isolate with the global watchdog for wall-time + CPU-time enforcement.
+    // The watchdog thread reads our CPU time cross-thread via pthread_getcpuclockid.
+    let _thread_id = thread_id; // suppress unused warning on non-Linux
     let v8_handle = runtime.v8_isolate().thread_safe_handle();
-    let (watchdog_tx, watchdog_rx) = tokio::sync::watch::channel(Instant::now());
-    let wall_limit = DEFAULT_WALL_LIMIT;
-    let watchdog_app_id = app_id.to_string();
-    let _watchdog_thread = std::thread::Builder::new()
-        .name(format!("watchdog-{app_id}"))
-        .spawn(move || {
-            watchdog_loop(watchdog_rx, v8_handle, wall_limit, &watchdog_app_id);
-        });
+    let watchdog_entry = {
+        #[cfg(target_os = "linux")]
+        let cpu_clock_id = {
+            let mut clock_id: libc::clockid_t = 0;
+            #[allow(unsafe_code)]
+            unsafe { libc::pthread_getcpuclockid(_thread_id, &mut clock_id) };
+            clock_id
+        };
+
+        let entry = Arc::new(WatchdogEntry::new(
+            v8_handle,
+            #[cfg(target_os = "linux")]
+            cpu_clock_id,
+            limits,
+        ));
+        watchdog_entries
+            .lock()
+            .unwrap()
+            .insert(app_id.to_string(), entry.clone());
+        entry
+    };
 
     // Create the RPC channel pair.
     // Wrapped in Option so Shutdown can drop the sender, causing the JS dispatch
@@ -210,6 +219,7 @@ async fn actor_loop(
         let mut state = op_state.borrow_mut();
         state.put(SharedRpcReceiver(Rc::new(tokio::sync::Mutex::new(rpc_rx))));
         state.put(RpcPendingReplies(pending_replies.clone()));
+        state.put(OpWatchdogEntry(watchdog_entry.clone()));
     }
 
     // Step 1: Load user code (registers __rpc methods)
@@ -287,9 +297,10 @@ async fn actor_loop(
                                         "Request queue full".to_string(),
                                     ));
                                 }
+                            } else {
+                                // Successfully injected — notify watchdog
+                                watchdog_entry.start_request();
                             }
-                            // Ping watchdog: new request injected = activity
-                            let _ = watchdog_tx.send(Instant::now());
                         } else {
                             // Shutting down — reject immediately
                             let _ = reply.send(Err("Isolate shutting down".to_string()));
@@ -344,8 +355,7 @@ async fn actor_loop(
             if let Ok(mut usage) = cpu_usage.lock() {
                 usage.request_count += completed as u64;
             }
-            // Ping watchdog: completed work = activity
-            let _ = watchdog_tx.send(Instant::now());
+            // Note: end_request() is called from op_rpc_respond via OpState
         }
         prev_pending_count = current_pending;
 
@@ -362,15 +372,28 @@ async fn actor_loop(
                 Poll::Pending
             }
             Poll::Ready(Err(e)) => {
-                // V8 terminated (possibly by watchdog). Drain pending replies with error.
                 let err_msg = format!("{e}");
                 if err_msg.contains("terminated") {
-                    for (_, tx) in pending_replies.borrow_mut().drain() {
-                        let _ = tx.send(Err("Wall-time limit exceeded".to_string()));
+                    // V8 was terminated by the global watchdog.
+                    // Cancel the termination so V8 can serve the next request.
+                    runtime.v8_isolate().cancel_terminate_execution();
+
+                    // Drain pending replies with timeout error
+                    let drained = pending_replies.borrow_mut().drain().collect::<Vec<_>>();
+                    for (_, tx) in drained {
+                        let _ = tx.send(Err("Execution time limit exceeded".to_string()));
                     }
+                    prev_pending_count = 0;
+
+                    eprintln!("[isolate] [{app_id}] Recovered from execution timeout");
+
+                    // DON'T exit — continue the poll_fn loop so the isolate can serve the next request
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                } else {
+                    eprintln!("[isolate] [{app_id}] Event loop error: {e}");
+                    Poll::Ready(())
                 }
-                eprintln!("[isolate] [{app_id}] Event loop error: {e}");
-                Poll::Ready(())
             }
             Poll::Pending => Poll::Pending,
         }

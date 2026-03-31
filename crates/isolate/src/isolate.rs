@@ -72,6 +72,10 @@ pub fn op_rpc_respond(state: &mut OpState, #[number] request_id: u64, #[string] 
             cpu_time: Duration::ZERO, // per-request CPU not available in concurrent mode
         }));
     }
+    // Notify the global watchdog that a request completed
+    if let Some(entry) = state.try_borrow::<crate::watchdog::OpWatchdogEntry>() {
+        entry.0.end_request();
+    }
 }
 
 // ---------------------------------------------------------------------------

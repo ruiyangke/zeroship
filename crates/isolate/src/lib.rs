@@ -12,3 +12,4 @@ pub mod cpu;
 pub mod isolate;
 mod permissions;
 pub mod pool;
+pub mod watchdog;

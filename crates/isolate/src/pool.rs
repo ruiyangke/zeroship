@@ -19,17 +19,25 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::actor::{self, ActorHandle, IsolateMessage};
+use crate::watchdog::{ExecutionLimits, GlobalWatchdog};
 
 /// Per-app entry in the pool.
 struct PoolEntry {
+    app_id: String,
     handle: ActorHandle,
     thread_handle: Option<std::thread::JoinHandle<()>>,
     last_used: Instant,
+    /// Reference to the global watchdog for unregistration on drop.
+    watchdog_entries: Arc<Mutex<HashMap<String, Arc<crate::watchdog::WatchdogEntry>>>>,
 }
 
 impl PoolEntry {
     /// Send a graceful shutdown message and join the actor thread.
     fn graceful_shutdown(&mut self) {
+        // Unregister from watchdog
+        if let Ok(mut entries) = self.watchdog_entries.lock() {
+            entries.remove(&self.app_id);
+        }
         // Best-effort: if the channel is full or closed, we just drop
         let _ = self.handle.tx.try_send(IsolateMessage::Shutdown);
         // Join the thread so it is not orphaned
@@ -53,6 +61,7 @@ pub struct IsolatePool {
     plugin_factory: PluginFactory,
     meter_factory: MeterFactory,
     quota_factory: QuotaFactory,
+    watchdog: GlobalWatchdog,
 }
 
 impl IsolatePool {
@@ -71,6 +80,7 @@ impl IsolatePool {
             plugin_factory,
             meter_factory,
             quota_factory,
+            watchdog: GlobalWatchdog::new(),
         });
 
         // Background eviction task — runs all policies every 10s
@@ -149,6 +159,15 @@ impl IsolatePool {
         let meter = (self.meter_factory)(app_id);
         let quota = (self.quota_factory)(app_id);
 
+        // Build execution limits from config
+        let limits = ExecutionLimits {
+            wall_time: Duration::from_secs(30), // default wall limit
+            cpu_time: self
+                .config
+                .cpu_limit()
+                .unwrap_or(Duration::from_secs(5)),
+        };
+
         let result = actor::spawn(
             app_id,
             server_js,
@@ -157,6 +176,8 @@ impl IsolatePool {
             self.config.cpu_limit(),
             meter,
             quota,
+            &self.watchdog,
+            limits,
         )?;
 
         eprintln!("[pool] Started: {app_id}");
@@ -165,9 +186,11 @@ impl IsolatePool {
         entries.insert(
             app_id.to_string(),
             PoolEntry {
+                app_id: app_id.to_string(),
                 handle: result.handle,
                 thread_handle: Some(result.thread_handle),
                 last_used: Instant::now(),
+                watchdog_entries: self.watchdog.entries_ref(),
             },
         );
 
