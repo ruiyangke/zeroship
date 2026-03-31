@@ -18,5 +18,6 @@
 //! ```
 
 pub mod config;
+pub mod meter_store;
 pub mod plugin;
 pub mod types;
