@@ -79,7 +79,7 @@ fn main() {
         }
 
         // Sequential: N requests one after another
-        for n in [5, 10, 20] {
+        for n in [5, 10] {
             let start = Instant::now();
             for _ in 0..n {
                 pool.dispatch("seq", FETCH_100MS_JS, RPC_BODY.into()).await.unwrap();
@@ -92,21 +92,27 @@ fn main() {
         println!();
 
         // Concurrent: N requests all at once
-        for n in [5u64, 10, 20, 50] {
+        for n in [10u64, 50, 100, 200, 500] {
             let start = Instant::now();
             let mut handles = Vec::new();
             for _ in 0..n {
                 let p = pool.clone();
                 handles.push(tokio::spawn(async move {
-                    p.dispatch("conc", FETCH_100MS_JS, RPC_BODY.into()).await.unwrap();
+                    p.dispatch("conc", FETCH_100MS_JS, RPC_BODY.into()).await
                 }));
             }
+            let mut ok = 0u64;
+            let mut err = 0u64;
             for h in handles {
-                h.await.unwrap();
+                match h.await.unwrap() {
+                    Ok(_) => ok += 1,
+                    Err(_) => err += 1,
+                }
             }
             let e = start.elapsed();
-            println!("fetch 100ms (conc, {}):   {:>5} reqs  {:.2}s  {:>8.1} req/s  {:>6.0}ms/req",
-                n, n, e.as_secs_f64(), n as f64 / e.as_secs_f64(), e.as_millis() as f64 / n as f64);
+            let status = if err > 0 { format!("  ({ok} ok, {err} err)") } else { String::new() };
+            println!("fetch 100ms (conc, {:>3}):  {:>5} reqs  {:.2}s  {:>8.1} req/s  {:>6.0}ms/req{}",
+                n, n, e.as_secs_f64(), ok as f64 / e.as_secs_f64(), e.as_millis() as f64 / n as f64, status);
         }
 
         println!("\n--- Analysis ---");

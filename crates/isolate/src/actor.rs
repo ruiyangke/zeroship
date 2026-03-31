@@ -142,7 +142,7 @@ async fn actor_loop(
     };
 
     // Create the RPC channel pair
-    let (rpc_tx, rpc_rx) = mpsc::channel::<(u64, String)>(64);
+    let (rpc_tx, rpc_rx) = mpsc::channel::<(u64, String)>(4096);
     let pending_replies: Rc<RefCell<HashMap<u64, oneshot::Sender<Result<RpcResult, String>>>>> =
         Rc::new(RefCell::new(HashMap::new()));
     let mut next_id: u64 = 0;
