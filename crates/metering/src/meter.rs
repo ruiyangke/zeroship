@@ -39,6 +39,20 @@ impl AppMeter {
         }
     }
 
+    /// Look up a counter by resource name (maps string keys to atomic fields).
+    pub fn get_counter(&self, name: &str) -> u64 {
+        match name {
+            "requests" => self.requests.load(Ordering::Acquire),
+            "cpu_ms" => self.cpu_time_us.load(Ordering::Acquire) / 1000,
+            "wall_ms" => self.wall_time_us.load(Ordering::Acquire) / 1000,
+            "egress_bytes" => self.egress_bytes.load(Ordering::Acquire),
+            "db_reads" => self.db_reads.load(Ordering::Acquire),
+            "db_writes" => self.db_writes.load(Ordering::Acquire),
+            "kv_ops" => self.kv_ops.load(Ordering::Acquire),
+            _ => 0,
+        }
+    }
+
     /// Record a completed request's usage.
     pub fn record(&self, delta: &UsageDelta) {
         self.requests.fetch_add(1, Ordering::Relaxed);
@@ -166,5 +180,11 @@ impl MeterRegistry {
     pub fn remove(&self, app_id: &str) {
         let mut meters = self.meters.lock().unwrap();
         meters.remove(app_id);
+    }
+
+    /// Get all meters (for flusher).
+    pub fn all_meters(&self) -> HashMap<String, Arc<AppMeter>> {
+        let meters = self.meters.lock().unwrap();
+        meters.clone()
     }
 }

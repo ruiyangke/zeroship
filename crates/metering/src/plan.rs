@@ -1,103 +1,92 @@
 //! Quota plan definitions.
 //!
-//! A plan defines the limits for an app. `None` means unlimited.
+//! A plan defines entitlements, quotas, and rate limits for an app.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// Time period for quota enforcement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Period {
+    PerRequest,
+    Daily,
+    Monthly,
+    Absolute,
+}
+
+/// A single quota definition — max usage within a period.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuotaDef {
+    /// Maximum allowed value. `None` means unlimited.
+    pub max: Option<u64>,
+    /// Time period for the quota.
+    pub period: Period,
+    /// Policy name for enforcement (e.g. "warn_then_block", "hard_kill").
+    pub policy: String,
+}
+
+/// A rate limit definition — requests per second with burst.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitDef {
+    pub max_per_second: u32,
+    pub burst: u32,
+    pub policy: String,
+}
 
 /// Quota plan — configurable limits per app.
-/// `None` on any field means unlimited (no enforcement).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotaPlan {
     pub name: String,
-
-    // --- Per-request hard limits ---
-    /// Max CPU time per request (ms). Exceeding kills the request.
-    pub max_cpu_per_request_ms: Option<u64>,
-    /// Max wall time per request (ms).
-    pub max_wall_time_per_request_ms: Option<u64>,
-
-    // --- Monthly quotas ---
-    /// Max requests per billing period.
-    pub monthly_requests: Option<u64>,
-    /// Max CPU milliseconds per billing period.
-    pub monthly_cpu_ms: Option<u64>,
-    /// Max egress bytes per billing period.
-    pub monthly_egress_bytes: Option<u64>,
-    /// Max DB read operations per billing period.
-    pub monthly_db_reads: Option<u64>,
-    /// Max DB write operations per billing period.
-    pub monthly_db_writes: Option<u64>,
-    /// Max KV operations per billing period.
-    pub monthly_kv_ops: Option<u64>,
-
-    // --- Static resource limits ---
-    /// Max DB storage in bytes.
-    pub max_db_storage_bytes: Option<u64>,
-    /// Max V8 heap memory in MB per isolate.
-    pub max_memory_mb: Option<u64>,
-
-    // --- Rate limits ---
-    /// Max requests per second.
-    pub rate_limit_rps: Option<u32>,
-    /// Burst allowance (token bucket capacity).
-    pub rate_limit_burst: Option<u32>,
+    pub version: u32,
+    pub description: String,
+    pub entitlements: HashMap<String, serde_json::Value>,
+    pub quotas: HashMap<String, QuotaDef>,
+    pub rate_limits: HashMap<String, RateLimitDef>,
 }
 
 impl QuotaPlan {
     /// Free tier — conservative limits.
     pub fn free() -> Self {
+        let mut quotas = HashMap::new();
+        quotas.insert("cpu_ms".into(), QuotaDef { max: Some(50_000), period: Period::Monthly, policy: "warn_then_block".into() });
+        quotas.insert("requests".into(), QuotaDef { max: Some(100_000), period: Period::Monthly, policy: "warn_then_block".into() });
+        quotas.insert("egress_bytes".into(), QuotaDef { max: Some(1_000_000_000), period: Period::Monthly, policy: "warn_then_block".into() });
+        quotas.insert("db_reads".into(), QuotaDef { max: Some(500_000), period: Period::Monthly, policy: "warn_then_block".into() });
+        quotas.insert("db_writes".into(), QuotaDef { max: Some(50_000), period: Period::Monthly, policy: "warn_then_block".into() });
+        quotas.insert("kv_ops".into(), QuotaDef { max: Some(100_000), period: Period::Monthly, policy: "warn_then_block".into() });
+        quotas.insert("db_storage_bytes".into(), QuotaDef { max: Some(500_000_000), period: Period::Absolute, policy: "block_writes_only".into() });
+        quotas.insert("cpu_per_request".into(), QuotaDef { max: Some(10), period: Period::PerRequest, policy: "hard_kill".into() });
+
+        let mut rate_limits = HashMap::new();
+        rate_limits.insert("default".into(), RateLimitDef { max_per_second: 10, burst: 50, policy: "reject".into() });
+
         Self {
             name: "free".into(),
-            max_cpu_per_request_ms: Some(10),
-            max_wall_time_per_request_ms: Some(30_000),
-            monthly_requests: Some(100_000),
-            monthly_cpu_ms: Some(10_000),
-            monthly_egress_bytes: Some(1_000_000_000),       // 1GB
-            monthly_db_reads: Some(500_000),
-            monthly_db_writes: Some(50_000),
-            monthly_kv_ops: Some(100_000),
-            max_db_storage_bytes: Some(500_000_000),          // 500MB
-            max_memory_mb: Some(128),
-            rate_limit_rps: Some(10),
-            rate_limit_burst: Some(50),
+            version: 1,
+            description: "Free tier".into(),
+            entitlements: HashMap::new(),
+            quotas,
+            rate_limits,
         }
     }
 
     /// Pro tier — generous limits.
     pub fn pro() -> Self {
+        let mut quotas = HashMap::new();
+        quotas.insert("cpu_ms".into(), QuotaDef { max: Some(30_000_000), period: Period::Monthly, policy: "warn_then_block".into() });
+        quotas.insert("requests".into(), QuotaDef { max: Some(10_000_000), period: Period::Monthly, policy: "warn_then_block".into() });
+        quotas.insert("cpu_per_request".into(), QuotaDef { max: Some(30_000), period: Period::PerRequest, policy: "hard_kill".into() });
+
+        let mut rate_limits = HashMap::new();
+        rate_limits.insert("default".into(), RateLimitDef { max_per_second: 1000, burst: 5000, policy: "reject".into() });
+
         Self {
             name: "pro".into(),
-            max_cpu_per_request_ms: Some(30_000),
-            max_wall_time_per_request_ms: Some(300_000),
-            monthly_requests: Some(10_000_000),
-            monthly_cpu_ms: Some(30_000_000),
-            monthly_egress_bytes: Some(100_000_000_000),      // 100GB
-            monthly_db_reads: None,                            // unlimited
-            monthly_db_writes: Some(5_000_000),
-            monthly_kv_ops: Some(10_000_000),
-            max_db_storage_bytes: Some(10_000_000_000),       // 10GB
-            max_memory_mb: Some(128),
-            rate_limit_rps: Some(1000),
-            rate_limit_burst: Some(5000),
-        }
-    }
-
-    /// Enterprise tier — effectively unlimited.
-    pub fn enterprise() -> Self {
-        Self {
-            name: "enterprise".into(),
-            max_cpu_per_request_ms: Some(300_000),
-            max_wall_time_per_request_ms: Some(600_000),
-            monthly_requests: None,
-            monthly_cpu_ms: None,
-            monthly_egress_bytes: None,
-            monthly_db_reads: None,
-            monthly_db_writes: None,
-            monthly_kv_ops: None,
-            max_db_storage_bytes: Some(100_000_000_000),      // 100GB
-            max_memory_mb: Some(256),
-            rate_limit_rps: None,
-            rate_limit_burst: None,
+            version: 1,
+            description: "Pro tier".into(),
+            entitlements: HashMap::new(),
+            quotas,
+            rate_limits,
         }
     }
 
@@ -105,18 +94,11 @@ impl QuotaPlan {
     pub fn unlimited() -> Self {
         Self {
             name: "unlimited".into(),
-            max_cpu_per_request_ms: None,
-            max_wall_time_per_request_ms: None,
-            monthly_requests: None,
-            monthly_cpu_ms: None,
-            monthly_egress_bytes: None,
-            monthly_db_reads: None,
-            monthly_db_writes: None,
-            monthly_kv_ops: None,
-            max_db_storage_bytes: None,
-            max_memory_mb: None,
-            rate_limit_rps: None,
-            rate_limit_burst: None,
+            version: 1,
+            description: "No limits".into(),
+            entitlements: HashMap::new(),
+            quotas: HashMap::new(),
+            rate_limits: HashMap::new(),
         }
     }
 }

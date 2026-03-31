@@ -6,9 +6,8 @@
 //! - Deny: over 100% on any dimension (returns 429)
 
 use crate::meter::AppMeter;
-use crate::plan::QuotaPlan;
+use crate::plan::{QuotaPlan, Period};
 use serde::Serialize;
-use std::sync::atomic::Ordering;
 
 /// Result of a quota check.
 #[derive(Debug)]
@@ -37,67 +36,47 @@ pub struct QuotaDenial {
     pub used: u64,
     pub limit: u64,
     pub message: String,
+    pub error_code: i32,
 }
 
 /// Check an app's current usage against its plan.
 /// Call this BEFORE dispatching a request.
-pub fn check_quota(meter: &AppMeter) -> QuotaDecision {
-    let plan = &meter.plan;
+pub fn check_quota(meter: &AppMeter, plan: &QuotaPlan) -> QuotaDecision {
     let mut warnings = Vec::new();
 
-    // Check each dimension that has a limit
-    if let Some(denial) = check_dimension(
-        "requests",
-        meter.requests.load(Ordering::Relaxed),
-        plan.monthly_requests,
-        &mut warnings,
-    ) {
-        return QuotaDecision::Deny(denial);
-    }
+    for (resource, quota) in &plan.quotas {
+        // Skip per-request quotas (enforced in isolate, not here)
+        if matches!(quota.period, Period::PerRequest) {
+            continue;
+        }
 
-    if let Some(denial) = check_dimension(
-        "cpu_ms",
-        meter.cpu_time_us.load(Ordering::Relaxed) / 1000, // us → ms
-        plan.monthly_cpu_ms,
-        &mut warnings,
-    ) {
-        return QuotaDecision::Deny(denial);
-    }
+        let max = match quota.max {
+            Some(m) => m,
+            None => continue, // unlimited
+        };
 
-    if let Some(denial) = check_dimension(
-        "egress_bytes",
-        meter.egress_bytes.load(Ordering::Relaxed),
-        plan.monthly_egress_bytes,
-        &mut warnings,
-    ) {
-        return QuotaDecision::Deny(denial);
-    }
+        let used = meter.get_counter(resource);
 
-    if let Some(denial) = check_dimension(
-        "db_reads",
-        meter.db_reads.load(Ordering::Relaxed),
-        plan.monthly_db_reads,
-        &mut warnings,
-    ) {
-        return QuotaDecision::Deny(denial);
-    }
+        let pct = if max > 0 { (used as f64 / max as f64) * 100.0 } else { 100.0 };
 
-    if let Some(denial) = check_dimension(
-        "db_writes",
-        meter.db_writes.load(Ordering::Relaxed),
-        plan.monthly_db_writes,
-        &mut warnings,
-    ) {
-        return QuotaDecision::Deny(denial);
-    }
+        if used > max {
+            return QuotaDecision::Deny(QuotaDenial {
+                dimension: resource.clone(),
+                used,
+                limit: max,
+                message: format!("Monthly {resource} quota exceeded ({used}/{max})"),
+                error_code: -32029,
+            });
+        }
 
-    if let Some(denial) = check_dimension(
-        "kv_ops",
-        meter.kv_ops.load(Ordering::Relaxed),
-        plan.monthly_kv_ops,
-        &mut warnings,
-    ) {
-        return QuotaDecision::Deny(denial);
+        if pct >= 80.0 {
+            warnings.push(QuotaWarning {
+                dimension: resource.clone(),
+                used,
+                limit: max,
+                usage_pct: pct,
+            });
+        }
     }
 
     if warnings.is_empty() {
@@ -107,94 +86,53 @@ pub fn check_quota(meter: &AppMeter) -> QuotaDecision {
     }
 }
 
-/// Check a single dimension. Returns Some(denial) if over limit,
-/// or pushes a warning if over 80%.
-fn check_dimension(
-    name: &str,
-    used: u64,
-    limit: Option<u64>,
-    warnings: &mut Vec<QuotaWarning>,
-) -> Option<QuotaDenial> {
-    let limit = match limit {
-        Some(l) => l,
-        None => return None, // No limit = always allow
-    };
-
-    if limit == 0 {
-        return Some(QuotaDenial {
-            dimension: name.into(),
-            used,
-            limit,
-            message: format!("{name} is disabled on this plan"),
-        });
-    }
-
-    let pct = (used as f64 / limit as f64) * 100.0;
-
-    if used > limit {
-        return Some(QuotaDenial {
-            dimension: name.into(),
-            used,
-            limit,
-            message: format!(
-                "Monthly {name} quota exceeded ({used}/{limit})",
-            ),
-        });
-    }
-
-    if pct >= 80.0 {
-        warnings.push(QuotaWarning {
-            dimension: name.into(),
-            used,
-            limit,
-            usage_pct: pct,
-        });
-    }
-
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::QuotaPlan;
+    use crate::plan::{QuotaPlan, QuotaDef, Period};
 
     #[test]
     fn allow_under_limit() {
-        let meter = AppMeter::new(QuotaPlan::free());
-        let decision = check_quota(&meter);
+        let plan = QuotaPlan::free();
+        let meter = AppMeter::new(plan.clone());
+        let decision = check_quota(&meter, &plan);
         assert!(matches!(decision, QuotaDecision::Allow));
     }
 
     #[test]
     fn warn_at_80_percent() {
-        let plan = QuotaPlan {
-            monthly_requests: Some(100),
-            ..QuotaPlan::unlimited()
-        };
-        let meter = AppMeter::new(plan);
+        let mut plan = QuotaPlan::unlimited();
+        plan.quotas.insert("requests".into(), QuotaDef {
+            max: Some(100),
+            period: Period::Monthly,
+            policy: "warn_then_block".into(),
+        });
+        let meter = AppMeter::new(plan.clone());
         meter.requests.store(85, Ordering::Relaxed);
-        let decision = check_quota(&meter);
+        let decision = check_quota(&meter, &plan);
         assert!(matches!(decision, QuotaDecision::Warn(_)));
     }
 
     #[test]
     fn deny_over_limit() {
-        let plan = QuotaPlan {
-            monthly_requests: Some(100),
-            ..QuotaPlan::unlimited()
-        };
-        let meter = AppMeter::new(plan);
+        let mut plan = QuotaPlan::unlimited();
+        plan.quotas.insert("requests".into(), QuotaDef {
+            max: Some(100),
+            period: Period::Monthly,
+            policy: "warn_then_block".into(),
+        });
+        let meter = AppMeter::new(plan.clone());
         meter.requests.store(101, Ordering::Relaxed);
-        let decision = check_quota(&meter);
+        let decision = check_quota(&meter, &plan);
         assert!(matches!(decision, QuotaDecision::Deny(_)));
     }
 
     #[test]
     fn unlimited_always_allows() {
-        let meter = AppMeter::new(QuotaPlan::unlimited());
+        let plan = QuotaPlan::unlimited();
+        let meter = AppMeter::new(plan.clone());
         meter.requests.store(999_999_999, Ordering::Relaxed);
-        let decision = check_quota(&meter);
+        let decision = check_quota(&meter, &plan);
         assert!(matches!(decision, QuotaDecision::Allow));
     }
 }

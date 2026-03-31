@@ -114,7 +114,7 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
 
     // 2. Quota check
     let meter = state.meters.get_or_create(&app_id);
-    match enforcer::check_quota(&meter) {
+    match enforcer::check_quota(&meter, &meter.plan) {
         QuotaDecision::Deny(denial) => {
             return json_response_with_status(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -177,17 +177,19 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
                 &snapshot.requests.to_string(),
             );
 
-            if let Some(limit) = meter.plan.monthly_requests {
-                add_header(
-                    &mut headers,
-                    "x-requests-limit",
-                    &limit.to_string(),
-                );
-                add_header(
-                    &mut headers,
-                    "x-requests-remaining",
-                    &limit.saturating_sub(snapshot.requests).to_string(),
-                );
+            if let Some(quota) = meter.plan.quotas.get("requests") {
+                if let Some(limit) = quota.max {
+                    add_header(
+                        &mut headers,
+                        "x-requests-limit",
+                        &limit.to_string(),
+                    );
+                    add_header(
+                        &mut headers,
+                        "x-requests-remaining",
+                        &limit.saturating_sub(snapshot.requests).to_string(),
+                    );
+                }
             }
 
             let mut response = Response::builder()
