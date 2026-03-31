@@ -51,12 +51,15 @@ pub fn build(state: AppState) -> Router {
 }
 
 /// Create an AppState for single-app mode.
+///
+/// If `plan` is provided, it is used for metering; otherwise defaults to unlimited (dev-friendly).
 pub fn single_app_state(
     server_js: String,
     client_html: Option<Vec<u8>>,
     config: &AppbaseConfig,
     data_dir: PathBuf,
     plugin_factory: PluginFactory,
+    plan: Option<QuotaPlan>,
 ) -> AppState {
     let pool = IsolatePool::new(config.isolates.clone(), data_dir, plugin_factory);
 
@@ -69,8 +72,8 @@ pub fn single_app_state(
         },
     );
 
-    // Default plan for single-app mode: unlimited (dev-friendly)
-    let meters = Arc::new(MeterRegistry::new(QuotaPlan::unlimited()));
+    let default_plan = plan.unwrap_or_else(QuotaPlan::unlimited);
+    let meters = Arc::new(MeterRegistry::new(default_plan));
     let rate_limiter = Arc::new(RateLimiter::new(10000, 50000));
 
     AppState {

@@ -1,0 +1,38 @@
+[server]
+port = 3000
+
+[isolates]
+max = 1000
+idle_timeout_secs = 60
+
+[plans.free]
+description = "Free tier"
+
+[plans.free.quotas]
+cpu_ms = { max = 50000, period = "monthly", policy = "warn_then_block" }
+requests = { max = 100000, period = "monthly", policy = "warn_then_block" }
+egress_bytes = { max = 1000000000, period = "monthly", policy = "warn_then_block" }
+db_reads = { max = 500000, period = "monthly", policy = "warn_then_block" }
+db_writes = { max = 50000, period = "monthly", policy = "warn_then_block" }
+kv_ops = { max = 100000, period = "monthly", policy = "warn_then_block" }
+cpu_per_request = { max = 10, period = "per_request", policy = "hard_kill" }
+
+[plans.free.rate_limits]
+default = { max_per_second = 10, burst = 50, policy = "reject" }
+
+[plans.pro]
+description = "Pro tier"
+
+[plans.pro.quotas]
+cpu_ms = { max = 30000000, period = "monthly", policy = "warn_then_block" }
+requests = { max = 10000000, period = "monthly", policy = "warn_then_block" }
+cpu_per_request = { max = 30000, period = "per_request", policy = "hard_kill" }
+
+[plans.pro.rate_limits]
+default = { max_per_second = 1000, burst = 5000, policy = "reject" }
+
+[defaults]
+plan = "free"
+
+[apps.default]
+plan = "pro"

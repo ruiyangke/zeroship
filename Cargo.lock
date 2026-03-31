@@ -47,6 +47,7 @@ version = "0.1.0"
 dependencies = [
  "appbase-core",
  "appbase-isolate",
+ "appbase-metering",
  "appbase-plugins",
  "appbase-server",
  "serde_json",
@@ -91,6 +92,8 @@ dependencies = [
  "appbase-core",
  "serde",
  "serde_json",
+ "tokio",
+ "toml",
 ]
 
 [[package]]

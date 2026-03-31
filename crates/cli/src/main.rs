@@ -25,11 +25,29 @@ fn main() {
 fn cmd_serve(args: &[String]) {
     let script = args
         .get(2)
-        .expect("Usage: appbase serve <server.js> [--static=index.html] [--port=3000] [--db=appbase.db]");
+        .expect("Usage: appbase serve <server.js> [--static=index.html] [--port=3000] [--db=appbase.db] [--config=appbase.toml]");
     let port = flag_u16(args, "--port=").unwrap_or(3000);
     let db_path = flag_str(args, "--db=").unwrap_or_else(|| "appbase.db".into());
     let static_file = flag_str(args, "--static=");
     let data_dir = PathBuf::from("data");
+
+    // Load config if appbase.toml exists
+    let config_path = flag_str(args, "--config=").unwrap_or_else(|| "appbase.toml".into());
+    let metering_config = if std::path::Path::new(&config_path).exists() {
+        eprintln!("[appbase] Loading config from {config_path}");
+        Some(
+            appbase_metering::config::MeteringConfig::load(&config_path).unwrap_or_else(|e| {
+                eprintln!("[appbase] Config error: {e}");
+                std::process::exit(1);
+            }),
+        )
+    } else {
+        None
+    };
+
+    let default_plan = metering_config
+        .as_ref()
+        .map(|c| c.plan_for_app("default"));
 
     let server_js = std::fs::read_to_string(script)
         .unwrap_or_else(|e| panic!("Failed to read {script}: {e}"));
@@ -63,6 +81,7 @@ fn cmd_serve(args: &[String]) {
             &config,
             data_dir,
             plugin_factory,
+            default_plan,
         );
         router::serve(state, &config.server.host, config.server.port).await
     }) {

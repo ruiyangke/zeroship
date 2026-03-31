@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 appbase-core = { path = "../core" }
 appbase-isolate = { path = "../isolate" }
+appbase-metering = { path = "../metering" }
 appbase-plugins = { path = "../plugins" }
 appbase-server = { path = "../server" }
 tokio = { version = "1", features = ["full"] }
