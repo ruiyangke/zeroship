@@ -1,8 +1,13 @@
 # Appbase Quota, Metering & Billing System — v3 Design
 
-> **Status:** Draft v3.0 | **Last Updated:** 2026-03-31 | **Author:** Platform Team
+> **Status:** Draft v3.1 | **Last Updated:** 2026-03-31 | **Author:** Platform Team
 >
 > **Revision History:**
+> - v3.1 (2026-03-31): Reflect actual crate split. Six crates now built: plan (pure types),
+>   core (Plugin trait + config), metering (counters + flush + rollover + event log),
+>   enforcement (rate limit + quota + concurrency), billing (pricing + spending limits),
+>   and all runtime crates (isolate, plugins, compiler, server, cli). Update Section 4.1
+>   to list crate owners. Update Section 17 implementation plan to reflect completed phases.
 > - v3.0 (2026-03-31): Three architectural changes. (1) Separate billing from quota/metering:
 >   remove inline spend tracking from hot path, billing becomes async background pipeline
 >   via SpendingReconciler; enforcer reads a single `spend_action` AtomicU8. New
@@ -869,16 +874,22 @@ rejected. Pre-flight validation: `POST /v1/_admin/config/validate` with raw TOML
 
 ```
 QUOTA/METERING PIPELINE (sync, hot path — no pricing math):
-  HTTP Request
-    -> Rate Limiter (single-AtomicU64 CAS, 2.8)              -> 429
-    -> Concurrency Guard (CAS loop, 18.5)                     -> 429
-    -> Entitlement Checker                                     -> 403
-    -> Quota Enforcer + spend_action check (1 AtomicU8 load)      -> 429 / warn / degrade
-    -> V8 Isolate Execution (CPU/wall watchdog)                -> 503 on limit
-    -> Meter Recorder (atomic counters + event log enqueue)
+  HTTP Request                                                   [crates/server]
+    -> Rate Limiter (single-AtomicU64 CAS, 2.8)              -> 429  [crates/enforcement]
+    -> Concurrency Guard (CAS loop, 18.5)                     -> 429  [crates/enforcement]
+    -> Entitlement Checker                                     -> 403  [crates/enforcement]
+    -> Quota Enforcer + spend_action check (1 AtomicU8 load)  -> 429  [crates/enforcement + billing flag]
+    -> V8 Isolate Execution (CPU/wall watchdog)                -> 503  [crates/isolate]
+    -> Meter Recorder (atomic counters + event log enqueue)           [crates/metering]
     -> Response Header Injector (X-Quota-*, RateLimit/RateLimit-Policy, X-CPU-*)
-    -> Concurrency Guard Drop (decrement gauge)
+    -> Concurrency Guard Drop (decrement gauge)                       [crates/enforcement]
   HTTP Response
+
+CRATE RESPONSIBILITIES (4-layer separation):
+  plan        = rules (QuotaPlan, limits, periods, policies)          [crates/plan]
+  enforcement = decisions (allow/warn/deny, rate limit, concurrency)  [crates/enforcement]
+  metering    = counting (atomic counters, flush, rollover, events)   [crates/metering]
+  billing     = money (pricing, spending limits, invoices)            [crates/billing]
 
 BILLING PIPELINE (async, background — crates/billing/):
   SpendingReconciler (every 10s):
@@ -1952,28 +1963,33 @@ drops, 60K row flush < 100ms, token bucket CAS under 1K concurrent requests.
 
 ## 17. Implementation Plan
 
-| Phase | Deliverable | Deps | Effort |
-|---|---|---|---|
-| 1 | Core types + config parser (Option<u64> for unlimited) | — | S |
-| 2 | Atomic counters (correct orderings) + concurrency guard (CAS) | 1 | S |
-| 3 | Token bucket (packed AtomicU64 CAS) | 1 | M |
-| 4 | Quota enforcer + spend_action flag check | 1,2 | M |
-| 5 | Tower middleware (full request path) + response headers | 2,3,4 | M |
-| 6 | Entitlement checker | 1,5 | S |
-| 7 | MeterStore trait + SqliteMeterStore (default) + batched flush + crash recovery | 2 | M |
-| 7b | Additional MeterStore adapters (redis, postgres, mmap, memory) | 7 | M |
-| 8 | Event log (append-only + external anchoring) | 2 | M |
-| 9 | Period rollover (double-buffered, drain-and-wait) | 7 | M |
-| 10 | Admin API (versioned /v1/) + RBAC + scoped keys | 2,4,7 | L |
-| 11 | Spending monitor + alerts + webhooks | 7,10 | M |
-| 12 | Invoice preview + billing + credits/wallets | 7,11 | M |
-| 13 | Per-endpoint + cron/background metering | 2,4 | M |
-| 14 | Prometheus metrics + dry-run/shadow modes | all | M |
+| Phase | Deliverable | Deps | Effort | Status |
+|---|---|---|---|---|
+| 1 | Core types + config parser (Option<u64> for unlimited) | — | S | **Done** (crates/plan + crates/core) |
+| 2 | Atomic counters (correct orderings) + concurrency guard (CAS) | 1 | S | **Done** (crates/metering + crates/enforcement) |
+| 3 | Token bucket (packed AtomicU64 CAS) | 1 | M | **Done** (crates/enforcement/rate_limit) |
+| 4 | Quota enforcer + spend_action flag check | 1,2 | M | **Done** (crates/enforcement/quota + crates/billing/spend_action) |
+| 5 | Tower middleware (full request path) + response headers | 2,3,4 | M | **Done** (crates/server/router + middleware) |
+| 6 | Entitlement checker | 1,5 | S | **Done** (crates/enforcement) |
+| 7 | MeterStore trait + SqliteMeterStore (default) + batched flush + crash recovery | 2 | M | **Done** (crates/metering/store + flusher) |
+| 7b | Additional MeterStore adapters (redis, postgres, mmap, memory) | 7 | M | Not started |
+| 8 | Event log (append-only + external anchoring) | 2 | M | **Done** (crates/core/event_log + crates/metering/event_logger) |
+| 9 | Period rollover (double-buffered, drain-and-wait) | 7 | M | **Done** (crates/metering/rollover) |
+| 10 | Admin API (versioned /v1/) + RBAC + scoped keys | 2,4,7 | L | Partial (admin routes in server, no RBAC yet) |
+| 11 | Spending monitor + alerts + webhooks | 7,10 | M | **Done** (crates/billing/reconciler + pricing) |
+| 12 | Invoice preview + billing + credits/wallets | 7,11 | M | Not started |
+| 13 | Per-endpoint + cron/background metering | 2,4 | M | Not started |
+| 14 | Prometheus metrics + dry-run/shadow modes | all | M | Not started |
 
 Phase 2+ (see Section 20): Dunning, packages, commitments, multi-currency, backfill tooling.
 
 Effort: S = 1-2 days, M = 3-5 days, L = 1-2 weeks.
 **Critical path:** 1 -> 2 -> 4 -> 5 -> 7 -> 10 (core enforcement + persistence + admin)
+
+**Crate split (completed):** The monolithic metering crate has been split into four
+focused crates: `appbase-plan` (rules), `appbase-enforcement` (decisions),
+`appbase-metering` (counting), `appbase-billing` (money). See `docs/architecture.md`
+for the full dependency graph and target architecture.
 
 ---
 
