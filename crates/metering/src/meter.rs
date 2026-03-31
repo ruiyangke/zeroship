@@ -140,6 +140,40 @@ impl appbase_core::plugin::PluginMeter for AppPluginMeter {
     }
 }
 
+/// Per-app quota checker that reads from the CounterRegistry and plan.
+/// Used for point-of-use quota enforcement in plugin ops.
+pub struct AppQuotaChecker {
+    registry: Arc<MeterRegistry>,
+    app_id: String,
+}
+
+impl AppQuotaChecker {
+    pub fn new(registry: Arc<MeterRegistry>, app_id: String) -> Self {
+        Self { registry, app_id }
+    }
+}
+
+impl appbase_core::plugin::PluginQuota for AppQuotaChecker {
+    fn check(&self, resource: &str) -> Result<(), appbase_core::plugin::QuotaDenied> {
+        let meter = self.registry.get_or_create(&self.app_id);
+        let used = meter.counters.get(resource).unwrap_or(0);
+
+        if let Some(quota) = meter.plan.quotas.get(resource) {
+            if let Some(max) = quota.max {
+                if used >= max {
+                    return Err(appbase_core::plugin::QuotaDenied {
+                        resource: resource.to_string(),
+                        used,
+                        limit: max,
+                        message: format!("{resource} quota exceeded ({used}/{max})"),
+                    });
+                }
+            }
+        }
+        Ok(()) // no quota defined, or under limit
+    }
+}
+
 /// Registry of all app meters. Thread-safe, shared across handlers.
 pub struct MeterRegistry {
     meters: Mutex<HashMap<String, Arc<AppMeter>>>,

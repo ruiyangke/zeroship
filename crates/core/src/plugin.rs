@@ -71,6 +71,37 @@ impl PluginMeter for NoopMeter {
     fn increment(&self, _resource_name: &str, _delta: u64) {}
 }
 
+/// Quota check result — returned when a resource is over quota.
+#[derive(Debug, Clone)]
+pub struct QuotaDenied {
+    pub resource: String,
+    pub used: u64,
+    pub limit: u64,
+    pub message: String,
+}
+
+impl std::fmt::Display for QuotaDenied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for QuotaDenied {}
+
+/// Quota checker for plugin ops. Check BEFORE consuming a resource.
+pub trait PluginQuota: Send + Sync {
+    /// Check if a resource can be consumed. Returns Err if over quota.
+    fn check(&self, resource: &str) -> Result<(), QuotaDenied>;
+}
+
+/// No-op quota checker — always allows. For testing / when quotas are disabled.
+pub struct NoopQuota;
+impl PluginQuota for NoopQuota {
+    fn check(&self, _resource: &str) -> Result<(), QuotaDenied> {
+        Ok(())
+    }
+}
+
 /// Context provided to plugins during isolate initialization.
 ///
 /// Gives plugins access to per-isolate state, the app identity,
@@ -85,6 +116,8 @@ pub struct PluginContext<'a> {
     pub data_dir: &'a Path,
     /// Meter for recording plugin resource usage (db ops, kv ops, etc.).
     pub meter: Arc<dyn PluginMeter>,
+    /// Quota checker for point-of-use enforcement (db ops, kv ops, etc.).
+    pub quota: Arc<dyn PluginQuota>,
 }
 
 /// The core plugin interface.
@@ -138,3 +171,9 @@ pub type PluginFactory = std::sync::Arc<dyn Fn(&str) -> Vec<Box<dyn Plugin>> + S
 /// Called each time a new isolate is spawned. Returns an `Arc<dyn PluginMeter>`
 /// that records plugin usage (db.reads, kv.writes, etc.) to the app's meter.
 pub type MeterFactory = std::sync::Arc<dyn Fn(&str) -> std::sync::Arc<dyn PluginMeter> + Send + Sync>;
+
+/// Factory that creates a `PluginQuota` for a given app.
+///
+/// Called each time a new isolate is spawned. Returns an `Arc<dyn PluginQuota>`
+/// that checks resource quotas at point of use in plugin ops.
+pub type QuotaFactory = std::sync::Arc<dyn Fn(&str) -> std::sync::Arc<dyn PluginQuota> + Send + Sync>;

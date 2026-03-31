@@ -11,7 +11,7 @@
 //! giving the isolate a chance to flush state and close resources.
 
 use appbase_core::config::IsolateConfig;
-use appbase_core::plugin::{MeterFactory, PluginFactory};
+use appbase_core::plugin::{MeterFactory, PluginFactory, QuotaFactory};
 use appbase_core::types::RpcResult;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -48,6 +48,7 @@ pub struct IsolatePool {
     data_dir: PathBuf,
     plugin_factory: PluginFactory,
     meter_factory: MeterFactory,
+    quota_factory: QuotaFactory,
 }
 
 impl IsolatePool {
@@ -57,6 +58,7 @@ impl IsolatePool {
         data_dir: PathBuf,
         plugin_factory: PluginFactory,
         meter_factory: MeterFactory,
+        quota_factory: QuotaFactory,
     ) -> Arc<Self> {
         let pool = Arc::new(Self {
             entries: Mutex::new(HashMap::new()),
@@ -64,6 +66,7 @@ impl IsolatePool {
             data_dir,
             plugin_factory,
             meter_factory,
+            quota_factory,
         });
 
         // Background eviction task — runs all policies every 10s
@@ -140,6 +143,7 @@ impl IsolatePool {
         let app_data_dir = self.data_dir.join(app_id);
         let plugins = (self.plugin_factory)(app_id);
         let meter = (self.meter_factory)(app_id);
+        let quota = (self.quota_factory)(app_id);
 
         let handle = actor::spawn(
             app_id,
@@ -148,6 +152,7 @@ impl IsolatePool {
             plugins,
             self.config.cpu_limit(),
             meter,
+            quota,
         )?;
 
         eprintln!("[pool] Started: {app_id}");

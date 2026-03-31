@@ -4,7 +4,7 @@
 //! single-threaded tokio runtime. Communication is via `IsolateMessage` enum
 //! sent over an mpsc channel.
 
-use appbase_core::plugin::{Plugin, PluginMeter};
+use appbase_core::plugin::{Plugin, PluginMeter, PluginQuota};
 use appbase_core::types::RpcResult;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -77,6 +77,7 @@ pub fn spawn(
     plugins: Vec<Box<dyn Plugin>>,
     cpu_limit: Option<Duration>,
     meter: Arc<dyn PluginMeter>,
+    quota: Arc<dyn PluginQuota>,
 ) -> Result<ActorHandle, String> {
     let (tx, rx) = mpsc::channel::<IsolateMessage>(64);
     let cpu_usage = Arc::new(Mutex::new(CpuUsage::default()));
@@ -94,7 +95,7 @@ pub fn spawn(
                 .build()
                 .unwrap();
             rt.block_on(actor_loop(
-                &app_id, &server_js, &data_dir, plugins, rx, cpu_limit, cpu_usage_clone, meter,
+                &app_id, &server_js, &data_dir, plugins, rx, cpu_limit, cpu_usage_clone, meter, quota,
             ));
         })
         .map_err(|e| format!("Failed to spawn V8 thread: {e}"))?;
@@ -112,11 +113,12 @@ async fn actor_loop(
     cpu_limit: Option<Duration>,
     cpu_usage: Arc<Mutex<CpuUsage>>,
     meter: Arc<dyn PluginMeter>,
+    quota: Arc<dyn PluginQuota>,
 ) {
     // Ensure data directory exists
     let _ = std::fs::create_dir_all(data_dir);
 
-    let (mut runtime, mut rpc_bridge) = match isolate::create(&plugins, app_id, data_dir, meter.clone()) {
+    let (mut runtime, mut rpc_bridge) = match isolate::create(&plugins, app_id, data_dir, meter.clone(), quota.clone()) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("[isolate] [{app_id}] Failed to create V8 runtime: {e}");
@@ -155,7 +157,7 @@ async fn actor_loop(
             }
             IsolateMessage::Reload { server_js, reply } => {
                 // Create fresh isolate — old one is dropped (V8 cleanup)
-                match isolate::create(&plugins, app_id, data_dir, meter.clone()) {
+                match isolate::create(&plugins, app_id, data_dir, meter.clone(), quota.clone()) {
                     Ok((new_runtime, new_holder)) => {
                         runtime = new_runtime;
                         rpc_bridge = new_holder;

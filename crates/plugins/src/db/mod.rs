@@ -1,4 +1,4 @@
-use appbase_core::plugin::{Aggregation, MeterResource, Plugin, PluginContext, PluginMeter};
+use appbase_core::plugin::{Aggregation, MeterResource, Plugin, PluginContext, PluginMeter, PluginQuota};
 use deno_core::op2;
 use deno_core::{OpDecl, OpState};
 use rusqlite::Connection;
@@ -79,6 +79,7 @@ globalThis.db = {
             .unwrap();
         ctx.op_state.put(conn);
         ctx.op_state.put(DbMeter(ctx.meter.clone()));
+        ctx.op_state.put(DbQuota(ctx.quota.clone()));
     }
 
     fn meter_resources(&self) -> Vec<MeterResource> {
@@ -102,6 +103,9 @@ globalThis.db = {
 /// Newtype wrapper around the meter to avoid OpState type collision.
 struct DbMeter(Arc<dyn PluginMeter>);
 
+/// Newtype wrapper around the quota checker to avoid OpState type collision.
+struct DbQuota(Arc<dyn PluginQuota>);
+
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 #[class(generic)]
 pub enum DbError {
@@ -111,6 +115,8 @@ pub enum DbError {
     Json(#[from] serde_json::Error),
     #[error("Invalid collection name: {0}")]
     InvalidName(String),
+    #[error("Quota exceeded: {0}")]
+    QuotaExceeded(#[from] appbase_core::plugin::QuotaDenied),
 }
 
 fn validate_collection_name(name: &str) -> Result<(), DbError> {
@@ -128,6 +134,7 @@ fn validate_collection_name(name: &str) -> Result<(), DbError> {
 #[op2(fast)]
 pub fn op_db_ensure_table(state: &mut OpState, #[string] name: &str) -> Result<(), DbError> {
     validate_collection_name(name)?;
+    state.borrow::<DbQuota>().0.check("db.writes")?;
     let db = state.borrow::<Rc<Connection>>().clone();
     state.borrow::<DbMeter>().0.increment("db.writes", 1);
     db.execute(
@@ -152,6 +159,7 @@ pub fn op_db_insert(
     #[serde] mut doc: serde_json::Value,
 ) -> Result<serde_json::Value, DbError> {
     validate_collection_name(collection)?;
+    state.borrow::<DbQuota>().0.check("db.writes")?;
     let db = state.borrow::<Rc<Connection>>().clone();
     state.borrow::<DbMeter>().0.increment("db.writes", 1);
 
@@ -177,6 +185,7 @@ pub fn op_db_find(
     #[serde] filter: serde_json::Value,
 ) -> Result<Vec<serde_json::Value>, DbError> {
     validate_collection_name(collection)?;
+    state.borrow::<DbQuota>().0.check("db.reads")?;
     let db = state.borrow::<Rc<Connection>>().clone();
     state.borrow::<DbMeter>().0.increment("db.reads", 1);
 
@@ -214,6 +223,8 @@ pub fn op_db_update(
     #[serde] updates: serde_json::Value,
 ) -> Result<serde_json::Value, DbError> {
     validate_collection_name(collection)?;
+    state.borrow::<DbQuota>().0.check("db.reads")?;
+    state.borrow::<DbQuota>().0.check("db.writes")?;
     let db = state.borrow::<Rc<Connection>>().clone();
     state.borrow::<DbMeter>().0.increment("db.reads", 1);
     state.borrow::<DbMeter>().0.increment("db.writes", 1);
@@ -249,6 +260,7 @@ pub fn op_db_delete(
     #[string] id: &str,
 ) -> Result<(), DbError> {
     validate_collection_name(collection)?;
+    state.borrow::<DbQuota>().0.check("db.writes")?;
     let db = state.borrow::<Rc<Connection>>().clone();
     state.borrow::<DbMeter>().0.increment("db.writes", 1);
     db.execute(

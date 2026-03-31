@@ -1,12 +1,12 @@
 //! Axum router for appbase — RPC dispatch with metering, quota enforcement, and admin API.
 
 use appbase_core::config::AppbaseConfig;
-use appbase_core::plugin::{MeterFactory, PluginFactory};
+use appbase_core::plugin::{MeterFactory, PluginFactory, QuotaFactory};
 use appbase_core::types::AppBundle;
 use appbase_isolate::pool::IsolatePool;
 use appbase_core::event_log::EventKind;
 use appbase_enforcement::concurrency::ConcurrencyGuard;
-use appbase_enforcement::quota::{self as enforcer, QuotaDecision};
+// enforcer::check_quota removed — resource quotas now enforced at point of use in plugins
 use appbase_enforcement::error_codes;
 use appbase_enforcement::rate_limit::RateLimiter;
 use appbase_core::billing::SpendAction;
@@ -137,7 +137,17 @@ pub fn single_app_state(
         ))
     });
 
-    let pool = IsolatePool::new(config.isolates.clone(), data_dir, plugin_factory, meter_factory);
+    // Create a quota factory that produces AppQuotaChecker instances for
+    // point-of-use quota enforcement in plugin ops (db.reads, kv.writes, etc.).
+    let meters_for_quota = meters.clone();
+    let quota_factory: QuotaFactory = Arc::new(move |app_id: &str| -> Arc<dyn appbase_core::plugin::PluginQuota> {
+        Arc::new(appbase_metering::meter::AppQuotaChecker::new(
+            meters_for_quota.clone(),
+            app_id.to_string(),
+        ))
+    });
+
+    let pool = IsolatePool::new(config.isolates.clone(), data_dir, plugin_factory, meter_factory, quota_factory);
 
     let mut bundles = HashMap::new();
     bundles.insert(
@@ -264,29 +274,8 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
         }
     }
 
-    // 4. Quota check — single call, capture both deny and warnings
-    let usage = meter.counters.snapshot();
-    let quota_decision = enforcer::check_quota(&usage, &meter.plan);
-    let quota_warnings = match &quota_decision {
-        QuotaDecision::Deny(denial) => {
-            state.event_sender.log_enforcement(&app_id, EventKind::QuotaDenied, serde_json::json!({
-                "dimension": denial.dimension,
-            }));
-            let reset = seconds_until_period_reset();
-            return rpc_error_response(
-                StatusCode::TOO_MANY_REQUESTS,
-                denial.error_code,
-                &denial.message,
-                &format!(
-                    r#""type":"quota_exceeded","dimension":"{}","used":{},"limit":{}"#,
-                    json_escape(&denial.dimension), denial.used, denial.limit
-                ),
-                Some(reset),
-            );
-        }
-        QuotaDecision::Warn(w) => w.clone(),
-        QuotaDecision::Allow => vec![],
-    };
+    // 4. Resource quotas are now enforced at point of use in plugin ops
+    //    (db.reads, kv.writes, etc.). Warning headers are computed post-dispatch.
 
     // 5. Get app bundle
     let bundle = {
@@ -367,13 +356,22 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
                 add_header(&mut headers, "x-spending-warning", "Approaching spending limit");
             }
 
-            // Quota warning headers (spec §8.2) — use append, not insert, for multi-value
-            for warning in &quota_warnings {
-                append_header(
-                    &mut headers,
-                    "x-quota-warning",
-                    &format!("{} at {:.0}% ({}/{})", warning.dimension, warning.usage_pct, warning.used, warning.limit),
-                );
+            // Quota warning headers (spec §8.2) — computed post-dispatch from snapshot
+            let usage_snapshot = meter.counters.snapshot();
+            for (resource, quota) in &meter.plan.quotas {
+                if let Some(max) = quota.max {
+                    let used = usage_snapshot.get(resource).copied().unwrap_or(0);
+                    if max > 0 {
+                        let pct = used as f64 / max as f64 * 100.0;
+                        if pct >= 80.0 {
+                            append_header(
+                                &mut headers,
+                                "x-quota-warning",
+                                &format!("{resource} at {pct:.0}% ({used}/{max})"),
+                            );
+                        }
+                    }
+                }
             }
 
             let mut response = Response::builder()

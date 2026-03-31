@@ -1,6 +1,6 @@
 //! V8 isolate wrapper — creates a `JsRuntime` with plugins and handles RPC dispatch.
 
-use appbase_core::plugin::{Plugin, PluginContext, PluginMeter};
+use appbase_core::plugin::{Plugin, PluginContext, PluginMeter, PluginQuota};
 use appbase_core::types::RpcResult;
 use deno_core::*;
 use std::borrow::Cow;
@@ -55,6 +55,7 @@ pub fn create(
     app_id: &str,
     data_dir: &Path,
     meter: Arc<dyn PluginMeter>,
+    quota: Arc<dyn PluginQuota>,
 ) -> Result<(JsRuntime, Rc<RpcBridge>), String> {
     // Collect ops from all plugins + core ops
     let mut all_ops = vec![op_rpc_get_request(), op_rpc_set_response()];
@@ -121,6 +122,7 @@ pub fn create(
             app_id,
             data_dir,
             meter,
+            quota,
         };
         for plugin in plugins {
             plugin.init(&mut ctx);
