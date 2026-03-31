@@ -1,8 +1,24 @@
 # Appbase Quota, Metering & Billing System — v2 Design
 
-> **Status:** Draft v2.1 | **Last Updated:** 2026-03-30 | **Author:** Platform Team
+> **Status:** Draft v2.2 | **Last Updated:** 2026-03-30 | **Author:** Platform Team
 >
 > **Revision History:**
+> - v2.2 (2026-03-30): Round 2 review fixes. IETF RateLimit headers updated to
+>   draft-ietf-httpapi-ratelimit-headers-10 (RateLimit combined field + RateLimit-Policy).
+>   Replace bcrypt with SHA-256 for API key hashing (high-entropy keys don't need KDF).
+>   Fix double-buffered rollover in-flight data race with epoch-based reclamation
+>   (crossbeam-epoch). Assign distinct error codes -32029 to -32032. Rename spending
+>   limit field to `limit` with currency inferred from app. Switch compare_exchange_weak
+>   to compare_exchange (strong) in ConcurrencyGuard. Correct comparison table (AWS
+>   Lambda 15-min timeout, Budgets ~12-24h delay, Vercel spend mgmt requires manual
+>   resume). Flesh out multi-currency section fully. Fix AtomicPtr reclamation with
+>   epoch-based RCU. Scale dedup capacity with deployment. Add 32-bit timestamp overflow
+>   assertion. Tighten free tier wall time to 10s. Use secret_env for webhook secret.
+>   Scale event log channel capacity. Fix pagination to use cursor-only for streaming.
+>   Decouple trial expiry from PeriodRoller. Add rate limit on backfill API. Complete
+>   glossary. Add app_id to dedup key. Add graceful metering degradation under memory
+>   pressure. Add plan version rollback. Add concurrent config reload safety (RwLock).
+>   Add storage quota 60-second enforcement gap mitigation.
 > - v2.1 (2026-03-30): Address review feedback. Fix TOCTOU in ConcurrencyGuard (CAS loop),
 >   pack token bucket state into single AtomicU64, correct memory orderings for ARM,
 >   add SQLite write batching strategy, remove hash chain in favor of external anchoring,
@@ -209,10 +225,18 @@ newest-wins semantics. `count_unique` uses a HyperLogLog sketch, not an atomic c
 | `subrequests` | count | network | sum | `op_fetch` call counter |
 | `db_reads` | count | database | sum | `op_db_find`/`op_db_get` counter |
 | `db_writes` | count | database | sum | `op_db_insert`/`op_db_update`/`op_db_delete` counter |
-| `db_storage_bytes` | bytes | storage | latest | `stat()` on SQLite file (sampled every 60s) |
+| `db_storage_bytes` | bytes | storage | latest | `stat()` on SQLite file (sampled every 60s) + write-time estimate |
 | `kv_reads` | count | database | sum | `op_kv_get`/`op_kv_list` counter |
 | `kv_writes` | count | database | sum | `op_kv_set`/`op_kv_delete` counter |
-| `kv_storage_bytes` | bytes | storage | latest | `stat()` on KV file (sampled every 60s) |
+| `kv_storage_bytes` | bytes | storage | latest | `stat()` on KV file (sampled every 60s) + write-time estimate |
+
+**Storage quota enforcement gap mitigation:** Storage is sampled via `stat()` every 60s.
+To close the gap: (1) each write op atomically adds estimated bytes to a
+`storage_write_accumulator` (AtomicU64); enforcement uses `last_sampled + accumulator`.
+(2) Accumulator resets on each `stat()` sample. (3) Estimates over-count (include page
+overhead); deletes don't decrement (corrected by next sample). (4) When estimated size
+crosses 90% of quota, an immediate `stat()` is triggered. This gives per-write
+enforcement granularity with the 60s sample as the source of truth.
 
 **Custom resources** are declared in config and tracked via the same pipeline:
 
@@ -241,12 +265,33 @@ recorded regardless of whether limits exist. This ensures:
 | **Cold** — Event log | ~100 ms | Append-only file | Audit trail, billing replay |
 
 **Idempotency:** Every usage delta carries an `idempotency_key` (typically
-`{request_id}_{resource}`). A bounded LRU deduplication set (capacity: 1M keys,
-TTL: 24 hours) tracks seen keys. Duplicates are silently dropped at the hot tier.
-The event log also stores the key for cold-tier deduplication during replay.
+`{app_id}_{request_id}_{resource}` — the `app_id` prefix prevents cross-app
+dedup collisions). A bounded LRU deduplication set tracks seen keys. Duplicates
+are silently dropped at the hot tier. The event log also stores the key for
+cold-tier deduplication during replay.
 
-**Backpressure:** The event log enqueue is a bounded channel (capacity: 10,000). If the
-channel is full (event log writer is slow), the metering pipeline:
+**Dedup capacity sizing:** The default 1M entries cycles through in ~6.7 seconds
+at 10K unique keys/second (15 resources * ~667 req/s), rendering the 24h TTL
+meaningless at high throughput — eviction is driven by LRU capacity, not TTL.
+Operators **must** scale `dedup_capacity` with their deployment:
+
+| Throughput | Recommended Capacity | Memory (~80 bytes/entry) |
+|---|---|---|
+| < 1K req/s | 1,000,000 (default) | ~80 MB |
+| 1K-5K req/s | 5,000,000 | ~400 MB |
+| 5K-10K req/s | 10,000,000 | ~800 MB |
+| > 10K req/s | `throughput * 15 * 120` (2-minute window) | Scale accordingly |
+
+The TTL serves as a secondary eviction policy for low-throughput deployments where
+the LRU capacity is not reached. At high throughput, the effective dedup window
+equals `capacity / (req_per_second * avg_resources_per_request)`.
+
+**Backpressure:** The event log enqueue is a bounded channel. The default capacity of
+10,000 fills in ~67ms at 150K events/s peak (10K req/s * 15 resources). Operators
+should size `channel_capacity` based on expected peak throughput and acceptable drop
+rate. A recommended formula: `channel_capacity = peak_events_per_second * flush_interval_ms / 1000 * 2` (2x headroom). For 10K req/s with 100ms flush:
+`150000 * 0.1 * 2 = 30,000`. If the channel is full (event log writer is slow), the
+metering pipeline:
 1. Still updates atomic counters (enforcement is never delayed)
 2. Drops the event with an `event_log_drop` counter increment
 3. Logs a warning with the dropped event's key (recoverable from warm tier)
@@ -328,6 +373,20 @@ impl TokenBucket {
 Refill-and-consume is a single CAS, eliminating the TOCTOU race. This follows
 Cloudflare's rate limiter and Linux kernel token bucket patterns.
 
+**32-bit timestamp overflow:** The lower 32 bits store epoch seconds as `u32`, wrapping
+at 2106-02-07. A startup assertion must verify:
+
+```rust
+fn assert_timestamp_safe() {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    assert!(now < (u32::MAX as u64 - 365 * 86400),
+        "System clock within 1 year of u32 epoch overflow (2106). \
+         Migrate token bucket to 64-bit timestamps.");
+}
+```
+
+Checked at startup; `timestamp_overflow_warning` alert fires if within 5 years.
+
 ### 2.8 Policies
 
 A policy defines enforcement behavior at configurable thresholds:
@@ -399,6 +458,13 @@ can be done per-app or in bulk:
 PUT  /v1/_admin/apps/{id}/plan         -- Single app migration
 POST /v1/_admin/plans/{name}/migrate   -- Bulk: migrate all apps on this plan to new version
 ```
+
+**Plan version rollback:** Apps can be rolled back to a previous version via
+`PUT /v1/_admin/apps/{id}/plan { "plan": "pro", "version": 1 }` (single) or
+`POST /v1/_admin/plans/{name}/migrate { "from_version": 2, "to_version": 1 }` (bulk).
+Rollback behaves like a plan change: limits apply immediately, token buckets reinitialize,
+`plan.changed` webhook fires with `reason: "version_rollback"`. Previous versions must exist
+in config or SQLite `plan_versions` table; otherwise 409.
 
 **Per-app overrides:** Individual quotas can be overridden without creating a custom plan:
 
@@ -596,7 +662,7 @@ max_apps = 3
 [plans.free.quotas]
 cpu_ms              = { max = 10000,          period = "monthly",      policy = "warn_then_block" }
 cpu_ms_per_request  = { resource = "cpu_ms",  max = 10,               period = "per_request",  policy = "hard_kill" }
-wall_ms_per_request = { resource = "wall_ms", max = 30000,            period = "per_request",  policy = "hard_kill" }
+wall_ms_per_request = { resource = "wall_ms", max = 10000,            period = "per_request",  policy = "hard_kill" }
 requests            = { max = 100000,         period = "monthly",     policy = "warn_then_block" }
 requests_daily      = { resource = "requests", max = 10000,           period = "daily",        policy = "warn_then_block" }
 egress_bytes        = { max = 1000000000,     period = "monthly",     policy = "warn_then_block" }
@@ -667,7 +733,7 @@ plan = "free"
 requests = { max = 200000 }
 
 [apps.my_blog.spending]
-limit_usd = 0.00
+limit = 0.00                      # Currency inferred from app (or billing.default_currency)
 action = "block"
 auto_resume = true
 
@@ -675,7 +741,7 @@ auto_resume = true
 
 [webhooks]
 url = "https://example.com/appbase-events"
-secret = "whsec_..."                           # HMAC-SHA256 signing secret
+secret_env = "APPBASE_WEBHOOK_SECRET"          # Env var containing HMAC-SHA256 signing secret
 events = ["quota.*", "spending.*", "billing.*"] # Event name prefix matching
 timeout_ms = 10000
 max_retries = 5
@@ -694,13 +760,18 @@ enabled = true
 retention_days = 90
 max_size_mb = 1024
 flush_interval_ms = 100        # Batch write interval
-channel_capacity = 10000       # Bounded async channel size
+channel_capacity = 30000       # Bounded async channel; size per peak throughput (see 2.5)
 ```
 
 ### 3.2 Configuration Validation Rules
 
 Validated at startup and on hot reload. Failures are fatal at startup; rejected on reload
 with a warning log (old config remains active).
+
+**Concurrent reload safety:** Config is behind `RwLock<Config>`. Request path holds a
+read guard (cheap, concurrent). Reload acquires a write guard, atomically swapping the
+entire config (no partial visibility). Concurrent reloads are serialized; a
+reload-in-progress flag prevents SIGHUP from queueing unbounded reloads.
 
 **Hot reload behavior** (`POST /v1/_admin/config/reload` or `SIGHUP`):
 - New plans: added to the registry immediately
@@ -718,7 +789,7 @@ with a warning log (old config remains active).
 | V3 | Quota `max` must be a positive integer | Invalid max value |
 | V4 | Rate limit `burst` must be >= `max_per_second` | Burst must be >= sustained rate |
 | V5 | Plan `version` must be a positive integer | Invalid plan version |
-| V6 | `spending.limit_usd` must be >= 0 | Negative spending limit |
+| V6 | `spending.limit` must be >= 0 | Negative spending limit |
 | V7 | Alert thresholds must be in [1, 100], sorted ascending, no duplicates | Invalid thresholds |
 | V8 | Entitlement keys must match `^[a-z][a-z0-9_]*$` | Invalid entitlement key |
 | V9 | Resource names must match `^[a-z][a-z0-9_]*$` | Invalid resource name |
@@ -758,14 +829,15 @@ REQUEST PATH (top to bottom):
     -> Quota Enforcer + inline spend check        -> 429 / warn headers
     -> V8 Isolate Execution (CPU/wall watchdog)   -> 503 on limit
     -> Meter Recorder (atomic counters + inline spend + event log enqueue)
-    -> Response Header Injector (X-Quota-*, RateLimit-*, X-CPU-*)
+    -> Response Header Injector (X-Quota-*, RateLimit/RateLimit-Policy, X-CPU-*)
     -> Concurrency Guard Drop (decrement gauge)
   HTTP Response
 
 BACKGROUND SERVICES:
-  Usage Flusher (5s), Event Logger, Period Roller (double-buffered),
+  Usage Flusher (5s), Event Logger, Period Roller (double-buffered, epoch-reclaimed),
   Storage Sampler (60s), Spending Reconciler (10s), Alert Dispatcher,
-  Dedup Janitor (hourly), Dunning Manager (12.8)
+  Dedup Janitor (hourly), Dunning Manager (12.8), TrialManager (60s),
+  MemoryWatchdog (5s)
 
 STORAGE LAYER:
   Atomic Counters (per-app per-resource), Token Buckets (packed AtomicU64),
@@ -779,7 +851,7 @@ STORAGE LAYER:
 ```
 Request completes -> Build UsageDelta { request_id, app_id, timestamp, deltas[] }
   For each (resource, value):
-    1. Dedup check: idempotency_key = "{req_id}_{resource}"
+    1. Dedup check: idempotency_key = "{app_id}_{req_id}_{resource}"
     2. counter[app][resource].fetch_add(value, Release)      ~10ns
     3. spend_accumulator[app].fetch_add(delta_cents, Release)
   Enqueue UsageDelta to event_log_channel (bounded mpsc, 10K; drop on full)
@@ -798,14 +870,26 @@ For each affected app (lock-free):
 1. Allocate new counter set ("buffer B") for the new period
 2. Atomically swap the active buffer pointer (`AtomicPtr` CAS) -- new requests
    immediately write to buffer B. No 503, no pause, no lock.
-3. Read final values from old buffer A (safe: no new writes after swap)
-4. INSERT snapshot into usage_history, update period metadata
-5. Dispatch `billing.period_end` webhook
-6. If spend-blocked and `auto_resume=true`: unblock
+3. **Epoch-based reclamation (drain in-flight writers):** After the swap, in-flight
+   requests may still write to buffer A. We use `crossbeam-epoch` for safe reclamation:
+   - Each request pins the epoch before loading the active buffer pointer.
+   - The rollover thread swaps the pointer, reads final values from old buffer A, then
+     calls `guard.defer_destroy()` — the old buffer is freed only after all threads
+     pinned in the prior epoch have unpinned (completed their request).
+   - **Alternative (simpler):** drain-and-wait: sleep for `2 * max_request_latency`
+     after swap. Bounded data loss (a few straggler writes) recoverable from event log.
+4. Read final values from old buffer A (safe: all in-flight writers drained per step 3)
+5. INSERT snapshot into usage_history, update period metadata
+6. Dispatch `billing.period_end` webhook
+7. If spend-blocked and `auto_resume=true`: unblock
 
-The `AtomicPtr` swap is a single instruction. In-flight requests may write to old or
-new buffer -- both are handled correctly. For `calendar_month`, rollover processes apps
-in batches of 100 with 10ms sleep to avoid SQLite write spikes.
+**AtomicPtr reclamation safety:** Raw `AtomicPtr::swap` without reclamation causes
+use-after-free. `crossbeam-epoch` provides lock-free RCU: request threads `pin()` on
+entry, `unpin()` on exit (RAII). `defer_destroy` defers deallocation until all prior-epoch
+threads complete.
+
+For `calendar_month`, rollover processes apps in batches of 100 with 10ms sleep to
+avoid SQLite write spikes.
 
 ### 4.4 SQLite Write Strategy at Scale
 
@@ -858,7 +942,7 @@ Data loss window: at most `flush_interval` (5 seconds) of counter updates. The e
 ```json
 {
   "event_id": "evt_01JQRA7XYZABC123",
-  "idempotency_key": "req_01JQRA7XYZ_cpu_ms",
+  "idempotency_key": "my_todo_req_01JQRA7XYZ_cpu_ms",
   "app_id": "my_todo",
   "resource": "cpu_ms",
   "value": 4,
@@ -878,7 +962,7 @@ Data loss window: at most `flush_interval` (5 seconds) of counter updates. The e
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `event_id` | ULID | Yes | Globally unique, sortable identifier |
-| `idempotency_key` | String | Yes | Deduplication key (unique per resource per request) |
+| `idempotency_key` | String | Yes | Deduplication key (`{app_id}_{request_id}_{resource}`; app_id prefix prevents cross-app collision) |
 | `app_id` | String | Yes | Tenant identifier |
 | `resource` | String | Yes | Resource name (must match defined resource) |
 | `value` | u64 | Yes | Consumption amount (>= 0, integer — fractional ms stored as microseconds) |
@@ -997,7 +1081,7 @@ default_alert_thresholds = [50, 75, 90, 100]
 
 # Per-app override
 [apps.my_blog.spending]
-limit_usd = 50.00                # Maximum spend per billing period
+limit = 50.00                    # In app's currency (or billing.default_currency)
 action = "block"                  # What happens at 100%
 auto_resume = true                # Resume at next period?
 alert_thresholds = [25, 50, 75, 100]  # Override default thresholds
@@ -1100,11 +1184,19 @@ X-Plan: pro                       X-Plan-Version: 1
 X-Quota-Resource: requests        X-Quota-Used: 42
 X-Quota-Limit: 10000000          X-Quota-Remaining: 9999958
 X-Quota-Reset: 2026-04-01T00:00:00Z
-RateLimit-Limit: 1000            RateLimit-Remaining: 997      RateLimit-Reset: 3
+RateLimit: limit=1000, remaining=997, reset=3
+RateLimit-Policy: 1000;w=1;burst=5000
 X-Enforcement-Mode: dry_run      # Only present if not "enforce"
 ```
 
 `X-Quota-*` shows the most constrained resource (lowest `remaining / limit` ratio).
+
+**RateLimit header convention:** Per
+[draft-ietf-httpapi-ratelimit-headers-10](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/):
+`RateLimit` is a combined field (`limit`, `remaining`, `reset` in seconds);
+`RateLimit-Policy` describes the policy (`<limit>;w=<window>[;burst=<burst>]`).
+The older separate `RateLimit-Limit`/`-Remaining`/`-Reset` headers are **not** used.
+`X-Quota-*` headers are Appbase-specific (no IETF draft covers quota headers).
 
 ### 8.2 Warning Headers
 
@@ -1148,7 +1240,7 @@ HTTP headers: `Retry-After: 86400` (seconds until period reset)
 {
   "jsonrpc": "2.0",
   "error": {
-    "code": -32029,
+    "code": -32030,
     "message": "Rate limit exceeded",
     "data": {
       "type": "rate_limited",
@@ -1163,9 +1255,10 @@ HTTP headers: `Retry-After: 86400` (seconds until period reset)
 HTTP headers: `Retry-After: 1`
 
 Other error types follow the same JSON-RPC 2.0 structure with `data.type` discriminator:
-- **Spending limit (429):** `data.type = "spending_limit"` with `current_spend_usd`, `limit_usd`, `auto_resume`, `period_end`
-- **Entitlement denied (403):** `data.type = "entitlement_denied"` with `feature`, `plan`, `required_plans`, `upgrade_url`
-- **Per-request limit (503):** `data.type = "execution_limit"` with `resource`, `used_ms`, `limit_ms`
+- **Spending limit (429):** code `-32031`, `data.type = "spending_limit"` with `current_spend`, `limit`, `currency`, `auto_resume`, `period_end`
+- **Concurrency limit (429):** code `-32032`, `data.type = "concurrency_limit"` with `current`, `limit`
+- **Entitlement denied (403):** code `-32033`, `data.type = "entitlement_denied"` with `feature`, `plan`, `required_plans`, `upgrade_url`
+- **Per-request limit (503):** code `-32034`, `data.type = "execution_limit"` with `resource`, `used_ms`, `limit_ms`
 
 ### 8.4 Error Code Catalog
 
@@ -1174,19 +1267,18 @@ All error codes used by the quota/metering system:
 | Code | HTTP | Type | Description |
 |---|---|---|---|
 | `-32029` | 429 | `quota_exceeded` | Monthly/daily quota reached |
-| `-32029` | 429 | `rate_limited` | Token bucket exhausted |
-| `-32029` | 429 | `spending_limit` | Spending limit reached |
-| `-32029` | 429 | `concurrency_limit` | Max concurrent requests |
-| `-32030` | 403 | `entitlement_denied` | Feature not available on plan |
-| `-32031` | 503 | `execution_limit` | Per-request CPU/wall limit (kill) |
+| `-32030` | 429 | `rate_limited` | Token bucket exhausted |
+| `-32031` | 429 | `spending_limit` | Spending limit reached |
+| `-32032` | 429 | `concurrency_limit` | Max concurrent requests |
+| `-32033` | 403 | `entitlement_denied` | Feature not available on plan |
+| `-32034` | 503 | `execution_limit` | Per-request CPU/wall limit (kill) |
 
-Note: The previous `period_rollover` error code (-32031/503) is eliminated by the
-double-buffered rollover design (Section 4.3). Rollover no longer causes any
-request failures.
+Note: The previous `period_rollover` error code is eliminated by the double-buffered
+rollover design (Section 4.3). Rollover no longer causes any request failures.
 
 All codes are within the JSON-RPC 2.0 implementation-defined server error range
-(-32000 to -32099). The `data.type` field disambiguates errors sharing the same code.
-Clients should use `data.type` for programmatic handling, not the numeric code alone.
+(-32000 to -32099). Each error type has a distinct code for unambiguous programmatic
+handling. The `data.type` field provides a human-readable discriminator.
 
 **Multiple simultaneous violations:** When multiple quotas are violated at the same time,
 the enforcer returns the error for the most critical violation (highest-severity policy
@@ -1218,21 +1310,26 @@ All admin endpoints require authentication via scoped API keys (see Section 10).
 Destructive operations require `X-Confirm: true` header. Responses are JSON with a
 standard envelope:
 
+**Offset-paginated endpoints** (small, bounded collections like apps, plans):
 ```json
 {
-  "data": {},
-  "meta": {
-    "total": 42,
-    "limit": 20,
-    "offset": 0,
-    "next_cursor": "...",
-    "has_more": true
-  },
-  "warnings": [
-    "App my_blog is now over quota for requests (200000/100000)"
-  ]
+  "data": [],
+  "meta": { "total": 42, "limit": 20, "offset": 0, "has_more": true },
+  "warnings": []
 }
 ```
+
+**Cursor-paginated endpoints** (unbounded/streaming like events, transactions):
+```json
+{
+  "data": [],
+  "meta": { "limit": 100, "next_cursor": "evt_01JQRA7XYZ", "has_more": true },
+  "warnings": []
+}
+```
+
+Each endpoint uses **one** pagination style, never both. The `meta` shape indicates
+which style is in use. See Section 9.9 for details.
 
 **Concurrency control:** Mutating endpoints use optimistic concurrency via `ETag`/
 `If-Match` headers. Example:
@@ -1334,27 +1431,34 @@ Supported formats: `csv`, `json`, `jsonl` (newline-delimited JSON).
 
 ### 9.9 Pagination
 
-List endpoints support two pagination modes:
+Each endpoint uses exactly **one** pagination style, determined by the nature of its data.
+Responses never mix offset and cursor fields.
 
-**Offset-based** (simple, for small datasets):
+**Offset-based** (bounded, small collections):
 ```
 GET /v1/_admin/apps?limit=20&offset=40&sort=app_id&order=asc
+Response meta: { "total": 42, "limit": 20, "offset": 40, "has_more": false }
 ```
+Used by: `/apps`, `/plans`, `/keys`, `/exchange_rates`.
 
-**Cursor-based** (stable, for large/streaming datasets):
+**Cursor-based** (unbounded, append-only, or streaming):
 ```
 GET /v1/_admin/apps/{id}/events?limit=100&cursor=evt_01JQRA7XYZ
-Response: { "data": [...], "next_cursor": "evt_01JQRB8ABC", "has_more": true }
+Response meta: { "limit": 100, "next_cursor": "evt_01JQRB8ABC", "has_more": true }
 ```
+Used by: `/events`, `/wallet/transactions`, `/usage/history`, `/export/*`,
+`/webhooks/failed`, `/reconciliation`.
 
-Event log queries always use cursor-based pagination (offset is unreliable on append-only
-data). The cursor is an opaque string (typically the last event_id).
+The cursor is an opaque string (typically the last event_id or ULID). Offset-based
+pagination is not supported on cursor endpoints (offset on append-only data is
+unreliable and produces inconsistent results under concurrent writes).
 
 ### 9.10 Health Check Response
 
 Returns `status`, `version`, `uptime_seconds`, and per-component health (rate_limiter,
 usage_flusher, event_logger, period_roller, spending_monitor, storage_sampler,
-webhook_dispatcher, dunning_manager) each with `status` and component-specific metrics.
+webhook_dispatcher, dunning_manager, trial_manager, memory_watchdog) each with
+`status` and component-specific metrics.
 
 ---
 
@@ -1398,9 +1502,15 @@ grace period (default: 24h, configurable via `key_rotation_grace_hours`).
 
 ### 10.6 Key Format
 
-Prefix `abk_` + 32 random bytes (base62). Stored as bcrypt hashes. Plaintext shown
-once at creation. Every admin API call is audit-logged (timestamp, key ID, role,
-endpoint, parameters, status, IP).
+Prefix `abk_` + 32 random bytes (base62). Stored as `SHA-256(key)` hashes.
+
+**Why SHA-256, not bcrypt:** API keys are 32 random bytes (192 bits entropy in base62) —
+not human passwords, cannot be brute-forced. bcrypt at ~10ms/hash = 10 CPU-s/s at 100
+req/s. SHA-256 on high-entropy input is pre-image resistant and adds < 1 us per lookup.
+This follows Stripe, GitHub, and AWS for API key verification.
+
+Plaintext is shown once at creation and never stored. Every admin API call is
+audit-logged (timestamp, key ID, role, endpoint, parameters, status, IP).
 
 ---
 
@@ -1940,7 +2050,7 @@ impl ConcurrencyGuard {
         loop {
             let current = gauge.load(Ordering::Acquire);
             if current >= limit { return Err(ConcurrencyExceeded); }
-            match gauge.compare_exchange_weak(
+            match gauge.compare_exchange(
                 current, current + 1, Ordering::AcqRel, Ordering::Acquire,
             ) {
                 Ok(_) => return Ok(Self { gauge }),
@@ -1954,8 +2064,9 @@ impl Drop for ConcurrencyGuard {
 }
 ```
 
-`compare_exchange_weak` ensures increment only succeeds if gauge unchanged since the
-limit check -- no transient over-limit state. `Drop` ensures decrement on panic/cancel.
+`compare_exchange` (strong) is used instead of `_weak`. On current ARM (LDXR/STXR),
+`_weak`'s theoretical advantage does not materialize — both emit the same loop. Strong
+avoids spurious retries that buy nothing. `Drop` ensures decrement on panic/cancel.
 
 ### 18.6 First Boot
 
@@ -2011,7 +2122,21 @@ The quota/metering system must impose minimal overhead on the request hot path:
 For context: V8 isolate dispatch typically takes 50-500 us, and actual JS execution
 takes 1-100 ms. The metering overhead is < 0.1% of request latency.
 
-### 18.10 Trial Periods
+### 18.10 Graceful Metering Degradation Under Memory Pressure
+
+The metering pipeline degrades gracefully under memory pressure rather than crashing:
+
+| Level | Trigger (RSS) | Response |
+|---|---|---|
+| Normal | < 80% limit | Full pipeline |
+| Warning | >= 80% | Shrink dedup LRU to 50%; log warning |
+| Critical | >= 90% | Shrink dedup to 10%; disable event log enqueue; stop HyperLogLog |
+| Emergency | >= 95% | Disable dedup (accept double-counting); counters + SQLite only |
+
+`MemoryWatchdog` checks RSS every 5s (`[server] memory_limit_mb = 2048`). Degradation is
+automatic/reversible. `appbase_memory_pressure_level` gauge tracks level (0-3).
+
+### 18.11 Trial Periods
 
 Trial periods are supported via time-limited plan assignments:
 
@@ -2022,26 +2147,38 @@ trial_ends_at = "2026-04-30T23:59:59Z"     # Auto-downgrade after this
 trial_downgrade_to = "free"                  # Plan to switch to
 ```
 
-When `trial_ends_at` passes, the PeriodRoller automatically:
-1. Changes the app's plan to `trial_downgrade_to`
-2. Dispatches a `plan.changed` webhook with `reason: "trial_expired"`
-3. Logs the transition
+Trial expiry is handled by a **dedicated TrialManager background task**, not the
+PeriodRoller. The PeriodRoller runs on billing period boundaries (monthly/daily),
+which may not align with trial end dates. The TrialManager checks trial deadlines
+every 60 seconds independently:
 
-### 18.11 Comparison with Industry Platforms
+1. Scan apps where `trial_ends_at <= now` and `trial_active = true`
+2. Change the app's plan to `trial_downgrade_to`
+3. Set `trial_active = false` to prevent re-processing
+4. Dispatch a `plan.changed` webhook with `reason: "trial_expired"`
+5. Log the transition
+
+A `trial.expiring_soon` webhook fires 72 hours before expiry (checked once per hour).
+
+### 18.12 Comparison with Industry Platforms
 
 | Capability | Appbase v2 | CF Workers | AWS Lambda | Vercel |
 |---|---|---|---|---|
-| Per-request CPU limit | Yes (kill) | Yes | No (billed) | No |
-| Spending limits | Yes (inline, real-time) | No | Budgets (~6h delay) | Yes (manual resume) |
-| Hard cap option | Yes (any plan) | Free tier only | No | With spend mgmt |
-| Prepaid credits | Yes (wallets) | No | Reserved pricing | No |
+| Per-request CPU limit | Yes (kill) | Yes (10ms free/30s paid) | 15 min max timeout (billed) | 10s-300s (plan-dependent) |
+| Spending limits | Yes (inline, real-time) | No | Budgets (~12-24h delay, alerting only, no hard stop) | Yes (requires manual per-project unpause) |
+| Hard cap option | Yes (any plan) | Free tier only | No (Budgets are alerts, not enforcement) | With spend mgmt (manual resume) |
+| Prepaid credits | Yes (wallets) | No | Savings Plans / Reserved | No |
 | Dunning | Yes | N/A | N/A | Automatic |
-| Usage event log | Yes (ext. anchored) | Analytics only | CloudWatch | No |
+| Usage event log | Yes (ext. anchored) | Workers Analytics (sampled) | CloudWatch Logs | No |
 | Custom resources | Yes (plugin SDK) | No | No | No |
-| RBAC for admin API | Yes (scoped keys) | API tokens | IAM | Team roles |
-| Per-endpoint metering | Yes | No | No | No |
-| Committed use discounts | Yes | No | Savings Plans | No |
+| RBAC for admin API | Yes (scoped keys) | API tokens | IAM policies | Team roles (coarse) |
+| Per-endpoint metering | Yes | No | Per-function only | No |
+| Committed use discounts | Yes | No | Savings Plans / Compute SP | No |
 | Dry-run/shadow mode | Yes | No | No | No |
+
+*AWS Lambda: 15-min max timeout, billed per 1ms. AWS Budgets: 12-24h delay, SNS alerts
+only (no hard enforcement without custom integration). Vercel Spend Mgmt: pauses
+deployments at limit, requires manual per-project unpause (no auto-resume).*
 
 ---
 
@@ -2050,19 +2187,83 @@ When `trial_ends_at` passes, the PeriodRoller automatically:
 ### 19.1 Motivation
 
 Customers in different regions expect to see prices and invoices in their local currency.
-Stripe, Lago, and Orb all support multi-currency billing.
+Stripe, Lago, and Orb all support multi-currency billing. Without multi-currency,
+international customers see USD amounts that do not match their payment statements,
+creating confusion and support burden.
 
-### 19.2 Design
+### 19.2 Design Principles
 
-Internal accounting uses the default currency (USD cents). Conversion happens at display
-time (invoices, spend estimates) using the rate at generation time, and at payment time
-(handled by Stripe/Lago). Per-app currency: `[apps.eu_customer] currency = "eur"`.
-Exchange rates managed via `[billing.exchange_rates]` in config or
-`PUT /v1/_admin/exchange_rates`.
+1. **Single internal ledger currency:** All metering, counters, and spend accumulators
+   operate in the platform's base currency (configurable, default: USD cents). This
+   avoids floating-point drift from repeated conversions.
+2. **Conversion at the boundary:** Currency conversion occurs at two points only:
+   - **Display time** (invoice preview, spend estimate API, dashboard) — uses the
+     rate locked at invoice generation time.
+   - **Payment time** — handled by the external payment processor (Stripe/Lago), which
+     applies its own FX rate at charge time.
+3. **Per-app currency assignment:** Each app has an optional `currency` field. If omitted,
+   `billing.default_currency` applies.
 
-Invoices record the `exchange_rate` used. Spend limits and credits are denominated in
-the app's currency. Rate updates do not retroactively change existing invoices.
-Cross-currency credit transfers are not supported in v2.
+### 19.3 Configuration
+
+```toml
+[billing]
+default_currency = "usd"
+
+# Exchange rates: base currency -> target currency multiplier.
+# Updated via config or Admin API. Rates are point-in-time snapshots.
+[billing.exchange_rates]
+eur = 0.92
+gbp = 0.79
+jpy = 149.50
+last_updated = "2026-03-30T00:00:00Z"
+
+[apps.eu_customer]
+currency = "eur"
+
+[apps.jp_customer]
+currency = "jpy"
+```
+
+### 19.4 Exchange Rate Management
+
+Rates defined in `[billing.exchange_rates]` or updated via Admin API:
+`GET/PUT /v1/_admin/exchange_rates`, `GET /v1/_admin/exchange_rates/history`.
+Rate updates are audit-logged. Stale rates (> 48h) trigger `exchange_rate_stale` alert.
+Automated FX provider integration (Open Exchange Rates, ECB) is a future enhancement.
+
+### 19.5 Invoice Behavior
+
+For non-default currency apps: (1) calculate line items in base currency, (2) convert
+to app currency at generation-time rate, (3) record both `amount_base_cents` and
+`amount_local` per line, (4) record `exchange_rate` and `rate_timestamp` on invoice.
+
+```json
+{
+  "app_id": "eu_customer", "currency": "eur",
+  "exchange_rate": 0.92, "rate_timestamp": "2026-03-30T00:00:00Z",
+  "line_items": [{ "type": "subscription", "amount_base_cents": 2000, "amount_local": 1840 }],
+  "total_local": 1840
+}
+```
+
+### 19.6 Spend Limits and Credits in Multi-Currency
+
+Spending limits (`limit`) are in the app's currency; the inline accumulator tracks base
+currency internally and converts the limit at each reconciliation tick. Wallet credits
+are in the app's currency; applied at the invoice's locked rate. Cross-currency credit
+transfers are not supported in v2.
+
+### 19.7 Supported Currencies
+
+ISO 4217 currencies accepted by the payment processor. Minimum: USD, EUR, GBP, JPY,
+CAD, AUD, CHF, CNY, INR, BRL. Zero-decimal currencies (JPY, KRW) use integer amounts;
+detected from a built-in ISO 4217 table.
+
+### 19.8 Limitations
+
+Rate updates do not retroactively change existing invoices. FX rounding is toward the
+platform (round up charges, round down credits). Base-currency ledger is source of truth.
 
 ---
 
@@ -2166,6 +2367,13 @@ each with idempotency keys. Options: `apply_to_counters` (default: false for dry
 `apply_to_invoices` (default: false). Closed-period events handled per Section 5.3.
 Requires `admin:events` scope.
 
+**Rate limiting:** The backfill endpoint is rate-limited to prevent accidental counter
+corruption or SQLite write saturation from runaway scripts:
+- **Default:** 10 requests/second, burst 50 (configurable via `[admin.backfill_rate_limit]`)
+- **Max batch size:** 1,000 events per request
+- Exceeding either limit returns 429 with `Retry-After`
+- Each backfill request is audit-logged with event count and affected app_ids
+
 ### 23.3 Re-Rating
 
 `POST /v1/_admin/apps/{id}/invoice/rerate` with `period` and optional `pricing_override`
@@ -2219,20 +2427,50 @@ Extend per-endpoint metering (Section 21) with configurable per-endpoint pricing
 
 | Term | Definition |
 |---|---|
+| **Acquire/Release** | Memory ordering guarantees for atomic operations; Acquire ensures visibility of prior Release writes across CPU cores |
+| **Anniversary billing** | Billing period resets on the customer's signup date each month |
+| **AtomicPtr** | Atomic pointer used for lock-free buffer swaps; requires epoch-based reclamation to prevent use-after-free |
 | **Backfill** | Retroactive insertion of usage events for missed data |
+| **Backpressure** | Flow control mechanism; when the event log channel is full, events are dropped rather than blocking enforcement |
+| **CAS (Compare-And-Swap)** | Atomic read-modify-write operation; the foundation of lock-free token buckets and concurrency guards |
 | **Commitment** | Minimum monthly spend guarantee for discounted rates |
-| **Dedup set** | Bounded LRU cache of idempotency keys |
+| **Concurrency guard** | CAS-based RAII guard that tracks concurrent in-flight requests per app |
+| **Counter floor** | Clamping a counter to zero when a correction would produce a negative value |
+| **Credit (wallet)** | Prepaid monetary unit applied against usage charges before invoicing (FIFO order) |
+| **crossbeam-epoch** | Rust crate for epoch-based memory reclamation; used to safely free old counter buffers after rollover |
+| **Dead letter queue** | Storage for webhook deliveries that failed all retry attempts |
+| **Dedup set** | Bounded LRU cache of idempotency keys (keyed by `{app_id}_{request_id}_{resource}`) |
 | **Digest anchor** | SHA-256 digest stored externally for tamper detection |
-| **Double buffer** | Two counter sets swapped atomically during rollover |
+| **Double buffer** | Two counter sets swapped atomically during rollover, with epoch-based draining of in-flight writers |
+| **Dry-run mode** | Enforcement decisions are computed and logged but never applied; all requests allowed |
 | **Dunning** | Payment failure recovery: grace period, retries, escalation |
 | **Entitlement** | Boolean flag controlling access to a feature |
+| **Epoch-based reclamation** | Memory management technique where freed objects are deferred until all threads from the prior epoch have completed |
+| **Event log** | Append-only file of usage events for audit trail and billing replay |
+| **Gauge** | Atomic counter for instantaneous values (e.g., concurrent connections) that can increment and decrement |
+| **Graduated pricing** | Tiered pricing where each tier's rate applies only to usage within that tier's range |
+| **HyperLogLog** | Probabilistic data structure for approximate distinct counting |
+| **Idempotency key** | Unique identifier (`{app_id}_{request_id}_{resource}`) ensuring each event is counted exactly once |
 | **Inline spend tracking** | Per-request spend estimation via atomic accumulator |
+| **LL/SC** | Load-Linked/Store-Conditional; ARM's mechanism for atomic CAS operations |
 | **Overage** | Usage beyond included amounts, billed per-unit |
 | **Package** | Add-on bundle of quota/entitlements at fixed price |
 | **Plan** | Named bundle of entitlements, quotas, rate limits, policies |
+| **Plan version** | Monotonically increasing integer; apps pin to a version until explicitly migrated |
 | **Policy** | Threshold-action pairs defining enforcement behavior |
-| **Scope** | RBAC permission unit (e.g., `read:usage`) |
-| **Token bucket** | Packed AtomicU64, CAS-based refill + consume |
+| **Proration** | Partial-period billing adjustment when a plan changes mid-cycle |
+| **Quota** | Numeric cap on accumulated resource usage within a time window |
+| **Rate limit** | Throughput cap enforced via token bucket algorithm |
+| **RBAC** | Role-Based Access Control; admin API keys have roles and scopes |
+| **Re-rating** | Recalculating an invoice with updated pricing or corrected usage data |
+| **Resource** | A measurable dimension of consumption (CPU, requests, storage, etc.) |
+| **Scope** | RBAC permission unit (e.g., `read:usage`); follows `action:resource` pattern |
+| **Shadow mode** | Current plan enforced normally while a second plan is evaluated for comparison |
+| **Spending limit** | Per-app cap on total monetary cost per billing period; denominated in the app's currency |
+| **Token bucket** | Rate limiting algorithm; packed into single AtomicU64 with CAS-based refill + consume |
+| **TrialManager** | Dedicated background task (independent of PeriodRoller) that checks and enforces trial expiry |
+| **ULID** | Universally Unique Lexicographically Sortable Identifier; used for event IDs |
+| **WAL** | Write-Ahead Log; SQLite journaling mode for concurrent reads during writes |
 
 ---
 
@@ -2255,6 +2493,8 @@ Extend per-endpoint metering (Section 21) with configurable per-endpoint pricing
 - [Orb — Minimum Commitments](https://docs.withorb.com/guides/concepts/minimum-commitments)
 - [Orb — Event Backfill](https://docs.withorb.com/guides/events-and-metrics/backfill)
 - [Sigstore Rekor Transparency Log](https://docs.sigstore.dev/logging/overview/)
-- [IETF — RateLimit Header Fields (draft-ietf-httpapi-ratelimit-headers)](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/)
+- [IETF — RateLimit Header Fields draft-10 (RateLimit + RateLimit-Policy)](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/10/)
 - [RFC 7231 Section 7.1.3 — Retry-After](https://www.rfc-editor.org/rfc/rfc7231#section-7.1.3)
+- [crossbeam-epoch — Epoch-Based Memory Reclamation](https://docs.rs/crossbeam-epoch/)
+- [ISO 4217 — Currency Codes](https://www.iso.org/iso-4217-currency-codes.html)
 - [Rust Atomics and Locks (Mara Bos) — Chapter 3: Memory Ordering](https://marabos.nl/atomics/memory-ordering.html)
