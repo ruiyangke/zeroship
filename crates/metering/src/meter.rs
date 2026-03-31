@@ -7,7 +7,7 @@
 //! Core resources are accessed via CoreHandles for O(1) fast-path.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
@@ -27,6 +27,8 @@ pub struct AppMeter {
     /// Spending enforcement action, set by billing reconciler, read by enforcer.
     /// 0=Allow, 1=Warn, 2=Degrade, 3=Block
     pub spend_action: AtomicU8,
+    /// Set by rollover before drain wait, checked by flusher to avoid double-counting.
+    pub rolling_over: AtomicBool,
 }
 
 /// Convert core's Aggregation enum to the registry's Aggregation enum.
@@ -63,6 +65,7 @@ impl AppMeter {
             counters: builder.build(),
             core,
             spend_action: AtomicU8::new(0), // Allow
+            rolling_over: AtomicBool::new(false),
         }
     }
 
@@ -77,6 +80,8 @@ impl AppMeter {
                 meter.counters.increment(handle, value);
             }
         }
+        // Sync last_flushed to match restored values so first flush doesn't double-count
+        meter.counters.sync_last_flushed();
         meter
     }
 
@@ -197,6 +202,8 @@ impl MeterRegistry {
                     new_meter.counters.increment(handle, *value);
                 }
             }
+            // Sync last_flushed so first flush doesn't re-flush transferred values
+            new_meter.counters.sync_last_flushed();
             meters.insert(app_id.to_string(), Arc::new(new_meter));
         } else {
             meters.insert(

@@ -70,9 +70,11 @@ async fn rollover_all(registry: &MeterRegistry, store: &dyn MeterStore, config: 
     for batch in app_ids.chunks(config.batch_size) {
         let mut old_meters: Vec<(String, Arc<crate::meter::AppMeter>)> = Vec::new();
 
-        // Step 1-2: Swap each app's meter atomically
+        // Step 1-2: Mark old meters as rolling over, then swap atomically
         for app_id in batch {
             if let Some(old) = registry.swap_for_rollover(app_id) {
+                // Set rolling_over BEFORE drain wait so flusher skips this meter
+                old.rolling_over.store(true, std::sync::atomic::Ordering::Release);
                 old_meters.push((app_id.clone(), old));
             }
         }
@@ -81,15 +83,14 @@ async fn rollover_all(registry: &MeterRegistry, store: &dyn MeterStore, config: 
         // held by request handlers should have been dropped.
         tokio::time::sleep(config.drain_wait).await;
 
-        // Step 4-5: Atomically drain remaining deltas from old meters, then archive.
+        // Step 4-5: Read remaining deltas from old meters, then archive.
         //
-        // We use swap_all() instead of snapshot() to prevent a race with the flusher:
-        // if the flusher grabbed an Arc to the old meter before the swap, its swap_all()
-        // and our swap_all() cannot both get the same values -- one gets them, the other
-        // gets zeros. This eliminates double-counting that would occur if snapshot()
-        // read values that the flusher also read and flushed.
+        // We use pending_deltas() (non-destructive read) because the old meter is
+        // removed from the registry (no new writes) and marked rolling_over (flusher
+        // skips it). This avoids the double-counting race where both flusher and
+        // rollover could read the same values via swap_all().
         for (app_id, old_meter) in &old_meters {
-            let final_deltas = old_meter.counters.swap_all();
+            let final_deltas = old_meter.counters.pending_deltas();
 
             // Flush remaining deltas from old meter to warm tier before archiving.
             // Any increments since the last flusher tick would otherwise be lost.

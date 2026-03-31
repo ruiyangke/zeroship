@@ -187,20 +187,38 @@ impl CounterRegistry {
         map
     }
 
-    /// Read current values and compute deltas since last flush.
-    /// Non-destructive — counters keep accumulating for enforcer/reconciler.
-    /// Used by the periodic flusher to push incremental deltas to the warm tier.
-    pub fn flush_deltas(&self) -> HashMap<String, u64> {
+    /// Phase 1: Compute deltas since last flush. Does NOT advance watermark.
+    /// Call `commit_flush()` after the store write succeeds.
+    pub fn pending_deltas(&self) -> HashMap<String, u64> {
         let mut deltas = HashMap::new();
         for (i, meta) in self.resources.iter().enumerate() {
             let current = self.counters[i].load(Ordering::Acquire);
-            let last = self.last_flushed[i].swap(current, Ordering::AcqRel);
+            let last = self.last_flushed[i].load(Ordering::Acquire);
             let delta = current.saturating_sub(last);
             if delta > 0 {
                 deltas.insert(meta.name.clone(), delta);
             }
         }
         deltas
+    }
+
+    /// Phase 2: Advance watermark after successful store write.
+    /// Call this ONLY after store.flush() succeeds.
+    pub fn commit_flush(&self) {
+        for i in 0..self.counters.len() {
+            let current = self.counters[i].load(Ordering::Acquire);
+            self.last_flushed[i].store(current, Ordering::Release);
+        }
+    }
+
+    /// Set last_flushed to current counter values.
+    /// Used after crash recovery to prevent re-flushing restored values,
+    /// and after set_plan() counter transfer.
+    pub fn sync_last_flushed(&self) {
+        for i in 0..self.counters.len() {
+            let current = self.counters[i].load(Ordering::Acquire);
+            self.last_flushed[i].store(current, Ordering::Release);
+        }
     }
 
     /// Look up a handle by resource name (for restoring counters from stored values).
