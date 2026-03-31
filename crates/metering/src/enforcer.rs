@@ -90,6 +90,7 @@ pub fn check_quota(meter: &AppMeter, plan: &QuotaPlan) -> QuotaDecision {
 mod tests {
     use super::*;
     use crate::plan::{QuotaPlan, QuotaDef, Period};
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn allow_under_limit() {
