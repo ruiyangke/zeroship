@@ -1,8 +1,14 @@
 # Appbase Quota, Metering & Billing System — v3 Design
 
-> **Status:** Draft v3.1 | **Last Updated:** 2026-03-31 | **Author:** Platform Team
+> **Status:** Draft v3.2 | **Last Updated:** 2026-03-31 | **Author:** Platform Team
 >
 > **Revision History:**
+> - v3.2 (2026-03-31): Point-of-use quota enforcement. Resource quotas (db.reads, kv.writes,
+>   etc.) are checked by the plugin at the point of use, not by a blanket pre-dispatch check.
+>   Router only checks throughput gates (rate limit, concurrency, spending). Adds PluginQuota
+>   trait to core. Updates §4.1 pipeline, §4.2 enforcement model, §2.7 quota semantics.
+>   Breaks enforcement→metering dependency (check_quota takes HashMap, not AppMeter).
+>   Moves billing traits (SpendAction, MeteringSnapshot, SpendEnforcement) to core::billing.
 > - v3.1 (2026-03-31): Reflect actual crate split. Six crates now built: plan (pure types),
 >   core (Plugin trait + config), metering (counters + flush + rollover + event log),
 >   enforcement (rate limit + quota + concurrency), billing (pricing + spending limits),
@@ -321,9 +327,10 @@ impl CounterRegistry {
 2. After all plugins load, the registry is **frozen** (no further registration).
 3. Config references resource names as strings -- core and plugin resources are
    interchangeable in `[plans.*.quotas]` and `[pricing.*]` sections.
-4. Plugins record usage via `PluginContext`, which holds pre-resolved `ResourceHandle`s:
+4. Plugins check quota and record usage via `PluginContext`:
    ```rust
-   ctx.meter.increment("db.reads", 1);           // Internally uses ResourceHandle
+   ctx.quota.check("db.writes")?;                 // Check BEFORE using
+   ctx.meter.increment("db.writes", 1);            // Record AFTER using
    ctx.meter.increment("db.storage_bytes", row_size);
    ```
 
@@ -408,6 +415,29 @@ A quota is a numeric cap on accumulated resource usage within a time window:
 | `daily` | 00:00 UTC | max 100K requests/day |
 | `monthly` | Billing period start | max 10M requests/month |
 | `absolute` | Never (manual only) | max 500MB storage |
+
+**Point-of-use enforcement:** Resource quotas are checked at the point of use by the
+resource owner (the plugin), not by a blanket pre-dispatch sweep. This means:
+- A request that only reads KV is never blocked by a `db.writes` quota
+- Each plugin op calls `ctx.quota.check(resource)?` before doing work
+- If over quota, the op returns an error; the request may still partially succeed
+- The router only checks throughput gates (rate limit, concurrency, spending)
+
+```rust
+/// Defined in core. Implemented per-app by the metering crate.
+pub trait PluginQuota: Send + Sync {
+    /// Check if a resource can be consumed. Err if over quota.
+    fn check(&self, resource: &str) -> Result<(), QuotaDenied>;
+}
+```
+
+**Two enforcement levels:**
+
+| Level | What | Where | When |
+|-------|------|-------|------|
+| **Throughput** | Rate limit, concurrency, spending | Router (pre-dispatch) | Every request |
+| **Resource** | db.writes, kv.reads, ai.tokens | Plugin op (point-of-use) | Per operation |
+| **Per-request** | cpu_ms_per_request, wall_ms_per_request | Watchdog (post-execution) | After V8 returns |
 
 **Soft vs hard quotas:** When `overage` billing is enabled for a plan, monthly quotas
 become "soft" — usage beyond the quota is allowed but billed at overage rates. The
@@ -873,21 +903,34 @@ rejected. Pre-flight validation: `POST /v1/_admin/config/validate` with raw TOML
 ### 4.1 System Overview
 
 ```
-QUOTA/METERING PIPELINE (sync, hot path — no pricing math):
-  HTTP Request                                                   [crates/server]
-    -> Rate Limiter (single-AtomicU64 CAS, 2.8)              -> 429  [crates/enforcement]
-    -> Concurrency Guard (CAS loop, 18.5)                     -> 429  [crates/enforcement]
-    -> Entitlement Checker                                     -> 403  [crates/enforcement]
-    -> Quota Enforcer + spend_action check (1 AtomicU8 load)  -> 429  [crates/enforcement + billing flag]
-    -> V8 Isolate Execution (CPU/wall watchdog)                -> 503  [crates/isolate]
-    -> Meter Recorder (atomic counters + event log enqueue)           [crates/metering]
-    -> Response Header Injector (X-Quota-*, RateLimit/RateLimit-Policy, X-CPU-*)
-    -> Concurrency Guard Drop (decrement gauge)                       [crates/enforcement]
+REQUEST PIPELINE (sync, hot path — no pricing math):
+  HTTP Request                                                        [crates/server]
+    -> Rate Limiter (single-AtomicU64 CAS, §2.8)                -> 429  [crates/enforcement]
+    -> Concurrency Guard (CAS loop, §18.5)                       -> 429  [crates/enforcement]
+    -> spend_action check (1 AtomicU8 load, <1ns)               -> 429  [core::billing flag]
+    -> V8 Isolate Execution                                             [crates/isolate]
+         Plugin ops check quota AT POINT OF USE:
+           ctx.quota.check("db.writes")?  -> Err if over limit          [core::PluginQuota]
+           ctx.meter.increment("db.writes", 1)                          [core::PluginMeter]
+         CPU/wall watchdog kills execution if over per-request limit -> 503
+    -> Record core metrics (requests, cpu, wall, egress, ingress)       [crates/metering]
+    -> Enqueue event to cold tier (mpsc, non-blocking)                  [crates/metering]
+    -> Response Headers (X-CPU-*, RateLimit, X-Plan, X-Quota-Warning)
+    -> Concurrency Guard Drop (decrement gauge)                         [crates/enforcement]
   HTTP Response
+
+ENFORCEMENT MODEL — "check before using":
+  Router checks:     throughput gates (rate limit, concurrency, spending)
+  Plugin ops check:  resource quotas (db.writes, kv.reads, ai.tokens)
+  Post-execution:    per-request limits (cpu_ms_per_request, wall_ms_per_request)
+
+  Resource quotas are NOT checked in a blanket pre-dispatch sweep. Each plugin
+  checks its own quota at the point of use via ctx.quota.check(resource). This
+  means a request that only reads KV is never blocked by a db.writes quota.
 
 CRATE RESPONSIBILITIES (4-layer separation):
   plan        = rules (QuotaPlan, limits, periods, policies)          [crates/plan]
-  enforcement = decisions (allow/warn/deny, rate limit, concurrency)  [crates/enforcement]
+  enforcement = decisions (rate limit, concurrency — pure functions)   [crates/enforcement]
   metering    = counting (atomic counters, flush, rollover, events)   [crates/metering]
   billing     = money (pricing, spending limits, invoices)            [crates/billing]
 
@@ -920,14 +963,24 @@ STORAGE LAYER:
 ### 4.2 Metering Pipeline
 
 ```
-Request completes -> Build UsageDelta { request_id, app_id, timestamp, deltas[] }
-  For each (resource, value):
-    1. Dedup check: idempotency_key = "{app_id}_{req_id}_{resource}"
-    2. counter[app][resource].fetch_add(value, Release)      ~3ns
-       (all resources use CounterRegistry: O(1) index via ResourceHandle, no lock)
-  Enqueue UsageDelta to event_log_channel (bounded mpsc, 30K; drop on full)
-  Background: EventLogger batch-writes to file; UsageFlusher batch-upserts via MeterStore
-  Note: No pricing math on this path. Spend is computed by SpendingReconciler (Section 6).
+During V8 execution (plugin ops):
+  Plugin op (e.g., db.insert):
+    1. ctx.quota.check("db.writes")?     -- check BEFORE using (~10ns)
+    2. Execute the operation               -- do the work
+    3. ctx.meter.increment("db.writes", 1) -- record AFTER using (~3ns)
+
+After V8 execution (router):
+  1. Record core metrics: requests +1, cpu_ms, wall_ms, egress, ingress
+     (via CoreHandles, O(1) fetch_add, no lock)
+  2. Enqueue event to event_log_channel (bounded mpsc, 30K; drop on full)
+
+Background:
+  EventLogger batch-writes to cold tier
+  UsageFlusher batch-upserts via MeterStore (two-phase: pending_deltas + commit_flush)
+  SpendingReconciler reads snapshots, computes cost (Section 6)
+
+Note: No pricing math on the request path. No blanket quota sweep. Each consumer
+checks its own quota at the point of use.
 ```
 
 ### 4.3 Period Rollover — Double-Buffered Design
@@ -1922,21 +1975,34 @@ respond 2xx within 10s, track IDs for 48+ hours, verify HMAC signature.
 | Avoid surprise bills | Spending limits, budget alerts, hard caps on free tier |
 | Access gated features | Clear entitlement error with required plan name |
 
-### 15.3 Plugin Metering SDK
+### 15.3 Plugin Metering & Quota SDK
 
-Plugins record usage via `PluginContext::meter`, which dispatches to the `CounterRegistry`
-via pre-resolved `ResourceHandle`s (O(1) direct index, no lock or hash lookup):
+Plugins check quotas and record usage via `PluginContext`. The pattern is always
+**check before using, record after using**:
 
 ```rust
-// Inside a plugin op — uses pre-resolved ResourceHandle for O(1) access
-ctx.meter.increment("db.reads", 1);           // Never fails, panics, or blocks
-ctx.meter.increment("db.storage_bytes", sz);  // Thread-safe, any async context
-match ctx.meter.quota_available("db.reads") { // Atomic load (Acquire), no I/O
-    QuotaAvailable::Yes(remaining) => { /* proceed */ },
-    QuotaAvailable::No { used, limit } => { /* reject */ },
-    QuotaAvailable::Unlimited => { /* no quota */ },
+// Inside a plugin op (e.g., op_db_insert)
+fn op_db_insert(ctx: &PluginContext, table: &str, data: Value) -> Result<Value> {
+    // 1. Check quota BEFORE doing work
+    ctx.quota.check("db.writes")?;      // Returns Err(QuotaDenied) if over limit
+
+    // 2. Do the work
+    let result = db.insert(table, data)?;
+
+    // 3. Record usage AFTER doing work
+    ctx.meter.increment("db.writes", 1);
+    ctx.meter.increment("db.storage_bytes", data.len() as u64);
+
+    Ok(result)
 }
 ```
+
+**`ctx.quota`** (`PluginQuota` trait): reads the counter + plan, returns `Err` if over quota.
+Single atomic load + comparison, ~10ns. The op can catch this error and return a
+structured JSON-RPC error to the client.
+
+**`ctx.meter`** (`PluginMeter` trait): increments the counter. Never fails, never blocks.
+O(1) fetch_add via name→handle lookup, ~30ns (HashMap lookup + atomic increment).
 
 Resource names must match those declared by `meter_resources()` (Section 2.4.1).
 Attempting to increment an unregistered resource name logs a warning and is a no-op.
