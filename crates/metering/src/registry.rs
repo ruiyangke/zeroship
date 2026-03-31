@@ -96,11 +96,12 @@ impl RegistryBuilder {
 
     /// Freeze the builder into an immutable CounterRegistry.
     pub fn build(self) -> CounterRegistry {
-        let counters: Vec<AtomicU64> = (0..self.resources.len())
-            .map(|_| AtomicU64::new(0))
-            .collect();
+        let n = self.resources.len();
+        let counters: Vec<AtomicU64> = (0..n).map(|_| AtomicU64::new(0)).collect();
+        let last_flushed: Vec<AtomicU64> = (0..n).map(|_| AtomicU64::new(0)).collect();
         CounterRegistry {
             counters: counters.into_boxed_slice(),
+            last_flushed: last_flushed.into_boxed_slice(),
             name_to_index: self.name_to_index,
             resources: self.resources,
         }
@@ -121,6 +122,8 @@ pub struct CoreHandles {
 pub struct CounterRegistry {
     /// Dense array of atomic counters indexed by ResourceHandle.
     counters: Box<[AtomicU64]>,
+    /// Tracks last-flushed value per counter for non-destructive delta computation.
+    last_flushed: Box<[AtomicU64]>,
     /// Name → index mapping for slow-path lookups (enforcer, flusher).
     name_to_index: HashMap<String, usize>,
     /// Resource metadata (for display, flushing).
@@ -169,16 +172,35 @@ impl CounterRegistry {
         map
     }
 
-    /// Swap all counters to zero and return deltas (for flusher).
+    /// Swap all counters to zero and return their values.
+    /// Only used during period rollover when the old meter is no longer receiving writes.
+    /// Also resets last_flushed so no stale tracking remains.
     pub fn swap_all(&self) -> HashMap<String, u64> {
         let mut map = HashMap::with_capacity(self.resources.len());
         for (i, meta) in self.resources.iter().enumerate() {
             let val = self.counters[i].swap(0, Ordering::AcqRel);
+            self.last_flushed[i].store(0, Ordering::Release);
             if val > 0 {
                 map.insert(meta.name.clone(), val);
             }
         }
         map
+    }
+
+    /// Read current values and compute deltas since last flush.
+    /// Non-destructive — counters keep accumulating for enforcer/reconciler.
+    /// Used by the periodic flusher to push incremental deltas to the warm tier.
+    pub fn flush_deltas(&self) -> HashMap<String, u64> {
+        let mut deltas = HashMap::new();
+        for (i, meta) in self.resources.iter().enumerate() {
+            let current = self.counters[i].load(Ordering::Acquire);
+            let last = self.last_flushed[i].swap(current, Ordering::AcqRel);
+            let delta = current.saturating_sub(last);
+            if delta > 0 {
+                deltas.insert(meta.name.clone(), delta);
+            }
+        }
+        deltas
     }
 
     /// Look up a handle by resource name (for restoring counters from stored values).
@@ -208,10 +230,13 @@ impl CounterRegistry {
         self.resources.iter().map(|m| m.name.as_str())
     }
 
-    /// Reset all counters to zero (for period rollover).
+    /// Reset all counters and last-flushed tracking to zero (for period rollover).
     pub fn reset_all(&self) {
         for counter in self.counters.iter() {
             counter.store(0, Ordering::Release);
+        }
+        for lf in self.last_flushed.iter() {
+            lf.store(0, Ordering::Release);
         }
     }
 }

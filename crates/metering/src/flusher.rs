@@ -1,8 +1,10 @@
 //! Warm tier flush loop — periodically writes hot-tier atomic counter deltas
 //! to the MeterStore (persistent storage).
 //!
-//! Uses CounterRegistry::swap_all() to atomically read and reset all counters,
-//! then flushes the deltas to the configured MeterStore adapter.
+//! Uses CounterRegistry::flush_deltas() to non-destructively compute deltas
+//! since the last flush, then writes them to the configured MeterStore adapter.
+//! Counters keep accumulating so the enforcer and reconciler see accurate
+//! running totals via snapshot().
 
 use appbase_core::meter_store::{MeterStore, ResourceDelta};
 use std::sync::Arc;
@@ -12,9 +14,9 @@ use crate::meter::MeterRegistry;
 
 /// Spawn a background task that flushes hot-tier counters to the MeterStore.
 ///
-/// Runs every `interval` (default 5 seconds). Reads each app's atomic counters
-/// via `swap_all()` (atomically read + reset to zero), then calls
-/// `store.flush(app_id, deltas)` with the accumulated values.
+/// Runs every `interval` (default 5 seconds). Computes deltas since the last
+/// flush via `flush_deltas()` (non-destructive), then calls
+/// `store.flush(app_id, deltas)` with the incremental values.
 pub fn spawn_flusher(
     registry: Arc<MeterRegistry>,
     store: Arc<dyn MeterStore>,
@@ -29,14 +31,19 @@ pub fn spawn_flusher(
 }
 
 /// Flush all apps' counters from hot tier to warm tier.
+///
+/// Uses `flush_deltas()` (non-destructive) instead of `swap_all()` so that
+/// counters keep accumulating. The enforcer and reconciler read running
+/// totals via `snapshot()`, which would see near-zero values if we zeroed
+/// counters every 5 seconds.
 fn flush_all(registry: &MeterRegistry, store: &dyn MeterStore) {
     let meters = registry.all_meters();
 
     for (app_id, meter) in &meters {
-        let deltas = meter.counters.swap_all();
+        let deltas = meter.counters.flush_deltas();
 
         if deltas.is_empty() {
-            continue; // no activity, skip flush
+            continue; // no activity since last flush, skip
         }
 
         let resource_deltas: Vec<ResourceDelta> = deltas
@@ -46,9 +53,10 @@ fn flush_all(registry: &MeterRegistry, store: &dyn MeterStore) {
 
         if let Err(e) = store.flush(app_id, &resource_deltas) {
             eprintln!("[flusher] Failed to flush {app_id}: {e}");
-            // Deltas are lost — the hot tier has already been reset.
-            // This is acceptable: the event log (cold tier) is the
-            // source of truth for billing reconciliation.
+            // On failure, the delta is not lost from the hot tier (counters
+            // still hold the running total). The next flush will re-compute
+            // the delta from last_flushed, which was already advanced.
+            // The event log (cold tier) remains the source of truth.
         }
     }
 }

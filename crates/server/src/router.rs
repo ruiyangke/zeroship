@@ -116,7 +116,15 @@ pub fn single_app_state(
     event_sender: EventSender,
 ) -> AppState {
     let default_plan = plan.unwrap_or_else(QuotaPlan::unlimited);
-    let meters = Arc::new(MeterRegistry::new(default_plan));
+
+    // Collect plugin-declared meter resources by creating a temporary set of plugins.
+    // This discovers resources like db.reads, kv.writes, etc. that plugins track.
+    let sample_plugins = plugin_factory("_resource_discovery");
+    let plugin_resources: Vec<appbase_core::plugin::MeterResource> = sample_plugins
+        .iter()
+        .flat_map(|p| p.meter_resources())
+        .collect();
+    let meters = Arc::new(MeterRegistry::new(default_plan, plugin_resources));
 
     // Create a meter factory that produces AppPluginMeter instances backed by the
     // shared MeterRegistry. This ensures plugin ops (db.reads, kv.writes, etc.)

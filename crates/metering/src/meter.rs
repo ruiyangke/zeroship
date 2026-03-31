@@ -11,8 +11,9 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use appbase_core::plugin::MeterResource;
 use crate::plan::QuotaPlan;
-use crate::registry::{CoreHandles, CounterRegistry, RegistryBuilder};
+use crate::registry::{Aggregation, CoreHandles, CounterRegistry, ResourceMeta, RegistryBuilder};
 
 /// Usage counters for a single app within a billing period.
 pub struct AppMeter {
@@ -28,10 +29,34 @@ pub struct AppMeter {
     pub spend_action: AtomicU8,
 }
 
+/// Convert core's Aggregation enum to the registry's Aggregation enum.
+fn convert_aggregation(agg: appbase_core::plugin::Aggregation) -> Aggregation {
+    match agg {
+        appbase_core::plugin::Aggregation::Sum => Aggregation::Sum,
+        appbase_core::plugin::Aggregation::Max => Aggregation::Max,
+        appbase_core::plugin::Aggregation::Latest => Aggregation::Latest,
+        appbase_core::plugin::Aggregation::Gauge => Aggregation::Gauge,
+    }
+}
+
 impl AppMeter {
     pub fn new(plan: QuotaPlan) -> Self {
+        Self::with_resources(plan, &[])
+    }
+
+    /// Create a meter with core resources plus additional plugin-declared resources.
+    pub fn with_resources(plan: QuotaPlan, plugin_resources: &[MeterResource]) -> Self {
         let mut builder = RegistryBuilder::new();
         let core = builder.register_core();
+        // Register plugin-declared resources (db.reads, kv.writes, etc.)
+        for res in plugin_resources {
+            builder.register(ResourceMeta {
+                name: res.name.clone(),
+                unit: res.unit.clone(),
+                aggregation: convert_aggregation(res.aggregation),
+                category: res.category.clone(),
+            });
+        }
         Self {
             plan,
             period_start: Mutex::new(SystemTime::now()),
@@ -44,8 +69,8 @@ impl AppMeter {
     /// Restore counters from the warm tier after a restart (crash recovery, spec §4.6).
     /// Populates atomic counters from a stored HashMap so enforcement resumes
     /// from where it left off, not from zero.
-    pub fn from_stored(plan: QuotaPlan, stored: &HashMap<String, u64>) -> Self {
-        let meter = Self::new(plan);
+    pub fn from_stored(plan: QuotaPlan, plugin_resources: &[MeterResource], stored: &HashMap<String, u64>) -> Self {
+        let meter = Self::with_resources(plan, plugin_resources);
         // Restore counters from stored values
         for (name, &value) in stored {
             if let Some(handle) = meter.counters.handle_for(name) {
@@ -133,13 +158,16 @@ impl appbase_core::plugin::PluginMeter for AppPluginMeter {
 pub struct MeterRegistry {
     meters: Mutex<HashMap<String, Arc<AppMeter>>>,
     default_plan: QuotaPlan,
+    /// Plugin-declared meter resources, stored so new AppMeters include them.
+    plugin_resources: Vec<MeterResource>,
 }
 
 impl MeterRegistry {
-    pub fn new(default_plan: QuotaPlan) -> Self {
+    pub fn new(default_plan: QuotaPlan, plugin_resources: Vec<MeterResource>) -> Self {
         Self {
             meters: Mutex::new(HashMap::new()),
             default_plan,
+            plugin_resources,
         }
     }
 
@@ -148,7 +176,12 @@ impl MeterRegistry {
         let mut meters = self.meters.lock().unwrap();
         meters
             .entry(app_id.to_string())
-            .or_insert_with(|| Arc::new(AppMeter::new(self.default_plan.clone())))
+            .or_insert_with(|| {
+                Arc::new(AppMeter::with_resources(
+                    self.default_plan.clone(),
+                    &self.plugin_resources,
+                ))
+            })
             .clone()
     }
 
@@ -158,7 +191,7 @@ impl MeterRegistry {
         if let Some(old) = meters.get(app_id) {
             // Transfer counter values from old meter to new one
             let snapshot = old.counters.snapshot();
-            let new_meter = AppMeter::new(plan);
+            let new_meter = AppMeter::with_resources(plan, &self.plugin_resources);
             for (name, value) in &snapshot {
                 if let Some(handle) = new_meter.counters.handle_for(name) {
                     new_meter.counters.increment(handle, *value);
@@ -166,7 +199,10 @@ impl MeterRegistry {
             }
             meters.insert(app_id.to_string(), Arc::new(new_meter));
         } else {
-            meters.insert(app_id.to_string(), Arc::new(AppMeter::new(plan)));
+            meters.insert(
+                app_id.to_string(),
+                Arc::new(AppMeter::with_resources(plan, &self.plugin_resources)),
+            );
         }
     }
 
@@ -210,7 +246,10 @@ impl MeterRegistry {
     pub fn swap_for_rollover(&self, app_id: &str) -> Option<Arc<AppMeter>> {
         let mut meters = self.meters.lock().unwrap();
         let old = meters.remove(app_id)?;
-        let new = Arc::new(AppMeter::new(old.plan.clone()));
+        let new = Arc::new(AppMeter::with_resources(
+            old.plan.clone(),
+            &self.plugin_resources,
+        ));
         meters.insert(app_id.to_string(), new);
         Some(old)
     }
@@ -228,6 +267,7 @@ impl MeterRegistry {
                 Ok(stored) if !stored.is_empty() => {
                     let meter = Arc::new(AppMeter::from_stored(
                         self.default_plan.clone(),
+                        &self.plugin_resources,
                         &stored,
                     ));
                     self.meters.lock().unwrap().insert(app_id.clone(), meter);

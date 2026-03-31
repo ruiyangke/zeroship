@@ -140,7 +140,7 @@ mod tests {
 
     #[tokio::test]
     async fn rollover_swaps_meter_and_archives() {
-        let registry = Arc::new(MeterRegistry::new(QuotaPlan::free()));
+        let registry = Arc::new(MeterRegistry::new(QuotaPlan::free(), vec![]));
         let store = Arc::new(InMemoryStore::new());
 
         // Record some usage
@@ -173,7 +173,7 @@ mod tests {
 
     #[tokio::test]
     async fn rollover_handles_missing_app() {
-        let registry = Arc::new(MeterRegistry::new(QuotaPlan::free()));
+        let registry = Arc::new(MeterRegistry::new(QuotaPlan::free(), vec![]));
         let store = Arc::new(InMemoryStore::new());
 
         // Rollover with no apps should be a no-op
@@ -189,7 +189,7 @@ mod tests {
 
     #[tokio::test]
     async fn rollover_preserves_old_meter_snapshot() {
-        let registry = Arc::new(MeterRegistry::new(QuotaPlan::free()));
+        let registry = Arc::new(MeterRegistry::new(QuotaPlan::free(), vec![]));
         let store = Arc::new(InMemoryStore::new());
 
         // Record usage on two apps
