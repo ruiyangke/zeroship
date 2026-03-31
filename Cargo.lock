@@ -45,6 +45,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 name = "appbase"
 version = "0.1.0"
 dependencies = [
+ "appbase-billing",
  "appbase-core",
  "appbase-isolate",
  "appbase-metering",
@@ -99,6 +100,7 @@ dependencies = [
 name = "appbase-metering"
 version = "0.1.0"
 dependencies = [
+ "appbase-billing",
  "appbase-core",
  "rusqlite",
  "serde",

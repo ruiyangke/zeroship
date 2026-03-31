@@ -12,9 +12,10 @@ description = "Free tier"
 cpu_ms = { max = 50000, period = "monthly", policy = "warn_then_block" }
 requests = { max = 100000, period = "monthly", policy = "warn_then_block" }
 egress_bytes = { max = 1000000000, period = "monthly", policy = "warn_then_block" }
-db_reads = { max = 500000, period = "monthly", policy = "warn_then_block" }
-db_writes = { max = 50000, period = "monthly", policy = "warn_then_block" }
-kv_ops = { max = 100000, period = "monthly", policy = "warn_then_block" }
+"db.reads" = { max = 500000, period = "monthly", policy = "warn_then_block" }
+"db.writes" = { max = 50000, period = "monthly", policy = "warn_then_block" }
+"kv.reads" = { max = 100000, period = "monthly", policy = "warn_then_block" }
+"kv.writes" = { max = 100000, period = "monthly", policy = "warn_then_block" }
 cpu_per_request = { max = 10, period = "per_request", policy = "hard_kill" }
 
 [plans.free.rate_limits]

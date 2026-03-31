@@ -276,6 +276,7 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
     };
 
     // 6. Dispatch to V8
+    let ingress_bytes = body.len() as u64;
     let wall_start = std::time::Instant::now();
     let result = state
         .pool
@@ -293,6 +294,7 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
                 rpc_result.cpu_time.as_micros() as u64,
                 wall_time.as_micros() as u64,
                 response_bytes,
+                ingress_bytes,
             );
 
             // Enqueue event for cold tier
@@ -303,7 +305,6 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
             }));
 
             // 8. Build response with metering + IETF RateLimit headers
-            let snapshot = meter.snapshot();
             let reset_secs = seconds_until_period_reset();
             let mut headers = HeaderMap::new();
 
@@ -319,7 +320,7 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
             // IETF RateLimit headers (draft-ietf-httpapi-ratelimit-headers-10)
             if let Some(quota) = meter.plan.quotas.get("requests") {
                 if let Some(limit) = quota.max {
-                    let used = snapshot.get("requests").copied().unwrap_or(0);
+                    let used = meter.counters.load(meter.core.requests);
                     let remaining = limit.saturating_sub(used);
                     add_header(
                         &mut headers,

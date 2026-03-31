@@ -73,6 +73,27 @@ impl MeteringConfig {
     }
 }
 
+/// Convert a TOML value to a serde_json::Value for entitlements.
+fn toml_value_to_json(v: &toml::Value) -> serde_json::Value {
+    match v {
+        toml::Value::Boolean(b) => serde_json::Value::Bool(*b),
+        toml::Value::Integer(i) => serde_json::json!(*i),
+        toml::Value::Float(f) => serde_json::json!(*f),
+        toml::Value::String(s) => serde_json::Value::String(s.clone()),
+        toml::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(toml_value_to_json).collect())
+        }
+        toml::Value::Table(t) => {
+            let map: serde_json::Map<String, serde_json::Value> = t
+                .iter()
+                .map(|(k, v)| (k.clone(), toml_value_to_json(v)))
+                .collect();
+            serde_json::Value::Object(map)
+        }
+        toml::Value::Datetime(dt) => serde_json::Value::String(dt.to_string()),
+    }
+}
+
 fn parse_plan(name: &str, val: &toml::Value) -> Result<QuotaPlan, String> {
     let description = val
         .get("description")
@@ -83,7 +104,10 @@ fn parse_plan(name: &str, val: &toml::Value) -> Result<QuotaPlan, String> {
     let mut quotas = HashMap::new();
     if let Some(q_table) = val.get("quotas").and_then(|v| v.as_table()) {
         for (resource, q_val) in q_table {
-            let max = q_val.get("max").and_then(|v| v.as_integer()).map(|v| v as u64);
+            let max = q_val.get("max")
+                .and_then(|v| v.as_integer())
+                .filter(|&v| v >= 0)
+                .map(|v| v as u64);
             let period = match q_val
                 .get("period")
                 .and_then(|v| v.as_str())
@@ -131,11 +155,21 @@ fn parse_plan(name: &str, val: &toml::Value) -> Result<QuotaPlan, String> {
         }
     }
 
+    let version = val.get("version").and_then(|v| v.as_integer()).unwrap_or(1) as u32;
+
+    let entitlements = if let Some(ent_table) = val.get("entitlements").and_then(|v| v.as_table()) {
+        ent_table.iter().map(|(k, v)| {
+            (k.clone(), toml_value_to_json(v))
+        }).collect()
+    } else {
+        HashMap::new()
+    };
+
     Ok(QuotaPlan {
         name: name.to_string(),
-        version: 1,
+        version,
         description,
-        entitlements: HashMap::new(),
+        entitlements,
         quotas,
         rate_limits,
     })
@@ -185,7 +219,7 @@ mod tests {
             .expect("Failed to load example config");
 
         let free = config.plans.get("free").unwrap();
-        assert_eq!(free.quotas.len(), 7);
+        assert_eq!(free.quotas.len(), 8);
         assert_eq!(free.quotas.get("cpu_ms").unwrap().max, Some(50_000));
         assert_eq!(free.quotas.get("requests").unwrap().max, Some(100_000));
         assert_eq!(

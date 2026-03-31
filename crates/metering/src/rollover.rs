@@ -4,7 +4,7 @@
 //! counter set so new requests write to fresh counters. After draining
 //! in-flight writers, reads the old counters and archives them.
 
-use appbase_core::meter_store::MeterStore;
+use appbase_core::meter_store::{MeterStore, ResourceDelta};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -81,16 +81,33 @@ async fn rollover_all(registry: &MeterRegistry, store: &dyn MeterStore, config: 
         // held by request handlers should have been dropped.
         tokio::time::sleep(config.drain_wait).await;
 
-        // Step 4-5: Read old meters and flush to store
+        // Step 4-5: Flush remaining deltas from old meters, then archive
         for (app_id, old_meter) in &old_meters {
             let snapshot = old_meter.counters.snapshot();
+
+            // Flush remaining deltas from old meter to warm tier before archiving.
+            // Any increments since the last flusher tick would otherwise be lost.
+            let deltas: Vec<ResourceDelta> = snapshot
+                .iter()
+                .map(|(k, &v)| ResourceDelta {
+                    resource: k.clone(),
+                    delta: v,
+                })
+                .collect();
+            if !deltas.is_empty() {
+                if let Err(e) = store.flush(app_id, &deltas) {
+                    eprintln!("[rollover] Failed to flush {app_id} before rollover: {e}");
+                }
+            }
+
+            // Now archive and reset warm tier
             if let Err(e) = store.rollover(app_id) {
                 eprintln!("[rollover] Failed to rollover {app_id} in store: {e}");
             }
 
             let requests = snapshot.get("requests").copied().unwrap_or(0);
-            let cpu_us = snapshot.get("cpu_us").copied().unwrap_or(0);
-            let cpu_ms = cpu_us as f64 / 1000.0;
+            let cpu_ms_val = snapshot.get("cpu_ms").copied().unwrap_or(0);
+            let cpu_ms = cpu_ms_val as f64;
             eprintln!(
                 "[rollover] {app_id}: {requests} requests, {cpu_ms:.1}ms CPU archived",
             );
@@ -126,6 +143,7 @@ mod tests {
             100_000, // 100ms in microseconds
             200_000, // 200ms in microseconds
             1024,
+            256,
         );
 
         // Perform rollover with 0s drain (test only)
@@ -170,12 +188,12 @@ mod tests {
 
         // Record usage on two apps
         let m1 = registry.get_or_create("app1");
-        m1.record_request(50_000, 100_000, 512);
+        m1.record_request(50_000, 100_000, 512, 128);
         // Also increment db counters via the plugin meter interface
         // (db_reads, db_writes, kv_ops are no longer core — if needed, register them as plugins)
 
         let m2 = registry.get_or_create("app2");
-        m2.record_request(200_000, 400_000, 2048);
+        m2.record_request(200_000, 400_000, 2048, 512);
 
         let config = RolloverConfig {
             drain_wait: Duration::from_millis(0),

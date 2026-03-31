@@ -91,8 +91,8 @@ impl PricingTable {
         let mut table = Self::new();
         // $0.30/million requests = 300 millicents / 1M
         table.add_flat("requests", 300, 1_000_000);
-        // $12.50/million CPU-ms = 12500 millicents / 1M (note: we store cpu_us, convert)
-        table.add_flat("cpu_us", 12500, 1_000_000_000); // per 1B microseconds = per 1M ms
+        // $12.50/million CPU-ms = 12500 millicents / 1M
+        table.add_flat("cpu_ms", 12500, 1_000_000); // per 1M milliseconds
         // $0.09/GB egress = 90 millicents / 1B bytes
         table.add_flat("egress_bytes", 90, 1_000_000_000);
         // $0.25/million db reads
@@ -160,11 +160,11 @@ mod tests {
         let table = PricingTable::cloudflare_comparable();
         let mut usage = HashMap::new();
         usage.insert("requests".to_string(), 3_500_000);
-        usage.insert("cpu_us".to_string(), 17_500_000_000); // 17.5M ms in us
+        usage.insert("cpu_ms".to_string(), 17_500_000); // 17.5M ms
         usage.insert("egress_bytes".to_string(), 7_000_000_000); // 7 GB
         let cost = table.compute_cost(&usage);
         // requests: 3.5M * 300 / 1M = 1050
-        // cpu: 17.5B * 12500 / 1B = 218750
+        // cpu: 17.5M * 12500 / 1M = 218750
         // egress: 7B * 90 / 1B = 630
         // total = 220430 millicents = $2.20
         assert_eq!(cost, 1050 + 218750 + 630);

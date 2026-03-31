@@ -8,6 +8,7 @@
 use appbase_core::config::{AppbaseConfig, IsolateConfig, ServerConfig};
 use appbase_core::plugin::{Plugin, PluginFactory};
 use appbase_server::router;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -74,6 +75,12 @@ fn cmd_serve(args: &[String]) {
         plugins: Default::default(),
     };
 
+    // Ensure data directory exists and compute store path before data_dir is moved
+    std::fs::create_dir_all(&data_dir).unwrap_or_else(|e| {
+        eprintln!("[appbase] Warning: could not create data dir: {e}");
+    });
+    let store_path = data_dir.join("metering.db");
+
     let rt = tokio::runtime::Runtime::new().unwrap();
     if let Err(e) = rt.block_on(async {
         // Cold-tier event log + background writer
@@ -92,14 +99,32 @@ fn cmd_serve(args: &[String]) {
             event_sender,
         );
 
-        // Warm-tier store for metering persistence
+        // Warm-tier store for metering persistence (prefer SQLite, fallback to in-memory)
         let store: Arc<dyn appbase_core::meter_store::MeterStore> =
-            Arc::new(appbase_metering::store::memory::InMemoryStore::new());
+            match appbase_metering::store::sqlite::SqliteMeterStore::new(
+                store_path.to_str().unwrap_or("metering.db"),
+            ) {
+                Ok(s) => {
+                    eprintln!(
+                        "[appbase] Using SQLite meter store at {}",
+                        store_path.display()
+                    );
+                    Arc::new(s)
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[appbase] SQLite meter store failed ({e}), falling back to in-memory"
+                    );
+                    Arc::new(appbase_metering::store::memory::InMemoryStore::new())
+                }
+            };
 
         // Crash recovery: reload counters from warm tier (spec §4.6)
-        // In production with a persistent store (SQLite/Redis), this recovers
-        // counters from the last flush, preventing quota bypass after restart.
-        state.meters.recover_from_store(store.as_ref(), &["default".to_string()]);
+        // With SQLite, this recovers counters from the last flush,
+        // preventing quota bypass after restart.
+        state
+            .meters
+            .recover_from_store(store.as_ref(), &["default".to_string()]);
 
         // Spawn background metering services
         let flusher_handle = appbase_metering::flusher::spawn_flusher(
@@ -112,13 +137,29 @@ fn cmd_serve(args: &[String]) {
             store,
             appbase_metering::rollover::RolloverConfig::default(),
         );
-        eprintln!("[appbase] Background services started (flusher=5s, roller=60s)");
+
+        // Spawn spending reconciler
+        let pricing = Arc::new(appbase_billing::pricing::PricingTable::cloudflare_comparable());
+        let reconciler_config = appbase_billing::reconciler::ReconcilerConfig {
+            interval: Duration::from_secs(10),
+            pricing,
+            limits: HashMap::new(), // TODO: load from config
+        };
+        let reconciler_handle = appbase_billing::reconciler::spawn_reconciler(
+            reconciler_config,
+            state.meters.clone(),
+            state.meters.clone(),
+        );
+        eprintln!(
+            "[appbase] Background services started (flusher=5s, roller=60s, reconciler=10s)"
+        );
 
         let result = router::serve(state, &config.server.host, config.server.port).await;
 
         // Abort background tasks on shutdown
         flusher_handle.abort();
         roller_handle.abort();
+        reconciler_handle.abort();
         event_writer_handle.abort();
 
         result

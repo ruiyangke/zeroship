@@ -136,10 +136,11 @@ impl QuotaPlan {
         quotas.insert("cpu_ms".into(), QuotaDef { max: Some(50_000), period: Period::Monthly, policy: "warn_then_block".into() });
         quotas.insert("requests".into(), QuotaDef { max: Some(100_000), period: Period::Monthly, policy: "warn_then_block".into() });
         quotas.insert("egress_bytes".into(), QuotaDef { max: Some(1_000_000_000), period: Period::Monthly, policy: "warn_then_block".into() });
-        quotas.insert("db_reads".into(), QuotaDef { max: Some(500_000), period: Period::Monthly, policy: "warn_then_block".into() });
-        quotas.insert("db_writes".into(), QuotaDef { max: Some(50_000), period: Period::Monthly, policy: "warn_then_block".into() });
-        quotas.insert("kv_ops".into(), QuotaDef { max: Some(100_000), period: Period::Monthly, policy: "warn_then_block".into() });
-        quotas.insert("db_storage_bytes".into(), QuotaDef { max: Some(500_000_000), period: Period::Absolute, policy: "block_writes_only".into() });
+        quotas.insert("db.reads".into(), QuotaDef { max: Some(500_000), period: Period::Monthly, policy: "warn_then_block".into() });
+        quotas.insert("db.writes".into(), QuotaDef { max: Some(50_000), period: Period::Monthly, policy: "warn_then_block".into() });
+        quotas.insert("kv.reads".into(), QuotaDef { max: Some(100_000), period: Period::Monthly, policy: "warn_then_block".into() });
+        quotas.insert("kv.writes".into(), QuotaDef { max: Some(100_000), period: Period::Monthly, policy: "warn_then_block".into() });
+        quotas.insert("db.storage".into(), QuotaDef { max: Some(500_000_000), period: Period::Absolute, policy: "block_writes_only".into() });
         quotas.insert("cpu_per_request".into(), QuotaDef { max: Some(10), period: Period::PerRequest, policy: "hard_kill".into() });
 
         let mut rate_limits = HashMap::new();

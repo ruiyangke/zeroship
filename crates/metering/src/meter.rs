@@ -17,7 +17,8 @@ use crate::registry::{CoreHandles, CounterRegistry, RegistryBuilder};
 /// Usage counters for a single app within a billing period.
 pub struct AppMeter {
     pub plan: QuotaPlan,
-    pub period_start: SystemTime,
+    /// Period start time, wrapped in Mutex so reset_period(&self) can update it.
+    pub period_start: Mutex<SystemTime>,
     /// Dynamic counters — core + plugin resources.
     pub counters: CounterRegistry,
     /// Core resource handles for fast-path access from router.
@@ -33,7 +34,7 @@ impl AppMeter {
         let core = builder.register_core();
         Self {
             plan,
-            period_start: SystemTime::now(),
+            period_start: Mutex::new(SystemTime::now()),
             counters: builder.build(),
             core,
             spend_action: AtomicU8::new(0), // Allow
@@ -62,11 +63,15 @@ impl AppMeter {
     /// Record a completed request's usage via core handles.
     /// Uses Release ordering so Acquire reads on other cores (enforcer, flusher)
     /// see the updated values. Required for ARM/AArch64 correctness.
-    pub fn record_request(&self, cpu_us: u64, wall_us: u64, egress: u64) {
+    ///
+    /// `cpu_us` and `wall_us` are in microseconds from the isolate/timer;
+    /// they are converted to milliseconds for storage (matching quota keys).
+    pub fn record_request(&self, cpu_us: u64, wall_us: u64, egress: u64, ingress: u64) {
         self.counters.increment(self.core.requests, 1);
-        self.counters.increment(self.core.cpu_us, cpu_us);
-        self.counters.increment(self.core.wall_us, wall_us);
+        self.counters.increment(self.core.cpu_ms, cpu_us / 1000);
+        self.counters.increment(self.core.wall_ms, wall_us / 1000);
         self.counters.increment(self.core.egress_bytes, egress);
+        self.counters.increment(self.core.ingress_bytes, ingress);
     }
 
     /// Take a consistent snapshot of current usage as name → value map.
@@ -78,6 +83,8 @@ impl AppMeter {
     /// Seconds since the billing period started.
     pub fn period_age_secs(&self) -> f64 {
         self.period_start
+            .lock()
+            .unwrap()
             .elapsed()
             .unwrap_or_default()
             .as_secs_f64()
@@ -87,6 +94,7 @@ impl AppMeter {
     /// Uses Release ordering so subsequent Acquire reads see zeros.
     pub fn reset_period(&self) {
         self.counters.reset_all();
+        *self.period_start.lock().unwrap() = SystemTime::now();
         self.spend_action.store(0, Ordering::Release);
     }
 }
@@ -114,10 +122,22 @@ impl MeterRegistry {
             .clone()
     }
 
-    /// Set a specific plan for an app.
+    /// Set a specific plan for an app, preserving existing counter values.
     pub fn set_plan(&self, app_id: &str, plan: QuotaPlan) {
         let mut meters = self.meters.lock().unwrap();
-        meters.insert(app_id.to_string(), Arc::new(AppMeter::new(plan)));
+        if let Some(old) = meters.get(app_id) {
+            // Transfer counter values from old meter to new one
+            let snapshot = old.counters.snapshot();
+            let new_meter = AppMeter::new(plan);
+            for (name, value) in &snapshot {
+                if let Some(handle) = new_meter.counters.handle_for(name) {
+                    new_meter.counters.increment(handle, *value);
+                }
+            }
+            meters.insert(app_id.to_string(), Arc::new(new_meter));
+        } else {
+            meters.insert(app_id.to_string(), Arc::new(AppMeter::new(plan)));
+        }
     }
 
     /// Get usage snapshot for an app. Returns None if no meter exists.
@@ -187,5 +207,37 @@ impl MeterRegistry {
                 Err(e) => eprintln!("[metering] Failed to recover {app_id}: {e}"),
             }
         }
+    }
+}
+
+impl appbase_billing::reconciler::MeteringSnapshot for MeterRegistry {
+    fn snapshot(&self, app_id: &str) -> Option<HashMap<String, u64>> {
+        let meters = self.meters.lock().unwrap();
+        meters.get(app_id).map(|m| m.counters.snapshot())
+    }
+
+    fn active_apps(&self) -> Vec<String> {
+        self.meters.lock().unwrap().keys().cloned().collect()
+    }
+}
+
+impl appbase_billing::reconciler::SpendEnforcement for MeterRegistry {
+    fn set_spend_action(
+        &self,
+        app_id: &str,
+        action: appbase_billing::spend_action::SpendAction,
+    ) {
+        let meters = self.meters.lock().unwrap();
+        if let Some(meter) = meters.get(app_id) {
+            appbase_billing::spend_action::SpendAction::store(&meter.spend_action, action);
+        }
+    }
+
+    fn get_spend_action(&self, app_id: &str) -> appbase_billing::spend_action::SpendAction {
+        let meters = self.meters.lock().unwrap();
+        meters
+            .get(app_id)
+            .map(|m| appbase_billing::spend_action::SpendAction::load(&m.spend_action))
+            .unwrap_or(appbase_billing::spend_action::SpendAction::Allow)
     }
 }
