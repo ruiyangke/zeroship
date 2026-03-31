@@ -1,4 +1,4 @@
-//! QPS benchmark — sequential actor model with real network I/O via fetch().
+//! QPS benchmark — concurrent actor model with real network I/O via fetch().
 
 use appbase_core::config::IsolateConfig;
 use appbase_core::plugin::{
@@ -70,7 +70,7 @@ fn main() {
     rt.block_on(async {
         let pool = make_pool();
 
-        println!("=== QPS Benchmark: Sequential Actor with real fetch() ===\n");
+        println!("=== QPS Benchmark: Concurrent Actor with real fetch() ===\n");
 
         // Test 1: Pure JS baseline
         {
@@ -151,8 +151,7 @@ fn main() {
 
             println!("\n--- Result ---");
             println!("Sequential:  3 × 3s = 9s total (requests serialized)");
-            println!("Concurrent:  should also be ~9s (actor processes one at a time!)");
-            println!("With concurrent runtime: would be ~3s (all 3 fetches overlap)");
+            println!("Concurrent:  should be ~3s (all 3 fetches overlap in event loop)");
         }
 
         pool.shutdown_all();

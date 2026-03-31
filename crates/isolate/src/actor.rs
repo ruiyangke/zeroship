@@ -1,18 +1,26 @@
 //! Isolate actor — runs a V8 isolate on a dedicated thread, handles messages.
 //!
 //! Each actor owns a `JsRuntime` (which is `!Send`) and runs on its own
-//! single-threaded tokio runtime. Communication is via `IsolateMessage` enum
-//! sent over an mpsc channel.
+//! single-threaded tokio runtime.
+//!
+//! **Concurrent mode**: multiple RPC requests can be in-flight simultaneously.
+//! Requests are injected into the JS event loop via an mpsc channel; each one
+//! runs as a fire-and-forget promise chain (like Deno.serve). The actor's
+//! poll_fn simultaneously drains incoming messages AND drives V8's event loop.
 
 use appbase_core::plugin::{Plugin, PluginMeter, PluginQuota};
 use appbase_core::types::RpcResult;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cpu::CpuUsage;
-use crate::isolate;
+use crate::isolate::{self, RpcPendingReplies, SharedRpcReceiver};
 
 /// Messages that can be sent to an isolate actor.
 pub enum IsolateMessage {
@@ -104,13 +112,20 @@ pub fn spawn(
 }
 
 /// The actor's main loop — runs on its own thread.
+///
+/// Uses a `poll_fn` to simultaneously:
+/// 1. Drain incoming `IsolateMessage`s from the mpsc channel
+/// 2. Drive the V8 event loop (which processes all in-flight JS promises)
+///
+/// Requests are injected into JS via `rpc_tx` → `op_rpc_recv()`.
+/// Responses come back via `op_rpc_respond()` → oneshot senders in `pending_replies`.
 async fn actor_loop(
     app_id: &str,
     server_js: &str,
     data_dir: &PathBuf,
     plugins: Vec<Box<dyn Plugin>>,
     mut rx: mpsc::Receiver<IsolateMessage>,
-    cpu_limit: Option<Duration>,
+    _cpu_limit: Option<Duration>,
     cpu_usage: Arc<Mutex<CpuUsage>>,
     meter: Arc<dyn PluginMeter>,
     quota: Arc<dyn PluginQuota>,
@@ -118,7 +133,7 @@ async fn actor_loop(
     // Ensure data directory exists
     let _ = std::fs::create_dir_all(data_dir);
 
-    let (mut runtime, mut rpc_bridge) = match isolate::create(&plugins, app_id, data_dir, meter.clone(), quota.clone()) {
+    let mut runtime = match isolate::create(&plugins, app_id, data_dir, meter.clone(), quota.clone()) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("[isolate] [{app_id}] Failed to create V8 runtime: {e}");
@@ -126,66 +141,124 @@ async fn actor_loop(
         }
     };
 
-    // Load server code
+    // Create the RPC channel pair
+    let (rpc_tx, rpc_rx) = mpsc::channel::<(u64, String)>(64);
+    let pending_replies: Rc<RefCell<HashMap<u64, oneshot::Sender<Result<RpcResult, String>>>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+    let mut next_id: u64 = 0;
+
+    // Store channel endpoints in OpState for the JS ops
+    {
+        let op_state = runtime.op_state();
+        let mut state = op_state.borrow_mut();
+        state.put(SharedRpcReceiver(Rc::new(tokio::sync::Mutex::new(rpc_rx))));
+        state.put(RpcPendingReplies(pending_replies.clone()));
+    }
+
+    // Step 1: Load user code (registers __rpc methods)
     if !server_js.is_empty() {
         if let Err(e) = runtime.execute_script("<server>", server_js.to_string()) {
             eprintln!("[isolate] [{app_id}] Script error: {e}");
             return;
         }
-        if let Err(e) = runtime.run_event_loop(Default::default()).await {
-            eprintln!("[isolate] [{app_id}] Event loop error: {e}");
-            return;
-        }
     }
 
-    eprintln!("[isolate] [{app_id}] Ready");
-
-    // Message loop
-    while let Some(msg) = rx.recv().await {
-        match msg {
-            IsolateMessage::Rpc { body, reply } => {
-                let result =
-                    isolate::handle_rpc(&mut runtime, &rpc_bridge, &body, cpu_limit).await;
-                let mapped = match result {
-                    Ok(rpc_result) => {
-                        cpu_usage.lock().unwrap().record(rpc_result.cpu_time);
-                        Ok(rpc_result)
+    // Step 2: Start the concurrent dispatch loop (AFTER channels + user code are ready)
+    // This fire-and-forget IIFE waits for requests via op_rpc_recv and dispatches them.
+    static DISPATCH_LOOP: &str = r#"(async () => {
+        while (true) {
+            const result = await Deno.core.ops.op_rpc_recv();
+            if (result === null) break;
+            const [requestId, requestJson] = result;
+            (async () => {
+                try {
+                    const request = JSON.parse(requestJson);
+                    let response;
+                    if (Array.isArray(request)) {
+                        response = JSON.stringify(await Promise.all(request.map(__dispatch)));
+                    } else {
+                        response = JSON.stringify(await __dispatch(request));
                     }
-                    Err(e) => Err(e.to_string()),
-                };
-                let _ = reply.send(mapped);
-            }
-            IsolateMessage::Reload { server_js, reply } => {
-                // Create fresh isolate — old one is dropped (V8 cleanup)
-                match isolate::create(&plugins, app_id, data_dir, meter.clone(), quota.clone()) {
-                    Ok((new_runtime, new_holder)) => {
-                        runtime = new_runtime;
-                        rpc_bridge = new_holder;
-                        if let Err(e) = runtime.execute_script("<server>", server_js) {
-                            eprintln!("[isolate] [{app_id}] Reload script error: {e}");
-                            let _ = reply.send(Err(e.to_string()));
-                            continue;
-                        }
-                        let _ = runtime.run_event_loop(Default::default()).await;
-                        eprintln!("[isolate] [{app_id}] Reloaded");
-                        let _ = reply.send(Ok(()));
-                    }
-                    Err(e) => {
-                        let _ = reply.send(Err(e));
-                    }
+                    Deno.core.ops.op_rpc_respond(requestId, response);
+                } catch (e) {
+                    Deno.core.ops.op_rpc_respond(requestId, JSON.stringify({
+                        jsonrpc: '2.0',
+                        error: { code: -32000, message: e.message || String(e) },
+                        id: null,
+                    }));
                 }
-            }
-            IsolateMessage::Stats { reply } => {
-                let usage = cpu_usage.lock().unwrap();
-                let _ = reply.send(ActorStats {
-                    total_cpu_ms: usage.total.as_secs_f64() * 1000.0,
-                    request_count: usage.request_count,
-                });
-            }
-            IsolateMessage::Shutdown => {
-                eprintln!("[isolate] [{app_id}] Shutting down");
-                break;
+            })();
+        }
+    })()"#;
+
+    if let Err(e) = runtime.execute_script("<dispatch>", DISPATCH_LOOP) {
+        eprintln!("[isolate] [{app_id}] Dispatch loop error: {e}");
+        return;
+    }
+
+    eprintln!("[isolate] [{app_id}] Ready (concurrent mode)");
+
+    // Concurrent event loop — poll_fn drives both message intake and V8 event loop.
+    std::future::poll_fn(|cx| {
+        // Phase 1: Drain incoming messages (non-blocking)
+        loop {
+            match rx.poll_recv(cx) {
+                Poll::Ready(Some(msg)) => match msg {
+                    IsolateMessage::Rpc { body, reply } => {
+                        let id = next_id;
+                        next_id += 1;
+                        pending_replies.borrow_mut().insert(id, reply);
+                        // Inject request into JS event loop via the channel
+                        if rpc_tx.try_send((id, body)).is_err() {
+                            // Channel full — backpressure: reject immediately
+                            if let Some(tx) = pending_replies.borrow_mut().remove(&id) {
+                                let _ = tx.send(Err(
+                                    "Request queue full".to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    IsolateMessage::Shutdown => {
+                        eprintln!("[isolate] [{app_id}] Shutting down");
+                        return Poll::Ready(());
+                    }
+                    IsolateMessage::Stats { reply } => {
+                        let usage = cpu_usage.lock().unwrap();
+                        let _ = reply.send(ActorStats {
+                            total_cpu_ms: usage.total.as_secs_f64() * 1000.0,
+                            request_count: usage.request_count,
+                        });
+                    }
+                    IsolateMessage::Reload { server_js: _, reply } => {
+                        let _ = reply.send(Err(
+                            "Reload not supported in concurrent mode yet".to_string(),
+                        ));
+                    }
+                },
+                Poll::Ready(None) => {
+                    // Actor channel closed — all senders dropped
+                    return Poll::Ready(());
+                }
+                Poll::Pending => break,
             }
         }
-    }
+
+        // Phase 2: Drive the V8 event loop (one tick)
+        match runtime.poll_event_loop(cx, Default::default()) {
+            Poll::Ready(Ok(())) => {
+                // Event loop drained — but our dispatch loop (the infinite
+                // `while(true) { await op_rpc_recv() }`) should keep it alive.
+                // If it actually drained, it means the dispatch loop exited
+                // (channel closed). Re-wake to check for more messages.
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            Poll::Ready(Err(e)) => {
+                eprintln!("[isolate] [{app_id}] Event loop error: {e}");
+                Poll::Ready(())
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    })
+    .await;
 }

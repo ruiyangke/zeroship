@@ -5,25 +5,30 @@ use appbase_core::types::RpcResult;
 use deno_core::*;
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
 
-use crate::cpu;
 use crate::permissions::appbase_permissions_container;
 
-/// Bidirectional string holder for Rust ↔ JS communication.
-/// - Rust sets `request` before calling JS
-/// - JS reads `request` via op, processes it, writes `response` via op
-/// - Rust reads `response` after JS completes
-/// This avoids embedding JSON in script strings (no compilation per request,
-/// no template literal injection risk).
-#[derive(Debug)]
-pub struct RpcBridge {
-    pub request: RefCell<String>,
-    pub response: RefCell<String>,
-}
+// ---------------------------------------------------------------------------
+// Concurrent RPC channel types (stored in OpState)
+// ---------------------------------------------------------------------------
+
+/// Shared receiver for incoming RPC requests (request_id, body_json).
+/// Wrapped in `Rc<tokio::sync::Mutex>` so the async op can hold it across .await.
+pub struct SharedRpcReceiver(pub Rc<tokio::sync::Mutex<mpsc::Receiver<(u64, String)>>>);
+
+/// Pending reply senders keyed by request_id.
+/// JS calls `op_rpc_respond(id, json)` which looks up and fires the oneshot.
+pub struct RpcPendingReplies(pub Rc<RefCell<HashMap<u64, oneshot::Sender<Result<RpcResult, String>>>>>);
+
+// ---------------------------------------------------------------------------
+// Ops
+// ---------------------------------------------------------------------------
 
 /// Stub: op_tls_peer_certificate is defined in deno_node but imported by deno_net's JS.
 /// We don't include deno_node, so we stub it to avoid "does not provide an export" errors.
@@ -33,20 +38,40 @@ pub fn op_tls_peer_certificate(_rid: u32, _detailed: bool) -> Vec<u8> {
     vec![] // stub — we don't support TLS peer certificate inspection
 }
 
-/// Op: JS reads the RPC request JSON set by Rust.
+/// Async op: JS calls this to receive the next RPC request.
+/// Returns [requestId, bodyJson]. Yields to event loop when no requests are pending.
+/// Returns null when the channel is closed (shutdown).
 #[op2]
-#[string]
-pub fn op_rpc_get_request(state: &mut OpState) -> String {
-    let bridge = state.borrow::<Rc<RpcBridge>>();
-    bridge.request.borrow().clone()
+#[serde]
+pub async fn op_rpc_recv(
+    state: Rc<RefCell<OpState>>,
+) -> Result<Option<(u32, String)>, deno_error::JsErrorBox> {
+    let rx = {
+        let s = state.borrow();
+        s.borrow::<SharedRpcReceiver>().0.clone()
+    };
+    let mut guard = rx.lock().await;
+    match guard.recv().await {
+        Some((id, body)) => Ok(Some((id as u32, body))),
+        None => Ok(None), // channel closed — shutdown
+    }
 }
 
-/// Op: JS writes the RPC response JSON back to Rust.
+/// Sync op: JS calls this to send a response for a specific request_id.
 #[op2(fast)]
-pub fn op_rpc_set_response(state: &mut OpState, #[string] result: &str) {
-    let bridge = state.borrow::<Rc<RpcBridge>>();
-    *bridge.response.borrow_mut() = result.to_string();
+pub fn op_rpc_respond(state: &mut OpState, #[smi] request_id: u32, #[string] result: &str) {
+    let pending = state.borrow::<RpcPendingReplies>();
+    if let Some(tx) = pending.0.borrow_mut().remove(&(request_id as u64)) {
+        let _ = tx.send(Ok(RpcResult {
+            json: result.to_string(),
+            cpu_time: Duration::ZERO, // per-request CPU not available in concurrent mode
+        }));
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Runtime JS + creation
+// ---------------------------------------------------------------------------
 
 /// Core runtime JS — console + RPC dispatch. Plugins' JS bridges are appended.
 static CORE_RUNTIME_JS: &str = include_str!("embed/runtime.js");
@@ -67,19 +92,19 @@ fn ensure_crypto_provider() {
 
 /// Create a V8 isolate with plugins loaded.
 ///
-/// Returns the `JsRuntime` and the `RpcBridge` for extracting RPC responses.
-/// V8 heap is limited to 128MB by default to prevent runaway memory usage.
+/// Returns the `JsRuntime`. RPC channel state (`SharedRpcReceiver`, `RpcPendingReplies`)
+/// must be placed into OpState by the caller (actor_loop) before executing user code.
 pub fn create(
     plugins: &[Box<dyn Plugin>],
     app_id: &str,
     data_dir: &Path,
     meter: Arc<dyn PluginMeter>,
     quota: Arc<dyn PluginQuota>,
-) -> Result<(JsRuntime, Rc<RpcBridge>), String> {
+) -> Result<JsRuntime, String> {
     ensure_crypto_provider();
 
     // Collect ops from all plugins + core ops
-    let mut all_ops = vec![op_rpc_get_request(), op_rpc_set_response(), op_tls_peer_certificate()];
+    let mut all_ops = vec![op_tls_peer_certificate(), op_rpc_recv(), op_rpc_respond()];
     for plugin in plugins {
         all_ops.extend(plugin.ops());
     }
@@ -152,14 +177,9 @@ pub fn create(
         current + 5 * 1024 * 1024
     });
 
-    let rpc_bridge = Rc::new(RpcBridge {
-        request: RefCell::new(String::new()),
-        response: RefCell::new(String::new()),
-    });
     {
         let op_state = runtime.op_state();
         let mut state = op_state.borrow_mut();
-        state.put(rpc_bridge.clone());
         // Provide an allow-all PermissionsContainer so deno_fetch ops can check permissions.
         state.put(appbase_permissions_container());
 
@@ -176,68 +196,7 @@ pub fn create(
         }
     }
 
-    Ok((runtime, rpc_bridge))
-}
-
-/// Fixed RPC dispatch script — compiled ONCE by V8, reused for all requests.
-/// Reads request JSON from Rust via op, dispatches, writes response back via op.
-static RPC_DISPATCH_SCRIPT: &str = r#"(async () => {
-    const requestJson = Deno.core.ops.op_rpc_get_request();
-    const result = await globalThis.__handleRpc(requestJson);
-    Deno.core.ops.op_rpc_set_response(result);
-})()"#;
-
-/// Execute an RPC request in the isolate and return the result with CPU timing.
-///
-/// Flow:
-/// 1. Rust writes request JSON to RpcBridge.request
-/// 2. V8 executes the fixed dispatch script (compiled once, reused)
-/// 3. JS reads request via op_rpc_get_request, dispatches, writes via op_rpc_set_response
-/// 4. Rust reads response from RpcBridge.response
-///
-/// No per-request script compilation. No JSON embedding in JS strings.
-pub async fn handle_rpc(
-    runtime: &mut JsRuntime,
-    rpc_bridge: &Rc<RpcBridge>,
-    request_json: &str,
-    cpu_limit: Option<Duration>,
-) -> Result<RpcResult, deno_error::JsErrorBox> {
-    fn err(e: impl std::fmt::Display) -> deno_error::JsErrorBox {
-        deno_error::JsErrorBox::generic(e.to_string())
-    }
-
-    // Step 1: Set request JSON in bridge (Rust → JS)
-    *rpc_bridge.request.borrow_mut() = request_json.to_string();
-
-    let cpu_before = cpu::thread_cpu_time();
-
-    // Step 2: Execute the fixed dispatch script (no compilation — V8 caches it)
-    runtime
-        .execute_script("<rpc>", RPC_DISPATCH_SCRIPT)
-        .map_err(err)?;
-    runtime
-        .run_event_loop(Default::default())
-        .await
-        .map_err(err)?;
-
-    let cpu_time = cpu::thread_cpu_time().saturating_sub(cpu_before);
-
-    // Step 3: Check CPU limit
-    if let Some(max) = cpu_limit {
-        if cpu_time > max {
-            return Err(deno_error::JsErrorBox::generic(format!(
-                "CPU time limit exceeded: {:.1}ms used, {:.1}ms allowed",
-                cpu_time.as_secs_f64() * 1000.0,
-                max.as_secs_f64() * 1000.0,
-            )));
-        }
-    }
-
-    // Step 4: Read response from bridge (JS → Rust)
-    Ok(RpcResult {
-        json: rpc_bridge.response.borrow().clone(),
-        cpu_time,
-    })
+    Ok(runtime)
 }
 
 /// Transpile TypeScript extension sources to JavaScript.

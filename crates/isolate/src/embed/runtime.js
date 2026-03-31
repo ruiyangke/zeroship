@@ -1,5 +1,5 @@
-// Appbase core runtime - injected before user code and plugin bridges
-// Contains: console, error handling, RPC dispatch, Web API globals.
+// Appbase core runtime -- primitives only.
+// Dispatch loop is started by the actor AFTER OpState and user code are ready.
 
 const { core } = Deno;
 
@@ -23,31 +23,21 @@ globalThis.console = {
   },
 };
 
-// Unhandled promise rejection handler - prevents silent failures
-// Without this, rejected promises with no .catch() would be silently swallowed
+// Unhandled promise rejection handler
 core.setUnhandledPromiseRejectionHandler((promise, reason) => {
   console.error('[appbase] Unhandled promise rejection:', reason);
 });
 
-// Report uncaught exceptions so they surface in Rust
+// Report uncaught exceptions
 core.setReportExceptionCallback((error) => {
   console.error('[appbase] Uncaught exception:', error.message || error);
 });
 
-// RPC dispatcher - user code registers functions here
+// RPC method registry -- user code registers functions here
 globalThis.__rpc = {};
 
-// Pre-compiled RPC dispatch function - called from Rust via op bridge
-// Reads request JSON from Rust op, dispatches to user function, writes response back
-globalThis.__handleRpc = async function(requestJson) {
-  const request = JSON.parse(requestJson);
-  if (Array.isArray(request)) {
-    return JSON.stringify(await Promise.all(request.map(__dispatch)));
-  }
-  return JSON.stringify(await __dispatch(request));
-};
-
-async function __dispatch(req) {
+// Single-request dispatch (called by the concurrent loop)
+globalThis.__dispatch = async function(req) {
   try {
     const fn_ = globalThis.__rpc[req.method];
     if (!fn_) {
@@ -58,4 +48,4 @@ async function __dispatch(req) {
   } catch (e) {
     return { jsonrpc: '2.0', error: { code: -32000, message: e.message || String(e) }, id: req.id };
   }
-}
+};
