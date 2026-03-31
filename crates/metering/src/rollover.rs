@@ -115,8 +115,8 @@ async fn rollover_all(registry: &MeterRegistry, store: &dyn MeterStore, config: 
             }
 
             let requests = final_deltas.get("requests").copied().unwrap_or(0);
-            let cpu_ms_val = final_deltas.get("cpu_ms").copied().unwrap_or(0);
-            let cpu_ms = cpu_ms_val as f64;
+            let cpu_us = final_deltas.get("cpu_us").copied().unwrap_or(0);
+            let cpu_ms = cpu_us as f64 / 1000.0;
             eprintln!(
                 "[rollover] {app_id}: {requests} requests, {cpu_ms:.1}ms CPU archived",
             );

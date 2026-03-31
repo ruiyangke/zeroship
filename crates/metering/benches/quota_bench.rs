@@ -54,7 +54,7 @@ fn bench_counter_registry(c: &mut Criterion) {
     group.bench_function("snapshot_9_resources", |b| {
         // Pre-populate so there's something to snapshot
         registry.increment(core.requests, 100_000);
-        registry.increment(core.cpu_ms, 50_000);
+        registry.increment(core.cpu_us, 50_000);
         b.iter(|| {
             black_box(registry.snapshot());
         });

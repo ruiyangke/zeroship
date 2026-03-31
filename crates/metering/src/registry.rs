@@ -41,8 +41,8 @@ impl RegistryBuilder {
         ResourceHandle(index)
     }
 
-    /// Register core resources (requests, cpu_ms, wall_ms, egress_bytes, ingress_bytes).
-    /// Returns handles in order.
+    /// Register core resources (requests, cpu_us, wall_us, egress_bytes, ingress_bytes).
+    /// Returns handles in order. CPU/wall stored in microseconds for precision.
     pub fn register_core(&mut self) -> CoreHandles {
         CoreHandles {
             requests: self.register(MeterResource {
@@ -51,15 +51,15 @@ impl RegistryBuilder {
                 aggregation: Aggregation::Sum,
                 category: "compute".into(),
             }),
-            cpu_ms: self.register(MeterResource {
-                name: "cpu_ms".into(),
-                unit: "milliseconds".into(),
+            cpu_us: self.register(MeterResource {
+                name: "cpu_us".into(),
+                unit: "microseconds".into(),
                 aggregation: Aggregation::Sum,
                 category: "compute".into(),
             }),
-            wall_ms: self.register(MeterResource {
-                name: "wall_ms".into(),
-                unit: "milliseconds".into(),
+            wall_us: self.register(MeterResource {
+                name: "wall_us".into(),
+                unit: "microseconds".into(),
                 aggregation: Aggregation::Sum,
                 category: "compute".into(),
             }),
@@ -96,8 +96,8 @@ impl RegistryBuilder {
 #[derive(Debug, Clone, Copy)]
 pub struct CoreHandles {
     pub requests: ResourceHandle,
-    pub cpu_ms: ResourceHandle,
-    pub wall_ms: ResourceHandle,
+    pub cpu_us: ResourceHandle,
+    pub wall_us: ResourceHandle,
     pub egress_bytes: ResourceHandle,
     pub ingress_bytes: ResourceHandle,
 }
@@ -274,8 +274,8 @@ mod tests {
         let mut builder = RegistryBuilder::new();
         let core = builder.register_core();
         assert_eq!(core.requests.0, 0);
-        assert_eq!(core.cpu_ms.0, 1);
-        assert_eq!(core.wall_ms.0, 2);
+        assert_eq!(core.cpu_us.0, 1);
+        assert_eq!(core.wall_us.0, 2);
         assert_eq!(core.egress_bytes.0, 3);
         assert_eq!(core.ingress_bytes.0, 4);
     }

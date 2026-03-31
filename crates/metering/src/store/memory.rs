@@ -94,7 +94,7 @@ mod tests {
                         delta: 100,
                     },
                     ResourceDelta {
-                        resource: "cpu_ms".into(),
+                        resource: "cpu_us".into(),
                         delta: 50,
                     },
                 ],
@@ -103,7 +103,7 @@ mod tests {
 
         let counters = store.load("app1").unwrap();
         assert_eq!(counters["requests"], 100);
-        assert_eq!(counters["cpu_ms"], 50);
+        assert_eq!(counters["cpu_us"], 50);
     }
 
     #[test]

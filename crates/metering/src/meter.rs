@@ -72,20 +72,11 @@ impl AppMeter {
     }
 
     /// Record a completed request's usage via core handles.
-    /// Uses Release ordering so Acquire reads on other cores (enforcer, flusher)
-    /// see the updated values. Required for ARM/AArch64 correctness.
-    ///
-    /// `cpu_us` and `wall_us` are in microseconds from the isolate/timer;
-    /// they are converted to milliseconds for storage (matching quota keys).
-    ///
-    /// NOTE: The `/ 1000` truncation loses sub-millisecond precision. Many fast
-    /// requests (< 1ms CPU) will record 0ms, causing under-counting of CPU usage.
-    /// A future fix should store microseconds (register as "cpu_us" / "wall_us")
-    /// and update quota definitions accordingly, or use a fractional accumulator.
+    /// CPU and wall time stored in microseconds — no truncation.
     pub fn record_request(&self, cpu_us: u64, wall_us: u64, egress: u64, ingress: u64) {
         self.counters.increment(self.core.requests, 1);
-        self.counters.increment(self.core.cpu_ms, cpu_us / 1000);
-        self.counters.increment(self.core.wall_ms, wall_us / 1000);
+        self.counters.increment(self.core.cpu_us, cpu_us);
+        self.counters.increment(self.core.wall_us, wall_us);
         self.counters.increment(self.core.egress_bytes, egress);
         self.counters.increment(self.core.ingress_bytes, ingress);
     }
@@ -115,45 +106,48 @@ impl AppMeter {
     }
 }
 
-/// Wrapper that implements `PluginMeter` by caching the `Arc<AppMeter>` for O(1) access.
-/// Created once per isolate, avoids registry lookup on every increment call.
+/// Implements `PluginMeter` by looking up the current `Arc<AppMeter>` from the
+/// registry on each call. Slightly slower than caching (~60ns vs ~27ns), but
+/// always uses the CURRENT meter — survives period rollover without stale refs.
 pub struct AppPluginMeter {
-    meter: Arc<AppMeter>,
+    registry: Arc<MeterRegistry>,
+    app_id: String,
 }
 
 impl AppPluginMeter {
     pub fn new(registry: Arc<MeterRegistry>, app_id: String) -> Self {
-        let meter = registry.get_or_create(&app_id);
-        Self { meter }
+        Self { registry, app_id }
     }
 }
 
 impl appbase_core::plugin::PluginMeter for AppPluginMeter {
     fn increment(&self, resource_name: &str, delta: u64) {
-        if let Some(handle) = self.meter.counters.handle_for(resource_name) {
-            self.meter.counters.increment(handle, delta);
+        let meter = self.registry.get_or_create(&self.app_id);
+        if let Some(handle) = meter.counters.handle_for(resource_name) {
+            meter.counters.increment(handle, delta);
         }
     }
 }
 
-/// Per-app quota checker that caches the `Arc<AppMeter>` for fast point-of-use checks.
-/// Created once per isolate, avoids registry lookup on every check call.
+/// Implements `PluginQuota` by looking up the current `Arc<AppMeter>` from the
+/// registry on each call. Always reads the CURRENT counter and plan values.
 pub struct AppQuotaChecker {
-    meter: Arc<AppMeter>,
+    registry: Arc<MeterRegistry>,
+    app_id: String,
 }
 
 impl AppQuotaChecker {
     pub fn new(registry: Arc<MeterRegistry>, app_id: String) -> Self {
-        let meter = registry.get_or_create(&app_id);
-        Self { meter }
+        Self { registry, app_id }
     }
 }
 
 impl appbase_core::plugin::PluginQuota for AppQuotaChecker {
     fn check(&self, resource: &str) -> Result<(), appbase_core::plugin::QuotaDenied> {
-        let used = self.meter.counters.get(resource).unwrap_or(0);
+        let meter = self.registry.get_or_create(&self.app_id);
+        let used = meter.counters.get(resource).unwrap_or(0);
 
-        if let Some(quota) = self.meter.plan.quotas.get(resource) {
+        if let Some(quota) = meter.plan.quotas.get(resource) {
             if let Some(max) = quota.max {
                 if used >= max {
                     return Err(appbase_core::plugin::QuotaDenied {

@@ -181,11 +181,11 @@ mod tests {
         let store = SqliteMeterStore::in_memory().unwrap();
         store.flush("app1", &[
             ResourceDelta { resource: "requests".into(), delta: 100 },
-            ResourceDelta { resource: "cpu_ms".into(), delta: 5000 },
+            ResourceDelta { resource: "cpu_us".into(), delta: 5000 },
         ]).unwrap();
         let c = store.load("app1").unwrap();
         assert_eq!(c["requests"], 100);
-        assert_eq!(c["cpu_ms"], 5000);
+        assert_eq!(c["cpu_us"], 5000);
     }
 
     #[test]

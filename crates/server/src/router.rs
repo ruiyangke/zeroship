@@ -6,7 +6,7 @@ use appbase_core::types::AppBundle;
 use appbase_isolate::pool::IsolatePool;
 use appbase_core::event_log::EventKind;
 use appbase_enforcement::concurrency::ConcurrencyGuard;
-// enforcer::check_quota removed — resource quotas now enforced at point of use in plugins
+use appbase_enforcement::quota;
 use appbase_enforcement::error_codes;
 use appbase_enforcement::rate_limit::RateLimiter;
 use appbase_core::billing::SpendAction;
@@ -274,8 +274,28 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
         }
     }
 
-    // 4. Resource quotas are now enforced at point of use in plugin ops
-    //    (db.reads, kv.writes, etc.). Warning headers are computed post-dispatch.
+    // 4. Pre-dispatch quota check for request-level dimensions (requests, cpu_us).
+    //    Plugin-level quotas (db.reads, kv.writes) are checked at point of use.
+    let usage = meter.counters.snapshot();
+    match quota::check_quota(&usage, &meter.plan) {
+        quota::QuotaDecision::Deny(denial) => {
+            state.event_sender.log_enforcement(&app_id, EventKind::QuotaDenied, serde_json::json!({
+                "dimension": denial.dimension,
+            }));
+            let reset = seconds_until_period_reset();
+            return rpc_error_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                denial.error_code,
+                &json_escape(&denial.message),
+                &format!(
+                    r#""type":"quota_exceeded","dimension":"{}","used":{},"limit":{}"#,
+                    json_escape(&denial.dimension), denial.used, denial.limit
+                ),
+                Some(reset),
+            );
+        }
+        quota::QuotaDecision::Warn(_) | quota::QuotaDecision::Allow => {}
+    }
 
     // 5. Get app bundle
     let bundle = {

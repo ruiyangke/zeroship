@@ -133,7 +133,7 @@ impl QuotaPlan {
     /// Free tier — conservative limits.
     pub fn free() -> Self {
         let mut quotas = HashMap::new();
-        quotas.insert("cpu_ms".into(), QuotaDef { max: Some(50_000), period: Period::Monthly, policy: "warn_then_block".into() });
+        quotas.insert("cpu_us".into(), QuotaDef { max: Some(50_000_000), period: Period::Monthly, policy: "warn_then_block".into() }); // 50K ms = 50M us
         quotas.insert("requests".into(), QuotaDef { max: Some(100_000), period: Period::Monthly, policy: "warn_then_block".into() });
         quotas.insert("egress_bytes".into(), QuotaDef { max: Some(1_000_000_000), period: Period::Monthly, policy: "warn_then_block".into() });
         quotas.insert("db.reads".into(), QuotaDef { max: Some(500_000), period: Period::Monthly, policy: "warn_then_block".into() });
@@ -141,7 +141,6 @@ impl QuotaPlan {
         quotas.insert("kv.reads".into(), QuotaDef { max: Some(100_000), period: Period::Monthly, policy: "warn_then_block".into() });
         quotas.insert("kv.writes".into(), QuotaDef { max: Some(100_000), period: Period::Monthly, policy: "warn_then_block".into() });
         quotas.insert("db.storage".into(), QuotaDef { max: Some(500_000_000), period: Period::Absolute, policy: "block_writes_only".into() });
-        quotas.insert("cpu_per_request".into(), QuotaDef { max: Some(10), period: Period::PerRequest, policy: "hard_kill".into() });
 
         let mut rate_limits = HashMap::new();
         rate_limits.insert("default".into(), RateLimitDef { max_per_second: 10, burst: 50, policy: "reject".into() });
@@ -166,7 +165,7 @@ impl QuotaPlan {
     /// Pro tier — generous limits.
     pub fn pro() -> Self {
         let mut quotas = HashMap::new();
-        quotas.insert("cpu_ms".into(), QuotaDef { max: Some(30_000_000), period: Period::Monthly, policy: "warn_then_block".into() });
+        quotas.insert("cpu_us".into(), QuotaDef { max: Some(30_000_000_000), period: Period::Monthly, policy: "warn_then_block".into() }); // 30M ms = 30B us
         quotas.insert("requests".into(), QuotaDef { max: Some(10_000_000), period: Period::Monthly, policy: "warn_then_block".into() });
         quotas.insert("cpu_per_request".into(), QuotaDef { max: Some(30_000), period: Period::PerRequest, policy: "hard_kill".into() });
 
