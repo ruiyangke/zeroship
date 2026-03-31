@@ -11,6 +11,26 @@ use std::sync::Arc;
 use std::time::Instant;
 
 const RPC_BODY: &str = r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#;
+const FIB_30_BODY: &str = r#"{"jsonrpc":"2.0","method":"fib","params":[30],"id":1}"#;
+const FIB_40_BODY: &str = r#"{"jsonrpc":"2.0","method":"fib","params":[40],"id":1}"#;
+const FIB_45_BODY: &str = r#"{"jsonrpc":"2.0","method":"fib","params":[45],"id":1}"#;
+
+/// Recursive fibonacci — CPU-intensive, no I/O.
+/// fib(30) ~ 5ms, fib(40) ~ 500ms, fib(45) ~ 5s
+const FIBONACCI_JS: &str = r#"
+globalThis.__rpc = {
+    fib(n) {
+        function fib(n) {
+            if (n <= 1) return n;
+            return fib(n - 1) + fib(n - 2);
+        }
+        const start = Date.now();
+        const result = fib(n);
+        const elapsed = Date.now() - start;
+        return { n, result, cpu_ms: elapsed };
+    }
+};
+"#;
 
 /// Infinite loop — should be killed by the CPU timer.
 const INFINITE_LOOP_JS: &str = r#"
@@ -132,6 +152,60 @@ async fn fetch_not_killed_by_cpu_timer() {
             panic!("fetch() should not be killed by CPU timer: {}", e);
         }
     }
+
+    pool.shutdown_all();
+}
+
+/// fib(30) ~5ms -- well within the 50ms CPU budget. Should succeed.
+#[tokio::test]
+async fn fibonacci_30_within_budget() {
+    let pool = make_pool();
+
+    let start = Instant::now();
+    let result = pool.dispatch("fib30", FIBONACCI_JS, FIB_30_BODY.into()).await;
+    let elapsed = start.elapsed();
+
+    assert!(result.is_ok(), "fib(30) should complete within budget: {:?}", result);
+    let r = result.unwrap();
+    println!("fib(30) in {:.0}ms: {}", elapsed.as_millis(), r.json);
+    assert!(r.json.contains("832040"), "fib(30) = 832040");
+
+    pool.shutdown_all();
+}
+
+/// fib(40) ~500ms -- WAY over the 50ms CPU budget. Should be killed.
+#[tokio::test]
+async fn fibonacci_40_exceeds_budget() {
+    let pool = make_pool();
+
+    let start = Instant::now();
+    let result = pool.dispatch("fib40", FIBONACCI_JS, FIB_40_BODY.into()).await;
+    let elapsed = start.elapsed();
+
+    assert!(result.is_err(), "fib(40) should be killed: {:?}", result);
+    println!("fib(40) killed after {:.0}ms: {}", elapsed.as_millis(), result.unwrap_err());
+
+    // Should be killed quickly -- not 500ms of actual fib computation
+    assert!(elapsed.as_millis() < 500, "Should be killed before completing: {:.0}ms", elapsed.as_millis());
+
+    pool.shutdown_all();
+}
+
+/// fib(45) ~5s -- massively over budget. Verifies the timer is precise.
+#[tokio::test]
+async fn fibonacci_45_killed_precisely() {
+    let pool = make_pool();
+
+    let start = Instant::now();
+    let result = pool.dispatch("fib45", FIBONACCI_JS, FIB_45_BODY.into()).await;
+    let elapsed = start.elapsed();
+
+    assert!(result.is_err(), "fib(45) should be killed: {:?}", result);
+    println!("fib(45) killed after {:.0}ms: {}", elapsed.as_millis(), result.unwrap_err());
+
+    // Should be killed near the CPU limit (default 50ms + overhead)
+    // NOT at 5 seconds (which is how long fib(45) would take without limits)
+    assert!(elapsed.as_millis() < 1000, "Should be killed well before 5s: {:.0}ms", elapsed.as_millis());
 
     pool.shutdown_all();
 }
