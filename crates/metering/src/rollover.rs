@@ -81,13 +81,19 @@ async fn rollover_all(registry: &MeterRegistry, store: &dyn MeterStore, config: 
         // held by request handlers should have been dropped.
         tokio::time::sleep(config.drain_wait).await;
 
-        // Step 4-5: Flush remaining deltas from old meters, then archive
+        // Step 4-5: Atomically drain remaining deltas from old meters, then archive.
+        //
+        // We use swap_all() instead of snapshot() to prevent a race with the flusher:
+        // if the flusher grabbed an Arc to the old meter before the swap, its swap_all()
+        // and our swap_all() cannot both get the same values -- one gets them, the other
+        // gets zeros. This eliminates double-counting that would occur if snapshot()
+        // read values that the flusher also read and flushed.
         for (app_id, old_meter) in &old_meters {
-            let snapshot = old_meter.counters.snapshot();
+            let final_deltas = old_meter.counters.swap_all();
 
             // Flush remaining deltas from old meter to warm tier before archiving.
             // Any increments since the last flusher tick would otherwise be lost.
-            let deltas: Vec<ResourceDelta> = snapshot
+            let deltas: Vec<ResourceDelta> = final_deltas
                 .iter()
                 .map(|(k, &v)| ResourceDelta {
                     resource: k.clone(),
@@ -105,8 +111,8 @@ async fn rollover_all(registry: &MeterRegistry, store: &dyn MeterStore, config: 
                 eprintln!("[rollover] Failed to rollover {app_id} in store: {e}");
             }
 
-            let requests = snapshot.get("requests").copied().unwrap_or(0);
-            let cpu_ms_val = snapshot.get("cpu_ms").copied().unwrap_or(0);
+            let requests = final_deltas.get("requests").copied().unwrap_or(0);
+            let cpu_ms_val = final_deltas.get("cpu_ms").copied().unwrap_or(0);
             let cpu_ms = cpu_ms_val as f64;
             eprintln!(
                 "[rollover] {app_id}: {requests} requests, {cpu_ms:.1}ms CPU archived",

@@ -66,6 +66,11 @@ impl AppMeter {
     ///
     /// `cpu_us` and `wall_us` are in microseconds from the isolate/timer;
     /// they are converted to milliseconds for storage (matching quota keys).
+    ///
+    /// NOTE: The `/ 1000` truncation loses sub-millisecond precision. Many fast
+    /// requests (< 1ms CPU) will record 0ms, causing under-counting of CPU usage.
+    /// A future fix should store microseconds (register as "cpu_us" / "wall_us")
+    /// and update quota definitions accordingly, or use a fractional accumulator.
     pub fn record_request(&self, cpu_us: u64, wall_us: u64, egress: u64, ingress: u64) {
         self.counters.increment(self.core.requests, 1);
         self.counters.increment(self.core.cpu_ms, cpu_us / 1000);
@@ -96,6 +101,31 @@ impl AppMeter {
         self.counters.reset_all();
         *self.period_start.lock().unwrap() = SystemTime::now();
         self.spend_action.store(0, Ordering::Release);
+    }
+}
+
+/// Wrapper that implements `PluginMeter` by looking up an app's `CounterRegistry`
+/// from the `MeterRegistry` at runtime. This avoids lifetime issues with passing
+/// `&CounterRegistry` directly into isolates, and ensures plugin ops (db.reads,
+/// kv.writes, etc.) are recorded against the correct app's meter instead of being
+/// silently discarded by `NoopMeter`.
+pub struct AppPluginMeter {
+    registry: Arc<MeterRegistry>,
+    app_id: String,
+}
+
+impl AppPluginMeter {
+    pub fn new(registry: Arc<MeterRegistry>, app_id: String) -> Self {
+        Self { registry, app_id }
+    }
+}
+
+impl appbase_core::plugin::PluginMeter for AppPluginMeter {
+    fn increment(&self, resource_name: &str, delta: u64) {
+        let meter = self.registry.get_or_create(&self.app_id);
+        if let Some(handle) = meter.counters.handle_for(resource_name) {
+            meter.counters.increment(handle, delta);
+        }
     }
 }
 

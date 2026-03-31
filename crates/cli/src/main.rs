@@ -138,12 +138,21 @@ fn cmd_serve(args: &[String]) {
             appbase_metering::rollover::RolloverConfig::default(),
         );
 
-        // Spawn spending reconciler
+        // Spawn spending reconciler with a default spending limit.
+        // TODO: load per-app spending limits from TOML config ([apps.X.spending]).
         let pricing = Arc::new(appbase_billing::pricing::PricingTable::cloudflare_comparable());
+        let mut limits = HashMap::new();
+        limits.insert(
+            "default".to_string(),
+            appbase_billing::reconciler::SpendingLimit {
+                limit_millicents: Some(500_000), // $5.00 default for free tier
+                ..Default::default()
+            },
+        );
         let reconciler_config = appbase_billing::reconciler::ReconcilerConfig {
             interval: Duration::from_secs(10),
             pricing,
-            limits: HashMap::new(), // TODO: load from config
+            limits,
         };
         let reconciler_handle = appbase_billing::reconciler::spawn_reconciler(
             reconciler_config,

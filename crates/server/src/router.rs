@@ -1,7 +1,7 @@
 //! Axum router for appbase — RPC dispatch with metering, quota enforcement, and admin API.
 
 use appbase_core::config::AppbaseConfig;
-use appbase_core::plugin::PluginFactory;
+use appbase_core::plugin::{MeterFactory, PluginFactory};
 use appbase_core::types::AppBundle;
 use appbase_isolate::pool::IsolatePool;
 use appbase_core::event_log::EventKind;
@@ -115,7 +115,21 @@ pub fn single_app_state(
     plan: Option<QuotaPlan>,
     event_sender: EventSender,
 ) -> AppState {
-    let pool = IsolatePool::new(config.isolates.clone(), data_dir, plugin_factory);
+    let default_plan = plan.unwrap_or_else(QuotaPlan::unlimited);
+    let meters = Arc::new(MeterRegistry::new(default_plan));
+
+    // Create a meter factory that produces AppPluginMeter instances backed by the
+    // shared MeterRegistry. This ensures plugin ops (db.reads, kv.writes, etc.)
+    // are recorded against the correct app's meter instead of being discarded.
+    let meters_for_factory = meters.clone();
+    let meter_factory: MeterFactory = Arc::new(move |app_id: &str| -> Arc<dyn appbase_core::plugin::PluginMeter> {
+        Arc::new(appbase_metering::meter::AppPluginMeter::new(
+            meters_for_factory.clone(),
+            app_id.to_string(),
+        ))
+    });
+
+    let pool = IsolatePool::new(config.isolates.clone(), data_dir, plugin_factory, meter_factory);
 
     let mut bundles = HashMap::new();
     bundles.insert(
@@ -126,8 +140,6 @@ pub fn single_app_state(
         },
     );
 
-    let default_plan = plan.unwrap_or_else(QuotaPlan::unlimited);
-    let meters = Arc::new(MeterRegistry::new(default_plan));
     let rate_limiter = Arc::new(RateLimiter::new(10000, 50000));
 
     AppState {
@@ -218,6 +230,12 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
             );
         }
     };
+
+    // Entitlement checks are NOT performed on every RPC call. Per the spec,
+    // entitlements gate specific features (custom_domains, cron_jobs, websockets),
+    // not general RPC access. Feature-specific entitlement checks should be added
+    // at the routing layer for those features (e.g., WebSocket upgrade handler,
+    // cron job creation endpoint). See enforcer::check_entitlement().
 
     // 3. Spending limit check
     let meter = state.meters.get_or_create(&app_id);
