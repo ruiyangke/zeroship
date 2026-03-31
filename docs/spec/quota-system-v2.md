@@ -1,36 +1,28 @@
 # Appbase Quota, Metering & Billing System — v2 Design
 
-> **Status:** Draft v2.2 | **Last Updated:** 2026-03-30 | **Author:** Platform Team
+> **Status:** Draft v2.3 | **Last Updated:** 2026-03-30 | **Author:** Platform Team
 >
 > **Revision History:**
+> - v2.3 (2026-03-30): Round 3 review fixes. Fix TokenBucket compare_exchange_weak to
+>   strong (C1). Replace epoch-based reclamation with drain-and-wait for period rollover
+>   (C2). Fix inline spend accumulator naming: delta_tenths -> tenths-of-a-cent with
+>   documented conversion (M1). Define MemoryWatchdog LRU shrink as capacity reduction
+>   with natural eviction (M2). Cache converted spending limit at reconciliation tick for
+>   multi-currency race (M3). Add PeriodRoller/TrialManager ordering with Mutex (M4).
+>   Adjust free tier CPU quota to 50K ms for consistency with 100K requests (M5). Add
+>   glossary entries for MemoryWatchdog, PeriodRoller, SpendingReconciler (m1). Fix stale
+>   channel capacity reference in architecture overview (m2). Fix /usage/history pagination
+>   to cursor-based (m3). Add dunning, commitment, exchange rate endpoints to API tables
+>   (m4). Move multi-currency, dunning, packages, commitments to Phase 2+ appendix.
+>   Simplify core spec to focus on implementable v2 scope. Target: under 2200 lines.
 > - v2.2 (2026-03-30): Round 2 review fixes. IETF RateLimit headers updated to
->   draft-ietf-httpapi-ratelimit-headers-10 (RateLimit combined field + RateLimit-Policy).
->   Replace bcrypt with SHA-256 for API key hashing (high-entropy keys don't need KDF).
->   Fix double-buffered rollover in-flight data race with epoch-based reclamation
->   (crossbeam-epoch). Assign distinct error codes -32029 to -32032. Rename spending
->   limit field to `limit` with currency inferred from app. Switch compare_exchange_weak
->   to compare_exchange (strong) in ConcurrencyGuard. Correct comparison table (AWS
->   Lambda 15-min timeout, Budgets ~12-24h delay, Vercel spend mgmt requires manual
->   resume). Flesh out multi-currency section fully. Fix AtomicPtr reclamation with
->   epoch-based RCU. Scale dedup capacity with deployment. Add 32-bit timestamp overflow
->   assertion. Tighten free tier wall time to 10s. Use secret_env for webhook secret.
->   Scale event log channel capacity. Fix pagination to use cursor-only for streaming.
->   Decouple trial expiry from PeriodRoller. Add rate limit on backfill API. Complete
->   glossary. Add app_id to dedup key. Add graceful metering degradation under memory
->   pressure. Add plan version rollback. Add concurrent config reload safety (RwLock).
->   Add storage quota 60-second enforcement gap mitigation.
-> - v2.1 (2026-03-30): Address review feedback. Fix TOCTOU in ConcurrencyGuard (CAS loop),
->   pack token bucket state into single AtomicU64, correct memory orderings for ARM,
->   add SQLite write batching strategy, remove hash chain in favor of external anchoring,
->   add inline spend tracking, add RBAC with scoped API keys, specify webhook idempotency
->   contract, add double-buffered period rollover, add dunning/payment failure handling,
->   fix type safety (`Option<u64>` instead of `-1`), fix JSON examples, add NTP jump
->   handling for daily reset, fix event correction negative counter issue, correct
->   comparison table, add API versioning. Add missing concepts: multi-currency,
->   committed use discounts, usage backfill tooling, package/bundle pricing,
->   per-endpoint metering, cron/background job metering.
-> - v2.0 (2026-03-30): Complete rewrite. Adds entitlements, spending limits, credits,
->   event log, webhook system, enforcement modes, tiered pricing, and operational guidance.
+>   draft-ietf-httpapi-ratelimit-headers-10. Replace bcrypt with SHA-256 for API key
+>   hashing. Fix double-buffered rollover. Assign distinct error codes. Add multi-currency,
+>   dunning, packages, commitments (now Phase 2+). Add graceful metering degradation.
+> - v2.1 (2026-03-30): Address review feedback. Fix TOCTOU in ConcurrencyGuard, pack
+>   token bucket into AtomicU64, correct memory orderings for ARM, add SQLite write
+>   batching, inline spend tracking, RBAC, webhook idempotency, double-buffered rollover.
+> - v2.0 (2026-03-30): Complete rewrite.
 > - v1.0: Initial quota system design (see `quota-system.md`).
 
 ## Table of Contents
@@ -53,14 +45,10 @@
 16. [Testing Strategy](#16-testing-strategy)
 17. [Implementation Plan](#17-implementation-plan)
 18. [Operational Guidance](#18-operational-guidance)
-19. [Multi-Currency Support](#19-multi-currency-support)
-20. [Package & Bundle Pricing](#20-package--bundle-pricing)
-21. [Per-Endpoint Metering](#21-per-endpoint-metering)
-22. [Metering for Cron & Background Jobs](#22-metering-for-cron--background-jobs)
-23. [Usage Data Backfill Tooling](#23-usage-data-backfill-tooling)
-24. [Future Considerations](#24-future-considerations)
-25. [Glossary](#25-glossary)
-26. [References](#26-references)
+19. [Future Considerations](#19-future-considerations)
+20. [Phase 2+ Extensions](#20-phase-2-extensions)
+21. [Glossary](#21-glossary)
+22. [References](#22-references)
 
 ---
 
@@ -93,11 +81,15 @@ billing systems (Stripe, Lago) consume the usage data via Admin API and webhooks
 
 ### 1.2 Non-Goals (v2)
 
-- Multi-region distributed metering (single-node; see Section 24 for future direction)
+- Multi-region distributed metering (single-node; see Section 19 for future direction)
 - Real-time payment processing (invoices are generated; payment is external)
 - Self-service plan creation by app developers (platform owner only in v2)
 - Tax calculation (delegated to payment processor)
 - Per-user metering within an app (metering is per-app, not per-end-user)
+- Multi-currency billing (Phase 2+; see Section 20)
+- Dunning / payment failure automation (Phase 2+; see Section 20)
+- Package / bundle pricing (Phase 2+; see Section 20)
+- Committed use discounts (Phase 2+; see Section 20)
 
 ---
 
@@ -166,9 +158,6 @@ mechanics and are configured separately:
 - "Max 100K requests/month" "Max 500MB database storage"
 - Checked on every request against running counters
 - Enforcement: configurable policy (warn, throttle, block, kill)
-
-This distinction aligns with how Metronome and Stigg separate entitlements (access
-decisions) from usage tracking (metering decisions).
 
 ### 2.4 Resources
 
@@ -286,12 +275,11 @@ The TTL serves as a secondary eviction policy for low-throughput deployments whe
 the LRU capacity is not reached. At high throughput, the effective dedup window
 equals `capacity / (req_per_second * avg_resources_per_request)`.
 
-**Backpressure:** The event log enqueue is a bounded channel. The default capacity of
-10,000 fills in ~67ms at 150K events/s peak (10K req/s * 15 resources). Operators
-should size `channel_capacity` based on expected peak throughput and acceptable drop
-rate. A recommended formula: `channel_capacity = peak_events_per_second * flush_interval_ms / 1000 * 2` (2x headroom). For 10K req/s with 100ms flush:
-`150000 * 0.1 * 2 = 30,000`. If the channel is full (event log writer is slow), the
-metering pipeline:
+**Backpressure:** The event log enqueue is a bounded channel. The capacity should
+be sized based on expected peak throughput and acceptable drop rate. Recommended
+formula: `channel_capacity = peak_events_per_second * flush_interval_ms / 1000 * 2`
+(2x headroom). For 10K req/s with 100ms flush: `150000 * 0.1 * 2 = 30,000`. If the
+channel is full (event log writer is slow), the metering pipeline:
 1. Still updates atomic counters (enforcement is never delayed)
 2. Drops the event with an `event_log_drop` counter increment
 3. Logs a warning with the dropped event's key (recoverable from warm tier)
@@ -359,7 +347,7 @@ impl TokenBucket {
                 .min(self.capacity_fp as u64) as u32;
             if refilled < 1000 { return false; }
             let new_state = (((refilled - 1000) as u64) << 32) | (now_secs as u64);
-            match self.state.compare_exchange_weak(
+            match self.state.compare_exchange(
                 current, new_state, Ordering::AcqRel, Ordering::Acquire,
             ) {
                 Ok(_) => return true,
@@ -369,6 +357,10 @@ impl TokenBucket {
     }
 }
 ```
+
+`compare_exchange` (strong) is used. On current ARM (LDXR/STXR), `compare_exchange_weak`'s
+theoretical advantage does not materialize — both emit the same loop. Strong avoids spurious
+failures that buy nothing in a retry loop where we recompute state anyway.
 
 Refill-and-consume is a single CAS, eliminating the TOCTOU race. This follows
 Cloudflare's rate limiter and Linux kernel token bucket patterns.
@@ -430,8 +422,7 @@ If no `[degraded]` section is configured, `degrade` falls back to the `free` pla
 
 **Grace period for in-flight requests:** When a quota transitions from allow to block,
 requests already in V8 execution complete normally. Only new incoming requests are
-blocked. This prevents half-processed side effects and aligns with Cloudflare Workers'
-behavior.
+blocked. This prevents half-processed side effects.
 
 ### 2.9 Plans
 
@@ -446,45 +437,21 @@ A plan is a named, versioned bundle:
 | `quotas` | Map\<String, Quota\> | Resource caps with windows and policies |
 | `rate_limits` | Map\<String, RateLimit\> | Throughput caps with burst |
 | `overage` | Option\<OverageConfig\> | Per-resource overage pricing |
-| `packages` | Option\<Vec\<PackageRef\>\> | Included package bundles (see Section 20) |
-| `commitment` | Option\<CommitmentConfig\> | Minimum commitment terms (see Section 12.7) |
 
-**Plan versioning:** Plans have a `version` field. When a plan definition changes in
-config, the version must be explicitly incremented. Existing apps remain on their assigned
-version until migrated via admin API. This prevents surprise behavior changes. Migration
-can be done per-app or in bulk:
+**Plan versioning:** Plans have a `version` field. When a plan definition changes,
+the version must be incremented. Existing apps stay on their assigned version until
+migrated via `PUT /v1/_admin/apps/{id}/plan` (single) or
+`POST /v1/_admin/plans/{name}/migrate` (bulk). Rollback uses the same endpoints with
+a previous version number; `plan.changed` webhook fires with `reason: "version_rollback"`.
 
-```
-PUT  /v1/_admin/apps/{id}/plan         -- Single app migration
-POST /v1/_admin/plans/{name}/migrate   -- Bulk: migrate all apps on this plan to new version
-```
+**Per-app overrides:** Individual quotas can be overridden via
+`[apps.my_blog.overrides.quotas]` without creating a custom plan. Overrides replace
+plan values for specified resources only.
 
-**Plan version rollback:** Apps can be rolled back to a previous version via
-`PUT /v1/_admin/apps/{id}/plan { "plan": "pro", "version": 1 }` (single) or
-`POST /v1/_admin/plans/{name}/migrate { "from_version": 2, "to_version": 1 }` (bulk).
-Rollback behaves like a plan change: limits apply immediately, token buckets reinitialize,
-`plan.changed` webhook fires with `reason: "version_rollback"`. Previous versions must exist
-in config or SQLite `plan_versions` table; otherwise 409.
-
-**Per-app overrides:** Individual quotas can be overridden without creating a custom plan:
-
-```toml
-[apps.my_blog.overrides.quotas]
-requests = { max = 200000 }    # Override only this quota
-```
-
-Overrides are merged at enforcement time: override values replace plan values for the
-specified resources; all other resources use the plan's definition.
-
-**Plan downgrade when usage exceeds new limits:** When an app is moved to a plan with
-lower limits than its current usage:
-- **Monthly quotas:** The app is immediately over-quota. The configured policy applies
-  (e.g., `warn_then_block` means the app is blocked until the next period reset).
-- **Storage quotas:** The app is over its storage limit. The `block_writes` policy
-  prevents further growth but does not delete existing data.
-- **Rate limits:** New rate limits apply immediately. Token buckets are reinitialized.
-- Admin API response includes a `warnings` field when a plan change would cause
-  immediate enforcement.
+**Plan downgrade when usage exceeds new limits:** Monthly quotas: immediately over-quota,
+policy applies. Storage: `block_writes` prevents growth. Rate limits: token buckets
+reinitialized. Admin API response includes `warnings` when a change causes immediate
+enforcement.
 
 ### 2.10 Enforcement Modes
 
@@ -496,34 +463,13 @@ To support safe rollout and testing, the system supports three enforcement modes
 | `dry_run` | Log decisions but always allow | Testing new limits |
 | `shadow` | Enforce old plan, log decisions for new plan | Plan migration validation |
 
-Configurable globally or per-app:
+Configurable globally or per-app via `enforcement_mode` in config.
 
-```toml
-[defaults]
-enforcement_mode = "enforce"
-
-[apps.my_blog]
-enforcement_mode = "dry_run"    # Testing new limits
-```
-
-**Mode details:**
-
-- **`enforce`** (default): Full enforcement. Requests are blocked/throttled as configured.
-- **`dry_run`**: Decisions are computed and logged but never applied. All requests are
-  allowed. Response headers include `X-Enforcement-Mode: dry_run`. Useful for testing
-  new quota configurations before enabling them.
-- **`shadow`**: The current plan is enforced normally, but a second "shadow" plan is also
-  evaluated. Both decisions are logged for comparison. This enables safe migration testing:
-
-```toml
-[apps.my_blog]
-plan = "free"
-enforcement_mode = "shadow"
-shadow_plan = "free"
-shadow_plan_version = 2    # Compare current free v1 against proposed free v2
-```
-
-Shadow mode emits Prometheus metrics with a `shadow="true"` label for A/B analysis.
+- **`enforce`** (default): Full enforcement.
+- **`dry_run`**: Decisions computed and logged but never applied. Headers include
+  `X-Enforcement-Mode: dry_run`.
+- **`shadow`**: Current plan enforced normally; a second "shadow" plan also evaluated.
+  Both decisions logged. Prometheus metrics emitted with `shadow="true"` label.
 
 ---
 
@@ -546,10 +492,9 @@ cors_origins = ["https://dashboard.example.com"]  # CORS for browser dashboard
 rate_limit = 100                      # Admin API rate limit (req/s)
 read_only = false                     # Set true for monitoring-only instances
 
-# ---- Access Control (RBAC) ----
-# See Section 10 for full RBAC documentation
+# ---- Access Control (RBAC) — See Section 10 ----
 [admin.keys.root]
-secret_env = "APPBASE_ROOT_KEY"       # Env var containing the key
+secret_env = "APPBASE_ROOT_KEY"
 role = "super_admin"
 
 [admin.keys.billing_service]
@@ -557,16 +502,11 @@ secret_env = "APPBASE_BILLING_KEY"
 role = "billing"
 scopes = ["read:usage", "read:invoices", "write:wallets"]
 
-[admin.keys.monitoring]
-secret_env = "APPBASE_MONITORING_KEY"
-role = "viewer"
-scopes = ["read:usage", "read:health", "read:metrics"]
-
 [admin.keys.team_ops]
 secret_env = "APPBASE_OPS_KEY"
 role = "operator"
 scopes = ["read:*", "write:apps", "write:overrides"]
-app_filter = ["team_a_*", "team_b_*"]  # Glob pattern: only these apps
+app_filter = ["team_a_*", "team_b_*"]
 
 [isolates]
 max = 1000
@@ -576,7 +516,7 @@ idle_timeout_secs = 60
 
 [billing]
 period = "calendar_month"       # "calendar_month" | "anniversary"
-default_currency = "usd"        # Default currency (see Section 19 for multi-currency)
+default_currency = "usd"
 timezone = "UTC"                # For daily resets and period boundaries
 overage_enabled = false         # Global default; per-plan override
 
@@ -660,7 +600,7 @@ cron_jobs = false
 websockets = false
 max_apps = 3
 [plans.free.quotas]
-cpu_ms              = { max = 10000,          period = "monthly",      policy = "warn_then_block" }
+cpu_ms              = { max = 50000,          period = "monthly",      policy = "warn_then_block" }
 cpu_ms_per_request  = { resource = "cpu_ms",  max = 10,               period = "per_request",  policy = "hard_kill" }
 wall_ms_per_request = { resource = "wall_ms", max = 10000,            period = "per_request",  policy = "hard_kill" }
 requests            = { max = 100000,         period = "monthly",     policy = "warn_then_block" }
@@ -770,17 +710,12 @@ with a warning log (old config remains active).
 
 **Concurrent reload safety:** Config is behind `RwLock<Config>`. Request path holds a
 read guard (cheap, concurrent). Reload acquires a write guard, atomically swapping the
-entire config (no partial visibility). Concurrent reloads are serialized; a
-reload-in-progress flag prevents SIGHUP from queueing unbounded reloads.
+entire config. A reload-in-progress flag prevents SIGHUP from queueing unbounded reloads.
 
-**Hot reload behavior** (`POST /v1/_admin/config/reload` or `SIGHUP`):
-- New plans: added to the registry immediately
-- Changed plans: new version required; existing apps stay on old version until migrated
-- Removed plans: rejected if any app references them
-- Changed policies: take effect immediately for all apps referencing them
-- Changed pricing: takes effect at next spend calculation cycle
-- Rate limit changes: token buckets reinitialized (may briefly allow a burst)
-- Atomic counters: **never** reset by config reload
+**Hot reload behavior** (`POST /v1/_admin/config/reload` or `SIGHUP`): New plans added
+immediately. Changed plans require new version; apps stay on old until migrated. Removed
+plans rejected if referenced. Policies and pricing take effect immediately. Rate limit
+changes reinitialize token buckets. Atomic counters are **never** reset by config reload.
 
 | # | Rule | Error If Violated |
 |---|---|---|
@@ -801,18 +736,8 @@ reload-in-progress flag prevents SIGHUP from queueing unbounded reloads.
 | V15 | Tiered pricing final tier must omit `up_to` (unlimited) | Final tier must be unbounded |
 | V16 | API key roles must be one of: `super_admin`, `admin`, `operator`, `billing`, `viewer` | Invalid role |
 
-**Type safety note:** Unlimited values (e.g., `max_apps` on enterprise) are represented
-as `Option<u64>` in Rust. Omitting a field means unlimited. The previous convention of
-using `-1` for unlimited is **removed** as it is type-unsafe (mixing signed semantics
-into unsigned fields). Configuration using `-1` will fail validation with:
-`"Use Option<u64> (omit field) instead of -1 for unlimited"`.
-
-Admin API endpoint for pre-flight validation:
-```
-POST /v1/_admin/config/validate
-Body: raw TOML content
-Response: { "valid": true, "errors": [{ "rule": "V1", "message": "...", "location": "..." }] }
-```
+**Type safety:** Unlimited values are `Option<u64>` (omit field = unlimited). `-1` is
+rejected. Pre-flight validation: `POST /v1/_admin/config/validate` with raw TOML body.
 
 ---
 
@@ -834,10 +759,12 @@ REQUEST PATH (top to bottom):
   HTTP Response
 
 BACKGROUND SERVICES:
-  Usage Flusher (5s), Event Logger, Period Roller (double-buffered, epoch-reclaimed),
-  Storage Sampler (60s), Spending Reconciler (10s), Alert Dispatcher,
-  Dedup Janitor (hourly), Dunning Manager (12.8), TrialManager (60s),
-  MemoryWatchdog (5s)
+  Usage Flusher (5s), Event Logger, PeriodRoller (double-buffered, drain-and-wait),
+  Storage Sampler (60s), SpendingReconciler (10s), Alert Dispatcher,
+  Dedup Janitor (hourly), TrialManager (60s), MemoryWatchdog (5s)
+
+  Ordering: PeriodRoller and TrialManager share a Mutex to prevent overlap.
+  PeriodRoller acquires the lock first (priority); TrialManager waits.
 
 STORAGE LAYER:
   Atomic Counters (per-app per-resource), Token Buckets (packed AtomicU64),
@@ -853,8 +780,9 @@ Request completes -> Build UsageDelta { request_id, app_id, timestamp, deltas[] 
   For each (resource, value):
     1. Dedup check: idempotency_key = "{app_id}_{req_id}_{resource}"
     2. counter[app][resource].fetch_add(value, Release)      ~10ns
-    3. spend_accumulator[app].fetch_add(delta_cents, Release)
-  Enqueue UsageDelta to event_log_channel (bounded mpsc, 10K; drop on full)
+    3. spend_accumulator[app].fetch_add(delta_tenths, Release)
+       // delta_tenths is in tenths-of-a-cent (see Section 6.2)
+  Enqueue UsageDelta to event_log_channel (bounded mpsc, 30K; drop on full)
   Background: EventLogger batch-writes to file; UsageFlusher batch-upserts to SQLite
 ```
 
@@ -870,23 +798,22 @@ For each affected app (lock-free):
 1. Allocate new counter set ("buffer B") for the new period
 2. Atomically swap the active buffer pointer (`AtomicPtr` CAS) -- new requests
    immediately write to buffer B. No 503, no pause, no lock.
-3. **Epoch-based reclamation (drain in-flight writers):** After the swap, in-flight
-   requests may still write to buffer A. We use `crossbeam-epoch` for safe reclamation:
-   - Each request pins the epoch before loading the active buffer pointer.
-   - The rollover thread swaps the pointer, reads final values from old buffer A, then
-     calls `guard.defer_destroy()` — the old buffer is freed only after all threads
-     pinned in the prior epoch have unpinned (completed their request).
-   - **Alternative (simpler):** drain-and-wait: sleep for `2 * max_request_latency`
-     after swap. Bounded data loss (a few straggler writes) recoverable from event log.
+3. **Drain in-flight writers (drain-and-wait):** After the swap, in-flight requests
+   may still hold a reference to buffer A. We use a simple drain-and-wait approach:
+   - Sleep for `2 * max_request_wall_time` (default: 2 * 10s = 20s for free tier,
+     configurable). This guarantees all in-flight requests that loaded the old pointer
+     have completed, since no request can exceed the wall time limit.
+   - After the sleep, buffer A has no active writers and is safe to read.
+   - Bounded data loss: a few straggler writes that land in buffer A after the swap
+     but before the pointer propagates to all cores. These are recoverable from the
+     event log during billing reconciliation.
+   - This is simpler and more correct than `crossbeam-epoch`'s `defer_destroy`, which
+     defers deallocation but does not block — meaning we could read buffer A while
+     in-flight writers are still active.
 4. Read final values from old buffer A (safe: all in-flight writers drained per step 3)
 5. INSERT snapshot into usage_history, update period metadata
 6. Dispatch `billing.period_end` webhook
 7. If spend-blocked and `auto_resume=true`: unblock
-
-**AtomicPtr reclamation safety:** Raw `AtomicPtr::swap` without reclamation causes
-use-after-free. `crossbeam-epoch` provides lock-free RCU: request threads `pin()` on
-entry, `unpin()` on exit (RAII). `defer_destroy` defers deallocation until all prior-epoch
-threads complete.
 
 For `calendar_month`, rollover processes apps in batches of 100 with 10ms sleep to
 avoid SQLite write spikes.
@@ -911,7 +838,7 @@ produces 150K individual writes, which saturates SQLite's single-writer lock.
 3. One WAL fsync per flush. ~50ms for 60K upserts on NVMe SSD.
 
 **Extreme scale (>10K apps):** Shard by app_id hash across multiple SQLite databases
-(~2K apps per shard), or store per-app counter snapshots as single MessagePack BLOBs.
+(~2K apps per shard).
 
 ### 4.5 Counter Overflow
 
@@ -962,16 +889,16 @@ Data loss window: at most `flush_interval` (5 seconds) of counter updates. The e
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `event_id` | ULID | Yes | Globally unique, sortable identifier |
-| `idempotency_key` | String | Yes | Deduplication key (`{app_id}_{request_id}_{resource}`; app_id prefix prevents cross-app collision) |
+| `idempotency_key` | String | Yes | Deduplication key (`{app_id}_{request_id}_{resource}`) |
 | `app_id` | String | Yes | Tenant identifier |
 | `resource` | String | Yes | Resource name (must match defined resource) |
-| `value` | u64 | Yes | Consumption amount (>= 0, integer — fractional ms stored as microseconds) |
+| `value` | u64 | Yes | Consumption amount (>= 0, integer) |
 | `timestamp` | ISO 8601 | Yes | Event time, always UTC, millisecond precision |
 | `period` | String | Yes | Billing period (YYYY-MM) |
 | `plan` | String | Yes | Plan name at time of event |
 | `plan_version` | u32 | Yes | Plan version at time of event |
-| `endpoint` | String | No | RPC method name for per-endpoint metering (see Section 21) |
-| `source` | String | Yes | Event source: `"request"`, `"cron"`, `"background"` (see Section 22) |
+| `endpoint` | String | No | RPC method name for per-endpoint metering |
+| `source` | String | Yes | Event source: `"request"`, `"cron"`, `"background"` |
 | `metadata` | Object | No | Arbitrary context for debugging |
 
 ### 5.2 Event Log Integrity
@@ -983,9 +910,9 @@ Each event log entry includes:
 **Integrity via periodic external digest anchoring:**
 
 The event log uses **periodic external digest anchoring** rather than an internal hash
-chain. An internal chain (`H(n) = SHA256(H(n-1) || payload)`) is security theater: an
-attacker with write access can rewrite the entire chain. External anchoring provides
-genuine tamper evidence, following AWS CloudTrail (S3 digest files) and Sigstore/Rekor.
+chain. An internal chain is security theater: an attacker with write access can rewrite
+the entire chain. External anchoring provides genuine tamper evidence, following AWS
+CloudTrail and Sigstore/Rekor.
 
 Every 10,000 entries or 300 seconds, a SHA-256 digest of recent entries is computed and
 posted to a configured external store (S3 Object Lock, Rekor, or a read-only-mounted
@@ -1059,15 +986,32 @@ predictability from day one.
 60K requests (at 1K req/s) can accumulate unbilled. For high-throughput apps, this means
 significant overshoot before the spending monitor catches up.
 
-**Solution:** Each request atomically updates a per-app spend accumulator
-(`AtomicU64::fetch_add(delta_cents, Release)`). Pre-request, the Quota Enforcer checks
-`spend_blocked[app].load(Acquire)`. When the accumulator exceeds the limit, the app is
-blocked and a `spending.blocked` webhook fires.
+**Solution:** Each request atomically updates a per-app spend accumulator. Pre-request,
+the Quota Enforcer checks `spend_blocked[app].load(Acquire)`. When the accumulator
+exceeds the limit, the app is blocked and a `spending.blocked` webhook fires.
+
+**Accumulator unit: tenths of a cent.** The inline accumulator (`AtomicU64`) tracks spend
+in tenths of a cent (0.1 cent = $0.001) to avoid floating-point arithmetic on the hot
+path while maintaining sub-cent precision. The per-request delta is computed as:
+
+```rust
+// delta_tenths: spend in tenths-of-a-cent for this request
+let delta_tenths: u64 = compute_request_cost_tenths(resource_deltas, pricing);
+spend_accumulator[app].fetch_add(delta_tenths, Release);
+```
+
+**Conversion to cents for wallet/invoice:** When the SpendingReconciler compares the
+accumulator against the spending limit (configured in dollars) or when displaying spend
+to users:
+- `spend_cents = accumulator_tenths / 10` (integer division, truncates — safe direction)
+- `spend_dollars = accumulator_tenths as f64 / 1000.0` (display only, never for comparison)
+- Spending limit comparison: `accumulator_tenths >= limit_dollars * 1000`
+
+The inline estimate always under-counts (safe direction). Max drift per 10s window:
+~$6 at 1K req/s, corrected at next reconciliation.
 
 The background SpendingReconciler (every 10s) recomputes exact spend from counter
-snapshots and corrects drift. Inline tracking uses fixed-point integer arithmetic
-(tenths of a cent, always under-counts -- safe direction). Max drift per 10s window:
-~$6 at 1K req/s, corrected at next reconciliation.
+snapshots and corrects drift.
 
 ### 6.3 Configuration
 
@@ -1166,7 +1110,7 @@ Expired credits are skipped during application and logged as `credit.expired`.
 GET    /v1/_admin/apps/{id}/wallet                -- Balance and config
 POST   /v1/_admin/apps/{id}/wallet/topup          -- Add credits { amount_cents, note }
 POST   /v1/_admin/apps/{id}/wallet/deduct         -- Deduct credits { amount_cents, note }
-GET    /v1/_admin/apps/{id}/wallet/transactions   -- Transaction history (paginated)
+GET    /v1/_admin/apps/{id}/wallet/transactions   -- Transaction history (cursor-paginated)
 ```
 
 ---
@@ -1191,12 +1135,9 @@ X-Enforcement-Mode: dry_run      # Only present if not "enforce"
 
 `X-Quota-*` shows the most constrained resource (lowest `remaining / limit` ratio).
 
-**RateLimit header convention:** Per
-[draft-ietf-httpapi-ratelimit-headers-10](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/):
-`RateLimit` is a combined field (`limit`, `remaining`, `reset` in seconds);
-`RateLimit-Policy` describes the policy (`<limit>;w=<window>[;burst=<burst>]`).
-The older separate `RateLimit-Limit`/`-Remaining`/`-Reset` headers are **not** used.
-`X-Quota-*` headers are Appbase-specific (no IETF draft covers quota headers).
+**RateLimit headers** per
+[draft-ietf-httpapi-ratelimit-headers-10](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/).
+`X-Quota-*` headers are Appbase-specific.
 
 ### 8.2 Warning Headers
 
@@ -1262,8 +1203,6 @@ Other error types follow the same JSON-RPC 2.0 structure with `data.type` discri
 
 ### 8.4 Error Code Catalog
 
-All error codes used by the quota/metering system:
-
 | Code | HTTP | Type | Description |
 |---|---|---|---|
 | `-32029` | 429 | `quota_exceeded` | Monthly/daily quota reached |
@@ -1273,70 +1212,19 @@ All error codes used by the quota/metering system:
 | `-32033` | 403 | `entitlement_denied` | Feature not available on plan |
 | `-32034` | 503 | `execution_limit` | Per-request CPU/wall limit (kill) |
 
-Note: The previous `period_rollover` error code is eliminated by the double-buffered
-rollover design (Section 4.3). Rollover no longer causes any request failures.
+All codes are in the JSON-RPC 2.0 server error range (-32000 to -32099).
 
-All codes are within the JSON-RPC 2.0 implementation-defined server error range
-(-32000 to -32099). Each error type has a distinct code for unambiguous programmatic
-handling. The `data.type` field provides a human-readable discriminator.
-
-**Multiple simultaneous violations:** When multiple quotas are violated at the same time,
-the enforcer returns the error for the most critical violation (highest-severity policy
-action). If severity is equal, the resource with the lowest remaining percentage is
-reported. All violated resources are listed in `data.all_violations`:
-
-```json
-{
-  "data": {
-    "type": "quota_exceeded",
-    "resource": "requests",
-    "all_violations": [
-      { "resource": "requests", "used": 100000, "limit": 100000 },
-      { "resource": "cpu_ms", "used": 10500, "limit": 10000 }
-    ]
-  }
-}
-```
+**Multiple violations:** The most critical violation is returned. All violated resources
+are listed in `data.all_violations`.
 
 ---
 
 ## 9. Admin API
 
-All admin endpoints are served under the `/v1/` prefix for API versioning. Future
-breaking changes will use `/v2/`, with the previous version supported for at least
-12 months after deprecation.
-
-All admin endpoints require authentication via scoped API keys (see Section 10).
-Destructive operations require `X-Confirm: true` header. Responses are JSON with a
-standard envelope:
-
-**Offset-paginated endpoints** (small, bounded collections like apps, plans):
-```json
-{
-  "data": [],
-  "meta": { "total": 42, "limit": 20, "offset": 0, "has_more": true },
-  "warnings": []
-}
-```
-
-**Cursor-paginated endpoints** (unbounded/streaming like events, transactions):
-```json
-{
-  "data": [],
-  "meta": { "limit": 100, "next_cursor": "evt_01JQRA7XYZ", "has_more": true },
-  "warnings": []
-}
-```
-
-Each endpoint uses **one** pagination style, never both. The `meta` shape indicates
-which style is in use. See Section 9.9 for details.
-
-**Concurrency control:** Mutating endpoints use optimistic concurrency via `ETag`/
-`If-Match` headers. Example:
-```
-GET /v1/_admin/apps/my_blog -> ETag: "v3"
-PUT /v1/_admin/apps/my_blog/plan  If-Match: "v3"  -> 200 OK (or 409 Conflict if changed)
-```
+All endpoints under `/v1/`. Authentication via scoped API keys (Section 10).
+Destructive operations require `X-Confirm: true`. Optimistic concurrency via
+`ETag`/`If-Match`. Two pagination styles (see 9.9): offset (bounded collections)
+and cursor (unbounded/streaming). Each endpoint uses exactly one style.
 
 ### 9.1 Apps
 
@@ -1357,13 +1245,13 @@ PUT /v1/_admin/apps/my_blog/plan  If-Match: "v3"  -> 200 OK (or 409 Conflict if 
 |---|---|---|---|
 | GET | `/v1/_admin/apps/{id}/usage` | `read:usage` | Current period usage (all resources) |
 | GET | `/v1/_admin/apps/{id}/usage?resource=cpu_ms` | `read:usage` | Single resource breakdown |
-| GET | `/v1/_admin/apps/{id}/usage/history` | `read:usage` | Historical periods (paginated) |
+| GET | `/v1/_admin/apps/{id}/usage/history` | `read:usage` | Historical periods (cursor-paginated) |
 | GET | `/v1/_admin/apps/{id}/usage/history/{period}` | `read:usage` | Specific period detail |
-| GET | `/v1/_admin/apps/{id}/events` | `read:events` | Raw events (paginated, filterable) |
+| GET | `/v1/_admin/apps/{id}/usage/endpoints` | `read:usage` | Per-endpoint usage breakdown |
+| GET | `/v1/_admin/apps/{id}/events` | `read:events` | Raw events (cursor-paginated, filterable) |
 | GET | `/v1/_admin/usage/summary` | `read:usage` | Platform-wide current period summary |
 | GET | `/v1/_admin/usage/top?resource=cpu_ms&limit=10` | `read:usage` | Top N apps by resource |
 
-Query parameters for list endpoints: `?limit=N&offset=M&sort=field&order=asc|desc`
 Event filtering: `?resource=X&from=ISO8601&to=ISO8601&method=X&source=request|cron|background`
 
 ### 9.3 Plans
@@ -1384,7 +1272,7 @@ Event filtering: `?resource=X&from=ISO8601&to=ISO8601&method=X&source=request|cr
 | PUT | `/v1/_admin/apps/{id}/spending` | `write:apps` | Set spending config |
 | POST | `/v1/_admin/apps/{id}/spending/resume` | `write:apps` | Resume spend-paused app |
 | GET | `/v1/_admin/apps/{id}/invoice/preview` | `read:invoices` | Preview next invoice |
-| GET | `/v1/_admin/apps/{id}/invoice/history` | `read:invoices` | Historical invoice snapshots |
+| GET | `/v1/_admin/apps/{id}/invoice/history` | `read:invoices` | Historical invoices (cursor-paginated) |
 
 ### 9.5 Credits
 
@@ -1393,7 +1281,7 @@ Event filtering: `?resource=X&from=ISO8601&to=ISO8601&method=X&source=request|cr
 | GET | `/v1/_admin/apps/{id}/wallet` | `read:wallets` | Wallet balance and config |
 | POST | `/v1/_admin/apps/{id}/wallet/topup` | `write:wallets` | Add credits `{ amount_cents, note }` |
 | POST | `/v1/_admin/apps/{id}/wallet/deduct` | `write:wallets` | Deduct credits `{ amount_cents, note }` |
-| GET | `/v1/_admin/apps/{id}/wallet/transactions` | `read:wallets` | Transaction history |
+| GET | `/v1/_admin/apps/{id}/wallet/transactions` | `read:wallets` | Transaction history (cursor-paginated) |
 
 ### 9.6 Operations
 
@@ -1407,7 +1295,7 @@ Event filtering: `?resource=X&from=ISO8601&to=ISO8601&method=X&source=request|cr
 | GET | `/v1/_admin/event_log/verify` | `read:events` | Verify event log integrity |
 | GET | `/v1/_admin/reconciliation` | `read:events` | Late-arriving events report |
 | POST | `/v1/_admin/reconciliation/apply` | `admin:events` | Apply late events to closed period |
-| GET | `/v1/_admin/webhooks/failed` | `read:webhooks` | Failed webhook deliveries |
+| GET | `/v1/_admin/webhooks/failed` | `read:webhooks` | Failed webhook deliveries (cursor-paginated) |
 | POST | `/v1/_admin/webhooks/{id}/replay` | `write:webhooks` | Re-send a failed webhook |
 | POST | `/v1/_admin/webhooks/test` | `write:webhooks` | Send a test event |
 
@@ -1420,58 +1308,41 @@ Event filtering: `?resource=X&from=ISO8601&to=ISO8601&method=X&source=request|cr
 | DELETE | `/v1/_admin/keys/{id}` | `admin:keys` | Revoke an API key |
 | POST | `/v1/_admin/keys/{id}/rotate` | `admin:keys` | Rotate key (old key valid for grace period) |
 
-### 9.8 Data Export
+### 9.8 Data Export & Backfill
 
 | Method | Path | Required Scope | Description |
 |---|---|---|---|
 | GET | `/v1/_admin/export/usage?from=...&to=...&format=csv` | `read:usage` | Export usage data |
 | GET | `/v1/_admin/export/events?from=...&to=...&format=jsonl` | `read:events` | Export raw events |
+| POST | `/v1/_admin/backfill/events` | `admin:events` | Backfill events (rate-limited, see below) |
+| POST | `/v1/_admin/apps/{id}/invoice/rerate` | `admin:events` | Re-rate invoice for a period |
 
-Supported formats: `csv`, `json`, `jsonl` (newline-delimited JSON).
+Supported export formats: `csv`, `json`, `jsonl` (newline-delimited JSON).
+
+**Backfill rate limiting:** Default 10 req/s, burst 50. Max 1,000 events per request.
+Each backfill request is audit-logged.
 
 ### 9.9 Pagination
 
-Each endpoint uses exactly **one** pagination style, determined by the nature of its data.
-Responses never mix offset and cursor fields.
+**Offset-based** (`?limit=N&offset=M&sort=field&order=asc|desc`):
+Used by `/apps`, `/plans`, `/keys`. Meta: `{ "total", "limit", "offset", "has_more" }`.
 
-**Offset-based** (bounded, small collections):
-```
-GET /v1/_admin/apps?limit=20&offset=40&sort=app_id&order=asc
-Response meta: { "total": 42, "limit": 20, "offset": 40, "has_more": false }
-```
-Used by: `/apps`, `/plans`, `/keys`, `/exchange_rates`.
-
-**Cursor-based** (unbounded, append-only, or streaming):
-```
-GET /v1/_admin/apps/{id}/events?limit=100&cursor=evt_01JQRA7XYZ
-Response meta: { "limit": 100, "next_cursor": "evt_01JQRB8ABC", "has_more": true }
-```
-Used by: `/events`, `/wallet/transactions`, `/usage/history`, `/export/*`,
-`/webhooks/failed`, `/reconciliation`.
-
-The cursor is an opaque string (typically the last event_id or ULID). Offset-based
-pagination is not supported on cursor endpoints (offset on append-only data is
-unreliable and produces inconsistent results under concurrent writes).
+**Cursor-based** (`?limit=N&cursor=<opaque>`):
+Used by `/events`, `/wallet/transactions`, `/usage/history`, `/invoice/history`,
+`/export/*`, `/webhooks/failed`, `/reconciliation`. Meta: `{ "limit", "next_cursor", "has_more" }`.
 
 ### 9.10 Health Check Response
 
 Returns `status`, `version`, `uptime_seconds`, and per-component health (rate_limiter,
-usage_flusher, event_logger, period_roller, spending_monitor, storage_sampler,
-webhook_dispatcher, dunning_manager, trial_manager, memory_watchdog) each with
-`status` and component-specific metrics.
+usage_flusher, event_logger, period_roller, spending_reconciler, storage_sampler,
+webhook_dispatcher, trial_manager, memory_watchdog) each with `status` and
+component-specific metrics.
 
 ---
 
 ## 10. Access Control & API Key Management
 
-### 10.1 Motivation
-
-A single admin API key is insufficient for production use. Different services and team
-members need different levels of access. This follows the principle of least privilege,
-as implemented by Stripe (restricted keys), Cloudflare (API tokens with permissions),
-and AWS (IAM policies).
-
-### 10.2 Roles
+### 10.1 Roles
 
 | Role | Description | Default Scopes |
 |---|---|---|
@@ -1481,7 +1352,7 @@ and AWS (IAM policies).
 | `billing` | Read usage, manage wallets and invoices | `read:usage`, `read:invoices`, `write:wallets` |
 | `viewer` | Read-only access | `read:*` |
 
-### 10.3 Scopes
+### 10.2 Scopes
 
 Scopes follow `action:resource` pattern. **Read:** `read:apps`, `read:usage`,
 `read:events`, `read:plans`, `read:invoices`, `read:wallets`, `read:health`,
@@ -1490,27 +1361,18 @@ Scopes follow `action:resource` pattern. **Read:** `read:apps`, `read:usage`,
 `admin:config`, `admin:events`, `admin:ops`, `admin:keys`.
 Wildcard: `read:*` = all reads, `*` = everything.
 
-### 10.4 App Filtering
+### 10.3 App Filtering
 
 Keys can be restricted to apps matching glob patterns via `app_filter = ["frontend_*"]`.
 Non-matching apps: 404 on detail, 403 on write, omitted from lists.
 
-### 10.5 Key Rotation
+### 10.4 Key Rotation & Format
 
-`POST /v1/_admin/keys/{id}/rotate` returns new key. Both old and new keys valid for
-grace period (default: 24h, configurable via `key_rotation_grace_hours`).
+`POST /v1/_admin/keys/{id}/rotate` returns new key. Both old and new valid for 24h grace.
 
-### 10.6 Key Format
-
-Prefix `abk_` + 32 random bytes (base62). Stored as `SHA-256(key)` hashes.
-
-**Why SHA-256, not bcrypt:** API keys are 32 random bytes (192 bits entropy in base62) —
-not human passwords, cannot be brute-forced. bcrypt at ~10ms/hash = 10 CPU-s/s at 100
-req/s. SHA-256 on high-entropy input is pre-image resistant and adds < 1 us per lookup.
-This follows Stripe, GitHub, and AWS for API key verification.
-
-Plaintext is shown once at creation and never stored. Every admin API call is
-audit-logged (timestamp, key ID, role, endpoint, parameters, status, IP).
+Key format: `abk_` + 32 random bytes (base62). Stored as `SHA-256(key)` (not bcrypt —
+high-entropy keys don't need KDF). Plaintext shown once at creation, never stored.
+Every admin API call is audit-logged.
 
 ---
 
@@ -1534,9 +1396,8 @@ appbase_quota_check_duration_seconds  # Enforcement check latency (p50, p99)
 appbase_active_isolates               # Current V8 isolate count
 appbase_webhook_sent_total            # Webhook delivery by status (success/failed)
 appbase_admin_api_requests_total      # Admin API calls by key_id, method, path
-appbase_admin_api_auth_failures_total # Auth failures by reason (invalid_key/insufficient_scope)
-appbase_dunning_apps_in_grace_total   # Apps in dunning grace period
-appbase_dunning_apps_suspended_total  # Apps suspended for non-payment
+appbase_admin_api_auth_failures_total # Auth failures by reason
+appbase_memory_pressure_level         # MemoryWatchdog pressure level (0-3)
 ```
 
 ### 11.2 Structured Logging
@@ -1591,7 +1452,6 @@ All enforcement decisions produce structured log entries:
 | `storage_high` | Storage > 90% of quota | Warning | Webhook |
 | `counter_overflow` | Counter saturated at u64::MAX | Critical | Log + webhook |
 | `webhook_failure` | Webhook delivery failed after all retries | Warning | Log |
-| `payment_failed` | Payment attempt failed (dunning) | Error | Webhook |
 
 ---
 
@@ -1605,8 +1465,8 @@ All enforcement decisions produce structured log entries:
 | Subscription + overage | Yes | Beyond included | No | Pro tier ($20/mo + usage) |
 | Pure usage-based | No | All usage | Optional | API-only tier |
 | Tiered (graduated) | Yes/No | Per-tier rates | Optional | Volume discount |
-| Committed use (credits) | Prepaid | Deducted from wallet | Optional | Enterprise |
-| Package bundles | Add-on | Included in package | Yes | Feature packs (see Section 20) |
+
+See Section 20 for Phase 2+ billing models (packages, commitments, multi-currency).
 
 ### 12.2 Invoice Preview
 
@@ -1618,7 +1478,6 @@ All enforcement decisions produce structured log entries:
   "currency": "usd",
   "line_items": [
     { "type": "subscription", "description": "Pro plan -- March 2026", "amount_cents": 2000 },
-    { "type": "commitment_base", "amount_cents": 5000, "note": "Usage below commitment floor" },
     { "type": "overage", "resource": "requests", "overage_quantity": 2500000, "amount_cents": 75 },
     { "type": "overage", "resource": "egress_bytes", "overage_bytes": 50000000000, "amount_cents": 450 },
     { "type": "credit", "description": "Wallet credit applied", "amount_cents": -525 }
@@ -1655,94 +1514,15 @@ When `overage.enabled = true` on a plan:
 
 ### 12.6 External Billing System Integration
 
-Appbase generates usage data; external systems handle payment:
+Appbase generates usage data; external systems handle payment.
 
-```
-                    Appbase                      External
-                  +----------+               +-------------+
-  billing.period  |          |  GET /invoice  |             |
-  _end webhook -->| Admin API|-->  preview -->| Stripe/Lago |
-                  |          |               |             |
-                  | GET      |  usage data   | Create      |
-                  | /export  |-->-->-->-->-->-| invoice     |
-                  |          |               |             |
-                  | POST     |  on payment   | Process     |
-                  | /wallet  |<--<--<--<--<--| payment     |
-                  | /topup   |               |             |
-                  +----------+               +-------------+
-```
+**Stripe:** `billing.period_end` webhook -> your service calls invoice preview ->
+creates Stripe invoice -> on success, optionally top up wallet.
 
-**Stripe integration pattern:**
-1. `billing.period_end` webhook fires
-2. Your service calls `GET /v1/_admin/apps/{id}/invoice/preview`
-3. Creates Stripe invoice with line items from preview
-4. Stripe processes payment
-5. On success: `POST /v1/_admin/apps/{id}/wallet/topup` for credit-based model
-6. On failure: Stripe fires `invoice.payment_failed` -> your service calls
-   `POST /v1/_admin/apps/{id}/dunning/start` (see Section 12.8)
+**Lago:** Forward usage events during period; Lago handles invoice + payment;
+Appbase handles enforcement.
 
-**Lago integration pattern:**
-1. During the period: forward usage events to Lago's event API
-2. Lago handles aggregation, invoice generation, and payment
-3. Appbase handles enforcement; Lago handles billing
-
-### 12.7 Minimum Commitment / Committed Use Discounts
-
-Enterprise customers often commit to a minimum monthly spend in exchange for lower
-per-unit rates. This follows the model used by AWS Reserved Instances, GCP Committed
-Use Discounts, and Orb's minimum commitments.
-
-**Configuration:**
-
-```toml
-[plans.enterprise_committed]
-description = "Enterprise with $500/mo minimum commitment"
-version = 1
-
-[plans.enterprise_committed.commitment]
-minimum_cents = 50000               # $500/month minimum
-term_months = 12                    # Contract duration
-start_date = "2026-01-01"          # Contract start
-discount_pct = 20                   # 20% discount on all usage rates
-rollover = false                    # Unused commitment does NOT roll over
-```
-
-**Invoice behavior:**
-- If usage charges >= `minimum_cents`: bill usage charges (with discount applied)
-- If usage charges < `minimum_cents`: bill `minimum_cents` (the commitment floor)
-- The invoice preview shows a `commitment_adjustment_cents` line item when the
-  floor applies
-
-**Tracking:**
-- `GET /v1/_admin/apps/{id}/commitment` returns commitment status, remaining term,
-  utilization percentage
-- `commitment.underutilized` webhook fires if utilization < 50% at mid-period
-
-### 12.8 Dunning — Payment Failure Handling
-
-When payment fails, the platform needs a clear escalation path. This follows Stripe's
-dunning model (retry schedule + grace period + eventual suspension).
-
-**Flow:** `payment_failed -> grace_period (3d) -> retry_1 (d3) -> retry_2 (d7) -> retry_3 (d14) -> suspended`
-
-```toml
-[billing.dunning]
-enabled = true
-grace_period_days = 3               # App runs normally during grace
-retry_schedule_days = [3, 7, 14]    # Days after failure to retry
-suspension_action = "degrade"       # "degrade" | "block" | "webhook"
-auto_reinstate_on_payment = true    # Restore plan when payment succeeds
-```
-
-At each stage, webhooks fire (`payment.failed`, `payment.retry`, `payment.suspended`).
-Suspension actions: `degrade` (free-tier limits), `block` (429 all requests), or
-`webhook` (external system decides). On payment success,
-`POST /v1/_admin/apps/{id}/dunning/resolve` reinstates the original plan.
-
-**Admin API:** `GET/POST /v1/_admin/apps/{id}/dunning` (state), `/dunning/start`,
-`/dunning/resolve`, `/dunning/override` (extend grace, skip to suspend).
-
-### 12.9 Graduated (Tiered) Pricing Calculation
+### 12.7 Graduated (Tiered) Pricing Calculation
 
 When tiered pricing is configured:
 
@@ -1761,8 +1541,7 @@ For usage = 75,000,000:
 ```
 
 Each tier is calculated independently (graduated model), not the entire volume at a
-single tier rate (volume model). This matches Lago's graduated charge model and is the
-most common approach in SaaS billing.
+single tier rate (volume model).
 
 ---
 
@@ -1781,16 +1560,11 @@ most common approach in SaaS billing.
 | `spending.resumed` | Spend-blocked app resumed | method (auto/manual) |
 | `billing.period_end` | Billing period ended | period, usage_summary |
 | `billing.invoice_ready` | Invoice preview available | period, total_cents |
-| `payment.failed` | Payment attempt failed | period, amount_cents, reason |
-| `payment.retry` | Payment retry attempted | attempt, final, amount_cents |
-| `payment.suspended` | App suspended for non-payment | action, period |
-| `payment.resolved` | Payment received after dunning | period, amount_cents |
 | `plan.changed` | Plan changed | old_plan, new_plan, old_version, new_version |
 | `app.created` | New app registered | app_id, plan |
 | `app.deleted` | App removed | app_id |
 | `credit.applied` | Credits deducted for usage | amount_cents, remaining_cents |
 | `credit.expired` | Credits expired unused | amount_cents |
-| `commitment.underutilized` | Commitment < 50% utilized at mid-period | utilization_pct |
 | `system.flush_error` | Counter flush failed | error_message |
 
 ### 13.2 Payload Format
@@ -1825,24 +1599,11 @@ most common approach in SaaS billing.
 - **Replay:** `POST /v1/_admin/webhooks/{id}/replay`
 - **Dedup:** Same event type + app + threshold fires at most once per billing period
 - **Event filtering:** The `events` config uses prefix matching with `*` wildcard.
-  `"quota.*"` matches `quota.warning`, `quota.exceeded`, `quota.recovered`.
-  `"*"` matches all events. Exact names (e.g., `"quota.warning"`) match only that event.
 
 ### 13.4 Receiver Idempotency Contract
 
-Webhook receivers **must** handle duplicate deliveries idempotently. Appbase guarantees
-at-least-once delivery but not exactly-once. Duplicates can occur due to:
-- Network timeouts where the receiver processed the event but Appbase did not see the 2xx
-- Retries after transient failures
-- Manual replay via admin API
-
-**Contract for receivers:**
-
-1. **Use the `id` field as idempotency key.** Store processed IDs and skip duplicates.
-2. **Respond 2xx within 10 seconds.** Non-2xx or timeout triggers retry.
-3. **Process async if needed.** Return 200 immediately, process in background.
-4. **Track IDs for 48+ hours** (covers retry window + manual replays).
-5. **Verify HMAC signature** before processing (`X-Appbase-Signature` header).
+At-least-once delivery (not exactly-once). Receivers must: use `id` as idempotency key,
+respond 2xx within 10s, track IDs for 48+ hours, verify HMAC signature.
 
 ---
 
@@ -1881,8 +1642,6 @@ at-least-once delivery but not exactly-once. Duplicates can occur due to:
 
 ### 14.4 Denial-of-Wallet Prevention
 
-An attacker targeting another user's app could exhaust their quota or spending limit:
-
 | Layer | Protection |
 |---|---|
 | 1. Rate limit | Caps request throughput regardless of origin |
@@ -1900,7 +1659,6 @@ An attacker targeting another user's app could exhaust their quota or spending l
 | SQLite WAL + `PRAGMA synchronous=NORMAL` | Durable flush with good performance |
 | Event log with external digest anchoring | Tamper detection backed by external trust root |
 | Idempotency dedup set | Prevent double-counting |
-| Checksums on exported data | Verify export integrity |
 
 ---
 
@@ -1920,7 +1678,6 @@ An attacker targeting another user's app could exhaust their quota or spending l
 | Monitor everything | Prometheus metrics + structured logs |
 | Export for analytics | CSV/JSONL export endpoints |
 | Integrate billing | Invoice preview API + webhook events |
-| Handle payment failures | Dunning system with configurable escalation (Section 12.8) |
 
 ### 15.2 For App Developers
 
@@ -1951,11 +1708,11 @@ match state.quota_available("ai_tokens") {    // Atomic load (Acquire), no I/O
 
 **Unit:** Policy evaluation, token bucket CAS (no double-refill), concurrency guard CAS
 (no slot leaks), quota enforcer decisions, config validation (V1-V16), invoice
-calculation (overage, credits, commitments), event correction (original_value matching,
-counter floor), RBAC (scopes, app filtering, key rotation).
+calculation (overage, credits), event correction (original_value matching, counter floor),
+RBAC (scopes, app filtering, key rotation).
 
 **Integration:** Full request flow with headers, double-buffered rollover (no 503),
-inline spend tracking, crash recovery, hot reload, dunning flow, SQLite batching.
+inline spend tracking, crash recovery, hot reload, SQLite batching.
 
 **Load:** Enforcement < 1us p99, 100 concurrent atomic correctness, 10K events/s no
 drops, 60K row flush < 100ms, token bucket CAS under 1K concurrent requests.
@@ -1976,14 +1733,14 @@ drops, 60K row flush < 100ms, token bucket CAS under 1K concurrent requests.
 | 6 | Entitlement checker | 1,5 | S |
 | 7 | SQLite store + batched flush + crash recovery | 2 | M |
 | 8 | Event log (append-only + external anchoring) | 2 | M |
-| 9 | Period rollover (double-buffered) | 7 | M |
+| 9 | Period rollover (double-buffered, drain-and-wait) | 7 | M |
 | 10 | Admin API (versioned /v1/) + RBAC + scoped keys | 2,4,7 | L |
 | 11 | Spending monitor + alerts + webhooks | 7,10 | M |
 | 12 | Invoice preview + billing + credits/wallets | 7,11 | M |
-| 13 | Dunning + packages + commitments | 11,12 | M |
-| 14 | Per-endpoint + cron/background metering | 2,4 | M |
-| 15 | Multi-currency + backfill tooling + data export | 12 | M |
-| 16 | Prometheus metrics + dry-run/shadow modes | all | M |
+| 13 | Per-endpoint + cron/background metering | 2,4 | M |
+| 14 | Prometheus metrics + dry-run/shadow modes | all | M |
+
+Phase 2+ (see Section 20): Dunning, packages, commitments, multi-currency, backfill tooling.
 
 Effort: S = 1-2 days, M = 3-5 days, L = 1-2 weeks.
 **Critical path:** 1 -> 2 -> 4 -> 5 -> 7 -> 10 (core enforcement + persistence + admin)
@@ -2016,33 +1773,15 @@ When an app is deleted via `DELETE /v1/_admin/apps/{id}`:
 
 ### 18.4 Clock and Time Handling
 
-- All internal timestamps use `Instant::now()` (monotonic) for duration measurement
-- All external timestamps use `SystemTime` in UTC with millisecond precision
-- Daily resets occur at 00:00 UTC regardless of server timezone
-- **NTP jump handling for daily reset:**
-  - Forward jumps: If `SystemTime` jumps forward by more than 5 minutes, the daily
-    reset timer recomputes the next reset time. If the jump skips past a reset point,
-    the system performs an immediate catch-up reset with a `daily_reset_catchup` log
-    entry. Counters are snapshotted at the jump-detected time (not the skipped time).
-  - Backward jumps: If `SystemTime` jumps backward by > 5 seconds, a warning is logged.
-    The daily reset timer uses the monotonic clock (`Instant`) as the primary trigger,
-    with `SystemTime` only for labeling. This means a backward NTP adjustment does NOT
-    cause a duplicate daily reset.
-  - Events with timestamps > 60 seconds in the future are rejected.
-- Monthly period boundaries are calculated using calendar arithmetic (e.g., March billing
-  period = March 1 00:00:00 UTC to March 31 23:59:59.999 UTC)
+- Internal: `Instant::now()` (monotonic) for durations. External: `SystemTime` UTC ms.
+- Daily resets at 00:00 UTC. Monthly boundaries via calendar arithmetic.
+- **NTP jumps:** Forward >5min: catch-up reset, snapshot at detection time. Backward
+  >5s: warning logged, monotonic clock prevents duplicate resets. Future timestamps
+  (>60s ahead) rejected.
 
 ### 18.5 Concurrency Guard — CAS-Based Acquire
 
-The `concurrent_requests` gauge uses a compare-and-swap loop instead of
-`fetch_add` + `fetch_sub`, eliminating the TOCTOU race where a slot could be
-temporarily "leaked" between the add and the limit check.
-
-**Problem with fetch_add:** `fetch_add(1)` then checking `if prev >= limit` and doing
-`fetch_sub(1)` creates a TOCTOU race -- the gauge is transiently over-limit, causing
-other threads to incorrectly reject requests.
-
-**CAS-based solution:**
+CAS loop instead of `fetch_add`+`fetch_sub` eliminates TOCTOU (transiently over-limit):
 
 ```rust
 impl ConcurrencyGuard {
@@ -2064,9 +1803,8 @@ impl Drop for ConcurrencyGuard {
 }
 ```
 
-`compare_exchange` (strong) is used instead of `_weak`. On current ARM (LDXR/STXR),
-`_weak`'s theoretical advantage does not materialize — both emit the same loop. Strong
-avoids spurious retries that buy nothing. `Drop` ensures decrement on panic/cancel.
+`compare_exchange` (strong) used — same ARM codegen as `_weak`. `Drop` ensures decrement
+on panic/cancel.
 
 ### 18.6 First Boot
 
@@ -2090,18 +1828,9 @@ On first startup with no existing database:
 
 ### 18.8 Graceful Shutdown
 
-On SIGTERM or SIGINT:
-
-1. **Stop accepting new connections** (listener closed)
-2. **Drain in-flight requests** (up to `graceful_shutdown_timeout_secs`)
-3. **Flush atomic counters to SQLite** (final UsageFlusher run)
-4. **Flush event log** (fsync remaining buffered events)
-5. **Cancel pending webhooks** (they will retry on next startup from dead letter)
-6. **Close SQLite connections**
-7. **Exit**
-
-If the timeout expires before drain completes, remaining requests are dropped and
-a warning is logged. Counter data up to the last flush is preserved.
+On SIGTERM/SIGINT: (1) stop accepting connections, (2) drain in-flight requests (up to
+`graceful_shutdown_timeout_secs`), (3) flush counters to SQLite, (4) flush event log,
+(5) cancel pending webhooks (retry on next startup), (6) close SQLite, (7) exit.
 
 ### 18.9 Performance Budget
 
@@ -2129,12 +1858,20 @@ The metering pipeline degrades gracefully under memory pressure rather than cras
 | Level | Trigger (RSS) | Response |
 |---|---|---|
 | Normal | < 80% limit | Full pipeline |
-| Warning | >= 80% | Shrink dedup LRU to 50%; log warning |
-| Critical | >= 90% | Shrink dedup to 10%; disable event log enqueue; stop HyperLogLog |
+| Warning | >= 80% | Shrink dedup LRU capacity to 50% of configured max; log warning |
+| Critical | >= 90% | Shrink dedup to 10% of configured max; disable event log enqueue; stop HyperLogLog |
 | Emergency | >= 95% | Disable dedup (accept double-counting); counters + SQLite only |
 
-`MemoryWatchdog` checks RSS every 5s (`[server] memory_limit_mb = 2048`). Degradation is
-automatic/reversible. `appbase_memory_pressure_level` gauge tracks level (0-3).
+**MemoryWatchdog** checks RSS every 5s (`[server] memory_limit_mb = 2048`). Degradation
+is automatic and reversible.
+
+**"Shrink dedup LRU" means:** Set the LRU's `max_capacity` to the reduced value (e.g.,
+50% of configured `dedup_capacity`). Entries beyond the new capacity are evicted naturally
+by the LRU on next insert — no bulk purge needed. When memory pressure drops back to
+Normal, restore `max_capacity` to the full configured value. The LRU refills naturally
+as new requests arrive.
+
+`appbase_memory_pressure_level` gauge tracks level (0-3).
 
 ### 18.11 Trial Periods
 
@@ -2147,11 +1884,25 @@ trial_ends_at = "2026-04-30T23:59:59Z"     # Auto-downgrade after this
 trial_downgrade_to = "free"                  # Plan to switch to
 ```
 
-Trial expiry is handled by a **dedicated TrialManager background task**, not the
-PeriodRoller. The PeriodRoller runs on billing period boundaries (monthly/daily),
-which may not align with trial end dates. The TrialManager checks trial deadlines
-every 60 seconds independently:
+**PeriodRoller / TrialManager ordering:** Both tasks share a `Mutex<()>` (the "rollover
+lock"). PeriodRoller acquires the lock first when both are scheduled simultaneously
+(PeriodRoller checks its schedule before TrialManager). This prevents a race where
+TrialManager downgrades an app to "free" while PeriodRoller is mid-rollover for the
+same app on "pro" limits.
 
+```
+rollover_lock: Mutex<()>
+
+PeriodRoller tick:
+  let _guard = rollover_lock.lock();
+  // ... perform period rollover for all affected apps ...
+
+TrialManager tick (every 60s):
+  let _guard = rollover_lock.lock();
+  // ... check and process expired trials ...
+```
+
+TrialManager behavior when it acquires the lock:
 1. Scan apps where `trial_ends_at <= now` and `trial_active = true`
 2. Change the app's plan to `trial_downgrade_to`
 3. Set `trial_active = false` to prevent re-processing
@@ -2164,54 +1915,94 @@ A `trial.expiring_soon` webhook fires 72 hours before expiry (checked once per h
 
 | Capability | Appbase v2 | CF Workers | AWS Lambda | Vercel |
 |---|---|---|---|---|
-| Per-request CPU limit | Yes (kill) | Yes (10ms free/30s paid) | 15 min max timeout (billed) | 10s-300s (plan-dependent) |
-| Spending limits | Yes (inline, real-time) | No | Budgets (~12-24h delay, alerting only, no hard stop) | Yes (requires manual per-project unpause) |
-| Hard cap option | Yes (any plan) | Free tier only | No (Budgets are alerts, not enforcement) | With spend mgmt (manual resume) |
-| Prepaid credits | Yes (wallets) | No | Savings Plans / Reserved | No |
-| Dunning | Yes | N/A | N/A | Automatic |
-| Usage event log | Yes (ext. anchored) | Workers Analytics (sampled) | CloudWatch Logs | No |
+| Spending limits | Inline, real-time | No | ~12-24h delay, alerts only | Manual per-project unpause |
+| Hard cap | Any plan | Free tier only | No | Manual resume |
+| Prepaid credits | Yes | No | Savings Plans | No |
 | Custom resources | Yes (plugin SDK) | No | No | No |
-| RBAC for admin API | Yes (scoped keys) | API tokens | IAM policies | Team roles (coarse) |
-| Per-endpoint metering | Yes | No | Per-function only | No |
-| Committed use discounts | Yes | No | Savings Plans / Compute SP | No |
-| Dry-run/shadow mode | Yes | No | No | No |
+| RBAC admin API | Scoped keys | API tokens | IAM | Coarse team roles |
+| Dry-run/shadow | Yes | No | No | No |
 
-*AWS Lambda: 15-min max timeout, billed per 1ms. AWS Budgets: 12-24h delay, SNS alerts
-only (no hard enforcement without custom integration). Vercel Spend Mgmt: pauses
-deployments at limit, requires manual per-project unpause (no auto-resume).*
+### 18.13 Per-Endpoint Metering
+
+Every usage event includes an `endpoint` field (auto-populated from JSON-RPC `method`).
+Per-endpoint aggregates are stored in SQLite (`endpoint_usage` table, keyed by
+`app_id, endpoint, resource, period`). Flushed alongside per-app counters using
+in-memory HashMaps (informational, not enforcement-critical).
+
+**Admin API:** `GET /v1/_admin/apps/{id}/usage/endpoints` (all, filtered, or top N).
+
+### 18.14 Metering for Cron & Background Jobs
+
+Every usage event has a `source` field:
+
+| Source | Description | Trigger |
+|---|---|---|
+| `request` | Normal HTTP request-response | RPC call from client |
+| `cron` | Scheduled job execution | Timer-triggered by platform |
+| `background` | Background task (e.g., webhooks, async processing) | Platform-initiated |
+
+Cron jobs get a synthetic `request_id` (`cron_{app_id}_{job_name}_{timestamp}`), run
+through the same V8 + metering pipeline, and tag events with `source: "cron"`. Quota
+enforcement applies identically. All sources share the same quota pool.
 
 ---
 
-## 19. Multi-Currency Support
+## 19. Future Considerations (Out of Scope for v2)
 
-### 19.1 Motivation
+### 19.1 Distributed Metering (Multi-Node)
 
-Customers in different regions expect to see prices and invoices in their local currency.
-Stripe, Lago, and Orb all support multi-currency billing. Without multi-currency,
-international customers see USD amounts that do not match their payment statements,
-creating confusion and support burden.
+When Appbase scales beyond a single node:
+- Each node maintains local atomic counters
+- Periodic sync to central store (Redis or CockroachDB)
+- Quota enforcement uses local counters (slightly stale) with periodic reconciliation
+- Trade-off: up to `sync_interval` seconds of over-quota usage spread across nodes
 
-### 19.2 Design Principles
+### 19.2 Usage-Based Autoscaling
 
-1. **Single internal ledger currency:** All metering, counters, and spend accumulators
-   operate in the platform's base currency (configurable, default: USD cents). This
-   avoids floating-point drift from repeated conversions.
-2. **Conversion at the boundary:** Currency conversion occurs at two points only:
-   - **Display time** (invoice preview, spend estimate API, dashboard) — uses the
-     rate locked at invoice generation time.
-   - **Payment time** — handled by the external payment processor (Stripe/Lago), which
-     applies its own FX rate at charge time.
-3. **Per-app currency assignment:** Each app has an optional `currency` field. If omitted,
-   `billing.default_currency` applies.
+Auto-adjust plan limits based on patterns. Scale up during spikes, scale down during
+quiet periods. Requires predictive modeling.
 
-### 19.3 Configuration
+### 19.3 Cost Allocation Tags
 
+Request-level labels (`team`, `environment`, `feature`) for internal chargeback.
+
+### 19.4 SLA Monitoring
+
+Track uptime and latency SLAs per enterprise app. Auto-issue credits on SLA violations.
+
+### 19.5 Marketplace Billing
+
+Third-party plugin creators billing for their plugin usage through the platform.
+
+### 19.6 Real-Time Usage Dashboard
+
+WebSocket-based live usage dashboard for app developers.
+
+### 19.7 Per-Endpoint Pricing
+
+Extend per-endpoint metering with configurable per-endpoint pricing rules.
+
+---
+
+## 20. Phase 2+ Extensions
+
+The following features are designed but deferred until the core system (Sections 1-19)
+is implemented and has real usage. They add significant complexity that is not justified
+until there are paying customers.
+
+### 20.1 Multi-Currency Support
+
+**Motivation:** Customers in different regions expect prices in their local currency.
+
+**Design principles:**
+1. **Single internal ledger currency:** All metering and spend accumulators operate in
+   the platform's base currency (default: USD cents). No floating-point drift.
+2. **Conversion at the boundary:** Currency conversion at display time (invoice preview)
+   and payment time (handled by Stripe/Lago).
+3. **Per-app currency assignment:** Each app has an optional `currency` field.
+
+**Configuration:**
 ```toml
-[billing]
-default_currency = "usd"
-
-# Exchange rates: base currency -> target currency multiplier.
-# Updated via config or Admin API. Rates are point-in-time snapshots.
 [billing.exchange_rates]
 eur = 0.92
 gbp = 0.79
@@ -2220,62 +2011,46 @@ last_updated = "2026-03-30T00:00:00Z"
 
 [apps.eu_customer]
 currency = "eur"
-
-[apps.jp_customer]
-currency = "jpy"
 ```
 
-### 19.4 Exchange Rate Management
+**Exchange rate management:** Rates via config or Admin API
+(`GET/PUT /v1/_admin/exchange_rates`, `GET /v1/_admin/exchange_rates/history`).
+Stale rates (> 48h) trigger `exchange_rate_stale` alert.
 
-Rates defined in `[billing.exchange_rates]` or updated via Admin API:
-`GET/PUT /v1/_admin/exchange_rates`, `GET /v1/_admin/exchange_rates/history`.
-Rate updates are audit-logged. Stale rates (> 48h) trigger `exchange_rate_stale` alert.
-Automated FX provider integration (Open Exchange Rates, ECB) is a future enhancement.
+**Spending limits in multi-currency:** The spending limit is in the app's currency.
+At each SpendingReconciler tick, the limit is converted to base currency using the
+current exchange rate and cached as `cached_limit_base_cents`. Inline checks compare
+the base-currency accumulator against this cached value — no per-request FX conversion.
+The cached limit refreshes every reconciliation tick (10s).
 
-### 19.5 Invoice Behavior
+**Invoice behavior:** Line items show both `amount_base_cents` and `amount_local`.
+Invoice records `exchange_rate` and `rate_timestamp` at generation time.
 
-For non-default currency apps: (1) calculate line items in base currency, (2) convert
-to app currency at generation-time rate, (3) record both `amount_base_cents` and
-`amount_local` per line, (4) record `exchange_rate` and `rate_timestamp` on invoice.
+**Supported currencies:** ISO 4217 currencies accepted by the payment processor.
+Zero-decimal currencies (JPY, KRW) use integer amounts.
 
-```json
-{
-  "app_id": "eu_customer", "currency": "eur",
-  "exchange_rate": 0.92, "rate_timestamp": "2026-03-30T00:00:00Z",
-  "line_items": [{ "type": "subscription", "amount_base_cents": 2000, "amount_local": 1840 }],
-  "total_local": 1840
-}
+### 20.2 Dunning — Payment Failure Handling
+
+**Flow:** `payment_failed -> grace_period (3d) -> retry_1 (d3) -> retry_2 (d7) -> retry_3 (d14) -> suspended`
+
+```toml
+[billing.dunning]
+enabled = true
+grace_period_days = 3
+retry_schedule_days = [3, 7, 14]
+suspension_action = "degrade"       # "degrade" | "block" | "webhook"
+auto_reinstate_on_payment = true
 ```
 
-### 19.6 Spend Limits and Credits in Multi-Currency
+Webhooks fire at each stage (`payment.failed`, `payment.retry`, `payment.suspended`).
+On payment success, `POST /v1/_admin/apps/{id}/dunning/resolve` reinstates the plan.
 
-Spending limits (`limit`) are in the app's currency; the inline accumulator tracks base
-currency internally and converts the limit at each reconciliation tick. Wallet credits
-are in the app's currency; applied at the invoice's locked rate. Cross-currency credit
-transfers are not supported in v2.
+**Admin API:** `GET/POST /v1/_admin/apps/{id}/dunning` (state), `/dunning/start`,
+`/dunning/resolve`, `/dunning/override`.
 
-### 19.7 Supported Currencies
+### 20.3 Package & Bundle Pricing
 
-ISO 4217 currencies accepted by the payment processor. Minimum: USD, EUR, GBP, JPY,
-CAD, AUD, CHF, CNY, INR, BRL. Zero-decimal currencies (JPY, KRW) use integer amounts;
-detected from a built-in ISO 4217 table.
-
-### 19.8 Limitations
-
-Rate updates do not retroactively change existing invoices. FX rounding is toward the
-platform (round up charges, round down credits). Base-currency ledger is source of truth.
-
----
-
-## 20. Package & Bundle Pricing
-
-### 20.1 Motivation
-
-Many SaaS platforms (AWS, Cloudflare, Vercel) offer add-on packages that bundle
-additional quota or features for a fixed price, independent of the base plan.
-Examples: "AI Package" ($10/mo for 1M AI tokens), "Storage Pack" ($5/mo for 10GB).
-
-### 20.2 Configuration
+Add-on packages that bundle additional quota or features for a fixed price.
 
 ```toml
 [packages.ai_starter]
@@ -2289,172 +2064,81 @@ ai_models_v2 = true
 [packages.storage_10gb]
 description = "Extra 10GB Storage"
 price_cents = 500
-stackable = true                      # Can purchase multiple
+stackable = true
 [packages.storage_10gb.quotas]
 db_storage_bytes = { max = 10000000000 }
 ```
 
-Apps assign packages: `packages = ["ai_starter", "storage_10gb", "storage_10gb"]`.
 Quotas are **additive** with plan quotas. Entitlements are **OR-merged**. Packages
 appear as separate invoice line items. Admin API: `GET/PUT /v1/_admin/apps/{id}/packages`.
 
----
+### 20.4 Minimum Commitment / Committed Use Discounts
 
-## 21. Per-Endpoint Metering
+```toml
+[plans.enterprise_committed.commitment]
+minimum_cents = 50000               # $500/month minimum
+term_months = 12
+start_date = "2026-01-01"
+discount_pct = 20
+rollover = false
+```
 
-### 21.1 Motivation
+If usage < minimum: bill minimum. If usage >= minimum: bill usage (with discount).
+`GET /v1/_admin/apps/{id}/commitment` returns status and utilization.
 
-Operators need visibility into which RPC methods consume the most resources, for
-cost attribution, optimization, and potential per-endpoint pricing. This follows
-the per-route analytics offered by Cloudflare Workers and AWS API Gateway.
+### 20.5 Phase 2+ Webhook Events
 
-### 21.2 How It Works
+These webhook events are added when their corresponding features are implemented:
 
-Every usage event includes an `endpoint` field (auto-populated from JSON-RPC `method`).
-Per-endpoint aggregates are stored in SQLite (`endpoint_usage` table, keyed by
-`app_id, endpoint, resource, period`). Flushed alongside per-app counters using
-in-memory HashMaps (informational, not enforcement-critical).
-
-**Admin API:** `GET /v1/_admin/apps/{id}/usage/endpoints` (all, filtered, or top N).
-Per-endpoint pricing is a future consideration (see Section 24).
-
----
-
-## 22. Metering for Cron & Background Jobs
-
-### 22.1 Motivation
-
-Apps may run scheduled tasks (cron jobs) or background processes that consume resources
-outside of the request-response cycle. These must be metered with the same accuracy
-as HTTP requests.
-
-### 22.2 Event Source Tagging
-
-Every usage event has a `source` field:
-
-| Source | Description | Trigger |
+| Event | Feature | Payload Data |
 |---|---|---|
-| `request` | Normal HTTP request-response | RPC call from client |
-| `cron` | Scheduled job execution | Timer-triggered by platform |
-| `background` | Background task (e.g., webhooks, async processing) | Platform-initiated |
+| `payment.failed` | Dunning | period, amount_cents, reason |
+| `payment.retry` | Dunning | attempt, final, amount_cents |
+| `payment.suspended` | Dunning | action, period |
+| `payment.resolved` | Dunning | period, amount_cents |
+| `commitment.underutilized` | Commitments | utilization_pct |
 
-### 22.3 Cron Job Metering
+### 20.6 Phase 2+ Implementation Plan
 
-Cron jobs get a synthetic `request_id` (`cron_{app_id}_{job_name}_{timestamp}`), run
-through the same V8 + metering pipeline, and tag events with `source: "cron"`. Quota
-enforcement applies identically -- cron usage counts toward monthly quotas.
-
-### 22.4 Background Jobs
-
-Background work (webhooks, async processing) is tagged `source: "background"` and
-metered identically. All sources share the same quota pool (prevents gaming). Operators
-can filter by source in per-endpoint analytics (Section 21).
-
----
-
-## 23. Usage Data Backfill Tooling
-
-### 23.1 Motivation
-
-When new resources are defined, pricing changes, or events are missed due to system
-issues, operators need to backfill or re-derive usage data. This follows the pattern
-used by Orb (invoice void + re-rate) and Lago (event replay).
-
-### 23.2 Backfill API
-
-`POST /v1/_admin/backfill/events` accepts an array of events with `source: "backfill"`,
-each with idempotency keys. Options: `apply_to_counters` (default: false for dry-run),
-`apply_to_invoices` (default: false). Closed-period events handled per Section 5.3.
-Requires `admin:events` scope.
-
-**Rate limiting:** The backfill endpoint is rate-limited to prevent accidental counter
-corruption or SQLite write saturation from runaway scripts:
-- **Default:** 10 requests/second, burst 50 (configurable via `[admin.backfill_rate_limit]`)
-- **Max batch size:** 1,000 events per request
-- Exceeding either limit returns 429 with `Retry-After`
-- Each backfill request is audit-logged with event count and affected app_ids
-
-### 23.3 Re-Rating
-
-`POST /v1/_admin/apps/{id}/invoice/rerate` with `period` and optional `pricing_override`
-returns a preview diff (original vs rerated totals). Confirm with
-`POST .../invoice/rerate/apply` using the returned preview token.
+| Phase | Deliverable | Deps | Effort |
+|---|---|---|---|
+| P2-1 | Dunning + payment failure handling | Core Phase 11,12 | M |
+| P2-2 | Package & bundle pricing | Core Phase 12 | M |
+| P2-3 | Committed use discounts | Core Phase 12 | M |
+| P2-4 | Multi-currency support | Core Phase 12 | M |
 
 ---
 
-## 24. Future Considerations (Out of Scope for v2)
-
-### 24.1 Distributed Metering (Multi-Node)
-
-When Appbase scales beyond a single node:
-- Each node maintains local atomic counters
-- Periodic sync to central store (Redis or CockroachDB)
-- Quota enforcement uses local counters (slightly stale) with periodic reconciliation
-- Trade-off: up to `sync_interval` seconds of over-quota usage spread across nodes
-
-### 24.2 Usage-Based Autoscaling
-
-Auto-adjust plan limits based on patterns. Scale up during spikes, scale down during
-quiet periods. Requires predictive modeling.
-
-### 24.3 Cost Allocation Tags
-
-Request-level labels (`team`, `environment`, `feature`) for internal chargeback:
-```
-X-Cost-Tags: team=backend,env=prod,feature=search
-```
-
-### 24.4 SLA Monitoring
-
-Track uptime and latency SLAs per enterprise app. Auto-issue credits on SLA violations.
-
-### 24.5 Marketplace Billing
-
-Third-party plugin creators billing for their plugin usage through the platform.
-
-### 24.6 Real-Time Usage Dashboard
-
-WebSocket-based live usage dashboard for app developers, consuming the same atomic
-counters used for enforcement.
-
-### 24.7 Per-Endpoint Pricing
-
-Extend per-endpoint metering (Section 21) with configurable per-endpoint pricing rules.
-
----
-
-## 25. Glossary
+## 21. Glossary
 
 | Term | Definition |
 |---|---|
 | **Acquire/Release** | Memory ordering guarantees for atomic operations; Acquire ensures visibility of prior Release writes across CPU cores |
 | **Anniversary billing** | Billing period resets on the customer's signup date each month |
-| **AtomicPtr** | Atomic pointer used for lock-free buffer swaps; requires epoch-based reclamation to prevent use-after-free |
+| **AtomicPtr** | Atomic pointer used for lock-free buffer swaps during period rollover |
 | **Backfill** | Retroactive insertion of usage events for missed data |
 | **Backpressure** | Flow control mechanism; when the event log channel is full, events are dropped rather than blocking enforcement |
 | **CAS (Compare-And-Swap)** | Atomic read-modify-write operation; the foundation of lock-free token buckets and concurrency guards |
-| **Commitment** | Minimum monthly spend guarantee for discounted rates |
 | **Concurrency guard** | CAS-based RAII guard that tracks concurrent in-flight requests per app |
 | **Counter floor** | Clamping a counter to zero when a correction would produce a negative value |
 | **Credit (wallet)** | Prepaid monetary unit applied against usage charges before invoicing (FIFO order) |
-| **crossbeam-epoch** | Rust crate for epoch-based memory reclamation; used to safely free old counter buffers after rollover |
 | **Dead letter queue** | Storage for webhook deliveries that failed all retry attempts |
 | **Dedup set** | Bounded LRU cache of idempotency keys (keyed by `{app_id}_{request_id}_{resource}`) |
 | **Digest anchor** | SHA-256 digest stored externally for tamper detection |
-| **Double buffer** | Two counter sets swapped atomically during rollover, with epoch-based draining of in-flight writers |
+| **Double buffer** | Two counter sets swapped atomically during rollover, with drain-and-wait for in-flight writers |
+| **Drain-and-wait** | After swapping the active buffer pointer, sleep for `2 * max_request_wall_time` to ensure all in-flight writers on the old buffer have completed |
 | **Dry-run mode** | Enforcement decisions are computed and logged but never applied; all requests allowed |
-| **Dunning** | Payment failure recovery: grace period, retries, escalation |
 | **Entitlement** | Boolean flag controlling access to a feature |
-| **Epoch-based reclamation** | Memory management technique where freed objects are deferred until all threads from the prior epoch have completed |
 | **Event log** | Append-only file of usage events for audit trail and billing replay |
 | **Gauge** | Atomic counter for instantaneous values (e.g., concurrent connections) that can increment and decrement |
 | **Graduated pricing** | Tiered pricing where each tier's rate applies only to usage within that tier's range |
 | **HyperLogLog** | Probabilistic data structure for approximate distinct counting |
 | **Idempotency key** | Unique identifier (`{app_id}_{request_id}_{resource}`) ensuring each event is counted exactly once |
-| **Inline spend tracking** | Per-request spend estimation via atomic accumulator |
+| **Inline spend tracking** | Per-request spend estimation via atomic accumulator, in tenths of a cent |
 | **LL/SC** | Load-Linked/Store-Conditional; ARM's mechanism for atomic CAS operations |
+| **MemoryWatchdog** | Background task (every 5s) that monitors RSS and triggers metering degradation at configurable memory pressure thresholds (80%/90%/95%) |
 | **Overage** | Usage beyond included amounts, billed per-unit |
-| **Package** | Add-on bundle of quota/entitlements at fixed price |
+| **PeriodRoller** | Background task that performs double-buffered counter rollover at billing period boundaries (monthly/daily); uses drain-and-wait to safely read old buffer |
 | **Plan** | Named bundle of entitlements, quotas, rate limits, policies |
 | **Plan version** | Monotonically increasing integer; apps pin to a version until explicitly migrated |
 | **Policy** | Threshold-action pairs defining enforcement behavior |
@@ -2466,35 +2150,29 @@ Extend per-endpoint metering (Section 21) with configurable per-endpoint pricing
 | **Resource** | A measurable dimension of consumption (CPU, requests, storage, etc.) |
 | **Scope** | RBAC permission unit (e.g., `read:usage`); follows `action:resource` pattern |
 | **Shadow mode** | Current plan enforced normally while a second plan is evaluated for comparison |
-| **Spending limit** | Per-app cap on total monetary cost per billing period; denominated in the app's currency |
+| **Spending limit** | Per-app cap on total monetary cost per billing period |
+| **SpendingReconciler** | Background task (every 10s) that recomputes exact spend from counter snapshots, corrects inline accumulator drift, and caches converted spending limits for multi-currency apps |
 | **Token bucket** | Rate limiting algorithm; packed into single AtomicU64 with CAS-based refill + consume |
-| **TrialManager** | Dedicated background task (independent of PeriodRoller) that checks and enforces trial expiry |
+| **TrialManager** | Background task (every 60s) that checks trial expiry; shares rollover lock with PeriodRoller to prevent ordering races |
 | **ULID** | Universally Unique Lexicographically Sortable Identifier; used for event IDs |
 | **WAL** | Write-Ahead Log; SQLite journaling mode for concurrent reads during writes |
 
 ---
 
-## 26. References
+## 22. References
 
 - [Cloudflare Workers Pricing](https://developers.cloudflare.com/workers/platform/pricing/)
 - [Cloudflare Workers Limits](https://developers.cloudflare.com/workers/platform/limits/)
 - [Cloudflare Rate Limiting Rules](https://developers.cloudflare.com/waf/rate-limiting-rules/)
 - [AWS Lambda Pricing](https://aws.amazon.com/lambda/pricing/)
-- [AWS Savings Plans](https://aws.amazon.com/savingsplans/)
 - [AWS CloudTrail Log File Integrity](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-log-file-validation-intro.html)
 - [Vercel Spend Management](https://vercel.com/docs/spend-management)
 - [Lago — Ingesting Usage Events](https://docs.getlago.com/guide/events/ingesting-usage)
 - [Lago — Wallets & Prepaid Credits](https://docs.getlago.com/guide/wallet-and-prepaid-credits)
 - [Lago — Graduated Charges](https://docs.getlago.com/guide/plans/charges/graduated)
-- [Lago — Why Billing Systems Are a Nightmare](https://www.getlago.com/blog/why-billing-systems-are-a-nightmare-for-engineers)
 - [Stripe — Usage-Based Billing](https://docs.stripe.com/billing/subscriptions/usage-based)
 - [Stripe — Restricted API Keys](https://docs.stripe.com/keys#limit-access)
-- [Stripe — Smart Retries (Dunning)](https://docs.stripe.com/billing/revenue-recovery/smart-retries)
-- [Orb — Minimum Commitments](https://docs.withorb.com/guides/concepts/minimum-commitments)
-- [Orb — Event Backfill](https://docs.withorb.com/guides/events-and-metrics/backfill)
-- [Sigstore Rekor Transparency Log](https://docs.sigstore.dev/logging/overview/)
-- [IETF — RateLimit Header Fields draft-10 (RateLimit + RateLimit-Policy)](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/10/)
+- [IETF — RateLimit Header Fields draft-10](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/10/)
 - [RFC 7231 Section 7.1.3 — Retry-After](https://www.rfc-editor.org/rfc/rfc7231#section-7.1.3)
-- [crossbeam-epoch — Epoch-Based Memory Reclamation](https://docs.rs/crossbeam-epoch/)
 - [ISO 4217 — Currency Codes](https://www.iso.org/iso-4217-currency-codes.html)
 - [Rust Atomics and Locks (Mara Bos) — Chapter 3: Memory Ordering](https://marabos.nl/atomics/memory-ordering.html)
