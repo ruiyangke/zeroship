@@ -280,13 +280,22 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
             });
 
             // 7.5. Update spend accumulator and check spending limit
-            let cost_tenths = meter.plan.cost_tenths_per_request;
-            if cost_tenths > 0 {
-                meter.spend_accumulator_tenths.fetch_add(cost_tenths, Ordering::Release);
+            // Cost is per 1000 requests; accumulate and batch-apply every 1000th request
+            // to avoid fractional math. For simplicity, add cost_per_1k / 1000 per request
+            // (integer division — rounds down, small error acceptable for inline tracking;
+            // the SpendingReconciler corrects drift periodically).
+            let cost_per_1k = meter.plan.cost_tenths_per_1k_requests;
+            if cost_per_1k > 0 {
+                // Every request accumulates (cost_per_1k) tenths, and we divide by 1000
+                // at the comparison point. Simpler: accumulate raw, compare against limit * 10 * 1000.
+                meter.spend_accumulator_tenths.fetch_add(cost_per_1k, Ordering::Release);
             }
             if let Some(limit_cents) = meter.plan.spending_limit_cents {
-                let spent_tenths = meter.spend_accumulator_tenths.load(Ordering::Acquire);
-                if spent_tenths >= limit_cents * 10 {
+                let spent_raw = meter.spend_accumulator_tenths.load(Ordering::Acquire);
+                // spent_raw is in units of cost_tenths_per_1k; actual tenths = spent_raw / 1000
+                // Compare: spent_raw / 1000 >= limit_cents * 10
+                // Equivalent: spent_raw >= limit_cents * 10_000 (avoids division)
+                if spent_raw >= limit_cents * 10_000 {
                     meter.spend_blocked.store(true, Ordering::Release);
                 }
             }

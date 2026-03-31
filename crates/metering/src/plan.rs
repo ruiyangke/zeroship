@@ -129,9 +129,10 @@ pub struct QuotaPlan {
     pub rate_limits: HashMap<String, RateLimitDef>,
     /// Per-app spending limit in cents. None = no limit.
     pub spending_limit_cents: Option<u64>,
-    /// Cost per request in tenths-of-a-cent. Default: 3 (~$0.003/request).
-    /// Used for inline spend accumulation. Override per plan for different pricing.
-    pub cost_tenths_per_request: u64,
+    /// Cost per 1000 requests in tenths-of-a-cent.
+    /// Cloudflare Workers: $0.30/million = 0.3 tenths per 1000 requests.
+    /// Default: 3 tenths per 1000 requests (~$0.30/million, CF-comparable).
+    pub cost_tenths_per_1k_requests: u64,
 }
 
 impl QuotaPlan {
@@ -165,7 +166,7 @@ impl QuotaPlan {
             quotas,
             rate_limits,
             spending_limit_cents: Some(500), // $5.00 spending cap for free tier
-            cost_tenths_per_request: 3,     // ~$0.003/request
+            cost_tenths_per_1k_requests: 3,     // ~$0.003/request
         }
     }
 
@@ -194,7 +195,7 @@ impl QuotaPlan {
             quotas,
             rate_limits,
             spending_limit_cents: None, // no spending limit for pro
-            cost_tenths_per_request: 3,
+            cost_tenths_per_1k_requests: 3,
         }
     }
 
@@ -208,7 +209,7 @@ impl QuotaPlan {
             quotas: HashMap::new(),
             rate_limits: HashMap::new(),
             spending_limit_cents: None,
-            cost_tenths_per_request: 0, // dev: no spend tracking
+            cost_tenths_per_1k_requests: 0, // dev: no spend tracking
         }
     }
 }

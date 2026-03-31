@@ -139,7 +139,7 @@ fn parse_plan(name: &str, val: &toml::Value) -> Result<QuotaPlan, String> {
         quotas,
         rate_limits,
         spending_limit_cents: None,
-        cost_tenths_per_request: 3, // default cost
+        cost_tenths_per_1k_requests: 3, // default cost
     })
 }
 

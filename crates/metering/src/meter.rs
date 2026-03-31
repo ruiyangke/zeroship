@@ -54,8 +54,10 @@ impl AppMeter {
     pub fn from_stored(plan: QuotaPlan, stored: &HashMap<String, u64>) -> Self {
         let spend_tenths = *stored.get("spend_tenths").unwrap_or(&0);
         // Re-evaluate spend_blocked from recovered state (spec §4.6)
+        // spend_tenths is in raw accumulator units (cost_tenths_per_1k per request)
+        // actual spend in tenths-of-a-cent = spend_tenths / 1000
         let blocked = match plan.spending_limit_cents {
-            Some(limit_cents) => spend_tenths >= limit_cents * 10,
+            Some(limit_cents) => spend_tenths >= limit_cents * 10_000,
             None => false,
         };
         Self {
