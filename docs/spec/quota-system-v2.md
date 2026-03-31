@@ -1,8 +1,12 @@
 # Appbase Quota, Metering & Billing System — v2 Design
 
-> **Status:** Draft v2.3 | **Last Updated:** 2026-03-30 | **Author:** Platform Team
+> **Status:** Draft v2.4 | **Last Updated:** 2026-03-30 | **Author:** Platform Team
 >
 > **Revision History:**
+> - v2.4 (2026-03-30): Abstract warm-tier storage behind `MeterStore` trait (Section 2.5).
+>   Add pluggable adapters: sqlite (default), memory, redis, postgres, mmap — each behind
+>   a Cargo feature flag. Add `[metering] store` config. Update architecture to trait-based
+>   language. SQLite remains default for backward compatibility.
 > - v2.3 (2026-03-30): Round 3 review fixes. Fix TokenBucket compare_exchange_weak to
 >   strong (C1). Replace epoch-based reclamation with drain-and-wait for period rollover
 >   (C2). Fix inline spend accumulator naming: delta_tenths -> tenths-of-a-cent with
@@ -60,8 +64,9 @@ limit enforcement, plan management, spending controls, billing integration, and
 operational observability.
 
 **TL;DR:** The system uses three layers — (1) in-memory atomic counters for real-time
-enforcement at sub-microsecond latency, (2) periodic batched SQLite flushes for durability,
-and (3) an append-only event log for audit/billing. Plans bundle entitlements, quotas, rate
+enforcement at sub-microsecond latency, (2) periodic batched flushes to a pluggable
+warm-tier store (MeterStore trait; SQLite by default) for durability, and (3) an
+append-only event log for audit/billing. Plans bundle entitlements, quotas, rate
 limits, and policies. Spending limits prevent bill shock with inline per-request tracking.
 The platform meters everything automatically; no SDK is needed for app developers. External
 billing systems (Stripe, Lago) consume the usage data via Admin API and webhooks.
@@ -237,7 +242,46 @@ aggregation = "sum"
 category = "custom"
 ```
 
-### 2.5 Metering
+### 2.5 MeterStore Trait (Warm-Tier Storage Abstraction)
+
+The warm tier is accessed exclusively through the `MeterStore` trait, decoupling the
+metering pipeline from any specific storage backend.
+
+```rust
+#[async_trait]
+pub trait MeterStore: Send + Sync + 'static {
+    /// Write counter deltas from hot tier (upsert: create if absent, else add delta).
+    async fn flush(&self, app_id: &str, deltas: &[(String, u64)]) -> Result<(), StoreError>;
+    /// Read current-period counters (startup/cache miss recovery).
+    async fn load(&self, app_id: &str) -> Result<HashMap<String, u64>, StoreError>;
+    /// Snapshot current counters into history, zero for new period. Returns snapshot.
+    async fn rollover(&self, app_id: &str) -> Result<HashMap<String, u64>, StoreError>;
+    /// Query past period snapshots for billing/history API.
+    async fn history(
+        &self, app_id: &str, periods: &[String],
+    ) -> Result<HashMap<String, HashMap<String, u64>>, StoreError>;
+    /// Cleanup: flush pending writes, close connections (shutdown/store swap).
+    async fn close(&self) -> Result<(), StoreError>;
+}
+```
+
+`StoreError` variants: `Io`, `Connection`, `Serialization`, `Timeout`, `Other(String)`.
+Transient errors retry (3 attempts, backoff). Permanent errors escalate to `flush_failure`.
+
+**Adapter implementations** (each behind a Cargo feature flag; only compiled when enabled):
+
+| Adapter | Feature Flag | Use Case | Default |
+|---|---|---|---|
+| `SqliteMeterStore` | `meter-sqlite` | Single-node production (durable, zero-dep) | **Yes** |
+| `MemoryMeterStore` | `meter-memory` | Testing, CI, ephemeral environments | No |
+| `RedisMeterStore` | `meter-redis` | Multi-node deployments, shared warm tier | No |
+| `PostgresMeterStore` | `meter-postgres` | Existing Postgres infrastructure | No |
+| `MmapMeterStore` | `meter-mmap` | High-throughput single-node, memory-mapped | No |
+
+At least one adapter must be compiled (build fails otherwise). `[metering] store` selects
+the active adapter at runtime. See Section 4.4 for adapter-specific write strategies.
+
+### 2.6 Metering
 
 Metering is **always active**, independent of plans. Every resource consumption is
 recorded regardless of whether limits exist. This ensures:
@@ -250,7 +294,7 @@ recorded regardless of whether limits exist. This ensures:
 | Tier | Latency | Durability | Purpose |
 |---|---|---|---|
 | **Hot** — Atomic counters | ~10 ns | None (in-memory) | Real-time enforcement |
-| **Warm** — Periodic flush | ~5 s | SQLite WAL | Survives restarts |
+| **Warm** — Periodic flush | ~5 s | MeterStore (default: SQLite WAL) | Survives restarts |
 | **Cold** — Event log | ~100 ms | Append-only file | Audit trail, billing replay |
 
 **Idempotency:** Every usage delta carries an `idempotency_key` (typically
@@ -259,32 +303,17 @@ dedup collisions). A bounded LRU deduplication set tracks seen keys. Duplicates
 are silently dropped at the hot tier. The event log also stores the key for
 cold-tier deduplication during replay.
 
-**Dedup capacity sizing:** The default 1M entries cycles through in ~6.7 seconds
-at 10K unique keys/second (15 resources * ~667 req/s), rendering the 24h TTL
-meaningless at high throughput — eviction is driven by LRU capacity, not TTL.
-Operators **must** scale `dedup_capacity` with their deployment:
+**Dedup capacity sizing:** Default 1M entries (~80 MB at ~80 bytes/entry). At high
+throughput, LRU capacity drives eviction (not TTL). Scale `dedup_capacity` with
+deployment: 1M for <1K req/s, 5M for 1K-5K, 10M for 5K-10K, or
+`throughput * 15 * 120` for >10K req/s. TTL is a secondary policy for low throughput.
+Effective dedup window = `capacity / (req/s * avg_resources_per_request)`.
 
-| Throughput | Recommended Capacity | Memory (~80 bytes/entry) |
-|---|---|---|
-| < 1K req/s | 1,000,000 (default) | ~80 MB |
-| 1K-5K req/s | 5,000,000 | ~400 MB |
-| 5K-10K req/s | 10,000,000 | ~800 MB |
-| > 10K req/s | `throughput * 15 * 120` (2-minute window) | Scale accordingly |
+**Backpressure:** Event log enqueue uses a bounded channel (size:
+`peak_events/s * flush_ms / 1000 * 2`). If full: counters still update (enforcement
+unaffected), event is dropped with `event_log_drop` increment (recoverable from warm tier).
 
-The TTL serves as a secondary eviction policy for low-throughput deployments where
-the LRU capacity is not reached. At high throughput, the effective dedup window
-equals `capacity / (req_per_second * avg_resources_per_request)`.
-
-**Backpressure:** The event log enqueue is a bounded channel. The capacity should
-be sized based on expected peak throughput and acceptable drop rate. Recommended
-formula: `channel_capacity = peak_events_per_second * flush_interval_ms / 1000 * 2`
-(2x headroom). For 10K req/s with 100ms flush: `150000 * 0.1 * 2 = 30,000`. If the
-channel is full (event log writer is slow), the metering pipeline:
-1. Still updates atomic counters (enforcement is never delayed)
-2. Drops the event with an `event_log_drop` counter increment
-3. Logs a warning with the dropped event's key (recoverable from warm tier)
-
-### 2.6 Quotas
+### 2.7 Quotas
 
 A quota is a numeric cap on accumulated resource usage within a time window:
 
@@ -300,7 +329,7 @@ become "soft" — usage beyond the quota is allowed but billed at overage rates.
 enforcement policy changes from `block` to `allow` (with `notify`). When overage is
 disabled, quotas are "hard" — usage is blocked at 100%.
 
-### 2.7 Rate Limits
+### 2.8 Rate Limits
 
 Rate limits are enforced via a **token bucket algorithm**:
 
@@ -379,7 +408,7 @@ fn assert_timestamp_safe() {
 
 Checked at startup; `timestamp_overflow_warning` alert fires if within 5 years.
 
-### 2.8 Policies
+### 2.9 Policies
 
 A policy defines enforcement behavior at configurable thresholds:
 
@@ -424,7 +453,7 @@ If no `[degraded]` section is configured, `degrade` falls back to the `free` pla
 requests already in V8 execution complete normally. Only new incoming requests are
 blocked. This prevents half-processed side effects.
 
-### 2.9 Plans
+### 2.10 Plans
 
 A plan is a named, versioned bundle:
 
@@ -453,7 +482,7 @@ policy applies. Storage: `block_writes` prevents growth. Rate limits: token buck
 reinitialized. Admin API response includes `warnings` when a change causes immediate
 enforcement.
 
-### 2.10 Enforcement Modes
+### 2.11 Enforcement Modes
 
 To support safe rollout and testing, the system supports three enforcement modes:
 
@@ -689,9 +718,20 @@ max_retries = 5
 # ---- Metering ----
 
 [metering]
-flush_interval_secs = 5        # Counter -> SQLite flush interval
+store = "sqlite"               # Warm-tier adapter: "sqlite" | "memory" | "redis" | "postgres" | "mmap"
+flush_interval_secs = 5        # Counter -> MeterStore flush interval
 dedup_capacity = 1000000       # Max entries in dedup LRU set
 dedup_ttl_hours = 24           # TTL for dedup entries
+
+[metering.sqlite]              # Config for SqliteMeterStore (default)
+path = "data/metering.db"
+[metering.redis]               # Config for RedisMeterStore
+url = "redis://localhost:6379"
+[metering.postgres]            # Config for PostgresMeterStore
+url = "postgres://localhost:5432/appbase"
+[metering.mmap]                # Config for MmapMeterStore
+path = "data/metering.mmap"
+# [metering.memory]           # MemoryMeterStore needs no config
 
 # ---- Event Log ----
 
@@ -700,7 +740,7 @@ enabled = true
 retention_days = 90
 max_size_mb = 1024
 flush_interval_ms = 100        # Batch write interval
-channel_capacity = 30000       # Bounded async channel; size per peak throughput (see 2.5)
+channel_capacity = 30000       # Bounded async channel; size per peak throughput (see 2.6)
 ```
 
 ### 3.2 Configuration Validation Rules
@@ -735,6 +775,9 @@ changes reinitialize token buckets. Atomic counters are **never** reset by confi
 | V14 | `[pricing]` entries must reference defined resources | Unknown resource in pricing |
 | V15 | Tiered pricing final tier must omit `up_to` (unlimited) | Final tier must be unbounded |
 | V16 | API key roles must be one of: `super_admin`, `admin`, `operator`, `billing`, `viewer` | Invalid role |
+| V17 | `metering.store` must be one of: `sqlite`, `memory`, `redis`, `postgres`, `mmap` | Unknown store adapter "{name}" |
+| V18 | Selected `metering.store` adapter must be compiled (feature flag enabled) | Store adapter "{name}" not compiled; enable the `meter-{name}` feature |
+| V19 | `metering.{adapter}` section must be valid for the selected adapter | Invalid {adapter} configuration |
 
 **Type safety:** Unlimited values are `Option<u64>` (omit field = unlimited). `-1` is
 rejected. Pre-flight validation: `POST /v1/_admin/config/validate` with raw TOML body.
@@ -748,7 +791,7 @@ rejected. Pre-flight validation: `POST /v1/_admin/config/validate` with raw TOML
 ```
 REQUEST PATH (top to bottom):
   HTTP Request
-    -> Rate Limiter (single-AtomicU64 CAS, 2.7) -> 429
+    -> Rate Limiter (single-AtomicU64 CAS, 2.8) -> 429
     -> Concurrency Guard (CAS loop, 18.5)        -> 429
     -> Entitlement Checker                        -> 403
     -> Quota Enforcer + inline spend check        -> 429 / warn headers
@@ -769,8 +812,8 @@ BACKGROUND SERVICES:
 STORAGE LAYER:
   Atomic Counters (per-app per-resource), Token Buckets (packed AtomicU64),
   Concurrency Gauges (AtomicU32 CAS), Spend Accumulators (AtomicU64),
-  Dedup LRU (1M, 24h TTL), SQLite (usage history), Event Log (append-only,
-  externally anchored), Plan Registry, Webhook Queue + dead letter
+  Dedup LRU (1M, 24h TTL), MeterStore (warm tier: sqlite|redis|postgres|mmap|memory),
+  Event Log (append-only, externally anchored), Plan Registry, Webhook Queue + dead letter
 ```
 
 ### 4.2 Metering Pipeline
@@ -783,7 +826,7 @@ Request completes -> Build UsageDelta { request_id, app_id, timestamp, deltas[] 
     3. spend_accumulator[app].fetch_add(delta_tenths, Release)
        // delta_tenths is in tenths-of-a-cent (see Section 6.2)
   Enqueue UsageDelta to event_log_channel (bounded mpsc, 30K; drop on full)
-  Background: EventLogger batch-writes to file; UsageFlusher batch-upserts to SQLite
+  Background: EventLogger batch-writes to file; UsageFlusher batch-upserts via MeterStore
 ```
 
 ### 4.3 Period Rollover — Double-Buffered Design
@@ -816,29 +859,22 @@ For each affected app (lock-free):
 7. If spend-blocked and `auto_resume=true`: unblock
 
 For `calendar_month`, rollover processes apps in batches of 100 with 10ms sleep to
-avoid SQLite write spikes.
+avoid warm-tier write spikes (especially important for SQLite's single-writer lock).
 
-### 4.4 SQLite Write Strategy at Scale
+### 4.4 Adapter-Specific Write Strategies
 
-**Problem:** At 10K apps with 15 resources, a naive per-row INSERT every 5 seconds
-produces 150K individual writes, which saturates SQLite's single-writer lock.
+The `UsageFlusher` snapshots per-app counters (skipping zero-delta entries, ~60-80%)
+and calls `MeterStore::flush()`. Adapters handle batching internally:
 
-**Solution: Write coalescing with batched transactions.**
-
-1. Snapshot all per-app counters (skip zero-delta entries -- typically 60-80%)
-2. Single transaction with prepared statement reuse:
-   ```sql
-   BEGIN IMMEDIATE;
-   INSERT INTO usage_current (app_id, resource, value, updated_at)
-     VALUES (?1, ?2, ?3, ?4)
-     ON CONFLICT(app_id, resource) DO UPDATE SET value = value + excluded.value,
-       updated_at = excluded.updated_at;
-   COMMIT;
-   ```
-3. One WAL fsync per flush. ~50ms for 60K upserts on NVMe SSD.
-
-**Extreme scale (>10K apps):** Shard by app_id hash across multiple SQLite databases
-(~2K apps per shard).
+- **SqliteMeterStore:** Single `BEGIN IMMEDIATE` transaction with prepared statement
+  reuse (`INSERT ... ON CONFLICT DO UPDATE`). One WAL fsync per flush, ~50ms for 60K
+  upserts on NVMe. Shard by `app_id` hash at >10K apps.
+- **RedisMeterStore:** Single pipeline of `HINCRBY` per resource. Rollover via
+  `RENAME` + `HGETALL`. Scales with Redis Cluster.
+- **PostgresMeterStore:** Batched `INSERT ... ON CONFLICT DO UPDATE` with unnested
+  arrays. MVCC: reads never block during flush.
+- **MmapMeterStore:** Direct memory-mapped writes (no syscall). `msync(MS_ASYNC)`.
+- **MemoryMeterStore:** `HashMap`/`RwLock`. No durability. Testing only.
 
 ### 4.5 Counter Overflow
 
@@ -852,13 +888,13 @@ checked addition). A `counter_overflow` alert fires if saturation is reached.
 ### 4.6 Crash Recovery
 
 On startup after an unclean shutdown:
-1. Load last-flushed counters from SQLite (warm tier)
+1. Load last-flushed counters from the MeterStore via `store.load(app_id)` (warm tier)
 2. Replay event log entries after the last flush timestamp (cold tier)
 3. Rebuild atomic counters from the reconciled state
 4. Resume normal operation
 
-Data loss window: at most `flush_interval` (5 seconds) of counter updates. The event log
-(fsynced more frequently) can recover most of this.
+Data loss window: at most `flush_interval` (5s). Event log can recover most of this.
+Note: `MemoryMeterStore` provides no crash recovery; use for testing only.
 
 ---
 
@@ -1289,7 +1325,7 @@ Event filtering: `?resource=X&from=ISO8601&to=ISO8601&method=X&source=request|cr
 |---|---|---|---|
 | GET | `/v1/_admin/health` | `read:health` | System health |
 | GET | `/v1/_admin/metrics` | `read:metrics` | Prometheus-format metrics |
-| POST | `/v1/_admin/flush` | `admin:ops` | Force flush counters to SQLite |
+| POST | `/v1/_admin/flush` | `admin:ops` | Force flush counters to MeterStore |
 | POST | `/v1/_admin/config/validate` | `admin:config` | Validate TOML without applying |
 | POST | `/v1/_admin/config/reload` | `admin:config` | Hot reload configuration |
 | GET | `/v1/_admin/event_log/verify` | `read:events` | Verify event log integrity |
@@ -1445,7 +1481,7 @@ All enforcement decisions produce structured log entries:
 | `rate_limit_spike` | Rate limiting > 100/5min for an app | Warning | Webhook + log |
 | `spend_threshold` | Spend reaches configured threshold | Warning | Webhook |
 | `spend_blocked` | App blocked due to spending limit | Error | Webhook |
-| `flush_failure` | Counter flush to SQLite failed | Critical | Log + webhook |
+| `flush_failure` | Counter flush to MeterStore failed | Critical | Log + webhook |
 | `event_log_error` | Event log write failed | Critical | Log + webhook |
 | `event_log_drops` | Event log channel full, events dropped | Warning | Log + webhook |
 | `usage_spike` | Any resource > 3x 7-day rolling average | Warning | Webhook |
@@ -1656,7 +1692,7 @@ respond 2xx within 10s, track IDs for 48+ hours, verify HMAC signature.
 |---|---|
 | `Acquire`/`Release` atomic ordering | Correct lock-free counter updates on ARM and x86 |
 | CAS loops for token bucket and concurrency | Race-free state transitions |
-| SQLite WAL + `PRAGMA synchronous=NORMAL` | Durable flush with good performance |
+| MeterStore adapters (SQLite WAL, Redis AOF, Postgres WAL, mmap msync) | Durable flush with adapter-appropriate guarantees |
 | Event log with external digest anchoring | Tamper detection backed by external trust root |
 | Idempotency dedup set | Prevent double-counting |
 
@@ -1712,7 +1748,8 @@ calculation (overage, credits), event correction (original_value matching, count
 RBAC (scopes, app filtering, key rotation).
 
 **Integration:** Full request flow with headers, double-buffered rollover (no 503),
-inline spend tracking, crash recovery, hot reload, SQLite batching.
+inline spend tracking, crash recovery, hot reload, MeterStore adapter batching (run
+integration suite against each compiled adapter).
 
 **Load:** Enforcement < 1us p99, 100 concurrent atomic correctness, 10K events/s no
 drops, 60K row flush < 100ms, token bucket CAS under 1K concurrent requests.
@@ -1731,7 +1768,8 @@ drops, 60K row flush < 100ms, token bucket CAS under 1K concurrent requests.
 | 4 | Quota enforcer + inline spend tracking | 1,2 | M |
 | 5 | Tower middleware (full request path) + response headers | 2,3,4 | M |
 | 6 | Entitlement checker | 1,5 | S |
-| 7 | SQLite store + batched flush + crash recovery | 2 | M |
+| 7 | MeterStore trait + SqliteMeterStore (default) + batched flush + crash recovery | 2 | M |
+| 7b | Additional MeterStore adapters (redis, postgres, mmap, memory) | 7 | M |
 | 8 | Event log (append-only + external anchoring) | 2 | M |
 | 9 | Period rollover (double-buffered, drain-and-wait) | 7 | M |
 | 10 | Admin API (versioned /v1/) + RBAC + scoped keys | 2,4,7 | L |
@@ -1753,7 +1791,7 @@ Effort: S = 1-2 days, M = 3-5 days, L = 1-2 weeks.
 
 **Example:** 1000 apps, 15 resources, 10K req/s, 90-day retention:
 - Memory: ~100 MB (dominated by 1M-entry dedup set at ~80 bytes/entry)
-- Disk: ~50 GB/year event log (~10 GB compressed), ~500 MB SQLite history
+- Disk: ~50 GB/year event log (~10 GB compressed), ~500 MB warm-tier history (SQLite/mmap)
 - Per-app overhead: 120B counters + 16B token bucket + 8B spend accumulator
 
 ### 18.2 Data Retention
@@ -1808,12 +1846,10 @@ on panic/cancel.
 
 ### 18.6 First Boot
 
-On first startup with no existing database:
-1. SQLite database is created with schema migrations
-2. All apps start with zero usage counters
-3. Billing period starts from current timestamp
-4. Event log file is created
-5. No history exists — `usage/history` endpoints return empty results
+On first startup with no existing warm-tier data:
+1. MeterStore is initialized (SQLite schema migrations, Redis namespace, Postgres tables, etc.)
+2. All apps start with zero counters; billing period starts from current timestamp
+3. Event log file is created; `usage/history` returns empty results
 
 ### 18.7 Accuracy vs Performance Trade-offs
 
@@ -1829,8 +1865,8 @@ On first startup with no existing database:
 ### 18.8 Graceful Shutdown
 
 On SIGTERM/SIGINT: (1) stop accepting connections, (2) drain in-flight requests (up to
-`graceful_shutdown_timeout_secs`), (3) flush counters to SQLite, (4) flush event log,
-(5) cancel pending webhooks (retry on next startup), (6) close SQLite, (7) exit.
+`graceful_shutdown_timeout_secs`), (3) `MeterStore::flush()`, (4) flush event log,
+(5) cancel pending webhooks (retry on next startup), (6) `MeterStore::close()`, (7) exit.
 
 ### 18.9 Performance Budget
 
@@ -1860,7 +1896,7 @@ The metering pipeline degrades gracefully under memory pressure rather than cras
 | Normal | < 80% limit | Full pipeline |
 | Warning | >= 80% | Shrink dedup LRU capacity to 50% of configured max; log warning |
 | Critical | >= 90% | Shrink dedup to 10% of configured max; disable event log enqueue; stop HyperLogLog |
-| Emergency | >= 95% | Disable dedup (accept double-counting); counters + SQLite only |
+| Emergency | >= 95% | Disable dedup (accept double-counting); counters + MeterStore only |
 
 **MemoryWatchdog** checks RSS every 5s (`[server] memory_limit_mb = 2048`). Degradation
 is automatic and reversible.
@@ -1925,8 +1961,8 @@ A `trial.expiring_soon` webhook fires 72 hours before expiry (checked once per h
 ### 18.13 Per-Endpoint Metering
 
 Every usage event includes an `endpoint` field (auto-populated from JSON-RPC `method`).
-Per-endpoint aggregates are stored in SQLite (`endpoint_usage` table, keyed by
-`app_id, endpoint, resource, period`). Flushed alongside per-app counters using
+Per-endpoint aggregates are stored in the warm tier via MeterStore (e.g., SQLite
+`endpoint_usage` table, keyed by `app_id, endpoint, resource, period`). Flushed alongside per-app counters using
 in-memory HashMaps (informational, not enforcement-critical).
 
 **Admin API:** `GET /v1/_admin/apps/{id}/usage/endpoints` (all, filtered, or top N).
@@ -1957,30 +1993,14 @@ When Appbase scales beyond a single node:
 - Quota enforcement uses local counters (slightly stale) with periodic reconciliation
 - Trade-off: up to `sync_interval` seconds of over-quota usage spread across nodes
 
-### 19.2 Usage-Based Autoscaling
+### 19.2 Other Future Directions
 
-Auto-adjust plan limits based on patterns. Scale up during spikes, scale down during
-quiet periods. Requires predictive modeling.
-
-### 19.3 Cost Allocation Tags
-
-Request-level labels (`team`, `environment`, `feature`) for internal chargeback.
-
-### 19.4 SLA Monitoring
-
-Track uptime and latency SLAs per enterprise app. Auto-issue credits on SLA violations.
-
-### 19.5 Marketplace Billing
-
-Third-party plugin creators billing for their plugin usage through the platform.
-
-### 19.6 Real-Time Usage Dashboard
-
-WebSocket-based live usage dashboard for app developers.
-
-### 19.7 Per-Endpoint Pricing
-
-Extend per-endpoint metering with configurable per-endpoint pricing rules.
+- **Usage-based autoscaling:** Auto-adjust limits based on patterns (predictive modeling)
+- **Cost allocation tags:** Request-level labels (`team`, `environment`) for chargeback
+- **SLA monitoring:** Track uptime/latency SLAs per enterprise app, auto-issue credits
+- **Marketplace billing:** Third-party plugin billing through the platform
+- **Real-time usage dashboard:** WebSocket-based live usage for app developers
+- **Per-endpoint pricing:** Configurable per-endpoint pricing rules
 
 ---
 
@@ -2136,7 +2156,9 @@ These webhook events are added when their corresponding features are implemented
 | **Idempotency key** | Unique identifier (`{app_id}_{request_id}_{resource}`) ensuring each event is counted exactly once |
 | **Inline spend tracking** | Per-request spend estimation via atomic accumulator, in tenths of a cent |
 | **LL/SC** | Load-Linked/Store-Conditional; ARM's mechanism for atomic CAS operations |
+| **MemoryMeterStore** | In-memory MeterStore adapter for testing; no durability, data lost on restart |
 | **MemoryWatchdog** | Background task (every 5s) that monitors RSS and triggers metering degradation at configurable memory pressure thresholds (80%/90%/95%) |
+| **MeterStore** | Trait abstracting the warm-tier storage layer; implementations include SqliteMeterStore (default), RedisMeterStore, PostgresMeterStore, MmapMeterStore, MemoryMeterStore |
 | **Overage** | Usage beyond included amounts, billed per-unit |
 | **PeriodRoller** | Background task that performs double-buffered counter rollover at billing period boundaries (monthly/daily); uses drain-and-wait to safely read old buffer |
 | **Plan** | Named bundle of entitlements, quotas, rate limits, policies |
