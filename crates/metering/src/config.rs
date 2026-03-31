@@ -138,6 +138,7 @@ fn parse_plan(name: &str, val: &toml::Value) -> Result<QuotaPlan, String> {
         entitlements: HashMap::new(),
         quotas,
         rate_limits,
+        spending_limit_cents: None,
     })
 }
 

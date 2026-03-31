@@ -17,6 +17,7 @@ use axum::Router;
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use crate::middleware;
@@ -115,8 +116,16 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
         );
     }
 
-    // 2. Quota check (error code from denial, -32029 per spec §8.4)
+    // 1.5. Spending limit check (error code -32031 per spec §6)
     let meter = state.meters.get_or_create(&app_id);
+    if meter.spend_blocked.load(Ordering::Acquire) {
+        return json_response_with_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            r#"{"jsonrpc":"2.0","error":{"code":-32031,"message":"Spending limit reached","data":{"type":"spending_limit"}},"id":null}"#,
+        );
+    }
+
+    // 2. Quota check (error code from denial, -32029 per spec §8.4)
     match enforcer::check_quota(&meter, &meter.plan) {
         QuotaDecision::Deny(denial) => {
             return json_response_with_status(
@@ -173,6 +182,17 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
                 egress_bytes: response_bytes,
                 ..UsageDelta::default()
             });
+
+            // 5.5. Update spend accumulator and check spending limit
+            // Approximate cost: $0.30 per million requests = 0.03 cents per request = 0.3 tenths per request
+            let cost_tenths: u64 = 3; // simplified: ~0.3 tenths-of-a-cent per request
+            meter.spend_accumulator_tenths.fetch_add(cost_tenths, Ordering::Release);
+            if let Some(limit_cents) = meter.plan.spending_limit_cents {
+                let spent_tenths = meter.spend_accumulator_tenths.load(Ordering::Acquire);
+                if spent_tenths >= limit_cents * 10 {
+                    meter.spend_blocked.store(true, Ordering::Release);
+                }
+            }
 
             // 6. Build response with metering + IETF RateLimit headers
             let snapshot = meter.snapshot();

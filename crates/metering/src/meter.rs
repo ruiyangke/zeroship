@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -22,6 +22,10 @@ pub struct AppMeter {
     pub db_reads: AtomicU64,
     pub db_writes: AtomicU64,
     pub kv_ops: AtomicU64,
+    /// Accumulated spend in tenths-of-a-cent.
+    pub spend_accumulator_tenths: AtomicU64,
+    /// True when spending limit has been reached.
+    pub spend_blocked: AtomicBool,
 }
 
 impl AppMeter {
@@ -36,6 +40,27 @@ impl AppMeter {
             db_reads: AtomicU64::new(0),
             db_writes: AtomicU64::new(0),
             kv_ops: AtomicU64::new(0),
+            spend_accumulator_tenths: AtomicU64::new(0),
+            spend_blocked: AtomicBool::new(false),
+        }
+    }
+
+    /// Restore counters from the warm tier after a restart (crash recovery, spec §4.6).
+    /// Populates atomic counters from a stored HashMap so enforcement resumes
+    /// from where it left off, not from zero.
+    pub fn from_stored(plan: QuotaPlan, stored: &HashMap<String, u64>) -> Self {
+        Self {
+            plan,
+            period_start: SystemTime::now(),
+            requests: AtomicU64::new(*stored.get("requests").unwrap_or(&0)),
+            cpu_time_us: AtomicU64::new(*stored.get("cpu_ms").unwrap_or(&0)),
+            wall_time_us: AtomicU64::new(*stored.get("wall_ms").unwrap_or(&0)),
+            egress_bytes: AtomicU64::new(*stored.get("egress_bytes").unwrap_or(&0)),
+            db_reads: AtomicU64::new(*stored.get("db_reads").unwrap_or(&0)),
+            db_writes: AtomicU64::new(*stored.get("db_writes").unwrap_or(&0)),
+            kv_ops: AtomicU64::new(*stored.get("kv_ops").unwrap_or(&0)),
+            spend_accumulator_tenths: AtomicU64::new(*stored.get("spend_tenths").unwrap_or(&0)),
+            spend_blocked: AtomicBool::new(false),
         }
     }
 
@@ -100,6 +125,8 @@ impl AppMeter {
         self.db_reads.store(0, Ordering::Release);
         self.db_writes.store(0, Ordering::Release);
         self.kv_ops.store(0, Ordering::Release);
+        self.spend_accumulator_tenths.store(0, Ordering::Release);
+        self.spend_blocked.store(false, Ordering::Release);
     }
 }
 
@@ -190,5 +217,29 @@ impl MeterRegistry {
     pub fn all_meters(&self) -> HashMap<String, Arc<AppMeter>> {
         let meters = self.meters.lock().unwrap();
         meters.clone()
+    }
+
+    /// Recover counters from the warm tier after a restart (spec §4.6).
+    /// For each app in the store, loads the stored counters and populates
+    /// the hot-tier atomics so enforcement resumes from the last-flushed state.
+    pub fn recover_from_store(
+        &self,
+        store: &dyn appbase_core::meter_store::MeterStore,
+        app_ids: &[String],
+    ) {
+        for app_id in app_ids {
+            match store.load(app_id) {
+                Ok(stored) if !stored.is_empty() => {
+                    let meter = Arc::new(AppMeter::from_stored(
+                        self.default_plan.clone(),
+                        &stored,
+                    ));
+                    self.meters.lock().unwrap().insert(app_id.clone(), meter);
+                    eprintln!("[metering] Recovered counters for {app_id}: {} resources", stored.len());
+                }
+                Ok(_) => {} // empty, no recovery needed
+                Err(e) => eprintln!("[metering] Failed to recover {app_id}: {e}"),
+            }
+        }
     }
 }

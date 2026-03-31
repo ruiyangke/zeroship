@@ -6,7 +6,7 @@
 //! - Deny: over 100% on any dimension (returns 429)
 
 use crate::meter::AppMeter;
-use crate::plan::{QuotaPlan, Period};
+use crate::plan::{evaluate_policy, PolicyAction, QuotaPlan, Period};
 use serde::Serialize;
 
 /// Result of a quota check.
@@ -59,23 +59,44 @@ pub fn check_quota(meter: &AppMeter, plan: &QuotaPlan) -> QuotaDecision {
 
         let pct = if max > 0 { (used as f64 / max as f64) * 100.0 } else { 100.0 };
 
-        if used > max {
-            return QuotaDecision::Deny(QuotaDenial {
-                dimension: resource.clone(),
-                used,
-                limit: max,
-                message: format!("Monthly {resource} quota exceeded ({used}/{max})"),
-                error_code: -32029,
-            });
-        }
+        let action = evaluate_policy(&quota.policy, pct);
 
-        if pct >= 80.0 {
-            warnings.push(QuotaWarning {
-                dimension: resource.clone(),
-                used,
-                limit: max,
-                usage_pct: pct,
-            });
+        match action {
+            PolicyAction::Block | PolicyAction::Kill => {
+                return QuotaDecision::Deny(QuotaDenial {
+                    dimension: resource.clone(),
+                    used,
+                    limit: max,
+                    message: format!("Monthly {resource} quota exceeded ({used}/{max})"),
+                    error_code: -32029,
+                });
+            }
+            PolicyAction::BlockWrites => {
+                return QuotaDecision::Deny(QuotaDenial {
+                    dimension: resource.clone(),
+                    used,
+                    limit: max,
+                    message: format!("{resource} quota exceeded — writes blocked ({used}/{max})"),
+                    error_code: -32029,
+                });
+            }
+            PolicyAction::Warn | PolicyAction::Notify => {
+                warnings.push(QuotaWarning {
+                    dimension: resource.clone(),
+                    used,
+                    limit: max,
+                    usage_pct: pct,
+                });
+            }
+            PolicyAction::Throttle => {
+                warnings.push(QuotaWarning {
+                    dimension: resource.clone(),
+                    used,
+                    limit: max,
+                    usage_pct: pct,
+                });
+            }
+            PolicyAction::Allow => {}
         }
     }
 

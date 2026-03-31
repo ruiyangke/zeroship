@@ -5,6 +5,91 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Policy action to take when a usage threshold is reached.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum PolicyAction {
+    Allow,
+    Warn,
+    Notify,
+    Throttle,
+    Block,
+    BlockWrites,
+    Kill,
+}
+
+/// Policy definition — actions at specific usage thresholds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyDef {
+    pub at_50_pct: Option<PolicyAction>,
+    pub at_80_pct: Option<PolicyAction>,
+    pub at_95_pct: Option<PolicyAction>,
+    pub at_100_pct: Option<PolicyAction>,
+}
+
+impl PolicyDef {
+    pub fn warn_then_block() -> Self {
+        Self {
+            at_50_pct: None,
+            at_80_pct: Some(PolicyAction::Warn),
+            at_95_pct: None,
+            at_100_pct: Some(PolicyAction::Block),
+        }
+    }
+    pub fn hard_kill() -> Self {
+        Self {
+            at_50_pct: None,
+            at_80_pct: None,
+            at_95_pct: None,
+            at_100_pct: Some(PolicyAction::Kill),
+        }
+    }
+    pub fn reject() -> Self {
+        Self {
+            at_50_pct: None,
+            at_80_pct: None,
+            at_95_pct: None,
+            at_100_pct: Some(PolicyAction::Block),
+        }
+    }
+    pub fn block_writes_only() -> Self {
+        Self {
+            at_50_pct: None,
+            at_80_pct: Some(PolicyAction::Warn),
+            at_95_pct: None,
+            at_100_pct: Some(PolicyAction::BlockWrites),
+        }
+    }
+}
+
+/// Resolve a policy name string to a PolicyDef.
+pub fn resolve_policy(name: &str) -> PolicyDef {
+    match name {
+        "warn_then_block" => PolicyDef::warn_then_block(),
+        "hard_kill" => PolicyDef::hard_kill(),
+        "reject" => PolicyDef::reject(),
+        "block_writes_only" => PolicyDef::block_writes_only(),
+        _ => PolicyDef::warn_then_block(), // default fallback
+    }
+}
+
+/// Evaluate a policy at a given usage percentage, returning the action to take.
+pub fn evaluate_policy(policy_name: &str, usage_pct: f64) -> PolicyAction {
+    let policy = resolve_policy(policy_name);
+    if usage_pct >= 100.0 {
+        return policy.at_100_pct.unwrap_or(PolicyAction::Block);
+    }
+    if usage_pct >= 95.0 {
+        return policy.at_95_pct.unwrap_or(PolicyAction::Allow);
+    }
+    if usage_pct >= 80.0 {
+        return policy.at_80_pct.unwrap_or(PolicyAction::Allow);
+    }
+    if usage_pct >= 50.0 {
+        return policy.at_50_pct.unwrap_or(PolicyAction::Allow);
+    }
+    PolicyAction::Allow
+}
+
 /// Time period for quota enforcement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Period {
@@ -42,6 +127,8 @@ pub struct QuotaPlan {
     pub entitlements: HashMap<String, serde_json::Value>,
     pub quotas: HashMap<String, QuotaDef>,
     pub rate_limits: HashMap<String, RateLimitDef>,
+    /// Per-app spending limit in cents. None = no limit.
+    pub spending_limit_cents: Option<u64>,
 }
 
 impl QuotaPlan {
@@ -67,6 +154,7 @@ impl QuotaPlan {
             entitlements: HashMap::new(),
             quotas,
             rate_limits,
+            spending_limit_cents: Some(500), // $5.00 spending cap for free tier
         }
     }
 
@@ -87,6 +175,7 @@ impl QuotaPlan {
             entitlements: HashMap::new(),
             quotas,
             rate_limits,
+            spending_limit_cents: None, // no spending limit for pro
         }
     }
 
@@ -99,6 +188,7 @@ impl QuotaPlan {
             entitlements: HashMap::new(),
             quotas: HashMap::new(),
             rate_limits: HashMap::new(),
+            spending_limit_cents: None,
         }
     }
 }
