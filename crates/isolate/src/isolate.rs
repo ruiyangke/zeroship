@@ -86,17 +86,23 @@ pub fn create(
         ..Default::default()
     };
 
-    // Deno web platform extensions — order matters (deps before dependents).
-    // These provide globalThis.fetch(), Request, Response, Headers, URL, etc.
+    // Deno web platform extensions — minimum 6 for fetch().
+    // Order matters: ESM imports resolved against already-loaded modules.
+    // See refs/deno/runtime/worker.rs for Deno's full registration order.
     let mut extensions = vec![
-        deno_webidl::deno_webidl::init(),
-        deno_web::deno_web::init(
+        deno_telemetry::deno_telemetry::init(),     // fetch's JS imports tracing from this
+        deno_webidl::deno_webidl::init(),            // WebIDL type conversions
+        deno_web::deno_web::init(                    // Event, Blob, URL, timers
             Arc::new(deno_web::BlobStore::default()),
-            None, // no base location URL
+            None,
             deno_web::InMemoryBroadcastChannel::default(),
         ),
-        deno_net::deno_net::init(None, None),
-        deno_fetch::deno_fetch::init(deno_fetch::Options::default()),
+        deno_tls::deno_tls::init(),                  // TLS primitives
+        deno_net::deno_net::init(None, None),         // fetch's 22_http_client.js imports from this
+        deno_fetch::deno_fetch::init(deno_fetch::Options {
+            user_agent: "appbase/0.1".to_string(),
+            ..Default::default()
+        }),
     ];
     // Our own extension must come after deno's since our JS may reference fetch.
     extensions.push(ext);
