@@ -405,42 +405,58 @@ async fn actor_loop(
         }
         prev_pending_count = current_pending;
 
+        // Helper: handle V8 termination recovery (used by both Ok and Err paths).
+        // When terminate_execution() is called from the watchdog/CPU-timer thread,
+        // deno_core may surface it as Ready(Err("terminated")) OR as Ready(Ok(()))
+        // depending on timing. We detect the latter by checking for pending replies
+        // when the event loop claims to be done.
+        let handle_termination = |runtime: &mut deno_core::JsRuntime| {
+            // Cancel the termination flag so V8 can serve the next request.
+            runtime.v8_isolate().cancel_terminate_execution();
+
+            // Disarm POSIX CPU timer — will re-arm on next request
+            #[cfg(target_os = "linux")]
+            if cpu_timer_active.get() {
+                if let Some(ref timer) = cpu_timer {
+                    timer.disarm();
+                    cpu_timer_active.set(false);
+                }
+            }
+
+            // Drain pending replies with timeout error
+            let drained = pending_replies.borrow_mut().drain().collect::<Vec<_>>();
+            for (_, tx) in drained {
+                let _ = tx.send(Err("Execution time limit exceeded".to_string()));
+            }
+
+            eprintln!("[isolate] [{app_id}] Recovered from execution timeout");
+        };
+
         match poll_result {
             Poll::Ready(Ok(())) => {
-                // Event loop drained. This happens when the JS dispatch loop
-                // exits (rpc_tx was dropped, so op_rpc_recv returned null).
-                // If no pending replies remain, we can exit cleanly.
+                // Event loop drained. This normally happens when the JS dispatch
+                // loop exits (rpc_tx was dropped, so op_rpc_recv returned null).
                 if pending_replies.borrow().is_empty() {
                     return Poll::Ready(());
                 }
-                // Still have in-flight responses — keep polling to let them complete
+
+                // Pending replies exist but the event loop reports done — this
+                // means V8 was terminated externally (terminate_execution() from
+                // the watchdog or CPU timer thread). deno_core sometimes surfaces
+                // this as Ok(()) rather than Err("terminated").
+                handle_termination(&mut runtime);
+                prev_pending_count = 0;
+
+                // Continue the poll_fn loop so the isolate can serve the next request
                 cx.waker().wake_by_ref();
                 Poll::Pending
             }
             Poll::Ready(Err(e)) => {
                 let err_msg = format!("{e}");
-                if err_msg.contains("terminated") {
+                if err_msg.contains("terminated") || !pending_replies.borrow().is_empty() {
                     // V8 was terminated by the watchdog or POSIX CPU timer.
-                    // Cancel the termination so V8 can serve the next request.
-                    runtime.v8_isolate().cancel_terminate_execution();
-
-                    // Disarm POSIX CPU timer — will re-arm on next request
-                    #[cfg(target_os = "linux")]
-                    if cpu_timer_active.get() {
-                        if let Some(ref timer) = cpu_timer {
-                            timer.disarm();
-                            cpu_timer_active.set(false);
-                        }
-                    }
-
-                    // Drain pending replies with timeout error
-                    let drained = pending_replies.borrow_mut().drain().collect::<Vec<_>>();
-                    for (_, tx) in drained {
-                        let _ = tx.send(Err("Execution time limit exceeded".to_string()));
-                    }
+                    handle_termination(&mut runtime);
                     prev_pending_count = 0;
-
-                    eprintln!("[isolate] [{app_id}] Recovered from execution timeout");
 
                     // DON'T exit — continue the poll_fn loop so the isolate can serve the next request
                     cx.waker().wake_by_ref();
