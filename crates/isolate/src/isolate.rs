@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
@@ -204,8 +204,15 @@ pub fn create(
     Ok(runtime)
 }
 
+/// Cache for transpiled TypeScript extension sources.
+/// Keyed by module name; value is the transpiled JS text.
+/// Extensions (e.g. deno_telemetry) ship static TS that never changes at
+/// runtime, so caching across isolate creations is safe.
+static TRANSPILE_CACHE: OnceLock<std::sync::Mutex<HashMap<String, String>>> = OnceLock::new();
+
 /// Transpile TypeScript extension sources to JavaScript.
 /// Used by deno_telemetry which ships .ts files.
+/// Results are cached so that only the first isolate pays the SWC cost.
 fn transpile_extension(
     name: ModuleName,
     source: ModuleCodeString,
@@ -219,6 +226,17 @@ fn transpile_extension(
         _ => return Ok((source, None)),
     }
 
+    // Check cache
+    let cache = TRANSPILE_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let key = name.to_string();
+    {
+        let c = cache.lock().unwrap();
+        if let Some(cached) = c.get(&key) {
+            return Ok((cached.clone().into(), None));
+        }
+    }
+
+    // Not cached — transpile
     let parsed = deno_ast::parse_module(ParseParams {
         specifier: deno_core::url::Url::parse(&name).unwrap(),
         text: source.into(),
@@ -244,5 +262,12 @@ fn transpile_extension(
         .map_err(|e| deno_error::JsErrorBox::generic(e.to_string()))?
         .into_source();
 
-    Ok((transpiled.text.into(), None))
+    // Cache the result
+    let text = transpiled.text.to_string();
+    {
+        let mut c = cache.lock().unwrap();
+        c.insert(key, text.clone());
+    }
+
+    Ok((text.into(), None))
 }

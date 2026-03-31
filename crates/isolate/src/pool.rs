@@ -288,22 +288,32 @@ impl IsolatePool {
     }
 }
 
-/// Read current process RSS in MB from /proc/self/status.
+/// Read current process RSS in MB.
+///
+/// Linux: reads `/proc/self/status` (VmRSS field).
+/// Other platforms: returns 0 (memory-pressure eviction is effectively disabled).
 fn process_rss_mb() -> usize {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|status| {
-            status.lines().find_map(|line| {
-                if line.starts_with("VmRSS:") {
-                    line.split_whitespace()
-                        .nth(1)?
-                        .parse::<usize>()
-                        .ok()
-                        .map(|kb| kb / 1024)
-                } else {
-                    None
-                }
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status.lines().find_map(|line| {
+                    if line.starts_with("VmRSS:") {
+                        line.split_whitespace()
+                            .nth(1)?
+                            .parse::<usize>()
+                            .ok()
+                            .map(|kb| kb / 1024)
+                    } else {
+                        None
+                    }
+                })
             })
-        })
-        .unwrap_or(0)
+            .unwrap_or(0)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        0
+    }
 }
