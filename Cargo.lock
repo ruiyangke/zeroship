@@ -147,6 +147,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "appbase-isolate-v8"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
+ "tokio",
+ "v8",
+]
+
+[[package]]
 name = "appbase-metering"
 version = "0.1.0"
 dependencies = [
