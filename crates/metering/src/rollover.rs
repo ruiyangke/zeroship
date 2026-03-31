@@ -103,16 +103,8 @@ async fn rollover_all(registry: &MeterRegistry, store: &dyn MeterStore, config: 
 
 /// Generate a period key like "2026-03" for the current month.
 fn current_period_key() -> String {
-    use std::time::SystemTime;
-    let secs = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let days = secs / 86400;
-    // Approximate month calculation (good enough for boundary detection)
-    let years = 1970 + days / 365;
-    let month = (days % 365) / 30 + 1;
-    format!("{years}-{month:02}")
+    let now = time::OffsetDateTime::now_utc();
+    format!("{}-{:02}", now.year(), now.month() as u8)
 }
 
 #[cfg(test)]

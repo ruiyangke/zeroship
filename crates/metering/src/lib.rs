@@ -7,6 +7,7 @@
 //! - `enforcer`: Quota checking logic (allow/warn/deny)
 //! - `rate_limit`: Token bucket rate limiter
 
+pub mod error_codes;
 pub mod plan;
 pub mod meter;
 pub mod enforcer;

@@ -10,6 +10,7 @@ use appbase_core::plugin::{Plugin, PluginFactory};
 use appbase_server::router;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -83,6 +84,22 @@ fn cmd_serve(args: &[String]) {
             plugin_factory,
             default_plan,
         );
+
+        // Spawn background metering services
+        let store: Arc<dyn appbase_core::meter_store::MeterStore> =
+            Arc::new(appbase_metering::store::memory::InMemoryStore::new());
+        let _flusher = appbase_metering::flusher::spawn_flusher(
+            state.meters.clone(),
+            store.clone(),
+            Duration::from_secs(5),
+        );
+        let _roller = appbase_metering::rollover::spawn_period_roller(
+            state.meters.clone(),
+            store,
+            appbase_metering::rollover::RolloverConfig::default(),
+        );
+        eprintln!("[appbase] Background services started (flusher=5s, roller=60s)");
+
         router::serve(state, &config.server.host, config.server.port).await
     }) {
         eprintln!("[appbase] Error: {e}");

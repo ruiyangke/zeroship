@@ -74,16 +74,8 @@ impl MeterStore for InMemoryStore {
 
 /// Generate a period string like "2026-03".
 fn chrono_period() -> String {
-    use std::time::SystemTime;
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    // Approximate: 30.44 days per month
-    let days = now / 86400;
-    let years = 1970 + days / 365;
-    let month = (days % 365) / 30 + 1;
-    format!("{years}-{month:02}")
+    let now = time::OffsetDateTime::now_utc();
+    format!("{}-{:02}", now.year(), now.month() as u8)
 }
 
 #[cfg(test)]

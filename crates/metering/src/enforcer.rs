@@ -5,6 +5,7 @@
 //! - Warn: over 80% on any dimension (adds warning header)
 //! - Deny: over 100% on any dimension (returns 429)
 
+use crate::error_codes;
 use crate::meter::AppMeter;
 use crate::plan::{evaluate_policy, PolicyAction, QuotaPlan, Period};
 use serde::Serialize;
@@ -76,7 +77,7 @@ pub fn check_quota(meter: &AppMeter, plan: &QuotaPlan) -> QuotaDecision {
                     used,
                     limit: max,
                     message: format!("Monthly {resource} quota exceeded ({used}/{max})"),
-                    error_code: -32029,
+                    error_code: error_codes::QUOTA_EXCEEDED,
                 });
             }
             PolicyAction::BlockWrites => {
@@ -85,7 +86,7 @@ pub fn check_quota(meter: &AppMeter, plan: &QuotaPlan) -> QuotaDecision {
                     used,
                     limit: max,
                     message: format!("{resource} quota exceeded — writes blocked ({used}/{max})"),
-                    error_code: -32029,
+                    error_code: error_codes::QUOTA_EXCEEDED,
                 });
             }
             PolicyAction::Warn | PolicyAction::Notify => {
@@ -126,14 +127,14 @@ pub fn check_entitlement(plan: &QuotaPlan, feature: &str) -> Result<(), Entitlem
                 Err(EntitlementDenial {
                     feature: feature.to_string(),
                     message: format!("Feature '{feature}' is not enabled on the {plan_name} plan", plan_name = plan.name),
-                    error_code: -32028,
+                    error_code: error_codes::ENTITLEMENT_DENIED,
                 })
             }
         }
         None => Err(EntitlementDenial {
             feature: feature.to_string(),
             message: format!("Feature '{feature}' is not available on the {plan_name} plan", plan_name = plan.name),
-            error_code: -32028,
+            error_code: error_codes::ENTITLEMENT_DENIED,
         }),
     }
 }
@@ -202,7 +203,7 @@ mod tests {
         assert!(result.is_err());
         let denial = result.unwrap_err();
         assert_eq!(denial.feature, "custom_domains");
-        assert_eq!(denial.error_code, -32028);
+        assert_eq!(denial.error_code, error_codes::ENTITLEMENT_DENIED);
     }
 
     #[test]

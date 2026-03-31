@@ -5,6 +5,7 @@ use appbase_core::plugin::PluginFactory;
 use appbase_core::types::AppBundle;
 use appbase_isolate::pool::IsolatePool;
 use appbase_metering::enforcer::{self, QuotaDecision};
+use appbase_metering::error_codes;
 use appbase_metering::meter::{MeterRegistry, UsageDelta};
 use appbase_metering::plan::QuotaPlan;
 use appbase_metering::rate_limit::RateLimiter;
@@ -108,25 +109,32 @@ pub async fn serve(state: AppState, host: &str, port: u16) -> Result<(), String>
 async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
     let app_id = state.default_app.clone();
 
-    // 1. Rate limit check (error code -32030 per spec §8.4)
+    // 1. Rate limit check
     if !state.rate_limiter.check(&app_id) {
         return json_response_with_status(
             StatusCode::TOO_MANY_REQUESTS,
-            r#"{"jsonrpc":"2.0","error":{"code":-32030,"message":"Rate limit exceeded","data":{"type":"rate_limited"}},"id":null}"#,
+            &format!(
+                r#"{{"jsonrpc":"2.0","error":{{"code":{},"message":"Rate limit exceeded","data":{{"type":"rate_limited"}}}},"id":null}}"#,
+                error_codes::RATE_LIMITED
+            ),
         );
     }
 
-    // 1.5. Spending limit check (error code -32031 per spec §6)
+    // 1.5. Spending limit check
     let meter = state.meters.get_or_create(&app_id);
     if meter.spend_blocked.load(Ordering::Acquire) {
         return json_response_with_status(
             StatusCode::TOO_MANY_REQUESTS,
-            r#"{"jsonrpc":"2.0","error":{"code":-32031,"message":"Spending limit reached","data":{"type":"spending_limit"}},"id":null}"#,
+            &format!(
+                r#"{{"jsonrpc":"2.0","error":{{"code":{},"message":"Spending limit reached","data":{{"type":"spending_limit"}}}},"id":null}}"#,
+                error_codes::SPENDING_LIMIT
+            ),
         );
     }
 
-    // 2. Quota check (error code from denial, -32029 per spec §8.4)
-    match enforcer::check_quota(&meter, &meter.plan) {
+    // 2. Quota check — single call, capture both deny and warnings
+    let quota_decision = enforcer::check_quota(&meter, &meter.plan);
+    let quota_warnings = match &quota_decision {
         QuotaDecision::Deny(denial) => {
             return json_response_with_status(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -136,15 +144,8 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
                 ),
             );
         }
-        QuotaDecision::Warn(_) => {
-            // Warnings captured below for response headers
-        }
-        QuotaDecision::Allow => {}
-    }
-    // Capture warnings for response headers
-    let quota_warnings = match enforcer::check_quota(&meter, &meter.plan) {
-        QuotaDecision::Warn(w) => w,
-        _ => vec![],
+        QuotaDecision::Warn(w) => w.clone(),
+        QuotaDecision::Allow => vec![],
     };
 
     // 3. Get app bundle
@@ -246,7 +247,8 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
             json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &format!(
-                    r#"{{"jsonrpc":"2.0","error":{{"code":-32603,"message":"{safe}"}},"id":null}}"#
+                    r#"{{"jsonrpc":"2.0","error":{{"code":{},"message":"{safe}"}},"id":null}}"#,
+                    error_codes::INTERNAL_ERROR
                 ),
             )
         }
