@@ -6,8 +6,8 @@
 //! - Deny: over 100% on any dimension (returns 429)
 
 use crate::error_codes;
-use crate::meter::AppMeter;
-use crate::plan::{evaluate_policy, PolicyAction, QuotaPlan, Period};
+use appbase_metering::meter::AppMeter;
+use appbase_plan::{evaluate_policy, PolicyAction, QuotaPlan, Period};
 use serde::Serialize;
 
 /// Result of a quota check.
@@ -142,7 +142,7 @@ pub fn check_entitlement(plan: &QuotaPlan, feature: &str) -> Result<(), Entitlem
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::{QuotaPlan, QuotaDef, Period};
+    use appbase_plan::{QuotaPlan, QuotaDef, Period};
 
     #[test]
     fn allow_under_limit() {

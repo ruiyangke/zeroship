@@ -1,6 +1,6 @@
 //! Token bucket rate limiter — per-app requests/second limiting.
 //!
-//! Implementation packs tokens (upper 32 bits, fixed-point ×1000) and
+//! Implementation packs tokens (upper 32 bits, fixed-point x1000) and
 //! last_refill (lower 32 bits, epoch seconds) into a single AtomicU64.
 //! Uses compare_exchange CAS loop for lock-free atomic refill+consume.
 //!
@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Max burst value: tokens are stored in upper 32 bits as tokens×1000.
+/// Max burst value: tokens are stored in upper 32 bits as tokens*1000.
 /// u32::MAX / 1000 = 4,294,967 max burst tokens.
 const MAX_BURST: u32 = u32::MAX / 1000;
 
@@ -36,14 +36,14 @@ fn now_secs() -> u32 {
 }
 
 /// Token bucket with packed atomic state — lock-free, no races.
-/// Upper 32 bits: tokens × 1000 (fixed-point for sub-token precision)
+/// Upper 32 bits: tokens x 1000 (fixed-point for sub-token precision)
 /// Lower 32 bits: last_refill timestamp (epoch seconds)
 ///
 /// Max supported burst: 4,294,967 tokens (u32::MAX / 1000).
 pub struct TokenBucket {
     state: AtomicU64,
-    capacity: u64,     // max tokens × 1000, clamped to u32::MAX
-    refill_rate: u64,  // tokens per second × 1000
+    capacity: u64,     // max tokens x 1000, clamped to u32::MAX
+    refill_rate: u64,  // tokens per second x 1000
 }
 
 impl TokenBucket {

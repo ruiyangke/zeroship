@@ -47,8 +47,10 @@ version = "0.1.0"
 dependencies = [
  "appbase-billing",
  "appbase-core",
+ "appbase-enforcement",
  "appbase-isolate",
  "appbase-metering",
+ "appbase-plan",
  "appbase-plugins",
  "appbase-server",
  "serde_json",
@@ -85,6 +87,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "appbase-enforcement"
+version = "0.1.0"
+dependencies = [
+ "appbase-metering",
+ "appbase-plan",
+ "serde",
+]
+
+[[package]]
 name = "appbase-isolate"
 version = "0.1.0"
 dependencies = [
@@ -102,12 +113,21 @@ version = "0.1.0"
 dependencies = [
  "appbase-billing",
  "appbase-core",
+ "appbase-plan",
  "rusqlite",
  "serde",
  "serde_json",
  "time",
  "tokio",
  "toml",
+]
+
+[[package]]
+name = "appbase-plan"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -129,8 +149,10 @@ version = "0.1.0"
 dependencies = [
  "appbase-billing",
  "appbase-core",
+ "appbase-enforcement",
  "appbase-isolate",
  "appbase-metering",
+ "appbase-plan",
  "axum",
  "bytes",
  "serde_json",

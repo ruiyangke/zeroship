@@ -1,19 +1,17 @@
 //! # appbase-metering
 //!
-//! Multi-tenant metering, quota enforcement, and rate limiting.
+//! Multi-tenant metering — per-app atomic usage counters, flush loop, and period rollover.
 //!
-//! - `plan`: Quota plan definitions (free, pro, enterprise)
+//! Quota plan definitions are in `appbase-plan`.
+//! Enforcement (quota checking, rate limiting, concurrency, error codes) is in `appbase-enforcement`.
+//!
+//! - `plan`: Re-exports from `appbase-plan` for backward compatibility
 //! - `meter`: Per-app atomic usage counters
-//! - `enforcer`: Quota checking logic (allow/warn/deny)
-//! - `rate_limit`: Token bucket rate limiter
+//! - `config`: TOML config parsing for metering plans
 
-pub mod error_codes;
 pub mod plan;
 pub mod registry;
 pub mod meter;
-pub mod enforcer;
-pub mod rate_limit;
-pub mod concurrency;
 pub mod config;
 pub mod event_channel;
 pub mod event_logger;

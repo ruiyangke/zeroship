@@ -8,6 +8,8 @@ description = "HTTP server for appbase — axum, Tower middleware, multi-tenant 
 appbase-core = { path = "../core" }
 appbase-isolate = { path = "../isolate" }
 appbase-metering = { path = "../metering" }
+appbase-enforcement = { path = "../enforcement" }
+appbase-plan = { path = "../plan" }
 appbase-billing = { path = "../billing" }
 axum = { version = "0.8", features = ["ws", "macros"] }
 bytes = "1"
