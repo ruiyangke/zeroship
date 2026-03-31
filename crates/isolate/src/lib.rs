@@ -9,6 +9,8 @@
 
 pub mod actor;
 pub mod cpu;
+#[cfg(target_os = "linux")]
+pub mod cpu_timer;
 pub mod isolate;
 mod permissions;
 pub mod pool;

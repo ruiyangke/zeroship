@@ -21,6 +21,9 @@ use std::time::{Duration, Instant};
 use crate::actor::{self, ActorHandle, IsolateMessage};
 use crate::watchdog::{ExecutionLimits, GlobalWatchdog};
 
+#[cfg(target_os = "linux")]
+use crate::cpu_timer::CpuTimerSystem;
+
 /// Per-app entry in the pool.
 struct PoolEntry {
     app_id: String,
@@ -62,6 +65,8 @@ pub struct IsolatePool {
     meter_factory: MeterFactory,
     quota_factory: QuotaFactory,
     watchdog: GlobalWatchdog,
+    #[cfg(target_os = "linux")]
+    cpu_timer_system: Arc<CpuTimerSystem>,
 }
 
 impl IsolatePool {
@@ -81,6 +86,8 @@ impl IsolatePool {
             meter_factory,
             quota_factory,
             watchdog: GlobalWatchdog::new(),
+            #[cfg(target_os = "linux")]
+            cpu_timer_system: Arc::new(CpuTimerSystem::new()),
         });
 
         // Background eviction task — runs all policies every 10s
@@ -178,6 +185,8 @@ impl IsolatePool {
             quota,
             &self.watchdog,
             limits,
+            #[cfg(target_os = "linux")]
+            self.cpu_timer_system.clone(),
         )?;
 
         eprintln!("[pool] Started: {app_id}");

@@ -20,6 +20,8 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cpu::CpuUsage;
+#[cfg(target_os = "linux")]
+use crate::cpu_timer::{CpuTimer, CpuTimerSystem};
 use crate::isolate::{self, RpcPendingReplies, SharedRpcReceiver};
 use crate::watchdog::{ExecutionLimits, GlobalWatchdog, OpWatchdogEntry, WatchdogEntry};
 
@@ -95,6 +97,7 @@ pub fn spawn(
     quota: Arc<dyn PluginQuota>,
     watchdog: &GlobalWatchdog,
     limits: ExecutionLimits,
+    #[cfg(target_os = "linux")] cpu_timer_system: Arc<CpuTimerSystem>,
 ) -> Result<SpawnResult, String> {
     let (tx, rx) = mpsc::channel::<IsolateMessage>(64);
     let cpu_usage = Arc::new(Mutex::new(CpuUsage::default()));
@@ -134,6 +137,8 @@ pub fn spawn(
                 thread_id,
                 limits,
                 watchdog_ref,
+                #[cfg(target_os = "linux")]
+                cpu_timer_system,
             ));
         })
         .map_err(|e| format!("Failed to spawn V8 thread: {e}"))?;
@@ -165,6 +170,7 @@ async fn actor_loop(
     thread_id: libc::pthread_t,
     limits: ExecutionLimits,
     watchdog_entries: Arc<Mutex<HashMap<String, Arc<WatchdogEntry>>>>,
+    #[cfg(target_os = "linux")] cpu_timer_system: Arc<CpuTimerSystem>,
 ) {
     // Ensure data directory exists
     let _ = std::fs::create_dir_all(data_dir);
@@ -181,8 +187,8 @@ async fn actor_loop(
     // Register this isolate with the global watchdog for wall-time + CPU-time enforcement.
     // The watchdog thread reads our CPU time cross-thread via pthread_getcpuclockid.
     let _thread_id = thread_id; // suppress unused warning on non-Linux
-    let v8_handle = runtime.v8_isolate().thread_safe_handle();
     let watchdog_entry = {
+        let v8_handle = runtime.v8_isolate().thread_safe_handle();
         #[cfg(target_os = "linux")]
         let cpu_clock_id = {
             let mut clock_id: libc::clockid_t = 0;
@@ -203,6 +209,28 @@ async fn actor_loop(
             .insert(app_id.to_string(), entry.clone());
         entry
     };
+
+    // --- POSIX CPU timer (Linux only) ---
+    // Create a per-thread POSIX timer for precise CPU time enforcement.
+    // This runs alongside the global watchdog (which handles wall-time + liveness).
+    #[cfg(target_os = "linux")]
+    let cpu_timer = {
+        let id = crate::cpu_timer::app_id_hash(app_id);
+        let v8_handle = runtime.v8_isolate().thread_safe_handle();
+        cpu_timer_system.register(id, v8_handle);
+        match CpuTimer::new(id) {
+            Ok(timer) => {
+                eprintln!("[cpu-timer] [{app_id}] Created POSIX CPU timer (id={id:#x})");
+                Some(timer)
+            }
+            Err(e) => {
+                eprintln!("[cpu-timer] [{app_id}] Failed to create POSIX timer: {e}");
+                None
+            }
+        }
+    };
+    #[cfg(target_os = "linux")]
+    let cpu_timer_active = std::cell::Cell::new(false);
 
     // Create the RPC channel pair.
     // Wrapped in Option so Shutdown can drop the sender, causing the JS dispatch
@@ -300,6 +328,15 @@ async fn actor_loop(
                             } else {
                                 // Successfully injected — notify watchdog
                                 watchdog_entry.start_request();
+
+                                // Arm POSIX CPU timer on first request
+                                #[cfg(target_os = "linux")]
+                                if !cpu_timer_active.get() {
+                                    if let Some(ref timer) = cpu_timer {
+                                        timer.arm(limits.cpu_time);
+                                        cpu_timer_active.set(true);
+                                    }
+                                }
                             }
                         } else {
                             // Shutting down — reject immediately
@@ -356,6 +393,15 @@ async fn actor_loop(
                 usage.request_count += completed as u64;
             }
             // Note: end_request() is called from op_rpc_respond via OpState
+
+            // Disarm POSIX CPU timer when all requests complete
+            #[cfg(target_os = "linux")]
+            if current_pending == 0 && cpu_timer_active.get() {
+                if let Some(ref timer) = cpu_timer {
+                    timer.disarm();
+                    cpu_timer_active.set(false);
+                }
+            }
         }
         prev_pending_count = current_pending;
 
@@ -374,9 +420,18 @@ async fn actor_loop(
             Poll::Ready(Err(e)) => {
                 let err_msg = format!("{e}");
                 if err_msg.contains("terminated") {
-                    // V8 was terminated by the global watchdog.
+                    // V8 was terminated by the watchdog or POSIX CPU timer.
                     // Cancel the termination so V8 can serve the next request.
                     runtime.v8_isolate().cancel_terminate_execution();
+
+                    // Disarm POSIX CPU timer — will re-arm on next request
+                    #[cfg(target_os = "linux")]
+                    if cpu_timer_active.get() {
+                        if let Some(ref timer) = cpu_timer {
+                            timer.disarm();
+                            cpu_timer_active.set(false);
+                        }
+                    }
 
                     // Drain pending replies with timeout error
                     let drained = pending_replies.borrow_mut().drain().collect::<Vec<_>>();
@@ -404,5 +459,12 @@ async fn actor_loop(
     for (_, tx) in pending_replies.borrow_mut().drain() {
         let _ = tx.send(Err("Isolate shut down".to_string()));
     }
+
+    // Unregister from POSIX CPU timer system
+    #[cfg(target_os = "linux")]
+    if let Some(ref timer) = cpu_timer {
+        cpu_timer_system.unregister(timer.app_id());
+    }
+
     eprintln!("[isolate] [{app_id}] Stopped");
 }
