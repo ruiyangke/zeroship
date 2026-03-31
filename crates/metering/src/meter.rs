@@ -24,6 +24,8 @@ pub struct AppMeter {
     pub kv_ops: AtomicU64,
     /// Accumulated spend in tenths-of-a-cent.
     pub spend_accumulator_tenths: AtomicU64,
+    /// Last flushed spend value (for computing deltas in flusher).
+    pub last_flushed_spend: AtomicU64,
     /// True when spending limit has been reached.
     pub spend_blocked: AtomicBool,
 }
@@ -41,6 +43,7 @@ impl AppMeter {
             db_writes: AtomicU64::new(0),
             kv_ops: AtomicU64::new(0),
             spend_accumulator_tenths: AtomicU64::new(0),
+            last_flushed_spend: AtomicU64::new(0),
             spend_blocked: AtomicBool::new(false),
         }
     }
@@ -49,6 +52,12 @@ impl AppMeter {
     /// Populates atomic counters from a stored HashMap so enforcement resumes
     /// from where it left off, not from zero.
     pub fn from_stored(plan: QuotaPlan, stored: &HashMap<String, u64>) -> Self {
+        let spend_tenths = *stored.get("spend_tenths").unwrap_or(&0);
+        // Re-evaluate spend_blocked from recovered state (spec §4.6)
+        let blocked = match plan.spending_limit_cents {
+            Some(limit_cents) => spend_tenths >= limit_cents * 10,
+            None => false,
+        };
         Self {
             plan,
             period_start: SystemTime::now(),
@@ -59,8 +68,9 @@ impl AppMeter {
             db_reads: AtomicU64::new(*stored.get("db_reads").unwrap_or(&0)),
             db_writes: AtomicU64::new(*stored.get("db_writes").unwrap_or(&0)),
             kv_ops: AtomicU64::new(*stored.get("kv_ops").unwrap_or(&0)),
-            spend_accumulator_tenths: AtomicU64::new(*stored.get("spend_tenths").unwrap_or(&0)),
-            spend_blocked: AtomicBool::new(false),
+            spend_accumulator_tenths: AtomicU64::new(spend_tenths),
+            last_flushed_spend: AtomicU64::new(spend_tenths),
+            spend_blocked: AtomicBool::new(blocked),
         }
     }
 
@@ -126,6 +136,7 @@ impl AppMeter {
         self.db_writes.store(0, Ordering::Release);
         self.kv_ops.store(0, Ordering::Release);
         self.spend_accumulator_tenths.store(0, Ordering::Release);
+        self.last_flushed_spend.store(0, Ordering::Release);
         self.spend_blocked.store(false, Ordering::Release);
     }
 }

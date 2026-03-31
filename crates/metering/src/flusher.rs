@@ -51,6 +51,10 @@ fn flush_all(registry: &MeterRegistry, store: &dyn MeterStore) {
 }
 
 /// Read and reset atomic counters for one app, returning non-zero deltas.
+///
+/// Uses `swap(0, AcqRel)` for normal counters (additive deltas).
+/// Spend accumulator uses a different strategy: we read the current value
+/// and compute the delta since last flush (tracked in `last_flushed_spend`).
 fn collect_deltas(meter: &crate::meter::AppMeter) -> Vec<ResourceDelta> {
     let mut deltas = Vec::new();
 
@@ -77,6 +81,19 @@ fn collect_deltas(meter: &crate::meter::AppMeter) -> Vec<ResourceDelta> {
     collect!("db_reads", db_reads);
     collect!("db_writes", db_writes);
     collect!("kv_ops", kv_ops);
+
+    // Spend accumulator: compute delta since last flush.
+    // The spend accumulator is monotonically increasing (never swapped to zero),
+    // so we track last-flushed value to compute the additive delta.
+    let current_spend = meter.spend_accumulator_tenths.load(Ordering::Acquire);
+    let last_spend = meter.last_flushed_spend.swap(current_spend, Ordering::AcqRel);
+    let spend_delta = current_spend.saturating_sub(last_spend);
+    if spend_delta > 0 {
+        deltas.push(ResourceDelta {
+            resource: "spend_tenths".into(),
+            delta: spend_delta,
+        });
+    }
 
     deltas
 }

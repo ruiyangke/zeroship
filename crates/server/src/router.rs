@@ -280,9 +280,10 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
             });
 
             // 7.5. Update spend accumulator and check spending limit
-            // Approximate cost: $0.30 per million requests = 0.03 cents per request = 0.3 tenths per request
-            let cost_tenths: u64 = 3; // simplified: ~0.3 tenths-of-a-cent per request
-            meter.spend_accumulator_tenths.fetch_add(cost_tenths, Ordering::Release);
+            let cost_tenths = meter.plan.cost_tenths_per_request;
+            if cost_tenths > 0 {
+                meter.spend_accumulator_tenths.fetch_add(cost_tenths, Ordering::Release);
+            }
             if let Some(limit_cents) = meter.plan.spending_limit_cents {
                 let spent_tenths = meter.spend_accumulator_tenths.load(Ordering::Acquire);
                 if spent_tenths >= limit_cents * 10 {
@@ -360,12 +361,24 @@ async fn handle_stats(State(state): State<AppState>) -> Response {
     )
 }
 
-/// GET /_usage — all apps' usage.
+/// GET /_usage — all apps' usage with concurrency info.
 async fn handle_all_usage(State(state): State<AppState>) -> Response {
     let usage = state.meters.all_usage();
+    // Enrich each app's snapshot with concurrent_requests
+    let mut enriched = serde_json::Map::new();
+    for (app_id, snapshot) in &usage {
+        let mut val = serde_json::to_value(snapshot).unwrap_or_default();
+        if let Some(obj) = val.as_object_mut() {
+            obj.insert(
+                "concurrent_requests".to_string(),
+                serde_json::Value::from(state.concurrency.current(app_id)),
+            );
+        }
+        enriched.insert(app_id.clone(), val);
+    }
     json_response(
         StatusCode::OK,
-        &serde_json::to_string(&usage).unwrap_or_default(),
+        &serde_json::Value::Object(enriched).to_string(),
     )
 }
 
