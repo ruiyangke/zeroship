@@ -127,6 +127,16 @@ pub struct CounterRegistry {
     resources: Vec<ResourceMeta>,
 }
 
+impl appbase_core::plugin::PluginMeter for CounterRegistry {
+    fn increment(&self, resource_name: &str, delta: u64) {
+        if let Some(&idx) = self.name_to_index.get(resource_name) {
+            self.counters[idx].fetch_add(delta, Ordering::Release);
+        }
+        // Unknown resource names are silently ignored at runtime
+        // (should have been caught at registration time)
+    }
+}
+
 impl CounterRegistry {
     /// Fast path: O(1) atomic increment by handle. No locks.
     #[inline]

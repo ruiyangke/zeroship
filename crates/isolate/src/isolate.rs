@@ -1,6 +1,6 @@
 //! V8 isolate wrapper — creates a `JsRuntime` with plugins and handles RPC dispatch.
 
-use appbase_core::plugin::{Plugin, PluginContext};
+use appbase_core::plugin::{NoopMeter, Plugin, PluginContext};
 use appbase_core::types::RpcResult;
 use deno_core::*;
 use std::borrow::Cow;
@@ -119,6 +119,7 @@ pub fn create(
             op_state: &mut state,
             app_id,
             data_dir,
+            meter: Arc::new(NoopMeter),
         };
         for plugin in plugins {
             plugin.init(&mut ctx);

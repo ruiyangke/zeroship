@@ -10,12 +10,13 @@
 //!   kv.has(key)        → boolean
 //!   kv.list(prefix)    → string[] (matching keys)
 
-use appbase_core::plugin::{Plugin, PluginContext};
+use appbase_core::plugin::{Aggregation, MeterResource, Plugin, PluginContext, PluginMeter};
 use deno_core::op2;
 use deno_core::{OpDecl, OpState};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// In-memory key-value store plugin.
 ///
@@ -63,14 +64,36 @@ globalThis.kv = {
 
     fn init(&self, ctx: &mut PluginContext<'_>) {
         ctx.op_state.put(Rc::new(KvStore(RefCell::new(HashMap::new()))));
+        ctx.op_state.put(KvMeter(ctx.meter.clone()));
+    }
+
+    fn meter_resources(&self) -> Vec<MeterResource> {
+        vec![
+            MeterResource {
+                name: "kv.reads".into(),
+                unit: "ops".into(),
+                aggregation: Aggregation::Sum,
+                category: "database".into(),
+            },
+            MeterResource {
+                name: "kv.writes".into(),
+                unit: "ops".into(),
+                aggregation: Aggregation::Sum,
+                category: "database".into(),
+            },
+        ]
     }
 }
+
+/// Newtype wrapper around the meter to avoid OpState type collision.
+struct KvMeter(Arc<dyn PluginMeter>);
 
 /// Get a value by key. Returns None if key doesn't exist.
 #[op2]
 #[string]
 pub fn op_kv_get(state: &mut OpState, #[string] key: &str) -> Option<String> {
     let store = state.borrow::<Rc<KvStore>>().clone();
+    state.borrow::<KvMeter>().0.increment("kv.reads", 1);
     store.0.borrow().get(key).cloned()
 }
 
@@ -78,6 +101,7 @@ pub fn op_kv_get(state: &mut OpState, #[string] key: &str) -> Option<String> {
 #[op2(fast)]
 pub fn op_kv_set(state: &mut OpState, #[string] key: &str, #[string] value: &str) {
     let store = state.borrow::<Rc<KvStore>>().clone();
+    state.borrow::<KvMeter>().0.increment("kv.writes", 1);
     store
         .0
         .borrow_mut()
@@ -88,6 +112,7 @@ pub fn op_kv_set(state: &mut OpState, #[string] key: &str, #[string] value: &str
 #[op2(fast)]
 pub fn op_kv_delete(state: &mut OpState, #[string] key: &str) -> bool {
     let store = state.borrow::<Rc<KvStore>>().clone();
+    state.borrow::<KvMeter>().0.increment("kv.writes", 1);
     store.0.borrow_mut().remove(key).is_some()
 }
 
@@ -96,6 +121,7 @@ pub fn op_kv_delete(state: &mut OpState, #[string] key: &str) -> bool {
 #[serde]
 pub fn op_kv_list(state: &mut OpState, #[string] prefix: &str) -> Vec<String> {
     let store = state.borrow::<Rc<KvStore>>().clone();
+    state.borrow::<KvMeter>().0.increment("kv.reads", 1);
     store
         .0
         .borrow()
@@ -109,5 +135,6 @@ pub fn op_kv_list(state: &mut OpState, #[string] prefix: &str) -> Vec<String> {
 #[op2(fast)]
 pub fn op_kv_has(state: &mut OpState, #[string] key: &str) -> bool {
     let store = state.borrow::<Rc<KvStore>>().clone();
+    state.borrow::<KvMeter>().0.increment("kv.reads", 1);
     store.0.borrow().contains_key(key)
 }

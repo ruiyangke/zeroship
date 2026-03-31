@@ -1,9 +1,10 @@
-use appbase_core::plugin::{Plugin, PluginContext};
+use appbase_core::plugin::{Aggregation, MeterResource, Plugin, PluginContext, PluginMeter};
 use deno_core::op2;
 use deno_core::{OpDecl, OpState};
 use rusqlite::Connection;
 use serde_json;
 use std::rc::Rc;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// SQLite-backed document database plugin.
@@ -77,8 +78,29 @@ globalThis.db = {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
             .unwrap();
         ctx.op_state.put(conn);
+        ctx.op_state.put(DbMeter(ctx.meter.clone()));
+    }
+
+    fn meter_resources(&self) -> Vec<MeterResource> {
+        vec![
+            MeterResource {
+                name: "db.reads".into(),
+                unit: "ops".into(),
+                aggregation: Aggregation::Sum,
+                category: "database".into(),
+            },
+            MeterResource {
+                name: "db.writes".into(),
+                unit: "ops".into(),
+                aggregation: Aggregation::Sum,
+                category: "database".into(),
+            },
+        ]
     }
 }
+
+/// Newtype wrapper around the meter to avoid OpState type collision.
+struct DbMeter(Arc<dyn PluginMeter>);
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 #[class(generic)]
@@ -107,6 +129,7 @@ fn validate_collection_name(name: &str) -> Result<(), DbError> {
 pub fn op_db_ensure_table(state: &mut OpState, #[string] name: &str) -> Result<(), DbError> {
     validate_collection_name(name)?;
     let db = state.borrow::<Rc<Connection>>().clone();
+    state.borrow::<DbMeter>().0.increment("db.writes", 1);
     db.execute(
         &format!(
             r#"CREATE TABLE IF NOT EXISTS "{name}" (
@@ -130,6 +153,7 @@ pub fn op_db_insert(
 ) -> Result<serde_json::Value, DbError> {
     validate_collection_name(collection)?;
     let db = state.borrow::<Rc<Connection>>().clone();
+    state.borrow::<DbMeter>().0.increment("db.writes", 1);
 
     let id = Uuid::new_v4().to_string();
     if let Some(obj) = doc.as_object_mut() {
@@ -154,6 +178,7 @@ pub fn op_db_find(
 ) -> Result<Vec<serde_json::Value>, DbError> {
     validate_collection_name(collection)?;
     let db = state.borrow::<Rc<Connection>>().clone();
+    state.borrow::<DbMeter>().0.increment("db.reads", 1);
 
     let mut stmt = db.prepare(&format!(r#"SELECT data FROM "{collection}""#))?;
     let rows: Vec<serde_json::Value> = stmt
@@ -190,6 +215,8 @@ pub fn op_db_update(
 ) -> Result<serde_json::Value, DbError> {
     validate_collection_name(collection)?;
     let db = state.borrow::<Rc<Connection>>().clone();
+    state.borrow::<DbMeter>().0.increment("db.reads", 1);
+    state.borrow::<DbMeter>().0.increment("db.writes", 1);
 
     let existing: String = db.query_row(
         &format!(r#"SELECT data FROM "{collection}" WHERE id = ?1"#),
@@ -223,6 +250,7 @@ pub fn op_db_delete(
 ) -> Result<(), DbError> {
     validate_collection_name(collection)?;
     let db = state.borrow::<Rc<Connection>>().clone();
+    state.borrow::<DbMeter>().0.increment("db.writes", 1);
     db.execute(
         &format!(r#"DELETE FROM "{collection}" WHERE id = ?1"#),
         rusqlite::params![id],

@@ -35,6 +35,41 @@
 
 use deno_core::{OpDecl, OpState};
 use std::path::Path;
+use std::sync::Arc;
+
+/// How values combine across events / billing periods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Aggregation {
+    Sum,
+    Max,
+    Latest,
+    Gauge,
+}
+
+/// Describes a metered resource declared by a plugin.
+#[derive(Debug, Clone)]
+pub struct MeterResource {
+    pub name: String,
+    pub unit: String,
+    pub aggregation: Aggregation,
+    pub category: String,
+}
+
+/// Trait for recording usage from plugins. Implemented by CounterRegistry in the metering crate.
+///
+/// Uses name-based lookup (HashMap, ~30ns overhead) which is fine for plugin ops
+/// that do I/O (DB queries, KV operations). The core runtime uses `ResourceHandle`
+/// directly for hot-path resources (requests, cpu_us).
+pub trait PluginMeter: Send + Sync {
+    fn increment(&self, resource_name: &str, delta: u64);
+}
+
+/// No-op meter for testing or when metering is disabled.
+pub struct NoopMeter;
+
+impl PluginMeter for NoopMeter {
+    fn increment(&self, _resource_name: &str, _delta: u64) {}
+}
 
 /// Context provided to plugins during isolate initialization.
 ///
@@ -48,6 +83,8 @@ pub struct PluginContext<'a> {
     pub app_id: &'a str,
     /// Base directory for this app's data (e.g., databases, files).
     pub data_dir: &'a Path,
+    /// Meter for recording plugin resource usage (db ops, kv ops, etc.).
+    pub meter: Arc<dyn PluginMeter>,
 }
 
 /// The core plugin interface.
@@ -79,6 +116,12 @@ pub trait Plugin: Send + Sync {
     /// Use `ctx.app_id` to scope data per app.
     /// Use `ctx.data_dir` for file-based storage paths.
     fn init(&self, ctx: &mut PluginContext<'_>);
+
+    /// Declare metered resources this plugin tracks.
+    /// Called once at startup during registry building.
+    fn meter_resources(&self) -> Vec<MeterResource> {
+        vec![]
+    }
 }
 
 /// Factory that creates plugin instances for a given app.

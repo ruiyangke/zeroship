@@ -4,9 +4,11 @@ use appbase_core::config::AppbaseConfig;
 use appbase_core::plugin::PluginFactory;
 use appbase_core::types::AppBundle;
 use appbase_isolate::pool::IsolatePool;
+use appbase_core::event_log::EventKind;
 use appbase_metering::concurrency::ConcurrencyGuard;
 use appbase_metering::enforcer::{self, QuotaDecision};
 use appbase_metering::error_codes;
+use appbase_metering::event_channel::EventSender;
 use appbase_metering::meter::{MeterRegistry, UsageDelta};
 use appbase_metering::plan::QuotaPlan;
 use appbase_metering::rate_limit::RateLimiter;
@@ -80,6 +82,8 @@ pub struct AppState {
     pub rate_limiter: Arc<RateLimiter>,
     /// Per-app concurrency gauges.
     pub concurrency: Arc<ConcurrencyRegistry>,
+    /// Event sender for cold-tier event logging.
+    pub event_sender: EventSender,
 }
 
 /// Build the axum router with all routes and middleware.
@@ -108,6 +112,7 @@ pub fn single_app_state(
     data_dir: PathBuf,
     plugin_factory: PluginFactory,
     plan: Option<QuotaPlan>,
+    event_sender: EventSender,
 ) -> AppState {
     let pool = IsolatePool::new(config.isolates.clone(), data_dir, plugin_factory);
 
@@ -132,6 +137,7 @@ pub fn single_app_state(
         meters,
         rate_limiter,
         concurrency: Arc::new(ConcurrencyRegistry::new()),
+        event_sender,
     }
 }
 
@@ -184,6 +190,7 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
 
     // 1. Rate limit check
     if !state.rate_limiter.check(&app_id) {
+        state.event_sender.log_enforcement(&app_id, EventKind::RateLimited, serde_json::json!({}));
         return rpc_error_response(
             StatusCode::TOO_MANY_REQUESTS,
             error_codes::RATE_LIMITED,
@@ -228,6 +235,9 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
     let quota_decision = enforcer::check_quota(&meter, &meter.plan);
     let quota_warnings = match &quota_decision {
         QuotaDecision::Deny(denial) => {
+            state.event_sender.log_enforcement(&app_id, EventKind::QuotaDenied, serde_json::json!({
+                "dimension": denial.dimension,
+            }));
             let reset = seconds_until_period_reset();
             return rpc_error_response(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -278,6 +288,13 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
                 egress_bytes: response_bytes,
                 ..UsageDelta::default()
             });
+
+            // Enqueue event for cold tier
+            state.event_sender.log_request(&app_id, serde_json::json!({
+                "cpu_ms": cpu_ms,
+                "wall_ms": wall_time.as_secs_f64() * 1000.0,
+                "egress_bytes": response_bytes,
+            }));
 
             // 7.5. Update spend accumulator and check spending limit
             // Cost is per 1000 requests; accumulate and batch-apply every 1000th request

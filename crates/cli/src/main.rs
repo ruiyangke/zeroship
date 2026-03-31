@@ -76,6 +76,12 @@ fn cmd_serve(args: &[String]) {
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     if let Err(e) = rt.block_on(async {
+        // Cold-tier event log + background writer
+        let event_log: std::sync::Arc<dyn appbase_core::event_log::EventLog> =
+            std::sync::Arc::new(appbase_metering::event_logger::InMemoryEventLog::new());
+        let (event_sender, event_writer_handle) =
+            appbase_metering::event_channel::spawn_event_writer(event_log);
+
         let state = router::single_app_state(
             server_js,
             client_html,
@@ -83,6 +89,7 @@ fn cmd_serve(args: &[String]) {
             data_dir,
             plugin_factory,
             default_plan,
+            event_sender,
         );
 
         // Warm-tier store for metering persistence
@@ -112,6 +119,7 @@ fn cmd_serve(args: &[String]) {
         // Abort background tasks on shutdown
         flusher_handle.abort();
         roller_handle.abort();
+        event_writer_handle.abort();
 
         result
     }) {
