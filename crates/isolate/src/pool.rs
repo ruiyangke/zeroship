@@ -23,15 +23,19 @@ use crate::actor::{self, ActorHandle, IsolateMessage};
 /// Per-app entry in the pool.
 struct PoolEntry {
     handle: ActorHandle,
+    thread_handle: Option<std::thread::JoinHandle<()>>,
     last_used: Instant,
 }
 
 impl PoolEntry {
-    /// Send a graceful shutdown message to the actor before dropping.
-    fn graceful_shutdown(&self) {
-        let tx = self.handle.tx.clone();
+    /// Send a graceful shutdown message and join the actor thread.
+    fn graceful_shutdown(&mut self) {
         // Best-effort: if the channel is full or closed, we just drop
-        let _ = tx.try_send(IsolateMessage::Shutdown);
+        let _ = self.handle.tx.try_send(IsolateMessage::Shutdown);
+        // Join the thread so it is not orphaned
+        if let Some(jh) = self.thread_handle.take() {
+            let _ = jh.join();
+        }
     }
 }
 
@@ -145,7 +149,7 @@ impl IsolatePool {
         let meter = (self.meter_factory)(app_id);
         let quota = (self.quota_factory)(app_id);
 
-        let handle = actor::spawn(
+        let result = actor::spawn(
             app_id,
             server_js,
             &app_data_dir,
@@ -157,10 +161,12 @@ impl IsolatePool {
 
         eprintln!("[pool] Started: {app_id}");
 
+        let handle = result.handle.clone();
         entries.insert(
             app_id.to_string(),
             PoolEntry {
-                handle: handle.clone(),
+                handle: result.handle,
+                thread_handle: Some(result.thread_handle),
                 last_used: Instant::now(),
             },
         );

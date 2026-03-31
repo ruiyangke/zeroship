@@ -41,27 +41,32 @@ pub fn op_tls_peer_certificate(_rid: u32, _detailed: bool) -> Vec<u8> {
 /// Async op: JS calls this to receive the next RPC request.
 /// Returns [requestId, bodyJson]. Yields to event loop when no requests are pending.
 /// Returns null when the channel is closed (shutdown).
+///
+/// Request IDs use `f64` (`#[number]`) to avoid truncation: `u64` values up to
+/// 2^53 are represented exactly, which is sufficient for ~285 years at 1M req/s.
 #[op2]
 #[serde]
 pub async fn op_rpc_recv(
     state: Rc<RefCell<OpState>>,
-) -> Result<Option<(u32, String)>, deno_error::JsErrorBox> {
+) -> Result<Option<(f64, String)>, deno_error::JsErrorBox> {
     let rx = {
         let s = state.borrow();
         s.borrow::<SharedRpcReceiver>().0.clone()
     };
     let mut guard = rx.lock().await;
     match guard.recv().await {
-        Some((id, body)) => Ok(Some((id as u32, body))),
+        Some((id, body)) => Ok(Some((id as f64, body))),
         None => Ok(None), // channel closed — shutdown
     }
 }
 
 /// Sync op: JS calls this to send a response for a specific request_id.
+///
+/// Uses `#[number]` (f64) to match `op_rpc_recv` — avoids `#[smi]` truncation at 2^31.
 #[op2(fast)]
-pub fn op_rpc_respond(state: &mut OpState, #[smi] request_id: u32, #[string] result: &str) {
+pub fn op_rpc_respond(state: &mut OpState, #[number] request_id: u64, #[string] result: &str) {
     let pending = state.borrow::<RpcPendingReplies>();
-    if let Some(tx) = pending.0.borrow_mut().remove(&(request_id as u64)) {
+    if let Some(tx) = pending.0.borrow_mut().remove(&request_id) {
         let _ = tx.send(Ok(RpcResult {
             json: result.to_string(),
             cpu_time: Duration::ZERO, // per-request CPU not available in concurrent mode

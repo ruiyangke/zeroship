@@ -16,11 +16,12 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cpu::CpuUsage;
 use crate::isolate::{self, RpcPendingReplies, SharedRpcReceiver};
+use deno_core::v8;
 
 /// Messages that can be sent to an isolate actor.
 pub enum IsolateMessage {
@@ -75,9 +76,15 @@ impl ActorHandle {
     }
 }
 
+/// Result of spawning an isolate actor: a cloneable handle plus the thread's JoinHandle.
+pub struct SpawnResult {
+    pub handle: ActorHandle,
+    pub thread_handle: std::thread::JoinHandle<()>,
+}
+
 /// Spawn an isolate actor on a new thread.
 ///
-/// Returns a handle for sending messages.
+/// Returns a handle for sending messages and the thread's JoinHandle.
 pub fn spawn(
     app_id: &str,
     server_js: &str,
@@ -86,7 +93,7 @@ pub fn spawn(
     cpu_limit: Option<Duration>,
     meter: Arc<dyn PluginMeter>,
     quota: Arc<dyn PluginQuota>,
-) -> Result<ActorHandle, String> {
+) -> Result<SpawnResult, String> {
     let (tx, rx) = mpsc::channel::<IsolateMessage>(64);
     let cpu_usage = Arc::new(Mutex::new(CpuUsage::default()));
     let cpu_usage_clone = cpu_usage.clone();
@@ -95,7 +102,7 @@ pub fn spawn(
     let server_js = server_js.to_string();
     let data_dir = data_dir.clone();
 
-    std::thread::Builder::new()
+    let thread_handle = std::thread::Builder::new()
         .name(format!("v8-{app_id}"))
         .spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -108,7 +115,10 @@ pub fn spawn(
         })
         .map_err(|e| format!("Failed to spawn V8 thread: {e}"))?;
 
-    Ok(ActorHandle { tx, cpu_usage })
+    Ok(SpawnResult {
+        handle: ActorHandle { tx, cpu_usage },
+        thread_handle,
+    })
 }
 
 /// The actor's main loop — runs on its own thread.
@@ -119,6 +129,36 @@ pub fn spawn(
 ///
 /// Requests are injected into JS via `rpc_tx` → `op_rpc_recv()`.
 /// Responses come back via `op_rpc_respond()` → oneshot senders in `pending_replies`.
+/// Default wall-time limit per isolate: 30 seconds of no completed work.
+const DEFAULT_WALL_LIMIT: Duration = Duration::from_secs(30);
+
+/// Watchdog thread: terminates V8 execution if no activity for `wall_limit`.
+///
+/// Runs on a separate OS thread (not tokio) so it can fire even when V8
+/// blocks the actor thread in a tight JS loop.
+fn watchdog_loop(
+    watchdog_rx: tokio::sync::watch::Receiver<Instant>,
+    v8_handle: v8::IsolateHandle,
+    wall_limit: Duration,
+    app_id: &str,
+) {
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let last_activity = *watchdog_rx.borrow();
+        if last_activity.elapsed() > wall_limit {
+            eprintln!(
+                "[isolate] [{app_id}] Wall-time limit exceeded ({wall_limit:?}), terminating V8"
+            );
+            v8_handle.terminate_execution();
+            break;
+        }
+        // If the sender is dropped (actor exited), stop the watchdog.
+        if watchdog_rx.has_changed().is_err() {
+            break;
+        }
+    }
+}
+
 async fn actor_loop(
     app_id: &str,
     server_js: &str,
@@ -141,8 +181,25 @@ async fn actor_loop(
         }
     };
 
-    // Create the RPC channel pair
+    // --- Wall-time watchdog (Issue 1) ---
+    // V8's IsolateHandle is Send and can terminate execution from another thread.
+    // If V8 is stuck in a tight JS loop (e.g. `while(true){}`), the poll_fn
+    // never gets polled, so we MUST use a separate OS thread for the watchdog.
+    let v8_handle = runtime.v8_isolate().thread_safe_handle();
+    let (watchdog_tx, watchdog_rx) = tokio::sync::watch::channel(Instant::now());
+    let wall_limit = DEFAULT_WALL_LIMIT;
+    let watchdog_app_id = app_id.to_string();
+    let _watchdog_thread = std::thread::Builder::new()
+        .name(format!("watchdog-{app_id}"))
+        .spawn(move || {
+            watchdog_loop(watchdog_rx, v8_handle, wall_limit, &watchdog_app_id);
+        });
+
+    // Create the RPC channel pair.
+    // Wrapped in Option so Shutdown can drop the sender, causing the JS dispatch
+    // loop to exit naturally (op_rpc_recv returns null when channel closes).
     let (rpc_tx, rpc_rx) = mpsc::channel::<(u64, String)>(4096);
+    let mut rpc_tx: Option<mpsc::Sender<(u64, String)>> = Some(rpc_tx);
     let pending_replies: Rc<RefCell<HashMap<u64, oneshot::Sender<Result<RpcResult, String>>>>> =
         Rc::new(RefCell::new(HashMap::new()));
     let mut next_id: u64 = 0;
@@ -165,31 +222,41 @@ async fn actor_loop(
 
     // Step 2: Start the concurrent dispatch loop (AFTER channels + user code are ready)
     // This fire-and-forget IIFE waits for requests via op_rpc_recv and dispatches them.
-    static DISPATCH_LOOP: &str = r#"(async () => {
-        while (true) {
-            const result = await Deno.core.ops.op_rpc_recv();
-            if (result === null) break;
-            const [requestId, requestJson] = result;
-            (async () => {
-                try {
-                    const request = JSON.parse(requestJson);
-                    let response;
-                    if (Array.isArray(request)) {
-                        response = JSON.stringify(await Promise.all(request.map(__dispatch)));
-                    } else {
-                        response = JSON.stringify(await __dispatch(request));
+    // Capture internal ops into closure-scoped variables, then delete them from
+    // the ops object so user JS cannot call op_rpc_recv() or op_rpc_respond()
+    // directly (Issue 8: internal ops exposed to user JS).
+    static DISPATCH_LOOP: &str = r#"{
+        const __recv = Deno.core.ops.op_rpc_recv;
+        const __respond = Deno.core.ops.op_rpc_respond;
+        delete Deno.core.ops.op_rpc_recv;
+        delete Deno.core.ops.op_rpc_respond;
+
+        (async () => {
+            while (true) {
+                const result = await __recv();
+                if (result === null) break;
+                const [requestId, requestJson] = result;
+                (async () => {
+                    try {
+                        const request = JSON.parse(requestJson);
+                        let response;
+                        if (Array.isArray(request)) {
+                            response = JSON.stringify(await Promise.all(request.map(__dispatch)));
+                        } else {
+                            response = JSON.stringify(await __dispatch(request));
+                        }
+                        __respond(requestId, response);
+                    } catch (e) {
+                        __respond(requestId, JSON.stringify({
+                            jsonrpc: '2.0',
+                            error: { code: -32000, message: e.message || String(e) },
+                            id: null,
+                        }));
                     }
-                    Deno.core.ops.op_rpc_respond(requestId, response);
-                } catch (e) {
-                    Deno.core.ops.op_rpc_respond(requestId, JSON.stringify({
-                        jsonrpc: '2.0',
-                        error: { code: -32000, message: e.message || String(e) },
-                        id: null,
-                    }));
-                }
-            })();
-        }
-    })()"#;
+                })();
+            }
+        })()
+    }"#;
 
     if let Err(e) = runtime.execute_script("<dispatch>", DISPATCH_LOOP) {
         eprintln!("[isolate] [{app_id}] Dispatch loop error: {e}");
@@ -198,6 +265,9 @@ async fn actor_loop(
 
     eprintln!("[isolate] [{app_id}] Ready (concurrent mode)");
 
+    // Track the number of pending replies at each poll so we can detect completions.
+    let mut prev_pending_count: usize = 0;
+
     // Concurrent event loop — poll_fn drives both message intake and V8 event loop.
     std::future::poll_fn(|cx| {
         // Phase 1: Drain incoming messages (non-blocking)
@@ -205,22 +275,32 @@ async fn actor_loop(
             match rx.poll_recv(cx) {
                 Poll::Ready(Some(msg)) => match msg {
                     IsolateMessage::Rpc { body, reply } => {
-                        let id = next_id;
-                        next_id += 1;
-                        pending_replies.borrow_mut().insert(id, reply);
-                        // Inject request into JS event loop via the channel
-                        if rpc_tx.try_send((id, body)).is_err() {
-                            // Channel full — backpressure: reject immediately
-                            if let Some(tx) = pending_replies.borrow_mut().remove(&id) {
-                                let _ = tx.send(Err(
-                                    "Request queue full".to_string(),
-                                ));
+                        if let Some(ref tx) = rpc_tx {
+                            let id = next_id;
+                            next_id += 1;
+                            pending_replies.borrow_mut().insert(id, reply);
+                            // Inject request into JS event loop via the channel
+                            if tx.try_send((id, body)).is_err() {
+                                // Channel full — backpressure: reject immediately
+                                if let Some(sender) = pending_replies.borrow_mut().remove(&id) {
+                                    let _ = sender.send(Err(
+                                        "Request queue full".to_string(),
+                                    ));
+                                }
                             }
+                            // Ping watchdog: new request injected = activity
+                            let _ = watchdog_tx.send(Instant::now());
+                        } else {
+                            // Shutting down — reject immediately
+                            let _ = reply.send(Err("Isolate shutting down".to_string()));
                         }
                     }
                     IsolateMessage::Shutdown => {
                         eprintln!("[isolate] [{app_id}] Shutting down");
-                        return Poll::Ready(());
+                        // Drop rpc_tx to close the channel; JS dispatch loop
+                        // will see null from op_rpc_recv and exit, allowing
+                        // the V8 event loop to drain in-flight requests.
+                        rpc_tx.take();
                     }
                     IsolateMessage::Stats { reply } => {
                         let usage = cpu_usage.lock().unwrap();
@@ -244,16 +324,51 @@ async fn actor_loop(
         }
 
         // Phase 2: Drive the V8 event loop (one tick)
-        match runtime.poll_event_loop(cx, Default::default()) {
+        // Measure thread CPU time around the poll to track actual CPU usage (Issue 3).
+        let cpu_before = crate::cpu::thread_cpu_time();
+        let poll_result = runtime.poll_event_loop(cx, Default::default());
+        let cpu_after = crate::cpu::thread_cpu_time();
+        let cpu_delta = cpu_after.saturating_sub(cpu_before);
+
+        // Record CPU usage if any was consumed
+        if !cpu_delta.is_zero() {
+            if let Ok(mut usage) = cpu_usage.lock() {
+                usage.total += cpu_delta;
+            }
+        }
+
+        // Detect completed responses: if pending_replies shrank, requests were completed
+        let current_pending = pending_replies.borrow().len();
+        if current_pending < prev_pending_count {
+            let completed = prev_pending_count - current_pending;
+            if let Ok(mut usage) = cpu_usage.lock() {
+                usage.request_count += completed as u64;
+            }
+            // Ping watchdog: completed work = activity
+            let _ = watchdog_tx.send(Instant::now());
+        }
+        prev_pending_count = current_pending;
+
+        match poll_result {
             Poll::Ready(Ok(())) => {
-                // Event loop drained — but our dispatch loop (the infinite
-                // `while(true) { await op_rpc_recv() }`) should keep it alive.
-                // If it actually drained, it means the dispatch loop exited
-                // (channel closed). Re-wake to check for more messages.
+                // Event loop drained. This happens when the JS dispatch loop
+                // exits (rpc_tx was dropped, so op_rpc_recv returned null).
+                // If no pending replies remain, we can exit cleanly.
+                if pending_replies.borrow().is_empty() {
+                    return Poll::Ready(());
+                }
+                // Still have in-flight responses — keep polling to let them complete
                 cx.waker().wake_by_ref();
                 Poll::Pending
             }
             Poll::Ready(Err(e)) => {
+                // V8 terminated (possibly by watchdog). Drain pending replies with error.
+                let err_msg = format!("{e}");
+                if err_msg.contains("terminated") {
+                    for (_, tx) in pending_replies.borrow_mut().drain() {
+                        let _ = tx.send(Err("Wall-time limit exceeded".to_string()));
+                    }
+                }
                 eprintln!("[isolate] [{app_id}] Event loop error: {e}");
                 Poll::Ready(())
             }
@@ -261,4 +376,10 @@ async fn actor_loop(
         }
     })
     .await;
+
+    // Drain any remaining pending replies with errors so callers don't hang
+    for (_, tx) in pending_replies.borrow_mut().drain() {
+        let _ = tx.send(Err("Isolate shut down".to_string()));
+    }
+    eprintln!("[isolate] [{app_id}] Stopped");
 }
