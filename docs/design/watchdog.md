@@ -1,5 +1,8 @@
 # Watchdog & Execution Limits — Design Document
 
+> **Status:** Implemented (global watchdog). See [cpu-timer.md](cpu-timer.md) for the
+> planned upgrade to POSIX CPU timers with exact enforcement.
+
 ## Problem
 
 A single `while(true){}` in user JS permanently hangs an isolate thread. No CPU or wall-time limits are enforced. The current per-isolate watchdog thread doesn't scale (1000 apps = 1000 extra threads).

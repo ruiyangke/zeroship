@@ -1,8 +1,14 @@
 # Appbase Quota, Metering & Billing System — v3 Design
 
-> **Status:** Draft v3.2 | **Last Updated:** 2026-03-31 | **Author:** Platform Team
+> **Status:** Draft v3.3 | **Last Updated:** 2026-03-31 | **Author:** Platform Team
 >
 > **Revision History:**
+> - v3.3 (2026-03-31): CPU time enforcement design. Two-layer architecture: (1) POSIX CPU timer
+>   (CLOCK_THREAD_CPUTIME_ID + SIGRTMIN signal + shared pipe + 1 watchdog thread) for exact
+>   per-isolate CPU limits on Linux; (2) global polling watchdog as fallback for non-Linux.
+>   Signal handler is async-signal-safe (atomic flag + pipe write only); terminate_execution()
+>   called from watchdog thread in normal context. Per-request CPU attribution via V8 promise
+>   hooks (Before/After) complements the hard timer for billing. See docs/design/cpu-timer.md.
 > - v3.2 (2026-03-31): Point-of-use quota enforcement. Resource quotas (db.reads, kv.writes,
 >   etc.) are checked by the plugin at the point of use, not by a blanket pre-dispatch check.
 >   Router only checks throughput gates (rate limit, concurrency, spending). Adds PluginQuota
@@ -960,7 +966,42 @@ STORAGE LAYER:
   Billing Ledger (spend per app per period, in millicents)
 ```
 
-### 4.2 Metering Pipeline
+### 4.2 CPU Time Enforcement
+
+Two-layer architecture for enforcing CPU time limits on V8 isolates:
+
+**Layer 1: POSIX CPU Timer (Linux, exact)**
+
+Each V8 actor thread gets a `timer_create(CLOCK_THREAD_CPUTIME_ID)` timer that
+fires `SIGRTMIN+1` when the thread has consumed its CPU budget. The signal handler
+sets an atomic flag and writes to a shared pipe (both async-signal-safe). A single
+watchdog thread reads from the pipe and calls `v8::IsolateHandle::terminate_execution()`
+in normal thread context (safe — no signal handler deadlock).
+
+```
+timer fires → signal handler → atomic flag + pipe write → watchdog → terminate V8
+```
+
+Precision: **exact** (50ms limit = 50ms CPU, zero overshoot). Cost: 1 pipe + 1 thread
+total, not per-isolate. See `docs/design/cpu-timer.md` for full design.
+
+**Layer 2: Global Polling Watchdog (fallback, all platforms)**
+
+A single thread polls every 500ms, reading each active isolate's CPU time via
+`pthread_getcpuclockid` (cross-thread). Falls back to wall-time on non-Linux.
+Used on macOS/Windows and as a liveness detector (catches hung event loops).
+
+**Per-request CPU attribution** uses V8 promise hooks (`Before`/`After`) to
+measure CPU time per JS execution slice and attribute it to the originating
+request. This is for billing — the POSIX timer provides the hard safety limit.
+
+| Limit type | Mechanism | Granularity |
+|---|---|---|
+| Per-isolate CPU (hard kill) | POSIX timer + terminate | Exact, per-isolate |
+| Per-request CPU (billing) | V8 promise hooks | Approximate, per-request |
+| Liveness (hung detection) | Global watchdog polling | ±500ms, per-isolate |
+
+### 4.3 Metering Pipeline
 
 ```
 During V8 execution (plugin ops):
@@ -983,7 +1024,7 @@ Note: No pricing math on the request path. No blanket quota sweep. Each consumer
 checks its own quota at the point of use.
 ```
 
-### 4.3 Period Rollover — Double-Buffered Design
+### 4.4 Period Rollover — Double-Buffered Design
 
 The naive approach of locking per-app counters during rollover causes a brief 503 for
 all apps whose periods end at the same time (e.g., all calendar_month apps at midnight
@@ -1015,7 +1056,7 @@ For each affected app (lock-free):
 For `calendar_month`, rollover processes apps in batches of 100 with 10ms sleep to
 avoid warm-tier write spikes (especially important for SQLite's single-writer lock).
 
-### 4.4 Adapter-Specific Write Strategies
+### 4.5 Adapter-Specific Write Strategies
 
 The `UsageFlusher` snapshots per-app counters (skipping zero-delta entries, ~60-80%)
 and calls `MeterStore::flush()`. Adapters handle batching internally:
@@ -1030,7 +1071,7 @@ and calls `MeterStore::flush()`. Adapters handle batching internally:
 - **MmapMeterStore:** Direct memory-mapped writes (no syscall). `msync(MS_ASYNC)`.
 - **MemoryMeterStore:** `HashMap`/`RwLock`. No durability. Testing only.
 
-### 4.5 Counter Overflow
+### 4.6 Counter Overflow
 
 All atomic counters are `AtomicU64`. Overflow analysis:
 - At 1B requests/second: 584 years to overflow
@@ -1039,7 +1080,7 @@ All atomic counters are `AtomicU64`. Overflow analysis:
 Defensive handling: counters saturate at `u64::MAX - 1` (using `fetch_update` with
 checked addition). A `counter_overflow` alert fires if saturation is reached.
 
-### 4.6 Crash Recovery
+### 4.7 Crash Recovery
 
 On startup after an unclean shutdown:
 1. Load last-flushed counters from the MeterStore via `store.load(app_id)` (warm tier)
