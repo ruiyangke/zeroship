@@ -6,10 +6,11 @@ use appbase_core::types::AppBundle;
 use appbase_isolate::pool::IsolatePool;
 use appbase_core::event_log::EventKind;
 use appbase_metering::concurrency::ConcurrencyGuard;
+use appbase_billing::spend_action::SpendAction;
 use appbase_metering::enforcer::{self, QuotaDecision};
 use appbase_metering::error_codes;
 use appbase_metering::event_channel::EventSender;
-use appbase_metering::meter::{MeterRegistry, UsageDelta};
+use appbase_metering::meter::MeterRegistry;
 use appbase_metering::plan::QuotaPlan;
 use appbase_metering::rate_limit::RateLimiter;
 use std::sync::atomic::AtomicU32;
@@ -220,15 +221,21 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
 
     // 3. Spending limit check
     let meter = state.meters.get_or_create(&app_id);
-    if meter.spend_blocked.load(Ordering::Acquire) {
-        let reset = seconds_until_period_reset();
-        return rpc_error_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            error_codes::SPENDING_LIMIT,
-            "Spending limit reached",
-            r#""type":"spending_limit""#,
-            Some(reset),
-        );
+    let spend_action = SpendAction::load(&meter.spend_action);
+    match spend_action {
+        SpendAction::Block => {
+            let reset = seconds_until_period_reset();
+            return rpc_error_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                error_codes::SPENDING_LIMIT,
+                "Spending limit reached",
+                r#""type":"spending_limit""#,
+                Some(reset),
+            );
+        }
+        SpendAction::Warn | SpendAction::Degrade | SpendAction::Allow => {
+            // Warn/Degrade handled below in response headers
+        }
     }
 
     // 4. Quota check — single call, capture both deny and warnings
@@ -282,12 +289,11 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
             let response_bytes = rpc_result.json.len() as u64;
 
             // 7. Record usage
-            meter.record(&UsageDelta {
-                cpu_time: rpc_result.cpu_time,
-                wall_time,
-                egress_bytes: response_bytes,
-                ..UsageDelta::default()
-            });
+            meter.record_request(
+                rpc_result.cpu_time.as_micros() as u64,
+                wall_time.as_micros() as u64,
+                response_bytes,
+            );
 
             // Enqueue event for cold tier
             state.event_sender.log_request(&app_id, serde_json::json!({
@@ -295,27 +301,6 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
                 "wall_ms": wall_time.as_secs_f64() * 1000.0,
                 "egress_bytes": response_bytes,
             }));
-
-            // 7.5. Update spend accumulator and check spending limit
-            // Cost is per 1000 requests; accumulate and batch-apply every 1000th request
-            // to avoid fractional math. For simplicity, add cost_per_1k / 1000 per request
-            // (integer division — rounds down, small error acceptable for inline tracking;
-            // the SpendingReconciler corrects drift periodically).
-            let cost_per_1k = meter.plan.cost_tenths_per_1k_requests;
-            if cost_per_1k > 0 {
-                // Every request accumulates (cost_per_1k) tenths, and we divide by 1000
-                // at the comparison point. Simpler: accumulate raw, compare against limit * 10 * 1000.
-                meter.spend_accumulator_tenths.fetch_add(cost_per_1k, Ordering::Release);
-            }
-            if let Some(limit_cents) = meter.plan.spending_limit_cents {
-                let spent_raw = meter.spend_accumulator_tenths.load(Ordering::Acquire);
-                // spent_raw is in units of cost_tenths_per_1k; actual tenths = spent_raw / 1000
-                // Compare: spent_raw / 1000 >= limit_cents * 10
-                // Equivalent: spent_raw >= limit_cents * 10_000 (avoids division)
-                if spent_raw >= limit_cents * 10_000 {
-                    meter.spend_blocked.store(true, Ordering::Release);
-                }
-            }
 
             // 8. Build response with metering + IETF RateLimit headers
             let snapshot = meter.snapshot();
@@ -334,7 +319,8 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
             // IETF RateLimit headers (draft-ietf-httpapi-ratelimit-headers-10)
             if let Some(quota) = meter.plan.quotas.get("requests") {
                 if let Some(limit) = quota.max {
-                    let remaining = limit.saturating_sub(snapshot.requests);
+                    let used = snapshot.get("requests").copied().unwrap_or(0);
+                    let remaining = limit.saturating_sub(used);
                     add_header(
                         &mut headers,
                         "ratelimit",
@@ -346,6 +332,11 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
                         &format!("{limit};w={reset_secs}"),
                     );
                 }
+            }
+
+            // Spending warning header
+            if spend_action == SpendAction::Warn {
+                add_header(&mut headers, "x-spending-warning", "Approaching spending limit");
             }
 
             // Quota warning headers (spec §8.2) — use append, not insert, for multi-value
@@ -392,15 +383,16 @@ async fn handle_all_usage(State(state): State<AppState>) -> Response {
     let usage = state.meters.all_usage();
     // Enrich each app's snapshot with concurrent_requests
     let mut enriched = serde_json::Map::new();
-    for (app_id, snapshot) in &usage {
-        let mut val = serde_json::to_value(snapshot).unwrap_or_default();
-        if let Some(obj) = val.as_object_mut() {
-            obj.insert(
-                "concurrent_requests".to_string(),
-                serde_json::Value::from(state.concurrency.current(app_id)),
-            );
+    for (app_id, counters) in &usage {
+        let mut obj = serde_json::Map::new();
+        for (key, &val) in counters {
+            obj.insert(key.clone(), serde_json::Value::from(val));
         }
-        enriched.insert(app_id.clone(), val);
+        obj.insert(
+            "concurrent_requests".to_string(),
+            serde_json::Value::from(state.concurrency.current(app_id)),
+        );
+        enriched.insert(app_id.clone(), serde_json::Value::Object(obj));
     }
     json_response(
         StatusCode::OK,
@@ -414,16 +406,16 @@ async fn handle_app_usage(
     Path(app_id): Path<String>,
 ) -> Response {
     match state.meters.get_usage(&app_id) {
-        Some(usage) => {
-            // Serialize usage and add concurrency info
-            let mut val = serde_json::to_value(&usage).unwrap_or_default();
-            if let Some(obj) = val.as_object_mut() {
-                obj.insert(
-                    "concurrent_requests".to_string(),
-                    serde_json::Value::from(state.concurrency.current(&app_id)),
-                );
+        Some(counters) => {
+            let mut obj = serde_json::Map::new();
+            for (key, &val) in &counters {
+                obj.insert(key.clone(), serde_json::Value::from(val));
             }
-            json_response(StatusCode::OK, &val.to_string())
+            obj.insert(
+                "concurrent_requests".to_string(),
+                serde_json::Value::from(state.concurrency.current(&app_id)),
+            );
+            json_response(StatusCode::OK, &serde_json::Value::Object(obj).to_string())
         }
         None => json_response(
             StatusCode::NOT_FOUND,

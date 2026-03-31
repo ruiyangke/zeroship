@@ -127,12 +127,6 @@ pub struct QuotaPlan {
     pub entitlements: HashMap<String, serde_json::Value>,
     pub quotas: HashMap<String, QuotaDef>,
     pub rate_limits: HashMap<String, RateLimitDef>,
-    /// Per-app spending limit in cents. None = no limit.
-    pub spending_limit_cents: Option<u64>,
-    /// Cost per 1000 requests in tenths-of-a-cent.
-    /// Cloudflare Workers: $0.30/million = 0.3 tenths per 1000 requests.
-    /// Default: 3 tenths per 1000 requests (~$0.30/million, CF-comparable).
-    pub cost_tenths_per_1k_requests: u64,
 }
 
 impl QuotaPlan {
@@ -165,8 +159,6 @@ impl QuotaPlan {
             },
             quotas,
             rate_limits,
-            spending_limit_cents: Some(500), // $5.00 spending cap for free tier
-            cost_tenths_per_1k_requests: 3,     // ~$0.003/request
         }
     }
 
@@ -194,8 +186,6 @@ impl QuotaPlan {
             },
             quotas,
             rate_limits,
-            spending_limit_cents: None, // no spending limit for pro
-            cost_tenths_per_1k_requests: 3,
         }
     }
 
@@ -208,8 +198,6 @@ impl QuotaPlan {
             entitlements: HashMap::new(),
             quotas: HashMap::new(),
             rate_limits: HashMap::new(),
-            spending_limit_cents: None,
-            cost_tenths_per_1k_requests: 0, // dev: no spend tracking
         }
     }
 }

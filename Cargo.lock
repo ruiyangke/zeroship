@@ -125,6 +125,7 @@ dependencies = [
 name = "appbase-server"
 version = "0.1.0"
 dependencies = [
+ "appbase-billing",
  "appbase-core",
  "appbase-isolate",
  "appbase-metering",

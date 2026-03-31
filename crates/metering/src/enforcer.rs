@@ -143,7 +143,6 @@ pub fn check_entitlement(plan: &QuotaPlan, feature: &str) -> Result<(), Entitlem
 mod tests {
     use super::*;
     use crate::plan::{QuotaPlan, QuotaDef, Period};
-    use std::sync::atomic::Ordering;
 
     #[test]
     fn allow_under_limit() {
@@ -162,7 +161,7 @@ mod tests {
             policy: "warn_then_block".into(),
         });
         let meter = AppMeter::new(plan.clone());
-        meter.requests.store(85, Ordering::Relaxed);
+        meter.counters.increment(meter.core.requests, 85);
         let decision = check_quota(&meter, &plan);
         assert!(matches!(decision, QuotaDecision::Warn(_)));
     }
@@ -176,7 +175,7 @@ mod tests {
             policy: "warn_then_block".into(),
         });
         let meter = AppMeter::new(plan.clone());
-        meter.requests.store(101, Ordering::Relaxed);
+        meter.counters.increment(meter.core.requests, 101);
         let decision = check_quota(&meter, &plan);
         assert!(matches!(decision, QuotaDecision::Deny(_)));
     }
@@ -185,7 +184,7 @@ mod tests {
     fn unlimited_always_allows() {
         let plan = QuotaPlan::unlimited();
         let meter = AppMeter::new(plan.clone());
-        meter.requests.store(999_999_999, Ordering::Relaxed);
+        meter.counters.increment(meter.core.requests, 999_999_999);
         let decision = check_quota(&meter, &plan);
         assert!(matches!(decision, QuotaDecision::Allow));
     }

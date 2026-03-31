@@ -2,49 +2,41 @@
 //!
 //! All counters use `AtomicU64` for lock-free concurrent updates
 //! from multiple HTTP handler threads. The meter is shared via `Arc`.
+//!
+//! v3.0: Uses CounterRegistry for dynamic, plugin-extensible counters.
+//! Core resources are accessed via CoreHandles for O(1) fast-path.
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use crate::plan::QuotaPlan;
+use crate::registry::{CoreHandles, CounterRegistry, RegistryBuilder};
 
 /// Usage counters for a single app within a billing period.
 pub struct AppMeter {
     pub plan: QuotaPlan,
     pub period_start: SystemTime,
-    pub requests: AtomicU64,
-    pub cpu_time_us: AtomicU64,
-    pub wall_time_us: AtomicU64,
-    pub egress_bytes: AtomicU64,
-    pub db_reads: AtomicU64,
-    pub db_writes: AtomicU64,
-    pub kv_ops: AtomicU64,
-    /// Accumulated spend in tenths-of-a-cent.
-    pub spend_accumulator_tenths: AtomicU64,
-    /// Last flushed spend value (for computing deltas in flusher).
-    pub last_flushed_spend: AtomicU64,
-    /// True when spending limit has been reached.
-    pub spend_blocked: AtomicBool,
+    /// Dynamic counters — core + plugin resources.
+    pub counters: CounterRegistry,
+    /// Core resource handles for fast-path access from router.
+    pub core: CoreHandles,
+    /// Spending enforcement action, set by billing reconciler, read by enforcer.
+    /// 0=Allow, 1=Warn, 2=Degrade, 3=Block
+    pub spend_action: AtomicU8,
 }
 
 impl AppMeter {
     pub fn new(plan: QuotaPlan) -> Self {
+        let mut builder = RegistryBuilder::new();
+        let core = builder.register_core();
         Self {
             plan,
             period_start: SystemTime::now(),
-            requests: AtomicU64::new(0),
-            cpu_time_us: AtomicU64::new(0),
-            wall_time_us: AtomicU64::new(0),
-            egress_bytes: AtomicU64::new(0),
-            db_reads: AtomicU64::new(0),
-            db_writes: AtomicU64::new(0),
-            kv_ops: AtomicU64::new(0),
-            spend_accumulator_tenths: AtomicU64::new(0),
-            last_flushed_spend: AtomicU64::new(0),
-            spend_blocked: AtomicBool::new(false),
+            counters: builder.build(),
+            core,
+            spend_action: AtomicU8::new(0), // Allow
         }
     }
 
@@ -52,120 +44,51 @@ impl AppMeter {
     /// Populates atomic counters from a stored HashMap so enforcement resumes
     /// from where it left off, not from zero.
     pub fn from_stored(plan: QuotaPlan, stored: &HashMap<String, u64>) -> Self {
-        let spend_tenths = *stored.get("spend_tenths").unwrap_or(&0);
-        // Re-evaluate spend_blocked from recovered state (spec §4.6)
-        // spend_tenths is in raw accumulator units (cost_tenths_per_1k per request)
-        // actual spend in tenths-of-a-cent = spend_tenths / 1000
-        let blocked = match plan.spending_limit_cents {
-            Some(limit_cents) => spend_tenths >= limit_cents * 10_000,
-            None => false,
-        };
-        Self {
-            plan,
-            period_start: SystemTime::now(),
-            requests: AtomicU64::new(*stored.get("requests").unwrap_or(&0)),
-            cpu_time_us: AtomicU64::new(*stored.get("cpu_ms").unwrap_or(&0)),
-            wall_time_us: AtomicU64::new(*stored.get("wall_ms").unwrap_or(&0)),
-            egress_bytes: AtomicU64::new(*stored.get("egress_bytes").unwrap_or(&0)),
-            db_reads: AtomicU64::new(*stored.get("db_reads").unwrap_or(&0)),
-            db_writes: AtomicU64::new(*stored.get("db_writes").unwrap_or(&0)),
-            kv_ops: AtomicU64::new(*stored.get("kv_ops").unwrap_or(&0)),
-            spend_accumulator_tenths: AtomicU64::new(spend_tenths),
-            last_flushed_spend: AtomicU64::new(spend_tenths),
-            spend_blocked: AtomicBool::new(blocked),
+        let meter = Self::new(plan);
+        // Restore counters from stored values
+        for (name, &value) in stored {
+            if let Some(handle) = meter.counters.handle_for(name) {
+                meter.counters.increment(handle, value);
+            }
         }
+        meter
     }
 
-    /// Look up a counter by resource name (maps string keys to atomic fields).
+    /// Look up a counter by resource name (maps string keys to atomic counters).
     pub fn get_counter(&self, name: &str) -> u64 {
-        match name {
-            "requests" => self.requests.load(Ordering::Acquire),
-            "cpu_ms" => self.cpu_time_us.load(Ordering::Acquire) / 1000,
-            "wall_ms" => self.wall_time_us.load(Ordering::Acquire) / 1000,
-            "egress_bytes" => self.egress_bytes.load(Ordering::Acquire),
-            "db_reads" => self.db_reads.load(Ordering::Acquire),
-            "db_writes" => self.db_writes.load(Ordering::Acquire),
-            "kv_ops" => self.kv_ops.load(Ordering::Acquire),
-            _ => 0,
-        }
+        self.counters.get(name).unwrap_or(0)
     }
 
-    /// Record a completed request's usage.
+    /// Record a completed request's usage via core handles.
     /// Uses Release ordering so Acquire reads on other cores (enforcer, flusher)
     /// see the updated values. Required for ARM/AArch64 correctness.
-    pub fn record(&self, delta: &UsageDelta) {
-        self.requests.fetch_add(1, Ordering::Release);
-        self.cpu_time_us
-            .fetch_add(delta.cpu_time.as_micros() as u64, Ordering::Release);
-        self.wall_time_us
-            .fetch_add(delta.wall_time.as_micros() as u64, Ordering::Release);
-        self.egress_bytes
-            .fetch_add(delta.egress_bytes, Ordering::Release);
-        self.db_reads
-            .fetch_add(delta.db_reads, Ordering::Release);
-        self.db_writes
-            .fetch_add(delta.db_writes, Ordering::Release);
-        self.kv_ops.fetch_add(delta.kv_ops, Ordering::Release);
+    pub fn record_request(&self, cpu_us: u64, wall_us: u64, egress: u64) {
+        self.counters.increment(self.core.requests, 1);
+        self.counters.increment(self.core.cpu_us, cpu_us);
+        self.counters.increment(self.core.wall_us, wall_us);
+        self.counters.increment(self.core.egress_bytes, egress);
     }
 
-    /// Take a consistent snapshot of current usage.
-    /// Uses Acquire ordering to see all Release writes from record().
-    pub fn snapshot(&self) -> UsageSnapshot {
-        UsageSnapshot {
-            requests: self.requests.load(Ordering::Acquire),
-            cpu_time_ms: self.cpu_time_us.load(Ordering::Acquire) as f64 / 1000.0,
-            wall_time_ms: self.wall_time_us.load(Ordering::Acquire) as f64 / 1000.0,
-            egress_bytes: self.egress_bytes.load(Ordering::Acquire),
-            db_reads: self.db_reads.load(Ordering::Acquire),
-            db_writes: self.db_writes.load(Ordering::Acquire),
-            kv_ops: self.kv_ops.load(Ordering::Acquire),
-            period_age_secs: self
-                .period_start
-                .elapsed()
-                .unwrap_or_default()
-                .as_secs_f64(),
-        }
+    /// Take a consistent snapshot of current usage as name → value map.
+    /// Uses Acquire ordering to see all Release writes from record_request().
+    pub fn snapshot(&self) -> HashMap<String, u64> {
+        self.counters.snapshot()
+    }
+
+    /// Seconds since the billing period started.
+    pub fn period_age_secs(&self) -> f64 {
+        self.period_start
+            .elapsed()
+            .unwrap_or_default()
+            .as_secs_f64()
     }
 
     /// Reset all counters for a new billing period.
     /// Uses Release ordering so subsequent Acquire reads see zeros.
     pub fn reset_period(&self) {
-        self.requests.store(0, Ordering::Release);
-        self.cpu_time_us.store(0, Ordering::Release);
-        self.wall_time_us.store(0, Ordering::Release);
-        self.egress_bytes.store(0, Ordering::Release);
-        self.db_reads.store(0, Ordering::Release);
-        self.db_writes.store(0, Ordering::Release);
-        self.kv_ops.store(0, Ordering::Release);
-        self.spend_accumulator_tenths.store(0, Ordering::Release);
-        self.last_flushed_spend.store(0, Ordering::Release);
-        self.spend_blocked.store(false, Ordering::Release);
+        self.counters.reset_all();
+        self.spend_action.store(0, Ordering::Release);
     }
-}
-
-/// Incremental usage from a single request.
-#[derive(Debug, Default, Clone)]
-pub struct UsageDelta {
-    pub cpu_time: Duration,
-    pub wall_time: Duration,
-    pub egress_bytes: u64,
-    pub db_reads: u64,
-    pub db_writes: u64,
-    pub kv_ops: u64,
-}
-
-/// Point-in-time snapshot of an app's usage (serializable).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UsageSnapshot {
-    pub requests: u64,
-    pub cpu_time_ms: f64,
-    pub wall_time_ms: f64,
-    pub egress_bytes: u64,
-    pub db_reads: u64,
-    pub db_writes: u64,
-    pub kv_ops: u64,
-    /// Seconds since the billing period started.
-    pub period_age_secs: f64,
 }
 
 /// Registry of all app meters. Thread-safe, shared across handlers.
@@ -198,13 +121,13 @@ impl MeterRegistry {
     }
 
     /// Get usage snapshot for an app. Returns None if no meter exists.
-    pub fn get_usage(&self, app_id: &str) -> Option<UsageSnapshot> {
+    pub fn get_usage(&self, app_id: &str) -> Option<HashMap<String, u64>> {
         let meters = self.meters.lock().unwrap();
         meters.get(app_id).map(|m| m.snapshot())
     }
 
     /// Get usage snapshots for all apps.
-    pub fn all_usage(&self) -> HashMap<String, UsageSnapshot> {
+    pub fn all_usage(&self) -> HashMap<String, HashMap<String, u64>> {
         let meters = self.meters.lock().unwrap();
         meters
             .iter()

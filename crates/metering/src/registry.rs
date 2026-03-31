@@ -181,6 +181,11 @@ impl CounterRegistry {
         map
     }
 
+    /// Look up a handle by resource name (for restoring counters from stored values).
+    pub fn handle_for(&self, name: &str) -> Option<ResourceHandle> {
+        self.name_to_index.get(name).map(|&idx| ResourceHandle(idx))
+    }
+
     /// Number of registered resources.
     pub fn len(&self) -> usize {
         self.resources.len()

@@ -83,14 +83,16 @@ async fn rollover_all(registry: &MeterRegistry, store: &dyn MeterStore, config: 
 
         // Step 4-5: Read old meters and flush to store
         for (app_id, old_meter) in &old_meters {
-            let snapshot = old_meter.snapshot();
+            let snapshot = old_meter.counters.snapshot();
             if let Err(e) = store.rollover(app_id) {
                 eprintln!("[rollover] Failed to rollover {app_id} in store: {e}");
             }
 
+            let requests = snapshot.get("requests").copied().unwrap_or(0);
+            let cpu_us = snapshot.get("cpu_us").copied().unwrap_or(0);
+            let cpu_ms = cpu_us as f64 / 1000.0;
             eprintln!(
-                "[rollover] {app_id}: {} requests, {:.1}ms CPU archived",
-                snapshot.requests, snapshot.cpu_time_ms
+                "[rollover] {app_id}: {requests} requests, {cpu_ms:.1}ms CPU archived",
             );
         }
 
@@ -110,10 +112,8 @@ fn current_period_key() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::meter::UsageDelta;
     use crate::plan::QuotaPlan;
     use crate::store::memory::InMemoryStore;
-    use std::time::Duration as StdDuration;
 
     #[tokio::test]
     async fn rollover_swaps_meter_and_archives() {
@@ -122,12 +122,11 @@ mod tests {
 
         // Record some usage
         let meter = registry.get_or_create("app1");
-        meter.record(&UsageDelta {
-            cpu_time: StdDuration::from_millis(100),
-            wall_time: StdDuration::from_millis(200),
-            egress_bytes: 1024,
-            ..UsageDelta::default()
-        });
+        meter.record_request(
+            100_000, // 100ms in microseconds
+            200_000, // 200ms in microseconds
+            1024,
+        );
 
         // Perform rollover with 0s drain (test only)
         let config = RolloverConfig {
@@ -141,7 +140,7 @@ mod tests {
         // New meter should have zero counters
         let new_meter = registry.get_or_create("app1");
         let snap = new_meter.snapshot();
-        assert_eq!(snap.requests, 0);
+        assert_eq!(snap.get("requests").copied().unwrap_or(0), 0);
 
         // Store should have history
         let hist = store.history("app1", 10).unwrap();
@@ -171,24 +170,12 @@ mod tests {
 
         // Record usage on two apps
         let m1 = registry.get_or_create("app1");
-        m1.record(&UsageDelta {
-            cpu_time: StdDuration::from_millis(50),
-            wall_time: StdDuration::from_millis(100),
-            egress_bytes: 512,
-            db_reads: 10,
-            db_writes: 5,
-            kv_ops: 3,
-        });
+        m1.record_request(50_000, 100_000, 512);
+        // Also increment db counters via the plugin meter interface
+        // (db_reads, db_writes, kv_ops are no longer core — if needed, register them as plugins)
 
         let m2 = registry.get_or_create("app2");
-        m2.record(&UsageDelta {
-            cpu_time: StdDuration::from_millis(200),
-            wall_time: StdDuration::from_millis(400),
-            egress_bytes: 2048,
-            db_reads: 20,
-            db_writes: 10,
-            kv_ops: 6,
-        });
+        m2.record_request(200_000, 400_000, 2048);
 
         let config = RolloverConfig {
             drain_wait: Duration::from_millis(0),
@@ -201,8 +188,8 @@ mod tests {
         // Both apps should have fresh meters
         let s1 = registry.get_or_create("app1").snapshot();
         let s2 = registry.get_or_create("app2").snapshot();
-        assert_eq!(s1.requests, 0);
-        assert_eq!(s2.requests, 0);
+        assert_eq!(s1.get("requests").copied().unwrap_or(0), 0);
+        assert_eq!(s2.get("requests").copied().unwrap_or(0), 0);
 
         // Both should have history
         assert!(!store.history("app1", 10).unwrap().is_empty());
