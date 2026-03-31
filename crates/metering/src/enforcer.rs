@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn allow_under_limit() {
         let plan = QuotaPlan::free();
-        let meter = AppMeter::new(plan.clone());
+        let meter = AppMeter::with_resources(plan.clone(), &[]);
         let decision = check_quota(&meter, &plan);
         assert!(matches!(decision, QuotaDecision::Allow));
     }
@@ -160,7 +160,7 @@ mod tests {
             period: Period::Monthly,
             policy: "warn_then_block".into(),
         });
-        let meter = AppMeter::new(plan.clone());
+        let meter = AppMeter::with_resources(plan.clone(), &[]);
         meter.counters.increment(meter.core.requests, 85);
         let decision = check_quota(&meter, &plan);
         assert!(matches!(decision, QuotaDecision::Warn(_)));
@@ -174,7 +174,7 @@ mod tests {
             period: Period::Monthly,
             policy: "warn_then_block".into(),
         });
-        let meter = AppMeter::new(plan.clone());
+        let meter = AppMeter::with_resources(plan.clone(), &[]);
         meter.counters.increment(meter.core.requests, 101);
         let decision = check_quota(&meter, &plan);
         assert!(matches!(decision, QuotaDecision::Deny(_)));
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn unlimited_always_allows() {
         let plan = QuotaPlan::unlimited();
-        let meter = AppMeter::new(plan.clone());
+        let meter = AppMeter::with_resources(plan.clone(), &[]);
         meter.counters.increment(meter.core.requests, 999_999_999);
         let decision = check_quota(&meter, &plan);
         assert!(matches!(decision, QuotaDecision::Allow));

@@ -23,7 +23,6 @@ use crate::actor::{self, ActorHandle, IsolateMessage};
 /// Per-app entry in the pool.
 struct PoolEntry {
     handle: ActorHandle,
-    server_js: String,
     last_used: Instant,
 }
 
@@ -157,7 +156,6 @@ impl IsolatePool {
             app_id.to_string(),
             PoolEntry {
                 handle: handle.clone(),
-                server_js: server_js.to_string(),
                 last_used: Instant::now(),
             },
         );

@@ -7,31 +7,15 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use appbase_core::plugin::{Aggregation, MeterResource};
+
 /// Opaque handle to a counter slot. O(1) access, no lock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResourceHandle(pub(crate) usize);
 
-/// Metadata for a registered resource.
-#[derive(Debug, Clone)]
-pub struct ResourceMeta {
-    pub name: String,
-    pub unit: String,
-    pub aggregation: Aggregation,
-    pub category: String,
-}
-
-/// How values combine across events.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Aggregation {
-    Sum,
-    Max,
-    Latest,
-    Gauge,
-}
-
 /// Builder for CounterRegistry — mutable during registration, frozen for runtime.
 pub struct RegistryBuilder {
-    resources: Vec<ResourceMeta>,
+    resources: Vec<MeterResource>,
     name_to_index: HashMap<String, usize>,
 }
 
@@ -45,7 +29,7 @@ impl RegistryBuilder {
 
     /// Register a resource. Returns a handle for O(1) runtime access.
     /// Panics if name is already registered (name collision = fatal at startup).
-    pub fn register(&mut self, meta: ResourceMeta) -> ResourceHandle {
+    pub fn register(&mut self, meta: MeterResource) -> ResourceHandle {
         let name = meta.name.clone();
         assert!(
             !self.name_to_index.contains_key(&name),
@@ -61,31 +45,31 @@ impl RegistryBuilder {
     /// Returns handles in order.
     pub fn register_core(&mut self) -> CoreHandles {
         CoreHandles {
-            requests: self.register(ResourceMeta {
+            requests: self.register(MeterResource {
                 name: "requests".into(),
                 unit: "count".into(),
                 aggregation: Aggregation::Sum,
                 category: "compute".into(),
             }),
-            cpu_ms: self.register(ResourceMeta {
+            cpu_ms: self.register(MeterResource {
                 name: "cpu_ms".into(),
                 unit: "milliseconds".into(),
                 aggregation: Aggregation::Sum,
                 category: "compute".into(),
             }),
-            wall_ms: self.register(ResourceMeta {
+            wall_ms: self.register(MeterResource {
                 name: "wall_ms".into(),
                 unit: "milliseconds".into(),
                 aggregation: Aggregation::Sum,
                 category: "compute".into(),
             }),
-            egress_bytes: self.register(ResourceMeta {
+            egress_bytes: self.register(MeterResource {
                 name: "egress_bytes".into(),
                 unit: "bytes".into(),
                 aggregation: Aggregation::Sum,
                 category: "network".into(),
             }),
-            ingress_bytes: self.register(ResourceMeta {
+            ingress_bytes: self.register(MeterResource {
                 name: "ingress_bytes".into(),
                 unit: "bytes".into(),
                 aggregation: Aggregation::Sum,
@@ -127,7 +111,7 @@ pub struct CounterRegistry {
     /// Name → index mapping for slow-path lookups (enforcer, flusher).
     name_to_index: HashMap<String, usize>,
     /// Resource metadata (for display, flushing).
-    resources: Vec<ResourceMeta>,
+    resources: Vec<MeterResource>,
 }
 
 impl appbase_core::plugin::PluginMeter for CounterRegistry {
@@ -244,7 +228,7 @@ impl CounterRegistry {
     }
 
     /// Get resource metadata by name.
-    pub fn resource_meta(&self, name: &str) -> Option<&ResourceMeta> {
+    pub fn resource_meta(&self, name: &str) -> Option<&MeterResource> {
         self.name_to_index
             .get(name)
             .map(|&idx| &self.resources[idx])
@@ -273,7 +257,7 @@ mod tests {
     #[test]
     fn register_and_increment() {
         let mut builder = RegistryBuilder::new();
-        let h = builder.register(ResourceMeta {
+        let h = builder.register(MeterResource {
             name: "requests".into(),
             unit: "count".into(),
             aggregation: Aggregation::Sum,
@@ -299,13 +283,13 @@ mod tests {
     #[test]
     fn snapshot_skips_zeros() {
         let mut builder = RegistryBuilder::new();
-        let h1 = builder.register(ResourceMeta {
+        let h1 = builder.register(MeterResource {
             name: "a".into(),
             unit: "x".into(),
             aggregation: Aggregation::Sum,
             category: "c".into(),
         });
-        let _h2 = builder.register(ResourceMeta {
+        let _h2 = builder.register(MeterResource {
             name: "b".into(),
             unit: "x".into(),
             aggregation: Aggregation::Sum,
@@ -321,7 +305,7 @@ mod tests {
     #[test]
     fn swap_all_resets() {
         let mut builder = RegistryBuilder::new();
-        let h = builder.register(ResourceMeta {
+        let h = builder.register(MeterResource {
             name: "x".into(),
             unit: "y".into(),
             aggregation: Aggregation::Sum,
@@ -338,7 +322,7 @@ mod tests {
     #[should_panic(expected = "name collision")]
     fn duplicate_name_panics() {
         let mut builder = RegistryBuilder::new();
-        let meta = ResourceMeta {
+        let meta = MeterResource {
             name: "dup".into(),
             unit: "x".into(),
             aggregation: Aggregation::Sum,

@@ -13,7 +13,7 @@ use std::time::SystemTime;
 
 use appbase_core::plugin::MeterResource;
 use crate::plan::QuotaPlan;
-use crate::registry::{Aggregation, CoreHandles, CounterRegistry, ResourceMeta, RegistryBuilder};
+use crate::registry::{CoreHandles, CounterRegistry, RegistryBuilder};
 
 /// Usage counters for a single app within a billing period.
 pub struct AppMeter {
@@ -31,33 +31,14 @@ pub struct AppMeter {
     pub rolling_over: AtomicBool,
 }
 
-/// Convert core's Aggregation enum to the registry's Aggregation enum.
-fn convert_aggregation(agg: appbase_core::plugin::Aggregation) -> Aggregation {
-    match agg {
-        appbase_core::plugin::Aggregation::Sum => Aggregation::Sum,
-        appbase_core::plugin::Aggregation::Max => Aggregation::Max,
-        appbase_core::plugin::Aggregation::Latest => Aggregation::Latest,
-        appbase_core::plugin::Aggregation::Gauge => Aggregation::Gauge,
-    }
-}
-
 impl AppMeter {
-    pub fn new(plan: QuotaPlan) -> Self {
-        Self::with_resources(plan, &[])
-    }
-
     /// Create a meter with core resources plus additional plugin-declared resources.
     pub fn with_resources(plan: QuotaPlan, plugin_resources: &[MeterResource]) -> Self {
         let mut builder = RegistryBuilder::new();
         let core = builder.register_core();
         // Register plugin-declared resources (db.reads, kv.writes, etc.)
         for res in plugin_resources {
-            builder.register(ResourceMeta {
-                name: res.name.clone(),
-                unit: res.unit.clone(),
-                aggregation: convert_aggregation(res.aggregation),
-                category: res.category.clone(),
-            });
+            builder.register(res.clone());
         }
         Self {
             plan,
