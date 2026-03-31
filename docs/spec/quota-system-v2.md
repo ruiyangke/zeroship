@@ -1,8 +1,16 @@
-# Appbase Quota, Metering & Billing System — v2 Design
+# Appbase Quota, Metering & Billing System — v3 Design
 
-> **Status:** Draft v2.4 | **Last Updated:** 2026-03-30 | **Author:** Platform Team
+> **Status:** Draft v3.0 | **Last Updated:** 2026-03-31 | **Author:** Platform Team
 >
 > **Revision History:**
+> - v3.0 (2026-03-31): Three architectural changes. (1) Separate billing from quota/metering:
+>   remove inline spend tracking from hot path, billing becomes async background pipeline
+>   via SpendingReconciler; enforcer reads a single `spend_action` AtomicU8. New
+>   `crates/billing/` crate. (2) Plugin-declared dynamic meters: plugins register
+>   MeterResource descriptors at startup; AppMeter uses a dynamic CounterRegistry instead
+>   of hardcoded db/kv counters. (3) Multi-dimensional PricingTable in billing crate:
+>   replaces flat cost_tenths_per_1k_requests; canonical monetary unit is millicents.
+>   Plans define limits, not prices. Pricing lives in `[pricing.*]` config only.
 > - v2.4 (2026-03-30): Abstract warm-tier storage behind `MeterStore` trait (Section 2.5).
 >   Add pluggable adapters: sqlite (default), memory, redis, postgres, mmap — each behind
 >   a Cargo feature flag. Add `[metering] store` config. Update architecture to trait-based
@@ -67,9 +75,13 @@ operational observability.
 enforcement at sub-microsecond latency, (2) periodic batched flushes to a pluggable
 warm-tier store (MeterStore trait; SQLite by default) for durability, and (3) an
 append-only event log for audit/billing. Plans bundle entitlements, quotas, rate
-limits, and policies. Spending limits prevent bill shock with inline per-request tracking.
-The platform meters everything automatically; no SDK is needed for app developers. External
-billing systems (Stripe, Lago) consume the usage data via Admin API and webhooks.
+limits, and policies. Quota/metering (sync, hot path) is cleanly separated from billing
+(async, background): the enforcer reads atomic counters and a `spend_action` AtomicU8 flag;
+the SpendingReconciler computes cost from metering snapshots + a PricingTable every 10s
+and sets/clears that flag. Resources are declared dynamically by plugins at startup via
+`meter_resources()`. The platform meters everything automatically; no SDK is needed for
+app developers. External billing systems (Stripe, Lago) consume the usage data via Admin
+API and webhooks.
 
 ### 1.1 Design Goals
 
@@ -117,21 +129,22 @@ billing systems (Stripe, Lago) consume the usage data via Admin API and webhooks
                          |             |
                     references    references
                          |             |
-                    +----v-----+       |
-                    | RESOURCE |<------+
-                    | (what is |
-                    | consumed)|
-                    +----+-----+
-                         |
-                    measured by
-                         |
-                    +----v-----+
-                    | METERING |  Always on, independent
-                    | (events  |  of plans
+   +----------+     +----v-----+       |
+   |  PLUGIN  |---->| RESOURCE |<------+     +----------------+
+   | declares |     | (what is |             | BILLING        |
+   | resources|     | consumed)|             | (async, bg)    |
+   +----------+     +----+-----+             | PricingTable   |
+                         |                   | SpendReconciler|
+                    measured by              | sets spend_    |
+                         |                   | blocked flag   |
+                    +----v-----+             +-------+--------+
+                    | METERING |  Sync hot path       |
+                    | (events  |  reads flag <--------+
                     | +counters|
                     +----------+
 
    When a quota or rate limit is crossed -> POLICY defines what happens
+   Billing reads metering snapshots; enforcer never does pricing math
 ```
 
 ### 2.2 Seven Distinct Concerns
@@ -205,7 +218,7 @@ negligible on x86 (strong ordering by default) and a few nanoseconds on ARM.
 Note: `latest` uses `store(value, Release)` with a timestamp-guarded CAS for
 newest-wins semantics. `count_unique` uses a HyperLogLog sketch, not an atomic counter.
 
-**Built-in resources:**
+**Core resources** (always present, measured by the runtime):
 
 | Resource | Unit | Category | Aggregation | Measurement Method |
 |---|---|---|---|---|
@@ -217,12 +230,13 @@ newest-wins semantics. `count_unique` uses a HyperLogLog sketch, not an atomic c
 | `egress_bytes` | bytes | network | sum | `Content-Length` or chunked body byte count |
 | `ingress_bytes` | bytes | network | sum | Request body byte count |
 | `subrequests` | count | network | sum | `op_fetch` call counter |
-| `db_reads` | count | database | sum | `op_db_find`/`op_db_get` counter |
-| `db_writes` | count | database | sum | `op_db_insert`/`op_db_update`/`op_db_delete` counter |
-| `db_storage_bytes` | bytes | storage | latest | `stat()` on SQLite file (sampled every 60s) + write-time estimate |
-| `kv_reads` | count | database | sum | `op_kv_get`/`op_kv_list` counter |
-| `kv_writes` | count | database | sum | `op_kv_set`/`op_kv_delete` counter |
-| `kv_storage_bytes` | bytes | storage | latest | `stat()` on KV file (sampled every 60s) + write-time estimate |
+
+**Plugin resources** (registered dynamically by plugins at startup — see 2.4.1):
+
+Database, KV, AI, and other domain-specific resources are declared by their respective
+plugins via `meter_resources()`. For example, the database plugin declares `db.reads`,
+`db.writes`, `db.storage_bytes`; the KV plugin declares `kv.reads`, `kv.writes`,
+`kv.storage_bytes`. These are not hardcoded in the runtime.
 
 **Storage quota enforcement gap mitigation:** Storage is sampled via `stat()` every 60s.
 To close the gap: (1) each write op atomically adds estimated bytes to a
@@ -232,7 +246,7 @@ overhead); deletes don't decrement (corrected by next sample). (4) When estimate
 crosses 90% of quota, an immediate `stat()` is triggered. This gives per-write
 enforcement granularity with the 60s sample as the source of truth.
 
-**Custom resources** are declared in config and tracked via the same pipeline:
+**Custom resources** can also be declared in config (for resources not owned by any plugin):
 
 ```toml
 [resources.ai_tokens]
@@ -241,6 +255,72 @@ description = "AI API tokens consumed"
 aggregation = "sum"
 category = "custom"
 ```
+
+#### 2.4.1 Plugin Resource Registration
+
+Plugins declare metered resources via the `meter_resources()` trait method:
+
+```rust
+pub trait Plugin: Send + Sync {
+    fn name(&self) -> &str;
+    fn ops(&self) -> Vec<OpDecl>;
+    fn js_bridge(&self) -> &str;
+    fn init(&self, ctx: PluginContext);
+
+    /// Declare metered resources this plugin tracks.
+    fn meter_resources(&self) -> Vec<MeterResource> {
+        vec![] // default: no custom meters
+    }
+}
+
+pub struct MeterResource {
+    pub name: String,             // "db.reads", "kv.writes", "ai.tokens"
+    pub unit: &'static str,       // "ops", "bytes", "ms", "tokens"
+    pub aggregation: Aggregation, // sum, max, latest
+    pub category: &'static str,   // "database", "storage", "ai", "custom"
+}
+```
+
+<!-- Added in round 4: addressing C1 (RwLock perf), M8 (unified paths), M9 (struct definition) -->
+**CounterRegistry** uses a two-phase design (inspired by Cloudflare Workers' pre-allocated
+slots): at startup, all resources are registered by name into a frozen dense array; at
+runtime, counter access is O(1) via `ResourceHandle` index with no locks or hash lookups.
+
+```rust
+pub struct CounterRegistry {
+    /// Frozen name-to-index map (built at startup, immutable at runtime).
+    index: HashMap<String, ResourceHandle>,
+    /// Dense array of atomic counters. Index = ResourceHandle.0.
+    counters: Box<[AtomicU64]>,
+}
+
+#[derive(Clone, Copy)]
+pub struct ResourceHandle(usize);
+
+impl CounterRegistry {
+    /// Called during startup registration phase only. Returns a handle for O(1) access.
+    pub fn register(&mut self, name: &str) -> ResourceHandle;
+    /// Fast path: O(1) atomic increment by handle. No locks.
+    pub fn increment(&self, handle: ResourceHandle, delta: u64);
+    /// Slow path: name-based lookup (enforcer, flusher, billing). O(1) HashMap lookup.
+    pub fn get(&self, name: &str) -> Option<u64>;
+    /// Snapshot all counters as name->value map.
+    pub fn snapshot(&self) -> HashMap<String, u64>;
+}
+```
+
+**Registration protocol:**
+1. At startup, core resources register first (requests, cpu_ms, wall_ms, memory_bytes,
+   storage_bytes -- handles 0..4), then `plugin.meter_resources()` runs (handles 5+).
+   Each returns a `ResourceHandle`. Name collisions are fatal (fail-fast).
+2. After all plugins load, the registry is **frozen** (no further registration).
+3. Config references resource names as strings -- core and plugin resources are
+   interchangeable in `[plans.*.quotas]` and `[pricing.*]` sections.
+4. Plugins record usage via `PluginContext`, which holds pre-resolved `ResourceHandle`s:
+   ```rust
+   ctx.meter.increment("db.reads", 1);           // Internally uses ResourceHandle
+   ctx.meter.increment("db.storage_bytes", row_size);
+   ```
 
 ### 2.5 MeterStore Trait (Warm-Tier Storage Abstraction)
 
@@ -465,7 +545,7 @@ A plan is a named, versioned bundle:
 | `entitlements` | Map\<String, Value\> | Feature gates (bool or numeric) |
 | `quotas` | Map\<String, Quota\> | Resource caps with windows and policies |
 | `rate_limits` | Map\<String, RateLimit\> | Throughput caps with burst |
-| `overage` | Option\<OverageConfig\> | Per-resource overage pricing |
+| `overage` | Option\<OverageConfig\> | Whether overage is allowed (not pricing — pricing is in `[pricing.*]`) |
 
 **Plan versioning:** Plans have a `version` field. When a plan definition changes,
 the version must be incremented. Existing apps stay on their assigned version until
@@ -553,12 +633,13 @@ overage_enabled = false         # Global default; per-plan override
 
 [spending]
 enabled = true
-check_interval_secs = 10       # Background reconciliation interval
-inline_tracking = true         # Per-request spend estimation (see Section 6)
+check_interval_secs = 10       # Background reconciliation interval (SpendingReconciler)
 default_alert_thresholds = [50, 75, 90, 100]
 alert_channels = ["webhook"]
 
-# ---- Pricing (flat per-unit; tiered pricing uses [[pricing.X.tiers]] array) ----
+# ---- Pricing (consumed by billing module only; never on hot path) ----
+# Flat per-unit; tiered pricing uses [[pricing.X.tiers]] array.
+# Canonical internal unit: millicents (1/1000 cent). Config uses human-readable rates.
 [pricing.requests]
 per_million = 0.30
 [pricing.cpu_ms]
@@ -582,7 +663,8 @@ per_million = 3.00
 # Tiered: [[pricing.requests.tiers]] with { up_to, per_million }. Final tier omits up_to.
 
 # ---- Resources ----
-# Built-in resources are auto-registered. Only custom resources need declaration.
+# Core resources are auto-registered. Plugin resources are registered by plugins
+# at startup via meter_resources(). Only additional custom resources need declaration.
 
 [resources.ai_tokens]
 unit = "count"
@@ -660,10 +742,7 @@ concurrent          = { resource = "concurrent_requests", max = 50,   period = "
 [plans.pro.rate_limits]
 requests = { max_per_second = 1000, burst = 5000, policy = "soft_block" }
 [plans.pro.overage]
-enabled = true
-requests = { per_million = 0.30 }
-cpu_ms = { per_million = 0.02 }
-egress = { per_gb = 0.09 }
+enabled = true    # Overage allowed; rates come from [pricing.*] section, not the plan
 
 [plans.enterprise]
 description = "Enterprise tier -- custom limits, SLA"
@@ -760,14 +839,14 @@ changes reinitialize token buckets. Atomic counters are **never** reset by confi
 | # | Rule | Error If Violated |
 |---|---|---|
 | V1 | Every policy in a quota must reference a defined `[policies.*]` | Unknown policy "{name}" |
-| V2 | Every `resource` field in a quota must match a built-in or custom resource | Unknown resource "{name}" |
+| V2 | Every `resource` field in a quota must match a core, plugin, or custom resource | Unknown resource "{name}" |
 | V3 | Quota `max` must be a positive integer | Invalid max value |
 | V4 | Rate limit `burst` must be >= `max_per_second` | Burst must be >= sustained rate |
 | V5 | Plan `version` must be a positive integer | Invalid plan version |
 | V6 | `spending.limit` must be >= 0 | Negative spending limit |
 | V7 | Alert thresholds must be in [1, 100], sorted ascending, no duplicates | Invalid thresholds |
 | V8 | Entitlement keys must match `^[a-z][a-z0-9_]*$` | Invalid entitlement key |
-| V9 | Resource names must match `^[a-z][a-z0-9_]*$` | Invalid resource name |
+| V9 | Resource names must match `^[a-z][a-z0-9_.]*$` (dots allowed for plugin namespacing) | Invalid resource name |
 | V10 | Policy thresholds must be in (0, 100], sorted ascending | Invalid policy threshold |
 | V11 | Apps must reference existing plans | Unknown plan "{name}" |
 | V12 | Override quotas must reference resources that exist in the plan or globally | Unknown resource in override |
@@ -789,31 +868,42 @@ rejected. Pre-flight validation: `POST /v1/_admin/config/validate` with raw TOML
 ### 4.1 System Overview
 
 ```
-REQUEST PATH (top to bottom):
+QUOTA/METERING PIPELINE (sync, hot path — no pricing math):
   HTTP Request
-    -> Rate Limiter (single-AtomicU64 CAS, 2.8) -> 429
-    -> Concurrency Guard (CAS loop, 18.5)        -> 429
-    -> Entitlement Checker                        -> 403
-    -> Quota Enforcer + inline spend check        -> 429 / warn headers
-    -> V8 Isolate Execution (CPU/wall watchdog)   -> 503 on limit
-    -> Meter Recorder (atomic counters + inline spend + event log enqueue)
+    -> Rate Limiter (single-AtomicU64 CAS, 2.8)              -> 429
+    -> Concurrency Guard (CAS loop, 18.5)                     -> 429
+    -> Entitlement Checker                                     -> 403
+    -> Quota Enforcer + spend_action check (1 AtomicU8 load)      -> 429 / warn / degrade
+    -> V8 Isolate Execution (CPU/wall watchdog)                -> 503 on limit
+    -> Meter Recorder (atomic counters + event log enqueue)
     -> Response Header Injector (X-Quota-*, RateLimit/RateLimit-Policy, X-CPU-*)
     -> Concurrency Guard Drop (decrement gauge)
   HTTP Response
 
-BACKGROUND SERVICES:
+BILLING PIPELINE (async, background — crates/billing/):
+  SpendingReconciler (every 10s):
+    read metering snapshots -> apply PricingTable -> compute cost
+    -> compare against spending limits -> set spend_action AtomicU8 (0=allow/1=warn/2=degrade/3=block)
+    -> fire budget alerts, spending.blocked webhooks
+  InvoiceGenerator (at period end):
+    read final metering snapshot -> apply PricingTable -> produce line items
+    -> apply wallet credits -> emit billing.invoice_ready webhook
+
+BACKGROUND SERVICES (shared):
   Usage Flusher (5s), Event Logger, PeriodRoller (double-buffered, drain-and-wait),
-  Storage Sampler (60s), SpendingReconciler (10s), Alert Dispatcher,
-  Dedup Janitor (hourly), TrialManager (60s), MemoryWatchdog (5s)
+  Storage Sampler (60s), Alert Dispatcher, Dedup Janitor (hourly),
+  TrialManager (60s), MemoryWatchdog (5s)
 
   Ordering: PeriodRoller and TrialManager share a Mutex to prevent overlap.
   PeriodRoller acquires the lock first (priority); TrialManager waits.
 
 STORAGE LAYER:
-  Atomic Counters (per-app per-resource), Token Buckets (packed AtomicU64),
-  Concurrency Gauges (AtomicU32 CAS), Spend Accumulators (AtomicU64),
+  Atomic Counters (per-app, core + plugin via CounterRegistry),
+  Token Buckets (packed AtomicU64), Concurrency Gauges (AtomicU32 CAS),
+  spend_action flags (per-app AtomicU8, set by billing, read by enforcer),
   Dedup LRU (1M, 24h TTL), MeterStore (warm tier: sqlite|redis|postgres|mmap|memory),
-  Event Log (append-only, externally anchored), Plan Registry, Webhook Queue + dead letter
+  Event Log (append-only, externally anchored), Plan Registry, Webhook Queue + dead letter,
+  Billing Ledger (spend per app per period, in millicents)
 ```
 
 ### 4.2 Metering Pipeline
@@ -822,11 +912,11 @@ STORAGE LAYER:
 Request completes -> Build UsageDelta { request_id, app_id, timestamp, deltas[] }
   For each (resource, value):
     1. Dedup check: idempotency_key = "{app_id}_{req_id}_{resource}"
-    2. counter[app][resource].fetch_add(value, Release)      ~10ns
-    3. spend_accumulator[app].fetch_add(delta_tenths, Release)
-       // delta_tenths is in tenths-of-a-cent (see Section 6.2)
+    2. counter[app][resource].fetch_add(value, Release)      ~3ns
+       (all resources use CounterRegistry: O(1) index via ResourceHandle, no lock)
   Enqueue UsageDelta to event_log_channel (bounded mpsc, 30K; drop on full)
   Background: EventLogger batch-writes to file; UsageFlusher batch-upserts via MeterStore
+  Note: No pricing math on this path. Spend is computed by SpendingReconciler (Section 6).
 ```
 
 ### 4.3 Period Rollover — Double-Buffered Design
@@ -1009,45 +1099,69 @@ Corrections require admin privilege and are audit-logged.
 
 ## 6. Spending Limits & Budget Alerts
 
-### 6.1 Motivation
+### 6.1 Separation of Concerns
 
-Vercel's lack of spending limits was a well-documented problem, leading to unexpected
-bills of thousands of dollars. Their eventual spend management system (2024) still
-requires manual per-project unpausing after the limit is hit. Appbase addresses cost
-predictability from day one.
+Billing is cleanly separated from quota/metering. No pricing math occurs on the request
+hot path.
 
-### 6.2 Inline Spend Tracking
+| Aspect | Quota/Metering (sync, hot path) | Billing (async, background) |
+|---|---|---|
+| **Crate** | `crates/quota/` | `crates/billing/` |
+| **Latency budget** | < 3 us total | 10s reconciliation tick |
+| **Data** | Atomic counters, token buckets | PricingTable, spend ledger |
+| **Concepts** | Resources, limits, policies | Cost, prices, invoices, wallets |
+| **Monetary awareness** | None — reads `spend_action` flag only | Full — computes cost in millicents |
+| **spend_action flag** | READ (single `AtomicU8::load(Acquire)`, <1ns) | SET by SpendingReconciler |
+| **Plugin interaction** | Records usage via `CounterRegistry` (O(1) ResourceHandle) | Reads metering snapshots via `MeteringSnapshot` trait |
 
-**Problem:** Checking spending only every 60 seconds creates a blind spot where up to
-60K requests (at 1K req/s) can accumulate unbilled. For high-throughput apps, this means
-significant overshoot before the spending monitor catches up.
+<!-- Added in round 4: addressing C2 (spend_blocked can't encode degrade) -->
+The `spend_action` flag is a per-app `AtomicU8` on the `AppMeter`: 0=allow, 1=warn
+(add `X-Spending-Warning` header), 2=degrade (free-tier limits), 3=block (429 error).
+The enforcer loads it (<1ns) and branches on value. The SpendingReconciler writes it
+every 10s based on computed spend vs. spending limit and configured action (Section 6.4).
 
-**Solution:** Each request atomically updates a per-app spend accumulator. Pre-request,
-the Quota Enforcer checks `spend_blocked[app].load(Acquire)`. When the accumulator
-exceeds the limit, the app is blocked and a `spending.blocked` webhook fires.
+<!-- Added in round 4: addressing C4 (billing<->quota interface undefined) -->
+#### 6.1.1 Billing to Quota Interface
 
-**Accumulator unit: tenths of a cent.** The inline accumulator (`AtomicU64`) tracks spend
-in tenths of a cent (0.1 cent = $0.001) to avoid floating-point arithmetic on the hot
-path while maintaining sub-cent precision. The per-request delta is computed as:
+The billing crate depends on the quota crate only through two traits (inspired by Lago's
+separation of ingestion from billing):
 
 ```rust
-// delta_tenths: spend in tenths-of-a-cent for this request
-let delta_tenths: u64 = compute_request_cost_tenths(resource_deltas, pricing);
-spend_accumulator[app].fetch_add(delta_tenths, Release);
+/// Billing reads metering data through this. Implemented by AppMeterMap.
+pub trait MeteringSnapshot: Send + Sync {
+    fn snapshot(&self, app_id: &str) -> Option<HashMap<String, u64>>;
+    fn active_apps(&self) -> Vec<String>;
+}
+/// Billing signals enforcement through this. Sets spend_action AtomicU8.
+pub trait SpendEnforcement: Send + Sync {
+    fn set_spend_action(&self, app_id: &str, action: SpendAction);
+    fn get_spend_action(&self, app_id: &str) -> SpendAction;
+}
+
+#[repr(u8)]
+pub enum SpendAction { Allow = 0, Warn = 1, Degrade = 2, Block = 3 }
 ```
 
-**Conversion to cents for wallet/invoice:** When the SpendingReconciler compares the
-accumulator against the spending limit (configured in dollars) or when displaying spend
-to users:
-- `spend_cents = accumulator_tenths / 10` (integer division, truncates — safe direction)
-- `spend_dollars = accumulator_tenths as f64 / 1000.0` (display only, never for comparison)
-- Spending limit comparison: `accumulator_tenths >= limit_dollars * 1000`
+Billing receives `Arc<dyn MeteringSnapshot>` + `Arc<dyn SpendEnforcement>` via DI. Quota never imports billing types.
 
-The inline estimate always under-counts (safe direction). Max drift per 10s window:
-~$6 at 1K req/s, corrected at next reconciliation.
+### 6.2 Spending Enforcement via Background Reconciliation
 
-The background SpendingReconciler (every 10s) recomputes exact spend from counter
-snapshots and corrects drift.
+Spending limits are enforced by the **SpendingReconciler** (every 10s), which:
+1. Reads metering counter snapshots for each app via `MeteringSnapshot` trait (Section 6.1.1)
+2. Applies the `PricingTable` (Section 12.2) to compute current-period cost in millicents
+3. Compares cost against the app's spending limit
+4. Sets `spend_action` on the AppMeter via `SpendEnforcement` trait:
+   - At 100% of limit: set to configured action value (block=3, degrade=2, warn=1)
+   - Fires `spending.blocked` webhook
+5. Resets `spend_action = 0` (allow) when spend drops below limit (e.g., after credit
+   top-up or period rollover)
+
+**Maximum overshoot window:** At 10s reconciliation interval and 1K req/s, up to 10K
+requests may land between checks. At typical pricing ($0.30/M requests), this is ~$0.003
+overshoot — negligible. For apps with very low spending limits (<$1), reduce
+`check_interval_secs` to 1s via per-app config.
+
+The enforcer does NOT compute cost. It performs `spend_action.load(Acquire)` (~1ns) and branches (0=allow, 1=warn, 2=degrade, 3=block).
 
 ### 6.3 Configuration
 
@@ -1056,7 +1170,6 @@ snapshots and corrects drift.
 [spending]
 enabled = true
 check_interval_secs = 10           # Background reconciliation interval
-inline_tracking = true             # Per-request spend estimation
 default_alert_thresholds = [50, 75, 90, 100]
 
 # Per-app override
@@ -1083,7 +1196,7 @@ webhook_url = "https://..."       # Per-app webhook for spend alerts
 SpendingReconciler tick (every 10s)
    |
    +-- For each app with spending limit:
-   |     reconcile spend_accumulator with calculated spend
+   |     compute spend from metering snapshots + PricingTable
    |     for each threshold [50, 75, 90, 100]:
    |       if spend >= threshold% of limit:
    |         if not already_alerted[app][threshold]:
@@ -1110,23 +1223,25 @@ SpendingReconciler tick (every 10s)
 
 Inspired by Lago's wallet system:
 
-- **Wallet** — A container holding a credit balance in cents
+- **Wallet** — A container holding a credit balance in millicents internally
 - **Credit** — A monetary unit applied against usage charges before invoicing
 - **Top-up** — Adding funds to a wallet (manual or automatic)
 - **Expiry** — Optional: credits expire after a configurable date
 
 ### 7.2 Wallet Structure
 
+Wallet balances use millicents internally (see Section 12.1). API responses convert to cents.
+
 ```json
 {
   "app_id": "my_todo",
-  "balance_cents": 10000,
+  "balance_millicents": 10000000,
   "currency": "usd",
-  "auto_topup": { "enabled": true, "threshold_cents": 1000, "amount_cents": 10000 },
+  "auto_topup": { "enabled": true, "threshold_millicents": 1000000, "amount_millicents": 10000000 },
   "expires_at": null,
   "transactions": [
-    { "type": "topup", "amount_cents": 10000, "timestamp": "...", "note": "Initial deposit" },
-    { "type": "deduction", "amount_cents": -2500, "period": "2026-02", "note": "Feb usage" }
+    { "type": "topup", "amount_millicents": 10000000, "timestamp": "...", "note": "Initial deposit" },
+    { "type": "deduction", "amount_millicents": -2500000, "period": "2026-02", "note": "Feb usage" }
   ]
 }
 ```
@@ -1144,8 +1259,8 @@ Expired credits are skipped during application and logged as `credit.expired`.
 
 ```
 GET    /v1/_admin/apps/{id}/wallet                -- Balance and config
-POST   /v1/_admin/apps/{id}/wallet/topup          -- Add credits { amount_cents, note }
-POST   /v1/_admin/apps/{id}/wallet/deduct         -- Deduct credits { amount_cents, note }
+POST   /v1/_admin/apps/{id}/wallet/topup          -- Add credits { amount_millicents, note }
+POST   /v1/_admin/apps/{id}/wallet/deduct         -- Deduct credits { amount_millicents, note }
 GET    /v1/_admin/apps/{id}/wallet/transactions   -- Transaction history (cursor-paginated)
 ```
 
@@ -1315,8 +1430,8 @@ Event filtering: `?resource=X&from=ISO8601&to=ISO8601&method=X&source=request|cr
 | Method | Path | Required Scope | Description |
 |---|---|---|---|
 | GET | `/v1/_admin/apps/{id}/wallet` | `read:wallets` | Wallet balance and config |
-| POST | `/v1/_admin/apps/{id}/wallet/topup` | `write:wallets` | Add credits `{ amount_cents, note }` |
-| POST | `/v1/_admin/apps/{id}/wallet/deduct` | `write:wallets` | Deduct credits `{ amount_cents, note }` |
+| POST | `/v1/_admin/apps/{id}/wallet/topup` | `write:wallets` | Add credits `{ amount_millicents, note }` |
+| POST | `/v1/_admin/apps/{id}/wallet/deduct` | `write:wallets` | Deduct credits `{ amount_millicents, note }` |
 | GET | `/v1/_admin/apps/{id}/wallet/transactions` | `read:wallets` | Transaction history (cursor-paginated) |
 
 ### 9.6 Operations
@@ -1425,7 +1540,7 @@ appbase_resource_usage_total          # Per-app per-resource usage counters
 appbase_enforcement_total             # Per-app enforcement decisions (allow/warn/block)
 appbase_rate_limited_total            # Rate limit rejections per app
 appbase_spend_estimate_cents          # Current spend estimate per app
-appbase_spend_blocked                 # Whether app is spend-blocked (0/1)
+appbase_spend_action                  # Current spend action per app (0=allow,1=warn,2=degrade,3=block)
 appbase_meter_flush_duration_seconds  # Flush latency histogram (p50, p99)
 appbase_event_log_drops_total         # Events dropped due to backpressure
 appbase_quota_check_duration_seconds  # Enforcement check latency (p50, p99)
@@ -1480,7 +1595,7 @@ All enforcement decisions produce structured log entries:
 | `quota_exceeded` | App at 100% of any quota | Error | Webhook |
 | `rate_limit_spike` | Rate limiting > 100/5min for an app | Warning | Webhook + log |
 | `spend_threshold` | Spend reaches configured threshold | Warning | Webhook |
-| `spend_blocked` | App blocked due to spending limit | Error | Webhook |
+| `spend_action_changed` | Spend action changed (block/degrade/warn) | Error | Webhook |
 | `flush_failure` | Counter flush to MeterStore failed | Critical | Log + webhook |
 | `event_log_error` | Event log write failed | Critical | Log + webhook |
 | `event_log_drops` | Event log channel full, events dropped | Warning | Log + webhook |
@@ -1493,7 +1608,77 @@ All enforcement decisions produce structured log entries:
 
 ## 12. Billing Integration
 
-### 12.1 Supported Billing Models
+Billing logic lives in `crates/billing/`, separate from the quota/metering crate.
+It reads metering data (counter snapshots, event log) and produces cost computations,
+invoices, and spending limit enforcement via the `spend_action` flag.
+
+### 12.1 Unit System
+
+All monetary amounts within the billing module use **millicents** (1/1000 of a cent,
+i.e., $0.00001) as the canonical unit. This provides sufficient precision for
+sub-cent-per-request pricing without floating-point arithmetic.
+
+<!-- Added in round 4: addressing C3 (unified to millicents, matching Orb/Metronome) -->
+All monetary values are stored in millicents internally (billing, wallets, ledger). API
+responses convert to cents via integer division (truncation -- safe direction for platform).
+
+| Context | Unit | Example |
+|---|---|---|
+| Internal (billing, wallets, ledger) | millicents (`u64`) | 300 millicents = $0.003 |
+| Spending limit config | dollars (`f64` in TOML) | `limit = 50.00` |
+| API response (wallet, invoice) | cents (`i64`) | 2000 cents = $20.00 |
+| Display | dollars (`f64`, 2 dp) | `"$50.00"` |
+
+Conversions: `millicents / 100 = cents`, `millicents / 100_000 = dollars`. Truncation is
+safe direction for billing. Display uses `as f64 / 100_000.0`.
+
+### 12.2 PricingTable
+
+The `PricingTable` maps resource names to pricing rules. It is configured in the
+`[pricing.*]` TOML section (see Section 3.1) and used exclusively by the billing module.
+It is never accessed on the hot path.
+
+```rust
+/// Lives in crates/billing/, not in QuotaPlan.
+pub struct PricingTable {
+    pub rules: HashMap<String, PricingRule>,
+}
+
+pub enum PricingRule {
+    /// Flat rate: X millicents per Y units
+    Flat { rate_millicents: u64, per_units: u64 },
+    /// Tiered: different rates at different usage levels (graduated)
+    Tiered { tiers: Vec<PricingTier> },
+}
+
+pub struct PricingTier {
+    pub up_to: Option<u64>,       // None = unlimited (final tier)
+    pub rate_millicents: u64,
+    pub per_units: u64,
+}
+```
+
+The PricingTable is loaded from `[pricing.*]` config at startup and refreshed on hot
+reload. Plans define limits (quotas, rate limits); the PricingTable defines prices.
+This separation means pricing can change without touching plan definitions, and plan
+changes don't affect pricing.
+
+<!-- Added in round 4: addressing M6 (TOML pricing conversion unspecified) -->
+#### 12.2.1 TOML to PricingRule Conversion
+
+TOML values are in dollars; internal values are in millicents. GB = 10^9 bytes (SI, not
+GiB), consistent with AWS and Cloudflare pricing.
+
+| TOML key | PricingRule | Conversion |
+|---|---|---|
+| `per_million = X` | `Flat { rate_millicents: (X * 100_000) as u64, per_units: 1_000_000 }` | $X per 1M units |
+| `per_gb = X` | `Flat { rate_millicents: (X * 100_000) as u64, per_units: 1_000_000_000 }` | $X per GB |
+| `per_gb_month = X` | `Flat { rate_millicents: (X * 100_000) as u64, per_units: 1_000_000_000 }` | $X per GB-month (prorated by `days_in_period / days_in_month`) |
+| `[[pricing.*.tiers]]` | `Tiered { tiers }` | Each tier mapped via same formula |
+
+E.g., `per_million = 0.30` becomes `Flat { rate_millicents: 30_000, per_units: 1_000_000 }`.
+
+### 12.3 Supported Billing Models
 
 | Model | Base Fee | Usage Charges | Hard Caps | Example |
 |---|---|---|---|---|
@@ -1504,7 +1689,7 @@ All enforcement decisions produce structured log entries:
 
 See Section 20 for Phase 2+ billing models (packages, commitments, multi-currency).
 
-### 12.2 Invoice Preview
+### 12.4 Invoice Preview
 
 ```json
 {
@@ -1525,14 +1710,14 @@ See Section 20 for Phase 2+ billing models (packages, commitments, multi-currenc
 }
 ```
 
-### 12.3 Billing Period Configuration
+### 12.5 Billing Period Configuration
 
 | Type | When Counters Reset | Best For |
 |---|---|---|
 | `calendar_month` | 1st at 00:00 UTC | Simplicity, standard SaaS |
 | `anniversary` | Signup day each month | Per-customer billing dates |
 
-### 12.4 Plan Changes (Proration)
+### 12.6 Plan Changes (Proration)
 
 | Scenario | Effective Limits | Billing |
 |---|---|---|
@@ -1540,7 +1725,7 @@ See Section 20 for Phase 2+ billing models (packages, commitments, multi-currenc
 | Downgrade mid-period | Old limits until period end | New price starts next period, no refund |
 | Cancel | Drops to free-tier limits | No refund for current period |
 
-### 12.5 Overage
+### 12.7 Overage
 
 When `overage.enabled = true` on a plan:
 - Monthly quotas become **soft limits** (usage beyond max is allowed)
@@ -1548,7 +1733,7 @@ When `overage.enabled = true` on a plan:
 - Overage is billed at the configured per-unit rate
 - Spending limits still apply as a hard ceiling on total cost
 
-### 12.6 External Billing System Integration
+### 12.8 External Billing System Integration
 
 Appbase generates usage data; external systems handle payment.
 
@@ -1558,7 +1743,7 @@ creates Stripe invoice -> on success, optionally top up wallet.
 **Lago:** Forward usage events during period; Lago handles invoice + payment;
 Appbase handles enforcement.
 
-### 12.7 Graduated (Tiered) Pricing Calculation
+### 12.9 Graduated (Tiered) Pricing Calculation
 
 When tiered pricing is configured:
 
@@ -1728,15 +1913,22 @@ respond 2xx within 10s, track IDs for 48+ hours, verify HMAC signature.
 
 ### 15.3 Plugin Metering SDK
 
+Plugins record usage via `PluginContext::meter`, which dispatches to the `CounterRegistry`
+via pre-resolved `ResourceHandle`s (O(1) direct index, no lock or hash lookup):
+
 ```rust
-state.meter("ai_tokens", 150);                // Never fails, panics, or blocks
-state.meter("egress_bytes", size as u64);     // Thread-safe, any async context
-match state.quota_available("ai_tokens") {    // Atomic load (Acquire), no I/O
+// Inside a plugin op — uses pre-resolved ResourceHandle for O(1) access
+ctx.meter.increment("db.reads", 1);           // Never fails, panics, or blocks
+ctx.meter.increment("db.storage_bytes", sz);  // Thread-safe, any async context
+match ctx.meter.quota_available("db.reads") { // Atomic load (Acquire), no I/O
     QuotaAvailable::Yes(remaining) => { /* proceed */ },
     QuotaAvailable::No { used, limit } => { /* reject */ },
     QuotaAvailable::Unlimited => { /* no quota */ },
 }
 ```
+
+Resource names must match those declared by `meter_resources()` (Section 2.4.1).
+Attempting to increment an unregistered resource name logs a warning and is a no-op.
 
 ---
 
@@ -1748,8 +1940,8 @@ calculation (overage, credits), event correction (original_value matching, count
 RBAC (scopes, app filtering, key rotation).
 
 **Integration:** Full request flow with headers, double-buffered rollover (no 503),
-inline spend tracking, crash recovery, hot reload, MeterStore adapter batching (run
-integration suite against each compiled adapter).
+spend_action flag propagation, crash recovery, hot reload, MeterStore adapter batching
+(run integration suite against each compiled adapter), plugin resource registration.
 
 **Load:** Enforcement < 1us p99, 100 concurrent atomic correctness, 10K events/s no
 drops, 60K row flush < 100ms, token bucket CAS under 1K concurrent requests.
@@ -1765,7 +1957,7 @@ drops, 60K row flush < 100ms, token bucket CAS under 1K concurrent requests.
 | 1 | Core types + config parser (Option<u64> for unlimited) | — | S |
 | 2 | Atomic counters (correct orderings) + concurrency guard (CAS) | 1 | S |
 | 3 | Token bucket (packed AtomicU64 CAS) | 1 | M |
-| 4 | Quota enforcer + inline spend tracking | 1,2 | M |
+| 4 | Quota enforcer + spend_action flag check | 1,2 | M |
 | 5 | Tower middleware (full request path) + response headers | 2,3,4 | M |
 | 6 | Entitlement checker | 1,5 | S |
 | 7 | MeterStore trait + SqliteMeterStore (default) + batched flush + crash recovery | 2 | M |
@@ -1792,7 +1984,7 @@ Effort: S = 1-2 days, M = 3-5 days, L = 1-2 weeks.
 **Example:** 1000 apps, 15 resources, 10K req/s, 90-day retention:
 - Memory: ~100 MB (dominated by 1M-entry dedup set at ~80 bytes/entry)
 - Disk: ~50 GB/year event log (~10 GB compressed), ~500 MB warm-tier history (SQLite/mmap)
-- Per-app overhead: 120B counters + 16B token bucket + 8B spend accumulator
+- Per-app overhead: 120B core counters + plugin counters + 16B token bucket + 1B spend_action flag
 
 ### 18.2 Data Retention
 
@@ -1860,7 +2052,7 @@ On first startup with no existing warm-tier data:
 | LRU dedup with 24h TTL | May miss duplicates after eviction | 1M capacity handles 11K distinct events/second |
 | Acquire/Release atomic ordering | Slightly more expensive than Relaxed on ARM | Required for correctness on weakly-ordered CPUs; negligible cost on x86 |
 | Event log async enqueue | May drop events under backpressure | Counters are source of truth; event log is supplementary |
-| Inline spend tracking | ~10ns overhead per request | Eliminates 60-second blind spot; negligible vs V8 execution time |
+| Spend-blocked flag check | ~1ns overhead per request | Single atomic load; pricing computed asynchronously by SpendingReconciler (10s) |
 
 ### 18.8 Graceful Shutdown
 
@@ -1877,9 +2069,8 @@ The quota/metering system must impose minimal overhead on the request hot path:
 | Rate limit check | < 100 ns | Single AtomicU64 CAS on token bucket |
 | Concurrency check | < 50 ns | AtomicU32 CAS loop |
 | Quota enforcement (all resources) | < 1 us | Sequential atomic loads (Acquire) |
-| Inline spend check | < 20 ns | Single AtomicU64 load (Acquire) |
-| Meter recording (all resources) | < 500 ns | Sequential atomic fetch_add (Release) |
-| Inline spend update | < 20 ns | Single AtomicU64 fetch_add (Release) |
+| Spend-action check | < 1 ns | Single AtomicU8 load (Acquire) |
+| Meter recording (all resources) | < 500 ns | O(1) fetch_add via ResourceHandle (no lock, no hash) |
 | Event log enqueue | < 200 ns | mpsc channel send (non-blocking) |
 | Response header injection | < 500 ns | String formatting |
 | **Total overhead per request** | **< 3 us** | |
@@ -1951,7 +2142,7 @@ A `trial.expiring_soon` webhook fires 72 hours before expiry (checked once per h
 
 | Capability | Appbase v2 | CF Workers | AWS Lambda | Vercel |
 |---|---|---|---|---|
-| Spending limits | Inline, real-time | No | ~12-24h delay, alerts only | Manual per-project unpause |
+| Spending limits | Background (10s), flag-based | No | ~12-24h delay, alerts only | Manual per-project unpause |
 | Hard cap | Any plan | Free tier only | No | Manual resume |
 | Prepaid credits | Yes | No | Savings Plans | No |
 | Custom resources | Yes (plugin SDK) | No | No | No |
@@ -2154,7 +2345,12 @@ These webhook events are added when their corresponding features are implemented
 | **Graduated pricing** | Tiered pricing where each tier's rate applies only to usage within that tier's range |
 | **HyperLogLog** | Probabilistic data structure for approximate distinct counting |
 | **Idempotency key** | Unique identifier (`{app_id}_{request_id}_{resource}`) ensuring each event is counted exactly once |
-| **Inline spend tracking** | Per-request spend estimation via atomic accumulator, in tenths of a cent |
+| **CounterRegistry** | Two-phase dense array of AtomicU64 counters. Startup: register by name, get `ResourceHandle`. Runtime: O(1) index, no locks. HashMap lookup only for enforcer/flusher/billing |
+| **MeteringSnapshot** | Trait billing uses to read counter values; implemented by AppMeterMap |
+| **ResourceHandle** | Opaque `usize` index into CounterRegistry; O(1) atomic counter access |
+| **SpendAction** | Enum (Allow=0, Warn=1, Degrade=2, Block=3) as AtomicU8; set by SpendingReconciler, read by enforcer |
+| **SpendEnforcement** | Trait billing uses to set/get spend_action on AppMeter |
+| **Millicent** | Canonical monetary unit in the billing module; 1/1000 of a cent ($0.00001). All internal cost computations use millicents |
 | **LL/SC** | Load-Linked/Store-Conditional; ARM's mechanism for atomic CAS operations |
 | **MemoryMeterStore** | In-memory MeterStore adapter for testing; no durability, data lost on restart |
 | **MemoryWatchdog** | Background task (every 5s) that monitors RSS and triggers metering degradation at configurable memory pressure thresholds (80%/90%/95%) |
@@ -2163,6 +2359,7 @@ These webhook events are added when their corresponding features are implemented
 | **PeriodRoller** | Background task that performs double-buffered counter rollover at billing period boundaries (monthly/daily); uses drain-and-wait to safely read old buffer |
 | **Plan** | Named bundle of entitlements, quotas, rate limits, policies |
 | **Plan version** | Monotonically increasing integer; apps pin to a version until explicitly migrated |
+| **PricingTable** | Maps resource names to PricingRule (flat or tiered); lives in billing crate, loaded from `[pricing.*]` config; never accessed on hot path |
 | **Policy** | Threshold-action pairs defining enforcement behavior |
 | **Proration** | Partial-period billing adjustment when a plan changes mid-cycle |
 | **Quota** | Numeric cap on accumulated resource usage within a time window |
@@ -2173,7 +2370,7 @@ These webhook events are added when their corresponding features are implemented
 | **Scope** | RBAC permission unit (e.g., `read:usage`); follows `action:resource` pattern |
 | **Shadow mode** | Current plan enforced normally while a second plan is evaluated for comparison |
 | **Spending limit** | Per-app cap on total monetary cost per billing period |
-| **SpendingReconciler** | Background task (every 10s) that recomputes exact spend from counter snapshots, corrects inline accumulator drift, and caches converted spending limits for multi-currency apps |
+| **SpendingReconciler** | Background task (every 10s) in the billing crate that reads metering snapshots via `MeteringSnapshot` trait, computes cost via PricingTable, and sets the `spend_action` AtomicU8 flag on AppMeter via `SpendEnforcement` trait |
 | **Token bucket** | Rate limiting algorithm; packed into single AtomicU64 with CAS-based refill + consume |
 | **TrialManager** | Background task (every 60s) that checks trial expiry; shares rollover lock with PeriodRoller to prevent ordering races |
 | **ULID** | Universally Unique Lexicographically Sortable Identifier; used for event IDs |
