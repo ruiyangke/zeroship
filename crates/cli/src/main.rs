@@ -88,19 +88,25 @@ fn cmd_serve(args: &[String]) {
         // Spawn background metering services
         let store: Arc<dyn appbase_core::meter_store::MeterStore> =
             Arc::new(appbase_metering::store::memory::InMemoryStore::new());
-        let _flusher = appbase_metering::flusher::spawn_flusher(
+        let flusher_handle = appbase_metering::flusher::spawn_flusher(
             state.meters.clone(),
             store.clone(),
             Duration::from_secs(5),
         );
-        let _roller = appbase_metering::rollover::spawn_period_roller(
+        let roller_handle = appbase_metering::rollover::spawn_period_roller(
             state.meters.clone(),
             store,
             appbase_metering::rollover::RolloverConfig::default(),
         );
         eprintln!("[appbase] Background services started (flusher=5s, roller=60s)");
 
-        router::serve(state, &config.server.host, config.server.port).await
+        let result = router::serve(state, &config.server.host, config.server.port).await;
+
+        // Abort background tasks on shutdown
+        flusher_handle.abort();
+        roller_handle.abort();
+
+        result
     }) {
         eprintln!("[appbase] Error: {e}");
         std::process::exit(1);
