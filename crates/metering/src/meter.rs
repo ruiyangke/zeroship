@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
 use appbase_core::plugin::MeterResource;
@@ -115,50 +115,45 @@ impl AppMeter {
     }
 }
 
-/// Wrapper that implements `PluginMeter` by looking up an app's `CounterRegistry`
-/// from the `MeterRegistry` at runtime. This avoids lifetime issues with passing
-/// `&CounterRegistry` directly into isolates, and ensures plugin ops (db.reads,
-/// kv.writes, etc.) are recorded against the correct app's meter instead of being
-/// silently discarded by `NoopMeter`.
+/// Wrapper that implements `PluginMeter` by caching the `Arc<AppMeter>` for O(1) access.
+/// Created once per isolate, avoids registry lookup on every increment call.
 pub struct AppPluginMeter {
-    registry: Arc<MeterRegistry>,
-    app_id: String,
+    meter: Arc<AppMeter>,
 }
 
 impl AppPluginMeter {
     pub fn new(registry: Arc<MeterRegistry>, app_id: String) -> Self {
-        Self { registry, app_id }
+        let meter = registry.get_or_create(&app_id);
+        Self { meter }
     }
 }
 
 impl appbase_core::plugin::PluginMeter for AppPluginMeter {
     fn increment(&self, resource_name: &str, delta: u64) {
-        let meter = self.registry.get_or_create(&self.app_id);
-        if let Some(handle) = meter.counters.handle_for(resource_name) {
-            meter.counters.increment(handle, delta);
+        if let Some(handle) = self.meter.counters.handle_for(resource_name) {
+            self.meter.counters.increment(handle, delta);
         }
     }
 }
 
-/// Per-app quota checker that reads from the CounterRegistry and plan.
-/// Used for point-of-use quota enforcement in plugin ops.
+/// Per-app quota checker that caches the `Arc<AppMeter>` for fast point-of-use checks.
+/// Created once per isolate, avoids registry lookup on every check call.
 pub struct AppQuotaChecker {
-    registry: Arc<MeterRegistry>,
-    app_id: String,
+    meter: Arc<AppMeter>,
 }
 
 impl AppQuotaChecker {
     pub fn new(registry: Arc<MeterRegistry>, app_id: String) -> Self {
-        Self { registry, app_id }
+        let meter = registry.get_or_create(&app_id);
+        Self { meter }
     }
 }
 
 impl appbase_core::plugin::PluginQuota for AppQuotaChecker {
     fn check(&self, resource: &str) -> Result<(), appbase_core::plugin::QuotaDenied> {
-        let meter = self.registry.get_or_create(&self.app_id);
-        let used = meter.counters.get(resource).unwrap_or(0);
+        let used = self.meter.counters.get(resource).unwrap_or(0);
 
-        if let Some(quota) = meter.plan.quotas.get(resource) {
+        if let Some(quota) = self.meter.plan.quotas.get(resource) {
             if let Some(max) = quota.max {
                 if used >= max {
                     return Err(appbase_core::plugin::QuotaDenied {
@@ -170,13 +165,14 @@ impl appbase_core::plugin::PluginQuota for AppQuotaChecker {
                 }
             }
         }
-        Ok(()) // no quota defined, or under limit
+        Ok(())
     }
 }
 
 /// Registry of all app meters. Thread-safe, shared across handlers.
+/// Uses RwLock for the map (reads dominate after warmup) + Mutex for writes.
 pub struct MeterRegistry {
-    meters: Mutex<HashMap<String, Arc<AppMeter>>>,
+    meters: RwLock<HashMap<String, Arc<AppMeter>>>,
     default_plan: QuotaPlan,
     /// Plugin-declared meter resources, stored so new AppMeters include them.
     plugin_resources: Vec<MeterResource>,
@@ -185,15 +181,24 @@ pub struct MeterRegistry {
 impl MeterRegistry {
     pub fn new(default_plan: QuotaPlan, plugin_resources: Vec<MeterResource>) -> Self {
         Self {
-            meters: Mutex::new(HashMap::new()),
+            meters: RwLock::new(HashMap::new()),
             default_plan,
             plugin_resources,
         }
     }
 
     /// Get or create a meter for an app.
+    /// Fast path: RwLock read (concurrent). Slow path: write lock on miss.
     pub fn get_or_create(&self, app_id: &str) -> Arc<AppMeter> {
-        let mut meters = self.meters.lock().unwrap();
+        // Fast path: read lock (no contention with other readers)
+        {
+            let meters = self.meters.read().unwrap();
+            if let Some(meter) = meters.get(app_id) {
+                return meter.clone();
+            }
+        }
+        // Slow path: write lock (only on first access per app)
+        let mut meters = self.meters.write().unwrap();
         meters
             .entry(app_id.to_string())
             .or_insert_with(|| {
@@ -212,7 +217,7 @@ impl MeterRegistry {
     /// is ~microseconds (Mutex hold time), and the warm tier has the authoritative
     /// period totals. The alternative (pausing all writes) is too expensive.
     pub fn set_plan(&self, app_id: &str, plan: QuotaPlan) {
-        let mut meters = self.meters.lock().unwrap();
+        let mut meters = self.meters.write().unwrap();
         if let Some(old) = meters.get(app_id) {
             // Transfer counter values from old meter to new one
             let snapshot = old.counters.snapshot();
@@ -235,13 +240,13 @@ impl MeterRegistry {
 
     /// Get usage snapshot for an app. Returns None if no meter exists.
     pub fn get_usage(&self, app_id: &str) -> Option<HashMap<String, u64>> {
-        let meters = self.meters.lock().unwrap();
+        let meters = self.meters.read().unwrap();
         meters.get(app_id).map(|m| m.snapshot())
     }
 
     /// Get usage snapshots for all apps.
     pub fn all_usage(&self) -> HashMap<String, HashMap<String, u64>> {
-        let meters = self.meters.lock().unwrap();
+        let meters = self.meters.read().unwrap();
         meters
             .iter()
             .map(|(id, m)| (id.clone(), m.snapshot()))
@@ -250,7 +255,7 @@ impl MeterRegistry {
 
     /// Reset a specific app's usage counters.
     pub fn reset(&self, app_id: &str) {
-        let meters = self.meters.lock().unwrap();
+        let meters = self.meters.read().unwrap();
         if let Some(meter) = meters.get(app_id) {
             meter.reset_period();
         }
@@ -258,20 +263,20 @@ impl MeterRegistry {
 
     /// Remove an app's meter entirely.
     pub fn remove(&self, app_id: &str) {
-        let mut meters = self.meters.lock().unwrap();
+        let mut meters = self.meters.write().unwrap();
         meters.remove(app_id);
     }
 
     /// Get all meters (for flusher).
     pub fn all_meters(&self) -> HashMap<String, Arc<AppMeter>> {
-        let meters = self.meters.lock().unwrap();
+        let meters = self.meters.read().unwrap();
         meters.clone()
     }
 
     /// Atomically swap an app's meter for a fresh one (period rollover).
     /// Returns the old meter (for draining and reading), or None if app not found.
     pub fn swap_for_rollover(&self, app_id: &str) -> Option<Arc<AppMeter>> {
-        let mut meters = self.meters.lock().unwrap();
+        let mut meters = self.meters.write().unwrap();
         let old = meters.remove(app_id)?;
         let new = Arc::new(AppMeter::with_resources(
             old.plan.clone(),
@@ -297,7 +302,7 @@ impl MeterRegistry {
                         &self.plugin_resources,
                         &stored,
                     ));
-                    self.meters.lock().unwrap().insert(app_id.clone(), meter);
+                    self.meters.write().unwrap().insert(app_id.clone(), meter);
                     eprintln!("[metering] Recovered counters for {app_id}: {} resources", stored.len());
                 }
                 Ok(_) => {} // empty, no recovery needed
@@ -309,12 +314,12 @@ impl MeterRegistry {
 
 impl appbase_core::billing::MeteringSnapshot for MeterRegistry {
     fn snapshot(&self, app_id: &str) -> Option<HashMap<String, u64>> {
-        let meters = self.meters.lock().unwrap();
+        let meters = self.meters.read().unwrap();
         meters.get(app_id).map(|m| m.counters.snapshot())
     }
 
     fn active_apps(&self) -> Vec<String> {
-        self.meters.lock().unwrap().keys().cloned().collect()
+        self.meters.read().unwrap().keys().cloned().collect()
     }
 }
 
@@ -324,14 +329,14 @@ impl appbase_core::billing::SpendEnforcement for MeterRegistry {
         app_id: &str,
         action: appbase_core::billing::SpendAction,
     ) {
-        let meters = self.meters.lock().unwrap();
+        let meters = self.meters.read().unwrap();
         if let Some(meter) = meters.get(app_id) {
             appbase_core::billing::SpendAction::store(&meter.spend_action, action);
         }
     }
 
     fn get_spend_action(&self, app_id: &str) -> appbase_core::billing::SpendAction {
-        let meters = self.meters.lock().unwrap();
+        let meters = self.meters.read().unwrap();
         meters
             .get(app_id)
             .map(|m| appbase_core::billing::SpendAction::load(&m.spend_action))
