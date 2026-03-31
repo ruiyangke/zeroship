@@ -55,6 +55,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "appbase-billing"
+version = "0.1.0"
+dependencies = [
+ "appbase-core",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "appbase-compiler"
 version = "0.1.0"
 dependencies = [
@@ -90,8 +100,10 @@ name = "appbase-metering"
 version = "0.1.0"
 dependencies = [
  "appbase-core",
+ "rusqlite",
  "serde",
  "serde_json",
+ "time",
  "tokio",
  "toml",
 ]
@@ -119,6 +131,7 @@ dependencies = [
  "axum",
  "bytes",
  "serde_json",
+ "time",
  "tokio",
  "tower-http",
  "tracing",
@@ -711,6 +724,15 @@ dependencies = [
  "futures-util",
  "parking_lot",
  "tokio",
+]
+
+[[package]]
+name = "deranged"
+version = "0.5.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
+dependencies = [
+ "powerfmt",
 ]
 
 [[package]]
@@ -1567,6 +1589,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-conv"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6673768db2d862beb9b39a78fdcb1a69439615d5794a1be50caa9bc92c81967"
+
+[[package]]
 name = "num-integer"
 version = "0.1.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1740,6 +1768,12 @@ dependencies = [
  "writeable",
  "zerovec",
 ]
+
+[[package]]
+name = "powerfmt"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
 name = "ppv-lite86"
@@ -2642,6 +2676,25 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "time"
+version = "0.3.47"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "743bd48c283afc0388f9b8827b976905fb217ad9e647fae3a379a9283c4def2c"
+dependencies = [
+ "deranged",
+ "num-conv",
+ "powerfmt",
+ "serde_core",
+ "time-core",
+]
+
+[[package]]
+name = "time-core"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7694e1cfe791f8d31026952abf09c69ca6f6fa4e1a1229e18988f06a04a12dca"
 
 [[package]]
 name = "timezone_provider"

@@ -1,17 +1,14 @@
 [package]
-name = "appbase-metering"
+name = "appbase-billing"
 version = "0.1.0"
 edition = "2024"
-description = "Multi-tenant metering, quota enforcement, and rate limiting for appbase"
+description = "Billing, pricing, and spending limits for appbase"
 
 [dependencies]
 appbase-core = { path = "../core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
-time = "0.3"
 tokio = { version = "1", features = ["time", "rt"] }
-rusqlite = { version = "0.38", features = ["bundled"] }
 
 [lints]
 workspace = true

@@ -9,6 +9,7 @@
 
 pub mod error_codes;
 pub mod plan;
+pub mod registry;
 pub mod meter;
 pub mod enforcer;
 pub mod rate_limit;
