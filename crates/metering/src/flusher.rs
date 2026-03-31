@@ -71,8 +71,8 @@ fn collect_deltas(meter: &crate::meter::AppMeter) -> Vec<ResourceDelta> {
     }
 
     collect!("requests", requests);
-    collect!("cpu_us", cpu_time_us);
-    collect!("wall_us", wall_time_us);
+    collect!("cpu_ms", cpu_time_us); // stored as microseconds, key is cpu_ms (enforcer divides by 1000)
+    collect!("wall_ms", wall_time_us); // stored as microseconds, key is wall_ms
     collect!("egress_bytes", egress_bytes);
     collect!("db_reads", db_reads);
     collect!("db_writes", db_writes);

@@ -107,28 +107,37 @@ pub async fn serve(state: AppState, host: &str, port: u16) -> Result<(), String>
 async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
     let app_id = state.default_app.clone();
 
-    // 1. Rate limit check
+    // 1. Rate limit check (error code -32030 per spec §8.4)
     if !state.rate_limiter.check(&app_id) {
         return json_response_with_status(
             StatusCode::TOO_MANY_REQUESTS,
-            r#"{"jsonrpc":"2.0","error":{"code":-32429,"message":"Rate limit exceeded"},"id":null}"#,
+            r#"{"jsonrpc":"2.0","error":{"code":-32030,"message":"Rate limit exceeded","data":{"type":"rate_limited"}},"id":null}"#,
         );
     }
 
-    // 2. Quota check
+    // 2. Quota check (error code from denial, -32029 per spec §8.4)
     let meter = state.meters.get_or_create(&app_id);
     match enforcer::check_quota(&meter, &meter.plan) {
         QuotaDecision::Deny(denial) => {
             return json_response_with_status(
                 StatusCode::TOO_MANY_REQUESTS,
                 &format!(
-                    r#"{{"jsonrpc":"2.0","error":{{"code":-32429,"message":"{}","data":{{"dimension":"{}","used":{},"limit":{}}}}},"id":null}}"#,
-                    denial.message, denial.dimension, denial.used, denial.limit
+                    r#"{{"jsonrpc":"2.0","error":{{"code":{},"message":"{}","data":{{"type":"quota_exceeded","dimension":"{}","used":{},"limit":{}}}}},"id":null}}"#,
+                    denial.error_code, denial.message, denial.dimension, denial.used, denial.limit
                 ),
             );
         }
-        QuotaDecision::Allow | QuotaDecision::Warn(_) => {} // proceed
+        QuotaDecision::Warn(ref warnings) => {
+            // Warnings are captured and added to response headers later
+            // (stored in a local var for the response-building phase)
+        }
+        QuotaDecision::Allow => {}
     }
+    // Capture warnings for response headers
+    let quota_warnings = match enforcer::check_quota(&meter, &meter.plan) {
+        QuotaDecision::Warn(w) => w,
+        _ => vec![],
+    };
 
     // 3. Get app bundle
     let bundle = {
@@ -194,6 +203,15 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
                         &format!("{limit};w={reset}"),
                     );
                 }
+            }
+
+            // Add quota warning headers (spec §8.2)
+            for warning in &quota_warnings {
+                add_header(
+                    &mut headers,
+                    "x-quota-warning",
+                    &format!("{} at {:.0}% ({}/{})", warning.dimension, warning.usage_pct, warning.used, warning.limit),
+                );
             }
 
             let mut response = Response::builder()

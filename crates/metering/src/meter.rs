@@ -54,31 +54,34 @@ impl AppMeter {
     }
 
     /// Record a completed request's usage.
+    /// Uses Release ordering so Acquire reads on other cores (enforcer, flusher)
+    /// see the updated values. Required for ARM/AArch64 correctness.
     pub fn record(&self, delta: &UsageDelta) {
-        self.requests.fetch_add(1, Ordering::Relaxed);
+        self.requests.fetch_add(1, Ordering::Release);
         self.cpu_time_us
-            .fetch_add(delta.cpu_time.as_micros() as u64, Ordering::Relaxed);
+            .fetch_add(delta.cpu_time.as_micros() as u64, Ordering::Release);
         self.wall_time_us
-            .fetch_add(delta.wall_time.as_micros() as u64, Ordering::Relaxed);
+            .fetch_add(delta.wall_time.as_micros() as u64, Ordering::Release);
         self.egress_bytes
-            .fetch_add(delta.egress_bytes, Ordering::Relaxed);
+            .fetch_add(delta.egress_bytes, Ordering::Release);
         self.db_reads
-            .fetch_add(delta.db_reads, Ordering::Relaxed);
+            .fetch_add(delta.db_reads, Ordering::Release);
         self.db_writes
-            .fetch_add(delta.db_writes, Ordering::Relaxed);
-        self.kv_ops.fetch_add(delta.kv_ops, Ordering::Relaxed);
+            .fetch_add(delta.db_writes, Ordering::Release);
+        self.kv_ops.fetch_add(delta.kv_ops, Ordering::Release);
     }
 
     /// Take a consistent snapshot of current usage.
+    /// Uses Acquire ordering to see all Release writes from record().
     pub fn snapshot(&self) -> UsageSnapshot {
         UsageSnapshot {
-            requests: self.requests.load(Ordering::Relaxed),
-            cpu_time_ms: self.cpu_time_us.load(Ordering::Relaxed) as f64 / 1000.0,
-            wall_time_ms: self.wall_time_us.load(Ordering::Relaxed) as f64 / 1000.0,
-            egress_bytes: self.egress_bytes.load(Ordering::Relaxed),
-            db_reads: self.db_reads.load(Ordering::Relaxed),
-            db_writes: self.db_writes.load(Ordering::Relaxed),
-            kv_ops: self.kv_ops.load(Ordering::Relaxed),
+            requests: self.requests.load(Ordering::Acquire),
+            cpu_time_ms: self.cpu_time_us.load(Ordering::Acquire) as f64 / 1000.0,
+            wall_time_ms: self.wall_time_us.load(Ordering::Acquire) as f64 / 1000.0,
+            egress_bytes: self.egress_bytes.load(Ordering::Acquire),
+            db_reads: self.db_reads.load(Ordering::Acquire),
+            db_writes: self.db_writes.load(Ordering::Acquire),
+            kv_ops: self.kv_ops.load(Ordering::Acquire),
             period_age_secs: self
                 .period_start
                 .elapsed()
@@ -88,14 +91,15 @@ impl AppMeter {
     }
 
     /// Reset all counters for a new billing period.
+    /// Uses Release ordering so subsequent Acquire reads see zeros.
     pub fn reset_period(&self) {
-        self.requests.store(0, Ordering::Relaxed);
-        self.cpu_time_us.store(0, Ordering::Relaxed);
-        self.wall_time_us.store(0, Ordering::Relaxed);
-        self.egress_bytes.store(0, Ordering::Relaxed);
-        self.db_reads.store(0, Ordering::Relaxed);
-        self.db_writes.store(0, Ordering::Relaxed);
-        self.kv_ops.store(0, Ordering::Relaxed);
+        self.requests.store(0, Ordering::Release);
+        self.cpu_time_us.store(0, Ordering::Release);
+        self.wall_time_us.store(0, Ordering::Release);
+        self.egress_bytes.store(0, Ordering::Release);
+        self.db_reads.store(0, Ordering::Release);
+        self.db_writes.store(0, Ordering::Release);
+        self.kv_ops.store(0, Ordering::Release);
     }
 }
 
