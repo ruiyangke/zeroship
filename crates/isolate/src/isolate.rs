@@ -25,6 +25,14 @@ pub struct RpcBridge {
     pub response: RefCell<String>,
 }
 
+/// Stub: op_tls_peer_certificate is defined in deno_node but imported by deno_net's JS.
+/// We don't include deno_node, so we stub it to avoid "does not provide an export" errors.
+#[op2]
+#[buffer]
+pub fn op_tls_peer_certificate(_rid: u32, _detailed: bool) -> Vec<u8> {
+    vec![] // stub — we don't support TLS peer certificate inspection
+}
+
 /// Op: JS reads the RPC request JSON set by Rust.
 #[op2]
 #[string]
@@ -59,7 +67,7 @@ pub fn create(
     quota: Arc<dyn PluginQuota>,
 ) -> Result<(JsRuntime, Rc<RpcBridge>), String> {
     // Collect ops from all plugins + core ops
-    let mut all_ops = vec![op_rpc_get_request(), op_rpc_set_response()];
+    let mut all_ops = vec![op_rpc_get_request(), op_rpc_set_response(), op_tls_peer_certificate()];
     for plugin in plugins {
         all_ops.extend(plugin.ops());
     }
@@ -114,6 +122,9 @@ pub fn create(
     let mut runtime = JsRuntime::new(RuntimeOptions {
         extensions,
         create_params: Some(create_params),
+        extension_transpiler: Some(Rc::new(|name, source| {
+            transpile_extension(name, source)
+        })),
         ..Default::default()
     });
 
@@ -215,4 +226,47 @@ pub async fn handle_rpc(
         json: rpc_bridge.response.borrow().clone(),
         cpu_time,
     })
+}
+
+/// Transpile TypeScript extension sources to JavaScript.
+/// Used by deno_telemetry which ships .ts files.
+fn transpile_extension(
+    name: ModuleName,
+    source: ModuleCodeString,
+) -> Result<(ModuleCodeString, Option<SourceMapData>), deno_error::JsErrorBox> {
+    use deno_ast::{MediaType, ParseParams, SourceMapOption};
+
+    let media_type = MediaType::from_path(std::path::Path::new(&*name));
+    match media_type {
+        MediaType::TypeScript | MediaType::Tsx => {}
+        // JS/MJS pass through without transpilation
+        _ => return Ok((source, None)),
+    }
+
+    let parsed = deno_ast::parse_module(ParseParams {
+        specifier: deno_core::url::Url::parse(&name).unwrap(),
+        text: source.into(),
+        media_type,
+        capture_tokens: false,
+        scope_analysis: false,
+        maybe_syntax: None,
+    })
+    .map_err(|e| deno_error::JsErrorBox::generic(e.to_string()))?;
+
+    let transpiled = parsed
+        .transpile(
+            &deno_ast::TranspileOptions {
+                imports_not_used_as_values: deno_ast::ImportsNotUsedAsValues::Remove,
+                ..Default::default()
+            },
+            &deno_ast::TranspileModuleOptions::default(),
+            &deno_ast::EmitOptions {
+                source_map: SourceMapOption::None,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| deno_error::JsErrorBox::generic(e.to_string()))?
+        .into_source();
+
+    Ok((transpiled.text.into(), None))
 }
