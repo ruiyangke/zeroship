@@ -1,31 +1,17 @@
 //! SpendingReconciler — background service that computes spend and sets SpendAction.
 //!
 //! Runs every N seconds (default 10s). For each app with a spending limit:
-//! 1. Reads counter snapshot from metering (via MeteringSnapshot trait)
+//! 1. Reads counter snapshot from metering (via MeteringSnapshot trait from core)
 //! 2. Computes cost via PricingTable
 //! 3. Compares against spending limit
-//! 4. Sets SpendAction on the AppMeter (via SpendEnforcement trait)
+//! 4. Sets SpendAction on the AppMeter (via SpendEnforcement trait from core)
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use appbase_core::billing::{MeteringSnapshot, SpendAction, SpendEnforcement};
 use crate::pricing::PricingTable;
-use crate::spend_action::SpendAction;
-
-/// Interface to read metering data (implemented by quota crate).
-pub trait MeteringSnapshot: Send + Sync {
-    /// Get all counter values for an app.
-    fn snapshot(&self, app_id: &str) -> Option<HashMap<String, u64>>;
-    /// List all active app IDs.
-    fn active_apps(&self) -> Vec<String>;
-}
-
-/// Interface to set spending enforcement (implemented by quota crate).
-pub trait SpendEnforcement: Send + Sync {
-    fn set_spend_action(&self, app_id: &str, action: SpendAction);
-    fn get_spend_action(&self, app_id: &str) -> SpendAction;
-}
 
 /// Per-app spending configuration.
 #[derive(Debug, Clone)]
@@ -82,7 +68,6 @@ fn reconcile(
         let limit_mc = match limit.limit_millicents {
             Some(lim) => lim,
             None => {
-                // No spending limit — ensure allow
                 enforcement.set_spend_action(app_id, SpendAction::Allow);
                 continue;
             }
@@ -90,7 +75,7 @@ fn reconcile(
 
         let usage = match metering.snapshot(app_id) {
             Some(u) => u,
-            None => continue, // app not active
+            None => continue,
         };
 
         let cost_mc = config.pricing.compute_cost(&usage);
@@ -154,25 +139,17 @@ mod tests {
     fn under_limit_allows() {
         let pricing = Arc::new(PricingTable::cloudflare_comparable());
         let mut usage = HashMap::new();
-        usage.insert("requests".to_string(), 100_000); // tiny usage
+        usage.insert("requests".to_string(), 100_000);
         let mut data = HashMap::new();
         data.insert("app1".to_string(), usage);
-
         let metering = MockMetering { data };
         let enforcement = MockEnforcement::new();
-
         let mut limits = HashMap::new();
         limits.insert("app1".to_string(), SpendingLimit {
-            limit_millicents: Some(500_000), // $5.00
+            limit_millicents: Some(500_000),
             ..Default::default()
         });
-
-        let config = ReconcilerConfig {
-            interval: Duration::from_secs(10),
-            pricing,
-            limits,
-        };
-
+        let config = ReconcilerConfig { interval: Duration::from_secs(10), pricing, limits };
         reconcile(&config, &metering, &enforcement);
         assert_eq!(enforcement.get_spend_action("app1"), SpendAction::Allow);
     }
@@ -181,25 +158,17 @@ mod tests {
     fn over_limit_blocks() {
         let pricing = Arc::new(PricingTable::cloudflare_comparable());
         let mut usage = HashMap::new();
-        usage.insert("requests".to_string(), 100_000_000); // 100M requests
+        usage.insert("requests".to_string(), 100_000_000);
         let mut data = HashMap::new();
         data.insert("app1".to_string(), usage);
-
         let metering = MockMetering { data };
         let enforcement = MockEnforcement::new();
-
         let mut limits = HashMap::new();
         limits.insert("app1".to_string(), SpendingLimit {
-            limit_millicents: Some(10_000), // $0.10 limit, way under cost
+            limit_millicents: Some(10_000),
             ..Default::default()
         });
-
-        let config = ReconcilerConfig {
-            interval: Duration::from_secs(10),
-            pricing,
-            limits,
-        };
-
+        let config = ReconcilerConfig { interval: Duration::from_secs(10), pricing, limits };
         reconcile(&config, &metering, &enforcement);
         assert_eq!(enforcement.get_spend_action("app1"), SpendAction::Block);
     }
@@ -207,31 +176,22 @@ mod tests {
     #[test]
     fn warn_threshold() {
         let mut table = PricingTable::new();
-        table.add_flat("requests", 1000, 1_000_000); // $1/million
+        table.add_flat("requests", 1000, 1_000_000);
         let pricing = Arc::new(table);
-
         let mut usage = HashMap::new();
-        usage.insert("requests".to_string(), 850_000); // 850 millicents cost
+        usage.insert("requests".to_string(), 850_000);
         let mut data = HashMap::new();
         data.insert("app1".to_string(), usage);
-
         let metering = MockMetering { data };
         let enforcement = MockEnforcement::new();
-
         let mut limits = HashMap::new();
         limits.insert("app1".to_string(), SpendingLimit {
-            limit_millicents: Some(1000), // 1000 millicents limit
+            limit_millicents: Some(1000),
             warn_pct: 80,
             degrade_pct: 0,
             block_pct: 100,
         });
-
-        let config = ReconcilerConfig {
-            interval: Duration::from_secs(10),
-            pricing,
-            limits,
-        };
-
+        let config = ReconcilerConfig { interval: Duration::from_secs(10), pricing, limits };
         reconcile(&config, &metering, &enforcement);
         assert_eq!(enforcement.get_spend_action("app1"), SpendAction::Warn);
     }
@@ -241,19 +201,12 @@ mod tests {
         let pricing = Arc::new(PricingTable::cloudflare_comparable());
         let metering = MockMetering { data: HashMap::new() };
         let enforcement = MockEnforcement::new();
-
         let mut limits = HashMap::new();
         limits.insert("app1".to_string(), SpendingLimit {
             limit_millicents: None,
             ..Default::default()
         });
-
-        let config = ReconcilerConfig {
-            interval: Duration::from_secs(10),
-            pricing,
-            limits,
-        };
-
+        let config = ReconcilerConfig { interval: Duration::from_secs(10), pricing, limits };
         reconcile(&config, &metering, &enforcement);
         assert_eq!(enforcement.get_spend_action("app1"), SpendAction::Allow);
     }

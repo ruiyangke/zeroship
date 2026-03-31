@@ -6,9 +6,9 @@
 //! - Deny: over 100% on any dimension (returns 429)
 
 use crate::error_codes;
-use appbase_metering::meter::AppMeter;
 use appbase_plan::{evaluate_policy, PolicyAction, QuotaPlan, Period};
 use serde::Serialize;
+use std::collections::HashMap;
 
 /// Result of a quota check.
 #[derive(Debug)]
@@ -49,8 +49,9 @@ pub struct QuotaDenial {
 }
 
 /// Check an app's current usage against its plan.
-/// Call this BEFORE dispatching a request.
-pub fn check_quota(meter: &AppMeter, plan: &QuotaPlan) -> QuotaDecision {
+/// Takes a usage snapshot (resource name → accumulated value) and the plan.
+/// Pure function — no dependency on metering internals.
+pub fn check_quota(usage: &HashMap<String, u64>, plan: &QuotaPlan) -> QuotaDecision {
     let mut warnings = Vec::new();
 
     for (resource, quota) in &plan.quotas {
@@ -64,7 +65,7 @@ pub fn check_quota(meter: &AppMeter, plan: &QuotaPlan) -> QuotaDecision {
             None => continue, // unlimited
         };
 
-        let used = meter.get_counter(resource);
+        let used = usage.get(resource.as_str()).copied().unwrap_or(0);
 
         let pct = if max > 0 { (used as f64 / max as f64) * 100.0 } else { 100.0 };
 
@@ -144,11 +145,14 @@ mod tests {
     use super::*;
     use appbase_plan::{QuotaPlan, QuotaDef, Period};
 
+    fn usage(pairs: &[(&str, u64)]) -> HashMap<String, u64> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
     #[test]
     fn allow_under_limit() {
         let plan = QuotaPlan::free();
-        let meter = AppMeter::with_resources(plan.clone(), &[]);
-        let decision = check_quota(&meter, &plan);
+        let decision = check_quota(&HashMap::new(), &plan);
         assert!(matches!(decision, QuotaDecision::Allow));
     }
 
@@ -160,9 +164,7 @@ mod tests {
             period: Period::Monthly,
             policy: "warn_then_block".into(),
         });
-        let meter = AppMeter::with_resources(plan.clone(), &[]);
-        meter.counters.increment(meter.core.requests, 85);
-        let decision = check_quota(&meter, &plan);
+        let decision = check_quota(&usage(&[("requests", 85)]), &plan);
         assert!(matches!(decision, QuotaDecision::Warn(_)));
     }
 
@@ -174,18 +176,14 @@ mod tests {
             period: Period::Monthly,
             policy: "warn_then_block".into(),
         });
-        let meter = AppMeter::with_resources(plan.clone(), &[]);
-        meter.counters.increment(meter.core.requests, 101);
-        let decision = check_quota(&meter, &plan);
+        let decision = check_quota(&usage(&[("requests", 101)]), &plan);
         assert!(matches!(decision, QuotaDecision::Deny(_)));
     }
 
     #[test]
     fn unlimited_always_allows() {
         let plan = QuotaPlan::unlimited();
-        let meter = AppMeter::with_resources(plan.clone(), &[]);
-        meter.counters.increment(meter.core.requests, 999_999_999);
-        let decision = check_quota(&meter, &plan);
+        let decision = check_quota(&usage(&[("requests", 999_999_999)]), &plan);
         assert!(matches!(decision, QuotaDecision::Allow));
     }
 

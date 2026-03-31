@@ -273,7 +273,7 @@ impl MeterRegistry {
     }
 }
 
-impl appbase_billing::reconciler::MeteringSnapshot for MeterRegistry {
+impl appbase_core::billing::MeteringSnapshot for MeterRegistry {
     fn snapshot(&self, app_id: &str) -> Option<HashMap<String, u64>> {
         let meters = self.meters.lock().unwrap();
         meters.get(app_id).map(|m| m.counters.snapshot())
@@ -284,23 +284,23 @@ impl appbase_billing::reconciler::MeteringSnapshot for MeterRegistry {
     }
 }
 
-impl appbase_billing::reconciler::SpendEnforcement for MeterRegistry {
+impl appbase_core::billing::SpendEnforcement for MeterRegistry {
     fn set_spend_action(
         &self,
         app_id: &str,
-        action: appbase_billing::spend_action::SpendAction,
+        action: appbase_core::billing::SpendAction,
     ) {
         let meters = self.meters.lock().unwrap();
         if let Some(meter) = meters.get(app_id) {
-            appbase_billing::spend_action::SpendAction::store(&meter.spend_action, action);
+            appbase_core::billing::SpendAction::store(&meter.spend_action, action);
         }
     }
 
-    fn get_spend_action(&self, app_id: &str) -> appbase_billing::spend_action::SpendAction {
+    fn get_spend_action(&self, app_id: &str) -> appbase_core::billing::SpendAction {
         let meters = self.meters.lock().unwrap();
         meters
             .get(app_id)
-            .map(|m| appbase_billing::spend_action::SpendAction::load(&m.spend_action))
-            .unwrap_or(appbase_billing::spend_action::SpendAction::Allow)
+            .map(|m| appbase_core::billing::SpendAction::load(&m.spend_action))
+            .unwrap_or(appbase_core::billing::SpendAction::Allow)
     }
 }

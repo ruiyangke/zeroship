@@ -5,7 +5,6 @@ edition = "2024"
 description = "Rate limiting, quota enforcement, concurrency control, and entitlements for appbase"
 
 [dependencies]
-appbase-metering = { path = "../metering" }
 appbase-plan = { path = "../plan" }
 serde = { version = "1", features = ["derive"] }
 

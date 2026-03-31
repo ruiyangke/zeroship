@@ -17,6 +17,7 @@
 //! appbase (binary)      ← CLI, config, wiring
 //! ```
 
+pub mod billing;
 pub mod config;
 pub mod event_log;
 pub mod meter_store;

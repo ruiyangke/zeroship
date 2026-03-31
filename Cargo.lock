@@ -90,7 +90,6 @@ dependencies = [
 name = "appbase-enforcement"
 version = "0.1.0"
 dependencies = [
- "appbase-metering",
  "appbase-plan",
  "serde",
 ]
@@ -111,7 +110,6 @@ dependencies = [
 name = "appbase-metering"
 version = "0.1.0"
 dependencies = [
- "appbase-billing",
  "appbase-core",
  "appbase-plan",
  "rusqlite",

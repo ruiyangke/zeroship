@@ -9,7 +9,7 @@ use appbase_enforcement::concurrency::ConcurrencyGuard;
 use appbase_enforcement::quota::{self as enforcer, QuotaDecision};
 use appbase_enforcement::error_codes;
 use appbase_enforcement::rate_limit::RateLimiter;
-use appbase_billing::spend_action::SpendAction;
+use appbase_core::billing::SpendAction;
 use appbase_metering::event_channel::EventSender;
 use appbase_metering::meter::MeterRegistry;
 use appbase_plan::QuotaPlan;
@@ -265,7 +265,8 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
     }
 
     // 4. Quota check — single call, capture both deny and warnings
-    let quota_decision = enforcer::check_quota(&meter, &meter.plan);
+    let usage = meter.counters.snapshot();
+    let quota_decision = enforcer::check_quota(&usage, &meter.plan);
     let quota_warnings = match &quota_decision {
         QuotaDecision::Deny(denial) => {
             state.event_sender.log_enforcement(&app_id, EventKind::QuotaDenied, serde_json::json!({
