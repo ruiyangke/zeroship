@@ -28,6 +28,45 @@ use crate::middleware;
 /// Default concurrency limit per app (max in-flight requests).
 const DEFAULT_CONCURRENCY_LIMIT: u32 = 100;
 
+/// Per-app concurrency gauges — keyed by app_id.
+pub struct ConcurrencyRegistry {
+    gauges: std::sync::RwLock<HashMap<String, Arc<AtomicU32>>>,
+}
+
+impl ConcurrencyRegistry {
+    pub fn new() -> Self {
+        Self {
+            gauges: std::sync::RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Get or create a per-app concurrency gauge.
+    pub fn get_or_create(&self, app_id: &str) -> Arc<AtomicU32> {
+        // Fast path: read lock
+        {
+            let gauges = self.gauges.read().unwrap();
+            if let Some(gauge) = gauges.get(app_id) {
+                return gauge.clone();
+            }
+        }
+        // Slow path: write lock
+        let mut gauges = self.gauges.write().unwrap();
+        gauges
+            .entry(app_id.to_string())
+            .or_insert_with(|| Arc::new(AtomicU32::new(0)))
+            .clone()
+    }
+
+    /// Get current in-flight count for an app.
+    pub fn current(&self, app_id: &str) -> u32 {
+        let gauges = self.gauges.read().unwrap();
+        gauges
+            .get(app_id)
+            .map(|g| g.load(Ordering::Acquire))
+            .unwrap_or(0)
+    }
+}
+
 /// Shared state for all axum handlers.
 #[derive(Clone)]
 pub struct AppState {
@@ -39,8 +78,8 @@ pub struct AppState {
     pub meters: Arc<MeterRegistry>,
     /// Rate limiter: per-app requests/second.
     pub rate_limiter: Arc<RateLimiter>,
-    /// Concurrency gauge: counts in-flight requests per app.
-    pub concurrency_gauge: Arc<AtomicU32>,
+    /// Per-app concurrency gauges.
+    pub concurrency: Arc<ConcurrencyRegistry>,
 }
 
 /// Build the axum router with all routes and middleware.
@@ -92,7 +131,7 @@ pub fn single_app_state(
         static_html: client_html.map(Bytes::from),
         meters,
         rate_limiter,
-        concurrency_gauge: Arc::new(AtomicU32::new(0)),
+        concurrency: Arc::new(ConcurrencyRegistry::new()),
     }
 }
 
@@ -155,8 +194,9 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
     }
 
     // 2. Concurrency guard — RAII, auto-decrements on drop
+    let app_gauge = state.concurrency.get_or_create(&app_id);
     let _concurrency_guard = match ConcurrencyGuard::try_acquire(
-        &state.concurrency_gauge,
+        &app_gauge,
         DEFAULT_CONCURRENCY_LIMIT,
     ) {
         Some(guard) => guard,
@@ -281,9 +321,9 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
                 }
             }
 
-            // Quota warning headers (spec §8.2)
+            // Quota warning headers (spec §8.2) — use append, not insert, for multi-value
             for warning in &quota_warnings {
-                add_header(
+                append_header(
                     &mut headers,
                     "x-quota-warning",
                     &format!("{} at {:.0}% ({}/{})", warning.dimension, warning.usage_pct, warning.used, warning.limit),
@@ -329,16 +369,23 @@ async fn handle_all_usage(State(state): State<AppState>) -> Response {
     )
 }
 
-/// GET /_apps/{app_id}/usage — single app's usage.
+/// GET /_apps/{app_id}/usage — single app's usage + concurrency.
 async fn handle_app_usage(
     State(state): State<AppState>,
     Path(app_id): Path<String>,
 ) -> Response {
     match state.meters.get_usage(&app_id) {
-        Some(usage) => json_response(
-            StatusCode::OK,
-            &serde_json::to_string(&usage).unwrap_or_default(),
-        ),
+        Some(usage) => {
+            // Serialize usage and add concurrency info
+            let mut val = serde_json::to_value(&usage).unwrap_or_default();
+            if let Some(obj) = val.as_object_mut() {
+                obj.insert(
+                    "concurrent_requests".to_string(),
+                    serde_json::Value::from(state.concurrency.current(&app_id)),
+                );
+            }
+            json_response(StatusCode::OK, &val.to_string())
+        }
         None => json_response(
             StatusCode::NOT_FOUND,
             &format!(r#"{{"error":"No usage data for '{app_id}'"}}"#),
@@ -412,6 +459,14 @@ fn add_header(headers: &mut HeaderMap, name: &'static str, value: &str) {
     let n = axum::http::header::HeaderName::from_static(name);
     if let Ok(v) = HeaderValue::from_str(value) {
         headers.insert(n, v);
+    }
+}
+
+/// Append a header value (allows multiple values for the same header name).
+fn append_header(headers: &mut HeaderMap, name: &'static str, value: &str) {
+    let n = axum::http::header::HeaderName::from_static(name);
+    if let Ok(v) = HeaderValue::from_str(value) {
+        headers.append(n, v);
     }
 }
 

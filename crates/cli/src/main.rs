@@ -85,9 +85,16 @@ fn cmd_serve(args: &[String]) {
             default_plan,
         );
 
-        // Spawn background metering services
+        // Warm-tier store for metering persistence
         let store: Arc<dyn appbase_core::meter_store::MeterStore> =
             Arc::new(appbase_metering::store::memory::InMemoryStore::new());
+
+        // Crash recovery: reload counters from warm tier (spec §4.6)
+        // In production with a persistent store (SQLite/Redis), this recovers
+        // counters from the last flush, preventing quota bypass after restart.
+        state.meters.recover_from_store(store.as_ref(), &["default".to_string()]);
+
+        // Spawn background metering services
         let flusher_handle = appbase_metering::flusher::spawn_flusher(
             state.meters.clone(),
             store.clone(),
