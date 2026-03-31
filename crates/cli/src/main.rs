@@ -126,6 +126,9 @@ fn cmd_serve(args: &[String]) {
             .meters
             .recover_from_store(store.as_ref(), &["default".to_string()]);
 
+        // Clone store for final shutdown flush before it is moved into background tasks
+        let store_for_shutdown = store.clone();
+
         // Spawn background metering services
         let flusher_handle = appbase_metering::flusher::spawn_flusher(
             state.meters.clone(),
@@ -163,7 +166,13 @@ fn cmd_serve(args: &[String]) {
             "[appbase] Background services started (flusher=5s, roller=60s, reconciler=10s)"
         );
 
+        let meters_for_shutdown = state.meters.clone();
+
         let result = router::serve(state, &config.server.host, config.server.port).await;
+
+        // Final flush before aborting background tasks to avoid losing recent increments
+        eprintln!("[appbase] Shutting down — final flush...");
+        appbase_metering::flusher::flush_all(&meters_for_shutdown, store_for_shutdown.as_ref());
 
         // Abort background tasks on shutdown
         flusher_handle.abort();

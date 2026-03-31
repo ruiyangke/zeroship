@@ -37,7 +37,7 @@ pub fn spawn_flusher(
 /// counters keep accumulating. The enforcer and reconciler read running
 /// totals via `snapshot()`, which would see near-zero values if we zeroed
 /// counters every 5 seconds.
-fn flush_all(registry: &MeterRegistry, store: &dyn MeterStore) {
+pub fn flush_all(registry: &MeterRegistry, store: &dyn MeterStore) {
     let meters = registry.all_meters();
 
     for (app_id, meter) in &meters {
@@ -46,7 +46,7 @@ fn flush_all(registry: &MeterRegistry, store: &dyn MeterStore) {
             continue;
         }
 
-        let deltas = meter.counters.pending_deltas();
+        let (deltas, snapshot) = meter.counters.pending_deltas();
 
         if deltas.is_empty() {
             continue; // no activity since last flush, skip
@@ -58,7 +58,7 @@ fn flush_all(registry: &MeterRegistry, store: &dyn MeterStore) {
             .collect();
 
         if store.flush(app_id, &resource_deltas).is_ok() {
-            meter.counters.commit_flush();
+            meter.counters.commit_flush(&snapshot);
         } else {
             eprintln!("[flusher] Failed to flush {app_id}, will retry next cycle");
             // Watermark NOT advanced — deltas will be retried next cycle.

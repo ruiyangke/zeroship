@@ -278,7 +278,7 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
                 &denial.message,
                 &format!(
                     r#""type":"quota_exceeded","dimension":"{}","used":{},"limit":{}"#,
-                    denial.dimension, denial.used, denial.limit
+                    json_escape(&denial.dimension), denial.used, denial.limit
                 ),
                 Some(reset),
             );
@@ -384,7 +384,7 @@ async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
             response
         }
         Err(e) => {
-            let safe = sanitize_error(&e);
+            let safe = json_escape(&sanitize_error(&e));
             json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &format!(
@@ -446,7 +446,7 @@ async fn handle_app_usage(
         }
         None => json_response(
             StatusCode::NOT_FOUND,
-            &format!(r#"{{"error":"No usage data for '{app_id}'"}}"#),
+            &format!(r#"{{"error":"No usage data for '{}'"}}"#, json_escape(&app_id)),
         ),
     }
 }
@@ -461,7 +461,7 @@ async fn handle_evict_app(
     state.rate_limiter.remove(&app_id);
     json_response(
         StatusCode::OK,
-        &format!(r#"{{"evicted":"{app_id}"}}"#),
+        &format!(r#"{{"evicted":"{}"}}"#, json_escape(&app_id)),
     )
 }
 
@@ -485,6 +485,15 @@ async fn handle_static(State(state): State<AppState>) -> Response {
 
 // --- Helpers ---
 
+/// Escape a string for safe interpolation into a JSON string literal.
+/// Handles backslash, double-quote, newline, and carriage return.
+fn json_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
 fn json_response(status: StatusCode, body: &str) -> Response {
     Response::builder()
         .status(status)
@@ -501,8 +510,9 @@ fn rpc_error_response(
     data_fields: &str,
     retry_after: Option<u64>,
 ) -> Response {
+    let safe_message = json_escape(message);
     let body = format!(
-        r#"{{"jsonrpc":"2.0","error":{{"code":{code},"message":"{message}","data":{{{data_fields}}}}},"id":null}}"#,
+        r#"{{"jsonrpc":"2.0","error":{{"code":{code},"message":"{safe_message}","data":{{{data_fields}}}}},"id":null}}"#,
     );
     let mut builder = Response::builder()
         .status(status)

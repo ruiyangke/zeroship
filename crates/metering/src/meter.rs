@@ -191,6 +191,11 @@ impl MeterRegistry {
     }
 
     /// Set a specific plan for an app, preserving existing counter values.
+    ///
+    /// Note: There is a small window where increments to the old meter after
+    /// snapshot() but before insert() are lost. This is acceptable: the window
+    /// is ~microseconds (Mutex hold time), and the warm tier has the authoritative
+    /// period totals. The alternative (pausing all writes) is too expensive.
     pub fn set_plan(&self, app_id: &str, plan: QuotaPlan) {
         let mut meters = self.meters.lock().unwrap();
         if let Some(old) = meters.get(app_id) {

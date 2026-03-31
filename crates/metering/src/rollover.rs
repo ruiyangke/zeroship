@@ -90,7 +90,7 @@ async fn rollover_all(registry: &MeterRegistry, store: &dyn MeterStore, config: 
         // skips it). This avoids the double-counting race where both flusher and
         // rollover could read the same values via swap_all().
         for (app_id, old_meter) in &old_meters {
-            let final_deltas = old_meter.counters.pending_deltas();
+            let (final_deltas, snapshot) = old_meter.counters.pending_deltas();
 
             // Flush remaining deltas from old meter to warm tier before archiving.
             // Any increments since the last flusher tick would otherwise be lost.
@@ -104,7 +104,9 @@ async fn rollover_all(registry: &MeterRegistry, store: &dyn MeterStore, config: 
             if !deltas.is_empty() {
                 if let Err(e) = store.flush(app_id, &deltas) {
                     eprintln!("[rollover] Failed to flush {app_id} before rollover: {e}");
+                    continue; // skip archive for this app — data would be incomplete
                 }
+                old_meter.counters.commit_flush(&snapshot);
             }
 
             // Now archive and reset warm tier

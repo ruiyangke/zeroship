@@ -188,26 +188,33 @@ impl CounterRegistry {
     }
 
     /// Phase 1: Compute deltas since last flush. Does NOT advance watermark.
-    /// Call `commit_flush()` after the store write succeeds.
-    pub fn pending_deltas(&self) -> HashMap<String, u64> {
+    /// Returns (resource_name -> delta, snapshotted_currents).
+    /// Call `commit_flush(&snapshot)` after the store write succeeds,
+    /// passing the exact snapshot returned here to avoid TOCTOU races
+    /// where increments between pending_deltas() and commit_flush()
+    /// would be marked as flushed without being written to the store.
+    pub fn pending_deltas(&self) -> (HashMap<String, u64>, Vec<u64>) {
         let mut deltas = HashMap::new();
+        let mut currents = Vec::with_capacity(self.counters.len());
         for (i, meta) in self.resources.iter().enumerate() {
             let current = self.counters[i].load(Ordering::Acquire);
+            currents.push(current);
             let last = self.last_flushed[i].load(Ordering::Acquire);
             let delta = current.saturating_sub(last);
             if delta > 0 {
                 deltas.insert(meta.name.clone(), delta);
             }
         }
-        deltas
+        (deltas, currents)
     }
 
-    /// Phase 2: Advance watermark after successful store write.
+    /// Phase 2: Advance watermark using the exact snapshot from pending_deltas().
     /// Call this ONLY after store.flush() succeeds.
-    pub fn commit_flush(&self) {
-        for i in 0..self.counters.len() {
-            let current = self.counters[i].load(Ordering::Acquire);
-            self.last_flushed[i].store(current, Ordering::Release);
+    pub fn commit_flush(&self, snapshot: &[u64]) {
+        for (i, &val) in snapshot.iter().enumerate() {
+            if i < self.last_flushed.len() {
+                self.last_flushed[i].store(val, Ordering::Release);
+            }
         }
     }
 
