@@ -55,6 +55,16 @@ static CORE_RUNTIME_JS: &str = include_str!("embed/runtime.js");
 /// Prevents a single app from consuming all memory and crashing the process.
 const DEFAULT_HEAP_LIMIT_MB: usize = 128;
 
+/// Install the default TLS crypto provider (rustls + ring).
+/// Safe to call multiple times — only the first call has effect.
+fn ensure_crypto_provider() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// Create a V8 isolate with plugins loaded.
 ///
 /// Returns the `JsRuntime` and the `RpcBridge` for extracting RPC responses.
@@ -66,6 +76,8 @@ pub fn create(
     meter: Arc<dyn PluginMeter>,
     quota: Arc<dyn PluginQuota>,
 ) -> Result<(JsRuntime, Rc<RpcBridge>), String> {
+    ensure_crypto_provider();
+
     // Collect ops from all plugins + core ops
     let mut all_ops = vec![op_rpc_get_request(), op_rpc_set_response(), op_tls_peer_certificate()];
     for plugin in plugins {

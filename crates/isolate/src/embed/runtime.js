@@ -1,7 +1,17 @@
 // Appbase core runtime - injected before user code and plugin bridges
-// Contains: console, error handling, RPC dispatch. No primitives (db, auth, etc.)
+// Contains: console, error handling, RPC dispatch, Web API globals.
 
 const { core } = Deno;
+
+// Expose Web APIs as globals (deno extensions export them but don't assign to globalThis)
+import { fetch } from "ext:deno_fetch/26_fetch.js";
+import { Headers } from "ext:deno_fetch/20_headers.js";
+import { Request } from "ext:deno_fetch/23_request.js";
+import { Response } from "ext:deno_fetch/23_response.js";
+globalThis.fetch = fetch;
+globalThis.Request = Request;
+globalThis.Response = Response;
+globalThis.Headers = Headers;
 
 // Console
 globalThis.console = {

@@ -140,6 +140,7 @@ dependencies = [
  "deno_web",
  "deno_webidl",
  "libc",
+ "rustls",
  "serde_json",
  "tokio",
 ]
