@@ -84,8 +84,14 @@ impl Isolate {
 
         if !self.server_js.is_empty() {
             let code = v8::String::new(scope, &self.server_js).unwrap();
-            let script = v8::Script::compile(scope, code, None).unwrap();
-            script.run(scope).unwrap();
+            if let Some(script) = v8::Script::compile(scope, code, None) {
+                if script.run(scope).is_none() {
+                    eprintln!("[v8] Server JS execution failed (syntax/runtime error)");
+                    // Don't panic — isolate still works, methods just won't be registered
+                }
+            } else {
+                eprintln!("[v8] Server JS compilation failed (syntax error)");
+            }
         }
 
         let code = v8::String::new(scope, DISPATCH_JS).unwrap();

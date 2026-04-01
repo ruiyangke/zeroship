@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { getApp, getAppUsage, deployApp, deleteApp, updatePlan } from "../api";
+import { getApp, getAppUsage, deployApp, deleteApp, updatePlan, callRpc } from "../api";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
 import { Copy, Check, ChevronRight } from "lucide-react";
 
 const PLANS = ["free", "starter", "pro", "enterprise"];
@@ -17,8 +18,14 @@ export default function AppDetail() {
   const queryClient = useQueryClient();
 
   const [code, setCode] = useState("");
+  const [codePrefilled, setCodePrefilled] = useState(false);
   const [newPlan, setNewPlan] = useState("");
   const [copied, setCopied] = useState(false);
+  const [rpcMethod, setRpcMethod] = useState("");
+  const [rpcParams, setRpcParams] = useState("[]");
+  const [rpcResult, setRpcResult] = useState<string | null>(null);
+  const [rpcRunning, setRpcRunning] = useState(false);
+  const [rpcError, setRpcError] = useState<string | null>(null);
 
   const { data: app, isLoading, error: appError } = useQuery({
     queryKey: ["app", id],
@@ -35,6 +42,12 @@ export default function AppDetail() {
   // Set newPlan when app loads
   if (app && !newPlan) {
     setNewPlan(app.plan_id);
+  }
+
+  // Pre-fill deploy textarea with current server_js
+  if (app && (app as any).server_js && !codePrefilled) {
+    setCode((app as any).server_js);
+    setCodePrefilled(true);
   }
 
   const deployMutation = useMutation({
@@ -74,6 +87,22 @@ export default function AppDetail() {
   function handlePlanChange() {
     if (!newPlan || newPlan === app?.plan_id) return;
     planMutation.mutate(newPlan);
+  }
+
+  async function handleRpc() {
+    if (!id || !rpcMethod.trim()) return;
+    setRpcRunning(true);
+    setRpcResult(null);
+    setRpcError(null);
+    try {
+      const params = JSON.parse(rpcParams);
+      const result = await callRpc(id, rpcMethod, params);
+      setRpcResult(JSON.stringify(result, null, 2));
+    } catch (e: any) {
+      setRpcError(e.message || "RPC call failed");
+    } finally {
+      setRpcRunning(false);
+    }
   }
 
   const error = appError?.message ?? "";
@@ -215,6 +244,65 @@ export default function AppDetail() {
             <div className="mt-3 p-2.5 text-xs border border-destructive text-destructive bg-destructive/5">
               {deployMutation.error.message}
             </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Current Code */}
+      {(app as any).server_js && (
+        <Card className="mb-4">
+          <CardHeader>
+            <CardTitle>current code</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <pre className="p-3 bg-background border border-border text-xs font-mono whitespace-pre-wrap overflow-auto max-h-80">
+              {(app as any).server_js}
+            </pre>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Test */}
+      <Card className="mb-4">
+        <CardHeader>
+          <CardTitle>test</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="mb-3">
+            <Label htmlFor="rpc-method">rpc method</Label>
+            <Input
+              id="rpc-method"
+              placeholder="e.g. add"
+              value={rpcMethod}
+              onChange={(e) => setRpcMethod(e.target.value)}
+            />
+          </div>
+          <div className="mb-3">
+            <Label htmlFor="rpc-params">params (json array)</Label>
+            <Textarea
+              id="rpc-params"
+              placeholder='[10, 20]'
+              value={rpcParams}
+              onChange={(e) => setRpcParams(e.target.value)}
+              rows={3}
+            />
+          </div>
+          <Button
+            variant="primary"
+            onClick={handleRpc}
+            disabled={rpcRunning || !rpcMethod.trim()}
+          >
+            {rpcRunning ? "running..." : "run"}
+          </Button>
+          {rpcError && (
+            <div className="mt-3 p-2.5 text-xs border border-destructive text-destructive bg-destructive/5">
+              {rpcError}
+            </div>
+          )}
+          {rpcResult && (
+            <pre className="mt-3 p-3 bg-background border border-border text-xs font-mono whitespace-pre-wrap overflow-auto max-h-60">
+              {rpcResult}
+            </pre>
           )}
         </CardContent>
       </Card>

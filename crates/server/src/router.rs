@@ -649,6 +649,7 @@ async fn handle_get_app(
                 "id": data.id,
                 "plan_id": data.plan_id,
                 "version": data.version,
+                "server_js": data.server_js,
             });
             json_response(StatusCode::OK, &info.to_string())
         }

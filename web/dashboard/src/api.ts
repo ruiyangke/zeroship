@@ -100,3 +100,17 @@ export function getAppUsage(id: string): Promise<UsageCounters> {
 export function getAllUsage(): Promise<AllUsage> {
   return apiFetch("/_usage");
 }
+
+// ── RPC ───────────────────────────────────────────────────
+
+export async function callRpc(appId: string, method: string, params: unknown[]): Promise<unknown> {
+  const res = await fetch('/rpc', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-App-Id': appId,
+    },
+    body: JSON.stringify({ jsonrpc: '2.0', method, params, id: 1 }),
+  });
+  return res.json();
+}

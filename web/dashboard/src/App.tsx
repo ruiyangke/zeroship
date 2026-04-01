@@ -6,6 +6,7 @@ import Overview from "./pages/Overview";
 import AppList from "./pages/AppList";
 import AppDetail from "./pages/AppDetail";
 import CreateApp from "./pages/CreateApp";
+import AIChat from "./pages/AIChat";
 
 function App() {
   const [authed, setAuthed] = useState(() => !!localStorage.getItem("appbase_key"));
@@ -38,6 +39,7 @@ function App() {
           <Route path="/apps" element={<AppList />} />
           <Route path="/apps/new" element={<CreateApp />} />
           <Route path="/apps/:id" element={<AppDetail />} />
+          <Route path="/ai" element={<AIChat />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Layout>
