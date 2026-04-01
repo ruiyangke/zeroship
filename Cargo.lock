@@ -150,8 +150,13 @@ dependencies = [
 name = "appbase-isolate-v8"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "libc",
  "serde_json",
+ "tokio",
  "v8",
 ]
 
