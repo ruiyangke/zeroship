@@ -1,34 +1,33 @@
-import { useState, useEffect, useRef } from "react";
-import { getStats, getHealth, getAllUsage, type Stats, type HealthStatus, type AppUsage } from "../api";
+import { useQuery } from "@tanstack/react-query";
+import { getStats, getHealth, getAllUsage } from "../api";
+import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge";
+import { Activity, Server, Box, Gauge, Zap } from "lucide-react";
 import StatusBadge from "../components/StatusBadge";
 
 export default function Overview() {
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [health, setHealth] = useState<HealthStatus | null>(null);
-  const [usage, setUsage] = useState<AppUsage[]>([]);
-  const [error, setError] = useState("");
-  const intervalRef = useRef<number | null>(null);
+  const { data: stats, error: statsError } = useQuery({
+    queryKey: ["stats"],
+    queryFn: getStats,
+    refetchInterval: 5000,
+  });
 
-  function fetchAll() {
-    Promise.all([getStats(), getHealth(), getAllUsage()])
-      .then(([s, h, u]) => {
-        setStats(s);
-        setHealth(h);
-        setUsage(u);
-        setError("");
-      })
-      .catch((err) => setError(err.message));
-  }
+  const { data: health } = useQuery({
+    queryKey: ["health"],
+    queryFn: getHealth,
+    refetchInterval: 5000,
+  });
 
-  useEffect(() => {
-    fetchAll();
-    intervalRef.current = window.setInterval(fetchAll, 5000);
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, []);
+  const { data: usage } = useQuery({
+    queryKey: ["usage"],
+    queryFn: getAllUsage,
+    refetchInterval: 5000,
+  });
 
-  const totalRequests = usage.reduce((sum, u) => {
+  const error = statsError?.message ?? "";
+
+  const totalRequests = (usage ?? []).reduce((sum, u) => {
     return sum + Object.values(u.counters || {}).reduce((a, b) => a + b, 0);
   }, 0);
 
@@ -40,80 +39,113 @@ export default function Overview() {
 
   return (
     <div>
-      <div className="page-header">
-        <h1>// overview</h1>
-        <span className="text-secondary" style={{ fontSize: 11 }}>
-          auto-refresh: 5s
-        </span>
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-xl font-medium tracking-[0.05em]">// overview</h1>
+        <Badge variant="muted">auto-refresh: 5s</Badge>
       </div>
 
-      {error && <div className="error-message">{error}</div>}
+      {error && (
+        <div className="text-xs text-destructive border border-destructive/30 bg-destructive/5 p-3 mb-4">
+          {error}
+        </div>
+      )}
 
-      <div className="stats-grid">
-        <div className="stat-card">
-          <div className="stat-label">health</div>
-          <div className="stat-value accent">
-            {health ? health.status : "--"}
-          </div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-label">total apps</div>
-          <div className="stat-value">
-            {stats ? stats.apps.length : "--"}
-          </div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-label">active isolates</div>
-          <div className="stat-value">
-            {stats ? `${stats.active_isolates} / ${stats.max_isolates}` : "--"}
-          </div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-label">pool utilization</div>
-          <div className="stat-value">{stats ? `${utilization}%` : "--"}</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-label">total requests</div>
-          <div className="stat-value">{stats ? totalRequests : "--"}</div>
-        </div>
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4 mb-6">
+        <Card>
+          <CardContent className="pt-5">
+            <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.1em] text-muted-foreground mb-2">
+              <Activity className="h-3 w-3" />
+              health
+            </div>
+            <div className="text-[28px] font-bold text-primary">
+              {health ? health.status : "--"}
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-5">
+            <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.1em] text-muted-foreground mb-2">
+              <Box className="h-3 w-3" />
+              total apps
+            </div>
+            <div className="text-[28px] font-bold">
+              {stats ? stats.apps.length : "--"}
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-5">
+            <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.1em] text-muted-foreground mb-2">
+              <Server className="h-3 w-3" />
+              active isolates
+            </div>
+            <div className="text-[28px] font-bold">
+              {stats ? `${stats.active_isolates} / ${stats.max_isolates}` : "--"}
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-5">
+            <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.1em] text-muted-foreground mb-2">
+              <Gauge className="h-3 w-3" />
+              pool utilization
+            </div>
+            <div className="text-[28px] font-bold">
+              {stats ? `${utilization}%` : "--"}
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-5">
+            <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.1em] text-muted-foreground mb-2">
+              <Zap className="h-3 w-3" />
+              total requests
+            </div>
+            <div className="text-[28px] font-bold">
+              {stats ? totalRequests : "--"}
+            </div>
+          </CardContent>
+        </Card>
       </div>
 
       {stats && stats.apps.length > 0 && (
-        <div className="card">
-          <div className="card-header">
-            <h2>isolate pool</h2>
-          </div>
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>app id</th>
-                <th>requests</th>
-                <th>idle</th>
-                <th>status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {stats.apps.map((app) => {
-                const status: "running" | "idle" | "stopped" =
-                  app.request_count > 0 && app.idle_secs < 5
-                    ? "running"
-                    : app.idle_secs < 60
-                      ? "idle"
-                      : "stopped";
-                return (
-                  <tr key={app.app_id}>
-                    <td>{app.app_id}</td>
-                    <td>{app.request_count}</td>
-                    <td>{app.idle_secs}s</td>
-                    <td>
-                      <StatusBadge status={status} />
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        <Card>
+          <CardHeader>
+            <CardTitle>isolate pool</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>app id</TableHead>
+                  <TableHead>requests</TableHead>
+                  <TableHead>idle</TableHead>
+                  <TableHead>status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {stats.apps.map((app) => {
+                  const status: "running" | "idle" | "stopped" =
+                    app.request_count > 0 && app.idle_secs < 5
+                      ? "running"
+                      : app.idle_secs < 60
+                        ? "idle"
+                        : "stopped";
+                  return (
+                    <TableRow key={app.app_id}>
+                      <TableCell>{app.app_id}</TableCell>
+                      <TableCell>{app.request_count}</TableCell>
+                      <TableCell>{app.idle_secs}s</TableCell>
+                      <TableCell>
+                        <StatusBadge status={status} />
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
       )}
     </div>
   );

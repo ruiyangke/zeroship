@@ -1,24 +1,27 @@
-import { useState, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { listApps, getStats, type AppRecord, type Stats } from "../api";
+import { useQuery } from "@tanstack/react-query";
+import { listApps, getStats } from "../api";
+import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import { Plus } from "lucide-react";
 import StatusBadge from "../components/StatusBadge";
 
 export default function AppList() {
-  const [apps, setApps] = useState<AppRecord[]>([]);
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
   const navigate = useNavigate();
 
-  useEffect(() => {
-    Promise.all([listApps(), getStats()])
-      .then(([a, s]) => {
-        setApps(a);
-        setStats(s);
-      })
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false));
-  }, []);
+  const { data: apps, isLoading, error: appsError } = useQuery({
+    queryKey: ["apps"],
+    queryFn: listApps,
+  });
+
+  const { data: stats } = useQuery({
+    queryKey: ["stats"],
+    queryFn: getStats,
+  });
+
+  const error = appsError?.message ?? "";
 
   function getAppStatus(appId: string): "running" | "idle" | "stopped" {
     if (!stats) return "stopped";
@@ -37,60 +40,78 @@ export default function AppList() {
 
   return (
     <div>
-      <div className="page-header">
-        <h1>// apps</h1>
-        <Link to="/apps/new" className="btn btn-primary">
-          + new app
-        </Link>
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-xl font-medium tracking-[0.05em]">// apps</h1>
+        <Button variant="primary" asChild>
+          <Link to="/apps/new">
+            <Plus className="h-3 w-3 mr-1.5" />
+            new app
+          </Link>
+        </Button>
       </div>
 
-      {error && <div className="error-message">{error}</div>}
+      {error && (
+        <div className="text-xs text-destructive border border-destructive/30 bg-destructive/5 p-3 mb-4">
+          {error}
+        </div>
+      )}
 
-      {loading ? (
-        <div className="loading">loading apps...</div>
-      ) : apps.length === 0 ? (
-        <div className="empty-state">
-          no apps found — <Link to="/apps/new">create one</Link>
+      {isLoading ? (
+        <div className="text-[13px] text-muted-foreground py-5">loading apps...</div>
+      ) : !apps || apps.length === 0 ? (
+        <div className="text-[13px] text-muted-foreground py-10 text-center border border-dashed border-border">
+          no apps found --{" "}
+          <Link to="/apps/new" className="text-primary hover:opacity-80 transition-opacity">
+            create one
+          </Link>
         </div>
       ) : (
-        <div className="card" style={{ padding: 0 }}>
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>id</th>
-                <th>plan</th>
-                <th>version</th>
-                <th>requests</th>
-                <th>status</th>
-                <th>updated</th>
-              </tr>
-            </thead>
-            <tbody>
-              {apps.map((app) => (
-                <tr
-                  key={app.id}
-                  style={{ cursor: "pointer" }}
-                  onClick={() => navigate(`/apps/${app.id}`)}
-                >
-                  <td>
-                    <Link to={`/apps/${app.id}`} onClick={(e) => e.stopPropagation()}>
-                      {app.id}
-                    </Link>
-                  </td>
-                  <td>{app.plan_id}</td>
-                  <td>v{app.version}</td>
-                  <td>{getAppRequests(app.id)}</td>
-                  <td>
-                    <StatusBadge status={getAppStatus(app.id)} />
-                  </td>
-                  <td className="text-secondary">
-                    {new Date(app.updated_at).toLocaleDateString()}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <Card className="p-0">
+          <CardContent className="p-0">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>id</TableHead>
+                  <TableHead>plan</TableHead>
+                  <TableHead>version</TableHead>
+                  <TableHead>requests</TableHead>
+                  <TableHead>status</TableHead>
+                  <TableHead>updated</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {apps.map((app) => (
+                  <TableRow
+                    key={app.id}
+                    className="cursor-pointer"
+                    onClick={() => navigate(`/apps/${app.id}`)}
+                  >
+                    <TableCell>
+                      <Link
+                        to={`/apps/${app.id}`}
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-primary hover:opacity-80 transition-opacity"
+                      >
+                        {app.id}
+                      </Link>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="muted">{app.plan_id}</Badge>
+                    </TableCell>
+                    <TableCell>v{app.version}</TableCell>
+                    <TableCell>{getAppRequests(app.id)}</TableCell>
+                    <TableCell>
+                      <StatusBadge status={getAppStatus(app.id)} />
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {new Date(app.updated_at).toLocaleDateString()}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
       )}
     </div>
   );

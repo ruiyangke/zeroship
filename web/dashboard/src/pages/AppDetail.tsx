@@ -1,85 +1,60 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { getApp, getAppUsage, deployApp, deleteApp, updatePlan, type AppRecord, type UsageCounters } from "../api";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { getApp, getAppUsage, deployApp, deleteApp, updatePlan } from "../api";
+import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
+import { Copy, Check, ChevronRight } from "lucide-react";
 
 const PLANS = ["free", "starter", "pro", "enterprise"];
 
 export default function AppDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
-  const [app, setApp] = useState<AppRecord | null>(null);
-  const [usage, setUsage] = useState<UsageCounters | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-
-  // Deploy state
   const [code, setCode] = useState("");
-  const [deploying, setDeploying] = useState(false);
-  const [deployResult, setDeployResult] = useState<{ ok: boolean; msg: string } | null>(null);
-
-  // Plan change state
   const [newPlan, setNewPlan] = useState("");
-  const [changingPlan, setChangingPlan] = useState(false);
-
-  // Copy state
   const [copied, setCopied] = useState(false);
 
-  useEffect(() => {
-    if (!id) return;
-    setLoading(true);
-    Promise.all([getApp(id), getAppUsage(id).catch(() => null)])
-      .then(([a, u]) => {
-        setApp(a);
-        setUsage(u);
-        setNewPlan(a.plan_id);
-      })
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false));
-  }, [id]);
+  const { data: app, isLoading, error: appError } = useQuery({
+    queryKey: ["app", id],
+    queryFn: () => getApp(id!),
+    enabled: !!id,
+  });
 
-  async function handleDeploy() {
-    if (!id || !code.trim()) return;
-    setDeploying(true);
-    setDeployResult(null);
-    try {
-      const res = await deployApp(id, code);
-      setDeployResult({ ok: true, msg: `deployed version ${res.version}` });
-      // Refresh app data
-      const updated = await getApp(id);
-      setApp(updated);
-    } catch (err: unknown) {
-      setDeployResult({ ok: false, msg: err instanceof Error ? err.message : "deploy failed" });
-    } finally {
-      setDeploying(false);
-    }
+  const { data: usage } = useQuery({
+    queryKey: ["app-usage", id],
+    queryFn: () => getAppUsage(id!).catch(() => null),
+    enabled: !!id,
+  });
+
+  // Set newPlan when app loads
+  if (app && !newPlan) {
+    setNewPlan(app.plan_id);
   }
 
-  async function handleDelete() {
-    if (!id) return;
-    const confirmed = window.confirm(`delete app "${id}"? this cannot be undone.`);
-    if (!confirmed) return;
-    try {
-      await deleteApp(id);
-      navigate("/apps");
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "delete failed");
-    }
-  }
+  const deployMutation = useMutation({
+    mutationFn: () => deployApp(id!, code),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["app", id] });
+    },
+  });
 
-  async function handlePlanChange() {
-    if (!id || !newPlan || newPlan === app?.plan_id) return;
-    setChangingPlan(true);
-    try {
-      await updatePlan(id, newPlan);
-      const updated = await getApp(id);
-      setApp(updated);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "plan change failed");
-    } finally {
-      setChangingPlan(false);
-    }
-  }
+  const deleteMutation = useMutation({
+    mutationFn: () => deleteApp(id!),
+    onSuccess: () => navigate("/apps"),
+  });
+
+  const planMutation = useMutation({
+    mutationFn: (planId: string) => updatePlan(id!, planId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["app", id] });
+    },
+  });
 
   function handleCopy() {
     if (!app) return;
@@ -89,9 +64,37 @@ export default function AppDetail() {
     });
   }
 
-  if (loading) return <div className="loading">loading...</div>;
-  if (error && !app) return <div className="error-message">{error}</div>;
-  if (!app) return <div className="error-message">app not found</div>;
+  function handleDelete() {
+    if (!id) return;
+    const confirmed = window.confirm(`delete app "${id}"? this cannot be undone.`);
+    if (!confirmed) return;
+    deleteMutation.mutate();
+  }
+
+  function handlePlanChange() {
+    if (!newPlan || newPlan === app?.plan_id) return;
+    planMutation.mutate(newPlan);
+  }
+
+  const error = appError?.message ?? "";
+
+  if (isLoading) {
+    return <div className="text-[13px] text-muted-foreground py-5">loading...</div>;
+  }
+  if (error && !app) {
+    return (
+      <div className="text-xs text-destructive border border-destructive/30 bg-destructive/5 p-3">
+        {error}
+      </div>
+    );
+  }
+  if (!app) {
+    return (
+      <div className="text-xs text-destructive border border-destructive/30 bg-destructive/5 p-3">
+        app not found
+      </div>
+    );
+  }
 
   const totalRequests = usage
     ? Object.values(usage.counters || {}).reduce((a, b) => a + b, 0)
@@ -99,150 +102,183 @@ export default function AppDetail() {
 
   return (
     <div>
-      <div className="breadcrumb">
-        <Link to="/apps">apps</Link>
-        <span className="separator">/</span>
+      {/* Breadcrumb */}
+      <div className="text-xs text-muted-foreground mb-4 flex items-center gap-1">
+        <Link to="/apps" className="text-muted-foreground hover:text-foreground transition-colors">
+          apps
+        </Link>
+        <ChevronRight className="h-3 w-3" />
         <span>{app.id}</span>
       </div>
 
-      <div className="page-header">
-        <h1>// {app.id}</h1>
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-xl font-medium tracking-[0.05em]">// {app.id}</h1>
       </div>
 
-      {error && <div className="error-message">{error}</div>}
+      {error && (
+        <div className="text-xs text-destructive border border-destructive/30 bg-destructive/5 p-3 mb-4">
+          {error}
+        </div>
+      )}
 
       {/* Info Panel */}
-      <div className="card">
-        <div className="card-header">
-          <h2>info</h2>
-        </div>
-        <div className="info-grid">
-          <div className="info-item">
-            <div className="info-label">app id</div>
-            <div className="info-value">{app.id}</div>
-          </div>
-          <div className="info-item">
-            <div className="info-label">plan</div>
-            <div className="info-value">{app.plan_id}</div>
-          </div>
-          <div className="info-item">
-            <div className="info-label">version</div>
-            <div className="info-value">v{app.version}</div>
-          </div>
-          <div className="info-item">
-            <div className="info-label">api key</div>
-            <div className="info-value">
-              <div className="copy-wrap">
-                <span style={{ flex: 1 }}>{app.api_key}</span>
-                <button className={`copy-btn ${copied ? "copied" : ""}`} onClick={handleCopy}>
-                  {copied ? "copied" : "copy"}
+      <Card className="mb-4">
+        <CardHeader>
+          <CardTitle>info</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 gap-3">
+            <InfoItem label="app id" value={app.id} />
+            <InfoItem label="plan" value={app.plan_id} />
+            <InfoItem label="version" value={`v${app.version}`} />
+            <div className="p-3 bg-background border border-border">
+              <div className="text-[10px] uppercase tracking-[0.1em] text-muted-foreground mb-1">
+                api key
+              </div>
+              <div className="text-[13px] text-foreground flex items-center gap-2">
+                <span className="flex-1 break-all">{app.api_key}</span>
+                <button
+                  onClick={handleCopy}
+                  className="shrink-0 p-1 border border-border text-muted-foreground hover:border-primary hover:text-primary transition-colors cursor-pointer bg-transparent"
+                >
+                  {copied ? (
+                    <Check className="h-3 w-3" />
+                  ) : (
+                    <Copy className="h-3 w-3" />
+                  )}
                 </button>
               </div>
             </div>
+            <InfoItem label="created" value={new Date(app.created_at).toLocaleString()} />
+            <InfoItem label="updated" value={new Date(app.updated_at).toLocaleString()} />
           </div>
-          <div className="info-item">
-            <div className="info-label">created</div>
-            <div className="info-value">{new Date(app.created_at).toLocaleString()}</div>
-          </div>
-          <div className="info-item">
-            <div className="info-label">updated</div>
-            <div className="info-value">{new Date(app.updated_at).toLocaleString()}</div>
-          </div>
-        </div>
-      </div>
+        </CardContent>
+      </Card>
 
       {/* Usage Panel */}
-      <div className="card">
-        <div className="card-header">
-          <h2>usage</h2>
-        </div>
-        {usage ? (
-          <div className="stats-grid">
-            <div className="stat-card">
-              <div className="stat-label">total requests</div>
-              <div className="stat-value">{totalRequests}</div>
-            </div>
-            {Object.entries(usage.counters || {}).map(([key, val]) => (
-              <div className="stat-card" key={key}>
-                <div className="stat-label">{key}</div>
-                <div className="stat-value">{val}</div>
+      <Card className="mb-4">
+        <CardHeader>
+          <CardTitle>usage</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {usage ? (
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-3">
+              <div className="p-3 bg-background border border-border">
+                <div className="text-[10px] uppercase tracking-[0.1em] text-muted-foreground mb-1">
+                  total requests
+                </div>
+                <div className="text-[28px] font-bold">{totalRequests}</div>
               </div>
-            ))}
-          </div>
-        ) : (
-          <div className="text-secondary" style={{ fontSize: 13 }}>
-            no usage data available
-          </div>
-        )}
-      </div>
+              {Object.entries(usage.counters || {}).map(([key, val]) => (
+                <div key={key} className="p-3 bg-background border border-border">
+                  <div className="text-[10px] uppercase tracking-[0.1em] text-muted-foreground mb-1">
+                    {key}
+                  </div>
+                  <div className="text-[28px] font-bold">{val}</div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-[13px] text-muted-foreground">
+              no usage data available
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Deploy Panel */}
-      <div className="card">
-        <div className="card-header">
-          <h2>deploy</h2>
-        </div>
-        <div className="form-group">
-          <label htmlFor="deploy-code">javascript source</label>
-          <textarea
-            id="deploy-code"
-            className="form-input"
-            placeholder="// paste your handler code here..."
-            value={code}
-            onChange={(e) => setCode(e.target.value)}
-          />
-        </div>
-        <button
-          className="btn btn-primary"
-          onClick={handleDeploy}
-          disabled={deploying || !code.trim()}
-        >
-          {deploying ? "deploying..." : "deploy"}
-        </button>
-        {deployResult && (
-          <div className={`deploy-result ${deployResult.ok ? "success" : "error"}`}>
-            {deployResult.msg}
+      <Card className="mb-4">
+        <CardHeader>
+          <CardTitle>deploy</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="mb-4">
+            <Label htmlFor="deploy-code">javascript source</Label>
+            <Textarea
+              id="deploy-code"
+              placeholder="// paste your handler code here..."
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+            />
           </div>
-        )}
-      </div>
+          <Button
+            variant="primary"
+            onClick={() => deployMutation.mutate()}
+            disabled={deployMutation.isPending || !code.trim()}
+          >
+            {deployMutation.isPending ? "deploying..." : "deploy"}
+          </Button>
+          {deployMutation.isSuccess && (
+            <div className="mt-3 p-2.5 text-xs border border-primary text-primary bg-primary/5">
+              deployed version {deployMutation.data.version}
+            </div>
+          )}
+          {deployMutation.isError && (
+            <div className="mt-3 p-2.5 text-xs border border-destructive text-destructive bg-destructive/5">
+              {deployMutation.error.message}
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Danger Zone */}
-      <div className="card danger-zone">
-        <div className="card-header">
-          <h2>danger zone</h2>
-        </div>
-        <div className="danger-actions">
-          <div className="form-group">
-            <label htmlFor="plan-select">change plan</label>
-            <div style={{ display: "flex", gap: 8 }}>
-              <select
-                id="plan-select"
-                className="form-input"
-                value={newPlan}
-                onChange={(e) => setNewPlan(e.target.value)}
-                style={{ flex: 1 }}
-              >
-                {PLANS.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
-              <button
-                className="btn btn-danger btn-small"
+      <Card className="border-destructive/30">
+        <CardHeader>
+          <CardTitle className="text-destructive">danger zone</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="mb-4">
+            <Label htmlFor="plan-select">change plan</Label>
+            <div className="flex gap-2">
+              <Select value={newPlan} onValueChange={setNewPlan}>
+                <SelectTrigger className="flex-1">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {PLANS.map((p) => (
+                    <SelectItem key={p} value={p}>
+                      {p}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button
+                variant="destructive"
+                size="sm"
                 onClick={handlePlanChange}
-                disabled={changingPlan || newPlan === app.plan_id}
+                disabled={planMutation.isPending || newPlan === app.plan_id}
               >
-                {changingPlan ? "..." : "update"}
-              </button>
+                {planMutation.isPending ? "..." : "update"}
+              </Button>
             </div>
           </div>
-        </div>
-        <div className="mt-16">
-          <button className="btn btn-danger" onClick={handleDelete}>
-            delete app
-          </button>
-        </div>
+          {(deleteMutation.isError || planMutation.isError) && (
+            <div className="text-xs text-destructive border border-destructive/30 bg-destructive/5 p-2.5 mb-4">
+              {deleteMutation.error?.message || planMutation.error?.message}
+            </div>
+          )}
+          <div className="mt-4">
+            <Button
+              variant="destructive"
+              onClick={handleDelete}
+              disabled={deleteMutation.isPending}
+            >
+              {deleteMutation.isPending ? "deleting..." : "delete app"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function InfoItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="p-3 bg-background border border-border">
+      <div className="text-[10px] uppercase tracking-[0.1em] text-muted-foreground mb-1">
+        {label}
       </div>
+      <div className="text-[13px] text-foreground break-all">{value}</div>
     </div>
   );
 }

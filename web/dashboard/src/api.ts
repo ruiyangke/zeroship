@@ -28,22 +28,24 @@ export interface AppUsage {
   counters: Record<string, number>;
 }
 
+const API_BASE = '';
+
 function getKey(): string {
   return localStorage.getItem("appbase_key") || "";
 }
 
-async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
-  const key = getKey();
-  const res = await fetch(path, {
-    ...opts,
+async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
     headers: {
-      "Authorization": `Bearer ${key}`,
-      ...opts.headers,
+      'Authorization': `Bearer ${getKey()}`,
+      'Content-Type': 'application/json',
+      ...options?.headers,
     },
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`${res.status} ${res.statusText}: ${text}`);
+    throw new Error(text || `HTTP ${res.status}`);
   }
   return res.json();
 }
@@ -51,27 +53,26 @@ async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
 // ── Apps ──────────────────────────────────────────────────
 
 export function listApps(): Promise<AppRecord[]> {
-  return request("/api/apps");
+  return apiFetch("/api/apps");
 }
 
 export function getApp(id: string): Promise<AppRecord> {
-  return request(`/api/apps/${id}`);
+  return apiFetch(`/api/apps/${id}`);
 }
 
 export function createApp(id: string, plan_id: string): Promise<AppRecord> {
-  return request("/api/apps", {
+  return apiFetch("/api/apps", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id, plan_id }),
   });
 }
 
 export function deleteApp(id: string): Promise<{ deleted: boolean }> {
-  return request(`/api/apps/${id}`, { method: "DELETE" });
+  return apiFetch(`/api/apps/${id}`, { method: "DELETE" });
 }
 
 export function deployApp(id: string, code: string): Promise<{ version: number }> {
-  return request(`/api/apps/${id}/deploy`, {
+  return apiFetch(`/api/apps/${id}/deploy`, {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
     body: code,
@@ -79,9 +80,8 @@ export function deployApp(id: string, code: string): Promise<{ version: number }
 }
 
 export function updatePlan(id: string, plan_id: string): Promise<{ updated: boolean }> {
-  return request(`/api/apps/${id}/plan`, {
+  return apiFetch(`/api/apps/${id}/plan`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ plan_id }),
   });
 }
@@ -89,17 +89,17 @@ export function updatePlan(id: string, plan_id: string): Promise<{ updated: bool
 // ── System ───────────────────────────────────────────────
 
 export function getStats(): Promise<Stats> {
-  return request("/_stats");
+  return apiFetch("/_stats");
 }
 
 export function getHealth(): Promise<HealthStatus> {
-  return request("/_health");
+  return apiFetch("/_health");
 }
 
 export function getAppUsage(id: string): Promise<UsageCounters> {
-  return request(`/_apps/${id}/usage`);
+  return apiFetch(`/_apps/${id}/usage`);
 }
 
 export function getAllUsage(): Promise<AppUsage[]> {
-  return request("/_usage");
+  return apiFetch("/_usage");
 }

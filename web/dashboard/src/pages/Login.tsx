@@ -1,5 +1,10 @@
 import { useState, type FormEvent } from "react";
+import { useMutation } from "@tanstack/react-query";
 import { getHealth } from "../api";
+import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
 
 interface LoginProps {
   onLogin: () => void;
@@ -7,53 +12,67 @@ interface LoginProps {
 
 export default function Login({ onLogin }: LoginProps) {
   const [key, setKey] = useState("");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
 
-  async function handleSubmit(e: FormEvent) {
+  const loginMutation = useMutation({
+    mutationFn: async (masterKey: string) => {
+      localStorage.setItem("appbase_key", masterKey.trim());
+      try {
+        await getHealth();
+      } catch {
+        localStorage.removeItem("appbase_key");
+        throw new Error(
+          "connection failed -- check your key and that the server is running on :3333"
+        );
+      }
+    },
+    onSuccess: () => onLogin(),
+  });
+
+  function handleSubmit(e: FormEvent) {
     e.preventDefault();
     if (!key.trim()) return;
-
-    setLoading(true);
-    setError("");
-
-    // Store key temporarily to test it
-    localStorage.setItem("appbase_key", key.trim());
-
-    try {
-      await getHealth();
-      onLogin();
-    } catch {
-      localStorage.removeItem("appbase_key");
-      setError("connection failed — check your key and that the server is running on :3333");
-    } finally {
-      setLoading(false);
-    }
+    loginMutation.mutate(key);
   }
 
   return (
-    <div className="login-page">
-      <div className="login-box">
-        <h1>appbase</h1>
-        <div className="subtitle">enter master key to continue</div>
-        <form onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label htmlFor="master-key">master key</label>
-            <input
-              id="master-key"
-              type="password"
-              className="form-input"
-              placeholder="sk_..."
-              value={key}
-              onChange={(e) => setKey(e.target.value)}
-              autoFocus
-            />
-          </div>
-          <button type="submit" className="btn btn-primary" disabled={loading || !key.trim()}>
-            {loading ? "connecting..." : "authenticate"}
-          </button>
-          {error && <div className="login-error">{error}</div>}
-        </form>
+    <div className="flex items-center justify-center h-screen p-5">
+      <div className="w-[400px] max-w-full">
+        <h1 className="text-sm font-bold tracking-[0.15em] uppercase text-primary mb-1">
+          appbase
+        </h1>
+        <div className="text-xs text-muted-foreground mb-6">
+          enter master key to continue
+        </div>
+        <Card>
+          <CardContent>
+            <form onSubmit={handleSubmit}>
+              <div className="mb-4">
+                <Label htmlFor="master-key">master key</Label>
+                <Input
+                  id="master-key"
+                  type="password"
+                  placeholder="sk_..."
+                  value={key}
+                  onChange={(e) => setKey(e.target.value)}
+                  autoFocus
+                />
+              </div>
+              <Button
+                type="submit"
+                variant="primary"
+                className="w-full"
+                disabled={loginMutation.isPending || !key.trim()}
+              >
+                {loginMutation.isPending ? "connecting..." : "authenticate"}
+              </Button>
+              {loginMutation.isError && (
+                <div className="text-xs text-destructive mt-2">
+                  {loginMutation.error.message}
+                </div>
+              )}
+            </form>
+          </CardContent>
+        </Card>
       </div>
     </div>
   );
