@@ -732,7 +732,15 @@ async fn handle_deploy(
             state.bundles.lock().unwrap().remove(&id);
             state.bundle_versions.write().unwrap().insert(id.clone(), version);
             state.pool.evict_app(&id);
-            json_response(StatusCode::OK, &format!(r#"{{"version":{version}}}"#))
+            let test_curl = format!(
+                "curl -X POST http://localhost:3333/rpc -H 'X-App-Id: {id}' -H 'Content-Type: application/json' -d '{{\"jsonrpc\":\"2.0\",\"method\":\"YOUR_METHOD\",\"params\":[],\"id\":1}}'"
+            );
+            let resp = serde_json::json!({
+                "version": version,
+                "app_id": id,
+                "test": test_curl,
+            });
+            json_response(StatusCode::OK, &resp.to_string())
         }
         Err(appbase_control::RegistryError::NotFound(_)) => {
             json_response(StatusCode::NOT_FOUND, r#"{"error":"App not found"}"#)

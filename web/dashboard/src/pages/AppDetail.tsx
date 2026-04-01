@@ -22,6 +22,7 @@ export default function AppDetail() {
   const [codePrefilled, setCodePrefilled] = useState(false);
   const [newPlan, setNewPlan] = useState("");
   const [copied, setCopied] = useState(false);
+  const [curlCopied, setCurlCopied] = useState(false);
   const [rpcMethod, setRpcMethod] = useState("");
   const [rpcParams, setRpcParams] = useState("[]");
   const [rpcResult, setRpcResult] = useState<string | null>(null);
@@ -188,6 +189,35 @@ export default function AppDetail() {
           {duplicating ? "duplicating..." : "duplicate"}
         </Button>
       </div>
+
+      {/* Quick Start */}
+      <Card className="mb-4 border-primary/30">
+        <CardHeader>
+          <CardTitle>quick start</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="relative">
+            <pre className="p-3 bg-background border border-border text-xs font-mono whitespace-pre-wrap overflow-auto">
+{`curl -X POST http://localhost:3333/rpc \\
+  -H 'X-App-Id: ${app.id}' \\
+  -H 'Content-Type: application/json' \\
+  -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}'`}
+            </pre>
+            <button
+              onClick={() => {
+                const cmd = `curl -X POST http://localhost:3333/rpc -H 'X-App-Id: ${app.id}' -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}'`;
+                navigator.clipboard.writeText(cmd).then(() => {
+                  setCurlCopied(true);
+                  setTimeout(() => setCurlCopied(false), 2000);
+                });
+              }}
+              className="absolute top-2 right-2 p-1.5 border border-border text-muted-foreground hover:border-primary hover:text-primary transition-colors cursor-pointer bg-card"
+            >
+              {curlCopied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+            </button>
+          </div>
+        </CardContent>
+      </Card>
 
       {error && (
         <div className="text-xs text-destructive border border-destructive/30 bg-destructive/5 p-3 mb-4">

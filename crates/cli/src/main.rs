@@ -211,8 +211,40 @@ fn cmd_serve(args: &[String]) {
             state.meters.clone(),
             state.meters.clone(),
         );
+        // Idle isolate eviction (every 30s)
+        let pool_for_eviction = state.pool.clone();
+        let eviction_handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                pool_for_eviction.evict_idle();
+            }
+        });
+
+        // Version polling for hot reload (every 5s)
+        let registry_for_poll = state.registry.clone();
+        let pool_for_poll = state.pool.clone();
+        let bundles_for_poll = state.bundles.clone();
+        let versions_for_poll = state.bundle_versions.clone();
+        let hot_reload_handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let versions = versions_for_poll.read().unwrap().clone();
+                for (app_id, cached_version) in &versions {
+                    if let Ok(Some(db_version)) = registry_for_poll.get_version(app_id).await {
+                        if db_version > *cached_version {
+                            // Evict stale cache + isolate
+                            bundles_for_poll.lock().unwrap().remove(app_id);
+                            pool_for_poll.evict_app(app_id);
+                            versions_for_poll.write().unwrap().remove(app_id);
+                            eprintln!("[hot-reload] App '{app_id}' updated: v{cached_version} → v{db_version}");
+                        }
+                    }
+                }
+            }
+        });
+
         eprintln!(
-            "[appbase] Background services started (flusher=5s, roller=60s, reconciler=10s)"
+            "[appbase] Background services started (flusher=5s, roller=60s, reconciler=10s, eviction=30s, hot-reload=5s)"
         );
 
         let meters_for_shutdown = state.meters.clone();
@@ -228,6 +260,8 @@ fn cmd_serve(args: &[String]) {
         roller_handle.abort();
         reconciler_handle.abort();
         event_writer_handle.abort();
+        eviction_handle.abort();
+        hot_reload_handle.abort();
 
         result
     }) {
