@@ -5,16 +5,16 @@
 //! CPU time measured per-request via CLOCK_THREAD_CPUTIME_ID.
 //!
 //! Supports async/await, setTimeout/clearTimeout, setInterval/clearInterval
-//! via a channel-driven event loop backed by tokio timers (zero CPU while idle).
+//! via a min-heap event loop (Node.js/libuv model). Zero CPU while idle.
 
 #![allow(unsafe_code)]
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
 
 /// Initialize V8 (safe to call multiple times).
 pub fn init_v8() {
@@ -36,91 +36,88 @@ pub struct RequestResult {
 }
 
 // ---------------------------------------------------------------------------
-// Shared tokio runtime for timer/op scheduling
+// Timer min-heap entry
 // ---------------------------------------------------------------------------
 
-fn timer_runtime() -> &'static tokio::runtime::Runtime {
-    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RT.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .unwrap()
-    })
+#[derive(Eq, PartialEq)]
+struct TimerHeapEntry {
+    fire_at: Instant,
+    id: u32,
+}
+
+impl Ord for TimerHeapEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.fire_at
+            .cmp(&other.fire_at)
+            .then(self.id.cmp(&other.id))
+    }
+}
+
+impl PartialOrd for TimerHeapEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Event types for channel-driven event loop
+// Timer callback storage
 // ---------------------------------------------------------------------------
 
-enum Event {
-    TimerFired(u32),
-    #[allow(dead_code)] // Used by future fetch() support
-    OpCompleted(u32, String),
+#[allow(missing_debug_implementations)]
+struct TimerCallback {
+    callback: v8::Global<v8::Function>,
+    interval: Option<Duration>, // None = setTimeout, Some = setInterval
+}
+
+// ---------------------------------------------------------------------------
+// Async op result (for future fetch/DB support)
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+struct OpResult {
+    id: u32,
+    value: String,
 }
 
 // ---------------------------------------------------------------------------
 // Event loop state
 // ---------------------------------------------------------------------------
 
-#[allow(missing_debug_implementations)]
-struct Timer {
-    callback: v8::Global<v8::Function>,
-    interval: Option<Duration>,
-    /// Handle to cancel the spawned tokio timer task
-    task_handle: Option<tokio::task::JoinHandle<()>>,
-}
-
 /// State shared between V8 callbacks and the event loop driver.
 #[allow(missing_debug_implementations)]
 struct EventLoopState {
-    timers: HashMap<u32, Timer>,
+    /// Timer min-heap: next-to-fire on top (via Reverse for BinaryHeap)
+    timer_heap: BinaryHeap<Reverse<TimerHeapEntry>>,
+    /// Timer callbacks stored separately (heap only has fire_at + id)
+    timer_callbacks: HashMap<u32, TimerCallback>,
     next_timer_id: u32,
-    /// Pending async op promises: id -> resolver
+    /// Async op channel sender (for future fetch() etc)
+    #[allow(dead_code)]
+    op_tx: mpsc::Sender<OpResult>,
+    /// Async op channel receiver
+    op_rx: mpsc::Receiver<OpResult>,
+    /// Pending promise resolvers for async ops
     pending_resolvers: HashMap<u32, v8::Global<v8::PromiseResolver>>,
-    #[allow(dead_code)] // Used by future fetch() support
+    #[allow(dead_code)]
     next_op_id: u32,
-    /// Completed ops waiting to be resolved: (id, json_value)
-    completed_ops: Vec<(u32, String)>,
-    /// Timer IDs ready to fire immediately (0ms delay, no channel round-trip)
-    ready_timer_ids: Vec<u32>,
-    /// Channel sender for event notifications (cloned into spawned tasks)
-    event_tx: mpsc::Sender<Event>,
-    /// Channel receiver for event notifications (used by event loop)
-    event_rx: mpsc::Receiver<Event>,
 }
 
 impl EventLoopState {
     fn new() -> Self {
-        let (event_tx, event_rx) = mpsc::channel(1024);
+        let (op_tx, op_rx) = mpsc::channel();
         Self {
-            timers: HashMap::new(),
+            timer_heap: BinaryHeap::new(),
+            timer_callbacks: HashMap::new(),
             next_timer_id: 1,
+            op_tx,
+            op_rx,
             pending_resolvers: HashMap::new(),
             next_op_id: 1,
-            completed_ops: Vec::new(),
-            ready_timer_ids: Vec::new(),
-            event_tx,
-            event_rx,
         }
     }
 }
 
 type SharedState = Rc<RefCell<EventLoopState>>;
-
-/// Spawn a timer task on the shared tokio runtime.
-/// Returns a `JoinHandle` that can be aborted for `clearTimeout`.
-fn spawn_timer_task(
-    tx: mpsc::Sender<Event>,
-    timer_id: u32,
-    delay: Duration,
-) -> tokio::task::JoinHandle<()> {
-    timer_runtime().spawn(async move {
-        tokio::time::sleep(delay).await;
-        let _ = tx.send(Event::TimerFired(timer_id)).await;
-    })
-}
 
 // ---------------------------------------------------------------------------
 // Console polyfill
@@ -178,30 +175,19 @@ fn set_timeout_callback(
 
     let delay = Duration::from_millis(u64::from(ms));
 
-    if ms == 0 {
-        // 0ms timer: queue directly, no channel round-trip
-        s.timers.insert(
-            id,
-            Timer {
-                callback: global_cb,
-                interval: None,
-                task_handle: None,
-            },
-        );
-        s.ready_timer_ids.push(id);
-    } else {
-        // Non-zero timer: spawn tokio task
-        let tx = s.event_tx.clone();
-        let handle = spawn_timer_task(tx, id, delay);
-        s.timers.insert(
-            id,
-            Timer {
-                callback: global_cb,
-                interval: None,
-                task_handle: Some(handle),
-            },
-        );
-    }
+    // Insert into min-heap (no tokio task!)
+    s.timer_heap.push(Reverse(TimerHeapEntry {
+        fire_at: Instant::now() + delay,
+        id,
+    }));
+    s.timer_callbacks.insert(
+        id,
+        TimerCallback {
+            callback: global_cb,
+            interval: None,
+        },
+    );
+
     rv.set(v8::Integer::new(scope, id as i32).into());
 }
 
@@ -222,12 +208,8 @@ fn clear_timeout_callback(
     };
 
     let mut s = state.borrow_mut();
-    if let Some(timer) = s.timers.remove(&id) {
-        // Abort the spawned tokio task to prevent it from firing
-        if let Some(handle) = timer.task_handle {
-            handle.abort();
-        }
-    }
+    // Lazy deletion: only remove from callbacks, heap entry will be skipped when popped
+    s.timer_callbacks.remove(&id);
 }
 
 fn set_interval_callback(
@@ -263,17 +245,19 @@ fn set_interval_callback(
     let id = s.next_timer_id;
     s.next_timer_id += 1;
 
-    let tx = s.event_tx.clone();
-    let handle = spawn_timer_task(tx, id, dur);
-
-    s.timers.insert(
+    // Insert into min-heap
+    s.timer_heap.push(Reverse(TimerHeapEntry {
+        fire_at: Instant::now() + dur,
         id,
-        Timer {
+    }));
+    s.timer_callbacks.insert(
+        id,
+        TimerCallback {
             callback: global_cb,
             interval: Some(dur),
-            task_handle: Some(handle),
         },
     );
+
     rv.set(v8::Integer::new(scope, id as i32).into());
 }
 
@@ -333,153 +317,167 @@ fn setup_globals(scope: &mut v8::PinScope) {
 }
 
 // ---------------------------------------------------------------------------
-// Event loop
+// Event loop — min-heap + phased model (Node.js/libuv style)
 // ---------------------------------------------------------------------------
 
-/// Process all pending events from the channel without blocking.
-/// Marks fired timers in the state so they can be handled by V8.
-fn drain_ready_events(state: &SharedState) -> Vec<Event> {
-    let mut events = Vec::new();
-    let mut s = state.borrow_mut();
-    while let Ok(event) = s.event_rx.try_recv() {
-        events.push(event);
-    }
-    events
-}
+/// Fire all timers whose fire_at <= now. Returns true if any timer fired.
+fn fire_ready_timers(scope: &mut v8::PinScope, state: &SharedState) -> bool {
+    let mut any_fired = false;
+    let now = Instant::now();
 
-/// Fire timer callbacks for the given fired timer IDs.
-/// For setInterval timers, re-spawns the next timer task.
-fn fire_timers(
-    scope: &mut v8::PinScope,
-    state: &SharedState,
-    fired_ids: &[u32],
-) {
-    for &id in fired_ids {
-        let callback_opt = {
-            let mut s = state.borrow_mut();
-            if let Some(timer) = s.timers.remove(&id) {
-                let cb = timer.callback.clone();
-                if let Some(dur) = timer.interval {
-                    // setInterval: re-spawn timer task for next interval
-                    let tx = s.event_tx.clone();
-                    let handle = spawn_timer_task(tx, id, dur);
-                    s.timers.insert(
-                        id,
-                        Timer {
-                            callback: timer.callback,
-                            interval: Some(dur),
-                            task_handle: Some(handle),
-                        },
-                    );
-                }
-                Some(cb)
-            } else {
-                None
-            }
+    loop {
+        let should_fire = {
+            let s = state.borrow();
+            s.timer_heap
+                .peek()
+                .map(|Reverse(e)| e.fire_at <= now)
+                .unwrap_or(false)
+        };
+        if !should_fire {
+            break;
+        }
+
+        let entry = state.borrow_mut().timer_heap.pop().unwrap().0;
+
+        // Check if callback still exists (lazy deletion: cleared timers are skipped)
+        let cb_opt = {
+            let s = state.borrow();
+            s.timer_callbacks
+                .get(&entry.id)
+                .map(|t| (t.callback.clone(), t.interval))
         };
 
-        if let Some(callback) = callback_opt {
+        if let Some((callback, interval)) = cb_opt {
+            any_fired = true;
+
+            // Fire the callback
             let func = v8::Local::new(scope, &callback);
             let undefined = v8::undefined(scope).into();
             func.call(scope, undefined, &[]);
             scope.perform_microtask_checkpoint();
+
+            // Handle interval: re-insert into heap with new fire_at
+            if let Some(dur) = interval {
+                let mut s = state.borrow_mut();
+                s.timer_heap.push(Reverse(TimerHeapEntry {
+                    fire_at: Instant::now() + dur,
+                    id: entry.id,
+                }));
+                // DON'T remove callback from timer_callbacks
+            } else {
+                // setTimeout: remove callback
+                state.borrow_mut().timer_callbacks.remove(&entry.id);
+            }
+        }
+        // else: timer was cleared (lazy deletion) -- skip
+    }
+
+    any_fired
+}
+
+/// Drain completed async ops from the channel and resolve their promises.
+fn drain_async_ops(scope: &mut v8::PinScope, state: &SharedState) {
+    loop {
+        let result = state.borrow_mut().op_rx.try_recv();
+        match result {
+            Ok(op_result) => {
+                let resolver = state.borrow_mut().pending_resolvers.remove(&op_result.id);
+                if let Some(resolver) = resolver {
+                    let r = v8::Local::new(scope, &resolver);
+                    let val = v8::String::new(scope, &op_result.value).unwrap();
+                    r.resolve(scope, val.into());
+                    scope.perform_microtask_checkpoint();
+                }
+            }
+            Err(_) => break,
         }
     }
 }
 
-/// Resolve completed async ops in V8.
-fn resolve_ops(
-    scope: &mut v8::PinScope,
-    state: &SharedState,
-) {
-    let completed: Vec<(u32, String)> =
-        state.borrow_mut().completed_ops.drain(..).collect();
-    for (id, value) in completed {
-        let resolver = state.borrow_mut().pending_resolvers.remove(&id);
-        if let Some(resolver) = resolver {
-            let r = v8::Local::new(scope, &resolver);
-            let val = v8::String::new(scope, &value).unwrap();
-            r.resolve(scope, val.into());
-            scope.perform_microtask_checkpoint();
+/// Compute the wait duration until the next valid timer fires.
+/// Skips cleared timers (lazy deletion) by iterating the heap.
+fn compute_wait_timeout(state: &SharedState) -> Option<Duration> {
+    let s = state.borrow();
+
+    // Find next valid timer in heap (skip cleared ones)
+    let mut next_fire = None;
+    for Reverse(entry) in s.timer_heap.iter() {
+        if s.timer_callbacks.contains_key(&entry.id) {
+            next_fire = Some(entry.fire_at);
+            break; // heap is ordered, first valid entry is the soonest
         }
+    }
+
+    match next_fire {
+        Some(fire_at) => Some(fire_at.saturating_duration_since(Instant::now())),
+        None if !s.pending_resolvers.is_empty() => {
+            // No timers but async ops pending: wait up to 60s for op completion
+            Some(Duration::from_secs(60))
+        }
+        None => None, // nothing to wait for
     }
 }
 
 /// Drive the event loop until there is no more pending work.
-/// Uses channel-based blocking (zero CPU while idle).
-fn run_event_loop(
-    scope: &mut v8::PinScope,
-    state: &SharedState,
-) {
+/// Uses min-heap timers + computed sleep (zero CPU while idle).
+fn run_event_loop(scope: &mut v8::PinScope, state: &SharedState) {
     loop {
-        // Phase 1: V8 work (synchronous)
+        // Phase 1: Microtasks
         scope.perform_microtask_checkpoint();
 
-        // Process immediately-ready timers (0ms, no channel)
-        let ready_ids: Vec<u32> = state.borrow_mut().ready_timer_ids.drain(..).collect();
-        if !ready_ids.is_empty() {
-            fire_timers(scope, state, &ready_ids);
-            scope.perform_microtask_checkpoint();
-            continue; // re-check for more ready work before blocking
-        }
+        // Phase 2: Fire all ready timers
+        fire_ready_timers(scope, state);
 
-        // Drain and process channel events
-        let events = drain_ready_events(state);
-        let fired_ids: Vec<u32> = events
-            .into_iter()
-            .filter_map(|e| match e {
-                Event::TimerFired(id) => {
-                    if state.borrow().timers.contains_key(&id) {
-                        Some(id)
-                    } else {
-                        None
-                    }
-                }
-                Event::OpCompleted(id, value) => {
-                    state.borrow_mut().completed_ops.push((id, value));
-                    None
-                }
-            })
-            .collect();
+        // Phase 3: Drain completed async ops
+        drain_async_ops(scope, state);
 
-        fire_timers(scope, state, &fired_ids);
-        resolve_ops(scope, state);
-
-        // Check if done
+        // Phase 4: Check if done
         {
             let s = state.borrow();
-            if s.timers.is_empty() && s.pending_resolvers.is_empty() && s.ready_timer_ids.is_empty() {
+            let has_timers = !s.timer_callbacks.is_empty();
+            let has_ops = !s.pending_resolvers.is_empty();
+            if !has_timers && !has_ops {
                 break;
             }
         }
 
-        // Phase 2: wait for next event (blocks, zero CPU)
+        // Phase 5: Wait for next event (computed timeout)
+        let timeout = match compute_wait_timeout(state) {
+            Some(d) => d,
+            None => break, // nothing to wait for
+        };
+
+        if timeout.is_zero() {
+            continue; // immediate timer ready
+        }
+
+        // Block until timeout or async op completion (whichever first)
         {
-            let mut s = state.borrow_mut();
-            match s.event_rx.blocking_recv() {
-                Some(event) => {
-                    match event {
-                        Event::TimerFired(id) => {
-                            if s.timers.contains_key(&id) {
-                                drop(s);
-                                fire_timers(scope, state, &[id]);
-                            }
-                        }
-                        Event::OpCompleted(id, value) => {
-                            s.completed_ops.push((id, value));
-                            drop(s);
-                            resolve_ops(scope, state);
-                        }
+            let has_pending_ops = !state.borrow().pending_resolvers.is_empty();
+            if has_pending_ops {
+                // Wait for op completion OR timeout
+                let result = state.borrow_mut().op_rx.recv_timeout(timeout);
+                if let Ok(op_result) = result {
+                    let resolver =
+                        state.borrow_mut().pending_resolvers.remove(&op_result.id);
+                    if let Some(resolver) = resolver {
+                        let r = v8::Local::new(scope, &resolver);
+                        let val = v8::String::new(scope, &op_result.value).unwrap();
+                        r.resolve(scope, val.into());
+                        scope.perform_microtask_checkpoint();
                     }
                 }
-                None => break, // channel closed
+                // Timeout or Disconnected: fall through to re-check timers
+            } else {
+                // No pending ops, just sleep until next timer
+                std::thread::sleep(timeout);
             }
         }
     }
 }
 
 /// Drive the event loop until a specific promise settles or no more work.
-/// Uses channel-based blocking (zero CPU while idle).
+/// Uses min-heap timers + computed sleep (zero CPU while idle).
 fn run_event_loop_until_settled(
     scope: &mut v8::PinScope,
     state: &SharedState,
@@ -495,7 +493,7 @@ fn run_event_loop_until_settled(
             }
         }
 
-        // Phase 1: V8 work (synchronous)
+        // Phase 1: Microtasks
         scope.perform_microtask_checkpoint();
 
         // Check again after microtasks
@@ -507,37 +505,10 @@ fn run_event_loop_until_settled(
             }
         }
 
-        // Process immediately-ready timers (0ms, no channel)
-        let ready_ids: Vec<u32> = state.borrow_mut().ready_timer_ids.drain(..).collect();
-        if !ready_ids.is_empty() {
-            fire_timers(scope, state, &ready_ids);
-            scope.perform_microtask_checkpoint();
-            continue; // re-check promise state
-        }
+        // Phase 2: Fire all ready timers
+        fire_ready_timers(scope, state);
 
-        // Drain and process channel events
-        let events = drain_ready_events(state);
-        let fired_ids: Vec<u32> = events
-            .into_iter()
-            .filter_map(|e| match e {
-                Event::TimerFired(id) => {
-                    if state.borrow().timers.contains_key(&id) {
-                        Some(id)
-                    } else {
-                        None
-                    }
-                }
-                Event::OpCompleted(id, value) => {
-                    state.borrow_mut().completed_ops.push((id, value));
-                    None
-                }
-            })
-            .collect();
-
-        fire_timers(scope, state, &fired_ids);
-        resolve_ops(scope, state);
-
-        // Check promise after processing events
+        // Check promise after timers
         {
             let local = v8::Local::new(scope, promise);
             match local.state() {
@@ -546,36 +517,58 @@ fn run_event_loop_until_settled(
             }
         }
 
-        // Check if done (no work left even if promise still pending)
+        // Phase 3: Drain completed async ops
+        drain_async_ops(scope, state);
+
+        // Check promise after ops
+        {
+            let local = v8::Local::new(scope, promise);
+            match local.state() {
+                v8::PromiseState::Fulfilled | v8::PromiseState::Rejected => return,
+                v8::PromiseState::Pending => {}
+            }
+        }
+
+        // Phase 4: Check if done (no work left even if promise still pending)
         {
             let s = state.borrow();
-            if s.timers.is_empty() && s.pending_resolvers.is_empty() {
+            if s.timer_callbacks.is_empty() && s.pending_resolvers.is_empty() {
                 drop(s);
                 scope.perform_microtask_checkpoint();
                 return;
             }
         }
 
-        // Phase 2: wait for next event (blocks, zero CPU)
+        // Phase 5: Wait for next event (computed timeout)
+        let timeout = match compute_wait_timeout(state) {
+            Some(d) => d,
+            None => {
+                scope.perform_microtask_checkpoint();
+                return;
+            }
+        };
+
+        if timeout.is_zero() {
+            continue; // immediate timer ready
+        }
+
+        // Block until timeout or async op completion (whichever first)
         {
-            let mut s = state.borrow_mut();
-            match s.event_rx.blocking_recv() {
-                Some(event) => {
-                    match event {
-                        Event::TimerFired(id) => {
-                            if s.timers.contains_key(&id) {
-                                drop(s);
-                                fire_timers(scope, state, &[id]);
-                            }
-                        }
-                        Event::OpCompleted(id, value) => {
-                            s.completed_ops.push((id, value));
-                            drop(s);
-                            resolve_ops(scope, state);
-                        }
+            let has_pending_ops = !state.borrow().pending_resolvers.is_empty();
+            if has_pending_ops {
+                let result = state.borrow_mut().op_rx.recv_timeout(timeout);
+                if let Ok(op_result) = result {
+                    let resolver =
+                        state.borrow_mut().pending_resolvers.remove(&op_result.id);
+                    if let Some(resolver) = resolver {
+                        let r = v8::Local::new(scope, &resolver);
+                        let val = v8::String::new(scope, &op_result.value).unwrap();
+                        r.resolve(scope, val.into());
+                        scope.perform_microtask_checkpoint();
                     }
                 }
-                None => break, // channel closed
+            } else {
+                std::thread::sleep(timeout);
             }
         }
     }
@@ -679,13 +672,13 @@ impl Isolate {
     pub fn execute_request(&mut self, request_json: &str) -> Result<RequestResult, String> {
         self.ensure_initialized();
 
-        // Reset completed ops from prior requests
-        self.state.borrow_mut().completed_ops.clear();
-
-        // Drain any stale events from prior requests
+        // Drain any stale timer heap entries and callbacks from prior requests
         {
             let mut s = self.state.borrow_mut();
-            while s.event_rx.try_recv().is_ok() {}
+            s.timer_heap.clear();
+            s.timer_callbacks.clear();
+            // Drain stale op results
+            while s.op_rx.try_recv().is_ok() {}
         }
 
         let wall_start = Instant::now();
