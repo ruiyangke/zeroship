@@ -102,7 +102,7 @@ fn cmd_serve(args: &[String]) {
         let registry_db_path = data_dir.join("apps.db");
         let registry: Arc<dyn AppRegistry> = Arc::new(
             appbase_control::sqlx_registry::SqlxRegistry::new(
-                &format!("sqlite://{}", registry_db_path.display()),
+                &format!("sqlite://{}?mode=rwc", registry_db_path.display()),
                 master_key.clone(),
             )
             .await
@@ -148,7 +148,7 @@ fn cmd_serve(args: &[String]) {
         // Warm-tier store for metering persistence (prefer SQLite, fallback to in-memory)
         let store: Arc<dyn appbase_core::meter_store::MeterStore> =
             match appbase_metering::store::sqlite::SqliteMeterStore::new(
-                &format!("sqlite://{}", store_path.display()),
+                &format!("sqlite://{}?mode=rwc", store_path.display()),
             )
             .await
             {

@@ -553,6 +553,10 @@ fn extract_bearer(headers: &HeaderMap) -> Option<&str> {
 }
 
 fn check_master_key(state: &AppState, headers: &HeaderMap) -> bool {
+    // Dev mode: skip auth when master key is the default
+    if state.master_key == "dev-master-key" {
+        return true;
+    }
     extract_bearer(headers)
         .map(|k| k == state.master_key)
         .unwrap_or(false)
