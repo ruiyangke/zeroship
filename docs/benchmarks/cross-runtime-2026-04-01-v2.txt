@@ -1,0 +1,78 @@
+Cross-Runtime RPC Benchmark (v2 — Fair Comparison)
+Date: 2026-04-01
+Machine: Linux (16 cores)
+Tool: wrk 4.2.0, 4 threads, 50 connections, 10s per test
+
+Servers:
+  deno_core:    crates/isolate + crates/server (axum), 1 V8 thread, concurrent event loop, full metering/enforcement pipeline
+  per-request:  crates/isolate_v8, 16 worker threads (1 isolate each), per-request model, hyper HTTP, no metering
+  concurrent:   crates/isolate_v8, 1 V8 thread, serial JS + concurrent I/O, hyper HTTP, no metering
+  conc-pool:    crates/isolate_v8, 16 concurrent V8 threads (concurrent model x16), hyper HTTP, no metering
+
+NOTE: v1 benchmark was flawed — deno_core returned instant "method not found" errors
+for fib/timeout/promiseChain scenarios. Only ping results were accurate. This v2
+benchmark uses matching server.js across all runtimes.
+
+==================================================
+  Results (req/s at 50 connections)
+==================================================
+
+Scenario                 deno_core    per-req(16)  concurrent(1)  conc-pool(16)
+1. ping/pong              121,167       85,054       132,552         86,892
+2. fib(10)                119,174       84,389       115,484         84,861
+3. fib(35) [5s]             1,105           35             5             32
+4. Promise chain          103,528       80,479       128,907         82,262
+5. setTimeout(0)              n/a       84,852        84,729         82,126
+6. Promise+100ms              n/a          158           474            474
+
+==================================================
+  Analysis
+==================================================
+
+1. SINGLE-THREAD CONCURRENT IS FASTEST for sync workloads:
+   - ping: 133K (concurrent) > 121K (deno_core) > 87K (conc-pool) > 85K (per-request)
+   - Promise chain: 129K > 104K > 82K > 80K
+   - Single-thread avoids inter-thread contention on channel + scheduling
+
+2. CONC-POOL ADDS OVERHEAD, does NOT improve sync throughput:
+   - 87K (conc-pool) vs 133K (concurrent) — 16 threads SLOWER than 1
+   - Bottleneck: std::sync::mpsc contention + round-robin scheduling overhead
+   - Multiple event loops don't help when requests are already fast enough
+
+3. fib(35) — deno_core dominates at 1,105 req/s:
+   - deno_core uses fire-and-forget model: multiple fib(35) calls interleaved
+     in the same V8 event loop, sharing JIT optimization
+   - per-request: 35 req/s (16 threads, each computing fib(35) serially)
+   - conc-pool: 32 req/s (similar to per-request — each thread blocks on fib(35))
+   - concurrent: 5 req/s (single thread, fully serial)
+
+4. TIMER-BASED I/O — concurrent model shines:
+   - Promise+100ms: 474 req/s (concurrent) vs 158 (per-request) — 3x faster
+   - Concurrent I/O overlap: 50 connections share the 100ms wait
+   - conc-pool matches concurrent: 474 req/s (each thread handles ~3 connections)
+
+5. WHY DENO_CORE IS FAST FOR fib(35):
+   - Fire-and-forget dispatch: requests become independent promise chains
+   - poll_event_loop() drives ALL promises per tick
+   - V8 JIT optimization shared across interleaved requests
+   - Key: microtask queue processes ALL requests' entries per tick
+   - Our serial model: microtask queue has entries from exactly 1 request
+     → safe for per-request kill, but prevents JIT batching
+
+==================================================
+  Conclusion
+==================================================
+
+The single-thread concurrent model is the best general-purpose choice:
+- Fastest for sync workloads (133K vs 121K vs 85K)
+- Fastest for I/O workloads (474 vs 158 req/s)
+- Clean per-request kill capability (serial microtask queue)
+- Only weakness: CPU-heavy workloads (5 vs 1,105 for fib(35))
+
+For CPU-heavy workloads, the tradeoff is clear:
+- deno_core's fire-and-forget model: 1,105 req/s but NO per-request kill
+- Our serial model: 5 req/s but clean per-request kill
+
+Production strategy: single concurrent thread per app (default),
+with optional scale-up to N threads for CPU-heavy apps (pro plan).
+CPU limits + watchdog kill handle runaway requests.

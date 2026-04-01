@@ -1,0 +1,50 @@
+Cross-Runtime RPC Benchmark
+Date: 2026-04-01
+Machine: Linux (16 cores)
+Tool: wrk, 4 threads, 50 connections, 10s per test
+
+Servers:
+  raw V8 concurrent:   1 V8 thread, serial JS + concurrent I/O
+  raw V8 conc-pool:    16 V8 threads, each with concurrent I/O
+  Node.js:             v22.22.2, http module, single thread
+
+=========================================================
+
+--- 1. ping/pong (minimal) ---
+  raw V8 concurrent (1 thread)            136522.72 req/s   355.75us 244.34us
+  raw V8 conc-pool (16 threads)            83697.04 req/s   634.73us 578.14us
+  Node.js v22.22.2                         15660.58 req/s   3.54ms 7.05ms
+
+--- 2. fib(10) (light CPU) ---
+  raw V8 concurrent (1 thread)            119496.91 req/s   398.01us 184.90us
+  raw V8 conc-pool (16 threads)            85359.57 req/s   626.07us 577.48us
+  Node.js v22.22.2                         15750.44 req/s   3.16ms 2.63ms
+
+--- 3. fib(35) (heavy CPU) ---
+  raw V8 concurrent (1 thread)                 5.19 req/s   1.03s 563.48ms
+  raw V8 conc-pool (16 threads)               34.43 req/s   1.15s 415.05ms
+  Node.js v22.22.2                             4.79 req/s   827.06ms 274.43ms
+
+--- 4. setTimeout(0) ---
+  raw V8 concurrent (1 thread)             78423.92 req/s   605.34us 315.64us
+  raw V8 conc-pool (16 threads)            84687.04 req/s   637.97us 588.68us
+  Node.js v22.22.2                         18589.07 req/s   2.58ms 665.11us
+
+--- 5. Promise chain (sync .then) ---
+  raw V8 concurrent (1 thread)            133422.21 req/s   359.88us 201.74us
+  raw V8 conc-pool (16 threads)            86437.94 req/s   619.88us 563.48us
+  Node.js v22.22.2                         15360.93 req/s   3.19ms 1.92ms
+
+--- 6. Promise chain + 100ms timer ---
+  raw V8 concurrent (1 thread)               474.18 req/s   100.62ms 166.51us
+  raw V8 conc-pool (16 threads)              474.45 req/s   100.57ms 206.96us
+  Node.js v22.22.2                           474.42 req/s   100.77ms 551.28us
+
+=========================================================
+
+Notes:
+  raw V8 concurrent:   single V8 thread with serial JS + concurrent I/O.
+                       Requests overlap during I/O waits.
+  raw V8 conc-pool:    N concurrent isolate threads with round-robin dispatch.
+                       Best of both: concurrent I/O + multi-core scaling.
+  Node.js:             single-threaded event loop via http module.
