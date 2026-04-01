@@ -227,15 +227,111 @@ fn main() {
         );
     }
 
-    println!("\n=== Comparison ===");
-    println!();
-    println!("{:<35} {:>12} {:>12}", "", "req/s", "latency");
-    println!("{:<35} {:>12} {:>12}", "---", "---", "---");
-    println!("{:<35} {:>12} {:>12}", "deno_core (wrk, full HTTP pipeline)", "121,000", "129us");
-    println!("{:<35} {:>12} {:>12}", "deno_core (bench, pure dispatch)", "33,000", "30us");
-    println!("{:<35} {:>12} {:>12}", "raw V8 sync (single thread)", "~350,000", "~2.9us");
-    println!("{:<35} {:>12} {:>12}", "raw V8 sync (8 threads)", "~1,500,000", "~0.7us");
-    println!("{:<35} {:>12} {:>12}", "raw V8 async (single, 1ms timer)", "~500", "~2ms");
-    println!("{:<35} {:>12} {:>12}", "raw V8 fib(30) (single thread)", "~60", "~16ms");
-    println!("{:<35} {:>12} {:>12}", "raw V8 fib(30) (8 threads)", "~300", "~3ms");
+    // =========================================================================
+    println!("\n=== Concurrent Model (serial JS, concurrent I/O) ===\n");
+
+    use appbase_isolate_v8::concurrent::{ConcurrentIsolate, Event};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let next_id = AtomicU64::new(1);
+
+    // Helper: send N requests to a ConcurrentIsolate and collect results
+    fn bench_concurrent(
+        event_tx: &std::sync::mpsc::Sender<Event>,
+        next_id: &AtomicU64,
+        body: &str,
+        n: u64,
+    ) -> Vec<Result<appbase_isolate_v8::RequestResult, String>> {
+        let mut reply_rxs = Vec::new();
+        // Send all requests at once
+        for _ in 0..n {
+            let id = next_id.fetch_add(1, Ordering::Relaxed);
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            event_tx.send(Event::NewRequest {
+                id,
+                body: body.to_string(),
+                reply: reply_tx,
+            }).unwrap();
+            reply_rxs.push(reply_rx);
+        }
+        // Collect results (blocking)
+        reply_rxs.into_iter().map(|rx| rx.blocking_recv().unwrap()).collect()
+    }
+
+    // Start a concurrent isolate
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let event_tx_clone = event_tx.clone();
+    let js = SERVER_JS.to_string();
+    std::thread::spawn(move || {
+        let mut iso = ConcurrentIsolate::new(&js, event_rx, event_tx_clone);
+        iso.run_event_loop();
+    });
+    // Warmup
+    {
+        let id = next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        event_tx.send(Event::NewRequest { id, body: RPC_BODY.to_string(), reply: tx }).unwrap();
+        rx.blocking_recv().unwrap().unwrap();
+    }
+
+    // Concurrent: sync RPC
+    {
+        let n = 10_000u64;
+        let start = Instant::now();
+        let results = bench_concurrent(&event_tx, &next_id, RPC_BODY, n);
+        let e = start.elapsed();
+        let ok = results.iter().filter(|r| r.is_ok()).count();
+        println!(
+            "{:<40} {:>7} reqs  {:.2}s  {:>9.0} req/s  {:>8.1}us/req",
+            "concurrent: sync RPC (ping)", n, e.as_secs_f64(), ok as f64 / e.as_secs_f64(), e.as_micros() as f64 / n as f64
+        );
+    }
+
+    // Concurrent: async setTimeout(0) (Promise chain)
+    {
+        let n = 10_000u64;
+        let start = Instant::now();
+        let results = bench_concurrent(&event_tx, &next_id, CHAIN_BODY, n);
+        let e = start.elapsed();
+        let ok = results.iter().filter(|r| r.is_ok()).count();
+        println!(
+            "{:<40} {:>7} reqs  {:.2}s  {:>9.0} req/s  {:>8.1}us/req",
+            "concurrent: Promise chain (0ms)", n, e.as_secs_f64(), ok as f64 / e.as_secs_f64(), e.as_micros() as f64 / n as f64
+        );
+    }
+
+    // Concurrent: 100 requests with 10ms timer (overlap test)
+    {
+        let timer_body = r#"{"jsonrpc":"2.0","method":"delayed","params":[],"id":1}"#;
+        let n = 100u64;
+        let start = Instant::now();
+        let results = bench_concurrent(&event_tx, &next_id, timer_body, n);
+        let e = start.elapsed();
+        let ok = results.iter().filter(|r| r.is_ok()).count();
+        println!(
+            "{:<40} {:>7} reqs  {:.2}s  {:>9.0} req/s  {:>8.1}ms/req  (should be ~1ms not 100ms)",
+            "concurrent: 100x setTimeout(1ms)", n, e.as_secs_f64(), ok as f64 / e.as_secs_f64(), e.as_millis() as f64 / n as f64
+        );
+    }
+
+    // Concurrent: fib(30) (CPU-heavy, serial JS — no speedup expected)
+    {
+        let n = 10u64;
+        let start = Instant::now();
+        let results = bench_concurrent(&event_tx, &next_id, FIB_30, n);
+        let e = start.elapsed();
+        let ok = results.iter().filter(|r| r.is_ok()).count();
+        println!(
+            "{:<40} {:>7} reqs  {:.2}s  {:>9.0} req/s  {:>8.1}ms/req  (CPU-bound, no overlap)",
+            "concurrent: fib(30)", n, e.as_secs_f64(), ok as f64 / e.as_secs_f64(), e.as_millis() as f64 / n as f64
+        );
+    }
+
+    // Shutdown concurrent isolate
+    event_tx.send(Event::Shutdown).unwrap();
+
+    println!("\n=== Summary ===");
+    println!("Per-request model: 1 request at a time, blocking. Best for CPU-heavy multi-thread.");
+    println!("Concurrent model:  N requests overlapping I/O, serial JS. Best for I/O-heavy apps.");
+    println!("Both models: per-request CPU tracking, clean kill, zero collateral.");
 }
