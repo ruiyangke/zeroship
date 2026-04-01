@@ -17,6 +17,7 @@ export default defineConfig({
       '/_health': 'http://localhost:3333',
       '/_apps': 'http://localhost:3333',
       '/_usage': 'http://localhost:3333',
+      '/rpc': 'http://localhost:3333',
     }
   },
   build: {

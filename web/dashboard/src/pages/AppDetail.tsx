@@ -1,14 +1,15 @@
 import { useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { getApp, getAppUsage, getAppLogs, deployApp, deleteApp, updatePlan, callRpc } from "../api";
+import { getApp, getAppUsage, getAppLogs, deployApp, deleteApp, updatePlan, callRpc, createApp } from "../api";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
-import { Copy, Check, ChevronRight } from "lucide-react";
+import { Copy, Check, ChevronRight, CopyPlus } from "lucide-react";
+import Editor from '@monaco-editor/react';
 
 const PLANS = ["free", "starter", "pro", "enterprise"];
 
@@ -26,6 +27,7 @@ export default function AppDetail() {
   const [rpcResult, setRpcResult] = useState<string | null>(null);
   const [rpcRunning, setRpcRunning] = useState(false);
   const [rpcError, setRpcError] = useState<string | null>(null);
+  const [duplicating, setDuplicating] = useState(false);
 
   const { data: app, isLoading, error: appError } = useQuery({
     queryKey: ["app", id],
@@ -104,7 +106,12 @@ export default function AppDetail() {
     try {
       const params = JSON.parse(rpcParams);
       const result = await callRpc(id, rpcMethod, params);
-      setRpcResult(JSON.stringify(result, null, 2));
+      const resultObj = result as any;
+      if (resultObj && resultObj.error) {
+        setRpcError(JSON.stringify(resultObj.error, null, 2));
+      } else {
+        setRpcResult(JSON.stringify(result, null, 2));
+      }
     } catch (e: any) {
       setRpcError(e.message || "RPC call failed");
     } finally {
@@ -112,7 +119,27 @@ export default function AppDetail() {
     }
   }
 
+  async function handleDuplicate() {
+    if (!app || !id) return;
+    setDuplicating(true);
+    try {
+      const newId = `${id}-copy`;
+      await createApp(newId, app.plan_id);
+      const currentCode = (app as any).server_js || code;
+      if (currentCode) {
+        await deployApp(newId, currentCode);
+      }
+      queryClient.invalidateQueries({ queryKey: ["apps"] });
+      navigate(`/apps/${newId}`);
+    } catch (e: any) {
+      alert(`Failed to duplicate: ${e.message}`);
+    } finally {
+      setDuplicating(false);
+    }
+  }
+
   const error = appError?.message ?? "";
+  const isNotFound = error.includes("404") || error.toLowerCase().includes("not found");
 
   if (isLoading) {
     return <div className="text-[13px] text-muted-foreground py-5">loading...</div>;
@@ -120,7 +147,10 @@ export default function AppDetail() {
   if (error && !app) {
     return (
       <div className="text-xs text-destructive border border-destructive/30 bg-destructive/5 p-3">
-        {error}
+        <div className="font-medium mb-1">
+          {isNotFound ? "app not found" : "error loading app"}
+        </div>
+        <div className="text-muted-foreground">{error}</div>
       </div>
     );
   }
@@ -147,6 +177,16 @@ export default function AppDetail() {
 
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-xl font-medium tracking-[0.05em]">// {app.id}</h1>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleDuplicate}
+          disabled={duplicating}
+          className="flex items-center gap-1.5"
+        >
+          <CopyPlus className="h-3.5 w-3.5" />
+          {duplicating ? "duplicating..." : "duplicate"}
+        </Button>
       </div>
 
       {error && (
@@ -228,12 +268,24 @@ export default function AppDetail() {
         <CardContent>
           <div className="mb-4">
             <Label htmlFor="deploy-code">javascript source</Label>
-            <Textarea
-              id="deploy-code"
-              placeholder="// paste your handler code here..."
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-            />
+            <div className="mt-1.5 border border-border overflow-hidden">
+              <Editor
+                height="300px"
+                defaultLanguage="javascript"
+                theme="vs-dark"
+                value={code}
+                onChange={(v) => setCode(v ?? "")}
+                options={{
+                  minimap: { enabled: false },
+                  fontSize: 13,
+                  fontFamily: "'JetBrains Mono', monospace",
+                  lineNumbers: "on",
+                  scrollBeyondLastLine: false,
+                  automaticLayout: true,
+                  tabSize: 2,
+                }}
+              />
+            </div>
           </div>
           <Button
             variant="primary"
@@ -248,8 +300,9 @@ export default function AppDetail() {
             </div>
           )}
           {deployMutation.isError && (
-            <div className="mt-3 p-2.5 text-xs border border-destructive text-destructive bg-destructive/5">
-              {deployMutation.error.message}
+            <div className="mt-3 p-2.5 text-xs border-2 border-destructive text-destructive bg-destructive/5">
+              <div className="font-medium mb-1">deploy failed</div>
+              <div>{deployMutation.error.message}</div>
             </div>
           )}
         </CardContent>
@@ -262,9 +315,25 @@ export default function AppDetail() {
             <CardTitle>current code</CardTitle>
           </CardHeader>
           <CardContent>
-            <pre className="p-3 bg-background border border-border text-xs font-mono whitespace-pre-wrap overflow-auto max-h-80">
-              {(app as any).server_js}
-            </pre>
+            <div className="border border-border overflow-hidden">
+              <Editor
+                height="300px"
+                defaultLanguage="javascript"
+                theme="vs-dark"
+                value={(app as any).server_js}
+                options={{
+                  readOnly: true,
+                  minimap: { enabled: false },
+                  fontSize: 13,
+                  fontFamily: "'JetBrains Mono', monospace",
+                  lineNumbers: "on",
+                  scrollBeyondLastLine: false,
+                  automaticLayout: true,
+                  tabSize: 2,
+                  domReadOnly: true,
+                }}
+              />
+            </div>
           </CardContent>
         </Card>
       )}
@@ -302,8 +371,9 @@ export default function AppDetail() {
             {rpcRunning ? "running..." : "run"}
           </Button>
           {rpcError && (
-            <div className="mt-3 p-2.5 text-xs border border-destructive text-destructive bg-destructive/5">
-              {rpcError}
+            <div className="mt-3 p-2.5 text-xs border-2 border-destructive text-destructive bg-destructive/5">
+              <div className="font-medium mb-1">rpc error</div>
+              <pre className="font-mono whitespace-pre-wrap">{rpcError}</pre>
             </div>
           )}
           {rpcResult && (
