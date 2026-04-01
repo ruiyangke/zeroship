@@ -10,7 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 appbase-core = { path = "../core" }
-appbase-isolate = { path = "../isolate" }
 appbase-metering = { path = "../metering" }
 appbase-enforcement = { path = "../enforcement" }
 appbase-plan = { path = "../plan" }
@@ -19,6 +18,7 @@ appbase-server = { path = "../server" }
 appbase-billing = { path = "../billing" }
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
+toml = "1.1.1"
 
 [lints]
 workspace = true

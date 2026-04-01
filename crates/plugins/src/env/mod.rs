@@ -5,15 +5,11 @@
 //! passed at construction time, for security.
 //!
 //! JS API:
-//!   env.get(key) → string | null
-//!   env.list()   → string[] (all available keys)
+//!   env.get(key) -> string | null
+//!   env.list()   -> string[] (all available keys)
 
 use appbase_core::plugin::{Plugin, PluginContext};
-use deno_core::op2;
-use deno_core::{OpDecl, OpState};
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
 
 /// Environment variables plugin.
 ///
@@ -23,9 +19,6 @@ use std::rc::Rc;
 pub struct EnvPlugin {
     vars: HashMap<String, String>,
 }
-
-/// Newtype wrapper to avoid OpState type collision with KvStore and DbConnection.
-pub struct EnvStore(pub RefCell<HashMap<String, String>>);
 
 impl EnvPlugin {
     /// Create with explicit variables.
@@ -49,36 +42,17 @@ impl Plugin for EnvPlugin {
         "env"
     }
 
-    fn ops(&self) -> Vec<OpDecl> {
-        vec![op_env_get(), op_env_list()]
-    }
-
     fn js_bridge(&self) -> &str {
         r#"
 globalThis.env = {
-  get: (key) => Deno.core.ops.op_env_get(key),
-  list: () => Deno.core.ops.op_env_list(),
+  get: (key) => { throw new Error("env plugin not yet implemented for raw V8"); },
+  list: () => { throw new Error("env plugin not yet implemented for raw V8"); },
 };
 "#
     }
 
-    fn init(&self, ctx: &mut PluginContext<'_>) {
-        ctx.op_state.put(Rc::new(EnvStore(RefCell::new(self.vars.clone()))));
+    fn init(&self, _ctx: &mut PluginContext<'_>) {
+        // TODO: re-implement with raw V8 ops
+        // Will store self.vars in the V8 isolate context
     }
-}
-
-/// Get an environment variable by key. Returns None if not set.
-#[op2]
-#[string]
-pub fn op_env_get(state: &mut OpState, #[string] key: &str) -> Option<String> {
-    let store = state.borrow::<Rc<EnvStore>>().clone();
-    store.0.borrow().get(key).cloned()
-}
-
-/// List all available environment variable keys.
-#[op2]
-#[serde]
-pub fn op_env_list(state: &mut OpState) -> Vec<String> {
-    let store = state.borrow::<Rc<EnvStore>>().clone();
-    store.0.borrow().keys().cloned().collect()
 }

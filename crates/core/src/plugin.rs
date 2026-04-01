@@ -2,8 +2,8 @@
 //!
 //! Plugins extend the runtime with new capabilities (db, kv, auth, storage, etc.)
 //! Each plugin provides:
-//! - **Ops**: Rust functions callable from JavaScript via `Deno.core.ops.*`
 //! - **JS bridge**: JavaScript code defining the user-facing API (e.g., `globalThis.db`)
+//! - **Meter resources**: Declared metered resources for billing/enforcement
 //! - **State init**: Per-isolate state injection (e.g., database connections)
 //!
 //! # Lifecycle
@@ -11,31 +11,11 @@
 //! 1. Plugin is constructed with its config (e.g., `DbPlugin::new("path.db")`)
 //! 2. `configure()` is called to validate the config
 //! 3. When an isolate is created:
-//!    a. `ops()` is called to register Rust functions in V8
-//!    b. `js_bridge()` is injected into the global scope
-//!    c. `init()` is called with a `PluginContext` to set up per-isolate state
-//! 4. User code runs, calling the plugin's JS API which dispatches to ops
-//!
-//! # Example
-//!
-//! ```rust,ignore
-//! use appbase_core::plugin::{Plugin, PluginContext};
-//!
-//! struct MyPlugin { api_key: String }
-//!
-//! impl Plugin for MyPlugin {
-//!     fn name(&self) -> &str { "my_plugin" }
-//!     fn ops(&self) -> Vec<OpDecl> { vec![op_my_call()] }
-//!     fn js_bridge(&self) -> &str { "globalThis.myPlugin = { call: () => Deno.core.ops.op_my_call() };" }
-//!     fn init(&self, ctx: &mut PluginContext) {
-//!         ctx.op_state.put(MyState { api_key: self.api_key.clone() });
-//!     }
-//! }
-//! ```
+//!    a. `js_bridge()` is injected into the global scope
+//!    b. `init()` is called with a `PluginContext` to set up per-isolate state
+//! 4. User code runs, calling the plugin's JS API
 
-use deno_core::{OpDecl, OpState};
 use std::path::Path;
-use std::sync::Arc;
 
 /// How values combine across events / billing periods.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,20 +84,16 @@ impl PluginQuota for NoopQuota {
 
 /// Context provided to plugins during isolate initialization.
 ///
-/// Gives plugins access to per-isolate state, the app identity,
-/// and the data directory for file-based storage.
+/// Gives plugins access to the app identity, data directory,
+/// and metering/quota interfaces.
 #[allow(clippy::missing_debug_implementations)]
 pub struct PluginContext<'a> {
-    /// Mutable reference to the V8 OpState — plugins put their state here.
-    pub op_state: &'a mut OpState,
-    /// The app ID this isolate belongs to.
-    pub app_id: &'a str,
+    /// Meter for recording plugin resource usage (db ops, kv ops, etc.).
+    pub meter: &'a dyn PluginMeter,
+    /// Quota checker for point-of-use enforcement (db ops, kv ops, etc.).
+    pub quota: &'a dyn PluginQuota,
     /// Base directory for this app's data (e.g., databases, files).
     pub data_dir: &'a Path,
-    /// Meter for recording plugin resource usage (db ops, kv ops, etc.).
-    pub meter: Arc<dyn PluginMeter>,
-    /// Quota checker for point-of-use enforcement (db ops, kv ops, etc.).
-    pub quota: Arc<dyn PluginQuota>,
 }
 
 /// The core plugin interface.
@@ -131,10 +107,6 @@ pub trait Plugin: Send + Sync {
     /// Used in config files and logging.
     fn name(&self) -> &str;
 
-    /// V8 ops registered by this plugin.
-    /// These become callable from JS via `Deno.core.ops.op_name()`.
-    fn ops(&self) -> Vec<OpDecl>;
-
     /// JavaScript code injected into the V8 global scope.
     /// Typically defines a global object that wraps the raw ops
     /// into a user-friendly API.
@@ -145,8 +117,6 @@ pub trait Plugin: Send + Sync {
     /// Initialize per-isolate state.
     /// Called once per isolate, before any user code runs.
     ///
-    /// Use `ctx.op_state` to inject database connections, stores, etc.
-    /// Use `ctx.app_id` to scope data per app.
     /// Use `ctx.data_dir` for file-based storage paths.
     fn init(&self, ctx: &mut PluginContext<'_>);
 

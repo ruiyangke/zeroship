@@ -66,12 +66,22 @@ fn cmd_serve(args: &[String]) {
         ]
     });
 
+    // Load isolate config from TOML if available, otherwise use defaults
+    let isolate_config = if std::path::Path::new(&config_path).exists() {
+        let toml_str = std::fs::read_to_string(&config_path).unwrap_or_default();
+        toml::from_str::<AppbaseConfig>(&toml_str)
+            .map(|c| c.isolates)
+            .unwrap_or_default()
+    } else {
+        IsolateConfig::default()
+    };
+
     let config = AppbaseConfig {
         server: ServerConfig {
             port,
             host: "0.0.0.0".into(),
         },
-        isolates: IsolateConfig::default(),
+        isolates: isolate_config,
         plugins: Default::default(),
     };
 

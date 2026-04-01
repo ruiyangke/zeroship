@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/core",
-    "crates/isolate",
     "crates/plugins",
     "crates/server",
     "crates/cli",

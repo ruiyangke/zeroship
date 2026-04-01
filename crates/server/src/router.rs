@@ -1,10 +1,10 @@
 //! Axum router for appbase — RPC dispatch with metering, quota enforcement, and admin API.
 
 use appbase_core::config::AppbaseConfig;
-use appbase_core::plugin::{MeterFactory, PluginFactory, QuotaFactory};
+use appbase_core::plugin::{PluginFactory};
 use appbase_core::types::AppBundle;
-use appbase_isolate::pool::IsolatePool;
 use appbase_core::event_log::EventKind;
+use crate::v8pool::V8Pool;
 use appbase_enforcement::concurrency::ConcurrencyGuard;
 use appbase_enforcement::quota;
 use appbase_enforcement::error_codes;
@@ -73,7 +73,7 @@ impl ConcurrencyRegistry {
 /// Shared state for all axum handlers.
 #[derive(Clone)]
 pub struct AppState {
-    pub pool: Arc<IsolatePool>,
+    pub pool: Arc<V8Pool>,
     pub bundles: Arc<Mutex<HashMap<String, AppBundle>>>,
     pub default_app: String,
     pub static_html: Option<Bytes>,
@@ -110,7 +110,7 @@ pub fn single_app_state(
     server_js: String,
     client_html: Option<Vec<u8>>,
     config: &AppbaseConfig,
-    data_dir: PathBuf,
+    _data_dir: PathBuf,
     plugin_factory: PluginFactory,
     plan: Option<QuotaPlan>,
     event_sender: EventSender,
@@ -126,28 +126,10 @@ pub fn single_app_state(
         .collect();
     let meters = Arc::new(MeterRegistry::new(default_plan, plugin_resources));
 
-    // Create a meter factory that produces AppPluginMeter instances backed by the
-    // shared MeterRegistry. This ensures plugin ops (db.reads, kv.writes, etc.)
-    // are recorded against the correct app's meter instead of being discarded.
-    let meters_for_factory = meters.clone();
-    let meter_factory: MeterFactory = Arc::new(move |app_id: &str| -> Arc<dyn appbase_core::plugin::PluginMeter> {
-        Arc::new(appbase_metering::meter::AppPluginMeter::new(
-            meters_for_factory.clone(),
-            app_id.to_string(),
-        ))
-    });
+    // Note: MeterFactory and QuotaFactory for plugin-level metering inside isolates
+    // are not yet wired into V8Pool. They will be added when plugin support lands.
 
-    // Create a quota factory that produces AppQuotaChecker instances for
-    // point-of-use quota enforcement in plugin ops (db.reads, kv.writes, etc.).
-    let meters_for_quota = meters.clone();
-    let quota_factory: QuotaFactory = Arc::new(move |app_id: &str| -> Arc<dyn appbase_core::plugin::PluginQuota> {
-        Arc::new(appbase_metering::meter::AppQuotaChecker::new(
-            meters_for_quota.clone(),
-            app_id.to_string(),
-        ))
-    });
-
-    let pool = IsolatePool::new(config.isolates.clone(), data_dir, plugin_factory, meter_factory, quota_factory);
+    let pool = Arc::new(V8Pool::new(&server_js, &config.isolates));
 
     let mut bundles = HashMap::new();
     bundles.insert(
