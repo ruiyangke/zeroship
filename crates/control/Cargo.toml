@@ -14,5 +14,8 @@ thiserror = "2"
 tokio = { version = "1", features = ["sync", "rt"] }
 appbase-plan = { path = "../plan" }
 
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
 [lints]
 workspace = true

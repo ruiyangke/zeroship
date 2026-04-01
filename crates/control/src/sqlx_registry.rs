@@ -227,3 +227,140 @@ impl AppRegistry for SqlxRegistry {
             .unwrap_or(false))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static DB_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn test_db_url() -> String {
+        let id = DB_COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("sqlite:file:testdb_{id}?mode=memory&cache=shared")
+    }
+
+    #[tokio::test]
+    async fn create_and_get_app() {
+        let reg = SqlxRegistry::new(&test_db_url(), "test-key".into())
+            .await
+            .unwrap();
+        let record = reg.create_app("test-app", "free").await.unwrap();
+        assert_eq!(record.id, "test-app");
+        assert_eq!(record.plan_id, "free");
+        assert_eq!(record.version, 0);
+        assert!(!record.api_key.is_empty());
+
+        let app = reg.get_app("test-app").await.unwrap().unwrap();
+        assert_eq!(app.id, "test-app");
+        assert_eq!(app.server_js, ""); // empty until deployed
+    }
+
+    #[tokio::test]
+    async fn create_duplicate_fails() {
+        let reg = SqlxRegistry::new(&test_db_url(), "k".into())
+            .await
+            .unwrap();
+        reg.create_app("app1", "free").await.unwrap();
+        let err = reg.create_app("app1", "free").await.unwrap_err();
+        assert!(matches!(err, RegistryError::AlreadyExists(_)));
+    }
+
+    #[tokio::test]
+    async fn deploy_and_get_version() {
+        let reg = SqlxRegistry::new(&test_db_url(), "k".into())
+            .await
+            .unwrap();
+        reg.create_app("app1", "free").await.unwrap();
+
+        let v1 = reg.deploy("app1", "var __rpc = {};", None).await.unwrap();
+        assert_eq!(v1, 1);
+
+        let v2 = reg
+            .deploy("app1", "var __rpc = { ping: function() {} };", None)
+            .await
+            .unwrap();
+        assert_eq!(v2, 2);
+
+        let app = reg.get_app("app1").await.unwrap().unwrap();
+        assert!(app.server_js.contains("ping"));
+        assert_eq!(app.version, 2);
+    }
+
+    #[tokio::test]
+    async fn deploy_nonexistent_fails() {
+        let reg = SqlxRegistry::new(&test_db_url(), "k".into())
+            .await
+            .unwrap();
+        let err = reg.deploy("ghost", "code", None).await.unwrap_err();
+        assert!(matches!(err, RegistryError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_app() {
+        let reg = SqlxRegistry::new(&test_db_url(), "k".into())
+            .await
+            .unwrap();
+        reg.create_app("app1", "free").await.unwrap();
+        assert!(reg.delete_app("app1").await.unwrap());
+        assert!(reg.get_app("app1").await.unwrap().is_none());
+        assert!(!reg.delete_app("app1").await.unwrap()); // already deleted
+    }
+
+    #[tokio::test]
+    async fn list_apps() {
+        let reg = SqlxRegistry::new(&test_db_url(), "k".into())
+            .await
+            .unwrap();
+        reg.create_app("a", "free").await.unwrap();
+        reg.create_app("b", "pro").await.unwrap();
+        let apps = reg.list_apps().await.unwrap();
+        assert_eq!(apps.len(), 2);
+        assert_eq!(apps[0].id, "a");
+        assert_eq!(apps[1].id, "b");
+    }
+
+    #[tokio::test]
+    async fn set_plan() {
+        let reg = SqlxRegistry::new(&test_db_url(), "k".into())
+            .await
+            .unwrap();
+        reg.create_app("app1", "free").await.unwrap();
+        assert!(reg.set_plan("app1", "pro").await.unwrap());
+        let plan = reg.get_plan("app1").await.unwrap();
+        assert_eq!(plan, "pro");
+    }
+
+    #[tokio::test]
+    async fn validate_key() {
+        let reg = SqlxRegistry::new(&test_db_url(), "k".into())
+            .await
+            .unwrap();
+        let record = reg.create_app("app1", "free").await.unwrap();
+        assert!(reg.validate_key("app1", &record.api_key).await.unwrap());
+        assert!(!reg.validate_key("app1", "wrong-key").await.unwrap());
+        assert!(!reg.validate_key("nonexistent", "any").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn get_version() {
+        let reg = SqlxRegistry::new(&test_db_url(), "k".into())
+            .await
+            .unwrap();
+        assert!(reg.get_version("ghost").await.unwrap().is_none());
+        reg.create_app("app1", "free").await.unwrap();
+        assert_eq!(reg.get_version("app1").await.unwrap(), Some(0));
+        reg.deploy("app1", "code", None).await.unwrap();
+        assert_eq!(reg.get_version("app1").await.unwrap(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn invalid_app_id() {
+        let reg = SqlxRegistry::new(&test_db_url(), "k".into())
+            .await
+            .unwrap();
+        assert!(reg.create_app("", "free").await.is_err());
+        assert!(reg.create_app("has spaces", "free").await.is_err());
+        assert!(reg.create_app(&"a".repeat(65), "free").await.is_err());
+    }
+}
