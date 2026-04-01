@@ -20,16 +20,22 @@ use tokio::sync::{mpsc, oneshot};
 const SERVER_JS: &str = r#"
 var __rpc = {
     ping: function() { return "pong"; },
-    echo: function(msg) { return msg; },
-    add: function(a, b) { return a + b; },
     fib: function(n) {
         function fib(n) { return n <= 1 ? n : fib(n-1) + fib(n-2); }
         return fib(n);
     },
-    delayed: function() {
+    timeout0: function() {
         return new Promise(function(resolve) {
-            setTimeout(function() { resolve("done"); }, 1);
+            setTimeout(function() { resolve("done"); }, 0);
         });
+    },
+    promiseChain: function() {
+        return Promise.resolve(1).then(function(v) { return v + 10; }).then(function(v) { return v * 2; });
+    },
+    promiseChainTimeout: function() {
+        return new Promise(function(resolve) {
+            setTimeout(function() { resolve(1); }, 100);
+        }).then(function(v) { return v + 10; }).then(function(v) { return v * 2; });
     }
 };
 "#;
