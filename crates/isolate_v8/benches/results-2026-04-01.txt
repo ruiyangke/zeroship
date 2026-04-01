@@ -11,44 +11,44 @@ Servers:
 =========================================================
 
 --- 1. ping/pong (minimal) ---
-  raw V8 concurrent (1 thread)            168766.54 req/s   283.31us 174.47us
-  raw V8 conc-pool (16 threads)           113134.33 req/s   454.31us 382.37us
-  Node.js v22.22.2                         15988.48 req/s   3.44ms 6.68ms
+  raw V8 concurrent (1 thread)            179354.55 req/s   264.27us 132.60us
+  raw V8 conc-pool (16 threads)           114325.42 req/s   451.94us 391.95us
+  Node.js v22.22.2                         16063.57 req/s   3.43ms 6.98ms
 
 --- 2. fib(10) (light CPU) ---
-  raw V8 concurrent (1 thread)            126548.70 req/s   376.86us 164.47us
-  raw V8 conc-pool (16 threads)            97516.63 req/s   542.57us 490.95us
-  Node.js v22.22.2                         16165.59 req/s   3.08ms 2.74ms
+  raw V8 concurrent (1 thread)            131282.98 req/s   357.06us 92.42us
+  raw V8 conc-pool (16 threads)           103789.21 req/s   512.57us 504.61us
+  Node.js v22.22.2                         15532.65 req/s   3.18ms 2.32ms
 
 --- 3. fib(35) (heavy CPU) ---
-  raw V8 concurrent (1 thread)                 5.19 req/s   1.04s 592.56ms
-  raw V8 conc-pool (16 threads)               39.05 req/s   1.07s 302.68ms
-  Node.js v22.22.2                             4.59 req/s   1.62s 486.59ms
+  raw V8 concurrent (1 thread)                 5.39 req/s   1.09s 599.97ms
+  raw V8 conc-pool (16 threads)               38.90 req/s   1.08s 304.83ms
+  Node.js v22.22.2                             4.79 req/s   788.57ms 266.72ms
 
 --- 4. setTimeout(0) ---
-  raw V8 concurrent (1 thread)             95525.22 req/s   486.13us 176.14us
-  raw V8 conc-pool (16 threads)           103659.50 req/s   496.49us 428.52us
-  Node.js v22.22.2                         18796.09 req/s   2.55ms 653.90us
+  raw V8 concurrent (1 thread)             94453.27 req/s   498.33us 248.89us
+  raw V8 conc-pool (16 threads)            98770.77 req/s   534.28us 491.78us
+  Node.js v22.22.2                         18952.86 req/s   2.53ms 645.62us
 
 --- 5. Promise chain (sync .then) ---
-  raw V8 concurrent (1 thread)            156396.64 req/s   304.17us 136.69us
-  raw V8 conc-pool (16 threads)           102616.11 req/s   514.53us 472.02us
-  Node.js v22.22.2                         15983.45 req/s   3.03ms 1.49ms
+  raw V8 concurrent (1 thread)            143079.77 req/s   350.73us 274.08us
+  raw V8 conc-pool (16 threads)           101489.60 req/s   519.39us 477.40us
+  Node.js v22.22.2                         15839.61 req/s   3.07ms 1.40ms
 
 --- 6. Promise chain + 100ms timer ---
-  raw V8 concurrent (1 thread)               474.50 req/s   100.63ms 135.21us
-  raw V8 conc-pool (16 threads)              474.29 req/s   100.60ms 156.40us
-  Node.js v22.22.2                           474.24 req/s   100.85ms 750.26us
+  raw V8 concurrent (1 thread)               474.62 req/s   100.63ms 132.58us
+  raw V8 conc-pool (16 threads)              474.27 req/s   100.60ms 167.13us
+  Node.js v22.22.2                           474.58 req/s   100.76ms 609.40us
 
 --- 7. fetch() → local Rust echo ---
-  raw V8 concurrent (1 thread)             46938.05 req/s   1.01ms 413.40us
-  raw V8 conc-pool (16 threads)            42271.84 req/s   1.16ms 610.34us
-  Node.js v22.22.2                          3240.92 req/s   16.45ms 18.91ms
+  raw V8 concurrent (1 thread)             51605.64 req/s   0.91ms 190.11us
+  raw V8 conc-pool (16 threads)            83289.93 req/s   594.49us 430.56us
+  Node.js v22.22.2                          3228.17 req/s   16.93ms 22.15ms
 
 --- 8. fetch() → external API ---
-  raw V8 concurrent (1 thread)               155.75 req/s   324.21ms 220.19ms
-  raw V8 conc-pool (16 threads)              156.46 req/s   320.87ms 208.74ms
-  Node.js v22.22.2                           150.40 req/s   334.82ms 226.66ms
+  raw V8 concurrent (1 thread)               163.00 req/s   305.14ms 189.33ms
+  raw V8 conc-pool (16 threads)              162.83 req/s   309.29ms 196.94ms
+  Node.js v22.22.2                           120.08 req/s   422.31ms 335.03ms
 
 =========================================================
 

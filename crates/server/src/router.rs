@@ -130,7 +130,7 @@ pub fn single_app_state(
     // Note: plugin-level metering/quota inside isolates is not yet wired into
     // V8Pool. It will be added when plugin support lands.
 
-    let pool = Arc::new(V8Pool::new(&server_js, &config.isolates));
+    let pool = Arc::new(V8Pool::new(&config.isolates));
 
     let mut bundles = HashMap::new();
     bundles.insert(
@@ -203,8 +203,17 @@ fn seconds_until_period_reset() -> u64 {
 /// Enforcement pipeline per spec §4.1:
 /// 1. Rate limit → 2. Concurrency guard → 3. Spending limit →
 /// 4. Quota check → 5. Dispatch → 6. Record usage → 7. Response headers
-async fn handle_rpc(State(state): State<AppState>, body: String) -> Response {
-    let app_id = state.default_app.clone();
+async fn handle_rpc(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    // Extract app_id: X-App-Id header > default
+    let app_id = headers
+        .get("x-app-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| state.default_app.clone());
 
     // 1. Rate limit check
     if !state.rate_limiter.check(&app_id) {
