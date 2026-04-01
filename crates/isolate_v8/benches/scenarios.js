@@ -28,15 +28,6 @@ var __rpc = {
           .then(function(v) { return v * 2; });
     },
 
-    fetchEcho: async function(url) {
-        var resp = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ts: Date.now() }),
-        });
-        return await resp.json();
-    },
-
     fetchExternal: async function(url) {
         var resp = await fetch(url);
         var data = await resp.json();

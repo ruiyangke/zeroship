@@ -7,6 +7,20 @@ use std::time::Duration;
 
 use crate::event_loop::{OpResult, SharedState};
 
+/// Shared reqwest Client — reuses TCP connections and TLS sessions across fetch calls.
+fn shared_client() -> &'static reqwest::Client {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::limited(20))
+            .pool_max_idle_per_host(50)
+            .build()
+            .expect("Failed to create HTTP client")
+    })
+}
+
 /// V8 callback for `__rawFetch(method, url, headersJson, body)`.
 /// Returns a Promise that resolves with a JSON string.
 pub(crate) fn raw_fetch_callback(
@@ -101,15 +115,7 @@ pub(crate) fn raw_fetch_callback(
 
 /// Perform the actual HTTP fetch via reqwest. Returns a JSON string.
 async fn do_fetch(method: &str, url: &str, headers_json: &str, body: Option<&str>) -> String {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::limited(20))
-        .build();
-
-    let client = match client {
-        Ok(c) => c,
-        Err(e) => return format!(r#"{{"error":"Failed to create HTTP client: {}"}}"#, escape_json(&e.to_string())),
-    };
+    let client = shared_client();
 
     let reqwest_method = match method.to_uppercase().as_str() {
         "GET" => reqwest::Method::GET,
