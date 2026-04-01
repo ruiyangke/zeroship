@@ -275,20 +275,9 @@ fn cmd_serve(args: &[String]) {
     }
 }
 
-fn cmd_dev(args: &[String]) {
-    let entry = args
-        .get(2)
-        .expect("Usage: appbase dev <app.jsx> [--port=3000] [--compiler=appbase-compile]");
-    let port = flag_u16(args, "--port=").unwrap_or(3000);
-    let compiler = flag_str(args, "--compiler=").unwrap_or_else(|| "appbase-compile".into());
-    let minify = args.iter().any(|a| a == "--minify");
-
-    eprintln!("[appbase] Dev mode not yet migrated to new architecture.");
-    eprintln!("[appbase] Use the old runtime: appbase-rt dev {entry} --port={port} --compiler={compiler}");
-    if minify {
-        eprintln!("[appbase] --minify flag noted");
-    }
-    // TODO: migrate dev mode to use appbase-server with dev middleware
+fn cmd_dev(_args: &[String]) {
+    eprintln!("The `dev` command is not yet implemented.");
+    eprintln!("Use `appbase serve <server.js>` instead.");
     std::process::exit(1);
 }
 

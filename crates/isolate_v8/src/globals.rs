@@ -1,4 +1,4 @@
-//! V8 global bindings — console, setTimeout, clearTimeout, setInterval, clearInterval.
+//! V8 global bindings — console, setTimeout, clearTimeout, setInterval, clearInterval, env.
 
 use std::cmp::Reverse;
 use std::time::Duration;
@@ -160,6 +160,33 @@ fn set_interval_callback(
 }
 
 // ---------------------------------------------------------------------------
+// env.get callback — reads APPBASE_APP_{KEY} from process env
+// ---------------------------------------------------------------------------
+
+fn env_get_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if args.length() < 1 {
+        rv.set(v8::null(scope).into());
+        return;
+    }
+
+    let key = args.get(0).to_rust_string_lossy(scope);
+    let env_key = format!("APPBASE_APP_{}", key.to_uppercase());
+    match std::env::var(&env_key) {
+        Ok(val) => {
+            let v = v8::String::new(scope, &val).unwrap();
+            rv.set(v.into());
+        }
+        Err(_) => {
+            rv.set(v8::null(scope).into());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Setup all globals on a V8 context
 // ---------------------------------------------------------------------------
 
@@ -242,5 +269,17 @@ pub(crate) fn setup_globals(scope: &mut v8::PinScope) {
 
         let kv_key = v8::String::new(scope, "kv").unwrap();
         global.set(scope, kv_key.into(), kv.into());
+    }
+
+    // env namespace (read-only, reads APPBASE_APP_{KEY} from process env)
+    {
+        let env = v8::Object::new(scope);
+
+        let get_fn = v8::Function::new(scope, env_get_callback).unwrap();
+        let get_key = v8::String::new(scope, "get").unwrap();
+        env.set(scope, get_key.into(), get_fn.into());
+
+        let env_key = v8::String::new(scope, "env").unwrap();
+        global.set(scope, env_key.into(), env.into());
     }
 }

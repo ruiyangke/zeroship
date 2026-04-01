@@ -5,22 +5,18 @@ use appbase_core::plugin::{Aggregation, MeterResource, Plugin, PluginContext};
 /// In multi-tenant mode, each app gets its own database file
 /// at `{data_dir}/db.sqlite` (data_dir is set by PluginContext).
 /// In single-app mode, use `DbPlugin::with_path("appbase.db")` for a fixed path.
-pub struct DbPlugin {
-    /// If set, overrides the default `{data_dir}/db.sqlite` path.
-    fixed_path: Option<String>,
-}
+pub struct DbPlugin;
 
 impl DbPlugin {
     /// Create a db plugin that uses `{data_dir}/db.sqlite` per app.
     pub fn new() -> Self {
-        Self { fixed_path: None }
+        Self
     }
 
     /// Create a db plugin with a fixed database path (single-app mode).
-    pub fn with_path(path: &str) -> Self {
-        Self {
-            fixed_path: Some(path.to_string()),
-        }
+    /// Currently a no-op — path configuration is not yet implemented.
+    pub fn with_path(_path: &str) -> Self {
+        Self
     }
 }
 
@@ -80,14 +76,3 @@ pub enum DbError {
     QuotaExceeded(#[from] appbase_core::plugin::QuotaDenied),
 }
 
-fn validate_collection_name(name: &str) -> Result<(), DbError> {
-    if name.is_empty() || name.len() > 64 {
-        return Err(DbError::InvalidName("must be 1-64 characters".into()));
-    }
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return Err(DbError::InvalidName(
-            "only alphanumeric and underscore allowed".into(),
-        ));
-    }
-    Ok(())
-}

@@ -171,6 +171,49 @@ var __rpc = {
 
 ---
 
+## Using env for Configuration
+
+The `env` object provides read-only access to per-app configuration via process environment variables.
+
+### API
+
+| Method | Signature | Returns |
+|--------|-----------|---------|
+| `env.get(key)` | `(string) -> string \| null` | Value or `null` if not set |
+
+Keys are case-insensitive and mapped to process environment variables with the `APPBASE_APP_` prefix. For example, `env.get("api_key")` reads `APPBASE_APP_API_KEY`.
+
+### Example: API Proxy with Secret Key
+
+```bash
+# Set the env var before starting the server
+export APPBASE_APP_OWM_KEY="your-openweathermap-key"
+```
+
+```javascript
+var __rpc = {
+  weather: async function(city) {
+    var apiKey = env.get("owm_key");
+    if (!apiKey) throw new Error("OWM_KEY not configured");
+
+    var resp = await fetch(
+      "https://api.openweathermap.org/data/2.5/weather?q=" +
+      encodeURIComponent(city) + "&appid=" + apiKey + "&units=metric"
+    );
+    if (!resp.ok) throw new Error("API error: " + resp.status);
+    return await resp.json();
+  }
+};
+```
+
+### Important
+
+- Only variables with the `APPBASE_APP_` prefix are accessible. System variables like `PATH` or `HOME` are never exposed.
+- Values are read from the process environment at call time — no restart required if you change them.
+- Returns `null` (not `undefined`) when a key is not set.
+
+---
+
 ## Error Handling
 
 Thrown errors and rejected Promises are caught by the runtime and returned as JSON-RPC errors.
@@ -401,7 +444,7 @@ var __rpc = {
 
     // Use the platform env system for secrets
     // Set APPBASE_OWM_KEY in your environment before starting the server
-    var apiKey = "demo"; // Replace with env.get("APPBASE_OWM_KEY") when env plugin is wired
+    var apiKey = env.get("owm_key") || "demo"; // reads APPBASE_APP_OWM_KEY from process env
 
     var resp = await fetch(
       API_BASE + "/weather?q=" + encodeURIComponent(city) + "&appid=" + apiKey + "&units=metric"

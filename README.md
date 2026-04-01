@@ -223,6 +223,15 @@ Schedule deferred execution within the isolate's event loop.
 
 Repeating timers within the isolate's event loop.
 
+### `env.get(key)`
+
+Read per-app configuration from process environment variables. Keys are mapped to `APPBASE_APP_{KEY}` (uppercased). Returns the value as a string, or `null` if not set.
+
+```javascript
+// Set APPBASE_APP_API_KEY=secret123 in the server environment
+var key = env.get("api_key"); // "secret123"
+```
+
 ### Standard JS Built-ins
 
 `Promise`, `async/await`, `JSON.parse`, `JSON.stringify`, `Array`, `Map`, `Set`, `Date`, `Math`, `RegExp`, and all other standard JavaScript built-in objects.
@@ -231,7 +240,7 @@ Repeating timers within the isolate's event loop.
 
 The web dashboard provides a UI for managing your appbase instance.
 
-<!-- TODO: Add screenshot -->
+The dashboard provides a single-page interface with a sidebar for navigation. The main views include a system overview with health indicators and usage graphs, an app list with inline status badges, a code editor with deploy button, and an AI chat panel for generating apps from natural language.
 
 ### Features
 
@@ -328,7 +337,7 @@ plan = "pro"
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `APPBASE_MASTER_KEY` | Master key for admin API authentication | `dev-master-key` |
-| `APPBASE_*` | Any `APPBASE_`-prefixed variable is available to apps via the `env` plugin | — |
+| `APPBASE_APP_*` | Per-app config variables, readable via `env.get(key)` in JS (e.g., `APPBASE_APP_API_KEY` is read as `env.get("api_key")`) | — |
 
 ### CLI Arguments
 

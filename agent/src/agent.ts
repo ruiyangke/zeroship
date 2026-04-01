@@ -36,6 +36,7 @@ var __rpc = {
 - setTimeout / setInterval / clearTimeout / clearInterval
 - console.log / console.error
 - kv.get(key) / kv.set(key, value) / kv.delete(key) / kv.list() — per-app key-value store
+- env.get(key) — read config from process env (reads APPBASE_APP_{KEY}, e.g. env.get("api_key") reads APPBASE_APP_API_KEY)
 - Promise, async/await
 - JSON.parse / JSON.stringify
 - All standard JavaScript built-ins

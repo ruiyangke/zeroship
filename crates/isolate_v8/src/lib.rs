@@ -515,6 +515,33 @@ mod tests {
     }
 
     #[test]
+    fn env_get_works() {
+        // SAFETY: test is single-threaded with respect to this env var.
+        unsafe { std::env::set_var("APPBASE_APP_TEST_KEY", "test_value") };
+        init_v8();
+        let js = r#"var __rpc = { test: function() { return env.get("test_key"); } };"#;
+        let mut isolate = Isolate::new(js);
+        let r = isolate
+            .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
+            .unwrap();
+        assert!(r.json.contains("test_value"), "got: {}", r.json);
+        // SAFETY: test is single-threaded with respect to this env var.
+        unsafe { std::env::remove_var("APPBASE_APP_TEST_KEY") };
+    }
+
+    #[test]
+    fn env_get_missing_returns_null() {
+        init_v8();
+        let js =
+            r#"var __rpc = { test: function() { return env.get("nonexistent_key_xyz") === null ? "is_null" : "not_null"; } };"#;
+        let mut isolate = Isolate::new(js);
+        let r = isolate
+            .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
+            .unwrap();
+        assert!(r.json.contains("is_null"), "got: {}", r.json);
+    }
+
+    #[test]
     fn kv_persists_across_requests() {
         init_v8();
         let js = r#"
