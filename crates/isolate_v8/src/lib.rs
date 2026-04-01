@@ -9,6 +9,8 @@
 
 #![allow(unsafe_code)]
 
+pub mod concurrent;
+
 use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
@@ -40,9 +42,9 @@ pub struct RequestResult {
 // ---------------------------------------------------------------------------
 
 #[derive(Eq, PartialEq)]
-struct TimerHeapEntry {
-    fire_at: Instant,
-    id: u32,
+pub(crate) struct TimerHeapEntry {
+    pub(crate) fire_at: Instant,
+    pub(crate) id: u32,
 }
 
 impl Ord for TimerHeapEntry {
@@ -64,9 +66,9 @@ impl PartialOrd for TimerHeapEntry {
 // ---------------------------------------------------------------------------
 
 #[allow(missing_debug_implementations)]
-struct TimerCallback {
-    callback: v8::Global<v8::Function>,
-    interval: Option<Duration>, // None = setTimeout, Some = setInterval
+pub(crate) struct TimerCallback {
+    pub(crate) callback: v8::Global<v8::Function>,
+    pub(crate) interval: Option<Duration>, // None = setTimeout, Some = setInterval
 }
 
 // ---------------------------------------------------------------------------
@@ -74,9 +76,9 @@ struct TimerCallback {
 // ---------------------------------------------------------------------------
 
 #[allow(dead_code)]
-struct OpResult {
-    id: u32,
-    value: String,
+pub(crate) struct OpResult {
+    pub(crate) id: u32,
+    pub(crate) value: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -85,25 +87,25 @@ struct OpResult {
 
 /// State shared between V8 callbacks and the event loop driver.
 #[allow(missing_debug_implementations)]
-struct EventLoopState {
+pub(crate) struct EventLoopState {
     /// Timer min-heap: next-to-fire on top (via Reverse for BinaryHeap)
-    timer_heap: BinaryHeap<Reverse<TimerHeapEntry>>,
+    pub(crate) timer_heap: BinaryHeap<Reverse<TimerHeapEntry>>,
     /// Timer callbacks stored separately (heap only has fire_at + id)
-    timer_callbacks: HashMap<u32, TimerCallback>,
-    next_timer_id: u32,
+    pub(crate) timer_callbacks: HashMap<u32, TimerCallback>,
+    pub(crate) next_timer_id: u32,
     /// Async op channel sender (for future fetch() etc)
     #[allow(dead_code)]
-    op_tx: mpsc::Sender<OpResult>,
+    pub(crate) op_tx: mpsc::Sender<OpResult>,
     /// Async op channel receiver
-    op_rx: mpsc::Receiver<OpResult>,
+    pub(crate) op_rx: mpsc::Receiver<OpResult>,
     /// Pending promise resolvers for async ops
-    pending_resolvers: HashMap<u32, v8::Global<v8::PromiseResolver>>,
+    pub(crate) pending_resolvers: HashMap<u32, v8::Global<v8::PromiseResolver>>,
     #[allow(dead_code)]
-    next_op_id: u32,
+    pub(crate) next_op_id: u32,
 }
 
 impl EventLoopState {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let (op_tx, op_rx) = mpsc::channel();
         Self {
             timer_heap: BinaryHeap::new(),
@@ -117,7 +119,7 @@ impl EventLoopState {
     }
 }
 
-type SharedState = Rc<RefCell<EventLoopState>>;
+pub(crate) type SharedState = Rc<RefCell<EventLoopState>>;
 
 // ---------------------------------------------------------------------------
 // Console polyfill
@@ -265,7 +267,7 @@ fn set_interval_callback(
 // Setup globals on context
 // ---------------------------------------------------------------------------
 
-fn setup_globals(scope: &mut v8::PinScope) {
+pub(crate) fn setup_globals(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
 
     // console.log
@@ -321,7 +323,7 @@ fn setup_globals(scope: &mut v8::PinScope) {
 // ---------------------------------------------------------------------------
 
 /// Fire all timers whose fire_at <= now. Returns true if any timer fired.
-fn fire_ready_timers(scope: &mut v8::PinScope, state: &SharedState) -> bool {
+pub(crate) fn fire_ready_timers(scope: &mut v8::PinScope, state: &SharedState) -> bool {
     let mut any_fired = false;
     let now = Instant::now();
 
@@ -801,7 +803,7 @@ pub fn execute_request(
     isolate.execute_request(request_json)
 }
 
-fn thread_cpu_time() -> Duration {
+pub(crate) fn thread_cpu_time() -> Duration {
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
