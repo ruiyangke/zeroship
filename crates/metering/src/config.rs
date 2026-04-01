@@ -3,7 +3,7 @@
 //! Loads quota plans, default plan assignment, and per-app plan overrides
 //! from an `appbase.toml` configuration file.
 
-use crate::plan::{Period, QuotaDef, QuotaPlan, RateLimitDef};
+use appbase_plan::{Period, QuotaDef, QuotaPlan, RateLimitDef};
 use std::collections::HashMap;
 
 /// Parsed metering configuration from TOML.

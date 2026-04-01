@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
 use appbase_core::plugin::MeterResource;
-use crate::plan::QuotaPlan;
+use appbase_plan::QuotaPlan;
 use crate::registry::{CoreHandles, CounterRegistry, RegistryBuilder};
 
 /// Usage counters for a single app within a billing period.

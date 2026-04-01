@@ -44,8 +44,8 @@ pub enum Event {
     Shutdown,
 }
 
-// SAFETY: All constituent types (u64, String, tokio::sync::oneshot::Sender) are Send.
-unsafe impl Send for Event {}
+// All constituent types (u64, String, tokio::sync::oneshot::Sender) are Send,
+// so Event auto-derives Send — no unsafe impl needed.
 
 /// Tracking info for an in-flight request whose dispatch returned a Promise.
 struct PendingRequest {
@@ -355,6 +355,20 @@ impl ConcurrentIsolate {
 
         let params = v8::CreateParams::default().heap_limits(0, 128 * 1024 * 1024);
         let mut isolate = v8::Isolate::new(params);
+
+        // Register near-heap-limit callback to prevent OOM crashes
+        unsafe extern "C" fn near_heap_limit_callback(
+            _data: *mut std::ffi::c_void,
+            current_heap_limit: usize,
+            _initial_heap_limit: usize,
+        ) -> usize {
+            eprintln!(
+                "[v8] Near heap limit: {}MB, not increasing",
+                current_heap_limit / 1024 / 1024
+            );
+            current_heap_limit
+        }
+        isolate.add_near_heap_limit_callback(near_heap_limit_callback, std::ptr::null_mut());
 
         let el_state: SharedState = Rc::new(RefCell::new(EventLoopState::new()));
         el_state.borrow_mut().tokio_handle = tokio_handle;

@@ -5,11 +5,8 @@
 //! Quota plan definitions are in `appbase-plan`.
 //! Enforcement (quota checking, rate limiting, concurrency, error codes) is in `appbase-enforcement`.
 //!
-//! - `plan`: Re-exports from `appbase-plan` for backward compatibility
 //! - `meter`: Per-app atomic usage counters
 //! - `config`: TOML config parsing for metering plans
-
-pub mod plan;
 pub mod registry;
 pub mod meter;
 pub mod config;

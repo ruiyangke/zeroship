@@ -136,14 +136,3 @@ pub trait Plugin: Send + Sync {
 /// may need to create plugins concurrently.
 pub type PluginFactory = std::sync::Arc<dyn Fn(&str) -> Vec<Box<dyn Plugin>> + Send + Sync>;
 
-/// Factory that creates a `PluginMeter` for a given app.
-///
-/// Called each time a new isolate is spawned. Returns an `Arc<dyn PluginMeter>`
-/// that records plugin usage (db.reads, kv.writes, etc.) to the app's meter.
-pub type MeterFactory = std::sync::Arc<dyn Fn(&str) -> std::sync::Arc<dyn PluginMeter> + Send + Sync>;
-
-/// Factory that creates a `PluginQuota` for a given app.
-///
-/// Called each time a new isolate is spawned. Returns an `Arc<dyn PluginQuota>`
-/// that checks resource quotas at point of use in plugin ops.
-pub type QuotaFactory = std::sync::Arc<dyn Fn(&str) -> std::sync::Arc<dyn PluginQuota> + Send + Sync>;

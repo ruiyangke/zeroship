@@ -89,7 +89,7 @@ pub struct AppState {
 
 /// Build the axum router with all routes and middleware.
 pub fn build(state: AppState) -> Router {
-    let (cors, _compression) = middleware::production_layers();
+    let (cors, compression) = middleware::production_layers();
 
     Router::new()
         .route("/rpc", post(handle_rpc))
@@ -100,6 +100,7 @@ pub fn build(state: AppState) -> Router {
         .route("/_usage", get(handle_all_usage))
         .fallback(get(handle_static))
         .layer(cors)
+        .layer(compression)
         .with_state(state)
 }
 
@@ -126,8 +127,8 @@ pub fn single_app_state(
         .collect();
     let meters = Arc::new(MeterRegistry::new(default_plan, plugin_resources));
 
-    // Note: MeterFactory and QuotaFactory for plugin-level metering inside isolates
-    // are not yet wired into V8Pool. They will be added when plugin support lands.
+    // Note: plugin-level metering/quota inside isolates is not yet wired into
+    // V8Pool. It will be added when plugin support lands.
 
     let pool = Arc::new(V8Pool::new(&server_js, &config.isolates));
 
@@ -164,9 +165,13 @@ pub async fn serve(state: AppState, host: &str, port: u16) -> Result<(), String>
 
     eprintln!("[appbase] http://{addr}");
 
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| format!("Server error: {e}"))
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.ok();
+            eprintln!("[appbase] Shutting down gracefully...");
+        });
+
+    server.await.map_err(|e| format!("Server error: {e}"))
 }
 
 // --- Handlers ---

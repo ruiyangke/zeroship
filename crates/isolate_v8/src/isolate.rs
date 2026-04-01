@@ -29,6 +29,20 @@ impl Isolate {
         let params = v8::CreateParams::default().heap_limits(0, 128 * 1024 * 1024);
         let mut isolate = v8::Isolate::new(params);
 
+        // Register near-heap-limit callback to prevent OOM crashes
+        unsafe extern "C" fn near_heap_limit_callback(
+            _data: *mut std::ffi::c_void,
+            current_heap_limit: usize,
+            _initial_heap_limit: usize,
+        ) -> usize {
+            eprintln!(
+                "[v8] Near heap limit: {}MB, not increasing",
+                current_heap_limit / 1024 / 1024
+            );
+            current_heap_limit
+        }
+        isolate.add_near_heap_limit_callback(near_heap_limit_callback, std::ptr::null_mut());
+
         let state: SharedState = Rc::new(RefCell::new(EventLoopState::new()));
         state.borrow_mut().tokio_handle = tokio::runtime::Handle::try_current().ok();
         isolate.set_slot(state.clone());

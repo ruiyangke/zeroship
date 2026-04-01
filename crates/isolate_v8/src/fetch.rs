@@ -3,9 +3,73 @@
 //! Called from JS as: `__rawFetch(method, url, headersJson, body)` -> Promise<string>
 //! The resolved string is JSON: `{status, statusText, headers, body, url, redirected}` or `{error}`.
 
+use std::net::IpAddr;
 use std::time::Duration;
 
 use crate::event_loop::{OpResult, SharedState};
+
+/// Maximum response body size: 10 MB.
+const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
+
+/// Build an error JSON string using serde_json.
+fn error_json(msg: &str) -> String {
+    serde_json::json!({ "error": msg }).to_string()
+}
+
+/// Validate the URL to prevent SSRF attacks.
+///
+/// Blocks private/internal IPs, loopback, link-local, and non-HTTP(S) schemes.
+fn validate_url(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
+
+    // Only allow http and https schemes
+    match parsed.scheme() {
+        "http" | "https" => {}
+        scheme => return Err(format!("Blocked URL scheme: {scheme}")),
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "URL has no host".to_string())?
+        .to_lowercase();
+
+    // Block localhost
+    if host == "localhost" {
+        return Err("Blocked request to localhost".to_string());
+    }
+
+    // Try to parse as IP address (handles both bare IPs and bracket-stripped IPv6)
+    let ip: Option<IpAddr> = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse()
+        .ok();
+
+    if let Some(addr) = ip {
+        match addr {
+            IpAddr::V4(v4) => {
+                if v4.is_loopback()           // 127.0.0.0/8
+                    || v4.is_private()         // 10/8, 172.16/12, 192.168/16
+                    || v4.is_link_local()      // 169.254/16
+                    || v4.is_unspecified()     // 0.0.0.0
+                    || v4.is_broadcast()       // 255.255.255.255
+                {
+                    return Err(format!("Blocked request to private/internal IP: {v4}"));
+                }
+            }
+            IpAddr::V6(v6) => {
+                if v6.is_loopback()        // ::1
+                    || v6.is_unspecified()  // ::
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80  // fe80::/10 link-local
+                {
+                    return Err(format!("Blocked request to private/internal IPv6: {v6}"));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
 
 /// Shared reqwest Client — reuses TCP connections and TLS sessions across fetch calls.
 fn shared_client() -> &'static reqwest::Client {
@@ -115,6 +179,11 @@ pub(crate) fn raw_fetch_callback(
 
 /// Perform the actual HTTP fetch via reqwest. Returns a JSON string.
 async fn do_fetch(method: &str, url: &str, headers_json: &str, body: Option<&str>) -> String {
+    // SSRF protection: validate URL before making any request
+    if let Err(msg) = validate_url(url) {
+        return error_json(&msg);
+    }
+
     let client = shared_client();
 
     let reqwest_method = match method.to_uppercase().as_str() {
@@ -127,7 +196,7 @@ async fn do_fetch(method: &str, url: &str, headers_json: &str, body: Option<&str
         "OPTIONS" => reqwest::Method::OPTIONS,
         other => match reqwest::Method::from_bytes(other.as_bytes()) {
             Ok(m) => m,
-            Err(e) => return format!(r#"{{"error":"Invalid HTTP method: {}"}}"#, escape_json(&e.to_string())),
+            Err(e) => return error_json(&format!("Invalid HTTP method: {e}")),
         },
     };
 
@@ -142,7 +211,7 @@ async fn do_fetch(method: &str, url: &str, headers_json: &str, body: Option<&str
                     request = request.header(&key, &value);
                 }
             }
-            Err(e) => return format!(r#"{{"error":"Invalid headers: {}"}}"#, escape_json(&e)),
+            Err(e) => return error_json(&format!("Invalid headers: {e}")),
         }
     }
 
@@ -154,7 +223,7 @@ async fn do_fetch(method: &str, url: &str, headers_json: &str, body: Option<&str
     // Send request
     let response = match request.send().await {
         Ok(r) => r,
-        Err(e) => return format!(r#"{{"error":"{}"}}"#, escape_json(&e.to_string())),
+        Err(e) => return error_json(&e.to_string()),
     };
 
     let status = response.status().as_u16();
@@ -170,24 +239,38 @@ async fn do_fetch(method: &str, url: &str, headers_json: &str, body: Option<&str
         }
     }
 
-    // Read body
-    let body_text = match response.text().await {
-        Ok(t) => t,
-        Err(e) => return format!(r#"{{"error":"Failed to read response body: {}"}}"#, escape_json(&e.to_string())),
+    // Check content-length hint before reading body
+    if let Some(len) = response.content_length() {
+        if len > MAX_RESPONSE_SIZE as u64 {
+            return error_json(&format!(
+                "Response too large: {} bytes (max {})",
+                len, MAX_RESPONSE_SIZE
+            ));
+        }
+    }
+
+    // Read body with size limit
+    let body_bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return error_json(&format!("Failed to read response body: {e}")),
     };
 
-    // Build response JSON
-    let headers_json = serde_json::to_string(&resp_headers).unwrap_or_else(|_| "[]".to_string());
+    if body_bytes.len() > MAX_RESPONSE_SIZE {
+        return error_json(&format!("Response too large: {} bytes", body_bytes.len()));
+    }
 
-    format!(
-        r#"{{"status":{},"statusText":"{}","headers":{},"body":"{}","url":"{}","redirected":{}}}"#,
-        status,
-        escape_json(&status_text),
-        headers_json,
-        escape_json(&body_text),
-        escape_json(&final_url),
-        redirected,
-    )
+    let body_text = String::from_utf8_lossy(&body_bytes).to_string();
+
+    // Build response JSON with serde_json
+    serde_json::json!({
+        "status": status,
+        "statusText": status_text,
+        "headers": resp_headers,
+        "body": body_text,
+        "url": final_url,
+        "redirected": redirected,
+    })
+    .to_string()
 }
 
 /// Parse headers from JSON — supports both `[["key","val"],...]` and `{"key":"val",...}` formats.
@@ -220,23 +303,4 @@ fn parse_headers(json: &str) -> Result<Vec<(String, String)>, String> {
         }
         _ => Err("Headers must be an array or object".to_string()),
     }
-}
-
-/// Escape a string for inclusion in a JSON string value.
-fn escape_json(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out
 }

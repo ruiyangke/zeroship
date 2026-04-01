@@ -138,7 +138,7 @@ fn current_period_key() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::QuotaPlan;
+    use appbase_plan::QuotaPlan;
     use crate::store::memory::InMemoryStore;
 
     #[tokio::test]

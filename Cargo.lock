@@ -117,6 +117,7 @@ dependencies = [
  "reqwest",
  "serde_json",
  "tokio",
+ "url",
  "v8",
 ]
 

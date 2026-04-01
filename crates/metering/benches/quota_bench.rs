@@ -7,7 +7,7 @@ use appbase_core::plugin::{Aggregation, MeterResource, PluginMeter, PluginQuota}
 use appbase_enforcement::concurrency::ConcurrencyGuard;
 use appbase_enforcement::rate_limit::RateLimiter;
 use appbase_metering::meter::{AppPluginMeter, AppQuotaChecker, MeterRegistry};
-use appbase_metering::plan::QuotaPlan;
+use appbase_plan::QuotaPlan;
 use appbase_metering::registry::RegistryBuilder;
 
 fn make_plugin_resources() -> Vec<MeterResource> {
