@@ -16,6 +16,7 @@
           buildInputs = with pkgs; [
             nodejs_22
             nodePackages.npm
+            bun
             rustc
             cargo
             pkg-config
@@ -25,7 +26,6 @@
             hey
           ];
 
-          RUSQLITE_USE_BUNDLED = "1";
           RUST_BACKTRACE = "1";
         };
       });
