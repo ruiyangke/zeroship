@@ -23,49 +23,122 @@
 
 ## 3. Execution Model
 
-### 3.1 Request Lifecycle
+### 3.1 Core Principle: Concurrent I/O, Serial JS, Clean Kill
+
+```
+I/O:  CONCURRENT — all requests' async ops run in parallel on tokio
+JS:   SERIAL per-request — only 1 request's .then chain executes at a time
+Kill: CLEAN — microtask queue has only 1 request's entries, zero collateral
+
+This gives us workerd's kill safety with event loop simplicity.
+No V8 Locker. No thread pool. No lock contention.
+```
+
+### 3.2 Request Lifecycle
 
 ```
 HTTP request arrives (tokio)
     |
     v
-Dispatcher (round-robin or per-app affinity)
+Dispatcher (round-robin across workers)
     |
     v
 Worker thread (1 per app, persistent V8 isolate)
     |
     v
-Inject request into V8 event loop (fire-and-forget)
+Event loop accepts request
     |
-    +---> JS handler called (async or sync)
+    +---> Call dispatch function → returns Promise
     |       |
-    |       +---> await fetch(url) ──> event loop yields
-    |       |                          other requests run
-    |       |                          fetch completes
-    |       +---> return result
+    |       +---> Handler calls fetch(url) → starts async op on tokio
+    |       |     (I/O runs concurrently with other requests' I/O)
+    |       |
+    |       +---> Handler calls db.find() → starts async op on tokio
+    |
+    v
+Request is now "pending" (waiting for async ops)
+Other requests accepted and dispatched (concurrent I/O)
+    |
+    v
+Async op completes → event loop resolves THIS request's promise
+    (microtask queue: ONLY this request's .then entries)
     |
     v
 Response sent via oneshot channel
 ```
 
-### 3.2 Concurrency Within One Isolate
+### 3.3 Concurrency Model: Serial JS, Concurrent I/O
 
 ```
-1 V8 thread, N concurrent requests, event loop multiplexes:
+3 requests arrive:
 
-  time -->
+  Phase: ACCEPT (all start I/O concurrently)
+    A → dispatch → handler calls fetch(api1) → op starts on tokio
+    B → dispatch → handler calls fetch(api2) → op starts on tokio
+    C → dispatch → handler calls fetch(api3) → op starts on tokio
 
-  [Before(A)] A runs JS   [After(A)] A yields (await fetch)
-                [Before(B)] B runs JS   [After(B)] B yields (await db)
-                                [Before(C)] C runs JS   [After(C)] C returns
-  [Before(A)] A resumes JS [After(A)] A returns
-                [Before(B)] B resumes JS [After(B)] B returns
+    All 3 fetches run in parallel. V8 thread waits.
 
-  All I/O overlaps. JS execution serialized.
-  Promise hooks see every transition.
+  Phase: RESOLVE (one at a time, serial JS)
+
+    api2 responds first:
+      Enter "B's JS scope"
+      Resolve B's promise → run B's .then → run B's .then
+      Microtask queue: [B.then1, B.then2] — ONLY B's entries
+      B completes → send response
+
+    api1 responds:
+      Enter "A's JS scope"
+      Resolve A's promise → run A's .then chain
+      Microtask queue: [A.then1] — ONLY A's entries
+      A completes → send response
+
+    api3 responds:
+      Enter "C's JS scope"
+      Resolve C's promise → C enters tight loop!
+      POSIX timer fires → terminate_execution()
+      Microtask queue: [C.then1, C.then2] — ONLY C's entries
+      → ALL lost entries belong to C. Zero collateral.
+      cancel_terminate → isolate recovers
+      C gets error. A and B already responded. No damage.
 ```
 
-### 3.3 Promise Hooks — Per-Request Tracking
+### 3.4 Why This Is Safe
+
+```
+At any moment, the microtask queue contains entries from EXACTLY 1 request.
+
+Why? Because we resolve promises ONE REQUEST AT A TIME:
+  1. Pick 1 completed async op (for request B)
+  2. Resolve B's promise
+  3. Run microtask checkpoint → processes ONLY B's .then chain
+  4. B's .then may create more microtasks → still B's entries
+  5. B completes (or yields with new async op)
+  6. Microtask queue is now EMPTY
+  7. Pick next completed async op (for request A)
+  8. Repeat
+
+Between step 6 and 7: queue is empty. Clean slate.
+If terminate_execution fires during step 3: only B's entries are lost.
+```
+
+### 3.5 Comparison with workerd
+
+```
+workerd achieves the same guarantee via V8 Locker:
+  Lock → run 1 request's JS → unlock
+  Queue has only that request's microtasks
+
+We achieve it via serial promise resolution:
+  Resolve 1 request's promise → checkpoint → queue drained
+  Queue has only that request's microtasks
+
+Same safety. Different mechanism.
+workerd: needs V8 Locker, thread pool, C++ complexity
+Ours: needs careful event loop ordering, single thread, Rust simplicity
+```
+
+### 3.6 Promise Hooks — Per-Request CPU Tracking
 
 ```rust
 // V8 calls this on every promise lifecycle event
@@ -90,7 +163,7 @@ fn promise_hook(type: PromiseHookType, promise, parent) {
 
             // Check budget
             if requests[req_id].cpu > budget {
-                kill_request(req_id);
+                kill_request(req_id); // reject promise, send error
             }
             CURRENT_REQUEST.set(0);
         }
@@ -101,92 +174,115 @@ fn promise_hook(type: PromiseHookType, promise, parent) {
 }
 ```
 
-### 3.4 Per-Request Kill
+### 3.7 Per-Request Kill — Three Layers
 
 ```
-Soft kill (budget exceeded during a yield point):
-  After hook detects: request A over budget
+Layer 1: Soft kill (at yield points, zero collateral)
+  After hook detects: request A cpu > budget
   → reject A's promise chain with "CPU limit exceeded"
   → A's reply gets error
-  → B, C continue unaffected
+  → Microtask queue was A-only → nothing else affected
+  → Event loop continues with next request
 
-Hard kill (infinite loop — hooks can't fire):
-  POSIX CPU timer fires (50ms)
+Layer 2: Hard kill (tight loops, zero collateral)
+  POSIX CPU timer fires (50ms hard limit)
   → signal handler → pipe → watchdog thread
   → terminate_execution()
   → V8 unwinds current stack
+  → Microtask queue: only current request's entries → safe to clear
   → cancel_terminate_execution()
-  → promise hook tells us it was request A
-  → drain A's reply with error
-  → re-enter event loop
-  → B, C continue
+  → Current request gets error
+  → Isolate recovers, serves next request
+
+Layer 3: Nuclear kill (corrupted state, last resort)
+  V8 heap exceeded, unrecoverable error
+  → Evict entire isolate
+  → All pending requests get error
+  → New isolate created on next request
+
+Layers 1+2: zero collateral damage to other requests.
+Layer 3: only for unrecoverable situations (rare).
 ```
 
 ## 4. Event Loop
 
-### 4.1 Phases (Node.js/libuv inspired)
+### 4.1 Phases
 
 ```
 loop {
-    // Phase 1: Microtasks
+    // Phase 1: ACCEPT new requests
+    //   Call dispatch function for each → creates Promise → starts async ops
+    //   All async ops begin immediately (concurrent I/O on tokio)
+    //   DO NOT run microtask checkpoint yet (batch all dispatches first)
+    while let Ok(request) = request_rx.try_recv() {
+        dispatch(request)   // fire-and-forget, returns Promise
+    }
+    // Now run microtask checkpoint to let initial async ops start
     isolate.perform_microtask_checkpoint();
 
-    // Phase 2: Timers
+    // Phase 2: TIMERS
+    //   Fire each ready timer's callback individually
+    //   Microtask checkpoint after each (drain that timer's chain)
     while timer_heap.peek().fire_at <= now {
         fire timer callback
-        microtask checkpoint
+        isolate.perform_microtask_checkpoint();  // drain this callback's chain
     }
 
-    // Phase 3: Pending async ops (fetch, DB results)
+    // Phase 3: RESOLVE async ops (ONE AT A TIME — the key to clean kill)
+    //   For each completed op, resolve its promise and drain its chain.
+    //   Microtask queue has ONLY this request's entries after each resolve.
     while let Ok(result) = op_rx.try_recv() {
-        resolve promise
-        microtask checkpoint
+        resolve_promise(result.request_id, result.value);
+        isolate.perform_microtask_checkpoint();  // drain THIS request's chain only
+        // If terminated during checkpoint → only this request's entries lost
     }
 
-    // Phase 4: Incoming requests
-    while let Ok(request) = request_rx.try_recv() {
-        call dispatch function (fire-and-forget)
-        microtask checkpoint
-    }
-
-    // Phase 5: Check done
+    // Phase 4: CHECK done
     if no timers && no pending ops && no pending requests {
         // idle — wait for next request
     }
 
-    // Phase 6: Wait
-    // Block until: timer fires, op completes, or new request arrives
-    select {
-        timer_timeout => continue
-        op_result => continue
-        new_request => continue
+    // Phase 5: WAIT (zero CPU)
+    //   Block until: timer fires, op completes, or new request arrives
+    //   Single recv_timeout on merged event channel
+    let timeout = duration_until_next_timer();
+    match event_rx.recv_timeout(timeout) {
+        Ok(Event::OpCompleted(..)) => continue,
+        Ok(Event::NewRequest(..)) => continue,
+        Err(Timeout) => continue,             // timer ready
+        Err(Disconnected) => break,           // shutdown
     }
 }
 ```
 
-### 4.2 Wait Mechanism
-
-Phase 6 blocks the V8 thread with zero CPU. Three wake sources:
+### 4.2 The Critical Invariant
 
 ```
-Timer:       std::thread::sleep(duration_until_next_timer)
-Async op:    op_rx.recv_timeout(timeout)
-New request: request_rx.recv_timeout(timeout)
+INVARIANT: Between each perform_microtask_checkpoint() call in Phase 3,
+exactly ONE promise is resolved. Therefore the microtask queue contains
+entries from AT MOST one request at any time.
+
+This guarantees: terminate_execution() during a microtask checkpoint
+can only destroy the current request's .then chain. All other requests'
+state (pending promises in the V8 heap) is untouched.
 ```
 
-All three channels merged into one `std::sync::mpsc`:
+### 4.3 Wait Mechanism
+
+Phase 5 blocks the V8 thread with zero CPU. All events merged into one channel:
 
 ```rust
 enum Event {
-    TimerFired(u32),              // from timer heap (immediate)
-    OpCompleted(u32, String),     // from tokio async op thread
-    NewRequest(u64, String, oneshot::Sender<Result>),  // from HTTP
+    NewRequest { id: u64, body: String, reply: oneshot::Sender<Result> },
+    OpCompleted { op_id: u32, value: String },
 }
 ```
 
-Single `recv_timeout` handles all wake sources.
+Timers use the min-heap, not the channel. The wait timeout is computed from
+the heap's smallest fire_at. `recv_timeout(timeout)` blocks for exactly the
+right duration — wakes on op completion OR timer expiry, whichever first.
 
-### 4.3 Timer Implementation
+### 4.4 Timer Implementation
 
 ```
 Storage: BinaryHeap<Reverse<TimerEntry>> (min-heap)
@@ -196,7 +292,8 @@ Fire: O(log n) pop
 Cancel: lazy deletion (remove callback, skip stale entries)
 ```
 
-No spawned tasks per timer. Compute sleep duration from heap.peek().
+No spawned tasks per timer. No channel messages for timers.
+Compute sleep duration from heap.peek().
 
 ## 5. Async Op System
 
