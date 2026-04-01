@@ -11,34 +11,39 @@ Servers:
 =========================================================
 
 --- 1. ping/pong (minimal) ---
-  raw V8 concurrent (1 thread)            136522.72 req/s   355.75us 244.34us
-  raw V8 conc-pool (16 threads)            83697.04 req/s   634.73us 578.14us
-  Node.js v22.22.2                         15660.58 req/s   3.54ms 7.05ms
+  raw V8 concurrent (1 thread)            160058.72 req/s   313.23us 264.35us
+  raw V8 conc-pool (16 threads)            96391.05 req/s   547.89us 506.03us
+  Node.js v22.22.2                         15048.46 req/s   3.68ms 7.35ms
 
 --- 2. fib(10) (light CPU) ---
-  raw V8 concurrent (1 thread)            119496.91 req/s   398.01us 184.90us
-  raw V8 conc-pool (16 threads)            85359.57 req/s   626.07us 577.48us
-  Node.js v22.22.2                         15750.44 req/s   3.16ms 2.63ms
+  raw V8 concurrent (1 thread)            114670.10 req/s   457.60us 411.27us
+  raw V8 conc-pool (16 threads)            71099.25 req/s   799.69us 0.88ms
+  Node.js v22.22.2                         12929.40 req/s   4.01ms 5.33ms
 
 --- 3. fib(35) (heavy CPU) ---
-  raw V8 concurrent (1 thread)                 5.19 req/s   1.03s 563.48ms
-  raw V8 conc-pool (16 threads)               34.43 req/s   1.15s 415.05ms
-  Node.js v22.22.2                             4.79 req/s   827.06ms 274.43ms
+  raw V8 concurrent (1 thread)                 5.19 req/s   1.02s 552.06ms
+  raw V8 conc-pool (16 threads)               38.64 req/s   1.09s 362.35ms
+  Node.js v22.22.2                             4.99 req/s   859.18ms 403.12ms
 
 --- 4. setTimeout(0) ---
-  raw V8 concurrent (1 thread)             78423.92 req/s   605.34us 315.64us
-  raw V8 conc-pool (16 threads)            84687.04 req/s   637.97us 588.68us
-  Node.js v22.22.2                         18589.07 req/s   2.58ms 665.11us
+  raw V8 concurrent (1 thread)             85507.48 req/s   568.10us 337.87us
+  raw V8 conc-pool (16 threads)            91090.16 req/s   592.76us 572.09us
+  Node.js v22.22.2                         11977.93 req/s   4.02ms 1.49ms
 
 --- 5. Promise chain (sync .then) ---
-  raw V8 concurrent (1 thread)            133422.21 req/s   359.88us 201.74us
-  raw V8 conc-pool (16 threads)            86437.94 req/s   619.88us 563.48us
-  Node.js v22.22.2                         15360.93 req/s   3.19ms 1.92ms
+  raw V8 concurrent (1 thread)             48978.08 req/s   1.05ms 0.90ms
+  raw V8 conc-pool (16 threads)            60622.06 req/s   0.91ms 0.93ms
+  Node.js v22.22.2                         14041.26 req/s   3.50ms 2.21ms
 
 --- 6. Promise chain + 100ms timer ---
-  raw V8 concurrent (1 thread)               474.18 req/s   100.62ms 166.51us
-  raw V8 conc-pool (16 threads)              474.45 req/s   100.57ms 206.96us
-  Node.js v22.22.2                           474.42 req/s   100.77ms 551.28us
+  raw V8 concurrent (1 thread)               474.58 req/s   100.68ms 347.23us
+  raw V8 conc-pool (16 threads)              474.39 req/s   100.65ms 486.88us
+  Node.js v22.22.2                           474.46 req/s   100.86ms 738.04us
+
+--- 7. fetch() → local echo POST ---
+  raw V8 concurrent (1 thread)            238837.71 req/s   168.42us 118.46us
+  raw V8 conc-pool (16 threads)           218623.33 req/s   204.60us 234.37us
+  Node.js v22.22.2                         21014.22 req/s   2.43ms 3.31ms
 
 =========================================================
 

@@ -21,41 +21,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
-const SERVER_JS: &str = r#"
-var __rpc = {
-    ping: function() { return "pong"; },
-    fib: function(n) {
-        function fib(n) { return n <= 1 ? n : fib(n-1) + fib(n-2); }
-        return fib(n);
-    },
-    timeout0: function() {
-        return new Promise(function(resolve) {
-            setTimeout(function() { resolve("done"); }, 0);
-        });
-    },
-    promiseChain: function() {
-        return Promise.resolve(1).then(function(v) { return v + 10; }).then(function(v) { return v * 2; });
-    },
-    promiseChainTimeout: function() {
-        return new Promise(function(resolve) {
-            setTimeout(function() { resolve(1); }, 100);
-        }).then(function(v) { return v + 10; }).then(function(v) { return v * 2; });
-    },
-    httpGet: async function(url) {
-        var resp = await fetch(url);
-        var body = await resp.text();
-        return { status: resp.status, ok: resp.ok, length: body.length, type: resp.headers.get("content-type") };
-    },
-    httpPost: async function(url, data) {
-        var resp = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(data),
-        });
-        return await resp.json();
-    }
-};
-"#;
+/// Default JS loaded when no --js flag is provided.
+/// Loads shared scenarios from benches/scenarios.js at build time.
+const SERVER_JS: &str = include_str!("../benches/scenarios.js");
 
 // ===========================================================================
 // Spawn + warmup helper

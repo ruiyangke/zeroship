@@ -1,27 +1,12 @@
 // Node.js baseline RPC server for cross-runtime benchmarks.
+// Loads the same scenarios.js as the V8 server.
 // Usage: node node_server.js [port]
 
 const http = require("http");
+const path = require("path");
 
 const port = parseInt(process.argv[2] || "4002", 10);
-
-const rpc = {
-  ping() { return "pong"; },
-  fib(n) {
-    function fib(n) { return n <= 1 ? n : fib(n - 1) + fib(n - 2); }
-    return fib(n);
-  },
-  timeout0() {
-    return new Promise(resolve => setTimeout(() => resolve("done"), 0));
-  },
-  promiseChain() {
-    return Promise.resolve(1).then(v => v + 10).then(v => v * 2);
-  },
-  promiseChainTimeout() {
-    return new Promise(resolve => setTimeout(() => resolve(1), 100))
-      .then(v => v + 10).then(v => v * 2);
-  },
-};
+const rpc = require(path.join(__dirname, "scenarios.js"));
 
 const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && req.url === "/health") {
