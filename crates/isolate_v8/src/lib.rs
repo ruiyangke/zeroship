@@ -23,6 +23,7 @@ mod event_loop;
 mod fetch;
 mod globals;
 mod isolate;
+mod kv;
 pub mod runtime;
 mod timers;
 
@@ -486,5 +487,51 @@ mod tests {
         let result = reply_rx.blocking_recv().unwrap().unwrap();
         assert!(result.json.contains("httpbin.org/get"), "got: {}", result.json);
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn kv_store_works() {
+        init_v8();
+        let js = r#"
+            var __rpc = {
+                test: function() {
+                    kv.set("name", "Alice");
+                    kv.set("age", "30");
+                    var name = kv.get("name");
+                    var missing = kv.get("nonexistent");
+                    var keys = kv.list();
+                    kv.delete("age");
+                    var afterDelete = kv.list();
+                    return { name, missing, keys, afterDelete };
+                }
+            };
+        "#;
+        let mut isolate = Isolate::new(js);
+        let r = isolate
+            .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
+            .unwrap();
+        assert!(r.json.contains("Alice"), "got: {}", r.json);
+        assert!(r.json.contains("null"), "got: {}", r.json);
+    }
+
+    #[test]
+    fn kv_persists_across_requests() {
+        init_v8();
+        let js = r#"
+            var __rpc = {
+                set: function(k, v) { kv.set(k, v); return "ok"; },
+                get: function(k) { return kv.get(k); }
+            };
+        "#;
+        let mut isolate = Isolate::new(js);
+        isolate
+            .execute_request(
+                r#"{"jsonrpc":"2.0","method":"set","params":["key1","value1"],"id":1}"#,
+            )
+            .unwrap();
+        let r = isolate
+            .execute_request(r#"{"jsonrpc":"2.0","method":"get","params":["key1"],"id":2}"#)
+            .unwrap();
+        assert!(r.json.contains("value1"), "got: {}", r.json);
     }
 }

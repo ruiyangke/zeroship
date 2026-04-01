@@ -35,6 +35,7 @@ var __rpc = {
 - fetch(url, options) — full Web Fetch API (Headers, Request, Response)
 - setTimeout / setInterval / clearTimeout / clearInterval
 - console.log / console.error
+- kv.get(key) / kv.set(key, value) / kv.delete(key) / kv.list() — per-app key-value store
 - Promise, async/await
 - JSON.parse / JSON.stringify
 - All standard JavaScript built-ins

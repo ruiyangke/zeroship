@@ -36,6 +36,8 @@ pub(crate) struct EventLoopState {
     pub(crate) concurrent_event_tx: Option<mpsc::Sender<crate::concurrent::Event>>,
     /// Per-isolate log buffer. Console output is appended here.
     pub(crate) log_buffer: Vec<String>,
+    /// Per-isolate key-value store (persistent across requests, lost on evict)
+    pub(crate) kv_store: HashMap<String, String>,
 }
 
 /// Result of an async op (e.g., fetch response, DB query result).
@@ -56,6 +58,7 @@ impl EventLoopState {
             tokio_handle: None,
             concurrent_event_tx: None,
             log_buffer: Vec::new(),
+            kv_store: HashMap::new(),
         }
     }
 }
