@@ -280,39 +280,97 @@ trait RuntimePlugin {
 
 ## 6. Isolate Management
 
-### 6.1 Per-App Isolate (Long-Lived)
+### 6.1 Per-App Worker Group (Scalable)
 
 ```
-App "todo-app":
-  1 V8 isolate (created once)
-  1 persistent context (JS state persists across requests)
-  1 worker thread (dedicated)
-  N concurrent requests in-flight (event loop multiplexes)
+App "todo-app" (Pro plan, 4 workers):
+  4 V8 isolates (same server.js loaded in each)
+  4 persistent contexts (JS state independent per worker)
+  4 worker threads (dedicated)
+  Each worker: N concurrent requests in-flight (event loop multiplexes)
+  Load balancer: round-robin across workers
+
+App "blog" (Free plan, 1 worker):
+  1 V8 isolate, 1 thread, concurrent event loop
 ```
 
-### 6.2 Isolate Pool
+Configurable per app via plan:
+```toml
+[plans.free]
+max_workers = 1
+
+[plans.pro]
+max_workers = 4
+
+[plans.enterprise]
+max_workers = 16
+
+[apps.high_traffic_api]
+workers = 8          # override (up to plan max)
+```
+
+### 6.2 IsolateManager
+
+```rust
+struct WorkerHandle {
+    request_tx: mpsc::Sender<Event>,
+    thread: JoinHandle<()>,
+}
+
+struct AppWorkerGroup {
+    workers: Vec<WorkerHandle>,
+    next: AtomicUsize,  // round-robin
+}
+
+impl AppWorkerGroup {
+    fn dispatch(&self, request: Request) {
+        let idx = self.next.fetch_add(1, Relaxed) % self.workers.len();
+        self.workers[idx].send(request);
+    }
+}
+
+struct IsolateManager {
+    apps: HashMap<AppId, AppWorkerGroup>,
+}
+```
+
+### 6.3 Shared State Model
+
+Workers share NOTHING in memory. Each isolate has its own JS global state.
+Shared state goes through external storage:
 
 ```
-IsolateManager:
-  apps: HashMap<AppId, WorkerHandle>
+Worker 0: var counter = 0;  // counter++ → 1
+Worker 1: var counter = 0;  // counter++ → 1 (not 2!)
 
-  dispatch(app_id, request) → WorkerHandle.send(request)
-
-  WorkerHandle:
-    request_tx: mpsc::Sender<Event>  // inject requests
-    thread: JoinHandle               // the V8 worker thread
+Correct for shared state:
+  await db.update("counter", { $inc: 1 });  // atomic in DB
+  await kv.get("session:abc");               // shared KV store
 ```
 
-### 6.3 Lifecycle
+This matches: Node.js cluster, Cloudflare Workers, Supabase Edge Runtime.
+
+### 6.4 Scaling Math
+
+| Plan | Workers | Lightweight RPC | fib(30) ~16ms | fetch(100ms I/O) |
+|------|---------|----------------|---------------|-------------------|
+| Free (1) | 1 | 100K req/s | 60 req/s | 10K req/s |
+| Pro (4) | 4 | 400K req/s | 240 req/s | 40K req/s |
+| Enterprise (16) | 16 | 1.6M req/s | 960 req/s | 160K req/s |
+
+Linear scaling — workers share nothing.
+
+### 6.5 Lifecycle
 
 ```
-1. App first request → create isolate + worker thread
-2. Load server.js (compiled once, persistent context)
-3. Start event loop (blocks on recv_timeout)
-4. Requests arrive → inject via channel → fire-and-forget dispatch
-5. Idle timeout → evict isolate (configurable)
-6. Memory pressure → evict LRU isolates
-7. Shutdown → drain in-flight, close channel, join thread
+1. App first request → create N workers (N from plan config)
+2. Each worker: load server.js (compiled once, persistent context)
+3. Each worker: start event loop (blocks on recv_timeout)
+4. Requests arrive → round-robin to workers → fire-and-forget dispatch
+5. Idle timeout → evict app (all workers)
+6. Memory pressure → evict LRU apps
+7. Scale down → reduce workers (drain in-flight first)
+8. Shutdown → drain all, close channels, join threads
 ```
 
 ## 7. CPU Enforcement
