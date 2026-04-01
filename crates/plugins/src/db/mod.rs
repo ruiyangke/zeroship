@@ -70,8 +70,8 @@ globalThis.db = {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
-    #[error("SQLite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
+    #[error("Database error: {0}")]
+    Database(String),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("Invalid collection name: {0}")]

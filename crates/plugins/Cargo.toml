@@ -6,7 +6,7 @@ description = "Built-in plugins for appbase — db, kv, env"
 
 [features]
 default = ["db", "kv", "env"]
-db = ["dep:rusqlite", "dep:uuid"]
+db = ["dep:uuid"]
 kv = []
 env = []
 
@@ -16,7 +16,6 @@ serde_json = "1"
 thiserror = "2"
 
 # db plugin only
-rusqlite = { version = "0.38", features = ["bundled"], optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 
 [lints]

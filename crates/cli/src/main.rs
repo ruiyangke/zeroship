@@ -98,13 +98,14 @@ fn cmd_serve(args: &[String]) {
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     if let Err(e) = rt.block_on(async {
-        // Create the control plane registry (SQLite-backed)
+        // Create the control plane registry (SQLite-backed via sqlx)
         let registry_db_path = data_dir.join("apps.db");
         let registry: Arc<dyn AppRegistry> = Arc::new(
-            appbase_control::sqlx_registry::SqliteRegistry::new(
-                registry_db_path.to_str().unwrap_or("apps.db"),
+            appbase_control::sqlx_registry::SqlxRegistry::new(
+                &format!("sqlite://{}", registry_db_path.display()),
                 master_key.clone(),
             )
+            .await
             .unwrap_or_else(|e| {
                 eprintln!("[appbase] Failed to open registry DB: {e}");
                 std::process::exit(1);
@@ -147,8 +148,10 @@ fn cmd_serve(args: &[String]) {
         // Warm-tier store for metering persistence (prefer SQLite, fallback to in-memory)
         let store: Arc<dyn appbase_core::meter_store::MeterStore> =
             match appbase_metering::store::sqlite::SqliteMeterStore::new(
-                store_path.to_str().unwrap_or("metering.db"),
-            ) {
+                &format!("sqlite://{}", store_path.display()),
+            )
+            .await
+            {
                 Ok(s) => {
                     eprintln!(
                         "[appbase] Using SQLite meter store at {}",

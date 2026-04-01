@@ -1,127 +1,127 @@
-//! SqliteRegistry — AppRegistry backed by SQLite via rusqlite.
+//! SqlxRegistry — AppRegistry backed by sqlx AnyPool (SQLite or Postgres).
 //!
-//! Uses `tokio::task::spawn_blocking` to bridge sync rusqlite with async trait.
-//! For Postgres support, migrate to sqlx when libsqlite3-sys conflict is resolved.
+//! Uses `sqlx::any::AnyPool` so the same code works against both SQLite and Postgres.
+//! SQL uses `$N` bind parameters and `CURRENT_TIMESTAMP` for cross-database compatibility.
 
 use async_trait::async_trait;
-use rusqlite::{params, Connection, OptionalExtension};
-use std::sync::{Arc, Mutex};
+use sqlx::any::{Any, AnyRow};
+use sqlx::{Executor, Row};
+
+type AnyPool = sqlx::Pool<Any>;
 
 use crate::{AppData, AppRecord, AppRegistry, RegistryError};
 
-/// AppRegistry implementation backed by SQLite.
-pub struct SqliteRegistry {
-    conn: Arc<Mutex<Connection>>,
+fn db_err(e: sqlx::Error) -> RegistryError {
+    RegistryError::Database(e.to_string())
+}
+
+fn app_record_from_row(r: &AnyRow) -> AppRecord {
+    AppRecord {
+        id: r.get("id"),
+        plan_id: r.get("plan_id"),
+        version: r.get("version"),
+        api_key: r.get("api_key"),
+        created_at: r.get("created_at"),
+        updated_at: r.get("updated_at"),
+    }
+}
+
+/// AppRegistry implementation backed by sqlx AnyPool (SQLite or Postgres).
+pub struct SqlxRegistry {
+    pool: AnyPool,
     master_key: String,
 }
 
-impl SqliteRegistry {
-    /// Open (or create) the registry database.
-    pub fn new(path: &str, master_key: String) -> Result<Self, RegistryError> {
-        let conn = Connection::open(path)
-            .map_err(|e| RegistryError::Database(format!("Failed to open: {e}")))?;
+impl SqlxRegistry {
+    /// Open (or create) the registry database from a connection URL.
+    ///
+    /// Examples:
+    /// - `sqlite://path/to/apps.db`
+    /// - `sqlite://:memory:`
+    /// - `postgres://user:pass@host/db`
+    pub async fn new(database_url: &str, master_key: String) -> Result<Self, RegistryError> {
+        sqlx::any::install_default_drivers();
+        let pool = AnyPool::connect(database_url)
+            .await
+            .map_err(|e| RegistryError::Database(format!("Connection failed: {e}")))?;
 
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=NORMAL;
-             CREATE TABLE IF NOT EXISTS apps (
-                 id          TEXT PRIMARY KEY,
-                 plan_id     TEXT NOT NULL DEFAULT 'free',
-                 server_js   TEXT NOT NULL DEFAULT '',
-                 client_html BLOB,
-                 version     INTEGER NOT NULL DEFAULT 0,
-                 api_key     TEXT NOT NULL,
-                 created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-                 updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-             );",
-        )
-        .map_err(|e| RegistryError::Database(format!("Migration failed: {e}")))?;
+        let registry = Self { pool, master_key };
+        registry.migrate().await?;
+        Ok(registry)
+    }
 
-        Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
-            master_key,
-        })
+    /// Run schema migrations.
+    async fn migrate(&self) -> Result<(), RegistryError> {
+        self.pool
+            .execute(
+                "CREATE TABLE IF NOT EXISTS apps (
+                    id          TEXT PRIMARY KEY,
+                    plan_id     TEXT NOT NULL DEFAULT 'free',
+                    server_js   TEXT NOT NULL DEFAULT '',
+                    client_html BLOB,
+                    version     INTEGER NOT NULL DEFAULT 0,
+                    api_key     TEXT NOT NULL,
+                    created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )",
+            )
+            .await
+            .map_err(|e| RegistryError::Database(format!("Migration failed: {e}")))?;
+
+        Ok(())
     }
 
     /// Validate the master key for admin operations.
     pub fn check_master_key(&self, key: &str) -> bool {
         self.master_key == key
     }
-
-    /// Run a blocking database operation on tokio's blocking thread pool.
-    async fn blocking<F, T>(&self, f: F) -> Result<T, RegistryError>
-    where
-        F: FnOnce(&Connection) -> Result<T, RegistryError> + Send + 'static,
-        T: Send + 'static,
-    {
-        let conn = self.conn.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap();
-            f(&conn)
-        })
-        .await
-        .map_err(|e| RegistryError::Database(format!("Task join error: {e}")))?
-    }
 }
 
 #[async_trait]
-impl AppRegistry for SqliteRegistry {
+impl AppRegistry for SqlxRegistry {
     async fn get_app(&self, app_id: &str) -> Result<Option<AppData>, RegistryError> {
-        let id = app_id.to_string();
-        self.blocking(move |conn| {
-            conn.query_row(
-                "SELECT id, plan_id, server_js, client_html, version FROM apps WHERE id = ?1",
-                params![id],
-                |row| {
-                    Ok(AppData {
-                        id: row.get(0)?,
-                        plan_id: row.get(1)?,
-                        server_js: row.get(2)?,
-                        client_html: row.get(3)?,
-                        version: row.get(4)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(|e| RegistryError::Database(e.to_string()))
-        })
+        let row = sqlx::query(
+            "SELECT id, plan_id, server_js, client_html, version FROM apps WHERE id = $1",
+        )
+        .bind(app_id)
+        .fetch_optional(&self.pool)
         .await
+        .map_err(db_err)?;
+
+        Ok(row.map(|r| AppData {
+            id: r.get("id"),
+            plan_id: r.get("plan_id"),
+            server_js: r.get("server_js"),
+            client_html: r.get("client_html"),
+            version: r.get("version"),
+        }))
     }
 
     async fn get_version(&self, app_id: &str) -> Result<Option<i64>, RegistryError> {
-        let id = app_id.to_string();
-        self.blocking(move |conn| {
-            conn.query_row("SELECT version FROM apps WHERE id = ?1", params![id], |row| {
-                row.get(0)
-            })
-            .optional()
-            .map_err(|e| RegistryError::Database(e.to_string()))
-        })
-        .await
+        let row = sqlx::query("SELECT version FROM apps WHERE id = $1")
+            .bind(app_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(db_err)?;
+
+        Ok(row.map(|r| r.get("version")))
     }
 
     async fn get_plan(&self, app_id: &str) -> Result<String, RegistryError> {
-        let id = app_id.to_string();
-        self.blocking(move |conn| {
-            conn.query_row(
-                "SELECT plan_id FROM apps WHERE id = ?1",
-                params![id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| RegistryError::Database(e.to_string()))?
-            .ok_or_else(|| RegistryError::NotFound(id))
-        })
-        .await
+        let row = sqlx::query("SELECT plan_id FROM apps WHERE id = $1")
+            .bind(app_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(db_err)?;
+
+        row.map(|r| r.get("plan_id"))
+            .ok_or_else(|| RegistryError::NotFound(app_id.to_string()))
     }
 
     async fn create_app(&self, app_id: &str, plan_id: &str) -> Result<AppRecord, RegistryError> {
-        let id = app_id.to_string();
-        let plan = plan_id.to_string();
-
-        if id.is_empty()
-            || id.len() > 64
-            || !id
+        if app_id.is_empty()
+            || app_id.len() > 64
+            || !app_id
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         {
@@ -131,39 +131,31 @@ impl AppRegistry for SqliteRegistry {
         }
 
         let api_key = uuid::Uuid::new_v4().to_string();
-        let key = api_key.clone();
 
-        self.blocking(move |conn| {
-            conn.execute(
-                "INSERT INTO apps (id, plan_id, api_key) VALUES (?1, ?2, ?3)",
-                params![id, plan, key],
-            )
-            .map_err(|e| {
-                let msg = e.to_string();
-                if msg.contains("UNIQUE") {
-                    RegistryError::AlreadyExists(id.clone())
-                } else {
-                    RegistryError::Database(msg)
-                }
-            })?;
+        let result = sqlx::query("INSERT INTO apps (id, plan_id, api_key) VALUES ($1, $2, $3)")
+            .bind(app_id)
+            .bind(plan_id)
+            .bind(&api_key)
+            .execute(&self.pool)
+            .await;
 
-            conn.query_row(
-                "SELECT id, plan_id, version, api_key, created_at, updated_at FROM apps WHERE id = ?1",
-                params![id],
-                |row| {
-                    Ok(AppRecord {
-                        id: row.get(0)?,
-                        plan_id: row.get(1)?,
-                        version: row.get(2)?,
-                        api_key: row.get(3)?,
-                        created_at: row.get(4)?,
-                        updated_at: row.get(5)?,
-                    })
-                },
-            )
-            .map_err(|e| RegistryError::Database(e.to_string()))
-        })
+        if let Err(e) = result {
+            let msg = e.to_string();
+            if msg.contains("UNIQUE") || msg.contains("duplicate key") {
+                return Err(RegistryError::AlreadyExists(app_id.to_string()));
+            }
+            return Err(RegistryError::Database(msg));
+        }
+
+        let row = sqlx::query(
+            "SELECT id, plan_id, version, api_key, created_at, updated_at FROM apps WHERE id = $1",
+        )
+        .bind(app_id)
+        .fetch_one(&self.pool)
         .await
+        .map_err(db_err)?;
+
+        Ok(app_record_from_row(&row))
     }
 
     async fn deploy(
@@ -172,91 +164,66 @@ impl AppRegistry for SqliteRegistry {
         server_js: &str,
         client_html: Option<&[u8]>,
     ) -> Result<i64, RegistryError> {
-        let id = app_id.to_string();
-        let js = server_js.to_string();
-        let html = client_html.map(|b| b.to_vec());
+        let q = sqlx::query(
+            "UPDATE apps SET server_js = $1, client_html = $2, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $3",
+        )
+        .bind(server_js)
+        .bind(client_html)
+        .bind(app_id);
+        let result = self.pool.execute(q).await.map_err(db_err)?;
 
-        self.blocking(move |conn| {
-            let rows = conn
-                .execute(
-                    "UPDATE apps SET server_js = ?1, client_html = ?2, version = version + 1, updated_at = datetime('now') WHERE id = ?3",
-                    params![js, html, id],
-                )
-                .map_err(|e| RegistryError::Database(e.to_string()))?;
+        if result.rows_affected() == 0 {
+            return Err(RegistryError::NotFound(app_id.to_string()));
+        }
 
-            if rows == 0 {
-                return Err(RegistryError::NotFound(id));
-            }
+        let row = sqlx::query("SELECT version FROM apps WHERE id = $1")
+            .bind(app_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(db_err)?;
 
-            conn.query_row("SELECT version FROM apps WHERE id = ?1", params![id], |row| {
-                row.get(0)
-            })
-            .map_err(|e| RegistryError::Database(e.to_string()))
-        })
-        .await
+        Ok(row.get("version"))
     }
 
     async fn delete_app(&self, app_id: &str) -> Result<bool, RegistryError> {
-        let id = app_id.to_string();
-        self.blocking(move |conn| {
-            let rows = conn
-                .execute("DELETE FROM apps WHERE id = ?1", params![id])
-                .map_err(|e| RegistryError::Database(e.to_string()))?;
-            Ok(rows > 0)
-        })
-        .await
+        let q = sqlx::query("DELETE FROM apps WHERE id = $1").bind(app_id);
+        let result = self.pool.execute(q).await.map_err(db_err)?;
+        Ok(result.rows_affected() > 0)
     }
 
     async fn list_apps(&self) -> Result<Vec<AppRecord>, RegistryError> {
-        self.blocking(move |conn| {
-            let mut stmt = conn
-                .prepare("SELECT id, plan_id, version, api_key, created_at, updated_at FROM apps ORDER BY id")
-                .map_err(|e| RegistryError::Database(e.to_string()))?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok(AppRecord {
-                        id: row.get(0)?,
-                        plan_id: row.get(1)?,
-                        version: row.get(2)?,
-                        api_key: row.get(3)?,
-                        created_at: row.get(4)?,
-                        updated_at: row.get(5)?,
-                    })
-                })
-                .map_err(|e| RegistryError::Database(e.to_string()))?;
-            rows.collect::<Result<Vec<_>, _>>()
-                .map_err(|e| RegistryError::Database(e.to_string()))
-        })
+        let rows = sqlx::query(
+            "SELECT id, plan_id, version, api_key, created_at, updated_at FROM apps ORDER BY id",
+        )
+        .fetch_all(&self.pool)
         .await
+        .map_err(db_err)?;
+
+        Ok(rows.iter().map(app_record_from_row).collect())
     }
 
     async fn set_plan(&self, app_id: &str, plan_id: &str) -> Result<bool, RegistryError> {
-        let id = app_id.to_string();
-        let plan = plan_id.to_string();
-        self.blocking(move |conn| {
-            let rows = conn
-                .execute(
-                    "UPDATE apps SET plan_id = ?1, updated_at = datetime('now') WHERE id = ?2",
-                    params![plan, id],
-                )
-                .map_err(|e| RegistryError::Database(e.to_string()))?;
-            Ok(rows > 0)
-        })
-        .await
+        let q = sqlx::query(
+            "UPDATE apps SET plan_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+        )
+        .bind(plan_id)
+        .bind(app_id);
+        let result = self.pool.execute(q).await.map_err(db_err)?;
+        Ok(result.rows_affected() > 0)
     }
 
     async fn validate_key(&self, app_id: &str, key: &str) -> Result<bool, RegistryError> {
-        let id = app_id.to_string();
-        let k = key.to_string();
-        self.blocking(move |conn| {
-            let stored: Option<String> = conn
-                .query_row("SELECT api_key FROM apps WHERE id = ?1", params![id], |row| {
-                    row.get(0)
-                })
-                .optional()
-                .map_err(|e| RegistryError::Database(e.to_string()))?;
-            Ok(stored.as_deref() == Some(k.as_str()))
-        })
-        .await
+        let row = sqlx::query("SELECT api_key FROM apps WHERE id = $1")
+            .bind(app_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(db_err)?;
+
+        Ok(row
+            .map(|r| {
+                let stored: String = r.get("api_key");
+                stored == key
+            })
+            .unwrap_or(false))
     }
 }
