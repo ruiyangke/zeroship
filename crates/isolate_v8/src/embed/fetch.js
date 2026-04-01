@@ -22,54 +22,96 @@
   // Headers
   // =========================================================================
 
+  var VALID_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+  function validateName(name) {
+    name = String(name);
+    if (!VALID_TOKEN.test(name)) {
+      throw new TypeError("Invalid header name: " + name);
+    }
+    return name;
+  }
+
+  function validateValue(value) {
+    value = String(value);
+    for (var i = 0; i < value.length; i++) {
+      var c = value.charCodeAt(i);
+      if (c > 0xFF || c === 0x00 || c === 0x0A || c === 0x0D) {
+        throw new TypeError("Invalid header value");
+      }
+    }
+    return value.replace(/^[\t ]+|[\t ]+$/g, "");
+  }
+
   function Headers(init) {
-    this._map = Object.create(null); // lowercase key -> [name, ...values]
+    this._map = Object.create(null); // lowercase key -> [value, ...]
+
+    if (init === null || (init !== undefined && typeof init !== "object")) {
+      throw new TypeError("Failed to construct 'Headers': The provided value is not of type '(sequence<sequence<ByteString>> or record<ByteString, ByteString>)'");
+    }
 
     if (init) {
       if (init instanceof Headers) {
         init.forEach(function(value, name) {
           this.append(name, value);
         }, this);
-      } else if (Array.isArray(init)) {
-        for (var i = 0; i < init.length; i++) {
-          if (!Array.isArray(init[i]) || init[i].length < 2) {
-            throw new TypeError("Each header pair must be an iterable [name, value]");
+      } else if (init !== null && typeof init === "object" && typeof init[Symbol.iterator] === "function") {
+        // Iterable (Array, custom iterators, etc.)
+        var iter = init[Symbol.iterator]();
+        var item;
+        while (!(item = iter.next()).done) {
+          var pair = item.value;
+          if (!pair || typeof pair !== "object" || typeof pair[Symbol.iterator] !== "function") {
+            throw new TypeError("Each header pair must be iterable");
           }
-          this.append(init[i][0], init[i][1]);
+          var pairArr = Array.from ? Array.from(pair) : [].slice.call(pair);
+          if (pairArr.length !== 2) {
+            throw new TypeError("Each header pair must have exactly two elements");
+          }
+          this.append(pairArr[0], pairArr[1]);
         }
       } else if (typeof init === "object") {
-        var keys = Object.keys(init);
-        for (var j = 0; j < keys.length; j++) {
-          this.append(keys[j], init[keys[j]]);
+        // Record<string, string> — per spec, sort keys and skip Symbols
+        var names = Object.keys(init).sort();
+        for (var j = 0; j < names.length; j++) {
+          var name = validateName(names[j]);
+          var val = validateValue(String(init[names[j]]));
+          this.append(name, val);
         }
       }
     }
   }
 
   Headers.prototype.append = function(name, value) {
-    var key = name.toLowerCase();
+    var key = validateName(name).toLowerCase();
+    value = validateValue(value);
     if (this._map[key]) {
-      this._map[key].push(String(value));
+      this._map[key].push(value);
     } else {
-      this._map[key] = [String(value)];
+      this._map[key] = [value];
     }
   };
 
   Headers.prototype.delete = function(name) {
-    delete this._map[name.toLowerCase()];
+    var key = validateName(name).toLowerCase();
+    delete this._map[key];
   };
 
   Headers.prototype.get = function(name) {
-    var values = this._map[name.toLowerCase()];
+    var key = validateName(name).toLowerCase();
+    var values = this._map[key];
     return values ? values.join(", ") : null;
   };
 
   Headers.prototype.has = function(name) {
-    return name.toLowerCase() in this._map;
+    var key = validateName(name).toLowerCase();
+    return key in this._map;
   };
 
   Headers.prototype.set = function(name, value) {
-    this._map[name.toLowerCase()] = [String(value)];
+    var key = validateName(name).toLowerCase();
+    value = validateValue(value);
+    this._map[key] = [value];
   };
 
   Headers.prototype.forEach = function(callback, thisArg) {
@@ -81,42 +123,49 @@
   };
 
   Headers.prototype.entries = function() {
-    var keys = Object.keys(this._map).sort();
-    var index = 0;
     var self = this;
-    return {
+    var index = 0;
+    var iter = {
       next: function() {
+        var keys = Object.keys(self._map).sort();
         if (index >= keys.length) return { done: true, value: undefined };
         var key = keys[index++];
         return { done: false, value: [key, self._map[key].join(", ")] };
       },
       [Symbol.iterator]: function() { return this; }
     };
+    Object.defineProperty(iter, Symbol.toStringTag, { value: "Iterator" });
+    return iter;
   };
 
   Headers.prototype.keys = function() {
-    var keys = Object.keys(this._map).sort();
+    var self = this;
     var index = 0;
-    return {
+    var iter = {
       next: function() {
+        var keys = Object.keys(self._map).sort();
         if (index >= keys.length) return { done: true, value: undefined };
         return { done: false, value: keys[index++] };
       },
       [Symbol.iterator]: function() { return this; }
     };
+    Object.defineProperty(iter, Symbol.toStringTag, { value: "Iterator" });
+    return iter;
   };
 
   Headers.prototype.values = function() {
-    var keys = Object.keys(this._map).sort();
-    var index = 0;
     var self = this;
-    return {
+    var index = 0;
+    var iter = {
       next: function() {
+        var keys = Object.keys(self._map).sort();
         if (index >= keys.length) return { done: true, value: undefined };
         return { done: false, value: self._map[keys[index++]].join(", ") };
       },
       [Symbol.iterator]: function() { return this; }
     };
+    Object.defineProperty(iter, Symbol.toStringTag, { value: "Iterator" });
+    return iter;
   };
 
   Headers.prototype[Symbol.iterator] = function() {
@@ -249,6 +298,9 @@
   }
 
   Request.prototype.clone = function() {
+    if (this._bodyUsed) {
+      throw new TypeError("Cannot clone a disturbed Request");
+    }
     return new Request(this);
   };
 
@@ -260,9 +312,31 @@
 
   function Response(body, init) {
     init = init || {};
+    var status = init.status !== undefined ? init.status : 200;
 
-    this.status = init.status !== undefined ? init.status : 200;
-    this.statusText = init.statusText !== undefined ? init.statusText : "";
+    // Validate status range
+    if (status < 200 || status > 599) {
+      throw new RangeError("Invalid status code: " + status);
+    }
+
+    var statusText = init.statusText !== undefined ? init.statusText : "";
+
+    // Validate statusText (no non-ASCII, no CR/LF)
+    for (var i = 0; i < statusText.length; i++) {
+      var c = statusText.charCodeAt(i);
+      if (c > 0x7E || (c < 0x20 && c !== 0x09)) {
+        throw new TypeError("Invalid statusText");
+      }
+    }
+
+    // Null-body status: 204, 205, 304 — body must be null
+    if (body !== null && body !== undefined && body !== "" &&
+        (status === 204 || status === 205 || status === 304)) {
+      throw new TypeError("Response with null body status cannot have body");
+    }
+
+    this.status = status;
+    this.statusText = statusText;
     this.headers = new Headers(init.headers);
     this.type = "default";
     this.url = "";
@@ -273,6 +347,9 @@
   }
 
   Response.prototype.clone = function() {
+    if (this._bodyUsed) {
+      throw new TypeError("Cannot clone a disturbed Response");
+    }
     var resp = new Response(this._bodyText, {
       status: this.status,
       statusText: this.statusText,
@@ -288,8 +365,15 @@
   applyBodyMixin(Response.prototype);
 
   Response.error = function() {
-    var resp = new Response(null, { status: 0, statusText: "" });
+    var resp = Object.create(Response.prototype);
+    resp.status = 0;
+    resp.statusText = "";
+    resp.headers = new Headers();
     resp.type = "error";
+    resp.url = "";
+    resp.redirected = false;
+    resp.ok = false;
+    initBody(resp, null);
     return resp;
   };
 
@@ -343,6 +427,8 @@
 
   AbortSignal.prototype.dispatchEvent = function(event) {
     if (event.type === "abort") {
+      event.target = this;
+      event.currentTarget = this;
       for (var i = 0; i < this._listeners.length; i++) {
         try { this._listeners[i].call(this, event); } catch (e) {}
       }
@@ -371,7 +457,7 @@
       if (!signal.aborted) {
         signal.aborted = true;
         signal.reason = new DOMException("The operation timed out.", "TimeoutError");
-        signal.dispatchEvent({ type: "abort" });
+        signal.dispatchEvent({ type: "abort", target: signal, currentTarget: signal });
       }
     }, ms);
     return signal;
@@ -389,7 +475,8 @@
     if (this.signal.aborted) return;
     this.signal.aborted = true;
     this.signal.reason = reason !== undefined ? reason : new DOMException("The operation was aborted.", "AbortError");
-    this.signal.dispatchEvent({ type: "abort" });
+    var event = { type: "abort", target: this.signal, currentTarget: this.signal };
+    this.signal.dispatchEvent(event);
   };
 
   // =========================================================================
@@ -457,15 +544,15 @@
         }
 
         var responseHeaders = new Headers(parsed.headers || []);
-        var response = new Response(parsed.body || "", {
-          status: parsed.status,
-          statusText: parsed.statusText || "",
-          headers: responseHeaders
-        });
+        var response = Object.create(Response.prototype);
+        response.status = parsed.status;
+        response.statusText = parsed.statusText || "";
+        response.headers = responseHeaders;
+        response.type = "basic";
         response.url = parsed.url || url;
         response.redirected = !!parsed.redirected;
         response.ok = parsed.status >= 200 && parsed.status < 300;
-        response.type = "basic";
+        initBody(response, parsed.body || "");
 
         resolve(response);
       }, function(err) {
