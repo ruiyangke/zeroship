@@ -36,6 +36,12 @@ var __rpc = {
         });
         return await resp.json();
     },
+
+    fetchExternal: async function(url) {
+        var resp = await fetch(url);
+        var data = await resp.json();
+        return { status: resp.status, url: resp.url };
+    },
 };
 
 // Node.js: export for require()

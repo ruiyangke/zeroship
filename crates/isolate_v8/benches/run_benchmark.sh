@@ -80,7 +80,7 @@ echo "All servers ready." >&2
 # ---------------------------------------------------------------------------
 make_lua() {
     local method=$1 params=$2
-    local file="/tmp/appbase-bench-${method}-${params}.lua"
+    local file="/tmp/appbase-bench-${method}.lua"
     cat > "$file" << EOF
 wrk.method = "POST"
 wrk.body = '{"jsonrpc":"2.0","method":"${method}","params":${params},"id":1}'
@@ -139,6 +139,7 @@ scenario "4. setTimeout(0)"                 timeout0          "[]"
 scenario "5. Promise chain (sync .then)"    promiseChain      "[]"
 scenario "6. Promise chain + 100ms timer"   promiseChainTimeout "[]"
 scenario "7. fetch() → local echo POST"    fetchEcho           "[\"http://localhost:$PORT_ECHO\"]"
+scenario "8. fetch() → external API"       fetchExternal       "[\"https://httpbin.org/get\"]"
 
 echo ""
 echo "========================================================="
