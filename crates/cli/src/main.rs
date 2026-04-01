@@ -5,6 +5,7 @@
 //!   appbase dev <app.jsx> [--port=3000] [--compiler=appbase-compile]
 //!   appbase compile <app.jsx> [--target=rust|node] [--outdir=.dist] [--minify]
 
+use appbase_control::AppRegistry;
 use appbase_core::config::{AppbaseConfig, IsolateConfig, ServerConfig};
 use appbase_core::plugin::{Plugin, PluginFactory};
 use appbase_server::router;
@@ -91,8 +92,40 @@ fn cmd_serve(args: &[String]) {
     });
     let store_path = data_dir.join("metering.db");
 
+    // Master key: from env or generate a default for development
+    let master_key = std::env::var("APPBASE_MASTER_KEY")
+        .unwrap_or_else(|_| "dev-master-key".to_string());
+
     let rt = tokio::runtime::Runtime::new().unwrap();
     if let Err(e) = rt.block_on(async {
+        // Create the control plane registry (SQLite-backed)
+        let registry_db_path = data_dir.join("apps.db");
+        let registry: Arc<dyn AppRegistry> = Arc::new(
+            appbase_control::sqlx_registry::SqliteRegistry::new(
+                registry_db_path.to_str().unwrap_or("apps.db"),
+                master_key.clone(),
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("[appbase] Failed to open registry DB: {e}");
+                std::process::exit(1);
+            }),
+        );
+
+        // Backward compat: ensure "default" app exists and deploy the server_js to it
+        if registry.get_app("default").await.unwrap_or(None).is_none() {
+            registry.create_app("default", "free").await.unwrap_or_else(|e| {
+                eprintln!("[appbase] Failed to create default app: {e}");
+                std::process::exit(1);
+            });
+        }
+        registry
+            .deploy("default", &server_js, client_html.as_deref())
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("[appbase] Failed to deploy default app: {e}");
+                std::process::exit(1);
+            });
+
         // Cold-tier event log + background writer
         let event_log: std::sync::Arc<dyn appbase_core::event_log::EventLog> =
             std::sync::Arc::new(appbase_metering::event_logger::InMemoryEventLog::new());
@@ -107,6 +140,8 @@ fn cmd_serve(args: &[String]) {
             plugin_factory,
             default_plan,
             event_sender,
+            registry,
+            master_key.clone(),
         );
 
         // Warm-tier store for metering persistence (prefer SQLite, fallback to in-memory)

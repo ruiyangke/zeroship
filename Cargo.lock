@@ -58,6 +58,7 @@ name = "appbase"
 version = "0.1.0"
 dependencies = [
  "appbase-billing",
+ "appbase-control",
  "appbase-core",
  "appbase-enforcement",
  "appbase-metering",
@@ -86,6 +87,20 @@ dependencies = [
  "serde",
  "serde_json",
  "swc_core",
+]
+
+[[package]]
+name = "appbase-control"
+version = "0.1.0"
+dependencies = [
+ "appbase-plan",
+ "async-trait",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -161,6 +176,7 @@ name = "appbase-server"
 version = "0.1.0"
 dependencies = [
  "appbase-billing",
+ "appbase-control",
  "appbase-core",
  "appbase-enforcement",
  "appbase-isolate-v8",
@@ -168,6 +184,7 @@ dependencies = [
  "appbase-plan",
  "axum",
  "bytes",
+ "serde",
  "serde_json",
  "time",
  "tokio",
@@ -202,6 +219,17 @@ dependencies = [
  "compression-core",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "async-trait"
+version = "0.1.89"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

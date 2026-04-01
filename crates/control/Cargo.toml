@@ -1,0 +1,20 @@
+[package]
+name = "appbase-control"
+version = "0.1.0"
+edition = "2024"
+description = "Control plane for appbase — app registry, deploy, plan management"
+
+[dependencies]
+# Using rusqlite to match metering crate (avoids libsqlite3-sys link conflict with sqlx).
+# Migration to sqlx (for Postgres support) requires unifying all crates first.
+rusqlite = { version = "0.38", features = ["bundled"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "rt"] }
+appbase-plan = { path = "../plan" }
+
+[lints]
+workspace = true

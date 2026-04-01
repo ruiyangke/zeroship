@@ -1,7 +1,8 @@
 //! Axum router for appbase — RPC dispatch with metering, quota enforcement, and admin API.
 
+use appbase_control::AppRegistry;
 use appbase_core::config::AppbaseConfig;
-use appbase_core::plugin::{PluginFactory};
+use appbase_core::plugin::PluginFactory;
 use appbase_core::types::AppBundle;
 use appbase_core::event_log::EventKind;
 use crate::v8pool::V8Pool;
@@ -18,13 +19,13 @@ use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::middleware;
 
@@ -74,9 +75,13 @@ impl ConcurrencyRegistry {
 #[derive(Clone)]
 pub struct AppState {
     pub pool: Arc<V8Pool>,
+    pub registry: Arc<dyn AppRegistry>,
     pub bundles: Arc<Mutex<HashMap<String, AppBundle>>>,
+    pub bundle_versions: Arc<RwLock<HashMap<String, i64>>>,
     pub default_app: String,
     pub static_html: Option<Bytes>,
+    /// Master key for admin API endpoints.
+    pub master_key: String,
     /// Metering: per-app usage counters.
     pub meters: Arc<MeterRegistry>,
     /// Rate limiter: per-app requests/second.
@@ -98,6 +103,13 @@ pub fn build(state: AppState) -> Router {
         .route("/_apps/{app_id}", delete(handle_evict_app))
         .route("/_apps/{app_id}/usage", get(handle_app_usage))
         .route("/_usage", get(handle_all_usage))
+        // Control plane API
+        .route("/api/apps", post(handle_create_app))
+        .route("/api/apps", get(handle_list_apps))
+        .route("/api/apps/{id}", get(handle_get_app))
+        .route("/api/apps/{id}", delete(handle_delete_app_api))
+        .route("/api/apps/{id}/deploy", post(handle_deploy))
+        .route("/api/apps/{id}/plan", put(handle_set_plan))
         .fallback(get(handle_static))
         .layer(cors)
         .layer(compression)
@@ -115,6 +127,8 @@ pub fn single_app_state(
     plugin_factory: PluginFactory,
     plan: Option<QuotaPlan>,
     event_sender: EventSender,
+    registry: Arc<dyn AppRegistry>,
+    master_key: String,
 ) -> AppState {
     let default_plan = plan.unwrap_or_else(QuotaPlan::unlimited);
 
@@ -145,9 +159,12 @@ pub fn single_app_state(
 
     AppState {
         pool,
+        registry,
         bundles: Arc::new(Mutex::new(bundles)),
+        bundle_versions: Arc::new(RwLock::new(HashMap::new())),
         default_app: "default".to_string(),
         static_html: client_html.map(Bytes::from),
+        master_key,
         meters,
         rate_limiter,
         concurrency: Arc::new(ConcurrencyRegistry::new()),
@@ -208,12 +225,8 @@ async fn handle_rpc(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    // Extract app_id: X-App-Id header > default
-    let app_id = headers
-        .get("x-app-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| state.default_app.clone());
+    // Extract app_id: subdomain > X-App-Id header > default
+    let app_id = extract_app_id(&headers, &state.default_app);
 
     // 1. Rate limit check
     if !state.rate_limiter.check(&app_id) {
@@ -293,17 +306,27 @@ async fn handle_rpc(
         quota::QuotaDecision::Warn(_) | quota::QuotaDecision::Allow => {}
     }
 
-    // 5. Get app bundle
-    let bundle = {
+    // 5. Load app bundle (cache → registry)
+    let cached = {
         let bundles = state.bundles.lock().unwrap();
-        match bundles.get(&app_id) {
-            Some(b) => b.clone(),
-            None => {
-                return json_response(
-                    StatusCode::NOT_FOUND,
-                    r#"{"error":"App not found"}"#,
-                )
+        bundles.get(&app_id).cloned()
+    };
+    let bundle = if let Some(b) = cached {
+        b
+    } else {
+        // Cache miss → load from registry
+        match state.registry.get_app(&app_id).await {
+            Ok(Some(data)) => {
+                let bundle = AppBundle {
+                    server_js: data.server_js,
+                    client_html: data.client_html,
+                };
+                state.bundles.lock().unwrap().insert(app_id.clone(), bundle.clone());
+                state.bundle_versions.write().unwrap().insert(app_id.clone(), data.version);
+                bundle
             }
+            Ok(None) => return json_response(StatusCode::NOT_FOUND, r#"{"error":"App not found"}"#),
+            Err(e) => return json_response(StatusCode::INTERNAL_SERVER_ERROR, &format!(r#"{{"error":"{}"}}"#, e)),
         }
     };
 
@@ -495,6 +518,258 @@ async fn handle_static(State(state): State<AppState>) -> Response {
             .unwrap()
     } else {
         json_response(StatusCode::OK, r#"{"status":"appbase running"}"#)
+    }
+}
+
+// --- App ID resolution ---
+
+/// Three-level app ID resolution: subdomain > X-App-Id header > default.
+fn extract_app_id(headers: &HeaderMap, default: &str) -> String {
+    // 1. Check Host header for subdomain: my-app.platform.dev → "my-app"
+    if let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) {
+        let parts: Vec<&str> = host.split('.').collect();
+        if parts.len() >= 3 {
+            let subdomain = parts[0];
+            if subdomain != "www" && subdomain != "api" {
+                return subdomain.to_string();
+            }
+        }
+    }
+    // 2. Check X-App-Id header
+    if let Some(id) = headers.get("x-app-id").and_then(|v| v.to_str().ok()) {
+        return id.to_string();
+    }
+    // 3. Default app
+    default.to_string()
+}
+
+// --- Auth helpers ---
+
+fn extract_bearer(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+}
+
+fn check_master_key(state: &AppState, headers: &HeaderMap) -> bool {
+    extract_bearer(headers)
+        .map(|k| k == state.master_key)
+        .unwrap_or(false)
+}
+
+// --- Control plane handlers ---
+
+/// POST /api/apps — create a new app (master key required).
+async fn handle_create_app(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if !check_master_key(&state, &headers) {
+        return json_response(StatusCode::UNAUTHORIZED, r#"{"error":"Invalid or missing master key"}"#);
+    }
+
+    #[derive(serde::Deserialize)]
+    struct CreateBody {
+        id: String,
+        #[serde(default = "default_plan_id")]
+        plan_id: String,
+    }
+    fn default_plan_id() -> String {
+        "free".to_string()
+    }
+
+    let parsed: CreateBody = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &format!(r#"{{"error":"Invalid JSON: {}"}}"#, json_escape(&e.to_string())),
+            );
+        }
+    };
+
+    match state.registry.create_app(&parsed.id, &parsed.plan_id).await {
+        Ok(record) => json_response(
+            StatusCode::CREATED,
+            &serde_json::to_string(&record).unwrap_or_default(),
+        ),
+        Err(appbase_control::RegistryError::AlreadyExists(_)) => {
+            json_response(StatusCode::CONFLICT, r#"{"error":"App already exists"}"#)
+        }
+        Err(appbase_control::RegistryError::InvalidInput(msg)) => {
+            json_response(StatusCode::BAD_REQUEST, &format!(r#"{{"error":"{}"}}"#, json_escape(&msg)))
+        }
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!(r#"{{"error":"{}"}}"#, json_escape(&e.to_string())),
+        ),
+    }
+}
+
+/// GET /api/apps — list all apps (master key required).
+async fn handle_list_apps(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if !check_master_key(&state, &headers) {
+        return json_response(StatusCode::UNAUTHORIZED, r#"{"error":"Invalid or missing master key"}"#);
+    }
+
+    match state.registry.list_apps().await {
+        Ok(apps) => json_response(
+            StatusCode::OK,
+            &serde_json::to_string(&apps).unwrap_or_default(),
+        ),
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!(r#"{{"error":"{}"}}"#, json_escape(&e.to_string())),
+        ),
+    }
+}
+
+/// GET /api/apps/:id — get app info (master key required).
+async fn handle_get_app(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !check_master_key(&state, &headers) {
+        return json_response(StatusCode::UNAUTHORIZED, r#"{"error":"Invalid or missing master key"}"#);
+    }
+
+    match state.registry.get_app(&id).await {
+        Ok(Some(data)) => {
+            let info = serde_json::json!({
+                "id": data.id,
+                "plan_id": data.plan_id,
+                "version": data.version,
+            });
+            json_response(StatusCode::OK, &info.to_string())
+        }
+        Ok(None) => json_response(StatusCode::NOT_FOUND, r#"{"error":"App not found"}"#),
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!(r#"{{"error":"{}"}}"#, json_escape(&e.to_string())),
+        ),
+    }
+}
+
+/// DELETE /api/apps/:id — delete an app (master key required).
+async fn handle_delete_app_api(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !check_master_key(&state, &headers) {
+        return json_response(StatusCode::UNAUTHORIZED, r#"{"error":"Invalid or missing master key"}"#);
+    }
+
+    match state.registry.delete_app(&id).await {
+        Ok(true) => {
+            // Evict from cache and pool
+            state.bundles.lock().unwrap().remove(&id);
+            state.bundle_versions.write().unwrap().remove(&id);
+            state.pool.evict_app(&id);
+            state.meters.remove(&id);
+            state.rate_limiter.remove(&id);
+            json_response(StatusCode::OK, &format!(r#"{{"deleted":"{}"}}"#, json_escape(&id)))
+        }
+        Ok(false) => json_response(StatusCode::NOT_FOUND, r#"{"error":"App not found"}"#),
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!(r#"{{"error":"{}"}}"#, json_escape(&e.to_string())),
+        ),
+    }
+}
+
+/// POST /api/apps/:id/deploy — deploy JS to an app (per-app API key required).
+async fn handle_deploy(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    // Auth: per-app key or master key
+    let key = match extract_bearer(&headers) {
+        Some(k) => k.to_string(),
+        None => {
+            return json_response(StatusCode::UNAUTHORIZED, r#"{"error":"Missing Authorization header"}"#);
+        }
+    };
+
+    let is_master = key == state.master_key;
+    if !is_master {
+        match state.registry.validate_key(&id, &key).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return json_response(StatusCode::UNAUTHORIZED, r#"{"error":"Invalid API key"}"#);
+            }
+            Err(e) => {
+                return json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!(r#"{{"error":"{}"}}"#, json_escape(&e.to_string())),
+                );
+            }
+        }
+    }
+
+    if body.is_empty() {
+        return json_response(StatusCode::BAD_REQUEST, r#"{"error":"Empty deploy body"}"#);
+    }
+
+    match state.registry.deploy(&id, &body, None).await {
+        Ok(version) => {
+            // Evict cached bundle and isolate so next request picks up new code
+            state.bundles.lock().unwrap().remove(&id);
+            state.bundle_versions.write().unwrap().insert(id.clone(), version);
+            state.pool.evict_app(&id);
+            json_response(StatusCode::OK, &format!(r#"{{"version":{version}}}"#))
+        }
+        Err(appbase_control::RegistryError::NotFound(_)) => {
+            json_response(StatusCode::NOT_FOUND, r#"{"error":"App not found"}"#)
+        }
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!(r#"{{"error":"{}"}}"#, json_escape(&e.to_string())),
+        ),
+    }
+}
+
+/// PUT /api/apps/:id/plan — set an app's plan (master key required).
+async fn handle_set_plan(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if !check_master_key(&state, &headers) {
+        return json_response(StatusCode::UNAUTHORIZED, r#"{"error":"Invalid or missing master key"}"#);
+    }
+
+    #[derive(serde::Deserialize)]
+    struct PlanBody {
+        plan_id: String,
+    }
+
+    let parsed: PlanBody = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &format!(r#"{{"error":"Invalid JSON: {}"}}"#, json_escape(&e.to_string())),
+            );
+        }
+    };
+
+    match state.registry.set_plan(&id, &parsed.plan_id).await {
+        Ok(true) => json_response(StatusCode::OK, &format!(r#"{{"plan_id":"{}"}}"#, json_escape(&parsed.plan_id))),
+        Ok(false) => json_response(StatusCode::NOT_FOUND, r#"{"error":"App not found"}"#),
+        Err(e) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!(r#"{{"error":"{}"}}"#, json_escape(&e.to_string())),
+        ),
     }
 }
 

@@ -16,6 +16,7 @@ appbase-plan = { path = "../plan" }
 appbase-plugins = { path = "../plugins" }
 appbase-server = { path = "../server" }
 appbase-billing = { path = "../billing" }
+appbase-control = { path = "../control" }
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 toml = "1.1.1"
