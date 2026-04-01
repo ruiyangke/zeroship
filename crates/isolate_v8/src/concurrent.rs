@@ -18,10 +18,10 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crate::{
-    fire_ready_timers, init_v8, setup_globals, thread_cpu_time, EventLoopState, RequestResult,
-    SharedState,
-};
+use crate::event_loop::{EventLoopState, SharedState};
+use crate::globals::setup_globals;
+use crate::runtime::{init_v8, thread_cpu_time, RequestResult, DISPATCH_JS, FETCH_JS};
+use crate::timers::fire_ready_timers;
 
 // ---------------------------------------------------------------------------
 // Event types for the concurrent model
@@ -59,7 +59,6 @@ struct PendingRequest {
 
 // ---------------------------------------------------------------------------
 // LoopState — all mutable state NOT including the V8 isolate itself.
-// This separation allows calling methods while a V8 scope borrows the isolate.
 // ---------------------------------------------------------------------------
 
 struct LoopState {
@@ -79,24 +78,30 @@ struct LoopState {
     server_js: String,
     initialized: bool,
     shutdown: bool,
+
+    cpu_limit: Option<Duration>,
 }
 
 impl LoopState {
     /// Phase 1: ACCEPT — drain buffered events + channel.
-    fn accept_requests(&mut self, scope: &mut v8::PinScope) {
-        // Drain buffered events first (from Phase 5 recv_timeout)
-        let buffered: Vec<Event> = self.buffered_events.drain(..).collect();
-        for event in buffered {
+    /// Returns true if any async work was queued.
+    fn accept_requests(&mut self, scope: &mut v8::PinScope) -> bool {
+        let had_pending_before = !self.pending_requests.is_empty();
+
+        while let Some(event) = self.buffered_events.pop_front() {
             self.handle_event(scope, event);
         }
 
-        // Drain channel
         loop {
             match self.event_rx.try_recv() {
                 Ok(event) => self.handle_event(scope, event),
                 Err(_) => break,
             }
         }
+
+        !self.pending_requests.is_empty()
+            || !self.completed_ops.is_empty()
+            || had_pending_before
     }
 
     fn handle_event(&mut self, scope: &mut v8::PinScope, event: Event) {
@@ -129,14 +134,14 @@ impl LoopState {
         let wall_start = Instant::now();
 
         let dispatch_fn = match &self.dispatch_fn {
-            Some(f) => f.clone(),
+            Some(f) => f,
             None => {
                 let _ = reply.send(Err("Isolate not initialized".to_string()));
                 return;
             }
         };
 
-        let func = v8::Local::new(scope, &dispatch_fn);
+        let func = v8::Local::new(scope, dispatch_fn);
         let arg = match v8::String::new(scope, &body) {
             Some(s) => s,
             None => {
@@ -206,10 +211,14 @@ impl LoopState {
 
     /// Phase 3: RESOLVE completed ops one at a time, checkpoint after each.
     fn resolve_completed_ops(&mut self, scope: &mut v8::PinScope) {
-        let completed: Vec<(u32, String)> = self.completed_ops.drain(..).collect();
+        if self.completed_ops.is_empty() {
+            return;
+        }
+
+        let mut completed = Vec::new();
+        std::mem::swap(&mut completed, &mut self.completed_ops);
 
         for (op_id, value) in completed {
-            // Resolve this ONE promise
             let resolver = self.el_state.borrow_mut().pending_resolvers.remove(&op_id);
             if let Some(resolver) = resolver {
                 let r = v8::Local::new(scope, &resolver);
@@ -217,53 +226,55 @@ impl LoopState {
                 r.resolve(scope, val.into());
             }
 
-            // Run microtasks for THIS promise chain only
-            // CRITICAL: queue now has only this request's entries
             scope.perform_microtask_checkpoint();
-
-            // Check all pending requests: did any promise settle?
             self.check_settled_promises(scope);
         }
     }
 
     /// Check all pending requests — if their promise settled, send the reply.
     fn check_settled_promises(&mut self, scope: &mut v8::PinScope) {
-        let mut completed_ids: Vec<(u64, Option<String>, Option<String>)> = Vec::new();
+        if self.pending_requests.is_empty() {
+            return;
+        }
 
+        let mut settled: Vec<u64> = Vec::new();
         for (id, req) in &self.pending_requests {
             let promise = v8::Local::new(scope, &req.promise);
-            match promise.state() {
-                v8::PromiseState::Fulfilled => {
-                    let val = promise.result(scope);
-                    let json = val
-                        .to_string(scope)
-                        .unwrap()
-                        .to_rust_string_lossy(scope);
-                    completed_ids.push((*id, Some(json), None));
-                }
-                v8::PromiseState::Rejected => {
-                    let val = promise.result(scope);
-                    let msg = val
-                        .to_string(scope)
-                        .unwrap()
-                        .to_rust_string_lossy(scope);
-                    completed_ids.push((*id, None, Some(msg)));
-                }
-                v8::PromiseState::Pending => {}
+            if promise.state() != v8::PromiseState::Pending {
+                settled.push(*id);
             }
         }
 
-        for (id, json_opt, err_opt) in completed_ids {
+        for id in settled {
             if let Some(mut req) = self.pending_requests.remove(&id) {
-                if let Some(reply) = req.reply.take() {
-                    if let Some(json) = json_opt {
-                        let _ = reply.send(Ok(RequestResult {
-                            json,
-                            cpu_time: req.cpu_accumulated,
-                            wall_time: req.wall_start.elapsed(),
-                        }));
-                    } else if let Some(msg) = err_opt {
-                        let _ = reply.send(Err(msg));
+                let promise = v8::Local::new(scope, &req.promise);
+                match promise.state() {
+                    v8::PromiseState::Fulfilled => {
+                        let json = promise
+                            .result(scope)
+                            .to_string(scope)
+                            .unwrap()
+                            .to_rust_string_lossy(scope);
+                        if let Some(reply) = req.reply.take() {
+                            let _ = reply.send(Ok(RequestResult {
+                                json,
+                                cpu_time: req.cpu_accumulated,
+                                wall_time: req.wall_start.elapsed(),
+                            }));
+                        }
+                    }
+                    v8::PromiseState::Rejected => {
+                        let msg = promise
+                            .result(scope)
+                            .to_string(scope)
+                            .unwrap()
+                            .to_rust_string_lossy(scope);
+                        if let Some(reply) = req.reply.take() {
+                            let _ = reply.send(Err(msg));
+                        }
+                    }
+                    v8::PromiseState::Pending => {
+                        self.pending_requests.insert(id, req);
                     }
                 }
             }
@@ -274,10 +285,20 @@ impl LoopState {
     fn compute_wait_timeout(&self) -> Duration {
         let s = self.el_state.borrow();
 
-        // Find next valid timer in heap (skip cleared ones)
+        if s.timers.callbacks.is_empty() {
+            return if !self.pending_requests.is_empty()
+                || !s.pending_resolvers.is_empty()
+                || !self.completed_ops.is_empty()
+            {
+                Duration::from_secs(60)
+            } else {
+                Duration::from_secs(60)
+            };
+        }
+
         let mut next_fire = None;
-        for std::cmp::Reverse(entry) in s.timer_heap.iter() {
-            if s.timer_callbacks.contains_key(&entry.id) {
+        for std::cmp::Reverse(entry) in s.timers.heap.iter() {
+            if s.timers.callbacks.contains_key(&entry.id) {
                 next_fire = Some(entry.fire_at);
                 break;
             }
@@ -285,22 +306,16 @@ impl LoopState {
 
         match next_fire {
             Some(fire_at) => fire_at.saturating_duration_since(Instant::now()),
-            None if !self.pending_requests.is_empty()
-                || !s.pending_resolvers.is_empty()
-                || !self.completed_ops.is_empty() =>
-            {
-                Duration::from_secs(60)
-            }
             None => Duration::from_secs(60),
         }
     }
 
     fn has_pending_work(&self) -> bool {
+        if !self.pending_requests.is_empty() || !self.completed_ops.is_empty() {
+            return true;
+        }
         let s = self.el_state.borrow();
-        !self.pending_requests.is_empty()
-            || !s.timer_callbacks.is_empty()
-            || !s.pending_resolvers.is_empty()
-            || !self.completed_ops.is_empty()
+        !s.timers.callbacks.is_empty() || !s.pending_resolvers.is_empty()
     }
 }
 
@@ -315,6 +330,10 @@ impl LoopState {
 pub struct ConcurrentIsolate {
     isolate: v8::OwnedIsolate,
     ls: LoopState,
+    #[cfg(target_os = "linux")]
+    cpu_timer: Option<crate::cpu_timer::CpuTimer>,
+    #[cfg(target_os = "linux")]
+    cpu_timer_active: bool,
 }
 
 // SAFETY: ConcurrentIsolate is only used on a single dedicated worker thread.
@@ -323,10 +342,14 @@ unsafe impl Send for ConcurrentIsolate {}
 
 impl ConcurrentIsolate {
     /// Create a new concurrent isolate.
+    ///
+    /// `cpu_limit` — if `Some`, arms a POSIX CPU timer per request batch (Linux only).
     pub fn new(
         server_js: &str,
         event_rx: std::sync::mpsc::Receiver<Event>,
         event_tx: std::sync::mpsc::Sender<Event>,
+        tokio_handle: Option<tokio::runtime::Handle>,
+        cpu_limit: Option<Duration>,
     ) -> Self {
         init_v8();
 
@@ -334,6 +357,8 @@ impl ConcurrentIsolate {
         let mut isolate = v8::Isolate::new(params);
 
         let el_state: SharedState = Rc::new(RefCell::new(EventLoopState::new()));
+        el_state.borrow_mut().tokio_handle = tokio_handle;
+        el_state.borrow_mut().concurrent_event_tx = Some(event_tx.clone());
         isolate.set_slot(el_state.clone());
 
         let context = {
@@ -356,7 +381,12 @@ impl ConcurrentIsolate {
                 server_js: server_js.to_string(),
                 initialized: false,
                 shutdown: false,
+                cpu_limit,
             },
+            #[cfg(target_os = "linux")]
+            cpu_timer: None,
+            #[cfg(target_os = "linux")]
+            cpu_timer_active: false,
         }
     }
 
@@ -371,70 +401,117 @@ impl ConcurrentIsolate {
             return;
         }
 
-        v8::scope!(let handle_scope, &mut self.isolate);
-        let context = v8::Local::new(handle_scope, &self.ls.context);
-        let scope = &mut v8::ContextScope::new(handle_scope, context);
+        {
+            v8::scope!(let handle_scope, &mut self.isolate);
+            let context = v8::Local::new(handle_scope, &self.ls.context);
+            let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-        setup_globals(scope);
+            setup_globals(scope);
 
-        if !self.ls.server_js.is_empty() {
-            let code = v8::String::new(scope, &self.ls.server_js).unwrap();
+            // Load Fetch API polyfill
+            {
+                let fetch_code = v8::String::new(scope, FETCH_JS).unwrap();
+                let fetch_script = v8::Script::compile(scope, fetch_code, None).unwrap();
+                fetch_script.run(scope).unwrap();
+            }
+
+            if !self.ls.server_js.is_empty() {
+                let code = v8::String::new(scope, &self.ls.server_js).unwrap();
+                let script = v8::Script::compile(scope, code, None).unwrap();
+                script.run(scope).unwrap();
+            }
+
+            let code = v8::String::new(scope, DISPATCH_JS).unwrap();
             let script = v8::Script::compile(scope, code, None).unwrap();
-            script.run(scope).unwrap();
+            let result = script.run(scope).unwrap();
+            let func = v8::Local::<v8::Function>::try_from(result).unwrap();
+            self.ls.dispatch_fn = Some(v8::Global::new(scope, func));
         }
 
-        let dispatch_src = r#"(function(__req_json) {
-            var req = JSON.parse(__req_json);
-            var fn = __rpc[req.method];
-            if (!fn) return JSON.stringify({jsonrpc:"2.0",error:{code:-32601,message:"not found"},id:req.id});
-            try {
-                var result = fn.apply(null, req.params || []);
-                if (result && typeof result.then === 'function') {
-                    return result.then(function(v) {
-                        return JSON.stringify({jsonrpc:"2.0",result:v,id:req.id});
-                    }, function(e) {
-                        return JSON.stringify({jsonrpc:"2.0",error:{code:-32000,message:e && e.message ? e.message : String(e)},id:req.id});
-                    });
-                }
-                return JSON.stringify({jsonrpc:"2.0",result:result,id:req.id});
-            } catch(e) {
-                return JSON.stringify({jsonrpc:"2.0",error:{code:-32000,message:e.message},id:req.id});
-            }
-        })"#;
-
-        let code = v8::String::new(scope, dispatch_src).unwrap();
-        let script = v8::Script::compile(scope, code, None).unwrap();
-        let result = script.run(scope).unwrap();
-        let func = v8::Local::<v8::Function>::try_from(result).unwrap();
-        self.ls.dispatch_fn = Some(v8::Global::new(scope, func));
-
         self.ls.initialized = true;
+
+        // Create POSIX CPU timer (Linux only, must be on V8 thread)
+        #[cfg(target_os = "linux")]
+        if self.ls.cpu_limit.is_some() {
+            let system = crate::cpu_timer::CpuTimerSystem::get_or_init();
+            let app_id = 0u64; // single-app mode for now
+            let v8_handle = self.isolate.thread_safe_handle();
+            system.register(app_id, v8_handle);
+            match crate::cpu_timer::CpuTimer::new(app_id) {
+                Ok(timer) => self.cpu_timer = Some(timer),
+                Err(e) => eprintln!("[cpu-timer] Failed: {e}"),
+            }
+        }
     }
 
-    /// Run one iteration of the event loop (Phases 1-4).
-    /// Returns true if there is still pending work.
+    /// Arm the CPU timer before entering V8.
+    fn arm_cpu_timer(&mut self) {
+        #[cfg(target_os = "linux")]
+        if !self.cpu_timer_active {
+            if let (Some(timer), Some(limit)) = (&self.cpu_timer, self.ls.cpu_limit) {
+                timer.arm(limit);
+                self.cpu_timer_active = true;
+            }
+        }
+    }
+
+    /// Disarm the CPU timer after V8 returns.
+    fn disarm_cpu_timer(&mut self) {
+        #[cfg(target_os = "linux")]
+        if self.cpu_timer_active {
+            if let Some(timer) = &self.cpu_timer {
+                timer.disarm();
+            }
+            self.cpu_timer_active = false;
+        }
+    }
+
+    /// Run one iteration of the event loop.
     fn tick(&mut self) -> bool {
-        v8::scope!(let handle_scope, &mut self.isolate);
-        let context = v8::Local::new(handle_scope, &self.ls.context);
-        let scope = &mut v8::ContextScope::new(handle_scope, context);
+        // Arm CPU timer BEFORE entering V8 — protects sync calls like fib(35)
+        self.arm_cpu_timer();
 
-        // Phase 1: ACCEPT
-        self.ls.accept_requests(scope);
-        scope.perform_microtask_checkpoint();
+        // All V8 interaction in a block so the scope drops before disarm
+        let result = {
+            v8::scope!(let handle_scope, &mut self.isolate);
+            let context = v8::Local::new(handle_scope, &self.ls.context);
+            let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-        // Phase 2: TIMERS
-        fire_ready_timers(scope, &self.ls.el_state);
-        self.ls.check_settled_promises(scope);
+            // Phase 1: ACCEPT
+            let has_async_work = self.ls.accept_requests(scope);
 
-        // Phase 3: RESOLVE
-        self.ls.resolve_completed_ops(scope);
+            if !has_async_work {
+                false
+            } else {
+                scope.perform_microtask_checkpoint();
+                self.ls.check_settled_promises(scope);
 
-        // Phase 4: CHECK
-        self.ls.has_pending_work()
+                // Phase 2: TIMERS
+                {
+                    let has_timers = !self.ls.el_state.borrow().timers.callbacks.is_empty();
+                    if has_timers {
+                        fire_ready_timers(scope, &self.ls.el_state);
+                        self.ls.check_settled_promises(scope);
+                    }
+                }
+
+                // Phase 3: RESOLVE
+                self.ls.resolve_completed_ops(scope);
+
+                // Phase 4: CHECK
+                self.ls.has_pending_work()
+            }
+        };
+        // V8 scope dropped — safe to access self.isolate for timer ops
+
+        if !result {
+            self.disarm_cpu_timer();
+        }
+
+        result
     }
 
     /// Run the event loop. Blocks the current thread.
-    /// Returns when the event channel is disconnected (all senders dropped).
     pub fn run_event_loop(&mut self) {
         self.ensure_initialized();
 
@@ -445,7 +522,18 @@ impl ConcurrentIsolate {
 
             self.tick();
 
-            // Phase 5: WAIT
+            // Handle V8 termination (CPU limit exceeded)
+            if self.isolate.is_execution_terminating() {
+                self.isolate.cancel_terminate_execution();
+                self.disarm_cpu_timer();
+                // Drain pending requests with error
+                for (_id, req) in self.ls.pending_requests.drain() {
+                    if let Some(reply) = req.reply {
+                        let _ = reply.send(Err("CPU time limit exceeded".to_string()));
+                    }
+                }
+            }
+
             let timeout = self.ls.compute_wait_timeout();
 
             if timeout.is_zero() {
@@ -458,17 +546,14 @@ impl ConcurrentIsolate {
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    // All senders dropped — drain remaining work
                     while self.tick() {
                         let timeout = self.ls.compute_wait_timeout();
                         if timeout.is_zero() {
                             continue;
                         }
-                        // Brief wait for timer resolution
                         std::thread::sleep(timeout.min(Duration::from_millis(100)));
                     }
 
-                    // Fail any remaining pending requests
                     for (_id, req) in self.ls.pending_requests.drain() {
                         if let Some(reply) = req.reply {
                             let _ = reply.send(Err(
@@ -491,23 +576,16 @@ impl ConcurrentIsolate {
             let has_work = self.tick();
 
             if !has_work {
-                // Check if there are buffered or channel events
                 match self.ls.event_rx.try_recv() {
                     Ok(event) => {
                         self.ls.buffered_events.push_back(event);
                         continue;
                     }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        // No events and no work — done
-                        break;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        break;
-                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
                 }
             }
 
-            // Wait briefly for more events
             let timeout = self.ls.compute_wait_timeout();
             let timeout = timeout.min(Duration::from_millis(100));
 
@@ -517,7 +595,6 @@ impl ConcurrentIsolate {
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    // Do one more pass
                     self.tick();
                     break;
                 }
@@ -532,7 +609,11 @@ impl ConcurrentIsolate {
 
 /// Spawn a worker thread running a `ConcurrentIsolate` event loop.
 /// Returns the event sender for dispatching requests to this worker.
-pub fn spawn_concurrent_worker(server_js: &str) -> std::sync::mpsc::Sender<Event> {
+pub fn spawn_concurrent_worker(
+    server_js: &str,
+    tokio_handle: Option<tokio::runtime::Handle>,
+    cpu_limit: Option<Duration>,
+) -> std::sync::mpsc::Sender<Event> {
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let event_tx_clone = event_tx.clone();
     let js = server_js.to_string();
@@ -540,7 +621,8 @@ pub fn spawn_concurrent_worker(server_js: &str) -> std::sync::mpsc::Sender<Event
     std::thread::Builder::new()
         .name("v8-concurrent-worker".to_string())
         .spawn(move || {
-            let mut isolate = ConcurrentIsolate::new(&js, event_rx, event_tx_clone);
+            let mut isolate =
+                ConcurrentIsolate::new(&js, event_rx, event_tx_clone, tokio_handle, cpu_limit);
             isolate.run_event_loop();
         })
         .expect("Failed to spawn V8 worker thread");
@@ -595,7 +677,7 @@ var __rpc = {
         let event_tx_clone = event_tx.clone();
 
         let handle = std::thread::spawn(move || {
-            let mut isolate = ConcurrentIsolate::new(TEST_JS, event_rx, event_tx_clone);
+            let mut isolate = ConcurrentIsolate::new(TEST_JS, event_rx, event_tx_clone, None, None);
             isolate.run_until_idle();
         });
 
@@ -622,7 +704,7 @@ var __rpc = {
         let event_tx_clone = event_tx.clone();
 
         let handle = std::thread::spawn(move || {
-            let mut isolate = ConcurrentIsolate::new(TEST_JS, event_rx, event_tx_clone);
+            let mut isolate = ConcurrentIsolate::new(TEST_JS, event_rx, event_tx_clone, None, None);
             isolate.run_until_idle();
         });
 
@@ -645,14 +727,12 @@ var __rpc = {
 
     #[test]
     fn concurrent_multiple_requests_overlap() {
-        // Send 3 async requests with setTimeout(20ms). With concurrent model,
-        // all 3 start at once and overlap, so total time should be ~20ms (not 60ms).
         init_v8();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let event_tx_clone = event_tx.clone();
 
         let handle = std::thread::spawn(move || {
-            let mut isolate = ConcurrentIsolate::new(TEST_JS, event_rx, event_tx_clone);
+            let mut isolate = ConcurrentIsolate::new(TEST_JS, event_rx, event_tx_clone, None, None);
             isolate.run_until_idle();
         });
 
@@ -683,7 +763,6 @@ var __rpc = {
             "3 concurrent async requests: total wall={:.0}ms (should be ~20ms, not 60ms)",
             total_wall.as_millis()
         );
-        // Generous margin but must be less than serial (60ms)
         assert!(
             total_wall < Duration::from_millis(500),
             "Concurrent requests took too long: {:?}",
@@ -700,11 +779,10 @@ var __rpc = {
         let event_tx_clone = event_tx.clone();
 
         let handle = std::thread::spawn(move || {
-            let mut isolate = ConcurrentIsolate::new(TEST_JS, event_rx, event_tx_clone);
+            let mut isolate = ConcurrentIsolate::new(TEST_JS, event_rx, event_tx_clone, None, None);
             isolate.run_until_idle();
         });
 
-        // Sync
         let (reply_tx1, reply_rx1) = tokio::sync::oneshot::channel();
         event_tx
             .send(Event::NewRequest {
@@ -714,7 +792,6 @@ var __rpc = {
             })
             .unwrap();
 
-        // Async
         let (reply_tx2, reply_rx2) = tokio::sync::oneshot::channel();
         event_tx
             .send(Event::NewRequest {
@@ -724,7 +801,6 @@ var __rpc = {
             })
             .unwrap();
 
-        // Sync
         let (reply_tx3, reply_rx3) = tokio::sync::oneshot::channel();
         event_tx
             .send(Event::NewRequest {
@@ -755,7 +831,7 @@ var __rpc = {
         let event_tx_clone = event_tx.clone();
 
         let handle = std::thread::spawn(move || {
-            let mut isolate = ConcurrentIsolate::new(TEST_JS, event_rx, event_tx_clone);
+            let mut isolate = ConcurrentIsolate::new(TEST_JS, event_rx, event_tx_clone, None, None);
             isolate.run_until_idle();
         });
 
@@ -771,7 +847,6 @@ var __rpc = {
         drop(event_tx);
 
         let result = reply_rx.blocking_recv().unwrap().unwrap();
-        // (1 + 10) * 2 = 22
         assert!(result.json.contains("\"result\":22"));
         handle.join().unwrap();
     }
@@ -779,7 +854,7 @@ var __rpc = {
     #[test]
     fn concurrent_worker_spawn() {
         init_v8();
-        let event_tx = spawn_concurrent_worker(TEST_JS);
+        let event_tx = spawn_concurrent_worker(TEST_JS, None, None);
 
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         event_tx

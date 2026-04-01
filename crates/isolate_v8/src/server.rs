@@ -1,10 +1,14 @@
 //! Minimal HTTP server for raw V8 runtime -- benchmarkable with wrk/hey.
 //!
-//! Uses per-thread V8 isolates via dedicated worker threads.
-//! POST /rpc -> dispatch to worker -> JSON-RPC response
+//! Two modes:
+//!   --mode=concurrent       (default) 1 ConcurrentIsolate, serial JS + concurrent I/O
+//!   --mode=concurrent-pool  N ConcurrentIsolates, round-robin dispatch
+//!
+//! POST /rpc -> dispatch to V8 -> JSON-RPC response
 //! GET /health -> {"status":"ok"}
 
-use appbase_isolate_v8::{init_v8, Isolate};
+use appbase_isolate_v8::concurrent::{ConcurrentIsolate, Event};
+use appbase_isolate_v8::init_v8;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -13,9 +17,9 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot};
 
 const SERVER_JS: &str = r#"
 var __rpc = {
@@ -36,71 +40,125 @@ var __rpc = {
         return new Promise(function(resolve) {
             setTimeout(function() { resolve(1); }, 100);
         }).then(function(v) { return v + 10; }).then(function(v) { return v * 2; });
+    },
+    httpGet: async function(url) {
+        var resp = await fetch(url);
+        var body = await resp.text();
+        return { status: resp.status, ok: resp.ok, length: body.length, type: resp.headers.get("content-type") };
+    },
+    httpPost: async function(url, data) {
+        var resp = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(data),
+        });
+        return await resp.json();
     }
 };
 "#;
 
-struct WorkRequest {
-    body: String,
-    reply: oneshot::Sender<Result<appbase_isolate_v8::RequestResult, String>>,
-}
+// ===========================================================================
+// Spawn + warmup helper
+// ===========================================================================
 
-/// Spawn a V8 worker thread with its own isolate.
-/// Returns a channel to send work to it.
-fn spawn_worker(id: usize) -> mpsc::Sender<WorkRequest> {
-    let (tx, mut rx) = mpsc::channel::<WorkRequest>(256);
+/// Spawn a ConcurrentIsolate on a dedicated thread and warmup with a ping.
+/// Returns the event sender for dispatching requests.
+///
+/// `cpu_limit` — if `Some`, arms a POSIX CPU timer per request batch (Linux only).
+fn spawn_and_warmup(
+    name: &str,
+    cpu_limit: Option<std::time::Duration>,
+) -> std::sync::mpsc::Sender<Event> {
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let event_tx_clone = event_tx.clone();
+    let js = SERVER_JS.to_string();
+    let thread_name = name.to_string();
+    let tokio_handle = tokio::runtime::Handle::current();
 
     std::thread::Builder::new()
-        .name(format!("v8-worker-{id}"))
+        .name(thread_name)
         .spawn(move || {
-            // V8 isolate created and used only on THIS thread
-            let mut isolate = Isolate::new(SERVER_JS);
-            // Warmup
-            isolate
-                .execute_request(r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":0}"#)
-                .unwrap();
-
-            // Process requests
-            while let Some(req) = rx.blocking_recv() {
-                let result = isolate.execute_request(&req.body);
-                let _ = req.reply.send(result);
-            }
+            let mut isolate = ConcurrentIsolate::new(
+                &js, event_rx, event_tx_clone, Some(tokio_handle), cpu_limit,
+            );
+            isolate.run_event_loop();
         })
         .unwrap();
 
-    tx
+    // Warmup (on a separate thread to avoid blocking tokio runtime)
+    let warmup_tx = event_tx.clone();
+    std::thread::spawn(move || {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        warmup_tx
+            .send(Event::NewRequest {
+                id: 0,
+                body: r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":0}"#.to_string(),
+                reply: tx,
+            })
+            .unwrap();
+        rx.blocking_recv().unwrap().unwrap();
+    })
+    .join()
+    .unwrap();
+
+    event_tx
 }
 
-/// Round-robin dispatcher across worker threads.
+// ===========================================================================
+// Dispatcher — 1 or N concurrent isolates
+// ===========================================================================
+
 struct Dispatcher {
-    workers: Vec<mpsc::Sender<WorkRequest>>,
-    next: std::sync::atomic::AtomicUsize,
+    senders: Vec<std::sync::mpsc::Sender<Event>>,
+    next: AtomicU64,
+    next_id: AtomicU64,
 }
 
 impl Dispatcher {
     fn new(num_workers: usize) -> Self {
-        let workers: Vec<_> = (0..num_workers).map(spawn_worker).collect();
+        let cpu_limit = Some(std::time::Duration::from_secs(5));
+        let senders: Vec<_> = (0..num_workers)
+            .map(|i| spawn_and_warmup(&format!("v8-worker-{i}"), cpu_limit))
+            .collect();
+
         Self {
-            workers,
-            next: std::sync::atomic::AtomicUsize::new(0),
+            senders,
+            next: AtomicU64::new(0),
+            next_id: AtomicU64::new(1),
         }
     }
 
     async fn dispatch(&self, body: String) -> Result<appbase_isolate_v8::RequestResult, String> {
-        let idx = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % self.workers.len();
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.workers[idx]
-            .send(WorkRequest {
+        let idx = (self.next.fetch_add(1, Ordering::Relaxed) as usize) % self.senders.len();
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.senders[idx]
+            .send(Event::NewRequest {
+                id,
                 body,
                 reply: reply_tx,
             })
-            .await
-            .map_err(|_| "Worker channel closed".to_string())?;
-        reply_rx
-            .await
-            .map_err(|_| "Worker dropped reply".to_string())?
+            .map_err(|_| "Event channel closed".to_string())?;
+
+        match tokio::time::timeout(std::time::Duration::from_secs(30), reply_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err("Reply channel closed".to_string()),
+            Err(_) => Err("Request timed out (30s wall time)".to_string()),
+        }
     }
 }
+
+impl Drop for Dispatcher {
+    fn drop(&mut self) {
+        for tx in &self.senders {
+            let _ = tx.send(Event::Shutdown);
+        }
+    }
+}
+
+// ===========================================================================
+// HTTP handler
+// ===========================================================================
 
 async fn handle_request(
     req: Request<Incoming>,
@@ -154,16 +212,35 @@ async fn handle_request(
 async fn main() {
     init_v8();
 
-    let num_workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(8);
+    let mode = std::env::args()
+        .find(|a| a.starts_with("--mode="))
+        .map(|a| a.strip_prefix("--mode=").unwrap().to_string())
+        .unwrap_or_else(|| "concurrent".to_string());
+
+    let port: u16 = std::env::args()
+        .find(|a| a.starts_with("--port="))
+        .and_then(|a| a.strip_prefix("--port=").unwrap().parse().ok())
+        .unwrap_or(4000);
+
+    let num_workers = match mode.as_str() {
+        "concurrent-pool" => {
+            let n = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(8);
+            eprintln!("[v8-server] mode=concurrent-pool ({n} V8 threads)");
+            n
+        }
+        _ => {
+            eprintln!("[v8-server] mode=concurrent (1 V8 thread)");
+            1
+        }
+    };
 
     let dispatcher = Arc::new(Dispatcher::new(num_workers));
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 4000));
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = TcpListener::bind(addr).await.unwrap();
     eprintln!("[v8-server] http://{addr}");
-    eprintln!("[v8-server] {num_workers} V8 worker threads (1 isolate each)");
 
     loop {
         let (stream, _) = listener.accept().await.unwrap();
