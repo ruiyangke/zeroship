@@ -104,7 +104,38 @@ fn main() {
         );
     }
 
-    // Test 5: Per-request CPU measurement
+    // Test 5: fib(30) multi-threaded (CPU-heavy, parallelized)
+    {
+        let server_js = SERVER_JS.to_string();
+        for threads in [1u64, 2, 4, 8] {
+            let n = 1_000u64;
+            let per_thread = n / threads;
+            let js = server_js.clone();
+
+            let start = Instant::now();
+            let handles: Vec<_> = (0..threads)
+                .map(|_| {
+                    let js = js.clone();
+                    std::thread::spawn(move || {
+                        let mut isolate = Isolate::new(&js);
+                        for _ in 0..per_thread {
+                            isolate.execute_request(FIB_30).unwrap();
+                        }
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap();
+            }
+            let e = start.elapsed();
+            println!(
+                "fib(30) x {threads} threads:       {:>7} reqs  {:.2}s  {:>9.0} req/s  {:.1}ms/req",
+                n, e.as_secs_f64(), n as f64 / e.as_secs_f64(), e.as_millis() as f64 / n as f64
+            );
+        }
+    }
+
+    // Test 6: Per-request CPU measurement
     {
         let mut isolate = Isolate::new(SERVER_JS);
         isolate.execute_request(FIB_35).unwrap(); // warmup
