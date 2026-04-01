@@ -26,7 +26,7 @@ pub fn spawn_flusher(
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(interval).await;
-            flush_all(&registry, store.as_ref());
+            flush_all(&registry, store.as_ref()).await;
         }
     })
 }
@@ -37,7 +37,7 @@ pub fn spawn_flusher(
 /// counters keep accumulating. The enforcer and reconciler read running
 /// totals via `snapshot()`, which would see near-zero values if we zeroed
 /// counters every 5 seconds.
-pub fn flush_all(registry: &MeterRegistry, store: &dyn MeterStore) {
+pub async fn flush_all(registry: &MeterRegistry, store: &dyn MeterStore) {
     let meters = registry.all_meters();
 
     for (app_id, meter) in &meters {
@@ -57,7 +57,7 @@ pub fn flush_all(registry: &MeterRegistry, store: &dyn MeterStore) {
             .map(|(resource, delta)| ResourceDelta { resource, delta })
             .collect();
 
-        if store.flush(app_id, &resource_deltas).is_ok() {
+        if store.flush(app_id, &resource_deltas).await.is_ok() {
             meter.counters.commit_flush(&snapshot);
         } else {
             eprintln!("[flusher] Failed to flush {app_id}, will retry next cycle");

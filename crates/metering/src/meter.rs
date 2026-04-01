@@ -283,13 +283,13 @@ impl MeterRegistry {
     /// Recover counters from the warm tier after a restart (spec §4.6).
     /// For each app in the store, loads the stored counters and populates
     /// the hot-tier atomics so enforcement resumes from the last-flushed state.
-    pub fn recover_from_store(
+    pub async fn recover_from_store(
         &self,
         store: &dyn appbase_core::meter_store::MeterStore,
         app_ids: &[String],
     ) {
         for app_id in app_ids {
-            match store.load(app_id) {
+            match store.load(app_id).await {
                 Ok(stored) if !stored.is_empty() => {
                     let meter = Arc::new(AppMeter::from_stored(
                         self.default_plan.clone(),

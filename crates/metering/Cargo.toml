@@ -7,6 +7,7 @@ description = "Multi-tenant metering, quota enforcement, and rate limiting for a
 [dependencies]
 appbase-core = { path = "../core" }
 appbase-plan = { path = "../plan" }
+async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"

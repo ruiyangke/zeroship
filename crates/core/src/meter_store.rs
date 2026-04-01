@@ -3,6 +3,7 @@
 //! Implementations: InMemoryStore (dev), SqliteStore, RedisStore, PostgresStore, MmapStore.
 //! Each behind a feature flag in the metering crate.
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -39,12 +40,13 @@ pub struct PeriodSnapshot {
 ///   for the same app, only one should succeed; the other should return the
 ///   existing snapshot or a no-op result.
 /// - `flush()` is additive and idempotent for the same delta set.
+#[async_trait]
 pub trait MeterStore: Send + Sync {
     /// Flush counter deltas from hot tier. Additive (UPSERT with +=).
-    fn flush(&self, app_id: &str, deltas: &[ResourceDelta]) -> Result<(), MeterStoreError>;
+    async fn flush(&self, app_id: &str, deltas: &[ResourceDelta]) -> Result<(), MeterStoreError>;
 
     /// Load current counters for an app (startup or cache miss).
-    fn load(&self, app_id: &str) -> Result<HashMap<String, u64>, MeterStoreError>;
+    async fn load(&self, app_id: &str) -> Result<HashMap<String, u64>, MeterStoreError>;
 
     /// Atomically snapshot current period counters and reset for new period.
     /// Returns the snapshot of the completed period.
@@ -52,15 +54,15 @@ pub trait MeterStore: Send + Sync {
     /// Implementations MUST ensure this is atomic — no concurrent flush can
     /// land between the snapshot and the reset. Use a per-app lock or
     /// database transaction.
-    fn rollover(&self, app_id: &str) -> Result<PeriodSnapshot, MeterStoreError>;
+    async fn rollover(&self, app_id: &str) -> Result<PeriodSnapshot, MeterStoreError>;
 
     /// Query usage history (past N periods) for billing.
-    fn history(&self, app_id: &str, periods: u32) -> Result<Vec<PeriodSnapshot>, MeterStoreError>;
+    async fn history(&self, app_id: &str, periods: u32) -> Result<Vec<PeriodSnapshot>, MeterStoreError>;
 
     /// Graceful cleanup (close connections, flush buffers).
     /// Called once during shutdown. Implementations should flush
     /// any pending writes before returning.
-    fn close(&self) -> Result<(), MeterStoreError>;
+    async fn close(&self) -> Result<(), MeterStoreError>;
 }
 
 /// Errors from MeterStore operations.

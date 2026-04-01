@@ -102,7 +102,7 @@ async fn rollover_all(registry: &MeterRegistry, store: &dyn MeterStore, config: 
                 })
                 .collect();
             if !deltas.is_empty() {
-                if let Err(e) = store.flush(app_id, &deltas) {
+                if let Err(e) = store.flush(app_id, &deltas).await {
                     eprintln!("[rollover] Failed to flush {app_id} before rollover: {e}");
                     continue; // skip archive for this app — data would be incomplete
                 }
@@ -110,7 +110,7 @@ async fn rollover_all(registry: &MeterRegistry, store: &dyn MeterStore, config: 
             }
 
             // Now archive and reset warm tier
-            if let Err(e) = store.rollover(app_id) {
+            if let Err(e) = store.rollover(app_id).await {
                 eprintln!("[rollover] Failed to rollover {app_id} in store: {e}");
             }
 
@@ -170,7 +170,7 @@ mod tests {
         assert_eq!(snap.get("requests").copied().unwrap_or(0), 0);
 
         // Store should have history
-        let hist = store.history("app1", 10).unwrap();
+        let hist = store.history("app1", 10).await.unwrap();
         assert!(!hist.is_empty());
     }
 
@@ -219,8 +219,8 @@ mod tests {
         assert_eq!(s2.get("requests").copied().unwrap_or(0), 0);
 
         // Both should have history
-        assert!(!store.history("app1", 10).unwrap().is_empty());
-        assert!(!store.history("app2", 10).unwrap().is_empty());
+        assert!(!store.history("app1", 10).await.unwrap().is_empty());
+        assert!(!store.history("app2", 10).await.unwrap().is_empty());
     }
 
     #[test]

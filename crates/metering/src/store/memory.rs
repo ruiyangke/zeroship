@@ -4,6 +4,7 @@
 //! lost on restart. Fast, zero external dependencies.
 
 use appbase_core::meter_store::{MeterStore, MeterStoreError, PeriodSnapshot, ResourceDelta};
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -24,8 +25,9 @@ impl InMemoryStore {
     }
 }
 
+#[async_trait]
 impl MeterStore for InMemoryStore {
-    fn flush(&self, app_id: &str, deltas: &[ResourceDelta]) -> Result<(), MeterStoreError> {
+    async fn flush(&self, app_id: &str, deltas: &[ResourceDelta]) -> Result<(), MeterStoreError> {
         let mut counters = self.counters.lock().unwrap();
         let app = counters.entry(app_id.to_string()).or_default();
         for delta in deltas {
@@ -34,12 +36,12 @@ impl MeterStore for InMemoryStore {
         Ok(())
     }
 
-    fn load(&self, app_id: &str) -> Result<HashMap<String, u64>, MeterStoreError> {
+    async fn load(&self, app_id: &str) -> Result<HashMap<String, u64>, MeterStoreError> {
         let counters = self.counters.lock().unwrap();
         Ok(counters.get(app_id).cloned().unwrap_or_default())
     }
 
-    fn rollover(&self, app_id: &str) -> Result<PeriodSnapshot, MeterStoreError> {
+    async fn rollover(&self, app_id: &str) -> Result<PeriodSnapshot, MeterStoreError> {
         let mut counters = self.counters.lock().unwrap();
         let current = counters.remove(app_id).unwrap_or_default();
 
@@ -60,14 +62,14 @@ impl MeterStore for InMemoryStore {
         Ok(snapshot)
     }
 
-    fn history(&self, app_id: &str, periods: u32) -> Result<Vec<PeriodSnapshot>, MeterStoreError> {
+    async fn history(&self, app_id: &str, periods: u32) -> Result<Vec<PeriodSnapshot>, MeterStoreError> {
         let history = self.history.lock().unwrap();
         let all = history.get(app_id).cloned().unwrap_or_default();
         let start = all.len().saturating_sub(periods as usize);
         Ok(all[start..].to_vec())
     }
 
-    fn close(&self) -> Result<(), MeterStoreError> {
+    async fn close(&self) -> Result<(), MeterStoreError> {
         Ok(()) // nothing to clean up
     }
 }
@@ -82,8 +84,8 @@ fn chrono_period() -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn flush_and_load() {
+    #[tokio::test]
+    async fn flush_and_load() {
         let store = InMemoryStore::new();
         store
             .flush(
@@ -99,15 +101,16 @@ mod tests {
                     },
                 ],
             )
+            .await
             .unwrap();
 
-        let counters = store.load("app1").unwrap();
+        let counters = store.load("app1").await.unwrap();
         assert_eq!(counters["requests"], 100);
         assert_eq!(counters["cpu_us"], 50);
     }
 
-    #[test]
-    fn flush_is_additive() {
+    #[tokio::test]
+    async fn flush_is_additive() {
         let store = InMemoryStore::new();
         store
             .flush(
@@ -117,6 +120,7 @@ mod tests {
                     delta: 10,
                 }],
             )
+            .await
             .unwrap();
         store
             .flush(
@@ -126,14 +130,15 @@ mod tests {
                     delta: 20,
                 }],
             )
+            .await
             .unwrap();
 
-        let counters = store.load("app1").unwrap();
+        let counters = store.load("app1").await.unwrap();
         assert_eq!(counters["requests"], 30);
     }
 
-    #[test]
-    fn rollover_resets_and_stores_history() {
+    #[tokio::test]
+    async fn rollover_resets_and_stores_history() {
         let store = InMemoryStore::new();
         store
             .flush(
@@ -143,25 +148,26 @@ mod tests {
                     delta: 42,
                 }],
             )
+            .await
             .unwrap();
 
-        let snapshot = store.rollover("app1").unwrap();
+        let snapshot = store.rollover("app1").await.unwrap();
         assert_eq!(snapshot.counters["requests"], 42);
 
         // Counters should be reset
-        let counters = store.load("app1").unwrap();
+        let counters = store.load("app1").await.unwrap();
         assert!(counters.is_empty());
 
         // History should have 1 entry
-        let hist = store.history("app1", 10).unwrap();
+        let hist = store.history("app1", 10).await.unwrap();
         assert_eq!(hist.len(), 1);
         assert_eq!(hist[0].counters["requests"], 42);
     }
 
-    #[test]
-    fn load_unknown_app_returns_empty() {
+    #[tokio::test]
+    async fn load_unknown_app_returns_empty() {
         let store = InMemoryStore::new();
-        let counters = store.load("nonexistent").unwrap();
+        let counters = store.load("nonexistent").await.unwrap();
         assert!(counters.is_empty());
     }
 }

@@ -172,7 +172,8 @@ fn cmd_serve(args: &[String]) {
         // preventing quota bypass after restart.
         state
             .meters
-            .recover_from_store(store.as_ref(), &["default".to_string()]);
+            .recover_from_store(store.as_ref(), &["default".to_string()])
+            .await;
 
         // Clone store for final shutdown flush before it is moved into background tasks
         let store_for_shutdown = store.clone();
@@ -220,7 +221,7 @@ fn cmd_serve(args: &[String]) {
 
         // Final flush before aborting background tasks to avoid losing recent increments
         eprintln!("[appbase] Shutting down — final flush...");
-        appbase_metering::flusher::flush_all(&meters_for_shutdown, store_for_shutdown.as_ref());
+        appbase_metering::flusher::flush_all(&meters_for_shutdown, store_for_shutdown.as_ref()).await;
 
         // Abort background tasks on shutdown
         flusher_handle.abort();
