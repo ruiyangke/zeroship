@@ -96,6 +96,11 @@ fn cmd_serve(args: &[String]) {
     let master_key = std::env::var("APPBASE_MASTER_KEY")
         .unwrap_or_else(|_| "dev-master-key".to_string());
 
+    if master_key == "dev-master-key" {
+        eprintln!("\u{26a0}\u{fe0f}  WARNING: Using default master key. Set APPBASE_MASTER_KEY for production.");
+        eprintln!("\u{26a0}\u{fe0f}  Admin API is accessible with key: dev-master-key");
+    }
+
     let rt = tokio::runtime::Runtime::new().unwrap();
     if let Err(e) = rt.block_on(async {
         // Create the control plane registry (SQLite-backed via sqlx)

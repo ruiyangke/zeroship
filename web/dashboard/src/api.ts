@@ -7,6 +7,7 @@ export interface AppRecord {
   api_key: string;
   created_at: string;
   updated_at: string;
+  server_js?: string;  // included when fetching single app
 }
 
 export interface Stats {

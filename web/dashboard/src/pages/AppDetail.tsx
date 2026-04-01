@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getApp, getAppUsage, getAppLogs, deployApp, deleteApp, updatePlan, callRpc, createApp } from "../api";
@@ -11,7 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Copy, Check, ChevronRight, CopyPlus } from "lucide-react";
 import Editor from '@monaco-editor/react';
 
-const PLANS = ["free", "starter", "pro", "enterprise"];
+const PLANS = ["free", "pro"];
 
 export default function AppDetail() {
   const { id } = useParams<{ id: string }>();
@@ -22,6 +22,7 @@ export default function AppDetail() {
   const [codePrefilled, setCodePrefilled] = useState(false);
   const [newPlan, setNewPlan] = useState("");
   const [copied, setCopied] = useState(false);
+  const [showApiKey, setShowApiKey] = useState(false);
   const [curlCopied, setCurlCopied] = useState(false);
   const [rpcMethod, setRpcMethod] = useState("");
   const [rpcParams, setRpcParams] = useState("[]");
@@ -50,15 +51,19 @@ export default function AppDetail() {
   });
 
   // Set newPlan when app loads
-  if (app && !newPlan) {
-    setNewPlan(app.plan_id);
-  }
+  useEffect(() => {
+    if (app && !newPlan) {
+      setNewPlan(app.plan_id);
+    }
+  }, [app]);
 
   // Pre-fill deploy textarea with current server_js
-  if (app && (app as any).server_js && !codePrefilled) {
-    setCode((app as any).server_js);
-    setCodePrefilled(true);
-  }
+  useEffect(() => {
+    if (app && app.server_js && !codePrefilled) {
+      setCode(app.server_js);
+      setCodePrefilled(true);
+    }
+  }, [app]);
 
   const deployMutation = useMutation({
     mutationFn: () => deployApp(id!, code),
@@ -126,7 +131,7 @@ export default function AppDetail() {
     try {
       const newId = `${id}-copy`;
       await createApp(newId, app.plan_id);
-      const currentCode = (app as any).server_js || code;
+      const currentCode = app.server_js || code;
       if (currentCode) {
         await deployApp(newId, currentCode);
       }
@@ -240,7 +245,17 @@ export default function AppDetail() {
                 api key
               </div>
               <div className="text-[13px] text-foreground flex items-center gap-2">
-                <span className="flex-1 break-all">{app.api_key}</span>
+                <span className="flex-1 break-all font-mono">
+                  {showApiKey
+                    ? app.api_key
+                    : `${"*".repeat(Math.max(0, app.api_key.length - 8))}${app.api_key.slice(-8)}`}
+                </span>
+                <button
+                  onClick={() => setShowApiKey((v) => !v)}
+                  className="shrink-0 px-1.5 py-0.5 text-[10px] border border-border text-muted-foreground hover:border-primary hover:text-primary transition-colors cursor-pointer bg-transparent"
+                >
+                  {showApiKey ? "hide" : "show"}
+                </button>
                 <button
                   onClick={handleCopy}
                   className="shrink-0 p-1 border border-border text-muted-foreground hover:border-primary hover:text-primary transition-colors cursor-pointer bg-transparent"
@@ -339,7 +354,7 @@ export default function AppDetail() {
       </Card>
 
       {/* Current Code */}
-      {(app as any).server_js && (
+      {app.server_js && (
         <Card className="mb-4">
           <CardHeader>
             <CardTitle>current code</CardTitle>
@@ -350,7 +365,7 @@ export default function AppDetail() {
                 height="300px"
                 defaultLanguage="javascript"
                 theme="vs-dark"
-                value={(app as any).server_js}
+                value={app.server_js}
                 options={{
                   readOnly: true,
                   minimap: { enabled: false },

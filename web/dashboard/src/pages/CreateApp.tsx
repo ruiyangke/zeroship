@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
 
-const PLANS = ["free", "starter", "pro", "enterprise"];
+const PLANS = ["free", "pro"];
 
 export default function CreateApp() {
   const navigate = useNavigate();

@@ -296,8 +296,10 @@ impl LoopState {
                 || !s.pending_resolvers.is_empty()
                 || !self.completed_ops.is_empty()
             {
-                Duration::from_secs(60)
+                // Have async work pending — short wait for quick response
+                Duration::from_millis(100)
             } else {
+                // Nothing pending — long wait for new requests
                 Duration::from_secs(60)
             };
         }

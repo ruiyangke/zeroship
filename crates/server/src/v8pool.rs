@@ -90,13 +90,12 @@ impl V8Pool {
             Ok(Ok(Ok(result))) => {
                 // Store logs in per-app ring buffer
                 if !result.logs.is_empty() {
-                    if let Ok(mut app_logs) = entry.logs.lock() {
-                        app_logs.extend(result.logs.iter().cloned());
-                        // Keep last 100
-                        if app_logs.len() > 100 {
-                            let drain = app_logs.len() - 100;
-                            app_logs.drain(..drain);
-                        }
+                    let mut app_logs = entry.logs.lock().unwrap_or_else(|e| e.into_inner());
+                    app_logs.extend(result.logs.iter().cloned());
+                    // Keep last 100
+                    if app_logs.len() > 100 {
+                        let drain = app_logs.len() - 100;
+                        app_logs.drain(..drain);
                     }
                 }
                 Ok(RpcResult {
@@ -119,7 +118,7 @@ impl V8Pool {
     ) -> Result<Arc<IsolateEntry>, String> {
         // Fast path: read lock
         {
-            let isolates = self.isolates.read().unwrap();
+            let isolates = self.isolates.read().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = isolates.get(app_id) {
                 // Update last_used (interior mutability via atomic would be better,
                 // but Instant isn't atomic. We accept a slight staleness here —
@@ -129,7 +128,7 @@ impl V8Pool {
         }
 
         // Slow path: write lock, create isolate
-        let mut isolates = self.isolates.write().unwrap();
+        let mut isolates = self.isolates.write().unwrap_or_else(|e| e.into_inner());
 
         // Double-check (another thread may have created it)
         if let Some(entry) = isolates.get(app_id) {
@@ -218,7 +217,7 @@ impl V8Pool {
     /// Evict idle isolates (called periodically by background task).
     pub fn evict_idle(&self) {
         let timeout = Duration::from_secs(self.config.idle_timeout_secs);
-        let mut isolates = self.isolates.write().unwrap();
+        let mut isolates = self.isolates.write().unwrap_or_else(|e| e.into_inner());
         let now_ms = epoch_ms();
 
         let idle: Vec<String> = isolates
@@ -240,7 +239,7 @@ impl V8Pool {
 
     /// Evict a specific app's isolate.
     pub fn evict_app(&self, app_id: &str) {
-        let mut isolates = self.isolates.write().unwrap();
+        let mut isolates = self.isolates.write().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = isolates.remove(app_id) {
             let _ = entry.sender.send(Event::Shutdown);
             eprintln!("[pool] Evicted '{app_id}' (manual)");
@@ -249,7 +248,7 @@ impl V8Pool {
 
     /// Return recent console logs for an app.
     pub fn get_logs(&self, app_id: &str) -> Vec<String> {
-        let isolates = self.isolates.read().unwrap();
+        let isolates = self.isolates.read().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = isolates.get(app_id) {
             if let Ok(logs) = entry.logs.lock() {
                 return logs.clone();
@@ -260,7 +259,7 @@ impl V8Pool {
 
     /// Return pool statistics.
     pub fn stats(&self) -> PoolStats {
-        let isolates = self.isolates.read().unwrap();
+        let isolates = self.isolates.read().unwrap_or_else(|e| e.into_inner());
         let apps: Vec<IsolateStats> = isolates
             .iter()
             .map(|(id, entry)| IsolateStats {
@@ -281,9 +280,10 @@ impl V8Pool {
 
 impl Drop for V8Pool {
     fn drop(&mut self) {
-        let isolates = self.isolates.read().unwrap();
-        for (_, entry) in isolates.iter() {
-            let _ = entry.sender.send(Event::Shutdown);
+        if let Ok(isolates) = self.isolates.read() {
+            for (_, entry) in isolates.iter() {
+                let _ = entry.sender.send(Event::Shutdown);
+            }
         }
     }
 }

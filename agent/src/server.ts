@@ -106,4 +106,8 @@ export default {
   fetch: app.fetch,
 };
 
+if (!process.env.APPBASE_MASTER_KEY) {
+  console.warn("\u26a0\ufe0f  APPBASE_MASTER_KEY not set \u2014 using dev-master-key");
+}
+
 console.log(`[agent] http://localhost:${port}`);

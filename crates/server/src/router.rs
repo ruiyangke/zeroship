@@ -436,8 +436,11 @@ async fn handle_rpc(
     }
 }
 
-/// GET /_stats — pool statistics.
-async fn handle_stats(State(state): State<AppState>) -> Response {
+/// GET /_stats — pool statistics (master key required).
+async fn handle_stats(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !check_master_key(&state, &headers) {
+        return json_response(StatusCode::UNAUTHORIZED, r#"{"error":"Invalid or missing master key"}"#);
+    }
     let stats = state.pool.stats();
     json_response(
         StatusCode::OK,
@@ -445,8 +448,11 @@ async fn handle_stats(State(state): State<AppState>) -> Response {
     )
 }
 
-/// GET /_usage — all apps' usage with concurrency info.
-async fn handle_all_usage(State(state): State<AppState>) -> Response {
+/// GET /_usage — all apps' usage with concurrency info (master key required).
+async fn handle_all_usage(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !check_master_key(&state, &headers) {
+        return json_response(StatusCode::UNAUTHORIZED, r#"{"error":"Invalid or missing master key"}"#);
+    }
     let usage = state.meters.all_usage();
     // Enrich each app's snapshot with concurrent_requests
     let mut enriched = serde_json::Map::new();
@@ -467,11 +473,15 @@ async fn handle_all_usage(State(state): State<AppState>) -> Response {
     )
 }
 
-/// GET /_apps/{app_id}/usage — single app's usage + concurrency.
+/// GET /_apps/{app_id}/usage — single app's usage + concurrency (master key required).
 async fn handle_app_usage(
     State(state): State<AppState>,
     Path(app_id): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
+    if !check_master_key(&state, &headers) {
+        return json_response(StatusCode::UNAUTHORIZED, r#"{"error":"Invalid or missing master key"}"#);
+    }
     match state.meters.get_usage(&app_id) {
         Some(counters) => {
             let mut obj = serde_json::Map::new();
@@ -491,11 +501,15 @@ async fn handle_app_usage(
     }
 }
 
-/// DELETE /_apps/{app_id} — manually evict + clear meter.
+/// DELETE /_apps/{app_id} — manually evict + clear meter (master key required).
 async fn handle_evict_app(
     State(state): State<AppState>,
     Path(app_id): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
+    if !check_master_key(&state, &headers) {
+        return json_response(StatusCode::UNAUTHORIZED, r#"{"error":"Invalid or missing master key"}"#);
+    }
     state.pool.evict_app(&app_id);
     state.meters.remove(&app_id);
     state.rate_limiter.remove(&app_id);
@@ -525,6 +539,15 @@ async fn handle_static(State(state): State<AppState>) -> Response {
 
 // --- App ID resolution ---
 
+/// Validate an app_id: non-empty, max 64 chars, only alphanumeric + hyphens + underscores.
+fn is_valid_app_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// Three-level app ID resolution: subdomain > X-App-Id header > default.
 fn extract_app_id(headers: &HeaderMap, default: &str) -> String {
     // 1. Check Host header for subdomain: my-app.platform.dev → "my-app"
@@ -532,16 +555,18 @@ fn extract_app_id(headers: &HeaderMap, default: &str) -> String {
         let parts: Vec<&str> = host.split('.').collect();
         if parts.len() >= 3 {
             let subdomain = parts[0];
-            if subdomain != "www" && subdomain != "api" {
+            if subdomain != "www" && subdomain != "api" && is_valid_app_id(subdomain) {
                 return subdomain.to_string();
             }
         }
     }
     // 2. Check X-App-Id header
     if let Some(id) = headers.get("x-app-id").and_then(|v| v.to_str().ok()) {
-        return id.to_string();
+        if is_valid_app_id(id) {
+            return id.to_string();
+        }
     }
-    // 3. Default app
+    // 3. Default app (also used when validation fails — don't error on the data plane)
     default.to_string()
 }
 
@@ -554,13 +579,20 @@ fn extract_bearer(headers: &HeaderMap) -> Option<&str> {
         .and_then(|v| v.strip_prefix("Bearer "))
 }
 
-fn check_master_key(state: &AppState, headers: &HeaderMap) -> bool {
-    // Dev mode: skip auth when master key is the default
-    if state.master_key == "dev-master-key" {
-        return true;
+/// Constant-time string comparison to prevent timing attacks on secrets.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
     }
+    a.bytes()
+        .zip(b.bytes())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
+fn check_master_key(state: &AppState, headers: &HeaderMap) -> bool {
     extract_bearer(headers)
-        .map(|k| k == state.master_key)
+        .map(|k| constant_time_eq(k, &state.master_key))
         .unwrap_or(false)
 }
 
@@ -706,7 +738,7 @@ async fn handle_deploy(
         }
     };
 
-    let is_master = key == state.master_key;
+    let is_master = constant_time_eq(&key, &state.master_key);
     if !is_master {
         match state.registry.validate_key(&id, &key).await {
             Ok(true) => {}
