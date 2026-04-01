@@ -23,5 +23,9 @@ harness = false
 name = "v8-server"
 path = "src/server.rs"
 
+[[bin]]
+name = "echo-server"
+path = "benches/echo_server.rs"
+
 [lints]
 workspace = true

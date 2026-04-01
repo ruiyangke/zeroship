@@ -20,6 +20,7 @@ DURATION=10s
 PORT_CONCURRENT=4000
 PORT_POOL=4001
 PORT_NODE=4002
+PORT_ECHO=8888
 
 PIDS=()
 
@@ -43,10 +44,14 @@ echo "Building v8-server (release)..." >&2
 echo "Starting servers..." >&2
 
 # Kill any existing servers on our ports
-for port in $PORT_CONCURRENT $PORT_POOL $PORT_NODE; do
+for port in $PORT_CONCURRENT $PORT_POOL $PORT_NODE $PORT_ECHO; do
     lsof -ti :"$port" 2>/dev/null | xargs kill -9 2>/dev/null || true
 done
 sleep 1
+
+# Echo server (async Rust, fetch target)
+"$ROOT_DIR/target/release/echo-server" $PORT_ECHO &
+PIDS+=($!)
 
 "$ROOT_DIR/target/release/v8-server" --mode=concurrent --port=$PORT_CONCURRENT &
 PIDS+=($!)
@@ -133,7 +138,8 @@ scenario "3. fib(35) (heavy CPU)"           fib               "[35]"  5s
 scenario "4. setTimeout(0)"                 timeout0          "[]"
 scenario "5. Promise chain (sync .then)"    promiseChain      "[]"
 scenario "6. Promise chain + 100ms timer"   promiseChainTimeout "[]"
-scenario "7. fetch() → external API"       fetchExternal       "[\"https://httpbin.org/get\"]"
+scenario "7. fetch() → local Rust echo"    fetchExternal       "[\"http://localhost:$PORT_ECHO\"]"
+scenario "8. fetch() → external API"       fetchExternal       "[\"https://httpbin.org/get\"]"
 
 echo ""
 echo "========================================================="
