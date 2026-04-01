@@ -1,7 +1,6 @@
-//! QPS benchmark -- raw V8 per-request model.
+//! QPS benchmark -- raw V8 per-request model with persistent context.
 
-use appbase_isolate_v8::{execute_request, init_v8, IsolatePool};
-use std::sync::Arc;
+use appbase_isolate_v8::{init_v8, Isolate, IsolatePool};
 use std::time::Instant;
 
 const RPC_BODY: &str = r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#;
@@ -21,18 +20,17 @@ var __rpc = {
 fn main() {
     init_v8();
 
-    println!("=== Raw V8 QPS Benchmark (Per-Request Model) ===\n");
+    println!("=== Raw V8 QPS Benchmark (Persistent Context) ===\n");
 
-    // Test 1: Single isolate, sequential
+    // Test 1: Single isolate, sequential -- persistent context
     {
-        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
-        // warmup
-        execute_request(&mut isolate, SERVER_JS, RPC_BODY).unwrap();
+        let mut isolate = Isolate::new(SERVER_JS);
+        isolate.execute_request(RPC_BODY).unwrap(); // warmup + init
 
-        let n = 50_000u64;
+        let n = 100_000u64;
         let start = Instant::now();
         for _ in 0..n {
-            execute_request(&mut isolate, SERVER_JS, RPC_BODY).unwrap();
+            isolate.execute_request(RPC_BODY).unwrap();
         }
         let e = start.elapsed();
         println!(
@@ -46,7 +44,7 @@ fn main() {
         let pool = IsolatePool::new(SERVER_JS, 8);
         pool.execute(RPC_BODY).unwrap();
 
-        let n = 50_000u64;
+        let n = 100_000u64;
         let start = Instant::now();
         for _ in 0..n {
             pool.execute(RPC_BODY).unwrap();
@@ -58,12 +56,11 @@ fn main() {
         );
     }
 
-    // Test 3: Per-thread isolates, multi-threaded concurrent
-    // Each thread creates its own isolate (V8 isolates are !Send)
+    // Test 3: Per-thread isolates, multi-threaded
     {
         let server_js = SERVER_JS.to_string();
         for threads in [2u64, 4, 8] {
-            let n = 50_000u64;
+            let n = 100_000u64;
             let per_thread = n / threads;
             let js = server_js.clone();
 
@@ -72,9 +69,9 @@ fn main() {
                 .map(|_| {
                     let js = js.clone();
                     std::thread::spawn(move || {
-                        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+                        let mut isolate = Isolate::new(&js);
                         for _ in 0..per_thread {
-                            execute_request(&mut isolate, &js, RPC_BODY).unwrap();
+                            isolate.execute_request(RPC_BODY).unwrap();
                         }
                     })
                 })
@@ -92,13 +89,13 @@ fn main() {
 
     // Test 4: fib(30) throughput
     {
-        let pool = IsolatePool::new(SERVER_JS, 8);
-        pool.execute(FIB_30).unwrap();
+        let mut isolate = Isolate::new(SERVER_JS);
+        isolate.execute_request(FIB_30).unwrap();
 
         let n = 1_000u64;
         let start = Instant::now();
         for _ in 0..n {
-            pool.execute(FIB_30).unwrap();
+            isolate.execute_request(FIB_30).unwrap();
         }
         let e = start.elapsed();
         println!(
@@ -109,8 +106,10 @@ fn main() {
 
     // Test 5: Per-request CPU measurement
     {
-        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
-        let r = execute_request(&mut isolate, SERVER_JS, FIB_35).unwrap();
+        let mut isolate = Isolate::new(SERVER_JS);
+        isolate.execute_request(FIB_35).unwrap(); // warmup
+
+        let r = isolate.execute_request(FIB_35).unwrap();
         println!(
             "\nPer-request CPU:\n  fib(35): cpu={:.2}ms wall={:.2}ms json={}",
             r.cpu_time.as_secs_f64() * 1000.0,
@@ -119,7 +118,8 @@ fn main() {
         );
     }
 
-    println!("\n--- Summary ---");
-    println!("Raw V8, no deno_core, no event loop, no channel overhead.");
-    println!("Fresh context per request = exact per-request CPU attribution.");
+    println!("\n--- Comparison ---");
+    println!("deno_core (single isolate, wrk):  121,000 req/s  129us/req");
+    println!("Raw V8 (single isolate, this):     see above");
+    println!("Raw V8 (8 threads, this):          see above");
 }
