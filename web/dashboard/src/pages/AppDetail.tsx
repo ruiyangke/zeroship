@@ -96,9 +96,7 @@ export default function AppDetail() {
     );
   }
 
-  const totalRequests = usage
-    ? Object.values(usage.counters || {}).reduce((a, b) => a + b, 0)
-    : 0;
+  const totalRequests = usage?.requests ?? 0;
 
   return (
     <div>
@@ -169,7 +167,7 @@ export default function AppDetail() {
                 </div>
                 <div className="text-[28px] font-bold">{totalRequests}</div>
               </div>
-              {Object.entries(usage.counters || {}).map(([key, val]) => (
+              {Object.entries(usage || {}).map(([key, val]) => (
                 <div key={key} className="p-3 bg-background border border-border">
                   <div className="text-[10px] uppercase tracking-[0.1em] text-muted-foreground mb-1">
                     {key}

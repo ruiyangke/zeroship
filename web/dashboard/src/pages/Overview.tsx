@@ -27,9 +27,12 @@ export default function Overview() {
 
   const error = statsError?.message ?? "";
 
-  const totalRequests = (usage ?? []).reduce((sum, u) => {
-    return sum + Object.values(u.counters || {}).reduce((a, b) => a + b, 0);
-  }, 0);
+  // /_usage returns { app_id: { resource: value, ... } } — an object, not an array
+  const totalRequests = usage
+    ? Object.values(usage as Record<string, Record<string, number>>).reduce((sum, counters) => {
+        return sum + (counters.requests ?? 0);
+      }, 0)
+    : 0;
 
   const utilization = stats
     ? stats.max_isolates > 0

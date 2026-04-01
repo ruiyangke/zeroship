@@ -19,14 +19,11 @@ export interface HealthStatus {
   status: string;
 }
 
-export interface UsageCounters {
-  counters: Record<string, number>;
-}
+// /_apps/:id/usage returns flat { requests: N, cpu_us: N, ... }
+export type UsageCounters = Record<string, number>;
 
-export interface AppUsage {
-  app_id: string;
-  counters: Record<string, number>;
-}
+// /_usage returns { app_id: { resource: value, ... } }
+export type AllUsage = Record<string, Record<string, number>>;
 
 const API_BASE = '';
 
@@ -100,6 +97,6 @@ export function getAppUsage(id: string): Promise<UsageCounters> {
   return apiFetch(`/_apps/${id}/usage`);
 }
 
-export function getAllUsage(): Promise<AppUsage[]> {
+export function getAllUsage(): Promise<AllUsage> {
   return apiFetch("/_usage");
 }
