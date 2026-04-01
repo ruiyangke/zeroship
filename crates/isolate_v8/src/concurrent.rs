@@ -163,10 +163,12 @@ impl LoopState {
                             .to_string(scope)
                             .unwrap()
                             .to_rust_string_lossy(scope);
+                        let logs = self.el_state.borrow_mut().log_buffer.drain(..).collect();
                         let _ = reply.send(Ok(RequestResult {
                             json,
                             cpu_time: cpu_elapsed,
                             wall_time: wall_start.elapsed(),
+                            logs,
                         }));
                     }
                     v8::PromiseState::Rejected => {
@@ -197,10 +199,12 @@ impl LoopState {
                     .to_string(scope)
                     .unwrap()
                     .to_rust_string_lossy(scope);
+                let logs = self.el_state.borrow_mut().log_buffer.drain(..).collect();
                 let _ = reply.send(Ok(RequestResult {
                     json,
                     cpu_time: cpu_elapsed,
                     wall_time: wall_start.elapsed(),
+                    logs,
                 }));
             }
             None => {
@@ -256,10 +260,12 @@ impl LoopState {
                             .unwrap()
                             .to_rust_string_lossy(scope);
                         if let Some(reply) = req.reply.take() {
+                            let logs = self.el_state.borrow_mut().log_buffer.drain(..).collect();
                             let _ = reply.send(Ok(RequestResult {
                                 json,
                                 cpu_time: req.cpu_accumulated,
                                 wall_time: req.wall_start.elapsed(),
+                                logs,
                             }));
                         }
                     }

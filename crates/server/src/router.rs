@@ -110,6 +110,8 @@ pub fn build(state: AppState) -> Router {
         .route("/api/apps/{id}", delete(handle_delete_app_api))
         .route("/api/apps/{id}/deploy", post(handle_deploy))
         .route("/api/apps/{id}/plan", put(handle_set_plan))
+        .route("/api/apps/{id}/logs", get(handle_app_logs))
+        .route("/api/templates", get(handle_templates))
         .fallback(get(handle_static))
         .layer(cors)
         .layer(compression)
@@ -776,6 +778,51 @@ async fn handle_set_plan(
             &format!(r#"{{"error":"{}"}}"#, json_escape(&e.to_string())),
         ),
     }
+}
+
+/// GET /api/apps/:id/logs — recent console output for an app.
+async fn handle_app_logs(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !check_master_key(&state, &headers) {
+        return json_response(StatusCode::UNAUTHORIZED, r#"{"error":"Invalid or missing master key"}"#);
+    }
+
+    let logs = state.pool.get_logs(&id);
+    json_response(StatusCode::OK, &serde_json::to_string(&logs).unwrap_or_default())
+}
+
+/// GET /api/templates — list available starter templates.
+async fn handle_templates() -> Response {
+    let templates = serde_json::json!([
+        {
+            "id": "hello-world",
+            "name": "Hello World",
+            "description": "Simple ping/pong API",
+            "code": "var __rpc = {\n  ping: function() {\n    return \"pong\";\n  },\n  hello: function(name) {\n    return \"Hello, \" + (name || \"world\") + \"!\";\n  }\n};"
+        },
+        {
+            "id": "todo-api",
+            "name": "Todo API",
+            "description": "In-memory todo list with CRUD operations",
+            "code": "var todos = [];\nvar nextId = 1;\n\nvar __rpc = {\n  list: function() {\n    return todos;\n  },\n  add: function(title) {\n    var todo = { id: nextId++, title: title, done: false };\n    todos.push(todo);\n    return todo;\n  },\n  toggle: function(id) {\n    var todo = todos.find(function(t) { return t.id === id; });\n    if (!todo) return { error: \"not found\" };\n    todo.done = !todo.done;\n    return todo;\n  },\n  remove: function(id) {\n    var idx = todos.findIndex(function(t) { return t.id === id; });\n    if (idx === -1) return { error: \"not found\" };\n    return todos.splice(idx, 1)[0];\n  }\n};"
+        },
+        {
+            "id": "weather-proxy",
+            "name": "Weather Proxy",
+            "description": "Fetch weather data from wttr.in",
+            "code": "var __rpc = {\n  get: async function(city) {\n    var resp = await fetch(\"https://wttr.in/\" + (city || \"London\") + \"?format=j1\");\n    var data = await resp.json();\n    var current = data.current_condition[0];\n    return {\n      city: city || \"London\",\n      temp_c: current.temp_C,\n      feels_like_c: current.FeelsLikeC,\n      description: current.weatherDesc[0].value,\n      humidity: current.humidity\n    };\n  }\n};"
+        },
+        {
+            "id": "math-api",
+            "name": "Math API",
+            "description": "Basic math operations",
+            "code": "var __rpc = {\n  add: function(a, b) { return a + b; },\n  subtract: function(a, b) { return a - b; },\n  multiply: function(a, b) { return a * b; },\n  divide: function(a, b) {\n    if (b === 0) throw new Error(\"Division by zero\");\n    return a / b;\n  },\n  factorial: function(n) {\n    if (n < 0) throw new Error(\"Negative input\");\n    if (n <= 1) return 1;\n    var result = 1;\n    for (var i = 2; i <= n; i++) result *= i;\n    return result;\n  }\n};"
+        }
+    ]);
+    json_response(StatusCode::OK, &templates.to_string())
 }
 
 // --- Helpers ---

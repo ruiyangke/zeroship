@@ -34,6 +34,8 @@ pub(crate) struct EventLoopState {
     /// Optional sender for ConcurrentIsolate event channel.
     /// When set, async ops send Event::OpCompleted here instead of op_tx.
     pub(crate) concurrent_event_tx: Option<mpsc::Sender<crate::concurrent::Event>>,
+    /// Per-isolate log buffer. Console output is appended here.
+    pub(crate) log_buffer: Vec<String>,
 }
 
 /// Result of an async op (e.g., fetch response, DB query result).
@@ -53,6 +55,7 @@ impl EventLoopState {
             next_op_id: 1,
             tokio_handle: None,
             concurrent_event_tx: None,
+            log_buffer: Vec::new(),
         }
     }
 }

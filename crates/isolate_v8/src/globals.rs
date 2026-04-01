@@ -21,7 +21,21 @@ fn console_log_callback(
         let s = arg.to_rust_string_lossy(scope);
         parts.push(s);
     }
-    println!("{}", parts.join(" "));
+    let line = parts.join(" ");
+    println!("{}", line);
+
+    // Append to per-isolate log buffer
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("EventLoopState not in isolate slot")
+        .clone();
+    let mut s = state.borrow_mut();
+    s.log_buffer.push(line);
+    // Cap buffer at 1000 entries to prevent memory bloat
+    if s.log_buffer.len() > 1000 {
+        let drain = s.log_buffer.len() - 1000;
+        s.log_buffer.drain(..drain);
+    }
 }
 
 // ---------------------------------------------------------------------------

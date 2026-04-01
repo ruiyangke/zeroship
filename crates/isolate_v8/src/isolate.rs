@@ -170,11 +170,13 @@ impl Isolate {
 
         let cpu_time = thread_cpu_time().saturating_sub(cpu_start);
         let wall_time = wall_start.elapsed();
+        let logs = self.state.borrow_mut().log_buffer.drain(..).collect();
 
         Ok(RequestResult {
             json,
             cpu_time,
             wall_time,
+            logs,
         })
     }
 }

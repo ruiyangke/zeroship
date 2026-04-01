@@ -101,6 +101,25 @@ export function getAllUsage(): Promise<AllUsage> {
   return apiFetch("/_usage");
 }
 
+// ── Logs ──────────────────────────────────────────────────
+
+export function getAppLogs(id: string): Promise<string[]> {
+  return apiFetch(`/api/apps/${id}/logs`);
+}
+
+// ── Templates ─────────────────────────────────────────────
+
+export interface AppTemplate {
+  id: string;
+  name: string;
+  description: string;
+  code: string;
+}
+
+export function getTemplates(): Promise<AppTemplate[]> {
+  return apiFetch("/api/templates");
+}
+
 // ── RPC ───────────────────────────────────────────────────
 
 export async function callRpc(appId: string, method: string, params: unknown[]): Promise<unknown> {

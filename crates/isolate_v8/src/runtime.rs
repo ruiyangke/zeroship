@@ -33,6 +33,8 @@ pub struct RequestResult {
     pub json: String,
     pub cpu_time: Duration,
     pub wall_time: Duration,
+    /// Console output captured during execution.
+    pub logs: Vec<String>,
 }
 
 /// Embedded Fetch API polyfill -- loaded after globals are set up.

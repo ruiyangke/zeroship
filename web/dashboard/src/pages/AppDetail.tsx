@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { getApp, getAppUsage, deployApp, deleteApp, updatePlan, callRpc } from "../api";
+import { getApp, getAppUsage, getAppLogs, deployApp, deleteApp, updatePlan, callRpc } from "../api";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -37,6 +37,13 @@ export default function AppDetail() {
     queryKey: ["app-usage", id],
     queryFn: () => getAppUsage(id!).catch(() => null),
     enabled: !!id,
+  });
+
+  const { data: logs } = useQuery({
+    queryKey: ["app-logs", id],
+    queryFn: () => getAppLogs(id!).catch(() => [] as string[]),
+    enabled: !!id,
+    refetchInterval: 5000,
   });
 
   // Set newPlan when app loads
@@ -303,6 +310,24 @@ export default function AppDetail() {
             <pre className="mt-3 p-3 bg-background border border-border text-xs font-mono whitespace-pre-wrap overflow-auto max-h-60">
               {rpcResult}
             </pre>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Logs */}
+      <Card className="mb-4">
+        <CardHeader>
+          <CardTitle>logs</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {logs && logs.length > 0 ? (
+            <pre className="p-3 bg-background border border-border text-xs font-mono whitespace-pre-wrap overflow-auto max-h-60">
+              {logs.join("\n")}
+            </pre>
+          ) : (
+            <div className="text-[13px] text-muted-foreground">
+              no console output captured yet
+            </div>
           )}
         </CardContent>
       </Card>

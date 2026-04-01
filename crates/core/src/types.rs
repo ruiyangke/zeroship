@@ -43,6 +43,8 @@ pub struct RpcResult {
     pub json: String,
     /// CPU time consumed by V8 during this call (excludes I/O wait).
     pub cpu_time: Duration,
+    /// Console output captured during execution.
+    pub logs: Vec<String>,
 }
 
 /// Statistics for a single isolate.

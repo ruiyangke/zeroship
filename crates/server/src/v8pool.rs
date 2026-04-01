@@ -20,6 +20,8 @@ struct IsolateEntry {
     last_used_ms: AtomicU64,
     /// Total requests dispatched.
     request_count: AtomicU64,
+    /// Per-app log ring buffer (last 100 entries).
+    logs: std::sync::Mutex<Vec<String>>,
 }
 
 fn epoch_ms() -> u64 {
@@ -85,10 +87,24 @@ impl V8Pool {
         entry.last_used_ms.store(epoch_ms(), Ordering::Relaxed);
 
         match tokio::time::timeout(self.wall_timeout, reply_rx).await {
-            Ok(Ok(Ok(result))) => Ok(RpcResult {
-                json: result.json,
-                cpu_time: result.cpu_time,
-            }),
+            Ok(Ok(Ok(result))) => {
+                // Store logs in per-app ring buffer
+                if !result.logs.is_empty() {
+                    if let Ok(mut app_logs) = entry.logs.lock() {
+                        app_logs.extend(result.logs.iter().cloned());
+                        // Keep last 100
+                        if app_logs.len() > 100 {
+                            let drain = app_logs.len() - 100;
+                            app_logs.drain(..drain);
+                        }
+                    }
+                }
+                Ok(RpcResult {
+                    json: result.json,
+                    cpu_time: result.cpu_time,
+                    logs: result.logs,
+                })
+            }
             Ok(Ok(Err(e))) => Err(e),
             Ok(Err(_)) => Err("V8 worker dropped reply".to_string()),
             Err(_) => Err("Request timed out (30s wall time)".to_string()),
@@ -180,6 +196,7 @@ impl V8Pool {
             sender: event_tx,
             last_used_ms: AtomicU64::new(epoch_ms()),
             request_count: AtomicU64::new(0),
+            logs: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -228,6 +245,17 @@ impl V8Pool {
             let _ = entry.sender.send(Event::Shutdown);
             eprintln!("[pool] Evicted '{app_id}' (manual)");
         }
+    }
+
+    /// Return recent console logs for an app.
+    pub fn get_logs(&self, app_id: &str) -> Vec<String> {
+        let isolates = self.isolates.read().unwrap();
+        if let Some(entry) = isolates.get(app_id) {
+            if let Ok(logs) = entry.logs.lock() {
+                return logs.clone();
+            }
+        }
+        Vec::new()
     }
 
     /// Return pool statistics.
