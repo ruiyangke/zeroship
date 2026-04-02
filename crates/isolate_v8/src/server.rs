@@ -8,6 +8,7 @@
 //! GET /health -> {"status":"ok"}
 
 use appbase_isolate_v8::concurrent::{ConcurrentIsolate, Event};
+use appbase_isolate_v8::modules::ModuleEntry;
 use appbase_isolate_v8::init_v8;
 use bytes::Bytes;
 use http_body_util::Full;
@@ -22,8 +23,15 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 
 /// Default JS loaded when no --js flag is provided.
-/// Loads shared scenarios from benches/scenarios.js at build time.
+/// Loads shared scenarios from benches/scenarios.js at build time (ESM format).
 const SERVER_JS: &str = include_str!("../benches/scenarios.js");
+
+fn server_modules() -> Vec<ModuleEntry> {
+    vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: SERVER_JS.into(),
+    }]
+}
 
 // ===========================================================================
 // Spawn + warmup helper
@@ -39,7 +47,7 @@ fn spawn_and_warmup(
 ) -> std::sync::mpsc::Sender<Event> {
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let event_tx_clone = event_tx.clone();
-    let js = SERVER_JS.to_string();
+    let modules = server_modules();
     let thread_name = name.to_string();
     let tokio_handle = tokio::runtime::Handle::current();
 
@@ -47,7 +55,7 @@ fn spawn_and_warmup(
         .name(thread_name)
         .spawn(move || {
             let mut isolate = ConcurrentIsolate::new(
-                &js, event_rx, event_tx_clone, Some(tokio_handle), cpu_limit,
+                modules, event_rx, event_tx_clone, Some(tokio_handle), cpu_limit,
             );
             isolate.run_event_loop();
         })

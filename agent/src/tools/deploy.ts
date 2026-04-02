@@ -50,7 +50,7 @@ export const deployApp = tool(
   {
     name: "deploy_app",
     description:
-      "Deploy a JavaScript app to the appbase platform. The server_js should define var __rpc = { methodName: function(params) { ... } }. Each method becomes a JSON-RPC endpoint.",
+      "Deploy a JavaScript app to the appbase platform. The server_js should be an ES module with exported functions (export function methodName(params) { ... }). Each exported function becomes a JSON-RPC endpoint.",
     schema: z.object({
       app_id: z
         .string()

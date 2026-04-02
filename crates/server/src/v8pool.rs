@@ -6,6 +6,7 @@
 use appbase_core::config::IsolateConfig;
 use appbase_core::types::{IsolateStats, PoolStats, RpcResult};
 use appbase_isolate_v8::concurrent::{ConcurrentIsolate, Event};
+use appbase_isolate_v8::modules::ModuleEntry;
 use appbase_isolate_v8::init_v8;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -163,7 +164,10 @@ impl V8Pool {
     ) -> Result<IsolateEntry, String> {
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let event_tx_clone = event_tx.clone();
-        let js = server_js.to_string();
+        let modules = vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: server_js.into(),
+        }];
         let handle = self.tokio_handle.clone();
         let cpu_limit = self.config.cpu_limit();
         let thread_name = format!("v8-{app_id}");
@@ -172,7 +176,7 @@ impl V8Pool {
             .name(thread_name)
             .spawn(move || {
                 let mut isolate =
-                    ConcurrentIsolate::new(&js, event_rx, event_tx_clone, Some(handle), cpu_limit);
+                    ConcurrentIsolate::new(modules, event_rx, event_tx_clone, Some(handle), cpu_limit);
                 isolate.run_event_loop();
             })
             .map_err(|e| format!("Failed to spawn V8 thread: {e}"))?;

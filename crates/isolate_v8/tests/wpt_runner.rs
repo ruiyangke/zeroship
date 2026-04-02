@@ -3,7 +3,7 @@
 //! Uses testharness.js in ShellTestEnvironment mode (no document/DOM).
 //! Scripts are loaded separately via eval to avoid V8 string size limits.
 
-use appbase_isolate_v8::{init_v8, Isolate};
+use appbase_isolate_v8::{init_v8, Isolate, ModuleEntry};
 use std::path::Path;
 
 const WPT_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../refs/wpt");
@@ -38,11 +38,16 @@ fn run_wpt_test(test_path: &str) -> (usize, usize, Vec<(String, bool, Option<Str
     let test_js = std::fs::read_to_string(wpt_root.join(test_path))
         .unwrap_or_else(|e| panic!("WPT test not found: {test_path}: {e}"));
 
-    // server_js = pre-shims + server_shim (small enough for V8::String::new)
-    let server_js = format!("{SHIMS_PRE}\n{SERVER_SHIM}");
+    // Combine pre-shims + server_shim into a single ES module.
+    // The shims set globalThis properties (works from module scope).
+    let module_source = format!("{SHIMS_PRE}\n{SERVER_SHIM}");
+    let modules = vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: module_source,
+    }];
 
     let result = std::panic::catch_unwind(|| {
-        let mut iso = Isolate::new(&server_js);
+        let mut iso = Isolate::new(modules);
 
         // Load testharness.js via eval (200KB, too large for single server_js)
         let body = serde_json::json!({"jsonrpc":"2.0","method":"__load_harness","params":[harness_js],"id":1}).to_string();
@@ -147,9 +152,13 @@ fn wpt_harness_smoke() {
     init_v8();
     let wpt_root = Path::new(WPT_ROOT);
     let harness_js = std::fs::read_to_string(wpt_root.join("resources/testharness.js")).unwrap();
-    let server_js = format!("{SHIMS_PRE}\n{SERVER_SHIM}");
+    let module_source = format!("{SHIMS_PRE}\n{SERVER_SHIM}");
+    let modules = vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: module_source,
+    }];
 
-    let mut iso = Isolate::new(&server_js);
+    let mut iso = Isolate::new(modules);
     let body = serde_json::json!({"jsonrpc":"2.0","method":"__load_harness","params":[harness_js],"id":1}).to_string();
     let r = iso.execute_request(&body).unwrap();
     eprintln!("[smoke] harness load: {}", r.json);

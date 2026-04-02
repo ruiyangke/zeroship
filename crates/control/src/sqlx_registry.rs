@@ -276,11 +276,11 @@ mod tests {
             .unwrap();
         reg.create_app("app1", "free").await.unwrap();
 
-        let v1 = reg.deploy("app1", "var __rpc = {};", None).await.unwrap();
+        let v1 = reg.deploy("app1", "export function noop() {}", None).await.unwrap();
         assert_eq!(v1, 1);
 
         let v2 = reg
-            .deploy("app1", "var __rpc = { ping: function() {} };", None)
+            .deploy("app1", "export function ping() {}", None)
             .await
             .unwrap();
         assert_eq!(v2, 2);

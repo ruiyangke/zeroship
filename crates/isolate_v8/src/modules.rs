@@ -158,14 +158,6 @@ fn resolve_callback<'a>(
     None
 }
 
-/// Helper: wrap a single-file app as a module entry.
-pub fn single_file_to_modules(server_js: &str) -> Vec<ModuleEntry> {
-    vec![ModuleEntry {
-        specifier: "index.js".to_string(),
-        source: server_js.to_string(),
-    }]
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

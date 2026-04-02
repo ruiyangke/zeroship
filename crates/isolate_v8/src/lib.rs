@@ -39,11 +39,18 @@ pub use runtime::{init_v8, RequestResult};
 mod tests {
     use super::*;
 
+    /// Helper to create a single-module entry for tests.
+    fn m(source: &str) -> Vec<ModuleEntry> {
+        vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: source.into(),
+        }]
+    }
+
     #[test]
     fn basic_rpc() {
         init_v8();
-        let js = r#"var __rpc = { ping: function() { return "pong"; } };"#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"export function ping() { return "pong"; }"#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":1}"#)
             .unwrap();
@@ -53,8 +60,10 @@ mod tests {
     #[test]
     fn persistent_context() {
         init_v8();
-        let js = r#"var __rpc = { count: (function() { var n=0; return function() { return ++n; }; })() };"#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"
+            let n = 0;
+            export function count() { return ++n; }
+        "#));
 
         let r1 = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"count","params":[],"id":1}"#)
@@ -74,15 +83,12 @@ mod tests {
     #[test]
     fn per_request_cpu() {
         init_v8();
-        let js = r#"
-            var __rpc = {
-                fib: function(n) {
-                    function f(n) { return n <= 1 ? n : f(n-1) + f(n-2); }
-                    return f(n);
-                }
-            };
-        "#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"
+            export function fib(n) {
+                function f(n) { return n <= 1 ? n : f(n-1) + f(n-2); }
+                return f(n);
+            }
+        "#));
         let r1 = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"fib","params":[20],"id":1}"#)
             .unwrap();
@@ -95,8 +101,7 @@ mod tests {
     #[test]
     fn pool_reuse() {
         init_v8();
-        let js = r#"var __rpc = { ping: function() { return "pong"; } };"#;
-        let pool = IsolatePool::new(js, 4);
+        let pool = IsolatePool::new(m(r#"export function ping() { return "pong"; }"#), 4);
         for i in 0..10 {
             let r = pool
                 .execute(&format!(
@@ -110,16 +115,13 @@ mod tests {
     #[test]
     fn async_timeout() {
         init_v8();
-        let js = r#"
-            var __rpc = {
-                delayed: function() {
-                    return new Promise(function(resolve) {
-                        setTimeout(function() { resolve("done after delay"); }, 10);
-                    });
-                }
-            };
-        "#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"
+            export function delayed() {
+                return new Promise(function(resolve) {
+                    setTimeout(function() { resolve("done after delay"); }, 10);
+                });
+            }
+        "#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"delayed","params":[],"id":1}"#)
             .unwrap();
@@ -129,17 +131,14 @@ mod tests {
     #[test]
     fn async_await_syntax() {
         init_v8();
-        let js = r#"
-            var __rpc = {
-                greeting: async function(name) {
-                    var msg = await new Promise(function(resolve) {
-                        setTimeout(function() { resolve("Hello, " + name + "!"); }, 5);
-                    });
-                    return msg;
-                }
-            };
-        "#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"
+            export async function greeting(name) {
+                const msg = await new Promise(function(resolve) {
+                    setTimeout(function() { resolve("Hello, " + name + "!"); }, 5);
+                });
+                return msg;
+            }
+        "#));
         let r = isolate
             .execute_request(
                 r#"{"jsonrpc":"2.0","method":"greeting","params":["world"],"id":1}"#,
@@ -151,18 +150,15 @@ mod tests {
     #[test]
     fn clear_timeout_works() {
         init_v8();
-        let js = r#"
-            var __rpc = {
-                test_clear: function() {
-                    return new Promise(function(resolve) {
-                        var id = setTimeout(function() { resolve("should not fire"); }, 5000);
-                        clearTimeout(id);
-                        setTimeout(function() { resolve("cleared ok"); }, 5);
-                    });
-                }
-            };
-        "#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"
+            export function test_clear() {
+                return new Promise(function(resolve) {
+                    var id = setTimeout(function() { resolve("should not fire"); }, 5000);
+                    clearTimeout(id);
+                    setTimeout(function() { resolve("cleared ok"); }, 5);
+                });
+            }
+        "#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"test_clear","params":[],"id":1}"#)
             .unwrap();
@@ -172,20 +168,17 @@ mod tests {
     #[test]
     fn promise_chain() {
         init_v8();
-        let js = r#"
-            var __rpc = {
-                chain: function() {
-                    return new Promise(function(resolve) {
-                        setTimeout(function() { resolve(1); }, 5);
-                    }).then(function(v) {
-                        return v + 10;
-                    }).then(function(v) {
-                        return v * 2;
-                    });
-                }
-            };
-        "#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"
+            export function chain() {
+                return new Promise(function(resolve) {
+                    setTimeout(function() { resolve(1); }, 5);
+                }).then(function(v) {
+                    return v + 10;
+                }).then(function(v) {
+                    return v * 2;
+                });
+            }
+        "#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"chain","params":[],"id":1}"#)
             .unwrap();
@@ -195,16 +188,13 @@ mod tests {
     #[test]
     fn set_timeout_zero_delay() {
         init_v8();
-        let js = r#"
-            var __rpc = {
-                immediate: function() {
-                    return new Promise(function(resolve) {
-                        setTimeout(function() { resolve("immediate"); }, 0);
-                    });
-                }
-            };
-        "#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"
+            export function immediate() {
+                return new Promise(function(resolve) {
+                    setTimeout(function() { resolve("immediate"); }, 0);
+                });
+            }
+        "#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"immediate","params":[],"id":1}"#)
             .unwrap();
@@ -214,19 +204,16 @@ mod tests {
     #[test]
     fn multiple_timeouts_ordered() {
         init_v8();
-        let js = r#"
-            var __rpc = {
-                ordered: function() {
-                    var results = [];
-                    return new Promise(function(resolve) {
-                        setTimeout(function() { results.push("c"); resolve(results.join(",")); }, 30);
-                        setTimeout(function() { results.push("a"); }, 5);
-                        setTimeout(function() { results.push("b"); }, 15);
-                    });
-                }
-            };
-        "#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"
+            export function ordered() {
+                var results = [];
+                return new Promise(function(resolve) {
+                    setTimeout(function() { results.push("c"); resolve(results.join(",")); }, 30);
+                    setTimeout(function() { results.push("a"); }, 5);
+                    setTimeout(function() { results.push("b"); }, 15);
+                });
+            }
+        "#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"ordered","params":[],"id":1}"#)
             .unwrap();
@@ -236,8 +223,7 @@ mod tests {
     #[test]
     fn sync_still_works_with_event_loop() {
         init_v8();
-        let js = r#"var __rpc = { add: function(a, b) { return a + b; } };"#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"export function add(a, b) { return a + b; }"#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"add","params":[3,4],"id":1}"#)
             .unwrap();
@@ -247,15 +233,12 @@ mod tests {
     #[test]
     fn console_log_works() {
         init_v8();
-        let js = r#"
-            var __rpc = {
-                greet: function() {
-                    console.log("Hello from JS!");
-                    return "logged";
-                }
-            };
-        "#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"
+            export function greet() {
+                console.log("Hello from JS!");
+                return "logged";
+            }
+        "#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"greet","params":[],"id":1}"#)
             .unwrap();
@@ -269,17 +252,14 @@ mod tests {
     #[test]
     fn fetch_get_json() {
         init_v8();
-        let js = r#"
-            var __rpc = {
-                test: async function() {
-                    var resp = await fetch("https://httpbin.org/get");
-                    if (!resp.ok) return "status: " + resp.status;
-                    var data = await resp.json();
-                    return data.url;
-                }
-            };
-        "#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var resp = await fetch("https://httpbin.org/get");
+                if (!resp.ok) return "status: " + resp.status;
+                var data = await resp.json();
+                return data.url;
+            }
+        "#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
             .unwrap();
@@ -289,20 +269,17 @@ mod tests {
     #[test]
     fn fetch_post_body() {
         init_v8();
-        let js = r#"
-            var __rpc = {
-                test: async function() {
-                    var resp = await fetch("https://httpbin.org/post", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ hello: "world" }),
-                    });
-                    var data = await resp.json();
-                    return JSON.parse(data.data).hello;
-                }
-            };
-        "#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var resp = await fetch("https://httpbin.org/post", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ hello: "world" }),
+                });
+                var data = await resp.json();
+                return JSON.parse(data.data).hello;
+            }
+        "#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
             .unwrap();
@@ -312,15 +289,12 @@ mod tests {
     #[test]
     fn fetch_response_headers() {
         init_v8();
-        let js = r#"
-            var __rpc = {
-                test: async function() {
-                    var resp = await fetch("https://httpbin.org/get");
-                    return resp.headers.get("content-type");
-                }
-            };
-        "#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var resp = await fetch("https://httpbin.org/get");
+                return resp.headers.get("content-type");
+            }
+        "#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
             .unwrap();
@@ -330,15 +304,12 @@ mod tests {
     #[test]
     fn fetch_404_not_ok() {
         init_v8();
-        let js = r#"
-            var __rpc = {
-                test: async function() {
-                    var resp = await fetch("https://httpbin.org/status/404");
-                    return { ok: resp.ok, status: resp.status };
-                }
-            };
-        "#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var resp = await fetch("https://httpbin.org/status/404");
+                return { ok: resp.ok, status: resp.status };
+            }
+        "#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
             .unwrap();
@@ -349,19 +320,16 @@ mod tests {
     #[test]
     fn fetch_invalid_url_rejects() {
         init_v8();
-        let js = r#"
-            var __rpc = {
-                test: async function() {
-                    try {
-                        await fetch("not-a-url://invalid");
-                        return "should not reach";
-                    } catch (e) {
-                        return "caught: " + e.message;
-                    }
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                try {
+                    await fetch("not-a-url://invalid");
+                    return "should not reach";
+                } catch (e) {
+                    return "caught: " + e.message;
                 }
-            };
-        "#;
-        let mut isolate = Isolate::new(js);
+            }
+        "#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
             .unwrap();
@@ -371,16 +339,13 @@ mod tests {
     #[test]
     fn fetch_response_text() {
         init_v8();
-        let js = r#"
-            var __rpc = {
-                test: async function() {
-                    var resp = await fetch("https://httpbin.org/robots.txt");
-                    var text = await resp.text();
-                    return text.length > 0 ? "has body" : "empty";
-                }
-            };
-        "#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var resp = await fetch("https://httpbin.org/robots.txt");
+                var text = await resp.text();
+                return text.length > 0 ? "has body" : "empty";
+            }
+        "#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
             .unwrap();
@@ -390,21 +355,18 @@ mod tests {
     #[test]
     fn headers_class_works() {
         init_v8();
-        let js = r#"
-            var __rpc = {
-                test: function() {
-                    var h = new Headers({ "Content-Type": "text/plain", "X-Custom": "hello" });
-                    h.append("X-Custom", "world");
-                    return {
-                        ct: h.get("content-type"),
-                        custom: h.get("x-custom"),
-                        has_ct: h.has("content-type"),
-                        missing: h.has("nonexistent"),
-                    };
-                }
-            };
-        "#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"
+            export function test() {
+                var h = new Headers({ "Content-Type": "text/plain", "X-Custom": "hello" });
+                h.append("X-Custom", "world");
+                return {
+                    ct: h.get("content-type"),
+                    custom: h.get("x-custom"),
+                    has_ct: h.has("content-type"),
+                    missing: h.has("nonexistent"),
+                };
+            }
+        "#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
             .unwrap();
@@ -415,23 +377,20 @@ mod tests {
     #[test]
     fn request_class_works() {
         init_v8();
-        let js = r#"
-            var __rpc = {
-                test: function() {
-                    var req = new Request("https://example.com", {
-                        method: "POST",
-                        headers: { "X-Test": "1" },
-                        body: "hello",
-                    });
-                    return {
-                        url: req.url,
-                        method: req.method,
-                        header: req.headers.get("x-test"),
-                    };
-                }
-            };
-        "#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"
+            export function test() {
+                var req = new Request("https://example.com", {
+                    method: "POST",
+                    headers: { "X-Test": "1" },
+                    body: "hello",
+                });
+                return {
+                    url: req.url,
+                    method: req.method,
+                    header: req.headers.get("x-test"),
+                };
+            }
+        "#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
             .unwrap();
@@ -442,16 +401,13 @@ mod tests {
     #[test]
     fn response_static_json() {
         init_v8();
-        let js = r#"
-            var __rpc = {
-                test: async function() {
-                    var resp = Response.json({ hello: "world" });
-                    var data = await resp.json();
-                    return { status: resp.status, hello: data.hello, ct: resp.headers.get("content-type") };
-                }
-            };
-        "#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var resp = Response.json({ hello: "world" });
+                var data = await resp.json();
+                return { status: resp.status, hello: data.hello, ct: resp.headers.get("content-type") };
+            }
+        "#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
             .unwrap();
@@ -463,20 +419,20 @@ mod tests {
     fn fetch_concurrent_model() {
         use crate::concurrent::{ConcurrentIsolate, Event};
         init_v8();
-        let js = r#"
-            var __rpc = {
-                test: async function() {
+        let modules = vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: r#"
+                export async function test() {
                     var resp = await fetch("https://httpbin.org/get");
                     var data = await resp.json();
                     return data.url;
                 }
-            };
-        "#;
+            "#.into(),
+        }];
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let event_tx_clone = event_tx.clone();
-        let js_owned = js.to_string();
         let handle = std::thread::spawn(move || {
-            let mut isolate = ConcurrentIsolate::new(&js_owned, event_rx, event_tx_clone, None, None);
+            let mut isolate = ConcurrentIsolate::new(modules, event_rx, event_tx_clone, None, None);
             isolate.run_until_idle();
         });
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
@@ -496,21 +452,18 @@ mod tests {
     #[test]
     fn kv_store_works() {
         init_v8();
-        let js = r#"
-            var __rpc = {
-                test: function() {
-                    kv.set("name", "Alice");
-                    kv.set("age", "30");
-                    var name = kv.get("name");
-                    var missing = kv.get("nonexistent");
-                    var keys = kv.list();
-                    kv.delete("age");
-                    var afterDelete = kv.list();
-                    return { name, missing, keys, afterDelete };
-                }
-            };
-        "#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"
+            export function test() {
+                kv.set("name", "Alice");
+                kv.set("age", "30");
+                var name = kv.get("name");
+                var missing = kv.get("nonexistent");
+                var keys = kv.list();
+                kv.delete("age");
+                var afterDelete = kv.list();
+                return { name, missing, keys, afterDelete };
+            }
+        "#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
             .unwrap();
@@ -523,8 +476,7 @@ mod tests {
         // SAFETY: test is single-threaded with respect to this env var.
         unsafe { std::env::set_var("APPBASE_APP_TEST_KEY", "test_value") };
         init_v8();
-        let js = r#"var __rpc = { test: function() { return env.get("test_key"); } };"#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"export function test() { return env.get("test_key"); }"#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
             .unwrap();
@@ -536,9 +488,9 @@ mod tests {
     #[test]
     fn env_get_missing_returns_null() {
         init_v8();
-        let js =
-            r#"var __rpc = { test: function() { return env.get("nonexistent_key_xyz") === null ? "is_null" : "not_null"; } };"#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(
+            r#"export function test() { return env.get("nonexistent_key_xyz") === null ? "is_null" : "not_null"; }"#,
+        ));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
             .unwrap();
@@ -548,13 +500,10 @@ mod tests {
     #[test]
     fn kv_persists_across_requests() {
         init_v8();
-        let js = r#"
-            var __rpc = {
-                set: function(k, v) { kv.set(k, v); return "ok"; },
-                get: function(k) { return kv.get(k); }
-            };
-        "#;
-        let mut isolate = Isolate::new(js);
+        let mut isolate = Isolate::new(m(r#"
+            export function set(k, v) { kv.set(k, v); return "ok"; }
+            export function get(k) { return kv.get(k); }
+        "#));
         isolate
             .execute_request(
                 r#"{"jsonrpc":"2.0","method":"set","params":["key1","value1"],"id":1}"#,
@@ -569,13 +518,12 @@ mod tests {
     #[test]
     fn text_encoder_decoder() {
         init_v8();
-        let js = r#"var __rpc = { test: function() {
+        let mut isolate = Isolate::new(m(r#"export function test() {
             var enc = new TextEncoder();
             var buf = enc.encode("Hello");
             var dec = new TextDecoder();
             return { encoded: Array.from(buf), decoded: dec.decode(buf) };
-        }};"#;
-        let mut isolate = Isolate::new(js);
+        }"#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
             .unwrap();
@@ -586,12 +534,11 @@ mod tests {
     #[test]
     fn crypto_random_uuid() {
         init_v8();
-        let js = r#"var __rpc = { test: function() {
+        let mut isolate = Isolate::new(m(r#"export function test() {
             var id1 = crypto.randomUUID();
             var id2 = crypto.randomUUID();
             return { id1, id2, different: id1 !== id2, format: /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id1) };
-        }};"#;
-        let mut isolate = Isolate::new(js);
+        }"#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
             .unwrap();
@@ -602,14 +549,13 @@ mod tests {
     #[test]
     fn structured_clone() {
         init_v8();
-        let js = r#"var __rpc = { test: function() {
+        let mut isolate = Isolate::new(m(r#"export function test() {
             var obj = { a: 1, b: [2, 3], c: { d: "hello" } };
             var clone = structuredClone(obj);
             clone.a = 99;
             clone.b.push(4);
             return { original: obj.a, cloned: clone.a, origLen: obj.b.length, cloneLen: clone.b.length };
-        }};"#;
-        let mut isolate = Isolate::new(js);
+        }"#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
             .unwrap();
@@ -622,12 +568,11 @@ mod tests {
     #[test]
     fn btoa_atob() {
         init_v8();
-        let js = r#"var __rpc = { test: function() {
+        let mut isolate = Isolate::new(m(r#"export function test() {
             var encoded = btoa("Hello, World!");
             var decoded = atob(encoded);
             return { encoded, decoded };
-        }};"#;
-        let mut isolate = Isolate::new(js);
+        }"#));
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
             .unwrap();
@@ -649,7 +594,7 @@ mod tests {
                 export function add(a, b) { return a + b; }
             "#.into(),
         }];
-        let mut isolate = Isolate::from_modules(modules);
+        let mut isolate = Isolate::new(modules);
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":1}"#)
             .unwrap();
@@ -677,7 +622,7 @@ mod tests {
                 source: "export function add(a, b) { return a + b; }".into(),
             },
         ];
-        let mut isolate = Isolate::from_modules(modules);
+        let mut isolate = Isolate::new(modules);
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"compute","params":[3,4],"id":1}"#)
             .unwrap();
@@ -696,7 +641,7 @@ mod tests {
                 }
             "#.into(),
         }];
-        let mut isolate = Isolate::from_modules(modules);
+        let mut isolate = Isolate::new(modules);
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"fetchTest","params":[],"id":1}"#)
             .unwrap();
@@ -713,7 +658,7 @@ mod tests {
                 export function get(k) { return kv.get(k); }
             "#.into(),
         }];
-        let mut isolate = Isolate::from_modules(modules);
+        let mut isolate = Isolate::new(modules);
         isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"set","params":["x","1"],"id":1}"#)
             .unwrap();
@@ -736,7 +681,7 @@ mod tests {
                 }
             "#.into(),
         }];
-        let mut isolate = Isolate::from_modules(modules);
+        let mut isolate = Isolate::new(modules);
         let r = isolate
             .execute_request(r#"{"jsonrpc":"2.0","method":"delayed","params":[],"id":1}"#)
             .unwrap();
@@ -757,7 +702,7 @@ mod tests {
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let event_tx_clone = event_tx.clone();
         let handle = std::thread::spawn(move || {
-            let mut isolate = ConcurrentIsolate::from_modules(modules, event_rx, event_tx_clone, None, None);
+            let mut isolate = ConcurrentIsolate::new(modules, event_rx, event_tx_clone, None, None);
             isolate.run_until_idle();
         });
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
@@ -791,7 +736,7 @@ mod tests {
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let event_tx_clone = event_tx.clone();
         let handle = std::thread::spawn(move || {
-            let mut isolate = ConcurrentIsolate::from_modules(modules, event_rx, event_tx_clone, None, None);
+            let mut isolate = ConcurrentIsolate::new(modules, event_rx, event_tx_clone, None, None);
             isolate.run_until_idle();
         });
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();

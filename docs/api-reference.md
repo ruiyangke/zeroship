@@ -36,7 +36,7 @@ Call an app's RPC method using JSON-RPC 2.0.
 | Field | Type | Description |
 |-------|------|-------------|
 | `jsonrpc` | string | Must be `"2.0"` |
-| `method` | string | Name of the RPC method defined in the app's `__rpc` object |
+| `method` | string | Name of the exported function in the app's ES module |
 | `params` | array | Arguments passed to the method |
 | `id` | number/string | Request ID, echoed back in the response |
 
@@ -232,7 +232,7 @@ Get a single app's details, including its deployed code.
   "id": "my-app",
   "plan_id": "free",
   "version": 2,
-  "server_js": "var __rpc = { ping: function() { return \"pong\"; } };"
+  "server_js": "export function ping() { return \"pong\"; }"
 }
 ```
 
@@ -299,11 +299,9 @@ On deploy, the app's cached bundle is invalidated and its V8 isolate is evicted.
 **Request Body:** Raw JavaScript source code (plain text).
 
 ```javascript
-var __rpc = {
-  ping: function() {
-    return "pong";
-  }
-};
+export function ping() {
+  return "pong";
+}
 ```
 
 **Success Response (200):**
@@ -328,7 +326,7 @@ var __rpc = {
 # Deploy using the app's API key
 curl -X POST http://localhost:3000/api/apps/my-app/deploy \
   -H "Authorization: Bearer 550e8400-e29b-41d4-a716-446655440000" \
-  -d 'var __rpc = { ping: function() { return "pong"; } };'
+  -d 'export function ping() { return "pong"; }'
 
 # Deploy using the master key
 curl -X POST http://localhost:3000/api/apps/my-app/deploy \
@@ -417,7 +415,7 @@ List available starter templates. No authentication required.
     "id": "hello-world",
     "name": "Hello World",
     "description": "Simple ping/pong API",
-    "code": "var __rpc = { ... };"
+    "code": "export function ping() { ... }"
   },
   {
     "id": "todo-api",

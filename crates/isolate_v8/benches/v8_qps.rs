@@ -1,7 +1,7 @@
 //! QPS benchmark -- raw V8 per-request model with persistent context + event loop.
 //! Compares sync, async, CPU-heavy, and multi-threaded scenarios.
 
-use appbase_isolate_v8::{init_v8, Isolate, IsolatePool};
+use appbase_isolate_v8::{init_v8, Isolate, IsolatePool, ModuleEntry};
 use std::time::Instant;
 
 const RPC_BODY: &str = r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#;
@@ -11,24 +11,29 @@ const ASYNC_BODY: &str = r#"{"jsonrpc":"2.0","method":"delayed","params":[],"id"
 const CHAIN_BODY: &str = r#"{"jsonrpc":"2.0","method":"chain","params":[],"id":1}"#;
 
 const SERVER_JS: &str = r#"
-var __rpc = {
-    test: function() { return "ok"; },
-    fib: function(n) {
-        function fib(n) { return n <= 1 ? n : fib(n-1) + fib(n-2); }
-        return fib(n);
-    },
-    delayed: function() {
-        return new Promise(function(resolve) {
-            setTimeout(function() { resolve("done"); }, 1);
-        });
-    },
-    chain: function() {
-        return new Promise(function(resolve) {
-            setTimeout(function() { resolve(1); }, 0);
-        }).then(function(v) { return v + 10; }).then(function(v) { return v * 2; });
-    }
-};
+export function test() { return "ok"; }
+export function fib(n) {
+    function fib(n) { return n <= 1 ? n : fib(n-1) + fib(n-2); }
+    return fib(n);
+}
+export function delayed() {
+    return new Promise(function(resolve) {
+        setTimeout(function() { resolve("done"); }, 1);
+    });
+}
+export function chain() {
+    return new Promise(function(resolve) {
+        setTimeout(function() { resolve(1); }, 0);
+    }).then(function(v) { return v + 10; }).then(function(v) { return v * 2; });
+}
 "#;
+
+fn server_modules() -> Vec<ModuleEntry> {
+    vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: SERVER_JS.into(),
+    }]
+}
 
 fn bench(name: &str, n: u64, f: impl Fn()) {
     let start = Instant::now();
@@ -53,7 +58,7 @@ fn main() {
 
     // Sync: single isolate
     {
-        let mut isolate = Isolate::new(SERVER_JS);
+        let mut isolate = Isolate::new(server_modules());
         isolate.execute_request(RPC_BODY).unwrap();
         let n = 100_000u64;
         let start = Instant::now();
@@ -69,7 +74,7 @@ fn main() {
 
     // Sync: pool
     {
-        let pool = IsolatePool::new(SERVER_JS, 8);
+        let pool = IsolatePool::new(server_modules(), 8);
         pool.execute(RPC_BODY).unwrap();
         let n = 100_000u64;
         let start = Instant::now();
@@ -87,13 +92,11 @@ fn main() {
     for threads in [2u64, 4, 8] {
         let n = 100_000u64;
         let per_thread = n / threads;
-        let js = SERVER_JS.to_string();
         let start = Instant::now();
         let handles: Vec<_> = (0..threads)
             .map(|_| {
-                let js = js.clone();
                 std::thread::spawn(move || {
-                    let mut isolate = Isolate::new(&js);
+                    let mut isolate = Isolate::new(server_modules());
                     for _ in 0..per_thread {
                         isolate.execute_request(RPC_BODY).unwrap();
                     }
@@ -114,7 +117,7 @@ fn main() {
 
     // Async: setTimeout 1ms
     {
-        let mut isolate = Isolate::new(SERVER_JS);
+        let mut isolate = Isolate::new(server_modules());
         isolate.execute_request(ASYNC_BODY).unwrap();
         let n = 1_000u64;
         let start = Instant::now();
@@ -130,7 +133,7 @@ fn main() {
 
     // Async: promise chain (setTimeout 0 + .then.then)
     {
-        let mut isolate = Isolate::new(SERVER_JS);
+        let mut isolate = Isolate::new(server_modules());
         isolate.execute_request(CHAIN_BODY).unwrap();
         let n = 10_000u64;
         let start = Instant::now();
@@ -148,13 +151,11 @@ fn main() {
     for threads in [2u64, 4, 8] {
         let n = 1_000u64;
         let per_thread = n / threads;
-        let js = SERVER_JS.to_string();
         let start = Instant::now();
         let handles: Vec<_> = (0..threads)
             .map(|_| {
-                let js = js.clone();
                 std::thread::spawn(move || {
-                    let mut isolate = Isolate::new(&js);
+                    let mut isolate = Isolate::new(server_modules());
                     for _ in 0..per_thread {
                         isolate.execute_request(ASYNC_BODY).unwrap();
                     }
@@ -175,7 +176,7 @@ fn main() {
 
     // fib(30): single + multi
     {
-        let mut isolate = Isolate::new(SERVER_JS);
+        let mut isolate = Isolate::new(server_modules());
         isolate.execute_request(FIB_30).unwrap();
         let n = 100u64;
         let start = Instant::now();
@@ -192,13 +193,11 @@ fn main() {
     for threads in [2u64, 4, 8] {
         let n = 100u64;
         let per_thread = n / threads;
-        let js = SERVER_JS.to_string();
         let start = Instant::now();
         let handles: Vec<_> = (0..threads)
             .map(|_| {
-                let js = js.clone();
                 std::thread::spawn(move || {
-                    let mut isolate = Isolate::new(&js);
+                    let mut isolate = Isolate::new(server_modules());
                     for _ in 0..per_thread {
                         isolate.execute_request(FIB_30).unwrap();
                     }
@@ -217,7 +216,7 @@ fn main() {
 
     // Per-request CPU
     {
-        let mut isolate = Isolate::new(SERVER_JS);
+        let mut isolate = Isolate::new(server_modules());
         isolate.execute_request(FIB_35).unwrap();
         let r = isolate.execute_request(FIB_35).unwrap();
         println!(
@@ -261,9 +260,8 @@ fn main() {
     // Start a concurrent isolate
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let event_tx_clone = event_tx.clone();
-    let js = SERVER_JS.to_string();
     std::thread::spawn(move || {
-        let mut iso = ConcurrentIsolate::new(&js, event_rx, event_tx_clone);
+        let mut iso = ConcurrentIsolate::new(server_modules(), event_rx, event_tx_clone, None, None);
         iso.run_event_loop();
     });
     // Warmup

@@ -844,25 +844,25 @@ async fn handle_templates() -> Response {
             "id": "hello-world",
             "name": "Hello World",
             "description": "Simple ping/pong API",
-            "code": "var __rpc = {\n  ping: function() {\n    return \"pong\";\n  },\n  hello: function(name) {\n    return \"Hello, \" + (name || \"world\") + \"!\";\n  }\n};"
+            "code": "export function ping() {\n  return \"pong\";\n}\n\nexport function hello(name) {\n  return \"Hello, \" + (name || \"world\") + \"!\";\n}"
         },
         {
             "id": "todo-api",
             "name": "Todo API",
             "description": "In-memory todo list with CRUD operations",
-            "code": "var todos = [];\nvar nextId = 1;\n\nvar __rpc = {\n  list: function() {\n    return todos;\n  },\n  add: function(title) {\n    var todo = { id: nextId++, title: title, done: false };\n    todos.push(todo);\n    return todo;\n  },\n  toggle: function(id) {\n    var todo = todos.find(function(t) { return t.id === id; });\n    if (!todo) return { error: \"not found\" };\n    todo.done = !todo.done;\n    return todo;\n  },\n  remove: function(id) {\n    var idx = todos.findIndex(function(t) { return t.id === id; });\n    if (idx === -1) return { error: \"not found\" };\n    return todos.splice(idx, 1)[0];\n  }\n};"
+            "code": "let todos = [];\nlet nextId = 1;\n\nexport function list() {\n  return todos;\n}\n\nexport function add(title) {\n  const todo = { id: nextId++, title: title, done: false };\n  todos.push(todo);\n  return todo;\n}\n\nexport function toggle(id) {\n  const todo = todos.find(t => t.id === id);\n  if (!todo) return { error: \"not found\" };\n  todo.done = !todo.done;\n  return todo;\n}\n\nexport function remove(id) {\n  const idx = todos.findIndex(t => t.id === id);\n  if (idx === -1) return { error: \"not found\" };\n  return todos.splice(idx, 1)[0];\n}"
         },
         {
             "id": "weather-proxy",
             "name": "Weather Proxy",
             "description": "Fetch weather data from wttr.in",
-            "code": "var __rpc = {\n  get: async function(city) {\n    var resp = await fetch(\"https://wttr.in/\" + (city || \"London\") + \"?format=j1\");\n    var data = await resp.json();\n    var current = data.current_condition[0];\n    return {\n      city: city || \"London\",\n      temp_c: current.temp_C,\n      feels_like_c: current.FeelsLikeC,\n      description: current.weatherDesc[0].value,\n      humidity: current.humidity\n    };\n  }\n};"
+            "code": "export async function get(city) {\n  const resp = await fetch(\"https://wttr.in/\" + (city || \"London\") + \"?format=j1\");\n  const data = await resp.json();\n  const current = data.current_condition[0];\n  return {\n    city: city || \"London\",\n    temp_c: current.temp_C,\n    feels_like_c: current.FeelsLikeC,\n    description: current.weatherDesc[0].value,\n    humidity: current.humidity\n  };\n}"
         },
         {
             "id": "math-api",
             "name": "Math API",
             "description": "Basic math operations",
-            "code": "var __rpc = {\n  add: function(a, b) { return a + b; },\n  subtract: function(a, b) { return a - b; },\n  multiply: function(a, b) { return a * b; },\n  divide: function(a, b) {\n    if (b === 0) throw new Error(\"Division by zero\");\n    return a / b;\n  },\n  factorial: function(n) {\n    if (n < 0) throw new Error(\"Negative input\");\n    if (n <= 1) return 1;\n    var result = 1;\n    for (var i = 2; i <= n; i++) result *= i;\n    return result;\n  }\n};"
+            "code": "export function add(a, b) { return a + b; }\nexport function subtract(a, b) { return a - b; }\nexport function multiply(a, b) { return a * b; }\n\nexport function divide(a, b) {\n  if (b === 0) throw new Error(\"Division by zero\");\n  return a / b;\n}\n\nexport function factorial(n) {\n  if (n < 0) throw new Error(\"Negative input\");\n  if (n <= 1) return 1;\n  let result = 1;\n  for (let i = 2; i <= n; i++) result *= i;\n  return result;\n}"
         }
     ]);
     json_response(StatusCode::OK, &templates.to_string())
