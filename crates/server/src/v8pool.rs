@@ -176,7 +176,7 @@ impl V8Pool {
             .name(thread_name)
             .spawn(move || {
                 let mut isolate =
-                    ConcurrentIsolate::new(modules, event_rx, event_tx_clone, Some(handle), cpu_limit);
+                    ConcurrentIsolate::new(modules, event_rx, event_tx_clone, Some(handle), cpu_limit, std::collections::HashMap::new());
                 isolate.run_event_loop();
             })
             .map_err(|e| format!("Failed to spawn V8 thread: {e}"))?;

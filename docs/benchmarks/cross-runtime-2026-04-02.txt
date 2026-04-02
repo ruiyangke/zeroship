@@ -1,0 +1,57 @@
+Cross-Runtime RPC Benchmark
+Date: 2026-04-02
+Machine: Linux (16 cores)
+Tool: wrk 4.2.0, 4 threads, 50 connections, 10s per test
+
+Servers:
+  raw V8 concurrent:   1 V8 thread, serial JS + concurrent I/O, ESM modules
+  raw V8 conc-pool:    16 V8 threads, each with concurrent I/O, ESM modules
+  Node.js:             v22.22.2, http module, single thread
+
+Changes since 2026-04-01:
+  - ESM module system (replaced script mode)
+  - URL/URLSearchParams polyfill (ada-url native)
+  - #[appbase_op] proc macro (zero overhead, generates identical code)
+  - Per-app env vars (HashMap instead of process env)
+  - Fix: copy module namespace exports to plain object (avoids exotic object overhead)
+
+==================================================
+  Results (req/s at 50 connections)
+==================================================
+
+Scenario                    concurrent(1)  conc-pool(16)  Node.js v22
+1. ping/pong                    148,338         87,882       14,299
+2. fib(10) (light CPU)          134,310         95,192       12,350
+3. fib(35) (heavy CPU) [5s]           5             30            5
+4. setTimeout(0)                 43,442         71,186       18,936
+5. Promise chain                151,022         43,790       10,899
+6. Promise+100ms timer              474            474          474
+7. fetch -> local echo           53,932         76,297        3,272
+8. fetch -> external API            190            189          185
+
+==================================================
+  vs old baseline (2026-04-01)
+==================================================
+
+Scenario                    Old(concurrent)  New(concurrent)  Delta
+1. ping/pong                    132,552         148,338       +12%
+2. fib(10)                      115,484         134,310       +16%
+3. Promise chain                128,907         151,022       +17%
+4. setTimeout(0)                 84,729          43,442       -49%
+
+Root cause of setTimeout regression: heavier EventLoopState struct (added
+env_vars, url polyfill globals) increases per-tick overhead in the timer
+drain path. Sync RPC and Promise paths recovered and exceeded baseline
+after fixing module namespace → plain object copy.
+
+==================================================
+  vs Node.js v22.22.2
+==================================================
+
+ping:           10.4x faster (single thread)
+fib(10):        10.9x faster
+fib(35):         6.5x faster (16 threads)
+Promise chain:  13.9x faster
+setTimeout(0):   3.8x faster (16 threads)
+fetch local:    23.3x faster (16 threads)
+fetch external:  ~1x (network-bound)

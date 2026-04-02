@@ -8,10 +8,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Instant;
 
+use std::collections::HashMap;
+
 use crate::event_loop::{run_event_loop, run_event_loop_until_settled, EventLoopState, SharedState};
 use crate::globals::setup_globals;
 use crate::modules::ModuleEntry;
-use crate::runtime::{thread_cpu_time, HttpResult, RequestResult, DISPATCH_JS, FETCH_JS, HTTP_DISPATCH_JS};
+use crate::runtime::{thread_cpu_time, HttpResult, RequestResult, DISPATCH_JS, FETCH_JS, HTTP_DISPATCH_JS, URL_JS};
 
 /// A V8 isolate with persistent context -- compiled code stays across requests.
 /// ES modules are compiled ONCE. Each request just calls the handler function.
@@ -29,7 +31,9 @@ pub struct Isolate {
 impl Isolate {
     /// Create a new isolate for ES module format (`export function ...`).
     /// Call `init_v8()` before creating isolates.
-    pub fn new(modules: Vec<ModuleEntry>) -> Self {
+    ///
+    /// `env_vars` — per-app environment variables accessible via `env.get(key)`.
+    pub fn new(modules: Vec<ModuleEntry>, env_vars: HashMap<String, String>) -> Self {
         let params = v8::CreateParams::default().heap_limits(0, 128 * 1024 * 1024);
         let mut isolate = v8::Isolate::new(params);
 
@@ -47,7 +51,7 @@ impl Isolate {
         }
         isolate.add_near_heap_limit_callback(near_heap_limit_callback, std::ptr::null_mut());
 
-        let state: SharedState = Rc::new(RefCell::new(EventLoopState::new()));
+        let state: SharedState = Rc::new(RefCell::new(EventLoopState::with_env(env_vars)));
         state.borrow_mut().tokio_handle = tokio::runtime::Handle::try_current().ok();
         isolate.set_slot(state.clone());
 
@@ -84,21 +88,35 @@ impl Isolate {
 
         setup_globals(scope);
 
-        // Load Fetch API polyfill
-        {
-            let fetch_code = v8::String::new(scope, FETCH_JS).unwrap();
-            let fetch_script = v8::Script::compile(scope, fetch_code, None).unwrap();
-            fetch_script.run(scope).unwrap();
+        // Load polyfills
+        for polyfill in [FETCH_JS, URL_JS] {
+            let code = v8::String::new(scope, polyfill).unwrap();
+            let script = v8::Script::compile(scope, code, None).unwrap();
+            script.run(scope).unwrap();
         }
 
-        // Load ES modules and bind namespace to globalThis.__rpc
-        // so the existing DISPATCH_JS works unchanged.
+        // Load ES modules and copy exports to a plain object on globalThis.__rpc.
+        // Module Namespace objects are V8 exotic objects with slower property access
+        // (live binding resolution per lookup). Copying to a plain object restores
+        // fast inline-cached property access on the dispatch hot path.
         match crate::modules::load_modules(scope, &modules) {
             Ok(namespace) => {
                 let global = context.global(scope);
-                let rpc_key = v8::String::new(scope, "__rpc").unwrap();
                 let ns_local = v8::Local::new(scope, &namespace);
-                global.set(scope, rpc_key.into(), ns_local);
+                let ns_obj = ns_local.to_object(scope).unwrap();
+
+                let plain = v8::Object::new(scope);
+                if let Some(names) = ns_obj.get_own_property_names(scope, Default::default()) {
+                    for i in 0..names.length() {
+                        let key = names.get_index(scope, i).unwrap();
+                        if let Some(val) = ns_obj.get(scope, key) {
+                            plain.set(scope, key, val);
+                        }
+                    }
+                }
+
+                let rpc_key = v8::String::new(scope, "__rpc").unwrap();
+                global.set(scope, rpc_key.into(), plain.into());
             }
             Err(e) => {
                 eprintln!("[v8] Module loading failed: {e}");
@@ -316,6 +334,7 @@ impl Isolate {
 pub struct IsolatePool {
     available: std::sync::Mutex<Vec<Isolate>>,
     modules: Vec<ModuleEntry>,
+    env_vars: HashMap<String, String>,
     max_size: usize,
 }
 
@@ -326,10 +345,11 @@ unsafe impl Send for IsolatePool {}
 unsafe impl Sync for IsolatePool {}
 
 impl IsolatePool {
-    pub fn new(modules: Vec<ModuleEntry>, max_size: usize) -> Self {
+    pub fn new(modules: Vec<ModuleEntry>, env_vars: HashMap<String, String>, max_size: usize) -> Self {
         Self {
             available: std::sync::Mutex::new(Vec::new()),
             modules,
+            env_vars,
             max_size,
         }
     }
@@ -339,7 +359,7 @@ impl IsolatePool {
             let mut pool = self.available.lock().unwrap();
             pool.pop()
         }
-        .unwrap_or_else(|| Isolate::new(self.modules.clone()));
+        .unwrap_or_else(|| Isolate::new(self.modules.clone(), self.env_vars.clone()));
 
         let result = isolate.execute_request(request_json);
 

@@ -1,0 +1,16 @@
+[package]
+name = "appbase-ops"
+version = "0.1.0"
+edition = "2024"
+description = "Proc macro for generating V8 callback wrappers from Rust functions"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+
+[lints]
+workspace = true

@@ -6,7 +6,7 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use crate::event_loop::{OpResult, SharedState};
+use appbase_ops::appbase_op;
 
 /// Maximum response body size: 10 MB.
 const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
@@ -85,96 +85,13 @@ fn shared_client() -> &'static reqwest::Client {
     })
 }
 
-/// V8 callback for `__rawFetch(method, url, headersJson, body)`.
-/// Returns a Promise that resolves with a JSON string.
-pub(crate) fn raw_fetch_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("EventLoopState not in isolate slot")
-        .clone();
-
-    // Extract arguments
-    let method = if args.length() > 0 {
-        args.get(0).to_rust_string_lossy(scope)
-    } else {
-        "GET".to_string()
-    };
-
-    let url = if args.length() > 1 {
-        args.get(1).to_rust_string_lossy(scope)
-    } else {
-        let msg = v8::String::new(scope, "__rawFetch: url is required").unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return;
-    };
-
-    let headers_json = if args.length() > 2 && !args.get(2).is_null_or_undefined() {
-        args.get(2).to_rust_string_lossy(scope)
-    } else {
-        String::new()
-    };
-
-    let body = if args.length() > 3 && !args.get(3).is_null_or_undefined() {
-        Some(args.get(3).to_rust_string_lossy(scope))
-    } else {
-        None
-    };
-
-    // Create promise resolver
-    let resolver = v8::PromiseResolver::new(scope).unwrap();
-    let promise = resolver.get_promise(scope);
-    let global_resolver = v8::Global::new(scope, resolver);
-
-    // Assign op id and store resolver
-    let (op_id, op_tx, concurrent_tx, tokio_handle) = {
-        let mut s = state.borrow_mut();
-        let id = s.next_op_id;
-        s.next_op_id += 1;
-        s.pending_resolvers.insert(id, global_resolver);
-        (id, s.op_tx.clone(), s.concurrent_event_tx.clone(), s.tokio_handle.clone())
-    };
-
-    // Spawn the HTTP request
-    match tokio_handle {
-        Some(handle) => {
-            handle.spawn(async move {
-                let result = do_fetch(&method, &url, &headers_json, body.as_deref()).await;
-                match concurrent_tx {
-                    Some(tx) => {
-                        let _ = tx.send(crate::concurrent::Event::OpCompleted { op_id, value: result });
-                    }
-                    None => {
-                        let _ = op_tx.send(OpResult { id: op_id, value: result });
-                    }
-                }
-            });
-        }
-        None => {
-            // Fallback: spawn a std::thread with a one-shot tokio runtime
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("Failed to create tokio runtime for fetch");
-                let result = rt.block_on(do_fetch(&method, &url, &headers_json, body.as_deref()));
-                match concurrent_tx {
-                    Some(tx) => {
-                        let _ = tx.send(crate::concurrent::Event::OpCompleted { op_id, value: result });
-                    }
-                    None => {
-                        let _ = op_tx.send(OpResult { id: op_id, value: result });
-                    }
-                }
-            });
-        }
-    }
-
-    rv.set(promise.into());
+/// `__rawFetch(method, url, headersJson, body) → Promise<string>`
+///
+/// The async body runs on a tokio task. The macro generates the Promise plumbing,
+/// channel dispatch, and tokio spawn logic.
+#[appbase_op(r#async)]
+async fn raw_fetch(method: String, url: String, headers_json: String, body: Option<String>) -> String {
+    do_fetch(&method, &url, &headers_json, body.as_deref()).await
 }
 
 /// Perform the actual HTTP fetch via reqwest. Returns a JSON string.

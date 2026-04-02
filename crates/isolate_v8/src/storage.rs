@@ -16,7 +16,7 @@
 //!   current → builds/v2   ← symlink to active version
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Errors from storage operations.
 #[derive(Debug)]

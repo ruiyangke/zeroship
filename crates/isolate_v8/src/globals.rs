@@ -1,4 +1,7 @@
-//! V8 global bindings — console, setTimeout, clearTimeout, setInterval, clearInterval, env.
+//! V8 global bindings — console, setTimeout, clearTimeout, setInterval, clearInterval.
+//!
+//! Timer and console callbacks remain hand-written (they take V8 Function args
+//! or are variadic). All other native APIs use `#[appbase_op]` in their own modules.
 
 use std::cmp::Reverse;
 use std::time::Duration;
@@ -7,7 +10,7 @@ use crate::event_loop::SharedState;
 use crate::timers::{TimerCallback, TimerHeapEntry};
 
 // ---------------------------------------------------------------------------
-// Console polyfill
+// Console polyfill (variadic — stays manual)
 // ---------------------------------------------------------------------------
 
 fn console_log_callback(
@@ -24,14 +27,12 @@ fn console_log_callback(
     let line = parts.join(" ");
     println!("{}", line);
 
-    // Append to per-isolate log buffer
     let state: SharedState = scope
         .get_slot::<SharedState>()
         .expect("EventLoopState not in isolate slot")
         .clone();
     let mut s = state.borrow_mut();
     s.log_buffer.push(line);
-    // Cap buffer at 1000 entries to prevent memory bloat
     if s.log_buffer.len() > 1000 {
         let drain = s.log_buffer.len() - 1000;
         s.log_buffer.drain(..drain);
@@ -39,7 +40,7 @@ fn console_log_callback(
 }
 
 // ---------------------------------------------------------------------------
-// Timer callbacks
+// Timer callbacks (take v8::Function args — stays manual)
 // ---------------------------------------------------------------------------
 
 fn set_timeout_callback(
@@ -107,7 +108,6 @@ fn clear_timeout_callback(
         return;
     };
 
-    // Lazy deletion: only remove from callbacks, heap entry will be skipped when popped
     state.borrow_mut().timers.callbacks.remove(&id);
 }
 
@@ -160,62 +160,12 @@ fn set_interval_callback(
 }
 
 // ---------------------------------------------------------------------------
-// env.get callback — reads APPBASE_APP_{KEY} from process env
-// ---------------------------------------------------------------------------
-
-fn env_get_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    if args.length() < 1 {
-        rv.set(v8::null(scope).into());
-        return;
-    }
-
-    let key = args.get(0).to_rust_string_lossy(scope);
-    let env_key = format!("APPBASE_APP_{}", key.to_uppercase());
-    match std::env::var(&env_key) {
-        Ok(val) => {
-            let v = v8::String::new(scope, &val).unwrap();
-            rv.set(v.into());
-        }
-        Err(_) => {
-            rv.set(v8::null(scope).into());
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// crypto.randomUUID() — generates a RFC 4122 v4 UUID
-// ---------------------------------------------------------------------------
-
-fn crypto_random_uuid_callback(
-    scope: &mut v8::PinScope,
-    _args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes).unwrap();
-    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
-    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10xx
-
-    let uuid = format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5], bytes[6], bytes[7],
-        bytes[8], bytes[9], bytes[10], bytes[11],
-        bytes[12], bytes[13], bytes[14], bytes[15]
-    );
-    let v = v8::String::new(scope, &uuid).unwrap();
-    rv.set(v.into());
-}
-
-// ---------------------------------------------------------------------------
 // Setup all globals on a V8 context
 // ---------------------------------------------------------------------------
 
-/// Install console, setTimeout, clearTimeout, setInterval, clearInterval on the global object.
+/// Install console, timers, fetch, URL, KV, crypto, env on the global object.
+///
+/// Callbacks from `#[appbase_op]` modules are referenced as `crate::{mod}::{fn}_callback`.
 pub(crate) fn setup_globals(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
 
@@ -272,6 +222,17 @@ pub(crate) fn setup_globals(scope: &mut v8::PinScope) {
         global.set(scope, key.into(), f.into());
     }
 
+    // __urlParse / __urlCanParse (native URL parser via ada-url)
+    {
+        let f = v8::Function::new(scope, crate::url::url_parse_callback).unwrap();
+        let key = v8::String::new(scope, "__urlParse").unwrap();
+        global.set(scope, key.into(), f.into());
+
+        let f = v8::Function::new(scope, crate::url::url_can_parse_callback).unwrap();
+        let key = v8::String::new(scope, "__urlCanParse").unwrap();
+        global.set(scope, key.into(), f.into());
+    }
+
     // kv namespace
     {
         let kv = v8::Object::new(scope);
@@ -299,18 +260,18 @@ pub(crate) fn setup_globals(scope: &mut v8::PinScope) {
     // crypto.randomUUID()
     {
         let crypto = v8::Object::new(scope);
-        let uuid_fn = v8::Function::new(scope, crypto_random_uuid_callback).unwrap();
+        let uuid_fn = v8::Function::new(scope, crate::crypto::crypto_random_uuid_callback).unwrap();
         let uuid_key = v8::String::new(scope, "randomUUID").unwrap();
         crypto.set(scope, uuid_key.into(), uuid_fn.into());
         let crypto_key = v8::String::new(scope, "crypto").unwrap();
         global.set(scope, crypto_key.into(), crypto.into());
     }
 
-    // env namespace (read-only, reads APPBASE_APP_{KEY} from process env)
+    // env namespace
     {
         let env = v8::Object::new(scope);
 
-        let get_fn = v8::Function::new(scope, env_get_callback).unwrap();
+        let get_fn = v8::Function::new(scope, crate::env::env_get_callback).unwrap();
         let get_key = v8::String::new(scope, "get").unwrap();
         env.set(scope, get_key.into(), get_fn.into());
 

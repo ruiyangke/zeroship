@@ -38,6 +38,8 @@ pub(crate) struct EventLoopState {
     pub(crate) log_buffer: Vec<String>,
     /// Per-isolate key-value store (persistent across requests, lost on evict)
     pub(crate) kv_store: HashMap<String, String>,
+    /// Per-app environment variables (injected at isolate creation).
+    pub(crate) env_vars: HashMap<String, String>,
 }
 
 /// Result of an async op (e.g., fetch response, DB query result).
@@ -59,7 +61,14 @@ impl EventLoopState {
             concurrent_event_tx: None,
             log_buffer: Vec::new(),
             kv_store: HashMap::new(),
+            env_vars: HashMap::new(),
         }
+    }
+
+    pub(crate) fn with_env(env_vars: HashMap<String, String>) -> Self {
+        let mut state = Self::new();
+        state.env_vars = env_vars;
+        state
     }
 }
 

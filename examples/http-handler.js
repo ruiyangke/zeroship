@@ -2,10 +2,8 @@
 // Tests: onRequest, Request/Response objects, headers, status codes
 
 export function onRequest(request) {
-    // Parse path from URL (URL constructor may not be available)
-    const urlStr = request.url;
-    const pathMatch = urlStr.match(/^https?:\/\/[^/]+(\/[^?#]*)/);
-    const path = pathMatch ? pathMatch[1] : "/";
+    const url = new URL(request.url);
+    const path = url.pathname;
     const method = request.method;
 
     // Simple router

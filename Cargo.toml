@@ -11,6 +11,7 @@ members = [
     "crates/billing",
     "crates/isolate_v8",
     "crates/control",
+    "crates/appbase_ops",
 ]
 resolver = "3"
 

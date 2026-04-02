@@ -16,6 +16,8 @@ bytes = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 url = "2"
 getrandom = "0.2"
+ada-url = "3.4.4"
+appbase-ops = { path = "../appbase_ops" }
 
 [[bench]]
 name = "v8_qps"

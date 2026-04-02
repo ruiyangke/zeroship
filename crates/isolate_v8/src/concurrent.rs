@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use crate::event_loop::{EventLoopState, SharedState};
 use crate::globals::setup_globals;
 use crate::modules::ModuleEntry;
-use crate::runtime::{init_v8, thread_cpu_time, RequestResult, DISPATCH_JS, FETCH_JS};
+use crate::runtime::{init_v8, thread_cpu_time, RequestResult, DISPATCH_JS, FETCH_JS, URL_JS};
 use crate::timers::fire_ready_timers;
 
 // ---------------------------------------------------------------------------
@@ -359,6 +359,7 @@ impl ConcurrentIsolate {
         event_tx: std::sync::mpsc::Sender<Event>,
         tokio_handle: Option<tokio::runtime::Handle>,
         cpu_limit: Option<Duration>,
+        env_vars: std::collections::HashMap<String, String>,
     ) -> Self {
         init_v8();
 
@@ -379,7 +380,7 @@ impl ConcurrentIsolate {
         }
         isolate.add_near_heap_limit_callback(near_heap_limit_callback, std::ptr::null_mut());
 
-        let el_state: SharedState = Rc::new(RefCell::new(EventLoopState::new()));
+        let el_state: SharedState = Rc::new(RefCell::new(EventLoopState::with_env(env_vars)));
         el_state.borrow_mut().tokio_handle = tokio_handle;
         el_state.borrow_mut().concurrent_event_tx = Some(event_tx.clone());
         isolate.set_slot(el_state.clone());
@@ -434,21 +435,33 @@ impl ConcurrentIsolate {
 
             setup_globals(scope);
 
-            // Load Fetch API polyfill
-            {
-                let fetch_code = v8::String::new(scope, FETCH_JS).unwrap();
-                let fetch_script = v8::Script::compile(scope, fetch_code, None).unwrap();
-                fetch_script.run(scope).unwrap();
+            // Load polyfills
+            for polyfill in [FETCH_JS, URL_JS] {
+                let code = v8::String::new(scope, polyfill).unwrap();
+                let script = v8::Script::compile(scope, code, None).unwrap();
+                script.run(scope).unwrap();
             }
 
-            // Load ES modules and bind namespace to globalThis.__rpc
-            // so the existing DISPATCH_JS works unchanged.
+            // Load ES modules and copy exports to a plain object on globalThis.__rpc.
+            // Module Namespace objects are V8 exotic objects with slower property access.
             match crate::modules::load_modules(scope, &modules) {
                 Ok(namespace) => {
                     let global = context.global(scope);
-                    let rpc_key = v8::String::new(scope, "__rpc").unwrap();
                     let ns_local = v8::Local::new(scope, &namespace);
-                    global.set(scope, rpc_key.into(), ns_local);
+                    let ns_obj = ns_local.to_object(scope).unwrap();
+
+                    let plain = v8::Object::new(scope);
+                    if let Some(names) = ns_obj.get_own_property_names(scope, Default::default()) {
+                        for i in 0..names.length() {
+                            let key = names.get_index(scope, i).unwrap();
+                            if let Some(val) = ns_obj.get(scope, key) {
+                                plain.set(scope, key, val);
+                            }
+                        }
+                    }
+
+                    let rpc_key = v8::String::new(scope, "__rpc").unwrap();
+                    global.set(scope, rpc_key.into(), plain.into());
                 }
                 Err(e) => {
                     eprintln!("[v8] Module loading failed: {e}");
@@ -502,8 +515,16 @@ impl ConcurrentIsolate {
 
     /// Run one iteration of the event loop.
     fn tick(&mut self) -> bool {
-        // Arm CPU timer BEFORE entering V8 — protects sync calls like fib(35)
-        self.arm_cpu_timer();
+        // Arm CPU timer BEFORE entering V8 — protects user JS dispatch + timer callbacks.
+        // Only arm if there's actually work to do (avoids 2 syscalls on idle ticks).
+        let has_work = !self.ls.buffered_events.is_empty()
+            || !self.ls.pending_requests.is_empty()
+            || !self.ls.completed_ops.is_empty()
+            || !self.ls.el_state.borrow().timers.callbacks.is_empty();
+
+        if has_work {
+            self.arm_cpu_timer();
+        }
 
         // All V8 interaction in a block so the scope drops before disarm
         let result = {
@@ -511,7 +532,7 @@ impl ConcurrentIsolate {
             let context = v8::Local::new(handle_scope, &self.ls.context);
             let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-            // Phase 1: ACCEPT
+            // Phase 1: ACCEPT — dispatch new requests (runs user JS)
             let has_async_work = self.ls.accept_requests(scope);
 
             if !has_async_work {
@@ -536,9 +557,8 @@ impl ConcurrentIsolate {
                 self.ls.has_pending_work()
             }
         };
-        // V8 scope dropped — safe to access self.isolate for timer ops
 
-        if !result {
+        if has_work {
             self.disarm_cpu_timer();
         }
 
@@ -647,6 +667,7 @@ pub fn spawn_concurrent_worker(
     modules: Vec<ModuleEntry>,
     tokio_handle: Option<tokio::runtime::Handle>,
     cpu_limit: Option<Duration>,
+    env_vars: std::collections::HashMap<String, String>,
 ) -> std::sync::mpsc::Sender<Event> {
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let event_tx_clone = event_tx.clone();
@@ -655,7 +676,7 @@ pub fn spawn_concurrent_worker(
         .name("v8-concurrent-worker".to_string())
         .spawn(move || {
             let mut isolate =
-                ConcurrentIsolate::new(modules, event_rx, event_tx_clone, tokio_handle, cpu_limit);
+                ConcurrentIsolate::new(modules, event_rx, event_tx_clone, tokio_handle, cpu_limit, env_vars);
             isolate.run_event_loop();
         })
         .expect("Failed to spawn V8 worker thread");
@@ -713,7 +734,7 @@ export function fib(n) {
         let event_tx_clone = event_tx.clone();
 
         let handle = std::thread::spawn(move || {
-            let mut isolate = ConcurrentIsolate::new(test_modules(), event_rx, event_tx_clone, None, None);
+            let mut isolate = ConcurrentIsolate::new(test_modules(), event_rx, event_tx_clone, None, None, HashMap::new());
             isolate.run_until_idle();
         });
 
@@ -740,7 +761,7 @@ export function fib(n) {
         let event_tx_clone = event_tx.clone();
 
         let handle = std::thread::spawn(move || {
-            let mut isolate = ConcurrentIsolate::new(test_modules(), event_rx, event_tx_clone, None, None);
+            let mut isolate = ConcurrentIsolate::new(test_modules(), event_rx, event_tx_clone, None, None, HashMap::new());
             isolate.run_until_idle();
         });
 
@@ -768,7 +789,7 @@ export function fib(n) {
         let event_tx_clone = event_tx.clone();
 
         let handle = std::thread::spawn(move || {
-            let mut isolate = ConcurrentIsolate::new(test_modules(), event_rx, event_tx_clone, None, None);
+            let mut isolate = ConcurrentIsolate::new(test_modules(), event_rx, event_tx_clone, None, None, HashMap::new());
             isolate.run_until_idle();
         });
 
@@ -815,7 +836,7 @@ export function fib(n) {
         let event_tx_clone = event_tx.clone();
 
         let handle = std::thread::spawn(move || {
-            let mut isolate = ConcurrentIsolate::new(test_modules(), event_rx, event_tx_clone, None, None);
+            let mut isolate = ConcurrentIsolate::new(test_modules(), event_rx, event_tx_clone, None, None, HashMap::new());
             isolate.run_until_idle();
         });
 
@@ -867,7 +888,7 @@ export function fib(n) {
         let event_tx_clone = event_tx.clone();
 
         let handle = std::thread::spawn(move || {
-            let mut isolate = ConcurrentIsolate::new(test_modules(), event_rx, event_tx_clone, None, None);
+            let mut isolate = ConcurrentIsolate::new(test_modules(), event_rx, event_tx_clone, None, None, HashMap::new());
             isolate.run_until_idle();
         });
 
@@ -890,7 +911,7 @@ export function fib(n) {
     #[test]
     fn concurrent_worker_spawn() {
         init_v8();
-        let event_tx = spawn_concurrent_worker(test_modules(), None, None);
+        let event_tx = spawn_concurrent_worker(test_modules(), None, None, HashMap::new());
 
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         event_tx

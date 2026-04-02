@@ -58,7 +58,7 @@ fn main() {
 
     // Sync: single isolate
     {
-        let mut isolate = Isolate::new(server_modules());
+        let mut isolate = Isolate::new(server_modules(), std::collections::HashMap::new());
         isolate.execute_request(RPC_BODY).unwrap();
         let n = 100_000u64;
         let start = Instant::now();
@@ -74,7 +74,7 @@ fn main() {
 
     // Sync: pool
     {
-        let pool = IsolatePool::new(server_modules(), 8);
+        let pool = IsolatePool::new(server_modules(), std::collections::HashMap::new(), 8);
         pool.execute(RPC_BODY).unwrap();
         let n = 100_000u64;
         let start = Instant::now();
@@ -96,7 +96,7 @@ fn main() {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
                 std::thread::spawn(move || {
-                    let mut isolate = Isolate::new(server_modules());
+                    let mut isolate = Isolate::new(server_modules(), std::collections::HashMap::new());
                     for _ in 0..per_thread {
                         isolate.execute_request(RPC_BODY).unwrap();
                     }
@@ -117,7 +117,7 @@ fn main() {
 
     // Async: setTimeout 1ms
     {
-        let mut isolate = Isolate::new(server_modules());
+        let mut isolate = Isolate::new(server_modules(), std::collections::HashMap::new());
         isolate.execute_request(ASYNC_BODY).unwrap();
         let n = 1_000u64;
         let start = Instant::now();
@@ -133,7 +133,7 @@ fn main() {
 
     // Async: promise chain (setTimeout 0 + .then.then)
     {
-        let mut isolate = Isolate::new(server_modules());
+        let mut isolate = Isolate::new(server_modules(), std::collections::HashMap::new());
         isolate.execute_request(CHAIN_BODY).unwrap();
         let n = 10_000u64;
         let start = Instant::now();
@@ -155,7 +155,7 @@ fn main() {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
                 std::thread::spawn(move || {
-                    let mut isolate = Isolate::new(server_modules());
+                    let mut isolate = Isolate::new(server_modules(), std::collections::HashMap::new());
                     for _ in 0..per_thread {
                         isolate.execute_request(ASYNC_BODY).unwrap();
                     }
@@ -176,7 +176,7 @@ fn main() {
 
     // fib(30): single + multi
     {
-        let mut isolate = Isolate::new(server_modules());
+        let mut isolate = Isolate::new(server_modules(), std::collections::HashMap::new());
         isolate.execute_request(FIB_30).unwrap();
         let n = 100u64;
         let start = Instant::now();
@@ -197,7 +197,7 @@ fn main() {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
                 std::thread::spawn(move || {
-                    let mut isolate = Isolate::new(server_modules());
+                    let mut isolate = Isolate::new(server_modules(), std::collections::HashMap::new());
                     for _ in 0..per_thread {
                         isolate.execute_request(FIB_30).unwrap();
                     }
@@ -216,7 +216,7 @@ fn main() {
 
     // Per-request CPU
     {
-        let mut isolate = Isolate::new(server_modules());
+        let mut isolate = Isolate::new(server_modules(), std::collections::HashMap::new());
         isolate.execute_request(FIB_35).unwrap();
         let r = isolate.execute_request(FIB_35).unwrap();
         println!(
@@ -261,7 +261,7 @@ fn main() {
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let event_tx_clone = event_tx.clone();
     std::thread::spawn(move || {
-        let mut iso = ConcurrentIsolate::new(server_modules(), event_rx, event_tx_clone, None, None);
+        let mut iso = ConcurrentIsolate::new(server_modules(), event_rx, event_tx_clone, None, None, std::collections::HashMap::new());
         iso.run_event_loop();
     });
     // Warmup

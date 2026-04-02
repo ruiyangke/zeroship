@@ -47,7 +47,7 @@ fn run_wpt_test(test_path: &str) -> (usize, usize, Vec<(String, bool, Option<Str
     }];
 
     let result = std::panic::catch_unwind(|| {
-        let mut iso = Isolate::new(modules);
+        let mut iso = Isolate::new(modules, std::collections::HashMap::new());
 
         // Load testharness.js via eval (200KB, too large for single server_js)
         let body = serde_json::json!({"jsonrpc":"2.0","method":"__load_harness","params":[harness_js],"id":1}).to_string();
@@ -158,7 +158,7 @@ fn wpt_harness_smoke() {
         source: module_source,
     }];
 
-    let mut iso = Isolate::new(modules);
+    let mut iso = Isolate::new(modules, std::collections::HashMap::new());
     let body = serde_json::json!({"jsonrpc":"2.0","method":"__load_harness","params":[harness_js],"id":1}).to_string();
     let r = iso.execute_request(&body).unwrap();
     eprintln!("[smoke] harness load: {}", r.json);

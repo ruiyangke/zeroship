@@ -14,7 +14,7 @@ fn load_example(name: &str) -> Isolate {
         specifier: "index.js".to_string(),
         source,
     }];
-    Isolate::new(modules)
+    Isolate::new(modules, std::collections::HashMap::new())
 }
 
 fn rpc(isolate: &mut Isolate, method: &str, params: &str) -> serde_json::Value {

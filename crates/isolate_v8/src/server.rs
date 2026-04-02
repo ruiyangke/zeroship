@@ -55,7 +55,7 @@ fn spawn_and_warmup(
         .name(thread_name)
         .spawn(move || {
             let mut isolate = ConcurrentIsolate::new(
-                modules, event_rx, event_tx_clone, Some(tokio_handle), cpu_limit,
+                modules, event_rx, event_tx_clone, Some(tokio_handle), cpu_limit, std::collections::HashMap::new(),
             );
             isolate.run_event_loop();
         })
