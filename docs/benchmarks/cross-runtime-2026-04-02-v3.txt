@@ -1,0 +1,94 @@
+Building v8-server (release)...
+    Finished `release` profile [optimized] target(s) in 8.37s
+Starting servers...
+[echo-rs] http://0.0.0.0:8888 (async, hyper)
+[v8-server] mode=concurrent (1 V8 thread)
+[v8-server] mode=concurrent-pool (16 V8 threads)
+[v8-server] http://0.0.0.0:4000
+[node] http://0.0.0.0:4002 (Node.js v22.22.2)
+[v8-server] http://0.0.0.0:4001
+All servers ready.
+Cross-Runtime RPC Benchmark
+Date: 2026-04-02
+Machine: Linux (16 cores)
+Tool: wrk, 4 threads, 50 connections, 10s per test
+
+Servers:
+  raw V8 concurrent:   1 V8 thread, serial JS + concurrent I/O
+  raw V8 conc-pool:    16 V8 threads, each with concurrent I/O
+  Node.js:             v22.22.2, http module, single thread
+
+=========================================================
+
+--- 1. ping/pong (minimal) ---
+  raw V8 concurrent (1 thread)            177374.06 req/s   264.82us 109.03us
+  raw V8 conc-pool (16 threads)           114865.96 req/s   447.60us 379.49us
+  Node.js v22.22.2                         16144.63 req/s   3.38ms 6.29ms
+
+--- 2. fib(10) (light CPU) ---
+  raw V8 concurrent (1 thread)            140848.55 req/s   334.89us 100.19us
+  raw V8 conc-pool (16 threads)           110938.43 req/s   461.62us 393.41us
+  Node.js v22.22.2                         14900.48 req/s   3.40ms 3.64ms
+
+--- 3. fib(35) (heavy CPU) ---
+  raw V8 concurrent (1 thread)                 6.39 req/s   1.01s 561.22ms
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+  raw V8 conc-pool (16 threads)               46.40 req/s   886.94ms 388.57ms
+  Node.js v22.22.2                             6.39 req/s   773.37ms 325.00ms
+
+--- 4. setTimeout(0) ---
+  raw V8 concurrent (1 thread)             98638.98 req/s   468.85us 159.86us
+  raw V8 conc-pool (16 threads)            87664.83 req/s   623.72us 663.10us
+  Node.js v22.22.2                         18365.88 req/s   2.62ms 1.06ms
+
+--- 5. Promise chain (sync .then) ---
+  raw V8 concurrent (1 thread)            155025.42 req/s   309.86us 138.41us
+  raw V8 conc-pool (16 threads)           111266.33 req/s   464.94us 403.12us
+  Node.js v22.22.2                         15326.60 req/s   3.20ms 1.97ms
+
+--- 6. Promise chain + 100ms timer ---
+  raw V8 concurrent (1 thread)               474.36 req/s   100.62ms 193.72us
+  raw V8 conc-pool (16 threads)              474.40 req/s   100.58ms 140.05us
+  Node.js v22.22.2                           474.49 req/s   100.69ms 583.49us
+
+--- 7. fetch() → local Rust echo ---
+  raw V8 concurrent (1 thread)             54328.68 req/s   0.87ms 172.83us
+  raw V8 conc-pool (16 threads)            83658.06 req/s   591.66us 415.16us
+  Node.js v22.22.2                          3222.09 req/s   17.00ms 22.31ms
+
+--- 8. fetch() → external API ---
+  raw V8 concurrent (1 thread)               190.36 req/s   265.64ms 163.32ms
+  raw V8 conc-pool (16 threads)              187.15 req/s   267.62ms 166.53ms
+  Node.js v22.22.2                           182.60 req/s   274.90ms 166.57ms
+
+=========================================================
+
+Notes:
+  raw V8 concurrent:   single V8 thread with serial JS + concurrent I/O.
+                       Requests overlap during I/O waits.
+  raw V8 conc-pool:    N concurrent isolate threads with round-robin dispatch.
+                       Best of both: concurrent I/O + multi-core scaling.
+  Node.js:             single-threaded event loop via http module.
+
+=========================================================
+  Summary (req/s) — v3 after all optimizations
+=========================================================
+
+Scenario                    concurrent(1)  conc-pool(16)  Node.js v22    vs Node (best)
+1. ping/pong                    177,374        114,866       16,145       11.0x
+2. fib(10) (light CPU)          140,849        110,938       14,900        9.5x
+3. fib(35) (heavy CPU) [5s]           6             46            6        7.3x (pool)
+4. setTimeout(0)                 98,639         87,665       18,366        5.4x
+5. Promise chain                155,025        111,266       15,327       10.1x
+6. Promise+100ms timer              474            474          474        1.0x
+7. fetch → local echo            54,329         83,658        3,222       26.0x (pool)
+8. fetch → external API             190            187          183        1.0x
+
+All optimizations applied:
+  - ESM namespace → plain object copy (+12-17%)
+  - Lazy CPU timer arm (+123% on timers, +20% on ping)
+  - Cached onRequest Global<Function>
+  - Trusted headers (skip validation for inbound)
+  - Sync Response extraction (direct _bodyText/_map read)
+  - Fixed Headers iterator O(n²) → O(n)
+  - Fixed Request double Headers allocation
