@@ -1,5 +1,5 @@
 {
-  description = "appbase - single-file full-stack framework";
+  description = "appbase - AI-native app platform";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -24,9 +24,13 @@
             sqlite
             wrk
             hey
+            playwright-test
           ];
 
           RUST_BACKTRACE = "1";
+          # Use Nix-provided Playwright browsers instead of downloading
+          PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
         };
       });
 }

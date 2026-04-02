@@ -8,9 +8,9 @@ export default defineConfig({
     baseURL: "http://localhost:5173",
     headless: true,
   },
-  // Servers must be started manually:
-  //   1. cd /tmp/appbase-e2e && APPBASE_MASTER_KEY=e2e-test-key appbase serve server.js --port=3335
-  //   2. cd web/dashboard && npx vite --port 5173
+  // Servers must be started manually before running tests:
+  //   1. APPBASE_MASTER_KEY=e2e-test-key appbase serve server.js --port=3335
+  //   2. cd web/dashboard && npx vite --port 5173  (for UI tests only)
   projects: [
     {
       name: "chromium",
