@@ -573,4 +573,100 @@
   globalThis.AbortController = AbortController;
   globalThis.AbortSignal = AbortSignal;
 
+  // =========================================================================
+  // TextEncoder / TextDecoder polyfill
+  // =========================================================================
+
+  if (typeof TextEncoder === "undefined") {
+    globalThis.TextEncoder = function TextEncoder() {};
+    TextEncoder.prototype.encode = function(str) {
+      str = String(str);
+      var buf = new Uint8Array(str.length * 3); // UTF-8 worst case
+      var pos = 0;
+      for (var i = 0; i < str.length; i++) {
+        var c = str.charCodeAt(i);
+        if (c < 0x80) {
+          buf[pos++] = c;
+        } else if (c < 0x800) {
+          buf[pos++] = 0xc0 | (c >> 6);
+          buf[pos++] = 0x80 | (c & 0x3f);
+        } else if (c >= 0xd800 && c <= 0xdbff) {
+          var next = str.charCodeAt(++i);
+          var cp = ((c - 0xd800) << 10) + (next - 0xdc00) + 0x10000;
+          buf[pos++] = 0xf0 | (cp >> 18);
+          buf[pos++] = 0x80 | ((cp >> 12) & 0x3f);
+          buf[pos++] = 0x80 | ((cp >> 6) & 0x3f);
+          buf[pos++] = 0x80 | (cp & 0x3f);
+        } else {
+          buf[pos++] = 0xe0 | (c >> 12);
+          buf[pos++] = 0x80 | ((c >> 6) & 0x3f);
+          buf[pos++] = 0x80 | (c & 0x3f);
+        }
+      }
+      return buf.subarray(0, pos);
+    };
+  }
+
+  if (typeof TextDecoder === "undefined") {
+    globalThis.TextDecoder = function TextDecoder() {};
+    TextDecoder.prototype.decode = function(buf) {
+      if (!buf) return "";
+      var bytes = new Uint8Array(buf.buffer || buf);
+      var result = "";
+      for (var i = 0; i < bytes.length;) {
+        var b = bytes[i];
+        if (b < 0x80) { result += String.fromCharCode(b); i++; }
+        else if ((b & 0xe0) === 0xc0) {
+          result += String.fromCharCode(((b & 0x1f) << 6) | (bytes[i+1] & 0x3f));
+          i += 2;
+        } else if ((b & 0xf0) === 0xe0) {
+          result += String.fromCharCode(((b & 0x0f) << 12) | ((bytes[i+1] & 0x3f) << 6) | (bytes[i+2] & 0x3f));
+          i += 3;
+        } else {
+          var cp = ((b & 0x07) << 18) | ((bytes[i+1] & 0x3f) << 12) | ((bytes[i+2] & 0x3f) << 6) | (bytes[i+3] & 0x3f);
+          cp -= 0x10000;
+          result += String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff));
+          i += 4;
+        }
+      }
+      return result;
+    };
+  }
+
+  // =========================================================================
+  // atob / btoa polyfill (Base64)
+  // =========================================================================
+
+  if (typeof btoa === "undefined") {
+    var _chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    globalThis.btoa = function(str) {
+      str = String(str);
+      var out = "";
+      for (var i = 0; i < str.length; i += 3) {
+        var a = str.charCodeAt(i);
+        var b = i + 1 < str.length ? str.charCodeAt(i + 1) : 0;
+        var c = i + 2 < str.length ? str.charCodeAt(i + 2) : 0;
+        out += _chars[(a >> 2)];
+        out += _chars[((a & 3) << 4) | (b >> 4)];
+        out += i + 1 < str.length ? _chars[((b & 15) << 2) | (c >> 6)] : "=";
+        out += i + 2 < str.length ? _chars[c & 63] : "=";
+      }
+      return out;
+    };
+    globalThis.atob = function(str) {
+      str = String(str).replace(/=+$/, "");
+      var out = "";
+      for (var i = 0; i < str.length; i += 4) {
+        var a = _chars.indexOf(str[i]);
+        var b = _chars.indexOf(str[i + 1]);
+        var c = _chars.indexOf(str[i + 2]);
+        var d = _chars.indexOf(str[i + 3]);
+        out += String.fromCharCode((a << 2) | (b >> 4));
+        if (c >= 0) out += String.fromCharCode(((b & 15) << 4) | (c >> 2));
+        if (d >= 0) out += String.fromCharCode(((c & 3) << 6) | d);
+      }
+      return out;
+    };
+  }
+
 })(globalThis);

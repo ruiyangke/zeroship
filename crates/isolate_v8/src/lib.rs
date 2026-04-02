@@ -561,4 +561,37 @@ mod tests {
             .unwrap();
         assert!(r.json.contains("value1"), "got: {}", r.json);
     }
+
+    #[test]
+    fn text_encoder_decoder() {
+        init_v8();
+        let js = r#"var __rpc = { test: function() {
+            var enc = new TextEncoder();
+            var buf = enc.encode("Hello");
+            var dec = new TextDecoder();
+            return { encoded: Array.from(buf), decoded: dec.decode(buf) };
+        }};"#;
+        let mut isolate = Isolate::new(js);
+        let r = isolate
+            .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
+            .unwrap();
+        assert!(r.json.contains("Hello"), "got: {}", r.json);
+        assert!(r.json.contains("[72,101,108,108,111]"), "got: {}", r.json);
+    }
+
+    #[test]
+    fn btoa_atob() {
+        init_v8();
+        let js = r#"var __rpc = { test: function() {
+            var encoded = btoa("Hello, World!");
+            var decoded = atob(encoded);
+            return { encoded, decoded };
+        }};"#;
+        let mut isolate = Isolate::new(js);
+        let r = isolate
+            .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
+            .unwrap();
+        assert!(r.json.contains("SGVsbG8sIFdvcmxkIQ=="), "got: {}", r.json);
+        assert!(r.json.contains("Hello, World!"), "got: {}", r.json);
+    }
 }

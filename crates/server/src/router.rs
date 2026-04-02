@@ -927,3 +927,82 @@ fn sanitize_error(msg: &str) -> String {
         .replace('/', "")
         .replace('\\', "")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_app_id_from_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-app-id", "my-app".parse().unwrap());
+        assert_eq!(extract_app_id(&headers, "default"), "my-app");
+    }
+
+    #[test]
+    fn test_extract_app_id_from_subdomain() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "my-app.platform.dev".parse().unwrap());
+        assert_eq!(extract_app_id(&headers, "default"), "my-app");
+    }
+
+    #[test]
+    fn test_extract_app_id_default() {
+        let headers = HeaderMap::new();
+        assert_eq!(extract_app_id(&headers, "default"), "default");
+    }
+
+    #[test]
+    fn test_extract_app_id_www_subdomain_ignored() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "www.platform.dev".parse().unwrap());
+        assert_eq!(extract_app_id(&headers, "default"), "default");
+    }
+
+    #[test]
+    fn test_extract_app_id_invalid_chars_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-app-id", "app with spaces".parse().unwrap());
+        assert_eq!(extract_app_id(&headers, "default"), "default");
+    }
+
+    #[test]
+    fn test_extract_bearer() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer my-key".parse().unwrap());
+        assert_eq!(extract_bearer(&headers), Some("my-key"));
+    }
+
+    #[test]
+    fn test_extract_bearer_missing() {
+        let headers = HeaderMap::new();
+        assert_eq!(extract_bearer(&headers), None);
+    }
+
+    #[test]
+    fn test_constant_time_eq() {
+        assert!(constant_time_eq("abc", "abc"));
+        assert!(!constant_time_eq("abc", "abd"));
+        assert!(!constant_time_eq("abc", "ab"));
+        assert!(!constant_time_eq("", "a"));
+        assert!(constant_time_eq("", ""));
+    }
+
+    #[test]
+    fn test_is_valid_app_id() {
+        assert!(is_valid_app_id("my-app"));
+        assert!(is_valid_app_id("app_123"));
+        assert!(is_valid_app_id("a"));
+        assert!(!is_valid_app_id(""));
+        assert!(!is_valid_app_id("app with spaces"));
+        assert!(!is_valid_app_id("app/path"));
+        assert!(!is_valid_app_id(&"a".repeat(65)));
+    }
+
+    #[test]
+    fn test_json_escape() {
+        assert_eq!(json_escape("hello"), "hello");
+        assert_eq!(json_escape("he\"llo"), "he\\\"llo");
+        assert_eq!(json_escape("line\nbreak"), "line\\nbreak");
+    }
+}
