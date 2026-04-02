@@ -1,0 +1,42 @@
+name: CI
+on: [push, pull_request]
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace -- -D warnings
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: cd web/dashboard && npm ci && npx tsc --noEmit && npx vite build
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: [rust, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: cargo build --release --bin appbase
+      - run: cd web/dashboard && npm ci
+      - run: |
+          mkdir -p /tmp/e2e/data
+          echo 'var __rpc = { ping: function() { return "pong"; } };' > /tmp/e2e/server.js
+          cd /tmp/e2e && APPBASE_MASTER_KEY=ci-key $GITHUB_WORKSPACE/target/release/appbase serve server.js --port=3335 &
+          sleep 3
+          cd $GITHUB_WORKSPACE/web/dashboard && npx playwright install --with-deps chromium
+          npx playwright test e2e/backend-api.spec.ts
