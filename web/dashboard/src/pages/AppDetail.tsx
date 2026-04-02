@@ -247,8 +247,10 @@ export default function AppDetail() {
               <div className="text-[13px] text-foreground flex items-center gap-2">
                 <span className="flex-1 break-all font-mono">
                   {showApiKey
-                    ? app.api_key
-                    : `${"*".repeat(Math.max(0, app.api_key.length - 8))}${app.api_key.slice(-8)}`}
+                    ? (app.api_key ?? "")
+                    : app.api_key
+                      ? `${"*".repeat(Math.max(0, app.api_key.length - 8))}${app.api_key.slice(-8)}`
+                      : "—"}
                 </span>
                 <button
                   onClick={() => setShowApiKey((v) => !v)}
