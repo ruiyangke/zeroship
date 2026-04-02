@@ -24,11 +24,14 @@ mod fetch;
 mod globals;
 mod isolate;
 mod kv;
+pub mod modules;
 pub mod runtime;
+pub mod storage;
 mod timers;
 
 // Re-export public API
 pub use isolate::{Isolate, IsolatePool};
+pub use storage::AppStorage;
 pub use runtime::{init_v8, RequestResult};
 
 #[cfg(test)]
