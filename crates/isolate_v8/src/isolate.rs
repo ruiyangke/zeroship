@@ -149,35 +149,54 @@ impl Isolate {
             }
         }
 
-        // Compile single HTTP dispatch function that takes handler as first arg.
-        // One Rust→JS call per request (handler passed in, no property lookup).
+        // Compile optimized HTTP dispatch function:
+        //   1. Trusted headers: build _map directly, skip validateName/validateValue
+        //   2. Sync body read: resp._bodyText directly, not resp.text().then()
+        //   3. Direct _map access: read resp.headers._map, skip forEach
+        //   4. Handler as arg: no property lookup
+        // Note: Object.create + defineProperty for lazy Request was SLOWER (causes V8
+        // dictionary mode transition). Using new Request() with trusted headers instead.
         if self.on_request_fn.is_some() {
             let code = v8::String::new(scope, r#"(function(__handler, __method, __url, __headers_json, __body) {
     try {
-        var hdrs = __headers_json ? JSON.parse(__headers_json) : [];
-        var reqInit = { method: __method, headers: hdrs };
+        // Build trusted headers map — skip validation (like workerd's appendUnguarded).
+        // Inbound headers from Hyper are already validated.
+        var map = Object.create(null);
+        if (__headers_json) {
+            var arr = JSON.parse(__headers_json);
+            for (var i = 0; i < arr.length; i++) {
+                var k = arr[i][0].toLowerCase(), v = arr[i][1];
+                if (map[k]) map[k].push(v); else map[k] = [v];
+            }
+        }
+        var reqInit = { method: __method, headers: Headers._fromTrusted(map) };
         if (__body && __method !== "GET" && __method !== "HEAD") reqInit.body = __body;
         var req = new Request(__url, reqInit);
+
         var result = __handler(req);
-        if (result && typeof result.then === 'function') {
-            return result.then(function(resp) {
-                return resp.text().then(function(body) {
-                    var h = [];
-                    resp.headers.forEach(function(v, k) { h.push([k, v]); });
-                    return JSON.stringify({ status: resp.status, headers: h, body: body });
-                });
-            }, function(e) {
+
+        // Sync Response serialization — read _bodyText and _map directly.
+        // Avoids resp.text().then() Promise chain and forEach/sort overhead.
+        function __serResp(resp) {
+            if (!resp || resp.status === undefined) {
+                return JSON.stringify({ status: 200, headers: [], body: String(resp) });
+            }
+            var h = [];
+            var m = resp.headers._map;
+            var keys = Object.keys(m);
+            for (var i = 0; i < keys.length; i++) {
+                var vals = m[keys[i]];
+                for (var j = 0; j < vals.length; j++) h.push([keys[i], vals[j]]);
+            }
+            return JSON.stringify({ status: resp.status, headers: h, body: resp._bodyText || "" });
+        }
+
+        if (result && typeof result.then === "function") {
+            return result.then(function(resp) { return __serResp(resp); }, function(e) {
                 return JSON.stringify({ status: 500, headers: [], body: e.message || String(e) });
             });
         }
-        if (result && result.status !== undefined) {
-            var h = [];
-            result.headers.forEach(function(v, k) { h.push([k, v]); });
-            return result.text().then(function(body) {
-                return JSON.stringify({ status: result.status, headers: h, body: body });
-            });
-        }
-        return JSON.stringify({ status: 200, headers: [], body: String(result) });
+        return __serResp(result);
     } catch(e) {
         return JSON.stringify({ status: 500, headers: [], body: e.message || String(e) });
     }

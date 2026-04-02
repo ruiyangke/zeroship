@@ -92,6 +92,14 @@
     }
   };
 
+  // Trusted fast-path: skip validation for headers from the HTTP stack.
+  // Like workerd's appendUnguarded — inbound headers are already validated by Hyper.
+  Headers._fromTrusted = function(map) {
+    var h = new Headers();
+    h._map = map;
+    return h;
+  };
+
   Headers.prototype.delete = function(name) {
     var key = validateName(name).toLowerCase();
     delete this._map[key];
@@ -124,10 +132,10 @@
 
   Headers.prototype.entries = function() {
     var self = this;
+    var keys = Object.keys(this._map).sort(); // snapshot once
     var index = 0;
     var iter = {
       next: function() {
-        var keys = Object.keys(self._map).sort();
         if (index >= keys.length) return { done: true, value: undefined };
         var key = keys[index++];
         return { done: false, value: [key, self._map[key].join(", ")] };
@@ -139,11 +147,10 @@
   };
 
   Headers.prototype.keys = function() {
-    var self = this;
+    var keys = Object.keys(this._map).sort(); // snapshot once
     var index = 0;
     var iter = {
       next: function() {
-        var keys = Object.keys(self._map).sort();
         if (index >= keys.length) return { done: true, value: undefined };
         return { done: false, value: keys[index++] };
       },
@@ -155,10 +162,10 @@
 
   Headers.prototype.values = function() {
     var self = this;
+    var keys = Object.keys(this._map).sort(); // snapshot once
     var index = 0;
     var iter = {
       next: function() {
-        var keys = Object.keys(self._map).sort();
         if (index >= keys.length) return { done: true, value: undefined };
         return { done: false, value: self._map[keys[index++]].join(", ") };
       },
@@ -261,33 +268,19 @@
 
   function Request(input, init) {
     init = init || {};
+    var isReq = input instanceof Request;
 
-    if (input instanceof Request) {
-      this.url = input.url;
-      this.method = input.method;
-      this.headers = new Headers(input.headers);
-      this.redirect = input.redirect;
-      this.signal = input.signal;
-      this.cache = input.cache;
-      this.credentials = input.credentials;
-      this.mode = input.mode;
-      this.referrer = input.referrer;
-      initBody(this, input._bodyText);
-    } else {
-      this.url = String(input);
-      this.method = "GET";
-      this.headers = new Headers();
-      this.redirect = "follow";
-      this.signal = null;
-      this.cache = "default";
-      this.credentials = "same-origin";
-      this.mode = "cors";
-      this.referrer = "about:client";
-      initBody(this, null);
-    }
+    this.url = isReq ? input.url : String(input);
+    this.method = isReq ? input.method : "GET";
+    this.redirect = isReq ? input.redirect : "follow";
+    this.signal = isReq ? input.signal : null;
+    this.cache = isReq ? input.cache : "default";
+    this.credentials = isReq ? input.credentials : "same-origin";
+    this.mode = isReq ? input.mode : "cors";
+    this.referrer = isReq ? input.referrer : "about:client";
+    initBody(this, isReq ? input._bodyText : null);
 
     if (init.method !== undefined) this.method = init.method.toUpperCase();
-    if (init.headers !== undefined) this.headers = new Headers(init.headers);
     if (init.redirect !== undefined) this.redirect = init.redirect;
     if (init.signal !== undefined) this.signal = init.signal;
     if (init.cache !== undefined) this.cache = init.cache;
@@ -295,6 +288,8 @@
     if (init.mode !== undefined) this.mode = init.mode;
     if (init.referrer !== undefined) this.referrer = init.referrer;
     if (init.body !== undefined) initBody(this, init.body);
+    // Headers: construct ONCE. init.headers overrides, else copy from input Request.
+    this.headers = new Headers(init.headers !== undefined ? init.headers : (isReq ? input.headers : undefined));
   }
 
   Request.prototype.clone = function() {
