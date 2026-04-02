@@ -81,7 +81,7 @@ impl SqlxRegistry {
 impl AppRegistry for SqlxRegistry {
     async fn get_app(&self, app_id: &str) -> Result<Option<AppData>, RegistryError> {
         let row = sqlx::query(
-            "SELECT id, plan_id, server_js, client_html, version FROM apps WHERE id = $1",
+            "SELECT id, plan_id, server_js, client_html, version, api_key, created_at, updated_at FROM apps WHERE id = $1",
         )
         .bind(app_id)
         .fetch_optional(&self.pool)
@@ -94,6 +94,9 @@ impl AppRegistry for SqlxRegistry {
             server_js: r.get("server_js"),
             client_html: r.get("client_html"),
             version: r.get("version"),
+            api_key: r.get("api_key"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
         }))
     }
 

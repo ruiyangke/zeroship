@@ -684,6 +684,9 @@ async fn handle_get_app(
                 "plan_id": data.plan_id,
                 "version": data.version,
                 "server_js": data.server_js,
+                "api_key": data.api_key,
+                "created_at": data.created_at,
+                "updated_at": data.updated_at,
             });
             json_response(StatusCode::OK, &info.to_string())
         }

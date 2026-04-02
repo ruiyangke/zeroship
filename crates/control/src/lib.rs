@@ -20,6 +20,9 @@ pub struct AppData {
     pub server_js: String,
     pub client_html: Option<Vec<u8>>,
     pub version: i64,
+    pub api_key: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// App metadata (without JS bundle).
