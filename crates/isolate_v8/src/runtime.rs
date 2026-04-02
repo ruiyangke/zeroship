@@ -27,7 +27,7 @@ pub(crate) fn thread_cpu_time() -> Duration {
     Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
 }
 
-/// Result of executing a JS request.
+/// Result of executing a JSON-RPC request.
 #[derive(Debug)]
 pub struct RequestResult {
     pub json: String,
@@ -37,8 +37,57 @@ pub struct RequestResult {
     pub logs: Vec<String>,
 }
 
+/// Result of executing an HTTP request via onRequest handler.
+#[derive(Debug)]
+pub struct HttpResult {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+    pub cpu_time: Duration,
+    pub wall_time: Duration,
+    pub logs: Vec<String>,
+}
+
 /// Embedded Fetch API polyfill -- loaded after globals are set up.
 pub(crate) const FETCH_JS: &str = include_str!("embed/fetch.js");
+
+/// HTTP dispatch function — calls onRequest(Request) if exported.
+/// Returns a JSON string with { status, headers, body } or null if onRequest is not defined.
+pub(crate) const HTTP_DISPATCH_JS: &str = r#"(function(__method, __url, __headers_json, __body) {
+    var handler = globalThis.__rpc && globalThis.__rpc.onRequest;
+    if (!handler || typeof handler !== 'function') return null;
+
+    try {
+        var hdrs = __headers_json ? JSON.parse(__headers_json) : [];
+        var reqInit = { method: __method, headers: hdrs };
+        if (__body && __method !== "GET" && __method !== "HEAD") reqInit.body = __body;
+        var req = new Request(__url, reqInit);
+
+        var result = handler(req);
+        if (result && typeof result.then === 'function') {
+            return result.then(function(resp) {
+                return resp.text().then(function(body) {
+                    var respHeaders = [];
+                    resp.headers.forEach(function(v, k) { respHeaders.push([k, v]); });
+                    return JSON.stringify({ status: resp.status, headers: respHeaders, body: body });
+                });
+            }, function(e) {
+                return JSON.stringify({ status: 500, headers: [], body: e.message || String(e) });
+            });
+        }
+        // Sync Response
+        if (result && result.status !== undefined) {
+            var respHeaders = [];
+            result.headers.forEach(function(v, k) { respHeaders.push([k, v]); });
+            return result.text().then(function(body) {
+                return JSON.stringify({ status: result.status, headers: respHeaders, body: body });
+            });
+        }
+        return JSON.stringify({ status: 200, headers: [], body: String(result) });
+    } catch(e) {
+        return JSON.stringify({ status: 500, headers: [], body: e.message || String(e) });
+    }
+})"#;
 
 /// The JSON-RPC dispatch function compiled once and reused for every request.
 /// Handles both sync and async (Promise-returning) handlers.

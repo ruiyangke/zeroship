@@ -11,7 +11,7 @@ use std::time::Instant;
 use crate::event_loop::{run_event_loop, run_event_loop_until_settled, EventLoopState, SharedState};
 use crate::globals::setup_globals;
 use crate::modules::ModuleEntry;
-use crate::runtime::{thread_cpu_time, RequestResult, DISPATCH_JS, FETCH_JS};
+use crate::runtime::{thread_cpu_time, HttpResult, RequestResult, DISPATCH_JS, FETCH_JS, HTTP_DISPATCH_JS};
 
 /// A V8 isolate with persistent context -- compiled code stays across requests.
 /// ES modules are compiled ONCE. Each request just calls the handler function.
@@ -19,6 +19,8 @@ pub struct Isolate {
     isolate: v8::OwnedIsolate,
     context: v8::Global<v8::Context>,
     dispatch_fn: Option<v8::Global<v8::Function>>,
+    http_dispatch_fn: Option<v8::Global<v8::Function>>,
+    has_on_request: bool,
     initialized: bool,
     modules: Vec<ModuleEntry>,
     state: SharedState,
@@ -59,6 +61,8 @@ impl Isolate {
             isolate,
             context,
             dispatch_fn: None,
+            http_dispatch_fn: None,
+            has_on_request: false,
             initialized: false,
             modules,
             state,
@@ -101,13 +105,128 @@ impl Isolate {
             }
         }
 
+        // Compile JSON-RPC dispatch function
         let code = v8::String::new(scope, DISPATCH_JS).unwrap();
         let script = v8::Script::compile(scope, code, None).unwrap();
         let result = script.run(scope).unwrap();
         let func = v8::Local::<v8::Function>::try_from(result).unwrap();
         self.dispatch_fn = Some(v8::Global::new(scope, func));
 
+        // Compile HTTP dispatch function (for onRequest handler)
+        let http_code = v8::String::new(scope, HTTP_DISPATCH_JS).unwrap();
+        let http_script = v8::Script::compile(scope, http_code, None).unwrap();
+        let http_result = http_script.run(scope).unwrap();
+        let http_func = v8::Local::<v8::Function>::try_from(http_result).unwrap();
+        self.http_dispatch_fn = Some(v8::Global::new(scope, http_func));
+
+        // Check if onRequest is exported
+        let global = context.global(scope);
+        let rpc_key = v8::String::new(scope, "__rpc").unwrap();
+        if let Some(rpc_obj) = global.get(scope, rpc_key.into()) {
+            let on_request_key = v8::String::new(scope, "onRequest").unwrap();
+            if let Some(handler) = rpc_obj.to_object(scope).and_then(|obj| obj.get(scope, on_request_key.into())) {
+                self.has_on_request = handler.is_function();
+            }
+        }
+
         self.initialized = true;
+    }
+
+    /// Check if the app exports an onRequest handler.
+    pub fn has_http_handler(&mut self) -> bool {
+        self.ensure_initialized();
+        self.has_on_request
+    }
+
+    /// Execute an HTTP request via the onRequest handler.
+    /// Returns None if onRequest is not exported.
+    pub fn execute_http(
+        &mut self,
+        method: &str,
+        url: &str,
+        headers_json: &str,
+        body: &str,
+    ) -> Option<Result<HttpResult, String>> {
+        self.ensure_initialized();
+
+        if !self.has_on_request {
+            return None;
+        }
+
+        // Drain stale state
+        {
+            let mut s = self.state.borrow_mut();
+            s.timers.heap.clear();
+            s.timers.callbacks.clear();
+            while s.op_rx.try_recv().is_ok() {}
+        }
+
+        let wall_start = std::time::Instant::now();
+        let cpu_start = thread_cpu_time();
+
+        v8::scope!(let handle_scope, &mut self.isolate);
+        let context = v8::Local::new(handle_scope, &self.context);
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        let dispatch_fn = self.http_dispatch_fn.as_ref().unwrap();
+        let func = v8::Local::new(scope, dispatch_fn);
+
+        let arg_method = v8::String::new(scope, method).unwrap();
+        let arg_url = v8::String::new(scope, url).unwrap();
+        let arg_headers = v8::String::new(scope, headers_json).unwrap();
+        let arg_body = v8::String::new(scope, body).unwrap();
+        let undefined = v8::undefined(scope).into();
+
+        let result = func.call(scope, undefined, &[
+            arg_method.into(), arg_url.into(), arg_headers.into(), arg_body.into()
+        ]);
+
+        // Get the JSON string result from the dispatch
+        let json_str = match result {
+            Some(val) if val.is_null_or_undefined() => return None,
+            Some(val) if val.is_promise() => {
+                let promise = v8::Local::<v8::Promise>::try_from(val).unwrap();
+                let global_promise = v8::Global::new(scope, promise);
+                run_event_loop_until_settled(scope, &self.state, &global_promise);
+                let promise = v8::Local::new(scope, &global_promise);
+                match promise.state() {
+                    v8::PromiseState::Fulfilled => promise.result(scope).to_rust_string_lossy(scope),
+                    v8::PromiseState::Rejected => {
+                        let msg = promise.result(scope).to_rust_string_lossy(scope);
+                        return Some(Err(format!("onRequest rejected: {msg}")));
+                    }
+                    v8::PromiseState::Pending => return Some(Err("onRequest promise still pending".into())),
+                }
+            }
+            Some(val) => val.to_rust_string_lossy(scope),
+            None => return Some(Err("onRequest call failed".into())),
+        };
+
+        // Parse the JSON response from HTTP_DISPATCH_JS
+        let parsed: serde_json::Value = match serde_json::from_str(&json_str) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(format!("Failed to parse HTTP response: {e}"))),
+        };
+
+        let status = parsed.get("status").and_then(|v| v.as_u64()).unwrap_or(200) as u16;
+        let headers: Vec<(String, String)> = parsed.get("headers")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|pair| {
+                let a = pair.as_array()?;
+                Some((a.get(0)?.as_str()?.to_string(), a.get(1)?.as_str()?.to_string()))
+            }).collect())
+            .unwrap_or_default();
+        let body = parsed.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let logs = self.state.borrow_mut().log_buffer.drain(..).collect();
+
+        Some(Ok(HttpResult {
+            status,
+            headers,
+            body,
+            cpu_time: thread_cpu_time().saturating_sub(cpu_start),
+            wall_time: wall_start.elapsed(),
+            logs,
+        }))
     }
 
     /// Execute a single RPC request. Returns the JSON response + timing info.

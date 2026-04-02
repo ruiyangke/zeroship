@@ -752,4 +752,84 @@ mod tests {
         assert!(result.json.contains("done_10"), "got: {}", result.json);
         handle.join().unwrap();
     }
+
+    // -----------------------------------------------------------------------
+    // onRequest HTTP handler tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn on_request_basic() {
+        init_v8();
+        let modules = vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: r#"
+                export function onRequest(request) {
+                    return new Response("Hello from " + request.method + " " + request.url, {
+                        status: 200,
+                        headers: { "X-Custom": "test" },
+                    });
+                }
+            "#.into(),
+        }];
+        let mut isolate = Isolate::new(modules);
+        assert!(isolate.has_http_handler());
+
+        let result = isolate.execute_http("GET", "http://localhost/hello", "[]", "").unwrap().unwrap();
+        assert_eq!(result.status, 200);
+        assert!(result.body.contains("Hello from GET"), "got: {}", result.body);
+    }
+
+    #[test]
+    fn on_request_with_rpc() {
+        // Both RPC methods and onRequest in the same app
+        init_v8();
+        let modules = vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: r#"
+                export function add(a, b) { return a + b; }
+                export function onRequest(request) {
+                    return new Response("HTTP handler", { status: 200 });
+                }
+            "#.into(),
+        }];
+        let mut isolate = Isolate::new(modules);
+
+        // RPC still works
+        let rpc = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"add","params":[3,4],"id":1}"#).unwrap();
+        assert!(rpc.json.contains("7"));
+
+        // HTTP also works
+        let http = isolate.execute_http("GET", "http://localhost/", "[]", "").unwrap().unwrap();
+        assert_eq!(http.status, 200);
+        assert!(http.body.contains("HTTP handler"));
+    }
+
+    #[test]
+    fn no_on_request_returns_none() {
+        init_v8();
+        let modules = vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: "export function ping() { return 'pong'; }".into(),
+        }];
+        let mut isolate = Isolate::new(modules);
+        assert!(!isolate.has_http_handler());
+        assert!(isolate.execute_http("GET", "http://localhost/", "[]", "").is_none());
+    }
+
+    #[test]
+    fn on_request_async() {
+        init_v8();
+        let modules = vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: r#"
+                export async function onRequest(request) {
+                    return new Response("async response", { status: 201 });
+                }
+            "#.into(),
+        }];
+        let mut isolate = Isolate::new(modules);
+        let result = isolate.execute_http("GET", "http://localhost/", "[]", "").unwrap().unwrap();
+        assert_eq!(result.status, 201);
+        assert!(result.body.contains("async response"));
+    }
 }
