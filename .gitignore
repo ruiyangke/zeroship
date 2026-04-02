@@ -8,3 +8,4 @@ result
 *.db-wal
 target/
 refs/
+test-results/
