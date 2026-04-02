@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use crate::event_loop::{run_event_loop, run_event_loop_until_settled, EventLoopState, SharedState};
 use crate::globals::setup_globals;
 use crate::modules::ModuleEntry;
-use crate::runtime::{thread_cpu_time, HttpResult, RequestResult, DISPATCH_JS, FETCH_JS, HTTP_DISPATCH_JS, URL_JS};
+use crate::runtime::{thread_cpu_time, HttpResult, RequestResult, DISPATCH_JS, FETCH_JS, URL_JS};
 
 /// A V8 isolate with persistent context -- compiled code stays across requests.
 /// ES modules are compiled ONCE. Each request just calls the handler function.
@@ -21,8 +21,11 @@ pub struct Isolate {
     isolate: v8::OwnedIsolate,
     context: v8::Global<v8::Context>,
     dispatch_fn: Option<v8::Global<v8::Function>>,
+    /// Cached direct handle to the user's `onRequest` function.
+    on_request_fn: Option<v8::Global<v8::Function>>,
+    /// Single JS dispatch: `(handler, method, url, headers_json, body) → JSON string`
+    /// Handler is passed as first arg — no property lookup needed.
     http_dispatch_fn: Option<v8::Global<v8::Function>>,
-    has_on_request: bool,
     initialized: bool,
     modules: Vec<ModuleEntry>,
     state: SharedState,
@@ -65,8 +68,8 @@ impl Isolate {
             isolate,
             context,
             dispatch_fn: None,
+            on_request_fn: None,
             http_dispatch_fn: None,
-            has_on_request: false,
             initialized: false,
             modules,
             state,
@@ -130,21 +133,58 @@ impl Isolate {
         let func = v8::Local::<v8::Function>::try_from(result).unwrap();
         self.dispatch_fn = Some(v8::Global::new(scope, func));
 
-        // Compile HTTP dispatch function (for onRequest handler)
-        let http_code = v8::String::new(scope, HTTP_DISPATCH_JS).unwrap();
-        let http_script = v8::Script::compile(scope, http_code, None).unwrap();
-        let http_result = http_script.run(scope).unwrap();
-        let http_func = v8::Local::<v8::Function>::try_from(http_result).unwrap();
-        self.http_dispatch_fn = Some(v8::Global::new(scope, http_func));
-
-        // Check if onRequest is exported
-        let global = context.global(scope);
-        let rpc_key = v8::String::new(scope, "__rpc").unwrap();
-        if let Some(rpc_obj) = global.get(scope, rpc_key.into()) {
-            let on_request_key = v8::String::new(scope, "onRequest").unwrap();
-            if let Some(handler) = rpc_obj.to_object(scope).and_then(|obj| obj.get(scope, on_request_key.into())) {
-                self.has_on_request = handler.is_function();
+        // Cache onRequest handler directly as Global<Function> (if exported).
+        // Eliminates the __rpc.onRequest property lookup on every request.
+        {
+            let global = context.global(scope);
+            let rpc_key = v8::String::new(scope, "__rpc").unwrap();
+            if let Some(rpc_obj) = global.get(scope, rpc_key.into()) {
+                let on_request_key = v8::String::new(scope, "onRequest").unwrap();
+                if let Some(handler) = rpc_obj.to_object(scope).and_then(|obj| obj.get(scope, on_request_key.into())) {
+                    if handler.is_function() {
+                        let func = v8::Local::<v8::Function>::try_from(handler).unwrap();
+                        self.on_request_fn = Some(v8::Global::new(scope, func));
+                    }
+                }
             }
+        }
+
+        // Compile single HTTP dispatch function that takes handler as first arg.
+        // One Rust→JS call per request (handler passed in, no property lookup).
+        if self.on_request_fn.is_some() {
+            let code = v8::String::new(scope, r#"(function(__handler, __method, __url, __headers_json, __body) {
+    try {
+        var hdrs = __headers_json ? JSON.parse(__headers_json) : [];
+        var reqInit = { method: __method, headers: hdrs };
+        if (__body && __method !== "GET" && __method !== "HEAD") reqInit.body = __body;
+        var req = new Request(__url, reqInit);
+        var result = __handler(req);
+        if (result && typeof result.then === 'function') {
+            return result.then(function(resp) {
+                return resp.text().then(function(body) {
+                    var h = [];
+                    resp.headers.forEach(function(v, k) { h.push([k, v]); });
+                    return JSON.stringify({ status: resp.status, headers: h, body: body });
+                });
+            }, function(e) {
+                return JSON.stringify({ status: 500, headers: [], body: e.message || String(e) });
+            });
+        }
+        if (result && result.status !== undefined) {
+            var h = [];
+            result.headers.forEach(function(v, k) { h.push([k, v]); });
+            return result.text().then(function(body) {
+                return JSON.stringify({ status: result.status, headers: h, body: body });
+            });
+        }
+        return JSON.stringify({ status: 200, headers: [], body: String(result) });
+    } catch(e) {
+        return JSON.stringify({ status: 500, headers: [], body: e.message || String(e) });
+    }
+})"#).unwrap();
+            let s = v8::Script::compile(scope, code, None).unwrap();
+            let r = s.run(scope).unwrap();
+            self.http_dispatch_fn = Some(v8::Global::new(scope, v8::Local::<v8::Function>::try_from(r).unwrap()));
         }
 
         self.initialized = true;
@@ -153,10 +193,11 @@ impl Isolate {
     /// Check if the app exports an onRequest handler.
     pub fn has_http_handler(&mut self) -> bool {
         self.ensure_initialized();
-        self.has_on_request
+        self.on_request_fn.is_some()
     }
 
-    /// Execute an HTTP request via the onRequest handler.
+    /// Execute an HTTP request via cached onRequest `Global<Function>`.
+    /// Single Rust→JS call: handler passed as first arg, no property lookup.
     /// Returns None if onRequest is not exported.
     pub fn execute_http(
         &mut self,
@@ -167,7 +208,7 @@ impl Isolate {
     ) -> Option<Result<HttpResult, String>> {
         self.ensure_initialized();
 
-        if !self.has_on_request {
+        if self.on_request_fn.is_none() {
             return None;
         }
 
@@ -185,21 +226,20 @@ impl Isolate {
         v8::scope!(let handle_scope, &mut self.isolate);
         let context = v8::Local::new(handle_scope, &self.context);
         let scope = &mut v8::ContextScope::new(handle_scope, context);
+        let undefined = v8::undefined(scope).into();
 
-        let dispatch_fn = self.http_dispatch_fn.as_ref().unwrap();
-        let func = v8::Local::new(scope, dispatch_fn);
-
+        // Single JS call: dispatch_fn(handler, method, url, headers_json, body)
+        let dispatch = v8::Local::new(scope, self.http_dispatch_fn.as_ref().unwrap());
+        let handler = v8::Local::new(scope, self.on_request_fn.as_ref().unwrap());
         let arg_method = v8::String::new(scope, method).unwrap();
         let arg_url = v8::String::new(scope, url).unwrap();
         let arg_headers = v8::String::new(scope, headers_json).unwrap();
         let arg_body = v8::String::new(scope, body).unwrap();
-        let undefined = v8::undefined(scope).into();
 
-        let result = func.call(scope, undefined, &[
-            arg_method.into(), arg_url.into(), arg_headers.into(), arg_body.into()
+        let result = dispatch.call(scope, undefined, &[
+            handler.into(), arg_method.into(), arg_url.into(), arg_headers.into(), arg_body.into()
         ]);
 
-        // Get the JSON string result from the dispatch
         let json_str = match result {
             Some(val) if val.is_null_or_undefined() => return None,
             Some(val) if val.is_promise() => {
