@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 
 use crate::event_loop::{EventLoopState, SharedState};
 use crate::globals::setup_globals;
+use crate::isolate::AppCode;
+use crate::modules::ModuleEntry;
 use crate::runtime::{init_v8, thread_cpu_time, RequestResult, DISPATCH_JS, FETCH_JS};
 use crate::timers::fire_ready_timers;
 
@@ -75,7 +77,7 @@ struct LoopState {
 
     buffered_events: VecDeque<Event>,
 
-    server_js: String,
+    app_code: AppCode,
     initialized: bool,
     shutdown: bool,
 
@@ -349,11 +351,9 @@ pub struct ConcurrentIsolate {
 unsafe impl Send for ConcurrentIsolate {}
 
 impl ConcurrentIsolate {
-    /// Create a new concurrent isolate.
-    ///
-    /// `cpu_limit` — if `Some`, arms a POSIX CPU timer per request batch (Linux only).
-    pub fn new(
-        server_js: &str,
+    /// Internal constructor — shared by `new` and `from_modules`.
+    fn create_raw(
+        app_code: AppCode,
         event_rx: std::sync::mpsc::Receiver<Event>,
         event_tx: std::sync::mpsc::Sender<Event>,
         tokio_handle: Option<tokio::runtime::Handle>,
@@ -400,7 +400,7 @@ impl ConcurrentIsolate {
                 event_rx,
                 event_tx,
                 buffered_events: VecDeque::new(),
-                server_js: server_js.to_string(),
+                app_code,
                 initialized: false,
                 shutdown: false,
                 cpu_limit,
@@ -410,6 +410,32 @@ impl ConcurrentIsolate {
             #[cfg(target_os = "linux")]
             cpu_timer_active: false,
         }
+    }
+
+    /// Create a new concurrent isolate for legacy script format (`var __rpc = { ... }`).
+    ///
+    /// `cpu_limit` — if `Some`, arms a POSIX CPU timer per request batch (Linux only).
+    pub fn new(
+        server_js: &str,
+        event_rx: std::sync::mpsc::Receiver<Event>,
+        event_tx: std::sync::mpsc::Sender<Event>,
+        tokio_handle: Option<tokio::runtime::Handle>,
+        cpu_limit: Option<Duration>,
+    ) -> Self {
+        Self::create_raw(AppCode::Script(server_js.to_string()), event_rx, event_tx, tokio_handle, cpu_limit)
+    }
+
+    /// Create a new concurrent isolate for ES module format (`export function ...`).
+    ///
+    /// `cpu_limit` — if `Some`, arms a POSIX CPU timer per request batch (Linux only).
+    pub fn from_modules(
+        modules: Vec<ModuleEntry>,
+        event_rx: std::sync::mpsc::Receiver<Event>,
+        event_tx: std::sync::mpsc::Sender<Event>,
+        tokio_handle: Option<tokio::runtime::Handle>,
+        cpu_limit: Option<Duration>,
+    ) -> Self {
+        Self::create_raw(AppCode::Modules(modules), event_rx, event_tx, tokio_handle, cpu_limit)
     }
 
     /// Get a clone of the event sender (for passing to async op tasks).
@@ -423,6 +449,9 @@ impl ConcurrentIsolate {
             return;
         }
 
+        // Clone app_code so we don't borrow self.ls during V8 scope
+        let app_code = self.ls.app_code.clone();
+
         {
             v8::scope!(let handle_scope, &mut self.isolate);
             let context = v8::Local::new(handle_scope, &self.ls.context);
@@ -430,22 +459,38 @@ impl ConcurrentIsolate {
 
             setup_globals(scope);
 
-            // Load Fetch API polyfill
+            // Load Fetch API polyfill (works for both script and module modes)
             {
                 let fetch_code = v8::String::new(scope, FETCH_JS).unwrap();
                 let fetch_script = v8::Script::compile(scope, fetch_code, None).unwrap();
                 fetch_script.run(scope).unwrap();
             }
 
-            if !self.ls.server_js.is_empty() {
-                let code = v8::String::new(scope, &self.ls.server_js).unwrap();
-                if let Some(script) = v8::Script::compile(scope, code, None) {
-                    if script.run(scope).is_none() {
-                        eprintln!("[v8] Server JS execution failed (syntax/runtime error)");
-                        // Don't panic — isolate still works, methods just won't be registered
+            match &app_code {
+                AppCode::Script(server_js) => {
+                    if !server_js.is_empty() {
+                        let code = v8::String::new(scope, server_js).unwrap();
+                        if let Some(script) = v8::Script::compile(scope, code, None) {
+                            if script.run(scope).is_none() {
+                                eprintln!("[v8] Server JS execution failed (syntax/runtime error)");
+                            }
+                        } else {
+                            eprintln!("[v8] Server JS compilation failed (syntax error)");
+                        }
                     }
-                } else {
-                    eprintln!("[v8] Server JS compilation failed (syntax error)");
+                }
+                AppCode::Modules(modules) => {
+                    match crate::modules::load_modules(scope, modules) {
+                        Ok(namespace) => {
+                            let global = context.global(scope);
+                            let rpc_key = v8::String::new(scope, "__rpc").unwrap();
+                            let ns_local = v8::Local::new(scope, &namespace);
+                            global.set(scope, rpc_key.into(), ns_local);
+                        }
+                        Err(e) => {
+                            eprintln!("[v8] Module loading failed: {e}");
+                        }
+                    }
                 }
             }
 
@@ -635,7 +680,7 @@ impl ConcurrentIsolate {
 // Helper: spawn a concurrent worker thread
 // ---------------------------------------------------------------------------
 
-/// Spawn a worker thread running a `ConcurrentIsolate` event loop.
+/// Spawn a worker thread running a `ConcurrentIsolate` event loop (legacy script format).
 /// Returns the event sender for dispatching requests to this worker.
 pub fn spawn_concurrent_worker(
     server_js: &str,
@@ -651,6 +696,28 @@ pub fn spawn_concurrent_worker(
         .spawn(move || {
             let mut isolate =
                 ConcurrentIsolate::new(&js, event_rx, event_tx_clone, tokio_handle, cpu_limit);
+            isolate.run_event_loop();
+        })
+        .expect("Failed to spawn V8 worker thread");
+
+    event_tx
+}
+
+/// Spawn a worker thread running a `ConcurrentIsolate` event loop (ES module format).
+/// Returns the event sender for dispatching requests to this worker.
+pub fn spawn_concurrent_worker_modules(
+    modules: Vec<ModuleEntry>,
+    tokio_handle: Option<tokio::runtime::Handle>,
+    cpu_limit: Option<Duration>,
+) -> std::sync::mpsc::Sender<Event> {
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let event_tx_clone = event_tx.clone();
+
+    std::thread::Builder::new()
+        .name("v8-concurrent-worker".to_string())
+        .spawn(move || {
+            let mut isolate =
+                ConcurrentIsolate::from_modules(modules, event_rx, event_tx_clone, tokio_handle, cpu_limit);
             isolate.run_event_loop();
         })
         .expect("Failed to spawn V8 worker thread");

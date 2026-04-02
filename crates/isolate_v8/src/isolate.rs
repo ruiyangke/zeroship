@@ -10,7 +10,17 @@ use std::time::Instant;
 
 use crate::event_loop::{run_event_loop, run_event_loop_until_settled, EventLoopState, SharedState};
 use crate::globals::setup_globals;
+use crate::modules::ModuleEntry;
 use crate::runtime::{thread_cpu_time, RequestResult, DISPATCH_JS, FETCH_JS};
+
+/// How the app's code is provided.
+#[derive(Clone)]
+pub(crate) enum AppCode {
+    /// Legacy: a script that sets `var __rpc = { ... }`.
+    Script(String),
+    /// New: ES modules with `export function ...`.
+    Modules(Vec<ModuleEntry>),
+}
 
 /// A V8 isolate with persistent context -- compiled code stays across requests.
 /// Server JS is compiled ONCE. Each request just calls the handler function.
@@ -19,13 +29,13 @@ pub struct Isolate {
     context: v8::Global<v8::Context>,
     dispatch_fn: Option<v8::Global<v8::Function>>,
     initialized: bool,
-    server_js: String,
+    app_code: AppCode,
     state: SharedState,
 }
 
 impl Isolate {
-    /// Create a new isolate. Call `init_v8()` before creating isolates.
-    pub fn new(server_js: &str) -> Self {
+    /// Create a V8 isolate and context with common setup.
+    fn create_raw(app_code: AppCode) -> Self {
         let params = v8::CreateParams::default().heap_limits(0, 128 * 1024 * 1024);
         let mut isolate = v8::Isolate::new(params);
 
@@ -58,9 +68,21 @@ impl Isolate {
             context,
             dispatch_fn: None,
             initialized: false,
-            server_js: server_js.to_string(),
+            app_code,
             state,
         }
+    }
+
+    /// Create a new isolate for legacy script format (`var __rpc = { ... }`).
+    /// Call `init_v8()` before creating isolates.
+    pub fn new(server_js: &str) -> Self {
+        Self::create_raw(AppCode::Script(server_js.to_string()))
+    }
+
+    /// Create a new isolate for ES module format (`export function ...`).
+    /// Call `init_v8()` before creating isolates.
+    pub fn from_modules(modules: Vec<ModuleEntry>) -> Self {
+        Self::create_raw(AppCode::Modules(modules))
     }
 
     /// Lazy initialization: load server JS + compile dispatch function (once).
@@ -69,28 +91,49 @@ impl Isolate {
             return;
         }
 
+        // Clone app_code so we don't borrow self during V8 scope
+        let app_code = self.app_code.clone();
+
         v8::scope!(let handle_scope, &mut self.isolate);
         let context = v8::Local::new(handle_scope, &self.context);
         let scope = &mut v8::ContextScope::new(handle_scope, context);
 
         setup_globals(scope);
 
-        // Load Fetch API polyfill
+        // Load Fetch API polyfill (works for both script and module modes)
         {
             let fetch_code = v8::String::new(scope, FETCH_JS).unwrap();
             let fetch_script = v8::Script::compile(scope, fetch_code, None).unwrap();
             fetch_script.run(scope).unwrap();
         }
 
-        if !self.server_js.is_empty() {
-            let code = v8::String::new(scope, &self.server_js).unwrap();
-            if let Some(script) = v8::Script::compile(scope, code, None) {
-                if script.run(scope).is_none() {
-                    eprintln!("[v8] Server JS execution failed (syntax/runtime error)");
-                    // Don't panic — isolate still works, methods just won't be registered
+        match &app_code {
+            AppCode::Script(server_js) => {
+                if !server_js.is_empty() {
+                    let code = v8::String::new(scope, server_js).unwrap();
+                    if let Some(script) = v8::Script::compile(scope, code, None) {
+                        if script.run(scope).is_none() {
+                            eprintln!("[v8] Server JS execution failed (syntax/runtime error)");
+                        }
+                    } else {
+                        eprintln!("[v8] Server JS compilation failed (syntax error)");
+                    }
                 }
-            } else {
-                eprintln!("[v8] Server JS compilation failed (syntax error)");
+            }
+            AppCode::Modules(modules) => {
+                // Load ES modules and bind namespace to globalThis.__rpc
+                // so the existing DISPATCH_JS works unchanged.
+                match crate::modules::load_modules(scope, modules) {
+                    Ok(namespace) => {
+                        let global = context.global(scope);
+                        let rpc_key = v8::String::new(scope, "__rpc").unwrap();
+                        let ns_local = v8::Local::new(scope, &namespace);
+                        global.set(scope, rpc_key.into(), ns_local);
+                    }
+                    Err(e) => {
+                        eprintln!("[v8] Module loading failed: {e}");
+                    }
+                }
             }
         }
 
@@ -189,7 +232,7 @@ impl Isolate {
 /// Each isolate has a persistent context with pre-compiled handlers.
 pub struct IsolatePool {
     available: std::sync::Mutex<Vec<Isolate>>,
-    server_js: String,
+    app_code: AppCode,
     max_size: usize,
 }
 
@@ -203,7 +246,15 @@ impl IsolatePool {
     pub fn new(server_js: &str, max_size: usize) -> Self {
         Self {
             available: std::sync::Mutex::new(Vec::new()),
-            server_js: server_js.to_string(),
+            app_code: AppCode::Script(server_js.to_string()),
+            max_size,
+        }
+    }
+
+    pub fn from_modules(modules: Vec<ModuleEntry>, max_size: usize) -> Self {
+        Self {
+            available: std::sync::Mutex::new(Vec::new()),
+            app_code: AppCode::Modules(modules),
             max_size,
         }
     }
@@ -213,7 +264,7 @@ impl IsolatePool {
             let mut pool = self.available.lock().unwrap();
             pool.pop()
         }
-        .unwrap_or_else(|| Isolate::new(&self.server_js));
+        .unwrap_or_else(|| Isolate::create_raw(self.app_code.clone()));
 
         let result = isolate.execute_request(request_json);
 

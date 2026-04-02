@@ -31,6 +31,7 @@ mod timers;
 
 // Re-export public API
 pub use isolate::{Isolate, IsolatePool};
+pub use modules::ModuleEntry;
 pub use storage::AppStorage;
 pub use runtime::{init_v8, RequestResult};
 
@@ -632,5 +633,178 @@ mod tests {
             .unwrap();
         assert!(r.json.contains("SGVsbG8sIFdvcmxkIQ=="), "got: {}", r.json);
         assert!(r.json.contains("Hello, World!"), "got: {}", r.json);
+    }
+
+    // -----------------------------------------------------------------------
+    // ESM module integration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn esm_basic_rpc() {
+        init_v8();
+        let modules = vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: r#"
+                export function ping() { return "pong"; }
+                export function add(a, b) { return a + b; }
+            "#.into(),
+        }];
+        let mut isolate = Isolate::from_modules(modules);
+        let r = isolate
+            .execute_request(r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":1}"#)
+            .unwrap();
+        assert!(r.json.contains("pong"), "got: {}", r.json);
+
+        let r2 = isolate
+            .execute_request(r#"{"jsonrpc":"2.0","method":"add","params":[3,4],"id":2}"#)
+            .unwrap();
+        assert!(r2.json.contains("\"result\":7"), "got: {}", r2.json);
+    }
+
+    #[test]
+    fn esm_multi_module_rpc() {
+        init_v8();
+        let modules = vec![
+            ModuleEntry {
+                specifier: "index.js".into(),
+                source: r#"
+                    import { add } from './math.js';
+                    export function compute(a, b) { return add(a, b); }
+                "#.into(),
+            },
+            ModuleEntry {
+                specifier: "math.js".into(),
+                source: "export function add(a, b) { return a + b; }".into(),
+            },
+        ];
+        let mut isolate = Isolate::from_modules(modules);
+        let r = isolate
+            .execute_request(r#"{"jsonrpc":"2.0","method":"compute","params":[3,4],"id":1}"#)
+            .unwrap();
+        assert!(r.json.contains("7"), "got: {}", r.json);
+    }
+
+    #[test]
+    fn esm_async_with_fetch() {
+        init_v8();
+        let modules = vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: r#"
+                export async function fetchTest() {
+                    const resp = await fetch("https://httpbin.org/get");
+                    return resp.status;
+                }
+            "#.into(),
+        }];
+        let mut isolate = Isolate::from_modules(modules);
+        let r = isolate
+            .execute_request(r#"{"jsonrpc":"2.0","method":"fetchTest","params":[],"id":1}"#)
+            .unwrap();
+        assert!(r.json.contains("200"), "got: {}", r.json);
+    }
+
+    #[test]
+    fn esm_with_kv() {
+        init_v8();
+        let modules = vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: r#"
+                export function set(k, v) { kv.set(k, v); return "ok"; }
+                export function get(k) { return kv.get(k); }
+            "#.into(),
+        }];
+        let mut isolate = Isolate::from_modules(modules);
+        isolate
+            .execute_request(r#"{"jsonrpc":"2.0","method":"set","params":["x","1"],"id":1}"#)
+            .unwrap();
+        let r = isolate
+            .execute_request(r#"{"jsonrpc":"2.0","method":"get","params":["x"],"id":2}"#)
+            .unwrap();
+        assert!(r.json.contains("1"), "got: {}", r.json);
+    }
+
+    #[test]
+    fn esm_async_timeout() {
+        init_v8();
+        let modules = vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: r#"
+                export function delayed() {
+                    return new Promise(function(resolve) {
+                        setTimeout(function() { resolve("done after delay"); }, 10);
+                    });
+                }
+            "#.into(),
+        }];
+        let mut isolate = Isolate::from_modules(modules);
+        let r = isolate
+            .execute_request(r#"{"jsonrpc":"2.0","method":"delayed","params":[],"id":1}"#)
+            .unwrap();
+        assert!(r.json.contains("done after delay"), "got: {}", r.json);
+    }
+
+    #[test]
+    fn esm_concurrent_sync() {
+        use crate::concurrent::{ConcurrentIsolate, Event};
+        init_v8();
+        let modules = vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: r#"
+                export function ping() { return "pong"; }
+                export function add(a, b) { return a + b; }
+            "#.into(),
+        }];
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let event_tx_clone = event_tx.clone();
+        let handle = std::thread::spawn(move || {
+            let mut isolate = ConcurrentIsolate::from_modules(modules, event_rx, event_tx_clone, None, None);
+            isolate.run_until_idle();
+        });
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        event_tx
+            .send(Event::NewRequest {
+                id: 1,
+                body: r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":1}"#.to_string(),
+                reply: reply_tx,
+            })
+            .unwrap();
+        drop(event_tx);
+        let result = reply_rx.blocking_recv().unwrap().unwrap();
+        assert!(result.json.contains("pong"), "got: {}", result.json);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn esm_concurrent_async() {
+        use crate::concurrent::{ConcurrentIsolate, Event};
+        init_v8();
+        let modules = vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: r#"
+                export function delayed(ms) {
+                    return new Promise(function(resolve) {
+                        setTimeout(function() { resolve("done_" + ms); }, ms || 10);
+                    });
+                }
+            "#.into(),
+        }];
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let event_tx_clone = event_tx.clone();
+        let handle = std::thread::spawn(move || {
+            let mut isolate = ConcurrentIsolate::from_modules(modules, event_rx, event_tx_clone, None, None);
+            isolate.run_until_idle();
+        });
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        event_tx
+            .send(Event::NewRequest {
+                id: 1,
+                body: r#"{"jsonrpc":"2.0","method":"delayed","params":[10],"id":1}"#.to_string(),
+                reply: reply_tx,
+            })
+            .unwrap();
+        drop(event_tx);
+        let result = reply_rx.blocking_recv().unwrap().unwrap();
+        assert!(result.json.contains("done_10"), "got: {}", result.json);
+        handle.join().unwrap();
     }
 }

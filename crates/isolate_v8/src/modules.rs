@@ -40,12 +40,13 @@ impl ModuleRegistry {
 /// Compile and register all modules, instantiate and evaluate the entrypoint.
 ///
 /// `entries[0]` is the entrypoint. All others are dependencies.
+/// Returns the entrypoint module's namespace object (contains the exports).
 pub(crate) fn load_modules(
     scope: &mut v8::PinScope,
     entries: &[ModuleEntry],
-) -> Result<(), String> {
+) -> Result<v8::Global<v8::Value>, String> {
     if entries.is_empty() {
-        return Ok(());
+        return Err("No modules to load".into());
     }
 
     let registry: SharedRegistry = Rc::new(RefCell::new(ModuleRegistry::new()));
@@ -109,7 +110,16 @@ pub(crate) fn load_modules(
         scope.perform_microtask_checkpoint();
     }
 
-    Ok(())
+    // Phase 4: Extract entrypoint namespace (contains the module's exports)
+    let namespace = {
+        let reg = registry.borrow();
+        let cm = reg.modules.get(entrypoint).unwrap();
+        let module = v8::Local::new(scope, &cm.module);
+        let ns = module.get_module_namespace();
+        v8::Global::new(scope, ns)
+    };
+
+    Ok(namespace)
 }
 
 /// V8 resolve callback — called when V8 encounters `import ... from '...'`.
@@ -174,7 +184,7 @@ mod tests {
             v8::scope!(let handle_scope, &mut isolate);
             let context = v8::Context::new(handle_scope, Default::default());
             let scope = &mut v8::ContextScope::new(handle_scope, context);
-            load_modules(scope, entries)?;
+            let _namespace = load_modules(scope, entries)?;
         }
 
         Ok(isolate)
