@@ -214,6 +214,76 @@ test.describe("App Detail Page", () => {
 });
 
 // =========================================================================
+// App Detail — Extended Flows (create a test app, exercise full lifecycle)
+// =========================================================================
+
+test.describe("App Lifecycle in Dashboard", () => {
+  const appId = `lifecycle-${Date.now()}`;
+
+  test.beforeEach(async ({ page }) => { await login(page); });
+
+  test("full lifecycle: create → deploy → test → logs → delete", async ({ page, request }) => {
+    // Step 1: Create app via API (faster than UI for setup)
+    await createTestApp(request, appId,
+      'var __rpc = { greet: function(name) { console.log("Hello " + name); return "Hi " + name; } };'
+    );
+
+    // Step 2: Navigate to app detail
+    await page.goto(`/apps/${appId}`);
+    await expect(page.locator(`text=${appId}`).first()).toBeVisible({ timeout: 10000 });
+
+    // Step 3: Test panel — call RPC
+    const methodInput = page.locator('input[placeholder*="method"]').first();
+    await expect(methodInput).toBeVisible({ timeout: 10000 });
+    await methodInput.fill("greet");
+
+    const paramsInput = page.locator('textarea[placeholder*="param"], input[placeholder*="param"]').first();
+    if (await paramsInput.isVisible({ timeout: 2000 }).catch(() => false)) {
+      await paramsInput.fill('["World"]');
+    }
+
+    await page.click('button:has-text("run")');
+    await expect(page.locator("text=Hi World").first()).toBeVisible({ timeout: 10000 });
+
+    // Step 4: Logs should show console.log output
+    // The logs section auto-refreshes — wait for it
+    await expect(page.locator("text=Hello World").first()).toBeVisible({ timeout: 15000 });
+
+    // Cleanup
+    await deleteTestApp(request, appId);
+  });
+
+  test("delete app from app list", async ({ page, request }) => {
+    const delAppId = `del-${Date.now()}`;
+    await createTestApp(request, delAppId);
+
+    // Navigate to apps list
+    await page.goto("/apps");
+    await expect(page.locator(`text=${delAppId}`).first()).toBeVisible({ timeout: 10000 });
+
+    // Navigate to app detail
+    await page.click(`text=${delAppId}`);
+    await expect(page).toHaveURL(new RegExp(`/apps/${delAppId}`), { timeout: 5000 });
+
+    // Find and click delete button
+    const deleteBtn = page.locator('button:has-text("delete"), button:has-text("DELETE")').first();
+    await expect(deleteBtn).toBeVisible({ timeout: 5000 });
+
+    // Handle confirmation dialog
+    page.on("dialog", (dialog) => dialog.accept());
+    await deleteBtn.click();
+
+    // Should navigate away (to apps list or show deleted message)
+    await page.waitForTimeout(2000);
+    // Verify app is gone from API
+    const res = await request.get(`${API}/api/apps/${delAppId}`, {
+      headers: { Authorization: `Bearer ${MASTER_KEY}` },
+    });
+    expect(res.status()).toBe(404);
+  });
+});
+
+// =========================================================================
 // AI Chat
 // =========================================================================
 

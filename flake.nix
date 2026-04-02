@@ -24,11 +24,10 @@
             sqlite
             wrk
             hey
-            playwright-test
           ];
 
           RUST_BACKTRACE = "1";
-          # Use Nix-provided Playwright browsers instead of downloading
+          # Playwright: use Nix-provided browsers, npm provides the test runner
           PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
         };
