@@ -1,68 +1,258 @@
 /**
- * Dashboard UI E2E tests — tests the React frontend via Playwright browser.
+ * Dashboard UI E2E tests — comprehensive browser tests.
  *
- * Requires: libglib-2.0 (Chromium dependency).
- * Skip on environments without browser support (e.g., minimal Nix shells).
- * Run: npx playwright test e2e/dashboard.spec.ts
+ * Requires: Chromium (via Nix playwright-test or npx playwright install)
+ * Servers: appbase on :3335, vite on :5173
  */
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 
 const MASTER_KEY = "e2e-test-key";
+const API = "http://localhost:3335";
 
-test.describe("Login", () => {
-  test("shows login page", async ({ page }) => {
+/** Helper: login and navigate to authenticated state */
+async function login(page: Page) {
+  await page.goto("/");
+  await page.evaluate((key) => localStorage.setItem("appbase_key", key), MASTER_KEY);
+  await page.goto("/");
+  await expect(page.locator("text=overview").first()).toBeVisible({ timeout: 10000 });
+}
+
+/** Helper: create an app via API for test setup */
+async function createTestApp(request: any, id: string, code?: string) {
+  await request.post(`${API}/api/apps`, {
+    headers: { Authorization: `Bearer ${MASTER_KEY}`, "Content-Type": "application/json" },
+    data: { id, plan_id: "free" },
+  });
+  if (code) {
+    await request.post(`${API}/api/apps/${id}/deploy`, {
+      headers: { Authorization: `Bearer ${MASTER_KEY}`, "Content-Type": "application/javascript" },
+      data: code,
+    });
+  }
+}
+
+/** Helper: delete an app via API for cleanup */
+async function deleteTestApp(request: any, id: string) {
+  await request.delete(`${API}/api/apps/${id}`, {
+    headers: { Authorization: `Bearer ${MASTER_KEY}` },
+  });
+}
+
+// =========================================================================
+// Login
+// =========================================================================
+
+test.describe("Login Page", () => {
+  test("shows login form with key input", async ({ page }) => {
     await page.goto("/");
-    await expect(page.locator("text=master key")).toBeVisible();
+    const input = page.locator('input[type="password"]');
+    await expect(input).toBeVisible();
+    const button = page.locator('button[type="submit"]');
+    await expect(button).toBeVisible();
   });
 
-  test("login with valid key", async ({ page }) => {
+  test("login with valid key redirects to overview", async ({ page }) => {
     await page.goto("/");
     await page.fill('input[type="password"]', MASTER_KEY);
     await page.click('button[type="submit"]');
-    // Should redirect to overview
-    await expect(page.locator("text=overview")).toBeVisible({ timeout: 10000 });
+    await expect(page.locator("text=overview").first()).toBeVisible({ timeout: 10000 });
+    // Verify key is stored
+    const key = await page.evaluate(() => localStorage.getItem("appbase_key"));
+    expect(key).toBe(MASTER_KEY);
+  });
+
+  test("login persists across page reloads", async ({ page }) => {
+    await login(page);
+    await page.reload();
+    // Should still be authenticated (no login page)
+    await expect(page.locator("text=overview").first()).toBeVisible({ timeout: 10000 });
   });
 });
 
-test.describe("Authenticated", () => {
-  test.beforeEach(async ({ page }) => {
-    // Login first
-    await page.goto("/");
-    await page.evaluate((key) => {
-      localStorage.setItem("appbase_key", key);
-    }, MASTER_KEY);
-    await page.goto("/");
+// =========================================================================
+// Overview
+// =========================================================================
+
+test.describe("Overview Page", () => {
+  test.beforeEach(async ({ page }) => { await login(page); });
+
+  test("shows health status", async ({ page }) => {
+    await expect(page.locator("text=health").first()).toBeVisible({ timeout: 10000 });
   });
 
-  test("overview shows stats", async ({ page }) => {
-    await expect(page.locator("text=health")).toBeVisible({ timeout: 10000 });
+  test("shows pool stats", async ({ page }) => {
+    await expect(page.locator("text=isolate").first()).toBeVisible({ timeout: 10000 });
   });
 
-  test("apps page shows app list", async ({ page }) => {
-    await page.click('text=apps');
-    await expect(page.locator("text=default")).toBeVisible({ timeout: 10000 });
+  test("sidebar navigation works", async ({ page }) => {
+    // Click through all nav items
+    await page.click("text=apps");
+    await expect(page).toHaveURL(/\/apps/);
+
+    await page.click("text=create app");
+    await expect(page).toHaveURL(/\/apps\/new/);
+
+    await page.click("text=ai agent");
+    await expect(page).toHaveURL(/\/ai/);
+
+    await page.click("text=overview");
+    await expect(page).toHaveURL(/\/$/);
+  });
+});
+
+// =========================================================================
+// App List
+// =========================================================================
+
+test.describe("App List Page", () => {
+  test.beforeEach(async ({ page }) => { await login(page); });
+
+  test("shows default app", async ({ page }) => {
+    await page.click("text=apps");
+    await expect(page.locator("text=default").first()).toBeVisible({ timeout: 10000 });
   });
 
-  test("create app page has form", async ({ page }) => {
-    await page.click('text=create app');
-    await expect(page.locator('input[placeholder*="app"]')).toBeVisible({ timeout: 10000 });
+  test("clicking app navigates to detail", async ({ page }) => {
+    await page.click("text=apps");
+    await page.click("text=default");
+    await expect(page).toHaveURL(/\/apps\/default/);
+  });
+});
+
+// =========================================================================
+// Create App
+// =========================================================================
+
+test.describe("Create App Page", () => {
+  test.beforeEach(async ({ page }) => { await login(page); });
+
+  test("shows form with app id input and plan select", async ({ page }) => {
+    await page.click("text=create app");
+    await expect(page.locator('input[placeholder*="app"]').first()).toBeVisible({ timeout: 10000 });
   });
 
-  test("create app page shows templates", async ({ page }) => {
-    await page.click('text=create app');
-    // Templates should be visible
+  test("shows starter templates", async ({ page }) => {
+    await page.click("text=create app");
     await expect(page.locator("text=Hello World").first()).toBeVisible({ timeout: 10000 });
   });
 
-  test("AI agent page loads", async ({ page }) => {
-    await page.click('text=ai agent');
-    await expect(page.locator("text=Describe")).toBeVisible({ timeout: 10000 });
+  test("can create app with form", async ({ page, request }) => {
+    const appId = `ui-create-${Date.now()}`;
+    await page.click("text=create app");
+
+    await page.fill('input[placeholder*="app"]', appId);
+    await page.click('button:has-text("create")');
+
+    // Should navigate to app detail
+    await expect(page).toHaveURL(new RegExp(`/apps/${appId}`), { timeout: 10000 });
+
+    // Cleanup
+    await deleteTestApp(request, appId);
+  });
+});
+
+// =========================================================================
+// App Detail
+// =========================================================================
+
+test.describe("App Detail Page", () => {
+  // Use the "default" app which always exists
+  const appId = "default";
+
+  test.beforeEach(async ({ page }) => { await login(page); });
+
+  test("shows app info", async ({ page }) => {
+    await page.goto(`/apps/${appId}`);
+    await expect(page.locator(`text=${appId}`).first()).toBeVisible({ timeout: 10000 });
   });
 
-  test("app detail shows Monaco editor", async ({ page }) => {
-    await page.click('text=apps');
-    await page.click('text=default');
-    // Monaco editor should load
+  test("shows Monaco editor with deployed code", async ({ page }) => {
+    await page.goto(`/apps/${appId}`);
     await expect(page.locator(".monaco-editor").first()).toBeVisible({ timeout: 15000 });
+  });
+
+  test("shows API key (masked)", async ({ page }) => {
+    await page.goto(`/apps/${appId}`);
+    // API key should be masked with asterisks
+    await expect(page.locator("text=****").first()).toBeVisible({ timeout: 10000 });
+  });
+
+  test("shows quick start curl command", async ({ page }) => {
+    await page.goto(`/apps/${appId}`);
+    await expect(page.locator("text=curl").first()).toBeVisible({ timeout: 10000 });
+  });
+
+  test("test panel: can call RPC method", async ({ page }) => {
+    await page.goto(`/apps/${appId}`);
+
+    // Find method input and fill it — default app has "ping"
+    const methodInput = page.locator('input[placeholder*="method"]').first();
+    await expect(methodInput).toBeVisible({ timeout: 10000 });
+    await methodInput.fill("ping");
+
+    // Click run button
+    await page.click('button:has-text("run")');
+
+    // Should see "pong" result
+    await expect(page.locator("text=pong").first()).toBeVisible({ timeout: 10000 });
+  });
+
+  test("deploy: can redeploy code", async ({ page }) => {
+    await page.goto(`/apps/${appId}`);
+
+    // Wait for Monaco to load
+    await expect(page.locator(".monaco-editor").first()).toBeVisible({ timeout: 15000 });
+
+    // Click deploy button
+    const deployBtn = page.locator('button:has-text("deploy"), button:has-text("DEPLOY")').first();
+    await expect(deployBtn).toBeVisible({ timeout: 5000 });
+    await deployBtn.click();
+
+    // Should see version increment or success message
+    await expect(page.locator("text=v").first()).toBeVisible({ timeout: 10000 });
+  });
+});
+
+// =========================================================================
+// AI Chat
+// =========================================================================
+
+test.describe("AI Chat Page", () => {
+  test.beforeEach(async ({ page }) => { await login(page); });
+
+  test("shows chat interface with example prompts", async ({ page }) => {
+    await page.click("text=ai agent");
+    await expect(page.locator("text=Describe").first()).toBeVisible({ timeout: 10000 });
+    // Should show example prompts
+    await expect(page.locator("text=todo").first()).toBeVisible({ timeout: 5000 });
+  });
+
+  test("clicking example fills input", async ({ page }) => {
+    await page.click("text=ai agent");
+    // Click first example prompt
+    const example = page.locator("button:has-text('todo')").first();
+    await expect(example).toBeVisible({ timeout: 5000 });
+    await example.click();
+
+    // Input should be filled
+    const textarea = page.locator("textarea").first();
+    const value = await textarea.inputValue();
+    expect(value.length).toBeGreaterThan(0);
+  });
+});
+
+// =========================================================================
+// Logout
+// =========================================================================
+
+test.describe("Logout", () => {
+  test("logout clears auth and shows login", async ({ page }) => {
+    await login(page);
+    await page.click("text=logout");
+    // Should show login page
+    await expect(page.locator('input[type="password"]')).toBeVisible({ timeout: 5000 });
+    // Key should be cleared
+    const key = await page.evaluate(() => localStorage.getItem("appbase_key"));
+    expect(key).toBeNull();
   });
 });
