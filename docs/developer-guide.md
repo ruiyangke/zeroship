@@ -214,6 +214,57 @@ var __rpc = {
 
 ---
 
+## Utility APIs
+
+### crypto.randomUUID()
+
+Generates a RFC 4122 v4 UUID string.
+
+```javascript
+var __rpc = {
+  create: function(name) {
+    var id = crypto.randomUUID();
+    // e.g. "550e8400-e29b-41d4-a716-446655440000"
+    kv.set("item:" + id, JSON.stringify({ id: id, name: name }));
+    return { id: id };
+  }
+};
+```
+
+### TextEncoder / TextDecoder
+
+Encode and decode UTF-8 strings to/from `Uint8Array`.
+
+```javascript
+var enc = new TextEncoder();
+var buf = enc.encode("Hello");    // Uint8Array [72, 101, 108, 108, 111]
+
+var dec = new TextDecoder();
+var str = dec.decode(buf);        // "Hello"
+```
+
+### btoa / atob
+
+Base64 encode and decode strings.
+
+```javascript
+var encoded = btoa("Hello, World!");  // "SGVsbG8sIFdvcmxkIQ=="
+var decoded = atob(encoded);          // "Hello, World!"
+```
+
+### structuredClone
+
+Deep-clone a JSON-serializable object. This is a simplified polyfill using `JSON.parse(JSON.stringify(...))` — it handles plain objects, arrays, strings, numbers, booleans, and null. It does not preserve `Date`, `Map`, `Set`, `RegExp`, or circular references.
+
+```javascript
+var original = { a: 1, b: [2, 3] };
+var clone = structuredClone(original);
+clone.b.push(4);
+// original.b is still [2, 3], clone.b is [2, 3, 4]
+```
+
+---
+
 ## Error Handling
 
 Thrown errors and rejected Promises are caught by the runtime and returned as JSON-RPC errors.

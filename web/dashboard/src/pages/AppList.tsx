@@ -5,8 +5,35 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
-import { Plus } from "lucide-react";
+import { Plus, Copy, Check } from "lucide-react";
 import StatusBadge from "../components/StatusBadge";
+import { useState } from "react";
+
+function CopyableEndpoint({ appId }: { appId: string }) {
+  const [copied, setCopied] = useState(false);
+  const snippet = `curl -X POST /rpc -H 'X-App-Id: ${appId}' -d '{"jsonrpc":"2.0","method":"...","params":[],"id":1}'`;
+
+  function handleCopy(e: React.MouseEvent) {
+    e.stopPropagation();
+    navigator.clipboard.writeText(snippet).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground font-mono">
+      <code className="truncate max-w-[180px]">X-App-Id: {appId}</code>
+      <button
+        onClick={handleCopy}
+        className="p-0.5 hover:text-primary transition-colors"
+        title="Copy curl example"
+      >
+        {copied ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
+      </button>
+    </span>
+  );
+}
 
 export default function AppList() {
   const navigate = useNavigate();
@@ -74,6 +101,7 @@ export default function AppList() {
                   <TableHead>id</TableHead>
                   <TableHead>plan</TableHead>
                   <TableHead>version</TableHead>
+                  <TableHead>endpoint</TableHead>
                   <TableHead>requests</TableHead>
                   <TableHead>status</TableHead>
                   <TableHead>updated</TableHead>
@@ -99,6 +127,9 @@ export default function AppList() {
                       <Badge variant="muted">{app.plan_id}</Badge>
                     </TableCell>
                     <TableCell>v{app.version}</TableCell>
+                    <TableCell>
+                      <CopyableEndpoint appId={app.id} />
+                    </TableCell>
                     <TableCell>{getAppRequests(app.id)}</TableCell>
                     <TableCell>
                       <StatusBadge status={getAppStatus(app.id)} />

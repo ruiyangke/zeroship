@@ -580,6 +580,42 @@ mod tests {
     }
 
     #[test]
+    fn crypto_random_uuid() {
+        init_v8();
+        let js = r#"var __rpc = { test: function() {
+            var id1 = crypto.randomUUID();
+            var id2 = crypto.randomUUID();
+            return { id1, id2, different: id1 !== id2, format: /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id1) };
+        }};"#;
+        let mut isolate = Isolate::new(js);
+        let r = isolate
+            .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
+            .unwrap();
+        assert!(r.json.contains("\"different\":true"), "got: {}", r.json);
+        assert!(r.json.contains("\"format\":true"), "got: {}", r.json);
+    }
+
+    #[test]
+    fn structured_clone() {
+        init_v8();
+        let js = r#"var __rpc = { test: function() {
+            var obj = { a: 1, b: [2, 3], c: { d: "hello" } };
+            var clone = structuredClone(obj);
+            clone.a = 99;
+            clone.b.push(4);
+            return { original: obj.a, cloned: clone.a, origLen: obj.b.length, cloneLen: clone.b.length };
+        }};"#;
+        let mut isolate = Isolate::new(js);
+        let r = isolate
+            .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
+            .unwrap();
+        assert!(r.json.contains("\"original\":1"), "got: {}", r.json);
+        assert!(r.json.contains("\"cloned\":99"), "got: {}", r.json);
+        assert!(r.json.contains("\"origLen\":2"), "got: {}", r.json);
+        assert!(r.json.contains("\"cloneLen\":3"), "got: {}", r.json);
+    }
+
+    #[test]
     fn btoa_atob() {
         init_v8();
         let js = r#"var __rpc = { test: function() {

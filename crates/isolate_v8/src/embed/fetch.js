@@ -669,4 +669,14 @@
     };
   }
 
+  // =========================================================================
+  // structuredClone polyfill (JSON-based, covers common cases)
+  // =========================================================================
+
+  if (typeof structuredClone === "undefined") {
+    globalThis.structuredClone = function(obj) {
+      return JSON.parse(JSON.stringify(obj));
+    };
+  }
+
 })(globalThis);

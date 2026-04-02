@@ -37,6 +37,10 @@ var __rpc = {
 - console.log / console.error
 - kv.get(key) / kv.set(key, value) / kv.delete(key) / kv.list() — per-app key-value store
 - env.get(key) — read config from process env (reads APPBASE_APP_{KEY}, e.g. env.get("api_key") reads APPBASE_APP_API_KEY)
+- crypto.randomUUID() — generate a RFC 4122 v4 UUID string
+- TextEncoder / TextDecoder — encode/decode UTF-8 strings to/from Uint8Array
+- btoa(str) / atob(str) — Base64 encode/decode
+- structuredClone(obj) — deep clone a JSON-serializable object
 - Promise, async/await
 - JSON.parse / JSON.stringify
 - All standard JavaScript built-ins

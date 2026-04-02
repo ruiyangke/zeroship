@@ -187,6 +187,31 @@ fn env_get_callback(
 }
 
 // ---------------------------------------------------------------------------
+// crypto.randomUUID() — generates a RFC 4122 v4 UUID
+// ---------------------------------------------------------------------------
+
+fn crypto_random_uuid_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).unwrap();
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10xx
+
+    let uuid = format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11],
+        bytes[12], bytes[13], bytes[14], bytes[15]
+    );
+    let v = v8::String::new(scope, &uuid).unwrap();
+    rv.set(v.into());
+}
+
+// ---------------------------------------------------------------------------
 // Setup all globals on a V8 context
 // ---------------------------------------------------------------------------
 
@@ -269,6 +294,16 @@ pub(crate) fn setup_globals(scope: &mut v8::PinScope) {
 
         let kv_key = v8::String::new(scope, "kv").unwrap();
         global.set(scope, kv_key.into(), kv.into());
+    }
+
+    // crypto.randomUUID()
+    {
+        let crypto = v8::Object::new(scope);
+        let uuid_fn = v8::Function::new(scope, crypto_random_uuid_callback).unwrap();
+        let uuid_key = v8::String::new(scope, "randomUUID").unwrap();
+        crypto.set(scope, uuid_key.into(), uuid_fn.into());
+        let crypto_key = v8::String::new(scope, "crypto").unwrap();
+        global.set(scope, crypto_key.into(), crypto.into());
     }
 
     // env namespace (read-only, reads APPBASE_APP_{KEY} from process env)

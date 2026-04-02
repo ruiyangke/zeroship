@@ -126,6 +126,7 @@ name = "appbase-isolate-v8"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "getrandom 0.2.17",
  "http-body-util",
  "hyper",
  "hyper-util",
