@@ -77,16 +77,15 @@ function URL(input, base) {
     var parsed = __urlParse(String(input), baseStr);
     if (parsed === null) throw new TypeError("Invalid URL: " + input);
 
-    var data = JSON.parse(parsed);
-    this._protocol = data.protocol;
-    this._username = data.username;
-    this._password = data.password;
-    this._hostname = data.hostname;
-    this._port = data.port;
-    this._pathname = data.pathname;
-    this._search = data.search;
-    this._hash = data.hash;
-    this._origin = data.origin;
+    this._protocol = parsed.protocol;
+    this._username = parsed.username;
+    this._password = parsed.password;
+    this._hostname = parsed.hostname;
+    this._port = parsed.port;
+    this._pathname = parsed.pathname;
+    this._search = parsed.search;
+    this._hash = parsed.hash;
+    this._origin = parsed.origin;
     this._searchParams = new URLSearchParams(this._search);
 }
 
