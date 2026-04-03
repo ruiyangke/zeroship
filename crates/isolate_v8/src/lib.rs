@@ -1030,4 +1030,76 @@ mod tests {
         let r = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
         assert!(r.json.contains("64"), "SHA-512 should produce 64 bytes, got: {}", r.json);
     }
+
+    // -----------------------------------------------------------------------
+    // Web Crypto: importKey + exportKey + generateKey
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn crypto_import_export_hmac_raw() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var raw = new Uint8Array([1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]);
+                var key = await crypto.subtle.importKey("raw", raw, {name: "HMAC", hash: "SHA-256"}, true, ["sign", "verify"]);
+                if (key.type !== "secret") return "wrong type: " + key.type;
+                if (!key.extractable) return "not extractable";
+                var exported = await crypto.subtle.exportKey("raw", key);
+                var arr = new Uint8Array(exported);
+                if (arr.length !== 16) return "wrong length: " + arr.length;
+                for (var i = 0; i < 16; i++) { if (arr[i] !== i+1) return "mismatch at " + i; }
+                return "ok";
+            }
+        "#), no_env());
+        let r = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+        assert!(r.json.contains("ok"), "got: {}", r.json);
+    }
+
+    #[test]
+    fn crypto_generate_hmac_key() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var key = await crypto.subtle.generateKey({name: "HMAC", hash: "SHA-256"}, true, ["sign", "verify"]);
+                if (key.type !== "secret") return "wrong type";
+                var exported = await crypto.subtle.exportKey("raw", key);
+                if (new Uint8Array(exported).length !== 32) return "wrong length";
+                return "ok";
+            }
+        "#), no_env());
+        let r = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+        assert!(r.json.contains("ok"), "got: {}", r.json);
+    }
+
+    #[test]
+    fn crypto_generate_ecdsa_keypair() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var kp = await crypto.subtle.generateKey({name: "ECDSA", namedCurve: "P-256"}, true, ["sign", "verify"]);
+                if (!kp.publicKey || !kp.privateKey) return "no keypair";
+                if (kp.publicKey.type !== "public") return "wrong pub type";
+                if (kp.privateKey.type !== "private") return "wrong priv type";
+                return "ok";
+            }
+        "#), no_env());
+        let r = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+        assert!(r.json.contains("ok"), "got: {}", r.json);
+    }
+
+    #[test]
+    fn crypto_generate_aes_key() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var key = await crypto.subtle.generateKey({name: "AES-GCM", length: 256}, true, ["encrypt", "decrypt"]);
+                if (key.type !== "secret") return "wrong type";
+                var raw = await crypto.subtle.exportKey("raw", key);
+                if (new Uint8Array(raw).length !== 32) return "wrong length";
+                return "ok";
+            }
+        "#), no_env());
+        let r = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+        assert!(r.json.contains("ok"), "got: {}", r.json);
+    }
 }

@@ -69,6 +69,9 @@
   var _crypto = globalThis.crypto || {};
   var _nativeGRV = _crypto.__cryptoGetRandomValues;
   var _nativeDigest = _crypto.__cryptoDigest;
+  var _nativeImportKey = _crypto.__cryptoImportKey;
+  var _nativeExportKey = _crypto.__cryptoExportKey;
+  var _nativeGenerateKey = _crypto.__cryptoGenerateKey;
 
   // =========================================================================
   // crypto.getRandomValues
@@ -89,7 +92,19 @@
   };
 
   // =========================================================================
-  // SubtleCrypto (digest only for now — more methods added in Tasks 3-7)
+  // CryptoKey — opaque handle to Rust key store
+  // =========================================================================
+
+  function CryptoKey(handle, algorithm, type, extractable, usages) {
+    this._handle = handle;
+    this.algorithm = Object.freeze(algorithm);
+    this.type = type;
+    this.extractable = extractable;
+    this.usages = Object.freeze(usages.slice());
+  }
+
+  // =========================================================================
+  // SubtleCrypto
   // =========================================================================
 
   function SubtleCrypto() {}
@@ -105,9 +120,76 @@
     }
   };
 
+  SubtleCrypto.prototype.importKey = function(format, keyData, algorithm, extractable, keyUsages) {
+    try {
+      var algo = normalizeAlgorithm(algorithm);
+      var bytes;
+      if (format === "raw" || format === "pkcs8" || format === "spki") {
+        bytes = toBytes(keyData);
+      } else {
+        throw new TypeError("Unsupported format: " + format);
+      }
+      var params = JSON.stringify({
+        format: format,
+        keyData: _B64.encode(bytes),
+        algorithm: algo,
+        extractable: !!extractable,
+        usages: keyUsages || []
+      });
+      var result = JSON.parse(_nativeImportKey(params));
+      return Promise.resolve(new CryptoKey(result.keyId, algo, result.type, !!extractable, keyUsages || []));
+    } catch (e) {
+      return Promise.reject(e);
+    }
+  };
+
+  SubtleCrypto.prototype.exportKey = function(format, key) {
+    try {
+      if (!(key instanceof CryptoKey)) throw new TypeError("Expected CryptoKey");
+      if (!key.extractable) throw new DOMException("Key is not extractable", "InvalidAccessError");
+      var params = JSON.stringify({ format: format, keyId: key._handle });
+      var result = JSON.parse(_nativeExportKey(params));
+      var bytes = _B64.decode(result.keyData);
+      return Promise.resolve(bytes.buffer);
+    } catch (e) {
+      return Promise.reject(e);
+    }
+  };
+
+  SubtleCrypto.prototype.generateKey = function(algorithm, extractable, keyUsages) {
+    try {
+      var algo = normalizeAlgorithm(algorithm);
+      var params = JSON.stringify({
+        algorithm: algo,
+        extractable: !!extractable,
+        usages: keyUsages || []
+      });
+      var result = JSON.parse(_nativeGenerateKey(params));
+      if (result.keyId !== undefined) {
+        // Symmetric key
+        return Promise.resolve(new CryptoKey(result.keyId, algo, "secret", !!extractable, keyUsages || []));
+      }
+      // Key pair
+      var pubUsages = [];
+      var privUsages = [];
+      for (var i = 0; i < (keyUsages || []).length; i++) {
+        var u = keyUsages[i];
+        if (u === "verify" || u === "encrypt" || u === "wrapKey") pubUsages.push(u);
+        else privUsages.push(u);
+      }
+      return Promise.resolve({
+        publicKey: new CryptoKey(result.publicKeyId, algo, "public", true, pubUsages),
+        privateKey: new CryptoKey(result.privateKeyId, algo, "private", !!extractable, privUsages)
+      });
+    } catch (e) {
+      return Promise.reject(e);
+    }
+  };
+
   _crypto.subtle = new SubtleCrypto();
 
-  // Ensure crypto is on globalThis
+  // Ensure crypto and CryptoKey are on globalThis
   globalThis.crypto = _crypto;
+  globalThis.CryptoKey = CryptoKey;
 
 })(globalThis);

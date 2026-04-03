@@ -273,6 +273,18 @@ pub(crate) fn setup_globals(scope: &mut v8::PinScope) {
         let digest_key = v8::String::new(scope, "__cryptoDigest").unwrap();
         crypto.set(scope, digest_key.into(), digest_fn.into());
 
+        let import_fn = v8::Function::new(scope, crate::crypto::crypto_import_key_callback).unwrap();
+        let import_key = v8::String::new(scope, "__cryptoImportKey").unwrap();
+        crypto.set(scope, import_key.into(), import_fn.into());
+
+        let export_fn = v8::Function::new(scope, crate::crypto::crypto_export_key_callback).unwrap();
+        let export_key = v8::String::new(scope, "__cryptoExportKey").unwrap();
+        crypto.set(scope, export_key.into(), export_fn.into());
+
+        let gen_fn = v8::Function::new(scope, crate::crypto::crypto_generate_key_callback).unwrap();
+        let gen_key = v8::String::new(scope, "__cryptoGenerateKey").unwrap();
+        crypto.set(scope, gen_key.into(), gen_fn.into());
+
         let crypto_key = v8::String::new(scope, "crypto").unwrap();
         global.set(scope, crypto_key.into(), crypto.into());
     }
