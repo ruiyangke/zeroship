@@ -18,23 +18,78 @@ use aws_lc_rs::signature::KeyPair;
 
 use crate::event_loop::{Curve, KeyData, SharedState};
 
+// ---------------------------------------------------------------------------
+// Thread-local entropy buffer (same pattern as workerd: 4KB lazy-fill)
+// Amortizes CSPRNG syscall across ~256 UUID calls.
+// ---------------------------------------------------------------------------
+
+use std::cell::RefCell;
+
+const ENTROPY_BUF_SIZE: usize = 4096;
+
+struct EntropyBuf {
+    store: [u8; ENTROPY_BUF_SIZE],
+    pos: usize,
+}
+
+impl EntropyBuf {
+    fn new() -> Self {
+        Self { store: [0u8; ENTROPY_BUF_SIZE], pos: ENTROPY_BUF_SIZE }
+    }
+
+    fn fill(&mut self, out: &mut [u8]) {
+        let mut remaining = out.len();
+        let mut offset = 0;
+        while remaining > 0 {
+            if self.pos >= ENTROPY_BUF_SIZE {
+                aws_lc_rs::rand::fill(&mut self.store).unwrap();
+                self.pos = 0;
+            }
+            let avail = ENTROPY_BUF_SIZE - self.pos;
+            let n = remaining.min(avail);
+            out[offset..offset + n].copy_from_slice(&self.store[self.pos..self.pos + n]);
+            // Zeroize dispensed bytes (like workerd's OPENSSL_cleanse)
+            self.store[self.pos..self.pos + n].fill(0);
+            self.pos += n;
+            offset += n;
+            remaining -= n;
+        }
+    }
+}
+
+thread_local! {
+    static ENTROPY: RefCell<EntropyBuf> = RefCell::new(EntropyBuf::new());
+}
+
+fn fast_random(out: &mut [u8]) {
+    ENTROPY.with(|e| e.borrow_mut().fill(out));
+}
+
+// ---------------------------------------------------------------------------
+// randomUUID — manual hex LUT (same pattern as workerd: no format! macro)
+// ---------------------------------------------------------------------------
+
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
 /// `crypto.randomUUID() → string`
 ///
-/// Generates a RFC 4122 v4 UUID.
+/// RFC 4122 v4 UUID. Uses thread-local buffered CSPRNG + manual hex formatting
+/// (same approach as Cloudflare workerd).
 #[appbase_op]
 fn crypto_random_uuid() -> String {
-    let mut bytes = [0u8; 16];
-    aws_lc_rs::rand::fill(&mut bytes).unwrap();
-    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
-    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10xx
+    let mut b = [0u8; 16];
+    fast_random(&mut b);
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // variant 10xx
 
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5], bytes[6], bytes[7],
-        bytes[8], bytes[9], bytes[10], bytes[11],
-        bytes[12], bytes[13], bytes[14], bytes[15]
-    )
+    let mut buf = [0u8; 36];
+    let mut p = 0;
+    for (i, &byte) in b.iter().enumerate() {
+        if i == 4 || i == 6 || i == 8 || i == 10 { buf[p] = b'-'; p += 1; }
+        buf[p] = HEX[(byte >> 4) as usize]; p += 1;
+        buf[p] = HEX[(byte & 0x0f) as usize]; p += 1;
+    }
+    String::from_utf8(buf.to_vec()).unwrap()
 }
 
 /// `__cryptoGetRandomValues(len) → base64 string of random bytes`
@@ -46,8 +101,7 @@ fn crypto_get_random_values(len: u32) -> Result<String, crate::ops::OpError> {
         ));
     }
     let mut buf = vec![0u8; len as usize];
-    aws_lc_rs::rand::fill(&mut buf)
-        .map_err(|e| crate::ops::OpError::error(format!("RNG failed: {e}")))?;
+    fast_random(&mut buf);
     Ok(B64.encode(&buf))
 }
 
