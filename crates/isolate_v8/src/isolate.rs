@@ -23,7 +23,7 @@ pub struct Isolate {
     dispatch_fn: Option<v8::Global<v8::Function>>,
     /// Cached direct handle to the user's `onRequest` function.
     on_request_fn: Option<v8::Global<v8::Function>>,
-    /// Single JS dispatch: `(handler, method, url, headers_json, body) → JSON string`
+    /// Single JS dispatch: `(handler, method, url, headers_json, body) → Response object`
     /// Handler is passed as first arg — no property lookup needed.
     http_dispatch_fn: Option<v8::Global<v8::Function>>,
     initialized: bool,
@@ -175,30 +175,22 @@ impl Isolate {
 
         var result = __handler(req);
 
-        // Sync Response serialization — read _bodyText and _map directly.
-        // Avoids resp.text().then() Promise chain and forEach/sort overhead.
-        function __serResp(resp) {
-            if (!resp || resp.status === undefined) {
-                return JSON.stringify({ status: 200, headers: [], body: String(resp) });
-            }
-            var h = [];
-            var m = resp.headers._map;
-            var keys = Object.keys(m);
-            for (var i = 0; i < keys.length; i++) {
-                var vals = m[keys[i]];
-                for (var j = 0; j < vals.length; j++) h.push([keys[i], vals[j]]);
-            }
-            return JSON.stringify({ status: resp.status, headers: h, body: resp._bodyText || "" });
-        }
-
+        // Return Response object directly — Rust reads properties via V8 API.
+        // No JSON.stringify/parse on the hot path.
         if (result && typeof result.then === "function") {
-            return result.then(function(resp) { return __serResp(resp); }, function(e) {
-                return JSON.stringify({ status: 500, headers: [], body: e.message || String(e) });
+            return result.then(function(resp) {
+                if (!resp || resp.status === undefined) return new Response(String(resp), { status: 200 });
+                return resp;
+            }, function(e) {
+                return new Response(e.message || String(e), { status: 500 });
             });
         }
-        return __serResp(result);
+        if (!result || result.status === undefined) {
+            return new Response(String(result), { status: 200 });
+        }
+        return result;
     } catch(e) {
-        return JSON.stringify({ status: 500, headers: [], body: e.message || String(e) });
+        return new Response(e.message || String(e), { status: 500 });
     }
 })"#).unwrap();
             let s = v8::Script::compile(scope, code, None).unwrap();
@@ -259,7 +251,8 @@ impl Isolate {
             handler.into(), arg_method.into(), arg_url.into(), arg_headers.into(), arg_body.into()
         ]);
 
-        let json_str = match result {
+        // Resolve the dispatch result to a V8 Response object.
+        let resp_val = match result {
             Some(val) if val.is_null_or_undefined() => return None,
             Some(val) if val.is_promise() => {
                 let promise = v8::Local::<v8::Promise>::try_from(val).unwrap();
@@ -267,7 +260,7 @@ impl Isolate {
                 run_event_loop_until_settled(scope, &self.state, &global_promise);
                 let promise = v8::Local::new(scope, &global_promise);
                 match promise.state() {
-                    v8::PromiseState::Fulfilled => promise.result(scope).to_rust_string_lossy(scope),
+                    v8::PromiseState::Fulfilled => promise.result(scope),
                     v8::PromiseState::Rejected => {
                         let msg = promise.result(scope).to_rust_string_lossy(scope);
                         return Some(Err(format!("onRequest rejected: {msg}")));
@@ -275,35 +268,12 @@ impl Isolate {
                     v8::PromiseState::Pending => return Some(Err("onRequest promise still pending".into())),
                 }
             }
-            Some(val) => val.to_rust_string_lossy(scope),
+            Some(val) => val,
             None => return Some(Err("onRequest call failed".into())),
         };
 
-        // Parse the JSON response from HTTP_DISPATCH_JS
-        let parsed: serde_json::Value = match serde_json::from_str(&json_str) {
-            Ok(v) => v,
-            Err(e) => return Some(Err(format!("Failed to parse HTTP response: {e}"))),
-        };
-
-        let status = parsed.get("status").and_then(|v| v.as_u64()).unwrap_or(200) as u16;
-        let headers: Vec<(String, String)> = parsed.get("headers")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|pair| {
-                let a = pair.as_array()?;
-                Some((a.get(0)?.as_str()?.to_string(), a.get(1)?.as_str()?.to_string()))
-            }).collect())
-            .unwrap_or_default();
-        let body = parsed.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let logs = self.state.borrow_mut().log_buffer.drain(..).collect();
-
-        Some(Ok(HttpResult {
-            status,
-            headers,
-            body,
-            cpu_time: thread_cpu_time().saturating_sub(cpu_start),
-            wall_time: wall_start.elapsed(),
-            logs,
-        }))
+        // Extract response fields directly from V8 object — no JSON serialization.
+        Some(extract_http_result(scope, resp_val, cpu_start, wall_start, &self.state))
     }
 
     /// Execute a single RPC request. Returns the JSON response + timing info.
@@ -382,6 +352,71 @@ impl Isolate {
             logs,
         })
     }
+}
+
+/// Extract HTTP response fields directly from a V8 Response object.
+/// Reads `status`, `headers._map`, and `_bodyText` via the V8 API,
+/// avoiding JSON.stringify on the JS side and serde_json::from_str on Rust side.
+fn extract_http_result(
+    scope: &mut v8::PinScope,
+    resp_val: v8::Local<v8::Value>,
+    cpu_start: std::time::Duration,
+    wall_start: std::time::Instant,
+    state: &SharedState,
+) -> Result<HttpResult, String> {
+    let resp = resp_val.to_object(scope).ok_or("Response is not an object")?;
+
+    // status
+    let status_key = v8::String::new(scope, "status").unwrap();
+    let status = resp.get(scope, status_key.into())
+        .and_then(|v| v.uint32_value(scope))
+        .unwrap_or(200) as u16;
+
+    // body (read _bodyText directly — avoids the async .text() Promise chain)
+    let body_key = v8::String::new(scope, "_bodyText").unwrap();
+    let body = resp.get(scope, body_key.into())
+        .map(|v| v.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+
+    // headers (read _map directly from headers object)
+    let headers_key = v8::String::new(scope, "headers").unwrap();
+    let mut headers: Vec<(String, String)> = Vec::new();
+    if let Some(headers_obj) = resp.get(scope, headers_key.into()) {
+        if let Some(headers_obj) = headers_obj.to_object(scope) {
+            let map_key = v8::String::new(scope, "_map").unwrap();
+            if let Some(map_val) = headers_obj.get(scope, map_key.into()) {
+                if let Some(map_obj) = map_val.to_object(scope) {
+                    if let Some(names) = map_obj.get_own_property_names(scope, Default::default()) {
+                        for i in 0..names.length() {
+                            let key = names.get_index(scope, i).unwrap();
+                            let key_str = key.to_rust_string_lossy(scope);
+                            if let Some(val_arr) = map_obj.get(scope, key) {
+                                // Each value in _map is an array of strings
+                                if let Ok(arr) = v8::Local::<v8::Array>::try_from(val_arr) {
+                                    for j in 0..arr.length() {
+                                        if let Some(v) = arr.get_index(scope, j) {
+                                            headers.push((key_str.clone(), v.to_rust_string_lossy(scope)));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let logs = state.borrow_mut().log_buffer.drain(..).collect();
+
+    Ok(HttpResult {
+        status,
+        headers,
+        body,
+        cpu_time: thread_cpu_time().saturating_sub(cpu_start),
+        wall_time: wall_start.elapsed(),
+        logs,
+    })
 }
 
 // ---------------------------------------------------------------------------
