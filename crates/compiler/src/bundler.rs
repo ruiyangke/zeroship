@@ -208,7 +208,13 @@ pub fn bundle(project_dir: &Path, options: &BundleOptions) -> Result<BundleResul
     ];
 
     if options.minify {
+        // Full minify: renames identifiers — smaller but unreadable stack traces
         args.push("--minify".to_string());
+    } else {
+        // Default: strip whitespace + simplify syntax, but keep identifier names.
+        // Readable stack traces with ~33% size reduction.
+        args.push("--minify-whitespace".to_string());
+        args.push("--minify-syntax".to_string());
     }
 
     if options.sourcemap {
