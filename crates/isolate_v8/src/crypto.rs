@@ -27,6 +27,20 @@ use std::cell::RefCell;
 
 const ENTROPY_BUF_SIZE: usize = 4096;
 
+/// Volatile zeroize — compiler cannot optimize this away.
+/// Equivalent to workerd's OPENSSL_cleanse / BoringSSL's OPENSSL_cleanse.
+#[inline(never)]
+fn zeroize_slice(buf: &mut [u8]) {
+    for byte in buf.iter_mut() {
+        // SAFETY: volatile write ensures the compiler cannot elide the store.
+        // The pointer is valid (derived from a mutable slice reference).
+        #[allow(unsafe_code)]
+        unsafe { std::ptr::write_volatile(byte as *mut u8, 0) };
+    }
+    // Compiler fence prevents reordering past this point
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+}
+
 struct EntropyBuf {
     store: [u8; ENTROPY_BUF_SIZE],
     pos: usize,
@@ -48,8 +62,10 @@ impl EntropyBuf {
             let avail = ENTROPY_BUF_SIZE - self.pos;
             let n = remaining.min(avail);
             out[offset..offset + n].copy_from_slice(&self.store[self.pos..self.pos + n]);
-            // Zeroize dispensed bytes (like workerd's OPENSSL_cleanse)
-            self.store[self.pos..self.pos + n].fill(0);
+            // Zeroize dispensed bytes — volatile write prevents compiler elision.
+            // Same purpose as workerd's OPENSSL_cleanse: ensure consumed entropy
+            // doesn't linger in memory where a side-channel could read it.
+            zeroize_slice(&mut self.store[self.pos..self.pos + n]);
             self.pos += n;
             offset += n;
             remaining -= n;
