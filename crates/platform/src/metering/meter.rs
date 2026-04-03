@@ -11,9 +11,9 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
-use appbase_core::plugin::MeterResource;
-use appbase_plan::QuotaPlan;
-use crate::registry::{CoreHandles, CounterRegistry, RegistryBuilder};
+use crate::core::plugin::MeterResource;
+use crate::plan::QuotaPlan;
+use crate::metering::registry::{CoreHandles, CounterRegistry, RegistryBuilder};
 
 /// Usage counters for a single app within a billing period.
 pub struct AppMeter {
@@ -120,7 +120,7 @@ impl AppPluginMeter {
     }
 }
 
-impl appbase_core::plugin::PluginMeter for AppPluginMeter {
+impl crate::core::plugin::PluginMeter for AppPluginMeter {
     fn increment(&self, resource_name: &str, delta: u64) {
         let meter = self.registry.get_or_create(&self.app_id);
         if let Some(handle) = meter.counters.handle_for(resource_name) {
@@ -142,15 +142,15 @@ impl AppQuotaChecker {
     }
 }
 
-impl appbase_core::plugin::PluginQuota for AppQuotaChecker {
-    fn check(&self, resource: &str) -> Result<(), appbase_core::plugin::QuotaDenied> {
+impl crate::core::plugin::PluginQuota for AppQuotaChecker {
+    fn check(&self, resource: &str) -> Result<(), crate::core::plugin::QuotaDenied> {
         let meter = self.registry.get_or_create(&self.app_id);
         let used = meter.counters.get(resource).unwrap_or(0);
 
         if let Some(quota) = meter.plan.quotas.get(resource) {
             if let Some(max) = quota.max {
                 if used >= max {
-                    return Err(appbase_core::plugin::QuotaDenied {
+                    return Err(crate::core::plugin::QuotaDenied {
                         resource: resource.to_string(),
                         used,
                         limit: max,
@@ -285,7 +285,7 @@ impl MeterRegistry {
     /// the hot-tier atomics so enforcement resumes from the last-flushed state.
     pub async fn recover_from_store(
         &self,
-        store: &dyn appbase_core::meter_store::MeterStore,
+        store: &dyn crate::core::meter_store::MeterStore,
         app_ids: &[String],
     ) {
         for app_id in app_ids {
@@ -306,7 +306,7 @@ impl MeterRegistry {
     }
 }
 
-impl appbase_core::billing::MeteringSnapshot for MeterRegistry {
+impl crate::core::billing::MeteringSnapshot for MeterRegistry {
     fn snapshot(&self, app_id: &str) -> Option<HashMap<String, u64>> {
         let meters = self.meters.read().unwrap();
         meters.get(app_id).map(|m| m.counters.snapshot())
@@ -317,23 +317,23 @@ impl appbase_core::billing::MeteringSnapshot for MeterRegistry {
     }
 }
 
-impl appbase_core::billing::SpendEnforcement for MeterRegistry {
+impl crate::core::billing::SpendEnforcement for MeterRegistry {
     fn set_spend_action(
         &self,
         app_id: &str,
-        action: appbase_core::billing::SpendAction,
+        action: crate::core::billing::SpendAction,
     ) {
         let meters = self.meters.read().unwrap();
         if let Some(meter) = meters.get(app_id) {
-            appbase_core::billing::SpendAction::store(&meter.spend_action, action);
+            crate::core::billing::SpendAction::store(&meter.spend_action, action);
         }
     }
 
-    fn get_spend_action(&self, app_id: &str) -> appbase_core::billing::SpendAction {
+    fn get_spend_action(&self, app_id: &str) -> crate::core::billing::SpendAction {
         let meters = self.meters.read().unwrap();
         meters
             .get(app_id)
-            .map(|m| appbase_core::billing::SpendAction::load(&m.spend_action))
-            .unwrap_or(appbase_core::billing::SpendAction::Allow)
+            .map(|m| crate::core::billing::SpendAction::load(&m.spend_action))
+            .unwrap_or(crate::core::billing::SpendAction::Allow)
     }
 }

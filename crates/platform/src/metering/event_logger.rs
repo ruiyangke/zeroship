@@ -3,7 +3,7 @@
 //! The in-memory implementation stores events in a Vec behind a Mutex.
 //! For production, replace with an append-only file or database-backed impl.
 
-use appbase_core::event_log::{EventLog, EventLogError, MeterEvent};
+use crate::core::event_log::{EventLog, EventLogError, MeterEvent};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -65,7 +65,7 @@ impl EventLog for InMemoryEventLog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use appbase_core::event_log::EventKind;
+    use crate::core::event_log::EventKind;
 
     fn make_event(app_id: &str, kind: EventKind) -> MeterEvent {
         MeterEvent {

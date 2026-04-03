@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use appbase_core::billing::{MeteringSnapshot, SpendAction, SpendEnforcement};
-use crate::pricing::PricingTable;
+use crate::core::billing::{MeteringSnapshot, SpendAction, SpendEnforcement};
+use crate::billing::pricing::PricingTable;
 
 /// Per-app spending configuration.
 #[derive(Debug, Clone)]

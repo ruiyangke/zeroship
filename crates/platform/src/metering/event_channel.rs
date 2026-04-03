@@ -3,7 +3,7 @@
 //! The request handler enqueues events via EventSender (non-blocking, drops on full).
 //! The background EventWriter drains the channel and appends to the EventLog.
 
-use appbase_core::event_log::{EventLog, EventKind, MeterEvent};
+use crate::core::event_log::{EventLog, EventKind, MeterEvent};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::mpsc;
@@ -85,7 +85,7 @@ pub fn spawn_event_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event_logger::InMemoryEventLog;
+    use crate::metering::event_logger::InMemoryEventLog;
 
     #[tokio::test]
     async fn events_flow_through_channel() {

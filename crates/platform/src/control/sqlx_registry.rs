@@ -9,7 +9,7 @@ use sqlx::{Executor, Row};
 
 type AnyPool = sqlx::Pool<Any>;
 
-use crate::{AppData, AppRecord, AppRegistry, RegistryError};
+use crate::control::{AppData, AppRecord, AppRegistry, RegistryError};
 
 fn db_err(e: sqlx::Error) -> RegistryError {
     RegistryError::Database(e.to_string())

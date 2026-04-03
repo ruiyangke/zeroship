@@ -1,5 +1,5 @@
 //! Re-export SpendAction from core for backward compatibility.
-pub use appbase_core::billing::SpendAction;
+pub use crate::core::billing::SpendAction;
 
 #[cfg(test)]
 mod tests {

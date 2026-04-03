@@ -3,8 +3,8 @@
 //! One `ConcurrentIsolate` per app, created lazily on first request.
 //! LRU eviction when pool reaches capacity or idle timeout expires.
 
-use appbase_core::config::IsolateConfig;
-use appbase_core::types::{IsolateStats, PoolStats, RpcResult};
+use crate::core::config::IsolateConfig;
+use crate::core::types::{IsolateStats, PoolStats, RpcResult};
 use appbase_runtime::concurrent::{ConcurrentIsolate, Event};
 use appbase_runtime::modules::ModuleEntry;
 use appbase_runtime::init_v8;

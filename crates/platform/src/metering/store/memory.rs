@@ -3,7 +3,7 @@
 //! Stores counters in a HashMap behind a Mutex. No persistence — data is
 //! lost on restart. Fast, zero external dependencies.
 
-use appbase_core::meter_store::{MeterStore, MeterStoreError, PeriodSnapshot, ResourceDelta};
+use crate::core::meter_store::{MeterStore, MeterStoreError, PeriodSnapshot, ResourceDelta};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Mutex;

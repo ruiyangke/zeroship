@@ -68,26 +68,10 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 name = "appbase"
 version = "0.1.0"
 dependencies = [
- "appbase-billing",
- "appbase-control",
- "appbase-core",
- "appbase-enforcement",
- "appbase-metering",
- "appbase-plan",
- "appbase-server",
+ "appbase-platform",
  "serde_json",
  "tokio",
  "toml 1.1.1+spec-1.1.0",
-]
-
-[[package]]
-name = "appbase-billing"
-version = "0.1.0"
-dependencies = [
- "appbase-core",
- "serde",
- "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -100,73 +84,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "appbase-control"
+name = "appbase-platform"
 version = "0.1.0"
 dependencies = [
- "appbase-plan",
+ "appbase-runtime",
  "async-trait",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "appbase-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "toml 0.8.23",
-]
-
-[[package]]
-name = "appbase-enforcement"
-version = "0.1.0"
-dependencies = [
- "appbase-plan",
- "serde",
-]
-
-[[package]]
-name = "appbase-metering"
-version = "0.1.0"
-dependencies = [
- "appbase-core",
- "appbase-enforcement",
- "appbase-plan",
- "async-trait",
+ "axum",
+ "bytes",
  "criterion",
  "serde",
  "serde_json",
  "sqlx",
+ "thiserror",
  "time",
  "tokio",
  "toml 0.8.23",
-]
-
-[[package]]
-name = "appbase-plan"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "appbase-platform"
-version = "0.1.0"
-dependencies = [
- "appbase-billing",
- "appbase-control",
- "appbase-core",
- "appbase-enforcement",
- "appbase-metering",
- "appbase-plan",
- "appbase-server",
+ "tower-http",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -197,27 +132,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "appbase-server"
-version = "0.1.0"
-dependencies = [
- "appbase-billing",
- "appbase-control",
- "appbase-core",
- "appbase-enforcement",
- "appbase-metering",
- "appbase-plan",
- "appbase-runtime",
- "axum",
- "bytes",
- "serde",
- "serde_json",
- "time",
- "tokio",
- "tower-http",
- "tracing",
 ]
 
 [[package]]

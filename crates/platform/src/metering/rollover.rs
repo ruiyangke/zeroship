@@ -4,11 +4,11 @@
 //! counter set so new requests write to fresh counters. After draining
 //! in-flight writers, reads the old counters and archives them.
 
-use appbase_core::meter_store::{MeterStore, ResourceDelta};
+use crate::core::meter_store::{MeterStore, ResourceDelta};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::meter::MeterRegistry;
+use crate::metering::meter::MeterRegistry;
 
 /// Configuration for the period roller.
 pub struct RolloverConfig {
@@ -68,7 +68,7 @@ async fn rollover_all(registry: &MeterRegistry, store: &dyn MeterStore, config: 
 
     // Process in batches to avoid warm-tier write spikes
     for batch in app_ids.chunks(config.batch_size) {
-        let mut old_meters: Vec<(String, Arc<crate::meter::AppMeter>)> = Vec::new();
+        let mut old_meters: Vec<(String, Arc<crate::metering::meter::AppMeter>)> = Vec::new();
 
         // Step 1-2: Mark old meters as rolling over, then swap atomically
         for app_id in batch {
@@ -138,8 +138,8 @@ fn current_period_key() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use appbase_plan::QuotaPlan;
-    use crate::store::memory::InMemoryStore;
+    use crate::plan::QuotaPlan;
+    use crate::metering::store::memory::InMemoryStore;
 
     #[tokio::test]
     async fn rollover_swaps_meter_and_archives() {

@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use appbase_core::plugin::{Aggregation, MeterResource};
+use crate::core::plugin::{Aggregation, MeterResource};
 
 /// Opaque handle to a counter slot. O(1) access, no lock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -114,7 +114,7 @@ pub struct CounterRegistry {
     resources: Vec<MeterResource>,
 }
 
-impl appbase_core::plugin::PluginMeter for CounterRegistry {
+impl crate::core::plugin::PluginMeter for CounterRegistry {
     fn increment(&self, resource_name: &str, delta: u64) {
         if let Some(&idx) = self.name_to_index.get(resource_name) {
             self.counters[idx].fetch_add(delta, Ordering::Release);

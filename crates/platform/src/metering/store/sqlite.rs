@@ -6,7 +6,7 @@
 //!
 //! Uses sqlx AnyPool for SQLite+Postgres compatibility.
 
-use appbase_core::meter_store::{MeterStore, MeterStoreError, PeriodSnapshot, ResourceDelta};
+use crate::core::meter_store::{MeterStore, MeterStoreError, PeriodSnapshot, ResourceDelta};
 use async_trait::async_trait;
 use sqlx::any::Any;
 type AnyPool = sqlx::Pool<Any>;
@@ -191,7 +191,7 @@ impl MeterStore for SqliteMeterStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use appbase_core::meter_store::ResourceDelta;
+    use crate::core::meter_store::ResourceDelta;
 
     #[tokio::test]
     async fn flush_and_load() {

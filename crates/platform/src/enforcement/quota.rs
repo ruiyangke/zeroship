@@ -5,8 +5,8 @@
 //! - Warn: over 80% on any dimension (adds warning header)
 //! - Deny: over 100% on any dimension (returns 429)
 
-use crate::error_codes;
-use appbase_plan::{evaluate_policy, PolicyAction, QuotaPlan, Period};
+use crate::enforcement::error_codes;
+use crate::plan::{evaluate_policy, PolicyAction, QuotaPlan, Period};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -143,7 +143,7 @@ pub fn check_entitlement(plan: &QuotaPlan, feature: &str) -> Result<(), Entitlem
 #[cfg(test)]
 mod tests {
     use super::*;
-    use appbase_plan::{QuotaPlan, QuotaDef, Period};
+    use crate::plan::{QuotaPlan, QuotaDef, Period};
 
     fn usage(pairs: &[(&str, u64)]) -> HashMap<String, u64> {
         pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()

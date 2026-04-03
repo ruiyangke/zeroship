@@ -5,10 +5,10 @@
 //!   appbase dev <entrypoint> [--port=3000] [--compiler=appbase-compile]
 //!   appbase compile <entrypoint> [--target=rust|node] [--outdir=.dist] [--minify]
 
-use appbase_control::AppRegistry;
-use appbase_core::config::{AppbaseConfig, IsolateConfig, ServerConfig};
-use appbase_core::plugin::{Plugin, PluginFactory};
-use appbase_server::router;
+use appbase_platform::control::AppRegistry;
+use appbase_platform::core::config::{AppbaseConfig, IsolateConfig, ServerConfig};
+use appbase_platform::core::plugin::{Plugin, PluginFactory};
+use appbase_platform::server::router;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,7 +38,7 @@ fn cmd_serve(args: &[String]) {
     let metering_config = if std::path::Path::new(&config_path).exists() {
         eprintln!("[appbase] Loading config from {config_path}");
         Some(
-            appbase_metering::config::MeteringConfig::load(&config_path).unwrap_or_else(|e| {
+            appbase_platform::metering::config::MeteringConfig::load(&config_path).unwrap_or_else(|e| {
                 eprintln!("[appbase] Config error: {e}");
                 std::process::exit(1);
             }),
@@ -102,7 +102,7 @@ fn cmd_serve(args: &[String]) {
         // Create the control plane registry (SQLite-backed via sqlx)
         let registry_db_path = data_dir.join("apps.db");
         let registry: Arc<dyn AppRegistry> = Arc::new(
-            appbase_control::sqlx_registry::SqlxRegistry::new(
+            appbase_platform::control::sqlx_registry::SqlxRegistry::new(
                 &format!("sqlite://{}?mode=rwc", registry_db_path.display()),
                 master_key.clone(),
             )
@@ -129,10 +129,10 @@ fn cmd_serve(args: &[String]) {
             });
 
         // Cold-tier event log + background writer
-        let event_log: std::sync::Arc<dyn appbase_core::event_log::EventLog> =
-            std::sync::Arc::new(appbase_metering::event_logger::InMemoryEventLog::new());
+        let event_log: std::sync::Arc<dyn appbase_platform::core::event_log::EventLog> =
+            std::sync::Arc::new(appbase_platform::metering::event_logger::InMemoryEventLog::new());
         let (event_sender, event_writer_handle) =
-            appbase_metering::event_channel::spawn_event_writer(event_log);
+            appbase_platform::metering::event_channel::spawn_event_writer(event_log);
 
         let state = router::single_app_state(
             server_js,
@@ -147,8 +147,8 @@ fn cmd_serve(args: &[String]) {
         );
 
         // Warm-tier store for metering persistence (prefer SQLite, fallback to in-memory)
-        let store: Arc<dyn appbase_core::meter_store::MeterStore> =
-            match appbase_metering::store::sqlite::SqliteMeterStore::new(
+        let store: Arc<dyn appbase_platform::core::meter_store::MeterStore> =
+            match appbase_platform::metering::store::sqlite::SqliteMeterStore::new(
                 &format!("sqlite://{}?mode=rwc", store_path.display()),
             )
             .await
@@ -164,7 +164,7 @@ fn cmd_serve(args: &[String]) {
                     eprintln!(
                         "[appbase] SQLite meter store failed ({e}), falling back to in-memory"
                     );
-                    Arc::new(appbase_metering::store::memory::InMemoryStore::new())
+                    Arc::new(appbase_platform::metering::store::memory::InMemoryStore::new())
                 }
             };
 
@@ -180,34 +180,34 @@ fn cmd_serve(args: &[String]) {
         let store_for_shutdown = store.clone();
 
         // Spawn background metering services
-        let flusher_handle = appbase_metering::flusher::spawn_flusher(
+        let flusher_handle = appbase_platform::metering::flusher::spawn_flusher(
             state.meters.clone(),
             store.clone(),
             Duration::from_secs(5),
         );
-        let roller_handle = appbase_metering::rollover::spawn_period_roller(
+        let roller_handle = appbase_platform::metering::rollover::spawn_period_roller(
             state.meters.clone(),
             store,
-            appbase_metering::rollover::RolloverConfig::default(),
+            appbase_platform::metering::rollover::RolloverConfig::default(),
         );
 
         // Spawn spending reconciler with a default spending limit.
         // TODO: load per-app spending limits from TOML config ([apps.X.spending]).
-        let pricing = Arc::new(appbase_billing::pricing::PricingTable::cloudflare_comparable());
+        let pricing = Arc::new(appbase_platform::billing::pricing::PricingTable::cloudflare_comparable());
         let mut limits = HashMap::new();
         limits.insert(
             "default".to_string(),
-            appbase_billing::reconciler::SpendingLimit {
+            appbase_platform::billing::reconciler::SpendingLimit {
                 limit_millicents: Some(500_000), // $5.00 default for free tier
                 ..Default::default()
             },
         );
-        let reconciler_config = appbase_billing::reconciler::ReconcilerConfig {
+        let reconciler_config = appbase_platform::billing::reconciler::ReconcilerConfig {
             interval: Duration::from_secs(10),
             pricing,
             limits,
         };
-        let reconciler_handle = appbase_billing::reconciler::spawn_reconciler(
+        let reconciler_handle = appbase_platform::billing::reconciler::spawn_reconciler(
             reconciler_config,
             state.meters.clone(),
             state.meters.clone(),
@@ -254,7 +254,7 @@ fn cmd_serve(args: &[String]) {
 
         // Final flush before aborting background tasks to avoid losing recent increments
         eprintln!("[appbase] Shutting down — final flush...");
-        appbase_metering::flusher::flush_all(&meters_for_shutdown, store_for_shutdown.as_ref()).await;
+        appbase_platform::metering::flusher::flush_all(&meters_for_shutdown, store_for_shutdown.as_ref()).await;
 
         // Abort background tasks on shutdown
         flusher_handle.abort();

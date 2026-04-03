@@ -1,17 +1,10 @@
 [workspace]
 members = [
-    "crates/core",
-    "crates/server",
-    "crates/cli",
-    "crates/plan",
-    "crates/enforcement",
-    "crates/metering",
-    "crates/compiler",
-    "crates/billing",
     "crates/runtime",
-    "crates/control",
     "crates/runtime_macros",
+    "crates/compiler",
     "crates/platform",
+    "crates/cli",
 ]
 resolver = "3"
 

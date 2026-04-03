@@ -7,11 +7,11 @@
 //! Counters keep accumulating so the enforcer and reconciler see accurate
 //! running totals via snapshot().
 
-use appbase_core::meter_store::{MeterStore, ResourceDelta};
+use crate::core::meter_store::{MeterStore, ResourceDelta};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::meter::MeterRegistry;
+use crate::metering::meter::MeterRegistry;
 
 /// Spawn a background task that flushes hot-tier counters to the MeterStore.
 ///

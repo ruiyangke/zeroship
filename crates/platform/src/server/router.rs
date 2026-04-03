@@ -1,19 +1,19 @@
 //! Axum router for appbase — RPC dispatch with metering, quota enforcement, and admin API.
 
-use appbase_control::AppRegistry;
-use appbase_core::config::AppbaseConfig;
-use appbase_core::plugin::PluginFactory;
-use appbase_core::types::AppBundle;
-use appbase_core::event_log::EventKind;
-use crate::v8pool::V8Pool;
-use appbase_enforcement::concurrency::ConcurrencyGuard;
-use appbase_enforcement::quota;
-use appbase_enforcement::error_codes;
-use appbase_enforcement::rate_limit::RateLimiter;
-use appbase_core::billing::SpendAction;
-use appbase_metering::event_channel::EventSender;
-use appbase_metering::meter::MeterRegistry;
-use appbase_plan::QuotaPlan;
+use crate::control::AppRegistry;
+use crate::core::config::AppbaseConfig;
+use crate::core::plugin::PluginFactory;
+use crate::core::types::AppBundle;
+use crate::core::event_log::EventKind;
+use crate::server::v8pool::V8Pool;
+use crate::enforcement::concurrency::ConcurrencyGuard;
+use crate::enforcement::quota;
+use crate::enforcement::error_codes;
+use crate::enforcement::rate_limit::RateLimiter;
+use crate::core::billing::SpendAction;
+use crate::metering::event_channel::EventSender;
+use crate::metering::meter::MeterRegistry;
+use crate::plan::QuotaPlan;
 use std::sync::atomic::AtomicU32;
 use axum::body::Body;
 use axum::extract::{Path, State};
@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, RwLock};
 
-use crate::middleware;
+use crate::server::middleware;
 
 /// Default concurrency limit per app (max in-flight requests).
 const DEFAULT_CONCURRENCY_LIMIT: u32 = 100;
@@ -137,7 +137,7 @@ pub fn single_app_state(
     // Collect plugin-declared meter resources by creating a temporary set of plugins.
     // This discovers resources like db.reads, kv.writes, etc. that plugins track.
     let sample_plugins = plugin_factory("_resource_discovery");
-    let plugin_resources: Vec<appbase_core::plugin::MeterResource> = sample_plugins
+    let plugin_resources: Vec<crate::core::plugin::MeterResource> = sample_plugins
         .iter()
         .flat_map(|p| p.meter_resources())
         .collect();
@@ -633,10 +633,10 @@ async fn handle_create_app(
             StatusCode::CREATED,
             &serde_json::to_string(&record).unwrap_or_default(),
         ),
-        Err(appbase_control::RegistryError::AlreadyExists(_)) => {
+        Err(crate::control::RegistryError::AlreadyExists(_)) => {
             json_response(StatusCode::CONFLICT, r#"{"error":"App already exists"}"#)
         }
-        Err(appbase_control::RegistryError::InvalidInput(msg)) => {
+        Err(crate::control::RegistryError::InvalidInput(msg)) => {
             json_response(StatusCode::BAD_REQUEST, &format!(r#"{{"error":"{}"}}"#, json_escape(&msg)))
         }
         Err(e) => json_response(
@@ -777,7 +777,7 @@ async fn handle_deploy(
             });
             json_response(StatusCode::OK, &resp.to_string())
         }
-        Err(appbase_control::RegistryError::NotFound(_)) => {
+        Err(crate::control::RegistryError::NotFound(_)) => {
             json_response(StatusCode::NOT_FOUND, r#"{"error":"App not found"}"#)
         }
         Err(e) => json_response(
