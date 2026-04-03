@@ -2,7 +2,7 @@
 //! Each isolate gets its own namespace. Data persists across requests
 //! but is lost when the isolate is evicted.
 
-use appbase_ops::appbase_op;
+use appbase_runtime_macros::appbase_op;
 
 use crate::event_loop::SharedState;
 

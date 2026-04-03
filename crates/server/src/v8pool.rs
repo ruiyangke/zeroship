@@ -5,9 +5,9 @@
 
 use appbase_core::config::IsolateConfig;
 use appbase_core::types::{IsolateStats, PoolStats, RpcResult};
-use appbase_isolate_v8::concurrent::{ConcurrentIsolate, Event};
-use appbase_isolate_v8::modules::ModuleEntry;
-use appbase_isolate_v8::init_v8;
+use appbase_runtime::concurrent::{ConcurrentIsolate, Event};
+use appbase_runtime::modules::ModuleEntry;
+use appbase_runtime::init_v8;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};

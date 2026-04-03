@@ -6,7 +6,7 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use appbase_ops::appbase_op;
+use appbase_runtime_macros::appbase_op;
 
 /// Maximum response body size: 10 MB.
 const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;

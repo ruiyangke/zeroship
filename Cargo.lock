@@ -132,27 +132,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "appbase-isolate-v8"
-version = "0.1.0"
-dependencies = [
- "ada-url",
- "appbase-compiler",
- "appbase-ops",
- "aws-lc-rs",
- "base64",
- "bytes",
- "http-body-util",
- "hyper",
- "hyper-util",
- "libc",
- "reqwest",
- "serde_json",
- "tokio",
- "url",
- "v8",
-]
-
-[[package]]
 name = "appbase-metering"
 version = "0.1.0"
 dependencies = [
@@ -167,15 +146,6 @@ dependencies = [
  "time",
  "tokio",
  "toml 0.8.23",
-]
-
-[[package]]
-name = "appbase-ops"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
@@ -200,6 +170,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "appbase-runtime"
+version = "0.1.0"
+dependencies = [
+ "ada-url",
+ "appbase-compiler",
+ "appbase-runtime-macros",
+ "aws-lc-rs",
+ "base64",
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "url",
+ "v8",
+]
+
+[[package]]
+name = "appbase-runtime-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "appbase-server"
 version = "0.1.0"
 dependencies = [
@@ -207,9 +207,9 @@ dependencies = [
  "appbase-control",
  "appbase-core",
  "appbase-enforcement",
- "appbase-isolate-v8",
  "appbase-metering",
  "appbase-plan",
+ "appbase-runtime",
  "axum",
  "bytes",
  "serde",

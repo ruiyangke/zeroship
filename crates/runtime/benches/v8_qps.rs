@@ -1,7 +1,7 @@
 //! QPS benchmark -- raw V8 per-request model with persistent context + event loop.
 //! Compares sync, async, CPU-heavy, and multi-threaded scenarios.
 
-use appbase_isolate_v8::{init_v8, Isolate, IsolatePool, ModuleEntry};
+use appbase_runtime::{init_v8, Isolate, IsolatePool, ModuleEntry};
 use std::time::Instant;
 
 const RPC_BODY: &str = r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#;
@@ -229,7 +229,7 @@ fn main() {
     // =========================================================================
     println!("\n=== Concurrent Model (serial JS, concurrent I/O) ===\n");
 
-    use appbase_isolate_v8::concurrent::{ConcurrentIsolate, Event};
+    use appbase_runtime::concurrent::{ConcurrentIsolate, Event};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     let next_id = AtomicU64::new(1);
@@ -240,7 +240,7 @@ fn main() {
         next_id: &AtomicU64,
         body: &str,
         n: u64,
-    ) -> Vec<Result<appbase_isolate_v8::RequestResult, String>> {
+    ) -> Vec<Result<appbase_runtime::RequestResult, String>> {
         let mut reply_rxs = Vec::new();
         // Send all requests at once
         for _ in 0..n {

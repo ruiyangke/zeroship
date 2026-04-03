@@ -7,9 +7,9 @@
 //! POST /rpc -> dispatch to V8 -> JSON-RPC response
 //! GET /health -> {"status":"ok"}
 
-use appbase_isolate_v8::concurrent::{ConcurrentIsolate, Event};
-use appbase_isolate_v8::modules::ModuleEntry;
-use appbase_isolate_v8::init_v8;
+use appbase_runtime::concurrent::{ConcurrentIsolate, Event};
+use appbase_runtime::modules::ModuleEntry;
+use appbase_runtime::init_v8;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -104,7 +104,7 @@ impl Dispatcher {
         }
     }
 
-    async fn dispatch(&self, body: String) -> Result<appbase_isolate_v8::RequestResult, String> {
+    async fn dispatch(&self, body: String) -> Result<appbase_runtime::RequestResult, String> {
         let idx = (self.next.fetch_add(1, Ordering::Relaxed) as usize) % self.senders.len();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();

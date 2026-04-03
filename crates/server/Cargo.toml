@@ -6,7 +6,7 @@ description = "HTTP server for appbase — axum, Tower middleware, multi-tenant 
 
 [dependencies]
 appbase-core = { path = "../core" }
-appbase-isolate-v8 = { path = "../isolate_v8" }
+appbase-runtime = { path = "../runtime" }
 appbase-metering = { path = "../metering" }
 appbase-enforcement = { path = "../enforcement" }
 appbase-plan = { path = "../plan" }

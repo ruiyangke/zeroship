@@ -8,9 +8,9 @@ members = [
     "crates/metering",
     "crates/compiler",
     "crates/billing",
-    "crates/isolate_v8",
+    "crates/runtime",
     "crates/control",
-    "crates/appbase_ops",
+    "crates/runtime_macros",
     "crates/platform",
 ]
 resolver = "3"

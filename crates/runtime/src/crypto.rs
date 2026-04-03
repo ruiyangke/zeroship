@@ -1,6 +1,6 @@
 //! Crypto APIs for V8 apps — backed by aws-lc-rs.
 
-use appbase_ops::appbase_op;
+use appbase_runtime_macros::appbase_op;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 

@@ -1,8 +1,8 @@
 [package]
-name = "appbase-isolate-v8"
+name = "appbase-runtime"
 version = "0.1.0"
 edition = "2024"
-description = "Raw V8 isolate runtime — per-request model with Locker, direct V8 API"
+description = "appbase V8 runtime — ESM modules, crypto, fetch, URL, timers, KV, event loop"
 
 [dependencies]
 v8 = "147"
@@ -18,7 +18,7 @@ url = "2"
 ada-url = "3.4.4"
 aws-lc-rs = "1"
 base64 = "0.22"
-appbase-ops = { path = "../appbase_ops" }
+appbase-runtime-macros = { path = "../runtime_macros" }
 
 [[bench]]
 name = "v8_qps"

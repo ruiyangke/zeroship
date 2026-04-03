@@ -3,7 +3,7 @@
 //! Exposes `__urlParse(input, base?)` and `__urlCanParse(input, base?)` to JS.
 //! The JS `URL` class wraps these native calls for spec-compliant URL parsing.
 
-use appbase_ops::appbase_op;
+use appbase_runtime_macros::appbase_op;
 
 /// V8 callback: `__urlParse(input, base?) → Object | null`
 ///

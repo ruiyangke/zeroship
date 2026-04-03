@@ -3,7 +3,7 @@
 //! Each isolate has its own `env_vars` map injected at creation time.
 //! Apps cannot access host process environment or other apps' secrets.
 
-use appbase_ops::appbase_op;
+use appbase_runtime_macros::appbase_op;
 
 use crate::event_loop::SharedState;
 

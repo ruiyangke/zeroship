@@ -3,7 +3,7 @@
 //! Uses testharness.js in ShellTestEnvironment mode (no document/DOM).
 //! Scripts are loaded separately via eval to avoid V8 string size limits.
 
-use appbase_isolate_v8::{init_v8, Isolate, ModuleEntry};
+use appbase_runtime::{init_v8, Isolate, ModuleEntry};
 use std::path::Path;
 
 const WPT_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../refs/wpt");
