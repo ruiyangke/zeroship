@@ -448,3 +448,57 @@ fn multi_ts_tree_shaking() {
     assert!(!result.js.contains("unusedHelper") && !result.js.contains("tree-shaking"),
         "unusedHelper should be tree-shaken");
 }
+
+#[test]
+fn npm_deps_rpc_ping() {
+    if !appbase_compiler::bundler::esbuild_available() {
+        eprintln!("SKIPPED: esbuild not on PATH");
+        return;
+    }
+    init_v8();
+    let mut isolate = bundle_example("npm-deps");
+    let result = rpc(&mut isolate, "ping", "[]");
+    assert_eq!(result["result"].as_str().unwrap(), "pong");
+}
+
+#[test]
+fn npm_deps_zod_validation_success() {
+    if !appbase_compiler::bundler::esbuild_available() {
+        eprintln!("SKIPPED: esbuild not on PATH");
+        return;
+    }
+    init_v8();
+    let mut isolate = bundle_example("npm-deps");
+    let result = isolate.execute_http(
+        "POST",
+        "http://localhost/validate",
+        "[]",
+        r#"{"name":"Alice","email":"alice@example.com","age":30}"#,
+    ).expect("onRequest not found").expect("onRequest failed");
+    assert_eq!(result.status, 200);
+    let body: serde_json::Value = serde_json::from_str(&result.body).unwrap();
+    assert_eq!(body["ok"].as_bool().unwrap(), true);
+    assert_eq!(body["user"]["name"].as_str().unwrap(), "Alice");
+    assert_eq!(body["user"]["email"].as_str().unwrap(), "alice@example.com");
+}
+
+#[test]
+fn npm_deps_zod_validation_failure() {
+    if !appbase_compiler::bundler::esbuild_available() {
+        eprintln!("SKIPPED: esbuild not on PATH");
+        return;
+    }
+    init_v8();
+    let mut isolate = bundle_example("npm-deps");
+    let result = isolate.execute_http(
+        "POST",
+        "http://localhost/validate",
+        "[]",
+        r#"{"name":"","email":"not-an-email"}"#,
+    ).expect("onRequest not found").expect("onRequest failed");
+    assert_eq!(result.status, 400);
+    let body: serde_json::Value = serde_json::from_str(&result.body).unwrap();
+    assert_eq!(body["ok"].as_bool().unwrap(), false);
+    let error = body["error"].as_str().unwrap();
+    assert!(error.contains("email") || error.contains("Invalid"), "got: {error}");
+}
