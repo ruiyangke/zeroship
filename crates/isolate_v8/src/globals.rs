@@ -301,6 +301,14 @@ pub(crate) fn setup_globals(scope: &mut v8::PinScope) {
         let decrypt_key = v8::String::new(scope, "__cryptoDecrypt").unwrap();
         crypto.set(scope, decrypt_key.into(), decrypt_fn.into());
 
+        let derive_bits_fn = v8::Function::new(scope, crate::crypto::crypto_derive_bits_callback).unwrap();
+        let derive_bits_key = v8::String::new(scope, "__cryptoDeriveBits").unwrap();
+        crypto.set(scope, derive_bits_key.into(), derive_bits_fn.into());
+
+        let derive_key_fn = v8::Function::new(scope, crate::crypto::crypto_derive_key_callback).unwrap();
+        let derive_key_key = v8::String::new(scope, "__cryptoDeriveKey").unwrap();
+        crypto.set(scope, derive_key_key.into(), derive_key_fn.into());
+
         let crypto_key = v8::String::new(scope, "crypto").unwrap();
         global.set(scope, crypto_key.into(), crypto.into());
     }

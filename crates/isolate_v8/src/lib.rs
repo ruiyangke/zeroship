@@ -1199,4 +1199,68 @@ mod tests {
         let r = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
         assert!(r.json.contains("ok"), "got: {}", r.json);
     }
+
+    #[test]
+    fn crypto_hkdf_derive_bits() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var keyMaterial = new TextEncoder().encode("input-key-material");
+                var key = await crypto.subtle.importKey("raw", keyMaterial, "HKDF", false, ["deriveBits"]);
+                var salt = new TextEncoder().encode("salt-value");
+                var info = new TextEncoder().encode("info-value");
+                var bits = await crypto.subtle.deriveBits(
+                    {name: "HKDF", hash: "SHA-256", salt: salt, info: info},
+                    key, 256
+                );
+                if (new Uint8Array(bits).length !== 32) return "wrong length";
+                return "ok";
+            }
+        "#), no_env());
+        let r = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+        assert!(r.json.contains("ok"), "got: {}", r.json);
+    }
+
+    #[test]
+    fn crypto_pbkdf2_derive_bits() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var password = new TextEncoder().encode("password");
+                var key = await crypto.subtle.importKey("raw", password, "PBKDF2", false, ["deriveBits"]);
+                var salt = new TextEncoder().encode("salt");
+                var bits = await crypto.subtle.deriveBits(
+                    {name: "PBKDF2", hash: "SHA-256", salt: salt, iterations: 100000},
+                    key, 256
+                );
+                if (new Uint8Array(bits).length !== 32) return "wrong length";
+                return "ok";
+            }
+        "#), no_env());
+        let r = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+        assert!(r.json.contains("ok"), "got: {}", r.json);
+    }
+
+    #[test]
+    fn crypto_derive_key_hkdf_to_aes() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var keyMaterial = new TextEncoder().encode("master-secret");
+                var baseKey = await crypto.subtle.importKey("raw", keyMaterial, "HKDF", false, ["deriveKey"]);
+                var aesKey = await crypto.subtle.deriveKey(
+                    {name: "HKDF", hash: "SHA-256", salt: new Uint8Array(16), info: new TextEncoder().encode("aes-key")},
+                    baseKey,
+                    {name: "AES-GCM", length: 256},
+                    true, ["encrypt", "decrypt"]
+                );
+                if (aesKey.type !== "secret") return "wrong type";
+                var raw = await crypto.subtle.exportKey("raw", aesKey);
+                if (new Uint8Array(raw).length !== 32) return "wrong length";
+                return "ok";
+            }
+        "#), no_env());
+        let r = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+        assert!(r.json.contains("ok"), "got: {}", r.json);
+    }
 }

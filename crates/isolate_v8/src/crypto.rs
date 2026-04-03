@@ -873,3 +873,173 @@ fn crypto_decrypt(state: SharedState, params: String) -> Result<String, crate::o
         ))),
     }
 }
+
+// ---------------------------------------------------------------------------
+// deriveBits / deriveKey
+// ---------------------------------------------------------------------------
+
+struct DeriveLen(usize);
+impl aws_lc_rs::hkdf::KeyType for DeriveLen {
+    fn len(&self) -> usize {
+        self.0
+    }
+}
+
+/// Shared deriveBits logic used by both `crypto_derive_bits` and `crypto_derive_key`.
+fn crypto_derive_bits_inner(
+    state: &SharedState,
+    p: &serde_json::Value,
+) -> Result<String, crate::ops::OpError> {
+    let algo_name = p["algorithm"]["name"]
+        .as_str()
+        .unwrap_or("")
+        .to_uppercase();
+    let key_id = p["keyId"].as_u64().unwrap_or(0) as u32;
+    let length = p["length"].as_u64().unwrap_or(0) as usize;
+    let hash = p["algorithm"]["hash"]["name"]
+        .as_str()
+        .unwrap_or("SHA-256")
+        .to_uppercase();
+
+    if length == 0 || length % 8 != 0 {
+        return Err(crate::ops::OpError::type_error(
+            "length must be a positive multiple of 8",
+        ));
+    }
+    let byte_len = length / 8;
+
+    let s = state.borrow();
+    let key = s
+        .key_store
+        .get(&key_id)
+        .ok_or_else(|| crate::ops::OpError::type_error("Key not found"))?;
+
+    let raw = match key {
+        KeyData::Symmetric { raw } => raw,
+        _ => {
+            return Err(crate::ops::OpError::type_error(
+                "deriveBits requires a symmetric key",
+            ))
+        }
+    };
+
+    match algo_name.as_str() {
+        "HKDF" => {
+            let hkdf_alg = match hash.as_str() {
+                "SHA-256" => aws_lc_rs::hkdf::HKDF_SHA256,
+                "SHA-384" => aws_lc_rs::hkdf::HKDF_SHA384,
+                "SHA-512" => aws_lc_rs::hkdf::HKDF_SHA512,
+                _ => {
+                    return Err(crate::ops::OpError::type_error(format!(
+                        "Unsupported HKDF hash: {hash}"
+                    )))
+                }
+            };
+            let salt_b64 = p["algorithm"]["salt"].as_str().unwrap_or("");
+            let salt_bytes = B64.decode(salt_b64).map_err(|e| {
+                crate::ops::OpError::type_error(format!("Invalid salt: {e}"))
+            })?;
+            let info_b64 = p["algorithm"]["info"].as_str().unwrap_or("");
+            let info_bytes = B64.decode(info_b64).map_err(|e| {
+                crate::ops::OpError::type_error(format!("Invalid info: {e}"))
+            })?;
+
+            let salt = aws_lc_rs::hkdf::Salt::new(hkdf_alg, &salt_bytes);
+            let prk = salt.extract(raw);
+            let info_refs: &[&[u8]] = &[&info_bytes];
+            let okm = prk
+                .expand(info_refs, DeriveLen(byte_len))
+                .map_err(|_| crate::ops::OpError::error("HKDF expand failed"))?;
+            let mut out = vec![0u8; byte_len];
+            okm.fill(&mut out)
+                .map_err(|_| crate::ops::OpError::error("HKDF fill failed"))?;
+            Ok(B64.encode(&out))
+        }
+        "PBKDF2" => {
+            let pbkdf2_alg = match hash.as_str() {
+                "SHA-256" => aws_lc_rs::pbkdf2::PBKDF2_HMAC_SHA256,
+                "SHA-384" => aws_lc_rs::pbkdf2::PBKDF2_HMAC_SHA384,
+                "SHA-512" => aws_lc_rs::pbkdf2::PBKDF2_HMAC_SHA512,
+                _ => {
+                    return Err(crate::ops::OpError::type_error(format!(
+                        "Unsupported PBKDF2 hash: {hash}"
+                    )))
+                }
+            };
+            let salt_b64 = p["algorithm"]["salt"].as_str().unwrap_or("");
+            let salt_bytes = B64.decode(salt_b64).map_err(|e| {
+                crate::ops::OpError::type_error(format!("Invalid salt: {e}"))
+            })?;
+            let iterations = p["algorithm"]["iterations"].as_u64().unwrap_or(1000) as u32;
+            let iterations = std::num::NonZeroU32::new(iterations)
+                .ok_or_else(|| crate::ops::OpError::type_error("iterations must be > 0"))?;
+
+            let mut out = vec![0u8; byte_len];
+            aws_lc_rs::pbkdf2::derive(pbkdf2_alg, iterations, &salt_bytes, raw, &mut out);
+            Ok(B64.encode(&out))
+        }
+        _ => Err(crate::ops::OpError::type_error(format!(
+            "Unsupported deriveBits algorithm: {algo_name}"
+        ))),
+    }
+}
+
+/// `__cryptoDeriveBits(params_json) → base64 derived bits`
+#[appbase_op(state)]
+fn crypto_derive_bits(state: SharedState, params: String) -> Result<String, crate::ops::OpError> {
+    let p: serde_json::Value = serde_json::from_str(&params)
+        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid params: {e}")))?;
+    crypto_derive_bits_inner(&state, &p)
+}
+
+/// `__cryptoDeriveKey(params_json) → JSON {keyId}`
+#[appbase_op(state)]
+fn crypto_derive_key(state: SharedState, params: String) -> Result<String, crate::ops::OpError> {
+    let p: serde_json::Value = serde_json::from_str(&params)
+        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid params: {e}")))?;
+
+    let derived_algo = &p["derivedKeyAlgorithm"];
+    let derived_name = derived_algo["name"]
+        .as_str()
+        .unwrap_or("")
+        .to_uppercase();
+
+    // Determine derived key length
+    let key_length = if let Some(len) = derived_algo["length"].as_u64() {
+        len as usize
+    } else if derived_name == "HMAC" {
+        // HMAC default key length = hash block size
+        let hash = derived_algo["hash"]["name"]
+            .as_str()
+            .unwrap_or("SHA-256")
+            .to_uppercase();
+        match hash.as_str() {
+            "SHA-256" => 256,
+            "SHA-384" => 384,
+            "SHA-512" => 512,
+            _ => 256,
+        }
+    } else {
+        return Err(crate::ops::OpError::type_error(
+            "derivedKeyAlgorithm must specify length",
+        ));
+    };
+
+    // Build a deriveBits params with the computed length
+    let mut derive_params = p.clone();
+    derive_params["length"] = serde_json::json!(key_length);
+
+    // Call deriveBits logic
+    let bits_b64 = crypto_derive_bits_inner(&state, &derive_params)?;
+    let raw = B64
+        .decode(&bits_b64)
+        .map_err(|e| crate::ops::OpError::error(format!("decode failed: {e}")))?;
+
+    // Store as symmetric key
+    let mut s = state.borrow_mut();
+    let key_id = s.next_key_id;
+    s.next_key_id += 1;
+    s.key_store.insert(key_id, KeyData::Symmetric { raw });
+
+    Ok(serde_json::json!({ "keyId": key_id }).to_string())
+}

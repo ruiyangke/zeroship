@@ -76,6 +76,8 @@
   var _nativeVerify = _crypto.__cryptoVerify;
   var _nativeEncrypt = _crypto.__cryptoEncrypt;
   var _nativeDecrypt = _crypto.__cryptoDecrypt;
+  var _nativeDeriveBits = _crypto.__cryptoDeriveBits;
+  var _nativeDeriveKey = _crypto.__cryptoDeriveKey;
 
   // =========================================================================
   // crypto.getRandomValues
@@ -270,6 +272,47 @@
     } catch (e) {
       return Promise.reject(e);
     }
+  };
+
+  SubtleCrypto.prototype.deriveBits = function(algorithm, baseKey, length) {
+    try {
+      if (!(baseKey instanceof CryptoKey)) throw new TypeError("Expected CryptoKey");
+      var algo = normalizeAlgorithm(algorithm);
+      var algoParams = { name: algo.name };
+      if (algo.hash) algoParams.hash = algo.hash;
+      if (algo.salt) algoParams.salt = _B64.encode(toBytes(algo.salt));
+      if (algo.info) algoParams.info = _B64.encode(toBytes(algo.info));
+      if (algo.iterations) algoParams.iterations = algo.iterations;
+      var params = JSON.stringify({
+        algorithm: algoParams,
+        keyId: baseKey._handle,
+        length: length
+      });
+      var result = _nativeDeriveBits(params);
+      return Promise.resolve(_B64.decode(result).buffer);
+    } catch (e) { return Promise.reject(e); }
+  };
+
+  SubtleCrypto.prototype.deriveKey = function(algorithm, baseKey, derivedKeyAlgorithm, extractable, keyUsages) {
+    try {
+      if (!(baseKey instanceof CryptoKey)) throw new TypeError("Expected CryptoKey");
+      var algo = normalizeAlgorithm(algorithm);
+      var derivedAlgo = normalizeAlgorithm(derivedKeyAlgorithm);
+      var algoParams = { name: algo.name };
+      if (algo.hash) algoParams.hash = algo.hash;
+      if (algo.salt) algoParams.salt = _B64.encode(toBytes(algo.salt));
+      if (algo.info) algoParams.info = _B64.encode(toBytes(algo.info));
+      if (algo.iterations) algoParams.iterations = algo.iterations;
+      var params = JSON.stringify({
+        algorithm: algoParams,
+        keyId: baseKey._handle,
+        derivedKeyAlgorithm: derivedAlgo,
+        extractable: !!extractable,
+        usages: keyUsages || []
+      });
+      var result = JSON.parse(_nativeDeriveKey(params));
+      return Promise.resolve(new CryptoKey(result.keyId, derivedAlgo, "secret", !!extractable, keyUsages || []));
+    } catch (e) { return Promise.reject(e); }
   };
 
   _crypto.subtle = new SubtleCrypto();
