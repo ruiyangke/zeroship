@@ -1102,4 +1102,63 @@ mod tests {
         let r = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
         assert!(r.json.contains("ok"), "got: {}", r.json);
     }
+
+    // -----------------------------------------------------------------------
+    // Web Crypto: sign + verify
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn crypto_hmac_sign_verify() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var raw = new TextEncoder().encode("my-secret-key-for-hmac-test!!");
+                var key = await crypto.subtle.importKey("raw", raw, {name: "HMAC", hash: "SHA-256"}, false, ["sign", "verify"]);
+                var data = new TextEncoder().encode("hello world");
+                var sig = await crypto.subtle.sign("HMAC", key, data);
+                var valid = await crypto.subtle.verify("HMAC", key, sig, data);
+                if (!valid) return "verify failed";
+                // Tamper with data
+                var bad = await crypto.subtle.verify("HMAC", key, sig, new TextEncoder().encode("tampered"));
+                if (bad) return "tampered verify should fail";
+                return "ok";
+            }
+        "#), no_env());
+        let r = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+        assert!(r.json.contains("ok"), "got: {}", r.json);
+    }
+
+    #[test]
+    fn crypto_ecdsa_sign_verify() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var kp = await crypto.subtle.generateKey({name: "ECDSA", namedCurve: "P-256"}, false, ["sign", "verify"]);
+                var data = new TextEncoder().encode("test message");
+                var sig = await crypto.subtle.sign({name: "ECDSA", hash: "SHA-256"}, kp.privateKey, data);
+                var valid = await crypto.subtle.verify({name: "ECDSA", hash: "SHA-256"}, kp.publicKey, sig, data);
+                if (!valid) return "verify failed";
+                return "ok";
+            }
+        "#), no_env());
+        let r = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+        assert!(r.json.contains("ok"), "got: {}", r.json);
+    }
+
+    #[test]
+    fn crypto_ed25519_sign_verify() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var kp = await crypto.subtle.generateKey({name: "Ed25519"}, false, ["sign", "verify"]);
+                var data = new TextEncoder().encode("ed25519 test");
+                var sig = await crypto.subtle.sign("Ed25519", kp.privateKey, data);
+                var valid = await crypto.subtle.verify("Ed25519", kp.publicKey, sig, data);
+                if (!valid) return "verify failed";
+                return "ok";
+            }
+        "#), no_env());
+        let r = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+        assert!(r.json.contains("ok"), "got: {}", r.json);
+    }
 }

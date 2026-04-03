@@ -322,3 +322,241 @@ fn crypto_generate_key(
         ))),
     }
 }
+
+// ---------------------------------------------------------------------------
+// sign
+// ---------------------------------------------------------------------------
+
+/// `__cryptoSign(params_json) → base64 signature`
+#[appbase_op(state)]
+fn crypto_sign(state: SharedState, params: String) -> Result<String, crate::ops::OpError> {
+    let p: serde_json::Value = serde_json::from_str(&params)
+        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid params: {e}")))?;
+
+    let algo_name = p["algorithm"]["name"]
+        .as_str()
+        .unwrap_or("")
+        .to_uppercase();
+    let key_id = p["keyId"].as_u64().unwrap_or(0) as u32;
+    let data = B64
+        .decode(p["data"].as_str().unwrap_or(""))
+        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid data: {e}")))?;
+    let hash = p["algorithm"]["hash"]["name"]
+        .as_str()
+        .unwrap_or("SHA-256")
+        .to_uppercase();
+
+    let s = state.borrow();
+    let key = s
+        .key_store
+        .get(&key_id)
+        .ok_or_else(|| crate::ops::OpError::type_error("Key not found"))?;
+
+    match (algo_name.as_str(), key) {
+        ("HMAC", KeyData::Symmetric { raw }) => {
+            let alg = match hash.as_str() {
+                "SHA-1" => aws_lc_rs::hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
+                "SHA-256" => aws_lc_rs::hmac::HMAC_SHA256,
+                "SHA-384" => aws_lc_rs::hmac::HMAC_SHA384,
+                "SHA-512" => aws_lc_rs::hmac::HMAC_SHA512,
+                _ => {
+                    return Err(crate::ops::OpError::type_error(format!(
+                        "Unsupported HMAC hash: {hash}"
+                    )))
+                }
+            };
+            let hmac_key = aws_lc_rs::hmac::Key::new(alg, raw);
+            let tag = aws_lc_rs::hmac::sign(&hmac_key, &data);
+            Ok(B64.encode(tag.as_ref()))
+        }
+        ("ECDSA", KeyData::EcPrivate { pkcs8_der, curve }) => {
+            let alg = match (curve, hash.as_str()) {
+                (Curve::P256, "SHA-256") => {
+                    &aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1_SIGNING
+                }
+                (Curve::P384, "SHA-384") => {
+                    &aws_lc_rs::signature::ECDSA_P384_SHA384_ASN1_SIGNING
+                }
+                _ => {
+                    return Err(crate::ops::OpError::type_error(
+                        "Unsupported ECDSA curve/hash combo",
+                    ))
+                }
+            };
+            let rng = aws_lc_rs::rand::SystemRandom::new();
+            let key_pair =
+                aws_lc_rs::signature::EcdsaKeyPair::from_pkcs8(alg, pkcs8_der)
+                    .map_err(|e| crate::ops::OpError::error(format!("Invalid ECDSA key: {e}")))?;
+            let sig = key_pair
+                .sign(&rng, &data)
+                .map_err(|e| crate::ops::OpError::error(format!("ECDSA sign failed: {e}")))?;
+            Ok(B64.encode(sig.as_ref()))
+        }
+        ("ED25519", KeyData::Ed25519Private { pkcs8_der }) => {
+            let key_pair =
+                aws_lc_rs::signature::Ed25519KeyPair::from_pkcs8(pkcs8_der).map_err(|e| {
+                    crate::ops::OpError::error(format!("Invalid Ed25519 key: {e}"))
+                })?;
+            let sig = key_pair.sign(&data);
+            Ok(B64.encode(sig.as_ref()))
+        }
+        ("RSASSA-PKCS1-V1_5", KeyData::RsaPrivate { pkcs8_der }) => {
+            let padding = match hash.as_str() {
+                "SHA-256" => &aws_lc_rs::signature::RSA_PKCS1_SHA256,
+                "SHA-384" => &aws_lc_rs::signature::RSA_PKCS1_SHA384,
+                "SHA-512" => &aws_lc_rs::signature::RSA_PKCS1_SHA512,
+                _ => {
+                    return Err(crate::ops::OpError::type_error(format!(
+                        "Unsupported RSA hash: {hash}"
+                    )))
+                }
+            };
+            let key_pair =
+                aws_lc_rs::signature::RsaKeyPair::from_pkcs8(pkcs8_der)
+                    .map_err(|e| crate::ops::OpError::error(format!("Invalid RSA key: {e}")))?;
+            let rng = aws_lc_rs::rand::SystemRandom::new();
+            let mut sig = vec![0u8; key_pair.public_modulus_len()];
+            key_pair
+                .sign(padding, &rng, &data, &mut sig)
+                .map_err(|e| crate::ops::OpError::error(format!("RSA sign failed: {e}")))?;
+            Ok(B64.encode(&sig))
+        }
+        ("RSA-PSS", KeyData::RsaPrivate { pkcs8_der }) => {
+            let padding = match hash.as_str() {
+                "SHA-256" => &aws_lc_rs::signature::RSA_PSS_SHA256,
+                "SHA-384" => &aws_lc_rs::signature::RSA_PSS_SHA384,
+                "SHA-512" => &aws_lc_rs::signature::RSA_PSS_SHA512,
+                _ => {
+                    return Err(crate::ops::OpError::type_error(format!(
+                        "Unsupported RSA-PSS hash: {hash}"
+                    )))
+                }
+            };
+            let key_pair =
+                aws_lc_rs::signature::RsaKeyPair::from_pkcs8(pkcs8_der)
+                    .map_err(|e| crate::ops::OpError::error(format!("Invalid RSA key: {e}")))?;
+            let rng = aws_lc_rs::rand::SystemRandom::new();
+            let mut sig = vec![0u8; key_pair.public_modulus_len()];
+            key_pair
+                .sign(padding, &rng, &data, &mut sig)
+                .map_err(|e| {
+                    crate::ops::OpError::error(format!("RSA-PSS sign failed: {e}"))
+                })?;
+            Ok(B64.encode(&sig))
+        }
+        _ => Err(crate::ops::OpError::type_error(format!(
+            "Cannot sign with {algo_name} and this key type"
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// verify
+// ---------------------------------------------------------------------------
+
+/// `__cryptoVerify(params_json) → "true" | "false"`
+#[appbase_op(state)]
+fn crypto_verify(state: SharedState, params: String) -> Result<String, crate::ops::OpError> {
+    let p: serde_json::Value = serde_json::from_str(&params)
+        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid params: {e}")))?;
+
+    let algo_name = p["algorithm"]["name"]
+        .as_str()
+        .unwrap_or("")
+        .to_uppercase();
+    let key_id = p["keyId"].as_u64().unwrap_or(0) as u32;
+    let data = B64
+        .decode(p["data"].as_str().unwrap_or(""))
+        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid data: {e}")))?;
+    let signature = B64
+        .decode(p["signature"].as_str().unwrap_or(""))
+        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid signature: {e}")))?;
+    let hash = p["algorithm"]["hash"]["name"]
+        .as_str()
+        .unwrap_or("SHA-256")
+        .to_uppercase();
+
+    let s = state.borrow();
+    let key = s
+        .key_store
+        .get(&key_id)
+        .ok_or_else(|| crate::ops::OpError::type_error("Key not found"))?;
+
+    let valid = match (algo_name.as_str(), key) {
+        ("HMAC", KeyData::Symmetric { raw }) => {
+            let alg = match hash.as_str() {
+                "SHA-1" => aws_lc_rs::hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
+                "SHA-256" => aws_lc_rs::hmac::HMAC_SHA256,
+                "SHA-384" => aws_lc_rs::hmac::HMAC_SHA384,
+                "SHA-512" => aws_lc_rs::hmac::HMAC_SHA512,
+                _ => {
+                    return Err(crate::ops::OpError::type_error(format!(
+                        "Unsupported HMAC hash: {hash}"
+                    )))
+                }
+            };
+            let hmac_key = aws_lc_rs::hmac::Key::new(alg, raw);
+            aws_lc_rs::hmac::verify(&hmac_key, &data, &signature).is_ok()
+        }
+        ("ECDSA", KeyData::EcPublic { raw, curve }) => {
+            let alg = match (curve, hash.as_str()) {
+                (Curve::P256, "SHA-256") => &aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1,
+                (Curve::P384, "SHA-384") => &aws_lc_rs::signature::ECDSA_P384_SHA384_ASN1,
+                _ => {
+                    return Err(crate::ops::OpError::type_error(
+                        "Unsupported ECDSA curve/hash combo",
+                    ))
+                }
+            };
+            let pub_key = aws_lc_rs::signature::UnparsedPublicKey::new(alg, raw);
+            pub_key.verify(&data, &signature).is_ok()
+        }
+        ("ED25519", KeyData::Ed25519Public { raw }) => {
+            let pub_key = aws_lc_rs::signature::UnparsedPublicKey::new(
+                &aws_lc_rs::signature::ED25519,
+                raw,
+            );
+            pub_key.verify(&data, &signature).is_ok()
+        }
+        ("RSASSA-PKCS1-V1_5", KeyData::RsaPublic { spki_der }) => {
+            let alg = match hash.as_str() {
+                "SHA-256" => &aws_lc_rs::signature::RSA_PKCS1_2048_8192_SHA256,
+                "SHA-384" => &aws_lc_rs::signature::RSA_PKCS1_2048_8192_SHA384,
+                "SHA-512" => &aws_lc_rs::signature::RSA_PKCS1_2048_8192_SHA512,
+                _ => {
+                    return Err(crate::ops::OpError::type_error(format!(
+                        "Unsupported RSA hash: {hash}"
+                    )))
+                }
+            };
+            let pub_key = aws_lc_rs::signature::UnparsedPublicKey::new(alg, spki_der);
+            pub_key.verify(&data, &signature).is_ok()
+        }
+        ("RSA-PSS", KeyData::RsaPublic { spki_der }) => {
+            let alg = match hash.as_str() {
+                "SHA-256" => &aws_lc_rs::signature::RSA_PSS_2048_8192_SHA256,
+                "SHA-384" => &aws_lc_rs::signature::RSA_PSS_2048_8192_SHA384,
+                "SHA-512" => &aws_lc_rs::signature::RSA_PSS_2048_8192_SHA512,
+                _ => {
+                    return Err(crate::ops::OpError::type_error(format!(
+                        "Unsupported RSA-PSS hash: {hash}"
+                    )))
+                }
+            };
+            let pub_key = aws_lc_rs::signature::UnparsedPublicKey::new(alg, spki_der);
+            pub_key.verify(&data, &signature).is_ok()
+        }
+        ("HMAC", _) => {
+            return Err(crate::ops::OpError::type_error(
+                "HMAC verify requires a symmetric key",
+            ))
+        }
+        _ => {
+            return Err(crate::ops::OpError::type_error(format!(
+                "Cannot verify with {algo_name} and this key type"
+            )))
+        }
+    };
+
+    Ok(if valid { "true" } else { "false" }.to_string())
+}

@@ -72,6 +72,8 @@
   var _nativeImportKey = _crypto.__cryptoImportKey;
   var _nativeExportKey = _crypto.__cryptoExportKey;
   var _nativeGenerateKey = _crypto.__cryptoGenerateKey;
+  var _nativeSign = _crypto.__cryptoSign;
+  var _nativeVerify = _crypto.__cryptoVerify;
 
   // =========================================================================
   // crypto.getRandomValues
@@ -181,6 +183,42 @@
         publicKey: new CryptoKey(result.publicKeyId, algo, "public", true, pubUsages),
         privateKey: new CryptoKey(result.privateKeyId, algo, "private", !!extractable, privUsages)
       });
+    } catch (e) {
+      return Promise.reject(e);
+    }
+  };
+
+  SubtleCrypto.prototype.sign = function(algorithm, key, data) {
+    try {
+      if (!(key instanceof CryptoKey)) throw new TypeError("Expected CryptoKey");
+      var algo = normalizeAlgorithm(algorithm);
+      var bytes = toBytes(data);
+      var params = JSON.stringify({
+        algorithm: algo,
+        keyId: key._handle,
+        data: _B64.encode(bytes)
+      });
+      var result = _nativeSign(params);
+      return Promise.resolve(_B64.decode(result).buffer);
+    } catch (e) {
+      return Promise.reject(e);
+    }
+  };
+
+  SubtleCrypto.prototype.verify = function(algorithm, key, signature, data) {
+    try {
+      if (!(key instanceof CryptoKey)) throw new TypeError("Expected CryptoKey");
+      var algo = normalizeAlgorithm(algorithm);
+      var dataBytes = toBytes(data);
+      var sigBytes = toBytes(signature);
+      var params = JSON.stringify({
+        algorithm: algo,
+        keyId: key._handle,
+        data: _B64.encode(dataBytes),
+        signature: _B64.encode(sigBytes)
+      });
+      var result = _nativeVerify(params);
+      return Promise.resolve(result === "true");
     } catch (e) {
       return Promise.reject(e);
     }
