@@ -13,7 +13,6 @@ appbase-core = { path = "../core" }
 appbase-metering = { path = "../metering" }
 appbase-enforcement = { path = "../enforcement" }
 appbase-plan = { path = "../plan" }
-appbase-plugins = { path = "../plugins" }
 appbase-server = { path = "../server" }
 appbase-billing = { path = "../billing" }
 appbase-control = { path = "../control" }

@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/core",
-    "crates/plugins",
     "crates/server",
     "crates/cli",
     "crates/plan",
@@ -12,6 +11,7 @@ members = [
     "crates/isolate_v8",
     "crates/control",
     "crates/appbase_ops",
+    "crates/platform",
 ]
 resolver = "3"
 

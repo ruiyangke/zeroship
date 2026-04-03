@@ -30,7 +30,6 @@ fn cmd_serve(args: &[String]) {
         .get(2)
         .expect("Usage: appbase serve <server.js> [--static=index.html] [--port=3000] [--db=appbase.db] [--config=appbase.toml]");
     let port = flag_u16(args, "--port=").unwrap_or(3000);
-    let db_path = flag_str(args, "--db=").unwrap_or_else(|| "appbase.db".into());
     let static_file = flag_str(args, "--static=");
     let data_dir = PathBuf::from("data");
 
@@ -58,13 +57,10 @@ fn cmd_serve(args: &[String]) {
         std::fs::read(&path).unwrap_or_else(|e| panic!("Failed to read {path}: {e}"))
     });
 
-    // Plugin factory: creates fresh plugins for each isolate
+    // Plugin factory: no legacy deno_core plugins — the V8 runtime has built-in
+    // KV (kv.rs), env (env.rs), crypto, fetch, URL, timers.
     let plugin_factory: PluginFactory = Arc::new(move |_app_id| -> Vec<Box<dyn Plugin>> {
-        vec![
-            Box::new(appbase_plugins::db::DbPlugin::with_path(&db_path)),
-            Box::new(appbase_plugins::kv::KvPlugin::new()),
-            Box::new(appbase_plugins::env::EnvPlugin::from_system("APPBASE_")),
-        ]
+        vec![]
     });
 
     // Load isolate config from TOML if available, otherwise use defaults

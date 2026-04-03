@@ -74,7 +74,6 @@ dependencies = [
  "appbase-enforcement",
  "appbase-metering",
  "appbase-plan",
- "appbase-plugins",
  "appbase-server",
  "serde_json",
  "tokio",
@@ -137,6 +136,7 @@ name = "appbase-isolate-v8"
 version = "0.1.0"
 dependencies = [
  "ada-url",
+ "appbase-compiler",
  "appbase-ops",
  "aws-lc-rs",
  "base64",
@@ -187,13 +187,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "appbase-plugins"
+name = "appbase-platform"
 version = "0.1.0"
 dependencies = [
+ "appbase-billing",
+ "appbase-control",
  "appbase-core",
- "serde_json",
- "thiserror",
- "uuid",
+ "appbase-enforcement",
+ "appbase-metering",
+ "appbase-plan",
+ "appbase-server",
 ]
 
 [[package]]
