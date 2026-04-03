@@ -199,16 +199,25 @@
   function initBody(obj, body) {
     obj._bodyUsed = false;
     obj._bodyText = "";
+    obj._bodyBytes = null;  // ArrayBuffer for binary bodies
 
     if (body === undefined || body === null) {
       obj._bodyText = "";
     } else if (typeof body === "string") {
       obj._bodyText = body;
     } else if (body instanceof ArrayBuffer) {
-      // Store as string for simplicity in this polyfill
-      obj._bodyText = String.fromCharCode.apply(null, new Uint8Array(body));
+      obj._bodyBytes = body;
+      // Also set _bodyText for backwards compat (lossy for binary)
+      var bytes = new Uint8Array(body);
+      var text = "";
+      for (var i = 0; i < bytes.length; i++) text += String.fromCharCode(bytes[i]);
+      obj._bodyText = text;
     } else if (ArrayBuffer.isView && ArrayBuffer.isView(body)) {
-      obj._bodyText = String.fromCharCode.apply(null, new Uint8Array(body.buffer, body.byteOffset, body.byteLength));
+      obj._bodyBytes = body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength);
+      var bytes = new Uint8Array(obj._bodyBytes);
+      var text = "";
+      for (var i = 0; i < bytes.length; i++) text += String.fromCharCode(bytes[i]);
+      obj._bodyText = text;
     } else {
       obj._bodyText = String(body);
     }
@@ -241,14 +250,19 @@
     };
 
     proto.arrayBuffer = function() {
-      return this.text().then(function(text) {
-        var buf = new ArrayBuffer(text.length);
-        var view = new Uint8Array(buf);
-        for (var i = 0; i < text.length; i++) {
-          view[i] = text.charCodeAt(i) & 0xff;
-        }
-        return buf;
-      });
+      if (this._bodyUsed) return Promise.reject(new TypeError("Body has already been consumed."));
+      this._bodyUsed = true;
+      if (this._bodyBytes) {
+        return Promise.resolve(this._bodyBytes);
+      }
+      // Fallback for string bodies
+      var text = this._bodyText;
+      var buf = new ArrayBuffer(text.length);
+      var view = new Uint8Array(buf);
+      for (var i = 0; i < text.length; i++) {
+        view[i] = text.charCodeAt(i) & 0xff;
+      }
+      return Promise.resolve(buf);
     };
 
     proto.blob = function() {
@@ -345,7 +359,9 @@
     if (this._bodyUsed) {
       throw new TypeError("Cannot clone a disturbed Response");
     }
-    var resp = new Response(this._bodyText, {
+    // Use _bodyBytes if available to preserve binary data losslessly
+    var cloneBody = this._bodyBytes ? this._bodyBytes.slice(0) : this._bodyText;
+    var resp = new Response(cloneBody, {
       status: this.status,
       statusText: this.statusText,
       headers: new Headers(this.headers)
