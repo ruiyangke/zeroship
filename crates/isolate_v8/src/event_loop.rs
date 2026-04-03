@@ -15,6 +15,27 @@ use std::time::Duration;
 use crate::timers::{fire_ready_timers, TimerState};
 
 // ---------------------------------------------------------------------------
+// Crypto key store
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub(crate) enum Curve {
+    P256,
+    P384,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum KeyData {
+    Symmetric { raw: Vec<u8> },
+    EcPrivate { pkcs8_der: Vec<u8>, curve: Curve },
+    EcPublic { raw: Vec<u8>, curve: Curve },
+    RsaPrivate { pkcs8_der: Vec<u8> },
+    RsaPublic { spki_der: Vec<u8> },
+    Ed25519Private { pkcs8_der: Vec<u8> },
+    Ed25519Public { raw: Vec<u8> },
+}
+
+// ---------------------------------------------------------------------------
 // Event loop state
 // ---------------------------------------------------------------------------
 
@@ -40,6 +61,9 @@ pub(crate) struct EventLoopState {
     pub(crate) kv_store: HashMap<String, String>,
     /// Per-app environment variables (injected at isolate creation).
     pub(crate) env_vars: HashMap<String, String>,
+    /// Crypto key store — key material stays in Rust, JS holds opaque u32 handles.
+    pub(crate) key_store: HashMap<u32, KeyData>,
+    pub(crate) next_key_id: u32,
 }
 
 /// Result of an async op (e.g., fetch response, DB query result).
@@ -62,6 +86,8 @@ impl EventLoopState {
             log_buffer: Vec::new(),
             kv_store: HashMap::new(),
             env_vars: HashMap::new(),
+            key_store: HashMap::new(),
+            next_key_id: 1,
         }
     }
 

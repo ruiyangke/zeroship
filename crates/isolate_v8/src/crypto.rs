@@ -1,4 +1,4 @@
-//! Crypto APIs for V8 apps.
+//! Crypto APIs for V8 apps — backed by aws-lc-rs.
 
 use appbase_ops::appbase_op;
 
@@ -8,7 +8,7 @@ use appbase_ops::appbase_op;
 #[appbase_op]
 fn crypto_random_uuid() -> String {
     let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes).unwrap();
+    aws_lc_rs::rand::fill(&mut bytes).unwrap();
     bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
     bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10xx
 
