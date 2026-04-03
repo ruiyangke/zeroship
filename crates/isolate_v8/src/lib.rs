@@ -1,5 +1,7 @@
 //! Raw V8 isolate runtime for appbase.
 //!
+//! Supports single-file and multi-module ESM projects.
+//!
 //! Two execution models:
 //! - **Per-request** (`Isolate`, `IsolatePool`): blocking, one request at a time per isolate.
 //!   Best for multi-threaded CPU-heavy workloads.
@@ -45,7 +47,7 @@ mod tests {
 
     use super::*;
 
-    /// Helper to create a single-module entry for tests.
+    /// Helper to create a module entry for tests (single-module shorthand).
     fn m(source: &str) -> Vec<ModuleEntry> {
         vec![ModuleEntry {
             specifier: "index.js".into(),

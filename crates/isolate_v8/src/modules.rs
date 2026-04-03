@@ -39,7 +39,8 @@ impl ModuleRegistry {
 
 /// Compile and register all modules, instantiate and evaluate the entrypoint.
 ///
-/// `entries[0]` is the entrypoint. All others are dependencies.
+/// `entries[0]` is the entrypoint module. Additional entries are imported modules
+/// (the runtime resolves imports via the module registry).
 /// Returns the entrypoint module's namespace object (contains the exports).
 pub(crate) fn load_modules(
     scope: &mut v8::PinScope,

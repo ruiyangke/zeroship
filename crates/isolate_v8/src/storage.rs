@@ -4,7 +4,9 @@
 //! ```text
 //! {base_dir}/
 //!   source/
-//!     app.tsx              ← original source
+//!     server.ts            ← entrypoint
+//!     utils.ts             ← additional modules
+//!     types.ts             ← type definitions
 //!   builds/
 //!     v1/
 //!       server.js          ← bundled output

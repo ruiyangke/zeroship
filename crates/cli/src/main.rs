@@ -2,8 +2,8 @@
 //!
 //! Commands:
 //!   appbase serve <server.js> [--static=index.html] [--port=3000] [--db=appbase.db]
-//!   appbase dev <app.jsx> [--port=3000] [--compiler=appbase-compile]
-//!   appbase compile <app.jsx> [--target=rust|node] [--outdir=.dist] [--minify]
+//!   appbase dev <entrypoint> [--port=3000] [--compiler=appbase-compile]
+//!   appbase compile <entrypoint> [--target=rust|node] [--outdir=.dist] [--minify]
 
 use appbase_control::AppRegistry;
 use appbase_core::config::{AppbaseConfig, IsolateConfig, ServerConfig};
@@ -286,10 +286,10 @@ fn print_usage() {
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  appbase serve <server.js> [--static=index.html] [--port=3000] [--db=appbase.db]");
-    eprintln!("  appbase dev <app.jsx> [--port=3000] [--compiler=appbase-compile]");
+    eprintln!("  appbase dev <entrypoint> [--port=3000] [--compiler=appbase-compile]");
     eprintln!();
     eprintln!("Compile with appbase-compile:");
-    eprintln!("  appbase-compile <app.jsx> [--target=rust|node] [--outdir=.dist] [--minify]");
+    eprintln!("  appbase-compile <entrypoint> [--target=rust|node] [--outdir=.dist] [--minify]");
 }
 
 // --- CLI helpers ---

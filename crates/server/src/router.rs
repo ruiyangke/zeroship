@@ -118,7 +118,7 @@ pub fn build(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Create an AppState for single-app mode.
+/// Create an AppState for single-app mode (one app per server instance).
 ///
 /// If `plan` is provided, it is used for metering; otherwise defaults to unlimited (dev-friendly).
 pub fn single_app_state(
