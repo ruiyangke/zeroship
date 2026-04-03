@@ -1,0 +1,137 @@
+Building v8-server (release)...
+    Finished `release` profile [optimized] target(s) in 9.35s
+Starting servers...
+[echo-rs] http://0.0.0.0:8888 (async, hyper)
+[v8-server] mode=concurrent (1 V8 thread)
+[v8-server] mode=concurrent-pool (16 V8 threads)
+[v8-server] http://0.0.0.0:4000
+[node] http://0.0.0.0:4002 (Node.js v22.22.2)
+[v8-server] http://0.0.0.0:4001
+All servers ready.
+Cross-Runtime RPC Benchmark
+Date: 2026-04-03
+Machine: Linux (16 cores)
+Tool: wrk, 4 threads, 50 connections, 10s per test
+
+Servers:
+  raw V8 concurrent:   1 V8 thread, serial JS + concurrent I/O
+  raw V8 conc-pool:    16 V8 threads, each with concurrent I/O
+  Node.js:             v22.22.2, http module, single thread
+
+=========================================================
+
+--- 1. ping/pong (minimal) ---
+  raw V8 concurrent (1 thread)            172598.30 req/s   273.02us 136.15us
+  raw V8 conc-pool (16 threads)           101243.09 req/s   509.89us 442.61us
+  Node.js v22.22.2                         14504.25 req/s   3.82ms 7.58ms
+
+--- 2. fib(10) (light CPU) ---
+  raw V8 concurrent (1 thread)            141357.44 req/s   330.77us 94.67us
+  raw V8 conc-pool (16 threads)           104400.51 req/s   490.38us 409.26us
+  Node.js v22.22.2                         13665.04 req/s   3.62ms 2.60ms
+
+--- 3. fib(35) (heavy CPU) ---
+  raw V8 concurrent (1 thread)                 7.39 req/s   1.01s 561.89ms
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+  raw V8 conc-pool (16 threads)               49.62 req/s   849.58ms 315.31ms
+  Node.js v22.22.2                             7.19 req/s   685.47ms 279.42ms
+
+--- 4. setTimeout(0) ---
+  raw V8 concurrent (1 thread)             99338.83 req/s   466.27us 146.46us
+  raw V8 conc-pool (16 threads)           103679.47 req/s   502.86us 451.63us
+  Node.js v22.22.2                         20897.90 req/s   2.30ms 688.94us
+
+--- 5. Promise chain (sync .then) ---
+  raw V8 concurrent (1 thread)            154868.54 req/s   308.60us 134.39us
+  raw V8 conc-pool (16 threads)           106819.30 req/s   472.89us 388.67us
+  Node.js v22.22.2                         14321.97 req/s   3.41ms 1.74ms
+
+--- 6. Promise chain + 100ms timer ---
+  raw V8 concurrent (1 thread)               474.49 req/s   100.64ms 129.41us
+  raw V8 conc-pool (16 threads)              474.55 req/s   100.62ms 158.52us
+  Node.js v22.22.2                           474.23 req/s   100.77ms 594.02us
+
+--- 7. fetch() → local Rust echo ---
+  raw V8 concurrent (1 thread)             52383.34 req/s   0.90ms 191.62us
+  raw V8 conc-pool (16 threads)            74700.27 req/s   682.08us 557.03us
+  Node.js v22.22.2                          3224.50 req/s   16.53ms 19.00ms
+
+--- 8. fetch() → external API ---
+  raw V8 concurrent (1 thread)               100.09 req/s   369.85ms 285.27ms
+  raw V8 conc-pool (16 threads)              130.06 req/s   337.12ms 236.29ms
+  Node.js v22.22.2                           103.76 req/s   389.30ms 298.62ms
+
+--- Crypto ---
+
+--- 9. randomUUID() ---
+  raw V8 concurrent (1 thread)            153928.53 req/s   378.16us 1.39ms
+  raw V8 conc-pool (16 threads)           105014.54 req/s   551.69us 1.42ms
+  Node.js v22.22.2                         13765.11 req/s   3.63ms 3.15ms
+
+--- 10. getRandomValues(32) ---
+  raw V8 concurrent (1 thread)            135527.32 req/s   350.76us 113.20us
+  raw V8 conc-pool (16 threads)           103168.08 req/s   498.37us 419.54us
+  Node.js v22.22.2                         11252.14 req/s   4.44ms 3.71ms
+
+--- 11. SHA-256 digest ---
+  raw V8 concurrent (1 thread)             98635.01 req/s   490.18us 212.20us
+  raw V8 conc-pool (16 threads)           103246.05 req/s   494.40us 410.68us
+  Node.js v22.22.2                         13609.48 req/s   3.56ms 1.20ms
+
+--- 12. HMAC-SHA256 sign (cached) ---
+  raw V8 concurrent (1 thread)             55013.37 req/s   0.92ms 600.95us
+  raw V8 conc-pool (16 threads)            92134.72 req/s   543.78us 429.59us
+  Node.js v22.22.2                         13006.81 req/s   3.71ms 1.08ms
+
+--- 13. HMAC-SHA256 sign+verify ---
+  raw V8 concurrent (1 thread)             40428.36 req/s   1.23ms 677.11us
+  raw V8 conc-pool (16 threads)            86131.66 req/s   574.31us 430.98us
+  Node.js v22.22.2                         11322.52 req/s   4.24ms 805.67us
+
+--- 14. AES-GCM encrypt (cached) ---
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+  raw V8 concurrent (1 thread)             37006.98 req/s   1.77ms 2.43ms
+  raw V8 conc-pool (16 threads)            88377.59 req/s   571.12us 446.79us
+  Node.js v22.22.2                         11823.99 req/s   4.08ms 1.17ms
+
+--- 15. ECDSA P-256 sign (cached) ---
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+  raw V8 concurrent (1 thread)             15578.48 req/s   3.09ms 811.90us
+  raw V8 conc-pool (16 threads)            66137.39 req/s   741.62us 496.47us
+  Node.js v22.22.2                         10699.73 req/s   4.51ms 1.24ms
+
+=========================================================
+
+Notes:
+  raw V8 concurrent:   single V8 thread with serial JS + concurrent I/O.
+                       Requests overlap during I/O waits.
+  raw V8 conc-pool:    N concurrent isolate threads with round-robin dispatch.
+                       Best of both: concurrent I/O + multi-core scaling.
+  Node.js:             single-threaded event loop via http module.
+
+=========================================================
+  Summary (req/s) — v3 with ArrayBuffer bridge for digest
+=========================================================
+
+Scenario                          concurrent(1)  conc-pool(16)  Node.js v22    vs Node (best)
+--- RPC ---
+1. ping/pong                         172,598        101,243       14,504       11.9x
+2. fib(10)                           141,357        104,401       13,665       10.3x
+3. fib(35) [5s]                            7             50            7        7.1x (pool)
+4. setTimeout(0)                      99,339        103,679       20,898        5.0x (pool)
+5. Promise chain                     154,869        106,819       14,322       10.8x
+6. Promise+100ms                         474            475          474        1.0x
+7. fetch → local echo                52,383         74,700        3,225       23.2x (pool)
+8. fetch → external API                 100            130          104        1.3x (pool)
+
+--- Crypto ---
+9. randomUUID()                      153,929        105,015       13,765       11.2x
+10. getRandomValues(32)              135,527        103,168       11,252       12.0x
+11. SHA-256 digest (ArrayBuffer!)     98,635        103,246       13,609        7.6x (pool)
+12. HMAC-SHA256 sign                  55,013         92,135       13,007        7.1x (pool)
+13. HMAC-SHA256 sign+verify           40,428         86,132       11,323        7.6x (pool)
+14. AES-GCM encrypt                   37,007         88,378       11,824        7.5x (pool)
+15. ECDSA P-256 sign                  15,578         66,137       10,700        6.2x (pool)
+
+Note: SHA-256 improved from 67K→99K (concurrent) after ArrayBuffer bridge.
+Remaining ops still use base64 — will improve similarly when migrated.
