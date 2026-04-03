@@ -25,8 +25,9 @@ impl Default for BundleOptions {
     fn default() -> Self {
         Self {
             entry: String::new(),
-            minify: true,
-            sourcemap: true,
+            minify: false, // No minification by default — readable output, clean stack traces.
+                           // Tree-shaking handles dead code. V8 bytecode cache makes parse time irrelevant.
+            sourcemap: false,
             target: "es2022".to_string(),
             external: Vec::new(),
         }
