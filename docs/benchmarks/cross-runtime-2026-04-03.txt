@@ -1,0 +1,117 @@
+Building v8-server (release)...
+    Finished `release` profile [optimized] target(s) in 11.11s
+Starting servers...
+[v8-server] mode=concurrent (1 V8 thread)
+[v8-server] mode=concurrent-pool (16 V8 threads)
+[echo-rs] http://0.0.0.0:8888 (async, hyper)
+[v8-server] http://0.0.0.0:4000
+[node] http://0.0.0.0:4002 (Node.js v22.22.2)
+[v8-server] http://0.0.0.0:4001
+All servers ready.
+Cross-Runtime RPC Benchmark
+Date: 2026-04-03
+Machine: Linux (16 cores)
+Tool: wrk, 4 threads, 50 connections, 10s per test
+
+Servers:
+  raw V8 concurrent:   1 V8 thread, serial JS + concurrent I/O
+  raw V8 conc-pool:    16 V8 threads, each with concurrent I/O
+  Node.js:             v22.22.2, http module, single thread
+
+=========================================================
+
+--- 1. ping/pong (minimal) ---
+  raw V8 concurrent (1 thread)            173255.33 req/s   269.23us 122.48us
+  raw V8 conc-pool (16 threads)           104089.82 req/s   494.01us 429.09us
+  Node.js v22.22.2                         16714.61 req/s   3.25ms 6.04ms
+
+--- 2. fib(10) (light CPU) ---
+  raw V8 concurrent (1 thread)            137585.40 req/s   341.91us 106.89us
+  raw V8 conc-pool (16 threads)           113277.67 req/s   447.38us 370.46us
+  Node.js v22.22.2                         16125.28 req/s   3.04ms 1.80ms
+
+--- 3. fib(35) (heavy CPU) ---
+  raw V8 concurrent (1 thread)                 7.39 req/s   1.00s 561.16ms
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+  raw V8 conc-pool (16 threads)               53.24 req/s   814.45ms 239.51ms
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+  Node.js v22.22.2                             7.19 req/s   754.34ms 343.78ms
+
+--- 4. setTimeout(0) ---
+  raw V8 concurrent (1 thread)             95402.49 req/s   482.53us 161.53us
+  raw V8 conc-pool (16 threads)           108534.08 req/s   471.07us 393.83us
+  Node.js v22.22.2                         19595.63 req/s   2.46ms 0.93ms
+
+--- 5. Promise chain (sync .then) ---
+  raw V8 concurrent (1 thread)            151105.52 req/s   316.78us 140.88us
+  raw V8 conc-pool (16 threads)           112795.09 req/s   452.74us 378.83us
+  Node.js v22.22.2                         16457.47 req/s   2.93ms 1.19ms
+
+--- 6. Promise chain + 100ms timer ---
+  raw V8 concurrent (1 thread)               474.38 req/s   100.68ms 141.14us
+  raw V8 conc-pool (16 threads)              474.46 req/s   100.65ms 159.21us
+  Node.js v22.22.2                           474.53 req/s   100.75ms 554.91us
+
+--- 7. fetch() → local Rust echo ---
+  raw V8 concurrent (1 thread)             53612.31 req/s   0.88ms 181.24us
+  raw V8 conc-pool (16 threads)            85157.07 req/s   575.39us 395.91us
+  Node.js v22.22.2                          3170.85 req/s   17.18ms 22.12ms
+
+--- 8. fetch() → external API ---
+  raw V8 concurrent (1 thread)                99.33 req/s   393.51ms 298.87ms
+  raw V8 conc-pool (16 threads)              133.47 req/s   351.47ms 249.75ms
+  Node.js v22.22.2                            84.59 req/s   452.55ms 336.69ms
+
+=========================================================
+
+Notes:
+  raw V8 concurrent:   single V8 thread with serial JS + concurrent I/O.
+                       Requests overlap during I/O waits.
+  raw V8 conc-pool:    N concurrent isolate threads with round-robin dispatch.
+                       Best of both: concurrent I/O + multi-core scaling.
+  Node.js:             single-threaded event loop via http module.
+
+=========================================================
+  Summary: RPC Benchmark (req/s)
+=========================================================
+
+Scenario                    concurrent(1)  conc-pool(16)  Node.js v22    vs Node (best)
+1. ping/pong                    173,255        104,090       16,715       10.4x
+2. fib(10) (light CPU)          137,585        113,278       16,125        8.5x
+3. fib(35) (heavy CPU) [5s]           7             53            7        7.4x (pool)
+4. setTimeout(0)                 95,402        108,534       19,596        5.5x (pool)
+5. Promise chain                151,106        112,795       16,457        9.2x
+6. Promise+100ms timer              474            474          475        1.0x
+7. fetch → local echo            53,612         85,157        3,171       26.9x (pool)
+8. fetch → external API              99            133           85        1.6x (pool)
+
+=========================================================
+  Summary: Crypto Benchmark (in-process, req/s)
+=========================================================
+
+Operation                         appbase     Node.js v22    vs Node
+randomUUID()                      297,681       780,942       0.4x  (Node native C++)
+getRandomValues(32)               259,282       323,310       0.8x  (close — was 0.5x before fix)
+SHA-256 digest                    144,745        77,609       1.9x
+HMAC-SHA256 sign (import+sign)     64,623        35,161       1.8x
+HMAC-SHA256 sign (cached key)     114,134        61,744       1.8x
+AES-256-GCM encrypt (cached)       83,950        60,668       1.4x
+ECDSA P-256 sign (cached)          20,714        67,011       0.3x  (key re-parse overhead)
+
+Optimizations applied:
+  - workerd-style 4KB thread-local CSPRNG buffer
+  - Manual hex LUT for UUID formatting (no format!() macro)
+  - Direct TypedArray backing store fill for getRandomValues (no base64)
+  - ESM namespace → plain object copy
+  - Lazy CPU timer arm
+  - Trusted headers for onRequest dispatch
+  - Sync Response extraction
