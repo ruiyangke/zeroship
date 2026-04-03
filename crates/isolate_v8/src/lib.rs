@@ -1161,4 +1161,42 @@ mod tests {
         let r = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
         assert!(r.json.contains("ok"), "got: {}", r.json);
     }
+
+    #[test]
+    fn crypto_aes_gcm_encrypt_decrypt() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var key = await crypto.subtle.generateKey({name: "AES-GCM", length: 256}, true, ["encrypt", "decrypt"]);
+                var iv = new Uint8Array(12);
+                crypto.getRandomValues(iv);
+                var data = new TextEncoder().encode("secret message");
+                var encrypted = await crypto.subtle.encrypt({name: "AES-GCM", iv: iv}, key, data);
+                var decrypted = await crypto.subtle.decrypt({name: "AES-GCM", iv: iv}, key, encrypted);
+                var text = new TextDecoder().decode(new Uint8Array(decrypted));
+                return text === "secret message" ? "ok" : "mismatch: " + text;
+            }
+        "#), no_env());
+        let r = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+        assert!(r.json.contains("ok"), "got: {}", r.json);
+    }
+
+    #[test]
+    fn crypto_aes_cbc_encrypt_decrypt() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var key = await crypto.subtle.generateKey({name: "AES-CBC", length: 256}, true, ["encrypt", "decrypt"]);
+                var iv = new Uint8Array(16);
+                crypto.getRandomValues(iv);
+                var data = new TextEncoder().encode("hello cbc");
+                var encrypted = await crypto.subtle.encrypt({name: "AES-CBC", iv: iv}, key, data);
+                var decrypted = await crypto.subtle.decrypt({name: "AES-CBC", iv: iv}, key, encrypted);
+                var text = new TextDecoder().decode(new Uint8Array(decrypted));
+                return text === "hello cbc" ? "ok" : "mismatch: " + text;
+            }
+        "#), no_env());
+        let r = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+        assert!(r.json.contains("ok"), "got: {}", r.json);
+    }
 }

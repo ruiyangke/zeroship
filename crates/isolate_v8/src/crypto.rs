@@ -4,6 +4,16 @@ use appbase_ops::appbase_op;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 
+use aws_lc_rs::aead::{Aad, Nonce, UnboundKey, LessSafeKey, AES_128_GCM, AES_256_GCM};
+use aws_lc_rs::cipher::{
+    DecryptionContext, EncryptionContext, PaddedBlockDecryptingKey, PaddedBlockEncryptingKey,
+    UnboundCipherKey, AES_128, AES_256,
+};
+use aws_lc_rs::iv::{FixedLength, IV_LEN_128_BIT};
+use aws_lc_rs::rsa::{
+    OaepAlgorithm, OaepPrivateDecryptingKey, OaepPublicEncryptingKey, PrivateDecryptingKey,
+    PublicEncryptingKey, OAEP_SHA256_MGF1SHA256, OAEP_SHA384_MGF1SHA384, OAEP_SHA512_MGF1SHA512,
+};
 use aws_lc_rs::signature::KeyPair;
 
 use crate::event_loop::{Curve, KeyData, SharedState};
@@ -559,4 +569,307 @@ fn crypto_verify(state: SharedState, params: String) -> Result<String, crate::op
     };
 
     Ok(if valid { "true" } else { "false" }.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for encrypt/decrypt
+// ---------------------------------------------------------------------------
+
+fn oaep_algo_for_hash(hash: &str) -> Result<&'static OaepAlgorithm, crate::ops::OpError> {
+    match hash {
+        "SHA-256" => Ok(&OAEP_SHA256_MGF1SHA256),
+        "SHA-384" => Ok(&OAEP_SHA384_MGF1SHA384),
+        "SHA-512" => Ok(&OAEP_SHA512_MGF1SHA512),
+        _ => Err(crate::ops::OpError::type_error(format!(
+            "Unsupported RSA-OAEP hash: {hash}"
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// encrypt
+// ---------------------------------------------------------------------------
+
+/// `__cryptoEncrypt(params_json) → base64 ciphertext`
+#[appbase_op(state)]
+fn crypto_encrypt(state: SharedState, params: String) -> Result<String, crate::ops::OpError> {
+    let p: serde_json::Value = serde_json::from_str(&params)
+        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid params: {e}")))?;
+
+    let algo_name = p["algorithm"]["name"]
+        .as_str()
+        .unwrap_or("")
+        .to_uppercase();
+    let key_id = p["keyId"].as_u64().unwrap_or(0) as u32;
+    let data = B64
+        .decode(p["data"].as_str().unwrap_or(""))
+        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid data: {e}")))?;
+    let hash = p["algorithm"]["hash"]["name"]
+        .as_str()
+        .unwrap_or("SHA-256")
+        .to_uppercase();
+
+    let s = state.borrow();
+    let key = s
+        .key_store
+        .get(&key_id)
+        .ok_or_else(|| crate::ops::OpError::type_error("Key not found"))?;
+
+    match (algo_name.as_str(), key) {
+        ("AES-GCM", KeyData::Symmetric { raw }) => {
+            let iv_b64 = p["algorithm"]["iv"].as_str().unwrap_or("");
+            let iv_bytes = B64
+                .decode(iv_b64)
+                .map_err(|e| crate::ops::OpError::type_error(format!("Invalid IV: {e}")))?;
+            if iv_bytes.len() != 12 {
+                return Err(crate::ops::OpError::type_error(
+                    "AES-GCM IV must be 12 bytes",
+                ));
+            }
+
+            let aead_alg = match raw.len() {
+                16 => &AES_128_GCM,
+                32 => &AES_256_GCM,
+                _ => {
+                    return Err(crate::ops::OpError::type_error(
+                        "AES-GCM key must be 16 or 32 bytes",
+                    ))
+                }
+            };
+
+            let unbound = UnboundKey::new(aead_alg, raw)
+                .map_err(|e| crate::ops::OpError::error(format!("AES-GCM key error: {e}")))?;
+            let less_safe = LessSafeKey::new(unbound);
+            let nonce = Nonce::try_assume_unique_for_key(&iv_bytes)
+                .map_err(|e| crate::ops::OpError::error(format!("Nonce error: {e}")))?;
+
+            let aad = if let Some(aad_b64) = p["algorithm"]["additionalData"].as_str() {
+                let aad_bytes = B64.decode(aad_b64).map_err(|e| {
+                    crate::ops::OpError::type_error(format!("Invalid AAD: {e}"))
+                })?;
+                Aad::from(aad_bytes)
+            } else {
+                Aad::from(Vec::<u8>::new())
+            };
+
+            let mut in_out = data;
+            less_safe
+                .seal_in_place_append_tag(nonce, aad, &mut in_out)
+                .map_err(|e| crate::ops::OpError::error(format!("AES-GCM encrypt: {e}")))?;
+
+            Ok(B64.encode(&in_out))
+        }
+        ("AES-CBC", KeyData::Symmetric { raw }) => {
+            let iv_b64 = p["algorithm"]["iv"].as_str().unwrap_or("");
+            let iv_bytes = B64
+                .decode(iv_b64)
+                .map_err(|e| crate::ops::OpError::type_error(format!("Invalid IV: {e}")))?;
+            if iv_bytes.len() != 16 {
+                return Err(crate::ops::OpError::type_error(
+                    "AES-CBC IV must be 16 bytes",
+                ));
+            }
+
+            let cipher_alg: &'static aws_lc_rs::cipher::Algorithm = match raw.len() {
+                16 => &AES_128,
+                32 => &AES_256,
+                _ => {
+                    return Err(crate::ops::OpError::type_error(
+                        "AES-CBC key must be 16 or 32 bytes",
+                    ))
+                }
+            };
+
+            let unbound = UnboundCipherKey::new(cipher_alg, raw)
+                .map_err(|e| crate::ops::OpError::error(format!("AES-CBC key error: {e}")))?;
+            let enc_key = PaddedBlockEncryptingKey::cbc_pkcs7(unbound)
+                .map_err(|e| crate::ops::OpError::error(format!("AES-CBC init error: {e}")))?;
+
+            let iv_array: [u8; 16] = iv_bytes.as_slice().try_into().unwrap();
+            let ctx = EncryptionContext::Iv128(FixedLength::<IV_LEN_128_BIT>::from(iv_array));
+
+            let mut in_out = data;
+            enc_key
+                .less_safe_encrypt(&mut in_out, ctx)
+                .map_err(|e| crate::ops::OpError::error(format!("AES-CBC encrypt: {e}")))?;
+
+            Ok(B64.encode(&in_out))
+        }
+        ("RSA-OAEP", KeyData::RsaPublic { spki_der }) => {
+            let oaep_alg = oaep_algo_for_hash(&hash)?;
+
+            let pub_key = PublicEncryptingKey::from_der(spki_der)
+                .map_err(|e| crate::ops::OpError::error(format!("RSA public key error: {e}")))?;
+            let oaep_key = OaepPublicEncryptingKey::new(pub_key)
+                .map_err(|e| crate::ops::OpError::error(format!("RSA-OAEP init error: {e}")))?;
+
+            let label = if let Some(label_b64) = p["algorithm"]["label"].as_str() {
+                let label_bytes = B64.decode(label_b64).map_err(|e| {
+                    crate::ops::OpError::type_error(format!("Invalid label: {e}"))
+                })?;
+                Some(label_bytes)
+            } else {
+                None
+            };
+
+            let mut ciphertext = vec![0u8; oaep_key.ciphertext_size()];
+            let ct = oaep_key
+                .encrypt(
+                    oaep_alg,
+                    &data,
+                    &mut ciphertext,
+                    label.as_deref(),
+                )
+                .map_err(|e| crate::ops::OpError::error(format!("RSA-OAEP encrypt: {e}")))?;
+
+            Ok(B64.encode(ct))
+        }
+        _ => Err(crate::ops::OpError::type_error(format!(
+            "Cannot encrypt with {algo_name} and this key type"
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// decrypt
+// ---------------------------------------------------------------------------
+
+/// `__cryptoDecrypt(params_json) → base64 plaintext`
+#[appbase_op(state)]
+fn crypto_decrypt(state: SharedState, params: String) -> Result<String, crate::ops::OpError> {
+    let p: serde_json::Value = serde_json::from_str(&params)
+        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid params: {e}")))?;
+
+    let algo_name = p["algorithm"]["name"]
+        .as_str()
+        .unwrap_or("")
+        .to_uppercase();
+    let key_id = p["keyId"].as_u64().unwrap_or(0) as u32;
+    let data = B64
+        .decode(p["data"].as_str().unwrap_or(""))
+        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid data: {e}")))?;
+    let hash = p["algorithm"]["hash"]["name"]
+        .as_str()
+        .unwrap_or("SHA-256")
+        .to_uppercase();
+
+    let s = state.borrow();
+    let key = s
+        .key_store
+        .get(&key_id)
+        .ok_or_else(|| crate::ops::OpError::type_error("Key not found"))?;
+
+    match (algo_name.as_str(), key) {
+        ("AES-GCM", KeyData::Symmetric { raw }) => {
+            let iv_b64 = p["algorithm"]["iv"].as_str().unwrap_or("");
+            let iv_bytes = B64
+                .decode(iv_b64)
+                .map_err(|e| crate::ops::OpError::type_error(format!("Invalid IV: {e}")))?;
+            if iv_bytes.len() != 12 {
+                return Err(crate::ops::OpError::type_error(
+                    "AES-GCM IV must be 12 bytes",
+                ));
+            }
+
+            let aead_alg = match raw.len() {
+                16 => &AES_128_GCM,
+                32 => &AES_256_GCM,
+                _ => {
+                    return Err(crate::ops::OpError::type_error(
+                        "AES-GCM key must be 16 or 32 bytes",
+                    ))
+                }
+            };
+
+            let unbound = UnboundKey::new(aead_alg, raw)
+                .map_err(|e| crate::ops::OpError::error(format!("AES-GCM key error: {e}")))?;
+            let less_safe = LessSafeKey::new(unbound);
+            let nonce = Nonce::try_assume_unique_for_key(&iv_bytes)
+                .map_err(|e| crate::ops::OpError::error(format!("Nonce error: {e}")))?;
+
+            let aad = if let Some(aad_b64) = p["algorithm"]["additionalData"].as_str() {
+                let aad_bytes = B64.decode(aad_b64).map_err(|e| {
+                    crate::ops::OpError::type_error(format!("Invalid AAD: {e}"))
+                })?;
+                Aad::from(aad_bytes)
+            } else {
+                Aad::from(Vec::<u8>::new())
+            };
+
+            let mut in_out = data;
+            let plaintext = less_safe
+                .open_in_place(nonce, aad, &mut in_out)
+                .map_err(|e| crate::ops::OpError::error(format!("AES-GCM decrypt: {e}")))?;
+
+            Ok(B64.encode(plaintext))
+        }
+        ("AES-CBC", KeyData::Symmetric { raw }) => {
+            let iv_b64 = p["algorithm"]["iv"].as_str().unwrap_or("");
+            let iv_bytes = B64
+                .decode(iv_b64)
+                .map_err(|e| crate::ops::OpError::type_error(format!("Invalid IV: {e}")))?;
+            if iv_bytes.len() != 16 {
+                return Err(crate::ops::OpError::type_error(
+                    "AES-CBC IV must be 16 bytes",
+                ));
+            }
+
+            let cipher_alg: &'static aws_lc_rs::cipher::Algorithm = match raw.len() {
+                16 => &AES_128,
+                32 => &AES_256,
+                _ => {
+                    return Err(crate::ops::OpError::type_error(
+                        "AES-CBC key must be 16 or 32 bytes",
+                    ))
+                }
+            };
+
+            let unbound = UnboundCipherKey::new(cipher_alg, raw)
+                .map_err(|e| crate::ops::OpError::error(format!("AES-CBC key error: {e}")))?;
+            let dec_key = PaddedBlockDecryptingKey::cbc_pkcs7(unbound)
+                .map_err(|e| crate::ops::OpError::error(format!("AES-CBC init error: {e}")))?;
+
+            let iv_array: [u8; 16] = iv_bytes.as_slice().try_into().unwrap();
+            let ctx = DecryptionContext::Iv128(FixedLength::<IV_LEN_128_BIT>::from(iv_array));
+
+            let mut in_out = data;
+            let plaintext = dec_key
+                .decrypt(&mut in_out, ctx)
+                .map_err(|e| crate::ops::OpError::error(format!("AES-CBC decrypt: {e}")))?;
+
+            Ok(B64.encode(plaintext))
+        }
+        ("RSA-OAEP", KeyData::RsaPrivate { pkcs8_der }) => {
+            let oaep_alg = oaep_algo_for_hash(&hash)?;
+
+            let priv_key = PrivateDecryptingKey::from_pkcs8(pkcs8_der)
+                .map_err(|e| crate::ops::OpError::error(format!("RSA private key error: {e}")))?;
+            let oaep_key = OaepPrivateDecryptingKey::new(priv_key)
+                .map_err(|e| crate::ops::OpError::error(format!("RSA-OAEP init error: {e}")))?;
+
+            let label = if let Some(label_b64) = p["algorithm"]["label"].as_str() {
+                let label_bytes = B64.decode(label_b64).map_err(|e| {
+                    crate::ops::OpError::type_error(format!("Invalid label: {e}"))
+                })?;
+                Some(label_bytes)
+            } else {
+                None
+            };
+
+            let mut plaintext = vec![0u8; oaep_key.min_output_size()];
+            let pt = oaep_key
+                .decrypt(
+                    oaep_alg,
+                    &data,
+                    &mut plaintext,
+                    label.as_deref(),
+                )
+                .map_err(|e| crate::ops::OpError::error(format!("RSA-OAEP decrypt: {e}")))?;
+
+            Ok(B64.encode(pt))
+        }
+        _ => Err(crate::ops::OpError::type_error(format!(
+            "Cannot decrypt with {algo_name} and this key type"
+        ))),
+    }
 }

@@ -74,6 +74,8 @@
   var _nativeGenerateKey = _crypto.__cryptoGenerateKey;
   var _nativeSign = _crypto.__cryptoSign;
   var _nativeVerify = _crypto.__cryptoVerify;
+  var _nativeEncrypt = _crypto.__cryptoEncrypt;
+  var _nativeDecrypt = _crypto.__cryptoDecrypt;
 
   // =========================================================================
   // crypto.getRandomValues
@@ -219,6 +221,52 @@
       });
       var result = _nativeVerify(params);
       return Promise.resolve(result === "true");
+    } catch (e) {
+      return Promise.reject(e);
+    }
+  };
+
+  SubtleCrypto.prototype.encrypt = function(algorithm, key, data) {
+    try {
+      if (!(key instanceof CryptoKey)) throw new TypeError("Expected CryptoKey");
+      var algo = normalizeAlgorithm(algorithm);
+      var bytes = toBytes(data);
+      var algoParams = { name: algo.name };
+      if (algo.hash) algoParams.hash = algo.hash;
+      if (algo.iv) algoParams.iv = _B64.encode(toBytes(algo.iv));
+      if (algo.additionalData) algoParams.additionalData = _B64.encode(toBytes(algo.additionalData));
+      if (algo.tagLength) algoParams.tagLength = algo.tagLength;
+      if (algo.label) algoParams.label = _B64.encode(toBytes(algo.label));
+      var params = JSON.stringify({
+        algorithm: algoParams,
+        keyId: key._handle,
+        data: _B64.encode(bytes)
+      });
+      var result = _nativeEncrypt(params);
+      return Promise.resolve(_B64.decode(result).buffer);
+    } catch (e) {
+      return Promise.reject(e);
+    }
+  };
+
+  SubtleCrypto.prototype.decrypt = function(algorithm, key, data) {
+    try {
+      if (!(key instanceof CryptoKey)) throw new TypeError("Expected CryptoKey");
+      var algo = normalizeAlgorithm(algorithm);
+      var bytes = toBytes(data);
+      var algoParams = { name: algo.name };
+      if (algo.hash) algoParams.hash = algo.hash;
+      if (algo.iv) algoParams.iv = _B64.encode(toBytes(algo.iv));
+      if (algo.additionalData) algoParams.additionalData = _B64.encode(toBytes(algo.additionalData));
+      if (algo.tagLength) algoParams.tagLength = algo.tagLength;
+      if (algo.label) algoParams.label = _B64.encode(toBytes(algo.label));
+      var params = JSON.stringify({
+        algorithm: algoParams,
+        keyId: key._handle,
+        data: _B64.encode(bytes)
+      });
+      var result = _nativeDecrypt(params);
+      return Promise.resolve(_B64.decode(result).buffer);
     } catch (e) {
       return Promise.reject(e);
     }

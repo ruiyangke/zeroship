@@ -293,6 +293,14 @@ pub(crate) fn setup_globals(scope: &mut v8::PinScope) {
         let verify_key = v8::String::new(scope, "__cryptoVerify").unwrap();
         crypto.set(scope, verify_key.into(), verify_fn.into());
 
+        let encrypt_fn = v8::Function::new(scope, crate::crypto::crypto_encrypt_callback).unwrap();
+        let encrypt_key = v8::String::new(scope, "__cryptoEncrypt").unwrap();
+        crypto.set(scope, encrypt_key.into(), encrypt_fn.into());
+
+        let decrypt_fn = v8::Function::new(scope, crate::crypto::crypto_decrypt_callback).unwrap();
+        let decrypt_key = v8::String::new(scope, "__cryptoDecrypt").unwrap();
+        crypto.set(scope, decrypt_key.into(), decrypt_fn.into());
+
         let crypto_key = v8::String::new(scope, "crypto").unwrap();
         global.set(scope, crypto_key.into(), crypto.into());
     }
