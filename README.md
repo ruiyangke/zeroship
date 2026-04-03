@@ -2,7 +2,7 @@
 
 **AI-native app platform — describe what you want, deploy in seconds.**
 
-appbase runs JavaScript apps in sandboxed V8 isolates with built-in metering, multi-tenant routing, and a control plane API. Write a single JS file, deploy it via API or dashboard, and call your functions over HTTP.
+appbase runs JavaScript apps in sandboxed V8 isolates with built-in metering, multi-tenant routing, and a control plane API. Write your app in JavaScript or TypeScript — from a single file to a full multi-module project — deploy via API or dashboard, and call your functions over HTTP.
 
 ## Key Features
 
@@ -148,7 +148,7 @@ See [docs/api-reference.md](docs/api-reference.md) for the full API reference.
 
 ## App Format
 
-Apps are single JavaScript files that define a `__rpc` object on `globalThis`. Each property is a callable RPC method.
+Apps are ESM modules (single file or multi-file projects) that export functions or an `onRequest` handler. The runtime supports `import`/`export` across modules.
 
 ```javascript
 var __rpc = {

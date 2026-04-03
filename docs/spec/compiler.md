@@ -2,7 +2,7 @@
 
 ## Overview
 
-The appbase compiler takes a single `.jsx` file containing both frontend and backend code, and splits it into two outputs: a **server bundle** (runs on Node or Rust/deno_core) and a **client bundle** (runs in the browser).
+The appbase compiler takes JavaScript/TypeScript source files (single file or multi-file project) and produces optimized bundles: a **server bundle** (runs on Node or Rust/deno_core) and a **client bundle** (runs in the browser).
 
 ---
 

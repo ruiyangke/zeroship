@@ -638,7 +638,7 @@ curl http://localhost:3000/_apps/my-app/usage
 
 ## Tips
 
-- **Keep apps small and focused.** One concern per app. A URL shortener, a webhook handler, a proxy — not all three in one file.
+- **Keep apps focused.** One concern per app. Structure larger apps across multiple modules using ESM imports.
 - **Validate all inputs.** Methods receive arbitrary data from the network. Check types and ranges.
 - **Use `console.log` for debugging.** Logs are captured and viewable via the API and dashboard.
 - **Handle fetch errors.** Network calls can fail. Always check `resp.ok` or wrap in try/catch.

@@ -24,7 +24,7 @@ let result = isolate.execute_request(rpc_json)?;
 ```
 data/apps/{app_id}/
   source/
-    app.tsx                    ← original source (kept for AI editing)
+    *.ts, *.tsx, *.js           ← original source files (kept for AI editing)
   builds/
     v1/
       server.js                ← bundled output from SWC
