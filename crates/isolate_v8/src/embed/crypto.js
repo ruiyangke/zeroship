@@ -2,7 +2,8 @@
   "use strict";
 
   // =========================================================================
-  // Base64 helpers (standard encoding, used for all crypto data transfer)
+  // Base64 helpers (only used for small structured params: IV, AAD, salt, info, label)
+  // Main data payloads use zero-copy ArrayBuffer bridge.
   // =========================================================================
 
   var _B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -122,14 +123,10 @@
       } else {
         throw new TypeError("Unsupported format: " + format);
       }
-      var params = JSON.stringify({
-        format: format,
-        keyData: _B64.encode(bytes),
-        algorithm: algo,
-        extractable: !!extractable,
-        usages: keyUsages || []
-      });
-      var result = JSON.parse(_nativeImportKey(params));
+      // Zero-serialization: pass key material as ArrayBuffer directly.
+      // Algorithm config stays as JSON string (small, structured).
+      var algoJson = JSON.stringify(algo);
+      var result = JSON.parse(_nativeImportKey(format, bytes, algoJson));
       return Promise.resolve(new CryptoKey(result.keyId, algo, result.type, !!extractable, keyUsages || []));
     } catch (e) {
       return Promise.reject(e);
@@ -140,10 +137,9 @@
     try {
       if (!(key instanceof CryptoKey)) throw new TypeError("Expected CryptoKey");
       if (!key.extractable) throw new DOMException("Key is not extractable", "InvalidAccessError");
-      var params = JSON.stringify({ format: format, keyId: key._handle });
-      var result = JSON.parse(_nativeExportKey(params));
-      var bytes = _B64.decode(result.keyData);
-      return Promise.resolve(bytes.buffer);
+      // Zero-serialization: receive key material as ArrayBuffer directly.
+      var result = _nativeExportKey(format, key._handle);
+      return Promise.resolve(result);
     } catch (e) {
       return Promise.reject(e);
     }
@@ -183,14 +179,11 @@
     try {
       if (!(key instanceof CryptoKey)) throw new TypeError("Expected CryptoKey");
       var algo = normalizeAlgorithm(algorithm);
+      var hash = algo.hash ? algo.hash.name : "SHA-256";
       var bytes = toBytes(data);
-      var params = JSON.stringify({
-        algorithm: algo,
-        keyId: key._handle,
-        data: _B64.encode(bytes)
-      });
-      var result = _nativeSign(params);
-      return Promise.resolve(_B64.decode(result).buffer);
+      // Zero-serialization: pass data as ArrayBuffer, receive signature as ArrayBuffer.
+      var result = _nativeSign(algo.name, hash, key._handle, bytes);
+      return Promise.resolve(result);
     } catch (e) {
       return Promise.reject(e);
     }
@@ -200,15 +193,11 @@
     try {
       if (!(key instanceof CryptoKey)) throw new TypeError("Expected CryptoKey");
       var algo = normalizeAlgorithm(algorithm);
+      var hash = algo.hash ? algo.hash.name : "SHA-256";
       var dataBytes = toBytes(data);
       var sigBytes = toBytes(signature);
-      var params = JSON.stringify({
-        algorithm: algo,
-        keyId: key._handle,
-        data: _B64.encode(dataBytes),
-        signature: _B64.encode(sigBytes)
-      });
-      var result = _nativeVerify(params);
+      // Zero-serialization: pass data and signature as ArrayBuffer directly.
+      var result = _nativeVerify(algo.name, hash, key._handle, dataBytes, sigBytes);
       return Promise.resolve(result === "true");
     } catch (e) {
       return Promise.reject(e);
@@ -220,19 +209,18 @@
       if (!(key instanceof CryptoKey)) throw new TypeError("Expected CryptoKey");
       var algo = normalizeAlgorithm(algorithm);
       var bytes = toBytes(data);
+      // Build algo config JSON — IV/AAD/label stay base64-encoded (small, structured).
+      // Only the main data payload crosses as ArrayBuffer.
       var algoParams = { name: algo.name };
       if (algo.hash) algoParams.hash = algo.hash;
       if (algo.iv) algoParams.iv = _B64.encode(toBytes(algo.iv));
       if (algo.additionalData) algoParams.additionalData = _B64.encode(toBytes(algo.additionalData));
       if (algo.tagLength) algoParams.tagLength = algo.tagLength;
       if (algo.label) algoParams.label = _B64.encode(toBytes(algo.label));
-      var params = JSON.stringify({
-        algorithm: algoParams,
-        keyId: key._handle,
-        data: _B64.encode(bytes)
-      });
-      var result = _nativeEncrypt(params);
-      return Promise.resolve(_B64.decode(result).buffer);
+      var algoJson = JSON.stringify(algoParams);
+      // Zero-serialization: pass data as ArrayBuffer, receive ciphertext as ArrayBuffer.
+      var result = _nativeEncrypt(algoJson, key._handle, bytes);
+      return Promise.resolve(result);
     } catch (e) {
       return Promise.reject(e);
     }
@@ -243,19 +231,18 @@
       if (!(key instanceof CryptoKey)) throw new TypeError("Expected CryptoKey");
       var algo = normalizeAlgorithm(algorithm);
       var bytes = toBytes(data);
+      // Build algo config JSON — IV/AAD/label stay base64-encoded (small, structured).
+      // Only the main data payload crosses as ArrayBuffer.
       var algoParams = { name: algo.name };
       if (algo.hash) algoParams.hash = algo.hash;
       if (algo.iv) algoParams.iv = _B64.encode(toBytes(algo.iv));
       if (algo.additionalData) algoParams.additionalData = _B64.encode(toBytes(algo.additionalData));
       if (algo.tagLength) algoParams.tagLength = algo.tagLength;
       if (algo.label) algoParams.label = _B64.encode(toBytes(algo.label));
-      var params = JSON.stringify({
-        algorithm: algoParams,
-        keyId: key._handle,
-        data: _B64.encode(bytes)
-      });
-      var result = _nativeDecrypt(params);
-      return Promise.resolve(_B64.decode(result).buffer);
+      var algoJson = JSON.stringify(algoParams);
+      // Zero-serialization: pass ciphertext as ArrayBuffer, receive plaintext as ArrayBuffer.
+      var result = _nativeDecrypt(algoJson, key._handle, bytes);
+      return Promise.resolve(result);
     } catch (e) {
       return Promise.reject(e);
     }
@@ -275,8 +262,9 @@
         keyId: baseKey._handle,
         length: length
       });
+      // Zero-serialization: derived bits returned as ArrayBuffer directly.
       var result = _nativeDeriveBits(params);
-      return Promise.resolve(_B64.decode(result).buffer);
+      return Promise.resolve(result);
     } catch (e) { return Promise.reject(e); }
   };
 

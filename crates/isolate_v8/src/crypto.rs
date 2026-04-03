@@ -168,8 +168,9 @@ fn crypto_digest(algo: String, data: Vec<u8>) -> Result<Vec<u8>, crate::ops::OpE
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn parse_curve(p: &serde_json::Value) -> Result<Curve, crate::ops::OpError> {
-    match p["algorithm"]["namedCurve"].as_str().unwrap_or("") {
+/// Parse named curve from an algorithm value (has `namedCurve` field directly).
+fn parse_curve_from_algo(algo: &serde_json::Value) -> Result<Curve, crate::ops::OpError> {
+    match algo["namedCurve"].as_str().unwrap_or("") {
         "P-256" => Ok(Curve::P256),
         "P-384" => Ok(Curve::P384),
         other => Err(crate::ops::OpError::type_error(format!(
@@ -178,26 +179,31 @@ fn parse_curve(p: &serde_json::Value) -> Result<Curve, crate::ops::OpError> {
     }
 }
 
+/// Parse named curve from a wrapper params object (has `algorithm.namedCurve`).
+fn parse_curve(p: &serde_json::Value) -> Result<Curve, crate::ops::OpError> {
+    parse_curve_from_algo(&p["algorithm"])
+}
+
 // ---------------------------------------------------------------------------
 // importKey
 // ---------------------------------------------------------------------------
 
-/// `__cryptoImportKey(params_json) → JSON {keyId, type}`
+/// `__cryptoImportKey(format, keyData: ArrayBuffer, algoJson) → JSON {keyId, type}`
+///
+/// Zero-serialization: key material passed as ArrayBuffer.
+/// Algorithm config and usages stay in algoJson (small, structured).
 #[appbase_op(state)]
-fn crypto_import_key(state: SharedState, params: String) -> Result<String, crate::ops::OpError> {
-    let p: serde_json::Value = serde_json::from_str(&params)
-        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid params: {e}")))?;
+fn crypto_import_key(state: SharedState, format: String, key_data: Vec<u8>, algo_json: String) -> Result<String, crate::ops::OpError> {
+    let p: serde_json::Value = serde_json::from_str(&algo_json)
+        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid algo params: {e}")))?;
 
-    let format = p["format"].as_str().unwrap_or("");
-    let key_data_b64 = p["keyData"].as_str().unwrap_or("");
-    let algo_name = p["algorithm"]["name"]
+    let algo_name = p["name"]
         .as_str()
         .unwrap_or("")
         .to_uppercase();
 
-    let key_bytes = B64
-        .decode(key_data_b64)
-        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid key data: {e}")))?;
+    let key_bytes = key_data;
+    let format = format.as_str();
 
     let (key_data, key_type) = match (algo_name.as_str(), format) {
         // Symmetric keys (raw only)
@@ -207,11 +213,11 @@ fn crypto_import_key(state: SharedState, params: String) -> Result<String, crate
         ) => (KeyData::Symmetric { raw: key_bytes }, "secret"),
         // EC keys
         ("ECDSA" | "ECDH", "raw") => {
-            let curve = parse_curve(&p)?;
+            let curve = parse_curve_from_algo(&p)?;
             (KeyData::EcPublic { raw: key_bytes, curve }, "public")
         }
         ("ECDSA" | "ECDH", "pkcs8") => {
-            let curve = parse_curve(&p)?;
+            let curve = parse_curve_from_algo(&p)?;
             (
                 KeyData::EcPrivate {
                     pkcs8_der: key_bytes,
@@ -221,7 +227,7 @@ fn crypto_import_key(state: SharedState, params: String) -> Result<String, crate
             )
         }
         ("ECDSA" | "ECDH", "spki") => {
-            let curve = parse_curve(&p)?;
+            let curve = parse_curve_from_algo(&p)?;
             (KeyData::EcPublic { raw: key_bytes, curve }, "public")
         }
         // RSA keys
@@ -264,22 +270,18 @@ fn crypto_import_key(state: SharedState, params: String) -> Result<String, crate
 // exportKey
 // ---------------------------------------------------------------------------
 
-/// `__cryptoExportKey(params_json) → JSON {keyData: base64}`
+/// `__cryptoExportKey(format, keyId) → ArrayBuffer`
+///
+/// Zero-serialization: key material returned as ArrayBuffer.
 #[appbase_op(state)]
-fn crypto_export_key(state: SharedState, params: String) -> Result<String, crate::ops::OpError> {
-    let p: serde_json::Value = serde_json::from_str(&params)
-        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid params: {e}")))?;
-
-    let format = p["format"].as_str().unwrap_or("");
-    let key_id = p["keyId"].as_u64().unwrap_or(0) as u32;
-
+fn crypto_export_key(state: SharedState, format: String, key_id: u32) -> Result<Vec<u8>, crate::ops::OpError> {
     let s = state.borrow();
     let key = s
         .key_store
         .get(&key_id)
         .ok_or_else(|| crate::ops::OpError::type_error("Key not found"))?;
 
-    let bytes = match (key, format) {
+    let bytes = match (key, format.as_str()) {
         (KeyData::Symmetric { raw }, "raw") => raw.clone(),
         (KeyData::EcPublic { raw, .. }, "raw") => raw.clone(),
         (KeyData::EcPrivate { pkcs8_der, .. }, "pkcs8") => pkcs8_der.clone(),
@@ -294,7 +296,7 @@ fn crypto_export_key(state: SharedState, params: String) -> Result<String, crate
         }
     };
 
-    Ok(serde_json::json!({ "keyData": B64.encode(&bytes) }).to_string())
+    Ok(bytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -429,24 +431,13 @@ fn crypto_generate_key(
 // sign
 // ---------------------------------------------------------------------------
 
-/// `__cryptoSign(params_json) → base64 signature`
+/// `__cryptoSign(algo, hash, keyId, data: ArrayBuffer) → ArrayBuffer`
+///
+/// Zero-serialization: data passed as ArrayBuffer, signature returned as ArrayBuffer.
 #[appbase_op(state)]
-fn crypto_sign(state: SharedState, params: String) -> Result<String, crate::ops::OpError> {
-    let p: serde_json::Value = serde_json::from_str(&params)
-        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid params: {e}")))?;
-
-    let algo_name = p["algorithm"]["name"]
-        .as_str()
-        .unwrap_or("")
-        .to_uppercase();
-    let key_id = p["keyId"].as_u64().unwrap_or(0) as u32;
-    let data = B64
-        .decode(p["data"].as_str().unwrap_or(""))
-        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid data: {e}")))?;
-    let hash = p["algorithm"]["hash"]["name"]
-        .as_str()
-        .unwrap_or("SHA-256")
-        .to_uppercase();
+fn crypto_sign(state: SharedState, algo: String, hash: String, key_id: u32, data: Vec<u8>) -> Result<Vec<u8>, crate::ops::OpError> {
+    let algo_name = algo.to_uppercase();
+    let hash = hash.to_uppercase();
 
     let s = state.borrow();
     let key = s
@@ -469,7 +460,7 @@ fn crypto_sign(state: SharedState, params: String) -> Result<String, crate::ops:
             };
             let hmac_key = aws_lc_rs::hmac::Key::new(alg, raw);
             let tag = aws_lc_rs::hmac::sign(&hmac_key, &data);
-            Ok(B64.encode(tag.as_ref()))
+            Ok(tag.as_ref().to_vec())
         }
         ("ECDSA", KeyData::EcPrivate { pkcs8_der, curve }) => {
             let alg = match (curve, hash.as_str()) {
@@ -492,7 +483,7 @@ fn crypto_sign(state: SharedState, params: String) -> Result<String, crate::ops:
             let sig = key_pair
                 .sign(&rng, &data)
                 .map_err(|e| crate::ops::OpError::error(format!("ECDSA sign failed: {e}")))?;
-            Ok(B64.encode(sig.as_ref()))
+            Ok(sig.as_ref().to_vec())
         }
         ("ED25519", KeyData::Ed25519Private { pkcs8_der }) => {
             let key_pair =
@@ -500,7 +491,7 @@ fn crypto_sign(state: SharedState, params: String) -> Result<String, crate::ops:
                     crate::ops::OpError::error(format!("Invalid Ed25519 key: {e}"))
                 })?;
             let sig = key_pair.sign(&data);
-            Ok(B64.encode(sig.as_ref()))
+            Ok(sig.as_ref().to_vec())
         }
         ("RSASSA-PKCS1-V1_5", KeyData::RsaPrivate { pkcs8_der }) => {
             let padding = match hash.as_str() {
@@ -521,7 +512,7 @@ fn crypto_sign(state: SharedState, params: String) -> Result<String, crate::ops:
             key_pair
                 .sign(padding, &rng, &data, &mut sig)
                 .map_err(|e| crate::ops::OpError::error(format!("RSA sign failed: {e}")))?;
-            Ok(B64.encode(&sig))
+            Ok(sig)
         }
         ("RSA-PSS", KeyData::RsaPrivate { pkcs8_der }) => {
             let padding = match hash.as_str() {
@@ -544,7 +535,7 @@ fn crypto_sign(state: SharedState, params: String) -> Result<String, crate::ops:
                 .map_err(|e| {
                     crate::ops::OpError::error(format!("RSA-PSS sign failed: {e}"))
                 })?;
-            Ok(B64.encode(&sig))
+            Ok(sig)
         }
         _ => Err(crate::ops::OpError::type_error(format!(
             "Cannot sign with {algo_name} and this key type"
@@ -556,27 +547,13 @@ fn crypto_sign(state: SharedState, params: String) -> Result<String, crate::ops:
 // verify
 // ---------------------------------------------------------------------------
 
-/// `__cryptoVerify(params_json) → "true" | "false"`
+/// `__cryptoVerify(algo, hash, keyId, data: ArrayBuffer, signature: ArrayBuffer) → "true"|"false"`
+///
+/// Zero-serialization: data and signature passed as ArrayBuffer.
 #[appbase_op(state)]
-fn crypto_verify(state: SharedState, params: String) -> Result<String, crate::ops::OpError> {
-    let p: serde_json::Value = serde_json::from_str(&params)
-        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid params: {e}")))?;
-
-    let algo_name = p["algorithm"]["name"]
-        .as_str()
-        .unwrap_or("")
-        .to_uppercase();
-    let key_id = p["keyId"].as_u64().unwrap_or(0) as u32;
-    let data = B64
-        .decode(p["data"].as_str().unwrap_or(""))
-        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid data: {e}")))?;
-    let signature = B64
-        .decode(p["signature"].as_str().unwrap_or(""))
-        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid signature: {e}")))?;
-    let hash = p["algorithm"]["hash"]["name"]
-        .as_str()
-        .unwrap_or("SHA-256")
-        .to_uppercase();
+fn crypto_verify(state: SharedState, algo: String, hash: String, key_id: u32, data: Vec<u8>, signature: Vec<u8>) -> Result<String, crate::ops::OpError> {
+    let algo_name = algo.to_uppercase();
+    let hash = hash.to_uppercase();
 
     let s = state.borrow();
     let key = s
@@ -682,21 +659,20 @@ fn oaep_algo_for_hash(hash: &str) -> Result<&'static OaepAlgorithm, crate::ops::
 // encrypt
 // ---------------------------------------------------------------------------
 
-/// `__cryptoEncrypt(params_json) → base64 ciphertext`
+/// `__cryptoEncrypt(algoJson, keyId, data: ArrayBuffer) → ArrayBuffer`
+///
+/// Zero-serialization: data payload as ArrayBuffer, ciphertext returned as ArrayBuffer.
+/// Algorithm config (IV, AAD, tagLength, label) stays in algoJson (small, structured).
 #[appbase_op(state)]
-fn crypto_encrypt(state: SharedState, params: String) -> Result<String, crate::ops::OpError> {
-    let p: serde_json::Value = serde_json::from_str(&params)
-        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid params: {e}")))?;
+fn crypto_encrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<u8>) -> Result<Vec<u8>, crate::ops::OpError> {
+    let p: serde_json::Value = serde_json::from_str(&algo_json)
+        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid algo params: {e}")))?;
 
-    let algo_name = p["algorithm"]["name"]
+    let algo_name = p["name"]
         .as_str()
         .unwrap_or("")
         .to_uppercase();
-    let key_id = p["keyId"].as_u64().unwrap_or(0) as u32;
-    let data = B64
-        .decode(p["data"].as_str().unwrap_or(""))
-        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid data: {e}")))?;
-    let hash = p["algorithm"]["hash"]["name"]
+    let hash = p["hash"]["name"]
         .as_str()
         .unwrap_or("SHA-256")
         .to_uppercase();
@@ -709,7 +685,7 @@ fn crypto_encrypt(state: SharedState, params: String) -> Result<String, crate::o
 
     match (algo_name.as_str(), key) {
         ("AES-GCM", KeyData::Symmetric { raw }) => {
-            let iv_b64 = p["algorithm"]["iv"].as_str().unwrap_or("");
+            let iv_b64 = p["iv"].as_str().unwrap_or("");
             let iv_bytes = B64
                 .decode(iv_b64)
                 .map_err(|e| crate::ops::OpError::type_error(format!("Invalid IV: {e}")))?;
@@ -735,7 +711,7 @@ fn crypto_encrypt(state: SharedState, params: String) -> Result<String, crate::o
             let nonce = Nonce::try_assume_unique_for_key(&iv_bytes)
                 .map_err(|e| crate::ops::OpError::error(format!("Nonce error: {e}")))?;
 
-            let aad = if let Some(aad_b64) = p["algorithm"]["additionalData"].as_str() {
+            let aad = if let Some(aad_b64) = p["additionalData"].as_str() {
                 let aad_bytes = B64.decode(aad_b64).map_err(|e| {
                     crate::ops::OpError::type_error(format!("Invalid AAD: {e}"))
                 })?;
@@ -749,10 +725,10 @@ fn crypto_encrypt(state: SharedState, params: String) -> Result<String, crate::o
                 .seal_in_place_append_tag(nonce, aad, &mut in_out)
                 .map_err(|e| crate::ops::OpError::error(format!("AES-GCM encrypt: {e}")))?;
 
-            Ok(B64.encode(&in_out))
+            Ok(in_out)
         }
         ("AES-CBC", KeyData::Symmetric { raw }) => {
-            let iv_b64 = p["algorithm"]["iv"].as_str().unwrap_or("");
+            let iv_b64 = p["iv"].as_str().unwrap_or("");
             let iv_bytes = B64
                 .decode(iv_b64)
                 .map_err(|e| crate::ops::OpError::type_error(format!("Invalid IV: {e}")))?;
@@ -785,7 +761,7 @@ fn crypto_encrypt(state: SharedState, params: String) -> Result<String, crate::o
                 .less_safe_encrypt(&mut in_out, ctx)
                 .map_err(|e| crate::ops::OpError::error(format!("AES-CBC encrypt: {e}")))?;
 
-            Ok(B64.encode(&in_out))
+            Ok(in_out)
         }
         ("RSA-OAEP", KeyData::RsaPublic { spki_der }) => {
             let oaep_alg = oaep_algo_for_hash(&hash)?;
@@ -795,7 +771,7 @@ fn crypto_encrypt(state: SharedState, params: String) -> Result<String, crate::o
             let oaep_key = OaepPublicEncryptingKey::new(pub_key)
                 .map_err(|e| crate::ops::OpError::error(format!("RSA-OAEP init error: {e}")))?;
 
-            let label = if let Some(label_b64) = p["algorithm"]["label"].as_str() {
+            let label = if let Some(label_b64) = p["label"].as_str() {
                 let label_bytes = B64.decode(label_b64).map_err(|e| {
                     crate::ops::OpError::type_error(format!("Invalid label: {e}"))
                 })?;
@@ -814,7 +790,7 @@ fn crypto_encrypt(state: SharedState, params: String) -> Result<String, crate::o
                 )
                 .map_err(|e| crate::ops::OpError::error(format!("RSA-OAEP encrypt: {e}")))?;
 
-            Ok(B64.encode(ct))
+            Ok(ct.to_vec())
         }
         _ => Err(crate::ops::OpError::type_error(format!(
             "Cannot encrypt with {algo_name} and this key type"
@@ -826,21 +802,20 @@ fn crypto_encrypt(state: SharedState, params: String) -> Result<String, crate::o
 // decrypt
 // ---------------------------------------------------------------------------
 
-/// `__cryptoDecrypt(params_json) → base64 plaintext`
+/// `__cryptoDecrypt(algoJson, keyId, data: ArrayBuffer) → ArrayBuffer`
+///
+/// Zero-serialization: ciphertext as ArrayBuffer, plaintext returned as ArrayBuffer.
+/// Algorithm config (IV, AAD, tagLength, label) stays in algoJson (small, structured).
 #[appbase_op(state)]
-fn crypto_decrypt(state: SharedState, params: String) -> Result<String, crate::ops::OpError> {
-    let p: serde_json::Value = serde_json::from_str(&params)
-        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid params: {e}")))?;
+fn crypto_decrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<u8>) -> Result<Vec<u8>, crate::ops::OpError> {
+    let p: serde_json::Value = serde_json::from_str(&algo_json)
+        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid algo params: {e}")))?;
 
-    let algo_name = p["algorithm"]["name"]
+    let algo_name = p["name"]
         .as_str()
         .unwrap_or("")
         .to_uppercase();
-    let key_id = p["keyId"].as_u64().unwrap_or(0) as u32;
-    let data = B64
-        .decode(p["data"].as_str().unwrap_or(""))
-        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid data: {e}")))?;
-    let hash = p["algorithm"]["hash"]["name"]
+    let hash = p["hash"]["name"]
         .as_str()
         .unwrap_or("SHA-256")
         .to_uppercase();
@@ -853,7 +828,7 @@ fn crypto_decrypt(state: SharedState, params: String) -> Result<String, crate::o
 
     match (algo_name.as_str(), key) {
         ("AES-GCM", KeyData::Symmetric { raw }) => {
-            let iv_b64 = p["algorithm"]["iv"].as_str().unwrap_or("");
+            let iv_b64 = p["iv"].as_str().unwrap_or("");
             let iv_bytes = B64
                 .decode(iv_b64)
                 .map_err(|e| crate::ops::OpError::type_error(format!("Invalid IV: {e}")))?;
@@ -879,7 +854,7 @@ fn crypto_decrypt(state: SharedState, params: String) -> Result<String, crate::o
             let nonce = Nonce::try_assume_unique_for_key(&iv_bytes)
                 .map_err(|e| crate::ops::OpError::error(format!("Nonce error: {e}")))?;
 
-            let aad = if let Some(aad_b64) = p["algorithm"]["additionalData"].as_str() {
+            let aad = if let Some(aad_b64) = p["additionalData"].as_str() {
                 let aad_bytes = B64.decode(aad_b64).map_err(|e| {
                     crate::ops::OpError::type_error(format!("Invalid AAD: {e}"))
                 })?;
@@ -893,10 +868,10 @@ fn crypto_decrypt(state: SharedState, params: String) -> Result<String, crate::o
                 .open_in_place(nonce, aad, &mut in_out)
                 .map_err(|e| crate::ops::OpError::error(format!("AES-GCM decrypt: {e}")))?;
 
-            Ok(B64.encode(plaintext))
+            Ok(plaintext.to_vec())
         }
         ("AES-CBC", KeyData::Symmetric { raw }) => {
-            let iv_b64 = p["algorithm"]["iv"].as_str().unwrap_or("");
+            let iv_b64 = p["iv"].as_str().unwrap_or("");
             let iv_bytes = B64
                 .decode(iv_b64)
                 .map_err(|e| crate::ops::OpError::type_error(format!("Invalid IV: {e}")))?;
@@ -929,7 +904,7 @@ fn crypto_decrypt(state: SharedState, params: String) -> Result<String, crate::o
                 .decrypt(&mut in_out, ctx)
                 .map_err(|e| crate::ops::OpError::error(format!("AES-CBC decrypt: {e}")))?;
 
-            Ok(B64.encode(plaintext))
+            Ok(plaintext.to_vec())
         }
         ("RSA-OAEP", KeyData::RsaPrivate { pkcs8_der }) => {
             let oaep_alg = oaep_algo_for_hash(&hash)?;
@@ -939,7 +914,7 @@ fn crypto_decrypt(state: SharedState, params: String) -> Result<String, crate::o
             let oaep_key = OaepPrivateDecryptingKey::new(priv_key)
                 .map_err(|e| crate::ops::OpError::error(format!("RSA-OAEP init error: {e}")))?;
 
-            let label = if let Some(label_b64) = p["algorithm"]["label"].as_str() {
+            let label = if let Some(label_b64) = p["label"].as_str() {
                 let label_bytes = B64.decode(label_b64).map_err(|e| {
                     crate::ops::OpError::type_error(format!("Invalid label: {e}"))
                 })?;
@@ -958,7 +933,7 @@ fn crypto_decrypt(state: SharedState, params: String) -> Result<String, crate::o
                 )
                 .map_err(|e| crate::ops::OpError::error(format!("RSA-OAEP decrypt: {e}")))?;
 
-            Ok(B64.encode(pt))
+            Ok(pt.to_vec())
         }
         _ => Err(crate::ops::OpError::type_error(format!(
             "Cannot decrypt with {algo_name} and this key type"
@@ -978,10 +953,11 @@ impl aws_lc_rs::hkdf::KeyType for DeriveLen {
 }
 
 /// Shared deriveBits logic used by both `crypto_derive_bits` and `crypto_derive_key`.
+/// Returns raw derived bytes (no base64 encoding).
 fn crypto_derive_bits_inner(
     state: &SharedState,
     p: &serde_json::Value,
-) -> Result<String, crate::ops::OpError> {
+) -> Result<Vec<u8>, crate::ops::OpError> {
     let algo_name = p["algorithm"]["name"]
         .as_str()
         .unwrap_or("")
@@ -1045,7 +1021,7 @@ fn crypto_derive_bits_inner(
             let mut out = vec![0u8; byte_len];
             okm.fill(&mut out)
                 .map_err(|_| crate::ops::OpError::error("HKDF fill failed"))?;
-            Ok(B64.encode(&out))
+            Ok(out)
         }
         "PBKDF2" => {
             let pbkdf2_alg = match hash.as_str() {
@@ -1068,7 +1044,7 @@ fn crypto_derive_bits_inner(
 
             let mut out = vec![0u8; byte_len];
             aws_lc_rs::pbkdf2::derive(pbkdf2_alg, iterations, &salt_bytes, raw, &mut out);
-            Ok(B64.encode(&out))
+            Ok(out)
         }
         _ => Err(crate::ops::OpError::type_error(format!(
             "Unsupported deriveBits algorithm: {algo_name}"
@@ -1076,9 +1052,12 @@ fn crypto_derive_bits_inner(
     }
 }
 
-/// `__cryptoDeriveBits(params_json) → base64 derived bits`
+/// `__cryptoDeriveBits(params_json) → ArrayBuffer`
+///
+/// Zero-serialization: derived bits returned as ArrayBuffer.
+/// Params stay as JSON (salt/info are small structured data).
 #[appbase_op(state)]
-fn crypto_derive_bits(state: SharedState, params: String) -> Result<String, crate::ops::OpError> {
+fn crypto_derive_bits(state: SharedState, params: String) -> Result<Vec<u8>, crate::ops::OpError> {
     let p: serde_json::Value = serde_json::from_str(&params)
         .map_err(|e| crate::ops::OpError::type_error(format!("Invalid params: {e}")))?;
     crypto_derive_bits_inner(&state, &p)
@@ -1121,11 +1100,8 @@ fn crypto_derive_key(state: SharedState, params: String) -> Result<String, crate
     let mut derive_params = p.clone();
     derive_params["length"] = serde_json::json!(key_length);
 
-    // Call deriveBits logic
-    let bits_b64 = crypto_derive_bits_inner(&state, &derive_params)?;
-    let raw = B64
-        .decode(&bits_b64)
-        .map_err(|e| crate::ops::OpError::error(format!("decode failed: {e}")))?;
+    // Call deriveBits logic — returns raw bytes directly (no base64)
+    let raw = crypto_derive_bits_inner(&state, &derive_params)?;
 
     // Store as symmetric key
     let mut s = state.borrow_mut();
