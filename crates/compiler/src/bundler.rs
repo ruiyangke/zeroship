@@ -198,6 +198,9 @@ pub fn bundle(project_dir: &Path, options: &BundleOptions) -> Result<BundleResul
         "--platform=neutral".to_string(),
         format!("--target={}", options.target),
         "--tree-shaking=true".to_string(),
+        // Resolve "main" and "module" fields in package.json (needed for
+        // packages like lodash-es that use "main" with --platform=neutral).
+        "--main-fields=module,main".to_string(),
         // npm conditional exports — prefer serverless/worker builds
         "--conditions=workerd,worker,browser".to_string(),
         "--log-level=warning".to_string(),

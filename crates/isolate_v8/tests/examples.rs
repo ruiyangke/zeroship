@@ -502,3 +502,87 @@ fn npm_deps_zod_validation_failure() {
     let error = body["error"].as_str().unwrap();
     assert!(error.contains("email") || error.contains("Invalid"), "got: {error}");
 }
+
+#[test]
+fn heavy_deps_ping() {
+    if !appbase_compiler::bundler::esbuild_available() {
+        eprintln!("SKIPPED: esbuild not on PATH");
+        return;
+    }
+    init_v8();
+    let mut isolate = bundle_example("heavy-deps");
+    let result = rpc(&mut isolate, "ping", "[]");
+    assert_eq!(result["result"].as_str().unwrap(), "pong");
+}
+
+#[test]
+fn heavy_deps_lodash_groupby() {
+    if !appbase_compiler::bundler::esbuild_available() {
+        eprintln!("SKIPPED: esbuild not on PATH");
+        return;
+    }
+    init_v8();
+    let mut isolate = bundle_example("heavy-deps");
+
+    // Add some tasks
+    rpc(&mut isolate, "addTask", r#"["Buy milk", "shopping"]"#);
+    rpc(&mut isolate, "addTask", r#"["Write code", "work"]"#);
+    rpc(&mut isolate, "addTask", r#"["Buy eggs", "shopping"]"#);
+
+    // List tasks — grouped by category via lodash groupBy
+    let result = rpc(&mut isolate, "listTasks", "[]");
+    let groups = &result["result"];
+    assert!(groups["shopping"].is_array(), "should have shopping group");
+    assert!(groups["work"].is_array(), "should have work group");
+    assert_eq!(groups["shopping"].as_array().unwrap().len(), 2);
+    assert_eq!(groups["work"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn heavy_deps_uuid_unique() {
+    if !appbase_compiler::bundler::esbuild_available() {
+        eprintln!("SKIPPED: esbuild not on PATH");
+        return;
+    }
+    init_v8();
+    let mut isolate = bundle_example("heavy-deps");
+
+    let r1 = rpc(&mut isolate, "addTask", r#"["Task 1", "test"]"#);
+    let r2 = rpc(&mut isolate, "addTask", r#"["Task 2", "test"]"#);
+    let id1 = r1["result"]["id"].as_str().unwrap();
+    let id2 = r2["result"]["id"].as_str().unwrap();
+
+    // UUIDs should be different
+    assert_ne!(id1, id2, "UUIDs should be unique");
+    // UUID format: 8-4-4-4-12
+    assert_eq!(id1.len(), 36, "UUID should be 36 chars: {id1}");
+    assert_eq!(id1.chars().filter(|c| *c == '-').count(), 4);
+}
+
+#[test]
+fn heavy_deps_tree_shaking_verification() {
+    if !appbase_compiler::bundler::esbuild_available() {
+        eprintln!("SKIPPED: esbuild not on PATH");
+        return;
+    }
+    let project_dir = format!("{}/../../examples/heavy-deps", env!("CARGO_MANIFEST_DIR"));
+    let result = appbase_compiler::bundler::bundle(
+        std::path::Path::new(&project_dir),
+        &appbase_compiler::bundler::BundleOptions {
+            entry: "src/index.ts".to_string(),
+            minify: true,
+            sourcemap: false,
+            ..Default::default()
+        },
+    ).unwrap();
+
+    eprintln!("Bundle size: {} bytes (from 43MB node_modules)", result.size_bytes);
+
+    // Should be well under 100KB after tree-shaking 43MB of deps
+    assert!(result.size_bytes < 100_000,
+        "Bundle should be < 100KB after tree-shaking, got {} bytes", result.size_bytes);
+
+    // Unused lodash functions should NOT be in the bundle
+    assert!(!result.js.contains("cloneDeep"), "cloneDeep should be tree-shaken");
+    assert!(!result.js.contains("debounce"), "debounce should be tree-shaken");
+}
