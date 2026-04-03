@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use crate::event_loop::{run_event_loop, run_event_loop_until_settled, EventLoopState, SharedState};
 use crate::globals::setup_globals;
 use crate::modules::ModuleEntry;
-use crate::runtime::{thread_cpu_time, HttpResult, RequestResult, DISPATCH_JS, FETCH_JS, URL_JS};
+use crate::runtime::{thread_cpu_time, HttpResult, RequestResult, DISPATCH_JS, FETCH_JS, URL_JS, CRYPTO_JS};
 
 /// A V8 isolate with persistent context -- compiled code stays across requests.
 /// ES modules are compiled ONCE. Each request just calls the handler function.
@@ -92,7 +92,7 @@ impl Isolate {
         setup_globals(scope);
 
         // Load polyfills
-        for polyfill in [FETCH_JS, URL_JS] {
+        for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS] {
             let code = v8::String::new(scope, polyfill).unwrap();
             let script = v8::Script::compile(scope, code, None).unwrap();
             script.run(scope).unwrap();

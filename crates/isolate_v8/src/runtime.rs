@@ -54,6 +54,9 @@ pub(crate) const FETCH_JS: &str = include_str!("embed/fetch.js");
 /// Embedded URL/URLSearchParams polyfill backed by ada-url native parser.
 pub(crate) const URL_JS: &str = include_str!("embed/url.js");
 
+/// Embedded crypto polyfill (getRandomValues, SubtleCrypto.digest, base64 helpers).
+pub(crate) const CRYPTO_JS: &str = include_str!("embed/crypto.js");
+
 /// HTTP dispatch function — calls onRequest(Request) if exported.
 /// Returns a JSON string with { status, headers, body } or null if onRequest is not defined.
 pub(crate) const HTTP_DISPATCH_JS: &str = r#"(function(__method, __url, __headers_json, __body) {

@@ -978,4 +978,56 @@ mod tests {
         assert!(r.body.contains("\"path\":\"/hello\""), "got: {}", r.body);
         assert!(r.body.contains("\"query\":\"world\""), "got: {}", r.body);
     }
+
+    // -----------------------------------------------------------------------
+    // Web Crypto: getRandomValues + subtle.digest
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn crypto_get_random_values() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export function test() {
+                var buf = new Uint8Array(16);
+                crypto.getRandomValues(buf);
+                var nonzero = 0;
+                for (var i = 0; i < buf.length; i++) { if (buf[i] !== 0) nonzero++; }
+                return nonzero > 0 ? "ok" : "all_zeros";
+            }
+        "#), no_env());
+        let r = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+        assert!(r.json.contains("ok"), "got: {}", r.json);
+    }
+
+    #[test]
+    fn crypto_subtle_digest_sha256() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var data = new TextEncoder().encode("hello");
+                var hash = await crypto.subtle.digest("SHA-256", data);
+                var bytes = new Uint8Array(hash);
+                var hex = "";
+                for (var i = 0; i < bytes.length; i++) hex += ("0" + bytes[i].toString(16)).slice(-2);
+                return hex;
+            }
+        "#), no_env());
+        let r = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+        // SHA-256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+        assert!(r.json.contains("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"), "got: {}", r.json);
+    }
+
+    #[test]
+    fn crypto_subtle_digest_sha512() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var data = new TextEncoder().encode("hello");
+                var hash = await crypto.subtle.digest("SHA-512", data);
+                return new Uint8Array(hash).length;
+            }
+        "#), no_env());
+        let r = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+        assert!(r.json.contains("64"), "SHA-512 should produce 64 bytes, got: {}", r.json);
+    }
 }

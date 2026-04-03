@@ -257,12 +257,22 @@ pub(crate) fn setup_globals(scope: &mut v8::PinScope) {
         global.set(scope, kv_key.into(), kv.into());
     }
 
-    // crypto.randomUUID()
+    // crypto namespace (randomUUID + native helpers for SubtleCrypto)
     {
         let crypto = v8::Object::new(scope);
+
         let uuid_fn = v8::Function::new(scope, crate::crypto::crypto_random_uuid_callback).unwrap();
         let uuid_key = v8::String::new(scope, "randomUUID").unwrap();
         crypto.set(scope, uuid_key.into(), uuid_fn.into());
+
+        let grv_fn = v8::Function::new(scope, crate::crypto::crypto_get_random_values_callback).unwrap();
+        let grv_key = v8::String::new(scope, "__cryptoGetRandomValues").unwrap();
+        crypto.set(scope, grv_key.into(), grv_fn.into());
+
+        let digest_fn = v8::Function::new(scope, crate::crypto::crypto_digest_callback).unwrap();
+        let digest_key = v8::String::new(scope, "__cryptoDigest").unwrap();
+        crypto.set(scope, digest_key.into(), digest_fn.into());
+
         let crypto_key = v8::String::new(scope, "crypto").unwrap();
         global.set(scope, crypto_key.into(), crypto.into());
     }
