@@ -67,6 +67,15 @@ fn type_ident(ty: &Type) -> Option<String> {
     }
 }
 
+/// Check if type is `Vec<u8>` — used for binary data args (reads from ArrayBufferView).
+fn is_vec_u8(ty: &Type) -> bool {
+    type_ident(ty).as_deref() == Some("Vec")
+        && first_generic_arg(ty)
+            .and_then(type_ident)
+            .as_deref()
+            == Some("u8")
+}
+
 /// Extract the first generic type argument (e.g. `String` from `Option<String>`).
 fn first_generic_arg(ty: &Type) -> Option<&Type> {
     if let Type::Path(TypePath { path, .. }) = ty {
@@ -117,6 +126,29 @@ fn parse_params(f: &ItemFn) -> Vec<Param> {
 fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2 {
     let idx = index as i32;
     let ident = type_ident(ty);
+
+    // Vec<u8> → read from ArrayBufferView backing store (zero-serialization binary transfer)
+    if is_vec_u8(ty) {
+        return quote! {
+            let #name: Vec<u8> = {
+                let __arg = args.get(#idx);
+                if let Ok(__view) = v8::Local::<v8::ArrayBufferView>::try_from(__arg) {
+                    let mut __buf = vec![0u8; __view.byte_length()];
+                    __view.copy_contents(&mut __buf);
+                    __buf
+                } else if let Ok(__ab) = v8::Local::<v8::ArrayBuffer>::try_from(__arg) {
+                    let __store = __ab.get_backing_store();
+                    let mut __buf = vec![0u8; __ab.byte_length()];
+                    for __i in 0..__buf.len() {
+                        __buf[__i] = __store[__i].get();
+                    }
+                    __buf
+                } else {
+                    Vec::new()
+                }
+            };
+        };
+    }
 
     match ident.as_deref() {
         Some("Option") => {
@@ -175,8 +207,24 @@ fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2 {
 // Return value codegen (Rust value → V8 value)
 // ---------------------------------------------------------------------------
 
+/// Generate code to write Vec<u8> as a V8 ArrayBuffer.
+fn gen_vec_u8_set(val: &TokenStream2) -> TokenStream2 {
+    quote! {
+        let __bytes = #val;
+        let __ab = v8::ArrayBuffer::new(scope, __bytes.len());
+        let __store = __ab.get_backing_store();
+        for (__i, &__b) in __bytes.iter().enumerate() {
+            __store[__i].set(__b);
+        }
+        rv.set(__ab.into());
+    }
+}
+
 /// Generate code to convert a scalar value (referenced by `val` tokens) to a V8 return value.
 fn gen_scalar_set(ty: &Type, val: &TokenStream2) -> TokenStream2 {
+    if is_vec_u8(ty) {
+        return gen_vec_u8_set(val);
+    }
     match type_ident(ty).as_deref() {
         Some("bool") => quote! { rv.set(v8::Boolean::new(scope, #val).into()); },
         Some("u32") => quote! { rv.set(v8::Integer::new_from_unsigned(scope, #val).into()); },
@@ -254,9 +302,15 @@ fn gen_call_return(fn_name: &Ident, call_args: &[&Ident], output: &ReturnType) -
                             }
                         }
                         Some("Vec") => {
-                            quote! {
-                                let __vec = __ok;
-                                #(gen_vec_set())
+                            if inner.map(is_vec_u8).unwrap_or(false) {
+                                let val = quote! { __ok };
+                                gen_vec_u8_set(&val)
+                            } else {
+                                let vec_set = gen_vec_set();
+                                quote! {
+                                    let __vec = __ok;
+                                    #vec_set
+                                }
                             }
                         }
                         _ => {
@@ -289,12 +343,21 @@ fn gen_call_return(fn_name: &Ident, call_args: &[&Ident], output: &ReturnType) -
                     }
                 }
 
-                // --- Vec<String> ---
+                // --- Vec<T> ---
                 Some("Vec") => {
-                    let vec_set = gen_vec_set();
-                    quote! {
-                        let __vec = #call;
-                        #vec_set
+                    if is_vec_u8(ty) {
+                        let val = quote! { __vec };
+                        let ab_set = gen_vec_u8_set(&val);
+                        quote! {
+                            let __vec = #call;
+                            #ab_set
+                        }
+                    } else {
+                        let vec_set = gen_vec_set();
+                        quote! {
+                            let __vec = #call;
+                            #vec_set
+                        }
                     }
                 }
 

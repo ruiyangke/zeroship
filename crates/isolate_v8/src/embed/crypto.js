@@ -103,8 +103,11 @@
     try {
       var algo = normalizeAlgorithm(algorithm);
       var bytes = toBytes(data);
-      var b64 = _nativeDigest(algo.name, _B64.encode(bytes));
-      return Promise.resolve(_B64.decode(b64).buffer);
+      // Zero-serialization: pass ArrayBuffer directly, receive ArrayBuffer back.
+      // No base64 encode/decode — the macro reads from TypedArray backing store
+      // and returns a new ArrayBuffer.
+      var result = _nativeDigest(algo.name, bytes);
+      return Promise.resolve(result);
     } catch (e) {
       return Promise.reject(e);
     }

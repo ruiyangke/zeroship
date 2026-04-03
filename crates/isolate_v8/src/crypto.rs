@@ -143,9 +143,12 @@ pub(crate) fn crypto_get_random_values_callback(
     rv.set(arg);
 }
 
-/// `__cryptoDigest(algo, data_b64) → base64 hash`
+/// `__cryptoDigest(algo, data: ArrayBuffer) → ArrayBuffer`
+///
+/// Zero-serialization: takes ArrayBuffer directly, returns ArrayBuffer.
+/// No base64 encode/decode overhead.
 #[appbase_op]
-fn crypto_digest(algo: String, data_b64: String) -> Result<String, crate::ops::OpError> {
+fn crypto_digest(algo: String, data: Vec<u8>) -> Result<Vec<u8>, crate::ops::OpError> {
     let algorithm = match algo.as_str() {
         "SHA-1" => &aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY,
         "SHA-256" => &aws_lc_rs::digest::SHA256,
@@ -157,11 +160,8 @@ fn crypto_digest(algo: String, data_b64: String) -> Result<String, crate::ops::O
             )))
         }
     };
-    let data = B64
-        .decode(&data_b64)
-        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid base64: {e}")))?;
     let digest = aws_lc_rs::digest::digest(algorithm, &data);
-    Ok(B64.encode(digest.as_ref()))
+    Ok(digest.as_ref().to_vec())
 }
 
 // ---------------------------------------------------------------------------
