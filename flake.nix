@@ -24,6 +24,7 @@
             sqlite
             wrk
             hey
+            esbuild
           ];
 
           RUST_BACKTRACE = "1";
