@@ -260,3 +260,53 @@ fn multi_module_validation() {
     let r = rpc(&mut iso, "createUser", r#"["Alice", "not-an-email"]"#);
     assert!(r["error"].is_object());
 }
+
+// =========================================================================
+// JWT Validator (Web Crypto)
+// =========================================================================
+
+#[test]
+fn jwt_sign_and_verify() {
+    init_v8();
+    let mut isolate = load_example("jwt-validator.js");
+
+    // Sign a JWT
+    let result = rpc(&mut isolate, "sign", r#"["{\"sub\":\"1234\",\"name\":\"Alice\"}", "my-secret-key"]"#);
+    let token = result["result"].as_str().expect("should return token string");
+    assert!(token.contains('.'), "JWT should have dots: {token}");
+    let parts: Vec<&str> = token.split('.').collect();
+    assert_eq!(parts.len(), 3, "JWT should have 3 parts");
+
+    // Verify the JWT
+    let result = rpc(&mut isolate, "verify", &format!(r#"["{token}", "my-secret-key"]"#));
+    let payload = &result["result"];
+    assert_eq!(payload["sub"].as_str().unwrap(), "1234");
+    assert_eq!(payload["name"].as_str().unwrap(), "Alice");
+}
+
+#[test]
+fn jwt_verify_wrong_key_fails() {
+    init_v8();
+    let mut isolate = load_example("jwt-validator.js");
+
+    let result = rpc(&mut isolate, "sign", r#"["{\"data\":\"test\"}", "correct-key"]"#);
+    let token = result["result"].as_str().unwrap();
+
+    // Verify with wrong key should fail (returns error)
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","method":"verify","params":["{token}", "wrong-key"],"id":1}}"#
+    );
+    let r = isolate.execute_request(&body).unwrap();
+    assert!(r.json.contains("error") || r.json.contains("Invalid signature"), "wrong key should fail: {}", r.json);
+}
+
+#[test]
+fn jwt_content_hash() {
+    init_v8();
+    let mut isolate = load_example("jwt-validator.js");
+
+    let result = rpc(&mut isolate, "hash", r#"["hello"]"#);
+    let hex = result["result"].as_str().unwrap();
+    // SHA-256("hello") = 2cf24dba...
+    assert!(hex.starts_with("2cf24dba"), "SHA-256 mismatch: {hex}");
+}
