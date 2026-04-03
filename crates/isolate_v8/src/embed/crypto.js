@@ -124,7 +124,8 @@
         throw new TypeError("Unsupported format: " + format);
       }
       // Zero-serialization: pass key material as ArrayBuffer directly.
-      // Algorithm config stays as JSON string (small, structured).
+      // Algorithm config as JSON input, {keyId, type} as JSON output — infrequent
+      // setup operation with tiny payloads.  (Audit items C-6, C-7.)
       var algoJson = JSON.stringify(algo);
       var result = JSON.parse(_nativeImportKey(format, bytes, algoJson));
       return Promise.resolve(new CryptoKey(result.keyId, algo, result.type, !!extractable, keyUsages || []));
@@ -148,6 +149,8 @@
   SubtleCrypto.prototype.generateKey = function(algorithm, extractable, keyUsages) {
     try {
       var algo = normalizeAlgorithm(algorithm);
+      // JSON for both params and result — infrequent setup operation with tiny
+      // structured payloads.  (Audit items C-8, C-9.)
       var params = JSON.stringify({
         algorithm: algo,
         extractable: !!extractable,
@@ -197,6 +200,10 @@
       var dataBytes = toBytes(data);
       var sigBytes = toBytes(signature);
       // Zero-serialization: pass data and signature as ArrayBuffer directly.
+      // The native op returns the string "true" or "false" (not a JS boolean)
+      // because the Rust op macro returns Result<String, OpError>.  We use a
+      // strict comparison here so the non-empty string "false" is never truthy.
+      // (Audit item C-12.)
       var result = _nativeVerify(algo.name, hash, key._handle, dataBytes, sigBytes);
       return Promise.resolve(result === "true");
     } catch (e) {
@@ -209,8 +216,10 @@
       if (!(key instanceof CryptoKey)) throw new TypeError("Expected CryptoKey");
       var algo = normalizeAlgorithm(algorithm);
       var bytes = toBytes(data);
-      // Build algo config JSON — IV/AAD/label stay base64-encoded (small, structured).
-      // Only the main data payload crosses as ArrayBuffer.
+      // Build algo config JSON — IV (12-16 B), AAD, and RSA-OAEP label are
+      // base64-encoded inside JSON.  These are tiny structured parameters, so the
+      // base64 overhead is negligible.  Only the bulk data payload crosses as
+      // ArrayBuffer via the zero-copy bridge.  (Audit items C-1, C-2, C-3.)
       var algoParams = { name: algo.name };
       if (algo.hash) algoParams.hash = algo.hash;
       if (algo.iv) algoParams.iv = _B64.encode(toBytes(algo.iv));
@@ -231,8 +240,9 @@
       if (!(key instanceof CryptoKey)) throw new TypeError("Expected CryptoKey");
       var algo = normalizeAlgorithm(algorithm);
       var bytes = toBytes(data);
-      // Build algo config JSON — IV/AAD/label stay base64-encoded (small, structured).
-      // Only the main data payload crosses as ArrayBuffer.
+      // Build algo config JSON — IV, AAD, and label are base64-encoded inside JSON.
+      // Same rationale as encrypt: tiny structured params, not bulk data.
+      // (Audit items C-1, C-2, C-3.)
       var algoParams = { name: algo.name };
       if (algo.hash) algoParams.hash = algo.hash;
       if (algo.iv) algoParams.iv = _B64.encode(toBytes(algo.iv));
@@ -254,6 +264,8 @@
       var algo = normalizeAlgorithm(algorithm);
       var algoParams = { name: algo.name };
       if (algo.hash) algoParams.hash = algo.hash;
+      // Salt (16-64 B) and info are base64-encoded inside JSON — tiny structured
+      // params, not bulk data.  (Audit items C-4, C-5.)
       if (algo.salt) algoParams.salt = _B64.encode(toBytes(algo.salt));
       if (algo.info) algoParams.info = _B64.encode(toBytes(algo.info));
       if (algo.iterations) algoParams.iterations = algo.iterations;
@@ -273,6 +285,8 @@
       if (!(baseKey instanceof CryptoKey)) throw new TypeError("Expected CryptoKey");
       var algo = normalizeAlgorithm(algorithm);
       var derivedAlgo = normalizeAlgorithm(derivedKeyAlgorithm);
+      // Salt/info base64-in-JSON + result as JSON — infrequent setup op with
+      // small structured payloads.  (Audit items C-4, C-5, C-10, C-11.)
       var algoParams = { name: algo.name };
       if (algo.hash) algoParams.hash = algo.hash;
       if (algo.salt) algoParams.salt = _B64.encode(toBytes(algo.salt));

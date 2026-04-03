@@ -191,7 +191,12 @@ fn parse_curve(p: &serde_json::Value) -> Result<Curve, crate::ops::OpError> {
 /// `__cryptoImportKey(format, keyData: ArrayBuffer, algoJson) → JSON {keyId, type}`
 ///
 /// Zero-serialization: key material passed as ArrayBuffer.
-/// Algorithm config and usages stay in algoJson (small, structured).
+/// Algorithm config stays in algoJson; result is a small JSON object with key handle.
+///
+/// Design note (audit items C-6, C-7): the algorithm config input and the {keyId, type}
+/// result use JSON serialization.  These are infrequent setup operations with tiny
+/// payloads, so the JSON overhead is negligible.  Bulk key material uses the zero-copy
+/// ArrayBuffer bridge.
 #[appbase_op(state)]
 fn crypto_import_key(state: SharedState, format: String, key_data: Vec<u8>, algo_json: String) -> Result<String, crate::ops::OpError> {
     let p: serde_json::Value = serde_json::from_str(&algo_json)
@@ -304,6 +309,10 @@ fn crypto_export_key(state: SharedState, format: String, key_id: u32) -> Result<
 // ---------------------------------------------------------------------------
 
 /// `__cryptoGenerateKey(params_json) → JSON {keyId} | {publicKeyId, privateKeyId}`
+///
+/// Design note (audit items C-8, C-9): params and result use JSON serialization.
+/// Key generation is an infrequent setup operation with small structured payloads,
+/// so the JSON overhead is negligible.
 #[appbase_op(state)]
 fn crypto_generate_key(
     state: SharedState,
@@ -550,6 +559,12 @@ fn crypto_sign(state: SharedState, algo: String, hash: String, key_id: u32, data
 /// `__cryptoVerify(algo, hash, keyId, data: ArrayBuffer, signature: ArrayBuffer) → "true"|"false"`
 ///
 /// Zero-serialization: data and signature passed as ArrayBuffer.
+///
+/// Returns the string `"true"` or `"false"` rather than a native boolean because the
+/// `#[appbase_op]` macro's return path is `Result<String, OpError>`.  The JS polyfill
+/// in `crypto.js` converts this with a strict comparison (`result === "true"`) so a
+/// truthy-but-wrong value like `"false"` (a non-empty string) never leaks through.
+/// (Audit item C-12.)
 #[appbase_op(state)]
 fn crypto_verify(state: SharedState, algo: String, hash: String, key_id: u32, data: Vec<u8>, signature: Vec<u8>) -> Result<String, crate::ops::OpError> {
     let algo_name = algo.to_uppercase();
@@ -662,7 +677,14 @@ fn oaep_algo_for_hash(hash: &str) -> Result<&'static OaepAlgorithm, crate::ops::
 /// `__cryptoEncrypt(algoJson, keyId, data: ArrayBuffer) → ArrayBuffer`
 ///
 /// Zero-serialization: data payload as ArrayBuffer, ciphertext returned as ArrayBuffer.
-/// Algorithm config (IV, AAD, tagLength, label) stays in algoJson (small, structured).
+/// Algorithm config (IV, AAD, tagLength, label) stays in algoJson as base64 strings.
+///
+/// Design note (audit items C-1, C-2, C-3): IV (12-16 B), AAD, and RSA-OAEP label are
+/// intentionally base64-encoded inside the JSON config rather than passed as separate
+/// ArrayBuffer arguments.  These are tiny structured parameters (not bulk data), so the
+/// base64 overhead is negligible and keeping them in a single JSON object simplifies the
+/// op signature and JS polyfill.  Bulk plaintext/ciphertext always uses the zero-copy
+/// ArrayBuffer bridge.
 #[appbase_op(state)]
 fn crypto_encrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<u8>) -> Result<Vec<u8>, crate::ops::OpError> {
     let p: serde_json::Value = serde_json::from_str(&algo_json)
@@ -805,7 +827,11 @@ fn crypto_encrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<
 /// `__cryptoDecrypt(algoJson, keyId, data: ArrayBuffer) → ArrayBuffer`
 ///
 /// Zero-serialization: ciphertext as ArrayBuffer, plaintext returned as ArrayBuffer.
-/// Algorithm config (IV, AAD, tagLength, label) stays in algoJson (small, structured).
+/// Algorithm config (IV, AAD, tagLength, label) stays in algoJson as base64 strings.
+///
+/// Design note (audit items C-1, C-2, C-3): same rationale as `crypto_encrypt` — IV,
+/// AAD, and label are small structured params that stay base64-in-JSON.  See the
+/// encrypt doc comment for the full explanation.
 #[appbase_op(state)]
 fn crypto_decrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<u8>) -> Result<Vec<u8>, crate::ops::OpError> {
     let p: serde_json::Value = serde_json::from_str(&algo_json)
@@ -954,6 +980,11 @@ impl aws_lc_rs::hkdf::KeyType for DeriveLen {
 
 /// Shared deriveBits logic used by both `crypto_derive_bits` and `crypto_derive_key`.
 /// Returns raw derived bytes (no base64 encoding).
+///
+/// Design note (audit items C-4, C-5): HKDF salt and info, and PBKDF2 salt, are
+/// base64-encoded inside the JSON params.  These are typically 16-64 bytes of structured
+/// config data, so the base64 overhead is negligible.  Keeping them in the JSON object
+/// avoids complicating the op signature with extra ArrayBuffer arguments.
 fn crypto_derive_bits_inner(
     state: &SharedState,
     p: &serde_json::Value,
@@ -1064,6 +1095,10 @@ fn crypto_derive_bits(state: SharedState, params: String) -> Result<Vec<u8>, cra
 }
 
 /// `__cryptoDeriveKey(params_json) → JSON {keyId}`
+///
+/// Design note (audit items C-10, C-11): params and result use JSON serialization.
+/// Key derivation is an infrequent setup operation with small structured payloads,
+/// so the JSON overhead is negligible.
 #[appbase_op(state)]
 fn crypto_derive_key(state: SharedState, params: String) -> Result<String, crate::ops::OpError> {
     let p: serde_json::Value = serde_json::from_str(&params)
