@@ -310,3 +310,141 @@ fn jwt_content_hash() {
     // SHA-256("hello") = 2cf24dba...
     assert!(hex.starts_with("2cf24dba"), "SHA-256 mismatch: {hex}");
 }
+
+// ---------------------------------------------------------------------------
+// Multi-file TypeScript bundled with esbuild
+// ---------------------------------------------------------------------------
+
+fn bundle_example(dir_name: &str) -> Isolate {
+
+    let project_dir = format!(
+        "{}/../../examples/{dir_name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+
+    // Detect entry
+    let entry = appbase_compiler::bundler::detect_entry(std::path::Path::new(&project_dir))
+        .unwrap_or_else(|| panic!("No entry point found in {project_dir}"));
+
+    // Bundle with esbuild
+    let result = appbase_compiler::bundler::bundle(
+        std::path::Path::new(&project_dir),
+        &appbase_compiler::bundler::BundleOptions {
+            entry,
+            minify: false,
+            sourcemap: false,
+            ..Default::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("Bundle failed: {e}"));
+
+    eprintln!("[bundle] {dir_name}: {} bytes", result.size_bytes);
+
+    let modules = vec![ModuleEntry {
+        specifier: "index.js".to_string(),
+        source: result.js,
+    }];
+    Isolate::new(modules, std::collections::HashMap::new())
+}
+
+#[test]
+fn multi_ts_rpc_ping() {
+    if !appbase_compiler::bundler::esbuild_available() {
+        eprintln!("SKIPPED: esbuild not on PATH");
+        return;
+    }
+    init_v8();
+    let mut isolate = bundle_example("multi-ts");
+    let result = rpc(&mut isolate, "ping", "[]");
+    assert_eq!(result["result"].as_str().unwrap(), "pong");
+}
+
+#[test]
+fn multi_ts_rpc_version() {
+    if !appbase_compiler::bundler::esbuild_available() {
+        eprintln!("SKIPPED: esbuild not on PATH");
+        return;
+    }
+    init_v8();
+    let mut isolate = bundle_example("multi-ts");
+    let result = rpc(&mut isolate, "getVersion", "[]");
+    assert_eq!(result["result"].as_str().unwrap(), "1.0.0");
+}
+
+#[test]
+fn multi_ts_http_root() {
+    if !appbase_compiler::bundler::esbuild_available() {
+        eprintln!("SKIPPED: esbuild not on PATH");
+        return;
+    }
+    init_v8();
+    let mut isolate = bundle_example("multi-ts");
+    let result = isolate.execute_http("GET", "http://localhost/", "[]", "")
+        .expect("onRequest not found")
+        .expect("onRequest failed");
+    assert_eq!(result.status, 200);
+    let body: serde_json::Value = serde_json::from_str(&result.body).unwrap();
+    assert_eq!(body["message"].as_str().unwrap(), "Hello from appbase!");
+    assert_eq!(body["version"].as_str().unwrap(), "1.0.0");
+}
+
+#[test]
+fn multi_ts_http_health() {
+    if !appbase_compiler::bundler::esbuild_available() {
+        eprintln!("SKIPPED: esbuild not on PATH");
+        return;
+    }
+    init_v8();
+    let mut isolate = bundle_example("multi-ts");
+    let result = isolate.execute_http("GET", "http://localhost/health", "[]", "")
+        .expect("onRequest not found")
+        .expect("onRequest failed");
+    assert_eq!(result.status, 200);
+    let body: serde_json::Value = serde_json::from_str(&result.body).unwrap();
+    assert_eq!(body["status"].as_str().unwrap(), "ok");
+}
+
+#[test]
+fn multi_ts_http_not_found() {
+    if !appbase_compiler::bundler::esbuild_available() {
+        eprintln!("SKIPPED: esbuild not on PATH");
+        return;
+    }
+    init_v8();
+    let mut isolate = bundle_example("multi-ts");
+    let result = isolate.execute_http("GET", "http://localhost/nonexistent", "[]", "")
+        .expect("onRequest not found")
+        .expect("onRequest failed");
+    assert_eq!(result.status, 404);
+}
+
+#[test]
+fn multi_ts_tree_shaking() {
+    if !appbase_compiler::bundler::esbuild_available() {
+        eprintln!("SKIPPED: esbuild not on PATH");
+        return;
+    }
+    // Verify that unused exports are tree-shaken from the bundle
+    let project_dir = format!(
+        "{}/../../examples/multi-ts",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let result = appbase_compiler::bundler::bundle(
+        std::path::Path::new(&project_dir),
+        &appbase_compiler::bundler::BundleOptions {
+            entry: "src/index.ts".to_string(),
+            minify: false,
+            sourcemap: false,
+            ..Default::default()
+        },
+    ).unwrap();
+
+    // Used exports should be in the bundle
+    assert!(result.js.contains("1.0.0"), "VERSION should be in bundle");
+
+    // Unused exports should be tree-shaken
+    assert!(!result.js.contains("this-should-not-appear-in-bundle"),
+        "DEBUG_SECRET should be tree-shaken");
+    assert!(!result.js.contains("unusedHelper") && !result.js.contains("tree-shaking"),
+        "unusedHelper should be tree-shaken");
+}

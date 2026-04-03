@@ -32,5 +32,8 @@ path = "src/server.rs"
 name = "echo-server"
 path = "benches/echo_server.rs"
 
+[dev-dependencies]
+appbase-compiler = { path = "../compiler" }
+
 [lints]
 workspace = true
