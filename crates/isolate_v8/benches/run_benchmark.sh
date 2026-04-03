@@ -142,6 +142,16 @@ scenario "7. fetch() → local Rust echo"    fetchExternal       "[\"http://loca
 scenario "8. fetch() → external API"       fetchExternal       "[\"https://httpbin.org/get\"]"
 
 echo ""
+echo "--- Crypto ---"
+scenario "9. randomUUID()"                  uuid              "[]"
+scenario "10. getRandomValues(32)"          randomBytes       "[]"
+scenario "11. SHA-256 digest"               sha256            "[]"
+scenario "12. HMAC-SHA256 sign (cached)"    hmacSign          "[]"
+scenario "13. HMAC-SHA256 sign+verify"      hmacVerify        "[]"
+scenario "14. AES-GCM encrypt (cached)"     aesEncrypt        "[]"
+scenario "15. ECDSA P-256 sign (cached)"    ecdsaSign         "[]"
+
+echo ""
 echo "========================================================="
 echo ""
 echo "Notes:"

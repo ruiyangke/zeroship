@@ -1,0 +1,143 @@
+Building v8-server (release)...
+    Finished `release` profile [optimized] target(s) in 0.26s
+Starting servers...
+[echo-rs] http://0.0.0.0:8888 (async, hyper)
+[v8-server] mode=concurrent (1 V8 thread)
+[v8-server] mode=concurrent-pool (16 V8 threads)
+[v8-server] http://0.0.0.0:4000
+[node] http://0.0.0.0:4002 (Node.js v22.22.2)
+[v8-server] http://0.0.0.0:4001
+All servers ready.
+Cross-Runtime RPC Benchmark
+Date: 2026-04-03
+Machine: Linux (16 cores)
+Tool: wrk, 4 threads, 50 connections, 10s per test
+
+Servers:
+  raw V8 concurrent:   1 V8 thread, serial JS + concurrent I/O
+  raw V8 conc-pool:    16 V8 threads, each with concurrent I/O
+  Node.js:             v22.22.2, http module, single thread
+
+=========================================================
+
+--- 1. ping/pong (minimal) ---
+  raw V8 concurrent (1 thread)            179718.26 req/s   259.15us 100.23us
+  raw V8 conc-pool (16 threads)           114790.18 req/s   443.05us 373.45us
+  Node.js v22.22.2                         14189.14 req/s   3.84ms 6.94ms
+
+--- 2. fib(10) (light CPU) ---
+  raw V8 concurrent (1 thread)            142902.19 req/s   330.37us 102.30us
+  raw V8 conc-pool (16 threads)           113061.87 req/s   447.83us 374.34us
+  Node.js v22.22.2                         14385.35 req/s   3.43ms 2.83ms
+
+--- 3. fib(35) (heavy CPU) ---
+  raw V8 concurrent (1 thread)                 7.39 req/s   1.01s 565.24ms
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+  raw V8 conc-pool (16 threads)               53.69 req/s   806.99ms 244.50ms
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+  Node.js v22.22.2                             6.99 req/s   698.41ms 329.83ms
+
+--- 4. setTimeout(0) ---
+  raw V8 concurrent (1 thread)             98131.57 req/s   473.69us 161.97us
+  raw V8 conc-pool (16 threads)           106857.90 req/s   482.54us 422.57us
+  Node.js v22.22.2                         20388.11 req/s   2.34ms 680.73us
+
+--- 5. Promise chain (sync .then) ---
+  raw V8 concurrent (1 thread)            152875.48 req/s   315.69us 156.32us
+  raw V8 conc-pool (16 threads)           100189.53 req/s   524.90us 485.80us
+  Node.js v22.22.2                         14122.48 req/s   3.43ms 1.69ms
+
+--- 6. Promise chain + 100ms timer ---
+  raw V8 concurrent (1 thread)               474.48 req/s   100.59ms 144.76us
+  raw V8 conc-pool (16 threads)              474.45 req/s   100.60ms 154.73us
+  Node.js v22.22.2                           474.12 req/s   100.81ms 624.77us
+
+--- 7. fetch() → local Rust echo ---
+  raw V8 concurrent (1 thread)             52257.48 req/s   0.90ms 183.77us
+  raw V8 conc-pool (16 threads)            83907.18 req/s   594.57us 433.97us
+  Node.js v22.22.2                          3273.80 req/s   16.42ms 19.82ms
+
+--- 8. fetch() → external API ---
+  raw V8 concurrent (1 thread)                95.27 req/s   399.48ms 301.39ms
+  raw V8 conc-pool (16 threads)              164.22 req/s   300.45ms 199.24ms
+  Node.js v22.22.2                           114.07 req/s   404.77ms 312.52ms
+
+--- Crypto ---
+
+--- 9. randomUUID() ---
+  raw V8 concurrent (1 thread)            152405.58 req/s   379.89us 1.37ms
+  raw V8 conc-pool (16 threads)           106551.00 req/s   545.33us 1.36ms
+  Node.js v22.22.2                         13421.78 req/s   3.67ms 2.39ms
+
+--- 10. getRandomValues(32) ---
+  raw V8 concurrent (1 thread)            133654.28 req/s   359.32us 173.06us
+  raw V8 conc-pool (16 threads)            85684.90 req/s   623.52us 572.38us
+  Node.js v22.22.2                          9951.06 req/s   5.05ms 4.56ms
+
+--- 11. SHA-256 digest ---
+  raw V8 concurrent (1 thread)             66889.80 req/s   721.89us 300.81us
+  raw V8 conc-pool (16 threads)            83809.35 req/s   627.80us 557.73us
+  Node.js v22.22.2                         11102.06 req/s   4.37ms 1.87ms
+
+--- 12. HMAC-SHA256 sign (cached) ---
+  raw V8 concurrent (1 thread)             53636.52 req/s   0.89ms 341.47us
+  raw V8 conc-pool (16 threads)            78746.93 req/s   660.31us 578.02us
+  Node.js v22.22.2                         11560.04 req/s   4.18ms 1.48ms
+
+--- 13. HMAC-SHA256 sign+verify ---
+  raw V8 concurrent (1 thread)             39351.30 req/s   1.22ms 496.87us
+  raw V8 conc-pool (16 threads)            85425.70 req/s   585.11us 445.28us
+  Node.js v22.22.2                         11242.77 req/s   4.28ms 0.94ms
+
+--- 14. AES-GCM encrypt (cached) ---
+  raw V8 concurrent (1 thread)             41433.69 req/s   1.27ms 1.31ms
+  raw V8 conc-pool (16 threads)            87253.91 req/s   580.28us 469.54us
+  Node.js v22.22.2                         11785.29 req/s   4.11ms 1.42ms
+
+--- 15. ECDSA P-256 sign (cached) ---
+[cpu-timer] app 0x0 terminated: CPU limit exceeded
+  raw V8 concurrent (1 thread)             16238.88 req/s   2.96ms 740.25us
+  raw V8 conc-pool (16 threads)            63442.18 req/s   789.84us 591.17us
+  Node.js v22.22.2                         10349.30 req/s   4.68ms 1.68ms
+
+=========================================================
+
+Notes:
+  raw V8 concurrent:   single V8 thread with serial JS + concurrent I/O.
+                       Requests overlap during I/O waits.
+  raw V8 conc-pool:    N concurrent isolate threads with round-robin dispatch.
+                       Best of both: concurrent I/O + multi-core scaling.
+  Node.js:             single-threaded event loop via http module.
+
+=========================================================
+  Summary Table (req/s)
+=========================================================
+
+Scenario                          concurrent(1)  conc-pool(16)  Node.js v22    vs Node (best)
+--- RPC ---
+1. ping/pong                         179,718        114,790       14,189       12.7x
+2. fib(10)                           142,902        113,062       14,385        9.9x
+3. fib(35) [5s]                            7             54            7        7.7x (pool)
+4. setTimeout(0)                      98,132        106,858       20,388        5.2x (pool)
+5. Promise chain                     152,875        100,190       14,122       10.8x
+6. Promise+100ms                         474            474          474        1.0x
+7. fetch → local echo                52,257         83,907        3,274       25.6x (pool)
+8. fetch → external API                  95            164          114        1.4x (pool)
+
+--- Crypto ---
+9. randomUUID()                      152,406        106,551       13,422       11.4x
+10. getRandomValues(32)              133,654         85,685        9,951       13.4x
+11. SHA-256 digest                    66,890         83,809       11,102        7.5x (pool)
+12. HMAC-SHA256 sign                  53,637         78,747       11,560        6.8x (pool)
+13. HMAC-SHA256 sign+verify           39,351         85,426       11,243        7.6x (pool)
+14. AES-GCM encrypt                   41,434         87,254       11,785        7.4x (pool)
+15. ECDSA P-256 sign                  16,239         63,442       10,349        6.1x (pool)
