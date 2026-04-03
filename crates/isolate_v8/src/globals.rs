@@ -265,8 +265,9 @@ pub(crate) fn setup_globals(scope: &mut v8::PinScope) {
         let uuid_key = v8::String::new(scope, "randomUUID").unwrap();
         crypto.set(scope, uuid_key.into(), uuid_fn.into());
 
+        // getRandomValues — direct TypedArray fill, no base64 (hand-written callback)
         let grv_fn = v8::Function::new(scope, crate::crypto::crypto_get_random_values_callback).unwrap();
-        let grv_key = v8::String::new(scope, "__cryptoGetRandomValues").unwrap();
+        let grv_key = v8::String::new(scope, "getRandomValues").unwrap();
         crypto.set(scope, grv_key.into(), grv_fn.into());
 
         let digest_fn = v8::Function::new(scope, crate::crypto::crypto_digest_callback).unwrap();

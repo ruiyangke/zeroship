@@ -67,7 +67,9 @@
   // =========================================================================
 
   var _crypto = globalThis.crypto || {};
-  var _nativeGRV = _crypto.__cryptoGetRandomValues;
+  // getRandomValues is registered directly as a native callback on crypto object
+  // by globals.rs — it fills the TypedArray backing store directly (zero copies).
+  // No JS override needed.
   var _nativeDigest = _crypto.__cryptoDigest;
   var _nativeImportKey = _crypto.__cryptoImportKey;
   var _nativeExportKey = _crypto.__cryptoExportKey;
@@ -78,24 +80,6 @@
   var _nativeDecrypt = _crypto.__cryptoDecrypt;
   var _nativeDeriveBits = _crypto.__cryptoDeriveBits;
   var _nativeDeriveKey = _crypto.__cryptoDeriveKey;
-
-  // =========================================================================
-  // crypto.getRandomValues
-  // =========================================================================
-
-  _crypto.getRandomValues = function(typedArray) {
-    if (!ArrayBuffer.isView(typedArray)) {
-      throw new TypeError("Argument must be a typed array");
-    }
-    if (typedArray.byteLength === 0) return typedArray;
-    if (typedArray.byteLength > 65536) {
-      throw new DOMException("getRandomValues: quota exceeded", "QuotaExceededError");
-    }
-    var b64 = _nativeGRV(typedArray.byteLength);
-    var bytes = _B64.decode(b64);
-    new Uint8Array(typedArray.buffer, typedArray.byteOffset, typedArray.byteLength).set(bytes);
-    return typedArray;
-  };
 
   // =========================================================================
   // CryptoKey — opaque handle to Rust key store

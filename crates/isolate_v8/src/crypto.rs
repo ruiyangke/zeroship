@@ -92,17 +92,55 @@ fn crypto_random_uuid() -> String {
     String::from_utf8(buf.to_vec()).unwrap()
 }
 
-/// `__cryptoGetRandomValues(len) → base64 string of random bytes`
-#[appbase_op]
-fn crypto_get_random_values(len: u32) -> Result<String, crate::ops::OpError> {
-    if len > 65536 {
-        return Err(crate::ops::OpError::type_error(
-            "getRandomValues: quota exceeded (max 65536 bytes)",
-        ));
+/// `crypto.getRandomValues(typedArray)` — fills TypedArray directly, zero copies.
+///
+/// Hand-written V8 callback (not `#[appbase_op]`) because we need direct access
+/// to the TypedArray backing store — same approach as workerd.
+pub(crate) fn crypto_get_random_values_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let arg = args.get(0);
+
+    // Must be a TypedArray (ArrayBufferView)
+    let buf_view = match v8::Local::<v8::ArrayBufferView>::try_from(arg) {
+        Ok(v) => v,
+        Err(_) => {
+            let msg = v8::String::new(scope, "getRandomValues: argument must be a typed array").unwrap();
+            let exc = v8::Exception::type_error(scope, msg);
+            scope.throw_exception(exc);
+            return;
+        }
+    };
+
+    let byte_len = buf_view.byte_length();
+    if byte_len > 65536 {
+        let msg = v8::String::new(scope, "getRandomValues: quota exceeded (max 65536 bytes)").unwrap();
+        let exc = v8::Exception::error(scope, msg);
+        scope.throw_exception(exc);
+        return;
     }
-    let mut buf = vec![0u8; len as usize];
-    fast_random(&mut buf);
-    Ok(B64.encode(&buf))
+
+    if byte_len == 0 {
+        rv.set(arg);
+        return;
+    }
+
+    // Generate random bytes into a temp buffer, then copy into the TypedArray
+    let mut tmp = vec![0u8; byte_len];
+    fast_random(&mut tmp);
+    buf_view.copy_contents(&mut []); // ensure backing store exists
+    // copy_contents reads FROM v8, we need to write TO v8 — use the backing store
+    let ab = buf_view.buffer(scope).unwrap();
+    let offset = buf_view.byte_offset();
+    let store = ab.get_backing_store();
+    // Write directly into the ArrayBuffer's backing store memory
+    for (i, &byte) in tmp.iter().enumerate() {
+        store[offset + i].set(byte);
+    }
+
+    rv.set(arg);
 }
 
 /// `__cryptoDigest(algo, data_b64) → base64 hash`
