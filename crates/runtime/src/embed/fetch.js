@@ -231,6 +231,33 @@
     return obj._bodyText;
   }
 
+  // Read a ReadableStream to completion, returning a Promise<string>.
+  function __readStreamToString(stream) {
+    var reader = stream.getReader();
+    var chunks = [];
+    function pump() {
+      return reader.read().then(function(result) {
+        if (result.done) {
+          // Concatenate all chunks into a single string.
+          var total = 0;
+          for (var i = 0; i < chunks.length; i++) total += chunks[i].length;
+          var buf = new Uint8Array(total);
+          var off = 0;
+          for (var i = 0; i < chunks.length; i++) {
+            buf.set(chunks[i], off);
+            off += chunks[i].length;
+          }
+          return new TextDecoder().decode(buf);
+        }
+        if (result.value) {
+          chunks.push(result.value instanceof Uint8Array ? result.value : new TextEncoder().encode(String(result.value)));
+        }
+        return pump();
+      });
+    }
+    return pump();
+  }
+
   function applyBodyMixin(proto) {
     Object.defineProperty(proto, "bodyUsed", {
       get: function() { return this._bodyUsed; },
@@ -238,6 +265,11 @@
     });
 
     proto.text = function() {
+      if (this._isStreamBody && this.body) {
+        if (this._bodyUsed) return Promise.reject(new TypeError("Body has already been consumed."));
+        this._bodyUsed = true;
+        return __readStreamToString(this.body);
+      }
       var text = consumeBody(this);
       if (text instanceof Promise) return text; // rejection
       return Promise.resolve(text);
@@ -352,7 +384,17 @@
     this.redirected = false;
     this.ok = this.status >= 200 && this.status < 300;
 
-    initBody(this, body);
+    // ReadableStream body — store reference, defer body text extraction.
+    if (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) {
+      this.body = body;
+      this._bodyText = null;
+      this._bodyBytes = null;
+      this._bodyUsed = false;
+      this._isStreamBody = true;
+    } else {
+      this._isStreamBody = false;
+      initBody(this, body);
+    }
   }
 
   Response.prototype.clone = function() {

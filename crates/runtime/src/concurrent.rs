@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use crate::event_loop::{EventLoopInner, SharedState};
 use crate::globals::setup_globals;
 use crate::modules::ModuleEntry;
-use crate::runtime::{init_v8, thread_cpu_time, RequestResult, DISPATCH_JS, FETCH_JS, URL_JS, CRYPTO_JS};
+use crate::runtime::{init_v8, thread_cpu_time, RequestResult, DISPATCH_JS, FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS};
 use crate::timers::fire_ready_timers;
 
 // ---------------------------------------------------------------------------
@@ -437,7 +437,7 @@ impl ConcurrentIsolate {
             setup_globals(scope);
 
             // Load polyfills
-            for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS] {
+            for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS] {
                 let code = v8::String::new(scope, polyfill).unwrap();
                 let script = v8::Script::compile(scope, code, None).unwrap();
                 script.run(scope).unwrap();

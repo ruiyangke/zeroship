@@ -57,6 +57,9 @@ pub(crate) const URL_JS: &str = include_str!("embed/url.js");
 /// Embedded crypto polyfill (getRandomValues, SubtleCrypto.digest, base64 helpers).
 pub(crate) const CRYPTO_JS: &str = include_str!("embed/crypto.js");
 
+/// Embedded ReadableStream polyfill (backed by native __streams callbacks).
+pub(crate) const STREAMS_JS: &str = include_str!("embed/streams.js");
+
 /// HTTP dispatch function — calls onRequest(Request) if exported.
 /// Returns a JSON string with { status, headers, body } or null if onRequest is not defined.
 pub(crate) const HTTP_DISPATCH_JS: &str = r#"(function(__method, __url, __headers_json, __body) {

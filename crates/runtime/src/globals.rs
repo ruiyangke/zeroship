@@ -314,6 +314,34 @@ pub(crate) fn setup_globals(scope: &mut v8::PinScope) {
         global.set(scope, crypto_key.into(), crypto.into());
     }
 
+    // __streams namespace (native backing for ReadableStream)
+    {
+        let streams = v8::Object::new(scope);
+
+        let create_fn = v8::Function::new(scope, crate::streams::stream_create_callback).unwrap();
+        let create_key = v8::String::new(scope, "create").unwrap();
+        streams.set(scope, create_key.into(), create_fn.into());
+
+        let read_fn = v8::Function::new(scope, crate::streams::stream_read_callback).unwrap();
+        let read_key = v8::String::new(scope, "read").unwrap();
+        streams.set(scope, read_key.into(), read_fn.into());
+
+        let enqueue_fn = v8::Function::new(scope, crate::streams::stream_enqueue_callback).unwrap();
+        let enqueue_key = v8::String::new(scope, "enqueue").unwrap();
+        streams.set(scope, enqueue_key.into(), enqueue_fn.into());
+
+        let close_fn = v8::Function::new(scope, crate::streams::stream_close_callback).unwrap();
+        let close_key = v8::String::new(scope, "close").unwrap();
+        streams.set(scope, close_key.into(), close_fn.into());
+
+        let error_fn = v8::Function::new(scope, crate::streams::stream_error_callback).unwrap();
+        let error_key = v8::String::new(scope, "error").unwrap();
+        streams.set(scope, error_key.into(), error_fn.into());
+
+        let streams_key = v8::String::new(scope, "__streams").unwrap();
+        global.set(scope, streams_key.into(), streams.into());
+    }
+
     // env namespace
     {
         let env = v8::Object::new(scope);

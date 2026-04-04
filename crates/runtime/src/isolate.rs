@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use crate::event_loop::{run_event_loop, run_event_loop_until_settled, EventLoopInner, OpResult, SharedState};
 use crate::globals::setup_globals;
 use crate::modules::ModuleEntry;
-use crate::runtime::{thread_cpu_time, HttpResult, RequestResult, DISPATCH_JS, FETCH_JS, URL_JS, CRYPTO_JS};
+use crate::runtime::{thread_cpu_time, HttpResult, RequestResult, DISPATCH_JS, FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS};
 
 /// A V8 isolate with persistent context -- compiled code stays across requests.
 /// ES modules are compiled ONCE. Each request just calls the handler function.
@@ -97,7 +97,7 @@ impl Isolate {
         setup_globals(scope);
 
         // Load polyfills
-        for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS] {
+        for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS] {
             let code = v8::String::new(scope, polyfill).unwrap();
             let script = v8::Script::compile(scope, code, None).unwrap();
             script.run(scope).unwrap();
@@ -163,6 +163,19 @@ impl Isolate {
         // dictionary mode transition). Using new Request() with trusted headers instead.
         if self.on_request_fn.is_some() {
             let code = v8::String::new(scope, r#"(function(__handler, __method, __url, __headers_json, __body) {
+    // If resp has a ReadableStream body, read it to completion so Rust
+    // can extract _bodyText synchronously via the V8 API.
+    function __ensureBody(resp) {
+        if (resp && resp._isStreamBody && resp.body) {
+            return resp.text().then(function(body) {
+                resp._bodyText = body;
+                resp._isStreamBody = false;
+                return resp;
+            });
+        }
+        return resp;
+    }
+
     try {
         // Build trusted headers map — skip validation (like workerd's appendUnguarded).
         // Inbound headers from Hyper are already validated.
@@ -185,7 +198,7 @@ impl Isolate {
         if (result && typeof result.then === "function") {
             return result.then(function(resp) {
                 if (!resp || resp.status === undefined) return new Response(String(resp), { status: 200 });
-                return resp;
+                return __ensureBody(resp);
             }, function(e) {
                 return new Response(e.message || String(e), { status: 500 });
             });
@@ -193,7 +206,7 @@ impl Isolate {
         if (!result || result.status === undefined) {
             return new Response(String(result), { status: 200 });
         }
-        return result;
+        return __ensureBody(result);
     } catch(e) {
         return new Response(e.message || String(e), { status: 500 });
     }
@@ -234,6 +247,7 @@ impl Isolate {
             s.timers.heap.clear();
             s.timers.callbacks.clear();
             s.pending_resolvers.clear();
+            s.streams.clear();
         }
         while self.op_rx.try_recv().is_ok() {} // drain outside the borrow
 
@@ -292,6 +306,7 @@ impl Isolate {
             s.timers.heap.clear();
             s.timers.callbacks.clear();
             s.pending_resolvers.clear();
+            s.streams.clear();
         }
         while self.op_rx.try_recv().is_ok() {} // drain outside the borrow
 
@@ -380,8 +395,10 @@ fn extract_http_result(
         .unwrap_or(200) as u16;
 
     // body (read _bodyText directly — avoids the async .text() Promise chain)
+    // For stream bodies, __ensureBody reads the stream and sets _bodyText.
     let body_key = v8::String::new(scope, "_bodyText").unwrap();
     let body = resp.get(scope, body_key.into())
+        .filter(|v| !v.is_null_or_undefined())
         .map(|v| v.to_rust_string_lossy(scope))
         .unwrap_or_default();
 

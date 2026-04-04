@@ -29,6 +29,7 @@ mod globals;
 mod isolate;
 mod kv;
 pub mod modules;
+mod streams;
 pub mod ops;
 pub mod runtime;
 pub mod storage;
@@ -1264,5 +1265,156 @@ mod tests {
         "#), no_env());
         let r = isolate.execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
         assert!(r.json.contains("ok"), "got: {}", r.json);
+    }
+
+    // =========================================================================
+    // ReadableStream tests
+    // =========================================================================
+
+    #[test]
+    fn readable_stream_sync_enqueue() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var stream = new ReadableStream({
+                    start(controller) {
+                        controller.enqueue("hello ");
+                        controller.enqueue("world");
+                        controller.close();
+                    }
+                });
+                var reader = stream.getReader();
+                var text = "";
+                while (true) {
+                    var r = await reader.read();
+                    if (r.done) break;
+                    text += new TextDecoder().decode(r.value);
+                }
+                return text;
+            }
+        "#), no_env());
+        let r = isolate
+            .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
+            .unwrap();
+        assert!(r.json.contains("hello world"), "got: {}", r.json);
+    }
+
+    #[test]
+    fn readable_stream_with_settimeout() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var stream = new ReadableStream({
+                    start(controller) {
+                        var count = 0;
+                        var id = setInterval(function() {
+                            controller.enqueue("chunk" + count + " ");
+                            count++;
+                            if (count >= 3) {
+                                clearInterval(id);
+                                controller.close();
+                            }
+                        }, 1);
+                    }
+                });
+                var reader = stream.getReader();
+                var text = "";
+                while (true) {
+                    var r = await reader.read();
+                    if (r.done) break;
+                    text += new TextDecoder().decode(r.value);
+                }
+                return text;
+            }
+        "#), no_env());
+        let r = isolate
+            .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
+            .unwrap();
+        assert!(r.json.contains("chunk0"), "got: {}", r.json);
+        assert!(r.json.contains("chunk2"), "got: {}", r.json);
+    }
+
+    #[test]
+    fn streaming_http_response_sync() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export function onRequest(request) {
+                var stream = new ReadableStream({
+                    start(controller) {
+                        controller.enqueue("data: event 0\n\n");
+                        controller.enqueue("data: event 1\n\n");
+                        controller.enqueue("data: event 2\n\n");
+                        controller.close();
+                    }
+                });
+                return new Response(stream, {
+                    headers: { "Content-Type": "text/event-stream" }
+                });
+            }
+        "#), no_env());
+        let r = isolate.execute_http("GET", "http://localhost/events", "[]", "")
+            .expect("onRequest not found")
+            .expect("onRequest failed");
+        assert_eq!(r.status, 200);
+        assert!(r.body.contains("data: event 0"), "got: {}", r.body);
+        assert!(r.body.contains("data: event 2"), "got: {}", r.body);
+    }
+
+    #[test]
+    fn streaming_http_response_with_timer() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export function onRequest(request) {
+                var stream = new ReadableStream({
+                    start(controller) {
+                        var count = 0;
+                        var id = setInterval(function() {
+                            controller.enqueue("data: event " + count + "\n\n");
+                            count++;
+                            if (count >= 5) {
+                                clearInterval(id);
+                                controller.close();
+                            }
+                        }, 1);
+                    }
+                });
+                return new Response(stream, {
+                    headers: { "Content-Type": "text/event-stream" }
+                });
+            }
+        "#), no_env());
+        let r = isolate.execute_http("GET", "http://localhost/events", "[]", "")
+            .expect("onRequest not found")
+            .expect("onRequest failed");
+        assert_eq!(r.status, 200);
+        assert!(r.body.contains("data: event 0"), "got: {}", r.body);
+        assert!(r.body.contains("data: event 4"), "got: {}", r.body);
+        // Check headers
+        let ct = r.headers.iter().find(|(k, _)| k == "content-type");
+        assert!(ct.is_some(), "missing content-type header");
+        assert_eq!(ct.unwrap().1, "text/event-stream");
+    }
+
+    #[test]
+    fn readable_stream_response_text_method() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                var stream = new ReadableStream({
+                    start(controller) {
+                        controller.enqueue("abc");
+                        controller.enqueue("def");
+                        controller.close();
+                    }
+                });
+                var resp = new Response(stream);
+                var text = await resp.text();
+                return text;
+            }
+        "#), no_env());
+        let r = isolate
+            .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
+            .unwrap();
+        assert!(r.json.contains("abcdef"), "got: {}", r.json);
     }
 }

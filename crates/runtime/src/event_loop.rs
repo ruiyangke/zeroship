@@ -67,12 +67,29 @@ pub(crate) struct EventLoopInner {
     /// Crypto key store — key material stays in Rust, JS holds opaque u32 handles.
     pub(crate) key_store: HashMap<u32, KeyData>,
     pub(crate) next_key_id: u32,
+    /// Active readable streams: stream_id -> StreamState.
+    pub(crate) streams: HashMap<u32, StreamState>,
+    pub(crate) next_stream_id: u32,
 }
 
 /// Result of an async op (e.g., fetch response, DB query result).
 pub(crate) struct OpResult {
     pub(crate) id: u32,
     pub(crate) value: String,
+}
+
+// ---------------------------------------------------------------------------
+// Stream state (for ReadableStream backing)
+// ---------------------------------------------------------------------------
+
+/// State for a single ReadableStream instance.
+pub(crate) struct StreamState {
+    /// Pending read promise resolver (JS is waiting for next chunk).
+    pub(crate) pending_read: Option<v8::Global<v8::PromiseResolver>>,
+    /// Buffered chunks waiting to be read.
+    pub(crate) buffer: Vec<Vec<u8>>,
+    /// Whether the stream has been closed.
+    pub(crate) closed: bool,
 }
 
 impl EventLoopInner {
@@ -90,6 +107,8 @@ impl EventLoopInner {
             env_vars: HashMap::new(),
             key_store: HashMap::new(),
             next_key_id: 1,
+            streams: HashMap::new(),
+            next_stream_id: 1,
         }, op_rx)
     }
 
@@ -139,9 +158,12 @@ fn compute_wait_timeout(state: &SharedState) -> Option<Duration> {
         }
     }
 
+    // Streams with pending reads also count as pending work.
+    let has_pending_streams = s.streams.values().any(|st| st.pending_read.is_some());
+
     match next_fire {
         Some(fire_at) => Some(fire_at.saturating_duration_since(std::time::Instant::now())),
-        None if !s.pending_resolvers.is_empty() => Some(Duration::from_secs(60)),
+        None if !s.pending_resolvers.is_empty() || has_pending_streams => Some(Duration::from_secs(60)),
         None => None,
     }
 }
@@ -164,7 +186,8 @@ pub(crate) fn run_event_loop(
 
         {
             let s = state.borrow();
-            if s.timers.callbacks.is_empty() && s.pending_resolvers.is_empty() {
+            let has_pending_streams = s.streams.values().any(|st| st.pending_read.is_some());
+            if s.timers.callbacks.is_empty() && s.pending_resolvers.is_empty() && !has_pending_streams {
                 break;
             }
         }
@@ -257,7 +280,8 @@ pub(crate) fn run_event_loop_until_settled(
         // Check if done (no work left)
         {
             let s = state.borrow();
-            if s.timers.callbacks.is_empty() && s.pending_resolvers.is_empty() {
+            let has_pending_streams = s.streams.values().any(|st| st.pending_read.is_some());
+            if s.timers.callbacks.is_empty() && s.pending_resolvers.is_empty() && !has_pending_streams {
                 drop(s);
                 scope.perform_microtask_checkpoint();
                 return;
