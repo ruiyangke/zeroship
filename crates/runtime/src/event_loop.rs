@@ -40,13 +40,16 @@ pub(crate) enum KeyData {
 // ---------------------------------------------------------------------------
 
 /// State shared between V8 callbacks and the event loop driver.
+///
+/// The async op channel receiver (`op_rx`) is intentionally kept OUTSIDE this
+/// struct (and therefore outside the `Rc<RefCell<>>`) so that blocking
+/// `recv_timeout()` calls never hold a mutable borrow on shared state.
+/// Whoever drives the event loop owns `op_rx` separately.
 #[allow(missing_debug_implementations)]
-pub(crate) struct EventLoopState {
+pub(crate) struct EventLoopInner {
     pub(crate) timers: TimerState,
     /// Pending promise resolvers for async ops (fetch, DB, etc.)
     pub(crate) pending_resolvers: HashMap<u32, v8::Global<v8::PromiseResolver>>,
-    /// Async op channel receiver (ops completed on background threads)
-    pub(crate) op_rx: mpsc::Receiver<OpResult>,
     /// Async op channel sender (cloned into background tasks)
     pub(crate) op_tx: mpsc::Sender<OpResult>,
     pub(crate) next_op_id: u32,
@@ -72,13 +75,12 @@ pub(crate) struct OpResult {
     pub(crate) value: String,
 }
 
-impl EventLoopState {
-    pub(crate) fn new() -> Self {
+impl EventLoopInner {
+    pub(crate) fn new() -> (Self, mpsc::Receiver<OpResult>) {
         let (op_tx, op_rx) = mpsc::channel();
-        Self {
+        (Self {
             timers: TimerState::new(),
             pending_resolvers: HashMap::new(),
-            op_rx,
             op_tx,
             next_op_id: 1,
             tokio_handle: None,
@@ -88,27 +90,28 @@ impl EventLoopState {
             env_vars: HashMap::new(),
             key_store: HashMap::new(),
             next_key_id: 1,
-        }
+        }, op_rx)
     }
 
-    pub(crate) fn with_env(env_vars: HashMap<String, String>) -> Self {
-        let mut state = Self::new();
+    pub(crate) fn with_env(env_vars: HashMap<String, String>) -> (Self, mpsc::Receiver<OpResult>) {
+        let (mut state, rx) = Self::new();
         state.env_vars = env_vars;
-        state
+        (state, rx)
     }
 }
 
-pub(crate) type SharedState = Rc<RefCell<EventLoopState>>;
+pub(crate) type SharedState = Rc<RefCell<EventLoopInner>>;
 
 // ---------------------------------------------------------------------------
 // Event loop helpers
 // ---------------------------------------------------------------------------
 
 /// Drain completed async ops from the channel and resolve their promises.
-fn drain_async_ops(scope: &mut v8::PinScope, state: &SharedState) {
+///
+/// `op_rx` is outside the `RefCell` — no borrow on shared state needed for recv.
+fn drain_async_ops(scope: &mut v8::PinScope, state: &SharedState, op_rx: &mpsc::Receiver<OpResult>) {
     loop {
-        let result = state.borrow_mut().op_rx.try_recv();
-        match result {
+        match op_rx.try_recv() {
             Ok(op_result) => {
                 let resolver = state.borrow_mut().pending_resolvers.remove(&op_result.id);
                 if let Some(resolver) = resolver {
@@ -149,11 +152,15 @@ fn compute_wait_timeout(state: &SharedState) -> Option<Duration> {
 
 /// Drive the event loop until no more pending work (timers, async ops).
 /// Used for fire-and-forget side effects after a sync response.
-pub(crate) fn run_event_loop(scope: &mut v8::PinScope, state: &SharedState) {
+pub(crate) fn run_event_loop(
+    scope: &mut v8::PinScope,
+    state: &SharedState,
+    op_rx: &mpsc::Receiver<OpResult>,
+) {
     loop {
         scope.perform_microtask_checkpoint();
         fire_ready_timers(scope, state);
-        drain_async_ops(scope, state);
+        drain_async_ops(scope, state, op_rx);
 
         {
             let s = state.borrow();
@@ -173,8 +180,7 @@ pub(crate) fn run_event_loop(scope: &mut v8::PinScope, state: &SharedState) {
 
         let has_pending_ops = !state.borrow().pending_resolvers.is_empty();
         if has_pending_ops {
-            let result = state.borrow_mut().op_rx.recv_timeout(timeout);
-            if let Ok(op_result) = result {
+            if let Ok(op_result) = op_rx.recv_timeout(timeout) {
                 let resolver = state.borrow_mut().pending_resolvers.remove(&op_result.id);
                 if let Some(resolver) = resolver {
                     let r = v8::Local::new(scope, &resolver);
@@ -189,12 +195,17 @@ pub(crate) fn run_event_loop(scope: &mut v8::PinScope, state: &SharedState) {
     }
 }
 
-/// Drive the event loop until a specific promise settles or no more work.
+/// Drive the event loop until a specific promise settles, no more work, or
+/// wall-time limit is exceeded.
 pub(crate) fn run_event_loop_until_settled(
     scope: &mut v8::PinScope,
     state: &SharedState,
+    op_rx: &mpsc::Receiver<OpResult>,
     promise: &v8::Global<v8::Promise>,
+    wall_timeout: Duration,
 ) {
+    let deadline = std::time::Instant::now() + wall_timeout;
+
     loop {
         // Check if promise already settled
         {
@@ -203,6 +214,11 @@ pub(crate) fn run_event_loop_until_settled(
                 v8::PromiseState::Fulfilled | v8::PromiseState::Rejected => return,
                 v8::PromiseState::Pending => {}
             }
+        }
+
+        // Check wall-time limit
+        if std::time::Instant::now() > deadline {
+            return; // wall-time exceeded, promise still pending
         }
 
         scope.perform_microtask_checkpoint();
@@ -227,7 +243,7 @@ pub(crate) fn run_event_loop_until_settled(
             }
         }
 
-        drain_async_ops(scope, state);
+        drain_async_ops(scope, state, op_rx);
 
         // Check after ops
         {
@@ -260,10 +276,13 @@ pub(crate) fn run_event_loop_until_settled(
             continue;
         }
 
+        // Cap wait at remaining wall-time
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let timeout = timeout.min(remaining);
+
         let has_pending_ops = !state.borrow().pending_resolvers.is_empty();
         if has_pending_ops {
-            let result = state.borrow_mut().op_rx.recv_timeout(timeout);
-            if let Ok(op_result) = result {
+            if let Ok(op_result) = op_rx.recv_timeout(timeout) {
                 let resolver = state.borrow_mut().pending_resolvers.remove(&op_result.id);
                 if let Some(resolver) = resolver {
                     let r = v8::Local::new(scope, &resolver);

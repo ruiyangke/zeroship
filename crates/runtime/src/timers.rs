@@ -80,34 +80,26 @@ pub(crate) fn fire_ready_timers(scope: &mut v8::PinScope, state: &SharedState) -
 
         let entry = state.borrow_mut().timers.heap.pop().unwrap().0;
 
-        // Check if callback still exists (lazy deletion: cleared timers are skipped)
-        let cb_opt = {
-            let s = state.borrow();
-            s.timers
-                .callbacks
-                .get(&entry.id)
-                .map(|t| (t.callback.clone(), t.interval))
-        };
+        // Take callback out (lazy deletion: cleared timers won't have an entry)
+        let cb_opt = state.borrow_mut().timers.callbacks.remove(&entry.id);
 
-        if let Some((callback, interval)) = cb_opt {
+        if let Some(cb) = cb_opt {
             any_fired = true;
 
-            let func = v8::Local::new(scope, &callback);
+            let func = v8::Local::new(scope, &cb.callback);
             let undefined = v8::undefined(scope).into();
             func.call(scope, undefined, &[]);
             scope.perform_microtask_checkpoint();
 
-            if let Some(dur) = interval {
-                // setInterval: re-insert with new fire_at
-                let mut s = state.borrow_mut();
-                s.timers.heap.push(Reverse(TimerHeapEntry {
+            if let Some(dur) = cb.interval {
+                // setInterval: re-insert callback + new heap entry
+                state.borrow_mut().timers.callbacks.insert(entry.id, cb);
+                state.borrow_mut().timers.heap.push(Reverse(TimerHeapEntry {
                     fire_at: Instant::now() + dur,
                     id: entry.id,
                 }));
-            } else {
-                // setTimeout: remove callback
-                state.borrow_mut().timers.callbacks.remove(&entry.id);
             }
+            // setTimeout: cb drops here, Global handle freed — no leak
         }
     }
 

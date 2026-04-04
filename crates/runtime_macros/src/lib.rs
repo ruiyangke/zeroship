@@ -396,7 +396,7 @@ fn generate_sync(needs_state: bool, input_fn: &ItemFn) -> syn::Result<TokenStrea
         quote! {
             let state: crate::event_loop::SharedState = scope
                 .get_slot::<crate::event_loop::SharedState>()
-                .expect("EventLoopState not in isolate slot")
+                .expect("EventLoopInner not in isolate slot")
                 .clone();
         }
     } else {
@@ -480,7 +480,7 @@ fn generate_async(input_fn: &ItemFn) -> syn::Result<TokenStream2> {
         ) {
             let __state: crate::event_loop::SharedState = scope
                 .get_slot::<crate::event_loop::SharedState>()
-                .expect("EventLoopState not in isolate slot")
+                .expect("EventLoopInner not in isolate slot")
                 .clone();
 
             #(#extractions)*

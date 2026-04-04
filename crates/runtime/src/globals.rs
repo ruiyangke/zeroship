@@ -29,7 +29,7 @@ fn console_log_callback(
 
     let state: SharedState = scope
         .get_slot::<SharedState>()
-        .expect("EventLoopState not in isolate slot")
+        .expect("EventLoopInner not in isolate slot")
         .clone();
     let mut s = state.borrow_mut();
     s.log_buffer.push(line);
@@ -50,7 +50,7 @@ fn set_timeout_callback(
 ) {
     let state: SharedState = scope
         .get_slot::<SharedState>()
-        .expect("EventLoopState not in isolate slot")
+        .expect("EventLoopInner not in isolate slot")
         .clone();
 
     let callback = match v8::Local::<v8::Function>::try_from(args.get(0)) {
@@ -99,7 +99,7 @@ fn clear_timeout_callback(
 ) {
     let state: SharedState = scope
         .get_slot::<SharedState>()
-        .expect("EventLoopState not in isolate slot")
+        .expect("EventLoopInner not in isolate slot")
         .clone();
 
     let id = if args.length() > 0 {
@@ -118,7 +118,7 @@ fn set_interval_callback(
 ) {
     let state: SharedState = scope
         .get_slot::<SharedState>()
-        .expect("EventLoopState not in isolate slot")
+        .expect("EventLoopInner not in isolate slot")
         .clone();
 
     let callback = match v8::Local::<v8::Function>::try_from(args.get(0)) {

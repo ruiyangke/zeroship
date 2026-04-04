@@ -18,7 +18,7 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crate::event_loop::{EventLoopState, SharedState};
+use crate::event_loop::{EventLoopInner, SharedState};
 use crate::globals::setup_globals;
 use crate::modules::ModuleEntry;
 use crate::runtime::{init_v8, thread_cpu_time, RequestResult, DISPATCH_JS, FETCH_JS, URL_JS, CRYPTO_JS};
@@ -380,7 +380,8 @@ impl ConcurrentIsolate {
         }
         isolate.add_near_heap_limit_callback(near_heap_limit_callback, std::ptr::null_mut());
 
-        let el_state: SharedState = Rc::new(RefCell::new(EventLoopState::with_env(env_vars)));
+        let (inner, _op_rx) = EventLoopInner::with_env(env_vars);
+        let el_state: SharedState = Rc::new(RefCell::new(inner));
         el_state.borrow_mut().tokio_handle = tokio_handle;
         el_state.borrow_mut().concurrent_event_tx = Some(event_tx.clone());
         isolate.set_slot(el_state.clone());
