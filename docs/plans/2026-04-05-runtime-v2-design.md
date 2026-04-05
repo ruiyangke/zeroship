@@ -1,7 +1,7 @@
 # Runtime v2 Design — Non-blocking Event Loop
 
 **Date:** 2026-04-05
-**Revision:** 3 (Round 2 review incorporated)
+**Revision:** 4 (Round 2 fixes: log attribution, reply ownership, scope API, overflow buffer)
 **Goal:** Refactor the runtime into a clean non-blocking architecture based on tokio, enabling streaming, WebSocket, and multi-isolate-per-thread.
 
 ## Why
@@ -84,9 +84,10 @@ pub(crate) struct RuntimeState {
 
     // Per-request context (see "Per-request isolation" section)
     pub(crate) active_requests: HashMap<u64, RequestContext>,
-    // Note: no current_request_id — per-request mode has one request at a time
-    // (log_buffer on RequestContext is sufficient), and concurrent mode attributes
-    // logs via PendingRequest tracking in check_settled_promises.
+
+    // Set before each JS dispatch, cleared after. Since JS is single-threaded,
+    // exactly one request's code runs at a time. console_log reads this field.
+    pub(crate) executing_request_id: Option<u64>,
 
     // Per-request log buffer (drained after each request completes).
     // Each entry is tagged with request_id for correct attribution in concurrent mode.
@@ -210,13 +211,13 @@ state like `log_buffer` would leak across requests. The fix: per-request context
 request-scoped state.
 
 ```rust
-/// Per-request context — created on accept, destroyed on reply.
+/// Per-request context — tracks request-scoped state (logs, timing, cancellation).
+/// Does NOT own the reply sender — that lives on PendingRequest (oneshot::Sender is !Clone).
 struct RequestContext {
     id: u64,
     log_buffer: Vec<String>,
     cpu_start: Duration,
     wall_start: Instant,
-    reply: oneshot::Sender<Result<RequestResult, String>>,
     cancel: tokio_util::sync::CancellationToken,
 }
 ```
@@ -235,21 +236,26 @@ Console.log routing depends on the execution model:
   free function attributes logs to the correct request via `PendingRequest` tracking when
   the promise settles.
 
-There is no `current_request_id` field. It was removed because it would be overwritten by
-each `accept_request` call, producing incorrect attribution for earlier requests still in
-flight. Instead, each model uses its own unambiguous mechanism.
+There is no global `current_request_id` that persists across dispatches. Instead,
+`executing_request_id` is set immediately before entering V8 for a specific request's
+code and cleared immediately after. Since JS execution is serial (one request's code
+runs at a time on the single-threaded event loop), this field is always correct.
 
 ```rust
+// Before dispatching request N's JS code (in accept_request, execute_request, etc.):
+self.state.borrow_mut().executing_request_id = Some(request_id);
+// ... V8 execution (dispatch call) ...
+self.state.borrow_mut().executing_request_id = None;
+
 // In the console.log native callback:
 fn console_log_callback(scope: &mut v8::HandleScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
     let state = get_state(scope);
     let mut s = state.borrow_mut();
     let msg = args.get(0).to_rust_string_lossy(scope);
 
-    // Tag with the current request_id (set before each JS dispatch).
-    // In per-request mode there is exactly one active request.
-    // In concurrent mode, the id was set by accept_request before dispatch.
-    let request_id = s.active_requests.keys().next().copied().unwrap_or(0);
+    // executing_request_id is set before each JS dispatch and cleared after.
+    // JS is single-threaded, so this always identifies the correct request.
+    let request_id = s.executing_request_id.unwrap_or(0);
     s.log_buffer.push((request_id, msg));
 }
 ```
@@ -354,14 +360,17 @@ chunk and retries on the next tick. This matches Node.js streams' `highWaterMark
 where the writable side buffers until drain.
 
 ```rust
-/// Stream forwarder with retry buffer for backpressure.
+/// Stream forwarder with overflow buffer for backpressure.
+/// When the mpsc channel is full, chunks accumulate in the overflow VecDeque.
+/// When the overflow is also full, the stream is closed (explicit failure, not silent data loss).
 struct StreamForwarder {
     sender: tokio::sync::mpsc::Sender<Vec<u8>>,
-    pending_chunk: Option<Vec<u8>>,  // buffered chunk waiting for retry
+    overflow: VecDeque<Vec<u8>>,        // buffered chunks waiting for retry
+    max_overflow: usize,                 // from RuntimeConfig (default: 64)
 }
 
 /// Forward a stream chunk to the HTTP body channel.
-/// If the channel is full, buffer the chunk for retry on the next tick.
+/// If the channel is full, buffer in overflow. If overflow is full, close the stream.
 fn forward_stream_chunk(
     forwarders: &mut HashMap<u32, StreamForwarder>,
     stream_id: u32,
@@ -369,19 +378,11 @@ fn forward_stream_chunk(
     done: bool,
 ) {
     if let Some(fwd) = forwarders.get_mut(&stream_id) {
-        // Try to send any pending chunk first
-        if let Some(pending) = fwd.pending_chunk.take() {
-            match fwd.sender.try_send(pending) {
-                Ok(()) => {} // sent successfully
-                Err(tokio::sync::mpsc::error::TrySendError::Full(old)) => {
-                    // Pending retry failed — channel still full.
-                    // Replace pending with new chunk (keep stream current, drop older data).
-                    // Dropping `old` is acceptable: the alternative (dropping `data`) loses
-                    // newer state, and holding both requires unbounded buffering.
-                    fwd.pending_chunk = Some(data);
-                    // Log warning: "backpressure: dropped older chunk, client too slow"
-                    return;
-                }
+        // Drain overflow into the channel first (FIFO order)
+        while let Some(pending) = fwd.overflow.front() {
+            match fwd.sender.try_send(pending.clone()) {
+                Ok(()) => { fwd.overflow.pop_front(); }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => break,
                 Err(_) => { forwarders.remove(&stream_id); return; } // channel closed
             }
         }
@@ -393,7 +394,15 @@ fn forward_stream_chunk(
             match fwd.sender.try_send(data) {
                 Ok(()) => {}
                 Err(tokio::sync::mpsc::error::TrySendError::Full(data)) => {
-                    fwd.pending_chunk = Some(data); // buffer for retry next tick
+                    if fwd.overflow.len() >= fwd.max_overflow {
+                        // Overflow full AND channel full — client is hopeless.
+                        // Explicit failure: close the stream, log error.
+                        // This is better than silent data loss.
+                        // Log: "stream {stream_id}: overflow full, closing (client too slow)"
+                        forwarders.remove(&stream_id);
+                        return;
+                    }
+                    fwd.overflow.push_back(data); // buffer for retry next tick
                 }
                 Err(_) => { forwarders.remove(&stream_id); } // client disconnected
             }
@@ -573,7 +582,7 @@ impl Runtime {
         let events = self.driver.drain_ready();
 
         // NOW create V8 scope — borrows &mut self.v8 exclusively.
-        v8::scope!(let handle_scope, &mut self.v8.isolate);
+        let handle_scope = &mut v8::HandleScope::new(&mut self.v8.isolate);
         let context = v8::Local::new(handle_scope, &self.v8.context);
         let scope = &mut v8::ContextScope::new(handle_scope, context);
 
@@ -594,16 +603,13 @@ impl Runtime {
         // PHASE 6: CANCELLATION — clean up cancelled requests via free function
         check_cancelled_requests(scope, &self.state, &mut self.pending_requests);
 
-        // PHASE 7: RETRY — retry any buffered stream chunks (backpressure)
-        // <!-- Added in round 3: addressing data loss on try_send Full -->
+        // PHASE 7: RETRY — drain overflow buffers into channels (backpressure)
         for fwd in self.stream_forwarders.values_mut() {
-            if let Some(pending) = fwd.pending_chunk.take() {
-                match fwd.sender.try_send(pending) {
-                    Ok(()) => {}
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(data)) => {
-                        fwd.pending_chunk = Some(data); // still full
-                    }
-                    Err(_) => {} // will be cleaned up
+            while let Some(pending) = fwd.overflow.front() {
+                match fwd.sender.try_send(pending.clone()) {
+                    Ok(()) => { fwd.overflow.pop_front(); }
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => break,
+                    Err(_) => break, // will be cleaned up
                 }
             }
         }
@@ -635,7 +641,7 @@ impl Runtime {
             || !s.pending_resolvers.is_empty()
             || s.streams.values().any(|st| st.pending_read.is_some() && !st.closed)
             || !self.pending_requests.is_empty()
-            || self.stream_forwarders.values().any(|f| f.pending_chunk.is_some())
+            || self.stream_forwarders.values().any(|f| !f.overflow.is_empty())
     }
 }
 ```
@@ -687,6 +693,10 @@ impl Runtime {
             if self.is_settled(promise) { return Ok(()); }
             if Instant::now() > deadline { return Err(EventLoopError::WallTimeout); }
             if !self.tick() { return Ok(()); }
+
+            // Check immediately after tick — the tick may have settled the promise.
+            // This avoids an unnecessary wait_for_events when the result is already ready.
+            if self.is_settled(promise) { return Ok(()); }
 
             // Wait — block until event arrives or timer fires.
             // Events are buffered in self.driver.buffer and consumed
@@ -787,19 +797,55 @@ impl Runtime {
     ) {
         self.ensure_initialized();
 
-        // Create per-request context
+        // Create per-request context (request-scoped state — no reply sender)
         let ctx = RequestContext {
             id,
             log_buffer: Vec::new(),
             cpu_start: self.cpu_time(),
             wall_start: Instant::now(),
-            reply,
-            cancel,
+            cancel: cancel.clone(),
         };
         self.state.borrow_mut().active_requests.insert(id, ctx);
 
-        // Dispatch into V8
-        // ... dispatch, store pending request
+        // Set executing_request_id so console.log routes correctly
+        self.state.borrow_mut().executing_request_id = Some(id);
+
+        // Dispatch into V8 — call the JS handler with the request body
+        let handle_scope = &mut v8::HandleScope::new(&mut self.v8.isolate);
+        let context = v8::Local::new(handle_scope, &self.v8.context);
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        let dispatch_fn = v8::Local::new(scope, self.v8.http_dispatch_fn.as_ref().unwrap());
+        let undefined = v8::undefined(scope).into();
+        let body_v8 = v8::String::new(scope, &body).unwrap().into();
+        let id_v8 = v8::Number::new(scope, id as f64).into();
+        let result = dispatch_fn.call(scope, undefined, &[id_v8, body_v8]);
+
+        scope.perform_microtask_checkpoint();
+
+        self.state.borrow_mut().executing_request_id = None;
+
+        // Check if result is a Promise (async handler) or immediate value
+        if let Some(result) = result {
+            let promise = v8::Local::<v8::Promise>::try_from(result);
+            if let Ok(promise) = promise {
+                // Async — track as PendingRequest (owns the reply sender)
+                let promise_global = v8::Global::new(scope, promise);
+                self.pending_requests.insert(id, PendingRequest {
+                    id,
+                    promise: promise_global,
+                    reply,
+                    cancel,
+                    wall_start: Instant::now(),
+                });
+            } else {
+                // Sync — extract result and reply immediately
+                let result = extract_sync_result(scope, &self.state, id, result);
+                let _ = reply.send(result);
+            }
+        } else {
+            let _ = reply.send(Err("dispatch returned None (JS exception)".to_string()));
+        }
     }
 }
 ```
@@ -875,10 +921,11 @@ impl Runtime {
         stream_id: u32,
         body_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     ) {
-        // Store as StreamForwarder with pending_chunk buffer for backpressure
+        // Store as StreamForwarder with overflow buffer for backpressure
         self.stream_forwarders.insert(stream_id, StreamForwarder {
             sender: body_tx,
-            pending_chunk: None,
+            overflow: VecDeque::new(),
+            max_overflow: 64,  // from RuntimeConfig
         });
     }
 }
@@ -940,8 +987,8 @@ propagate the error back to close the stream in JS and cancel any upstream fetch
 The `forward_stream_chunk` free function (defined in the StreamForwarder section above)
 handles all three cases:
 - **Ok**: chunk forwarded successfully.
-- **Full**: chunk buffered in `StreamForwarder.pending_chunk`, retried in tick() PHASE 7.
-  No data is lost. <!-- Added in round 3: addressing data loss on try_send Full -->
+- **Full**: chunk buffered in `StreamForwarder.overflow` (bounded VecDeque), retried in tick() PHASE 7.
+  No data is lost unless the overflow is also full, in which case the stream is explicitly closed.
 - **Closed**: client disconnected. Forwarder removed, stream marked closed. The fetch task
   sees `event_tx.send()` fail on the next chunk and stops reading from the origin server.
 
@@ -982,10 +1029,10 @@ impl Runtime {
 
         // Flush logs for any remaining requests
         {
-            let mut state = self.state.borrow_mut();
-            for (id, ctx) in state.active_requests.drain() {
+            self.state.borrow_mut().active_requests.clear();
+            for (id, req) in self.pending_requests.drain() {
                 // Send whatever we have — partial result is better than silence
-                let _ = ctx.reply.send(Err(format!("shutdown: request {} aborted", id)));
+                let _ = req.reply.send(Err(format!("shutdown: request {} aborted", id)));
             }
         }
 
@@ -1157,7 +1204,7 @@ runtime.shutdown(Duration::from_secs(5));
 - Every `self.field` reference in code examples corresponds to a declared struct field
 - Crypto/KV/env types not in runtime.rs or state.rs
 - **Backpressure test** — slow consumer does not cause unbounded memory growth; memory stays flat when a client reads at 1 byte/sec while origin streams at 100 MB/s
-- **Data integrity test** — `try_send(Full)` buffers and retries; no chunks are dropped under backpressure
+- **Data integrity test** — `try_send(Full)` buffers in overflow VecDeque and retries; no silent data loss (overflow-full triggers explicit stream close)
 - **Slow client test** — 100 concurrent SSE clients at varying speeds, no OOM, correct ordering
 - **Cancellation test** — client disconnect cancels in-flight fetch within 100ms
 - **Shutdown test** — graceful shutdown completes within timeout, all replies sent
