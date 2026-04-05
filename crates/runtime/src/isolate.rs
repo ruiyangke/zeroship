@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use std::collections::HashMap;
 
-use crate::event_loop::{run_event_loop, run_event_loop_until_settled, EventLoopInner, LoopEvent, SharedState};
+use crate::event_loop::{run_event_loop, EventLoopInner, LoopEvent, SharedState};
 use crate::globals::setup_globals;
 use crate::modules::ModuleEntry;
 use crate::runtime::{thread_cpu_time, HttpResult, RequestResult, DISPATCH_JS, FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS};
@@ -277,7 +277,7 @@ impl Isolate {
             Some(val) if val.is_promise() => {
                 let promise = v8::Local::<v8::Promise>::try_from(val).unwrap();
                 let global_promise = v8::Global::new(scope, promise);
-                run_event_loop_until_settled(scope, &self.state, &self.event_rx, &global_promise, Duration::from_secs(30));
+                run_event_loop(scope, &self.state, &self.event_rx, Some(&global_promise), Duration::from_secs(30));
                 let promise = v8::Local::new(scope, &global_promise);
                 match promise.state() {
                     v8::PromiseState::Fulfilled => promise.result(scope),
@@ -332,7 +332,7 @@ impl Isolate {
                 .map_err(|e| format!("Promise cast failed: {e}"))?;
             let global_promise = v8::Global::new(scope, promise);
 
-            run_event_loop_until_settled(scope, &self.state, &self.event_rx, &global_promise, Duration::from_secs(30));
+            run_event_loop(scope, &self.state, &self.event_rx, Some(&global_promise), Duration::from_secs(30));
 
             let promise = v8::Local::new(scope, &global_promise);
             match promise.state() {
@@ -358,7 +358,7 @@ impl Isolate {
             let json = json_v8.to_rust_string_lossy(scope);
 
             // Run any pending timers/ops (fire-and-forget side effects)
-            run_event_loop(scope, &self.state, &self.event_rx);
+            run_event_loop(scope, &self.state, &self.event_rx, None, Duration::from_secs(60));
 
             json
         };

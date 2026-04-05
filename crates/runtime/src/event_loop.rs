@@ -1,10 +1,10 @@
-//! Event loop state and drivers.
+//! Event loop state and unified driver.
 //!
-//! Two event loop variants:
-//! - `run_event_loop`: drives to exhaustion (fire-and-forget side effects)
-//! - `run_event_loop_until_settled`: drives until a specific promise settles
+//! Single `run_event_loop` function handles both modes:
+//! - `promise: None` — drive to exhaustion (fire-and-forget side effects)
+//! - `promise: Some(p)` — drive until the promise settles (or wall-time exceeded)
 //!
-//! Both use the min-heap timer system and async op channel.
+//! Uses the min-heap timer system and async op channel.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -13,27 +13,6 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use crate::timers::{fire_ready_timers, TimerState};
-
-// ---------------------------------------------------------------------------
-// Crypto key store
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
-pub(crate) enum Curve {
-    P256,
-    P384,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum KeyData {
-    Symmetric { raw: Vec<u8> },
-    EcPrivate { pkcs8_der: Vec<u8>, curve: Curve },
-    EcPublic { raw: Vec<u8>, curve: Curve },
-    RsaPrivate { pkcs8_der: Vec<u8> },
-    RsaPublic { spki_der: Vec<u8> },
-    Ed25519Private { pkcs8_der: Vec<u8> },
-    Ed25519Public { raw: Vec<u8> },
-}
 
 // ---------------------------------------------------------------------------
 // Event loop state
@@ -65,7 +44,7 @@ pub(crate) struct EventLoopInner {
     /// Per-app environment variables (injected at isolate creation).
     pub(crate) env_vars: HashMap<String, String>,
     /// Crypto key store — key material stays in Rust, JS holds opaque u32 handles.
-    pub(crate) key_store: HashMap<u32, KeyData>,
+    pub(crate) key_store: HashMap<u32, crate::crypto::KeyData>,
     pub(crate) next_key_id: u32,
     /// Active readable streams: stream_id -> StreamState.
     pub(crate) streams: HashMap<u32, StreamState>,
@@ -130,28 +109,46 @@ pub(crate) type SharedState = Rc<RefCell<EventLoopInner>>;
 // Event loop helpers
 // ---------------------------------------------------------------------------
 
+/// Handle one event — written ONCE, used by drain + wait phases.
+fn handle_one_event(scope: &mut v8::PinScope, state: &SharedState, event: LoopEvent) {
+    match event {
+        LoopEvent::OpCompleted { id, value } => {
+            let resolver = state.borrow_mut().pending_resolvers.remove(&id);
+            if let Some(resolver) = resolver {
+                let r = v8::Local::new(scope, &resolver);
+                let val = v8::String::new(scope, &value).unwrap();
+                r.resolve(scope, val.into());
+                scope.perform_microtask_checkpoint();
+            }
+        }
+        LoopEvent::StreamChunk { stream_id, data, done } => {
+            crate::streams::push_stream_chunk(scope, state, stream_id, &data, done);
+            scope.perform_microtask_checkpoint();
+        }
+    }
+}
+
 /// Drain completed events from the channel: resolve async ops and push stream chunks.
 ///
 /// `event_rx` is outside the `RefCell` — no borrow on shared state needed for recv.
 fn drain_events(scope: &mut v8::PinScope, state: &SharedState, event_rx: &mpsc::Receiver<LoopEvent>) {
-    loop {
-        match event_rx.try_recv() {
-            Ok(LoopEvent::OpCompleted { id, value }) => {
-                let resolver = state.borrow_mut().pending_resolvers.remove(&id);
-                if let Some(resolver) = resolver {
-                    let r = v8::Local::new(scope, &resolver);
-                    let val = v8::String::new(scope, &value).unwrap();
-                    r.resolve(scope, val.into());
-                    scope.perform_microtask_checkpoint();
-                }
-            }
-            Ok(LoopEvent::StreamChunk { stream_id, data, done }) => {
-                crate::streams::push_stream_chunk(scope, state, stream_id, &data, done);
-                scope.perform_microtask_checkpoint();
-            }
-            Err(_) => break,
-        }
+    while let Ok(event) = event_rx.try_recv() {
+        handle_one_event(scope, state, event);
     }
+}
+
+/// Check if there is any pending work (timers, async ops, or open streams).
+fn has_pending_work(state: &SharedState) -> bool {
+    let s = state.borrow();
+    !s.timers.callbacks.is_empty()
+        || !s.pending_resolvers.is_empty()
+        || s.streams.values().any(|st| st.pending_read.is_some() && !st.closed)
+}
+
+/// Check if a promise has settled (fulfilled or rejected).
+fn is_settled(scope: &mut v8::PinScope, promise: &v8::Global<v8::Promise>) -> bool {
+    let local = v8::Local::new(scope, promise);
+    local.state() != v8::PromiseState::Pending
 }
 
 /// Compute the wait duration until the next valid timer fires.
@@ -178,136 +175,55 @@ fn compute_wait_timeout(state: &SharedState) -> Option<Duration> {
 }
 
 // ---------------------------------------------------------------------------
-// Event loop drivers
+// Event loop driver
 // ---------------------------------------------------------------------------
 
-/// Drive the event loop until no more pending work (timers, async ops, streams).
-/// Used for fire-and-forget side effects after a sync response.
+/// Drive the event loop.
+///
+/// - If `promise` is `Some`, stop when the promise settles (or wall-time exceeded).
+/// - If `promise` is `None`, drive to exhaustion (fire-and-forget side effects)
+///   with a generous 60s wall-time cap.
 pub(crate) fn run_event_loop(
     scope: &mut v8::PinScope,
     state: &SharedState,
     event_rx: &mpsc::Receiver<LoopEvent>,
-) {
-    loop {
-        scope.perform_microtask_checkpoint();
-        fire_ready_timers(scope, state);
-        drain_events(scope, state, event_rx);
-
-        {
-            let s = state.borrow();
-            let has_pending_streams = s.streams.values().any(|st| st.pending_read.is_some() && !st.closed);
-            if s.timers.callbacks.is_empty() && s.pending_resolvers.is_empty() && !has_pending_streams {
-                break;
-            }
-        }
-
-        let timeout = match compute_wait_timeout(state) {
-            Some(d) => d,
-            None => break,
-        };
-
-        if timeout.is_zero() {
-            continue;
-        }
-
-        let has_pending_work = {
-            let s = state.borrow();
-            !s.pending_resolvers.is_empty()
-                || s.streams.values().any(|st| st.pending_read.is_some() && !st.closed)
-        };
-        if has_pending_work {
-            match event_rx.recv_timeout(timeout) {
-                Ok(LoopEvent::OpCompleted { id, value }) => {
-                    let resolver = state.borrow_mut().pending_resolvers.remove(&id);
-                    if let Some(resolver) = resolver {
-                        let r = v8::Local::new(scope, &resolver);
-                        let val = v8::String::new(scope, &value).unwrap();
-                        r.resolve(scope, val.into());
-                        scope.perform_microtask_checkpoint();
-                    }
-                }
-                Ok(LoopEvent::StreamChunk { stream_id, data, done }) => {
-                    crate::streams::push_stream_chunk(scope, state, stream_id, &data, done);
-                    scope.perform_microtask_checkpoint();
-                }
-                Err(_) => {}
-            }
-        } else {
-            std::thread::sleep(timeout);
-        }
-    }
-}
-
-/// Drive the event loop until a specific promise settles, no more work, or
-/// wall-time limit is exceeded.
-pub(crate) fn run_event_loop_until_settled(
-    scope: &mut v8::PinScope,
-    state: &SharedState,
-    event_rx: &mpsc::Receiver<LoopEvent>,
-    promise: &v8::Global<v8::Promise>,
+    promise: Option<&v8::Global<v8::Promise>>,
     wall_timeout: Duration,
 ) {
     let deadline = std::time::Instant::now() + wall_timeout;
 
     loop {
-        // Check if promise already settled
-        {
-            let local = v8::Local::new(scope, promise);
-            match local.state() {
-                v8::PromiseState::Fulfilled | v8::PromiseState::Rejected => return,
-                v8::PromiseState::Pending => {}
-            }
+        // Check promise settled
+        if let Some(p) = promise {
+            if is_settled(scope, p) { return; }
         }
 
-        // Check wall-time limit
-        if std::time::Instant::now() > deadline {
-            return; // wall-time exceeded, promise still pending
-        }
+        // Check wall-time
+        if std::time::Instant::now() > deadline { return; }
 
+        // Tick: microtasks, timers, drain events
         scope.perform_microtask_checkpoint();
-
-        // Check after microtasks
-        {
-            let local = v8::Local::new(scope, promise);
-            match local.state() {
-                v8::PromiseState::Fulfilled | v8::PromiseState::Rejected => return,
-                v8::PromiseState::Pending => {}
-            }
+        if let Some(p) = promise {
+            if is_settled(scope, p) { return; }
         }
 
         fire_ready_timers(scope, state);
-
-        // Check after timers
-        {
-            let local = v8::Local::new(scope, promise);
-            match local.state() {
-                v8::PromiseState::Fulfilled | v8::PromiseState::Rejected => return,
-                v8::PromiseState::Pending => {}
-            }
+        if let Some(p) = promise {
+            if is_settled(scope, p) { return; }
         }
 
         drain_events(scope, state, event_rx);
-
-        // Check after ops
-        {
-            let local = v8::Local::new(scope, promise);
-            match local.state() {
-                v8::PromiseState::Fulfilled | v8::PromiseState::Rejected => return,
-                v8::PromiseState::Pending => {}
-            }
+        if let Some(p) = promise {
+            if is_settled(scope, p) { return; }
         }
 
         // Check if done (no work left)
-        {
-            let s = state.borrow();
-            let has_pending_streams = s.streams.values().any(|st| st.pending_read.is_some() && !st.closed);
-            if s.timers.callbacks.is_empty() && s.pending_resolvers.is_empty() && !has_pending_streams {
-                drop(s);
-                scope.perform_microtask_checkpoint();
-                return;
-            }
+        if !has_pending_work(state) {
+            scope.perform_microtask_checkpoint();
+            return;
         }
 
+        // Compute wait timeout
         let timeout = match compute_wait_timeout(state) {
             Some(d) => d,
             None => {
@@ -324,27 +240,10 @@ pub(crate) fn run_event_loop_until_settled(
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         let timeout = timeout.min(remaining);
 
-        let has_pending_work = {
-            let s = state.borrow();
-            !s.pending_resolvers.is_empty()
-                || s.streams.values().any(|st| st.pending_read.is_some() && !st.closed)
-        };
-        if has_pending_work {
-            match event_rx.recv_timeout(timeout) {
-                Ok(LoopEvent::OpCompleted { id, value }) => {
-                    let resolver = state.borrow_mut().pending_resolvers.remove(&id);
-                    if let Some(resolver) = resolver {
-                        let r = v8::Local::new(scope, &resolver);
-                        let val = v8::String::new(scope, &value).unwrap();
-                        r.resolve(scope, val.into());
-                        scope.perform_microtask_checkpoint();
-                    }
-                }
-                Ok(LoopEvent::StreamChunk { stream_id, data, done }) => {
-                    crate::streams::push_stream_chunk(scope, state, stream_id, &data, done);
-                    scope.perform_microtask_checkpoint();
-                }
-                Err(_) => {}
+        // Wait for next event or timer
+        if has_pending_work(state) {
+            if let Ok(event) = event_rx.recv_timeout(timeout) {
+                handle_one_event(scope, state, event);
             }
         } else {
             std::thread::sleep(timeout);

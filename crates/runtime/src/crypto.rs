@@ -16,7 +16,28 @@ use aws_lc_rs::rsa::{
 };
 use aws_lc_rs::signature::KeyPair;
 
-use crate::event_loop::{Curve, KeyData, SharedState};
+use crate::event_loop::SharedState;
+
+// ---------------------------------------------------------------------------
+// Crypto key store types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub(crate) enum Curve {
+    P256,
+    P384,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum KeyData {
+    Symmetric { raw: Vec<u8> },
+    EcPrivate { pkcs8_der: Vec<u8>, curve: Curve },
+    EcPublic { raw: Vec<u8>, curve: Curve },
+    RsaPrivate { pkcs8_der: Vec<u8> },
+    RsaPublic { spki_der: Vec<u8> },
+    Ed25519Private { pkcs8_der: Vec<u8> },
+    Ed25519Public { raw: Vec<u8> },
+}
 
 // ---------------------------------------------------------------------------
 // Thread-local entropy buffer (same pattern as workerd: 4KB lazy-fill)
