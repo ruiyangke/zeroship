@@ -278,9 +278,14 @@ async fn do_fetch_streaming(
         }
     }
 
-    if concurrent_tx.is_some() {
+    // Decide: buffer full body (fast for small responses) or stream chunks (needed for large/SSE).
+    // Threshold: if content-length is known and small, or it's the concurrent model, buffer it.
+    let should_stream = concurrent_tx.is_none()
+        && response.content_length().map_or(true, |len| len > 1024 * 1024); // >1MB → stream
+
+    if !should_stream {
         // ---------------------------------------------------------------
-        // Concurrent model — full body, no streaming
+        // Buffered path — full body in one OpCompleted (fast for small responses)
         // ---------------------------------------------------------------
         let body_bytes = match response.bytes().await {
             Ok(bytes) => bytes,
@@ -303,13 +308,21 @@ async fn do_fetch_streaming(
         })
         .to_string();
 
-        let _ = concurrent_tx.unwrap().send(crate::concurrent::Event::OpCompleted {
-            op_id,
-            value: result,
-        });
+        if let Some(ctx) = concurrent_tx {
+            let _ = ctx.send(crate::concurrent::Event::OpCompleted {
+                op_id,
+                value: result,
+            });
+        } else {
+            let _ = event_tx.send(LoopEvent::OpCompleted {
+                id: op_id,
+                value: result,
+            });
+        }
     } else {
         // ---------------------------------------------------------------
-        // Per-request model — streaming body via LoopEvent::StreamChunk
+        // Streaming path — headers first, body chunks via StreamChunk
+        // (for large responses >1MB, SSE, chunked transfer, unknown length)
         // ---------------------------------------------------------------
 
         // Send headers + stream_id as OpCompleted (resolves the JS Promise)

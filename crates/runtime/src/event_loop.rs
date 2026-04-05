@@ -191,41 +191,44 @@ pub(crate) fn run_event_loop(
     wall_timeout: Duration,
 ) {
     let deadline = std::time::Instant::now() + wall_timeout;
+    let tracking_promise = promise.is_some();
 
     loop {
-        // Check promise settled
+        // Phase 1: Check if target promise settled
         if let Some(p) = promise {
             if is_settled(scope, p) { return; }
         }
 
-        // Check wall-time
-        if std::time::Instant::now() > deadline { return; }
-
-        // Tick: microtasks, timers, drain events
+        // Phase 2: Tick — microtasks, timers, drain events
         scope.perform_microtask_checkpoint();
-        if let Some(p) = promise {
-            if is_settled(scope, p) { return; }
-        }
-
         fire_ready_timers(scope, state);
-        if let Some(p) = promise {
-            if is_settled(scope, p) { return; }
-        }
-
         drain_events(scope, state, event_rx);
+
+        // Phase 3: Re-check promise after tick (common fast exit)
         if let Some(p) = promise {
             if is_settled(scope, p) { return; }
         }
 
-        // Check if done (no work left)
+        // Phase 4: Check if any work remains
         if !has_pending_work(state) {
             scope.perform_microtask_checkpoint();
             return;
         }
 
-        // Compute wait timeout
+        // Phase 5: Check wall-time (only when tracking a promise)
+        if tracking_promise && std::time::Instant::now() > deadline {
+            return;
+        }
+
+        // Phase 6: Wait for next event or timer
         let timeout = match compute_wait_timeout(state) {
-            Some(d) => d,
+            Some(d) => {
+                if tracking_promise {
+                    d.min(deadline.saturating_duration_since(std::time::Instant::now()))
+                } else {
+                    d
+                }
+            }
             None => {
                 scope.perform_microtask_checkpoint();
                 return;
@@ -236,17 +239,8 @@ pub(crate) fn run_event_loop(
             continue;
         }
 
-        // Cap wait at remaining wall-time
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        let timeout = timeout.min(remaining);
-
-        // Wait for next event or timer
-        if has_pending_work(state) {
-            if let Ok(event) = event_rx.recv_timeout(timeout) {
-                handle_one_event(scope, state, event);
-            }
-        } else {
-            std::thread::sleep(timeout);
+        if let Ok(event) = event_rx.recv_timeout(timeout) {
+            handle_one_event(scope, state, event);
         }
     }
 }
