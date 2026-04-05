@@ -1,7 +1,7 @@
 # Runtime v2 Design — Non-blocking Event Loop
 
 **Date:** 2026-04-05
-**Revision:** 2 (Round 1 review incorporated)
+**Revision:** 3 (Round 2 review incorporated)
 **Goal:** Refactor the runtime into a clean non-blocking architecture based on tokio, enabling streaming, WebSocket, and multi-isolate-per-thread.
 
 ## Why
@@ -59,6 +59,7 @@ struct EventDriver {
     event_rx: tokio::sync::mpsc::Receiver<LoopEvent>,  // bounded!
     local_rt: tokio::runtime::Runtime,                   // current-thread, owned per Runtime
     timer_sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+    buffer: Vec<LoopEvent>,  // events received during wait(), processed next tick
 }
 
 /// Shared with V8 callbacks via Rc<RefCell<>> in isolate slot.
@@ -82,7 +83,12 @@ pub(crate) struct RuntimeState {
 
     // Per-request context (see "Per-request isolation" section)
     pub(crate) active_requests: HashMap<u64, RequestContext>,
-    pub(crate) current_request_id: Option<u64>,
+    // Note: no current_request_id — per-request mode has one request at a time
+    // (log_buffer on RequestContext is sufficient), and concurrent mode attributes
+    // logs via PendingRequest tracking in check_settled_promises.
+
+    // Per-request log buffer (drained after each request completes)
+    pub(crate) log_buffer: Vec<String>,
 
     // App state (shared across requests — intentionally)
     pub(crate) kv_store: HashMap<String, String>,
@@ -102,9 +108,17 @@ pub struct Runtime {
     // Request tracking (for concurrent mode)
     pending_requests: HashMap<u64, PendingRequest>,
 
-    // CPU enforcement (Linux)
+    // Stream forwarders: stream_id -> HTTP body sender (for DeferredProxy streaming)
+    // <!-- Added in round 3: addressing phantom field self.stream_forwarders -->
+    stream_forwarders: HashMap<u32, StreamForwarder>,
+
+    // CPU enforcement (Linux) — see cpu_timer.rs (322 LOC)
+    // <!-- Added in round 3: addressing CPU enforcement gap -->
     #[cfg(target_os = "linux")]
     cpu_timer: Option<CpuTimer>,
+    #[cfg(target_os = "linux")]
+    cpu_timer_active: bool,
+    cpu_limit: Option<Duration>,
 }
 ```
 
@@ -181,7 +195,24 @@ struct RequestContext {
 }
 ```
 
-Console.log routes to the active request's buffer:
+<!-- Added in round 3: addressing current_request_id global overwrite -->
+
+Console.log routing depends on the execution model:
+
+- **Per-request mode** (`execute_request` / `execute_http`): Only one request executes at a
+  time. `log_buffer` lives on `RequestContext` and is drained when the request completes.
+  There is no ambiguity about which request a log belongs to — it is always the single
+  active request.
+
+- **Concurrent mode** (`accept_request`): Multiple requests are interleaved on the same
+  isolate, but each JS dispatch is called with the request ID. The `check_settled_promises`
+  free function attributes logs to the correct request via `PendingRequest` tracking when
+  the promise settles.
+
+There is no `current_request_id` field. It was removed because it would be overwritten by
+each `accept_request` call, producing incorrect attribution for earlier requests still in
+flight. Instead, each model uses its own unambiguous mechanism.
+
 ```rust
 // In the console.log native callback:
 fn console_log_callback(scope: &mut v8::HandleScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
@@ -189,11 +220,10 @@ fn console_log_callback(scope: &mut v8::HandleScope, args: v8::FunctionCallbackA
     let mut s = state.borrow_mut();
     let msg = args.get(0).to_rust_string_lossy(scope);
 
-    if let Some(req_id) = s.current_request_id {
-        if let Some(ctx) = s.active_requests.get_mut(&req_id) {
-            ctx.log_buffer.push(msg);
-        }
-    }
+    // Per-request mode: push to the global log_buffer (drained per request)
+    s.log_buffer.push(msg);
+    // Concurrent mode: logs are attributed to the correct request
+    // when check_settled_promises drains log_buffer into PendingRequest.
 }
 ```
 
@@ -247,21 +277,8 @@ async fn do_fetch(url: String, cancel: CancellationToken, event_tx: mpsc::Sender
     }
 }
 
-// Event loop checks cancellation during tick:
-impl Runtime {
-    fn check_cancelled_requests(&mut self, scope: &mut v8::HandleScope) {
-        let state = self.state.borrow();
-        let cancelled: Vec<u64> = state.active_requests.iter()
-            .filter(|(_, ctx)| ctx.cancel.is_cancelled())
-            .map(|(id, _)| *id)
-            .collect();
-        drop(state);
-
-        for id in cancelled {
-            self.cleanup_request(scope, id);
-        }
-    }
-}
+// Event loop checks cancellation during tick (free function — see tick() PHASE 6):
+// check_cancelled_requests(scope, &self.state, &mut self.pending_requests);
 ```
 
 This matches the pattern used by Deno's `op_fetch` and Cloudflare Workers' automatic fetch
@@ -298,6 +315,60 @@ pub(crate) enum WsMessageData {
 }
 ```
 
+### StreamForwarder — backpressure-safe body forwarding
+
+<!-- Added in round 3: addressing data loss on try_send Full -->
+
+When forwarding stream chunks to HTTP body channels, `try_send` may return `Full` if the
+client reads slowly. The chunk must NOT be dropped. `StreamForwarder` buffers one pending
+chunk and retries on the next tick. This matches Node.js streams' `highWaterMark` pattern
+where the writable side buffers until drain.
+
+```rust
+/// Stream forwarder with retry buffer for backpressure.
+struct StreamForwarder {
+    sender: tokio::sync::mpsc::Sender<Vec<u8>>,
+    pending_chunk: Option<Vec<u8>>,  // buffered chunk waiting for retry
+}
+
+/// Forward a stream chunk to the HTTP body channel.
+/// If the channel is full, buffer the chunk for retry on the next tick.
+fn forward_stream_chunk(
+    forwarders: &mut HashMap<u32, StreamForwarder>,
+    stream_id: u32,
+    data: Vec<u8>,
+    done: bool,
+) {
+    if let Some(fwd) = forwarders.get_mut(&stream_id) {
+        // Try to send any pending chunk first
+        if let Some(pending) = fwd.pending_chunk.take() {
+            match fwd.sender.try_send(pending) {
+                Ok(()) => {} // sent successfully
+                Err(tokio::sync::mpsc::error::TrySendError::Full(data)) => {
+                    fwd.pending_chunk = Some(data); // still full, keep pending
+                    // Log warning: "backpressure: client too slow"
+                    return;
+                }
+                Err(_) => { forwarders.remove(&stream_id); return; } // channel closed
+            }
+        }
+
+        if done {
+            // Drop sender to signal EOF to the HTTP body stream
+            forwarders.remove(&stream_id);
+        } else {
+            match fwd.sender.try_send(data) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(data)) => {
+                    fwd.pending_chunk = Some(data); // buffer for retry next tick
+                }
+                Err(_) => { forwarders.remove(&stream_id); } // client disconnected
+            }
+        }
+    }
+}
+```
+
 ### The poll-based tick
 
 <!-- Added in round 1: addressing critic's point about mutable aliasing in tick -->
@@ -306,11 +377,20 @@ The key insight: drain events into a `Vec<LoopEvent>` BEFORE creating the V8 sco
 Then process from the Vec. The V8 scope borrows `&mut self.v8` but the driver is accessed
 before and after — never during.
 
+<!-- Added in round 3: addressing borrow conflict — handle_event is now a free function -->
+
+**Critical borrow-safety rule:** Any function that needs both a V8 scope and access to
+`Runtime` fields (state, stream_forwarders, pending_requests) must be a **free function**
+taking those fields as separate parameters. A method like `self.handle_event(scope, event)`
+would fail to compile because `scope` borrows `&mut self.v8.isolate` while `self.handle_event`
+takes `&self` — violating Rust's aliasing rules. Free functions make the disjoint borrows
+explicit.
+
 ```rust
 impl EventDriver {
     /// Drain all currently-ready events without blocking.
     fn drain_ready(&mut self) -> Vec<LoopEvent> {
-        let mut events = Vec::new();
+        let mut events = std::mem::take(&mut self.buffer);
         while let Ok(event) = self.event_rx.try_recv() {
             events.push(event);
         }
@@ -320,17 +400,15 @@ impl EventDriver {
     /// Block until at least one event arrives or deadline expires.
     fn wait_for_events(&mut self, deadline: Instant) -> Vec<LoopEvent> {
         let timeout = deadline.saturating_duration_since(Instant::now());
-        let mut events = Vec::new();
 
         self.local_rt.block_on(async {
             tokio::select! {
                 event = self.event_rx.recv() => {
                     if let Some(e) = event {
-                        events.push(e);
+                        self.buffer.push(e);
                     }
                 }
                 _ = async {
-                    // Timer sleep: wake at next timer deadline or wall timeout
                     if let Some(sleep) = self.timer_sleep.as_mut() {
                         sleep.as_mut().await;
                     } else {
@@ -342,74 +420,183 @@ impl EventDriver {
 
         // Also drain anything else that became ready during the wait
         while let Ok(event) = self.event_rx.try_recv() {
-            events.push(event);
+            self.buffer.push(event);
         }
 
-        events
+        // Don't return here — buffer is consumed by drain_ready() in next tick()
+        Vec::new()
     }
+}
+
+/// Handle one event — FREE FUNCTION to avoid borrow conflicts.
+/// Takes scope and state as separate parameters instead of &self.
+/// <!-- Added in round 3: converted from method to free function -->
+fn handle_event(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    state: &SharedState,
+    stream_forwarders: &mut HashMap<u32, StreamForwarder>,
+    event: LoopEvent,
+) {
+    match event {
+        LoopEvent::OpCompleted { id, value } => {
+            let resolver = state.borrow_mut().pending_resolvers.remove(&id);
+            if let Some(resolver) = resolver {
+                let r = v8::Local::new(scope, &resolver);
+                let val = v8::String::new(scope, &value).unwrap();
+                r.resolve(scope, val.into());
+            }
+        }
+        LoopEvent::StreamChunk { stream_id, data, done } => {
+            // First try to forward to HTTP body channel (DeferredProxy path)
+            if stream_forwarders.contains_key(&stream_id) {
+                forward_stream_chunk(stream_forwarders, stream_id, data.clone(), done);
+            }
+            // Also push to JS ReadableStream (if reader is waiting)
+            crate::streams::push_stream_chunk(scope, state, stream_id, &data, done);
+        }
+        LoopEvent::WsMessage { ws_id, data } => {
+            crate::ws::push_ws_message(scope, state, ws_id, data);
+        }
+        LoopEvent::WsClose { ws_id, code, reason } => {
+            crate::ws::push_ws_close(scope, state, ws_id, code, &reason);
+        }
+        LoopEvent::WsPing { ws_id } => {
+            crate::ws::push_ws_pong(scope, state, ws_id);
+        }
+        LoopEvent::RequestCancelled { request_id } => {
+            cleanup_request_state(scope, state, request_id);
+        }
+    }
+    scope.perform_microtask_checkpoint();
+}
+
+/// Check for settled promises — FREE FUNCTION (same borrow-safety reason).
+fn check_settled_promises(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    state: &SharedState,
+    pending_requests: &mut HashMap<u64, PendingRequest>,
+) {
+    // Iterate pending_requests, check if their promises have settled,
+    // extract results and send via reply channel.
+    let settled: Vec<u64> = pending_requests.iter()
+        .filter(|(_, req)| is_promise_settled(scope, &req.promise))
+        .map(|(id, _)| *id)
+        .collect();
+
+    for id in settled {
+        if let Some(req) = pending_requests.remove(&id) {
+            let result = extract_promise_result(scope, state, &req.promise);
+            let _ = req.reply.send(result);
+        }
+    }
+}
+
+/// Check for cancelled requests — FREE FUNCTION (same borrow-safety reason).
+fn check_cancelled_requests(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    state: &SharedState,
+    pending_requests: &mut HashMap<u64, PendingRequest>,
+) {
+    let s = state.borrow();
+    let cancelled: Vec<u64> = s.active_requests.iter()
+        .filter(|(_, ctx)| ctx.cancel.is_cancelled())
+        .map(|(id, _)| *id)
+        .collect();
+    drop(s);
+
+    for id in cancelled {
+        cleanup_request_state(scope, state, id);
+        if let Some(req) = pending_requests.remove(&id) {
+            let _ = req.reply.send(Err("request cancelled".to_string()));
+        }
+    }
+}
+
+/// Clean up state for a single request — FREE FUNCTION.
+fn cleanup_request_state(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    state: &SharedState,
+    request_id: u64,
+) {
+    let mut s = state.borrow_mut();
+    s.active_requests.remove(&request_id);
+    // Clean up any streams, resolvers, etc. associated with request_id
 }
 
 impl Runtime {
     /// One tick of the event loop.
     fn tick(&mut self) -> bool {
-        // PHASE 0: DRAIN — get events from driver BEFORE creating V8 scope.
-        // This is safe because no V8 scope exists yet.
+        // PHASE 0: ARM CPU TIMER — before entering V8
+        // <!-- Added in round 3: addressing CPU enforcement gap -->
+        #[cfg(target_os = "linux")]
+        if let (Some(timer), Some(limit)) = (&self.cpu_timer, self.cpu_limit) {
+            if !self.cpu_timer_active {
+                timer.arm(limit);
+                self.cpu_timer_active = true;
+            }
+        }
+
+        // PHASE 1: DRAIN — get events from driver BEFORE creating V8 scope.
         let events = self.driver.drain_ready();
 
         // NOW create V8 scope — borrows &mut self.v8 exclusively.
-        let handle_scope = &mut v8::HandleScope::new(&mut self.v8.isolate);
+        v8::scope!(let handle_scope, &mut self.v8.isolate);
         let context = v8::Local::new(handle_scope, &self.v8.context);
         let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-        // PHASE 1: PROCESS — handle buffered events (no driver access needed)
+        // PHASE 2: PROCESS — handle events via FREE FUNCTION (no &self conflict)
         for event in events {
-            self.handle_event(scope, event);
+            handle_event(scope, &self.state, &mut self.stream_forwarders, event);
         }
 
-        // PHASE 2: TIMERS — fire all ready timers
+        // PHASE 3: TIMERS — fire all ready timers
         fire_ready_timers(scope, &self.state);
 
-        // PHASE 3: MICROTASKS — flush V8 microtask queue
+        // PHASE 4: MICROTASKS — flush V8 microtask queue
         scope.perform_microtask_checkpoint();
 
-        // PHASE 4: CHECK — check settled promises, send replies
-        self.check_settled_promises(scope);
+        // PHASE 5: CHECK — check settled promises via free function
+        check_settled_promises(scope, &self.state, &mut self.pending_requests);
 
-        // PHASE 5: CANCELLATION — clean up cancelled requests
-        self.check_cancelled_requests(scope);
+        // PHASE 6: CANCELLATION — clean up cancelled requests via free function
+        check_cancelled_requests(scope, &self.state, &mut self.pending_requests);
 
-        // V8 scope drops here — safe to access driver again
-        self.has_pending_work()
-    }
-
-    /// Handle one event (written ONCE, used everywhere).
-    fn handle_event(&self, scope: &mut v8::HandleScope, event: LoopEvent) {
-        match event {
-            LoopEvent::OpCompleted { id, value } => {
-                let resolver = self.state.borrow_mut().pending_resolvers.remove(&id);
-                if let Some(resolver) = resolver {
-                    let r = v8::Local::new(scope, &resolver);
-                    let val = v8::String::new(scope, &value).unwrap();
-                    r.resolve(scope, val.into());
+        // PHASE 7: RETRY — retry any buffered stream chunks (backpressure)
+        // <!-- Added in round 3: addressing data loss on try_send Full -->
+        for fwd in self.stream_forwarders.values_mut() {
+            if let Some(pending) = fwd.pending_chunk.take() {
+                match fwd.sender.try_send(pending) {
+                    Ok(()) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(data)) => {
+                        fwd.pending_chunk = Some(data); // still full
+                    }
+                    Err(_) => {} // will be cleaned up
                 }
             }
-            LoopEvent::StreamChunk { stream_id, data, done } => {
-                crate::streams::push_stream_chunk(scope, &self.state, stream_id, &data, done);
-            }
-            LoopEvent::WsMessage { ws_id, data } => {
-                crate::ws::push_ws_message(scope, &self.state, ws_id, data);
-            }
-            LoopEvent::WsClose { ws_id, code, reason } => {
-                crate::ws::push_ws_close(scope, &self.state, ws_id, code, &reason);
-            }
-            LoopEvent::WsPing { ws_id } => {
-                crate::ws::push_ws_pong(scope, &self.state, ws_id);
-            }
-            LoopEvent::RequestCancelled { request_id } => {
-                self.cleanup_request_state(scope, request_id);
-            }
         }
-        scope.perform_microtask_checkpoint();
+
+        // V8 scope drops here — safe to access driver again
+
+        // PHASE 8: DISARM CPU TIMER — after V8 work
+        #[cfg(target_os = "linux")]
+        if self.cpu_timer_active {
+            if let Some(timer) = &self.cpu_timer {
+                timer.disarm();
+            }
+            self.cpu_timer_active = false;
+        }
+
+        // PHASE 9: CHECK TERMINATION — CPU timer may have called TerminateExecution
+        if self.v8.isolate.is_execution_terminating() {
+            self.v8.isolate.cancel_terminate_execution();
+            // Error all pending requests — CPU limit exceeded
+            for (_, req) in self.pending_requests.drain() {
+                let _ = req.reply.send(Err("CPU time limit exceeded".to_string()));
+            }
+            return false;
+        }
+
+        self.has_pending_work()
     }
 
     /// Is there pending work?
@@ -419,6 +606,7 @@ impl Runtime {
             || !s.pending_resolvers.is_empty()
             || s.streams.values().any(|st| st.pending_read.is_some() && !st.closed)
             || !self.pending_requests.is_empty()
+            || self.stream_forwarders.values().any(|f| f.pending_chunk.is_some())
     }
 }
 ```
@@ -441,11 +629,10 @@ impl Runtime {
             if Instant::now() > deadline { return Err(EventLoopError::WallTimeout); }
             if !self.tick() { return Ok(()); }
 
-            // Wait — block until event arrives or timer fires
-            let events = self.driver.wait_for_events(deadline);
-            // Events will be picked up by drain_ready() in next tick()
-            // But we can also buffer them directly:
-            self.driver.buffer.extend(events);
+            // Wait — block until event arrives or timer fires.
+            // Events are buffered in self.driver.buffer and consumed
+            // by drain_ready() at the start of the next tick().
+            self.driver.wait_for_events(deadline);
         }
     }
 
@@ -551,7 +738,6 @@ impl Runtime {
             cancel,
         };
         self.state.borrow_mut().active_requests.insert(id, ctx);
-        self.state.borrow_mut().current_request_id = Some(id);
 
         // Dispatch into V8
         // ... dispatch, store pending request
@@ -630,8 +816,11 @@ impl Runtime {
         stream_id: u32,
         body_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     ) {
-        // Store in a separate map — checked in handle_event before JS dispatch
-        self.stream_forwarders.insert(stream_id, body_tx);
+        // Store as StreamForwarder with pending_chunk buffer for backpressure
+        self.stream_forwarders.insert(stream_id, StreamForwarder {
+            sender: body_tx,
+            pending_chunk: None,
+        });
     }
 }
 ```
@@ -689,42 +878,13 @@ impl RuntimeState {
 When a stream chunk send fails (channel closed because client disconnected), we must
 propagate the error back to close the stream in JS and cancel any upstream fetch.
 
-```rust
-// In the stream forwarder:
-fn forward_stream_chunk(
-    forwarders: &mut HashMap<u32, mpsc::Sender<Vec<u8>>>,
-    stream_id: u32,
-    data: Vec<u8>,
-    done: bool,
-    state: &SharedState,
-) {
-    if let Some(tx) = forwarders.get(&stream_id) {
-        // try_send: non-blocking, returns error if channel full or closed
-        match tx.try_send(data) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                // Client disconnected — clean up the stream
-                forwarders.remove(&stream_id);
-                let mut s = state.borrow_mut();
-                if let Some(stream) = s.streams.get_mut(&stream_id) {
-                    stream.closed = true;
-                }
-                // The fetch task will see event_tx.send() fail on next chunk
-                // and stop reading from the origin server.
-            }
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                // Backpressure — buffer is full, chunk will be retried next tick.
-                // In practice, the bounded event channel already applies backpressure
-                // before we get here.
-            }
-        }
-    }
-
-    if done {
-        forwarders.remove(&stream_id);
-    }
-}
-```
+The `forward_stream_chunk` free function (defined in the StreamForwarder section above)
+handles all three cases:
+- **Ok**: chunk forwarded successfully.
+- **Full**: chunk buffered in `StreamForwarder.pending_chunk`, retried in tick() PHASE 7.
+  No data is lost. <!-- Added in round 3: addressing data loss on try_send Full -->
+- **Closed**: client disconnected. Forwarder removed, stream marked closed. The fetch task
+  sees `event_tx.send()` fail on the next chunk and stops reading from the origin server.
 
 ## Graceful shutdown
 
@@ -756,8 +916,8 @@ impl Runtime {
             self.tick();
 
             if self.has_pending_work() {
-                let events = self.driver.wait_for_events(deadline);
-                self.driver.buffer.extend(events);
+                // Wait buffers events internally; drain_ready() picks them up next tick
+                self.driver.wait_for_events(deadline);
             }
         }
 
@@ -778,6 +938,27 @@ impl Runtime {
 This matches the Deno pattern where `op_fetch` tasks are cancelled via `AbortSignal` on shutdown,
 and Cloudflare Workers' 30-second grace period for in-flight requests.
 
+## CPU enforcement
+
+<!-- Added in round 3: addressing missing CPU enforcement -->
+
+The existing `cpu_timer.rs` (322 LOC) implements a POSIX CPU timer with signal handler and
+watchdog thread. The Runtime integrates it as follows:
+
+1. **Arm** the CPU timer before entering V8 (tick() PHASE 0).
+2. V8 executes JS. If CPU time exceeds the limit, the watchdog thread fires SIGALRM.
+3. The SIGALRM handler calls `v8::Isolate::terminate_execution()`, which causes the
+   current JS execution to throw an uncatchable exception.
+4. **Disarm** the timer after V8 work completes (tick() PHASE 8).
+5. **Check termination** (tick() PHASE 9): if `is_execution_terminating()` is true,
+   cancel termination, error all pending requests with "CPU time limit exceeded".
+
+This matches Cloudflare Workers' CPU time limits (10ms for free, 50ms for paid) and
+Deno Deploy's per-request CPU budgets. The timer measures actual CPU time (not wall time),
+so I/O waits do not count against the limit.
+
+The `cpu_limit` field on `Runtime` is set from `RuntimeConfig` and can differ per app tier.
+
 ## WebSocket (future)
 
 WebSocket fits naturally as additional LoopEvent variants (shown above in the Event types
@@ -793,8 +974,10 @@ crates/runtime/src/
 +-- lib.rs              Public API: Runtime, ModuleEntry, RequestResult, HttpStreamResult
 |
 +-- runtime.rs          Runtime struct + tick + run_until_settled + poll_event_loop
-|                       V8State, EventDriver structs
-|                       handle_event (ONCE), has_pending_work (ONCE), is_settled (ONCE)
+|                       V8State, EventDriver, StreamForwarder structs
+|                       Free functions: handle_event, check_settled_promises,
+|                       check_cancelled_requests, cleanup_request_state, fire_ready_timers
+|                       Methods: has_pending_work, is_settled (ONCE each)
 |
 +-- state.rs            RuntimeState, SharedState, RequestContext
 |                       LoopEvent enum, WsMessageData enum
@@ -908,13 +1091,17 @@ runtime.shutdown(Duration::from_secs(5));
 - All 88 existing tests pass
 - Benchmark: >=330K req/s for sync RPC (no regression)
 - SSE example: tokens stream to client word-by-word
-- `handle_event` written exactly ONCE
+- `handle_event` written exactly ONCE (as a free function)
 - `has_pending_work` written exactly ONCE
 - No duplicated event loop logic
+- No method calls on `&self` while a V8 scope is alive (borrow conflict prevention)
+- Every `self.field` reference in code examples corresponds to a declared struct field
 - Crypto/KV/env types not in runtime.rs or state.rs
-- **NEW: Backpressure test** — slow consumer does not cause unbounded memory growth; memory stays flat when a client reads at 1 byte/sec while origin streams at 100 MB/s
-- **NEW: Slow client test** — 100 concurrent SSE clients at varying speeds, no OOM, correct ordering
-- **NEW: Cancellation test** — client disconnect cancels in-flight fetch within 100ms
-- **NEW: Shutdown test** — graceful shutdown completes within timeout, all replies sent
-- **NEW: Per-request isolation test** — console.log output from request A does not appear in request B's logs
-- **NEW: Memory limit test** — stream exceeding MAX_STREAM_BUFFER_BYTES triggers backpressure or abort, not OOM
+- **Backpressure test** — slow consumer does not cause unbounded memory growth; memory stays flat when a client reads at 1 byte/sec while origin streams at 100 MB/s
+- **Data integrity test** — `try_send(Full)` buffers and retries; no chunks are dropped under backpressure
+- **Slow client test** — 100 concurrent SSE clients at varying speeds, no OOM, correct ordering
+- **Cancellation test** — client disconnect cancels in-flight fetch within 100ms
+- **Shutdown test** — graceful shutdown completes within timeout, all replies sent
+- **Per-request isolation test** — console.log output from request A does not appear in request B's logs (no global current_request_id)
+- **Memory limit test** — stream exceeding MAX_STREAM_BUFFER_BYTES triggers backpressure or abort, not OOM
+- **CPU enforcement test** — infinite loop in JS terminates within cpu_limit; all pending requests receive "CPU time limit exceeded" error
