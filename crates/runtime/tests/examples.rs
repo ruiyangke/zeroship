@@ -586,3 +586,45 @@ fn heavy_deps_tree_shaking_verification() {
     assert!(!result.js.contains("cloneDeep"), "cloneDeep should be tree-shaken");
     assert!(!result.js.contains("debounce"), "debounce should be tree-shaken");
 }
+
+#[test]
+fn ai_streaming_sse_complete() {
+    init_v8();
+    let mut isolate = load_example("ai-streaming.js");
+
+    // Test the /complete endpoint (no external API needed)
+    let result = isolate.execute_http(
+        "POST",
+        "http://localhost/complete",
+        "[]",
+        r#"{"prompt":"hello world from appbase"}"#,
+    ).expect("onRequest not found").expect("onRequest failed");
+
+    assert_eq!(result.status, 200);
+
+    // Verify SSE format
+    assert!(result.body.contains("data: "), "should have SSE data lines: {}", result.body);
+    assert!(result.body.contains("[DONE]"), "should end with [DONE]: {}", result.body);
+
+    // Verify each token is streamed as a separate SSE event
+    assert!(result.body.contains("\"content\":\"hello \""), "should have hello token: {}", result.body);
+    assert!(result.body.contains("\"content\":\"world \""), "should have world token: {}", result.body);
+    assert!(result.body.contains("\"content\":\"appbase\""), "should have appbase token: {}", result.body);
+
+    // Count SSE events (data: lines)
+    let event_count = result.body.matches("data: ").count();
+    // 4 tokens + [DONE] = 5 events
+    assert_eq!(event_count, 5, "should have 5 SSE events (4 tokens + DONE), got {}", event_count);
+}
+
+#[test]
+fn ai_streaming_root_endpoint() {
+    init_v8();
+    let mut isolate = load_example("ai-streaming.js");
+
+    let result = isolate.execute_http("GET", "http://localhost/", "[]", "")
+        .expect("onRequest not found").expect("onRequest failed");
+    assert_eq!(result.status, 200);
+    let body: serde_json::Value = serde_json::from_str(&result.body).unwrap();
+    assert!(body["endpoints"].is_array());
+}
