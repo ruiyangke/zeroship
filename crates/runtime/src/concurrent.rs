@@ -19,9 +19,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::event_loop::{EventLoopInner, SharedState};
-use crate::globals::setup_globals;
+use crate::init::setup_globals;
 use crate::modules::ModuleEntry;
-use crate::runtime::{init_v8, thread_cpu_time, RequestResult, DISPATCH_JS, FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS};
+use crate::init::{init_v8, thread_cpu_time, RequestResult, DISPATCH_JS, FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS};
 use crate::timers::fire_ready_timers;
 
 // ---------------------------------------------------------------------------

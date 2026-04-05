@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 use std::collections::HashMap;
 
 use crate::event_loop::{run_event_loop, EventLoopInner, LoopEvent, SharedState};
-use crate::globals::setup_globals;
+use crate::init::setup_globals;
 use crate::modules::ModuleEntry;
-use crate::runtime::{thread_cpu_time, HttpResult, RequestResult, DISPATCH_JS, FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS};
+use crate::init::{thread_cpu_time, HttpResult, RequestResult, DISPATCH_JS, FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS};
 
 /// A V8 isolate with persistent context -- compiled code stays across requests.
 /// ES modules are compiled ONCE. Each request just calls the handler function.

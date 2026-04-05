@@ -25,13 +25,13 @@ mod crypto;
 mod env;
 mod event_loop;
 mod fetch;
-mod globals;
+
 mod isolate;
 mod kv;
 pub mod modules;
 mod streams;
 pub mod ops;
-pub mod runtime;
+pub mod init;
 pub mod storage;
 mod timers;
 mod url;
@@ -40,7 +40,7 @@ mod url;
 pub use isolate::{Isolate, IsolatePool};
 pub use modules::ModuleEntry;
 pub use storage::AppStorage;
-pub use runtime::{init_v8, RequestResult};
+pub use init::{init_v8, RequestResult};
 
 #[cfg(test)]
 mod tests {
