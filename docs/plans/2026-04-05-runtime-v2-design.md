@@ -78,8 +78,9 @@ pub(crate) struct RuntimeState {
     // Tokio handle for spawning background tasks
     pub(crate) server_handle: Option<tokio::runtime::Handle>,
 
-    // Concurrent model (optional)
-    pub(crate) concurrent_event_tx: Option<std::sync::mpsc::Sender<ConcurrentEvent>>,
+    // Concurrent model (optional) — bounded to EVENT_CHANNEL_CAPACITY.
+    // Uses tokio::sync::mpsc (not std::sync::mpsc) so the bounded send can await backpressure.
+    pub(crate) concurrent_event_tx: Option<tokio::sync::mpsc::Sender<ConcurrentEvent>>,
 
     // Per-request context (see "Per-request isolation" section)
     pub(crate) active_requests: HashMap<u64, RequestContext>,
@@ -87,8 +88,10 @@ pub(crate) struct RuntimeState {
     // (log_buffer on RequestContext is sufficient), and concurrent mode attributes
     // logs via PendingRequest tracking in check_settled_promises.
 
-    // Per-request log buffer (drained after each request completes)
-    pub(crate) log_buffer: Vec<String>,
+    // Per-request log buffer (drained after each request completes).
+    // Each entry is tagged with request_id for correct attribution in concurrent mode.
+    // In per-request mode, all entries share the same request_id.
+    pub(crate) log_buffer: Vec<(u64, String)>,
 
     // App state (shared across requests — intentionally)
     pub(crate) kv_store: HashMap<String, String>,
@@ -147,6 +150,29 @@ when the buffer is full, the producer blocks, which pauses the network read, whi
 TCP backpressure upstream.
 
 ```rust
+/// All tunable runtime constants — passed to Runtime::new().
+pub struct RuntimeConfig {
+    pub event_channel_capacity: usize,      // default: 256
+    pub stream_body_capacity: usize,        // default: 16
+    pub max_stream_buffer_bytes: usize,     // default: 4 MB
+    pub cpu_limit: Option<Duration>,        // default: None (unlimited)
+    pub memory_limit_bytes: Option<usize>,  // default: None (V8 default)
+    pub wall_timeout: Duration,             // default: 30s
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            event_channel_capacity: EVENT_CHANNEL_CAPACITY,
+            stream_body_capacity: STREAM_BODY_CAPACITY,
+            max_stream_buffer_bytes: MAX_STREAM_BUFFER_BYTES,
+            cpu_limit: None,
+            memory_limit_bytes: None,
+            wall_timeout: Duration::from_secs(30),
+        }
+    }
+}
+
 /// Bounded channel capacity constants.
 /// These are tuned for typical workloads; each can be overridden via RuntimeConfig.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -220,10 +246,11 @@ fn console_log_callback(scope: &mut v8::HandleScope, args: v8::FunctionCallbackA
     let mut s = state.borrow_mut();
     let msg = args.get(0).to_rust_string_lossy(scope);
 
-    // Per-request mode: push to the global log_buffer (drained per request)
-    s.log_buffer.push(msg);
-    // Concurrent mode: logs are attributed to the correct request
-    // when check_settled_promises drains log_buffer into PendingRequest.
+    // Tag with the current request_id (set before each JS dispatch).
+    // In per-request mode there is exactly one active request.
+    // In concurrent mode, the id was set by accept_request before dispatch.
+    let request_id = s.active_requests.keys().next().copied().unwrap_or(0);
+    s.log_buffer.push((request_id, msg));
 }
 ```
 
@@ -294,7 +321,9 @@ cancellation), an enum gives exhaustive matching and zero allocation.
 
 ```rust
 pub(crate) enum LoopEvent {
-    // Core ops
+    // Core ops — value is JSON-encoded String for now. Future: typed OpValue enum
+    // (e.g., OpValue::Bytes(Vec<u8>), OpValue::Json(String)) to avoid double-serialization
+    // for binary ops like crypto.
     OpCompleted { id: u32, value: String },
 
     // Streaming
@@ -344,9 +373,13 @@ fn forward_stream_chunk(
         if let Some(pending) = fwd.pending_chunk.take() {
             match fwd.sender.try_send(pending) {
                 Ok(()) => {} // sent successfully
-                Err(tokio::sync::mpsc::error::TrySendError::Full(data)) => {
-                    fwd.pending_chunk = Some(data); // still full, keep pending
-                    // Log warning: "backpressure: client too slow"
+                Err(tokio::sync::mpsc::error::TrySendError::Full(old)) => {
+                    // Pending retry failed — channel still full.
+                    // Replace pending with new chunk (keep stream current, drop older data).
+                    // Dropping `old` is acceptable: the alternative (dropping `data`) loses
+                    // newer state, and holding both requires unbounded buffering.
+                    fwd.pending_chunk = Some(data);
+                    // Log warning: "backpressure: dropped older chunk, client too slow"
                     return;
                 }
                 Err(_) => { forwarders.remove(&stream_id); return; } // channel closed
@@ -398,7 +431,8 @@ impl EventDriver {
     }
 
     /// Block until at least one event arrives or deadline expires.
-    fn wait_for_events(&mut self, deadline: Instant) -> Vec<LoopEvent> {
+    /// Events are buffered in self.buffer; consumed by drain_ready() on next tick.
+    fn wait_for_events(&mut self, deadline: Instant) {
         let timeout = deadline.saturating_duration_since(Instant::now());
 
         self.local_rt.block_on(async {
@@ -423,8 +457,7 @@ impl EventDriver {
             self.buffer.push(event);
         }
 
-        // Don't return here — buffer is consumed by drain_ready() in next tick()
-        Vec::new()
+        // Buffer is consumed by drain_ready() in next tick().
     }
 }
 
@@ -577,14 +610,10 @@ impl Runtime {
 
         // V8 scope drops here — safe to access driver again
 
-        // PHASE 8: DISARM CPU TIMER — after V8 work
-        #[cfg(target_os = "linux")]
-        if self.cpu_timer_active {
-            if let Some(timer) = &self.cpu_timer {
-                timer.disarm();
-            }
-            self.cpu_timer_active = false;
-        }
+        // PHASE 8: CPU TIMER — kept armed across ticks to avoid arm/disarm overhead.
+        // Only disarmed in wait_for_events (I/O wait should not count as CPU time)
+        // and on loop exit. The timer measures actual CPU time, so idle poll_recv
+        // does not accumulate.
 
         // PHASE 9: CHECK TERMINATION — CPU timer may have called TerminateExecution
         if self.v8.isolate.is_execution_terminating() {
@@ -608,6 +637,36 @@ impl Runtime {
             || !self.pending_requests.is_empty()
             || self.stream_forwarders.values().any(|f| f.pending_chunk.is_some())
     }
+}
+```
+
+### Error types
+
+```rust
+/// Errors that can terminate the event loop.
+#[derive(Debug)]
+pub enum EventLoopError {
+    WallTimeout,
+    CpuExceeded,
+    ChannelClosed,
+    StreamError(String),
+}
+
+/// Result of a completed request (blocking mode).
+pub struct RequestResult {
+    pub body: String,
+    pub logs: Vec<String>,
+    pub cpu_time: Duration,
+    pub wall_time: Duration,
+}
+
+/// Tracks an in-flight request in concurrent mode.
+struct PendingRequest {
+    id: u64,
+    promise: v8::Global<v8::Promise>,
+    reply: oneshot::Sender<Result<RequestResult, String>>,
+    cancel: tokio_util::sync::CancellationToken,
+    wall_start: Instant,
 }
 ```
 
