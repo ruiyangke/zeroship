@@ -18,10 +18,9 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crate::event_loop::{EventLoopInner, SharedState};
-use crate::init::setup_globals;
+use crate::event_loop::{self, EventLoopInner, SharedState};
 use crate::modules::ModuleEntry;
-use crate::init::{init_v8, thread_cpu_time, RequestResult, DISPATCH_JS, FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS};
+use crate::init::{init_v8, load_polyfills_and_modules, thread_cpu_time, RequestResult};
 use crate::timers::fire_ready_timers;
 
 // ---------------------------------------------------------------------------
@@ -290,41 +289,24 @@ impl LoopState {
 
     /// Compute timeout for Phase 5 WAIT.
     fn compute_wait_timeout(&self) -> Duration {
-        let s = self.el_state.borrow();
-
-        if s.timers.callbacks.is_empty() {
-            return if !self.pending_requests.is_empty()
-                || !s.pending_resolvers.is_empty()
-                || !self.completed_ops.is_empty()
-            {
+        // Reuse shared timer scanning from event_loop
+        match event_loop::next_timer_fire(&self.el_state) {
+            Some(fire_at) => fire_at.saturating_duration_since(Instant::now()),
+            None if self.has_pending_work() => {
                 // Have async work pending — short wait for quick response
                 Duration::from_millis(100)
-            } else {
+            }
+            None => {
                 // Nothing pending — long wait for new requests
                 Duration::from_secs(60)
-            };
-        }
-
-        let mut next_fire = None;
-        for std::cmp::Reverse(entry) in s.timers.heap.iter() {
-            if s.timers.callbacks.contains_key(&entry.id) {
-                next_fire = Some(entry.fire_at);
-                break;
             }
-        }
-
-        match next_fire {
-            Some(fire_at) => fire_at.saturating_duration_since(Instant::now()),
-            None => Duration::from_secs(60),
         }
     }
 
     fn has_pending_work(&self) -> bool {
-        if !self.pending_requests.is_empty() || !self.completed_ops.is_empty() {
-            return true;
-        }
-        let s = self.el_state.borrow();
-        !s.timers.callbacks.is_empty() || !s.pending_resolvers.is_empty()
+        !self.pending_requests.is_empty()
+            || !self.completed_ops.is_empty()
+            || event_loop::has_pending_work(&self.el_state)
     }
 }
 
@@ -434,46 +416,7 @@ impl ConcurrentIsolate {
             let context = v8::Local::new(handle_scope, &self.ls.context);
             let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-            setup_globals(scope);
-
-            // Load polyfills
-            for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS] {
-                let code = v8::String::new(scope, polyfill).unwrap();
-                let script = v8::Script::compile(scope, code, None).unwrap();
-                script.run(scope).unwrap();
-            }
-
-            // Load ES modules and copy exports to a plain object on globalThis.__rpc.
-            // Module Namespace objects are V8 exotic objects with slower property access.
-            match crate::modules::load_modules(scope, &modules) {
-                Ok(namespace) => {
-                    let global = context.global(scope);
-                    let ns_local = v8::Local::new(scope, &namespace);
-                    let ns_obj = ns_local.to_object(scope).unwrap();
-
-                    let plain = v8::Object::new(scope);
-                    if let Some(names) = ns_obj.get_own_property_names(scope, Default::default()) {
-                        for i in 0..names.length() {
-                            let key = names.get_index(scope, i).unwrap();
-                            if let Some(val) = ns_obj.get(scope, key) {
-                                plain.set(scope, key, val);
-                            }
-                        }
-                    }
-
-                    let rpc_key = v8::String::new(scope, "__rpc").unwrap();
-                    global.set(scope, rpc_key.into(), plain.into());
-                }
-                Err(e) => {
-                    eprintln!("[v8] Module loading failed: {e}");
-                }
-            }
-
-            let code = v8::String::new(scope, DISPATCH_JS).unwrap();
-            let script = v8::Script::compile(scope, code, None).unwrap();
-            let result = script.run(scope).unwrap();
-            let func = v8::Local::<v8::Function>::try_from(result).unwrap();
-            self.ls.dispatch_fn = Some(v8::Global::new(scope, func));
+            self.ls.dispatch_fn = Some(load_polyfills_and_modules(scope, &modules));
         }
 
         self.ls.initialized = true;

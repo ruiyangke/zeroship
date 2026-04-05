@@ -138,7 +138,7 @@ fn drain_events(scope: &mut v8::PinScope, state: &SharedState, event_rx: &mpsc::
 }
 
 /// Check if there is any pending work (timers, async ops, or open streams).
-fn has_pending_work(state: &SharedState) -> bool {
+pub(crate) fn has_pending_work(state: &SharedState) -> bool {
     let s = state.borrow();
     !s.timers.callbacks.is_empty()
         || !s.pending_resolvers.is_empty()
@@ -151,25 +151,25 @@ fn is_settled(scope: &mut v8::PinScope, promise: &v8::Global<v8::Promise>) -> bo
     local.state() != v8::PromiseState::Pending
 }
 
-/// Compute the wait duration until the next valid timer fires.
-fn compute_wait_timeout(state: &SharedState) -> Option<Duration> {
+/// Find the next valid timer fire time (skipping cleared timers via lazy deletion).
+/// Returns `None` if no valid timers exist.
+pub(crate) fn next_timer_fire(state: &SharedState) -> Option<std::time::Instant> {
     let s = state.borrow();
-
-    // Find next valid timer (skip cleared ones via lazy deletion)
-    let mut next_fire = None;
     for std::cmp::Reverse(entry) in s.timers.heap.iter() {
         if s.timers.callbacks.contains_key(&entry.id) {
-            next_fire = Some(entry.fire_at);
-            break;
+            return Some(entry.fire_at);
         }
     }
+    None
+}
 
-    // Streams with pending reads also count as pending work.
-    let has_pending_streams = s.streams.values().any(|st| st.pending_read.is_some());
+/// Compute the wait duration until the next valid timer fires.
+pub(crate) fn compute_wait_timeout(state: &SharedState) -> Option<Duration> {
+    let has_pending_streams = state.borrow().streams.values().any(|st| st.pending_read.is_some());
 
-    match next_fire {
+    match next_timer_fire(state) {
         Some(fire_at) => Some(fire_at.saturating_duration_since(std::time::Instant::now())),
-        None if !s.pending_resolvers.is_empty() || has_pending_streams => Some(Duration::from_secs(60)),
+        None if !state.borrow().pending_resolvers.is_empty() || has_pending_streams => Some(Duration::from_secs(60)),
         None => None,
     }
 }

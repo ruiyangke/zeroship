@@ -147,6 +147,64 @@ pub(crate) const DISPATCH_JS: &str = r#"(function(__req_json) {
 })"#;
 
 // ===========================================================================
+// Shared initialization: polyfills + module loading + dispatch compilation
+// ===========================================================================
+
+/// Load polyfills, ES modules, and compile the JSON-RPC dispatch function.
+///
+/// Shared by both `Isolate::ensure_initialized` and `ConcurrentIsolate::ensure_initialized`.
+/// Returns the compiled dispatch `Global<Function>`.
+pub(crate) fn load_polyfills_and_modules(
+    scope: &mut v8::PinScope,
+    modules: &[crate::modules::ModuleEntry],
+) -> v8::Global<v8::Function> {
+    setup_globals(scope);
+
+    // Load polyfills
+    for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS] {
+        let code = v8::String::new(scope, polyfill).unwrap();
+        let script = v8::Script::compile(scope, code, None).unwrap();
+        script.run(scope).unwrap();
+    }
+
+    // Load ES modules and copy exports to a plain object on globalThis.__rpc.
+    // Module Namespace objects are V8 exotic objects with slower property access
+    // (live binding resolution per lookup). Copying to a plain object restores
+    // fast inline-cached property access on the dispatch hot path.
+    let context = scope.get_current_context();
+    match crate::modules::load_modules(scope, modules) {
+        Ok(namespace) => {
+            let global = context.global(scope);
+            let ns_local = v8::Local::new(scope, &namespace);
+            let ns_obj = ns_local.to_object(scope).unwrap();
+
+            let plain = v8::Object::new(scope);
+            if let Some(names) = ns_obj.get_own_property_names(scope, Default::default()) {
+                for i in 0..names.length() {
+                    let key = names.get_index(scope, i).unwrap();
+                    if let Some(val) = ns_obj.get(scope, key) {
+                        plain.set(scope, key, val);
+                    }
+                }
+            }
+
+            let rpc_key = v8::String::new(scope, "__rpc").unwrap();
+            global.set(scope, rpc_key.into(), plain.into());
+        }
+        Err(e) => {
+            eprintln!("[v8] Module loading failed: {e}");
+        }
+    }
+
+    // Compile JSON-RPC dispatch function
+    let code = v8::String::new(scope, DISPATCH_JS).unwrap();
+    let script = v8::Script::compile(scope, code, None).unwrap();
+    let result = script.run(scope).unwrap();
+    let func = v8::Local::<v8::Function>::try_from(result).unwrap();
+    v8::Global::new(scope, func)
+}
+
+// ===========================================================================
 // Console polyfill (variadic — stays manual)
 // ===========================================================================
 
