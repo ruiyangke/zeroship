@@ -1,7 +1,7 @@
 # Runtime v2 Design — Non-blocking Event Loop
 
 **Date:** 2026-04-05
-**Revision:** 5 (Round 3 fixes: u32 request IDs, streaming body deferral, double-delivery, unwrap guard, unsettled promise)
+**Revision:** 6 (Round 4 fixes: stale forwarder cleanup, CPU timer disarm before wait, v8::String unwrap guards, clone-free overflow drain)
 **Goal:** Refactor the runtime into a clean non-blocking architecture based on tokio, enabling streaming, WebSocket, and multi-isolate-per-thread.
 
 ## Why
@@ -379,10 +379,13 @@ fn forward_stream_chunk(
 ) {
     if let Some(fwd) = forwarders.get_mut(&stream_id) {
         // Drain overflow into the channel first (FIFO order)
-        while let Some(pending) = fwd.overflow.front() {
-            match fwd.sender.try_send(pending.clone()) {
-                Ok(()) => { fwd.overflow.pop_front(); }
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => break,
+        while let Some(chunk) = fwd.overflow.pop_front() {
+            match fwd.sender.try_send(chunk) {
+                Ok(()) => {} // sent, already popped
+                Err(tokio::sync::mpsc::error::TrySendError::Full(data)) => {
+                    fwd.overflow.push_front(data); // put it back
+                    break;
+                }
                 Err(_) => { forwarders.remove(&stream_id); return; } // channel closed
             }
         }
@@ -484,7 +487,15 @@ fn handle_event(
             let resolver = state.borrow_mut().pending_resolvers.remove(&id);
             if let Some(resolver) = resolver {
                 let r = v8::Local::new(scope, &resolver);
-                let val = v8::String::new(scope, &value).unwrap();
+                let val = match v8::String::new(scope, &value) {
+                    Some(s) => s,
+                    None => {
+                        let err_msg = v8::String::new(scope, "Op result too large").unwrap();
+                        let exc = v8::Exception::error(scope, err_msg);
+                        r.reject(scope, exc);
+                        return;
+                    }
+                };
                 r.resolve(scope, val.into());
             }
         }
@@ -605,22 +616,28 @@ impl Runtime {
         check_cancelled_requests(scope, &self.state, &mut self.pending_requests);
 
         // PHASE 7: RETRY — drain overflow buffers into channels (backpressure)
-        for fwd in self.stream_forwarders.values_mut() {
-            while let Some(pending) = fwd.overflow.front() {
-                match fwd.sender.try_send(pending.clone()) {
-                    Ok(()) => { fwd.overflow.pop_front(); }
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => break,
-                    Err(_) => break, // will be cleaned up
+        let closed_ids: Vec<u32> = Vec::new();
+        for (stream_id, fwd) in self.stream_forwarders.iter_mut() {
+            while let Some(chunk) = fwd.overflow.pop_front() {
+                match fwd.sender.try_send(chunk) {
+                    Ok(()) => {} // sent, already popped
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(data)) => {
+                        fwd.overflow.push_front(data); // put it back
+                        break;
+                    }
+                    Err(_) => { closed_ids.push(*stream_id); break; }
                 }
             }
+        }
+        for id in closed_ids {
+            self.stream_forwarders.remove(&id);
         }
 
         // V8 scope drops here — safe to access driver again
 
         // PHASE 8: CPU TIMER — kept armed across ticks to avoid arm/disarm overhead.
-        // Only disarmed in wait_for_events (I/O wait should not count as CPU time)
-        // and on loop exit. The timer measures actual CPU time, so idle poll_recv
-        // does not accumulate.
+        // Disarmed before wait_for_events in the run loop (I/O wait should not
+        // count as CPU time) and on loop exit. Re-armed in PHASE 0 of next tick.
 
         // PHASE 9: CHECK TERMINATION — CPU timer may have called TerminateExecution
         if self.v8.isolate.is_execution_terminating() {
@@ -705,6 +722,14 @@ impl Runtime {
             // Check immediately after tick — the tick may have settled the promise.
             // This avoids an unnecessary wait_for_events when the result is already ready.
             if self.is_settled(promise) { return Ok(()); }
+
+            // Disarm CPU timer during I/O wait — waiting is not CPU usage.
+            // PHASE 0 of the next tick() will re-arm it.
+            #[cfg(target_os = "linux")]
+            if self.cpu_timer_active {
+                if let Some(timer) = &self.cpu_timer { timer.disarm(); }
+                self.cpu_timer_active = false;
+            }
 
             // Wait — block until event arrives or timer fires.
             // Events are buffered in self.driver.buffer and consumed
@@ -831,7 +856,13 @@ impl Runtime {
             }
         };
         let undefined = v8::undefined(scope).into();
-        let body_v8 = v8::String::new(scope, &body).unwrap().into();
+        let body_v8 = match v8::String::new(scope, &body) {
+            Some(s) => s.into(),
+            None => {
+                let _ = reply.send(Err("Request body too large for V8".to_string()));
+                return;
+            }
+        };
         let id_v8 = v8::Number::new(scope, id as f64).into();
         let result = dispatch_fn.call(scope, undefined, &[id_v8, body_v8]);
 
