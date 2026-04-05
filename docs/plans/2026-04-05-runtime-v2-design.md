@@ -1,7 +1,7 @@
 # Runtime v2 Design — Non-blocking Event Loop
 
 **Date:** 2026-04-05
-**Revision:** 4 (Round 2 fixes: log attribution, reply ownership, scope API, overflow buffer)
+**Revision:** 5 (Round 3 fixes: u32 request IDs, streaming body deferral, double-delivery, unwrap guard, unsettled promise)
 **Goal:** Refactor the runtime into a clean non-blocking architecture based on tokio, enabling streaming, WebSocket, and multi-isolate-per-thread.
 
 ## Why
@@ -17,7 +17,7 @@ The current runtime was built incrementally across multiple sessions:
 It works (88 tests, 337K req/s) but can't support:
 - Chunked HTTP responses (true SSE/AI streaming to client)
 - WebSocket
-- Streaming request bodies
+- Streaming request bodies (deferred to v3 — current apps use complete JSON bodies)
 - Multiple isolates per thread
 - Non-blocking I/O integration
 
@@ -83,16 +83,16 @@ pub(crate) struct RuntimeState {
     pub(crate) concurrent_event_tx: Option<tokio::sync::mpsc::Sender<ConcurrentEvent>>,
 
     // Per-request context (see "Per-request isolation" section)
-    pub(crate) active_requests: HashMap<u64, RequestContext>,
+    pub(crate) active_requests: HashMap<u32, RequestContext>,
 
     // Set before each JS dispatch, cleared after. Since JS is single-threaded,
     // exactly one request's code runs at a time. console_log reads this field.
-    pub(crate) executing_request_id: Option<u64>,
+    pub(crate) executing_request_id: Option<u32>,
 
     // Per-request log buffer (drained after each request completes).
     // Each entry is tagged with request_id for correct attribution in concurrent mode.
     // In per-request mode, all entries share the same request_id.
-    pub(crate) log_buffer: Vec<(u64, String)>,
+    pub(crate) log_buffer: Vec<(u32, String)>,
 
     // App state (shared across requests — intentionally)
     pub(crate) kv_store: HashMap<String, String>,
@@ -110,7 +110,7 @@ pub struct Runtime {
     state: SharedState,
 
     // Request tracking (for concurrent mode)
-    pending_requests: HashMap<u64, PendingRequest>,
+    pending_requests: HashMap<u32, PendingRequest>,
 
     // Stream forwarders: stream_id -> HTTP body sender (for DeferredProxy streaming)
     // <!-- Added in round 3: addressing phantom field self.stream_forwarders -->
@@ -214,7 +214,7 @@ request-scoped state.
 /// Per-request context — tracks request-scoped state (logs, timing, cancellation).
 /// Does NOT own the reply sender — that lives on PendingRequest (oneshot::Sender is !Clone).
 struct RequestContext {
-    id: u64,
+    id: u32,
     log_buffer: Vec<String>,
     cpu_start: Duration,
     wall_start: Instant,
@@ -341,7 +341,7 @@ pub(crate) enum LoopEvent {
     WsPing { ws_id: u32 },
 
     // Phase 3: Request lifecycle
-    RequestCancelled { request_id: u64 },
+    RequestCancelled { request_id: u32 },
 }
 
 pub(crate) enum WsMessageData {
@@ -489,12 +489,13 @@ fn handle_event(
             }
         }
         LoopEvent::StreamChunk { stream_id, data, done } => {
-            // First try to forward to HTTP body channel (DeferredProxy path)
             if stream_forwarders.contains_key(&stream_id) {
-                forward_stream_chunk(stream_forwarders, stream_id, data.clone(), done);
+                // DeferredProxy path — forward to HTTP body channel only
+                forward_stream_chunk(stream_forwarders, stream_id, data, done);
+            } else {
+                // JS ReadableStream path — push to V8
+                crate::streams::push_stream_chunk(scope, state, stream_id, &data, done);
             }
-            // Also push to JS ReadableStream (if reader is waiting)
-            crate::streams::push_stream_chunk(scope, state, stream_id, &data, done);
         }
         LoopEvent::WsMessage { ws_id, data } => {
             crate::ws::push_ws_message(scope, state, ws_id, data);
@@ -516,11 +517,11 @@ fn handle_event(
 fn check_settled_promises(
     scope: &mut v8::ContextScope<v8::HandleScope>,
     state: &SharedState,
-    pending_requests: &mut HashMap<u64, PendingRequest>,
+    pending_requests: &mut HashMap<u32, PendingRequest>,
 ) {
     // Iterate pending_requests, check if their promises have settled,
     // extract results and send via reply channel.
-    let settled: Vec<u64> = pending_requests.iter()
+    let settled: Vec<u32> = pending_requests.iter()
         .filter(|(_, req)| is_promise_settled(scope, &req.promise))
         .map(|(id, _)| *id)
         .collect();
@@ -537,10 +538,10 @@ fn check_settled_promises(
 fn check_cancelled_requests(
     scope: &mut v8::ContextScope<v8::HandleScope>,
     state: &SharedState,
-    pending_requests: &mut HashMap<u64, PendingRequest>,
+    pending_requests: &mut HashMap<u32, PendingRequest>,
 ) {
     let s = state.borrow();
-    let cancelled: Vec<u64> = s.active_requests.iter()
+    let cancelled: Vec<u32> = s.active_requests.iter()
         .filter(|(_, ctx)| ctx.cancel.is_cancelled())
         .map(|(id, _)| *id)
         .collect();
@@ -558,7 +559,7 @@ fn check_cancelled_requests(
 fn cleanup_request_state(
     scope: &mut v8::ContextScope<v8::HandleScope>,
     state: &SharedState,
-    request_id: u64,
+    request_id: u32,
 ) {
     let mut s = state.borrow_mut();
     s.active_requests.remove(&request_id);
@@ -656,6 +657,7 @@ pub enum EventLoopError {
     CpuExceeded,
     ChannelClosed,
     StreamError(String),
+    NoMoreWork,
 }
 
 /// Result of a completed request (blocking mode).
@@ -668,7 +670,7 @@ pub struct RequestResult {
 
 /// Tracks an in-flight request in concurrent mode.
 struct PendingRequest {
-    id: u64,
+    id: u32,
     promise: v8::Global<v8::Promise>,
     reply: oneshot::Sender<Result<RequestResult, String>>,
     cancel: tokio_util::sync::CancellationToken,
@@ -692,7 +694,13 @@ impl Runtime {
         loop {
             if self.is_settled(promise) { return Ok(()); }
             if Instant::now() > deadline { return Err(EventLoopError::WallTimeout); }
-            if !self.tick() { return Ok(()); }
+            if !self.tick() {
+                return if self.is_settled(promise) {
+                    Ok(())
+                } else {
+                    Err(EventLoopError::NoMoreWork)
+                };
+            }
 
             // Check immediately after tick — the tick may have settled the promise.
             // This avoids an unnecessary wait_for_events when the result is already ready.
@@ -790,7 +798,7 @@ impl Runtime {
     /// Returns immediately — result sent via reply channel.
     pub fn accept_request(
         &mut self,
-        id: u64,
+        id: u32,
         body: String,
         reply: oneshot::Sender<Result<RequestResult, String>>,
         cancel: tokio_util::sync::CancellationToken,
@@ -815,7 +823,13 @@ impl Runtime {
         let context = v8::Local::new(handle_scope, &self.v8.context);
         let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-        let dispatch_fn = v8::Local::new(scope, self.v8.http_dispatch_fn.as_ref().unwrap());
+        let dispatch_fn = match self.v8.http_dispatch_fn.as_ref() {
+            Some(f) => v8::Local::new(scope, f),
+            None => {
+                let _ = reply.send(Err("No HTTP handler registered".to_string()));
+                return;
+            }
+        };
         let undefined = v8::undefined(scope).into();
         let body_v8 = v8::String::new(scope, &body).unwrap().into();
         let id_v8 = v8::Number::new(scope, id as f64).into();
