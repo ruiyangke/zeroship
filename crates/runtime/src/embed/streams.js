@@ -100,8 +100,14 @@
   // ReadableStream
   // -------------------------------------------------------------------------
 
-  function ReadableStream(underlyingSource) {
-    this._id = __streams.create();
+  function ReadableStream(underlyingSource, options) {
+    // Accept a pre-existing stream_id via options._streamId (used by streaming fetch).
+    // When set, the Rust event loop owns the stream and pushes chunks directly.
+    if (options && options._streamId !== undefined) {
+      this._id = options._streamId;
+    } else {
+      this._id = __streams.create();
+    }
     this._locked = false;
     this._disturbed = false;
     this._controller = new ReadableStreamDefaultController(this._id);

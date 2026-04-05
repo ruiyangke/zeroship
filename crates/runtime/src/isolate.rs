@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use std::collections::HashMap;
 
-use crate::event_loop::{run_event_loop, run_event_loop_until_settled, EventLoopInner, OpResult, SharedState};
+use crate::event_loop::{run_event_loop, run_event_loop_until_settled, EventLoopInner, LoopEvent, SharedState};
 use crate::globals::setup_globals;
 use crate::modules::ModuleEntry;
 use crate::runtime::{thread_cpu_time, HttpResult, RequestResult, DISPATCH_JS, FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS};
@@ -29,9 +29,9 @@ pub struct Isolate {
     initialized: bool,
     modules: Vec<ModuleEntry>,
     state: SharedState,
-    /// Async op channel receiver — kept outside RefCell so recv_timeout never
+    /// Event channel receiver — kept outside RefCell so recv_timeout never
     /// holds a mutable borrow on shared state.
-    op_rx: std::sync::mpsc::Receiver<OpResult>,
+    event_rx: std::sync::mpsc::Receiver<LoopEvent>,
 }
 
 impl Isolate {
@@ -57,7 +57,7 @@ impl Isolate {
         }
         isolate.add_near_heap_limit_callback(near_heap_limit_callback, std::ptr::null_mut());
 
-        let (inner, op_rx) = EventLoopInner::with_env(env_vars);
+        let (inner, event_rx) = EventLoopInner::with_env(env_vars);
         let state: SharedState = Rc::new(RefCell::new(inner));
         state.borrow_mut().tokio_handle = tokio::runtime::Handle::try_current().ok();
         isolate.set_slot(state.clone());
@@ -77,7 +77,7 @@ impl Isolate {
             initialized: false,
             modules,
             state,
-            op_rx,
+            event_rx,
         }
     }
 
@@ -249,7 +249,7 @@ impl Isolate {
             s.pending_resolvers.clear();
             s.streams.clear();
         }
-        while self.op_rx.try_recv().is_ok() {} // drain outside the borrow
+        while self.event_rx.try_recv().is_ok() {} // drain outside the borrow
 
         let wall_start = std::time::Instant::now();
         let cpu_start = thread_cpu_time();
@@ -277,7 +277,7 @@ impl Isolate {
             Some(val) if val.is_promise() => {
                 let promise = v8::Local::<v8::Promise>::try_from(val).unwrap();
                 let global_promise = v8::Global::new(scope, promise);
-                run_event_loop_until_settled(scope, &self.state, &self.op_rx, &global_promise, Duration::from_secs(30));
+                run_event_loop_until_settled(scope, &self.state, &self.event_rx, &global_promise, Duration::from_secs(30));
                 let promise = v8::Local::new(scope, &global_promise);
                 match promise.state() {
                     v8::PromiseState::Fulfilled => promise.result(scope),
@@ -308,7 +308,7 @@ impl Isolate {
             s.pending_resolvers.clear();
             s.streams.clear();
         }
-        while self.op_rx.try_recv().is_ok() {} // drain outside the borrow
+        while self.event_rx.try_recv().is_ok() {} // drain outside the borrow
 
         let wall_start = Instant::now();
         let cpu_start = thread_cpu_time();
@@ -332,7 +332,7 @@ impl Isolate {
                 .map_err(|e| format!("Promise cast failed: {e}"))?;
             let global_promise = v8::Global::new(scope, promise);
 
-            run_event_loop_until_settled(scope, &self.state, &self.op_rx, &global_promise, Duration::from_secs(30));
+            run_event_loop_until_settled(scope, &self.state, &self.event_rx, &global_promise, Duration::from_secs(30));
 
             let promise = v8::Local::new(scope, &global_promise);
             match promise.state() {
@@ -358,7 +358,7 @@ impl Isolate {
             let json = json_v8.to_rust_string_lossy(scope);
 
             // Run any pending timers/ops (fire-and-forget side effects)
-            run_event_loop(scope, &self.state, &self.op_rx);
+            run_event_loop(scope, &self.state, &self.event_rx);
 
             json
         };

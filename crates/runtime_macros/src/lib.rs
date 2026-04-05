@@ -490,14 +490,14 @@ fn generate_async(input_fn: &ItemFn) -> syn::Result<TokenStream2> {
             let __promise = __resolver.get_promise(scope);
             let __global_resolver = v8::Global::new(scope, __resolver);
 
-            let (__op_id, __op_tx, __concurrent_tx, __tokio_handle) = {
+            let (__op_id, __event_tx, __concurrent_tx, __tokio_handle) = {
                 let mut __s = __state.borrow_mut();
                 let __id = __s.next_op_id;
                 __s.next_op_id += 1;
                 __s.pending_resolvers.insert(__id, __global_resolver);
                 (
                     __id,
-                    __s.op_tx.clone(),
+                    __s.event_tx.clone(),
                     __s.concurrent_event_tx.clone(),
                     __s.tokio_handle.clone(),
                 )
@@ -513,7 +513,7 @@ fn generate_async(input_fn: &ItemFn) -> syn::Result<TokenStream2> {
                         });
                     }
                     None => {
-                        let _ = __op_tx.send(crate::event_loop::OpResult {
+                        let _ = __event_tx.send(crate::event_loop::LoopEvent::OpCompleted {
                             id: __op_id,
                             value: __value,
                         });

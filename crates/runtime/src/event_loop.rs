@@ -41,22 +41,22 @@ pub(crate) enum KeyData {
 
 /// State shared between V8 callbacks and the event loop driver.
 ///
-/// The async op channel receiver (`op_rx`) is intentionally kept OUTSIDE this
+/// The event channel receiver (`event_rx`) is intentionally kept OUTSIDE this
 /// struct (and therefore outside the `Rc<RefCell<>>`) so that blocking
 /// `recv_timeout()` calls never hold a mutable borrow on shared state.
-/// Whoever drives the event loop owns `op_rx` separately.
+/// Whoever drives the event loop owns `event_rx` separately.
 #[allow(missing_debug_implementations)]
 pub(crate) struct EventLoopInner {
     pub(crate) timers: TimerState,
     /// Pending promise resolvers for async ops (fetch, DB, etc.)
     pub(crate) pending_resolvers: HashMap<u32, v8::Global<v8::PromiseResolver>>,
-    /// Async op channel sender (cloned into background tasks)
-    pub(crate) op_tx: mpsc::Sender<OpResult>,
+    /// Event channel sender (cloned into background tasks for async ops and streaming)
+    pub(crate) event_tx: mpsc::Sender<LoopEvent>,
     pub(crate) next_op_id: u32,
     /// Tokio runtime handle for spawning async ops (fetch, etc.)
     pub(crate) tokio_handle: Option<tokio::runtime::Handle>,
     /// Optional sender for ConcurrentIsolate event channel.
-    /// When set, async ops send Event::OpCompleted here instead of op_tx.
+    /// When set, async ops send Event::OpCompleted here instead of event_tx.
     pub(crate) concurrent_event_tx: Option<mpsc::Sender<crate::concurrent::Event>>,
     /// Per-isolate log buffer. Console output is appended here.
     pub(crate) log_buffer: Vec<String>,
@@ -72,10 +72,15 @@ pub(crate) struct EventLoopInner {
     pub(crate) next_stream_id: u32,
 }
 
-/// Result of an async op (e.g., fetch response, DB query result).
-pub(crate) struct OpResult {
-    pub(crate) id: u32,
-    pub(crate) value: String,
+/// Events flowing through the per-request event loop channel.
+///
+/// `OpCompleted` carries the result of an async op (fetch headers, DB query, etc.).
+/// `StreamChunk` carries a body chunk from a background I/O task (streaming fetch).
+pub(crate) enum LoopEvent {
+    /// Async op completed — resolve the pending promise.
+    OpCompleted { id: u32, value: String },
+    /// Stream chunk arrived from background I/O (e.g., streaming fetch body).
+    StreamChunk { stream_id: u32, data: Vec<u8>, done: bool },
 }
 
 // ---------------------------------------------------------------------------
@@ -93,12 +98,12 @@ pub(crate) struct StreamState {
 }
 
 impl EventLoopInner {
-    pub(crate) fn new() -> (Self, mpsc::Receiver<OpResult>) {
-        let (op_tx, op_rx) = mpsc::channel();
+    pub(crate) fn new() -> (Self, mpsc::Receiver<LoopEvent>) {
+        let (event_tx, event_rx) = mpsc::channel();
         (Self {
             timers: TimerState::new(),
             pending_resolvers: HashMap::new(),
-            op_tx,
+            event_tx,
             next_op_id: 1,
             tokio_handle: None,
             concurrent_event_tx: None,
@@ -109,10 +114,10 @@ impl EventLoopInner {
             next_key_id: 1,
             streams: HashMap::new(),
             next_stream_id: 1,
-        }, op_rx)
+        }, event_rx)
     }
 
-    pub(crate) fn with_env(env_vars: HashMap<String, String>) -> (Self, mpsc::Receiver<OpResult>) {
+    pub(crate) fn with_env(env_vars: HashMap<String, String>) -> (Self, mpsc::Receiver<LoopEvent>) {
         let (mut state, rx) = Self::new();
         state.env_vars = env_vars;
         (state, rx)
@@ -125,20 +130,24 @@ pub(crate) type SharedState = Rc<RefCell<EventLoopInner>>;
 // Event loop helpers
 // ---------------------------------------------------------------------------
 
-/// Drain completed async ops from the channel and resolve their promises.
+/// Drain completed events from the channel: resolve async ops and push stream chunks.
 ///
-/// `op_rx` is outside the `RefCell` — no borrow on shared state needed for recv.
-fn drain_async_ops(scope: &mut v8::PinScope, state: &SharedState, op_rx: &mpsc::Receiver<OpResult>) {
+/// `event_rx` is outside the `RefCell` — no borrow on shared state needed for recv.
+fn drain_events(scope: &mut v8::PinScope, state: &SharedState, event_rx: &mpsc::Receiver<LoopEvent>) {
     loop {
-        match op_rx.try_recv() {
-            Ok(op_result) => {
-                let resolver = state.borrow_mut().pending_resolvers.remove(&op_result.id);
+        match event_rx.try_recv() {
+            Ok(LoopEvent::OpCompleted { id, value }) => {
+                let resolver = state.borrow_mut().pending_resolvers.remove(&id);
                 if let Some(resolver) = resolver {
                     let r = v8::Local::new(scope, &resolver);
-                    let val = v8::String::new(scope, &op_result.value).unwrap();
+                    let val = v8::String::new(scope, &value).unwrap();
                     r.resolve(scope, val.into());
                     scope.perform_microtask_checkpoint();
                 }
+            }
+            Ok(LoopEvent::StreamChunk { stream_id, data, done }) => {
+                crate::streams::push_stream_chunk(scope, state, stream_id, &data, done);
+                scope.perform_microtask_checkpoint();
             }
             Err(_) => break,
         }
@@ -172,21 +181,21 @@ fn compute_wait_timeout(state: &SharedState) -> Option<Duration> {
 // Event loop drivers
 // ---------------------------------------------------------------------------
 
-/// Drive the event loop until no more pending work (timers, async ops).
+/// Drive the event loop until no more pending work (timers, async ops, streams).
 /// Used for fire-and-forget side effects after a sync response.
 pub(crate) fn run_event_loop(
     scope: &mut v8::PinScope,
     state: &SharedState,
-    op_rx: &mpsc::Receiver<OpResult>,
+    event_rx: &mpsc::Receiver<LoopEvent>,
 ) {
     loop {
         scope.perform_microtask_checkpoint();
         fire_ready_timers(scope, state);
-        drain_async_ops(scope, state, op_rx);
+        drain_events(scope, state, event_rx);
 
         {
             let s = state.borrow();
-            let has_pending_streams = s.streams.values().any(|st| st.pending_read.is_some());
+            let has_pending_streams = s.streams.values().any(|st| st.pending_read.is_some() && !st.closed);
             if s.timers.callbacks.is_empty() && s.pending_resolvers.is_empty() && !has_pending_streams {
                 break;
             }
@@ -201,16 +210,27 @@ pub(crate) fn run_event_loop(
             continue;
         }
 
-        let has_pending_ops = !state.borrow().pending_resolvers.is_empty();
-        if has_pending_ops {
-            if let Ok(op_result) = op_rx.recv_timeout(timeout) {
-                let resolver = state.borrow_mut().pending_resolvers.remove(&op_result.id);
-                if let Some(resolver) = resolver {
-                    let r = v8::Local::new(scope, &resolver);
-                    let val = v8::String::new(scope, &op_result.value).unwrap();
-                    r.resolve(scope, val.into());
+        let has_pending_work = {
+            let s = state.borrow();
+            !s.pending_resolvers.is_empty()
+                || s.streams.values().any(|st| st.pending_read.is_some() && !st.closed)
+        };
+        if has_pending_work {
+            match event_rx.recv_timeout(timeout) {
+                Ok(LoopEvent::OpCompleted { id, value }) => {
+                    let resolver = state.borrow_mut().pending_resolvers.remove(&id);
+                    if let Some(resolver) = resolver {
+                        let r = v8::Local::new(scope, &resolver);
+                        let val = v8::String::new(scope, &value).unwrap();
+                        r.resolve(scope, val.into());
+                        scope.perform_microtask_checkpoint();
+                    }
+                }
+                Ok(LoopEvent::StreamChunk { stream_id, data, done }) => {
+                    crate::streams::push_stream_chunk(scope, state, stream_id, &data, done);
                     scope.perform_microtask_checkpoint();
                 }
+                Err(_) => {}
             }
         } else {
             std::thread::sleep(timeout);
@@ -223,7 +243,7 @@ pub(crate) fn run_event_loop(
 pub(crate) fn run_event_loop_until_settled(
     scope: &mut v8::PinScope,
     state: &SharedState,
-    op_rx: &mpsc::Receiver<OpResult>,
+    event_rx: &mpsc::Receiver<LoopEvent>,
     promise: &v8::Global<v8::Promise>,
     wall_timeout: Duration,
 ) {
@@ -266,7 +286,7 @@ pub(crate) fn run_event_loop_until_settled(
             }
         }
 
-        drain_async_ops(scope, state, op_rx);
+        drain_events(scope, state, event_rx);
 
         // Check after ops
         {
@@ -280,7 +300,7 @@ pub(crate) fn run_event_loop_until_settled(
         // Check if done (no work left)
         {
             let s = state.borrow();
-            let has_pending_streams = s.streams.values().any(|st| st.pending_read.is_some());
+            let has_pending_streams = s.streams.values().any(|st| st.pending_read.is_some() && !st.closed);
             if s.timers.callbacks.is_empty() && s.pending_resolvers.is_empty() && !has_pending_streams {
                 drop(s);
                 scope.perform_microtask_checkpoint();
@@ -304,16 +324,27 @@ pub(crate) fn run_event_loop_until_settled(
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         let timeout = timeout.min(remaining);
 
-        let has_pending_ops = !state.borrow().pending_resolvers.is_empty();
-        if has_pending_ops {
-            if let Ok(op_result) = op_rx.recv_timeout(timeout) {
-                let resolver = state.borrow_mut().pending_resolvers.remove(&op_result.id);
-                if let Some(resolver) = resolver {
-                    let r = v8::Local::new(scope, &resolver);
-                    let val = v8::String::new(scope, &op_result.value).unwrap();
-                    r.resolve(scope, val.into());
+        let has_pending_work = {
+            let s = state.borrow();
+            !s.pending_resolvers.is_empty()
+                || s.streams.values().any(|st| st.pending_read.is_some() && !st.closed)
+        };
+        if has_pending_work {
+            match event_rx.recv_timeout(timeout) {
+                Ok(LoopEvent::OpCompleted { id, value }) => {
+                    let resolver = state.borrow_mut().pending_resolvers.remove(&id);
+                    if let Some(resolver) = resolver {
+                        let r = v8::Local::new(scope, &resolver);
+                        let val = v8::String::new(scope, &value).unwrap();
+                        r.resolve(scope, val.into());
+                        scope.perform_microtask_checkpoint();
+                    }
+                }
+                Ok(LoopEvent::StreamChunk { stream_id, data, done }) => {
+                    crate::streams::push_stream_chunk(scope, state, stream_id, &data, done);
                     scope.perform_microtask_checkpoint();
                 }
+                Err(_) => {}
             }
         } else {
             std::thread::sleep(timeout);

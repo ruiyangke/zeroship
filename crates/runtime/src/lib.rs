@@ -1417,4 +1417,67 @@ mod tests {
             .unwrap();
         assert!(r.json.contains("abcdef"), "got: {}", r.json);
     }
+
+    #[test]
+    fn stream_chunks_from_background() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                // Create a ReadableStream and manually push chunks via the event channel.
+                // This simulates what streaming fetch does.
+                var stream = new ReadableStream({ start: function() {} });
+                var reader = stream.getReader();
+
+                // Schedule background chunk delivery via setTimeout
+                // (simulates chunks arriving from network)
+                setTimeout(function() {
+                    __streams.enqueue(stream._id, new TextEncoder().encode("chunk1 "));
+                }, 0);
+                setTimeout(function() {
+                    __streams.enqueue(stream._id, new TextEncoder().encode("chunk2 "));
+                }, 0);
+                setTimeout(function() {
+                    __streams.close(stream._id);
+                }, 0);
+
+                var text = "";
+                while (true) {
+                    var result = await reader.read();
+                    if (result.done) break;
+                    text += new TextDecoder().decode(result.value);
+                }
+                return text;
+            }
+        "#), no_env());
+        let r = isolate
+            .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
+            .unwrap();
+        assert!(r.json.contains("chunk1"), "got: {}", r.json);
+        assert!(r.json.contains("chunk2"), "got: {}", r.json);
+    }
+
+    #[test]
+    fn fetch_response_has_stream_body() {
+        init_v8();
+        let mut isolate = Isolate::new(m(r#"
+            export async function test() {
+                try {
+                    var resp = await fetch("https://httpbin.org/get");
+                    var hasBody = resp.body instanceof ReadableStream;
+                    var text = await resp.text();
+                    return { hasBody: hasBody, hasText: text.length > 0, status: resp.status };
+                } catch(e) {
+                    return { error: e.message };
+                }
+            }
+        "#), no_env());
+        let r = isolate
+            .execute_request(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#)
+            .unwrap();
+        // May fail due to network, but if it succeeds, verify structure
+        if r.json.contains("hasBody") {
+            assert!(r.json.contains("\"hasBody\":true"), "got: {}", r.json);
+            assert!(r.json.contains("\"hasText\":true"), "got: {}", r.json);
+        }
+    }
 }

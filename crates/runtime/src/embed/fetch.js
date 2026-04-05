@@ -605,7 +605,20 @@
         response.url = parsed.url || url;
         response.redirected = !!parsed.redirected;
         response.ok = parsed.status >= 200 && parsed.status < 300;
-        initBody(response, parsed.body || "");
+
+        if (parsed.stream_id !== undefined) {
+          // Streaming body — create ReadableStream backed by the pre-allocated stream_id.
+          // The Rust event loop will push chunks via LoopEvent::StreamChunk.
+          response.body = new ReadableStream(null, { _streamId: parsed.stream_id });
+          response._bodyText = null;
+          response._bodyBytes = null;
+          response._bodyUsed = false;
+          response._isStreamBody = true;
+        } else {
+          // Full body (concurrent model or legacy)
+          response._isStreamBody = false;
+          initBody(response, parsed.body || "");
+        }
 
         resolve(response);
       }, function(err) {

@@ -229,3 +229,58 @@ pub(crate) fn stream_error_callback(
         resolver.reject(scope, err);
     }
 }
+
+// ---------------------------------------------------------------------------
+// push_stream_chunk — called from event loop to deliver background I/O chunks
+// ---------------------------------------------------------------------------
+
+/// Push a chunk from the event loop channel into a stream's buffer or pending reader.
+///
+/// When `done` is true, the stream is closed. If `data` is non-empty AND `done`
+/// is true, the data is delivered first, then the stream is closed.
+///
+/// This is the bridge between background tokio tasks (streaming fetch) and the
+/// V8 ReadableStream infrastructure.
+pub(crate) fn push_stream_chunk(
+    scope: &mut v8::PinScope,
+    state: &SharedState,
+    stream_id: u32,
+    data: &[u8],
+    done: bool,
+) {
+    // Deliver data chunk (if non-empty)
+    if !data.is_empty() {
+        let pending = {
+            let mut s = state.borrow_mut();
+            s.streams.get_mut(&stream_id).and_then(|stream| stream.pending_read.take())
+        };
+
+        if let Some(resolver_global) = pending {
+            let resolver = v8::Local::new(scope, &resolver_global);
+            resolve_with_chunk(scope, resolver, data);
+        } else {
+            let mut s = state.borrow_mut();
+            if let Some(stream) = s.streams.get_mut(&stream_id) {
+                stream.buffer.push(data.to_vec());
+            }
+        }
+    }
+
+    // Close stream if done
+    if done {
+        let pending = {
+            let mut s = state.borrow_mut();
+            if let Some(stream) = s.streams.get_mut(&stream_id) {
+                stream.closed = true;
+                stream.pending_read.take()
+            } else {
+                None
+            }
+        };
+
+        if let Some(resolver_global) = pending {
+            let resolver = v8::Local::new(scope, &resolver_global);
+            resolve_with_done(scope, resolver);
+        }
+    }
+}
