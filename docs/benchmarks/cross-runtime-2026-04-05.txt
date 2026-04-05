@@ -144,3 +144,26 @@ Refactoring applied:
   - Shared load_polyfills_and_modules helper
   - concurrent.rs reuses event loop helpers
   Zero behavior change, zero performance regression.
+
+=========================================================
+  Run 2 (after event loop optimization + buffered fetch path)
+=========================================================
+
+Scenario                          concurrent(1)  conc-pool(16)  Node.js v22    vs Node (best)
+1. ping/pong                         172,700        106,404       10,874       15.9x
+2. fib(10)                            51,909         57,637       13,847        4.2x (pool)
+3. fib(35) [5s]                            7             44            6        7.9x (pool)
+4. setTimeout(0)                      68,904         74,483       15,010        5.0x (pool)
+5. Promise chain                     139,623        103,573       13,960       10.0x
+7. fetch → local echo                38,667         49,517        3,182       15.6x (pool)
+9. randomUUID                         72,858         30,150       12,334        5.9x
+11. SHA-256                           86,881         29,818       12,392        7.0x
+12. HMAC sign                         85,515         25,970       11,312        7.6x
+15. ECDSA sign                        16,881         26,684        9,563        2.8x (pool)
+
+Note: significant system load variance between runs.
+Stable metrics (CPU-bound, less affected by system noise):
+  SHA-256: 87K (consistent across all runs)
+  HMAC sign: 86K (consistent)
+  ping: 157K-173K range (±10%)
+  fetch local: 36K-52K range (±30%, most affected by system load)
