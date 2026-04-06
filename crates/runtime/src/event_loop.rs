@@ -7,8 +7,8 @@
 //! 4. If no work remains → done
 //! 5. Register waker → return Poll::Pending (yield to executor)
 //!
-//! The blocking `run_event_loop` wrapper drives this via `poll_fn` + a
-//! lightweight tokio current-thread runtime, so existing callers don't change.
+//! The blocking `run_event_loop` wrapper drives this via a manual `ParkWaker`
+//! loop with `std::thread::park_timeout`, so existing callers don't change.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -232,8 +232,14 @@ pub(crate) fn poll_event_loop(
 
 /// Drive the event loop to completion (blocking).
 ///
-/// Internally uses `poll_event_loop` via a lightweight tokio current-thread
-/// runtime, so the event loop is non-blocking underneath.
+/// Internally drives `poll_event_loop` with a manual `ParkWaker`. The thread
+/// parks via `std::thread::park_timeout` and is woken by:
+/// 1. `AtomicWaker` — background tasks (fetch, etc.) call `waker.wake()`
+///    which unparks this thread via `ParkWaker`.
+/// 2. Timeout — `park_timeout` returns when the next timer should fire.
+/// 3. Spurious wakes — harmless, just re-polls.
+///
+/// No tokio runtime needed. No `recv_timeout`.
 ///
 /// - `promise: Some(p)` → stop when promise settles (or wall-time exceeded)
 /// - `promise: None` → drive to exhaustion
@@ -244,43 +250,37 @@ pub(crate) fn run_event_loop(
     promise: Option<&v8::Global<v8::Promise>>,
     wall_timeout: Duration,
 ) {
+    use std::sync::Arc;
+    use std::task::{Context, Wake};
+
+    // Thread-parker waker: background tasks unpark this thread
+    // when they send events via the channel + wake the AtomicWaker.
+    struct ParkWaker(std::thread::Thread);
+    impl Wake for ParkWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    let parker = Arc::new(ParkWaker(std::thread::current()));
+    let waker = std::task::Waker::from(parker);
+    let mut cx = Context::from_waker(&waker);
     let deadline = Instant::now() + wall_timeout;
     let tracking_promise = promise.is_some();
 
-    // We can't use poll_fn here because scope is !Send and can't cross await.
-    // Instead, use a manual poll loop that alternates between tick and wait.
-    // This is equivalent to what poll_fn + block_on would do, but without
-    // requiring the scope to be alive across await points.
     loop {
-        // Check promise
-        if let Some(p) = promise {
-            if is_settled(scope, p) { return; }
+        // Non-blocking poll: drain events, fire timers, flush microtasks
+        match poll_event_loop(scope, state, event_rx, &mut cx, promise) {
+            Poll::Ready(()) => return,
+            Poll::Pending => {}
         }
 
-        // Tick: microtasks, timers, drain events
-        scope.perform_microtask_checkpoint();
-        fire_ready_timers(scope, state);
-        drain_events(scope, state, event_rx);
-
-        // Re-check promise
-        if let Some(p) = promise {
-            if is_settled(scope, p) { return; }
-        }
-
-        // Check if done
-        if !has_pending_work(state) {
-            scope.perform_microtask_checkpoint();
-            return;
-        }
-
-        // Check wall-time
+        // Wall-time check
         if tracking_promise && Instant::now() > deadline {
             return;
         }
 
-        // Wait — use recv_timeout for blocking mode
-        // The waker isn't used here (blocking mode doesn't have an executor).
-        // recv_timeout wakes on: event arrival OR timeout.
+        // Compute how long to park
         let timeout = match compute_wait_timeout(state) {
             Some(d) => {
                 if tracking_promise {
@@ -289,18 +289,15 @@ pub(crate) fn run_event_loop(
                     d
                 }
             }
-            None => {
-                scope.perform_microtask_checkpoint();
-                return;
-            }
+            None => return, // no more work possible
         };
 
         if timeout.is_zero() {
-            continue;
+            continue; // timer ready, re-poll immediately
         }
 
-        if let Ok(event) = event_rx.recv_timeout(timeout) {
-            handle_one_event(scope, state, event);
-        }
+        // Park thread — woken by AtomicWaker (ParkWaker::wake unparks)
+        // or timeout (next timer fire).
+        std::thread::park_timeout(timeout);
     }
 }
