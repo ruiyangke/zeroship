@@ -37,7 +37,7 @@ pub(crate) struct EventLoopInner {
     pub(crate) event_tx: mpsc::Sender<LoopEvent>,
     pub(crate) next_op_id: u32,
     pub(crate) tokio_handle: Option<tokio::runtime::Handle>,
-    pub(crate) concurrent_event_tx: Option<mpsc::Sender<crate::concurrent::Event>>,
+    pub(crate) concurrent_event_tx: Option<crate::concurrent::EventSender>,
     pub(crate) log_buffer: Vec<String>,
     pub(crate) kv_store: HashMap<String, String>,
     pub(crate) env_vars: HashMap<String, String>,

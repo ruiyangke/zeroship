@@ -44,25 +44,33 @@ fn server_modules() -> Vec<ModuleEntry> {
 fn spawn_and_warmup(
     name: &str,
     cpu_limit: Option<std::time::Duration>,
-) -> std::sync::mpsc::Sender<Event> {
+) -> appbase_runtime::concurrent::EventSender {
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let event_tx_clone = event_tx.clone();
     let modules = server_modules();
     let thread_name = name.to_string();
     let tokio_handle = tokio::runtime::Handle::current();
 
+    // Shared thread handle — the isolate publishes its thread in run_event_loop,
+    // and every EventSender.send() unparks it for zero-latency wake.
+    let v8_thread = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let v8_thread_inner = v8_thread.clone();
+
     std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
-            let mut isolate = ConcurrentIsolate::new(
-                modules, event_rx, event_tx_clone, Some(tokio_handle), cpu_limit, std::collections::HashMap::new(),
+            let mut isolate = ConcurrentIsolate::new_with_thread_handle(
+                modules, event_rx, event_tx_clone, Some(tokio_handle), cpu_limit,
+                std::collections::HashMap::new(), v8_thread_inner,
             );
             isolate.run_event_loop();
         })
         .unwrap();
 
+    let sender = appbase_runtime::concurrent::EventSender::new(event_tx, v8_thread);
+
     // Warmup (on a separate thread to avoid blocking tokio runtime)
-    let warmup_tx = event_tx.clone();
+    let warmup_tx = sender.clone();
     std::thread::spawn(move || {
         let (tx, rx) = tokio::sync::oneshot::channel();
         warmup_tx
@@ -77,7 +85,7 @@ fn spawn_and_warmup(
     .join()
     .unwrap();
 
-    event_tx
+    sender
 }
 
 // ===========================================================================
@@ -85,7 +93,7 @@ fn spawn_and_warmup(
 // ===========================================================================
 
 struct Dispatcher {
-    senders: Vec<std::sync::mpsc::Sender<Event>>,
+    senders: Vec<appbase_runtime::concurrent::EventSender>,
     next: AtomicU64,
     next_id: AtomicU64,
 }

@@ -234,9 +234,11 @@ fn main() {
 
     let next_id = AtomicU64::new(1);
 
+    use appbase_runtime::concurrent::EventSender;
+
     // Helper: send N requests to a ConcurrentIsolate and collect results
     fn bench_concurrent(
-        event_tx: &std::sync::mpsc::Sender<Event>,
+        event_tx: &EventSender,
         next_id: &AtomicU64,
         body: &str,
         n: u64,
@@ -258,12 +260,18 @@ fn main() {
     }
 
     // Start a concurrent isolate
-    let (event_tx, event_rx) = std::sync::mpsc::channel();
-    let event_tx_clone = event_tx.clone();
+    let (event_tx_raw, event_rx) = std::sync::mpsc::channel();
+    let event_tx_raw_clone = event_tx_raw.clone();
+    let v8_thread = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let v8_thread_inner = v8_thread.clone();
     std::thread::spawn(move || {
-        let mut iso = ConcurrentIsolate::new(server_modules(), event_rx, event_tx_clone, None, None, std::collections::HashMap::new());
+        let mut iso = ConcurrentIsolate::new_with_thread_handle(
+            server_modules(), event_rx, event_tx_raw_clone, None, None,
+            std::collections::HashMap::new(), v8_thread_inner,
+        );
         iso.run_event_loop();
     });
+    let event_tx = EventSender::new(event_tx_raw, v8_thread);
     // Warmup
     {
         let id = next_id.fetch_add(1, Ordering::Relaxed);

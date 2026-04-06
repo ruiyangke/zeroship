@@ -9,13 +9,14 @@
 //!   2. TIMERS — fire ready timer callbacks (one at a time, checkpoint after each)
 //!   3. RESOLVE — resolve completed ops ONE AT A TIME, checkpoint after each
 //!   4. CHECK — see if any pending promises settled
-//!   5. WAIT — recv_timeout on event channel (zero CPU while idle)
+//!   5. WAIT — park_timeout (zero CPU while idle, woken by EventSender)
 
 #![allow(unsafe_code)]
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::event_loop::{self, EventLoopInner, SharedState};
@@ -47,6 +48,42 @@ pub enum Event {
 // All constituent types (u64, String, tokio::sync::oneshot::Sender) are Send,
 // so Event auto-derives Send — no unsafe impl needed.
 
+// ---------------------------------------------------------------------------
+// EventSender — wraps mpsc::Sender<Event> + unparks the V8 thread after send
+// ---------------------------------------------------------------------------
+
+/// Sender that automatically unparks the V8 worker thread after every send.
+///
+/// The V8 thread uses `park_timeout` instead of `recv_timeout`. Without an
+/// explicit unpark, new events would only be noticed at the next timeout
+/// expiry. `EventSender` ensures zero-latency wake on every send.
+#[derive(Clone)]
+pub struct EventSender {
+    tx: std::sync::mpsc::Sender<Event>,
+    v8_thread: Arc<Mutex<Option<std::thread::Thread>>>,
+}
+
+impl EventSender {
+    /// Create a new `EventSender` wrapping a bare `mpsc::Sender` and a shared
+    /// thread handle. The handle may be `None` initially — the V8 thread
+    /// publishes itself via `run_event_loop`.
+    pub fn new(
+        tx: std::sync::mpsc::Sender<Event>,
+        v8_thread: Arc<Mutex<Option<std::thread::Thread>>>,
+    ) -> Self {
+        Self { tx, v8_thread }
+    }
+
+    /// Send an event and unpark the V8 thread so it processes immediately.
+    pub fn send(&self, event: Event) -> Result<(), std::sync::mpsc::SendError<Event>> {
+        let result = self.tx.send(event);
+        if let Some(t) = self.v8_thread.lock().unwrap().as_ref() {
+            t.unpark();
+        }
+        result
+    }
+}
+
 /// Tracking info for an in-flight request whose dispatch returned a Promise.
 struct PendingRequest {
     #[allow(dead_code)]
@@ -71,7 +108,7 @@ struct LoopState {
 
     event_rx: std::sync::mpsc::Receiver<Event>,
     #[allow(dead_code)]
-    event_tx: std::sync::mpsc::Sender<Event>,
+    event_tx: EventSender,
 
     buffered_events: VecDeque<Event>,
 
@@ -321,6 +358,7 @@ impl LoopState {
 pub struct ConcurrentIsolate {
     isolate: v8::OwnedIsolate,
     ls: LoopState,
+    v8_thread: Arc<Mutex<Option<std::thread::Thread>>>,
     #[cfg(target_os = "linux")]
     cpu_timer: Option<crate::cpu_timer::CpuTimer>,
     #[cfg(target_os = "linux")]
@@ -343,6 +381,21 @@ impl ConcurrentIsolate {
         cpu_limit: Option<Duration>,
         env_vars: std::collections::HashMap<String, String>,
     ) -> Self {
+        let v8_thread = Arc::new(Mutex::new(None));
+        Self::new_with_thread_handle(modules, event_rx, event_tx, tokio_handle, cpu_limit, env_vars, v8_thread)
+    }
+
+    /// Like `new`, but accepts a pre-created thread-handle Arc so callers
+    /// (e.g., `spawn_concurrent_worker`) can share it with the returned `EventSender`.
+    pub fn new_with_thread_handle(
+        modules: Vec<ModuleEntry>,
+        event_rx: std::sync::mpsc::Receiver<Event>,
+        event_tx: std::sync::mpsc::Sender<Event>,
+        tokio_handle: Option<tokio::runtime::Handle>,
+        cpu_limit: Option<Duration>,
+        env_vars: std::collections::HashMap<String, String>,
+        v8_thread: Arc<Mutex<Option<std::thread::Thread>>>,
+    ) -> Self {
         init_v8();
 
         let params = v8::CreateParams::default().heap_limits(0, 128 * 1024 * 1024);
@@ -362,10 +415,16 @@ impl ConcurrentIsolate {
         }
         isolate.add_near_heap_limit_callback(near_heap_limit_callback, std::ptr::null_mut());
 
+        // Wrap the bare mpsc sender so every send() also unparks the V8 thread.
+        let event_sender = EventSender {
+            tx: event_tx,
+            v8_thread: v8_thread.clone(),
+        };
+
         let (inner, _op_rx) = EventLoopInner::with_env(env_vars);
         let el_state: SharedState = Rc::new(RefCell::new(inner));
         el_state.borrow_mut().tokio_handle = tokio_handle;
-        el_state.borrow_mut().concurrent_event_tx = Some(event_tx.clone());
+        el_state.borrow_mut().concurrent_event_tx = Some(event_sender.clone());
         isolate.set_slot(el_state.clone());
 
         let context = {
@@ -383,13 +442,14 @@ impl ConcurrentIsolate {
                 pending_requests: HashMap::new(),
                 completed_ops: Vec::new(),
                 event_rx,
-                event_tx,
+                event_tx: event_sender,
                 buffered_events: VecDeque::new(),
                 modules,
                 initialized: false,
                 shutdown: false,
                 cpu_limit,
             },
+            v8_thread,
             #[cfg(target_os = "linux")]
             cpu_timer: None,
             #[cfg(target_os = "linux")]
@@ -398,7 +458,7 @@ impl ConcurrentIsolate {
     }
 
     /// Get a clone of the event sender (for passing to async op tasks).
-    pub fn event_sender(&self) -> std::sync::mpsc::Sender<Event> {
+    pub fn event_sender(&self) -> EventSender {
         self.ls.event_tx.clone()
     }
 
@@ -510,7 +570,15 @@ impl ConcurrentIsolate {
     }
 
     /// Run the event loop. Blocks the current thread.
+    ///
+    /// Uses `park_timeout` instead of `recv_timeout`. The V8 thread is woken by:
+    /// 1. `EventSender.send()` — unparks after every send (new requests, op completions)
+    /// 2. Timeout — `park_timeout` returns when the next timer should fire
+    /// 3. Spurious wakes — harmless, just re-polls
     pub fn run_event_loop(&mut self) {
+        // Publish our thread handle so EventSenders can unpark us.
+        *self.v8_thread.lock().unwrap() = Some(std::thread::current());
+
         self.ensure_initialized();
 
         loop {
@@ -538,28 +606,34 @@ impl ConcurrentIsolate {
                 continue;
             }
 
-            match self.ls.event_rx.recv_timeout(timeout) {
-                Ok(event) => {
-                    self.ls.buffered_events.push_back(event);
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    while self.tick() {
-                        let timeout = self.ls.compute_wait_timeout();
-                        if timeout.is_zero() {
-                            continue;
-                        }
-                        std::thread::sleep(timeout.min(Duration::from_millis(100)));
-                    }
+            // Park the thread — woken by EventSender.send() → thread.unpark()
+            // or by timeout when the next timer should fire.
+            std::thread::park_timeout(timeout);
 
-                    for (_id, req) in self.ls.pending_requests.drain() {
-                        if let Some(reply) = req.reply {
-                            let _ = reply.send(Err(
-                                "Event loop shut down with pending request".to_string(),
-                            ));
+            // After wake: drain any events that arrived while parked.
+            loop {
+                match self.ls.event_rx.try_recv() {
+                    Ok(event) => self.ls.buffered_events.push_back(event),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        // Channel closed — drain remaining work then exit.
+                        while self.tick() {
+                            let timeout = self.ls.compute_wait_timeout();
+                            if timeout.is_zero() {
+                                continue;
+                            }
+                            std::thread::sleep(timeout.min(Duration::from_millis(100)));
                         }
+
+                        for (_id, req) in self.ls.pending_requests.drain() {
+                            if let Some(reply) = req.reply {
+                                let _ = reply.send(Err(
+                                    "Event loop shut down with pending request".to_string(),
+                                ));
+                            }
+                        }
+                        return;
                     }
-                    break;
                 }
             }
         }
@@ -568,6 +642,9 @@ impl ConcurrentIsolate {
     /// Run the event loop until all pending requests are resolved or the channel
     /// disconnects. Useful for testing.
     pub fn run_until_idle(&mut self) {
+        // Publish our thread handle so EventSenders can unpark us.
+        *self.v8_thread.lock().unwrap() = Some(std::thread::current());
+
         self.ensure_initialized();
 
         loop {
@@ -587,14 +664,18 @@ impl ConcurrentIsolate {
             let timeout = self.ls.compute_wait_timeout();
             let timeout = timeout.min(Duration::from_millis(100));
 
-            match self.ls.event_rx.recv_timeout(timeout) {
-                Ok(event) => {
-                    self.ls.buffered_events.push_back(event);
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    self.tick();
-                    break;
+            // Park instead of recv_timeout — woken by EventSender.send() unpark.
+            std::thread::park_timeout(timeout);
+
+            // Drain events after wake.
+            loop {
+                match self.ls.event_rx.try_recv() {
+                    Ok(event) => self.ls.buffered_events.push_back(event),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.tick();
+                        return;
+                    }
                 }
             }
         }
@@ -606,26 +687,38 @@ impl ConcurrentIsolate {
 // ---------------------------------------------------------------------------
 
 /// Spawn a worker thread running a `ConcurrentIsolate` event loop.
-/// Returns the event sender for dispatching requests to this worker.
+/// Returns an `EventSender` for dispatching requests to this worker.
+/// The sender automatically unparks the V8 thread after every send.
 pub fn spawn_concurrent_worker(
     modules: Vec<ModuleEntry>,
     tokio_handle: Option<tokio::runtime::Handle>,
     cpu_limit: Option<Duration>,
     env_vars: std::collections::HashMap<String, String>,
-) -> std::sync::mpsc::Sender<Event> {
+) -> EventSender {
     let (event_tx, event_rx) = std::sync::mpsc::channel();
-    let event_tx_clone = event_tx.clone();
+    let event_tx_for_caller = event_tx.clone();
+
+    // Create a shared v8_thread handle. The ConcurrentIsolate will publish
+    // the actual thread handle once run_event_loop starts. All EventSenders
+    // (returned here AND cloned inside fetch tasks) share this Arc.
+    let v8_thread: Arc<Mutex<Option<std::thread::Thread>>> = Arc::new(Mutex::new(None));
+    let v8_thread_inner = v8_thread.clone();
 
     std::thread::Builder::new()
         .name("v8-concurrent-worker".to_string())
         .spawn(move || {
-            let mut isolate =
-                ConcurrentIsolate::new(modules, event_rx, event_tx_clone, tokio_handle, cpu_limit, env_vars);
+            let mut isolate = ConcurrentIsolate::new_with_thread_handle(
+                modules, event_rx, event_tx, tokio_handle, cpu_limit, env_vars,
+                v8_thread_inner,
+            );
             isolate.run_event_loop();
         })
         .expect("Failed to spawn V8 worker thread");
 
-    event_tx
+    EventSender {
+        tx: event_tx_for_caller,
+        v8_thread,
+    }
 }
 
 // ---------------------------------------------------------------------------

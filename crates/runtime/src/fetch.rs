@@ -208,7 +208,7 @@ async fn do_fetch_streaming(
     stream_id: u32,
     event_tx: &std::sync::mpsc::Sender<LoopEvent>,
     waker: &futures::task::AtomicWaker,
-    concurrent_tx: Option<&std::sync::mpsc::Sender<crate::concurrent::Event>>,
+    concurrent_tx: Option<&crate::concurrent::EventSender>,
 ) -> Result<(), String> {
     // SSRF protection: validate URL before making any request
     if let Err(msg) = validate_url(url) {

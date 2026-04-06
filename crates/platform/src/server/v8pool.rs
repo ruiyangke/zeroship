@@ -16,7 +16,7 @@ use std::time::Duration;
 /// Per-app isolate entry in the pool.
 struct IsolateEntry {
     /// Channel to send requests to the isolate's worker thread.
-    sender: std::sync::mpsc::Sender<Event>,
+    sender: appbase_runtime::concurrent::EventSender,
     /// Last time a request was dispatched (epoch millis, atomic for concurrent updates).
     last_used_ms: AtomicU64,
     /// Total requests dispatched.
@@ -172,17 +172,26 @@ impl V8Pool {
         let cpu_limit = self.config.cpu_limit();
         let thread_name = format!("v8-{app_id}");
 
+        // Shared thread handle for park/unpark waking.
+        let v8_thread = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let v8_thread_inner = v8_thread.clone();
+
         std::thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
                 let mut isolate =
-                    ConcurrentIsolate::new(modules, event_rx, event_tx_clone, Some(handle), cpu_limit, std::collections::HashMap::new());
+                    ConcurrentIsolate::new_with_thread_handle(
+                        modules, event_rx, event_tx_clone, Some(handle), cpu_limit,
+                        std::collections::HashMap::new(), v8_thread_inner,
+                    );
                 isolate.run_event_loop();
             })
             .map_err(|e| format!("Failed to spawn V8 thread: {e}"))?;
 
+        let sender = appbase_runtime::concurrent::EventSender::new(event_tx, v8_thread);
+
         // Warmup
-        let warmup_tx = event_tx.clone();
+        let warmup_tx = sender.clone();
         std::thread::spawn(move || {
             let (tx, rx) = tokio::sync::oneshot::channel();
             let _ = warmup_tx.send(Event::NewRequest {
@@ -196,7 +205,7 @@ impl V8Pool {
         .map_err(|_| "Warmup thread panicked".to_string())?;
 
         Ok(IsolateEntry {
-            sender: event_tx,
+            sender,
             last_used_ms: AtomicU64::new(epoch_ms()),
             request_count: AtomicU64::new(0),
             logs: std::sync::Mutex::new(Vec::new()),
