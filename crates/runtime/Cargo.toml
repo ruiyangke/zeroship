@@ -19,6 +19,7 @@ ada-url = "3.4.4"
 aws-lc-rs = "1"
 base64 = "0.22"
 appbase-runtime-macros = { path = "../runtime_macros" }
+futures = "0.3"
 
 [[bench]]
 name = "v8_qps"

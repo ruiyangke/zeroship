@@ -129,7 +129,7 @@ pub(crate) fn raw_fetch_callback(
     // Allocate op_id and grab channel senders.
     // stream_id is allocated but StreamState is NOT created until streaming is needed
     // (avoids HashMap insert + allocation for buffered responses).
-    let (op_id, stream_id, event_tx, concurrent_tx, tokio_handle) = {
+    let (op_id, stream_id, event_tx, waker, concurrent_tx, tokio_handle) = {
         let mut s = state.borrow_mut();
         let id = s.next_op_id;
         s.next_op_id += 1;
@@ -144,6 +144,7 @@ pub(crate) fn raw_fetch_callback(
             id,
             sid,
             s.event_tx.clone(),
+            s.waker.clone(),
             s.concurrent_event_tx.clone(),
             s.tokio_handle.clone(),
         )
@@ -152,7 +153,7 @@ pub(crate) fn raw_fetch_callback(
     let task = async move {
         let result = do_fetch_streaming(
             &method, &url, &headers_json, body.as_deref(),
-            op_id, stream_id, &event_tx, concurrent_tx.as_ref(),
+            op_id, stream_id, &event_tx, &waker, concurrent_tx.as_ref(),
         ).await;
 
         // If do_fetch_streaming returned an error string, send it as OpCompleted
@@ -170,6 +171,7 @@ pub(crate) fn raw_fetch_callback(
                         id: op_id,
                         value: err_json,
                     });
+                    waker.wake();
                 }
             }
         }
@@ -205,6 +207,7 @@ async fn do_fetch_streaming(
     op_id: u32,
     stream_id: u32,
     event_tx: &std::sync::mpsc::Sender<LoopEvent>,
+    waker: &futures::task::AtomicWaker,
     concurrent_tx: Option<&std::sync::mpsc::Sender<crate::concurrent::Event>>,
 ) -> Result<(), String> {
     // SSRF protection: validate URL before making any request
@@ -316,6 +319,7 @@ async fn do_fetch_streaming(
                 id: op_id,
                 value: result,
             });
+            waker.wake();
         }
     } else {
         // ---------------------------------------------------------------
@@ -338,6 +342,7 @@ async fn do_fetch_streaming(
             id: op_id,
             value: header_result,
         });
+        waker.wake();
 
         // Stream body chunks
         let mut total_bytes: usize = 0;
@@ -351,6 +356,7 @@ async fn do_fetch_streaming(
                             data: format!("Error: Response too large: {total_bytes} bytes").into_bytes(),
                             done: true,
                         });
+                        waker.wake();
                         return Ok(());
                     }
                     let _ = event_tx.send(LoopEvent::StreamChunk {
@@ -358,6 +364,7 @@ async fn do_fetch_streaming(
                         data: chunk.to_vec(),
                         done: false,
                     });
+                    waker.wake();
                 }
                 Ok(None) => {
                     // Body complete
@@ -366,6 +373,7 @@ async fn do_fetch_streaming(
                         data: vec![],
                         done: true,
                     });
+                    waker.wake();
                     break;
                 }
                 Err(e) => {
@@ -374,6 +382,7 @@ async fn do_fetch_streaming(
                         data: format!("Error: {e}").into_bytes(),
                         done: true,
                     });
+                    waker.wake();
                     return Ok(());
                 }
             }

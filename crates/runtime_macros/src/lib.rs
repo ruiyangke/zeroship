@@ -490,7 +490,7 @@ fn generate_async(input_fn: &ItemFn) -> syn::Result<TokenStream2> {
             let __promise = __resolver.get_promise(scope);
             let __global_resolver = v8::Global::new(scope, __resolver);
 
-            let (__op_id, __event_tx, __concurrent_tx, __tokio_handle) = {
+            let (__op_id, __event_tx, __waker, __concurrent_tx, __tokio_handle) = {
                 let mut __s = __state.borrow_mut();
                 let __id = __s.next_op_id;
                 __s.next_op_id += 1;
@@ -498,6 +498,7 @@ fn generate_async(input_fn: &ItemFn) -> syn::Result<TokenStream2> {
                 (
                     __id,
                     __s.event_tx.clone(),
+                    __s.waker.clone(),
                     __s.concurrent_event_tx.clone(),
                     __s.tokio_handle.clone(),
                 )
@@ -517,6 +518,7 @@ fn generate_async(input_fn: &ItemFn) -> syn::Result<TokenStream2> {
                             id: __op_id,
                             value: __value,
                         });
+                        __waker.wake();
                     }
                 }
             };

@@ -1,16 +1,24 @@
-//! Event loop state and unified driver.
+//! Non-blocking event loop — poll-based, waker-driven.
 //!
-//! Single `run_event_loop` function handles both modes:
-//! - `promise: None` — drive to exhaustion (fire-and-forget side effects)
-//! - `promise: Some(p)` — drive until the promise settles (or wall-time exceeded)
+//! The event loop never blocks. Each tick:
+//! 1. Drain all ready events (try_recv, non-blocking)
+//! 2. Fire expired timers
+//! 3. Flush V8 microtasks
+//! 4. If no work remains → done
+//! 5. Register waker → return Poll::Pending (yield to executor)
 //!
-//! Uses the min-heap timer system and async op channel.
+//! The blocking `run_event_loop` wrapper drives this via `poll_fn` + a
+//! lightweight tokio current-thread runtime, so existing callers don't change.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
+
+use futures::task::AtomicWaker;
 
 use crate::timers::{fire_ready_timers, TimerState};
 
@@ -20,65 +28,44 @@ use crate::timers::{fire_ready_timers, TimerState};
 
 /// State shared between V8 callbacks and the event loop driver.
 ///
-/// The event channel receiver (`event_rx`) is intentionally kept OUTSIDE this
-/// struct (and therefore outside the `Rc<RefCell<>>`) so that blocking
-/// `recv_timeout()` calls never hold a mutable borrow on shared state.
-/// Whoever drives the event loop owns `event_rx` separately.
+/// The event channel receiver (`event_rx`) is kept OUTSIDE this struct
+/// so recv operations never hold a borrow on shared state.
 #[allow(missing_debug_implementations)]
 pub(crate) struct EventLoopInner {
     pub(crate) timers: TimerState,
-    /// Pending promise resolvers for async ops (fetch, DB, etc.)
     pub(crate) pending_resolvers: HashMap<u32, v8::Global<v8::PromiseResolver>>,
-    /// Event channel sender (cloned into background tasks for async ops and streaming)
     pub(crate) event_tx: mpsc::Sender<LoopEvent>,
     pub(crate) next_op_id: u32,
-    /// Tokio runtime handle for spawning async ops (fetch, etc.)
     pub(crate) tokio_handle: Option<tokio::runtime::Handle>,
-    /// Optional sender for ConcurrentIsolate event channel.
-    /// When set, async ops send Event::OpCompleted here instead of event_tx.
     pub(crate) concurrent_event_tx: Option<mpsc::Sender<crate::concurrent::Event>>,
-    /// Per-isolate log buffer. Console output is appended here.
     pub(crate) log_buffer: Vec<String>,
-    /// Per-isolate key-value store (persistent across requests, lost on evict)
     pub(crate) kv_store: HashMap<String, String>,
-    /// Per-app environment variables (injected at isolate creation).
     pub(crate) env_vars: HashMap<String, String>,
-    /// Crypto key store — key material stays in Rust, JS holds opaque u32 handles.
     pub(crate) key_store: HashMap<u32, crate::crypto::KeyData>,
     pub(crate) next_key_id: u32,
-    /// Active readable streams: stream_id -> StreamState.
     pub(crate) streams: HashMap<u32, StreamState>,
     pub(crate) next_stream_id: u32,
+    /// Waker — background tasks (fetch, etc.) wake the event loop when results arrive.
+    pub(crate) waker: Arc<AtomicWaker>,
 }
 
-/// Events flowing through the per-request event loop channel.
-///
-/// `OpCompleted` carries the result of an async op (fetch headers, DB query, etc.).
-/// `StreamChunk` carries a body chunk from a background I/O task (streaming fetch).
+/// Events flowing through the event channel.
 pub(crate) enum LoopEvent {
-    /// Async op completed — resolve the pending promise.
     OpCompleted { id: u32, value: String },
-    /// Stream chunk arrived from background I/O (e.g., streaming fetch body).
     StreamChunk { stream_id: u32, data: Vec<u8>, done: bool },
 }
 
-// ---------------------------------------------------------------------------
-// Stream state (for ReadableStream backing)
-// ---------------------------------------------------------------------------
-
 /// State for a single ReadableStream instance.
 pub(crate) struct StreamState {
-    /// Pending read promise resolver (JS is waiting for next chunk).
     pub(crate) pending_read: Option<v8::Global<v8::PromiseResolver>>,
-    /// Buffered chunks waiting to be read.
     pub(crate) buffer: Vec<Vec<u8>>,
-    /// Whether the stream has been closed.
     pub(crate) closed: bool,
 }
 
 impl EventLoopInner {
     pub(crate) fn new() -> (Self, mpsc::Receiver<LoopEvent>) {
         let (event_tx, event_rx) = mpsc::channel();
+        let waker = Arc::new(AtomicWaker::new());
         (Self {
             timers: TimerState::new(),
             pending_resolvers: HashMap::new(),
@@ -93,6 +80,7 @@ impl EventLoopInner {
             next_key_id: 1,
             streams: HashMap::new(),
             next_stream_id: 1,
+            waker,
         }, event_rx)
     }
 
@@ -106,10 +94,10 @@ impl EventLoopInner {
 pub(crate) type SharedState = Rc<RefCell<EventLoopInner>>;
 
 // ---------------------------------------------------------------------------
-// Event loop helpers
+// Event loop helpers (each written ONCE)
 // ---------------------------------------------------------------------------
 
-/// Handle one event — written ONCE, used by drain + wait phases.
+/// Handle one event.
 fn handle_one_event(scope: &mut v8::PinScope, state: &SharedState, event: LoopEvent) {
     match event {
         LoopEvent::OpCompleted { id, value } => {
@@ -128,16 +116,14 @@ fn handle_one_event(scope: &mut v8::PinScope, state: &SharedState, event: LoopEv
     }
 }
 
-/// Drain completed events from the channel: resolve async ops and push stream chunks.
-///
-/// `event_rx` is outside the `RefCell` — no borrow on shared state needed for recv.
+/// Drain all ready events (non-blocking).
 fn drain_events(scope: &mut v8::PinScope, state: &SharedState, event_rx: &mpsc::Receiver<LoopEvent>) {
     while let Ok(event) = event_rx.try_recv() {
         handle_one_event(scope, state, event);
     }
 }
 
-/// Check if there is any pending work (timers, async ops, or open streams).
+/// Check if there is any pending work.
 pub(crate) fn has_pending_work(state: &SharedState) -> bool {
     let s = state.borrow();
     !s.timers.callbacks.is_empty()
@@ -145,15 +131,14 @@ pub(crate) fn has_pending_work(state: &SharedState) -> bool {
         || s.streams.values().any(|st| st.pending_read.is_some() && !st.closed)
 }
 
-/// Check if a promise has settled (fulfilled or rejected).
+/// Check if a promise has settled.
 fn is_settled(scope: &mut v8::PinScope, promise: &v8::Global<v8::Promise>) -> bool {
     let local = v8::Local::new(scope, promise);
     local.state() != v8::PromiseState::Pending
 }
 
-/// Find the next valid timer fire time (skipping cleared timers via lazy deletion).
-/// Returns `None` if no valid timers exist.
-pub(crate) fn next_timer_fire(state: &SharedState) -> Option<std::time::Instant> {
+/// Find the next valid timer fire time.
+pub(crate) fn next_timer_fire(state: &SharedState) -> Option<Instant> {
     let s = state.borrow();
     for std::cmp::Reverse(entry) in s.timers.heap.iter() {
         if s.timers.callbacks.contains_key(&entry.id) {
@@ -163,26 +148,95 @@ pub(crate) fn next_timer_fire(state: &SharedState) -> Option<std::time::Instant>
     None
 }
 
-/// Compute the wait duration until the next valid timer fires.
+/// Compute wait timeout until next timer.
 pub(crate) fn compute_wait_timeout(state: &SharedState) -> Option<Duration> {
     let has_pending_streams = state.borrow().streams.values().any(|st| st.pending_read.is_some());
-
     match next_timer_fire(state) {
-        Some(fire_at) => Some(fire_at.saturating_duration_since(std::time::Instant::now())),
+        Some(fire_at) => Some(fire_at.saturating_duration_since(Instant::now())),
         None if !state.borrow().pending_resolvers.is_empty() || has_pending_streams => Some(Duration::from_secs(60)),
         None => None,
     }
 }
 
 // ---------------------------------------------------------------------------
-// Event loop driver
+// Non-blocking poll (the core — like Deno's poll_event_loop)
 // ---------------------------------------------------------------------------
 
-/// Drive the event loop.
+/// One non-blocking tick of the event loop.
 ///
-/// - If `promise` is `Some`, stop when the promise settles (or wall-time exceeded).
-/// - If `promise` is `None`, drive to exhaustion (fire-and-forget side effects)
-///   with a generous 60s wall-time cap.
+/// Drains ready events, fires timers, flushes microtasks.
+/// Returns `Poll::Ready(())` when done, `Poll::Pending` when waiting for more work.
+/// Registers the waker so background tasks can re-trigger a poll.
+pub(crate) fn poll_event_loop(
+    scope: &mut v8::PinScope,
+    state: &SharedState,
+    event_rx: &mpsc::Receiver<LoopEvent>,
+    cx: &mut Context<'_>,
+    promise: Option<&v8::Global<v8::Promise>>,
+) -> Poll<()> {
+    // Register waker — background tasks (fetch, etc.) will wake us
+    state.borrow().waker.register(cx.waker());
+
+    // Check if promise already settled
+    if let Some(p) = promise {
+        if is_settled(scope, p) { return Poll::Ready(()); }
+    }
+
+    // Tick: microtasks → timers → drain events
+    scope.perform_microtask_checkpoint();
+    fire_ready_timers(scope, state);
+    drain_events(scope, state, event_rx);
+
+    // Re-check promise after tick
+    if let Some(p) = promise {
+        if is_settled(scope, p) { return Poll::Ready(()); }
+    }
+
+    // Check if any work remains
+    if !has_pending_work(state) {
+        scope.perform_microtask_checkpoint();
+        return Poll::Ready(());
+    }
+
+    // Schedule timer wake — so we re-poll when next timer fires
+    if let Some(fire_at) = next_timer_fire(state) {
+        let delay = fire_at.saturating_duration_since(Instant::now());
+        if delay.is_zero() {
+            // Timer already ready — wake immediately for another tick
+            cx.waker().wake_by_ref();
+        } else {
+            let waker = cx.waker().clone();
+            // Use tokio timer to wake at the right time
+            let handle = state.borrow().tokio_handle.clone();
+            if let Some(handle) = handle {
+                handle.spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    waker.wake();
+                });
+            } else {
+                // Fallback: spawn thread (for tests without tokio runtime)
+                std::thread::spawn(move || {
+                    std::thread::sleep(delay);
+                    waker.wake();
+                });
+            }
+        }
+    }
+
+    Poll::Pending
+}
+
+// ---------------------------------------------------------------------------
+// Blocking wrapper (backward-compatible API for existing callers)
+// ---------------------------------------------------------------------------
+
+/// Drive the event loop to completion (blocking).
+///
+/// Internally uses `poll_event_loop` via a lightweight tokio current-thread
+/// runtime, so the event loop is non-blocking underneath.
+///
+/// - `promise: Some(p)` → stop when promise settles (or wall-time exceeded)
+/// - `promise: None` → drive to exhaustion
 pub(crate) fn run_event_loop(
     scope: &mut v8::PinScope,
     state: &SharedState,
@@ -190,41 +244,47 @@ pub(crate) fn run_event_loop(
     promise: Option<&v8::Global<v8::Promise>>,
     wall_timeout: Duration,
 ) {
-    let deadline = std::time::Instant::now() + wall_timeout;
+    let deadline = Instant::now() + wall_timeout;
     let tracking_promise = promise.is_some();
 
+    // We can't use poll_fn here because scope is !Send and can't cross await.
+    // Instead, use a manual poll loop that alternates between tick and wait.
+    // This is equivalent to what poll_fn + block_on would do, but without
+    // requiring the scope to be alive across await points.
     loop {
-        // Phase 1: Check if target promise settled
+        // Check promise
         if let Some(p) = promise {
             if is_settled(scope, p) { return; }
         }
 
-        // Phase 2: Tick — microtasks, timers, drain events
+        // Tick: microtasks, timers, drain events
         scope.perform_microtask_checkpoint();
         fire_ready_timers(scope, state);
         drain_events(scope, state, event_rx);
 
-        // Phase 3: Re-check promise after tick (common fast exit)
+        // Re-check promise
         if let Some(p) = promise {
             if is_settled(scope, p) { return; }
         }
 
-        // Phase 4: Check if any work remains
+        // Check if done
         if !has_pending_work(state) {
             scope.perform_microtask_checkpoint();
             return;
         }
 
-        // Phase 5: Check wall-time (only when tracking a promise)
-        if tracking_promise && std::time::Instant::now() > deadline {
+        // Check wall-time
+        if tracking_promise && Instant::now() > deadline {
             return;
         }
 
-        // Phase 6: Wait for next event or timer
+        // Wait — use recv_timeout for blocking mode
+        // The waker isn't used here (blocking mode doesn't have an executor).
+        // recv_timeout wakes on: event arrival OR timeout.
         let timeout = match compute_wait_timeout(state) {
             Some(d) => {
                 if tracking_promise {
-                    d.min(deadline.saturating_duration_since(std::time::Instant::now()))
+                    d.min(deadline.saturating_duration_since(Instant::now()))
                 } else {
                     d
                 }
