@@ -1,0 +1,28 @@
+Cross-Runtime Benchmark — 2026-04-06
+After: non-blocking event loop (AtomicWaker + poll_event_loop)
+
+Machine: Linux (16 cores), idle system
+Tool: wrk, 4 threads, 50 connections, 10s per test
+
+Scenario                          concurrent(1)  conc-pool(16)  Node.js v22    vs Node (best)
+--- RPC ---
+1. ping/pong                         175,714        110,961       14,390       12.2x
+2. fib(10)                           141,769        109,676       14,157       10.0x
+3. fib(35) [5s]                            7             53            7        7.6x (pool)
+4. setTimeout(0)                      98,603        106,206       18,348        5.8x (pool)
+5. Promise chain                     152,940        108,902       14,382       10.6x
+6. Promise+100ms                         475            474          475        1.0x
+7. fetch → local echo                53,571         74,612        3,088       24.2x (pool)
+8. fetch → external API                 192            184          170        1.1x
+
+--- Crypto ---
+9. randomUUID                        155,348         96,995       12,319       12.6x
+10. getRandomValues(32)              132,009        100,185       11,318       11.7x
+11. SHA-256                           98,881         99,708       12,482        8.0x (pool)
+12. HMAC sign                         84,229         96,257       12,808        7.5x (pool)
+13. HMAC sign+verify                  70,419         95,693       11,044        8.7x (pool)
+14. AES-GCM encrypt                   62,172         92,375       10,897        8.5x (pool)
+15. ECDSA sign                        19,670         67,868       10,790        6.3x (pool)
+
+Zero regression from non-blocking event loop addition.
+AtomicWaker infrastructure is dormant in blocking mode.
