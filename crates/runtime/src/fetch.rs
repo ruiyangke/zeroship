@@ -126,7 +126,9 @@ pub(crate) fn raw_fetch_callback(
     let promise = resolver.get_promise(scope);
     let global_resolver = v8::Global::new(scope, resolver);
 
-    // Allocate op_id, stream_id, and grab channel senders
+    // Allocate op_id and grab channel senders.
+    // stream_id is allocated but StreamState is NOT created until streaming is needed
+    // (avoids HashMap insert + allocation for buffered responses).
     let (op_id, stream_id, event_tx, concurrent_tx, tokio_handle) = {
         let mut s = state.borrow_mut();
         let id = s.next_op_id;
@@ -135,12 +137,8 @@ pub(crate) fn raw_fetch_callback(
 
         let sid = s.next_stream_id;
         s.next_stream_id += 1;
-        // Pre-create the stream state so JS can attach a reader immediately
-        s.streams.insert(sid, crate::event_loop::StreamState {
-            pending_read: None,
-            buffer: Vec::new(),
-            closed: false,
-        });
+        // NOTE: StreamState is created lazily in do_fetch_streaming only when
+        // the streaming path is taken. For buffered responses, no StreamState exists.
 
         (
             id,

@@ -93,24 +93,28 @@ pub(crate) fn stream_read_callback(
         .clone();
     let mut s = state.borrow_mut();
 
-    if let Some(stream) = s.streams.get_mut(&stream_id) {
-        if !stream.buffer.is_empty() {
-            // Buffered chunk available — resolve immediately.
-            let data = stream.buffer.remove(0);
-            drop(s);
-            resolve_with_chunk(scope, resolver, &data);
-        } else if stream.closed {
-            // Stream already closed — resolve with {done: true}.
-            drop(s);
-            resolve_with_done(scope, resolver);
-        } else {
-            // No data available — store resolver for later.
-            stream.pending_read = Some(v8::Global::new(scope, resolver));
+    // Lazy-create StreamState if it doesn't exist yet (streaming fetch path:
+    // stream_id is allocated in the fetch callback but StreamState is deferred).
+    let stream = s.streams.entry(stream_id).or_insert_with(|| {
+        crate::event_loop::StreamState {
+            pending_read: None,
+            buffer: Vec::new(),
+            closed: false,
         }
-    } else {
-        // Unknown stream — resolve with done immediately.
+    });
+
+    if !stream.buffer.is_empty() {
+        // Buffered chunk available — resolve immediately.
+        let data = stream.buffer.remove(0);
+        drop(s);
+        resolve_with_chunk(scope, resolver, &data);
+    } else if stream.closed {
+        // Stream already closed — resolve with {done: true}.
         drop(s);
         resolve_with_done(scope, resolver);
+    } else {
+        // No data available — store resolver for later.
+        stream.pending_read = Some(v8::Global::new(scope, resolver));
     }
 
     rv.set(promise.into());
@@ -252,7 +256,15 @@ pub(crate) fn push_stream_chunk(
     if !data.is_empty() {
         let pending = {
             let mut s = state.borrow_mut();
-            s.streams.get_mut(&stream_id).and_then(|stream| stream.pending_read.take())
+            // Lazy-create StreamState if it doesn't exist yet
+            let stream = s.streams.entry(stream_id).or_insert_with(|| {
+                crate::event_loop::StreamState {
+                    pending_read: None,
+                    buffer: Vec::new(),
+                    closed: false,
+                }
+            });
+            stream.pending_read.take()
         };
 
         if let Some(resolver_global) = pending {
