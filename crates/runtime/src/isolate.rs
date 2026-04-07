@@ -3,6 +3,10 @@
 //! Context and compiled code persist across requests (like workerd).
 //! Each request enters the existing context, calls a pre-stored handler.
 //! CPU time measured per-request via CLOCK_THREAD_CPUTIME_ID.
+//!
+//! Uses `state::RuntimeState` + `state::SharedState` for all V8 callback state.
+//! Async ops are driven by a small blocking event loop that polls futures from
+//! `RuntimeState::spawned_ops` via a one-shot tokio runtime.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -10,9 +14,9 @@ use std::time::{Duration, Instant};
 
 use std::collections::HashMap;
 
-use crate::event_loop::{run_event_loop, EventLoopInner, LoopEvent, SharedState};
 use crate::modules::ModuleEntry;
 use crate::init::{load_polyfills_and_modules, thread_cpu_time, HttpResult, RequestResult};
+use crate::state::{DispatchResult, OpResult, RuntimeState, SharedState, SpawnedTimer};
 
 /// A V8 isolate with persistent context -- compiled code stays across requests.
 /// ES modules are compiled ONCE. Each request just calls the handler function.
@@ -28,9 +32,6 @@ pub struct Isolate {
     initialized: bool,
     modules: Vec<ModuleEntry>,
     state: SharedState,
-    /// Event channel receiver — kept outside RefCell so recv_timeout never
-    /// holds a mutable borrow on shared state.
-    event_rx: std::sync::mpsc::Receiver<LoopEvent>,
 }
 
 impl Isolate {
@@ -56,9 +57,8 @@ impl Isolate {
         }
         isolate.add_near_heap_limit_callback(near_heap_limit_callback, std::ptr::null_mut());
 
-        let (inner, event_rx) = EventLoopInner::with_env(env_vars);
-        let state: SharedState = Rc::new(RefCell::new(inner));
-        state.borrow_mut().tokio_handle = tokio::runtime::Handle::try_current().ok();
+        let rt_state = RuntimeState::new(env_vars);
+        let state: SharedState = Rc::new(RefCell::new(rt_state));
         isolate.set_slot(state.clone());
 
         let context = {
@@ -76,7 +76,6 @@ impl Isolate {
             initialized: false,
             modules,
             state,
-            event_rx,
         }
     }
 
@@ -111,17 +110,9 @@ impl Isolate {
             }
         }
 
-        // Compile optimized HTTP dispatch function:
-        //   1. Trusted headers: build _map directly, skip validateName/validateValue
-        //   2. Sync body read: resp._bodyText directly, not resp.text().then()
-        //   3. Direct _map access: read resp.headers._map, skip forEach
-        //   4. Handler as arg: no property lookup
-        // Note: Object.create + defineProperty for lazy Request was SLOWER (causes V8
-        // dictionary mode transition). Using new Request() with trusted headers instead.
+        // Compile optimized HTTP dispatch function
         if self.on_request_fn.is_some() {
             let code = v8::String::new(scope, r#"(function(__handler, __method, __url, __headers_json, __body) {
-    // If resp has a ReadableStream body, read it to completion so Rust
-    // can extract _bodyText synchronously via the V8 API.
     function __ensureBody(resp) {
         if (resp && resp._isStreamBody && resp.body) {
             return resp.text().then(function(body) {
@@ -134,8 +125,6 @@ impl Isolate {
     }
 
     try {
-        // Build trusted headers map — skip validation (like workerd's appendUnguarded).
-        // Inbound headers from Hyper are already validated.
         var map = Object.create(null);
         if (__headers_json) {
             var arr = JSON.parse(__headers_json);
@@ -150,8 +139,6 @@ impl Isolate {
 
         var result = __handler(req);
 
-        // Return Response object directly — Rust reads properties via V8 API.
-        // No JSON.stringify/parse on the hot path.
         if (result && typeof result.then === "function") {
             return result.then(function(resp) {
                 if (!resp || resp.status === undefined) return new Response(String(resp), { status: 200 });
@@ -201,12 +188,15 @@ impl Isolate {
         // Drain stale state
         {
             let mut s = self.state.borrow_mut();
-            s.timers.heap.clear();
-            s.timers.callbacks.clear();
+            s.timer_callbacks.clear();
             s.pending_resolvers.clear();
             s.streams.clear();
+            s.spawned_ops.clear();
+            s.spawned_timers.clear();
         }
-        while self.event_rx.try_recv().is_ok() {} // drain outside the borrow
+
+        // Set request context for logging
+        self.state.borrow_mut().executing_request_id = Some(0);
 
         let wall_start = std::time::Instant::now();
         let cpu_start = thread_cpu_time();
@@ -234,7 +224,7 @@ impl Isolate {
             Some(val) if val.is_promise() => {
                 let promise = v8::Local::<v8::Promise>::try_from(val).unwrap();
                 let global_promise = v8::Global::new(scope, promise);
-                run_event_loop(scope, &self.state, &self.event_rx, Some(&global_promise), Duration::from_secs(30));
+                run_blocking_event_loop(scope, &self.state, Some(&global_promise), Duration::from_secs(30));
                 let promise = v8::Local::new(scope, &global_promise);
                 match promise.state() {
                     v8::PromiseState::Fulfilled => promise.result(scope),
@@ -257,15 +247,18 @@ impl Isolate {
     pub fn execute_request(&mut self, request_json: &str) -> Result<RequestResult, String> {
         self.ensure_initialized();
 
-        // Drain stale timer state from prior requests
+        // Drain stale state from prior requests
         {
             let mut s = self.state.borrow_mut();
-            s.timers.heap.clear();
-            s.timers.callbacks.clear();
+            s.timer_callbacks.clear();
             s.pending_resolvers.clear();
             s.streams.clear();
+            s.spawned_ops.clear();
+            s.spawned_timers.clear();
         }
-        while self.event_rx.try_recv().is_ok() {} // drain outside the borrow
+
+        // Set request context for logging
+        self.state.borrow_mut().executing_request_id = Some(0);
 
         let wall_start = Instant::now();
         let cpu_start = thread_cpu_time();
@@ -275,54 +268,29 @@ impl Isolate {
         let scope = &mut v8::ContextScope::new(handle_scope, context);
 
         let dispatch_fn = self.dispatch_fn.as_ref().unwrap();
-        let func = v8::Local::new(scope, dispatch_fn);
 
-        let arg = v8::String::new(scope, request_json).ok_or("Failed to create arg string")?;
-        let undefined = v8::undefined(scope).into();
+        let dispatch_result = crate::request::dispatch_request(scope, &self.state, dispatch_fn, request_json);
 
-        let result = func
-            .call(scope, undefined, &[arg.into()])
-            .ok_or("Dispatch call failed")?;
+        let json = match dispatch_result {
+            DispatchResult::Sync(json) => {
+                // Run any pending timers/ops (fire-and-forget side effects)
+                run_blocking_event_loop(scope, &self.state, None, Duration::from_secs(60));
+                json
+            }
+            DispatchResult::Async(promise) => {
+                run_blocking_event_loop(scope, &self.state, Some(&promise), Duration::from_secs(30));
 
-        let json = if result.is_promise() {
-            let promise = v8::Local::<v8::Promise>::try_from(result)
-                .map_err(|e| format!("Promise cast failed: {e}"))?;
-            let global_promise = v8::Global::new(scope, promise);
-
-            run_event_loop(scope, &self.state, &self.event_rx, Some(&global_promise), Duration::from_secs(30));
-
-            let promise = v8::Local::new(scope, &global_promise);
-            match promise.state() {
-                v8::PromiseState::Fulfilled => {
-                    let value = promise.result(scope);
-                    let s = value
-                        .to_string(scope)
-                        .ok_or("Failed to stringify promise result")?;
-                    s.to_rust_string_lossy(scope)
-                }
-                v8::PromiseState::Rejected => {
-                    let value = promise.result(scope);
-                    let s = value.to_string(scope).ok_or("Failed to stringify rejection")?;
-                    let msg = s.to_rust_string_lossy(scope);
-                    return Err(format!("Promise rejected: {msg}"));
-                }
-                v8::PromiseState::Pending => {
-                    return Err("Promise still pending after event loop exhausted".into());
+                match crate::request::extract_promise_result(scope, &promise) {
+                    Ok(json) => json,
+                    Err(msg) => return Err(msg),
                 }
             }
-        } else {
-            let json_v8 = result.to_string(scope).ok_or("Failed to stringify")?;
-            let json = json_v8.to_rust_string_lossy(scope);
-
-            // Run any pending timers/ops (fire-and-forget side effects)
-            run_event_loop(scope, &self.state, &self.event_rx, None, Duration::from_secs(60));
-
-            json
+            DispatchResult::Error(msg) => return Err(msg),
         };
 
         let cpu_time = thread_cpu_time().saturating_sub(cpu_start);
         let wall_time = wall_start.elapsed();
-        let logs = self.state.borrow_mut().log_buffer.drain(..).collect();
+        let logs = self.state.borrow_mut().per_request_logs.remove(&0).unwrap_or_default();
 
         Ok(RequestResult {
             json,
@@ -333,9 +301,305 @@ impl Isolate {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Blocking event loop for per-request Isolate
+// ---------------------------------------------------------------------------
+
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
+/// Entry in the timer min-heap. Ordered by (fire_at, id).
+#[derive(Eq, PartialEq)]
+struct TimerHeapEntry {
+    fire_at: Instant,
+    id: u32,
+}
+
+impl Ord for TimerHeapEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.fire_at
+            .cmp(&other.fire_at)
+            .then(self.id.cmp(&other.id))
+    }
+}
+
+impl PartialOrd for TimerHeapEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Drive the event loop to completion (blocking).
+///
+/// Polls spawned ops and timers from `RuntimeState`. Uses a thread-local tokio
+/// runtime for async ops (fetch, etc.). Fires timer callbacks, resolves promises.
+///
+/// - `promise: Some(p)` → stop when promise settles (or wall-time exceeded)
+/// - `promise: None` → drive to exhaustion
+fn run_blocking_event_loop(
+    scope: &mut v8::PinScope,
+    state: &SharedState,
+    promise: Option<&v8::Global<v8::Promise>>,
+    wall_timeout: Duration,
+) {
+    use std::sync::mpsc;
+    use std::sync::Arc;
+    use futures::task::AtomicWaker;
+
+    let deadline = Instant::now() + wall_timeout;
+    let tracking_promise = promise.is_some();
+
+    // Event channel: spawned async ops send their results here.
+    // This bridges the async op futures (driven by tokio) with the blocking V8 loop.
+    let (event_tx, event_rx) = mpsc::channel::<OpResult>();
+    let waker = Arc::new(AtomicWaker::new());
+
+    // Timer heap for tracking absolute fire times
+    let mut timer_heap: BinaryHeap<Reverse<TimerHeapEntry>> = BinaryHeap::new();
+
+    loop {
+        // Check if promise already settled
+        if let Some(p) = promise {
+            let local = v8::Local::new(scope, p);
+            if local.state() != v8::PromiseState::Pending {
+                return;
+            }
+        }
+
+        // Wall-time check
+        if tracking_promise && Instant::now() > deadline {
+            return;
+        }
+
+        // Collect newly spawned timers into the heap
+        {
+            let now = Instant::now();
+            let timers: Vec<SpawnedTimer> = state.borrow_mut().spawned_timers.drain(..).collect();
+            for timer in timers {
+                timer_heap.push(Reverse(TimerHeapEntry {
+                    fire_at: now + timer.delay,
+                    id: timer.id,
+                }));
+            }
+        }
+
+        // Spawn new async ops: drain from state, spawn on tokio, send results to event_tx.
+        spawn_async_ops(state, &event_tx, &waker);
+
+        // Drain completed op results from the event channel
+        let mut processed_any = false;
+        while let Ok(result) = event_rx.try_recv() {
+            processed_any = true;
+            match result {
+                OpResult::Completed { op_id, value, .. } => {
+                    crate::request::resolve_op(scope, state, op_id, &value);
+                }
+                OpResult::StreamChunk { stream_id, data, done } => {
+                    crate::streams::push_stream_chunk(scope, state, stream_id, &data, done);
+                    scope.perform_microtask_checkpoint();
+                }
+                OpResult::Cancelled => {}
+            }
+        }
+
+        // Fire ready timers
+        let any_timer_fired = fire_ready_timers(scope, state, &mut timer_heap);
+
+        // Flush microtasks
+        scope.perform_microtask_checkpoint();
+
+        // Collect any new timers/ops spawned by timer callbacks or promise continuations
+        {
+            let now = Instant::now();
+            let timers: Vec<SpawnedTimer> = state.borrow_mut().spawned_timers.drain(..).collect();
+            for timer in timers {
+                timer_heap.push(Reverse(TimerHeapEntry {
+                    fire_at: now + timer.delay,
+                    id: timer.id,
+                }));
+            }
+        }
+        spawn_async_ops(state, &event_tx, &waker);
+
+        // Re-check if promise settled after processing
+        if let Some(p) = promise {
+            let local = v8::Local::new(scope, p);
+            if local.state() != v8::PromiseState::Pending {
+                return;
+            }
+        }
+
+        // Check if any work remains
+        let has_work = {
+            let s = state.borrow();
+            !s.timer_callbacks.is_empty()
+                || !s.pending_resolvers.is_empty()
+                || !s.spawned_ops.is_empty()
+                || !s.spawned_timers.is_empty()
+                || s.streams.values().any(|st| st.pending_read.is_some() && !st.closed)
+        };
+        let has_timers = !timer_heap.is_empty();
+
+        if !has_work && !has_timers {
+            return;
+        }
+
+        // If we processed something this tick, loop immediately
+        if processed_any || any_timer_fired {
+            continue;
+        }
+
+        // Compute wait timeout
+        let next_timer_fire = timer_heap.peek().map(|Reverse(e)| e.fire_at);
+        let wait_timeout = match next_timer_fire {
+            Some(fire_at) => {
+                let delay = fire_at.saturating_duration_since(Instant::now());
+                if tracking_promise {
+                    delay.min(deadline.saturating_duration_since(Instant::now()))
+                } else {
+                    delay
+                }
+            }
+            None if has_work => {
+                if tracking_promise {
+                    Duration::from_secs(30).min(deadline.saturating_duration_since(Instant::now()))
+                } else {
+                    Duration::from_secs(60)
+                }
+            }
+            None => return, // no more work possible
+        };
+
+        if wait_timeout.is_zero() {
+            continue;
+        }
+
+        // Park the thread — woken by AtomicWaker when an op completes,
+        // or by timeout when the next timer should fire.
+        {
+            use std::task::{Context, Wake};
+            struct ParkWaker(std::thread::Thread);
+            impl Wake for ParkWaker {
+                fn wake(self: Arc<Self>) {
+                    self.0.unpark();
+                }
+            }
+            let parker = Arc::new(ParkWaker(std::thread::current()));
+            let w = std::task::Waker::from(parker);
+            let cx = Context::from_waker(&w);
+            waker.register(cx.waker());
+            std::thread::park_timeout(wait_timeout);
+        }
+    }
+}
+
+/// Drain spawned ops from `RuntimeState` and spawn them on a tokio runtime.
+/// Results are sent through `event_tx`. The waker is triggered when a result arrives.
+fn spawn_async_ops(
+    state: &SharedState,
+    event_tx: &std::sync::mpsc::Sender<OpResult>,
+    waker: &std::sync::Arc<futures::task::AtomicWaker>,
+) {
+    let ops: Vec<_> = state.borrow_mut().spawned_ops.drain(..).collect();
+    if ops.is_empty() {
+        return;
+    }
+
+    // SAFETY: The spawned_ops futures are `dyn Future` (not `+ Send`) because
+    // `RuntimeState` is `!Send`. However, the actual futures created by fetch.rs
+    // and `#[appbase_op(async)]` only capture owned data (Strings, u32s, etc.)
+    // and are in practice Send. We assert Send here to spawn them on tokio.
+    struct SendFuture(std::pin::Pin<Box<dyn std::future::Future<Output = OpResult>>>);
+    unsafe impl Send for SendFuture {}
+    impl std::future::Future for SendFuture {
+        type Output = OpResult;
+        fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+            self.0.as_mut().poll(cx)
+        }
+    }
+
+    // Get or create a tokio handle
+    let tokio_handle = tokio::runtime::Handle::try_current().ok();
+
+    for op_future in ops {
+        let event_tx = event_tx.clone();
+        let waker = waker.clone();
+        let send_future = SendFuture(op_future);
+
+        match &tokio_handle {
+            Some(handle) => {
+                handle.spawn(async move {
+                    let result = send_future.await;
+                    let _ = event_tx.send(result);
+                    waker.wake();
+                });
+            }
+            None => {
+                // No tokio runtime — spawn a thread with its own runtime
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("Failed to create tokio runtime for async op");
+                    let result = rt.block_on(send_future);
+                    let _ = event_tx.send(result);
+                    waker.wake();
+                });
+            }
+        }
+    }
+}
+
+/// Fire all timers whose fire_at <= now.
+fn fire_ready_timers(
+    scope: &mut v8::PinScope,
+    state: &SharedState,
+    timer_heap: &mut BinaryHeap<Reverse<TimerHeapEntry>>,
+) -> bool {
+    let mut any_fired = false;
+    let now = Instant::now();
+
+    loop {
+        let should_fire = timer_heap
+            .peek()
+            .map(|Reverse(e)| e.fire_at <= now)
+            .unwrap_or(false);
+        if !should_fire {
+            break;
+        }
+
+        let entry = timer_heap.pop().unwrap().0;
+
+        // Check if the timer callback still exists (may have been cleared)
+        let has_cb = state.borrow().timer_callbacks.contains_key(&entry.id);
+        if !has_cb {
+            continue; // lazy deletion — timer was cleared
+        }
+
+        any_fired = true;
+        crate::request::fire_timer_callback(scope, state, entry.id);
+        scope.perform_microtask_checkpoint();
+
+        // Re-arm interval timers (fire_timer_callback re-inserts the callback for intervals)
+        let is_interval = state
+            .borrow()
+            .timer_callbacks
+            .get(&entry.id)
+            .and_then(|cb| cb.interval)
+            .is_some();
+        if is_interval {
+            let interval = state.borrow().timer_callbacks.get(&entry.id).unwrap().interval.unwrap();
+            timer_heap.push(Reverse(TimerHeapEntry {
+                fire_at: Instant::now() + interval,
+                id: entry.id,
+            }));
+        }
+    }
+
+    any_fired
+}
+
 /// Extract HTTP response fields directly from a V8 Response object.
-/// Reads `status`, `headers._map`, and `_bodyText` via the V8 API,
-/// avoiding JSON.stringify on the JS side and serde_json::from_str on Rust side.
 fn extract_http_result(
     scope: &mut v8::PinScope,
     resp_val: v8::Local<v8::Value>,
@@ -351,15 +615,14 @@ fn extract_http_result(
         .and_then(|v| v.uint32_value(scope))
         .unwrap_or(200) as u16;
 
-    // body (read _bodyText directly — avoids the async .text() Promise chain)
-    // For stream bodies, __ensureBody reads the stream and sets _bodyText.
+    // body
     let body_key = v8::String::new(scope, "_bodyText").unwrap();
     let body = resp.get(scope, body_key.into())
         .filter(|v| !v.is_null_or_undefined())
         .map(|v| v.to_rust_string_lossy(scope))
         .unwrap_or_default();
 
-    // headers (read _map directly from headers object)
+    // headers
     let headers_key = v8::String::new(scope, "headers").unwrap();
     let mut headers: Vec<(String, String)> = Vec::new();
     if let Some(headers_obj) = resp.get(scope, headers_key.into()) {
@@ -372,7 +635,6 @@ fn extract_http_result(
                             let key = names.get_index(scope, i).unwrap();
                             let key_str = key.to_rust_string_lossy(scope);
                             if let Some(val_arr) = map_obj.get(scope, key) {
-                                // Each value in _map is an array of strings
                                 if let Ok(arr) = v8::Local::<v8::Array>::try_from(val_arr) {
                                     for j in 0..arr.length() {
                                         if let Some(v) = arr.get_index(scope, j) {
@@ -388,7 +650,7 @@ fn extract_http_result(
         }
     }
 
-    let logs = state.borrow_mut().log_buffer.drain(..).collect();
+    let logs = state.borrow_mut().per_request_logs.remove(&0).unwrap_or_default();
 
     Ok(HttpResult {
         status,

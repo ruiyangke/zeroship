@@ -9,10 +9,10 @@
 //!   Best for I/O-heavy workloads with clean per-request kill.
 //!
 //! # Module structure
+//! - `state` — shared runtime state (`RuntimeState`, `SharedState`, event types)
 //! - `runtime` — V8 init, CPU time, shared constants
-//! - `timers` — min-heap timer system (setTimeout/setInterval)
-//! - `globals` — V8 global bindings (console, timers)
-//! - `event_loop` — event loop state and drivers
+//! - `timers` — timer callback type
+//! - `init` — V8 global bindings (console, timers, fetch, URL, KV, crypto, env, streams)
 //! - `isolate` — per-request `Isolate` and `IsolatePool`
 //! - `concurrent` — `ConcurrentIsolate` with serial JS + concurrent I/O
 
@@ -23,7 +23,6 @@ pub mod concurrent;
 pub mod cpu_timer;
 mod crypto;
 mod env;
-mod event_loop;
 mod fetch;
 
 mod isolate;

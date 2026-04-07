@@ -419,14 +419,8 @@ impl Runtime {
                     }
                 } else {
                     // Slow path: push into V8 ReadableStream.
-                    //
-                    // NOTE: crate::streams::push_stream_chunk currently takes
-                    // event_loop::SharedState (the old type). After Task 6 migrates
-                    // streams.rs to use state::SharedState, this can call
-                    // crate::streams::push_stream_chunk directly. For now we
-                    // duplicate the essential logic inline.
                     enter_v8!(self, |scope| {
-                        push_stream_chunk_inline(scope, &self.state, stream_id, &data, done);
+                        crate::streams::push_stream_chunk(scope, &self.state, stream_id, &data, done);
                     });
                 }
             }
@@ -579,79 +573,3 @@ impl Runtime {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Temporary inline push_stream_chunk
-// ---------------------------------------------------------------------------
-
-/// Inline version of `streams::push_stream_chunk` that works with `state::SharedState`.
-///
-/// TODO(task-6): Remove this once `streams.rs` is migrated to use `state::SharedState`.
-/// At that point, call `crate::streams::push_stream_chunk` directly.
-fn push_stream_chunk_inline(
-    scope: &mut v8::PinScope,
-    state: &SharedState,
-    stream_id: u32,
-    data: &[u8],
-    done: bool,
-) {
-    // Deliver data chunk (if non-empty)
-    if !data.is_empty() {
-        let pending = {
-            let mut s = state.borrow_mut();
-            let stream = s.streams.entry(stream_id).or_insert_with(|| {
-                crate::state::StreamState {
-                    pending_read: None,
-                    buffer: Vec::new(),
-                    closed: false,
-                }
-            });
-            stream.pending_read.take()
-        };
-
-        if let Some(resolver_global) = pending {
-            let resolver = v8::Local::new(scope, &resolver_global);
-            // Resolve with {value: Uint8Array(data), done: false}
-            let result = v8::Object::new(scope);
-            let done_key = v8::String::new(scope, "done").unwrap();
-            result.set(scope, done_key.into(), v8::Boolean::new(scope, false).into());
-            let value_key = v8::String::new(scope, "value").unwrap();
-            let ab = v8::ArrayBuffer::new(scope, data.len());
-            let store = ab.get_backing_store();
-            for (i, &b) in data.iter().enumerate() {
-                store[i].set(b);
-            }
-            let uint8 = v8::Uint8Array::new(scope, ab, 0, data.len()).unwrap();
-            result.set(scope, value_key.into(), uint8.into());
-            resolver.resolve(scope, result.into());
-        } else {
-            let mut s = state.borrow_mut();
-            if let Some(stream) = s.streams.get_mut(&stream_id) {
-                stream.buffer.push(data.to_vec());
-            }
-        }
-    }
-
-    // Close stream if done
-    if done {
-        let pending = {
-            let mut s = state.borrow_mut();
-            if let Some(stream) = s.streams.get_mut(&stream_id) {
-                stream.closed = true;
-                stream.pending_read.take()
-            } else {
-                None
-            }
-        };
-
-        if let Some(resolver_global) = pending {
-            let resolver = v8::Local::new(scope, &resolver_global);
-            // Resolve with {value: undefined, done: true}
-            let result = v8::Object::new(scope);
-            let done_key = v8::String::new(scope, "done").unwrap();
-            result.set(scope, done_key.into(), v8::Boolean::new(scope, true).into());
-            let value_key = v8::String::new(scope, "value").unwrap();
-            result.set(scope, value_key.into(), v8::undefined(scope).into());
-            resolver.resolve(scope, result.into());
-        }
-    }
-}

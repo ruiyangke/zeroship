@@ -4,14 +4,14 @@
 //! is serial per-request for clean kill safety. The microtask queue
 //! contains entries from exactly 1 request at any given moment.
 //!
-//! Uses the unified `LoopEvent` channel from `event_loop.rs`. All events
-//! (new requests, op completions, stream chunks, shutdown) flow through
-//! a single `mpsc::channel<LoopEvent>`. No separate concurrent event channel.
+//! Uses a `std::sync::mpsc` channel for receiving events (NewRequest, OpCompleted,
+//! StreamChunk, Shutdown). V8 callback state lives in `state::RuntimeState`, set
+//! on the isolate slot as `state::SharedState`.
 //!
 //! Event loop phases:
 //!   1. DRAIN — try_recv all events from the unified channel
 //!   2. DISPATCH — process NewRequest events (runs user JS)
-//!   3. RESOLVE — process OpCompleted/StreamChunk via shared handle_one_event
+//!   3. RESOLVE — process OpCompleted/StreamChunk events
 //!   4. TIMERS — fire ready timer callbacks
 //!   5. CHECK — see if any pending promises settled
 //!   6. WAIT — park_timeout (zero CPU while idle, woken by EventSender)
@@ -19,28 +19,65 @@
 #![allow(unsafe_code)]
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::event_loop::{self, EventLoopInner, SharedState};
-
-// Re-export LoopEvent so callers can construct NewRequest/Shutdown events.
-pub use crate::event_loop::LoopEvent;
+use crate::state::{RuntimeState, SharedState, SpawnedTimer};
 use crate::modules::ModuleEntry;
 use crate::init::{init_v8, load_polyfills_and_modules, thread_cpu_time, RequestResult};
-use crate::event_loop::fire_ready_timers;
+use crate::timers::TimerCallback;
+
+// ---------------------------------------------------------------------------
+// LoopEvent — events flowing through the event channel
+// ---------------------------------------------------------------------------
+
+/// Events flowing through the event channel.
+pub enum LoopEvent {
+    OpCompleted { id: u32, value: String },
+    StreamChunk { stream_id: u32, data: Vec<u8>, done: bool },
+    /// A new RPC request from the HTTP layer.
+    NewRequest {
+        id: u64,
+        body: String,
+        reply: tokio::sync::oneshot::Sender<Result<RequestResult, String>>,
+    },
+    /// Graceful shutdown signal.
+    Shutdown,
+}
+
+// ---------------------------------------------------------------------------
+// Timer heap (for blocking event loop — not tokio)
+// ---------------------------------------------------------------------------
+
+/// Entry in the timer min-heap. Ordered by (fire_at, id).
+#[derive(Eq, PartialEq)]
+struct TimerHeapEntry {
+    fire_at: Instant,
+    id: u32,
+}
+
+impl Ord for TimerHeapEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.fire_at
+            .cmp(&other.fire_at)
+            .then(self.id.cmp(&other.id))
+    }
+}
+
+impl PartialOrd for TimerHeapEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // EventSender — wraps mpsc::Sender<LoopEvent> + unparks the V8 thread
 // ---------------------------------------------------------------------------
 
 /// Sender that automatically unparks the V8 worker thread after every send.
-///
-/// The V8 thread uses `park_timeout` instead of `recv_timeout`. Without an
-/// explicit unpark, new events would only be noticed at the next timeout
-/// expiry. `EventSender` ensures zero-latency wake on every send.
 #[derive(Clone)]
 pub struct EventSender {
     tx: std::sync::mpsc::Sender<LoopEvent>,
@@ -48,9 +85,6 @@ pub struct EventSender {
 }
 
 impl EventSender {
-    /// Create a new `EventSender` wrapping a bare `mpsc::Sender` and a shared
-    /// thread handle. The handle may be `None` initially — the V8 thread
-    /// publishes itself via `run_event_loop`.
     pub fn new(
         tx: std::sync::mpsc::Sender<LoopEvent>,
         v8_thread: Arc<Mutex<Option<std::thread::Thread>>>,
@@ -58,7 +92,6 @@ impl EventSender {
         Self { tx, v8_thread }
     }
 
-    /// Send an event and unpark the V8 thread so it processes immediately.
     pub fn send(&self, event: LoopEvent) -> Result<(), std::sync::mpsc::SendError<LoopEvent>> {
         let result = self.tx.send(event);
         if let Some(t) = self.v8_thread.lock().unwrap().as_ref() {
@@ -85,12 +118,17 @@ struct PendingRequest {
 struct LoopState {
     context: v8::Global<v8::Context>,
     dispatch_fn: Option<v8::Global<v8::Function>>,
-    el_state: SharedState,
+    state: SharedState,
+
+    /// Timer heap for the blocking event loop.
+    timer_heap: BinaryHeap<Reverse<TimerHeapEntry>>,
 
     pending_requests: HashMap<u64, PendingRequest>,
 
     event_rx: std::sync::mpsc::Receiver<LoopEvent>,
-    /// Small buffer for events received outside of tick (e.g., during idle check).
+    event_tx: std::sync::mpsc::Sender<LoopEvent>,
+    tokio_handle: Option<tokio::runtime::Handle>,
+    /// Small buffer for events received outside of tick.
     buffered: Vec<LoopEvent>,
 
     modules: Vec<ModuleEntry>,
@@ -102,8 +140,6 @@ struct LoopState {
 
 impl LoopState {
     /// Drain all events from the buffer + channel, separating by type.
-    /// NewRequest/Shutdown are dispatched first (runs user JS), then I/O events
-    /// are resolved via shared handle_one_event.
     fn drain_all_events(&mut self) -> (Vec<LoopEvent>, Vec<LoopEvent>) {
         let mut requests = Vec::new();
         let mut io_events = Vec::new();
@@ -115,12 +151,10 @@ impl LoopState {
             }
         };
 
-        // Drain buffered events first (from run_until_idle / run_event_loop)
         for event in self.buffered.drain(..) {
             classify(event, &mut requests, &mut io_events);
         }
 
-        // Then drain the channel
         loop {
             match self.event_rx.try_recv() {
                 Ok(event) => classify(event, &mut requests, &mut io_events),
@@ -129,6 +163,84 @@ impl LoopState {
         }
 
         (requests, io_events)
+    }
+
+    /// Collect spawned timers from RuntimeState into the timer heap.
+    fn collect_spawned_timers(&mut self) {
+        let timers: Vec<SpawnedTimer> = self.state.borrow_mut().spawned_timers.drain(..).collect();
+        let now = Instant::now();
+        for timer in timers {
+            self.timer_heap.push(Reverse(TimerHeapEntry {
+                fire_at: now + timer.delay,
+                id: timer.id,
+            }));
+        }
+    }
+
+    /// Collect spawned ops from RuntimeState — spawn them on tokio and route
+    /// results back through the event channel.
+    ///
+    /// SAFETY: The spawned_ops futures are `dyn Future` (not `+ Send`) because
+    /// `RuntimeState` is `!Send`. However, the actual futures created by
+    /// `#[appbase_op(async)]` only capture owned data (Strings, u32s, etc.)
+    /// and are in practice Send. We assert Send here to spawn them on tokio.
+    /// This code path will be removed when concurrent.rs is replaced by Runtime.
+    fn collect_spawned_ops(&mut self) {
+        let ops: Vec<_> = self.state.borrow_mut().spawned_ops.drain(..).collect();
+        if ops.is_empty() {
+            return;
+        }
+
+        for op_future in ops {
+            let event_tx = self.event_tx.clone();
+
+            // Wrap the !Send future in a Send wrapper.
+            // SAFETY: The actual async op futures (fetch, etc.) only capture
+            // owned data and are effectively Send.
+            struct SendFuture(std::pin::Pin<Box<dyn std::future::Future<Output = crate::state::OpResult>>>);
+            unsafe impl Send for SendFuture {}
+            impl std::future::Future for SendFuture {
+                type Output = crate::state::OpResult;
+                fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+                    self.0.as_mut().poll(cx)
+                }
+            }
+
+            let send_future = SendFuture(op_future);
+
+            if let Some(handle) = &self.tokio_handle {
+                handle.spawn(async move {
+                    let result = send_future.await;
+                    match result {
+                        crate::state::OpResult::Completed { op_id, value, .. } => {
+                            let _ = event_tx.send(LoopEvent::OpCompleted { id: op_id, value });
+                        }
+                        crate::state::OpResult::StreamChunk { stream_id, data, done } => {
+                            let _ = event_tx.send(LoopEvent::StreamChunk { stream_id, data, done });
+                        }
+                        crate::state::OpResult::Cancelled => {}
+                    }
+                });
+            } else {
+                // No tokio handle — spawn thread as fallback
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("Failed to create tokio runtime for async op");
+                    let result = rt.block_on(send_future);
+                    match result {
+                        crate::state::OpResult::Completed { op_id, value, .. } => {
+                            let _ = event_tx.send(LoopEvent::OpCompleted { id: op_id, value });
+                        }
+                        crate::state::OpResult::StreamChunk { stream_id, data, done } => {
+                            let _ = event_tx.send(LoopEvent::StreamChunk { stream_id, data, done });
+                        }
+                        crate::state::OpResult::Cancelled => {}
+                    }
+                });
+            }
+        }
     }
 
     fn dispatch_request(
@@ -171,7 +283,7 @@ impl LoopState {
                             .to_string(scope)
                             .unwrap()
                             .to_rust_string_lossy(scope);
-                        let logs = self.el_state.borrow_mut().log_buffer.drain(..).collect();
+                        let logs = self.state.borrow_mut().per_request_logs.remove(&0).unwrap_or_default();
                         let _ = reply.send(Ok(RequestResult {
                             json,
                             cpu_time: cpu_elapsed,
@@ -207,7 +319,7 @@ impl LoopState {
                     .to_string(scope)
                     .unwrap()
                     .to_rust_string_lossy(scope);
-                let logs = self.el_state.borrow_mut().log_buffer.drain(..).collect();
+                let logs = self.state.borrow_mut().per_request_logs.remove(&0).unwrap_or_default();
                 let _ = reply.send(Ok(RequestResult {
                     json,
                     cpu_time: cpu_elapsed,
@@ -246,7 +358,7 @@ impl LoopState {
                             .unwrap()
                             .to_rust_string_lossy(scope);
                         if let Some(reply) = req.reply.take() {
-                            let logs = self.el_state.borrow_mut().log_buffer.drain(..).collect();
+                            let logs = self.state.borrow_mut().per_request_logs.remove(&0).unwrap_or_default();
                             let _ = reply.send(Ok(RequestResult {
                                 json,
                                 cpu_time: req.cpu_accumulated,
@@ -273,25 +385,90 @@ impl LoopState {
         }
     }
 
+    /// Fire all timers whose fire_at <= now.
+    fn fire_ready_timers(&mut self, scope: &mut v8::PinScope) -> bool {
+        let mut any_fired = false;
+        let now = Instant::now();
+
+        loop {
+            let should_fire = self
+                .timer_heap
+                .peek()
+                .map(|Reverse(e)| e.fire_at <= now)
+                .unwrap_or(false);
+            if !should_fire {
+                break;
+            }
+
+            let entry = self.timer_heap.pop().unwrap().0;
+
+            // Take callback out (lazy deletion: cleared timers won't have an entry)
+            let cb_opt = self.state.borrow_mut().timer_callbacks.remove(&entry.id);
+
+            if let Some(cb) = cb_opt {
+                any_fired = true;
+
+                let func = v8::Local::new(scope, &cb.callback);
+                let undefined = v8::undefined(scope).into();
+                func.call(scope, undefined, &[]);
+                scope.perform_microtask_checkpoint();
+
+                if let Some(dur) = cb.interval {
+                    // setInterval: re-insert callback + new heap entry
+                    self.state.borrow_mut().timer_callbacks.insert(entry.id, cb);
+                    self.timer_heap.push(Reverse(TimerHeapEntry {
+                        fire_at: Instant::now() + dur,
+                        id: entry.id,
+                    }));
+                }
+            }
+        }
+
+        any_fired
+    }
+
     /// Compute timeout for WAIT phase.
     fn compute_wait_timeout(&self) -> Duration {
-        // Reuse shared timer scanning from event_loop
-        match event_loop::next_timer_fire(&self.el_state) {
+        // Find next timer fire time
+        let next_timer = {
+            let s = self.state.borrow();
+            let mut result = None;
+            for Reverse(entry) in self.timer_heap.iter() {
+                if s.timer_callbacks.contains_key(&entry.id) {
+                    result = Some(entry.fire_at);
+                    break;
+                }
+            }
+            result
+        };
+
+        match next_timer {
             Some(fire_at) => fire_at.saturating_duration_since(Instant::now()),
-            None if self.has_pending_work() => {
-                // Have async work pending — short wait for quick response
-                Duration::from_millis(100)
-            }
-            None => {
-                // Nothing pending — long wait for new requests
-                Duration::from_secs(60)
-            }
+            None if self.has_pending_work() => Duration::from_millis(100),
+            None => Duration::from_secs(60),
         }
     }
 
     fn has_pending_work(&self) -> bool {
+        let s = self.state.borrow();
         !self.pending_requests.is_empty()
-            || event_loop::has_pending_work(&self.el_state)
+            || !s.timer_callbacks.is_empty()
+            || !s.pending_resolvers.is_empty()
+            || s.streams.values().any(|st| st.pending_read.is_some() && !st.closed)
+    }
+
+    /// Handle an I/O event (OpCompleted or StreamChunk).
+    fn handle_io_event(&self, scope: &mut v8::PinScope, event: LoopEvent) {
+        match event {
+            LoopEvent::OpCompleted { id, value } => {
+                crate::request::resolve_op(scope, &self.state, id, &value);
+            }
+            LoopEvent::StreamChunk { stream_id, data, done } => {
+                crate::streams::push_stream_chunk(scope, &self.state, stream_id, &data, done);
+                scope.perform_microtask_checkpoint();
+            }
+            _ => {}
+        }
     }
 }
 
@@ -300,13 +477,6 @@ impl LoopState {
 // ---------------------------------------------------------------------------
 
 /// A V8 isolate that supports multiple in-flight requests with concurrent I/O.
-///
-/// JS execution is serial per-request: the microtask queue contains entries
-/// from exactly 1 request at any moment, enabling clean per-request kill.
-///
-/// All events (new requests, op completions, stream chunks, shutdown) flow
-/// through a single unified `LoopEvent` channel. Fetch tasks send directly
-/// to the same channel — no separate concurrent event path.
 pub struct ConcurrentIsolate {
     isolate: v8::OwnedIsolate,
     ls: LoopState,
@@ -318,13 +488,9 @@ pub struct ConcurrentIsolate {
 }
 
 // SAFETY: ConcurrentIsolate is only used on a single dedicated worker thread.
-// The event channel (std::sync::mpsc) handles cross-thread communication.
 unsafe impl Send for ConcurrentIsolate {}
 
 impl ConcurrentIsolate {
-    /// Create a new concurrent isolate for ES module format (`export function ...`).
-    ///
-    /// `cpu_limit` — if `Some`, arms a POSIX CPU timer per request batch (Linux only).
     pub fn new(
         modules: Vec<ModuleEntry>,
         event_rx: std::sync::mpsc::Receiver<LoopEvent>,
@@ -337,8 +503,6 @@ impl ConcurrentIsolate {
         Self::new_with_thread_handle(modules, event_rx, event_tx, tokio_handle, cpu_limit, env_vars, v8_thread)
     }
 
-    /// Like `new`, but accepts a pre-created thread-handle Arc so callers
-    /// (e.g., `spawn_concurrent_worker`) can share it with the returned `EventSender`.
     pub fn new_with_thread_handle(
         modules: Vec<ModuleEntry>,
         event_rx: std::sync::mpsc::Receiver<LoopEvent>,
@@ -353,7 +517,6 @@ impl ConcurrentIsolate {
         let params = v8::CreateParams::default().heap_limits(0, 128 * 1024 * 1024);
         let mut isolate = v8::Isolate::new(params);
 
-        // Register near-heap-limit callback to prevent OOM crashes
         unsafe extern "C" fn near_heap_limit_callback(
             _data: *mut std::ffi::c_void,
             current_heap_limit: usize,
@@ -367,17 +530,10 @@ impl ConcurrentIsolate {
         }
         isolate.add_near_heap_limit_callback(near_heap_limit_callback, std::ptr::null_mut());
 
-        // Use the unified LoopEvent channel. The EventLoopInner's own event_tx
-        // is the SAME channel that the ConcurrentIsolate's event_rx reads from.
-        // We replace the auto-created inner channel with the caller's channel.
-        let (mut inner, _discard_rx) = EventLoopInner::with_env(env_vars);
-        // Overwrite the inner event_tx with the caller's tx so fetch tasks send
-        // to the same channel that the ConcurrentIsolate drains.
-        inner.event_tx = event_tx;
-        inner.tokio_handle = tokio_handle;
-
-        let el_state: SharedState = Rc::new(RefCell::new(inner));
-        isolate.set_slot(el_state.clone());
+        // Create RuntimeState and set as isolate slot
+        let rt_state = RuntimeState::new(env_vars);
+        let state: SharedState = Rc::new(RefCell::new(rt_state));
+        isolate.set_slot(state.clone());
 
         let context = {
             v8::scope!(let handle_scope, &mut isolate);
@@ -390,9 +546,12 @@ impl ConcurrentIsolate {
             ls: LoopState {
                 context,
                 dispatch_fn: None,
-                el_state,
+                state,
+                timer_heap: BinaryHeap::new(),
                 pending_requests: HashMap::new(),
                 event_rx,
+                event_tx,
+                tokio_handle,
                 buffered: Vec::new(),
                 modules,
                 initialized: false,
@@ -407,30 +566,26 @@ impl ConcurrentIsolate {
         }
     }
 
-    /// Initialize: load ES modules + compile dispatch function (once).
     fn ensure_initialized(&mut self) {
         if self.ls.initialized {
             return;
         }
 
-        // Clone modules so we don't borrow self.ls during V8 scope
         let modules = self.ls.modules.clone();
 
         {
             v8::scope!(let handle_scope, &mut self.isolate);
             let context = v8::Local::new(handle_scope, &self.ls.context);
             let scope = &mut v8::ContextScope::new(handle_scope, context);
-
             self.ls.dispatch_fn = Some(load_polyfills_and_modules(scope, &modules));
         }
 
         self.ls.initialized = true;
 
-        // Create POSIX CPU timer (Linux only, must be on V8 thread)
         #[cfg(target_os = "linux")]
         if self.ls.cpu_limit.is_some() {
             let system = crate::cpu_timer::CpuTimerSystem::get_or_init();
-            let app_id = 0u64; // single-app mode for now
+            let app_id = 0u64;
             let v8_handle = self.isolate.thread_safe_handle();
             system.register(app_id, v8_handle);
             match crate::cpu_timer::CpuTimer::new(app_id) {
@@ -440,7 +595,6 @@ impl ConcurrentIsolate {
         }
     }
 
-    /// Arm the CPU timer before entering V8.
     fn arm_cpu_timer(&mut self) {
         #[cfg(target_os = "linux")]
         if !self.cpu_timer_active {
@@ -451,7 +605,6 @@ impl ConcurrentIsolate {
         }
     }
 
-    /// Disarm the CPU timer after V8 returns.
     fn disarm_cpu_timer(&mut self) {
         #[cfg(target_os = "linux")]
         if self.cpu_timer_active {
@@ -462,38 +615,34 @@ impl ConcurrentIsolate {
         }
     }
 
-    /// Run one iteration of the event loop.
-    ///
-    /// Phases:
-    /// 1. DRAIN all events from unified channel (non-blocking)
-    /// 2. DISPATCH new requests (runs user JS)
-    /// 3. RESOLVE I/O events via shared handle_one_event (resolves promises, delivers stream data)
-    /// 4. TIMERS — fire ready timer callbacks
-    /// 5. CHECK — see if any pending promises settled
     fn tick(&mut self) -> bool {
-        // PHASE 1: DRAIN — get all events BEFORE creating V8 scope
+        // Collect spawned ops/timers from RuntimeState before draining events
+        self.ls.collect_spawned_ops();
+        self.ls.collect_spawned_timers();
+
+        // PHASE 1: DRAIN
         let (requests, io_events) = self.ls.drain_all_events();
 
-        // Check if there's actually work to do
         let has_work = !requests.is_empty()
             || !io_events.is_empty()
             || !self.ls.pending_requests.is_empty()
-            || !self.ls.el_state.borrow().timers.callbacks.is_empty();
+            || !self.ls.state.borrow().timer_callbacks.is_empty();
 
         if !has_work {
             return false;
         }
 
-        // Arm CPU timer BEFORE entering V8
         self.arm_cpu_timer();
 
-        // All V8 interaction in a block so the scope drops before disarm
         let result = {
             v8::scope!(let handle_scope, &mut self.isolate);
             let context = v8::Local::new(handle_scope, &self.ls.context);
             let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-            // PHASE 2: DISPATCH new requests (runs user JS)
+            // Set request context for logging
+            self.ls.state.borrow_mut().executing_request_id = Some(0);
+
+            // PHASE 2: DISPATCH new requests
             for event in requests {
                 match event {
                     LoopEvent::NewRequest { id, body, reply } => {
@@ -507,26 +656,30 @@ impl ConcurrentIsolate {
                             }
                         }
                     }
-                    _ => {} // unreachable — drain_all_events separates by type
+                    _ => {}
                 }
             }
 
             scope.perform_microtask_checkpoint();
+
+            // Collect any new ops/timers spawned during dispatch
+            self.ls.collect_spawned_ops();
+            self.ls.collect_spawned_timers();
+
             self.ls.check_settled_promises(scope);
 
-            // PHASE 3: RESOLVE I/O events via shared handle_one_event
+            // PHASE 3: RESOLVE I/O events
             for event in io_events {
-                event_loop::handle_one_event(scope, &self.ls.el_state, event);
+                self.ls.handle_io_event(scope, event);
                 self.ls.check_settled_promises(scope);
             }
 
             // PHASE 4: TIMERS
-            {
-                let has_timers = !self.ls.el_state.borrow().timers.callbacks.is_empty();
-                if has_timers {
-                    fire_ready_timers(scope, &self.ls.el_state);
-                    self.ls.check_settled_promises(scope);
-                }
+            if !self.ls.state.borrow().timer_callbacks.is_empty() {
+                self.ls.fire_ready_timers(scope);
+                // Collect timers spawned by timer callbacks
+                self.ls.collect_spawned_timers();
+                self.ls.check_settled_promises(scope);
             }
 
             // PHASE 5: CHECK
@@ -539,15 +692,8 @@ impl ConcurrentIsolate {
     }
 
     /// Run the event loop. Blocks the current thread.
-    ///
-    /// Uses `park_timeout` instead of `recv_timeout`. The V8 thread is woken by:
-    /// 1. `EventSender.send()` — unparks after every send (new requests, op completions)
-    /// 2. Timeout — `park_timeout` returns when the next timer should fire
-    /// 3. Spurious wakes — harmless, just re-polls
     pub fn run_event_loop(&mut self) {
-        // Publish our thread handle so EventSenders can unpark us.
         *self.v8_thread.lock().unwrap() = Some(std::thread::current());
-
         self.ensure_initialized();
 
         loop {
@@ -557,11 +703,9 @@ impl ConcurrentIsolate {
 
             self.tick();
 
-            // Handle V8 termination (CPU limit exceeded)
             if self.isolate.is_execution_terminating() {
                 self.isolate.cancel_terminate_execution();
                 self.disarm_cpu_timer();
-                // Drain pending requests with error
                 for (_id, req) in self.ls.pending_requests.drain() {
                     if let Some(reply) = req.reply {
                         let _ = reply.send(Err("CPU time limit exceeded".to_string()));
@@ -575,8 +719,6 @@ impl ConcurrentIsolate {
                 continue;
             }
 
-            // Park the thread — woken by EventSender.send() → thread.unpark()
-            // or by timeout when the next timer should fire.
             std::thread::park_timeout(timeout);
         }
     }
@@ -584,20 +726,15 @@ impl ConcurrentIsolate {
     /// Run the event loop until all pending requests are resolved or the channel
     /// disconnects. Useful for testing.
     pub fn run_until_idle(&mut self) {
-        // Publish our thread handle so EventSenders can unpark us.
         *self.v8_thread.lock().unwrap() = Some(std::thread::current());
-
         self.ensure_initialized();
 
         loop {
             let has_work = self.tick();
 
             if !has_work {
-                // Check if there are any new events (race between tick's drain and new sends)
                 match self.ls.event_rx.try_recv() {
                     Ok(event) => {
-                        // Event arrived between drain and this check. Buffer it
-                        // for the next tick to process.
                         self.ls.buffered.push(event);
                         continue;
                     }
@@ -609,7 +746,6 @@ impl ConcurrentIsolate {
             let timeout = self.ls.compute_wait_timeout();
             let timeout = timeout.min(Duration::from_millis(100));
 
-            // Park instead of recv_timeout — woken by EventSender.send() unpark.
             std::thread::park_timeout(timeout);
         }
     }
@@ -619,9 +755,6 @@ impl ConcurrentIsolate {
 // Helper: spawn a concurrent worker thread
 // ---------------------------------------------------------------------------
 
-/// Spawn a worker thread running a `ConcurrentIsolate` event loop.
-/// Returns an `EventSender` for dispatching requests to this worker.
-/// The sender automatically unparks the V8 thread after every send.
 pub fn spawn_concurrent_worker(
     modules: Vec<ModuleEntry>,
     tokio_handle: Option<tokio::runtime::Handle>,
@@ -631,9 +764,6 @@ pub fn spawn_concurrent_worker(
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let event_tx_for_caller = event_tx.clone();
 
-    // Create a shared v8_thread handle. The ConcurrentIsolate will publish
-    // the actual thread handle once run_event_loop starts. All EventSenders
-    // (returned here AND cloned inside fetch tasks) share this Arc.
     let v8_thread: Arc<Mutex<Option<std::thread::Thread>>> = Arc::new(Mutex::new(None));
     let v8_thread_inner = v8_thread.clone();
 

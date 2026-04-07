@@ -394,9 +394,9 @@ fn generate_sync(needs_state: bool, input_fn: &ItemFn) -> syn::Result<TokenStrea
     // State extraction
     let state_code = if needs_state {
         quote! {
-            let state: crate::event_loop::SharedState = scope
-                .get_slot::<crate::event_loop::SharedState>()
-                .expect("EventLoopInner not in isolate slot")
+            let state: crate::state::SharedState = scope
+                .get_slot::<crate::state::SharedState>()
+                .expect("RuntimeState not in isolate slot")
                 .clone();
         }
     } else {
@@ -478,9 +478,9 @@ fn generate_async(input_fn: &ItemFn) -> syn::Result<TokenStream2> {
             args: v8::FunctionCallbackArguments,
             mut rv: v8::ReturnValue,
         ) {
-            let __state: crate::event_loop::SharedState = scope
-                .get_slot::<crate::event_loop::SharedState>()
-                .expect("EventLoopInner not in isolate slot")
+            let __state: crate::state::SharedState = scope
+                .get_slot::<crate::state::SharedState>()
+                .expect("RuntimeState not in isolate slot")
                 .clone();
 
             #(#extractions)*
@@ -490,53 +490,24 @@ fn generate_async(input_fn: &ItemFn) -> syn::Result<TokenStream2> {
             let __promise = __resolver.get_promise(scope);
             let __global_resolver = v8::Global::new(scope, __resolver);
 
-            let (__op_id, __event_tx, __waker, __concurrent_tx, __tokio_handle) = {
+            let (__op_id, __request_id) = {
                 let mut __s = __state.borrow_mut();
                 let __id = __s.next_op_id;
                 __s.next_op_id += 1;
                 __s.pending_resolvers.insert(__id, __global_resolver);
-                (
-                    __id,
-                    __s.event_tx.clone(),
-                    __s.waker.clone(),
-                    __s.concurrent_event_tx.clone(),
-                    __s.tokio_handle.clone(),
-                )
+                (__id, __s.executing_request_id)
             };
 
-            let __task = async move {
+            let __fut = Box::pin(async move {
                 #send_result
-                match __concurrent_tx {
-                    Some(ref __ctx) => {
-                        let _ = __ctx.send(crate::concurrent::Event::OpCompleted {
-                            op_id: __op_id,
-                            value: __value,
-                        });
-                    }
-                    None => {
-                        let _ = __event_tx.send(crate::event_loop::LoopEvent::OpCompleted {
-                            id: __op_id,
-                            value: __value,
-                        });
-                        __waker.wake();
-                    }
+                crate::state::OpResult::Completed {
+                    op_id: __op_id,
+                    value: __value,
+                    request_id: __request_id,
                 }
-            };
+            });
 
-            match __tokio_handle {
-                Some(__handle) => {
-                    __handle.spawn(__task);
-                }
-                None => {
-                    std::thread::spawn(move || {
-                        let __rt = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                            .expect("Failed to create tokio runtime for async op");
-                        __rt.block_on(__task);
-                    });
-                }
-            }
+            __state.borrow_mut().spawned_ops.push(__fut);
 
             rv.set(__promise.into());
         }

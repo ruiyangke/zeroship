@@ -16,7 +16,7 @@ use aws_lc_rs::rsa::{
 };
 use aws_lc_rs::signature::KeyPair;
 
-use crate::event_loop::SharedState;
+use crate::state::SharedState;
 
 // ---------------------------------------------------------------------------
 // Crypto key store types

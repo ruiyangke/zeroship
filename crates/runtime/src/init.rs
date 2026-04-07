@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use crate::event_loop::SharedState;
+use crate::state::SharedState;
 use crate::timers::TimerCallback;
 
 // ===========================================================================
@@ -223,13 +223,15 @@ fn console_log_callback(
 
     let state: SharedState = scope
         .get_slot::<SharedState>()
-        .expect("EventLoopInner not in isolate slot")
+        .expect("RuntimeState not in isolate slot")
         .clone();
     let mut s = state.borrow_mut();
-    s.log_buffer.push(line);
-    if s.log_buffer.len() > 1000 {
-        let drain = s.log_buffer.len() - 1000;
-        s.log_buffer.drain(..drain);
+    let req_id = s.executing_request_id.unwrap_or(0);
+    let logs = s.per_request_logs.entry(req_id).or_default();
+    logs.push(line);
+    if logs.len() > 1000 {
+        let drain = logs.len() - 1000;
+        logs.drain(..drain);
     }
 }
 

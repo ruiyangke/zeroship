@@ -12,7 +12,7 @@
 //! the common SSE pattern where `controller.enqueue()` is called from a
 //! setTimeout callback while `reader.read()` is awaited.
 
-use crate::event_loop::{SharedState, StreamState};
+use crate::state::{SharedState, StreamState};
 
 /// Resolve a PromiseResolver with `{value: Uint8Array(data), done: false}`.
 fn resolve_with_chunk(
@@ -60,7 +60,7 @@ pub(crate) fn stream_create_callback(
 ) {
     let state: SharedState = scope
         .get_slot::<SharedState>()
-        .expect("EventLoopInner not in isolate slot")
+        .expect("RuntimeState not in isolate slot")
         .clone();
     let mut s = state.borrow_mut();
     let id = s.next_stream_id;
@@ -89,14 +89,14 @@ pub(crate) fn stream_read_callback(
 
     let state: SharedState = scope
         .get_slot::<SharedState>()
-        .expect("EventLoopInner not in isolate slot")
+        .expect("RuntimeState not in isolate slot")
         .clone();
     let mut s = state.borrow_mut();
 
     // Lazy-create StreamState if it doesn't exist yet (streaming fetch path:
     // stream_id is allocated in the fetch callback but StreamState is deferred).
     let stream = s.streams.entry(stream_id).or_insert_with(|| {
-        crate::event_loop::StreamState {
+        crate::state::StreamState {
             pending_read: None,
             buffer: Vec::new(),
             closed: false,
@@ -144,7 +144,7 @@ pub(crate) fn stream_enqueue_callback(
 
     let state: SharedState = scope
         .get_slot::<SharedState>()
-        .expect("EventLoopInner not in isolate slot")
+        .expect("RuntimeState not in isolate slot")
         .clone();
 
     // Synchronous fast-path: if there's a pending read, resolve it immediately.
@@ -178,7 +178,7 @@ pub(crate) fn stream_close_callback(
 
     let state: SharedState = scope
         .get_slot::<SharedState>()
-        .expect("EventLoopInner not in isolate slot")
+        .expect("RuntimeState not in isolate slot")
         .clone();
 
     let pending = {
@@ -212,7 +212,7 @@ pub(crate) fn stream_error_callback(
 
     let state: SharedState = scope
         .get_slot::<SharedState>()
-        .expect("EventLoopInner not in isolate slot")
+        .expect("RuntimeState not in isolate slot")
         .clone();
 
     let pending = {
@@ -258,7 +258,7 @@ pub(crate) fn push_stream_chunk(
             let mut s = state.borrow_mut();
             // Lazy-create StreamState if it doesn't exist yet
             let stream = s.streams.entry(stream_id).or_insert_with(|| {
-                crate::event_loop::StreamState {
+                crate::state::StreamState {
                     pending_read: None,
                     buffer: Vec::new(),
                     closed: false,
