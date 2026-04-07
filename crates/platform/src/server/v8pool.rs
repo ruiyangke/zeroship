@@ -1,13 +1,14 @@
 //! Multi-tenant V8 isolate pool.
 //!
-//! One `ConcurrentIsolate` per app, created lazily on first request.
+//! One `Runtime` per app, created lazily on first request.
 //! LRU eviction when pool reaches capacity or idle timeout expires.
 
 use crate::core::config::IsolateConfig;
 use crate::core::types::{IsolateStats, PoolStats, RpcResult};
-use appbase_runtime::concurrent::{ConcurrentIsolate, Event};
+use appbase_runtime::{IncomingRequest, Runtime};
 use appbase_runtime::modules::ModuleEntry;
 use appbase_runtime::init_v8;
+use tokio_util::sync::CancellationToken;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -16,7 +17,9 @@ use std::time::Duration;
 /// Per-app isolate entry in the pool.
 struct IsolateEntry {
     /// Channel to send requests to the isolate's worker thread.
-    sender: appbase_runtime::concurrent::EventSender,
+    request_tx: tokio::sync::mpsc::Sender<IncomingRequest>,
+    /// Cancellation token to shut down the isolate.
+    shutdown: CancellationToken,
     /// Last time a request was dispatched (epoch millis, atomic for concurrent updates).
     last_used_ms: AtomicU64,
     /// Total requests dispatched.
@@ -34,14 +37,13 @@ fn epoch_ms() -> u64 {
 
 /// Multi-tenant V8 isolate pool.
 ///
-/// Each app gets its own `ConcurrentIsolate` on a dedicated thread.
+/// Each app gets its own `Runtime` on a dedicated thread.
 /// Isolates are created lazily and evicted when idle or at capacity.
 pub struct V8Pool {
     /// Map of app_id → isolate entry. RwLock for concurrent reads (dispatch)
     /// with rare writes (create/evict).
     isolates: RwLock<HashMap<String, Arc<IsolateEntry>>>,
     config: IsolateConfig,
-    tokio_handle: tokio::runtime::Handle,
     next_request_id: AtomicU64,
     wall_timeout: Duration,
 }
@@ -56,7 +58,6 @@ impl V8Pool {
         Self {
             isolates: RwLock::new(HashMap::new()),
             config: config.clone(),
-            tokio_handle: tokio::runtime::Handle::current(),
             next_request_id: AtomicU64::new(1),
             wall_timeout: Duration::from_secs(30),
         }
@@ -74,14 +75,17 @@ impl V8Pool {
 
         let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let cancel = CancellationToken::new();
 
         entry
-            .sender
-            .send(Event::NewRequest {
+            .request_tx
+            .send(IncomingRequest {
                 id,
                 body,
                 reply: reply_tx,
+                cancel,
             })
+            .await
             .map_err(|_| format!("V8 isolate for '{app_id}' is dead"))?;
 
         entry.request_count.fetch_add(1, Ordering::Relaxed);
@@ -121,9 +125,6 @@ impl V8Pool {
         {
             let isolates = self.isolates.read().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = isolates.get(app_id) {
-                // Update last_used (interior mutability via atomic would be better,
-                // but Instant isn't atomic. We accept a slight staleness here —
-                // eviction checks under write lock will see the latest value.)
                 return Ok(entry.clone());
             }
         }
@@ -156,56 +157,59 @@ impl V8Pool {
         Ok(entry)
     }
 
-    /// Spawn a new ConcurrentIsolate on a dedicated thread.
+    /// Spawn a new Runtime on a dedicated thread.
     fn spawn_isolate(
         &self,
         app_id: &str,
         server_js: &str,
     ) -> Result<IsolateEntry, String> {
-        let (event_tx, event_rx) = std::sync::mpsc::channel();
-        let event_tx_clone = event_tx.clone();
+        let (request_tx, request_rx) = tokio::sync::mpsc::channel::<IncomingRequest>(256);
+        let shutdown = CancellationToken::new();
+        let shutdown_inner = shutdown.clone();
+
         let modules = vec![ModuleEntry {
             specifier: "index.js".into(),
             source: server_js.into(),
         }];
-        let handle = self.tokio_handle.clone();
         let cpu_limit = self.config.cpu_limit();
         let thread_name = format!("v8-{app_id}");
-
-        // Shared thread handle for park/unpark waking.
-        let v8_thread = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let v8_thread_inner = v8_thread.clone();
 
         std::thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
-                let mut isolate =
-                    ConcurrentIsolate::new_with_thread_handle(
-                        modules, event_rx, event_tx_clone, Some(handle), cpu_limit,
-                        std::collections::HashMap::new(), v8_thread_inner,
-                    );
-                isolate.run_event_loop();
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime build failed")
+                    .block_on(async {
+                        Runtime::new(
+                            modules,
+                            request_rx,
+                            shutdown_inner,
+                            cpu_limit,
+                            HashMap::new(),
+                        )
+                        .run()
+                        .await
+                    });
             })
             .map_err(|e| format!("Failed to spawn V8 thread: {e}"))?;
 
-        let sender = appbase_runtime::concurrent::EventSender::new(event_tx, v8_thread);
-
-        // Warmup
-        let warmup_tx = sender.clone();
-        std::thread::spawn(move || {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            let _ = warmup_tx.send(Event::NewRequest {
+        // Warmup: send a ping and wait for the reply synchronously.
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        request_tx
+            .blocking_send(IncomingRequest {
                 id: 0,
                 body: r#"{"jsonrpc":"2.0","method":"__ping","params":[],"id":0}"#.to_string(),
-                reply: tx,
-            });
-            let _ = rx.blocking_recv();
-        })
-        .join()
-        .map_err(|_| "Warmup thread panicked".to_string())?;
+                reply: reply_tx,
+                cancel: CancellationToken::new(),
+            })
+            .map_err(|_| "Warmup send failed — isolate thread died".to_string())?;
+        let _ = reply_rx.blocking_recv();
 
         Ok(IsolateEntry {
-            sender,
+            request_tx,
+            shutdown,
             last_used_ms: AtomicU64::new(epoch_ms()),
             request_count: AtomicU64::new(0),
             logs: std::sync::Mutex::new(Vec::new()),
@@ -221,7 +225,7 @@ impl V8Pool {
 
         if let Some(id) = oldest {
             if let Some(entry) = isolates.remove(&id) {
-                let _ = entry.sender.send(Event::Shutdown);
+                entry.shutdown.cancel();
                 eprintln!("[pool] Evicted '{id}' (LRU, pool full)");
             }
         }
@@ -244,7 +248,7 @@ impl V8Pool {
 
         for id in idle {
             if let Some(entry) = isolates.remove(&id) {
-                let _ = entry.sender.send(Event::Shutdown);
+                entry.shutdown.cancel();
                 eprintln!("[pool] Evicted '{id}' (idle {}s)", self.config.idle_timeout_secs);
             }
         }
@@ -254,7 +258,7 @@ impl V8Pool {
     pub fn evict_app(&self, app_id: &str) {
         let mut isolates = self.isolates.write().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = isolates.remove(app_id) {
-            let _ = entry.sender.send(Event::Shutdown);
+            entry.shutdown.cancel();
             eprintln!("[pool] Evicted '{app_id}' (manual)");
         }
     }
@@ -295,7 +299,7 @@ impl Drop for V8Pool {
     fn drop(&mut self) {
         if let Ok(isolates) = self.isolates.read() {
             for (_, entry) in isolates.iter() {
-                let _ = entry.sender.send(Event::Shutdown);
+                entry.shutdown.cancel();
             }
         }
     }
