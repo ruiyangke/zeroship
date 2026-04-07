@@ -239,7 +239,12 @@ fn set_timeout_callback(
     if let Some(req_id) = s.executing_request_id {
         s.timer_owner.insert(id, req_id);
     }
-    s.spawned_timers.push(crate::state::SpawnedTimer { id, delay, interval: None });
+    if delay < Duration::from_millis(1) {
+        // Fast path: fire inline without tokio::time::sleep overhead.
+        s.ready_timers.push(id);
+    } else {
+        s.spawned_timers.push(crate::state::SpawnedTimer { id, delay, interval: None });
+    }
 
     rv.set(v8::Integer::new(scope, id as i32).into());
 }

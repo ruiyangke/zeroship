@@ -56,6 +56,9 @@ pub struct RuntimeState {
     pub spawned_ops: Vec<Pin<Box<dyn Future<Output = OpResult>>>>,
     /// Timers queued to be armed on the next event-loop iteration.
     pub spawned_timers: Vec<SpawnedTimer>,
+    /// Timer IDs ready to fire immediately (delay == 0).
+    /// Drained by the Runtime after each enter_v8, avoiding tokio::time::sleep overhead.
+    pub(crate) ready_timers: Vec<u32>,
 
     /// The request currently being executed (None between requests).
     pub executing_request_id: Option<u64>,
@@ -95,6 +98,7 @@ impl RuntimeState {
 
             spawned_ops: Vec::new(),
             spawned_timers: Vec::new(),
+            ready_timers: Vec::new(),
 
             executing_request_id: None,
             executing_request_cancel: None,

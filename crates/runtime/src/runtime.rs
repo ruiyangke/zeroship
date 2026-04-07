@@ -287,20 +287,96 @@ impl Runtime {
     /// Move newly spawned ops and timers from `RuntimeState` into the
     /// `FuturesUnordered` collections so `tokio::select!` can poll them.
     fn collect_new_tasks(&mut self) {
-        let mut s = self.state.borrow_mut();
+        {
+            let mut s = self.state.borrow_mut();
 
-        // Drain spawned ops → pending_ops
-        for op_future in s.spawned_ops.drain(..) {
-            self.pending_ops.push(op_future);
+            // Drain spawned ops → pending_ops
+            for op_future in s.spawned_ops.drain(..) {
+                self.pending_ops.push(op_future);
+            }
+
+            // Drain spawned timers → pending_timers (create tokio::time::sleep futures)
+            for timer in s.spawned_timers.drain(..) {
+                let SpawnedTimer { id, delay, interval } = timer;
+                self.pending_timers.push(Box::pin(async move {
+                    tokio::time::sleep(delay).await;
+                    TimerResult { id, interval }
+                }));
+            }
         }
 
-        // Drain spawned timers → pending_timers (create tokio::time::sleep futures)
-        for timer in s.spawned_timers.drain(..) {
-            let SpawnedTimer { id, delay, interval } = timer;
-            self.pending_timers.push(Box::pin(async move {
-                tokio::time::sleep(delay).await;
-                TimerResult { id, interval }
-            }));
+        // Fire zero-delay timers inline (avoids tokio scheduling overhead).
+        // Loops because a timer callback may enqueue more ready_timers via
+        // nested setTimeout(0).
+        self.fire_ready_timers();
+    }
+
+    // -----------------------------------------------------------------------
+    // fire_ready_timers — inline execution of zero-delay timers
+    // -----------------------------------------------------------------------
+
+    /// Drain `ready_timers` and fire each callback inline, without going
+    /// through tokio::time::sleep. Loops until no more ready timers remain
+    /// (nested setTimeout(0) calls are batched in the same pass).
+    fn fire_ready_timers(&mut self) {
+        loop {
+            let timer_id = {
+                let mut s = self.state.borrow_mut();
+                s.ready_timers.pop()
+            };
+            let Some(timer_id) = timer_id else { break };
+
+            // Look up the owning request so we can set executing context.
+            let owner_request_id = self.state.borrow().timer_owner.get(&timer_id).copied();
+
+            if let Some(rid) = owner_request_id {
+                let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
+                let mut s = self.state.borrow_mut();
+                s.executing_request_id = Some(rid);
+                s.executing_request_cancel = cancel;
+            }
+
+            let cpu_start = thread_cpu_time();
+            self.arm_cpu_timer();
+
+            enter_v8!(self, |scope| {
+                crate::request::fire_timer_callback(scope, &self.state, timer_id);
+            });
+
+            let cpu_elapsed = thread_cpu_time().saturating_sub(cpu_start);
+            self.disarm_cpu_timer();
+
+            // Accumulate CPU time on owning request.
+            if let Some(rid) = owner_request_id {
+                if let Some(req) = self.pending_requests.get_mut(&rid) {
+                    req.cpu_accumulated += cpu_elapsed;
+                }
+            }
+
+            // One-shot timer: remove from timer_owner.
+            // (setInterval with delay 0 goes through spawned_timers, not ready_timers,
+            // so we won't see interval timers here.)
+            self.state.borrow_mut().timer_owner.remove(&timer_id);
+
+            self.clear_executing_request();
+            self.check_settled_promises_v8();
+
+            // Drain any new spawned ops/timers that the callback may have created
+            // (but NOT recursing into fire_ready_timers — we handle ready_timers
+            // via the outer loop).
+            {
+                let mut s = self.state.borrow_mut();
+                for op_future in s.spawned_ops.drain(..) {
+                    self.pending_ops.push(op_future);
+                }
+                for timer in s.spawned_timers.drain(..) {
+                    let SpawnedTimer { id, delay, interval } = timer;
+                    self.pending_timers.push(Box::pin(async move {
+                        tokio::time::sleep(delay).await;
+                        TimerResult { id, interval }
+                    }));
+                }
+            }
         }
     }
 

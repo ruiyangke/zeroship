@@ -166,12 +166,20 @@ impl LoopState {
 
     /// Collect spawned timers from RuntimeState into the timer heap.
     fn collect_spawned_timers(&mut self) {
-        let timers: Vec<SpawnedTimer> = self.state.borrow_mut().spawned_timers.drain(..).collect();
+        let mut s = self.state.borrow_mut();
+        let timers: Vec<SpawnedTimer> = s.spawned_timers.drain(..).collect();
         let now = Instant::now();
         for timer in timers {
             self.timer_heap.push(Reverse(TimerHeapEntry {
                 fire_at: now + timer.delay,
                 id: timer.id,
+            }));
+        }
+        // Drain ready_timers (zero-delay) — schedule them to fire immediately.
+        for id in s.ready_timers.drain(..) {
+            self.timer_heap.push(Reverse(TimerHeapEntry {
+                fire_at: now,
+                id,
             }));
         }
     }

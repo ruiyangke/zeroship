@@ -193,6 +193,7 @@ impl Isolate {
             s.streams.clear();
             s.spawned_ops.clear();
             s.spawned_timers.clear();
+            s.ready_timers.clear();
         }
 
         // Set request context for logging
@@ -255,6 +256,7 @@ impl Isolate {
             s.streams.clear();
             s.spawned_ops.clear();
             s.spawned_timers.clear();
+            s.ready_timers.clear();
         }
 
         // Set request context for logging
@@ -374,11 +376,19 @@ fn run_blocking_event_loop(
         // Collect newly spawned timers into the heap
         {
             let now = Instant::now();
-            let timers: Vec<SpawnedTimer> = state.borrow_mut().spawned_timers.drain(..).collect();
+            let mut s = state.borrow_mut();
+            let timers: Vec<SpawnedTimer> = s.spawned_timers.drain(..).collect();
             for timer in timers {
                 timer_heap.push(Reverse(TimerHeapEntry {
                     fire_at: now + timer.delay,
                     id: timer.id,
+                }));
+            }
+            // Drain ready_timers (zero-delay) — schedule them to fire immediately.
+            for id in s.ready_timers.drain(..) {
+                timer_heap.push(Reverse(TimerHeapEntry {
+                    fire_at: now,
+                    id,
                 }));
             }
         }
@@ -411,11 +421,18 @@ fn run_blocking_event_loop(
         // Collect any new timers/ops spawned by timer callbacks or promise continuations
         {
             let now = Instant::now();
-            let timers: Vec<SpawnedTimer> = state.borrow_mut().spawned_timers.drain(..).collect();
+            let mut s = state.borrow_mut();
+            let timers: Vec<SpawnedTimer> = s.spawned_timers.drain(..).collect();
             for timer in timers {
                 timer_heap.push(Reverse(TimerHeapEntry {
                     fire_at: now + timer.delay,
                     id: timer.id,
+                }));
+            }
+            for id in s.ready_timers.drain(..) {
+                timer_heap.push(Reverse(TimerHeapEntry {
+                    fire_at: now,
+                    id,
                 }));
             }
         }
@@ -436,6 +453,7 @@ fn run_blocking_event_loop(
                 || !s.pending_resolvers.is_empty()
                 || !s.spawned_ops.is_empty()
                 || !s.spawned_timers.is_empty()
+                || !s.ready_timers.is_empty()
                 || s.streams.values().any(|st| st.pending_read.is_some() && !st.closed)
         };
         let has_timers = !timer_heap.is_empty();
