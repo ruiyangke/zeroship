@@ -174,6 +174,10 @@ impl V8Pool {
         let cpu_limit = self.config.cpu_limit();
         let thread_name = format!("v8-{app_id}");
 
+        // Capture the server's multi-threaded tokio handle so fetch I/O
+        // can be spawned on it instead of the isolate's single-threaded runtime.
+        let server_handle = tokio::runtime::Handle::current();
+
         std::thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
@@ -188,6 +192,7 @@ impl V8Pool {
                             shutdown_inner,
                             cpu_limit,
                             HashMap::new(),
+                            Some(server_handle),
                         )
                         .run()
                         .await

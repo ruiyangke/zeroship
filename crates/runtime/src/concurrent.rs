@@ -538,7 +538,7 @@ impl ConcurrentIsolate {
         isolate.add_near_heap_limit_callback(near_heap_limit_callback, std::ptr::null_mut());
 
         // Create RuntimeState and set as isolate slot
-        let rt_state = RuntimeState::new(env_vars);
+        let rt_state = RuntimeState::new(env_vars, None);
         let state: SharedState = Rc::new(RefCell::new(rt_state));
         isolate.set_slot(state.clone());
 

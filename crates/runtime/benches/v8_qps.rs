@@ -276,6 +276,7 @@ fn main() {
                 shutdown_clone,
                 None,
                 std::collections::HashMap::new(),
+                None,
             );
             runtime.run().await;
         });

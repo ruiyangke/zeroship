@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
 
+use tokio::runtime::Handle as TokioHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::timers::TimerCallback;
@@ -77,6 +78,11 @@ pub struct RuntimeState {
     pub(crate) key_store: HashMap<u32, crate::crypto::KeyData>,
     /// Monotonically increasing key-id counter.
     pub next_key_id: u32,
+
+    /// Optional handle to the server's multi-threaded tokio runtime.
+    /// When set, fetch futures are spawned on this handle for multi-threaded I/O,
+    /// with results delivered back via oneshot channels.
+    pub server_handle: Option<TokioHandle>,
 }
 
 /// Convenience alias — the shared handle passed into V8 callbacks.
@@ -84,7 +90,9 @@ pub type SharedState = Rc<RefCell<RuntimeState>>;
 
 impl RuntimeState {
     /// Create a new `RuntimeState` seeded with the given environment variables.
-    pub fn new(env_vars: HashMap<String, String>) -> Self {
+    /// Create a new `RuntimeState` seeded with the given environment variables
+    /// and an optional handle to the server's multi-threaded tokio runtime.
+    pub fn new(env_vars: HashMap<String, String>, server_handle: Option<TokioHandle>) -> Self {
         Self {
             pending_resolvers: HashMap::new(),
             next_op_id: 1,
@@ -110,6 +118,8 @@ impl RuntimeState {
 
             key_store: HashMap::new(),
             next_key_id: 1,
+
+            server_handle,
         }
     }
 }

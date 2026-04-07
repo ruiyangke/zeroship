@@ -117,12 +117,16 @@ impl Runtime {
     /// - `shutdown` — token cancelled to trigger graceful shutdown.
     /// - `cpu_limit` — optional per-request CPU time limit (Linux only).
     /// - `env_vars` — environment variables exposed to JS via `env.get()`.
+    /// - `server_handle` — optional handle to the server's multi-threaded tokio
+    ///   runtime. When set, fetch I/O is spawned on this handle for parallel
+    ///   network I/O instead of running on the isolate's single-threaded runtime.
     pub fn new(
         modules: Vec<ModuleEntry>,
         request_rx: tokio::sync::mpsc::Receiver<IncomingRequest>,
         shutdown: CancellationToken,
         cpu_limit: Option<Duration>,
         env_vars: HashMap<String, String>,
+        server_handle: Option<tokio::runtime::Handle>,
     ) -> Self {
         init_v8();
 
@@ -144,7 +148,7 @@ impl Runtime {
         isolate.add_near_heap_limit_callback(near_heap_limit_callback, std::ptr::null_mut());
 
         // Create RuntimeState and set as isolate slot
-        let rt_state = RuntimeState::new(env_vars);
+        let rt_state = RuntimeState::new(env_vars, server_handle);
         let state: SharedState = Rc::new(RefCell::new(rt_state));
         isolate.set_slot(state.clone());
 
@@ -707,7 +711,7 @@ export function chain() {
                     .unwrap();
                 rt.block_on(async {
                     let mut runtime =
-                        Runtime::new(modules, rx, shutdown_inner, None, HashMap::new());
+                        Runtime::new(modules, rx, shutdown_inner, None, HashMap::new(), None);
                     runtime.run().await;
                 });
             })

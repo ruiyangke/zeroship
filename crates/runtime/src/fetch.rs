@@ -130,29 +130,58 @@ pub(crate) fn raw_fetch_callback(
         (id, req_id, cancel)
     };
 
-    // Build the future — all captured data is owned ('static)
-    let future: std::pin::Pin<Box<dyn std::future::Future<Output = OpResult>>> =
-        Box::pin(async move {
-            let fetch_work = do_fetch_buffered(&method, &url, &headers_json, body.as_deref());
+    // Capture server_handle before borrowing state mutably
+    let server_handle = state.borrow().server_handle.clone();
 
-            let value = match cancel {
-                Some(token) => {
-                    tokio::select! {
-                        result = fetch_work => result,
-                        _ = token.cancelled() => error_json("request cancelled"),
-                    }
+    if let Some(handle) = server_handle {
+        // Spawn fetch I/O on the server's multi-threaded tokio runtime.
+        // Only a lightweight oneshot receiver runs on the local runtime.
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel::<String>();
+        handle.spawn(async move {
+            let value = if let Some(token) = cancel {
+                tokio::select! {
+                    result = do_fetch_buffered(&method, &url, &headers_json, body.as_deref()) => result,
+                    _ = token.cancelled() => error_json("request cancelled"),
                 }
-                None => fetch_work.await,
+            } else {
+                do_fetch_buffered(&method, &url, &headers_json, body.as_deref()).await
             };
-
-            OpResult::Completed {
-                op_id,
-                value,
-                request_id,
-            }
+            let _ = result_tx.send(value);
         });
 
-    state.borrow_mut().spawned_ops.push(future);
+        let receiver_future: std::pin::Pin<Box<dyn std::future::Future<Output = OpResult>>> =
+            Box::pin(async move {
+                match result_rx.await {
+                    Ok(value) => OpResult::Completed { op_id, value, request_id },
+                    Err(_) => OpResult::Cancelled,
+                }
+            });
+        state.borrow_mut().spawned_ops.push(receiver_future);
+    } else {
+        // No server handle — run fetch on the local runtime (tests, standalone).
+        let future: std::pin::Pin<Box<dyn std::future::Future<Output = OpResult>>> =
+            Box::pin(async move {
+                let fetch_work = do_fetch_buffered(&method, &url, &headers_json, body.as_deref());
+
+                let value = match cancel {
+                    Some(token) => {
+                        tokio::select! {
+                            result = fetch_work => result,
+                            _ = token.cancelled() => error_json("request cancelled"),
+                        }
+                    }
+                    None => fetch_work.await,
+                };
+
+                OpResult::Completed {
+                    op_id,
+                    value,
+                    request_id,
+                }
+            });
+
+        state.borrow_mut().spawned_ops.push(future);
+    }
 
     rv.set(promise.into());
 }

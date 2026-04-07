@@ -47,6 +47,10 @@ fn spawn_and_warmup(name: &str) -> tokio::sync::mpsc::Sender<IncomingRequest> {
     let thread_name = name.to_string();
     let shutdown = CancellationToken::new();
 
+    // Capture the server's multi-threaded tokio handle so fetch I/O
+    // runs on the server's thread pool instead of the isolate's single-threaded runtime.
+    let server_handle = tokio::runtime::Handle::current();
+
     std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
@@ -61,6 +65,7 @@ fn spawn_and_warmup(name: &str) -> tokio::sync::mpsc::Sender<IncomingRequest> {
                     shutdown,
                     None,
                     std::collections::HashMap::new(),
+                    Some(server_handle),
                 );
                 runtime.run().await;
             });
