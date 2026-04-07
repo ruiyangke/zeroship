@@ -2,17 +2,14 @@
 //!
 //! Called from JS as: `__rawFetch(method, url, headersJson, body)` -> Promise<string>
 //!
-//! **Per-request model (streaming):** The promise resolves when HEADERS arrive.
-//! The resolved JSON includes `stream_id` instead of `body`. Body chunks are
-//! delivered as `LoopEvent::StreamChunk` through the event channel.
-//!
-//! **Concurrent model (full-body):** Uses the old approach — reads the full body
-//! before sending `Event::OpCompleted`. No streaming, no `stream_id`.
+//! The fetch future is pushed into `state.spawned_ops`. The main `select!` loop
+//! in runtime.rs polls it and resolves the promise when the response arrives.
+//! Responses are always fully buffered (up to MAX_RESPONSE_SIZE).
 
 use std::net::IpAddr;
 use std::time::Duration;
 
-use crate::event_loop::{LoopEvent, SharedState};
+use crate::state::{OpResult, SharedState};
 
 /// Maximum response body size: 10 MB.
 const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
@@ -93,14 +90,8 @@ fn shared_client() -> &'static reqwest::Client {
 
 /// Hand-written V8 callback for `__rawFetch(method, url, headersJson, body)`.
 ///
-/// Creates a Promise, allocates a stream_id, spawns a tokio task that:
-/// 1. Sends the request
-/// 2. On headers: sends `LoopEvent::OpCompleted` with `{status, headers, stream_id}`
-/// 3. On each body chunk: sends `LoopEvent::StreamChunk`
-/// 4. On completion: sends `LoopEvent::StreamChunk { done: true }`
-///
-/// For the concurrent model (`concurrent_event_tx` is Some), falls back to the
-/// full-body approach — reads entire body, sends `Event::OpCompleted`.
+/// Creates a Promise, allocates an op-id, and pushes an async future into
+/// `state.spawned_ops`. The event loop collects and polls these futures.
 pub(crate) fn raw_fetch_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -108,7 +99,7 @@ pub(crate) fn raw_fetch_callback(
 ) {
     let state: SharedState = scope
         .get_slot::<SharedState>()
-        .expect("EventLoopInner not in isolate slot")
+        .expect("RuntimeState not in isolate slot")
         .clone();
 
     // Extract JS arguments
@@ -126,90 +117,69 @@ pub(crate) fn raw_fetch_callback(
     let promise = resolver.get_promise(scope);
     let global_resolver = v8::Global::new(scope, resolver);
 
-    // Allocate op_id and grab channel senders.
-    // stream_id is allocated but StreamState is NOT created until streaming is needed
-    // (avoids HashMap insert + allocation for buffered responses).
-    let (op_id, stream_id, event_tx, waker, concurrent_tx, tokio_handle) = {
+    // Allocate op_id, capture request context, push future
+    let (op_id, request_id, cancel) = {
         let mut s = state.borrow_mut();
         let id = s.next_op_id;
         s.next_op_id += 1;
         s.pending_resolvers.insert(id, global_resolver);
 
-        let sid = s.next_stream_id;
-        s.next_stream_id += 1;
-        // NOTE: StreamState is created lazily in do_fetch_streaming only when
-        // the streaming path is taken. For buffered responses, no StreamState exists.
+        let req_id = s.executing_request_id;
+        let cancel = s.executing_request_cancel.clone();
 
-        (
-            id,
-            sid,
-            s.event_tx.clone(),
-            s.waker.clone(),
-            s.concurrent_event_tx.clone(),
-            s.tokio_handle.clone(),
-        )
+        (id, req_id, cancel)
     };
 
-    let task = async move {
-        let result = do_fetch_streaming(
-            &method, &url, &headers_json, body.as_deref(),
-            op_id, stream_id, &event_tx, &waker, concurrent_tx.as_ref(),
-        ).await;
+    // Build the future — all captured data is owned ('static)
+    let future: std::pin::Pin<Box<dyn std::future::Future<Output = OpResult>>> =
+        Box::pin(async move {
+            let fetch_work = do_fetch_buffered(&method, &url, &headers_json, body.as_deref());
 
-        // If do_fetch_streaming returned an error string, send it as OpCompleted
-        // (the error JSON is already formatted for JS consumption)
-        if let Err(err_json) = result {
-            match concurrent_tx {
-                Some(ref ctx) => {
-                    let _ = ctx.send(crate::concurrent::Event::OpCompleted {
-                        op_id,
-                        value: err_json,
-                    });
+            let value = match cancel {
+                Some(token) => {
+                    tokio::select! {
+                        result = fetch_work => result,
+                        _ = token.cancelled() => error_json("request cancelled"),
+                    }
                 }
-                None => {
-                    let _ = event_tx.send(LoopEvent::OpCompleted {
-                        id: op_id,
-                        value: err_json,
-                    });
-                    waker.wake();
-                }
+                None => fetch_work.await,
+            };
+
+            OpResult::Completed {
+                op_id,
+                value,
+                request_id,
             }
-        }
-    };
+        });
 
-    match tokio_handle {
-        Some(handle) => {
-            handle.spawn(task);
-        }
-        None => {
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("Failed to create tokio runtime for async op");
-                rt.block_on(task);
-            });
-        }
-    }
+    state.borrow_mut().spawned_ops.push(future);
 
     rv.set(promise.into());
 }
 
-/// Perform HTTP fetch with streaming body delivery.
+/// Perform an HTTP fetch and return the full buffered response as a JSON string.
 ///
-/// Returns `Ok(())` on success (events already sent), or `Err(error_json)` if
-/// the request failed before headers could be sent.
-async fn do_fetch_streaming(
+/// Always reads the entire body (up to MAX_RESPONSE_SIZE). Returns a JSON string
+/// with either the response data or an error object.
+async fn do_fetch_buffered(
     method: &str,
     url: &str,
     headers_json: &str,
     body: Option<&str>,
-    op_id: u32,
-    stream_id: u32,
-    event_tx: &std::sync::mpsc::Sender<LoopEvent>,
-    waker: &futures::task::AtomicWaker,
-    concurrent_tx: Option<&crate::concurrent::EventSender>,
-) -> Result<(), String> {
+) -> String {
+    match do_fetch_buffered_inner(method, url, headers_json, body).await {
+        Ok(json) => json,
+        Err(err_json) => err_json,
+    }
+}
+
+/// Inner implementation that returns `Result` for ergonomic `?` usage.
+async fn do_fetch_buffered_inner(
+    method: &str,
+    url: &str,
+    headers_json: &str,
+    body: Option<&str>,
+) -> Result<String, String> {
     // SSRF protection: validate URL before making any request
     if let Err(msg) = validate_url(url) {
         return Err(error_json(&msg));
@@ -251,7 +221,7 @@ async fn do_fetch_streaming(
     }
 
     // Send request
-    let mut response = match request.send().await {
+    let response = match request.send().await {
         Ok(r) => r,
         Err(e) => return Err(error_json(&e.to_string())),
     };
@@ -279,117 +249,30 @@ async fn do_fetch_streaming(
         }
     }
 
-    // Decide: buffer full body (fast for small responses) or stream chunks (needed for large/SSE).
-    // Threshold: if content-length is known and small, or it's the concurrent model, buffer it.
-    let should_stream = concurrent_tx.is_none()
-        && response.content_length().map_or(true, |len| len > 1024 * 1024); // >1MB → stream
+    // Read full body (buffered)
+    let body_bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return Err(error_json(&format!("Failed to read response body: {e}"))),
+    };
 
-    if !should_stream {
-        // ---------------------------------------------------------------
-        // Buffered path — full body in one OpCompleted (fast for small responses)
-        // ---------------------------------------------------------------
-        let body_bytes = match response.bytes().await {
-            Ok(bytes) => bytes,
-            Err(e) => return Err(error_json(&format!("Failed to read response body: {e}"))),
-        };
-
-        if body_bytes.len() > MAX_RESPONSE_SIZE {
-            return Err(error_json(&format!("Response too large: {} bytes", body_bytes.len())));
-        }
-
-        let body_text = String::from_utf8_lossy(&body_bytes).to_string();
-
-        let result = serde_json::json!({
-            "status": status,
-            "statusText": status_text,
-            "headers": resp_headers,
-            "body": body_text,
-            "url": final_url,
-            "redirected": redirected,
-        })
-        .to_string();
-
-        if let Some(ctx) = concurrent_tx {
-            let _ = ctx.send(crate::concurrent::Event::OpCompleted {
-                op_id,
-                value: result,
-            });
-        } else {
-            let _ = event_tx.send(LoopEvent::OpCompleted {
-                id: op_id,
-                value: result,
-            });
-            waker.wake();
-        }
-    } else {
-        // ---------------------------------------------------------------
-        // Streaming path — headers first, body chunks via StreamChunk
-        // (for large responses >1MB, SSE, chunked transfer, unknown length)
-        // ---------------------------------------------------------------
-
-        // Send headers + stream_id as OpCompleted (resolves the JS Promise)
-        let header_result = serde_json::json!({
-            "status": status,
-            "statusText": status_text,
-            "headers": resp_headers,
-            "url": final_url,
-            "redirected": redirected,
-            "stream_id": stream_id,
-        })
-        .to_string();
-
-        let _ = event_tx.send(LoopEvent::OpCompleted {
-            id: op_id,
-            value: header_result,
-        });
-        waker.wake();
-
-        // Stream body chunks
-        let mut total_bytes: usize = 0;
-        loop {
-            match response.chunk().await {
-                Ok(Some(chunk)) => {
-                    total_bytes += chunk.len();
-                    if total_bytes > MAX_RESPONSE_SIZE {
-                        let _ = event_tx.send(LoopEvent::StreamChunk {
-                            stream_id,
-                            data: format!("Error: Response too large: {total_bytes} bytes").into_bytes(),
-                            done: true,
-                        });
-                        waker.wake();
-                        return Ok(());
-                    }
-                    let _ = event_tx.send(LoopEvent::StreamChunk {
-                        stream_id,
-                        data: chunk.to_vec(),
-                        done: false,
-                    });
-                    waker.wake();
-                }
-                Ok(None) => {
-                    // Body complete
-                    let _ = event_tx.send(LoopEvent::StreamChunk {
-                        stream_id,
-                        data: vec![],
-                        done: true,
-                    });
-                    waker.wake();
-                    break;
-                }
-                Err(e) => {
-                    let _ = event_tx.send(LoopEvent::StreamChunk {
-                        stream_id,
-                        data: format!("Error: {e}").into_bytes(),
-                        done: true,
-                    });
-                    waker.wake();
-                    return Ok(());
-                }
-            }
-        }
+    if body_bytes.len() > MAX_RESPONSE_SIZE {
+        return Err(error_json(&format!(
+            "Response too large: {} bytes",
+            body_bytes.len()
+        )));
     }
 
-    Ok(())
+    let body_text = String::from_utf8_lossy(&body_bytes).to_string();
+
+    Ok(serde_json::json!({
+        "status": status,
+        "statusText": status_text,
+        "headers": resp_headers,
+        "body": body_text,
+        "url": final_url,
+        "redirected": redirected,
+    })
+    .to_string())
 }
 
 /// Parse headers from JSON — supports both `[["key","val"],...]` and `{"key":"val",...}` formats.
