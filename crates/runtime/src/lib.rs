@@ -35,6 +35,7 @@ pub mod init;
 pub mod storage;
 mod timers;
 mod url;
+pub mod state;
 
 // Re-export public API
 pub use isolate::{Isolate, IsolatePool};
@@ -431,7 +432,7 @@ mod tests {
 
     #[test]
     fn fetch_concurrent_model() {
-        use crate::concurrent::{ConcurrentIsolate, Event};
+        use crate::concurrent::{ConcurrentIsolate, LoopEvent};
         init_v8();
         let modules = vec![ModuleEntry {
             specifier: "index.js".into(),
@@ -451,7 +452,7 @@ mod tests {
         });
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         event_tx
-            .send(Event::NewRequest {
+            .send(LoopEvent::NewRequest {
                 id: 1,
                 body: r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#.to_string(),
                 reply: reply_tx,
@@ -701,7 +702,7 @@ mod tests {
 
     #[test]
     fn esm_concurrent_sync() {
-        use crate::concurrent::{ConcurrentIsolate, Event};
+        use crate::concurrent::{ConcurrentIsolate, LoopEvent};
         init_v8();
         let modules = vec![ModuleEntry {
             specifier: "index.js".into(),
@@ -718,7 +719,7 @@ mod tests {
         });
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         event_tx
-            .send(Event::NewRequest {
+            .send(LoopEvent::NewRequest {
                 id: 1,
                 body: r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":1}"#.to_string(),
                 reply: reply_tx,
@@ -732,7 +733,7 @@ mod tests {
 
     #[test]
     fn esm_concurrent_async() {
-        use crate::concurrent::{ConcurrentIsolate, Event};
+        use crate::concurrent::{ConcurrentIsolate, LoopEvent};
         init_v8();
         let modules = vec![ModuleEntry {
             specifier: "index.js".into(),
@@ -752,7 +753,7 @@ mod tests {
         });
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         event_tx
-            .send(Event::NewRequest {
+            .send(LoopEvent::NewRequest {
                 id: 1,
                 body: r#"{"jsonrpc":"2.0","method":"delayed","params":[10],"id":1}"#.to_string(),
                 reply: reply_tx,

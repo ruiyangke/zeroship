@@ -20,6 +20,7 @@ aws-lc-rs = "1"
 base64 = "0.22"
 appbase-runtime-macros = { path = "../runtime_macros" }
 futures = "0.3"
+tokio-util = { version = "0.7", features = ["rt"] }
 
 [[bench]]
 name = "v8_qps"
