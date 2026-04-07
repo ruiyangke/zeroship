@@ -7,11 +7,10 @@
 //! - Dispatch scripts (`DISPATCH_JS`, `HTTP_DISPATCH_JS`)
 //! - Result types (`RequestResult`, `HttpResult`)
 
-use std::cmp::Reverse;
 use std::time::Duration;
 
 use crate::event_loop::SharedState;
-use crate::timers::{TimerCallback, TimerHeapEntry};
+use crate::timers::TimerCallback;
 
 // ===========================================================================
 // V8 platform init
@@ -243,9 +242,9 @@ fn set_timeout_callback(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("EventLoopInner not in isolate slot")
+    let state: crate::state::SharedState = scope
+        .get_slot::<crate::state::SharedState>()
+        .expect("RuntimeState not in isolate slot")
         .clone();
 
     let callback = match v8::Local::<v8::Function>::try_from(args.get(0)) {
@@ -266,23 +265,16 @@ fn set_timeout_callback(
     };
 
     let global_cb = v8::Global::new(scope, callback);
-    let mut s = state.borrow_mut();
-    let id = s.timers.next_id;
-    s.timers.next_id += 1;
-
     let delay = Duration::from_millis(u64::from(ms));
 
-    s.timers.heap.push(Reverse(TimerHeapEntry {
-        fire_at: std::time::Instant::now() + delay,
-        id,
-    }));
-    s.timers.callbacks.insert(
-        id,
-        TimerCallback {
-            callback: global_cb,
-            interval: None,
-        },
-    );
+    let mut s = state.borrow_mut();
+    let id = s.next_timer_id;
+    s.next_timer_id += 1;
+    s.timer_callbacks.insert(id, TimerCallback { callback: global_cb, interval: None });
+    if let Some(req_id) = s.executing_request_id {
+        s.timer_owner.insert(id, req_id);
+    }
+    s.spawned_timers.push(crate::state::SpawnedTimer { id, delay, interval: None });
 
     rv.set(v8::Integer::new(scope, id as i32).into());
 }
@@ -292,9 +284,9 @@ fn clear_timeout_callback(
     args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
 ) {
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("EventLoopInner not in isolate slot")
+    let state: crate::state::SharedState = scope
+        .get_slot::<crate::state::SharedState>()
+        .expect("RuntimeState not in isolate slot")
         .clone();
 
     let id = if args.length() > 0 {
@@ -303,7 +295,11 @@ fn clear_timeout_callback(
         return;
     };
 
-    state.borrow_mut().timers.callbacks.remove(&id);
+    let mut s = state.borrow_mut();
+    s.timer_callbacks.remove(&id);
+    s.timer_owner.remove(&id);
+    // The tokio::time::sleep future will still fire but handle_timer()
+    // will find no callback and do nothing.
 }
 
 fn set_interval_callback(
@@ -311,9 +307,9 @@ fn set_interval_callback(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("EventLoopInner not in isolate slot")
+    let state: crate::state::SharedState = scope
+        .get_slot::<crate::state::SharedState>()
+        .expect("RuntimeState not in isolate slot")
         .clone();
 
     let callback = match v8::Local::<v8::Function>::try_from(args.get(0)) {
@@ -332,24 +328,17 @@ fn set_interval_callback(
     } else {
         0
     };
-    let dur = Duration::from_millis(u64::from(ms));
+    let delay = Duration::from_millis(u64::from(ms));
 
     let global_cb = v8::Global::new(scope, callback);
     let mut s = state.borrow_mut();
-    let id = s.timers.next_id;
-    s.timers.next_id += 1;
-
-    s.timers.heap.push(Reverse(TimerHeapEntry {
-        fire_at: std::time::Instant::now() + dur,
-        id,
-    }));
-    s.timers.callbacks.insert(
-        id,
-        TimerCallback {
-            callback: global_cb,
-            interval: Some(dur),
-        },
-    );
+    let id = s.next_timer_id;
+    s.next_timer_id += 1;
+    s.timer_callbacks.insert(id, TimerCallback { callback: global_cb, interval: Some(delay) });
+    if let Some(req_id) = s.executing_request_id {
+        s.timer_owner.insert(id, req_id);
+    }
+    s.spawned_timers.push(crate::state::SpawnedTimer { id, delay, interval: Some(delay) });
 
     rv.set(v8::Integer::new(scope, id as i32).into());
 }

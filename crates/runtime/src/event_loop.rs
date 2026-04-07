@@ -11,7 +11,8 @@
 //! loop with `std::thread::park_timeout`, so existing callers don't change.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -20,7 +21,98 @@ use std::time::{Duration, Instant};
 
 use futures::task::AtomicWaker;
 
-use crate::timers::{fire_ready_timers, TimerState};
+use crate::timers::TimerCallback;
+
+// ---------------------------------------------------------------------------
+// Heap-based timer types (used only by the old event loop / isolate path)
+// ---------------------------------------------------------------------------
+
+/// Entry in the timer min-heap. Ordered by (fire_at, id).
+#[derive(Eq, PartialEq)]
+pub(crate) struct TimerHeapEntry {
+    pub(crate) fire_at: Instant,
+    pub(crate) id: u32,
+}
+
+impl Ord for TimerHeapEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.fire_at
+            .cmp(&other.fire_at)
+            .then(self.id.cmp(&other.id))
+    }
+}
+
+impl PartialOrd for TimerHeapEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// A timer min-heap + callback store.
+#[allow(missing_debug_implementations)]
+pub(crate) struct TimerState {
+    /// Min-heap: next-to-fire on top (via Reverse for BinaryHeap).
+    pub(crate) heap: BinaryHeap<Reverse<TimerHeapEntry>>,
+    /// Callback storage, keyed by timer ID.
+    pub(crate) callbacks: HashMap<u32, TimerCallback>,
+    pub(crate) next_id: u32,
+}
+
+impl TimerState {
+    pub(crate) fn new() -> Self {
+        Self {
+            heap: BinaryHeap::new(),
+            callbacks: HashMap::new(),
+            next_id: 1,
+        }
+    }
+}
+
+/// Fire all timers whose fire_at <= now. Returns true if any timer fired.
+pub(crate) fn fire_ready_timers(scope: &mut v8::PinScope, state: &SharedState) -> bool {
+    let mut any_fired = false;
+    let now = Instant::now();
+
+    loop {
+        let should_fire = {
+            let s = state.borrow();
+            s.timers
+                .heap
+                .peek()
+                .map(|Reverse(e)| e.fire_at <= now)
+                .unwrap_or(false)
+        };
+        if !should_fire {
+            break;
+        }
+
+        let entry = state.borrow_mut().timers.heap.pop().unwrap().0;
+
+        // Take callback out (lazy deletion: cleared timers won't have an entry)
+        let cb_opt = state.borrow_mut().timers.callbacks.remove(&entry.id);
+
+        if let Some(cb) = cb_opt {
+            any_fired = true;
+
+            let func = v8::Local::new(scope, &cb.callback);
+            let undefined = v8::undefined(scope).into();
+            func.call(scope, undefined, &[]);
+            scope.perform_microtask_checkpoint();
+
+            if let Some(dur) = cb.interval {
+                // setInterval: re-insert callback + new heap entry
+                state.borrow_mut().timers.callbacks.insert(entry.id, cb);
+                state.borrow_mut().timers.heap.push(Reverse(TimerHeapEntry {
+                    fire_at: Instant::now() + dur,
+                    id: entry.id,
+                }));
+            }
+            // setTimeout: cb drops here, Global handle freed — no leak
+        }
+    }
+
+    any_fired
+}
 
 // ---------------------------------------------------------------------------
 // Event loop state
@@ -37,7 +129,6 @@ pub(crate) struct EventLoopInner {
     pub(crate) event_tx: mpsc::Sender<LoopEvent>,
     pub(crate) next_op_id: u32,
     pub(crate) tokio_handle: Option<tokio::runtime::Handle>,
-    pub(crate) concurrent_event_tx: Option<crate::concurrent::EventSender>,
     pub(crate) log_buffer: Vec<String>,
     pub(crate) kv_store: HashMap<String, String>,
     pub(crate) env_vars: HashMap<String, String>,
@@ -50,9 +141,21 @@ pub(crate) struct EventLoopInner {
 }
 
 /// Events flowing through the event channel.
-pub(crate) enum LoopEvent {
+///
+/// Single unified channel for both per-request and concurrent models.
+/// In concurrent mode, `NewRequest` and `Shutdown` are sent by the HTTP layer;
+/// `OpCompleted` and `StreamChunk` are sent by background I/O tasks (fetch, etc.).
+pub enum LoopEvent {
     OpCompleted { id: u32, value: String },
     StreamChunk { stream_id: u32, data: Vec<u8>, done: bool },
+    /// A new RPC request from the HTTP layer (concurrent mode only).
+    NewRequest {
+        id: u64,
+        body: String,
+        reply: tokio::sync::oneshot::Sender<Result<crate::init::RequestResult, String>>,
+    },
+    /// Graceful shutdown signal (concurrent mode only).
+    Shutdown,
 }
 
 /// State for a single ReadableStream instance.
@@ -72,7 +175,6 @@ impl EventLoopInner {
             event_tx,
             next_op_id: 1,
             tokio_handle: None,
-            concurrent_event_tx: None,
             log_buffer: Vec::new(),
             kv_store: HashMap::new(),
             env_vars: HashMap::new(),
@@ -97,8 +199,15 @@ pub(crate) type SharedState = Rc<RefCell<EventLoopInner>>;
 // Event loop helpers (each written ONCE)
 // ---------------------------------------------------------------------------
 
-/// Handle one event.
-fn handle_one_event(scope: &mut v8::PinScope, state: &SharedState, event: LoopEvent) {
+/// Handle one I/O event (OpCompleted or StreamChunk).
+///
+/// `NewRequest` and `Shutdown` are NOT handled here — they are concurrent-mode
+/// concerns handled by `ConcurrentIsolate`. This function only processes I/O
+/// completion events that resolve promises or deliver stream data.
+///
+/// Returns `true` if the event was handled, `false` if it was a concurrent-mode
+/// event that needs to be handled by the caller.
+pub(crate) fn handle_one_event(scope: &mut v8::PinScope, state: &SharedState, event: LoopEvent) -> bool {
     match event {
         LoopEvent::OpCompleted { id, value } => {
             let resolver = state.borrow_mut().pending_resolvers.remove(&id);
@@ -108,15 +217,22 @@ fn handle_one_event(scope: &mut v8::PinScope, state: &SharedState, event: LoopEv
                 r.resolve(scope, val.into());
                 scope.perform_microtask_checkpoint();
             }
+            true
         }
         LoopEvent::StreamChunk { stream_id, data, done } => {
             crate::streams::push_stream_chunk(scope, state, stream_id, &data, done);
             scope.perform_microtask_checkpoint();
+            true
         }
+        // Concurrent-mode events — not handled by the per-request event loop.
+        // Caller must handle these.
+        LoopEvent::NewRequest { .. } | LoopEvent::Shutdown => false,
     }
 }
 
-/// Drain all ready events (non-blocking).
+/// Drain all ready I/O events (non-blocking).
+///
+/// Skips `NewRequest`/`Shutdown` events (which should never appear in per-request mode).
 fn drain_events(scope: &mut v8::PinScope, state: &SharedState, event_rx: &mpsc::Receiver<LoopEvent>) {
     while let Ok(event) = event_rx.try_recv() {
         handle_one_event(scope, state, event);
