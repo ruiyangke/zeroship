@@ -1,14 +1,15 @@
 //! Minimal HTTP server for raw V8 runtime -- benchmarkable with wrk/hey.
 //!
 //! Two modes:
-//!   --mode=concurrent       (default) 1 ConcurrentIsolate, serial JS + concurrent I/O
-//!   --mode=concurrent-pool  N ConcurrentIsolates, round-robin dispatch
+//!   --mode=concurrent       (default) 1 Runtime worker, serial JS + concurrent I/O
+//!   --mode=concurrent-pool  N Runtime workers, round-robin dispatch
 //!
 //! POST /rpc -> dispatch to V8 -> JSON-RPC response
 //! GET /health -> {"status":"ok"}
 
-use appbase_runtime::concurrent::{ConcurrentIsolate, Event};
 use appbase_runtime::modules::ModuleEntry;
+use appbase_runtime::runtime::Runtime;
+use appbase_runtime::state::IncomingRequest;
 use appbase_runtime::init_v8;
 use bytes::Bytes;
 use http_body_util::Full;
@@ -21,6 +22,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 
 /// Default JS loaded when no --js flag is provided.
 /// Loads shared scenarios from benches/scenarios.js at build time (ESM format).
@@ -37,72 +39,68 @@ fn server_modules() -> Vec<ModuleEntry> {
 // Spawn + warmup helper
 // ===========================================================================
 
-/// Spawn a ConcurrentIsolate on a dedicated thread and warmup with a ping.
-/// Returns the event sender for dispatching requests.
-///
-/// `cpu_limit` — if `Some`, arms a POSIX CPU timer per request batch (Linux only).
-fn spawn_and_warmup(
-    name: &str,
-    cpu_limit: Option<std::time::Duration>,
-) -> appbase_runtime::concurrent::EventSender {
-    let (event_tx, event_rx) = std::sync::mpsc::channel();
-    let event_tx_clone = event_tx.clone();
+/// Spawn a Runtime on a dedicated thread and warmup with a ping.
+/// Returns the request sender for dispatching requests.
+fn spawn_and_warmup(name: &str) -> tokio::sync::mpsc::Sender<IncomingRequest> {
+    let (req_tx, req_rx) = tokio::sync::mpsc::channel::<IncomingRequest>(1024);
     let modules = server_modules();
     let thread_name = name.to_string();
-    let tokio_handle = tokio::runtime::Handle::current();
-
-    // Shared thread handle — the isolate publishes its thread in run_event_loop,
-    // and every EventSender.send() unparks it for zero-latency wake.
-    let v8_thread = std::sync::Arc::new(std::sync::Mutex::new(None));
-    let v8_thread_inner = v8_thread.clone();
+    let shutdown = CancellationToken::new();
 
     std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
-            let mut isolate = ConcurrentIsolate::new_with_thread_handle(
-                modules, event_rx, event_tx_clone, Some(tokio_handle), cpu_limit,
-                std::collections::HashMap::new(), v8_thread_inner,
-            );
-            isolate.run_event_loop();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let mut runtime = Runtime::new(
+                    modules,
+                    req_rx,
+                    shutdown,
+                    None,
+                    std::collections::HashMap::new(),
+                );
+                runtime.run().await;
+            });
         })
         .unwrap();
 
-    let sender = appbase_runtime::concurrent::EventSender::new(event_tx, v8_thread);
-
-    // Warmup (on a separate thread to avoid blocking tokio runtime)
-    let warmup_tx = sender.clone();
+    // Warmup: send a ping and wait for the reply
+    let warmup_tx = req_tx.clone();
     std::thread::spawn(move || {
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         warmup_tx
-            .send(Event::NewRequest {
+            .blocking_send(IncomingRequest {
                 id: 0,
                 body: r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":0}"#.to_string(),
-                reply: tx,
+                reply: reply_tx,
+                cancel: CancellationToken::new(),
             })
             .unwrap();
-        rx.blocking_recv().unwrap().unwrap();
+        reply_rx.blocking_recv().unwrap().unwrap();
     })
     .join()
     .unwrap();
 
-    sender
+    req_tx
 }
 
 // ===========================================================================
-// Dispatcher — 1 or N concurrent isolates
+// Dispatcher — 1 or N Runtime workers
 // ===========================================================================
 
 struct Dispatcher {
-    senders: Vec<appbase_runtime::concurrent::EventSender>,
+    senders: Vec<tokio::sync::mpsc::Sender<IncomingRequest>>,
     next: AtomicU64,
     next_id: AtomicU64,
 }
 
 impl Dispatcher {
     fn new(num_workers: usize) -> Self {
-        let cpu_limit = Some(std::time::Duration::from_secs(5));
         let senders: Vec<_> = (0..num_workers)
-            .map(|i| spawn_and_warmup(&format!("v8-worker-{i}"), cpu_limit))
+            .map(|i| spawn_and_warmup(&format!("v8-worker-{i}")))
             .collect();
 
         Self {
@@ -112,30 +110,25 @@ impl Dispatcher {
         }
     }
 
-    async fn dispatch(&self, body: String) -> Result<appbase_runtime::RequestResult, String> {
+    async fn dispatch(&self, body: String) -> Result<appbase_runtime::init::RequestResult, String> {
         let idx = (self.next.fetch_add(1, Ordering::Relaxed) as usize) % self.senders.len();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+
         self.senders[idx]
-            .send(Event::NewRequest {
+            .send(IncomingRequest {
                 id,
                 body,
                 reply: reply_tx,
+                cancel: CancellationToken::new(),
             })
-            .map_err(|_| "Event channel closed".to_string())?;
+            .await
+            .map_err(|_| "Request channel closed".to_string())?;
 
         match tokio::time::timeout(std::time::Duration::from_secs(30), reply_rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err("Reply channel closed".to_string()),
             Err(_) => Err("Request timed out (30s wall time)".to_string()),
-        }
-    }
-}
-
-impl Drop for Dispatcher {
-    fn drop(&mut self) {
-        for tx in &self.senders {
-            let _ = tx.send(Event::Shutdown);
         }
     }
 }

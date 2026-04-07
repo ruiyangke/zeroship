@@ -227,18 +227,18 @@ fn main() {
     }
 
     // =========================================================================
-    println!("\n=== Concurrent Model (serial JS, concurrent I/O) ===\n");
+    println!("\n=== Runtime Model (serial JS, concurrent I/O) ===\n");
 
-    use appbase_runtime::concurrent::{ConcurrentIsolate, Event};
+    use appbase_runtime::runtime::Runtime;
+    use appbase_runtime::state::IncomingRequest;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio_util::sync::CancellationToken;
 
     let next_id = AtomicU64::new(1);
 
-    use appbase_runtime::concurrent::EventSender;
-
-    // Helper: send N requests to a ConcurrentIsolate and collect results
-    fn bench_concurrent(
-        event_tx: &EventSender,
+    // Helper: send N requests to a Runtime worker and collect results
+    fn bench_runtime(
+        req_tx: &tokio::sync::mpsc::Sender<IncomingRequest>,
         next_id: &AtomicU64,
         body: &str,
         n: u64,
@@ -248,10 +248,11 @@ fn main() {
         for _ in 0..n {
             let id = next_id.fetch_add(1, Ordering::Relaxed);
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-            event_tx.send(Event::NewRequest {
+            req_tx.blocking_send(IncomingRequest {
                 id,
                 body: body.to_string(),
                 reply: reply_tx,
+                cancel: CancellationToken::new(),
             }).unwrap();
             reply_rxs.push(reply_rx);
         }
@@ -259,85 +260,98 @@ fn main() {
         reply_rxs.into_iter().map(|rx| rx.blocking_recv().unwrap()).collect()
     }
 
-    // Start a concurrent isolate
-    let (event_tx_raw, event_rx) = std::sync::mpsc::channel();
-    let event_tx_raw_clone = event_tx_raw.clone();
-    let v8_thread = std::sync::Arc::new(std::sync::Mutex::new(None));
-    let v8_thread_inner = v8_thread.clone();
+    // Start a Runtime worker on a dedicated thread
+    let (req_tx, req_rx) = tokio::sync::mpsc::channel::<IncomingRequest>(1024);
+    let shutdown = CancellationToken::new();
+    let shutdown_clone = shutdown.clone();
     std::thread::spawn(move || {
-        let mut iso = ConcurrentIsolate::new_with_thread_handle(
-            server_modules(), event_rx, event_tx_raw_clone, None, None,
-            std::collections::HashMap::new(), v8_thread_inner,
-        );
-        iso.run_event_loop();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut runtime = Runtime::new(
+                server_modules(),
+                req_rx,
+                shutdown_clone,
+                None,
+                std::collections::HashMap::new(),
+            );
+            runtime.run().await;
+        });
     });
-    let event_tx = EventSender::new(event_tx_raw, v8_thread);
+
     // Warmup
     {
         let id = next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = tokio::sync::oneshot::channel();
-        event_tx.send(Event::NewRequest { id, body: RPC_BODY.to_string(), reply: tx }).unwrap();
+        req_tx.blocking_send(IncomingRequest {
+            id,
+            body: RPC_BODY.to_string(),
+            reply: tx,
+            cancel: CancellationToken::new(),
+        }).unwrap();
         rx.blocking_recv().unwrap().unwrap();
     }
 
-    // Concurrent: sync RPC
+    // Runtime: sync RPC
     {
         let n = 10_000u64;
         let start = Instant::now();
-        let results = bench_concurrent(&event_tx, &next_id, RPC_BODY, n);
+        let results = bench_runtime(&req_tx, &next_id, RPC_BODY, n);
         let e = start.elapsed();
         let ok = results.iter().filter(|r| r.is_ok()).count();
         println!(
             "{:<40} {:>7} reqs  {:.2}s  {:>9.0} req/s  {:>8.1}us/req",
-            "concurrent: sync RPC (ping)", n, e.as_secs_f64(), ok as f64 / e.as_secs_f64(), e.as_micros() as f64 / n as f64
+            "runtime: sync RPC (ping)", n, e.as_secs_f64(), ok as f64 / e.as_secs_f64(), e.as_micros() as f64 / n as f64
         );
     }
 
-    // Concurrent: async setTimeout(0) (Promise chain)
+    // Runtime: async setTimeout(0) (Promise chain)
     {
         let n = 10_000u64;
         let start = Instant::now();
-        let results = bench_concurrent(&event_tx, &next_id, CHAIN_BODY, n);
+        let results = bench_runtime(&req_tx, &next_id, CHAIN_BODY, n);
         let e = start.elapsed();
         let ok = results.iter().filter(|r| r.is_ok()).count();
         println!(
             "{:<40} {:>7} reqs  {:.2}s  {:>9.0} req/s  {:>8.1}us/req",
-            "concurrent: Promise chain (0ms)", n, e.as_secs_f64(), ok as f64 / e.as_secs_f64(), e.as_micros() as f64 / n as f64
+            "runtime: Promise chain (0ms)", n, e.as_secs_f64(), ok as f64 / e.as_secs_f64(), e.as_micros() as f64 / n as f64
         );
     }
 
-    // Concurrent: 100 requests with 10ms timer (overlap test)
+    // Runtime: 100 requests with 1ms timer (overlap test)
     {
         let timer_body = r#"{"jsonrpc":"2.0","method":"delayed","params":[],"id":1}"#;
         let n = 100u64;
         let start = Instant::now();
-        let results = bench_concurrent(&event_tx, &next_id, timer_body, n);
+        let results = bench_runtime(&req_tx, &next_id, timer_body, n);
         let e = start.elapsed();
         let ok = results.iter().filter(|r| r.is_ok()).count();
         println!(
             "{:<40} {:>7} reqs  {:.2}s  {:>9.0} req/s  {:>8.1}ms/req  (should be ~1ms not 100ms)",
-            "concurrent: 100x setTimeout(1ms)", n, e.as_secs_f64(), ok as f64 / e.as_secs_f64(), e.as_millis() as f64 / n as f64
+            "runtime: 100x setTimeout(1ms)", n, e.as_secs_f64(), ok as f64 / e.as_secs_f64(), e.as_millis() as f64 / n as f64
         );
     }
 
-    // Concurrent: fib(30) (CPU-heavy, serial JS — no speedup expected)
+    // Runtime: fib(30) (CPU-heavy, serial JS — no speedup expected)
     {
         let n = 10u64;
         let start = Instant::now();
-        let results = bench_concurrent(&event_tx, &next_id, FIB_30, n);
+        let results = bench_runtime(&req_tx, &next_id, FIB_30, n);
         let e = start.elapsed();
         let ok = results.iter().filter(|r| r.is_ok()).count();
         println!(
             "{:<40} {:>7} reqs  {:.2}s  {:>9.0} req/s  {:>8.1}ms/req  (CPU-bound, no overlap)",
-            "concurrent: fib(30)", n, e.as_secs_f64(), ok as f64 / e.as_secs_f64(), e.as_millis() as f64 / n as f64
+            "runtime: fib(30)", n, e.as_secs_f64(), ok as f64 / e.as_secs_f64(), e.as_millis() as f64 / n as f64
         );
     }
 
-    // Shutdown concurrent isolate
-    event_tx.send(Event::Shutdown).unwrap();
+    // Shutdown Runtime worker
+    shutdown.cancel();
 
     println!("\n=== Summary ===");
     println!("Per-request model: 1 request at a time, blocking. Best for CPU-heavy multi-thread.");
-    println!("Concurrent model:  N requests overlapping I/O, serial JS. Best for I/O-heavy apps.");
+    println!("Runtime model:     N requests overlapping I/O, serial JS. Best for I/O-heavy apps.");
     println!("Both models: per-request CPU tracking, clean kill, zero collateral.");
 }
