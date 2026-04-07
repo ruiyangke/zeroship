@@ -34,6 +34,7 @@ pub mod ops;
 pub mod init;
 pub mod storage;
 mod request;
+pub mod runtime;
 mod timers;
 mod url;
 pub mod state;
@@ -43,6 +44,8 @@ pub use isolate::{Isolate, IsolatePool};
 pub use modules::ModuleEntry;
 pub use storage::AppStorage;
 pub use init::{init_v8, RequestResult};
+pub use runtime::Runtime;
+pub use state::IncomingRequest;
 
 #[cfg(test)]
 mod tests {
