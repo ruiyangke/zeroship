@@ -340,14 +340,45 @@ impl Runtime {
                 s.executing_request_cancel = cancel;
             }
 
-            let cpu_start = thread_cpu_time();
+            let cpu_start = if self.cpu_limit.is_some() { thread_cpu_time() } else { Duration::ZERO };
             self.arm_cpu_timer();
 
-            enter_v8!(self, |scope| {
-                crate::request::fire_timer_callback(scope, &self.state, timer_id);
-            });
+            // ONE enter_v8 for fire_timer + check settled + extract results
+            let settled_results: Vec<(u64, PendingRequest, Result<String, String>)> =
+                enter_v8!(self, |scope| {
+                    crate::request::fire_timer_callback(scope, &self.state, timer_id);
 
-            let cpu_elapsed = thread_cpu_time().saturating_sub(cpu_start);
+                    // Check settled promises IN THE SAME SCOPE
+                    let settled_ids: Vec<u64> = self
+                        .pending_requests
+                        .iter()
+                        .filter_map(|(&id, req)| {
+                            let p = v8::Local::new(scope, &req.promise);
+                            if p.state() != v8::PromiseState::Pending {
+                                Some(id)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    // Extract results IN THE SAME SCOPE
+                    settled_ids
+                        .into_iter()
+                        .filter_map(|id| {
+                            let req = self.pending_requests.remove(&id)?;
+                            let result =
+                                crate::request::extract_promise_result(scope, &req.promise);
+                            Some((id, req, result))
+                        })
+                        .collect()
+                });
+
+            let cpu_elapsed = if self.cpu_limit.is_some() {
+                thread_cpu_time().saturating_sub(cpu_start)
+            } else {
+                Duration::ZERO
+            };
             self.disarm_cpu_timer();
 
             // Accumulate CPU time on owning request.
@@ -362,8 +393,19 @@ impl Runtime {
             // so we won't see interval timers here.)
             self.state.borrow_mut().timer_owner.remove(&timer_id);
 
+            // Send replies OUTSIDE V8 scope (drain_request_logs borrows state)
+            for (id, req, result) in settled_results {
+                let logs = self.drain_request_logs(id);
+                let cpu_time = req.cpu_accumulated + cpu_elapsed;
+                let _ = req.reply.send(result.map(|json| RequestResult {
+                    json,
+                    cpu_time,
+                    wall_time: req.wall_start.elapsed(),
+                    logs,
+                }));
+            }
+
             self.clear_executing_request();
-            self.check_settled_promises_v8();
 
             // Drain any new spawned ops/timers that the callback may have created
             // (but NOT recursing into fire_ready_timers — we handle ready_timers
@@ -399,7 +441,7 @@ impl Runtime {
             s.executing_request_cancel = Some(cancel.clone());
         }
 
-        let cpu_start = thread_cpu_time();
+        let cpu_start = if self.cpu_limit.is_some() { thread_cpu_time() } else { Duration::ZERO };
         let wall_start = Instant::now();
 
         self.arm_cpu_timer();
@@ -420,7 +462,11 @@ impl Runtime {
             })
         };
 
-        let cpu_elapsed = thread_cpu_time().saturating_sub(cpu_start);
+        let cpu_elapsed = if self.cpu_limit.is_some() {
+            thread_cpu_time().saturating_sub(cpu_start)
+        } else {
+            Duration::ZERO
+        };
         self.disarm_cpu_timer();
 
         match dispatch_result {
@@ -432,6 +478,8 @@ impl Runtime {
                     wall_time: wall_start.elapsed(),
                     logs,
                 }));
+                self.clear_executing_request();
+                // No check_settled_promises_v8 — sync dispatch adds no pending promise
             }
             DispatchResult::Async(promise) => {
                 self.pending_requests.insert(id, PendingRequest {
@@ -442,14 +490,15 @@ impl Runtime {
                     wall_start,
                     cancel,
                 });
+                self.clear_executing_request();
+                self.check_settled_promises_v8();
             }
             DispatchResult::Error(msg) => {
                 let _ = reply.send(Err(msg));
+                self.clear_executing_request();
+                // No check_settled_promises_v8 — error dispatch adds no pending promise
             }
         }
-
-        self.clear_executing_request();
-        self.check_settled_promises_v8();
     }
 
     // -----------------------------------------------------------------------
@@ -468,25 +517,68 @@ impl Runtime {
                     s.executing_request_cancel = cancel;
                 }
 
-                let cpu_start = thread_cpu_time();
+                let cpu_start = if self.cpu_limit.is_some() { thread_cpu_time() } else { Duration::ZERO };
                 self.arm_cpu_timer();
 
-                enter_v8!(self, |scope| {
-                    crate::request::resolve_op(scope, &self.state, op_id, &value);
-                });
+                // ONE enter_v8 for resolve + check settled + extract results
+                let settled_results: Vec<(u64, PendingRequest, Result<String, String>)> =
+                    enter_v8!(self, |scope| {
+                        // Resolve the op promise
+                        crate::request::resolve_op(scope, &self.state, op_id, &value);
 
-                let cpu_elapsed = thread_cpu_time().saturating_sub(cpu_start);
+                        // Check settled promises IN THE SAME SCOPE
+                        let settled_ids: Vec<u64> = self
+                            .pending_requests
+                            .iter()
+                            .filter_map(|(&id, req)| {
+                                let p = v8::Local::new(scope, &req.promise);
+                                if p.state() != v8::PromiseState::Pending {
+                                    Some(id)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+
+                        // Extract results IN THE SAME SCOPE
+                        settled_ids
+                            .into_iter()
+                            .filter_map(|id| {
+                                let req = self.pending_requests.remove(&id)?;
+                                let result =
+                                    crate::request::extract_promise_result(scope, &req.promise);
+                                Some((id, req, result))
+                            })
+                            .collect()
+                    });
+
+                let cpu_elapsed = if self.cpu_limit.is_some() {
+                    thread_cpu_time().saturating_sub(cpu_start)
+                } else {
+                    Duration::ZERO
+                };
                 self.disarm_cpu_timer();
 
-                // Accumulate CPU time on the owning PendingRequest
+                // Accumulate CPU time on the owning PendingRequest (if it wasn't settled)
                 if let Some(rid) = request_id {
                     if let Some(req) = self.pending_requests.get_mut(&rid) {
                         req.cpu_accumulated += cpu_elapsed;
                     }
                 }
 
+                // Send replies OUTSIDE V8 scope (drain_request_logs borrows state)
+                for (id, req, result) in settled_results {
+                    let logs = self.drain_request_logs(id);
+                    let cpu_time = req.cpu_accumulated + cpu_elapsed;
+                    let _ = req.reply.send(result.map(|json| RequestResult {
+                        json,
+                        cpu_time,
+                        wall_time: req.wall_start.elapsed(),
+                        logs,
+                    }));
+                }
+
                 self.clear_executing_request();
-                self.check_settled_promises_v8();
             }
             OpResult::StreamChunk { stream_id, data, done } => {
                 // Fast path: if there's a stream forwarder, send directly (no V8 entry)
@@ -528,17 +620,48 @@ impl Runtime {
             s.executing_request_cancel = cancel;
         }
 
-        let cpu_start = thread_cpu_time();
+        let cpu_start = if self.cpu_limit.is_some() { thread_cpu_time() } else { Duration::ZERO };
         self.arm_cpu_timer();
 
-        enter_v8!(self, |scope| {
-            crate::request::fire_timer_callback(scope, &self.state, id);
-        });
+        // ONE enter_v8 for fire_timer + check settled + extract results
+        let settled_results: Vec<(u64, PendingRequest, Result<String, String>)> =
+            enter_v8!(self, |scope| {
+                crate::request::fire_timer_callback(scope, &self.state, id);
 
-        let cpu_elapsed = thread_cpu_time().saturating_sub(cpu_start);
+                // Check settled promises IN THE SAME SCOPE
+                let settled_ids: Vec<u64> = self
+                    .pending_requests
+                    .iter()
+                    .filter_map(|(&id, req)| {
+                        let p = v8::Local::new(scope, &req.promise);
+                        if p.state() != v8::PromiseState::Pending {
+                            Some(id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                // Extract results IN THE SAME SCOPE
+                settled_ids
+                    .into_iter()
+                    .filter_map(|id| {
+                        let req = self.pending_requests.remove(&id)?;
+                        let result =
+                            crate::request::extract_promise_result(scope, &req.promise);
+                        Some((id, req, result))
+                    })
+                    .collect()
+            });
+
+        let cpu_elapsed = if self.cpu_limit.is_some() {
+            thread_cpu_time().saturating_sub(cpu_start)
+        } else {
+            Duration::ZERO
+        };
         self.disarm_cpu_timer();
 
-        // Accumulate CPU time on owning request
+        // Accumulate CPU time on owning request (if it wasn't settled)
         if let Some(rid) = owner_request_id {
             if let Some(req) = self.pending_requests.get_mut(&rid) {
                 req.cpu_accumulated += cpu_elapsed;
@@ -557,8 +680,19 @@ impl Runtime {
             self.state.borrow_mut().timer_owner.remove(&id);
         }
 
+        // Send replies OUTSIDE V8 scope (drain_request_logs borrows state)
+        for (id, req, result) in settled_results {
+            let logs = self.drain_request_logs(id);
+            let cpu_time = req.cpu_accumulated + cpu_elapsed;
+            let _ = req.reply.send(result.map(|json| RequestResult {
+                json,
+                cpu_time,
+                wall_time: req.wall_start.elapsed(),
+                logs,
+            }));
+        }
+
         self.clear_executing_request();
-        self.check_settled_promises_v8();
     }
 
     // -----------------------------------------------------------------------
