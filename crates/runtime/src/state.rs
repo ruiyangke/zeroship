@@ -41,7 +41,7 @@ pub struct RuntimeState {
     pub next_op_id: u32,
 
     /// Callbacks for live timers (setTimeout / setInterval), keyed by timer-id.
-    pub timer_callbacks: HashMap<u32, TimerCallback>,
+    pub(crate) timer_callbacks: HashMap<u32, TimerCallback>,
     /// Monotonically increasing timer-id counter.
     pub next_timer_id: u32,
     /// Maps timer-id → request-id that owns it (for per-request cleanup).
@@ -71,7 +71,7 @@ pub struct RuntimeState {
     pub env_vars: HashMap<String, String>,
 
     /// WebCrypto key store, keyed by key-id.
-    pub key_store: HashMap<u32, crate::crypto::KeyData>,
+    pub(crate) key_store: HashMap<u32, crate::crypto::KeyData>,
     /// Monotonically increasing key-id counter.
     pub next_key_id: u32,
 }

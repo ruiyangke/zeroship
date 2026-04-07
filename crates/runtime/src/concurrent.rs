@@ -28,7 +28,6 @@ use std::time::{Duration, Instant};
 use crate::state::{RuntimeState, SharedState, SpawnedTimer};
 use crate::modules::ModuleEntry;
 use crate::init::{init_v8, load_polyfills_and_modules, thread_cpu_time, RequestResult};
-use crate::timers::TimerCallback;
 
 // ---------------------------------------------------------------------------
 // LoopEvent — events flowing through the event channel
