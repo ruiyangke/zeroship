@@ -21,7 +21,7 @@ use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::init::{init_v8, load_polyfills_and_modules, thread_cpu_time, RequestResult};
+use crate::init::{init_v8, load_polyfills_and_modules, RequestResult};
 use crate::modules::ModuleEntry;
 use crate::state::{
     DispatchResult, IncomingRequest, OpResult, RuntimeState, SharedState, SpawnedTimer,
@@ -340,7 +340,7 @@ impl Runtime {
                 s.executing_request_cancel = cancel;
             }
 
-            let cpu_start = if self.cpu_limit.is_some() { thread_cpu_time() } else { Duration::ZERO };
+            let start = Instant::now();
             self.arm_cpu_timer();
 
             // ONE enter_v8 for fire_timer + check settled + extract results
@@ -374,11 +374,7 @@ impl Runtime {
                         .collect()
                 });
 
-            let cpu_elapsed = if self.cpu_limit.is_some() {
-                thread_cpu_time().saturating_sub(cpu_start)
-            } else {
-                Duration::ZERO
-            };
+            let cpu_elapsed = start.elapsed();
             self.disarm_cpu_timer();
 
             // Accumulate CPU time on owning request.
@@ -441,8 +437,8 @@ impl Runtime {
             s.executing_request_cancel = Some(cancel.clone());
         }
 
-        let cpu_start = if self.cpu_limit.is_some() { thread_cpu_time() } else { Duration::ZERO };
-        let wall_start = Instant::now();
+        let start = Instant::now();
+        let wall_start = start;
 
         self.arm_cpu_timer();
 
@@ -462,11 +458,7 @@ impl Runtime {
             })
         };
 
-        let cpu_elapsed = if self.cpu_limit.is_some() {
-            thread_cpu_time().saturating_sub(cpu_start)
-        } else {
-            Duration::ZERO
-        };
+        let cpu_elapsed = start.elapsed();
         self.disarm_cpu_timer();
 
         match dispatch_result {
@@ -517,7 +509,7 @@ impl Runtime {
                     s.executing_request_cancel = cancel;
                 }
 
-                let cpu_start = if self.cpu_limit.is_some() { thread_cpu_time() } else { Duration::ZERO };
+                let start = Instant::now();
                 self.arm_cpu_timer();
 
                 // ONE enter_v8 for resolve + check settled + extract results
@@ -552,11 +544,7 @@ impl Runtime {
                             .collect()
                     });
 
-                let cpu_elapsed = if self.cpu_limit.is_some() {
-                    thread_cpu_time().saturating_sub(cpu_start)
-                } else {
-                    Duration::ZERO
-                };
+                let cpu_elapsed = start.elapsed();
                 self.disarm_cpu_timer();
 
                 // Accumulate CPU time on the owning PendingRequest (if it wasn't settled)
@@ -620,7 +608,7 @@ impl Runtime {
             s.executing_request_cancel = cancel;
         }
 
-        let cpu_start = if self.cpu_limit.is_some() { thread_cpu_time() } else { Duration::ZERO };
+        let start = Instant::now();
         self.arm_cpu_timer();
 
         // ONE enter_v8 for fire_timer + check settled + extract results
@@ -654,11 +642,7 @@ impl Runtime {
                     .collect()
             });
 
-        let cpu_elapsed = if self.cpu_limit.is_some() {
-            thread_cpu_time().saturating_sub(cpu_start)
-        } else {
-            Duration::ZERO
-        };
+        let cpu_elapsed = start.elapsed();
         self.disarm_cpu_timer();
 
         // Accumulate CPU time on owning request (if it wasn't settled)
