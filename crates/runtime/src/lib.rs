@@ -33,6 +33,7 @@ mod streams;
 pub mod ops;
 pub mod init;
 pub mod storage;
+mod request;
 mod timers;
 mod url;
 pub mod state;
