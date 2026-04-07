@@ -573,3 +573,297 @@ impl Runtime {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::init::RequestResult;
+    use crate::modules::ModuleEntry;
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    /// Build the test JS module with ping, add, delayed, and chain exports.
+    fn test_modules() -> Vec<ModuleEntry> {
+        vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: r#"
+export function ping() { return "pong"; }
+export function add(a, b) { return a + b; }
+export function delayed(ms) {
+    return new Promise(function(resolve) {
+        setTimeout(function() { resolve("done_" + ms); }, ms || 10);
+    });
+}
+export function chain() {
+    return new Promise(function(resolve) {
+        setTimeout(function() { resolve(1); }, 5);
+    }).then(function(v) { return v + 10; }).then(function(v) { return v * 2; });
+}
+"#
+            .into(),
+        }]
+    }
+
+    /// Spawn a Runtime on a dedicated OS thread with its own single-threaded
+    /// Tokio runtime.  Returns (request sender, shutdown token, thread handle).
+    fn spawn_runtime(
+        modules: Vec<ModuleEntry>,
+    ) -> (
+        tokio::sync::mpsc::Sender<IncomingRequest>,
+        CancellationToken,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        let shutdown = CancellationToken::new();
+        let shutdown_inner = shutdown.clone();
+
+        let handle = std::thread::Builder::new()
+            .name("v8-test".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let mut runtime =
+                        Runtime::new(modules, rx, shutdown_inner, None, HashMap::new());
+                    runtime.run().await;
+                });
+            })
+            .unwrap();
+
+        (tx, shutdown, handle)
+    }
+
+    /// Build a minimal JSON-RPC 2.0 request string.
+    fn rpc(method: &str, params: &str) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","method":"{method}","params":{params},"id":1}}"#
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // 1. Sync request: ping → "pong"
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn runtime_sync_request() {
+        let (tx, shutdown, handle) = spawn_runtime(test_modules());
+
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.blocking_send(IncomingRequest {
+            id: 1,
+            body: rpc("ping", "[]"),
+            reply: reply_tx,
+            cancel: CancellationToken::new(),
+        })
+        .unwrap();
+
+        let result: RequestResult = reply_rx.blocking_recv().unwrap().unwrap();
+        assert!(
+            result.json.contains("pong"),
+            "expected 'pong' in: {}",
+            result.json
+        );
+
+        shutdown.cancel();
+        handle.join().unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. Async request: delayed(5) → wall_time >= 5ms
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn runtime_async_request() {
+        let (tx, shutdown, handle) = spawn_runtime(test_modules());
+
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.blocking_send(IncomingRequest {
+            id: 2,
+            body: rpc("delayed", "[5]"),
+            reply: reply_tx,
+            cancel: CancellationToken::new(),
+        })
+        .unwrap();
+
+        let result: RequestResult = reply_rx.blocking_recv().unwrap().unwrap();
+        assert!(
+            result.json.contains("done_5"),
+            "expected 'done_5' in: {}",
+            result.json
+        );
+        assert!(
+            result.wall_time >= Duration::from_millis(5),
+            "wall_time {:?} should be >= 5ms",
+            result.wall_time
+        );
+
+        shutdown.cancel();
+        handle.join().unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. Concurrency: 3 × delayed(20) should complete well under 500ms total
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn runtime_concurrent_overlap() {
+        let (tx, shutdown, handle) = spawn_runtime(test_modules());
+
+        let wall_start = Instant::now();
+
+        // Send all three requests before waiting for any reply.
+        let mut receivers = Vec::new();
+        for id in 1u64..=3 {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            tx.blocking_send(IncomingRequest {
+                id,
+                body: rpc("delayed", "[20]"),
+                reply: reply_tx,
+                cancel: CancellationToken::new(),
+            })
+            .unwrap();
+            receivers.push(reply_rx);
+        }
+
+        // Collect all replies.
+        for rx in receivers {
+            let result: RequestResult = rx.blocking_recv().unwrap().unwrap();
+            assert!(
+                result.json.contains("done_20"),
+                "expected 'done_20' in: {}",
+                result.json
+            );
+        }
+
+        let total = wall_start.elapsed();
+        assert!(
+            total < Duration::from_millis(500),
+            "total wall {:?} should be < 500ms (concurrency expected)",
+            total
+        );
+
+        shutdown.cancel();
+        handle.join().unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. Mixed sync + async + sync interleaved
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn runtime_mixed_sync_async() {
+        let (tx, shutdown, handle) = spawn_runtime(test_modules());
+
+        // Send sync ping first.
+        let (r1_tx, r1_rx) = tokio::sync::oneshot::channel();
+        tx.blocking_send(IncomingRequest {
+            id: 10,
+            body: rpc("ping", "[]"),
+            reply: r1_tx,
+            cancel: CancellationToken::new(),
+        })
+        .unwrap();
+
+        // Immediately queue an async delayed(10).
+        let (r2_tx, r2_rx) = tokio::sync::oneshot::channel();
+        tx.blocking_send(IncomingRequest {
+            id: 11,
+            body: rpc("delayed", "[10]"),
+            reply: r2_tx,
+            cancel: CancellationToken::new(),
+        })
+        .unwrap();
+
+        // And another sync add(3,4) behind it.
+        let (r3_tx, r3_rx) = tokio::sync::oneshot::channel();
+        tx.blocking_send(IncomingRequest {
+            id: 12,
+            body: rpc("add", "[3,4]"),
+            reply: r3_tx,
+            cancel: CancellationToken::new(),
+        })
+        .unwrap();
+
+        let r1 = r1_rx.blocking_recv().unwrap().unwrap();
+        let r2 = r2_rx.blocking_recv().unwrap().unwrap();
+        let r3 = r3_rx.blocking_recv().unwrap().unwrap();
+
+        assert!(r1.json.contains("pong"), "r1: {}", r1.json);
+        assert!(r2.json.contains("done_10"), "r2: {}", r2.json);
+        assert!(r3.json.contains("7"), "r3: {}", r3.json);
+
+        shutdown.cancel();
+        handle.join().unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. Promise chain: setTimeout(1ms) → +10 → ×2 → 22
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn runtime_promise_chain() {
+        let (tx, shutdown, handle) = spawn_runtime(test_modules());
+
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.blocking_send(IncomingRequest {
+            id: 20,
+            body: rpc("chain", "[]"),
+            reply: reply_tx,
+            cancel: CancellationToken::new(),
+        })
+        .unwrap();
+
+        let result: RequestResult = reply_rx.blocking_recv().unwrap().unwrap();
+        assert!(
+            result.json.contains("22"),
+            "expected result 22 in: {}",
+            result.json
+        );
+
+        shutdown.cancel();
+        handle.join().unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. Shutdown: long-running request gets error on cancel
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn runtime_shutdown() {
+        let (tx, shutdown, handle) = spawn_runtime(test_modules());
+
+        // delayed(5000) — will never complete before we shut down.
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.blocking_send(IncomingRequest {
+            id: 30,
+            body: rpc("delayed", "[5000]"),
+            reply: reply_tx,
+            cancel: CancellationToken::new(),
+        })
+        .unwrap();
+
+        // Give the runtime a moment to receive and start the request.
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Trigger graceful shutdown.
+        shutdown.cancel();
+
+        // The pending request must receive an error.
+        let outcome = reply_rx.blocking_recv().unwrap();
+        assert!(
+            outcome.is_err(),
+            "expected Err on shutdown, got Ok({:?})",
+            outcome.ok()
+        );
+
+        handle.join().unwrap();
+    }
+}
+
