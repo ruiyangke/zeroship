@@ -218,7 +218,7 @@ impl Runtime {
     // CPU timer helpers
     // -----------------------------------------------------------------------
 
-    /// Arm the CPU timer before entering V8.
+    /// Arm the CPU timer (idempotent — guarded by `cpu_timer_active`).
     fn arm_cpu_timer(&mut self) {
         #[cfg(target_os = "linux")]
         if !self.cpu_timer_active {
@@ -229,7 +229,7 @@ impl Runtime {
         }
     }
 
-    /// Disarm the CPU timer after V8 returns.
+    /// Disarm the CPU timer (idempotent — guarded by `cpu_timer_active`).
     fn disarm_cpu_timer(&mut self) {
         #[cfg(target_os = "linux")]
         if self.cpu_timer_active {
@@ -262,6 +262,16 @@ impl Runtime {
                     let _ = req.reply.send(Err("CPU time limit exceeded".to_string()));
                 }
                 // Continue the loop — new requests can still arrive
+            }
+
+            // Arm/disarm CPU timer on busy↔idle transitions only.
+            // CLOCK_THREAD_CPUTIME_ID doesn't tick during I/O wait (select!),
+            // so staying armed while idle is safe — but we disarm to avoid
+            // accumulating CPU from Rust bookkeeping across many idle loops.
+            if !self.pending_requests.is_empty() {
+                self.arm_cpu_timer(); // no-op if already armed
+            } else {
+                self.disarm_cpu_timer(); // no-op if already disarmed
             }
 
             tokio::select! {
@@ -341,7 +351,6 @@ impl Runtime {
             }
 
             let start = Instant::now();
-            self.arm_cpu_timer();
 
             // ONE enter_v8 for fire_timer + check settled + extract results
             let settled_results: Vec<(u64, PendingRequest, Result<String, String>)> =
@@ -375,7 +384,6 @@ impl Runtime {
                 });
 
             let cpu_elapsed = start.elapsed();
-            self.disarm_cpu_timer();
 
             // Accumulate CPU time on owning request.
             if let Some(rid) = owner_request_id {
@@ -440,15 +448,12 @@ impl Runtime {
         let start = Instant::now();
         let wall_start = start;
 
-        self.arm_cpu_timer();
-
         let dispatch_result = {
             let dispatch_fn = match &self.dispatch_fn {
                 Some(f) => f,
                 None => {
                     let _ = reply.send(Err("Isolate not initialized".to_string()));
                     self.clear_executing_request();
-                    self.disarm_cpu_timer();
                     return;
                 }
             };
@@ -459,7 +464,6 @@ impl Runtime {
         };
 
         let cpu_elapsed = start.elapsed();
-        self.disarm_cpu_timer();
 
         match dispatch_result {
             DispatchResult::Sync(json) => {
@@ -510,7 +514,6 @@ impl Runtime {
                 }
 
                 let start = Instant::now();
-                self.arm_cpu_timer();
 
                 // ONE enter_v8 for resolve + check settled + extract results
                 let settled_results: Vec<(u64, PendingRequest, Result<String, String>)> =
@@ -545,7 +548,6 @@ impl Runtime {
                     });
 
                 let cpu_elapsed = start.elapsed();
-                self.disarm_cpu_timer();
 
                 // Accumulate CPU time on the owning PendingRequest (if it wasn't settled)
                 if let Some(rid) = request_id {
@@ -609,7 +611,6 @@ impl Runtime {
         }
 
         let start = Instant::now();
-        self.arm_cpu_timer();
 
         // ONE enter_v8 for fire_timer + check settled + extract results
         let settled_results: Vec<(u64, PendingRequest, Result<String, String>)> =
@@ -643,7 +644,6 @@ impl Runtime {
             });
 
         let cpu_elapsed = start.elapsed();
-        self.disarm_cpu_timer();
 
         // Accumulate CPU time on owning request (if it wasn't settled)
         if let Some(rid) = owner_request_id {
