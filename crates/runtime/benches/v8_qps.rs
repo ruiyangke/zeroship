@@ -275,6 +275,7 @@ fn main() {
                 req_rx,
                 shutdown_clone,
                 None,
+                None,
                 std::collections::HashMap::new(),
                 None,
             );

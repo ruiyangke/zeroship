@@ -103,6 +103,7 @@ pub struct Runtime {
     cpu_timer_active: bool,
 
     cpu_limit: Option<Duration>,
+    wall_timeout: Option<Duration>,
 }
 
 // SAFETY: Runtime is only used on a single tokio LocalSet task.
@@ -116,6 +117,7 @@ impl Runtime {
     /// - `request_rx` — channel that delivers `IncomingRequest`s.
     /// - `shutdown` — token cancelled to trigger graceful shutdown.
     /// - `cpu_limit` — optional per-request CPU time limit (Linux only).
+    /// - `wall_timeout` — optional per-request wall time limit.
     /// - `env_vars` — environment variables exposed to JS via `env.get()`.
     /// - `server_handle` — optional handle to the server's multi-threaded tokio
     ///   runtime. When set, fetch I/O is spawned on this handle for parallel
@@ -125,6 +127,7 @@ impl Runtime {
         request_rx: tokio::sync::mpsc::Receiver<IncomingRequest>,
         shutdown: CancellationToken,
         cpu_limit: Option<Duration>,
+        wall_timeout: Option<Duration>,
         env_vars: HashMap<String, String>,
         server_handle: Option<tokio::runtime::Handle>,
     ) -> Self {
@@ -176,6 +179,7 @@ impl Runtime {
             #[cfg(target_os = "linux")]
             cpu_timer_active: false,
             cpu_limit,
+            wall_timeout,
         }
     }
 
@@ -409,6 +413,13 @@ impl Runtime {
                 }));
             }
 
+            // Check CPU limit on the owning request (may still be pending)
+            if let Some(rid) = owner_request_id {
+                self.check_cpu_limit(rid);
+            }
+            // Clean up any requests cancelled by wall timeout
+            self.cleanup_cancelled_requests();
+
             self.clear_executing_request();
 
             // Drain any new spawned ops/timers that the callback may have created
@@ -484,8 +495,28 @@ impl Runtime {
                     reply,
                     cpu_accumulated: cpu_elapsed,
                     wall_start,
-                    cancel,
+                    cancel: cancel.clone(),
                 });
+
+                // Wall timeout — fires cancel token after wall_timeout
+                if let Some(wall_limit) = self.wall_timeout {
+                    let wall_cancel = cancel.clone();
+                    self.pending_ops.push(Box::pin(async move {
+                        tokio::select! {
+                            _ = tokio::time::sleep(wall_limit) => {
+                                wall_cancel.cancel();
+                            }
+                            _ = wall_cancel.cancelled() => {
+                                // Already cancelled (by CPU limit or other), stop the timer
+                            }
+                        }
+                        OpResult::Cancelled
+                    }));
+                }
+
+                // Check if initial dispatch already exceeded CPU limit
+                self.check_cpu_limit(id);
+
                 self.clear_executing_request();
                 self.check_settled_promises_v8();
             }
@@ -567,6 +598,13 @@ impl Runtime {
                         logs,
                     }));
                 }
+
+                // Check CPU limit on the owning request (may still be pending)
+                if let Some(rid) = request_id {
+                    self.check_cpu_limit(rid);
+                }
+                // Clean up any requests cancelled by wall timeout
+                self.cleanup_cancelled_requests();
 
                 self.clear_executing_request();
             }
@@ -676,6 +714,13 @@ impl Runtime {
             }));
         }
 
+        // Check CPU limit on the owning request (may still be pending)
+        if let Some(rid) = owner_request_id {
+            self.check_cpu_limit(rid);
+        }
+        // Clean up any requests cancelled by wall timeout
+        self.cleanup_cancelled_requests();
+
         self.clear_executing_request();
     }
 
@@ -730,6 +775,40 @@ impl Runtime {
                         let _ = req.reply.send(Err(msg));
                     }
                 }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Limit enforcement helpers
+    // -----------------------------------------------------------------------
+
+    /// Check if a request has exceeded its CPU limit. If so, cancel and reply with error.
+    fn check_cpu_limit(&mut self, request_id: u64) {
+        let Some(cpu_limit) = self.cpu_limit else { return };
+        let Some(req) = self.pending_requests.get(&request_id) else { return };
+
+        if req.cpu_accumulated > cpu_limit {
+            let req = self.pending_requests.remove(&request_id).unwrap();
+            req.cancel.cancel(); // cancels in-flight fetches
+            let logs = self.drain_request_logs(request_id);
+            let _ = req.reply.send(Err("CPU time limit exceeded".into()));
+        }
+    }
+
+    /// Clean up any pending requests whose cancel tokens have fired
+    /// (e.g. wall timeout expired while waiting for a fetch).
+    fn cleanup_cancelled_requests(&mut self) {
+        let cancelled: Vec<u64> = self
+            .pending_requests
+            .iter()
+            .filter(|(_, req)| req.cancel.is_cancelled())
+            .map(|(&id, _)| id)
+            .collect();
+        for id in cancelled {
+            if let Some(req) = self.pending_requests.remove(&id) {
+                let logs = self.drain_request_logs(id);
+                let _ = req.reply.send(Err("Request timed out".into()));
             }
         }
     }
@@ -829,7 +908,7 @@ export function chain() {
                     .unwrap();
                 rt.block_on(async {
                     let mut runtime =
-                        Runtime::new(modules, rx, shutdown_inner, None, HashMap::new(), None);
+                        Runtime::new(modules, rx, shutdown_inner, None, None, HashMap::new(), None);
                     runtime.run().await;
                 });
             })

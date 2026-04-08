@@ -191,6 +191,7 @@ impl V8Pool {
                             request_rx,
                             shutdown_inner,
                             cpu_limit,
+                            Some(Duration::from_secs(30)),
                             HashMap::new(),
                             Some(server_handle),
                         )

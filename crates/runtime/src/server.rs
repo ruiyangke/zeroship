@@ -64,6 +64,7 @@ fn spawn_and_warmup(name: &str) -> tokio::sync::mpsc::Sender<IncomingRequest> {
                     req_rx,
                     shutdown,
                     None,
+                    None,
                     std::collections::HashMap::new(),
                     Some(server_handle),
                 );
