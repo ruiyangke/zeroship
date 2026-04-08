@@ -1297,5 +1297,44 @@ export function chain() {
 
         handle.join().unwrap();
     }
+
+    // -----------------------------------------------------------------------
+    // StreamForwarder unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn stream_forwarder_basic() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let mut fwd = StreamForwarder::new(tx);
+
+        assert!(fwd.try_forward(b"hello".to_vec()));
+        assert!(fwd.try_forward(b"world".to_vec()));
+
+        assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from("hello"));
+        assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from("world"));
+    }
+
+    #[test]
+    fn stream_forwarder_backpressure_overflow() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(2);
+        let mut fwd = StreamForwarder::new(tx);
+        fwd.max_overflow = 2;
+
+        assert!(fwd.try_forward(b"a".to_vec())); // channel slot 1
+        assert!(fwd.try_forward(b"b".to_vec())); // channel slot 2
+        assert!(fwd.try_forward(b"c".to_vec())); // overflow slot 1
+        assert!(fwd.try_forward(b"d".to_vec())); // overflow slot 2
+        assert!(!fwd.try_forward(b"e".to_vec())); // overflow full → false
+    }
+
+    #[test]
+    fn stream_forwarder_client_disconnect() {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let mut fwd = StreamForwarder::new(tx);
+
+        drop(rx); // simulate client disconnect
+
+        assert!(!fwd.try_forward(b"data".to_vec())); // channel closed → false
+    }
 }
 
