@@ -5,7 +5,7 @@
 //! can borrow it without crossing thread boundaries.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -86,6 +86,11 @@ pub struct RuntimeState {
 
     /// Channel for stream events that bypass V8 (e.g. outbound HTTP stream chunks).
     pub stream_events_tx: Option<tokio::sync::mpsc::Sender<OpResult>>,
+
+    /// Stream IDs that have outbound StreamForwarders (HTTP streaming responses).
+    /// When a stream_id is in this set, `stream_enqueue_callback` forwards chunks
+    /// via `stream_events_tx` instead of buffering them for JS reads.
+    pub outbound_streams: HashSet<u32>,
 }
 
 /// Convenience alias — the shared handle passed into V8 callbacks.
@@ -125,6 +130,7 @@ impl RuntimeState {
             server_handle,
 
             stream_events_tx: None,
+            outbound_streams: HashSet::new(),
         }
     }
 }
@@ -218,12 +224,26 @@ pub enum DispatchResult {
 pub struct IncomingRequest {
     /// Unique request ID (monotonically increasing per isolate).
     pub id: u64,
-    /// Request body serialised as JSON.
-    pub body: String,
+    /// What kind of request this is (JSON-RPC or native HTTP).
+    pub kind: RequestKind,
     /// One-shot channel to send the response back to the HTTP layer.
     pub reply: tokio::sync::oneshot::Sender<Result<RequestReply, String>>,
     /// Token that the HTTP layer cancels when the client disconnects.
     pub cancel: CancellationToken,
+}
+
+/// Discriminant for how the request should be dispatched inside V8.
+pub enum RequestKind {
+    /// JSON-RPC request body — dispatched via the `__dispatch` function.
+    Rpc(String),
+    /// Native HTTP request — dispatched via `onRequest(Request)` with direct
+    /// V8 Response object inspection (no JSON serialization).
+    Http {
+        method: String,
+        url: String,
+        headers: String,
+        body: String,
+    },
 }
 
 /// Reply from the Runtime back to the HTTP layer.

@@ -14,69 +14,10 @@ use tokio_util::sync::CancellationToken;
 use crate::init::{HttpResult, RequestResult};
 use crate::modules::ModuleEntry;
 use crate::runtime::Runtime;
-use crate::state::{IncomingRequest, RequestReply};
+use crate::state::{IncomingRequest, RequestKind, RequestReply};
 
-// ---------------------------------------------------------------------------
-// HTTP dispatch JS wrapper
-// ---------------------------------------------------------------------------
-
-/// JS function registered as `__rpc.__httpDispatch`.
-/// Takes (method, url, headers_json, body) and returns {status, headers, body}.
-/// The dispatch function wraps this in JSON-RPC format automatically.
-const HTTP_DISPATCH_JS: &str = r#"(function(method, url, headers_json, body) {
-    function __ensureBody(resp) {
-        if (resp && resp._isStreamBody && resp.body) {
-            return resp.text().then(function(t) {
-                resp._bodyText = t;
-                resp._isStreamBody = false;
-                return resp;
-            });
-        }
-        return resp;
-    }
-    function __extract(resp) {
-        if (!resp || resp.status === undefined) resp = new Response(String(resp), {status:200});
-        var h = [];
-        if (resp.headers && resp.headers._map) {
-            var map = resp.headers._map;
-            var keys = Object.keys(map);
-            for (var i = 0; i < keys.length; i++) {
-                var arr = map[keys[i]];
-                for (var j = 0; j < arr.length; j++) h.push([keys[i], arr[j]]);
-            }
-        }
-        return {status: resp.status, headers: h, body: resp._bodyText || ""};
-    }
-    try {
-        var handler = __rpc.onRequest;
-        var map = Object.create(null);
-        if (headers_json) {
-            var arr = JSON.parse(headers_json);
-            for (var i = 0; i < arr.length; i++) {
-                var k = arr[i][0].toLowerCase(), v = arr[i][1];
-                if (map[k]) map[k].push(v); else map[k] = [v];
-            }
-        }
-        var reqInit = { method: method, headers: Headers._fromTrusted(map) };
-        if (body && method !== "GET" && method !== "HEAD") reqInit.body = body;
-        var req = new Request(url, reqInit);
-        var result = handler(req);
-        if (result && typeof result.then === "function") {
-            return result.then(function(resp) {
-                return Promise.resolve(__ensureBody(resp)).then(__extract);
-            }, function(e) {
-                return __extract(new Response(e.message || String(e), {status:500}));
-            });
-        }
-        var ensured = __ensureBody(result);
-        if (ensured && typeof ensured.then === "function") {
-            return ensured.then(__extract);
-        }
-        return __extract(result);
-    } catch(e) {
-        return __extract(new Response(e.message || String(e), {status:500}));
-    }
-})"#;
+// HTTP dispatch is now handled natively by Runtime.handle_http_request()
+// which calls onRequest(Request) directly and inspects the V8 Response object.
 
 // ---------------------------------------------------------------------------
 // Isolate
@@ -129,7 +70,7 @@ impl Isolate {
         }
     }
 
-    /// Lazy initialization + register HTTP dispatch if onRequest is exported.
+    /// Lazy initialization — detect onRequest handler availability.
     fn ensure_initialized(&mut self) {
         if self.runtime.initialized {
             return;
@@ -137,43 +78,9 @@ impl Isolate {
 
         self.runtime.ensure_initialized();
 
-        // Check if onRequest is exported and register __httpDispatch
-        let has_http = {
-            v8::scope!(let handle_scope, &mut self.runtime.isolate);
-            let context = v8::Local::new(handle_scope, &self.runtime.context);
-            let scope = &mut v8::ContextScope::new(handle_scope, context);
-
-            let global = context.global(scope);
-            let rpc_key = v8::String::new(scope, "__rpc").unwrap();
-            let has = global
-                .get(scope, rpc_key.into())
-                .and_then(|rpc| rpc.to_object(scope))
-                .and_then(|obj| {
-                    let key = v8::String::new(scope, "onRequest").unwrap();
-                    obj.get(scope, key.into())
-                })
-                .map(|v| v.is_function())
-                .unwrap_or(false);
-
-            if has {
-                // Compile and register __httpDispatch on __rpc
-                let code = v8::String::new(scope, HTTP_DISPATCH_JS).unwrap();
-                let script = v8::Script::compile(scope, code, None).unwrap();
-                let func_val = script.run(scope).unwrap();
-
-                let rpc_obj = global
-                    .get(scope, rpc_key.into())
-                    .unwrap()
-                    .to_object(scope)
-                    .unwrap();
-                let dispatch_key = v8::String::new(scope, "__httpDispatch").unwrap();
-                rpc_obj.set(scope, dispatch_key.into(), func_val);
-            }
-
-            has
-        };
-
-        self.has_http = Some(has_http);
+        // Runtime.ensure_initialized() already detects onRequest and caches
+        // http_handler_fn. We just check whether it was found.
+        self.has_http = Some(self.runtime.http_handler_fn.is_some());
     }
 
     /// Check if the app exports an onRequest handler.
@@ -184,6 +91,9 @@ impl Isolate {
 
     /// Execute an HTTP request via the onRequest handler.
     /// Returns None if onRequest is not exported.
+    ///
+    /// Uses native HTTP dispatch: calls `onRequest(Request)` directly and
+    /// inspects the returned V8 Response object in Rust.
     pub fn execute_http(
         &mut self,
         method: &str,
@@ -197,36 +107,47 @@ impl Isolate {
             return None;
         }
 
-        // Encode as JSON-RPC call to __httpDispatch
-        let request_json = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "__httpDispatch",
-            "params": [method, url, headers_json, body],
-            "id": 0
-        })
-        .to_string();
+        self.next_id += 1;
+        let id = self.next_id;
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
 
-        let result = self.execute_request(&request_json);
+        self.request_tx
+            .try_send(IncomingRequest {
+                id,
+                kind: RequestKind::Http {
+                    method: method.to_string(),
+                    url: url.to_string(),
+                    headers: headers_json.to_string(),
+                    body: body.to_string(),
+                },
+                reply: reply_tx,
+                cancel: CancellationToken::new(),
+            })
+            .ok()?;
 
-        Some(match result {
-            Err(e) => Err(e),
-            Ok(rr) => {
-                // Parse the JSON-RPC result to extract {status, headers, body}
-                match serde_json::from_str::<serde_json::Value>(&rr.json) {
-                    Ok(val) => {
-                        if let Some(err) = val.get("error") {
-                            let msg = err
-                                .get("message")
-                                .and_then(|m| m.as_str())
-                                .unwrap_or("unknown error");
-                            Err(msg.to_string())
-                        } else if let Some(result) = val.get("result") {
-                            let status = result
-                                .get("status")
+        let runtime = &mut self.runtime;
+        Some(self.local_rt.block_on(async {
+            // Phase 1: drive runtime until we get the reply
+            let reply = tokio::select! {
+                _ = runtime.run() => {
+                    return Err("runtime exited before reply".to_string());
+                }
+                result = reply_rx => {
+                    result.map_err(|_| "reply channel dropped".to_string())?
+                        .map_err(|e| e)?
+                }
+            };
+
+            match reply {
+                RequestReply::Complete(rr) => {
+                    // The HTTP dispatch path wraps the result as JSON with {status, headers, body}
+                    match serde_json::from_str::<serde_json::Value>(&rr.json) {
+                        Ok(val) => {
+                            let result = val.get("result").unwrap_or(&val);
+                            let status = result.get("status")
                                 .and_then(|s| s.as_u64())
                                 .unwrap_or(200) as u16;
-                            let body = result
-                                .get("body")
+                            let body = result.get("body")
                                 .and_then(|b| b.as_str())
                                 .unwrap_or("")
                                 .to_string();
@@ -234,15 +155,13 @@ impl Isolate {
                                 .get("headers")
                                 .and_then(|h| h.as_array())
                                 .map(|arr| {
-                                    arr.iter()
-                                        .filter_map(|pair| {
-                                            let a = pair.as_array()?;
-                                            Some((
-                                                a.first()?.as_str()?.to_string(),
-                                                a.get(1)?.as_str()?.to_string(),
-                                            ))
-                                        })
-                                        .collect()
+                                    arr.iter().filter_map(|pair| {
+                                        let a = pair.as_array()?;
+                                        Some((
+                                            a.first()?.as_str()?.to_string(),
+                                            a.get(1)?.as_str()?.to_string(),
+                                        ))
+                                    }).collect()
                                 })
                                 .unwrap_or_default();
 
@@ -254,14 +173,54 @@ impl Isolate {
                                 wall_time: rr.wall_time,
                                 logs: rr.logs,
                             })
-                        } else {
-                            Err("missing result in JSON-RPC response".to_string())
+                        }
+                        Err(e) => Err(format!("failed to parse response: {e}")),
+                    }
+                }
+                RequestReply::Stream(stream) => {
+                    // Phase 2: streaming response — drive runtime while collecting body
+                    let status = stream.status;
+                    let headers = stream.headers;
+                    let cpu_time = stream.cpu_time;
+                    let logs = stream.logs;
+                    let mut body_rx = stream.body_rx;
+                    let wall_start = std::time::Instant::now();
+                    let mut body_parts: Vec<bytes::Bytes> = Vec::new();
+
+                    // Drive runtime to push stream chunks while collecting body
+                    loop {
+                        tokio::select! {
+                            _ = runtime.run() => {
+                                // Runtime exited — drain remaining chunks
+                                while let Some(chunk) = body_rx.recv().await {
+                                    body_parts.push(chunk);
+                                }
+                                break;
+                            }
+                            chunk = body_rx.recv() => {
+                                match chunk {
+                                    Some(data) => body_parts.push(data),
+                                    None => break, // stream closed
+                                }
+                            }
                         }
                     }
-                    Err(e) => Err(format!("failed to parse response: {e}")),
+
+                    let body: String = body_parts.iter()
+                        .map(|b| String::from_utf8_lossy(b).to_string())
+                        .collect();
+
+                    Ok(HttpResult {
+                        status,
+                        headers,
+                        body,
+                        cpu_time,
+                        wall_time: wall_start.elapsed(),
+                        logs,
+                    })
                 }
             }
-        })
+        }))
     }
 
     /// Execute a single RPC request. Returns the JSON response + timing info.
@@ -275,7 +234,7 @@ impl Isolate {
         self.request_tx
             .try_send(IncomingRequest {
                 id,
-                body: request_json.to_string(),
+                kind: RequestKind::Rpc(request_json.to_string()),
                 reply: reply_tx,
                 cancel: CancellationToken::new(),
             })

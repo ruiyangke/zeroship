@@ -157,10 +157,24 @@ pub(crate) fn stream_enqueue_callback(
         let resolver = v8::Local::new(scope, &resolver_global);
         resolve_with_chunk(scope, resolver, &data);
     } else {
-        // No pending read — buffer the chunk for later.
-        let mut s = state.borrow_mut();
-        if let Some(stream) = s.streams.get_mut(&stream_id) {
-            stream.buffer.push(data);
+        // Check if this is an outbound stream (registered for HTTP streaming).
+        // If so, forward via stream_events channel for the StreamForwarder.
+        let is_outbound = state.borrow().outbound_streams.contains(&stream_id);
+        if is_outbound {
+            let s = state.borrow();
+            if let Some(tx) = &s.stream_events_tx {
+                let _ = tx.try_send(crate::state::OpResult::StreamChunk {
+                    stream_id,
+                    data,
+                    done: false,
+                });
+            }
+        } else {
+            // Inbound stream — buffer the chunk for later JS reads.
+            let mut s = state.borrow_mut();
+            if let Some(stream) = s.streams.get_mut(&stream_id) {
+                stream.buffer.push(data);
+            }
         }
     }
 }
@@ -181,15 +195,29 @@ pub(crate) fn stream_close_callback(
         .expect("RuntimeState not in isolate slot")
         .clone();
 
-    let pending = {
+    let (pending, is_outbound) = {
         let mut s = state.borrow_mut();
-        if let Some(stream) = s.streams.get_mut(&stream_id) {
+        let is_outbound = s.outbound_streams.remove(&stream_id);
+        let pending = if let Some(stream) = s.streams.get_mut(&stream_id) {
             stream.closed = true;
             stream.pending_read.take()
         } else {
             None
-        }
+        };
+        (pending, is_outbound)
     };
+
+    // For outbound streams, send a done event to close the StreamForwarder.
+    if is_outbound {
+        let s = state.borrow();
+        if let Some(tx) = &s.stream_events_tx {
+            let _ = tx.try_send(crate::state::OpResult::StreamChunk {
+                stream_id,
+                data: Vec::new(),
+                done: true,
+            });
+        }
+    }
 
     // If there's a pending read, resolve it with {done: true}.
     if let Some(resolver_global) = pending {

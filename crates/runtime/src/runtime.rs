@@ -24,8 +24,8 @@ use tokio_util::sync::CancellationToken;
 use crate::init::{init_v8, load_polyfills_and_modules, RequestResult};
 use crate::modules::ModuleEntry;
 use crate::state::{
-    DispatchResult, HttpStreamResult, IncomingRequest, OpResult, RequestReply, RuntimeState,
-    SharedState, SpawnedTimer, TimerResult,
+    DispatchResult, HttpStreamResult, IncomingRequest, OpResult, RequestKind, RequestReply,
+    RuntimeState, SharedState, SpawnedTimer, TimerResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -41,6 +41,9 @@ struct PendingRequest {
     cpu_accumulated: Duration,
     wall_start: Instant,
     cancel: CancellationToken,
+    /// If true, the resolved value is a V8 Response object (HTTP path).
+    /// If false, the resolved value is a JSON string (RPC path).
+    is_http: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +71,210 @@ macro_rules! enter_v8 {
         $scope.perform_microtask_checkpoint();
         __result
     }};
+}
+
+// ---------------------------------------------------------------------------
+// HTTP helper constants
+// ---------------------------------------------------------------------------
+
+/// JS helper compiled once: constructs a `Request` from Rust-supplied params.
+const HTTP_CREATE_REQUEST_JS: &str = r#"(function(method, url, headersJson, body) {
+    var map = Object.create(null);
+    if (headersJson) {
+        var arr = JSON.parse(headersJson);
+        for (var i = 0; i < arr.length; i++) {
+            var k = arr[i][0].toLowerCase(), v = arr[i][1];
+            if (map[k]) map[k].push(v); else map[k] = [v];
+        }
+    }
+    var init = { method: method, headers: Headers._fromTrusted(map) };
+    if (body && method !== "GET" && method !== "HEAD") init.body = body;
+    return new Request(url, init);
+})"#;
+
+// ---------------------------------------------------------------------------
+// V8 property access helpers
+// ---------------------------------------------------------------------------
+
+fn get_string_property(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, key: &str) -> String {
+    let key = v8::String::new(scope, key).unwrap();
+    obj.get(scope, key.into())
+        .map(|v| v.to_rust_string_lossy(scope))
+        .unwrap_or_default()
+}
+
+fn get_u32_property(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, key: &str) -> u32 {
+    let key = v8::String::new(scope, key).unwrap();
+    obj.get(scope, key.into())
+        .and_then(|v| v.uint32_value(scope))
+        .unwrap_or(0)
+}
+
+fn get_bool_property(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, key: &str) -> bool {
+    let key = v8::String::new(scope, key).unwrap();
+    obj.get(scope, key.into())
+        .map(|v| v.boolean_value(scope))
+        .unwrap_or(false)
+}
+
+/// Result of settling a pending request — RPC or HTTP path.
+enum SettledResult {
+    /// RPC path: JSON string result.
+    Rpc(Result<String, String>),
+    /// HTTP path: inspected Response object.
+    Http(Result<ResponseInfo, String>),
+}
+
+/// Classification of an inspected V8 Response object.
+enum ResponseInfo {
+    /// Complete buffered response.
+    Complete {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: String,
+    },
+    /// Streaming response — body arrives via the stream forwarder.
+    Stream {
+        status: u16,
+        headers: Vec<(String, String)>,
+        stream_id: u32,
+    },
+}
+
+/// Inspect a V8 Response object and extract status, headers, body / stream info.
+fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Value>) -> Result<ResponseInfo, String> {
+    let obj = match response_val.to_object(scope) {
+        Some(o) => o,
+        None => return Err("Handler did not return a Response object".to_string()),
+    };
+
+    let status = get_u32_property(scope, obj, "status") as u16;
+    if status == 0 {
+        // Likely not a Response — wrap raw value as 200 text body
+        let body = response_val.to_rust_string_lossy(scope);
+        return Ok(ResponseInfo::Complete {
+            status: 200,
+            headers: vec![("content-type".into(), "text/plain;charset=UTF-8".into())],
+            body,
+        });
+    }
+
+    // Extract headers from response.headers._map
+    let headers = extract_response_headers(scope, obj);
+
+    let is_stream = get_bool_property(scope, obj, "_isStreamBody");
+    if is_stream {
+        // Stream ID is on the ReadableStream body: response.body._id
+        let body_key = v8::String::new(scope, "body").unwrap();
+        let stream_id = obj.get(scope, body_key.into())
+            .and_then(|v| v.to_object(scope))
+            .map(|body_obj| get_u32_property(scope, body_obj, "_id"))
+            .unwrap_or(0);
+
+        // Check if the stream is already fully buffered + closed.
+        // This handles JS-created ReadableStreams where all chunks were
+        // enqueued synchronously in start().
+        let state: SharedState = scope
+            .get_slot::<SharedState>()
+            .expect("RuntimeState not in isolate slot")
+            .clone();
+        let s = state.borrow();
+        let stream_closed = s.streams.get(&stream_id).map(|ss| ss.closed).unwrap_or(false);
+
+        if stream_closed {
+            // Stream is closed — collect buffered chunks as complete body.
+            let body_text = s.streams.get(&stream_id)
+                .map(|ss| {
+                    ss.buffer.iter()
+                        .map(|b| String::from_utf8_lossy(b).to_string())
+                        .collect::<String>()
+                })
+                .unwrap_or_default();
+            drop(s);
+            // Clean up the stream state
+            state.borrow_mut().streams.remove(&stream_id);
+            Ok(ResponseInfo::Complete { status, headers, body: body_text })
+        } else {
+            drop(s);
+            // Stream still open — return as streaming (chunks arrive via timers/async ops)
+            Ok(ResponseInfo::Stream { status, headers, stream_id })
+        }
+    } else {
+        let body = get_string_property(scope, obj, "_bodyText");
+        Ok(ResponseInfo::Complete { status, headers, body })
+    }
+}
+
+/// Extract headers from a Response object's `headers._map` property.
+fn extract_response_headers(scope: &mut v8::PinScope, response_obj: v8::Local<v8::Object>) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    let headers_key = v8::String::new(scope, "headers").unwrap();
+    let Some(headers_val) = response_obj.get(scope, headers_key.into()) else { return result };
+    let Some(headers_obj) = headers_val.to_object(scope) else { return result };
+    let map_key = v8::String::new(scope, "_map").unwrap();
+    let Some(map_val) = headers_obj.get(scope, map_key.into()) else { return result };
+    let Some(map_obj) = map_val.to_object(scope) else { return result };
+
+    let Some(names) = map_obj.get_own_property_names(scope, Default::default()) else { return result };
+    for i in 0..names.length() {
+        let Some(name_val) = names.get_index(scope, i) else { continue };
+        let name = name_val.to_rust_string_lossy(scope);
+        let Some(arr_val) = map_obj.get(scope, name_val) else { continue };
+        let Some(arr_obj) = arr_val.to_object(scope) else { continue };
+        let len_key = v8::String::new(scope, "length").unwrap();
+        let len = arr_obj.get(scope, len_key.into())
+            .and_then(|v| v.uint32_value(scope))
+            .unwrap_or(0);
+        for j in 0..len {
+            if let Some(val) = arr_obj.get_index(scope, j) {
+                result.push((name.clone(), val.to_rust_string_lossy(scope)));
+            }
+        }
+    }
+    result
+}
+
+/// Extract the result of a settled promise, branching on RPC vs HTTP.
+fn extract_settled_result(
+    scope: &mut v8::PinScope,
+    promise: &v8::Global<v8::Promise>,
+    is_http: bool,
+) -> SettledResult {
+    let local = v8::Local::new(scope, promise);
+    match local.state() {
+        v8::PromiseState::Fulfilled => {
+            let val = local.result(scope);
+            if is_http {
+                SettledResult::Http(inspect_response(scope, val))
+            } else {
+                let json = val
+                    .to_string(scope)
+                    .map(|s| s.to_rust_string_lossy(scope))
+                    .unwrap_or_else(|| "[object]".to_string());
+                SettledResult::Rpc(Ok(json))
+            }
+        }
+        v8::PromiseState::Rejected => {
+            let msg = local
+                .result(scope)
+                .to_string(scope)
+                .map(|s| s.to_rust_string_lossy(scope))
+                .unwrap_or_else(|| "Promise rejected".to_string());
+            if is_http {
+                SettledResult::Http(Err(msg))
+            } else {
+                SettledResult::Rpc(Err(msg))
+            }
+        }
+        v8::PromiseState::Pending => {
+            let err = "Promise still pending".to_string();
+            if is_http {
+                SettledResult::Http(Err(err))
+            } else {
+                SettledResult::Rpc(Err(err))
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -112,50 +319,6 @@ impl StreamForwarder {
 }
 
 // ---------------------------------------------------------------------------
-// detect_stream_marker — parse JSON-RPC response for __stream marker
-// ---------------------------------------------------------------------------
-
-/// Parse a JSON-RPC response and check if the result contains __stream marker.
-fn detect_stream_marker(json: &str) -> Option<(u16, Vec<(String, String)>, u32)> {
-    // Fast path: skip expensive JSON parse when __stream is not present (99.99% of requests)
-    if !json.contains("\"__stream\"") {
-        return None;
-    }
-    let parsed: serde_json::Value = serde_json::from_str(json).ok()?;
-    let result = parsed.get("result")?;
-    // result may be a number, string, bool, or object
-    // For streaming, it should be a string containing JSON with __stream
-    let inner: serde_json::Value = if let Some(s) = result.as_str() {
-        serde_json::from_str(s).ok()?
-    } else if result.is_object() {
-        result.clone()
-    } else {
-        return None;
-    };
-
-    if !inner.get("__stream")?.as_bool().unwrap_or(false) {
-        return None;
-    }
-
-    let status = inner.get("status")?.as_u64()? as u16;
-    let stream_id = inner.get("stream_id")?.as_u64()? as u32;
-    let headers = inner.get("headers").and_then(|h| {
-        h.as_array().map(|arr| {
-            arr.iter().filter_map(|item| {
-                let pair = item.as_array()?;
-                if pair.len() == 2 {
-                    Some((pair[0].as_str()?.to_string(), pair[1].as_str()?.to_string()))
-                } else {
-                    None
-                }
-            }).collect()
-        })
-    }).unwrap_or_default();
-
-    Some((status, headers, stream_id))
-}
-
-// ---------------------------------------------------------------------------
 // Runtime
 // ---------------------------------------------------------------------------
 
@@ -167,6 +330,11 @@ pub struct Runtime {
     pub(crate) isolate: v8::OwnedIsolate,
     pub(crate) context: v8::Global<v8::Context>,
     pub(crate) dispatch_fn: Option<v8::Global<v8::Function>>,
+    /// Cached reference to `__rpc.onRequest` — present when the app exports an
+    /// HTTP handler.  Used by the native HTTP dispatch path.
+    pub(crate) http_handler_fn: Option<v8::Global<v8::Function>>,
+    /// Compiled helper: `__httpCreateRequest(method, url, headersJson, body) → Request`
+    http_create_request_fn: Option<v8::Global<v8::Function>>,
     pub(crate) initialized: bool,
     pub(crate) modules: Vec<ModuleEntry>,
     pub(crate) state: SharedState,
@@ -255,6 +423,8 @@ impl Runtime {
             isolate,
             context,
             dispatch_fn: None,
+            http_handler_fn: None,
+            http_create_request_fn: None,
             initialized: false,
             modules,
             state,
@@ -291,6 +461,34 @@ impl Runtime {
             let context = v8::Local::new(handle_scope, &self.context);
             let scope = &mut v8::ContextScope::new(handle_scope, context);
             self.dispatch_fn = Some(load_polyfills_and_modules(scope, &modules));
+
+            // Check if __rpc.onRequest is a function. If so, cache a Global ref
+            // for the native HTTP dispatch path.
+            let global = context.global(scope);
+            let rpc_key = v8::String::new(scope, "__rpc").unwrap();
+            if let Some(rpc_obj) = global
+                .get(scope, rpc_key.into())
+                .and_then(|v| v.to_object(scope))
+            {
+                let on_request_key = v8::String::new(scope, "onRequest").unwrap();
+                if let Some(handler) = rpc_obj.get(scope, on_request_key.into()) {
+                    if handler.is_function() {
+                        let func = v8::Local::<v8::Function>::try_from(handler).unwrap();
+                        self.http_handler_fn = Some(v8::Global::new(scope, func));
+                    }
+                }
+            }
+
+            // Compile a small JS helper that constructs a Request from Rust-supplied params.
+            // Much simpler than building Request via the V8 C API.
+            let helper_src = v8::String::new(scope, HTTP_CREATE_REQUEST_JS).unwrap();
+            if let Some(script) = v8::Script::compile(scope, helper_src, None) {
+                if let Some(val) = script.run(scope) {
+                    if let Ok(func) = v8::Local::<v8::Function>::try_from(val) {
+                        self.http_create_request_fn = Some(v8::Global::new(scope, func));
+                    }
+                }
+            }
         }
 
         self.initialized = true;
@@ -451,7 +649,7 @@ impl Runtime {
             let start = Instant::now();
 
             // ONE enter_v8 for fire_timer + check settled + extract results
-            let settled_results: Vec<(u64, PendingRequest, Result<String, String>)> =
+            let settled_results: Vec<(u64, PendingRequest, SettledResult)> =
                 enter_v8!(self, |scope| {
                     crate::request::fire_timer_callback(scope, &self.state, timer_id);
 
@@ -475,7 +673,7 @@ impl Runtime {
                         .filter_map(|id| {
                             let req = self.pending_requests.remove(&id)?;
                             let result =
-                                crate::request::extract_promise_result(scope, &req.promise);
+                                extract_settled_result(scope, &req.promise, req.is_http);
                             Some((id, req, result))
                         })
                         .collect()
@@ -496,27 +694,8 @@ impl Runtime {
             self.state.borrow_mut().timer_owner.remove(&timer_id);
 
             // Send replies OUTSIDE V8 scope (drain_request_logs borrows state)
-            for (id, req, result) in settled_results {
-                let logs = self.drain_request_logs(id);
-                let cpu_time = req.cpu_accumulated + cpu_elapsed;
-                let _ = req.reply.send(result.map(|json| {
-                    if let Some((status, headers, stream_id)) = detect_stream_marker(&json) {
-                        let (body_tx, body_rx) = tokio::sync::mpsc::channel(16);
-                        self.stream_forwarders.insert(stream_id, StreamForwarder::new(body_tx));
-                        RequestReply::Stream(HttpStreamResult {
-                            status, headers, body_rx,
-                            cpu_time,
-                            logs: logs.clone(),
-                        })
-                    } else {
-                        RequestReply::Complete(RequestResult {
-                            json,
-                            cpu_time,
-                            wall_time: req.wall_start.elapsed(),
-                            logs,
-                        })
-                    }
-                }));
+            for (id, req, settled) in settled_results {
+                self.send_settled_reply(id, req, settled, cpu_elapsed);
             }
 
             // Check CPU limit on the owning request (may still be pending)
@@ -553,7 +732,26 @@ impl Runtime {
 
     /// Dispatch an incoming HTTP/RPC request into the JS runtime.
     fn handle_incoming_request(&mut self, req: IncomingRequest) {
-        let IncomingRequest { id, body, reply, cancel } = req;
+        let IncomingRequest { id, kind, reply, cancel } = req;
+
+        match kind {
+            RequestKind::Rpc(body) => {
+                self.handle_rpc_request(id, body, reply, cancel);
+            }
+            RequestKind::Http { method, url, headers, body } => {
+                self.handle_http_request(id, method, url, headers, body, reply, cancel);
+            }
+        }
+    }
+
+    /// Dispatch a JSON-RPC request into the JS runtime.
+    fn handle_rpc_request(
+        &mut self,
+        id: u64,
+        body: String,
+        reply: tokio::sync::oneshot::Sender<Result<RequestReply, String>>,
+        cancel: CancellationToken,
+    ) {
 
         // Set executing_request_id on state so ops/timers know which request owns them
         {
@@ -584,24 +782,13 @@ impl Runtime {
 
         match dispatch_result {
             DispatchResult::Sync(json) => {
-                if let Some((status, headers, stream_id)) = detect_stream_marker(&json) {
-                    let (body_tx, body_rx) = tokio::sync::mpsc::channel(16);
-                    self.stream_forwarders.insert(stream_id, StreamForwarder::new(body_tx));
-                    let logs = self.drain_request_logs(id);
-                    let _ = reply.send(Ok(RequestReply::Stream(HttpStreamResult {
-                        status, headers, body_rx,
-                        cpu_time: cpu_elapsed,
-                        logs,
-                    })));
-                } else {
-                    let logs = self.drain_request_logs(id);
-                    let _ = reply.send(Ok(RequestReply::Complete(RequestResult {
-                        json,
-                        cpu_time: cpu_elapsed,
-                        wall_time: wall_start.elapsed(),
-                        logs,
-                    })));
-                }
+                let logs = self.drain_request_logs(id);
+                let _ = reply.send(Ok(RequestReply::Complete(RequestResult {
+                    json,
+                    cpu_time: cpu_elapsed,
+                    wall_time: wall_start.elapsed(),
+                    logs,
+                })));
                 self.clear_executing_request();
                 // No check_settled_promises_v8 — sync dispatch adds no pending promise
             }
@@ -613,6 +800,7 @@ impl Runtime {
                     cpu_accumulated: cpu_elapsed,
                     wall_start,
                     cancel: cancel.clone(),
+                    is_http: false,
                 });
 
                 // Wall timeout — fires cancel token after wall_timeout
@@ -646,6 +834,232 @@ impl Runtime {
     }
 
     // -----------------------------------------------------------------------
+    // handle_http_request — native HTTP dispatch via onRequest(Request)
+    // -----------------------------------------------------------------------
+
+    /// Dispatch an HTTP request by calling `onRequest(Request)` directly and
+    /// inspecting the returned Response v8::Object in Rust.
+    fn handle_http_request(
+        &mut self,
+        id: u64,
+        method: String,
+        url: String,
+        headers: String,
+        body: String,
+        reply: tokio::sync::oneshot::Sender<Result<RequestReply, String>>,
+        cancel: CancellationToken,
+    ) {
+        // Set executing_request_id on state
+        {
+            let mut s = self.state.borrow_mut();
+            s.executing_request_id = Some(id);
+            s.executing_request_cancel = Some(cancel.clone());
+        }
+
+        let handler_fn = match &self.http_handler_fn {
+            Some(f) => f,
+            None => {
+                let _ = reply.send(Err("No onRequest handler exported".to_string()));
+                self.clear_executing_request();
+                return;
+            }
+        };
+
+        let create_req_fn = match &self.http_create_request_fn {
+            Some(f) => f,
+            None => {
+                let _ = reply.send(Err("HTTP request helper not compiled".to_string()));
+                self.clear_executing_request();
+                return;
+            }
+        };
+
+        let start = Instant::now();
+        let wall_start = start;
+
+        // Enter V8: construct Request, call handler, inspect result
+        // Ok(Ok(info)) = sync complete, Ok(Err(msg)) = error, Err(promise) = async
+        let dispatch_result: Result<Result<ResponseInfo, String>, v8::Global<v8::Promise>> =
+            enter_v8!(self, |scope| {
+                let undefined = v8::undefined(scope).into();
+
+                // 1. Construct JS Request via helper
+                let create_fn = v8::Local::new(scope, create_req_fn);
+                let method_val = v8::String::new(scope, &method).unwrap().into();
+                let url_val = v8::String::new(scope, &url).unwrap().into();
+                let headers_val = v8::String::new(scope, &headers).unwrap().into();
+                let body_val = v8::String::new(scope, &body).unwrap().into();
+
+                let request_opt = create_fn.call(scope, undefined, &[method_val, url_val, headers_val, body_val]);
+                if request_opt.is_none() {
+                    Ok(Err("Failed to construct Request object".to_string()))
+                } else {
+                    let request = request_opt.unwrap();
+
+                    // 2. Call onRequest(request)
+                    let handler = v8::Local::new(scope, handler_fn);
+                    let result_opt = handler.call(scope, undefined, &[request]);
+                    if result_opt.is_none() {
+                        Ok(Err("onRequest threw an exception".to_string()))
+                    } else {
+                        let result = result_opt.unwrap();
+                        scope.perform_microtask_checkpoint();
+
+                        // 3. Check if result is a Promise
+                        if result.is_promise() {
+                            let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+                            match promise.state() {
+                                v8::PromiseState::Fulfilled => {
+                                    let resolved = promise.result(scope);
+                                    Ok(inspect_response(scope, resolved))
+                                }
+                                v8::PromiseState::Rejected => {
+                                    let msg = promise.result(scope)
+                                        .to_string(scope)
+                                        .map(|s| s.to_rust_string_lossy(scope))
+                                        .unwrap_or_else(|| "Promise rejected".to_string());
+                                    Ok(Err(msg))
+                                }
+                                v8::PromiseState::Pending => {
+                                    Err(v8::Global::new(scope, promise))
+                                }
+                            }
+                        } else {
+                            // Sync result — inspect directly
+                            Ok(inspect_response(scope, result))
+                        }
+                    }
+                }
+            });
+
+        let cpu_elapsed = start.elapsed();
+
+        match dispatch_result {
+            Ok(Ok(info)) => {
+                // Sync completion — send reply immediately
+                self.send_http_reply(id, info, reply, cpu_elapsed, wall_start);
+                self.clear_executing_request();
+            }
+            Ok(Err(msg)) => {
+                let _ = reply.send(Err(msg));
+                self.clear_executing_request();
+            }
+            Err(promise) => {
+                // Async — store as PendingRequest with is_http=true
+                self.pending_requests.insert(id, PendingRequest {
+                    id,
+                    promise,
+                    reply,
+                    cpu_accumulated: cpu_elapsed,
+                    wall_start,
+                    cancel: cancel.clone(),
+                    is_http: true,
+                });
+
+                // Wall timeout
+                if let Some(wall_limit) = self.wall_timeout {
+                    let wall_cancel = cancel.clone();
+                    self.pending_ops.push(Box::pin(async move {
+                        tokio::select! {
+                            _ = tokio::time::sleep(wall_limit) => {
+                                wall_cancel.cancel();
+                            }
+                            _ = wall_cancel.cancelled() => {}
+                        }
+                        OpResult::Cancelled
+                    }));
+                }
+
+                self.check_cpu_limit(id);
+                self.clear_executing_request();
+                self.check_settled_promises_v8();
+            }
+        }
+    }
+
+    /// Send an HTTP reply based on the inspected ResponseInfo.
+    fn send_http_reply(
+        &mut self,
+        id: u64,
+        info: ResponseInfo,
+        reply: tokio::sync::oneshot::Sender<Result<RequestReply, String>>,
+        cpu_time: Duration,
+        wall_start: Instant,
+    ) {
+        let logs = self.drain_request_logs(id);
+        match info {
+            ResponseInfo::Complete { status, headers, body } => {
+                // Wrap as JSON-RPC-like response for compatibility with RequestReply::Complete
+                let json = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "result": { "status": status, "headers": headers, "body": body },
+                    "id": 0
+                }).to_string();
+                let _ = reply.send(Ok(RequestReply::Complete(RequestResult {
+                    json,
+                    cpu_time,
+                    wall_time: wall_start.elapsed(),
+                    logs,
+                })));
+            }
+            ResponseInfo::Stream { status, headers, stream_id } => {
+                let (body_tx, body_rx) = tokio::sync::mpsc::channel(16);
+                let mut forwarder = StreamForwarder::new(body_tx);
+
+                // Flush any chunks already buffered in the stream state
+                {
+                    let mut s = self.state.borrow_mut();
+                    if let Some(stream) = s.streams.get_mut(&stream_id) {
+                        for chunk in stream.buffer.drain(..) {
+                            forwarder.try_forward(chunk);
+                        }
+                    }
+                    // Register as outbound so stream_enqueue_callback forwards chunks
+                    s.outbound_streams.insert(stream_id);
+                }
+
+                self.stream_forwarders.insert(stream_id, forwarder);
+                let _ = reply.send(Ok(RequestReply::Stream(HttpStreamResult {
+                    status, headers, body_rx,
+                    cpu_time,
+                    logs,
+                })));
+            }
+        }
+    }
+
+    /// Send a reply for a settled pending request (RPC or HTTP).
+    fn send_settled_reply(
+        &mut self,
+        id: u64,
+        req: PendingRequest,
+        settled: SettledResult,
+        cpu_elapsed: Duration,
+    ) {
+        let cpu_time = req.cpu_accumulated + cpu_elapsed;
+        match settled {
+            SettledResult::Rpc(Ok(json)) => {
+                let logs = self.drain_request_logs(id);
+                let _ = req.reply.send(Ok(RequestReply::Complete(RequestResult {
+                    json,
+                    cpu_time,
+                    wall_time: req.wall_start.elapsed(),
+                    logs,
+                })));
+            }
+            SettledResult::Rpc(Err(msg)) => {
+                let _ = req.reply.send(Err(msg));
+            }
+            SettledResult::Http(Ok(info)) => {
+                self.send_http_reply(id, info, req.reply, cpu_time, req.wall_start);
+            }
+            SettledResult::Http(Err(msg)) => {
+                let _ = req.reply.send(Err(msg));
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // handle_op_result
     // -----------------------------------------------------------------------
 
@@ -664,7 +1078,7 @@ impl Runtime {
                 let start = Instant::now();
 
                 // ONE enter_v8 for resolve + check settled + extract results
-                let settled_results: Vec<(u64, PendingRequest, Result<String, String>)> =
+                let settled_results: Vec<(u64, PendingRequest, SettledResult)> =
                     enter_v8!(self, |scope| {
                         // Resolve the op promise
                         crate::request::resolve_op(scope, &self.state, op_id, &value);
@@ -689,7 +1103,7 @@ impl Runtime {
                             .filter_map(|id| {
                                 let req = self.pending_requests.remove(&id)?;
                                 let result =
-                                    crate::request::extract_promise_result(scope, &req.promise);
+                                    extract_settled_result(scope, &req.promise, req.is_http);
                                 Some((id, req, result))
                             })
                             .collect()
@@ -705,27 +1119,8 @@ impl Runtime {
                 }
 
                 // Send replies OUTSIDE V8 scope (drain_request_logs borrows state)
-                for (id, req, result) in settled_results {
-                    let logs = self.drain_request_logs(id);
-                    let cpu_time = req.cpu_accumulated + cpu_elapsed;
-                    let _ = req.reply.send(result.map(|json| {
-                        if let Some((status, headers, stream_id)) = detect_stream_marker(&json) {
-                            let (body_tx, body_rx) = tokio::sync::mpsc::channel(16);
-                            self.stream_forwarders.insert(stream_id, StreamForwarder::new(body_tx));
-                            RequestReply::Stream(HttpStreamResult {
-                                status, headers, body_rx,
-                                cpu_time,
-                                logs: logs.clone(),
-                            })
-                        } else {
-                            RequestReply::Complete(RequestResult {
-                                json,
-                                cpu_time,
-                                wall_time: req.wall_start.elapsed(),
-                                logs,
-                            })
-                        }
-                    }));
+                for (id, req, settled) in settled_results {
+                    self.send_settled_reply(id, req, settled, cpu_elapsed);
                 }
 
                 // Check CPU limit on the owning request (may still be pending)
@@ -780,7 +1175,7 @@ impl Runtime {
         let start = Instant::now();
 
         // ONE enter_v8 for fire_timer + check settled + extract results
-        let settled_results: Vec<(u64, PendingRequest, Result<String, String>)> =
+        let settled_results: Vec<(u64, PendingRequest, SettledResult)> =
             enter_v8!(self, |scope| {
                 crate::request::fire_timer_callback(scope, &self.state, id);
 
@@ -804,7 +1199,7 @@ impl Runtime {
                     .filter_map(|id| {
                         let req = self.pending_requests.remove(&id)?;
                         let result =
-                            crate::request::extract_promise_result(scope, &req.promise);
+                            extract_settled_result(scope, &req.promise, req.is_http);
                         Some((id, req, result))
                     })
                     .collect()
@@ -832,27 +1227,8 @@ impl Runtime {
         }
 
         // Send replies OUTSIDE V8 scope (drain_request_logs borrows state)
-        for (id, req, result) in settled_results {
-            let logs = self.drain_request_logs(id);
-            let cpu_time = req.cpu_accumulated + cpu_elapsed;
-            let _ = req.reply.send(result.map(|json| {
-                if let Some((status, headers, stream_id)) = detect_stream_marker(&json) {
-                    let (body_tx, body_rx) = tokio::sync::mpsc::channel(16);
-                    self.stream_forwarders.insert(stream_id, StreamForwarder::new(body_tx));
-                    RequestReply::Stream(HttpStreamResult {
-                        status, headers, body_rx,
-                        cpu_time,
-                        logs: logs.clone(),
-                    })
-                } else {
-                    RequestReply::Complete(RequestResult {
-                        json,
-                        cpu_time,
-                        wall_time: req.wall_start.elapsed(),
-                        logs,
-                    })
-                }
-            }));
+        for (id, req, settled) in settled_results {
+            self.send_settled_reply(id, req, settled, cpu_elapsed);
         }
 
         // Check CPU limit on the owning request (may still be pending)
@@ -898,34 +1274,11 @@ impl Runtime {
         // Extract results and send replies
         for id in settled {
             if let Some(req) = self.pending_requests.remove(&id) {
-                let result = enter_v8!(self, |scope| {
-                    crate::request::extract_promise_result(scope, &req.promise)
+                let is_http = req.is_http;
+                let settled_result = enter_v8!(self, |scope| {
+                    extract_settled_result(scope, &req.promise, is_http)
                 });
-
-                let logs = self.drain_request_logs(id);
-                match result {
-                    Ok(json) => {
-                        if let Some((status, headers, stream_id)) = detect_stream_marker(&json) {
-                            let (body_tx, body_rx) = tokio::sync::mpsc::channel(16);
-                            self.stream_forwarders.insert(stream_id, StreamForwarder::new(body_tx));
-                            let _ = req.reply.send(Ok(RequestReply::Stream(HttpStreamResult {
-                                status, headers, body_rx,
-                                cpu_time: req.cpu_accumulated,
-                                logs,
-                            })));
-                        } else {
-                            let _ = req.reply.send(Ok(RequestReply::Complete(RequestResult {
-                                json,
-                                cpu_time: req.cpu_accumulated,
-                                wall_time: req.wall_start.elapsed(),
-                                logs,
-                            })));
-                        }
-                    }
-                    Err(msg) => {
-                        let _ = req.reply.send(Err(msg));
-                    }
-                }
+                self.send_settled_reply(id, req, settled_result, Duration::ZERO);
             }
         }
     }
@@ -942,7 +1295,7 @@ impl Runtime {
         if req.cpu_accumulated > cpu_limit {
             let req = self.pending_requests.remove(&request_id).unwrap();
             req.cancel.cancel(); // cancels in-flight fetches
-            let logs = self.drain_request_logs(request_id);
+            let _logs = self.drain_request_logs(request_id);
             let _ = req.reply.send(Err("CPU time limit exceeded".into()));
         }
     }
@@ -958,7 +1311,7 @@ impl Runtime {
             .collect();
         for id in cancelled {
             if let Some(req) = self.pending_requests.remove(&id) {
-                let logs = self.drain_request_logs(id);
+                let _logs = self.drain_request_logs(id);
                 let _ = req.reply.send(Err("Request timed out".into()));
             }
         }
@@ -1094,7 +1447,7 @@ export function chain() {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         tx.blocking_send(IncomingRequest {
             id: 1,
-            body: rpc("ping", "[]"),
+            kind: RequestKind::Rpc(rpc("ping", "[]")),
             reply: reply_tx,
             cancel: CancellationToken::new(),
         })
@@ -1122,7 +1475,7 @@ export function chain() {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         tx.blocking_send(IncomingRequest {
             id: 2,
-            body: rpc("delayed", "[5]"),
+            kind: RequestKind::Rpc(rpc("delayed", "[5]")),
             reply: reply_tx,
             cancel: CancellationToken::new(),
         })
@@ -1160,7 +1513,7 @@ export function chain() {
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
             tx.blocking_send(IncomingRequest {
                 id,
-                body: rpc("delayed", "[20]"),
+                kind: RequestKind::Rpc(rpc("delayed", "[20]")),
                 reply: reply_tx,
                 cancel: CancellationToken::new(),
             })
@@ -1201,7 +1554,7 @@ export function chain() {
         let (r1_tx, r1_rx) = tokio::sync::oneshot::channel();
         tx.blocking_send(IncomingRequest {
             id: 10,
-            body: rpc("ping", "[]"),
+            kind: RequestKind::Rpc(rpc("ping", "[]")),
             reply: r1_tx,
             cancel: CancellationToken::new(),
         })
@@ -1211,7 +1564,7 @@ export function chain() {
         let (r2_tx, r2_rx) = tokio::sync::oneshot::channel();
         tx.blocking_send(IncomingRequest {
             id: 11,
-            body: rpc("delayed", "[10]"),
+            kind: RequestKind::Rpc(rpc("delayed", "[10]")),
             reply: r2_tx,
             cancel: CancellationToken::new(),
         })
@@ -1221,7 +1574,7 @@ export function chain() {
         let (r3_tx, r3_rx) = tokio::sync::oneshot::channel();
         tx.blocking_send(IncomingRequest {
             id: 12,
-            body: rpc("add", "[3,4]"),
+            kind: RequestKind::Rpc(rpc("add", "[3,4]")),
             reply: r3_tx,
             cancel: CancellationToken::new(),
         })
@@ -1250,7 +1603,7 @@ export function chain() {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         tx.blocking_send(IncomingRequest {
             id: 20,
-            body: rpc("chain", "[]"),
+            kind: RequestKind::Rpc(rpc("chain", "[]")),
             reply: reply_tx,
             cancel: CancellationToken::new(),
         })
@@ -1279,7 +1632,7 @@ export function chain() {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         tx.blocking_send(IncomingRequest {
             id: 30,
-            body: rpc("delayed", "[5000]"),
+            kind: RequestKind::Rpc(rpc("delayed", "[5000]")),
             reply: reply_tx,
             cancel: CancellationToken::new(),
         })

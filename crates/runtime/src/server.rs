@@ -9,7 +9,7 @@
 
 use appbase_runtime::modules::ModuleEntry;
 use appbase_runtime::runtime::Runtime;
-use appbase_runtime::state::{IncomingRequest, RequestReply};
+use appbase_runtime::state::{IncomingRequest, RequestKind, RequestReply};
 use appbase_runtime::init_v8;
 use bytes::Bytes;
 use http_body_util::Full;
@@ -80,7 +80,7 @@ fn spawn_and_warmup(name: &str) -> tokio::sync::mpsc::Sender<IncomingRequest> {
         warmup_tx
             .blocking_send(IncomingRequest {
                 id: 0,
-                body: r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":0}"#.to_string(),
+                kind: RequestKind::Rpc(r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":0}"#.to_string()),
                 reply: reply_tx,
                 cancel: CancellationToken::new(),
             })
@@ -127,7 +127,7 @@ impl Dispatcher {
         self.senders[idx]
             .send(IncomingRequest {
                 id,
-                body,
+                kind: RequestKind::Rpc(body),
                 reply: reply_tx,
                 cancel: CancellationToken::new(),
             })

@@ -7,7 +7,7 @@ use crate::core::config::IsolateConfig;
 use crate::core::types::{IsolateStats, PoolStats, RpcResult};
 use appbase_runtime::{IncomingRequest, Runtime};
 use appbase_runtime::modules::ModuleEntry;
-use appbase_runtime::state::{HttpStreamResult, RequestReply};
+use appbase_runtime::state::{HttpStreamResult, RequestKind, RequestReply};
 use appbase_runtime::init_v8;
 
 /// Result from V8Pool dispatch — either a complete RPC result or a streaming response.
@@ -91,7 +91,7 @@ impl V8Pool {
             .request_tx
             .send(IncomingRequest {
                 id,
-                body,
+                kind: RequestKind::Rpc(body),
                 reply: reply_tx,
                 cancel,
             })
@@ -228,7 +228,7 @@ impl V8Pool {
         request_tx
             .blocking_send(IncomingRequest {
                 id: 0,
-                body: r#"{"jsonrpc":"2.0","method":"__ping","params":[],"id":0}"#.to_string(),
+                kind: RequestKind::Rpc(r#"{"jsonrpc":"2.0","method":"__ping","params":[],"id":0}"#.to_string()),
                 reply: reply_tx,
                 cancel: CancellationToken::new(),
             })

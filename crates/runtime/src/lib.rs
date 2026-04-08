@@ -434,7 +434,7 @@ mod tests {
     #[test]
     fn fetch_concurrent_model() {
         use crate::runtime::Runtime;
-        use crate::state::IncomingRequest;
+        use crate::state::{IncomingRequest, RequestKind};
         use tokio_util::sync::CancellationToken;
         let modules = vec![ModuleEntry {
             specifier: "index.js".into(),
@@ -465,7 +465,7 @@ mod tests {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         tx.blocking_send(IncomingRequest {
             id: 1,
-            body: r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#.to_string(),
+            kind: RequestKind::Rpc(r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#.to_string()),
             reply: reply_tx,
             cancel: CancellationToken::new(),
         }).unwrap();
@@ -715,7 +715,7 @@ mod tests {
     #[test]
     fn esm_concurrent_sync() {
         use crate::runtime::Runtime;
-        use crate::state::IncomingRequest;
+        use crate::state::{IncomingRequest, RequestKind};
         use tokio_util::sync::CancellationToken;
         let modules = vec![ModuleEntry {
             specifier: "index.js".into(),
@@ -743,7 +743,7 @@ mod tests {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         tx.blocking_send(IncomingRequest {
             id: 1,
-            body: r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":1}"#.to_string(),
+            kind: RequestKind::Rpc(r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":1}"#.to_string()),
             reply: reply_tx,
             cancel: CancellationToken::new(),
         }).unwrap();
@@ -757,7 +757,7 @@ mod tests {
     #[test]
     fn esm_concurrent_async() {
         use crate::runtime::Runtime;
-        use crate::state::IncomingRequest;
+        use crate::state::{IncomingRequest, RequestKind};
         use tokio_util::sync::CancellationToken;
         let modules = vec![ModuleEntry {
             specifier: "index.js".into(),
@@ -788,7 +788,7 @@ mod tests {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         tx.blocking_send(IncomingRequest {
             id: 1,
-            body: r#"{"jsonrpc":"2.0","method":"delayed","params":[10],"id":1}"#.to_string(),
+            kind: RequestKind::Rpc(r#"{"jsonrpc":"2.0","method":"delayed","params":[10],"id":1}"#.to_string()),
             reply: reply_tx,
             cancel: CancellationToken::new(),
         }).unwrap();

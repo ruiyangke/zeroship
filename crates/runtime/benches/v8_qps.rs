@@ -2,7 +2,7 @@
 //! Compares sync, async, CPU-heavy, and multi-threaded scenarios.
 
 use appbase_runtime::{init_v8, Isolate, IsolatePool, ModuleEntry};
-use appbase_runtime::state::RequestReply;
+use appbase_runtime::state::{RequestKind, RequestReply};
 use std::time::Instant;
 
 const RPC_BODY: &str = r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#;
@@ -251,7 +251,7 @@ fn main() {
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
             req_tx.blocking_send(IncomingRequest {
                 id,
-                body: body.to_string(),
+                kind: RequestKind::Rpc(body.to_string()),
                 reply: reply_tx,
                 cancel: CancellationToken::new(),
             }).unwrap();
@@ -296,7 +296,7 @@ fn main() {
         let (tx, rx) = tokio::sync::oneshot::channel();
         req_tx.blocking_send(IncomingRequest {
             id,
-            body: RPC_BODY.to_string(),
+            kind: RequestKind::Rpc(RPC_BODY.to_string()),
             reply: tx,
             cancel: CancellationToken::new(),
         }).unwrap();
