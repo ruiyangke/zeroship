@@ -11,8 +11,7 @@
 #![allow(unsafe_code)]
 
 use std::cell::RefCell;
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -25,42 +24,9 @@ use tokio_util::sync::CancellationToken;
 use crate::init::{init_v8, load_polyfills_and_modules, RequestResult};
 use crate::modules::ModuleEntry;
 use crate::state::{
-    DispatchResult, IncomingRequest, OpResult, RuntimeState, SharedState,
+    DispatchResult, IncomingRequest, OpResult, RuntimeState, SharedState, SpawnedTimer,
+    TimerResult,
 };
-
-// ---------------------------------------------------------------------------
-// TimerHeapEntry — min-heap entry for the timer wheel
-// ---------------------------------------------------------------------------
-
-/// Entry in the timer min-heap. Ordered by `fire_at` (earliest first),
-/// with `id` as tiebreaker.
-struct TimerHeapEntry {
-    fire_at: Instant,
-    id: u32,
-    interval: Option<Duration>,
-}
-
-impl Eq for TimerHeapEntry {}
-
-impl PartialEq for TimerHeapEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.fire_at == other.fire_at && self.id == other.id
-    }
-}
-
-impl Ord for TimerHeapEntry {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.fire_at
-            .cmp(&other.fire_at)
-            .then(self.id.cmp(&other.id))
-    }
-}
-
-impl PartialOrd for TimerHeapEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
 
 // ---------------------------------------------------------------------------
 // PendingRequest — tracking for in-flight async requests
@@ -122,8 +88,7 @@ pub struct Runtime {
 
     pending_requests: HashMap<u64, PendingRequest>,
     pending_ops: FuturesUnordered<Pin<Box<dyn Future<Output = OpResult>>>>,
-    timer_heap: BinaryHeap<Reverse<TimerHeapEntry>>,
-    timer_sleep: Pin<Box<tokio::time::Sleep>>,
+    pending_timers: FuturesUnordered<Pin<Box<dyn Future<Output = TimerResult>>>>,
 
     /// Senders for stream forwarders — when a stream chunk arrives and a
     /// forwarder exists, we send directly without entering V8.
@@ -205,8 +170,7 @@ impl Runtime {
             state,
             pending_requests: HashMap::new(),
             pending_ops: FuturesUnordered::new(),
-            timer_heap: BinaryHeap::new(),
-            timer_sleep: Box::pin(tokio::time::sleep(Duration::from_secs(86400 * 365))),
+            pending_timers: FuturesUnordered::new(),
             stream_forwarders: HashMap::new(),
             request_rx,
             shutdown,
@@ -325,8 +289,8 @@ impl Runtime {
                 Some(result) = self.pending_ops.next() => {
                     self.handle_op_result(result);
                 }
-                _ = self.timer_sleep.as_mut(), if !self.timer_heap.is_empty() => {
-                    self.fire_due_timers();
+                Some(result) = self.pending_timers.next() => {
+                    self.handle_timer(result);
                 }
                 // All branches disabled (no pending work, channel closed) → exit
                 else => break,
@@ -339,10 +303,8 @@ impl Runtime {
     // -----------------------------------------------------------------------
 
     /// Move newly spawned ops and timers from `RuntimeState` into the
-    /// `pending_ops` and `timer_heap` collections so `tokio::select!` can
-    /// poll them.
+    /// `FuturesUnordered` collections so `tokio::select!` can poll them.
     fn collect_new_tasks(&mut self) {
-        let mut new_timers = false;
         {
             let mut s = self.state.borrow_mut();
 
@@ -351,15 +313,13 @@ impl Runtime {
                 self.pending_ops.push(op_future);
             }
 
-            // Drain spawned timers → timer_heap entries
+            // Drain spawned timers → pending_timers (create tokio::time::sleep futures)
             for timer in s.spawned_timers.drain(..) {
-                let fire_at = Instant::now() + timer.delay;
-                self.timer_heap.push(Reverse(TimerHeapEntry {
-                    fire_at,
-                    id: timer.id,
-                    interval: timer.interval,
+                let SpawnedTimer { id, delay, interval } = timer;
+                self.pending_timers.push(Box::pin(async move {
+                    tokio::time::sleep(delay).await;
+                    TimerResult { id, interval }
                 }));
-                new_timers = true;
             }
         }
 
@@ -367,11 +327,6 @@ impl Runtime {
         // Loops because a timer callback may enqueue more ready_timers via
         // nested setTimeout(0).
         self.fire_ready_timers();
-
-        // Reset sleep to nearest deadline if new timers were added
-        if new_timers {
-            self.reset_timer_sleep();
-        }
     }
 
     // -----------------------------------------------------------------------
@@ -470,7 +425,19 @@ impl Runtime {
             // Drain any new spawned ops/timers that the callback may have created
             // (but NOT recursing into fire_ready_timers — we handle ready_timers
             // via the outer loop).
-            self.drain_spawned_into_heap();
+            {
+                let mut s = self.state.borrow_mut();
+                for op_future in s.spawned_ops.drain(..) {
+                    self.pending_ops.push(op_future);
+                }
+                for timer in s.spawned_timers.drain(..) {
+                    let SpawnedTimer { id, delay, interval } = timer;
+                    self.pending_timers.push(Box::pin(async move {
+                        tokio::time::sleep(delay).await;
+                        TimerResult { id, interval }
+                    }));
+                }
+            }
         }
     }
 
@@ -664,177 +631,97 @@ impl Runtime {
     }
 
     // -----------------------------------------------------------------------
-    // fire_due_timers — pop all due entries from the heap, fire callbacks
+    // handle_timer
     // -----------------------------------------------------------------------
 
-    /// Pop all timer-heap entries whose `fire_at` ≤ now, fire their JS
-    /// callbacks, re-insert interval timers, then reset the single sleep
-    /// future to the next deadline.
-    fn fire_due_timers(&mut self) {
-        let now = Instant::now();
+    /// Process a fired timer.
+    fn handle_timer(&mut self, timer: TimerResult) {
+        let TimerResult { id, interval } = timer;
 
-        while let Some(Reverse(entry)) = self.timer_heap.peek() {
-            if entry.fire_at > now {
-                break;
-            }
-            let Reverse(entry) = self.timer_heap.pop().unwrap();
+        // Find the owning request from timer_owner
+        let owner_request_id = self.state.borrow().timer_owner.get(&id).copied();
 
-            // Lazy deletion — timer may have been cleared via clearTimeout.
-            let has_callback = self
-                .state
-                .borrow()
-                .timer_callbacks
-                .contains_key(&entry.id);
-            if !has_callback {
-                continue;
-            }
-
-            // Find the owning request from timer_owner
-            let owner_request_id =
-                self.state.borrow().timer_owner.get(&entry.id).copied();
-
-            if let Some(rid) = owner_request_id {
-                let cancel =
-                    self.pending_requests.get(&rid).map(|r| r.cancel.clone());
-                let mut s = self.state.borrow_mut();
-                s.executing_request_id = Some(rid);
-                s.executing_request_cancel = cancel;
-            }
-
-            let start = Instant::now();
-
-            // ONE enter_v8 for fire_timer + check settled + extract results
-            let settled_results: Vec<(u64, PendingRequest, Result<String, String>)> =
-                enter_v8!(self, |scope| {
-                    crate::request::fire_timer_callback(
-                        scope,
-                        &self.state,
-                        entry.id,
-                    );
-
-                    // Check settled promises IN THE SAME SCOPE
-                    let settled_ids: Vec<u64> = self
-                        .pending_requests
-                        .iter()
-                        .filter_map(|(&id, req)| {
-                            let p = v8::Local::new(scope, &req.promise);
-                            if p.state() != v8::PromiseState::Pending {
-                                Some(id)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-
-                    // Extract results IN THE SAME SCOPE
-                    settled_ids
-                        .into_iter()
-                        .filter_map(|id| {
-                            let req = self.pending_requests.remove(&id)?;
-                            let result = crate::request::extract_promise_result(
-                                scope,
-                                &req.promise,
-                            );
-                            Some((id, req, result))
-                        })
-                        .collect()
-                });
-
-            let cpu_elapsed = start.elapsed();
-
-            // Accumulate CPU time on owning request (if it wasn't settled)
-            if let Some(rid) = owner_request_id {
-                if let Some(req) = self.pending_requests.get_mut(&rid) {
-                    req.cpu_accumulated += cpu_elapsed;
-                }
-            }
-
-            // Re-arm interval timers (only if callback wasn't cleared during fire)
-            if let Some(interval_dur) = entry.interval {
-                if self
-                    .state
-                    .borrow()
-                    .timer_callbacks
-                    .contains_key(&entry.id)
-                {
-                    self.timer_heap.push(Reverse(TimerHeapEntry {
-                        fire_at: Instant::now() + interval_dur,
-                        id: entry.id,
-                        interval: Some(interval_dur),
-                    }));
-                }
-            } else {
-                // One-shot timer: remove from timer_owner
-                self.state.borrow_mut().timer_owner.remove(&entry.id);
-            }
-
-            // Send replies OUTSIDE V8 scope (drain_request_logs borrows state)
-            for (id, req, result) in settled_results {
-                let logs = self.drain_request_logs(id);
-                let cpu_time = req.cpu_accumulated + cpu_elapsed;
-                let _ = req.reply.send(result.map(|json| RequestResult {
-                    json,
-                    cpu_time,
-                    wall_time: req.wall_start.elapsed(),
-                    logs,
-                }));
-            }
-
-            // Check CPU limit on the owning request (may still be pending)
-            if let Some(rid) = owner_request_id {
-                self.check_cpu_limit(rid);
-            }
-            // Clean up any requests cancelled by wall timeout
-            self.cleanup_cancelled_requests();
-
-            self.clear_executing_request();
-
-            // Drain any new spawned ops/timers from the callback (e.g. nested
-            // setTimeout) — but do NOT recurse into fire_ready_timers.
-            self.drain_spawned_into_heap();
+        if let Some(rid) = owner_request_id {
+            let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
+            let mut s = self.state.borrow_mut();
+            s.executing_request_id = Some(rid);
+            s.executing_request_cancel = cancel;
         }
 
-        self.reset_timer_sleep();
-    }
+        let start = Instant::now();
 
-    // -----------------------------------------------------------------------
-    // reset_timer_sleep — point the single Sleep at the nearest deadline
-    // -----------------------------------------------------------------------
+        // ONE enter_v8 for fire_timer + check settled + extract results
+        let settled_results: Vec<(u64, PendingRequest, Result<String, String>)> =
+            enter_v8!(self, |scope| {
+                crate::request::fire_timer_callback(scope, &self.state, id);
 
-    /// Reset `timer_sleep` to the earliest heap entry's `fire_at`, or to a
-    /// far-future instant if the heap is empty (guarded by the `if` in
-    /// `tokio::select!` so it won't actually fire).
-    fn reset_timer_sleep(&mut self) {
-        if let Some(Reverse(entry)) = self.timer_heap.peek() {
-            self.timer_sleep
-                .as_mut()
-                .reset(tokio::time::Instant::from_std(entry.fire_at));
+                // Check settled promises IN THE SAME SCOPE
+                let settled_ids: Vec<u64> = self
+                    .pending_requests
+                    .iter()
+                    .filter_map(|(&id, req)| {
+                        let p = v8::Local::new(scope, &req.promise);
+                        if p.state() != v8::PromiseState::Pending {
+                            Some(id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                // Extract results IN THE SAME SCOPE
+                settled_ids
+                    .into_iter()
+                    .filter_map(|id| {
+                        let req = self.pending_requests.remove(&id)?;
+                        let result =
+                            crate::request::extract_promise_result(scope, &req.promise);
+                        Some((id, req, result))
+                    })
+                    .collect()
+            });
+
+        let cpu_elapsed = start.elapsed();
+
+        // Accumulate CPU time on owning request (if it wasn't settled)
+        if let Some(rid) = owner_request_id {
+            if let Some(req) = self.pending_requests.get_mut(&rid) {
+                req.cpu_accumulated += cpu_elapsed;
+            }
+        }
+
+        // Re-arm interval timers
+        if let Some(interval_dur) = interval {
+            let timer_id = id;
+            self.pending_timers.push(Box::pin(async move {
+                tokio::time::sleep(interval_dur).await;
+                TimerResult { id: timer_id, interval: Some(interval_dur) }
+            }));
         } else {
-            self.timer_sleep
-                .as_mut()
-                .reset(tokio::time::Instant::now() + Duration::from_secs(86400));
+            // One-shot timer: remove from timer_owner
+            self.state.borrow_mut().timer_owner.remove(&id);
         }
-    }
 
-    // -----------------------------------------------------------------------
-    // drain_spawned_into_heap — move spawned timers/ops without firing ready
-    // -----------------------------------------------------------------------
-
-    /// Drain `spawned_timers` and `spawned_ops` from `RuntimeState` into the
-    /// heap / `pending_ops`. Does NOT call `fire_ready_timers` (avoids
-    /// infinite recursion when a timer callback enqueues zero-delay timers).
-    fn drain_spawned_into_heap(&mut self) {
-        let mut s = self.state.borrow_mut();
-        for timer in s.spawned_timers.drain(..) {
-            self.timer_heap.push(Reverse(TimerHeapEntry {
-                fire_at: Instant::now() + timer.delay,
-                id: timer.id,
-                interval: timer.interval,
+        // Send replies OUTSIDE V8 scope (drain_request_logs borrows state)
+        for (id, req, result) in settled_results {
+            let logs = self.drain_request_logs(id);
+            let cpu_time = req.cpu_accumulated + cpu_elapsed;
+            let _ = req.reply.send(result.map(|json| RequestResult {
+                json,
+                cpu_time,
+                wall_time: req.wall_start.elapsed(),
+                logs,
             }));
         }
-        for op in s.spawned_ops.drain(..) {
-            self.pending_ops.push(op);
+
+        // Check CPU limit on the owning request (may still be pending)
+        if let Some(rid) = owner_request_id {
+            self.check_cpu_limit(rid);
         }
+        // Clean up any requests cancelled by wall timeout
+        self.cleanup_cancelled_requests();
+
+        self.clear_executing_request();
     }
 
     // -----------------------------------------------------------------------
