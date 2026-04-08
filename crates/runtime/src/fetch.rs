@@ -4,12 +4,17 @@
 //!
 //! The fetch future is pushed into `state.spawned_ops`. The main `select!` loop
 //! in runtime.rs polls it and resolves the promise when the response arrives.
-//! Responses are always fully buffered (up to MAX_RESPONSE_SIZE).
+//!
+//! Small responses (≤1 MB or known content-length ≤1 MB) are fully buffered.
+//! Large/unknown-size responses stream: headers are sent immediately via
+//! `OpResult::Completed` (with `__stream: true`), then body chunks follow as
+//! `OpResult::StreamChunk` events through `stream_events_tx`.
 
 use std::net::IpAddr;
 use std::time::Duration;
 
 use crate::state::{OpResult, SharedState};
+use tokio_util::sync::CancellationToken;
 
 /// Maximum response body size: 10 MB.
 const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
@@ -88,10 +93,18 @@ fn shared_client() -> &'static reqwest::Client {
     })
 }
 
+/// Streaming threshold: responses with unknown or >1 MB content-length stream.
+const STREAM_THRESHOLD: u64 = 1024 * 1024;
+
 /// Hand-written V8 callback for `__rawFetch(method, url, headersJson, body)`.
 ///
 /// Creates a Promise, allocates an op-id, and pushes an async future into
 /// `state.spawned_ops`. The event loop collects and polls these futures.
+///
+/// When `stream_events_tx` is available and the response is large (or has
+/// unknown content-length), the fetch switches to streaming mode: headers are
+/// sent immediately as `OpResult::Completed` (with `__stream: true`), and body
+/// chunks follow as `OpResult::StreamChunk` events through the channel.
 pub(crate) fn raw_fetch_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -117,17 +130,21 @@ pub(crate) fn raw_fetch_callback(
     let promise = resolver.get_promise(scope);
     let global_resolver = v8::Global::new(scope, resolver);
 
-    // Allocate op_id, capture request context, push future
-    let (op_id, request_id, cancel) = {
+    // Allocate op_id + stream_id, capture request context
+    let (op_id, stream_id, request_id, cancel, stream_events_tx) = {
         let mut s = state.borrow_mut();
         let id = s.next_op_id;
         s.next_op_id += 1;
         s.pending_resolvers.insert(id, global_resolver);
 
+        let sid = s.next_stream_id;
+        s.next_stream_id += 1;
+
         let req_id = s.executing_request_id;
         let cancel = s.executing_request_cancel.clone();
+        let stx = s.stream_events_tx.clone();
 
-        (id, req_id, cancel)
+        (id, sid, req_id, cancel, stx)
     };
 
     // Capture server_handle before borrowing state mutably
@@ -138,15 +155,33 @@ pub(crate) fn raw_fetch_callback(
         // Only a lightweight oneshot receiver runs on the local runtime.
         let (result_tx, result_rx) = tokio::sync::oneshot::channel::<String>();
         handle.spawn(async move {
-            let value = if let Some(token) = cancel {
-                tokio::select! {
-                    result = do_fetch_buffered(&method, &url, &headers_json, body.as_deref()) => result,
-                    _ = token.cancelled() => error_json("request cancelled"),
+            // Build and send the HTTP request
+            let response = match build_and_send_request(
+                &method, &url, &headers_json, body.as_deref(), cancel.as_ref(),
+            ).await {
+                Ok(r) => r,
+                Err(err_json) => {
+                    let _ = result_tx.send(err_json);
+                    return;
                 }
-            } else {
-                do_fetch_buffered(&method, &url, &headers_json, body.as_deref()).await
             };
-            let _ = result_tx.send(value);
+
+            // Decide: buffer or stream based on content-length
+            let should_stream = stream_events_tx.is_some()
+                && response.content_length().map_or(true, |len| len > STREAM_THRESHOLD);
+
+            if should_stream {
+                // Drop the oneshot — receiver will see Err → OpResult::Cancelled
+                drop(result_tx);
+                do_fetch_streaming_from_response(
+                    response, op_id, stream_id, request_id,
+                    stream_events_tx.unwrap(), cancel, &url,
+                ).await;
+            } else {
+                // Buffer the entire body and send via oneshot
+                let value = buffer_response(response, &url).await;
+                let _ = result_tx.send(value);
+            }
         });
 
         let receiver_future: std::pin::Pin<Box<dyn std::future::Future<Output = OpResult>>> =
@@ -161,22 +196,30 @@ pub(crate) fn raw_fetch_callback(
         // No server handle — run fetch on the local runtime (tests, standalone).
         let future: std::pin::Pin<Box<dyn std::future::Future<Output = OpResult>>> =
             Box::pin(async move {
-                let fetch_work = do_fetch_buffered(&method, &url, &headers_json, body.as_deref());
-
-                let value = match cancel {
-                    Some(token) => {
-                        tokio::select! {
-                            result = fetch_work => result,
-                            _ = token.cancelled() => error_json("request cancelled"),
-                        }
+                // Build and send the HTTP request
+                let response = match build_and_send_request(
+                    &method, &url, &headers_json, body.as_deref(), cancel.as_ref(),
+                ).await {
+                    Ok(r) => r,
+                    Err(err_json) => {
+                        return OpResult::Completed { op_id, value: err_json, request_id };
                     }
-                    None => fetch_work.await,
                 };
 
-                OpResult::Completed {
-                    op_id,
-                    value,
-                    request_id,
+                // Decide: buffer or stream based on content-length
+                let should_stream = stream_events_tx.is_some()
+                    && response.content_length().map_or(true, |len| len > STREAM_THRESHOLD);
+
+                if should_stream {
+                    do_fetch_streaming_from_response(
+                        response, op_id, stream_id, request_id,
+                        stream_events_tx.unwrap(), cancel, &url,
+                    ).await;
+                    // Real results already sent via stream_events_tx
+                    OpResult::Cancelled
+                } else {
+                    let value = buffer_response(response, &url).await;
+                    OpResult::Completed { op_id, value, request_id }
                 }
             });
 
@@ -186,29 +229,22 @@ pub(crate) fn raw_fetch_callback(
     rv.set(promise.into());
 }
 
-/// Perform an HTTP fetch and return the full buffered response as a JSON string.
-///
-/// Always reads the entire body (up to MAX_RESPONSE_SIZE). Returns a JSON string
-/// with either the response data or an error object.
-async fn do_fetch_buffered(
-    method: &str,
-    url: &str,
-    headers_json: &str,
-    body: Option<&str>,
-) -> String {
-    match do_fetch_buffered_inner(method, url, headers_json, body).await {
-        Ok(json) => json,
-        Err(err_json) => err_json,
-    }
-}
+// ---------------------------------------------------------------------------
+// Shared request building
+// ---------------------------------------------------------------------------
 
-/// Inner implementation that returns `Result` for ergonomic `?` usage.
-async fn do_fetch_buffered_inner(
+/// Build and send an HTTP request, returning the `reqwest::Response`.
+///
+/// Validates the URL (SSRF protection), parses method/headers/body, sends the
+/// request. If a `CancellationToken` is provided, the send is raced against it.
+/// Returns `Err(json)` with an error JSON string on failure.
+async fn build_and_send_request(
     method: &str,
     url: &str,
     headers_json: &str,
     body: Option<&str>,
-) -> Result<String, String> {
+    cancel: Option<&CancellationToken>,
+) -> Result<reqwest::Response, String> {
     // SSRF protection: validate URL before making any request
     if let Err(msg) = validate_url(url) {
         return Err(error_json(&msg));
@@ -249,16 +285,41 @@ async fn do_fetch_buffered_inner(
         request = request.body(body.to_string());
     }
 
-    // Send request
-    let response = match request.send().await {
-        Ok(r) => r,
-        Err(e) => return Err(error_json(&e.to_string())),
+    // Send request, optionally racing against cancellation
+    let send_fut = request.send();
+    let response = if let Some(token) = cancel {
+        tokio::select! {
+            result = send_fut => result.map_err(|e| error_json(&e.to_string()))?,
+            _ = token.cancelled() => return Err(error_json("request cancelled")),
+        }
+    } else {
+        send_fut.await.map_err(|e| error_json(&e.to_string()))?
     };
 
+    Ok(response)
+}
+
+// ---------------------------------------------------------------------------
+// Buffered response path
+// ---------------------------------------------------------------------------
+
+/// Read the entire response body and return a JSON string with status, headers,
+/// body, url, and redirected fields.
+async fn buffer_response(response: reqwest::Response, original_url: &str) -> String {
+    match buffer_response_inner(response, original_url).await {
+        Ok(json) => json,
+        Err(err_json) => err_json,
+    }
+}
+
+async fn buffer_response_inner(
+    response: reqwest::Response,
+    original_url: &str,
+) -> Result<String, String> {
     let status = response.status().as_u16();
     let status_text = response.status().canonical_reason().unwrap_or("").to_string();
     let final_url = response.url().to_string();
-    let redirected = final_url != url;
+    let redirected = final_url != original_url;
 
     // Collect response headers
     let mut resp_headers: Vec<(String, String)> = Vec::new();
@@ -302,6 +363,139 @@ async fn do_fetch_buffered_inner(
         "redirected": redirected,
     })
     .to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Streaming response path
+// ---------------------------------------------------------------------------
+
+/// Stream a response: send headers immediately via `stream_events_tx`, then
+/// send body chunks as `OpResult::StreamChunk` events.
+///
+/// On error, sends the error as `OpResult::Completed` so the promise rejects.
+async fn do_fetch_streaming_from_response(
+    response: reqwest::Response,
+    op_id: u32,
+    stream_id: u32,
+    request_id: Option<u64>,
+    stream_events_tx: tokio::sync::mpsc::Sender<OpResult>,
+    cancel: Option<CancellationToken>,
+    original_url: &str,
+) {
+    match do_fetch_streaming_inner(
+        response, op_id, stream_id, request_id, &stream_events_tx, cancel.as_ref(), original_url,
+    ).await {
+        Ok(()) => {}
+        Err(err_json) => {
+            // Send error as OpResult::Completed so the promise rejects
+            let _ = stream_events_tx.send(OpResult::Completed {
+                op_id,
+                value: err_json,
+                request_id,
+            }).await;
+        }
+    }
+}
+
+async fn do_fetch_streaming_inner(
+    mut response: reqwest::Response,
+    op_id: u32,
+    stream_id: u32,
+    request_id: Option<u64>,
+    stream_events_tx: &tokio::sync::mpsc::Sender<OpResult>,
+    cancel: Option<&CancellationToken>,
+    original_url: &str,
+) -> Result<(), String> {
+    let status = response.status().as_u16();
+    let status_text = response.status().canonical_reason().unwrap_or("").to_string();
+    let final_url = response.url().to_string();
+    let redirected = final_url != original_url;
+
+    // Collect response headers
+    let mut resp_headers: Vec<(String, String)> = Vec::new();
+    for (key, value) in response.headers() {
+        if let Ok(v) = value.to_str() {
+            resp_headers.push((key.to_string(), v.to_string()));
+        }
+    }
+
+    // Send headers immediately (with stream marker)
+    let headers_json = serde_json::json!({
+        "status": status,
+        "statusText": status_text,
+        "headers": resp_headers,
+        "url": final_url,
+        "redirected": redirected,
+        "__stream": true,
+        "stream_id": stream_id,
+    })
+    .to_string();
+
+    stream_events_tx
+        .send(OpResult::Completed {
+            op_id,
+            value: headers_json,
+            request_id,
+        })
+        .await
+        .map_err(|_| error_json("stream_events channel closed"))?;
+
+    // Stream body chunks
+    loop {
+        let chunk_result = if let Some(token) = cancel {
+            tokio::select! {
+                chunk = response.chunk() => chunk,
+                _ = token.cancelled() => {
+                    // Send a final done chunk so the stream closes cleanly
+                    let _ = stream_events_tx.send(OpResult::StreamChunk {
+                        stream_id,
+                        data: Vec::new(),
+                        done: true,
+                    }).await;
+                    return Err(error_json("request cancelled"));
+                }
+            }
+        } else {
+            response.chunk().await
+        };
+
+        match chunk_result {
+            Ok(Some(chunk)) => {
+                stream_events_tx
+                    .send(OpResult::StreamChunk {
+                        stream_id,
+                        data: chunk.to_vec(),
+                        done: false,
+                    })
+                    .await
+                    .map_err(|_| error_json("stream_events channel closed"))?;
+            }
+            Ok(None) => {
+                // End of stream
+                let _ = stream_events_tx
+                    .send(OpResult::StreamChunk {
+                        stream_id,
+                        data: Vec::new(),
+                        done: true,
+                    })
+                    .await;
+                break;
+            }
+            Err(e) => {
+                // Send done chunk so JS side sees EOF, then return error
+                let _ = stream_events_tx
+                    .send(OpResult::StreamChunk {
+                        stream_id,
+                        data: Vec::new(),
+                        done: true,
+                    })
+                    .await;
+                return Err(error_json(&format!("Failed to read response chunk: {e}")));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Parse headers from JSON — supports both `[["key","val"],...]` and `{"key":"val",...}` formats.
