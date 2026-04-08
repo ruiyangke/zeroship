@@ -117,6 +117,10 @@ impl StreamForwarder {
 
 /// Parse a JSON-RPC response and check if the result contains __stream marker.
 fn detect_stream_marker(json: &str) -> Option<(u16, Vec<(String, String)>, u32)> {
+    // Fast path: skip expensive JSON parse when __stream is not present (99.99% of requests)
+    if !json.contains("\"__stream\"") {
+        return None;
+    }
     let parsed: serde_json::Value = serde_json::from_str(json).ok()?;
     let result = parsed.get("result")?;
     // result may be a number, string, bool, or object
