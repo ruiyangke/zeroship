@@ -7,8 +7,17 @@ use crate::core::config::IsolateConfig;
 use crate::core::types::{IsolateStats, PoolStats, RpcResult};
 use appbase_runtime::{IncomingRequest, Runtime};
 use appbase_runtime::modules::ModuleEntry;
-use appbase_runtime::state::RequestReply;
+use appbase_runtime::state::{HttpStreamResult, RequestReply};
 use appbase_runtime::init_v8;
+
+/// Result from V8Pool dispatch — either a complete RPC result or a streaming response.
+#[derive(Debug)]
+pub enum PoolDispatchResult {
+    /// Complete response (JSON-RPC).
+    Rpc(RpcResult),
+    /// Streaming response (SSE/AI) — headers + body channel.
+    Stream(HttpStreamResult),
+}
 use tokio_util::sync::CancellationToken;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -71,7 +80,7 @@ impl V8Pool {
         app_id: &str,
         server_js: &str,
         body: String,
-    ) -> Result<RpcResult, String> {
+    ) -> Result<PoolDispatchResult, String> {
         let entry = self.get_or_create(app_id, server_js)?;
 
         let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
@@ -104,15 +113,23 @@ impl V8Pool {
                         app_logs.drain(..drain);
                     }
                 }
-                Ok(RpcResult {
+                Ok(PoolDispatchResult::Rpc(RpcResult {
                     json: result.json,
                     cpu_time: result.cpu_time,
                     logs: result.logs,
-                })
+                }))
             }
-            Ok(Ok(Ok(RequestReply::Stream(_)))) => {
-                // TODO: streaming responses not yet supported in platform layer
-                Err("Streaming responses not yet supported".to_string())
+            Ok(Ok(Ok(RequestReply::Stream(stream)))) => {
+                // Store logs from the stream header in per-app ring buffer
+                if !stream.logs.is_empty() {
+                    let mut app_logs = entry.logs.lock().unwrap_or_else(|e| e.into_inner());
+                    app_logs.extend(stream.logs.iter().cloned());
+                    if app_logs.len() > 100 {
+                        let drain = app_logs.len() - 100;
+                        app_logs.drain(..drain);
+                    }
+                }
+                Ok(PoolDispatchResult::Stream(stream))
             }
             Ok(Ok(Err(e))) => Err(e),
             Ok(Err(_)) => Err("V8 worker dropped reply".to_string()),
