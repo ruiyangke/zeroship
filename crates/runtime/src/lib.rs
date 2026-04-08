@@ -5,20 +5,18 @@
 //! Two execution models:
 //! - **Per-request** (`Isolate`, `IsolatePool`): blocking, one request at a time per isolate.
 //!   Best for multi-threaded CPU-heavy workloads.
-//! - **Concurrent** (`ConcurrentIsolate`): serial JS + concurrent I/O on a single thread.
+//! - **Concurrent** (`Runtime`): serial JS + concurrent I/O on a single thread via async event loop.
 //!   Best for I/O-heavy workloads with clean per-request kill.
 //!
 //! # Module structure
 //! - `state` — shared runtime state (`RuntimeState`, `SharedState`, event types)
-//! - `runtime` — V8 init, CPU time, shared constants
+//! - `runtime` — `Runtime` (async event loop), V8 init, CPU time, shared constants
 //! - `timers` — timer callback type
 //! - `init` — V8 global bindings (console, timers, fetch, URL, KV, crypto, env, streams)
 //! - `isolate` — per-request `Isolate` and `IsolatePool`
-//! - `concurrent` — `ConcurrentIsolate` with serial JS + concurrent I/O
 
 #![allow(unsafe_code)]
 
-pub mod concurrent;
 #[cfg(target_os = "linux")]
 pub mod cpu_timer;
 mod crypto;
@@ -435,8 +433,9 @@ mod tests {
 
     #[test]
     fn fetch_concurrent_model() {
-        use crate::concurrent::{ConcurrentIsolate, LoopEvent};
-        init_v8();
+        use crate::runtime::Runtime;
+        use crate::state::IncomingRequest;
+        use tokio_util::sync::CancellationToken;
         let modules = vec![ModuleEntry {
             specifier: "index.js".into(),
             source: r#"
@@ -447,23 +446,32 @@ mod tests {
                 }
             "#.into(),
         }];
-        let (event_tx, event_rx) = std::sync::mpsc::channel();
-        let event_tx_clone = event_tx.clone();
-        let handle = std::thread::spawn(move || {
-            let mut isolate = ConcurrentIsolate::new(modules, event_rx, event_tx_clone, None, None, HashMap::new());
-            isolate.run_until_idle();
-        });
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        event_tx
-            .send(LoopEvent::NewRequest {
-                id: 1,
-                body: r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#.to_string(),
-                reply: reply_tx,
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        let shutdown = CancellationToken::new();
+        let shutdown_inner = shutdown.clone();
+        let handle = std::thread::Builder::new()
+            .name("v8-test".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let mut runtime = Runtime::new(modules, rx, shutdown_inner, None, None, HashMap::new(), None);
+                    runtime.run().await;
+                });
             })
             .unwrap();
-        drop(event_tx);
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.blocking_send(IncomingRequest {
+            id: 1,
+            body: r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#.to_string(),
+            reply: reply_tx,
+            cancel: CancellationToken::new(),
+        }).unwrap();
         let result = reply_rx.blocking_recv().unwrap().unwrap();
         assert!(result.json.contains("httpbin.org/get"), "got: {}", result.json);
+        shutdown.cancel();
         handle.join().unwrap();
     }
 
@@ -705,8 +713,9 @@ mod tests {
 
     #[test]
     fn esm_concurrent_sync() {
-        use crate::concurrent::{ConcurrentIsolate, LoopEvent};
-        init_v8();
+        use crate::runtime::Runtime;
+        use crate::state::IncomingRequest;
+        use tokio_util::sync::CancellationToken;
         let modules = vec![ModuleEntry {
             specifier: "index.js".into(),
             source: r#"
@@ -714,30 +723,40 @@ mod tests {
                 export function add(a, b) { return a + b; }
             "#.into(),
         }];
-        let (event_tx, event_rx) = std::sync::mpsc::channel();
-        let event_tx_clone = event_tx.clone();
-        let handle = std::thread::spawn(move || {
-            let mut isolate = ConcurrentIsolate::new(modules, event_rx, event_tx_clone, None, None, HashMap::new());
-            isolate.run_until_idle();
-        });
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        event_tx
-            .send(LoopEvent::NewRequest {
-                id: 1,
-                body: r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":1}"#.to_string(),
-                reply: reply_tx,
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        let shutdown = CancellationToken::new();
+        let shutdown_inner = shutdown.clone();
+        let handle = std::thread::Builder::new()
+            .name("v8-test".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let mut runtime = Runtime::new(modules, rx, shutdown_inner, None, None, HashMap::new(), None);
+                    runtime.run().await;
+                });
             })
             .unwrap();
-        drop(event_tx);
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.blocking_send(IncomingRequest {
+            id: 1,
+            body: r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":1}"#.to_string(),
+            reply: reply_tx,
+            cancel: CancellationToken::new(),
+        }).unwrap();
         let result = reply_rx.blocking_recv().unwrap().unwrap();
         assert!(result.json.contains("pong"), "got: {}", result.json);
+        shutdown.cancel();
         handle.join().unwrap();
     }
 
     #[test]
     fn esm_concurrent_async() {
-        use crate::concurrent::{ConcurrentIsolate, LoopEvent};
-        init_v8();
+        use crate::runtime::Runtime;
+        use crate::state::IncomingRequest;
+        use tokio_util::sync::CancellationToken;
         let modules = vec![ModuleEntry {
             specifier: "index.js".into(),
             source: r#"
@@ -748,23 +767,32 @@ mod tests {
                 }
             "#.into(),
         }];
-        let (event_tx, event_rx) = std::sync::mpsc::channel();
-        let event_tx_clone = event_tx.clone();
-        let handle = std::thread::spawn(move || {
-            let mut isolate = ConcurrentIsolate::new(modules, event_rx, event_tx_clone, None, None, HashMap::new());
-            isolate.run_until_idle();
-        });
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        event_tx
-            .send(LoopEvent::NewRequest {
-                id: 1,
-                body: r#"{"jsonrpc":"2.0","method":"delayed","params":[10],"id":1}"#.to_string(),
-                reply: reply_tx,
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        let shutdown = CancellationToken::new();
+        let shutdown_inner = shutdown.clone();
+        let handle = std::thread::Builder::new()
+            .name("v8-test".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let mut runtime = Runtime::new(modules, rx, shutdown_inner, None, None, HashMap::new(), None);
+                    runtime.run().await;
+                });
             })
             .unwrap();
-        drop(event_tx);
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.blocking_send(IncomingRequest {
+            id: 1,
+            body: r#"{"jsonrpc":"2.0","method":"delayed","params":[10],"id":1}"#.to_string(),
+            reply: reply_tx,
+            cancel: CancellationToken::new(),
+        }).unwrap();
         let result = reply_rx.blocking_recv().unwrap().unwrap();
         assert!(result.json.contains("done_10"), "got: {}", result.json);
+        shutdown.cancel();
         handle.join().unwrap();
     }
 
