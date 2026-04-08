@@ -2,6 +2,7 @@
 //! Compares sync, async, CPU-heavy, and multi-threaded scenarios.
 
 use appbase_runtime::{init_v8, Isolate, IsolatePool, ModuleEntry};
+use appbase_runtime::state::RequestReply;
 use std::time::Instant;
 
 const RPC_BODY: &str = r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#;
@@ -257,7 +258,13 @@ fn main() {
             reply_rxs.push(reply_rx);
         }
         // Collect results (blocking)
-        reply_rxs.into_iter().map(|rx| rx.blocking_recv().unwrap()).collect()
+        reply_rxs.into_iter().map(|rx| {
+            match rx.blocking_recv().unwrap() {
+                Ok(RequestReply::Complete(r)) => Ok(r),
+                Ok(RequestReply::Stream(_)) => Err("unexpected stream".to_string()),
+                Err(e) => Err(e),
+            }
+        }).collect()
     }
 
     // Start a Runtime worker on a dedicated thread
@@ -293,7 +300,10 @@ fn main() {
             reply: tx,
             cancel: CancellationToken::new(),
         }).unwrap();
-        rx.blocking_recv().unwrap().unwrap();
+        match rx.blocking_recv().unwrap().unwrap() {
+            RequestReply::Complete(_) => {}
+            RequestReply::Stream(_) => panic!("unexpected stream reply on warmup"),
+        }
     }
 
     // Runtime: sync RPC

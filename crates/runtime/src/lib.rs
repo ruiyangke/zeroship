@@ -469,7 +469,8 @@ mod tests {
             reply: reply_tx,
             cancel: CancellationToken::new(),
         }).unwrap();
-        let result = reply_rx.blocking_recv().unwrap().unwrap();
+        let reply = reply_rx.blocking_recv().unwrap().unwrap();
+        let result = match reply { state::RequestReply::Complete(r) => r, _ => panic!("expected Complete") };
         assert!(result.json.contains("httpbin.org/get"), "got: {}", result.json);
         shutdown.cancel();
         handle.join().unwrap();
@@ -746,7 +747,8 @@ mod tests {
             reply: reply_tx,
             cancel: CancellationToken::new(),
         }).unwrap();
-        let result = reply_rx.blocking_recv().unwrap().unwrap();
+        let reply = reply_rx.blocking_recv().unwrap().unwrap();
+        let result = match reply { state::RequestReply::Complete(r) => r, _ => panic!("expected Complete") };
         assert!(result.json.contains("pong"), "got: {}", result.json);
         shutdown.cancel();
         handle.join().unwrap();
@@ -790,7 +792,8 @@ mod tests {
             reply: reply_tx,
             cancel: CancellationToken::new(),
         }).unwrap();
-        let result = reply_rx.blocking_recv().unwrap().unwrap();
+        let reply = reply_rx.blocking_recv().unwrap().unwrap();
+        let result = match reply { state::RequestReply::Complete(r) => r, _ => panic!("expected Complete") };
         assert!(result.json.contains("done_10"), "got: {}", result.json);
         shutdown.cancel();
         handle.join().unwrap();

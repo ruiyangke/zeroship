@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::init::{HttpResult, RequestResult};
 use crate::modules::ModuleEntry;
 use crate::runtime::Runtime;
-use crate::state::IncomingRequest;
+use crate::state::{IncomingRequest, RequestReply};
 
 // ---------------------------------------------------------------------------
 // HTTP dispatch JS wrapper
@@ -293,7 +293,11 @@ impl Isolate {
                     Err("runtime exited before reply".to_string())
                 }
                 result = reply_rx => {
-                    result.map_err(|_| "reply channel dropped".to_string())?
+                    match result.map_err(|_| "reply channel dropped".to_string())? {
+                        Ok(RequestReply::Complete(r)) => Ok(r),
+                        Ok(RequestReply::Stream(_)) => Err("Unexpected streaming response".into()),
+                        Err(e) => Err(e),
+                    }
                 }
             }
         })

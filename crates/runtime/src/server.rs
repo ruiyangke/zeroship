@@ -9,7 +9,7 @@
 
 use appbase_runtime::modules::ModuleEntry;
 use appbase_runtime::runtime::Runtime;
-use appbase_runtime::state::IncomingRequest;
+use appbase_runtime::state::{IncomingRequest, RequestReply};
 use appbase_runtime::init_v8;
 use bytes::Bytes;
 use http_body_util::Full;
@@ -85,7 +85,10 @@ fn spawn_and_warmup(name: &str) -> tokio::sync::mpsc::Sender<IncomingRequest> {
                 cancel: CancellationToken::new(),
             })
             .unwrap();
-        reply_rx.blocking_recv().unwrap().unwrap();
+        match reply_rx.blocking_recv().unwrap().unwrap() {
+            RequestReply::Complete(_) => {}
+            RequestReply::Stream(_) => panic!("unexpected stream reply on warmup"),
+        }
     })
     .join()
     .unwrap();
@@ -132,7 +135,9 @@ impl Dispatcher {
             .map_err(|_| "Request channel closed".to_string())?;
 
         match tokio::time::timeout(std::time::Duration::from_secs(30), reply_rx).await {
-            Ok(Ok(result)) => result,
+            Ok(Ok(Ok(RequestReply::Complete(result)))) => Ok(result),
+            Ok(Ok(Ok(RequestReply::Stream(_)))) => Err("Streaming responses not supported in benchmark server".to_string()),
+            Ok(Ok(Err(e))) => Err(e),
             Ok(Err(_)) => Err("Reply channel closed".to_string()),
             Err(_) => Err("Request timed out (30s wall time)".to_string()),
         }

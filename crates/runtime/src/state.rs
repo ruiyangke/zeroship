@@ -83,6 +83,9 @@ pub struct RuntimeState {
     /// When set, fetch futures are spawned on this handle for multi-threaded I/O,
     /// with results delivered back via oneshot channels.
     pub server_handle: Option<TokioHandle>,
+
+    /// Channel for stream events that bypass V8 (e.g. outbound HTTP stream chunks).
+    pub stream_events_tx: Option<tokio::sync::mpsc::Sender<OpResult>>,
 }
 
 /// Convenience alias — the shared handle passed into V8 callbacks.
@@ -120,6 +123,8 @@ impl RuntimeState {
             next_key_id: 1,
 
             server_handle,
+
+            stream_events_tx: None,
         }
     }
 }
@@ -216,7 +221,36 @@ pub struct IncomingRequest {
     /// Request body serialised as JSON.
     pub body: String,
     /// One-shot channel to send the response back to the HTTP layer.
-    pub reply: tokio::sync::oneshot::Sender<Result<crate::init::RequestResult, String>>,
+    pub reply: tokio::sync::oneshot::Sender<Result<RequestReply, String>>,
     /// Token that the HTTP layer cancels when the client disconnects.
     pub cancel: CancellationToken,
+}
+
+/// Reply from the Runtime back to the HTTP layer.
+#[derive(Debug)]
+pub enum RequestReply {
+    /// Complete response — body is fully buffered.
+    Complete(crate::init::RequestResult),
+    /// Streaming response — headers ready, body arrives via channel.
+    Stream(HttpStreamResult),
+}
+
+/// Streaming HTTP response — headers sent immediately, body streams via channel.
+pub struct HttpStreamResult {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body_rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    pub cpu_time: std::time::Duration,
+    pub logs: Vec<String>,
+}
+
+impl std::fmt::Debug for HttpStreamResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpStreamResult")
+            .field("status", &self.status)
+            .field("headers", &self.headers)
+            .field("cpu_time", &self.cpu_time)
+            .field("logs", &self.logs)
+            .finish_non_exhaustive()
+    }
 }

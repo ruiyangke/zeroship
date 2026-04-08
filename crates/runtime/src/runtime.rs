@@ -24,8 +24,8 @@ use tokio_util::sync::CancellationToken;
 use crate::init::{init_v8, load_polyfills_and_modules, RequestResult};
 use crate::modules::ModuleEntry;
 use crate::state::{
-    DispatchResult, IncomingRequest, OpResult, RuntimeState, SharedState, SpawnedTimer,
-    TimerResult,
+    DispatchResult, HttpStreamResult, IncomingRequest, OpResult, RequestReply, RuntimeState,
+    SharedState, SpawnedTimer, TimerResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -37,7 +37,7 @@ struct PendingRequest {
     #[allow(dead_code)]
     id: u64,
     promise: v8::Global<v8::Promise>,
-    reply: tokio::sync::oneshot::Sender<Result<RequestResult, String>>,
+    reply: tokio::sync::oneshot::Sender<Result<RequestReply, String>>,
     cpu_accumulated: Duration,
     wall_start: Instant,
     cancel: CancellationToken,
@@ -71,6 +71,87 @@ macro_rules! enter_v8 {
 }
 
 // ---------------------------------------------------------------------------
+// StreamForwarder — overflow-buffered channel writer for outbound HTTP streams
+// ---------------------------------------------------------------------------
+
+use std::collections::VecDeque;
+
+struct StreamForwarder {
+    sender: tokio::sync::mpsc::Sender<bytes::Bytes>,
+    overflow: VecDeque<Vec<u8>>,
+    max_overflow: usize,
+}
+
+impl StreamForwarder {
+    fn new(sender: tokio::sync::mpsc::Sender<bytes::Bytes>) -> Self {
+        Self { sender, overflow: VecDeque::new(), max_overflow: 64 }
+    }
+
+    fn try_forward(&mut self, data: Vec<u8>) -> bool {
+        // Drain overflow first
+        while let Some(chunk) = self.overflow.pop_front() {
+            match self.sender.try_send(bytes::Bytes::from(chunk)) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(b)) => {
+                    self.overflow.push_front(b.to_vec());
+                    break;
+                }
+                Err(_) => return false,
+            }
+        }
+        match self.sender.try_send(bytes::Bytes::from(data)) {
+            Ok(()) => true,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(b)) => {
+                if self.overflow.len() >= self.max_overflow { return false; }
+                self.overflow.push_back(b.to_vec());
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// detect_stream_marker — parse JSON-RPC response for __stream marker
+// ---------------------------------------------------------------------------
+
+/// Parse a JSON-RPC response and check if the result contains __stream marker.
+fn detect_stream_marker(json: &str) -> Option<(u16, Vec<(String, String)>, u32)> {
+    let parsed: serde_json::Value = serde_json::from_str(json).ok()?;
+    let result = parsed.get("result")?;
+    // result may be a number, string, bool, or object
+    // For streaming, it should be a string containing JSON with __stream
+    let inner: serde_json::Value = if let Some(s) = result.as_str() {
+        serde_json::from_str(s).ok()?
+    } else if result.is_object() {
+        result.clone()
+    } else {
+        return None;
+    };
+
+    if !inner.get("__stream")?.as_bool().unwrap_or(false) {
+        return None;
+    }
+
+    let status = inner.get("status")?.as_u64()? as u16;
+    let stream_id = inner.get("stream_id")?.as_u64()? as u32;
+    let headers = inner.get("headers").and_then(|h| {
+        h.as_array().map(|arr| {
+            arr.iter().filter_map(|item| {
+                let pair = item.as_array()?;
+                if pair.len() == 2 {
+                    Some((pair[0].as_str()?.to_string(), pair[1].as_str()?.to_string()))
+                } else {
+                    None
+                }
+            }).collect()
+        })
+    }).unwrap_or_default();
+
+    Some((status, headers, stream_id))
+}
+
+// ---------------------------------------------------------------------------
 // Runtime
 // ---------------------------------------------------------------------------
 
@@ -92,7 +173,10 @@ pub struct Runtime {
 
     /// Senders for stream forwarders — when a stream chunk arrives and a
     /// forwarder exists, we send directly without entering V8.
-    stream_forwarders: HashMap<u32, tokio::sync::mpsc::Sender<Vec<u8>>>,
+    stream_forwarders: HashMap<u32, StreamForwarder>,
+
+    /// Receiver for stream events that bypass V8 (outbound HTTP stream chunks).
+    stream_events_rx: tokio::sync::mpsc::Receiver<OpResult>,
 
     request_rx: tokio::sync::mpsc::Receiver<IncomingRequest>,
     shutdown: CancellationToken,
@@ -151,7 +235,9 @@ impl Runtime {
         isolate.add_near_heap_limit_callback(near_heap_limit_callback, std::ptr::null_mut());
 
         // Create RuntimeState and set as isolate slot
-        let rt_state = RuntimeState::new(env_vars, server_handle);
+        let mut rt_state = RuntimeState::new(env_vars, server_handle);
+        let (stream_events_tx, stream_events_rx) = tokio::sync::mpsc::channel(64);
+        rt_state.stream_events_tx = Some(stream_events_tx);
         let state: SharedState = Rc::new(RefCell::new(rt_state));
         isolate.set_slot(state.clone());
 
@@ -172,6 +258,7 @@ impl Runtime {
             pending_ops: FuturesUnordered::new(),
             pending_timers: FuturesUnordered::new(),
             stream_forwarders: HashMap::new(),
+            stream_events_rx,
             request_rx,
             shutdown,
             #[cfg(target_os = "linux")]
@@ -292,6 +379,9 @@ impl Runtime {
                 Some(result) = self.pending_timers.next() => {
                     self.handle_timer(result);
                 }
+                Some(event) = self.stream_events_rx.recv() => {
+                    self.handle_op_result(event);
+                }
                 // All branches disabled (no pending work, channel closed) → exit
                 else => break,
             }
@@ -405,11 +495,23 @@ impl Runtime {
             for (id, req, result) in settled_results {
                 let logs = self.drain_request_logs(id);
                 let cpu_time = req.cpu_accumulated + cpu_elapsed;
-                let _ = req.reply.send(result.map(|json| RequestResult {
-                    json,
-                    cpu_time,
-                    wall_time: req.wall_start.elapsed(),
-                    logs,
+                let _ = req.reply.send(result.map(|json| {
+                    if let Some((status, headers, stream_id)) = detect_stream_marker(&json) {
+                        let (body_tx, body_rx) = tokio::sync::mpsc::channel(16);
+                        self.stream_forwarders.insert(stream_id, StreamForwarder::new(body_tx));
+                        RequestReply::Stream(HttpStreamResult {
+                            status, headers, body_rx,
+                            cpu_time,
+                            logs: logs.clone(),
+                        })
+                    } else {
+                        RequestReply::Complete(RequestResult {
+                            json,
+                            cpu_time,
+                            wall_time: req.wall_start.elapsed(),
+                            logs,
+                        })
+                    }
                 }));
             }
 
@@ -478,13 +580,24 @@ impl Runtime {
 
         match dispatch_result {
             DispatchResult::Sync(json) => {
-                let logs = self.drain_request_logs(id);
-                let _ = reply.send(Ok(RequestResult {
-                    json,
-                    cpu_time: cpu_elapsed,
-                    wall_time: wall_start.elapsed(),
-                    logs,
-                }));
+                if let Some((status, headers, stream_id)) = detect_stream_marker(&json) {
+                    let (body_tx, body_rx) = tokio::sync::mpsc::channel(16);
+                    self.stream_forwarders.insert(stream_id, StreamForwarder::new(body_tx));
+                    let logs = self.drain_request_logs(id);
+                    let _ = reply.send(Ok(RequestReply::Stream(HttpStreamResult {
+                        status, headers, body_rx,
+                        cpu_time: cpu_elapsed,
+                        logs,
+                    })));
+                } else {
+                    let logs = self.drain_request_logs(id);
+                    let _ = reply.send(Ok(RequestReply::Complete(RequestResult {
+                        json,
+                        cpu_time: cpu_elapsed,
+                        wall_time: wall_start.elapsed(),
+                        logs,
+                    })));
+                }
                 self.clear_executing_request();
                 // No check_settled_promises_v8 — sync dispatch adds no pending promise
             }
@@ -591,11 +704,23 @@ impl Runtime {
                 for (id, req, result) in settled_results {
                     let logs = self.drain_request_logs(id);
                     let cpu_time = req.cpu_accumulated + cpu_elapsed;
-                    let _ = req.reply.send(result.map(|json| RequestResult {
-                        json,
-                        cpu_time,
-                        wall_time: req.wall_start.elapsed(),
-                        logs,
+                    let _ = req.reply.send(result.map(|json| {
+                        if let Some((status, headers, stream_id)) = detect_stream_marker(&json) {
+                            let (body_tx, body_rx) = tokio::sync::mpsc::channel(16);
+                            self.stream_forwarders.insert(stream_id, StreamForwarder::new(body_tx));
+                            RequestReply::Stream(HttpStreamResult {
+                                status, headers, body_rx,
+                                cpu_time,
+                                logs: logs.clone(),
+                            })
+                        } else {
+                            RequestReply::Complete(RequestResult {
+                                json,
+                                cpu_time,
+                                wall_time: req.wall_start.elapsed(),
+                                logs,
+                            })
+                        }
                     }));
                 }
 
@@ -610,9 +735,9 @@ impl Runtime {
             }
             OpResult::StreamChunk { stream_id, data, done } => {
                 // Fast path: if there's a stream forwarder, send directly (no V8 entry)
-                if let Some(sender) = self.stream_forwarders.get(&stream_id) {
+                if let Some(forwarder) = self.stream_forwarders.get_mut(&stream_id) {
                     if !data.is_empty() {
-                        let _ = sender.try_send(data);
+                        forwarder.try_forward(data);
                     }
                     if done {
                         self.stream_forwarders.remove(&stream_id);
@@ -706,11 +831,23 @@ impl Runtime {
         for (id, req, result) in settled_results {
             let logs = self.drain_request_logs(id);
             let cpu_time = req.cpu_accumulated + cpu_elapsed;
-            let _ = req.reply.send(result.map(|json| RequestResult {
-                json,
-                cpu_time,
-                wall_time: req.wall_start.elapsed(),
-                logs,
+            let _ = req.reply.send(result.map(|json| {
+                if let Some((status, headers, stream_id)) = detect_stream_marker(&json) {
+                    let (body_tx, body_rx) = tokio::sync::mpsc::channel(16);
+                    self.stream_forwarders.insert(stream_id, StreamForwarder::new(body_tx));
+                    RequestReply::Stream(HttpStreamResult {
+                        status, headers, body_rx,
+                        cpu_time,
+                        logs: logs.clone(),
+                    })
+                } else {
+                    RequestReply::Complete(RequestResult {
+                        json,
+                        cpu_time,
+                        wall_time: req.wall_start.elapsed(),
+                        logs,
+                    })
+                }
             }));
         }
 
@@ -764,12 +901,22 @@ impl Runtime {
                 let logs = self.drain_request_logs(id);
                 match result {
                     Ok(json) => {
-                        let _ = req.reply.send(Ok(RequestResult {
-                            json,
-                            cpu_time: req.cpu_accumulated,
-                            wall_time: req.wall_start.elapsed(),
-                            logs,
-                        }));
+                        if let Some((status, headers, stream_id)) = detect_stream_marker(&json) {
+                            let (body_tx, body_rx) = tokio::sync::mpsc::channel(16);
+                            self.stream_forwarders.insert(stream_id, StreamForwarder::new(body_tx));
+                            let _ = req.reply.send(Ok(RequestReply::Stream(HttpStreamResult {
+                                status, headers, body_rx,
+                                cpu_time: req.cpu_accumulated,
+                                logs,
+                            })));
+                        } else {
+                            let _ = req.reply.send(Ok(RequestReply::Complete(RequestResult {
+                                json,
+                                cpu_time: req.cpu_accumulated,
+                                wall_time: req.wall_start.elapsed(),
+                                logs,
+                            })));
+                        }
                     }
                     Err(msg) => {
                         let _ = req.reply.send(Err(msg));
@@ -860,6 +1007,14 @@ mod tests {
     use crate::init::RequestResult;
     use crate::modules::ModuleEntry;
 
+    /// Unwrap a `RequestReply::Complete` into `RequestResult`, panicking on `Stream`.
+    fn unwrap_complete(reply: RequestReply) -> RequestResult {
+        match reply {
+            RequestReply::Complete(r) => r,
+            RequestReply::Stream(_) => panic!("expected Complete, got Stream"),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
@@ -941,7 +1096,7 @@ export function chain() {
         })
         .unwrap();
 
-        let result: RequestResult = reply_rx.blocking_recv().unwrap().unwrap();
+        let result: RequestResult = unwrap_complete(reply_rx.blocking_recv().unwrap().unwrap());
         assert!(
             result.json.contains("pong"),
             "expected 'pong' in: {}",
@@ -969,7 +1124,7 @@ export function chain() {
         })
         .unwrap();
 
-        let result: RequestResult = reply_rx.blocking_recv().unwrap().unwrap();
+        let result: RequestResult = unwrap_complete(reply_rx.blocking_recv().unwrap().unwrap());
         assert!(
             result.json.contains("done_5"),
             "expected 'done_5' in: {}",
@@ -1011,7 +1166,7 @@ export function chain() {
 
         // Collect all replies.
         for rx in receivers {
-            let result: RequestResult = rx.blocking_recv().unwrap().unwrap();
+            let result: RequestResult = unwrap_complete(rx.blocking_recv().unwrap().unwrap());
             assert!(
                 result.json.contains("done_20"),
                 "expected 'done_20' in: {}",
@@ -1068,9 +1223,9 @@ export function chain() {
         })
         .unwrap();
 
-        let r1 = r1_rx.blocking_recv().unwrap().unwrap();
-        let r2 = r2_rx.blocking_recv().unwrap().unwrap();
-        let r3 = r3_rx.blocking_recv().unwrap().unwrap();
+        let r1 = unwrap_complete(r1_rx.blocking_recv().unwrap().unwrap());
+        let r2 = unwrap_complete(r2_rx.blocking_recv().unwrap().unwrap());
+        let r3 = unwrap_complete(r3_rx.blocking_recv().unwrap().unwrap());
 
         assert!(r1.json.contains("pong"), "r1: {}", r1.json);
         assert!(r2.json.contains("done_10"), "r2: {}", r2.json);
@@ -1097,7 +1252,7 @@ export function chain() {
         })
         .unwrap();
 
-        let result: RequestResult = reply_rx.blocking_recv().unwrap().unwrap();
+        let result: RequestResult = unwrap_complete(reply_rx.blocking_recv().unwrap().unwrap());
         assert!(
             result.json.contains("22"),
             "expected result 22 in: {}",

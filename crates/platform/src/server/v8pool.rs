@@ -7,6 +7,7 @@ use crate::core::config::IsolateConfig;
 use crate::core::types::{IsolateStats, PoolStats, RpcResult};
 use appbase_runtime::{IncomingRequest, Runtime};
 use appbase_runtime::modules::ModuleEntry;
+use appbase_runtime::state::RequestReply;
 use appbase_runtime::init_v8;
 use tokio_util::sync::CancellationToken;
 use std::collections::HashMap;
@@ -92,7 +93,7 @@ impl V8Pool {
         entry.last_used_ms.store(epoch_ms(), Ordering::Relaxed);
 
         match tokio::time::timeout(self.wall_timeout, reply_rx).await {
-            Ok(Ok(Ok(result))) => {
+            Ok(Ok(Ok(RequestReply::Complete(result)))) => {
                 // Store logs in per-app ring buffer
                 if !result.logs.is_empty() {
                     let mut app_logs = entry.logs.lock().unwrap_or_else(|e| e.into_inner());
@@ -108,6 +109,10 @@ impl V8Pool {
                     cpu_time: result.cpu_time,
                     logs: result.logs,
                 })
+            }
+            Ok(Ok(Ok(RequestReply::Stream(_)))) => {
+                // TODO: streaming responses not yet supported in platform layer
+                Err("Streaming responses not yet supported".to_string())
             }
             Ok(Ok(Err(e))) => Err(e),
             Ok(Err(_)) => Err("V8 worker dropped reply".to_string()),
