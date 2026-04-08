@@ -79,12 +79,12 @@ macro_rules! enter_v8 {
 /// Owns the isolate and all associated state. Must be run on a `LocalSet`
 /// because V8 types are `!Send`.
 pub struct Runtime {
-    isolate: v8::OwnedIsolate,
-    context: v8::Global<v8::Context>,
-    dispatch_fn: Option<v8::Global<v8::Function>>,
-    initialized: bool,
-    modules: Vec<ModuleEntry>,
-    state: SharedState,
+    pub(crate) isolate: v8::OwnedIsolate,
+    pub(crate) context: v8::Global<v8::Context>,
+    pub(crate) dispatch_fn: Option<v8::Global<v8::Function>>,
+    pub(crate) initialized: bool,
+    pub(crate) modules: Vec<ModuleEntry>,
+    pub(crate) state: SharedState,
 
     pending_requests: HashMap<u64, PendingRequest>,
     pending_ops: FuturesUnordered<Pin<Box<dyn Future<Output = OpResult>>>>,
@@ -188,7 +188,7 @@ impl Runtime {
     // -----------------------------------------------------------------------
 
     /// Load polyfills, ES modules, and compile the dispatch function (once).
-    fn ensure_initialized(&mut self) {
+    pub(crate) fn ensure_initialized(&mut self) {
         if self.initialized {
             return;
         }
@@ -340,7 +340,7 @@ impl Runtime {
         loop {
             let timer_id = {
                 let mut s = self.state.borrow_mut();
-                s.ready_timers.pop()
+                if s.ready_timers.is_empty() { None } else { Some(s.ready_timers.remove(0)) }
             };
             let Some(timer_id) = timer_id else { break };
 
