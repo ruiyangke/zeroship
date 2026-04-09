@@ -135,6 +135,7 @@ dependencies = [
  "mimalloc",
  "reqwest",
  "serde_json",
+ "socket2 0.5.10",
  "tokio",
  "tokio-util",
  "v8",

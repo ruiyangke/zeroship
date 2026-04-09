@@ -177,23 +177,53 @@ async fn v8_loop(
 }
 
 // ===========================================================================
-// main
+// SO_REUSEPORT listener
 // ===========================================================================
 
-fn main() {
-    init_v8();
+fn create_reuseport_listener(port: u16) -> std::net::TcpListener {
+    use socket2::{Domain, Protocol, Socket, Type};
 
-    let port: u16 = std::env::args()
-        .find(|a| a.starts_with("--port="))
-        .and_then(|a| a.strip_prefix("--port=").unwrap().parse().ok())
-        .unwrap_or(5000);
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+    socket.set_reuse_port(true).unwrap();
+    socket.set_reuse_address(true).unwrap();
+    socket
+        .bind(
+            &format!("0.0.0.0:{port}")
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+                .into(),
+        )
+        .unwrap();
+    socket.listen(1024).unwrap();
+    socket.set_nonblocking(true).unwrap();
+    socket.into()
+}
 
+// ===========================================================================
+// Single-worker entry point (one compio runtime + one V8 isolate)
+// ===========================================================================
+
+fn run_single_worker(port: u16, use_reuseport: bool, worker_id: Option<usize>) {
     compio::runtime::RuntimeBuilder::new()
         .build()
         .unwrap()
         .block_on(async {
-            let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await.unwrap();
-            eprintln!("[v8-server-compio] http://0.0.0.0:{port}");
+            let listener = if use_reuseport {
+                // Convert std TcpListener -> compio TcpListener via RawFd
+                let std_listener = create_reuseport_listener(port);
+                unsafe {
+                    use std::os::fd::{FromRawFd, IntoRawFd};
+                    TcpListener::from_raw_fd(std_listener.into_raw_fd())
+                }
+            } else {
+                TcpListener::bind(format!("0.0.0.0:{port}")).await.unwrap()
+            };
+
+            if let Some(id) = worker_id {
+                eprintln!("[v8-server-compio] worker {id} ready on port {port}");
+            } else {
+                eprintln!("[v8-server-compio] http://0.0.0.0:{port}");
+            }
 
             // Channel from HTTP handlers to V8 event loop
             let (req_tx, req_rx) = tokio::sync::mpsc::channel::<IncomingRequest>(1024);
@@ -217,7 +247,6 @@ fn main() {
                     .await
                     .unwrap();
                 let _ = reply_rx.await;
-                eprintln!("[v8-server-compio] warmup complete");
             }
 
             // Accept loop
@@ -227,4 +256,43 @@ fn main() {
                 compio::runtime::spawn(handle_connection(stream, tx)).detach();
             }
         });
+}
+
+// ===========================================================================
+// main
+// ===========================================================================
+
+fn main() {
+    init_v8();
+
+    let port: u16 = std::env::args()
+        .find(|a| a.starts_with("--port="))
+        .and_then(|a| a.strip_prefix("--port=").unwrap().parse().ok())
+        .unwrap_or(5000);
+
+    let num_workers: usize = std::env::args()
+        .find(|a| a.starts_with("--workers="))
+        .and_then(|a| a.strip_prefix("--workers=").unwrap().parse().ok())
+        .unwrap_or(1);
+
+    if num_workers <= 1 {
+        // Single-worker: no SO_REUSEPORT needed
+        run_single_worker(port, false, None);
+    } else {
+        // Multi-worker: each thread gets its own compio runtime + V8 isolate
+        eprintln!("[v8-server-compio] {num_workers} workers on port {port}");
+        let mut handles = Vec::new();
+        for i in 0..num_workers {
+            let handle = std::thread::Builder::new()
+                .name(format!("compio-worker-{i}"))
+                .spawn(move || {
+                    run_single_worker(port, true, Some(i));
+                })
+                .unwrap();
+            handles.push(handle);
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
 }
