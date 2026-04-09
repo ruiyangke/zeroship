@@ -1,13 +1,18 @@
-//! V8 ESM module registry — loads pre-resolved modules into V8's native module system.
+//! V8 ESM module registry — lazy compilation via import graph discovery.
 //!
-//! The bundler (SWC/esbuild) resolves all imports at build time and produces
-//! a set of modules with resolved specifiers. The registry loads them into V8
-//! and lets V8 handle the module graph.
+//! Only the entry module is compiled eagerly. Its imports are discovered via
+//! `v8::Module::get_module_requests()`, compiled, and their imports discovered
+//! recursively — all BEFORE `instantiate_module` is called. The resolve
+//! callback only does lookups into the pre-compiled registry.
+//!
+//! This means: if an app has 1000 modules but the entry only imports 3
+//! (transitively), only 4 modules are compiled. The other 996 are never
+//! parsed by V8.
 
 #![allow(unsafe_code)]
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 /// A pre-resolved module to be loaded into V8.
@@ -17,14 +22,10 @@ pub struct ModuleEntry {
     pub source: String,
 }
 
-/// Internal compiled module.
-struct CompiledModule {
-    module: v8::Global<v8::Module>,
-}
-
 /// Module registry stored in V8 isolate slot.
 pub struct ModuleRegistry {
-    modules: HashMap<String, CompiledModule>,
+    /// Compiled V8 modules — populated by the lazy compilation loop.
+    compiled: HashMap<String, v8::Global<v8::Module>>,
 }
 
 pub type SharedRegistry = Rc<RefCell<ModuleRegistry>>;
@@ -32,16 +33,58 @@ pub type SharedRegistry = Rc<RefCell<ModuleRegistry>>;
 impl ModuleRegistry {
     pub fn new() -> Self {
         Self {
-            modules: HashMap::new(),
+            compiled: HashMap::new(),
         }
     }
 }
 
-/// Compile and register all modules, instantiate and evaluate the entrypoint.
+/// Resolve a specifier against the source map, trying common variants.
+fn resolve_specifier(specifier: &str, sources: &HashMap<String, String>) -> Option<String> {
+    let candidates = [
+        specifier.to_string(),
+        specifier.strip_prefix("./").unwrap_or(specifier).to_string(),
+        format!("{specifier}.js"),
+        format!("{}.js", specifier.strip_prefix("./").unwrap_or(specifier)),
+    ];
+    for candidate in &candidates {
+        if sources.contains_key(candidate) {
+            return Some(candidate.clone());
+        }
+    }
+    None
+}
+
+/// Compile a single module from source.
+fn compile_module(
+    scope: &mut v8::PinScope,
+    specifier: &str,
+    source: &str,
+) -> Result<v8::Global<v8::Module>, String> {
+    let source_str = v8::String::new(scope, source)
+        .ok_or_else(|| format!("Source too large: {specifier}"))?;
+    let name_str = v8::String::new(scope, specifier)
+        .ok_or_else(|| format!("Specifier too large: {specifier}"))?;
+
+    let origin = v8::ScriptOrigin::new(
+        scope, name_str.into(),
+        0, 0, false, -1, None, false, false,
+        true, // is_module
+        None,
+    );
+
+    let mut v8_source = v8::script_compiler::Source::new(source_str, Some(&origin));
+    let module = v8::script_compiler::compile_module(scope, &mut v8_source)
+        .ok_or_else(|| format!("Failed to compile: {specifier}"))?;
+
+    Ok(v8::Global::new(scope, module))
+}
+
+/// Load modules with lazy compilation.
 ///
-/// `entries[0]` is the entrypoint module. Additional entries are imported modules
-/// (the runtime resolves imports via the module registry).
-/// Returns the entrypoint module's namespace object (contains the exports).
+/// `entries[0]` is the entrypoint. All entries are stored as source strings,
+/// but only transitively imported modules are compiled.
+///
+/// Returns the entrypoint module's namespace object (contains exports).
 pub fn load_modules(
     scope: &mut v8::PinScope,
     entries: &[ModuleEntry],
@@ -50,46 +93,83 @@ pub fn load_modules(
         return Err("No modules to load".into());
     }
 
+    // Build source map (specifier → source string)
+    let mut sources: HashMap<String, String> = HashMap::new();
+    for entry in entries {
+        sources.insert(entry.specifier.clone(), entry.source.clone());
+    }
+
     let registry: SharedRegistry = Rc::new(RefCell::new(ModuleRegistry::new()));
 
-    // Phase 1: Compile all modules and register in the registry
-    for entry in entries {
-        let source_str = v8::String::new(scope, &entry.source)
-            .ok_or_else(|| format!("Failed to create source for {}", entry.specifier))?;
+    // Phase 1: Compile entry module
+    let entrypoint = &entries[0].specifier;
+    let entry_source = sources.get(entrypoint)
+        .ok_or_else(|| format!("Entrypoint not found: {entrypoint}"))?;
+    let entry_module = compile_module(scope, entrypoint, entry_source)?;
 
-        let name_str = v8::String::new(scope, &entry.specifier)
-            .ok_or_else(|| format!("Failed to create name for {}", entry.specifier))?;
+    // Phase 2: Discover and compile all transitive imports (BFS)
+    //
+    // V8's resolve_callback can't compile modules — it must return
+    // an already-compiled module. So we walk the import graph here,
+    // compiling each discovered module BEFORE calling instantiate_module.
+    {
+        let mut queue: VecDeque<(String, v8::Global<v8::Module>)> = VecDeque::new();
+        queue.push_back((entrypoint.clone(), entry_module));
 
-        let origin = v8::ScriptOrigin::new(
-            scope,
-            name_str.into(),
-            0, 0, false, -1, None, false, false,
-            true, // is_module = true
-            None,
-        );
+        while let Some((spec, module_global)) = queue.pop_front() {
+            // Store compiled module in registry
+            let already_registered = registry.borrow().compiled.contains_key(&spec);
+            if !already_registered {
+                registry.borrow_mut().compiled.insert(spec.clone(), module_global.clone());
+            }
 
-        let mut v8_source = v8::script_compiler::Source::new(source_str, Some(&origin));
+            // Discover this module's imports via V8
+            let module_local = v8::Local::new(scope, &module_global);
+            let requests = module_local.get_module_requests();
+            let num_requests = requests.length();
 
-        let module = v8::script_compiler::compile_module(scope, &mut v8_source)
-            .ok_or_else(|| format!("Failed to compile module: {}", entry.specifier))?;
+            for i in 0..num_requests {
+                let request = v8::Local::<v8::ModuleRequest>::try_from(
+                    requests.get(scope, i).unwrap()
+                ).unwrap();
+                let import_specifier = request.get_specifier().to_rust_string_lossy(scope);
 
-        let global = v8::Global::new(scope, module);
-        registry.borrow_mut().modules.insert(
-            entry.specifier.clone(),
-            CompiledModule { module: global },
-        );
+                // Resolve to actual source specifier
+                let resolved = match resolve_specifier(&import_specifier, &sources) {
+                    Some(s) => s,
+                    None => return Err(format!(
+                        "Cannot resolve import '{import_specifier}' from '{spec}'"
+                    )),
+                };
+
+                // Skip if already compiled
+                if registry.borrow().compiled.contains_key(&resolved) {
+                    continue;
+                }
+
+                // Compile the imported module
+                let source = sources.get(&resolved)
+                    .ok_or_else(|| format!(
+                        "Source not found for '{resolved}' (imported from '{spec}')"
+                    ))?;
+                let compiled = compile_module(scope, &resolved, source)?;
+
+                // Queue for import discovery (its own imports)
+                queue.push_back((resolved, compiled));
+            }
+        }
     }
 
     // Store registry in isolate slot for the resolve callback
     scope.set_slot(registry.clone());
 
-    // Phase 2: Instantiate entrypoint (V8 walks import graph via callback)
-    let entrypoint = &entries[0].specifier;
+    // Phase 3: Instantiate entrypoint
+    // resolve_callback only does lookups — all modules are pre-compiled.
     {
         let reg = registry.borrow();
-        let cm = reg.modules.get(entrypoint)
-            .ok_or_else(|| format!("Entrypoint not found: {entrypoint}"))?;
-        let module = v8::Local::new(scope, &cm.module);
+        let module_global = reg.compiled.get(entrypoint)
+            .ok_or_else(|| format!("Entrypoint not compiled: {entrypoint}"))?;
+        let module = v8::Local::new(scope, module_global);
 
         let ok = module.instantiate_module(scope, resolve_callback);
         if ok.is_none() || ok == Some(false) {
@@ -97,25 +177,24 @@ pub fn load_modules(
         }
     }
 
-    // Phase 3: Evaluate
+    // Phase 4: Evaluate
     {
         let reg = registry.borrow();
-        let cm = reg.modules.get(entrypoint).unwrap();
-        let module = v8::Local::new(scope, &cm.module);
+        let module_global = reg.compiled.get(entrypoint).unwrap();
+        let module = v8::Local::new(scope, module_global);
 
         let result = module.evaluate(scope);
         if result.is_none() {
             return Err(format!("Failed to evaluate: {entrypoint}"));
         }
-        // Drain microtasks (for top-level await)
         scope.perform_microtask_checkpoint();
     }
 
-    // Phase 4: Extract entrypoint namespace (contains the module's exports)
+    // Phase 5: Extract namespace
     let namespace = {
         let reg = registry.borrow();
-        let cm = reg.modules.get(entrypoint).unwrap();
-        let module = v8::Local::new(scope, &cm.module);
+        let module_global = reg.compiled.get(entrypoint).unwrap();
+        let module = v8::Local::new(scope, module_global);
         let ns = module.get_module_namespace();
         v8::Global::new(scope, ns)
     };
@@ -123,7 +202,9 @@ pub fn load_modules(
     Ok(namespace)
 }
 
-/// V8 resolve callback — called when V8 encounters `import ... from '...'`.
+/// V8 resolve callback — lookups only, never compiles.
+///
+/// All transitively imported modules are pre-compiled in Phase 2.
 fn resolve_callback<'a>(
     context: v8::Local<'a, v8::Context>,
     specifier: v8::Local<'a, v8::String>,
@@ -141,7 +222,7 @@ fn resolve_callback<'a>(
 
     let reg = registry.borrow();
 
-    // Try exact, then ./stripped, then with .js
+    // Try exact, then variants
     let candidates = [
         spec.clone(),
         spec.strip_prefix("./").unwrap_or(&spec).to_string(),
@@ -150,8 +231,8 @@ fn resolve_callback<'a>(
     ];
 
     for candidate in &candidates {
-        if let Some(cm) = reg.modules.get(candidate) {
-            return Some(v8::Local::new(scope, &cm.module));
+        if let Some(module_global) = reg.compiled.get(candidate) {
+            return Some(v8::Local::new(scope, module_global));
         }
     }
 
@@ -167,33 +248,6 @@ fn resolve_callback<'a>(
 mod tests {
     use super::*;
     use crate::init::init_v8;
-
-    fn run_modules(entries: &[ModuleEntry]) -> Result<v8::OwnedIsolate, String> {
-        init_v8();
-        let params = v8::CreateParams::default();
-        let mut isolate = v8::Isolate::new(params);
-
-        {
-            v8::scope!(let handle_scope, &mut isolate);
-            let context = v8::Context::new(handle_scope, Default::default());
-            let scope = &mut v8::ContextScope::new(handle_scope, context);
-            let _namespace = load_modules(scope, entries)?;
-        }
-
-        Ok(isolate)
-    }
-
-    fn get_global(isolate: &mut v8::OwnedIsolate, key: &str) -> String {
-        v8::scope!(let handle_scope, isolate);
-        let context = v8::Context::new(handle_scope, Default::default());
-        let scope = &mut v8::ContextScope::new(handle_scope, context);
-        let global = scope.get_current_context().global(scope);
-        let k = v8::String::new(scope, key).unwrap();
-        match global.get(scope, k.into()) {
-            Some(v) => v.to_rust_string_lossy(scope),
-            None => "undefined".to_string(),
-        }
-    }
 
     #[test]
     fn single_module() {
@@ -307,7 +361,6 @@ mod tests {
 
     #[test]
     fn shared_module() {
-        // Two modules import the same dependency
         init_v8();
         let params = v8::CreateParams::default();
         let mut isolate = v8::Isolate::new(params);
@@ -350,6 +403,37 @@ mod tests {
         let global = ctx.global(scope);
         let key = v8::String::new(scope, "sum").unwrap();
         let val = global.get(scope, key.into()).unwrap();
-        assert_eq!(val.int32_value(scope).unwrap(), 30); // 10 + 10*2
+        assert_eq!(val.int32_value(scope).unwrap(), 30);
+    }
+
+    #[test]
+    fn unused_modules_not_compiled() {
+        // Unused modules (including one with invalid syntax) should not
+        // cause errors — only transitively imported modules are compiled.
+        init_v8();
+        let params = v8::CreateParams::default();
+        let mut isolate = v8::Isolate::new(params);
+
+        v8::scope!(let hs, &mut isolate);
+        let ctx = v8::Context::new(hs, Default::default());
+        let scope = &mut v8::ContextScope::new(hs, ctx);
+
+        let entries = vec![
+            ModuleEntry {
+                specifier: "index.js".into(),
+                source: "export function ping() { return 'pong'; }".into(),
+            },
+            ModuleEntry {
+                specifier: "unused.js".into(),
+                source: "export function unused() { return 'never'; }".into(),
+            },
+            ModuleEntry {
+                specifier: "invalid-syntax.js".into(),
+                source: "THIS IS NOT VALID JAVASCRIPT }{}{".into(),
+            },
+        ];
+
+        let result = load_modules(scope, &entries);
+        assert!(result.is_ok(), "Unused modules (even invalid ones) should not cause errors");
     }
 }
