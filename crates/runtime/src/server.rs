@@ -104,6 +104,7 @@ struct Dispatcher {
     senders: Vec<tokio::sync::mpsc::Sender<IncomingRequest>>,
     next: AtomicU64,
     next_id: AtomicU64,
+    shared_cancel: CancellationToken,
 }
 
 impl Dispatcher {
@@ -116,6 +117,7 @@ impl Dispatcher {
             senders,
             next: AtomicU64::new(0),
             next_id: AtomicU64::new(1),
+            shared_cancel: CancellationToken::new(),
         }
     }
 
@@ -129,17 +131,16 @@ impl Dispatcher {
                 id,
                 kind: RequestKind::Rpc(body),
                 reply: reply_tx,
-                cancel: CancellationToken::new(),
+                cancel: self.shared_cancel.clone(),
             })
             .await
             .map_err(|_| "Request channel closed".to_string())?;
 
-        match tokio::time::timeout(std::time::Duration::from_secs(30), reply_rx).await {
-            Ok(Ok(Ok(RequestReply::Complete(result)))) => Ok(result),
-            Ok(Ok(Ok(RequestReply::Stream(_)))) => Err("Streaming responses not supported in benchmark server".to_string()),
-            Ok(Ok(Err(e))) => Err(e),
-            Ok(Err(_)) => Err("Reply channel closed".to_string()),
-            Err(_) => Err("Request timed out (30s wall time)".to_string()),
+        match reply_rx.await {
+            Ok(Ok(RequestReply::Complete(result))) => Ok(result),
+            Ok(Ok(RequestReply::Stream(_))) => Err("Streaming responses not supported in benchmark server".to_string()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err("Reply channel closed".to_string()),
         }
     }
 }
@@ -148,51 +149,48 @@ impl Dispatcher {
 // HTTP handler
 // ===========================================================================
 
+/// Static header value for "application/json" — avoids per-request allocation.
+static JSON_CT: hyper::header::HeaderValue = hyper::header::HeaderValue::from_static("application/json");
+
 async fn handle_request(
     req: Request<Incoming>,
     dispatcher: Arc<Dispatcher>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     match (req.method().clone(), req.uri().path()) {
-        (hyper::Method::GET, "/health") => Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "application/json")
-            .body(Full::new(Bytes::from(r#"{"status":"ok"}"#)))
-            .unwrap()),
+        (hyper::Method::GET, "/health") => {
+            let mut resp = Response::new(Full::new(Bytes::from(r#"{"status":"ok"}"#)));
+            resp.headers_mut().insert(hyper::header::CONTENT_TYPE, JSON_CT.clone());
+            Ok(resp)
+        }
         (hyper::Method::POST, "/rpc") => {
-            let body = http_body_util::BodyExt::collect(req.into_body())
+            let body_bytes = http_body_util::BodyExt::collect(req.into_body())
                 .await
                 .unwrap()
                 .to_bytes();
-            let body_str = String::from_utf8_lossy(&body).to_string();
+            let body_str = String::from_utf8(body_bytes.into()).unwrap_or_default();
 
             match dispatcher.dispatch(body_str).await {
-                Ok(result) => Ok(Response::builder()
-                    .status(StatusCode::OK)
-                    .header("content-type", "application/json")
-                    .header(
-                        "x-cpu-time-ms",
-                        format!("{:.3}", result.cpu_time.as_secs_f64() * 1000.0),
-                    )
-                    .header(
-                        "x-wall-time-ms",
-                        format!("{:.3}", result.wall_time.as_secs_f64() * 1000.0),
-                    )
-                    .body(Full::new(Bytes::from(result.json)))
-                    .unwrap()),
-                Err(e) => Ok(Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .header("content-type", "application/json")
-                    .body(Full::new(Bytes::from(format!(
+                Ok(result) => {
+                    let mut resp = Response::new(Full::new(Bytes::from(result.json)));
+                    resp.headers_mut().insert(hyper::header::CONTENT_TYPE, JSON_CT.clone());
+                    Ok(resp)
+                }
+                Err(e) => {
+                    let mut resp = Response::new(Full::new(Bytes::from(format!(
                         r#"{{"error":"{}"}}"#,
                         e.replace('"', "\\\"")
-                    ))))
-                    .unwrap()),
+                    ))));
+                    *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                    resp.headers_mut().insert(hyper::header::CONTENT_TYPE, JSON_CT.clone());
+                    Ok(resp)
+                }
             }
         }
-        _ => Ok(Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Full::new(Bytes::from("Not Found")))
-            .unwrap()),
+        _ => {
+            let mut resp = Response::new(Full::new(Bytes::from("Not Found")));
+            *resp.status_mut() = StatusCode::NOT_FOUND;
+            Ok(resp)
+        }
     }
 }
 
