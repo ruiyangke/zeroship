@@ -1,5 +1,6 @@
 #![allow(unsafe_code)]
 
+pub mod channel;
 pub mod runtime;
 pub mod fetch;
 
@@ -9,8 +10,7 @@ pub use appbase_v8_core::state;
 pub use appbase_v8_core::init;
 pub use appbase_v8_core::modules;
 
-pub use appbase_v8_core::{init_v8, RequestResult, ModuleEntry,
-    IncomingRequest, RequestReply, RequestKind, OpResult, HttpStreamResult, FetchRequest};
+pub use appbase_v8_core::{init_v8, RequestResult, ModuleEntry, OpResult, FetchRequest};
 pub use runtime::{Runtime, AsyncWork, AsyncEvent, DispatchOutcome, HttpDispatchResult};
 
 #[cfg(test)]
@@ -949,13 +949,13 @@ mod tests {
                 assert!(body.contains("data: event 0"), "got: {}", body);
                 assert!(body.contains("data: event 2"), "got: {}", body);
             }
-            DispatchOutcome::HttpStream { status, headers, mut body_rx, .. } => {
+            DispatchOutcome::HttpStream { status, headers, body: body_reader, .. } => {
                 assert_eq!(status, 200);
                 let ct = headers.iter().find(|(k, _)| k == "content-type");
                 assert!(ct.is_some());
-                // Drain the channel
+                // Drain the shared buffer
                 let mut body = String::new();
-                while let Ok(chunk) = body_rx.try_recv() {
+                for chunk in body_reader.drain() {
                     body.push_str(&String::from_utf8_lossy(&chunk));
                 }
                 assert!(body.contains("data: event 0"), "got: {}", body);

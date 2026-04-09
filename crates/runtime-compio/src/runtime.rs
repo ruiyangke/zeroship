@@ -25,22 +25,23 @@
 #![allow(unsafe_code)]
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use futures::stream::FuturesUnordered;
-use futures::{FutureExt, StreamExt};
-use tokio_util::sync::CancellationToken;
 
 use appbase_v8_core::init::{init_v8, load_polyfills_and_modules, RequestResult};
 use appbase_v8_core::http::{self, ResponseInfo, SettledResult, HTTP_CREATE_REQUEST_JS};
 use appbase_v8_core::modules::ModuleEntry;
 use appbase_v8_core::state::{
-    DispatchResult, HttpStreamResult, IncomingRequest, OpResult, RequestKind, RequestReply,
-    RuntimeState, SharedState, SpawnedTimer, TimerResult,
+    DispatchResult, OpResult, RuntimeState, SharedState, SpawnedTimer, TimerResult,
+};
+
+use crate::channel::{
+    self, CancelFlag, ResultReceiver, ResultSender, StreamReader, StreamWriter,
 };
 
 // ---------------------------------------------------------------------------
@@ -51,8 +52,8 @@ use appbase_v8_core::state::{
 pub enum DispatchOutcome {
     /// Sync handler completed immediately. No pump involvement needed.
     Complete(Result<RequestResult, String>),
-    /// Async handler: promise is pending. Await the receiver for the result.
-    Pending(tokio::sync::oneshot::Receiver<Result<RequestResult, String>>),
+    /// Async handler: promise is pending. Poll the receiver for the result.
+    Pending(ResultReceiver<Result<RequestResult, String>>),
     /// Sync HTTP response — complete buffered body.
     HttpComplete {
         status: u16,
@@ -60,15 +61,15 @@ pub enum DispatchOutcome {
         body: String,
         logs: Vec<String>,
     },
-    /// Streaming HTTP response — headers ready, body arrives via channel.
+    /// Streaming HTTP response — headers ready, body arrives via shared buffer.
     HttpStream {
         status: u16,
         headers: Vec<(String, String)>,
-        body_rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+        body: StreamReader,
         logs: Vec<String>,
     },
-    /// Async HTTP handler: promise is pending. Await the receiver for the reply.
-    HttpPending(tokio::sync::oneshot::Receiver<Result<HttpDispatchResult, String>>),
+    /// Async HTTP handler: promise is pending. Poll the receiver for the reply.
+    HttpPending(ResultReceiver<Result<HttpDispatchResult, String>>),
 }
 
 /// Result of an async HTTP dispatch (sent through the oneshot when promise settles).
@@ -82,7 +83,7 @@ pub enum HttpDispatchResult {
     Stream {
         status: u16,
         headers: Vec<(String, String)>,
-        body_rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+        body: StreamReader,
         logs: Vec<String>,
     },
 }
@@ -92,37 +93,17 @@ pub enum HttpDispatchResult {
 // ---------------------------------------------------------------------------
 
 struct StreamForwarder {
-    sender: tokio::sync::mpsc::Sender<bytes::Bytes>,
-    overflow: VecDeque<Vec<u8>>,
-    max_overflow: usize,
+    writer: StreamWriter,
 }
 
 impl StreamForwarder {
-    fn new(sender: tokio::sync::mpsc::Sender<bytes::Bytes>) -> Self {
-        Self { sender, overflow: VecDeque::new(), max_overflow: 64 }
+    fn new(writer: StreamWriter) -> Self {
+        Self { writer }
     }
 
     fn try_forward(&mut self, data: Vec<u8>) -> bool {
-        // Drain overflow first
-        while let Some(chunk) = self.overflow.pop_front() {
-            match self.sender.try_send(bytes::Bytes::from(chunk)) {
-                Ok(()) => {}
-                Err(tokio::sync::mpsc::error::TrySendError::Full(b)) => {
-                    self.overflow.push_front(b.to_vec());
-                    break;
-                }
-                Err(_) => return false,
-            }
-        }
-        match self.sender.try_send(bytes::Bytes::from(data)) {
-            Ok(()) => true,
-            Err(tokio::sync::mpsc::error::TrySendError::Full(b)) => {
-                if self.overflow.len() >= self.max_overflow { return false; }
-                self.overflow.push_back(b.to_vec());
-                true
-            }
-            Err(_) => false,
-        }
+        self.writer.push(data);
+        true // no backpressure on single-threaded — just buffer
     }
 }
 
@@ -161,17 +142,15 @@ struct PendingRequest {
     #[allow(dead_code)]
     id: u64,
     promise: v8::Global<v8::Promise>,
-    /// Reply channel for the channel-based event loop (legacy mode).
-    reply_channel: Option<tokio::sync::oneshot::Sender<Result<RequestReply, String>>>,
-    /// Reply channel for direct-dispatch async mode (pump task) — RPC path.
-    reply_direct: Option<tokio::sync::oneshot::Sender<Result<RequestResult, String>>>,
-    /// Reply channel for direct-dispatch async mode — HTTP path.
-    reply_http: Option<tokio::sync::oneshot::Sender<Result<HttpDispatchResult, String>>>,
+    /// Reply slot for direct-dispatch async mode (pump task) — RPC path.
+    reply_direct: Option<ResultSender<Result<RequestResult, String>>>,
+    /// Reply slot for direct-dispatch async mode — HTTP path.
+    reply_http: Option<ResultSender<Result<HttpDispatchResult, String>>>,
     /// Whether this is an HTTP request (affects response inspection).
     is_http: bool,
     cpu_accumulated: Duration,
     wall_start: Instant,
-    cancel: CancellationToken,
+    cancel: CancelFlag,
 }
 
 // ---------------------------------------------------------------------------
@@ -216,14 +195,6 @@ pub struct Runtime {
     pending_requests: HashMap<u64, PendingRequest>,
     next_direct_request_id: u64,
 
-    /// Used by the legacy channel-based `run()` event loop.
-    pending_ops: FuturesUnordered<Pin<Box<dyn Future<Output = OpResult>>>>,
-    /// Used by the legacy channel-based `run()` event loop.
-    pending_timers: FuturesUnordered<Pin<Box<dyn Future<Output = TimerResult>>>>,
-
-    request_rx: Option<tokio::sync::mpsc::Receiver<IncomingRequest>>,
-    shutdown: CancellationToken,
-
     /// Notification channel to wake the pump task when new work is added.
     /// dispatch_start sends a signal here after spawning timers/ops so the
     /// pump doesn't have to poll on a 1ms sleep.
@@ -249,29 +220,6 @@ impl Runtime {
     /// Create a new `Runtime` in direct-dispatch mode (no channel).
     pub fn new_direct(
         modules: Vec<ModuleEntry>,
-        env_vars: HashMap<String, String>,
-        cpu_limit: Option<Duration>,
-        wall_timeout: Option<Duration>,
-    ) -> Self {
-        Self::new_inner(modules, None, CancellationToken::new(), env_vars, cpu_limit, wall_timeout)
-    }
-
-    /// Create a new `Runtime` with a channel receiver (legacy mode).
-    pub fn new(
-        modules: Vec<ModuleEntry>,
-        request_rx: tokio::sync::mpsc::Receiver<IncomingRequest>,
-        shutdown: CancellationToken,
-        env_vars: HashMap<String, String>,
-        cpu_limit: Option<Duration>,
-        wall_timeout: Option<Duration>,
-    ) -> Self {
-        Self::new_inner(modules, Some(request_rx), shutdown, env_vars, cpu_limit, wall_timeout)
-    }
-
-    fn new_inner(
-        modules: Vec<ModuleEntry>,
-        request_rx: Option<tokio::sync::mpsc::Receiver<IncomingRequest>>,
-        shutdown: CancellationToken,
         env_vars: HashMap<String, String>,
         cpu_limit: Option<Duration>,
         wall_timeout: Option<Duration>,
@@ -317,10 +265,6 @@ impl Runtime {
             stream_forwarders: HashMap::new(),
             pending_requests: HashMap::new(),
             next_direct_request_id: 1,
-            pending_ops: FuturesUnordered::new(),
-            pending_timers: FuturesUnordered::new(),
-            request_rx,
-            shutdown,
             pump_notify_tx: None,
             cpu_limit,
             wall_timeout,
@@ -456,11 +400,9 @@ impl Runtime {
         // Drain ALL pending requests with CPU limit error
         for (_id, req) in self.pending_requests.drain() {
             if let Some(tx) = req.reply_direct {
-                let _ = tx.send(Err("CPU time limit exceeded".into()));
+                tx.send(Err("CPU time limit exceeded".into()));
             } else if let Some(tx) = req.reply_http {
-                let _ = tx.send(Err("CPU time limit exceeded".into()));
-            } else if let Some(tx) = req.reply_channel {
-                let _ = tx.send(Err("CPU time limit exceeded".into()));
+                tx.send(Err("CPU time limit exceeded".into()));
             }
         }
         true
@@ -516,8 +458,8 @@ impl Runtime {
                 })
             }
             DispatchResult::Async(promise) => {
-                // Try to settle inline: collect spawned tasks, fire ready timers
-                self.collect_new_tasks();
+                // Try to settle inline: fire ready timers
+                self.fire_ready_timers_inline();
 
                 // Check if the promise settled after microtask checkpoint + ready timers
                 self.arm_cpu_timer();
@@ -656,17 +598,16 @@ impl Runtime {
                     Err(_) => {
                         // Promise is truly pending — needs the pump to drive it
                         self.state.borrow_mut().executing_request_id = None;
-                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let (tx, rx) = channel::result_slot();
                         self.pending_requests.insert(request_id, PendingRequest {
                             id: request_id,
                             promise,
-                            reply_channel: None,
                             reply_direct: Some(tx),
                             reply_http: None,
                             is_http: false,
                             cpu_accumulated: cpu_total,
                             wall_start,
-                            cancel: CancellationToken::new(),
+                            cancel: CancelFlag::new(),
                         });
                         // Notify the pump that new work was added
                         self.notify_pump();
@@ -747,17 +688,16 @@ impl Runtime {
             Ok(Err(msg)) => DispatchOutcome::Complete(Err(msg)),
             Err(promise) => {
                 // Async — store as PendingRequest with is_http=true
-                let (tx, rx) = tokio::sync::oneshot::channel();
+                let (tx, rx) = channel::result_slot();
                 self.pending_requests.insert(request_id, PendingRequest {
                     id: request_id,
                     promise,
-                    reply_channel: None,
                     reply_direct: None,
                     reply_http: Some(tx),
                     is_http: true,
                     cpu_accumulated: cpu_elapsed,
                     wall_start,
-                    cancel: CancellationToken::new(),
+                    cancel: CancelFlag::new(),
                 });
                 self.notify_pump();
                 DispatchOutcome::HttpPending(rx)
@@ -778,8 +718,8 @@ impl Runtime {
                 DispatchOutcome::HttpComplete { status, headers, body, logs }
             }
             ResponseInfo::Stream { status, headers, stream_id } => {
-                let (body_tx, body_rx) = tokio::sync::mpsc::channel(16);
-                let mut forwarder = StreamForwarder::new(body_tx);
+                let (writer, reader) = channel::stream_buffer();
+                let mut forwarder = StreamForwarder::new(writer);
 
                 // Flush any chunks already buffered in the stream state
                 {
@@ -793,7 +733,7 @@ impl Runtime {
                 }
 
                 self.stream_forwarders.insert(stream_id, forwarder);
-                DispatchOutcome::HttpStream { status, headers, body_rx, logs }
+                DispatchOutcome::HttpStream { status, headers, body: reader, logs }
             }
         }
     }
@@ -858,10 +798,10 @@ impl Runtime {
         match result {
             OpResult::Completed { op_id, value, request_id } => {
                 if let Some(rid) = request_id {
-                    let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
                     let mut s = self.state.borrow_mut();
                     s.executing_request_id = Some(rid);
-                    s.executing_request_cancel = cancel;
+                    // compio fetch ignores cancellation — no CancellationToken needed
+                    s.executing_request_cancel = None;
                 }
 
                 let start = Instant::now();
@@ -907,6 +847,8 @@ impl Runtime {
                         forwarder.try_forward(data);
                     }
                     if done {
+                        // Signal completion to the reader, then remove
+                        forwarder.writer.close();
                         self.stream_forwarders.remove(&stream_id);
                     }
                 } else {
@@ -931,10 +873,9 @@ impl Runtime {
         let owner_request_id = self.state.borrow().timer_owner.get(&id).copied();
 
         if let Some(rid) = owner_request_id {
-            let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
             let mut s = self.state.borrow_mut();
             s.executing_request_id = Some(rid);
-            s.executing_request_cancel = cancel;
+            s.executing_request_cancel = None;
         }
 
         let start = Instant::now();
@@ -1024,10 +965,9 @@ impl Runtime {
             let owner_request_id = self.state.borrow().timer_owner.get(&timer_id).copied();
 
             if let Some(rid) = owner_request_id {
-                let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
                 let mut s = self.state.borrow_mut();
                 s.executing_request_id = Some(rid);
-                s.executing_request_cancel = cancel;
+                s.executing_request_cancel = None;
             }
 
             let start = Instant::now();
@@ -1103,26 +1043,20 @@ impl Runtime {
                     logs,
                 };
                 if let Some(tx) = req.reply_direct {
-                    let _ = tx.send(Ok(result));
-                } else if let Some(tx) = req.reply_channel {
-                    let _ = tx.send(Ok(RequestReply::Complete(result)));
+                    tx.send(Ok(result));
                 }
             }
             SettledResult::Rpc(Err(msg)) => {
                 if let Some(tx) = req.reply_direct {
-                    let _ = tx.send(Err(msg));
-                } else if let Some(tx) = req.reply_channel {
-                    let _ = tx.send(Err(msg));
+                    tx.send(Err(msg));
                 }
             }
             SettledResult::Http(Ok(info)) => {
-                self.send_http_settled(id, info, req.reply_http, req.reply_channel, cpu_time);
+                self.send_http_settled(id, info, req.reply_http, cpu_time);
             }
             SettledResult::Http(Err(msg)) => {
                 if let Some(tx) = req.reply_http {
-                    let _ = tx.send(Err(msg));
-                } else if let Some(tx) = req.reply_channel {
-                    let _ = tx.send(Err(msg));
+                    tx.send(Err(msg));
                 }
             }
         }
@@ -1133,32 +1067,19 @@ impl Runtime {
         &mut self,
         id: u64,
         info: ResponseInfo,
-        reply_http: Option<tokio::sync::oneshot::Sender<Result<HttpDispatchResult, String>>>,
-        reply_channel: Option<tokio::sync::oneshot::Sender<Result<RequestReply, String>>>,
-        cpu_time: Duration,
+        reply_http: Option<ResultSender<Result<HttpDispatchResult, String>>>,
+        _cpu_time: Duration,
     ) {
         let logs = self.drain_request_logs(id);
         match info {
             ResponseInfo::Complete { status, headers, body } => {
                 if let Some(tx) = reply_http {
-                    let _ = tx.send(Ok(HttpDispatchResult::Complete { status, headers, body, logs }));
-                } else if let Some(tx) = reply_channel {
-                    let json = serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "result": { "status": status, "headers": headers, "body": body },
-                        "id": 0
-                    }).to_string();
-                    let _ = tx.send(Ok(RequestReply::Complete(RequestResult {
-                        json,
-                        cpu_time,
-                        wall_time: Duration::ZERO,
-                        logs,
-                    })));
+                    tx.send(Ok(HttpDispatchResult::Complete { status, headers, body, logs }));
                 }
             }
             ResponseInfo::Stream { status, headers, stream_id } => {
-                let (body_tx, body_rx) = tokio::sync::mpsc::channel(16);
-                let mut forwarder = StreamForwarder::new(body_tx);
+                let (writer, reader) = channel::stream_buffer();
+                let mut forwarder = StreamForwarder::new(writer);
 
                 // Flush any chunks already buffered
                 {
@@ -1174,11 +1095,7 @@ impl Runtime {
                 self.stream_forwarders.insert(stream_id, forwarder);
 
                 if let Some(tx) = reply_http {
-                    let _ = tx.send(Ok(HttpDispatchResult::Stream { status, headers, body_rx, logs }));
-                } else if let Some(tx) = reply_channel {
-                    let _ = tx.send(Ok(RequestReply::Stream(HttpStreamResult {
-                        status, headers, body_rx, cpu_time, logs,
-                    })));
+                    tx.send(Ok(HttpDispatchResult::Stream { status, headers, body: reader, logs }));
                 }
             }
         }
@@ -1190,629 +1107,8 @@ impl Runtime {
     }
 
     // -----------------------------------------------------------------------
-    // Main event loop
-    // -----------------------------------------------------------------------
-
-    /// Run the event loop. Consumes events from all sources via `futures::select!`.
-    pub async fn run(&mut self) {
-        self.ensure_initialized();
-
-        loop {
-            self.collect_new_tasks();
-
-            // Check V8 termination
-            if self.isolate.is_execution_terminating() {
-                self.isolate.cancel_terminate_execution();
-                for (_id, req) in self.pending_requests.drain() {
-                    if let Some(tx) = req.reply_direct {
-                        let _ = tx.send(Err("CPU time limit exceeded".into()));
-                    } else if let Some(tx) = req.reply_http {
-                        let _ = tx.send(Err("CPU time limit exceeded".into()));
-                    } else if let Some(tx) = req.reply_channel {
-                        let _ = tx.send(Err("CPU time limit exceeded".into()));
-                    }
-                }
-            }
-
-            // We need to handle the case where FuturesUnordered is empty
-            // (select_next_some would never resolve). Use a helper that
-            // returns a future resolving to None when empty.
-            futures::select! {
-                _ = self.shutdown.cancelled().fuse() => {
-                    self.graceful_shutdown();
-                    break;
-                }
-                req = async {
-                    match &mut self.request_rx {
-                        Some(rx) => rx.recv().await,
-                        None => std::future::pending().await,
-                    }
-                }.fuse() => {
-                    match req {
-                        Some(req) => self.handle_incoming_request(req),
-                        None => break, // channel closed
-                    }
-                }
-                result = self.pending_ops.select_next_some() => {
-                    self.handle_op_result(result);
-                }
-                result = self.pending_timers.select_next_some() => {
-                    self.handle_timer(result);
-                }
-                complete => break, // all branches disabled
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // collect_new_tasks
-    // -----------------------------------------------------------------------
-
-    /// Move newly spawned ops and timers from `RuntimeState` into the
-    /// `FuturesUnordered` collections.
-    fn collect_new_tasks(&mut self) {
-        // Fast path: skip all work when nothing was spawned (common for sync requests).
-        {
-            let s = self.state.borrow();
-            if s.spawned_ops.is_empty()
-                && s.spawned_timers.is_empty()
-                && s.spawned_fetches.is_empty()
-                && s.ready_timers.is_empty()
-            {
-                return;
-            }
-        }
-
-        // Drain spawned fetches
-        let fetches: Vec<appbase_v8_core::state::FetchRequest> = {
-            self.state.borrow_mut().spawned_fetches.drain(..).collect()
-        };
-        for fetch_req in fetches {
-            let future = crate::fetch::execute_fetch(fetch_req);
-            self.pending_ops.push(future);
-        }
-
-        {
-            let mut s = self.state.borrow_mut();
-
-            // Drain spawned ops
-            for op_future in s.spawned_ops.drain(..) {
-                self.pending_ops.push(op_future);
-            }
-
-            // Drain spawned timers -- use compio::time::sleep
-            for timer in s.spawned_timers.drain(..) {
-                let SpawnedTimer { id, delay, interval } = timer;
-                self.pending_timers.push(Box::pin(async move {
-                    compio::time::sleep(delay).await;
-                    TimerResult { id, interval }
-                }));
-            }
-        }
-
-        // Fire zero-delay timers inline
-        self.fire_ready_timers();
-    }
-
-    // -----------------------------------------------------------------------
-    // fire_ready_timers
-    // -----------------------------------------------------------------------
-
-    fn fire_ready_timers(&mut self) {
-        loop {
-            let timer_id = {
-                let mut s = self.state.borrow_mut();
-                if s.ready_timers.is_empty() { None } else { Some(s.ready_timers.remove(0)) }
-            };
-            let Some(timer_id) = timer_id else { break };
-
-            let owner_request_id = self.state.borrow().timer_owner.get(&timer_id).copied();
-
-            if let Some(rid) = owner_request_id {
-                let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
-                let mut s = self.state.borrow_mut();
-                s.executing_request_id = Some(rid);
-                s.executing_request_cancel = cancel;
-            }
-
-            let start = Instant::now();
-
-            self.arm_cpu_timer();
-            let settled_results: Vec<(u64, PendingRequest, SettledResult)> =
-                enter_v8!(self, |scope| {
-                    appbase_v8_core::request::fire_timer_callback(scope, &self.state, timer_id);
-
-                    let settled_ids: Vec<u64> = self
-                        .pending_requests
-                        .iter()
-                        .filter_map(|(&id, req)| {
-                            let p = v8::Local::new(scope, &req.promise);
-                            if p.state() != v8::PromiseState::Pending {
-                                Some(id)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-
-                    settled_ids
-                        .into_iter()
-                        .filter_map(|id| {
-                            let req = self.pending_requests.remove(&id)?;
-                            let result =
-                                http::extract_settled_result(scope, &req.promise, req.is_http);
-                            Some((id, req, result))
-                        })
-                        .collect()
-                });
-            self.disarm_cpu_timer();
-
-            if self.check_v8_terminated() {
-                return;
-            }
-
-            let cpu_elapsed = start.elapsed();
-
-            if let Some(rid) = owner_request_id {
-                if let Some(req) = self.pending_requests.get_mut(&rid) {
-                    req.cpu_accumulated += cpu_elapsed;
-                }
-            }
-
-            // CPU limit check for the owning request
-            if let Some(rid) = owner_request_id {
-                self.check_cpu_limit(rid);
-            }
-
-            self.state.borrow_mut().timer_owner.remove(&timer_id);
-
-            for (id, req, settled) in settled_results {
-                self.send_settled_reply(id, req, settled, cpu_elapsed);
-            }
-
-            self.cleanup_cancelled_requests();
-            self.clear_executing_request();
-
-            // Drain new spawned ops/timers from the callback
-            {
-                let mut s = self.state.borrow_mut();
-                for op_future in s.spawned_ops.drain(..) {
-                    self.pending_ops.push(op_future);
-                }
-                for timer in s.spawned_timers.drain(..) {
-                    let SpawnedTimer { id, delay, interval } = timer;
-                    self.pending_timers.push(Box::pin(async move {
-                        compio::time::sleep(delay).await;
-                        TimerResult { id, interval }
-                    }));
-                }
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // handle_incoming_request
-    // -----------------------------------------------------------------------
-
-    fn handle_incoming_request(&mut self, req: IncomingRequest) {
-        let IncomingRequest { id, kind, reply, cancel } = req;
-
-        match kind {
-            RequestKind::Rpc(body) => {
-                self.handle_rpc_request(id, body, reply, cancel);
-            }
-            RequestKind::Http { method, url, headers, body } => {
-                self.handle_http_request_legacy(id, method, url, headers, body, reply, cancel);
-            }
-        }
-    }
-
-    fn handle_rpc_request(
-        &mut self,
-        id: u64,
-        body: String,
-        reply: tokio::sync::oneshot::Sender<Result<RequestReply, String>>,
-        cancel: CancellationToken,
-    ) {
-        {
-            let mut s = self.state.borrow_mut();
-            s.executing_request_id = Some(id);
-            s.executing_request_cancel = Some(cancel.clone());
-        }
-
-        let wall_start = Instant::now();
-
-        if self.dispatch_fn.is_none() {
-            let _ = reply.send(Err("Isolate not initialized".to_string()));
-            self.clear_executing_request();
-            return;
-        }
-
-        self.arm_cpu_timer();
-        let dispatch_result = {
-            let dispatch_fn = self.dispatch_fn.as_ref().unwrap();
-            enter_v8!(self, |scope| {
-                appbase_v8_core::request::dispatch_request(scope, &self.state, dispatch_fn, &body)
-            })
-        };
-        self.disarm_cpu_timer();
-
-        if self.check_v8_terminated() {
-            let _ = reply.send(Err("CPU time limit exceeded".into()));
-            self.clear_executing_request();
-            return;
-        }
-
-        // Single elapsed measurement used for both cpu_time and wall_time
-        // (single-threaded: cpu time == wall time for V8 execution).
-        let elapsed = wall_start.elapsed();
-
-        match dispatch_result {
-            DispatchResult::Sync(json) => {
-                let logs = self.drain_request_logs(id);
-                let _ = reply.send(Ok(RequestReply::Complete(RequestResult {
-                    json,
-                    cpu_time: elapsed,
-                    wall_time: elapsed,
-                    logs,
-                })));
-                self.clear_executing_request();
-            }
-            DispatchResult::Async(promise) => {
-                self.pending_requests.insert(id, PendingRequest {
-                    id,
-                    promise,
-                    reply_channel: Some(reply),
-                    reply_direct: None,
-                    reply_http: None,
-                    is_http: false,
-                    cpu_accumulated: elapsed,
-                    wall_start,
-                    cancel: cancel.clone(),
-                });
-
-                self.clear_executing_request();
-                self.check_settled_promises_v8();
-            }
-            DispatchResult::Error(msg) => {
-                let _ = reply.send(Err(msg));
-                self.clear_executing_request();
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // handle_http_request_legacy (channel-based event loop)
-    // -----------------------------------------------------------------------
-
-    fn handle_http_request_legacy(
-        &mut self,
-        id: u64,
-        method: String,
-        url: String,
-        headers: String,
-        body: String,
-        reply: tokio::sync::oneshot::Sender<Result<RequestReply, String>>,
-        cancel: CancellationToken,
-    ) {
-        {
-            let mut s = self.state.borrow_mut();
-            s.executing_request_id = Some(id);
-            s.executing_request_cancel = Some(cancel.clone());
-        }
-
-        if self.http_handler_fn.is_none() {
-            let _ = reply.send(Err("No onRequest handler exported".to_string()));
-            self.clear_executing_request();
-            return;
-        }
-        if self.http_create_request_fn.is_none() {
-            let _ = reply.send(Err("HTTP request helper not compiled".to_string()));
-            self.clear_executing_request();
-            return;
-        }
-
-        let start = Instant::now();
-
-        self.arm_cpu_timer();
-        let dispatch_result: Result<Result<ResponseInfo, String>, v8::Global<v8::Promise>> =
-            enter_v8!(self, |scope| {
-                let undefined = v8::undefined(scope).into();
-                let create_fn = v8::Local::new(scope, self.http_create_request_fn.as_ref().unwrap());
-                let method_val = v8::String::new(scope, &method).unwrap().into();
-                let url_val = v8::String::new(scope, &url).unwrap().into();
-                let headers_val = v8::String::new(scope, &headers).unwrap().into();
-                let body_val = v8::String::new(scope, &body).unwrap().into();
-
-                let request_opt = create_fn.call(scope, undefined, &[method_val, url_val, headers_val, body_val]);
-                if request_opt.is_none() {
-                    Ok(Err("Failed to construct Request object".to_string()))
-                } else {
-                    let request = request_opt.unwrap();
-                    let handler = v8::Local::new(scope, self.http_handler_fn.as_ref().unwrap());
-                    dispatch_http_inner(scope, handler, undefined, request)
-                }
-            });
-        self.disarm_cpu_timer();
-
-        if self.check_v8_terminated() {
-            let _ = reply.send(Err("CPU time limit exceeded".into()));
-            self.clear_executing_request();
-            return;
-        }
-
-        let cpu_elapsed = start.elapsed();
-
-        match dispatch_result {
-            Ok(Ok(info)) => {
-                self.send_http_settled(id, info, None, Some(reply), cpu_elapsed);
-                self.clear_executing_request();
-            }
-            Ok(Err(msg)) => {
-                let _ = reply.send(Err(msg));
-                self.clear_executing_request();
-            }
-            Err(promise) => {
-                self.pending_requests.insert(id, PendingRequest {
-                    id,
-                    promise,
-                    reply_channel: Some(reply),
-                    reply_direct: None,
-                    reply_http: None,
-                    is_http: true,
-                    cpu_accumulated: cpu_elapsed,
-                    wall_start: start,
-                    cancel: cancel.clone(),
-                });
-                self.clear_executing_request();
-                self.check_settled_promises_v8();
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // handle_op_result
-    // -----------------------------------------------------------------------
-
-    fn handle_op_result(&mut self, result: OpResult) {
-        match result {
-            OpResult::Completed { op_id, value, request_id } => {
-                if let Some(rid) = request_id {
-                    let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
-                    let mut s = self.state.borrow_mut();
-                    s.executing_request_id = Some(rid);
-                    s.executing_request_cancel = cancel;
-                }
-
-                let start = Instant::now();
-
-                self.arm_cpu_timer();
-                let settled_results: Vec<(u64, PendingRequest, SettledResult)> =
-                    enter_v8!(self, |scope| {
-                        appbase_v8_core::request::resolve_op(scope, &self.state, op_id, &value);
-
-                        let settled_ids: Vec<u64> = self
-                            .pending_requests
-                            .iter()
-                            .filter_map(|(&id, req)| {
-                                let p = v8::Local::new(scope, &req.promise);
-                                if p.state() != v8::PromiseState::Pending {
-                                    Some(id)
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-
-                        settled_ids
-                            .into_iter()
-                            .filter_map(|id| {
-                                let req = self.pending_requests.remove(&id)?;
-                                let result =
-                                    http::extract_settled_result(scope, &req.promise, req.is_http);
-                                Some((id, req, result))
-                            })
-                            .collect()
-                    });
-                self.disarm_cpu_timer();
-
-                if self.check_v8_terminated() {
-                    return;
-                }
-
-                let cpu_elapsed = start.elapsed();
-
-                if let Some(rid) = request_id {
-                    if let Some(req) = self.pending_requests.get_mut(&rid) {
-                        req.cpu_accumulated += cpu_elapsed;
-                    }
-                }
-
-                for (id, req, settled) in settled_results {
-                    self.send_settled_reply(id, req, settled, cpu_elapsed);
-                }
-
-                // CPU limit check for the owning request
-                if let Some(rid) = request_id {
-                    self.check_cpu_limit(rid);
-                }
-
-                self.cleanup_cancelled_requests();
-                self.clear_executing_request();
-            }
-            OpResult::StreamChunk { stream_id, data, done } => {
-                // Fast path: if there's a stream forwarder, send directly (no V8 entry)
-                if let Some(forwarder) = self.stream_forwarders.get_mut(&stream_id) {
-                    if !data.is_empty() {
-                        forwarder.try_forward(data);
-                    }
-                    if done {
-                        self.stream_forwarders.remove(&stream_id);
-                    }
-                } else {
-                    // Slow path: push into V8 ReadableStream
-                    self.arm_cpu_timer();
-                    enter_v8!(self, |scope| {
-                        appbase_v8_core::streams::push_stream_chunk(scope, &self.state, stream_id, &data, done);
-                    });
-                    self.disarm_cpu_timer();
-                    self.check_v8_terminated();
-                }
-            }
-            OpResult::Cancelled => {
-                // No-op
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // handle_timer
-    // -----------------------------------------------------------------------
-
-    fn handle_timer(&mut self, timer: TimerResult) {
-        let TimerResult { id, interval } = timer;
-
-        let owner_request_id = self.state.borrow().timer_owner.get(&id).copied();
-
-        if let Some(rid) = owner_request_id {
-            let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
-            let mut s = self.state.borrow_mut();
-            s.executing_request_id = Some(rid);
-            s.executing_request_cancel = cancel;
-        }
-
-        let start = Instant::now();
-
-        self.arm_cpu_timer();
-        let settled_results: Vec<(u64, PendingRequest, SettledResult)> =
-            enter_v8!(self, |scope| {
-                appbase_v8_core::request::fire_timer_callback(scope, &self.state, id);
-
-                let settled_ids: Vec<u64> = self
-                    .pending_requests
-                    .iter()
-                    .filter_map(|(&id, req)| {
-                        let p = v8::Local::new(scope, &req.promise);
-                        if p.state() != v8::PromiseState::Pending {
-                            Some(id)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
-                settled_ids
-                    .into_iter()
-                    .filter_map(|id| {
-                        let req = self.pending_requests.remove(&id)?;
-                        let result =
-                            http::extract_settled_result(scope, &req.promise, req.is_http);
-                        Some((id, req, result))
-                    })
-                    .collect()
-            });
-        self.disarm_cpu_timer();
-
-        if self.check_v8_terminated() {
-            return;
-        }
-
-        let cpu_elapsed = start.elapsed();
-
-        if let Some(rid) = owner_request_id {
-            if let Some(req) = self.pending_requests.get_mut(&rid) {
-                req.cpu_accumulated += cpu_elapsed;
-            }
-        }
-
-        // CPU limit check for the owning request
-        if let Some(rid) = owner_request_id {
-            self.check_cpu_limit(rid);
-        }
-
-        // Re-arm interval timers
-        if let Some(interval_dur) = interval {
-            let timer_id = id;
-            self.pending_timers.push(Box::pin(async move {
-                compio::time::sleep(interval_dur).await;
-                TimerResult { id: timer_id, interval: Some(interval_dur) }
-            }));
-        } else {
-            self.state.borrow_mut().timer_owner.remove(&id);
-        }
-
-        for (id, req, settled) in settled_results {
-            self.send_settled_reply(id, req, settled, cpu_elapsed);
-        }
-
-        self.cleanup_cancelled_requests();
-        self.clear_executing_request();
-    }
-
-    // -----------------------------------------------------------------------
-    // check_settled_promises_v8
-    // -----------------------------------------------------------------------
-
-    fn check_settled_promises_v8(&mut self) {
-        if self.pending_requests.is_empty() {
-            return;
-        }
-
-        self.arm_cpu_timer();
-        let settled: Vec<u64> = enter_v8!(self, |scope| {
-            self.pending_requests
-                .iter()
-                .filter_map(|(&id, req)| {
-                    let promise = v8::Local::new(scope, &req.promise);
-                    if promise.state() != v8::PromiseState::Pending {
-                        Some(id)
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        });
-        self.disarm_cpu_timer();
-
-        if self.check_v8_terminated() {
-            return;
-        }
-
-        if settled.is_empty() {
-            return;
-        }
-
-        for id in settled {
-            if let Some(req) = self.pending_requests.remove(&id) {
-                let is_http = req.is_http;
-                self.arm_cpu_timer();
-                let settled_result = enter_v8!(self, |scope| {
-                    http::extract_settled_result(scope, &req.promise, is_http)
-                });
-                self.disarm_cpu_timer();
-
-                if self.check_v8_terminated() {
-                    return;
-                }
-
-                self.send_settled_reply(id, req, settled_result, Duration::ZERO);
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
-
-    fn send_settled_reply(
-        &mut self,
-        id: u64,
-        req: PendingRequest,
-        settled: SettledResult,
-        cpu_elapsed: Duration,
-    ) {
-        self.send_settled_reply_any(id, req, settled, cpu_elapsed);
-    }
 
     fn drain_request_logs(&mut self, request_id: u64) -> Vec<String> {
         self.state
@@ -1829,7 +1125,7 @@ impl Runtime {
     }
 
     /// Check if a pending request has exceeded its CPU limit. If so, remove
-    /// it and send an error via the reply channel.
+    /// it and send an error via the reply slot.
     fn check_cpu_limit(&mut self, request_id: u64) {
         let Some(cpu_limit) = self.cpu_limit else { return };
         let Some(req) = self.pending_requests.get(&request_id) else { return };
@@ -1837,11 +1133,9 @@ impl Runtime {
             let req = self.pending_requests.remove(&request_id).unwrap();
             let _logs = self.drain_request_logs(request_id);
             if let Some(tx) = req.reply_direct {
-                let _ = tx.send(Err("CPU time limit exceeded".into()));
+                tx.send(Err("CPU time limit exceeded".into()));
             } else if let Some(tx) = req.reply_http {
-                let _ = tx.send(Err("CPU time limit exceeded".into()));
-            } else if let Some(tx) = req.reply_channel {
-                let _ = tx.send(Err("CPU time limit exceeded".into()));
+                tx.send(Err("CPU time limit exceeded".into()));
             }
         }
     }
@@ -1857,30 +1151,10 @@ impl Runtime {
             if let Some(req) = self.pending_requests.remove(&id) {
                 let _logs = self.drain_request_logs(id);
                 if let Some(tx) = req.reply_direct {
-                    let _ = tx.send(Err("Request timed out".into()));
+                    tx.send(Err("Request timed out".into()));
                 } else if let Some(tx) = req.reply_http {
-                    let _ = tx.send(Err("Request timed out".into()));
-                } else if let Some(tx) = req.reply_channel {
-                    let _ = tx.send(Err("Request timed out".into()));
+                    tx.send(Err("Request timed out".into()));
                 }
-            }
-        }
-    }
-
-    fn graceful_shutdown(&mut self) {
-        for (_, req) in &self.pending_requests {
-            req.cancel.cancel();
-        }
-        if let Some(rx) = &mut self.request_rx {
-            rx.close();
-        }
-        for (_id, req) in self.pending_requests.drain() {
-            if let Some(tx) = req.reply_direct {
-                let _ = tx.send(Err("Isolate shutting down".into()));
-            } else if let Some(tx) = req.reply_http {
-                let _ = tx.send(Err("Isolate shutting down".into()));
-            } else if let Some(tx) = req.reply_channel {
-                let _ = tx.send(Err("Isolate shutting down".into()));
             }
         }
     }

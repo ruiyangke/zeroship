@@ -119,7 +119,6 @@ name = "appbase-runtime-compio"
 version = "0.1.0"
 dependencies = [
  "appbase-v8-core",
- "bytes",
  "compio",
  "cyper",
  "futures",
@@ -129,8 +128,6 @@ dependencies = [
  "mimalloc",
  "serde_json",
  "socket2 0.5.10",
- "tokio",
- "tokio-util",
  "v8",
 ]
 

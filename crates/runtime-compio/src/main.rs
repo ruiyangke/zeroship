@@ -27,7 +27,22 @@ use appbase_runtime_compio::init_v8;
 use compio::buf::BufResult;
 use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
-use futures::{FutureExt, StreamExt};
+use futures::StreamExt;
+
+/// Yield control back to the compio event loop so other tasks (pump, accept) can run.
+/// On first poll returns Pending, on second poll returns Ready.
+fn yield_now() -> impl std::future::Future<Output = ()> {
+    let mut yielded = false;
+    std::future::poll_fn(move |cx| {
+        if yielded {
+            std::task::Poll::Ready(())
+        } else {
+            yielded = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+}
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -205,37 +220,24 @@ async fn dispatch_rpc(
             build_json_response(&format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\"")))
         }
         DispatchOutcome::Pending(rx) => {
-            // Await the pump task settling this promise.
+            // Poll the result slot until the pump task settles this promise.
             // The RefCell borrow is NOT held here — other tasks can run.
             let wall_limit = runtime.borrow().wall_timeout();
-            if let Some(wall_limit) = wall_limit {
-                // Race the reply against the wall timeout
-                futures::select! {
-                    result = rx.fuse() => {
-                        match result {
-                            Ok(Ok(r)) => build_json_response(&r.json),
-                            Ok(Err(e)) => {
-                                let escaped = e.replace('"', "\\\"");
-                                build_json_response(&format!(r#"{{"error":"{escaped}"}}"#))
-                            }
-                            Err(_) => SERVICE_UNAVAILABLE.to_vec(),
+            let deadline = wall_limit.map(|d| std::time::Instant::now() + d);
+            loop {
+                if let Some(result) = rx.try_recv() {
+                    break match result {
+                        Ok(r) => build_json_response(&r.json),
+                        Err(e) => {
+                            let escaped = e.replace('"', "\\\"");
+                            build_json_response(&format!(r#"{{"error":"{escaped}"}}"#))
                         }
-                    }
-                    _ = compio::time::sleep(wall_limit).fuse() => {
-                        build_json_response(r#"{"error":"Request timed out"}"#)
-                    }
+                    };
                 }
-            } else {
-                match rx.await {
-                    Ok(Ok(result)) => build_json_response(&result.json),
-                    Ok(Err(e)) => {
-                        build_json_response(&format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\"")))
-                    }
-                    Err(_) => {
-                        // Oneshot dropped — pump shut down
-                        SERVICE_UNAVAILABLE.to_vec()
-                    }
+                if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    break build_json_response(r#"{"error":"Request timed out"}"#);
                 }
+                yield_now().await;
             }
         }
         // HTTP variants should never come from dispatch_start (RPC path)
@@ -372,37 +374,42 @@ async fn dispatch_http(
             let BufResult(r, _) = stream.write_all(response).await;
             r.is_ok()
         }
-        DispatchOutcome::HttpStream { status, headers, mut body_rx, logs: _ } => {
+        DispatchOutcome::HttpStream { status, headers, body, logs: _ } => {
             // Write headers with chunked transfer encoding
             let header_bytes = build_stream_response_headers(status, &headers);
             let BufResult(r, _) = stream.write_all(header_bytes).await;
             if r.is_err() { return false; }
 
             // Stream body chunks using chunked transfer encoding
-            while let Some(chunk) = body_rx.recv().await {
-                // Write chunk size in hex + CRLF + data + CRLF
-                let size_hex = format!("{:x}\r\n", chunk.len());
-                let mut chunk_data = Vec::with_capacity(size_hex.len() + chunk.len() + 2);
-                chunk_data.extend_from_slice(size_hex.as_bytes());
-                chunk_data.extend_from_slice(&chunk);
-                chunk_data.extend_from_slice(b"\r\n");
-                let BufResult(r, _) = stream.write_all(chunk_data).await;
-                if r.is_err() { return false; }
+            loop {
+                for chunk in body.drain() {
+                    let size_hex = format!("{:x}\r\n", chunk.len());
+                    let mut chunk_data = Vec::with_capacity(size_hex.len() + chunk.len() + 2);
+                    chunk_data.extend_from_slice(size_hex.as_bytes());
+                    chunk_data.extend_from_slice(&chunk);
+                    chunk_data.extend_from_slice(b"\r\n");
+                    let BufResult(r, _) = stream.write_all(chunk_data).await;
+                    if r.is_err() { return false; }
+                }
+                if body.is_done() { break; }
+                yield_now().await;
             }
             // Write terminal chunk
             let BufResult(r, _) = stream.write_all(b"0\r\n\r\n".to_vec()).await;
             r.is_ok()
         }
         DispatchOutcome::HttpPending(rx) => {
-            // Await the pump task settling this promise
+            // Poll the result slot until the pump task settles this promise
             let wall_limit = runtime.borrow().wall_timeout();
-            let result = if let Some(wall_limit) = wall_limit {
-                futures::select! {
-                    result = rx.fuse() => result.ok(),
-                    _ = compio::time::sleep(wall_limit).fuse() => None,
+            let deadline = wall_limit.map(|d| std::time::Instant::now() + d);
+            let result = loop {
+                if let Some(result) = rx.try_recv() {
+                    break Some(result);
                 }
-            } else {
-                rx.await.ok()
+                if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    break None;
+                }
+                yield_now().await;
             };
 
             match result {
@@ -411,19 +418,23 @@ async fn dispatch_http(
                     let BufResult(r, _) = stream.write_all(response).await;
                     r.is_ok()
                 }
-                Some(Ok(HttpDispatchResult::Stream { status, headers, mut body_rx, logs: _ })) => {
+                Some(Ok(HttpDispatchResult::Stream { status, headers, body, logs: _ })) => {
                     let header_bytes = build_stream_response_headers(status, &headers);
                     let BufResult(r, _) = stream.write_all(header_bytes).await;
                     if r.is_err() { return false; }
 
-                    while let Some(chunk) = body_rx.recv().await {
-                        let size_hex = format!("{:x}\r\n", chunk.len());
-                        let mut chunk_data = Vec::with_capacity(size_hex.len() + chunk.len() + 2);
-                        chunk_data.extend_from_slice(size_hex.as_bytes());
-                        chunk_data.extend_from_slice(&chunk);
-                        chunk_data.extend_from_slice(b"\r\n");
-                        let BufResult(r, _) = stream.write_all(chunk_data).await;
-                        if r.is_err() { return false; }
+                    loop {
+                        for chunk in body.drain() {
+                            let size_hex = format!("{:x}\r\n", chunk.len());
+                            let mut chunk_data = Vec::with_capacity(size_hex.len() + chunk.len() + 2);
+                            chunk_data.extend_from_slice(size_hex.as_bytes());
+                            chunk_data.extend_from_slice(&chunk);
+                            chunk_data.extend_from_slice(b"\r\n");
+                            let BufResult(r, _) = stream.write_all(chunk_data).await;
+                            if r.is_err() { return false; }
+                        }
+                        if body.is_done() { break; }
+                        yield_now().await;
                     }
                     let BufResult(r, _) = stream.write_all(b"0\r\n\r\n".to_vec()).await;
                     r.is_ok()
