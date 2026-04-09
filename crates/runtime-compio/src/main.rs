@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 use appbase_runtime_compio::modules::ModuleEntry;
 use appbase_runtime_compio::runtime::Runtime;
@@ -38,6 +39,15 @@ fn server_modules() -> Vec<ModuleEntry> {
 
 /// Monotonic request ID counter (shared across connection handlers).
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Shared no-op cancellation token. Cloning is an Arc clone (cheap) vs.
+/// `CancellationToken::new()` which allocates a new tree node per call.
+/// This token is never cancelled and serves requests that have no timeout.
+static SHARED_CANCEL: OnceLock<CancellationToken> = OnceLock::new();
+
+fn shared_cancel() -> CancellationToken {
+    SHARED_CANCEL.get_or_init(CancellationToken::new).clone()
+}
 
 /// Static HTTP response parts.
 const HEALTH_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}";
@@ -127,7 +137,7 @@ async fn dispatch_rpc(
 
     let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let cancel = CancellationToken::new();
+    let cancel = shared_cancel();
 
     if req_tx
         .send(IncomingRequest {
@@ -242,7 +252,7 @@ fn run_single_worker(port: u16, use_reuseport: bool, worker_id: Option<usize>) {
                             r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":0}"#.to_string(),
                         ),
                         reply: reply_tx,
-                        cancel: CancellationToken::new(),
+                        cancel: shared_cancel(),
                     })
                     .await
                     .unwrap();

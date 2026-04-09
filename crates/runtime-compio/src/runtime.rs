@@ -209,6 +209,18 @@ impl Runtime {
     /// Move newly spawned ops and timers from `RuntimeState` into the
     /// `FuturesUnordered` collections.
     fn collect_new_tasks(&mut self) {
+        // Fast path: skip all work when nothing was spawned (common for sync requests).
+        {
+            let s = self.state.borrow();
+            if s.spawned_ops.is_empty()
+                && s.spawned_timers.is_empty()
+                && s.spawned_fetches.is_empty()
+                && s.ready_timers.is_empty()
+            {
+                return;
+            }
+        }
+
         // Drain spawned fetches
         let fetches: Vec<appbase_v8_core::state::FetchRequest> = {
             self.state.borrow_mut().spawned_fetches.drain(..).collect()
@@ -356,8 +368,7 @@ impl Runtime {
             s.executing_request_cancel = Some(cancel.clone());
         }
 
-        let start = Instant::now();
-        let wall_start = start;
+        let wall_start = Instant::now();
 
         let dispatch_result = {
             let dispatch_fn = match &self.dispatch_fn {
@@ -374,15 +385,17 @@ impl Runtime {
             })
         };
 
-        let cpu_elapsed = start.elapsed();
+        // Single elapsed measurement used for both cpu_time and wall_time
+        // (single-threaded: cpu time == wall time for V8 execution).
+        let elapsed = wall_start.elapsed();
 
         match dispatch_result {
             DispatchResult::Sync(json) => {
                 let logs = self.drain_request_logs(id);
                 let _ = reply.send(Ok(RequestReply::Complete(RequestResult {
                     json,
-                    cpu_time: cpu_elapsed,
-                    wall_time: wall_start.elapsed(),
+                    cpu_time: elapsed,
+                    wall_time: elapsed,
                     logs,
                 })));
                 self.clear_executing_request();
@@ -392,7 +405,7 @@ impl Runtime {
                     id,
                     promise,
                     reply,
-                    cpu_accumulated: cpu_elapsed,
+                    cpu_accumulated: elapsed,
                     wall_start,
                     cancel: cancel.clone(),
                 });
