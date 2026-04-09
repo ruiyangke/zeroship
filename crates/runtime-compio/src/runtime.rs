@@ -150,6 +150,13 @@ pub struct Runtime {
     cpu_limit: Option<Duration>,
     /// Optional per-request wall time limit.
     wall_timeout: Option<Duration>,
+
+    /// POSIX CPU timer — kills V8 on CPU limit exceeded (Linux only).
+    #[cfg(target_os = "linux")]
+    cpu_timer: Option<appbase_v8_core::cpu_timer::CpuTimer>,
+    /// Whether the CPU timer is currently armed.
+    #[cfg(target_os = "linux")]
+    cpu_timer_active: bool,
 }
 
 // SAFETY: Runtime is only used on a single compio thread.
@@ -231,6 +238,10 @@ impl Runtime {
             pump_notify_tx: None,
             cpu_limit,
             wall_timeout,
+            #[cfg(target_os = "linux")]
+            cpu_timer: None,
+            #[cfg(target_os = "linux")]
+            cpu_timer_active: false,
         }
     }
 
@@ -276,6 +287,63 @@ impl Runtime {
         }
 
         self.initialized = true;
+
+        // Create POSIX CPU timer if cpu_limit is configured (Linux only).
+        #[cfg(target_os = "linux")]
+        if self.cpu_limit.is_some() {
+            let system = appbase_v8_core::cpu_timer::CpuTimerSystem::get_or_init();
+            let app_id = 0u64;
+            let v8_handle = self.isolate.thread_safe_handle();
+            system.register(app_id, v8_handle);
+            match appbase_v8_core::cpu_timer::CpuTimer::new(app_id) {
+                Ok(timer) => self.cpu_timer = Some(timer),
+                Err(e) => eprintln!("[cpu-timer] Failed: {e}"),
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // CPU timer arm/disarm
+    // -----------------------------------------------------------------------
+
+    fn arm_cpu_timer(&mut self) {
+        #[cfg(target_os = "linux")]
+        if !self.cpu_timer_active {
+            if let (Some(timer), Some(limit)) = (&self.cpu_timer, self.cpu_limit) {
+                timer.arm(limit);
+                self.cpu_timer_active = true;
+            }
+        }
+    }
+
+    fn disarm_cpu_timer(&mut self) {
+        #[cfg(target_os = "linux")]
+        if self.cpu_timer_active {
+            if let Some(timer) = &self.cpu_timer {
+                timer.disarm();
+            }
+            self.cpu_timer_active = false;
+        }
+    }
+
+    /// Check if V8 was terminated by the CPU timer. If so, cancel termination,
+    /// disarm the timer, and drain all pending requests with an error.
+    /// Returns `true` if termination was detected.
+    fn check_v8_terminated(&mut self) -> bool {
+        if !self.isolate.is_execution_terminating() {
+            return false;
+        }
+        self.isolate.cancel_terminate_execution();
+        self.disarm_cpu_timer();
+        // Drain ALL pending requests with CPU limit error
+        for (_id, req) in self.pending_requests.drain() {
+            if let Some(tx) = req.reply_direct {
+                let _ = tx.send(Err("CPU time limit exceeded".into()));
+            } else if let Some(tx) = req.reply_channel {
+                let _ = tx.send(Err("CPU time limit exceeded".into()));
+            }
+        }
+        true
     }
 
     // -----------------------------------------------------------------------
@@ -290,16 +358,24 @@ impl Runtime {
     pub fn dispatch_rpc(&mut self, body: &str) -> Result<RequestResult, String> {
         self.ensure_initialized();
 
-        let dispatch_fn = match &self.dispatch_fn {
-            Some(f) => f,
-            None => return Err("Isolate not initialized".to_string()),
-        };
+        if self.dispatch_fn.is_none() {
+            return Err("Isolate not initialized".to_string());
+        }
 
         let wall_start = Instant::now();
 
-        let dispatch_result = enter_v8!(self, |scope| {
-            appbase_v8_core::request::dispatch_request(scope, &self.state, dispatch_fn, body)
-        });
+        self.arm_cpu_timer();
+        let dispatch_result = {
+            let dispatch_fn = self.dispatch_fn.as_ref().unwrap();
+            enter_v8!(self, |scope| {
+                appbase_v8_core::request::dispatch_request(scope, &self.state, dispatch_fn, body)
+            })
+        };
+        self.disarm_cpu_timer();
+
+        if self.check_v8_terminated() {
+            return Err("CPU time limit exceeded".into());
+        }
 
         let cpu_dispatch = wall_start.elapsed();
 
@@ -318,9 +394,15 @@ impl Runtime {
                 self.collect_new_tasks();
 
                 // Check if the promise settled after microtask checkpoint + ready timers
+                self.arm_cpu_timer();
                 let result = enter_v8!(self, |scope| {
                     appbase_v8_core::request::extract_promise_result(scope, &promise)
                 });
+                self.disarm_cpu_timer();
+
+                if self.check_v8_terminated() {
+                    return Err("CPU time limit exceeded".into());
+                }
 
                 let cpu_total = wall_start.elapsed();
 
@@ -360,21 +442,27 @@ impl Runtime {
     pub fn dispatch_start(&mut self, body: &str) -> DispatchOutcome {
         self.ensure_initialized();
 
-        let dispatch_fn = match &self.dispatch_fn {
-            Some(f) => f,
-            None => {
-                return DispatchOutcome::Complete(Err("Isolate not initialized".to_string()));
-            }
-        };
+        if self.dispatch_fn.is_none() {
+            return DispatchOutcome::Complete(Err("Isolate not initialized".to_string()));
+        }
 
         let request_id = self.next_direct_request_id;
         self.next_direct_request_id += 1;
 
         let wall_start = Instant::now();
 
-        let dispatch_result = enter_v8!(self, |scope| {
-            appbase_v8_core::request::dispatch_request(scope, &self.state, dispatch_fn, body)
-        });
+        self.arm_cpu_timer();
+        let dispatch_result = {
+            let dispatch_fn = self.dispatch_fn.as_ref().unwrap();
+            enter_v8!(self, |scope| {
+                appbase_v8_core::request::dispatch_request(scope, &self.state, dispatch_fn, body)
+            })
+        };
+        self.disarm_cpu_timer();
+
+        if self.check_v8_terminated() {
+            return DispatchOutcome::Complete(Err("CPU time limit exceeded".into()));
+        }
 
         let cpu_dispatch = wall_start.elapsed();
 
@@ -393,10 +481,20 @@ impl Runtime {
                 // without a round-trip through the pump task.
                 self.fire_ready_timers_inline();
 
+                if self.check_v8_terminated() {
+                    return DispatchOutcome::Complete(Err("CPU time limit exceeded".into()));
+                }
+
                 // Check if promise settled after microtask checkpoint + ready timers
+                self.arm_cpu_timer();
                 let result = enter_v8!(self, |scope| {
                     appbase_v8_core::request::extract_promise_result(scope, &promise)
                 });
+                self.disarm_cpu_timer();
+
+                if self.check_v8_terminated() {
+                    return DispatchOutcome::Complete(Err("CPU time limit exceeded".into()));
+                }
 
                 let cpu_total = wall_start.elapsed();
 
@@ -509,10 +607,16 @@ impl Runtime {
 
                 let start = Instant::now();
 
+                self.arm_cpu_timer();
                 let settled_results = enter_v8!(self, |scope| {
                     appbase_v8_core::request::resolve_op(scope, &self.state, op_id, &value);
                     collect_settled_promises(scope, &mut self.pending_requests)
                 });
+                self.disarm_cpu_timer();
+
+                if self.check_v8_terminated() {
+                    return;
+                }
 
                 let cpu_elapsed = start.elapsed();
 
@@ -538,9 +642,12 @@ impl Runtime {
                 self.drain_new_tasks_into(work);
             }
             OpResult::StreamChunk { stream_id, data, done } => {
+                self.arm_cpu_timer();
                 enter_v8!(self, |scope| {
                     appbase_v8_core::streams::push_stream_chunk(scope, &self.state, stream_id, &data, done);
                 });
+                self.disarm_cpu_timer();
+                self.check_v8_terminated();
             }
             OpResult::Cancelled => {}
         }
@@ -562,10 +669,16 @@ impl Runtime {
 
         let start = Instant::now();
 
+        self.arm_cpu_timer();
         let settled_results = enter_v8!(self, |scope| {
             appbase_v8_core::request::fire_timer_callback(scope, &self.state, id);
             collect_settled_promises(scope, &mut self.pending_requests)
         });
+        self.disarm_cpu_timer();
+
+        if self.check_v8_terminated() {
+            return;
+        }
 
         let cpu_elapsed = start.elapsed();
 
@@ -615,9 +728,15 @@ impl Runtime {
             };
             let Some(timer_id) = timer_id else { break };
 
+            self.arm_cpu_timer();
             enter_v8!(self, |scope| {
                 appbase_v8_core::request::fire_timer_callback(scope, &self.state, timer_id);
             });
+            self.disarm_cpu_timer();
+
+            if self.check_v8_terminated() {
+                return;
+            }
 
             self.state.borrow_mut().timer_owner.remove(&timer_id);
         }
@@ -643,10 +762,16 @@ impl Runtime {
 
             let start = Instant::now();
 
+            self.arm_cpu_timer();
             let settled_results = enter_v8!(self, |scope| {
                 appbase_v8_core::request::fire_timer_callback(scope, &self.state, timer_id);
                 collect_settled_promises(scope, &mut self.pending_requests)
             });
+            self.disarm_cpu_timer();
+
+            if self.check_v8_terminated() {
+                return;
+            }
 
             let cpu_elapsed = start.elapsed();
 
@@ -855,6 +980,7 @@ impl Runtime {
 
             let start = Instant::now();
 
+            self.arm_cpu_timer();
             let settled_results: Vec<(u64, PendingRequest, Result<String, String>)> =
                 enter_v8!(self, |scope| {
                     appbase_v8_core::request::fire_timer_callback(scope, &self.state, timer_id);
@@ -882,6 +1008,11 @@ impl Runtime {
                         })
                         .collect()
                 });
+            self.disarm_cpu_timer();
+
+            if self.check_v8_terminated() {
+                return;
+            }
 
             let cpu_elapsed = start.elapsed();
 
@@ -955,20 +1086,26 @@ impl Runtime {
 
         let wall_start = Instant::now();
 
-        let dispatch_result = {
-            let dispatch_fn = match &self.dispatch_fn {
-                Some(f) => f,
-                None => {
-                    let _ = reply.send(Err("Isolate not initialized".to_string()));
-                    self.clear_executing_request();
-                    return;
-                }
-            };
+        if self.dispatch_fn.is_none() {
+            let _ = reply.send(Err("Isolate not initialized".to_string()));
+            self.clear_executing_request();
+            return;
+        }
 
+        self.arm_cpu_timer();
+        let dispatch_result = {
+            let dispatch_fn = self.dispatch_fn.as_ref().unwrap();
             enter_v8!(self, |scope| {
                 appbase_v8_core::request::dispatch_request(scope, &self.state, dispatch_fn, &body)
             })
         };
+        self.disarm_cpu_timer();
+
+        if self.check_v8_terminated() {
+            let _ = reply.send(Err("CPU time limit exceeded".into()));
+            self.clear_executing_request();
+            return;
+        }
 
         // Single elapsed measurement used for both cpu_time and wall_time
         // (single-threaded: cpu time == wall time for V8 execution).
@@ -1022,6 +1159,7 @@ impl Runtime {
 
                 let start = Instant::now();
 
+                self.arm_cpu_timer();
                 let settled_results: Vec<(u64, PendingRequest, Result<String, String>)> =
                     enter_v8!(self, |scope| {
                         appbase_v8_core::request::resolve_op(scope, &self.state, op_id, &value);
@@ -1049,6 +1187,11 @@ impl Runtime {
                             })
                             .collect()
                     });
+                self.disarm_cpu_timer();
+
+                if self.check_v8_terminated() {
+                    return;
+                }
 
                 let cpu_elapsed = start.elapsed();
 
@@ -1072,9 +1215,12 @@ impl Runtime {
             }
             OpResult::StreamChunk { stream_id, data, done } => {
                 // Push into V8 ReadableStream (slow path, no forwarder in compio runtime)
+                self.arm_cpu_timer();
                 enter_v8!(self, |scope| {
                     appbase_v8_core::streams::push_stream_chunk(scope, &self.state, stream_id, &data, done);
                 });
+                self.disarm_cpu_timer();
+                self.check_v8_terminated();
             }
             OpResult::Cancelled => {
                 // No-op
@@ -1100,6 +1246,7 @@ impl Runtime {
 
         let start = Instant::now();
 
+        self.arm_cpu_timer();
         let settled_results: Vec<(u64, PendingRequest, Result<String, String>)> =
             enter_v8!(self, |scope| {
                 appbase_v8_core::request::fire_timer_callback(scope, &self.state, id);
@@ -1127,6 +1274,11 @@ impl Runtime {
                     })
                     .collect()
             });
+        self.disarm_cpu_timer();
+
+        if self.check_v8_terminated() {
+            return;
+        }
 
         let cpu_elapsed = start.elapsed();
 
@@ -1169,6 +1321,7 @@ impl Runtime {
             return;
         }
 
+        self.arm_cpu_timer();
         let settled: Vec<u64> = enter_v8!(self, |scope| {
             self.pending_requests
                 .iter()
@@ -1182,6 +1335,11 @@ impl Runtime {
                 })
                 .collect()
         });
+        self.disarm_cpu_timer();
+
+        if self.check_v8_terminated() {
+            return;
+        }
 
         if settled.is_empty() {
             return;
@@ -1189,9 +1347,16 @@ impl Runtime {
 
         for id in settled {
             if let Some(req) = self.pending_requests.remove(&id) {
+                self.arm_cpu_timer();
                 let settled_result = enter_v8!(self, |scope| {
                     appbase_v8_core::request::extract_promise_result(scope, &req.promise)
                 });
+                self.disarm_cpu_timer();
+
+                if self.check_v8_terminated() {
+                    return;
+                }
+
                 self.send_settled_reply(id, req, settled_result, Duration::ZERO);
             }
         }
