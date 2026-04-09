@@ -2,6 +2,7 @@
 members = [
     "crates/v8-core",
     "crates/runtime-tokio",
+    "crates/runtime-compio",
     "crates/runtime",
     "crates/runtime_macros",
     "crates/compiler",

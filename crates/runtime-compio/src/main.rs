@@ -1,0 +1,230 @@
+//! Minimal HTTP server for V8 runtime using compio (io_uring).
+//!
+//! POST /rpc -> dispatch to V8 -> JSON-RPC response
+//! GET /health -> {"status":"ok"}
+//!
+//! Uses httparse for zero-copy HTTP parsing and compio for io_uring I/O.
+
+#![allow(unsafe_code)]
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use appbase_runtime_compio::modules::ModuleEntry;
+use appbase_runtime_compio::runtime::Runtime;
+use appbase_runtime_compio::state::{IncomingRequest, RequestKind, RequestReply};
+use appbase_runtime_compio::init_v8;
+use compio::buf::BufResult;
+use compio::io::{AsyncRead, AsyncWriteExt};
+use compio::net::{TcpListener, TcpStream};
+use tokio_util::sync::CancellationToken;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// Default JS loaded when no --js flag is provided.
+const SERVER_JS: &str = include_str!("../benches/scenarios.js");
+
+fn server_modules() -> Vec<ModuleEntry> {
+    vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: SERVER_JS.into(),
+    }]
+}
+
+// ===========================================================================
+// HTTP connection handler (compio I/O)
+// ===========================================================================
+
+/// Monotonic request ID counter (shared across connection handlers).
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Static HTTP response parts.
+const HEALTH_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}";
+const NOT_FOUND_RESPONSE: &[u8] = b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found";
+
+async fn handle_connection(
+    mut stream: TcpStream,
+    req_tx: tokio::sync::mpsc::Sender<IncomingRequest>,
+) {
+    // Accumulation buffer for incoming data
+    let mut data = Vec::with_capacity(8192);
+
+    loop {
+        // Read into a fresh buffer (compio takes ownership)
+        let read_buf = Vec::with_capacity(4096);
+        let BufResult(result, read_buf) = stream.read(read_buf).await;
+
+        let n = match result {
+            Ok(0) => return,   // connection closed
+            Ok(n) => n,
+            Err(_) => return,  // read error
+        };
+
+        // Append the read data to our accumulation buffer
+        data.extend_from_slice(&read_buf[..n]);
+
+        // Try to parse one or more HTTP requests from the accumulated data
+        loop {
+            let mut headers = [httparse::EMPTY_HEADER; 32];
+            let mut req = httparse::Request::new(&mut headers);
+
+            let header_len = match req.parse(&data) {
+                Ok(httparse::Status::Complete(len)) => len,
+                Ok(httparse::Status::Partial) => break, // need more data
+                Err(_) => return,                       // parse error
+            };
+
+            let method = req.method.unwrap_or("GET");
+            let path = req.path.unwrap_or("/");
+
+            // Extract Content-Length
+            let content_length: usize = headers
+                .iter()
+                .find(|h| h.name.eq_ignore_ascii_case("content-length"))
+                .and_then(|h| std::str::from_utf8(h.value).ok())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+
+            let total_len = header_len + content_length;
+            if data.len() < total_len {
+                break; // need more body data
+            }
+
+            let body_bytes = &data[header_len..total_len];
+
+            // Route
+            let response_bytes: Vec<u8> = match (method, path) {
+                ("GET", "/health") => HEALTH_RESPONSE.to_vec(),
+                ("POST", "/rpc") => {
+                    dispatch_rpc(body_bytes, &req_tx).await
+                }
+                _ => NOT_FOUND_RESPONSE.to_vec(),
+            };
+
+            // Write response (compio takes ownership of the Vec)
+            let BufResult(write_result, _) = stream.write_all(response_bytes).await;
+            if write_result.is_err() {
+                return;
+            }
+
+            // Consume the processed request from the buffer
+            data.drain(..total_len);
+
+            if data.is_empty() {
+                break; // no more data, go back to reading
+            }
+            // Otherwise loop to parse next pipelined request
+        }
+    }
+}
+
+async fn dispatch_rpc(
+    body_bytes: &[u8],
+    req_tx: &tokio::sync::mpsc::Sender<IncomingRequest>,
+) -> Vec<u8> {
+    let body_str = String::from_utf8_lossy(body_bytes).into_owned();
+
+    let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let cancel = CancellationToken::new();
+
+    if req_tx
+        .send(IncomingRequest {
+            id,
+            kind: RequestKind::Rpc(body_str),
+            reply: reply_tx,
+            cancel,
+        })
+        .await
+        .is_err()
+    {
+        return b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n".to_vec();
+    }
+
+    let reply = match reply_rx.await {
+        Ok(reply) => reply,
+        Err(_) => {
+            return b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n".to_vec();
+        }
+    };
+
+    let response_body = match reply {
+        Ok(RequestReply::Complete(result)) => result.json,
+        Ok(RequestReply::Stream(_)) => r#"{"error":"streaming not supported"}"#.to_string(),
+        Err(e) => format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\"")),
+    };
+
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        response_body.len(),
+        response_body
+    )
+    .into_bytes()
+}
+
+// ===========================================================================
+// V8 event loop
+// ===========================================================================
+
+async fn v8_loop(
+    req_rx: tokio::sync::mpsc::Receiver<IncomingRequest>,
+    modules: Vec<ModuleEntry>,
+) {
+    let shutdown = CancellationToken::new();
+    let mut runtime = Runtime::new(modules, req_rx, shutdown, HashMap::new());
+    runtime.run().await;
+}
+
+// ===========================================================================
+// main
+// ===========================================================================
+
+fn main() {
+    init_v8();
+
+    let port: u16 = std::env::args()
+        .find(|a| a.starts_with("--port="))
+        .and_then(|a| a.strip_prefix("--port=").unwrap().parse().ok())
+        .unwrap_or(5000);
+
+    compio::runtime::RuntimeBuilder::new()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await.unwrap();
+            eprintln!("[v8-server-compio] http://0.0.0.0:{port}");
+
+            // Channel from HTTP handlers to V8 event loop
+            let (req_tx, req_rx) = tokio::sync::mpsc::channel::<IncomingRequest>(1024);
+
+            // Spawn V8 event loop
+            let modules = server_modules();
+            compio::runtime::spawn(v8_loop(req_rx, modules)).detach();
+
+            // Warmup: send a ping and wait
+            {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                req_tx
+                    .send(IncomingRequest {
+                        id: 0,
+                        kind: RequestKind::Rpc(
+                            r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":0}"#.to_string(),
+                        ),
+                        reply: reply_tx,
+                        cancel: CancellationToken::new(),
+                    })
+                    .await
+                    .unwrap();
+                let _ = reply_rx.await;
+                eprintln!("[v8-server-compio] warmup complete");
+            }
+
+            // Accept loop
+            loop {
+                let (stream, _addr) = listener.accept().await.unwrap();
+                let tx = req_tx.clone();
+                compio::runtime::spawn(handle_connection(stream, tx)).detach();
+            }
+        });
+}

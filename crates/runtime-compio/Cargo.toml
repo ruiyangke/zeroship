@@ -1,0 +1,27 @@
+[package]
+name = "appbase-runtime-compio"
+version = "0.1.0"
+edition = "2024"
+description = "compio (io_uring) event loop for appbase V8 runtime"
+
+[dependencies]
+appbase-v8-core = { path = "../v8-core" }
+v8 = "147"
+compio = { version = "0.12", features = ["time", "macros", "bytes"] }
+httparse = "1"
+serde_json = "1"
+futures = "0.3"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+mimalloc = { version = "0.1", default-features = false }
+bytes = "1"
+
+# For fetch: use a background tokio thread with reqwest (temporary)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+[[bin]]
+name = "v8-server-compio"
+path = "src/main.rs"
+
+[lints]
+workspace = true
