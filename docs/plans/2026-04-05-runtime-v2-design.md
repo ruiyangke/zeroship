@@ -477,7 +477,7 @@ impl EventDriver {
 /// Takes scope and state as separate parameters instead of &self.
 /// <!-- Added in round 3: converted from method to free function -->
 fn handle_event(
-    scope: &mut v8::ContextScope<v8::HandleScope>,
+    scope: &mut v8::PinScope,
     state: &SharedState,
     stream_forwarders: &mut HashMap<u32, StreamForwarder>,
     event: LoopEvent,
@@ -526,7 +526,7 @@ fn handle_event(
 
 /// Check for settled promises — FREE FUNCTION (same borrow-safety reason).
 fn check_settled_promises(
-    scope: &mut v8::ContextScope<v8::HandleScope>,
+    scope: &mut v8::PinScope,
     state: &SharedState,
     pending_requests: &mut HashMap<u32, PendingRequest>,
 ) {
@@ -547,7 +547,7 @@ fn check_settled_promises(
 
 /// Check for cancelled requests — FREE FUNCTION (same borrow-safety reason).
 fn check_cancelled_requests(
-    scope: &mut v8::ContextScope<v8::HandleScope>,
+    scope: &mut v8::PinScope,
     state: &SharedState,
     pending_requests: &mut HashMap<u32, PendingRequest>,
 ) {
@@ -568,7 +568,7 @@ fn check_cancelled_requests(
 
 /// Clean up state for a single request — FREE FUNCTION.
 fn cleanup_request_state(
-    scope: &mut v8::ContextScope<v8::HandleScope>,
+    scope: &mut v8::PinScope,
     state: &SharedState,
     request_id: u32,
 ) {

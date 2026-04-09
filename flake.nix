@@ -25,6 +25,9 @@
             wrk
             hey
             esbuild
+            # Profiling
+            perf
+            cargo-flamegraph
           ];
 
           RUST_BACKTRACE = "1";

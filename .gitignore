@@ -9,3 +9,5 @@ result
 target/
 refs/
 test-results/
+perf.data
+perf-compio.data
