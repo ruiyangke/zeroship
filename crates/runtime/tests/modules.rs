@@ -43,18 +43,3 @@ fn esm_multi_module_rpc() {
     assert!(r.json.contains("7"), "got: {}", r.json);
 }
 
-#[test]
-fn esm_with_kv() {
-    init_v8();
-    let modules = vec![ModuleEntry {
-        specifier: "index.js".into(),
-        source: r#"
-            export function set(k, v) { kv.set(k, v); return "ok"; }
-            export function get(k) { return kv.get(k); }
-        "#.into(),
-    }];
-    let mut runtime = Runtime::new_direct(modules, no_env(), None, None);
-    runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"set","params":["x","1"],"id":1}"#).unwrap();
-    let r = runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"get","params":["x"],"id":2}"#).unwrap();
-    assert!(r.json.contains("1"), "got: {}", r.json);
-}

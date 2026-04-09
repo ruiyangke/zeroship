@@ -7,7 +7,6 @@ pub mod modules;
 pub mod crypto;
 pub mod streams;
 pub mod timers;
-pub mod kv;
 pub mod env;
 pub mod url;
 pub mod ops;

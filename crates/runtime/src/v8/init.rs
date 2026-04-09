@@ -387,30 +387,6 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
         global.set(scope, key.into(), f.into());
     }
 
-    // kv namespace
-    {
-        let kv = v8::Object::new(scope);
-
-        let get_fn = v8::Function::new(scope, crate::v8::kv::kv_get_callback).unwrap();
-        let get_key = v8::String::new(scope, "get").unwrap();
-        kv.set(scope, get_key.into(), get_fn.into());
-
-        let set_fn = v8::Function::new(scope, crate::v8::kv::kv_set_callback).unwrap();
-        let set_key = v8::String::new(scope, "set").unwrap();
-        kv.set(scope, set_key.into(), set_fn.into());
-
-        let del_fn = v8::Function::new(scope, crate::v8::kv::kv_delete_callback).unwrap();
-        let del_key = v8::String::new(scope, "delete").unwrap();
-        kv.set(scope, del_key.into(), del_fn.into());
-
-        let list_fn = v8::Function::new(scope, crate::v8::kv::kv_list_callback).unwrap();
-        let list_key = v8::String::new(scope, "list").unwrap();
-        kv.set(scope, list_key.into(), list_fn.into());
-
-        let kv_key = v8::String::new(scope, "kv").unwrap();
-        global.set(scope, kv_key.into(), kv.into());
-    }
-
     // crypto namespace (randomUUID + native helpers for SubtleCrypto)
     {
         let crypto = v8::Object::new(scope);
