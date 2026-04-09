@@ -140,6 +140,11 @@ pub struct Runtime {
 
     request_rx: Option<tokio::sync::mpsc::Receiver<IncomingRequest>>,
     shutdown: CancellationToken,
+
+    /// Notification channel to wake the pump task when new work is added.
+    /// dispatch_start sends a signal here after spawning timers/ops so the
+    /// pump doesn't have to poll on a 1ms sleep.
+    pump_notify_tx: Option<futures::channel::mpsc::Sender<()>>,
 }
 
 // SAFETY: Runtime is only used on a single compio thread.
@@ -212,6 +217,19 @@ impl Runtime {
             pending_timers: FuturesUnordered::new(),
             request_rx,
             shutdown,
+            pump_notify_tx: None,
+        }
+    }
+
+    /// Set the pump notification sender. The pump task holds the receiver.
+    pub fn set_pump_notify(&mut self, tx: futures::channel::mpsc::Sender<()>) {
+        self.pump_notify_tx = Some(tx);
+    }
+
+    /// Wake the pump task so it can drain newly added work.
+    fn notify_pump(&self) {
+        if let Some(tx) = &self.pump_notify_tx {
+            let _ = tx.clone().try_send(());
         }
     }
 
@@ -348,7 +366,11 @@ impl Runtime {
                 }))
             }
             DispatchResult::Async(promise) => {
-                // Try to settle inline first (microtask checkpoint already ran in enter_v8)
+                // Fire zero-delay timers inline — this settles setTimeout(0) immediately
+                // without a round-trip through the pump task.
+                self.fire_ready_timers_inline();
+
+                // Check if promise settled after microtask checkpoint + ready timers
                 let result = enter_v8!(self, |scope| {
                     appbase_v8_core::request::extract_promise_result(scope, &promise)
                 });
@@ -357,7 +379,7 @@ impl Runtime {
 
                 match result {
                     Ok(json) => {
-                        // Promise settled synchronously (e.g. Promise.resolve chains)
+                        // Promise settled synchronously (e.g. Promise.resolve chains, setTimeout(0))
                         let logs = self.drain_request_logs(0);
                         DispatchOutcome::Complete(Ok(RequestResult {
                             json,
@@ -378,6 +400,8 @@ impl Runtime {
                             wall_start,
                             cancel: CancellationToken::new(),
                         });
+                        // Notify the pump that new work was added
+                        self.notify_pump();
                         DispatchOutcome::Pending(rx)
                     }
                 }
@@ -541,6 +565,24 @@ impl Runtime {
 
     // collect_settled_promises is a free function below (avoids double-borrow
     // when called inside enter_v8! which already borrows self.isolate).
+
+    /// Fire zero-delay timers inline during dispatch_start (no AsyncWork needed).
+    /// Spawned ops/timers from callbacks remain in RuntimeState for the pump to drain.
+    fn fire_ready_timers_inline(&mut self) {
+        loop {
+            let timer_id = {
+                let mut s = self.state.borrow_mut();
+                if s.ready_timers.is_empty() { None } else { Some(s.ready_timers.remove(0)) }
+            };
+            let Some(timer_id) = timer_id else { break };
+
+            enter_v8!(self, |scope| {
+                appbase_v8_core::request::fire_timer_callback(scope, &self.state, timer_id);
+            });
+
+            self.state.borrow_mut().timer_owner.remove(&timer_id);
+        }
+    }
 
     /// Fire zero-delay timers, draining new tasks into external AsyncWork.
     fn fire_ready_timers_pump(&mut self, work: &mut AsyncWork) {

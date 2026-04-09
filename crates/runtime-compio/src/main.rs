@@ -214,7 +214,11 @@ async fn dispatch_rpc(
 /// 4. Check if any promises settled, send results via oneshot channels
 ///
 /// The RefCell borrow on Runtime is scoped and NEVER held across .await.
-async fn pump_task(runtime: Rc<RefCell<Runtime>>, mut work: AsyncWork) {
+async fn pump_task(
+    runtime: Rc<RefCell<Runtime>>,
+    mut work: AsyncWork,
+    mut notify_rx: futures::channel::mpsc::Receiver<()>,
+) {
     loop {
         // Drain any newly spawned tasks (from dispatch_start calls)
         {
@@ -222,24 +226,13 @@ async fn pump_task(runtime: Rc<RefCell<Runtime>>, mut work: AsyncWork) {
             rt.drain_new_tasks_into(&mut work);
         }
 
-        // If no pending work and no pending requests, just yield and check again
-        let has_pending = {
-            let rt = runtime.borrow();
-            rt.has_pending_requests()
-        };
-        if work.pending_ops.is_empty() && work.pending_timers.is_empty() && !has_pending {
-            // Nothing to do — sleep briefly to avoid busy-spin, then check again
-            compio::time::sleep(std::time::Duration::from_millis(1)).await;
-            continue;
-        }
-
-        // Wait for the next event from pending ops or timers.
-        // This is a true async wait — compio's reactor wakes us when I/O
-        // completes or a timer fires. No busy-spinning.
+        // Wait for the next event from pending ops, timers, or a notification
+        // from dispatch_start that new work was added.
+        //
+        // The notify_rx branch replaces the old sleep(1ms) polling loop:
+        // when dispatch_start adds new work, it sends a signal here so we
+        // wake immediately instead of waiting 1ms.
         let event = {
-            // Use futures::select! to wait for whichever completes first.
-            // If one collection is empty, select_next_some would never resolve,
-            // so we guard with is_empty checks.
             let has_ops = !work.pending_ops.is_empty();
             let has_timers = !work.pending_timers.is_empty();
 
@@ -248,19 +241,24 @@ async fn pump_task(runtime: Rc<RefCell<Runtime>>, mut work: AsyncWork) {
                     futures::select! {
                         r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
                         r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
+                        _ = notify_rx.next() => None, // new work arrived, drain and retry
                     }
                 }
                 (true, false) => {
-                    let r = work.pending_ops.select_next_some().await;
-                    Some(AsyncEvent::Op(r))
+                    futures::select! {
+                        r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
+                        _ = notify_rx.next() => None,
+                    }
                 }
                 (false, true) => {
-                    let r = work.pending_timers.select_next_some().await;
-                    Some(AsyncEvent::Timer(r))
+                    futures::select! {
+                        r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
+                        _ = notify_rx.next() => None,
+                    }
                 }
                 (false, false) => {
-                    // No futures to poll — yield so connection handlers can dispatch
-                    compio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    // No futures to poll — block until dispatch_start notifies us
+                    let _ = notify_rx.next().await;
                     None
                 }
             }
@@ -342,12 +340,16 @@ fn run_single_worker(port: u16, use_reuseport: bool, worker_id: Option<usize>) {
             // briefly borrows Runtime to enter V8 and resolve promises.
             let mut async_work = AsyncWork::new();
 
+            // Create notification channel: dispatch_start -> pump_task
+            let (notify_tx, notify_rx) = futures::channel::mpsc::channel::<()>(1);
+            runtime.borrow_mut().set_pump_notify(notify_tx);
+
             // Initial drain: pick up any tasks from warmup
             runtime.borrow_mut().drain_new_tasks_into(&mut async_work);
 
             let rt_pump = runtime.clone();
             compio::runtime::spawn(async move {
-                pump_task(rt_pump, async_work).await;
+                pump_task(rt_pump, async_work, notify_rx).await;
             }).detach();
 
             // Accept loop
