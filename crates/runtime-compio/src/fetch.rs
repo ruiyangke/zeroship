@@ -1,75 +1,41 @@
-//! Reqwest-based fetch execution for the compio runtime.
+//! cyper-based fetch execution for the compio runtime.
 //!
-//! Since compio doesn't have a native HTTP client yet, fetch requests are
-//! dispatched to a background tokio thread running reqwest.
+//! cyper is a native compio HTTP client — requests run directly on the
+//! io_uring event loop with no background tokio thread.
 
 use std::future::Future;
 use std::pin::Pin;
-use std::time::Duration;
 
 use appbase_v8_core::fetch::{error_json, validate_url, parse_headers, MAX_RESPONSE_SIZE};
 use appbase_v8_core::state::{FetchRequest, OpResult};
 
-/// Shared reqwest Client -- reuses TCP connections and TLS sessions.
-fn shared_client() -> &'static reqwest::Client {
+/// Shared cyper Client — reuses connections across requests.
+/// cyper::Client is Arc-based and Send+Sync; the underlying CompioExecutor
+/// dispatches work to whichever compio runtime is current on the calling thread.
+fn shared_client() -> &'static cyper::Client {
     use std::sync::OnceLock;
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::limited(20))
-            .pool_max_idle_per_host(50)
-            .build()
-            .expect("Failed to create HTTP client")
-    })
+    static CLIENT: OnceLock<cyper::Client> = OnceLock::new();
+    CLIENT.get_or_init(cyper::Client::new)
 }
 
-/// Background tokio runtime for running reqwest fetch requests.
-/// Lazily initialized on first use.
-fn fetch_tokio_handle() -> &'static tokio::runtime::Handle {
-    use std::sync::OnceLock;
-    static HANDLE: OnceLock<tokio::runtime::Handle> = OnceLock::new();
-    HANDLE.get_or_init(|| {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("Failed to create fetch tokio runtime");
-        let handle = rt.handle().clone();
-        // Leak the runtime so it lives forever
-        std::mem::forget(rt);
-        handle
-    })
-}
-
-/// Execute a `FetchRequest` by spawning on the background tokio runtime.
-/// Returns a future that can be polled from the compio event loop.
+/// Execute a `FetchRequest` on the compio event loop via cyper.
+/// Returns a future that resolves to an `OpResult`.
 pub(crate) fn execute_fetch(
     req: FetchRequest,
 ) -> Pin<Box<dyn Future<Output = OpResult>>> {
-    let FetchRequest { op_id, stream_id: _, request_id, method, url, headers_json, body, cancel } = req;
-
-    let handle = fetch_tokio_handle();
-    let (result_tx, result_rx) = tokio::sync::oneshot::channel::<String>();
-
-    handle.spawn(async move {
-        let value = match build_and_send_request(&method, &url, &headers_json, body.as_deref(), cancel.as_ref()).await {
-            Ok(response) => buffer_response(response, &url).await,
-            Err(err_json) => err_json,
-        };
-        let _ = result_tx.send(value);
-    });
+    let FetchRequest { op_id, stream_id: _, request_id, method, url, headers_json, body, cancel: _ } = req;
 
     Box::pin(async move {
-        match result_rx.await {
-            Ok(value) => OpResult::Completed { op_id, value, request_id },
-            Err(_) => OpResult::Cancelled,
-        }
+        let value = match build_and_send_request(&method, &url, &headers_json, body.as_deref()).await {
+            Ok(json) => json,
+            Err(err_json) => err_json,
+        };
+        OpResult::Completed { op_id, value, request_id }
     })
 }
 
 // ---------------------------------------------------------------------------
-// Shared request building
+// Request building & sending
 // ---------------------------------------------------------------------------
 
 async fn build_and_send_request(
@@ -77,35 +43,34 @@ async fn build_and_send_request(
     url: &str,
     headers_json: &str,
     body: Option<&str>,
-    cancel: Option<&tokio_util::sync::CancellationToken>,
-) -> Result<reqwest::Response, String> {
+) -> Result<String, String> {
     if let Err(msg) = validate_url(url) {
         return Err(error_json(&msg));
     }
 
     let client = shared_client();
 
-    let reqwest_method = match method.to_uppercase().as_str() {
-        "GET" => reqwest::Method::GET,
-        "POST" => reqwest::Method::POST,
-        "PUT" => reqwest::Method::PUT,
-        "DELETE" => reqwest::Method::DELETE,
-        "PATCH" => reqwest::Method::PATCH,
-        "HEAD" => reqwest::Method::HEAD,
-        "OPTIONS" => reqwest::Method::OPTIONS,
-        other => match reqwest::Method::from_bytes(other.as_bytes()) {
-            Ok(m) => m,
-            Err(e) => return Err(error_json(&format!("Invalid HTTP method: {e}"))),
-        },
+    let http_method = match method.to_uppercase().as_str() {
+        "GET" => http::Method::GET,
+        "POST" => http::Method::POST,
+        "PUT" => http::Method::PUT,
+        "DELETE" => http::Method::DELETE,
+        "PATCH" => http::Method::PATCH,
+        "HEAD" => http::Method::HEAD,
+        "OPTIONS" => http::Method::OPTIONS,
+        other => http::Method::from_bytes(other.as_bytes())
+            .map_err(|e| error_json(&format!("Invalid HTTP method: {e}")))?,
     };
 
-    let mut request = client.request(reqwest_method, url);
+    let mut builder = client.request(http_method, url)
+        .map_err(|e| error_json(&e.to_string()))?;
 
     if !headers_json.is_empty() {
         match parse_headers(headers_json) {
             Ok(headers) => {
                 for (key, value) in headers {
-                    request = request.header(&key, &value);
+                    builder = builder.header(&key, &value)
+                        .map_err(|e| error_json(&format!("Invalid header: {e}")))?;
                 }
             }
             Err(e) => return Err(error_json(&format!("Invalid headers: {e}"))),
@@ -113,37 +78,20 @@ async fn build_and_send_request(
     }
 
     if let Some(body) = body {
-        request = request.body(body.to_string());
+        builder = builder.body(body.to_string());
     }
 
-    let send_fut = request.send();
-    let response = if let Some(token) = cancel {
-        tokio::select! {
-            result = send_fut => result.map_err(|e| error_json(&e.to_string()))?,
-            _ = token.cancelled() => return Err(error_json("request cancelled")),
-        }
-    } else {
-        send_fut.await.map_err(|e| error_json(&e.to_string()))?
-    };
+    let response = builder.send().await
+        .map_err(|e| error_json(&e.to_string()))?;
 
-    Ok(response)
+    buffer_response(response, url).await
 }
 
 // ---------------------------------------------------------------------------
 // Buffered response
 // ---------------------------------------------------------------------------
 
-async fn buffer_response(response: reqwest::Response, original_url: &str) -> String {
-    match buffer_response_inner(response, original_url).await {
-        Ok(json) => json,
-        Err(err_json) => err_json,
-    }
-}
-
-async fn buffer_response_inner(
-    response: reqwest::Response,
-    original_url: &str,
-) -> Result<String, String> {
+async fn buffer_response(response: cyper::Response, original_url: &str) -> Result<String, String> {
     let status = response.status().as_u16();
     let status_text = response.status().canonical_reason().unwrap_or("").to_string();
     let final_url = response.url().to_string();
@@ -164,10 +112,8 @@ async fn buffer_response_inner(
         }
     }
 
-    let body_bytes = match response.bytes().await {
-        Ok(bytes) => bytes,
-        Err(e) => return Err(error_json(&format!("Failed to read response body: {e}"))),
-    };
+    let body_bytes = response.bytes().await
+        .map_err(|e| error_json(&format!("Failed to read response body: {e}")))?;
 
     if body_bytes.len() > MAX_RESPONSE_SIZE {
         return Err(error_json(&format!(
