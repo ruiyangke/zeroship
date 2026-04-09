@@ -372,8 +372,8 @@
     init = init || {};
     var status = init.status !== undefined ? init.status : 200;
 
-    // Validate status range
-    if (status < 200 || status > 599) {
+    // Validate status range (101 allowed for WebSocket upgrade)
+    if ((status < 200 || status > 599) && status !== 101) {
       throw new RangeError("Invalid status code: " + status);
     }
 
@@ -400,6 +400,11 @@
     this.url = "";
     this.redirected = false;
     this.ok = this.status >= 200 && this.status < 300;
+
+    // WebSocket upgrade: store the client WebSocket reference
+    if (init.webSocket !== undefined) {
+      this.webSocket = init.webSocket;
+    }
 
     // ReadableStream body — store reference, defer body text extraction.
     if (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) {

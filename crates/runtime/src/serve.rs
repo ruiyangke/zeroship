@@ -221,11 +221,22 @@ async fn handle_connection(
                         ))
                         .collect();
 
+                    // Check if this is a WebSocket upgrade BEFORE dispatch
+                    let is_upgrade = headers.iter().any(|h|
+                        h.name.eq_ignore_ascii_case("upgrade") &&
+                        std::str::from_utf8(h.value).unwrap_or("").eq_ignore_ascii_case("websocket")
+                    );
+
                     let wrote_ok = dispatch_http(
                         &mut stream, method, &full_url, &headers_json, body_str, &runtime,
                         &raw_headers,
                     ).await;
                     if !wrote_ok { return; }
+
+                    // After WebSocket upgrade, the stream is no longer HTTP.
+                    // The dispatch_http call handled the full WebSocket lifecycle.
+                    // Exit the connection handler — don't try to parse more HTTP.
+                    if is_upgrade { return; }
                 }
                 _ => {
                     let BufResult(write_result, _) = stream.write_all(NOT_FOUND_RESPONSE.to_vec()).await;
@@ -531,6 +542,7 @@ async fn dispatch_http(
             r.is_ok()
         }
         DispatchOutcome::WebSocketUpgrade { ws_id, headers } => {
+
             handle_websocket_upgrade(stream, ws_id, &headers, request_headers, runtime).await
         }
         DispatchOutcome::Pending(_) => {
