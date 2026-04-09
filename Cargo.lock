@@ -68,7 +68,9 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 name = "appbase"
 version = "0.1.0"
 dependencies = [
+ "appbase-compiler",
  "appbase-platform",
+ "appbase-runtime",
  "serde_json",
  "tokio",
  "toml 1.1.1+spec-1.1.0",

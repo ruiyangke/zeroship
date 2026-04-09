@@ -9,6 +9,7 @@ use appbase_platform::control::AppRegistry;
 use appbase_platform::core::config::{AppbaseConfig, IsolateConfig, ServerConfig};
 use appbase_platform::core::plugin::{Plugin, PluginFactory};
 use appbase_platform::server::router;
+use appbase_runtime::bundle::{AppBundle, ModuleType};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,10 +20,121 @@ fn main() {
     let command = args.get(1).map(|s| s.as_str()).unwrap_or("help");
 
     match command {
+        "build" => cmd_build(&args),
+        "inspect" => cmd_inspect(&args),
         "serve" => cmd_serve(&args),
         "dev" => cmd_dev(&args),
         _ => print_usage(),
     }
+}
+
+fn cmd_build(args: &[String]) {
+    let input = args
+        .get(2)
+        .expect("Usage: appbase build <dir-or-file> [--output=app.appbundle] [--minify]");
+    let output = flag_str(args, "--output=").unwrap_or_else(|| "app.appbundle".into());
+    let minify = args.iter().any(|a| a == "--minify");
+
+    let input_path = PathBuf::from(input);
+
+    let (entry_name, source) = if input_path.is_file() {
+        // Single file -- read directly, skip esbuild
+        let source =
+            std::fs::read_to_string(&input_path).expect("Failed to read input file");
+        let name = input_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        (name, source)
+    } else if input_path.is_dir() {
+        // Directory -- bundle with esbuild via the compiler crate
+        use appbase_compiler::bundler::{bundle, BundleOptions};
+
+        let options = BundleOptions {
+            // entry left empty => auto-detect
+            entry: String::new(),
+            minify,
+            sourcemap: false,
+            ..Default::default()
+        };
+
+        let result = bundle(&input_path, &options).unwrap_or_else(|e| {
+            eprintln!("Build failed: {e}");
+            std::process::exit(1);
+        });
+
+        ("index.js".to_string(), result.js)
+    } else {
+        eprintln!("Input path does not exist: {}", input_path.display());
+        std::process::exit(1);
+    };
+
+    // Determine module type from extension
+    let module_type = if entry_name.ends_with(".json") {
+        ModuleType::Json
+    } else {
+        ModuleType::EsModule
+    };
+
+    // Create .appbundle
+    let bundle = AppBundle::new(
+        &entry_name,
+        vec![(entry_name.clone(), module_type, source.clone())],
+    );
+    let bytes = bundle.to_bytes();
+
+    std::fs::write(&output, &bytes).expect("Failed to write .appbundle");
+
+    let source_len = source.len();
+    let bundle_len = bytes.len();
+    eprintln!("Built {output}:");
+    eprintln!(
+        "  Source:    {source_len} bytes ({:.1}KB)",
+        source_len as f64 / 1024.0
+    );
+    eprintln!(
+        "  Bundle:    {bundle_len} bytes ({:.1}KB)",
+        bundle_len as f64 / 1024.0
+    );
+    eprintln!(
+        "  Ratio:     {:.1}%",
+        bundle_len as f64 / source_len as f64 * 100.0
+    );
+    eprintln!("  Entry:     {entry_name}");
+}
+
+fn cmd_inspect(args: &[String]) {
+    let file = args
+        .get(2)
+        .expect("Usage: appbase inspect <file.appbundle>");
+    let bytes = std::fs::read(file).expect("Failed to read file");
+
+    // Parse (validates integrity)
+    let bundle = AppBundle::from_bytes(&bytes).unwrap_or_else(|e| {
+        eprintln!("Invalid .appbundle: {e}");
+        std::process::exit(1);
+    });
+
+    println!(".appbundle v1");
+    println!("Modules: {}", bundle.module_count());
+
+    for (i, info) in bundle.all_module_info().iter().enumerate() {
+        println!(
+            "  [{i}] {} ({}, {:.1}KB compressed, {:.1}KB original)",
+            info.specifier,
+            info.module_type,
+            info.compressed_size as f64 / 1024.0,
+            info.original_size as f64 / 1024.0,
+        );
+    }
+
+    println!("Entry: {}", bundle.entry());
+    println!("Bundle size: {:.1}KB", bytes.len() as f64 / 1024.0);
+
+    // SHA-256 from header bytes 8..40
+    let hash_hex: String = bytes[8..40].iter().map(|b| format!("{b:02x}")).collect();
+    println!("SHA-256: {hash_hex}");
 }
 
 fn cmd_serve(args: &[String]) {
@@ -281,11 +393,10 @@ fn print_usage() {
     eprintln!("appbase — AI-native full-stack app platform");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  appbase serve <server.js> [--static=index.html] [--port=3000] [--db=appbase.db]");
-    eprintln!("  appbase dev <entrypoint> [--port=3000] [--compiler=appbase-compile]");
-    eprintln!();
-    eprintln!("Compile with appbase-compile:");
-    eprintln!("  appbase-compile <entrypoint> [--target=rust|node] [--outdir=.dist] [--minify]");
+    eprintln!("  appbase build   <dir-or-file> [--output=app.appbundle] [--minify]");
+    eprintln!("  appbase inspect <file.appbundle>");
+    eprintln!("  appbase serve   <server.js> [--static=index.html] [--port=3000] [--db=appbase.db]");
+    eprintln!("  appbase dev     <entrypoint> [--port=3000] [--compiler=appbase-compile]");
 }
 
 // --- CLI helpers ---

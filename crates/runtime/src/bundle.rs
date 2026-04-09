@@ -48,6 +48,15 @@ pub enum ModuleType {
     Data = 3,
 }
 
+/// Metadata about a single module (no decompression needed).
+#[derive(Debug, Clone)]
+pub struct ModuleInfo {
+    pub specifier: String,
+    pub module_type: ModuleType,
+    pub compressed_size: u32,
+    pub original_size: u32,
+}
+
 /// Errors returned by bundle operations.
 #[derive(Debug)]
 pub enum BundleError {
@@ -82,6 +91,17 @@ impl std::fmt::Display for BundleError {
 }
 
 impl std::error::Error for BundleError {}
+
+impl std::fmt::Display for ModuleType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EsModule => write!(f, "ES module"),
+            Self::Json => write!(f, "JSON"),
+            Self::Text => write!(f, "Text"),
+            Self::Data => write!(f, "Data"),
+        }
+    }
+}
 
 impl ModuleType {
     fn from_u8(v: u8) -> Result<Self, BundleError> {
@@ -320,6 +340,32 @@ impl AppBundle {
     /// Returns the entry module specifier.
     pub fn entry(&self) -> &str {
         &self.entry
+    }
+
+    /// Returns the number of modules in the bundle.
+    pub fn module_count(&self) -> usize {
+        self.order.len()
+    }
+
+    /// Returns ordered module specifiers.
+    pub fn module_names(&self) -> &[String] {
+        &self.order
+    }
+
+    /// Returns metadata for a module without decompressing it.
+    pub fn module_info(&self, specifier: &str) -> Option<ModuleInfo> {
+        let m = self.modules.get(specifier)?;
+        Some(ModuleInfo {
+            specifier: specifier.to_string(),
+            module_type: m.module_type,
+            compressed_size: m.compressed_size,
+            original_size: m.original_size,
+        })
+    }
+
+    /// Returns metadata for all modules in order, without decompression.
+    pub fn all_module_info(&self) -> Vec<ModuleInfo> {
+        self.order.iter().filter_map(|s| self.module_info(s)).collect()
     }
 
     /// Lazily decompress and return the source for `specifier`.

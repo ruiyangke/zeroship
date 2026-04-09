@@ -10,6 +10,8 @@ path = "src/main.rs"
 
 [dependencies]
 appbase-platform = { path = "../platform" }
+appbase-runtime = { path = "../runtime" }
+appbase-compiler = { path = "../compiler" }
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 toml = "1.1.1"

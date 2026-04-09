@@ -24,4 +24,4 @@ pub use state::{SharedState, RuntimeState, OpResult, FetchRequest, StreamState, 
 pub use storage::AppStorage;
 pub use runtime::{Runtime, DispatchOutcome, HttpDispatchResult, AsyncWork, AsyncEvent};
 pub use channel::{ResultSender, ResultReceiver, StreamWriter, StreamReader};
-pub use bundle::AppBundle;
+pub use bundle::{AppBundle, ModuleType, ModuleInfo};
