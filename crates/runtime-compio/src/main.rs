@@ -18,6 +18,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Duration;
 
 use appbase_runtime_compio::modules::ModuleEntry;
 use appbase_runtime_compio::runtime::Runtime;
@@ -320,7 +321,13 @@ fn create_reuseport_listener(port: u16) -> std::net::TcpListener {
 // Single-worker entry point (one compio runtime + one V8 isolate)
 // ===========================================================================
 
-fn run_single_worker(port: u16, use_reuseport: bool, worker_id: Option<usize>) {
+fn run_single_worker(
+    port: u16,
+    use_reuseport: bool,
+    worker_id: Option<usize>,
+    cpu_limit: Option<Duration>,
+    wall_timeout: Option<Duration>,
+) {
     compio::runtime::RuntimeBuilder::new()
         .build()
         .unwrap()
@@ -344,7 +351,7 @@ fn run_single_worker(port: u16, use_reuseport: bool, worker_id: Option<usize>) {
             // Create Runtime directly — no channel, no V8 loop task
             // No timeouts in the benchmark server (same as runtime-tokio's server.rs)
             let runtime = Rc::new(RefCell::new(
-                Runtime::new_direct(server_modules(), HashMap::new(), None, None),
+                Runtime::new_direct(server_modules(), HashMap::new(), cpu_limit, wall_timeout),
             ));
 
             // Warmup: dispatch a ping directly (uses dispatch_rpc for sync)
@@ -399,8 +406,25 @@ fn main() {
         .and_then(|a| a.strip_prefix("--workers=").unwrap().parse().ok())
         .unwrap_or(1);
 
+    let cpu_limit: Option<Duration> = std::env::args()
+        .find(|a| a.starts_with("--cpu-limit="))
+        .and_then(|a| a.strip_prefix("--cpu-limit=").unwrap().parse::<u64>().ok())
+        .map(Duration::from_millis);
+
+    let wall_timeout: Option<Duration> = std::env::args()
+        .find(|a| a.starts_with("--wall-timeout="))
+        .and_then(|a| a.strip_prefix("--wall-timeout=").unwrap().parse::<u64>().ok())
+        .map(Duration::from_millis);
+
+    if cpu_limit.is_some() || wall_timeout.is_some() {
+        eprintln!(
+            "[v8-server-compio] cpu_limit={:?} wall_timeout={:?}",
+            cpu_limit, wall_timeout
+        );
+    }
+
     if num_workers <= 1 {
-        run_single_worker(port, false, None);
+        run_single_worker(port, false, None, cpu_limit, wall_timeout);
     } else {
         eprintln!("[v8-server-compio] {num_workers} workers on port {port}");
         let mut handles = Vec::new();
@@ -408,7 +432,7 @@ fn main() {
             let handle = std::thread::Builder::new()
                 .name(format!("compio-worker-{i}"))
                 .spawn(move || {
-                    run_single_worker(port, true, Some(i));
+                    run_single_worker(port, true, Some(i), cpu_limit, wall_timeout);
                 })
                 .unwrap();
             handles.push(handle);
