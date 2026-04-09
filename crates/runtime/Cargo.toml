@@ -35,7 +35,7 @@ itoa = "1"
 socket2 = { version = "0.5", features = ["all"] }
 
 # Proc macros
-appbase-runtime-macros = { path = "../runtime_macros" }
+appbase-runtime-macros = { path = "../runtime-macros" }
 
 [[bin]]
 name = "v8-server-compio"

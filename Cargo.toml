@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "crates/runtime",
-    "crates/runtime_macros",
+    "crates/runtime-macros",
     "crates/compiler",
     "crates/platform",
     "crates/cli",
