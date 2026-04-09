@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use appbase_runtime::{init_v8, ModuleEntry, RequestResult};
-use appbase_runtime::io::runtime::{Runtime, DispatchOutcome};
+use appbase_runtime::runtime::{Runtime, DispatchOutcome};
 
 /// Create a module list from a single JS source string.
 pub fn m(source: &str) -> Vec<ModuleEntry> {

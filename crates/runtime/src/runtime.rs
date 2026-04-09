@@ -33,14 +33,14 @@ use std::time::{Duration, Instant};
 
 use futures::stream::FuturesUnordered;
 
-use crate::v8::init::{init_v8, load_polyfills_and_modules, RequestResult};
-use crate::v8::http::{self, ResponseInfo, SettledResult, HTTP_CREATE_REQUEST_JS};
-use crate::v8::modules::ModuleEntry;
-use crate::v8::state::{
+use crate::init::{init_v8, load_polyfills_and_modules, RequestResult};
+use crate::http::{self, ResponseInfo, SettledResult, HTTP_CREATE_REQUEST_JS};
+use crate::modules::ModuleEntry;
+use crate::state::{
     DispatchResult, OpResult, RuntimeState, SharedState, SpawnedTimer, TimerResult,
 };
 
-use crate::io::channel::{
+use crate::channel::{
     self, CancelFlag, ResultReceiver, ResultSender, StreamReader, StreamWriter,
 };
 
@@ -207,7 +207,7 @@ pub struct Runtime {
 
     /// POSIX CPU timer — kills V8 on CPU limit exceeded (Linux only).
     #[cfg(target_os = "linux")]
-    cpu_timer: Option<crate::v8::cpu_timer::CpuTimer>,
+    cpu_timer: Option<crate::cpu_timer::CpuTimer>,
     /// Whether the CPU timer is currently armed.
     #[cfg(target_os = "linux")]
     cpu_timer_active: bool,
@@ -353,11 +353,11 @@ impl Runtime {
         // Create POSIX CPU timer if cpu_limit is configured (Linux only).
         #[cfg(target_os = "linux")]
         if self.cpu_limit.is_some() {
-            let system = crate::v8::cpu_timer::CpuTimerSystem::get_or_init();
+            let system = crate::cpu_timer::CpuTimerSystem::get_or_init();
             let app_id = 0u64;
             let v8_handle = self.isolate.thread_safe_handle();
             system.register(app_id, v8_handle);
-            match crate::v8::cpu_timer::CpuTimer::new(app_id) {
+            match crate::cpu_timer::CpuTimer::new(app_id) {
                 Ok(timer) => self.cpu_timer = Some(timer),
                 Err(e) => eprintln!("[cpu-timer] Failed: {e}"),
             }
@@ -432,7 +432,7 @@ impl Runtime {
         let dispatch_result = {
             let dispatch_fn = self.dispatch_fn.as_ref().unwrap();
             enter_v8!(self, |scope| {
-                crate::v8::request::dispatch_request(scope, &self.state, dispatch_fn, body)
+                crate::dispatch::dispatch_request(scope, &self.state, dispatch_fn, body)
             })
         };
         self.disarm_cpu_timer();
@@ -462,7 +462,7 @@ impl Runtime {
                 // Check if the promise settled after microtask checkpoint + ready timers
                 self.arm_cpu_timer();
                 let result = enter_v8!(self, |scope| {
-                    crate::v8::request::extract_promise_result(scope, &promise)
+                    crate::dispatch::extract_promise_result(scope, &promise)
                 });
                 self.disarm_cpu_timer();
 
@@ -528,7 +528,7 @@ impl Runtime {
         let dispatch_result = {
             let dispatch_fn = self.dispatch_fn.as_ref().unwrap();
             enter_v8!(self, |scope| {
-                crate::v8::request::dispatch_request(scope, &self.state, dispatch_fn, body)
+                crate::dispatch::dispatch_request(scope, &self.state, dispatch_fn, body)
             })
         };
         self.disarm_cpu_timer();
@@ -563,7 +563,7 @@ impl Runtime {
                 // Check if promise settled after microtask checkpoint + ready timers
                 self.arm_cpu_timer();
                 let result = enter_v8!(self, |scope| {
-                    crate::v8::request::extract_promise_result(scope, &promise)
+                    crate::dispatch::extract_promise_result(scope, &promise)
                 });
                 self.disarm_cpu_timer();
 
@@ -752,11 +752,11 @@ impl Runtime {
         }
 
         // Drain spawned fetches
-        let fetches: Vec<crate::v8::state::FetchRequest> = {
+        let fetches: Vec<crate::state::FetchRequest> = {
             self.state.borrow_mut().spawned_fetches.drain(..).collect()
         };
         for fetch_req in fetches {
-            let future = crate::io::fetch::execute_fetch(fetch_req);
+            let future = crate::fetch::execute_fetch(fetch_req);
             work.pending_ops.push(future);
         }
 
@@ -806,7 +806,7 @@ impl Runtime {
 
                 self.arm_cpu_timer();
                 let settled_results = enter_v8!(self, |scope| {
-                    crate::v8::request::resolve_op(scope, &self.state, op_id, &value);
+                    crate::dispatch::resolve_op(scope, &self.state, op_id, &value);
                     collect_settled_promises(scope, &mut self.pending_requests)
                 });
                 self.disarm_cpu_timer();
@@ -865,7 +865,7 @@ impl Runtime {
                     // Slow path: push into V8 ReadableStream
                     self.arm_cpu_timer();
                     enter_v8!(self, |scope| {
-                        crate::v8::streams::push_stream_chunk(scope, &self.state, stream_id, &data, done);
+                        crate::streams::push_stream_chunk(scope, &self.state, stream_id, &data, done);
                     });
                     self.disarm_cpu_timer();
                     self.check_v8_terminated();
@@ -892,7 +892,7 @@ impl Runtime {
 
         self.arm_cpu_timer();
         let settled_results = enter_v8!(self, |scope| {
-            crate::v8::request::fire_timer_callback(scope, &self.state, id);
+            crate::dispatch::fire_timer_callback(scope, &self.state, id);
             collect_settled_promises(scope, &mut self.pending_requests)
         });
         self.disarm_cpu_timer();
@@ -963,7 +963,7 @@ impl Runtime {
 
             self.arm_cpu_timer();
             enter_v8!(self, |scope| {
-                crate::v8::request::fire_timer_callback(scope, &self.state, timer_id);
+                crate::dispatch::fire_timer_callback(scope, &self.state, timer_id);
             });
             self.disarm_cpu_timer();
 
@@ -996,7 +996,7 @@ impl Runtime {
 
             self.arm_cpu_timer();
             let settled_results = enter_v8!(self, |scope| {
-                crate::v8::request::fire_timer_callback(scope, &self.state, timer_id);
+                crate::dispatch::fire_timer_callback(scope, &self.state, timer_id);
                 collect_settled_promises(scope, &mut self.pending_requests)
             });
             self.disarm_cpu_timer();

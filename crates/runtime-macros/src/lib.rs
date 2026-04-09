@@ -267,8 +267,8 @@ fn gen_throw_error() -> TokenStream2 {
     quote! {
         let __msg = v8::String::new(scope, &__err.message).unwrap();
         let __exc = match __err.kind {
-            crate::v8::ops::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-            crate::v8::ops::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+            crate::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
+            crate::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
             _ => v8::Exception::error(scope, __msg),
         };
         scope.throw_exception(__exc);
@@ -394,8 +394,8 @@ fn generate_sync(needs_state: bool, input_fn: &ItemFn) -> syn::Result<TokenStrea
     // State extraction
     let state_code = if needs_state {
         quote! {
-            let state: crate::v8::state::SharedState = scope
-                .get_slot::<crate::v8::state::SharedState>()
+            let state: crate::state::SharedState = scope
+                .get_slot::<crate::state::SharedState>()
                 .expect("RuntimeState not in isolate slot")
                 .clone();
         }
@@ -478,8 +478,8 @@ fn generate_async(input_fn: &ItemFn) -> syn::Result<TokenStream2> {
             args: v8::FunctionCallbackArguments,
             mut rv: v8::ReturnValue,
         ) {
-            let __state: crate::v8::state::SharedState = scope
-                .get_slot::<crate::v8::state::SharedState>()
+            let __state: crate::state::SharedState = scope
+                .get_slot::<crate::state::SharedState>()
                 .expect("RuntimeState not in isolate slot")
                 .clone();
 
@@ -500,7 +500,7 @@ fn generate_async(input_fn: &ItemFn) -> syn::Result<TokenStream2> {
 
             let __fut = Box::pin(async move {
                 #send_result
-                crate::v8::state::OpResult::Completed {
+                crate::state::OpResult::Completed {
                     op_id: __op_id,
                     value: __value,
                     request_id: __request_id,

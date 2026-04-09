@@ -2,7 +2,7 @@ mod common;
 use common::*;
 
 use appbase_runtime::{init_v8, ModuleEntry};
-use appbase_runtime::io::runtime::Runtime;
+use appbase_runtime::runtime::Runtime;
 
 #[test]
 fn basic_rpc() {

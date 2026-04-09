@@ -3,7 +3,7 @@
 //! Extracted from `runtime-tokio` so both `runtime-tokio` and `runtime-compio`
 //! can reuse the same V8 property-access and response-inspection code.
 
-use crate::v8::state::SharedState;
+use crate::state::SharedState;
 
 // ---------------------------------------------------------------------------
 // HTTP helper constants

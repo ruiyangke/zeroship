@@ -9,8 +9,10 @@
 
 use std::time::Duration;
 
-use crate::v8::state::SharedState;
-use crate::v8::timers::TimerCallback;
+use appbase_runtime_macros::appbase_op;
+
+use crate::state::SharedState;
+use crate::state::TimerCallback;
 
 // ===========================================================================
 // V8 platform init
@@ -75,25 +77,25 @@ pub struct HttpResult {
 // ===========================================================================
 
 /// Embedded Fetch API polyfill -- loaded after globals are set up.
-pub const FETCH_JS: &str = include_str!("../embed/fetch.js");
+pub const FETCH_JS: &str = include_str!("embed/fetch.js");
 
 /// Embedded URL/URLSearchParams polyfill backed by ada-url native parser.
-pub const URL_JS: &str = include_str!("../embed/url.js");
+pub const URL_JS: &str = include_str!("embed/url.js");
 
 /// Embedded crypto polyfill (getRandomValues, SubtleCrypto.digest, base64 helpers).
-pub const CRYPTO_JS: &str = include_str!("../embed/crypto.js");
+pub const CRYPTO_JS: &str = include_str!("embed/crypto.js");
 
 /// Embedded ReadableStream/WritableStream/TransformStream polyfill (backed by native __streams callbacks).
-pub const STREAMS_JS: &str = include_str!("../embed/streams.js");
+pub const STREAMS_JS: &str = include_str!("embed/streams.js");
 
 /// Embedded Event/CustomEvent/EventTarget polyfill.
-pub const EVENTS_JS: &str = include_str!("../embed/events.js");
+pub const EVENTS_JS: &str = include_str!("embed/events.js");
 
 /// Embedded Blob/File polyfill.
-pub const BLOB_JS: &str = include_str!("../embed/blob.js");
+pub const BLOB_JS: &str = include_str!("embed/blob.js");
 
 /// Embedded FormData polyfill.
-pub const FORMDATA_JS: &str = include_str!("../embed/formdata.js");
+pub const FORMDATA_JS: &str = include_str!("embed/formdata.js");
 
 /// The JSON-RPC dispatch function compiled once and reused for every request.
 /// Handles both sync and async (Promise-returning) handlers.
@@ -126,7 +128,7 @@ pub const DISPATCH_JS: &str = r#"(function(__req_json) {
 /// Returns the compiled dispatch `Global<Function>`.
 pub fn load_polyfills_and_modules(
     scope: &mut v8::PinScope,
-    modules: &[crate::v8::modules::ModuleEntry],
+    modules: &[crate::modules::ModuleEntry],
 ) -> v8::Global<v8::Function> {
     setup_globals(scope);
 
@@ -142,7 +144,7 @@ pub fn load_polyfills_and_modules(
     // (live binding resolution per lookup). Copying to a plain object restores
     // fast inline-cached property access on the dispatch hot path.
     let context = scope.get_current_context();
-    match crate::v8::modules::load_modules(scope, modules) {
+    match crate::modules::load_modules(scope, modules) {
         Ok(namespace) => {
             let global = context.global(scope);
             let ns_local = v8::Local::new(scope, &namespace);
@@ -254,8 +256,8 @@ fn set_timeout_callback(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let state: crate::v8::state::SharedState = scope
-        .get_slot::<crate::v8::state::SharedState>()
+    let state: crate::state::SharedState = scope
+        .get_slot::<crate::state::SharedState>()
         .expect("RuntimeState not in isolate slot")
         .clone();
 
@@ -290,7 +292,7 @@ fn set_timeout_callback(
         // Fast path: fire inline without tokio::time::sleep overhead.
         s.ready_timers.push(id);
     } else {
-        s.spawned_timers.push(crate::v8::state::SpawnedTimer { id, delay, interval: None });
+        s.spawned_timers.push(crate::state::SpawnedTimer { id, delay, interval: None });
     }
 
     rv.set(v8::Integer::new(scope, id as i32).into());
@@ -301,8 +303,8 @@ fn clear_timeout_callback(
     args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
 ) {
-    let state: crate::v8::state::SharedState = scope
-        .get_slot::<crate::v8::state::SharedState>()
+    let state: crate::state::SharedState = scope
+        .get_slot::<crate::state::SharedState>()
         .expect("RuntimeState not in isolate slot")
         .clone();
 
@@ -324,8 +326,8 @@ fn set_interval_callback(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let state: crate::v8::state::SharedState = scope
-        .get_slot::<crate::v8::state::SharedState>()
+    let state: crate::state::SharedState = scope
+        .get_slot::<crate::state::SharedState>()
         .expect("RuntimeState not in isolate slot")
         .clone();
 
@@ -355,7 +357,7 @@ fn set_interval_callback(
     if let Some(req_id) = s.executing_request_id {
         s.timer_owner.insert(id, req_id);
     }
-    s.spawned_timers.push(crate::v8::state::SpawnedTimer { id, delay, interval: Some(delay) });
+    s.spawned_timers.push(crate::state::SpawnedTimer { id, delay, interval: Some(delay) });
 
     rv.set(v8::Integer::new(scope, id as i32).into());
 }
@@ -447,18 +449,18 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
 
     // __rawFetch (native HTTP fetch)
     {
-        let f = v8::Function::new(scope, crate::v8::fetch::raw_fetch_callback).unwrap();
+        let f = v8::Function::new(scope, crate::fetch::raw_fetch_callback).unwrap();
         let key = v8::String::new(scope, "__rawFetch").unwrap();
         global.set(scope, key.into(), f.into());
     }
 
     // __urlParse / __urlCanParse (native URL parser via ada-url)
     {
-        let f = v8::Function::new(scope, crate::v8::url::url_parse_callback).unwrap();
+        let f = v8::Function::new(scope, crate::url::url_parse_callback).unwrap();
         let key = v8::String::new(scope, "__urlParse").unwrap();
         global.set(scope, key.into(), f.into());
 
-        let f = v8::Function::new(scope, crate::v8::url::url_can_parse_callback).unwrap();
+        let f = v8::Function::new(scope, crate::url::url_can_parse_callback).unwrap();
         let key = v8::String::new(scope, "__urlCanParse").unwrap();
         global.set(scope, key.into(), f.into());
     }
@@ -467,52 +469,52 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
     {
         let crypto = v8::Object::new(scope);
 
-        let uuid_fn = v8::Function::new(scope, crate::v8::crypto::crypto_random_uuid_callback).unwrap();
+        let uuid_fn = v8::Function::new(scope, crate::crypto::crypto_random_uuid_callback).unwrap();
         let uuid_key = v8::String::new(scope, "randomUUID").unwrap();
         crypto.set(scope, uuid_key.into(), uuid_fn.into());
 
         // getRandomValues — direct TypedArray fill, no base64 (hand-written callback)
-        let grv_fn = v8::Function::new(scope, crate::v8::crypto::crypto_get_random_values_callback).unwrap();
+        let grv_fn = v8::Function::new(scope, crate::crypto::crypto_get_random_values_callback).unwrap();
         let grv_key = v8::String::new(scope, "getRandomValues").unwrap();
         crypto.set(scope, grv_key.into(), grv_fn.into());
 
-        let digest_fn = v8::Function::new(scope, crate::v8::crypto::crypto_digest_callback).unwrap();
+        let digest_fn = v8::Function::new(scope, crate::crypto::crypto_digest_callback).unwrap();
         let digest_key = v8::String::new(scope, "__cryptoDigest").unwrap();
         crypto.set(scope, digest_key.into(), digest_fn.into());
 
-        let import_fn = v8::Function::new(scope, crate::v8::crypto::crypto_import_key_callback).unwrap();
+        let import_fn = v8::Function::new(scope, crate::crypto::crypto_import_key_callback).unwrap();
         let import_key = v8::String::new(scope, "__cryptoImportKey").unwrap();
         crypto.set(scope, import_key.into(), import_fn.into());
 
-        let export_fn = v8::Function::new(scope, crate::v8::crypto::crypto_export_key_callback).unwrap();
+        let export_fn = v8::Function::new(scope, crate::crypto::crypto_export_key_callback).unwrap();
         let export_key = v8::String::new(scope, "__cryptoExportKey").unwrap();
         crypto.set(scope, export_key.into(), export_fn.into());
 
-        let gen_fn = v8::Function::new(scope, crate::v8::crypto::crypto_generate_key_callback).unwrap();
+        let gen_fn = v8::Function::new(scope, crate::crypto::crypto_generate_key_callback).unwrap();
         let gen_key = v8::String::new(scope, "__cryptoGenerateKey").unwrap();
         crypto.set(scope, gen_key.into(), gen_fn.into());
 
-        let sign_fn = v8::Function::new(scope, crate::v8::crypto::crypto_sign_callback).unwrap();
+        let sign_fn = v8::Function::new(scope, crate::crypto::crypto_sign_callback).unwrap();
         let sign_key = v8::String::new(scope, "__cryptoSign").unwrap();
         crypto.set(scope, sign_key.into(), sign_fn.into());
 
-        let verify_fn = v8::Function::new(scope, crate::v8::crypto::crypto_verify_callback).unwrap();
+        let verify_fn = v8::Function::new(scope, crate::crypto::crypto_verify_callback).unwrap();
         let verify_key = v8::String::new(scope, "__cryptoVerify").unwrap();
         crypto.set(scope, verify_key.into(), verify_fn.into());
 
-        let encrypt_fn = v8::Function::new(scope, crate::v8::crypto::crypto_encrypt_callback).unwrap();
+        let encrypt_fn = v8::Function::new(scope, crate::crypto::crypto_encrypt_callback).unwrap();
         let encrypt_key = v8::String::new(scope, "__cryptoEncrypt").unwrap();
         crypto.set(scope, encrypt_key.into(), encrypt_fn.into());
 
-        let decrypt_fn = v8::Function::new(scope, crate::v8::crypto::crypto_decrypt_callback).unwrap();
+        let decrypt_fn = v8::Function::new(scope, crate::crypto::crypto_decrypt_callback).unwrap();
         let decrypt_key = v8::String::new(scope, "__cryptoDecrypt").unwrap();
         crypto.set(scope, decrypt_key.into(), decrypt_fn.into());
 
-        let derive_bits_fn = v8::Function::new(scope, crate::v8::crypto::crypto_derive_bits_callback).unwrap();
+        let derive_bits_fn = v8::Function::new(scope, crate::crypto::crypto_derive_bits_callback).unwrap();
         let derive_bits_key = v8::String::new(scope, "__cryptoDeriveBits").unwrap();
         crypto.set(scope, derive_bits_key.into(), derive_bits_fn.into());
 
-        let derive_key_fn = v8::Function::new(scope, crate::v8::crypto::crypto_derive_key_callback).unwrap();
+        let derive_key_fn = v8::Function::new(scope, crate::crypto::crypto_derive_key_callback).unwrap();
         let derive_key_key = v8::String::new(scope, "__cryptoDeriveKey").unwrap();
         crypto.set(scope, derive_key_key.into(), derive_key_fn.into());
 
@@ -524,23 +526,23 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
     {
         let streams = v8::Object::new(scope);
 
-        let create_fn = v8::Function::new(scope, crate::v8::streams::stream_create_callback).unwrap();
+        let create_fn = v8::Function::new(scope, crate::streams::stream_create_callback).unwrap();
         let create_key = v8::String::new(scope, "create").unwrap();
         streams.set(scope, create_key.into(), create_fn.into());
 
-        let read_fn = v8::Function::new(scope, crate::v8::streams::stream_read_callback).unwrap();
+        let read_fn = v8::Function::new(scope, crate::streams::stream_read_callback).unwrap();
         let read_key = v8::String::new(scope, "read").unwrap();
         streams.set(scope, read_key.into(), read_fn.into());
 
-        let enqueue_fn = v8::Function::new(scope, crate::v8::streams::stream_enqueue_callback).unwrap();
+        let enqueue_fn = v8::Function::new(scope, crate::streams::stream_enqueue_callback).unwrap();
         let enqueue_key = v8::String::new(scope, "enqueue").unwrap();
         streams.set(scope, enqueue_key.into(), enqueue_fn.into());
 
-        let close_fn = v8::Function::new(scope, crate::v8::streams::stream_close_callback).unwrap();
+        let close_fn = v8::Function::new(scope, crate::streams::stream_close_callback).unwrap();
         let close_key = v8::String::new(scope, "close").unwrap();
         streams.set(scope, close_key.into(), close_fn.into());
 
-        let error_fn = v8::Function::new(scope, crate::v8::streams::stream_error_callback).unwrap();
+        let error_fn = v8::Function::new(scope, crate::streams::stream_error_callback).unwrap();
         let error_key = v8::String::new(scope, "error").unwrap();
         streams.set(scope, error_key.into(), error_fn.into());
 
@@ -552,11 +554,23 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
     {
         let env = v8::Object::new(scope);
 
-        let get_fn = v8::Function::new(scope, crate::v8::env::env_get_callback).unwrap();
+        let get_fn = v8::Function::new(scope, env_get_callback).unwrap();
         let get_key = v8::String::new(scope, "get").unwrap();
         env.set(scope, get_key.into(), get_fn.into());
 
         let env_key = v8::String::new(scope, "env").unwrap();
         global.set(scope, env_key.into(), env.into());
     }
+}
+
+// ===========================================================================
+// env.get (absorbed from v8/env.rs)
+// ===========================================================================
+
+/// `env.get(key) → string | null`
+///
+/// Reads from the per-app environment variables injected at deploy time.
+#[appbase_op(state)]
+fn env_get(state: SharedState, key: String) -> Option<String> {
+    state.borrow().env_vars.get(&key).cloned()
 }

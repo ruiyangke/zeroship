@@ -12,7 +12,7 @@
 //! the common SSE pattern where `controller.enqueue()` is called from a
 //! setTimeout callback while `reader.read()` is awaited.
 
-use crate::v8::state::{SharedState, StreamState};
+use crate::state::{SharedState, StreamState};
 
 /// Resolve a PromiseResolver with `{value: Uint8Array(data), done: false}`.
 fn resolve_with_chunk(
@@ -96,7 +96,7 @@ pub fn stream_read_callback(
     // Lazy-create StreamState if it doesn't exist yet (streaming fetch path:
     // stream_id is allocated in the fetch callback but StreamState is deferred).
     let stream = s.streams.entry(stream_id).or_insert_with(|| {
-        crate::v8::state::StreamState {
+        crate::state::StreamState {
             pending_read: None,
             buffer: Vec::new(),
             closed: false,
@@ -260,7 +260,7 @@ pub fn push_stream_chunk(
             let mut s = state.borrow_mut();
             // Lazy-create StreamState if it doesn't exist yet
             let stream = s.streams.entry(stream_id).or_insert_with(|| {
-                crate::v8::state::StreamState {
+                crate::state::StreamState {
                     pending_read: None,
                     buffer: Vec::new(),
                     closed: false,

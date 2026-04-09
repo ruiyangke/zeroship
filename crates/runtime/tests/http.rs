@@ -2,7 +2,7 @@ mod common;
 use common::*;
 
 use appbase_runtime::{init_v8, ModuleEntry};
-use appbase_runtime::io::runtime::{Runtime, DispatchOutcome};
+use appbase_runtime::runtime::{Runtime, DispatchOutcome};
 
 #[test]
 fn on_request_basic() {

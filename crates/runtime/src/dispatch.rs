@@ -6,7 +6,7 @@
 //! By making them free functions with disjoint `(scope, state)` params, Rust
 //! can verify the borrows don't overlap.
 
-use crate::v8::state::{DispatchResult, SharedState};
+use crate::state::{DispatchResult, SharedState};
 
 // ---------------------------------------------------------------------------
 // dispatch_request

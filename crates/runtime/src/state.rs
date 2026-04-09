@@ -10,7 +10,70 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::v8::timers::TimerCallback;
+// ---------------------------------------------------------------------------
+// TimerCallback (absorbed from v8/timers.rs)
+// ---------------------------------------------------------------------------
+
+/// Backing storage for a timer's callback.
+#[allow(missing_debug_implementations)]
+pub struct TimerCallback {
+    pub callback: v8::Global<v8::Function>,
+    /// None = setTimeout (one-shot), Some(dur) = setInterval (repeating).
+    pub interval: Option<Duration>,
+}
+
+// ---------------------------------------------------------------------------
+// OpError (absorbed from v8/ops.rs)
+// ---------------------------------------------------------------------------
+
+/// Error kind — maps to JS exception types.
+#[derive(Debug, Clone, Copy)]
+pub enum OpErrorKind {
+    /// `TypeError` — wrong argument types, missing arguments
+    TypeError,
+    /// `RangeError` — value out of bounds
+    RangeError,
+    /// Generic `Error`
+    Error,
+}
+
+/// An error from a V8 op.
+#[derive(Debug, Clone)]
+pub struct OpError {
+    pub kind: OpErrorKind,
+    pub message: String,
+}
+
+impl OpError {
+    pub fn type_error(msg: impl Into<String>) -> Self {
+        Self {
+            kind: OpErrorKind::TypeError,
+            message: msg.into(),
+        }
+    }
+
+    pub fn range_error(msg: impl Into<String>) -> Self {
+        Self {
+            kind: OpErrorKind::RangeError,
+            message: msg.into(),
+        }
+    }
+
+    pub fn error(msg: impl Into<String>) -> Self {
+        Self {
+            kind: OpErrorKind::Error,
+            message: msg.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for OpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}: {}", self.kind, self.message)
+    }
+}
+
+impl std::error::Error for OpError {}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -74,7 +137,7 @@ pub struct RuntimeState {
     pub env_vars: HashMap<String, String>,
 
     /// WebCrypto key store, keyed by key-id.
-    pub key_store: HashMap<u32, crate::v8::crypto::KeyData>,
+    pub key_store: HashMap<u32, crate::crypto::KeyData>,
     /// Monotonically increasing key-id counter.
     pub next_key_id: u32,
 
