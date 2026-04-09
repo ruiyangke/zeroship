@@ -9,6 +9,7 @@ pub mod modules;
 pub mod crypto;
 pub mod streams;
 pub mod url;
+pub mod websocket;
 pub mod channel;
 pub mod runtime;
 pub mod storage;
@@ -21,7 +22,7 @@ pub mod cpu_timer;
 // Convenience re-exports
 pub use init::{init_v8, RequestResult, HttpResult};
 pub use modules::ModuleEntry;
-pub use state::{SharedState, RuntimeState, OpResult, FetchRequest, StreamState, SpawnedTimer};
+pub use state::{SharedState, RuntimeState, OpResult, FetchRequest, StreamState, SpawnedTimer, WebSocketState, WsMessage};
 pub use storage::AppStorage;
 pub use runtime::{Runtime, DispatchOutcome, HttpDispatchResult, AsyncWork, AsyncEvent};
 pub use channel::{ResultSender, ResultReceiver, StreamWriter, StreamReader};

@@ -67,6 +67,11 @@ pub enum ResponseInfo {
         headers: Vec<(String, String)>,
         stream_id: u32,
     },
+    /// WebSocket upgrade — JS returned `new Response(null, { status: 101, webSocket: client })`.
+    WebSocket {
+        ws_id: u32,
+        headers: Vec<(String, String)>,
+    },
 }
 
 /// Result of settling a pending request — RPC or HTTP path.
@@ -101,6 +106,22 @@ pub fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Va
 
     // Extract headers from response.headers._map
     let headers = extract_response_headers(scope, obj);
+
+    // WebSocket upgrade: status 101 with a `webSocket` property
+    if status == 101 {
+        let ws_key = v8::String::new(scope, "webSocket").unwrap();
+        if let Some(ws_val) = obj.get(scope, ws_key.into()) {
+            if !ws_val.is_undefined() && !ws_val.is_null() {
+                if let Some(ws_obj) = ws_val.to_object(scope) {
+                    let id_key = v8::String::new(scope, "_id").unwrap();
+                    let ws_id = ws_obj.get(scope, id_key.into())
+                        .and_then(|v| v.uint32_value(scope))
+                        .unwrap_or(0);
+                    return Ok(ResponseInfo::WebSocket { ws_id, headers });
+                }
+            }
+        }
+    }
 
     let is_stream = get_bool_property(scope, obj, "_isStreamBody");
     if is_stream {

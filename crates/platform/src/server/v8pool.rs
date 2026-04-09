@@ -411,9 +411,11 @@ fn run_compio_worker(
                             logs,
                         });
                     }
-                    DispatchOutcome::HttpStream { .. } | DispatchOutcome::HttpPending(_) => {
+                    DispatchOutcome::HttpStream { .. }
+                    | DispatchOutcome::HttpPending(_)
+                    | DispatchOutcome::WebSocketUpgrade { .. } => {
                         let _ = req.reply.send(WorkResult::Error(
-                            "Streaming not supported through V8Pool".to_string(),
+                            "Streaming/WebSocket not supported through V8Pool".to_string(),
                         ));
                     }
                 }

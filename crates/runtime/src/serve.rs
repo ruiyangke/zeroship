@@ -212,8 +212,18 @@ async fn handle_connection(
                         .unwrap_or("localhost");
                     let full_url = format!("http://{}{}", host, path);
 
+                    // Collect raw request headers for WebSocket upgrade detection
+                    let raw_headers: Vec<(String, String)> = headers.iter()
+                        .filter(|h| !h.name.is_empty())
+                        .map(|h| (
+                            h.name.to_string(),
+                            std::str::from_utf8(h.value).unwrap_or("").to_string(),
+                        ))
+                        .collect();
+
                     let wrote_ok = dispatch_http(
                         &mut stream, method, &full_url, &headers_json, body_str, &runtime,
+                        &raw_headers,
                     ).await;
                     if !wrote_ok { return; }
                 }
@@ -404,7 +414,8 @@ async fn dispatch_rpc(
         }
         DispatchOutcome::HttpComplete { .. }
         | DispatchOutcome::HttpStream { .. }
-        | DispatchOutcome::HttpPending(_) => {
+        | DispatchOutcome::HttpPending(_)
+        | DispatchOutcome::WebSocketUpgrade { .. } => {
             SERVICE_UNAVAILABLE.to_vec()
         }
     }
@@ -421,6 +432,7 @@ async fn dispatch_http(
     headers_json: &str,
     body: &str,
     runtime: &Rc<RefCell<Runtime>>,
+    request_headers: &[(String, String)],
 ) -> bool {
     let outcome = runtime.borrow_mut().dispatch_http(method, url, headers_json, body);
 
@@ -491,6 +503,9 @@ async fn dispatch_http(
                     let BufResult(r, _) = stream.write_all(b"0\r\n\r\n".to_vec()).await;
                     r.is_ok()
                 }
+                Some(Ok(HttpDispatchResult::WebSocket { ws_id, headers, logs: _ })) => {
+                    handle_websocket_upgrade(stream, ws_id, &headers, request_headers, runtime).await
+                }
                 Some(Err(e)) => {
                     let body = format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\""));
                     let response = build_http_response(500, &[], &body);
@@ -515,12 +530,358 @@ async fn dispatch_http(
             let BufResult(r, _) = stream.write_all(response).await;
             r.is_ok()
         }
+        DispatchOutcome::WebSocketUpgrade { ws_id, headers } => {
+            handle_websocket_upgrade(stream, ws_id, &headers, request_headers, runtime).await
+        }
         DispatchOutcome::Pending(_) => {
             let response = build_http_response(500, &[], r#"{"error":"Unexpected pending state"}"#);
             let BufResult(r, _) = stream.write_all(response).await;
             r.is_ok()
         }
     }
+}
+
+// ===========================================================================
+// WebSocket handshake + frame I/O
+// ===========================================================================
+
+/// Compute the `Sec-WebSocket-Accept` value per RFC 6455 section 4.2.2.
+fn compute_ws_accept_key(key: &str) -> String {
+    use sha1::Digest;
+    let mut hasher = sha1::Sha1::new();
+    hasher.update(key.trim().as_bytes());
+    hasher.update(b"258EAFA5-E914-47DA-95CA-5AB5DC65C735");
+    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, hasher.finalize())
+}
+
+/// Write the HTTP 101 Switching Protocols response to complete the WebSocket handshake.
+async fn write_ws_handshake(
+    stream: &mut TcpStream,
+    accept_key: &str,
+    response_headers: &[(String, String)],
+) -> bool {
+    let mut buf = Vec::with_capacity(256);
+    buf.extend_from_slice(b"HTTP/1.1 101 Switching Protocols\r\n");
+    buf.extend_from_slice(b"Upgrade: websocket\r\n");
+    buf.extend_from_slice(b"Connection: Upgrade\r\n");
+    buf.extend_from_slice(b"Sec-WebSocket-Accept: ");
+    buf.extend_from_slice(accept_key.as_bytes());
+    buf.extend_from_slice(b"\r\n");
+
+    // Write any additional headers from the JS Response (e.g. Sec-WebSocket-Protocol)
+    for (name, value) in response_headers {
+        let lname = name.to_lowercase();
+        if lname == "upgrade" || lname == "connection" || lname == "sec-websocket-accept" {
+            continue; // already written
+        }
+        buf.extend_from_slice(name.as_bytes());
+        buf.extend_from_slice(b": ");
+        buf.extend_from_slice(value.as_bytes());
+        buf.extend_from_slice(b"\r\n");
+    }
+    buf.extend_from_slice(b"\r\n");
+
+    let BufResult(r, _) = stream.write_all(buf).await;
+    r.is_ok()
+}
+
+/// Read a single WebSocket frame from the stream.
+/// Returns (opcode, payload) or None on error/EOF.
+///
+/// Client-to-server frames are always masked (RFC 6455 section 5.1).
+async fn read_ws_frame(stream: &mut TcpStream) -> Option<(u8, Vec<u8>)> {
+    // Read the first 2 bytes: FIN/opcode + MASK/payload-len
+    let mut header = vec![0u8; 2];
+    let BufResult(r, returned) = stream.read(header).await;
+    header = returned;
+    if r.is_err() || r.as_ref().is_ok_and(|&n| n < 2) {
+        return None;
+    }
+
+    let _fin = (header[0] & 0x80) != 0;
+    let opcode = header[0] & 0x0F;
+    let masked = (header[1] & 0x80) != 0;
+    let mut payload_len = (header[1] & 0x7F) as u64;
+
+    // Extended payload length
+    if payload_len == 126 {
+        let mut ext = vec![0u8; 2];
+        let BufResult(r, returned) = stream.read(ext).await;
+        ext = returned;
+        if r.is_err() || r.as_ref().is_ok_and(|&n| n < 2) {
+            return None;
+        }
+        payload_len = u16::from_be_bytes([ext[0], ext[1]]) as u64;
+    } else if payload_len == 127 {
+        let mut ext = vec![0u8; 8];
+        let BufResult(r, returned) = stream.read(ext).await;
+        ext = returned;
+        if r.is_err() || r.as_ref().is_ok_and(|&n| n < 8) {
+            return None;
+        }
+        payload_len = u64::from_be_bytes([ext[0], ext[1], ext[2], ext[3], ext[4], ext[5], ext[6], ext[7]]);
+    }
+
+    // Masking key (4 bytes if masked)
+    let mask_key = if masked {
+        let mut mk = vec![0u8; 4];
+        let BufResult(r, returned) = stream.read(mk).await;
+        mk = returned;
+        if r.is_err() || r.as_ref().is_ok_and(|&n| n < 4) {
+            return None;
+        }
+        Some([mk[0], mk[1], mk[2], mk[3]])
+    } else {
+        None
+    };
+
+    // Read payload
+    let len = payload_len as usize;
+    let mut payload = vec![0u8; len];
+    if len > 0 {
+        let BufResult(r, returned) = stream.read(payload).await;
+        payload = returned;
+        if r.is_err() {
+            return None;
+        }
+        // May need to read more if partial
+        let read_n = r.unwrap_or(0);
+        if read_n < len {
+            // compio may return partial reads — keep reading
+            let mut offset = read_n;
+            while offset < len {
+                let remaining = vec![0u8; len - offset];
+                let BufResult(r2, returned2) = stream.read(remaining).await;
+                let n2 = r2.unwrap_or(0);
+                if n2 == 0 { return None; }
+                payload[offset..offset + n2].copy_from_slice(&returned2[..n2]);
+                offset += n2;
+            }
+        }
+    }
+
+    // Unmask
+    if let Some(mk) = mask_key {
+        for (i, byte) in payload.iter_mut().enumerate() {
+            *byte ^= mk[i % 4];
+        }
+    }
+
+    Some((opcode, payload))
+}
+
+/// Write a WebSocket frame to the stream (server-to-client: unmasked).
+async fn write_ws_frame(stream: &mut TcpStream, opcode: u8, payload: &[u8]) -> bool {
+    let len = payload.len();
+    let mut frame = Vec::with_capacity(10 + len);
+
+    // FIN + opcode
+    frame.push(0x80 | opcode);
+
+    // Payload length (unmasked)
+    if len < 126 {
+        frame.push(len as u8);
+    } else if len <= 65535 {
+        frame.push(126);
+        frame.extend_from_slice(&(len as u16).to_be_bytes());
+    } else {
+        frame.push(127);
+        frame.extend_from_slice(&(len as u64).to_be_bytes());
+    }
+
+    frame.extend_from_slice(payload);
+
+    let BufResult(r, _) = stream.write_all(frame).await;
+    r.is_ok()
+}
+
+/// Handle a WebSocket upgrade: perform handshake, then run the bidirectional pump.
+async fn handle_websocket_upgrade(
+    stream: &mut TcpStream,
+    ws_id: u32,
+    response_headers: &[(String, String)],
+    request_headers: &[(String, String)],
+    runtime: &Rc<RefCell<Runtime>>,
+) -> bool {
+    // Find the Sec-WebSocket-Key from request headers
+    let ws_key = request_headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("sec-websocket-key"))
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("");
+
+    if ws_key.is_empty() {
+        let response = build_http_response(400, &[], "Missing Sec-WebSocket-Key");
+        let BufResult(r, _) = stream.write_all(response).await;
+        return r.is_ok();
+    }
+
+    // Compute accept key and send 101 response
+    let accept_key = compute_ws_accept_key(ws_key);
+    if !write_ws_handshake(stream, &accept_key, response_headers).await {
+        return false;
+    }
+
+    // Find the server-side WebSocket ID (the peer of ws_id, which is the client side)
+    let server_ws_id = {
+        let state = runtime.borrow().state().clone();
+        let s = state.borrow();
+        s.websockets.get(&ws_id).and_then(|ws| ws.peer_id).unwrap_or(0)
+    };
+
+    if server_ws_id == 0 {
+        return false;
+    }
+
+    // Bidirectional pump: TCP <-> JS
+    // We loop, alternating between:
+    // 1. Check outgoing queue (JS -> TCP): drain server's outgoing messages
+    // 2. Try to read from TCP (TCP -> JS): deliver to server's _onMessage
+
+    let mut tcp_closed = false;
+
+    loop {
+        // 1. Drain outgoing messages from the server WebSocket (JS -> TCP)
+        let outgoing: Vec<crate::state::WsMessage> = {
+            let state = runtime.borrow().state().clone();
+            let mut s = state.borrow_mut();
+            if let Some(ws) = s.websockets.get_mut(&server_ws_id) {
+                ws.outgoing.drain(..).collect()
+            } else {
+                Vec::new()
+            }
+        };
+
+        for msg in outgoing {
+            match msg {
+                crate::state::WsMessage::Text(text) => {
+                    if !write_ws_frame(stream, 0x1, text.as_bytes()).await {
+                        return false;
+                    }
+                }
+                crate::state::WsMessage::Binary(data) => {
+                    if !write_ws_frame(stream, 0x2, &data).await {
+                        return false;
+                    }
+                }
+                crate::state::WsMessage::Close(code, reason) => {
+                    let mut close_payload = Vec::with_capacity(2 + reason.len());
+                    close_payload.extend_from_slice(&code.to_be_bytes());
+                    close_payload.extend_from_slice(reason.as_bytes());
+                    let _ = write_ws_frame(stream, 0x8, &close_payload).await;
+                    return true;
+                }
+            }
+        }
+
+        if tcp_closed {
+            break;
+        }
+
+        // 2. Try to read a frame from TCP (non-blocking attempt via compio)
+        // Use a small timeout to avoid blocking forever
+        let frame = {
+            use futures::FutureExt;
+            let read_future = read_ws_frame(stream).fuse();
+            let timeout_future = compio::time::sleep(Duration::from_millis(10)).fuse();
+
+            futures::pin_mut!(read_future);
+            futures::pin_mut!(timeout_future);
+
+            futures::select! {
+                result = read_future => result,
+                _ = timeout_future => None,
+            }
+        };
+
+        match frame {
+            Some((0x1, payload)) => {
+                // Text frame — deliver to the server WebSocket's _onMessage
+                let text = String::from_utf8_lossy(&payload).to_string();
+
+                // Queue the message in the server's incoming buffer
+                {
+                    let state = runtime.borrow().state().clone();
+                    let mut s = state.borrow_mut();
+                    if let Some(ws) = s.websockets.get_mut(&server_ws_id) {
+                        ws.incoming.push_back(crate::state::WsMessage::Text(text.clone()));
+                    }
+                }
+
+                // Enter V8 to fire the server WebSocket's _onMessage callback
+                deliver_ws_message(runtime, server_ws_id, &text);
+            }
+            Some((0x8, payload)) => {
+                // Close frame
+                let (code, reason) = if payload.len() >= 2 {
+                    let code = u16::from_be_bytes([payload[0], payload[1]]);
+                    let reason = String::from_utf8_lossy(&payload[2..]).to_string();
+                    (code, reason)
+                } else {
+                    (1000, String::new())
+                };
+
+                // Fire _onClose on the server WebSocket
+                deliver_ws_close(runtime, server_ws_id, code, &reason);
+
+                // Send close frame back
+                let mut close_payload = Vec::with_capacity(2 + reason.len());
+                close_payload.extend_from_slice(&code.to_be_bytes());
+                close_payload.extend_from_slice(reason.as_bytes());
+                let _ = write_ws_frame(stream, 0x8, &close_payload).await;
+                tcp_closed = true;
+            }
+            Some((0x9, payload)) => {
+                // Ping — respond with pong
+                let _ = write_ws_frame(stream, 0xA, &payload).await;
+            }
+            Some((0xA, _)) => {
+                // Pong — ignore
+            }
+            Some((0x2, payload)) => {
+                // Binary frame — for v1, convert to text
+                let text = String::from_utf8_lossy(&payload).to_string();
+                {
+                    let state = runtime.borrow().state().clone();
+                    let mut s = state.borrow_mut();
+                    if let Some(ws) = s.websockets.get_mut(&server_ws_id) {
+                        ws.incoming.push_back(crate::state::WsMessage::Text(text.clone()));
+                    }
+                }
+                deliver_ws_message(runtime, server_ws_id, &text);
+            }
+            None => {
+                // Timeout or read error — yield and try again
+                yield_now().await;
+            }
+            _ => {
+                // Unknown opcode — ignore
+            }
+        }
+    }
+
+    true
+}
+
+/// Enter V8 to call `ws._onMessage(data)` on the server WebSocket.
+fn deliver_ws_message(
+    runtime: &Rc<RefCell<Runtime>>,
+    ws_id: u32,
+    data: &str,
+) {
+    let mut rt = runtime.borrow_mut();
+    rt.enter_v8_for_ws_message(ws_id, data);
+}
+
+/// Enter V8 to call `ws._onClose(code, reason)` on the server WebSocket.
+fn deliver_ws_close(
+    runtime: &Rc<RefCell<Runtime>>,
+    ws_id: u32,
+    code: u16,
+    reason: &str,
+) {
+    let mut rt = runtime.borrow_mut();
+    rt.enter_v8_for_ws_close(ws_id, code, reason);
 }
 
 // ===========================================================================

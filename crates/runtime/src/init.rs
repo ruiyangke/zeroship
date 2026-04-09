@@ -97,6 +97,9 @@ pub const BLOB_JS: &str = include_str!("embed/blob.js");
 /// Embedded FormData polyfill.
 pub const FORMDATA_JS: &str = include_str!("embed/formdata.js");
 
+/// Embedded WebSocket/WebSocketPair polyfill (depends on events.js for EventTarget).
+pub const WEBSOCKET_JS: &str = include_str!("embed/websocket.js");
+
 /// The JSON-RPC dispatch function compiled once and reused for every request.
 /// Handles both sync and async (Promise-returning) handlers.
 pub const DISPATCH_JS: &str = r#"(function(__req_json) {
@@ -133,7 +136,7 @@ pub fn load_polyfills_and_modules(
     setup_globals(scope);
 
     // Load polyfills
-    for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS, EVENTS_JS, BLOB_JS, FORMDATA_JS] {
+    for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS, EVENTS_JS, BLOB_JS, FORMDATA_JS, WEBSOCKET_JS] {
         let code = v8::String::new(scope, polyfill).unwrap();
         let script = v8::Script::compile(scope, code, None).unwrap();
         script.run(scope).unwrap();
@@ -548,6 +551,29 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
 
         let streams_key = v8::String::new(scope, "__streams").unwrap();
         global.set(scope, streams_key.into(), streams.into());
+    }
+
+    // WebSocket native callbacks
+    {
+        let f = v8::Function::new(scope, crate::websocket::ws_create_pair_callback).unwrap();
+        let key = v8::String::new(scope, "__wsCreatePair").unwrap();
+        global.set(scope, key.into(), f.into());
+
+        let f = v8::Function::new(scope, crate::websocket::ws_link_pair_callback).unwrap();
+        let key = v8::String::new(scope, "__wsLinkPair").unwrap();
+        global.set(scope, key.into(), f.into());
+
+        let f = v8::Function::new(scope, crate::websocket::ws_accept_callback).unwrap();
+        let key = v8::String::new(scope, "__wsAccept").unwrap();
+        global.set(scope, key.into(), f.into());
+
+        let f = v8::Function::new(scope, crate::websocket::ws_send_callback).unwrap();
+        let key = v8::String::new(scope, "__wsSend").unwrap();
+        global.set(scope, key.into(), f.into());
+
+        let f = v8::Function::new(scope, crate::websocket::ws_close_callback).unwrap();
+        let key = v8::String::new(scope, "__wsClose").unwrap();
+        global.set(scope, key.into(), f.into());
     }
 
     // env namespace

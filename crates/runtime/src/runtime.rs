@@ -70,6 +70,11 @@ pub enum DispatchOutcome {
     },
     /// Async HTTP handler: promise is pending. Poll the receiver for the reply.
     HttpPending(ResultReceiver<Result<HttpDispatchResult, String>>),
+    /// WebSocket upgrade — JS returned Response with status 101 + webSocket property.
+    WebSocketUpgrade {
+        ws_id: u32,
+        headers: Vec<(String, String)>,
+    },
 }
 
 /// Result of an async HTTP dispatch (sent through the oneshot when promise settles).
@@ -84,6 +89,11 @@ pub enum HttpDispatchResult {
         status: u16,
         headers: Vec<(String, String)>,
         body: StreamReader,
+        logs: Vec<String>,
+    },
+    WebSocket {
+        ws_id: u32,
+        headers: Vec<(String, String)>,
         logs: Vec<String>,
     },
 }
@@ -733,6 +743,9 @@ impl Runtime {
                 self.stream_forwarders.insert(stream_id, forwarder);
                 DispatchOutcome::HttpStream { status, headers, body: reader, logs }
             }
+            ResponseInfo::WebSocket { ws_id, headers } => {
+                DispatchOutcome::WebSocketUpgrade { ws_id, headers }
+            }
         }
     }
 
@@ -1132,6 +1145,11 @@ impl Runtime {
                     tx.send(Ok(HttpDispatchResult::Stream { status, headers, body: reader, logs }));
                 }
             }
+            ResponseInfo::WebSocket { ws_id, headers } => {
+                if let Some(tx) = reply_http {
+                    tx.send(Ok(HttpDispatchResult::WebSocket { ws_id, headers, logs }));
+                }
+            }
         }
     }
 
@@ -1172,6 +1190,30 @@ impl Runtime {
                 tx.send(Err("CPU time limit exceeded".into()));
             }
         }
+    }
+
+    /// Get a clone of the shared state handle.
+    pub fn state(&self) -> &SharedState {
+        &self.state
+    }
+
+    /// Enter V8 to deliver a WebSocket message to the server-side WebSocket.
+    /// Finds the global WebSocket object by ws_id and calls `ws._onMessage(data)`.
+    pub fn enter_v8_for_ws_message(&mut self, ws_id: u32, data: &str) {
+        enter_v8!(self, |scope| {
+            let data_val: v8::Local<v8::Value> = v8::String::new(scope, data).unwrap().into();
+            call_ws_method(scope, ws_id, "_onMessage", &[data_val]);
+        });
+    }
+
+    /// Enter V8 to deliver a WebSocket close to the server-side WebSocket.
+    /// Finds the global WebSocket object by ws_id and calls `ws._onClose(code, reason)`.
+    pub fn enter_v8_for_ws_close(&mut self, ws_id: u32, code: u16, reason: &str) {
+        enter_v8!(self, |scope| {
+            let code_val: v8::Local<v8::Value> = v8::Integer::new(scope, code as i32).into();
+            let reason_val: v8::Local<v8::Value> = v8::String::new(scope, reason).unwrap().into();
+            call_ws_method(scope, ws_id, "_onClose", &[code_val, reason_val]);
+        });
     }
 
     fn cleanup_cancelled_requests(&mut self) {
@@ -1230,6 +1272,34 @@ fn collect_settled_promises(
 // ---------------------------------------------------------------------------
 // Free function: call onRequest handler and inspect result
 // ---------------------------------------------------------------------------
+
+/// Look up a WebSocket in the global `__wsRegistry` by ID and call a method on it.
+fn call_ws_method(
+    scope: &mut v8::PinScope,
+    ws_id: u32,
+    method: &str,
+    args: &[v8::Local<v8::Value>],
+) {
+    let global = scope.get_current_context().global(scope);
+
+    // Access __wsRegistry
+    let registry_key = v8::String::new(scope, "__wsRegistry").unwrap();
+    let Some(registry_val) = global.get(scope, registry_key.into()) else { return };
+    let Some(registry_obj) = registry_val.to_object(scope) else { return };
+
+    // Look up the WebSocket by its string ID (JS object keys are strings)
+    let id_key = v8::String::new(scope, &ws_id.to_string()).unwrap();
+    let Some(ws_val) = registry_obj.get(scope, id_key.into()) else { return };
+    if ws_val.is_undefined() || ws_val.is_null() { return; }
+    let Some(ws_obj) = ws_val.to_object(scope) else { return };
+
+    // Call the method
+    let method_key = v8::String::new(scope, method).unwrap();
+    let Some(method_val) = ws_obj.get(scope, method_key.into()) else { return };
+    let Ok(func) = v8::Local::<v8::Function>::try_from(method_val) else { return };
+
+    func.call(scope, ws_val, args);
+}
 
 /// Call the onRequest handler and inspect the result. Separated out to avoid
 /// borrow conflicts (self.http_handler_fn borrowed while enter_v8! borrows self).

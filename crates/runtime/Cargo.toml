@@ -38,6 +38,9 @@ socket2 = { version = "0.5", features = ["all"] }
 zstd = "0.13"
 sha2 = "0.10"
 
+# WebSocket handshake (SHA-1 for Sec-WebSocket-Accept per RFC 6455)
+sha1 = "0.10"
+
 # Proc macros
 appbase-runtime-macros = { path = "../runtime-macros" }
 

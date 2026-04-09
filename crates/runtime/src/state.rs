@@ -4,7 +4,7 @@
 //! callbacks can borrow it without crossing thread boundaries.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -86,6 +86,55 @@ pub const REQUEST_CHANNEL_CAPACITY: usize = 256;
 pub const MAX_PENDING_OPS: usize = 1024;
 
 // ---------------------------------------------------------------------------
+// WebSocket state
+// ---------------------------------------------------------------------------
+
+/// A message on a WebSocket channel.
+#[derive(Debug, Clone)]
+pub enum WsMessage {
+    /// UTF-8 text frame.
+    Text(String),
+    /// Binary frame.
+    Binary(Vec<u8>),
+    /// Close frame with code + reason.
+    Close(u16, String),
+}
+
+/// Per-WebSocket state tracked in RuntimeState.
+#[derive(Debug)]
+pub struct WebSocketState {
+    /// The other end of a WebSocketPair (None for standalone WebSockets).
+    pub peer_id: Option<u32>,
+    /// Whether `accept()` has been called (server-side).
+    pub accepted: bool,
+    /// Whether the WebSocket has been closed.
+    pub closed: bool,
+    /// Messages arriving TO this WebSocket (from peer or TCP).
+    pub incoming: VecDeque<WsMessage>,
+    /// Messages FROM this WebSocket (to peer or TCP).
+    pub outgoing: VecDeque<WsMessage>,
+    /// Close code (set when close is initiated).
+    pub close_code: Option<u16>,
+    /// Close reason (set when close is initiated).
+    pub close_reason: Option<String>,
+}
+
+impl WebSocketState {
+    /// Create a new WebSocket state in the CONNECTING state.
+    pub fn new() -> Self {
+        Self {
+            peer_id: None,
+            accepted: false,
+            closed: false,
+            incoming: VecDeque::new(),
+            outgoing: VecDeque::new(),
+            close_code: None,
+            close_reason: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Core state
 // ---------------------------------------------------------------------------
 
@@ -145,6 +194,11 @@ pub struct RuntimeState {
     /// When a stream_id is in this set, `stream_enqueue_callback` forwards chunks
     /// via the stream events channel instead of buffering them for JS reads.
     pub outbound_streams: HashSet<u32>,
+
+    /// WebSocket instances, keyed by ws_id.
+    pub websockets: HashMap<u32, WebSocketState>,
+    /// Monotonically increasing WebSocket ID counter (incremented by 2 for pairs).
+    pub next_ws_id: u32,
 }
 
 /// Convenience alias — the shared handle passed into V8 callbacks.
@@ -181,6 +235,9 @@ impl RuntimeState {
             next_key_id: 1,
 
             outbound_streams: HashSet::new(),
+
+            websockets: HashMap::new(),
+            next_ws_id: 1,
         }
     }
 }
