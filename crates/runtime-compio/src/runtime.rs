@@ -482,7 +482,11 @@ impl Runtime {
             return Err("Isolate not initialized".to_string());
         }
 
+        let request_id = self.next_direct_request_id;
+        self.next_direct_request_id += 1;
         let wall_start = Instant::now();
+
+        self.state.borrow_mut().executing_request_id = Some(request_id);
 
         self.arm_cpu_timer();
         let dispatch_result = {
@@ -494,6 +498,7 @@ impl Runtime {
         self.disarm_cpu_timer();
 
         if self.check_v8_terminated() {
+            self.state.borrow_mut().executing_request_id = None;
             return Err("CPU time limit exceeded".into());
         }
 
@@ -501,7 +506,8 @@ impl Runtime {
 
         match dispatch_result {
             DispatchResult::Sync(json) => {
-                let logs = self.drain_request_logs(0);
+                self.state.borrow_mut().executing_request_id = None;
+                let logs = self.drain_request_logs(request_id);
                 Ok(RequestResult {
                     json,
                     cpu_time: cpu_dispatch,
@@ -526,9 +532,10 @@ impl Runtime {
 
                 let cpu_total = wall_start.elapsed();
 
+                self.state.borrow_mut().executing_request_id = None;
                 match result {
                     Ok(json) => {
-                        let logs = self.drain_request_logs(0);
+                        let logs = self.drain_request_logs(request_id);
                         Ok(RequestResult {
                             json,
                             cpu_time: cpu_total,
@@ -542,7 +549,10 @@ impl Runtime {
                     }
                 }
             }
-            DispatchResult::Error(msg) => Err(msg),
+            DispatchResult::Error(msg) => {
+                self.state.borrow_mut().executing_request_id = None;
+                Err(msg)
+            }
         }
     }
 
@@ -571,6 +581,9 @@ impl Runtime {
 
         let wall_start = Instant::now();
 
+        // Set executing_request_id so console.log routes to this request
+        self.state.borrow_mut().executing_request_id = Some(request_id);
+
         self.arm_cpu_timer();
         let dispatch_result = {
             let dispatch_fn = self.dispatch_fn.as_ref().unwrap();
@@ -588,7 +601,8 @@ impl Runtime {
 
         match dispatch_result {
             DispatchResult::Sync(json) => {
-                let logs = self.drain_request_logs(0);
+                self.state.borrow_mut().executing_request_id = None;
+                let logs = self.drain_request_logs(request_id);
                 DispatchOutcome::Complete(Ok(RequestResult {
                     json,
                     cpu_time: cpu_dispatch,
@@ -602,6 +616,7 @@ impl Runtime {
                 self.fire_ready_timers_inline();
 
                 if self.check_v8_terminated() {
+                    self.state.borrow_mut().executing_request_id = None;
                     return DispatchOutcome::Complete(Err("CPU time limit exceeded".into()));
                 }
 
@@ -613,6 +628,7 @@ impl Runtime {
                 self.disarm_cpu_timer();
 
                 if self.check_v8_terminated() {
+                    self.state.borrow_mut().executing_request_id = None;
                     return DispatchOutcome::Complete(Err("CPU time limit exceeded".into()));
                 }
 
@@ -623,11 +639,13 @@ impl Runtime {
                         // CPU limit check for inline-settled async requests
                         if let Some(limit) = self.cpu_limit {
                             if cpu_total > limit {
+                                self.state.borrow_mut().executing_request_id = None;
                                 return DispatchOutcome::Complete(Err("CPU time limit exceeded".into()));
                             }
                         }
                         // Promise settled synchronously (e.g. Promise.resolve chains, setTimeout(0))
-                        let logs = self.drain_request_logs(0);
+                        self.state.borrow_mut().executing_request_id = None;
+                        let logs = self.drain_request_logs(request_id);
                         DispatchOutcome::Complete(Ok(RequestResult {
                             json,
                             cpu_time: cpu_total,
@@ -637,6 +655,7 @@ impl Runtime {
                     }
                     Err(_) => {
                         // Promise is truly pending — needs the pump to drive it
+                        self.state.borrow_mut().executing_request_id = None;
                         let (tx, rx) = tokio::sync::oneshot::channel();
                         self.pending_requests.insert(request_id, PendingRequest {
                             id: request_id,
@@ -656,6 +675,7 @@ impl Runtime {
                 }
             }
             DispatchResult::Error(msg) => {
+                self.state.borrow_mut().executing_request_id = None;
                 DispatchOutcome::Complete(Err(msg))
             }
         }
