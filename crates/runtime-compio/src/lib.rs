@@ -10,5 +10,5 @@ pub use appbase_v8_core::init;
 pub use appbase_v8_core::modules;
 
 pub use appbase_v8_core::{init_v8, RequestResult, ModuleEntry,
-    IncomingRequest, RequestReply, RequestKind, OpResult, FetchRequest};
-pub use runtime::{Runtime, AsyncWork, AsyncEvent, DispatchOutcome};
+    IncomingRequest, RequestReply, RequestKind, OpResult, HttpStreamResult, FetchRequest};
+pub use runtime::{Runtime, AsyncWork, AsyncEvent, DispatchOutcome, HttpDispatchResult};

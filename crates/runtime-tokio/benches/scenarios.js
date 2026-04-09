@@ -94,6 +94,21 @@ export async function aesEncrypt() {
 
 // ECDSA P-256 cached keypair
 var _ecKp = null;
+// =========================================================================
+// HTTP handler (onRequest)
+// =========================================================================
+
+export function onRequest(req) {
+    return new Response(JSON.stringify({ method: req.method, url: req.url }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+    });
+}
+
+// =========================================================================
+// ECDSA scenario
+// =========================================================================
+
 export async function ecdsaSign() {
     if (!_ecKp) {
         _ecKp = await crypto.subtle.generateKey(

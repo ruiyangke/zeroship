@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use appbase_runtime_compio::modules::ModuleEntry;
 use appbase_runtime_compio::runtime::Runtime;
-use appbase_runtime_compio::{AsyncWork, AsyncEvent, DispatchOutcome};
+use appbase_runtime_compio::{AsyncWork, AsyncEvent, DispatchOutcome, HttpDispatchResult};
 use appbase_runtime_compio::init_v8;
 use compio::buf::BufResult;
 use compio::io::{AsyncRead, AsyncWriteExt};
@@ -108,19 +108,38 @@ async fn handle_connection(
             let body_bytes = &data[consumed + header_len..consumed + total_len];
 
             // Route
-            let response_bytes: Vec<u8> = match (method, path) {
-                ("GET", "/health") => HEALTH_RESPONSE.to_vec(),
-                ("POST", "/rpc") => {
-                    dispatch_rpc(body_bytes, &runtime).await
+            let has_http = runtime.borrow().has_http_handler();
+            match (method, path) {
+                ("GET", "/health") => {
+                    let BufResult(write_result, _) = stream.write_all(HEALTH_RESPONSE.to_vec()).await;
+                    if write_result.is_err() { return; }
                 }
-                _ => NOT_FOUND_RESPONSE.to_vec(),
-            };
+                ("POST", "/rpc") => {
+                    let response_bytes = dispatch_rpc(body_bytes, &runtime).await;
+                    let BufResult(write_result, _) = stream.write_all(response_bytes).await;
+                    if write_result.is_err() { return; }
+                }
+                _ if has_http => {
+                    // Collect headers as JSON array of [name, value] pairs
+                    let headers_json = collect_headers_json(&headers);
+                    let body_str = std::str::from_utf8(body_bytes).unwrap_or("");
+                    // Reconstruct URL from Host header
+                    let host = headers.iter()
+                        .find(|h| h.name.eq_ignore_ascii_case("host"))
+                        .and_then(|h| std::str::from_utf8(h.value).ok())
+                        .unwrap_or("localhost");
+                    let full_url = format!("http://{}{}", host, path);
 
-            // Write response (compio takes ownership of the Vec)
-            let BufResult(write_result, _) = stream.write_all(response_bytes).await;
-            if write_result.is_err() {
-                return;
-            }
+                    let wrote_ok = dispatch_http(
+                        &mut stream, method, &full_url, &headers_json, body_str, &runtime,
+                    ).await;
+                    if !wrote_ok { return; }
+                }
+                _ => {
+                    let BufResult(write_result, _) = stream.write_all(NOT_FOUND_RESPONSE.to_vec()).await;
+                    if write_result.is_err() { return; }
+                }
+            };
 
             // Advance cursor past this request
             consumed += total_len;
@@ -218,6 +237,227 @@ async fn dispatch_rpc(
                     }
                 }
             }
+        }
+        // HTTP variants should never come from dispatch_start (RPC path)
+        DispatchOutcome::HttpComplete { .. }
+        | DispatchOutcome::HttpStream { .. }
+        | DispatchOutcome::HttpPending(_) => {
+            SERVICE_UNAVAILABLE.to_vec()
+        }
+    }
+}
+
+/// Collect HTTP headers into a JSON array of [name, value] pairs for the JS helper.
+fn collect_headers_json(headers: &[httparse::Header<'_>]) -> String {
+    let mut buf = String::from("[");
+    let mut first = true;
+    for h in headers {
+        if h.name.is_empty() { continue; }
+        if !first { buf.push(','); }
+        first = false;
+        let val = std::str::from_utf8(h.value).unwrap_or("");
+        // Minimal JSON escaping for header values
+        buf.push('[');
+        buf.push('"');
+        buf.push_str(h.name);
+        buf.push('"');
+        buf.push(',');
+        buf.push('"');
+        for ch in val.chars() {
+            match ch {
+                '"' => buf.push_str("\\\""),
+                '\\' => buf.push_str("\\\\"),
+                '\n' => buf.push_str("\\n"),
+                '\r' => buf.push_str("\\r"),
+                _ => buf.push(ch),
+            }
+        }
+        buf.push('"');
+        buf.push(']');
+    }
+    buf.push(']');
+    buf
+}
+
+/// Build a raw HTTP response with status, headers, and body.
+fn build_http_response(status: u16, headers: &[(String, String)], body: &str) -> Vec<u8> {
+    let status_text = match status {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        _ => "OK",
+    };
+
+    let mut buf = Vec::with_capacity(256 + body.len());
+    buf.extend_from_slice(b"HTTP/1.1 ");
+    let mut status_buf = itoa::Buffer::new();
+    buf.extend_from_slice(status_buf.format(status).as_bytes());
+    buf.push(b' ');
+    buf.extend_from_slice(status_text.as_bytes());
+    buf.extend_from_slice(b"\r\n");
+
+    // Write headers from the Response object
+    let mut has_content_length = false;
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("content-length") {
+            has_content_length = true;
+        }
+        buf.extend_from_slice(name.as_bytes());
+        buf.extend_from_slice(b": ");
+        buf.extend_from_slice(value.as_bytes());
+        buf.extend_from_slice(b"\r\n");
+    }
+    if !has_content_length {
+        buf.extend_from_slice(b"Content-Length: ");
+        let mut len_buf = itoa::Buffer::new();
+        buf.extend_from_slice(len_buf.format(body.len()).as_bytes());
+        buf.extend_from_slice(b"\r\n");
+    }
+    buf.extend_from_slice(b"\r\n");
+    buf.extend_from_slice(body.as_bytes());
+    buf
+}
+
+/// Build HTTP response headers for a streaming response (Transfer-Encoding: chunked).
+fn build_stream_response_headers(status: u16, headers: &[(String, String)]) -> Vec<u8> {
+    let status_text = match status {
+        200 => "OK", 404 => "Not Found", 500 => "Internal Server Error", _ => "OK",
+    };
+    let mut buf = Vec::with_capacity(256);
+    buf.extend_from_slice(b"HTTP/1.1 ");
+    let mut status_buf = itoa::Buffer::new();
+    buf.extend_from_slice(status_buf.format(status).as_bytes());
+    buf.push(b' ');
+    buf.extend_from_slice(status_text.as_bytes());
+    buf.extend_from_slice(b"\r\n");
+
+    for (name, value) in headers {
+        // Skip content-length since we're chunked
+        if name.eq_ignore_ascii_case("content-length") { continue; }
+        buf.extend_from_slice(name.as_bytes());
+        buf.extend_from_slice(b": ");
+        buf.extend_from_slice(value.as_bytes());
+        buf.extend_from_slice(b"\r\n");
+    }
+    buf.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
+    buf.extend_from_slice(b"\r\n");
+    buf
+}
+
+/// Dispatch an HTTP request to the onRequest handler.
+/// Returns true if writes succeeded, false on write error.
+async fn dispatch_http(
+    stream: &mut TcpStream,
+    method: &str,
+    url: &str,
+    headers_json: &str,
+    body: &str,
+    runtime: &Rc<RefCell<Runtime>>,
+) -> bool {
+    // Phase 1: dispatch into V8 (scoped borrow)
+    let outcome = runtime.borrow_mut().dispatch_http(method, url, headers_json, body);
+
+    // Phase 2: handle outcome
+    match outcome {
+        DispatchOutcome::HttpComplete { status, headers, body, logs: _ } => {
+            let response = build_http_response(status, &headers, &body);
+            let BufResult(r, _) = stream.write_all(response).await;
+            r.is_ok()
+        }
+        DispatchOutcome::HttpStream { status, headers, mut body_rx, logs: _ } => {
+            // Write headers with chunked transfer encoding
+            let header_bytes = build_stream_response_headers(status, &headers);
+            let BufResult(r, _) = stream.write_all(header_bytes).await;
+            if r.is_err() { return false; }
+
+            // Stream body chunks using chunked transfer encoding
+            while let Some(chunk) = body_rx.recv().await {
+                // Write chunk size in hex + CRLF + data + CRLF
+                let size_hex = format!("{:x}\r\n", chunk.len());
+                let mut chunk_data = Vec::with_capacity(size_hex.len() + chunk.len() + 2);
+                chunk_data.extend_from_slice(size_hex.as_bytes());
+                chunk_data.extend_from_slice(&chunk);
+                chunk_data.extend_from_slice(b"\r\n");
+                let BufResult(r, _) = stream.write_all(chunk_data).await;
+                if r.is_err() { return false; }
+            }
+            // Write terminal chunk
+            let BufResult(r, _) = stream.write_all(b"0\r\n\r\n".to_vec()).await;
+            r.is_ok()
+        }
+        DispatchOutcome::HttpPending(rx) => {
+            // Await the pump task settling this promise
+            let wall_limit = runtime.borrow().wall_timeout();
+            let result = if let Some(wall_limit) = wall_limit {
+                futures::select! {
+                    result = rx.fuse() => result.ok(),
+                    _ = compio::time::sleep(wall_limit).fuse() => None,
+                }
+            } else {
+                rx.await.ok()
+            };
+
+            match result {
+                Some(Ok(HttpDispatchResult::Complete { status, headers, body, logs: _ })) => {
+                    let response = build_http_response(status, &headers, &body);
+                    let BufResult(r, _) = stream.write_all(response).await;
+                    r.is_ok()
+                }
+                Some(Ok(HttpDispatchResult::Stream { status, headers, mut body_rx, logs: _ })) => {
+                    let header_bytes = build_stream_response_headers(status, &headers);
+                    let BufResult(r, _) = stream.write_all(header_bytes).await;
+                    if r.is_err() { return false; }
+
+                    while let Some(chunk) = body_rx.recv().await {
+                        let size_hex = format!("{:x}\r\n", chunk.len());
+                        let mut chunk_data = Vec::with_capacity(size_hex.len() + chunk.len() + 2);
+                        chunk_data.extend_from_slice(size_hex.as_bytes());
+                        chunk_data.extend_from_slice(&chunk);
+                        chunk_data.extend_from_slice(b"\r\n");
+                        let BufResult(r, _) = stream.write_all(chunk_data).await;
+                        if r.is_err() { return false; }
+                    }
+                    let BufResult(r, _) = stream.write_all(b"0\r\n\r\n".to_vec()).await;
+                    r.is_ok()
+                }
+                Some(Err(e)) => {
+                    let body = format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\""));
+                    let response = build_http_response(500, &[], &body);
+                    let BufResult(r, _) = stream.write_all(response).await;
+                    r.is_ok()
+                }
+                None => {
+                    let response = build_http_response(504, &[], r#"{"error":"Request timed out"}"#);
+                    let BufResult(r, _) = stream.write_all(response).await;
+                    r.is_ok()
+                }
+            }
+        }
+        DispatchOutcome::Complete(Ok(result)) => {
+            // Shouldn't happen for HTTP dispatch, but handle gracefully
+            let response = build_http_response(200, &[("content-type".into(), "application/json".into())], &result.json);
+            let BufResult(r, _) = stream.write_all(response).await;
+            r.is_ok()
+        }
+        DispatchOutcome::Complete(Err(e)) => {
+            let body = format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\""));
+            let response = build_http_response(500, &[], &body);
+            let BufResult(r, _) = stream.write_all(response).await;
+            r.is_ok()
+        }
+        DispatchOutcome::Pending(_) => {
+            // Shouldn't happen for HTTP dispatch
+            let response = build_http_response(500, &[], r#"{"error":"Unexpected pending state"}"#);
+            let BufResult(r, _) = stream.write_all(response).await;
+            r.is_ok()
         }
     }
 }
