@@ -391,20 +391,18 @@ impl Runtime {
     /// Check if V8 was terminated by the CPU timer. If so, cancel termination,
     /// disarm the timer, and drain all pending requests with an error.
     /// Returns `true` if termination was detected.
+    /// Check if V8 was terminated by the CPU timer. If so, cancel the
+    /// termination so the isolate can continue serving other requests.
+    /// Returns true if termination was detected.
+    ///
+    /// Does NOT drain pending requests — the caller decides which request
+    /// to error (only the one that was executing when the timer fired).
     fn check_v8_terminated(&mut self) -> bool {
         if !self.isolate.is_execution_terminating() {
             return false;
         }
         self.isolate.cancel_terminate_execution();
         self.disarm_cpu_timer();
-        // Drain ALL pending requests with CPU limit error
-        for (_id, req) in self.pending_requests.drain() {
-            if let Some(tx) = req.reply_direct {
-                tx.send(Err("CPU time limit exceeded".into()));
-            } else if let Some(tx) = req.reply_http {
-                tx.send(Err("CPU time limit exceeded".into()));
-            }
-        }
         true
     }
 
@@ -814,6 +812,18 @@ impl Runtime {
                 self.disarm_cpu_timer();
 
                 if self.check_v8_terminated() {
+                    // Only error the request whose JS was executing when the timer fired
+                    if let Some(rid) = request_id {
+                        if let Some(req) = self.pending_requests.remove(&rid) {
+                            if let Some(tx) = req.reply_direct {
+                                tx.send(Err("CPU time limit exceeded".into()));
+                            } else if let Some(tx) = req.reply_http {
+                                tx.send(Err("CPU time limit exceeded".into()));
+                            }
+                        }
+                    }
+                    self.clear_executing_request();
+                    self.drain_new_tasks_into(work);
                     return;
                 }
 
@@ -888,6 +898,18 @@ impl Runtime {
         self.disarm_cpu_timer();
 
         if self.check_v8_terminated() {
+            // Only error the request whose timer callback was executing
+            if let Some(rid) = owner_request_id {
+                if let Some(req) = self.pending_requests.remove(&rid) {
+                    if let Some(tx) = req.reply_direct {
+                        tx.send(Err("CPU time limit exceeded".into()));
+                    } else if let Some(tx) = req.reply_http {
+                        tx.send(Err("CPU time limit exceeded".into()));
+                    }
+                }
+            }
+            self.clear_executing_request();
+            self.drain_new_tasks_into(work);
             return;
         }
 
@@ -980,6 +1002,18 @@ impl Runtime {
             self.disarm_cpu_timer();
 
             if self.check_v8_terminated() {
+                // Only error the request whose timer callback was executing
+                if let Some(rid) = owner_request_id {
+                    if let Some(req) = self.pending_requests.remove(&rid) {
+                        if let Some(tx) = req.reply_direct {
+                            tx.send(Err("CPU time limit exceeded".into()));
+                        } else if let Some(tx) = req.reply_http {
+                            tx.send(Err("CPU time limit exceeded".into()));
+                        }
+                    }
+                }
+                self.clear_executing_request();
+                self.drain_new_tasks_into(work);
                 return;
             }
 
