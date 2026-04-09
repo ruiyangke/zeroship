@@ -50,11 +50,28 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// Default JS loaded when no --js flag is provided.
 const SERVER_JS: &str = include_str!("../benches/scenarios.js");
 
+/// Build an .appbundle at startup, then load modules from it.
+/// This exercises the real production path: bundle → parse → decompress → V8.
 fn server_modules() -> Vec<ModuleEntry> {
-    vec![ModuleEntry {
-        specifier: "index.js".into(),
-        source: SERVER_JS.into(),
-    }]
+    use appbase_runtime::bundle::{AppBundle, ModuleType};
+
+    // Build .appbundle from the JS source
+    let bundle = AppBundle::new("index.js", vec![
+        ("index.js".into(), ModuleType::EsModule, SERVER_JS.into()),
+    ]);
+    let bytes = bundle.to_bytes();
+
+    eprintln!(
+        "[v8-server-compio] appbundle: {} → {} bytes ({:.0}% ratio)",
+        SERVER_JS.len(),
+        bytes.len(),
+        bytes.len() as f64 / SERVER_JS.len() as f64 * 100.0,
+    );
+
+    // Parse and decompress — same path as production cold start
+    let mut loaded = AppBundle::from_bytes(&bytes)
+        .expect("Failed to parse .appbundle");
+    loaded.to_module_entries()
 }
 
 // ===========================================================================
