@@ -4,21 +4,20 @@
 //! GET /health -> {"status":"ok"}
 //!
 //! Uses httparse for zero-copy HTTP parsing and compio for io_uring I/O.
+//! Connection handlers call V8 directly via Rc<RefCell<Runtime>> — no channel.
 
 #![allow(unsafe_code)]
 
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::rc::Rc;
 
 use appbase_runtime_compio::modules::ModuleEntry;
 use appbase_runtime_compio::runtime::Runtime;
-use appbase_runtime_compio::state::{IncomingRequest, RequestKind, RequestReply};
 use appbase_runtime_compio::init_v8;
 use compio::buf::BufResult;
 use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
-use tokio_util::sync::CancellationToken;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -34,28 +33,17 @@ fn server_modules() -> Vec<ModuleEntry> {
 }
 
 // ===========================================================================
-// HTTP connection handler (compio I/O)
+// HTTP connection handler (compio I/O, direct V8 dispatch)
 // ===========================================================================
-
-/// Monotonic request ID counter (shared across connection handlers).
-static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Shared no-op cancellation token. Cloning is an Arc clone (cheap) vs.
-/// `CancellationToken::new()` which allocates a new tree node per call.
-/// This token is never cancelled and serves requests that have no timeout.
-static SHARED_CANCEL: OnceLock<CancellationToken> = OnceLock::new();
-
-fn shared_cancel() -> CancellationToken {
-    SHARED_CANCEL.get_or_init(CancellationToken::new).clone()
-}
 
 /// Static HTTP response parts.
 const HEALTH_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}";
 const NOT_FOUND_RESPONSE: &[u8] = b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found";
+const SERVICE_UNAVAILABLE: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
 
 async fn handle_connection(
     mut stream: TcpStream,
-    req_tx: tokio::sync::mpsc::Sender<IncomingRequest>,
+    runtime: Rc<RefCell<Runtime>>,
 ) {
     // Accumulation buffer for incoming data
     let mut data = Vec::with_capacity(8192);
@@ -113,7 +101,7 @@ async fn handle_connection(
             let response_bytes: Vec<u8> = match (method, path) {
                 ("GET", "/health") => HEALTH_RESPONSE.to_vec(),
                 ("POST", "/rpc") => {
-                    dispatch_rpc(body_bytes, &req_tx).await
+                    dispatch_rpc(body_bytes, &runtime)
                 }
                 _ => NOT_FOUND_RESPONSE.to_vec(),
             };
@@ -142,9 +130,6 @@ async fn handle_connection(
     }
 }
 
-/// Static 503 response (avoids repeated .to_vec() at each call site).
-const SERVICE_UNAVAILABLE: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
-
 /// Build an HTTP 200 JSON response without format!() overhead.
 /// Uses itoa for Content-Length and direct byte assembly.
 fn build_json_response(body: &str) -> Vec<u8> {
@@ -163,60 +148,23 @@ fn build_json_response(body: &str) -> Vec<u8> {
     buf
 }
 
-async fn dispatch_rpc(
+/// Dispatch a JSON-RPC request directly into V8 (no channel).
+/// The RefCell borrow is scoped — NOT held across any .await point.
+fn dispatch_rpc(
     body_bytes: &[u8],
-    req_tx: &tokio::sync::mpsc::Sender<IncomingRequest>,
+    runtime: &Rc<RefCell<Runtime>>,
 ) -> Vec<u8> {
-    // Validate UTF-8 without the lossy copy
     let body_str = match std::str::from_utf8(body_bytes) {
-        Ok(s) => s.to_owned(),
+        Ok(s) => s,
         Err(_) => return SERVICE_UNAVAILABLE.to_vec(),
     };
 
-    let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let cancel = shared_cancel();
+    let result = runtime.borrow_mut().dispatch_rpc(body_str);
 
-    if req_tx
-        .send(IncomingRequest {
-            id,
-            kind: RequestKind::Rpc(body_str),
-            reply: reply_tx,
-            cancel,
-        })
-        .await
-        .is_err()
-    {
-        return SERVICE_UNAVAILABLE.to_vec();
+    match result {
+        Ok(req_result) => build_json_response(&req_result.json),
+        Err(e) => build_json_response(&format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\""))),
     }
-
-    let reply = match reply_rx.await {
-        Ok(reply) => reply,
-        Err(_) => {
-            return SERVICE_UNAVAILABLE.to_vec();
-        }
-    };
-
-    let response_body = match reply {
-        Ok(RequestReply::Complete(result)) => result.json,
-        Ok(RequestReply::Stream(_)) => r#"{"error":"streaming not supported"}"#.to_string(),
-        Err(e) => format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\"")),
-    };
-
-    build_json_response(&response_body)
-}
-
-// ===========================================================================
-// V8 event loop
-// ===========================================================================
-
-async fn v8_loop(
-    req_rx: tokio::sync::mpsc::Receiver<IncomingRequest>,
-    modules: Vec<ModuleEntry>,
-) {
-    let shutdown = CancellationToken::new();
-    let mut runtime = Runtime::new(modules, req_rx, shutdown, HashMap::new());
-    runtime.run().await;
 }
 
 // ===========================================================================
@@ -252,7 +200,6 @@ fn run_single_worker(port: u16, use_reuseport: bool, worker_id: Option<usize>) {
         .unwrap()
         .block_on(async {
             let listener = if use_reuseport {
-                // Convert std TcpListener -> compio TcpListener via RawFd
                 let std_listener = create_reuseport_listener(port);
                 unsafe {
                     use std::os::fd::{FromRawFd, IntoRawFd};
@@ -268,35 +215,26 @@ fn run_single_worker(port: u16, use_reuseport: bool, worker_id: Option<usize>) {
                 eprintln!("[v8-server-compio] http://0.0.0.0:{port}");
             }
 
-            // Channel from HTTP handlers to V8 event loop
-            let (req_tx, req_rx) = tokio::sync::mpsc::channel::<IncomingRequest>(1024);
+            // Create Runtime directly — no channel, no V8 loop task
+            let runtime = Rc::new(RefCell::new(
+                Runtime::new_direct(server_modules(), HashMap::new()),
+            ));
 
-            // Spawn V8 event loop
-            let modules = server_modules();
-            compio::runtime::spawn(v8_loop(req_rx, modules)).detach();
-
-            // Warmup: send a ping and wait
+            // Warmup: dispatch a ping directly
             {
-                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                req_tx
-                    .send(IncomingRequest {
-                        id: 0,
-                        kind: RequestKind::Rpc(
-                            r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":0}"#.to_string(),
-                        ),
-                        reply: reply_tx,
-                        cancel: shared_cancel(),
-                    })
-                    .await
-                    .unwrap();
-                let _ = reply_rx.await;
+                let result = runtime.borrow_mut().dispatch_rpc(
+                    r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":0}"#,
+                );
+                if let Err(e) = result {
+                    eprintln!("[v8-server-compio] warmup failed: {e}");
+                }
             }
 
             // Accept loop
             loop {
                 let (stream, _addr) = listener.accept().await.unwrap();
-                let tx = req_tx.clone();
-                compio::runtime::spawn(handle_connection(stream, tx)).detach();
+                let rt = runtime.clone();
+                compio::runtime::spawn(handle_connection(stream, rt)).detach();
             }
         });
 }
@@ -319,10 +257,8 @@ fn main() {
         .unwrap_or(1);
 
     if num_workers <= 1 {
-        // Single-worker: no SO_REUSEPORT needed
         run_single_worker(port, false, None);
     } else {
-        // Multi-worker: each thread gets its own compio runtime + V8 isolate
         eprintln!("[v8-server-compio] {num_workers} workers on port {port}");
         let mut handles = Vec::new();
         for i in 0..num_workers {

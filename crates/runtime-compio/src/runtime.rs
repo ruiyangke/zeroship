@@ -77,7 +77,7 @@ pub struct Runtime {
     pending_ops: FuturesUnordered<Pin<Box<dyn Future<Output = OpResult>>>>,
     pending_timers: FuturesUnordered<Pin<Box<dyn Future<Output = TimerResult>>>>,
 
-    request_rx: tokio::sync::mpsc::Receiver<IncomingRequest>,
+    request_rx: Option<tokio::sync::mpsc::Receiver<IncomingRequest>>,
     shutdown: CancellationToken,
 }
 
@@ -85,10 +85,27 @@ pub struct Runtime {
 unsafe impl Send for Runtime {}
 
 impl Runtime {
-    /// Create a new `Runtime`.
+    /// Create a new `Runtime` in direct-dispatch mode (no channel).
+    pub fn new_direct(
+        modules: Vec<ModuleEntry>,
+        env_vars: HashMap<String, String>,
+    ) -> Self {
+        Self::new_inner(modules, None, CancellationToken::new(), env_vars)
+    }
+
+    /// Create a new `Runtime` with a channel receiver (legacy mode).
     pub fn new(
         modules: Vec<ModuleEntry>,
         request_rx: tokio::sync::mpsc::Receiver<IncomingRequest>,
+        shutdown: CancellationToken,
+        env_vars: HashMap<String, String>,
+    ) -> Self {
+        Self::new_inner(modules, Some(request_rx), shutdown, env_vars)
+    }
+
+    fn new_inner(
+        modules: Vec<ModuleEntry>,
+        request_rx: Option<tokio::sync::mpsc::Receiver<IncomingRequest>>,
         shutdown: CancellationToken,
         env_vars: HashMap<String, String>,
     ) -> Self {
@@ -159,6 +176,72 @@ impl Runtime {
     }
 
     // -----------------------------------------------------------------------
+    // Direct dispatch (channel-free mode)
+    // -----------------------------------------------------------------------
+
+    /// Dispatch a JSON-RPC request synchronously into V8. Returns the result
+    /// immediately for sync handlers (ping, fib, promiseChain, uuid, crypto).
+    /// For async handlers that produce a pending promise, fires ready timers
+    /// and checks settlement. Returns an error if the promise remains pending
+    /// (truly async ops like fetch are not yet supported in channel-free mode).
+    pub fn dispatch_rpc(&mut self, body: &str) -> Result<RequestResult, String> {
+        self.ensure_initialized();
+
+        let dispatch_fn = match &self.dispatch_fn {
+            Some(f) => f,
+            None => return Err("Isolate not initialized".to_string()),
+        };
+
+        let wall_start = Instant::now();
+
+        let dispatch_result = enter_v8!(self, |scope| {
+            appbase_v8_core::request::dispatch_request(scope, &self.state, dispatch_fn, body)
+        });
+
+        let cpu_dispatch = wall_start.elapsed();
+
+        match dispatch_result {
+            DispatchResult::Sync(json) => {
+                let logs = self.drain_request_logs(0);
+                Ok(RequestResult {
+                    json,
+                    cpu_time: cpu_dispatch,
+                    wall_time: cpu_dispatch,
+                    logs,
+                })
+            }
+            DispatchResult::Async(promise) => {
+                // Try to settle inline: collect spawned tasks, fire ready timers
+                self.collect_new_tasks();
+
+                // Check if the promise settled after microtask checkpoint + ready timers
+                let result = enter_v8!(self, |scope| {
+                    appbase_v8_core::request::extract_promise_result(scope, &promise)
+                });
+
+                let cpu_total = wall_start.elapsed();
+
+                match result {
+                    Ok(json) => {
+                        let logs = self.drain_request_logs(0);
+                        Ok(RequestResult {
+                            json,
+                            cpu_time: cpu_total,
+                            wall_time: cpu_total,
+                            logs,
+                        })
+                    }
+                    Err(_) => {
+                        // Promise still pending — async ops not supported in direct dispatch
+                        Err("Promise did not settle synchronously (async ops not supported in channel-free mode)".to_string())
+                    }
+                }
+            }
+            DispatchResult::Error(msg) => Err(msg),
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Main event loop
     // -----------------------------------------------------------------------
 
@@ -185,7 +268,12 @@ impl Runtime {
                     self.graceful_shutdown();
                     break;
                 }
-                req = self.request_rx.recv().fuse() => {
+                req = async {
+                    match &mut self.request_rx {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }.fuse() => {
                     match req {
                         Some(req) => self.handle_incoming_request(req),
                         None => break, // channel closed
@@ -662,7 +750,9 @@ impl Runtime {
         for (_, req) in &self.pending_requests {
             req.cancel.cancel();
         }
-        self.request_rx.close();
+        if let Some(rx) = &mut self.request_rx {
+            rx.close();
+        }
         for (_id, req) in self.pending_requests.drain() {
             let _ = req.reply.send(Err("Isolate shutting down".to_string()));
         }
