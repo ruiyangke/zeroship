@@ -19,8 +19,6 @@ use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
-use futures::StreamExt as _;
-use tokio_stream::wrappers::ReceiverStream;
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 use bytes::Bytes;
@@ -344,23 +342,6 @@ async fn handle_rpc(
     let wall_time = wall_start.elapsed();
 
     match result {
-        Ok(PoolDispatchResult::Stream(stream)) => {
-            // Streaming response — forward status, headers, and body channel directly.
-            let body_stream = ReceiverStream::new(stream.body_rx)
-                .map(|chunk| Ok::<_, std::io::Error>(chunk));
-            let body = Body::from_stream(body_stream);
-            let mut builder = axum::http::Response::builder()
-                .status(stream.status);
-            for (k, v) in &stream.headers {
-                builder = builder.header(k.as_str(), v.as_str());
-            }
-            builder.body(body).unwrap_or_else(|_| {
-                axum::http::Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Body::empty())
-                    .unwrap()
-            })
-        }
         Ok(PoolDispatchResult::Rpc(rpc_result)) => {
             let cpu_ms = rpc_result.cpu_time.as_secs_f64() * 1000.0;
             let response_bytes = rpc_result.json.len() as u64;

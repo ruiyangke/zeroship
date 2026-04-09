@@ -2,34 +2,59 @@
 //!
 //! One `Runtime` per app, created lazily on first request.
 //! LRU eviction when pool reaches capacity or idle timeout expires.
+//!
+//! Each V8 worker runs on a dedicated thread with its own compio runtime.
+//! `flume` channels bridge the tokio HTTP handler ↔ compio V8 worker.
 
 use crate::core::config::IsolateConfig;
 use crate::core::types::{IsolateStats, PoolStats, RpcResult};
-use appbase_runtime::{IncomingRequest, Runtime};
 use appbase_runtime::modules::ModuleEntry;
-use appbase_runtime::state::{HttpStreamResult, RequestKind, RequestReply};
 use appbase_runtime::init_v8;
+use appbase_runtime::runtime::Runtime;
+use appbase_runtime::{AsyncWork, AsyncEvent, DispatchOutcome};
 
-/// Result from V8Pool dispatch — either a complete RPC result or a streaming response.
-#[derive(Debug)]
-pub enum PoolDispatchResult {
-    /// Complete response (JSON-RPC).
-    Rpc(RpcResult),
-    /// Streaming response (SSE/AI) — headers + body channel.
-    Stream(HttpStreamResult),
-}
-use tokio_util::sync::CancellationToken;
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+// ---------------------------------------------------------------------------
+// WorkRequest / WorkResult — flume payload
+// ---------------------------------------------------------------------------
+
+/// A request sent from the tokio side (axum handler) to a compio V8 worker.
+struct WorkRequest {
+    body: String,
+    reply: flume::Sender<WorkResult>,
+}
+
+/// A result sent back from the compio V8 worker to the tokio side.
+enum WorkResult {
+    Complete {
+        json: String,
+        cpu_time: Duration,
+        logs: Vec<String>,
+    },
+    Error(String),
+}
+
+/// Result from V8Pool dispatch — currently only RPC (streaming can be added later).
+#[derive(Debug)]
+pub enum PoolDispatchResult {
+    /// Complete response (JSON-RPC).
+    Rpc(RpcResult),
+}
+
+// ---------------------------------------------------------------------------
+// IsolateEntry
+// ---------------------------------------------------------------------------
+
 /// Per-app isolate entry in the pool.
 struct IsolateEntry {
-    /// Channel to send requests to the isolate's worker thread.
-    request_tx: tokio::sync::mpsc::Sender<IncomingRequest>,
-    /// Cancellation token to shut down the isolate.
-    shutdown: CancellationToken,
+    /// Channel to send requests to the isolate's compio worker thread.
+    request_tx: flume::Sender<WorkRequest>,
     /// Last time a request was dispatched (epoch millis, atomic for concurrent updates).
     last_used_ms: AtomicU64,
     /// Total requests dispatched.
@@ -45,30 +70,30 @@ fn epoch_ms() -> u64 {
         .as_millis() as u64
 }
 
+// ---------------------------------------------------------------------------
+// V8Pool
+// ---------------------------------------------------------------------------
+
 /// Multi-tenant V8 isolate pool.
 ///
-/// Each app gets its own `Runtime` on a dedicated thread.
-/// Isolates are created lazily and evicted when idle or at capacity.
+/// Each app gets its own `Runtime` on a dedicated thread running a compio
+/// event loop. Isolates are created lazily and evicted when idle or at capacity.
 pub struct V8Pool {
     /// Map of app_id → isolate entry. RwLock for concurrent reads (dispatch)
     /// with rare writes (create/evict).
     isolates: RwLock<HashMap<String, Arc<IsolateEntry>>>,
     config: IsolateConfig,
-    next_request_id: AtomicU64,
     wall_timeout: Duration,
 }
 
 impl V8Pool {
     /// Create a new multi-tenant V8 pool.
-    ///
-    /// Must be called from within a Tokio runtime context.
     pub fn new(config: &IsolateConfig) -> Self {
         init_v8();
 
         Self {
             isolates: RwLock::new(HashMap::new()),
             config: config.clone(),
-            next_request_id: AtomicU64::new(1),
             wall_timeout: Duration::from_secs(30),
         }
     }
@@ -83,30 +108,24 @@ impl V8Pool {
     ) -> Result<PoolDispatchResult, String> {
         let entry = self.get_or_create(app_id, server_js)?;
 
-        let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let cancel = CancellationToken::new();
+        let (reply_tx, reply_rx) = flume::bounded(1);
 
         entry
             .request_tx
-            .send(IncomingRequest {
-                id,
-                kind: RequestKind::Rpc(body),
-                reply: reply_tx,
-                cancel,
-            })
+            .send_async(WorkRequest { body, reply: reply_tx })
             .await
             .map_err(|_| format!("V8 isolate for '{app_id}' is dead"))?;
 
         entry.request_count.fetch_add(1, Ordering::Relaxed);
         entry.last_used_ms.store(epoch_ms(), Ordering::Relaxed);
 
-        match tokio::time::timeout(self.wall_timeout, reply_rx).await {
-            Ok(Ok(Ok(RequestReply::Complete(result)))) => {
+        // flume::Receiver::recv_async() is runtime-agnostic — works with tokio
+        match tokio::time::timeout(self.wall_timeout, reply_rx.recv_async()).await {
+            Ok(Ok(WorkResult::Complete { json, cpu_time, logs })) => {
                 // Store logs in per-app ring buffer
-                if !result.logs.is_empty() {
+                if !logs.is_empty() {
                     let mut app_logs = entry.logs.lock().unwrap_or_else(|e| e.into_inner());
-                    app_logs.extend(result.logs.iter().cloned());
+                    app_logs.extend(logs.iter().cloned());
                     // Keep last 100
                     if app_logs.len() > 100 {
                         let drain = app_logs.len() - 100;
@@ -114,24 +133,12 @@ impl V8Pool {
                     }
                 }
                 Ok(PoolDispatchResult::Rpc(RpcResult {
-                    json: result.json,
-                    cpu_time: result.cpu_time,
-                    logs: result.logs,
+                    json,
+                    cpu_time,
+                    logs,
                 }))
             }
-            Ok(Ok(Ok(RequestReply::Stream(stream)))) => {
-                // Store logs from the stream header in per-app ring buffer
-                if !stream.logs.is_empty() {
-                    let mut app_logs = entry.logs.lock().unwrap_or_else(|e| e.into_inner());
-                    app_logs.extend(stream.logs.iter().cloned());
-                    if app_logs.len() > 100 {
-                        let drain = app_logs.len() - 100;
-                        app_logs.drain(..drain);
-                    }
-                }
-                Ok(PoolDispatchResult::Stream(stream))
-            }
-            Ok(Ok(Err(e))) => Err(e),
+            Ok(Ok(WorkResult::Error(e))) => Err(e),
             Ok(Err(_)) => Err("V8 worker dropped reply".to_string()),
             Err(_) => Err("Request timed out (30s wall time)".to_string()),
         }
@@ -179,65 +186,41 @@ impl V8Pool {
         Ok(entry)
     }
 
-    /// Spawn a new Runtime on a dedicated thread.
+    /// Spawn a new Runtime on a dedicated thread with a compio event loop.
     fn spawn_isolate(
         &self,
         app_id: &str,
         server_js: &str,
     ) -> Result<IsolateEntry, String> {
-        let (request_tx, request_rx) = tokio::sync::mpsc::channel::<IncomingRequest>(256);
-        let shutdown = CancellationToken::new();
-        let shutdown_inner = shutdown.clone();
+        let (request_tx, request_rx) = flume::bounded::<WorkRequest>(256);
 
         let modules = vec![ModuleEntry {
             specifier: "index.js".into(),
             source: server_js.into(),
         }];
         let cpu_limit = self.config.cpu_limit();
+        let wall_timeout = Some(Duration::from_secs(30));
         let thread_name = format!("v8-{app_id}");
-
-        // Capture the server's multi-threaded tokio handle so fetch I/O
-        // can be spawned on it instead of the isolate's single-threaded runtime.
-        let server_handle = tokio::runtime::Handle::current();
 
         std::thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("tokio runtime build failed")
-                    .block_on(async {
-                        Runtime::new(
-                            modules,
-                            request_rx,
-                            shutdown_inner,
-                            cpu_limit,
-                            Some(Duration::from_secs(30)),
-                            HashMap::new(),
-                            Some(server_handle),
-                        )
-                        .run()
-                        .await
-                    });
+                run_compio_worker(request_rx, modules, cpu_limit, wall_timeout);
             })
             .map_err(|e| format!("Failed to spawn V8 thread: {e}"))?;
 
         // Warmup: send a ping and wait for the reply synchronously.
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let (reply_tx, reply_rx) = flume::bounded(1);
         request_tx
-            .blocking_send(IncomingRequest {
-                id: 0,
-                kind: RequestKind::Rpc(r#"{"jsonrpc":"2.0","method":"__ping","params":[],"id":0}"#.to_string()),
+            .send(WorkRequest {
+                body: r#"{"jsonrpc":"2.0","method":"__ping","params":[],"id":0}"#.to_string(),
                 reply: reply_tx,
-                cancel: CancellationToken::new(),
             })
             .map_err(|_| "Warmup send failed — isolate thread died".to_string())?;
-        let _ = reply_rx.blocking_recv();
+        let _ = reply_rx.recv_timeout(Duration::from_secs(10));
 
         Ok(IsolateEntry {
             request_tx,
-            shutdown,
             last_used_ms: AtomicU64::new(epoch_ms()),
             request_count: AtomicU64::new(0),
             logs: std::sync::Mutex::new(Vec::new()),
@@ -252,8 +235,9 @@ impl V8Pool {
             .map(|(id, _)| id.clone());
 
         if let Some(id) = oldest {
-            if let Some(entry) = isolates.remove(&id) {
-                entry.shutdown.cancel();
+            if let Some(_entry) = isolates.remove(&id) {
+                // Dropping the Sender half causes the compio worker to exit
+                // when it tries recv_async().
                 eprintln!("[pool] Evicted '{id}' (LRU, pool full)");
             }
         }
@@ -275,8 +259,7 @@ impl V8Pool {
             .collect();
 
         for id in idle {
-            if let Some(entry) = isolates.remove(&id) {
-                entry.shutdown.cancel();
+            if let Some(_entry) = isolates.remove(&id) {
                 eprintln!("[pool] Evicted '{id}' (idle {}s)", self.config.idle_timeout_secs);
             }
         }
@@ -285,8 +268,7 @@ impl V8Pool {
     /// Evict a specific app's isolate.
     pub fn evict_app(&self, app_id: &str) {
         let mut isolates = self.isolates.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(entry) = isolates.remove(app_id) {
-            entry.shutdown.cancel();
+        if let Some(_entry) = isolates.remove(app_id) {
             eprintln!("[pool] Evicted '{app_id}' (manual)");
         }
     }
@@ -325,10 +307,175 @@ impl V8Pool {
 
 impl Drop for V8Pool {
     fn drop(&mut self) {
-        if let Ok(isolates) = self.isolates.read() {
-            for (_, entry) in isolates.iter() {
-                entry.shutdown.cancel();
+        // Dropping all IsolateEntry (and their request_tx) causes workers to exit.
+        if let Ok(mut isolates) = self.isolates.write() {
+            isolates.clear();
+        }
+    }
+}
+
+// ===========================================================================
+// Compio V8 worker — runs on a dedicated thread
+// ===========================================================================
+
+/// Yield control back to the compio event loop so other tasks (pump) can run.
+fn yield_now() -> impl std::future::Future<Output = ()> {
+    let mut yielded = false;
+    std::future::poll_fn(move |cx| {
+        if yielded {
+            std::task::Poll::Ready(())
+        } else {
+            yielded = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+}
+
+/// Run a compio event loop on the current thread, processing WorkRequests.
+fn run_compio_worker(
+    request_rx: flume::Receiver<WorkRequest>,
+    modules: Vec<ModuleEntry>,
+    cpu_limit: Option<Duration>,
+    wall_timeout: Option<Duration>,
+) {
+    compio::runtime::RuntimeBuilder::new()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let runtime = Rc::new(RefCell::new(
+                Runtime::new_direct(modules, HashMap::new(), cpu_limit, wall_timeout),
+            ));
+
+            // Spawn the pump task for async V8 work (fetch, timers, etc.)
+            let mut async_work = AsyncWork::new();
+            let (notify_tx, notify_rx) = futures::channel::mpsc::channel::<()>(1);
+            runtime.borrow_mut().set_pump_notify(notify_tx);
+            runtime.borrow_mut().drain_new_tasks_into(&mut async_work);
+
+            let rt_pump = runtime.clone();
+            compio::runtime::spawn(pump_task(rt_pump, async_work, notify_rx)).detach();
+
+            // Request loop: receive work from flume, dispatch into V8
+            while let Ok(req) = request_rx.recv_async().await {
+                let outcome = runtime.borrow_mut().dispatch_start(&req.body);
+
+                match outcome {
+                    DispatchOutcome::Complete(Ok(result)) => {
+                        let _ = req.reply.send(WorkResult::Complete {
+                            json: result.json,
+                            cpu_time: result.cpu_time,
+                            logs: result.logs,
+                        });
+                    }
+                    DispatchOutcome::Complete(Err(e)) => {
+                        let _ = req.reply.send(WorkResult::Error(e));
+                    }
+                    DispatchOutcome::Pending(rx) => {
+                        // Async handler — poll the result slot while pump drives
+                        // the promise to completion. yield_now lets the pump task run.
+                        let wall_limit = runtime.borrow().wall_timeout();
+                        let deadline = wall_limit.map(|d| std::time::Instant::now() + d);
+                        let result = loop {
+                            if let Some(result) = rx.try_recv() {
+                                break Some(result);
+                            }
+                            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                                break None;
+                            }
+                            yield_now().await;
+                        };
+                        match result {
+                            Some(Ok(r)) => {
+                                let _ = req.reply.send(WorkResult::Complete {
+                                    json: r.json,
+                                    cpu_time: r.cpu_time,
+                                    logs: r.logs,
+                                });
+                            }
+                            Some(Err(e)) => {
+                                let _ = req.reply.send(WorkResult::Error(e));
+                            }
+                            None => {
+                                let _ = req.reply.send(WorkResult::Error(
+                                    "Request timed out".to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    // HTTP variants — not used from the V8Pool RPC path
+                    DispatchOutcome::HttpComplete { body, logs, .. } => {
+                        let _ = req.reply.send(WorkResult::Complete {
+                            json: body,
+                            cpu_time: Duration::ZERO,
+                            logs,
+                        });
+                    }
+                    DispatchOutcome::HttpStream { .. } | DispatchOutcome::HttpPending(_) => {
+                        let _ = req.reply.send(WorkResult::Error(
+                            "Streaming not supported through V8Pool".to_string(),
+                        ));
+                    }
+                }
             }
+            // request_rx closed — worker exits naturally
+        });
+}
+
+// ===========================================================================
+// Pump task — drives async V8 work (ops, timers) to completion
+// ===========================================================================
+
+/// Background task that owns `AsyncWork` and drives pending ops/timers.
+/// Same architecture as runtime-compio's standalone server.
+async fn pump_task(
+    runtime: Rc<RefCell<Runtime>>,
+    mut work: AsyncWork,
+    mut notify_rx: futures::channel::mpsc::Receiver<()>,
+) {
+    use futures::StreamExt;
+
+    loop {
+        // Drain any newly spawned tasks (from dispatch_start calls)
+        {
+            let mut rt = runtime.borrow_mut();
+            rt.drain_new_tasks_into(&mut work);
+        }
+
+        let event = {
+            let has_ops = !work.pending_ops.is_empty();
+            let has_timers = !work.pending_timers.is_empty();
+
+            match (has_ops, has_timers) {
+                (true, true) => {
+                    futures::select! {
+                        r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
+                        r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
+                        _ = notify_rx.next() => None,
+                    }
+                }
+                (true, false) => {
+                    futures::select! {
+                        r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
+                        _ = notify_rx.next() => None,
+                    }
+                }
+                (false, true) => {
+                    futures::select! {
+                        r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
+                        _ = notify_rx.next() => None,
+                    }
+                }
+                (false, false) => {
+                    let _ = notify_rx.next().await;
+                    None
+                }
+            }
+        };
+
+        if let Some(event) = event {
+            let mut rt = runtime.borrow_mut();
+            rt.handle_async_event(event, &mut work);
         }
     }
 }

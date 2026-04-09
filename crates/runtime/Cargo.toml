@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-appbase-runtime-tokio = { path = "../runtime-tokio" }
+appbase-runtime-compio = { path = "../runtime-compio" }
 
 [lints]
 workspace = true
