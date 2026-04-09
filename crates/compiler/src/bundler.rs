@@ -217,15 +217,26 @@ pub fn bundle(project_dir: &Path, options: &BundleOptions) -> Result<BundleResul
         args.push("--minify-syntax".to_string());
     }
 
-    if options.sourcemap {
-        args.push("--sourcemap=inline".to_string());
-    }
+    // When sourcemap is requested, use external mode with a temp outfile so
+    // esbuild writes both bundled.js and bundled.js.map as separate files.
+    let tmp_dir = if options.sourcemap {
+        let dir = std::env::temp_dir().join(format!("appbase-build-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            BundleError::CompileError(format!("Failed to create temp dir: {e}"))
+        })?;
+        let out_file = dir.join("bundled.js");
+        args.push("--sourcemap=external".to_string());
+        args.push(format!("--outfile={}", out_file.display()));
+        Some(dir)
+    } else {
+        None
+    };
 
     for ext in &options.external {
         args.push(format!("--external:{ext}"));
     }
 
-    // Run esbuild — output to stdout
+    // Run esbuild — output to stdout (or to temp file when sourcemap is enabled)
     let output = Command::new("esbuild")
         .args(&args)
         .current_dir(project_dir)
@@ -234,6 +245,9 @@ pub fn bundle(project_dir: &Path, options: &BundleOptions) -> Result<BundleResul
 
     // Check for errors
     if !output.status.success() {
+        if let Some(ref dir) = tmp_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(BundleError::CompileError(stderr.trim().to_string()));
     }
@@ -244,15 +258,33 @@ pub fn bundle(project_dir: &Path, options: &BundleOptions) -> Result<BundleResul
         eprintln!("[bundler] {}", stderr.trim());
     }
 
-    let js = String::from_utf8(output.stdout).map_err(|e| {
-        BundleError::CompileError(format!("esbuild output is not valid UTF-8: {e}"))
-    })?;
+    let (js, source_map) = if let Some(ref dir) = tmp_dir {
+        // Read from temp files
+        let js = std::fs::read_to_string(dir.join("bundled.js")).map_err(|e| {
+            BundleError::CompileError(format!("Failed to read esbuild output: {e}"))
+        })?;
+        let map_path = dir.join("bundled.js.map");
+        let source_map = if map_path.exists() {
+            Some(std::fs::read_to_string(&map_path).map_err(|e| {
+                BundleError::CompileError(format!("Failed to read source map: {e}"))
+            })?)
+        } else {
+            None
+        };
+        let _ = std::fs::remove_dir_all(dir);
+        (js, source_map)
+    } else {
+        let js = String::from_utf8(output.stdout).map_err(|e| {
+            BundleError::CompileError(format!("esbuild output is not valid UTF-8: {e}"))
+        })?;
+        (js, None)
+    };
 
     let size_bytes = js.len();
 
     Ok(BundleResult {
         js,
-        source_map: None, // inline sourcemap is embedded in js when enabled
+        source_map,
         size_bytes,
     })
 }

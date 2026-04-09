@@ -31,14 +31,26 @@ fn main() {
 fn cmd_build(args: &[String]) {
     let input = args
         .get(2)
-        .expect("Usage: appbase build <dir-or-file> [--output=app.appbundle] [--minify]");
-    let output = flag_str(args, "--output=").unwrap_or_else(|| "app.appbundle".into());
+        .expect("Usage: appbase build <dir-or-file> [--outdir=dist] [--minify]");
+    let outdir = flag_str(args, "--outdir=").unwrap_or_else(|| "dist".into());
     let minify = args.iter().any(|a| a == "--minify");
 
     let input_path = PathBuf::from(input);
 
-    let (entry_name, source) = if input_path.is_file() {
-        // Single file -- read directly, skip esbuild
+    // Determine app name
+    let app_name = if input_path.is_file() {
+        input_path
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+    } else {
+        read_package_name(&input_path)
+            .unwrap_or_else(|| input_path.file_name().unwrap().to_string_lossy().to_string())
+    };
+
+    let (entry_name, source, source_map) = if input_path.is_file() {
+        // Single file -- read directly, skip esbuild (no source map)
         let source =
             std::fs::read_to_string(&input_path).expect("Failed to read input file");
         let name = input_path
@@ -46,16 +58,15 @@ fn cmd_build(args: &[String]) {
             .unwrap()
             .to_string_lossy()
             .to_string();
-        (name, source)
+        (name, source, None)
     } else if input_path.is_dir() {
         // Directory -- bundle with esbuild via the compiler crate
         use appbase_compiler::bundler::{bundle, BundleOptions};
 
         let options = BundleOptions {
-            // entry left empty => auto-detect
             entry: String::new(),
             minify,
-            sourcemap: false,
+            sourcemap: true,
             ..Default::default()
         };
 
@@ -64,7 +75,7 @@ fn cmd_build(args: &[String]) {
             std::process::exit(1);
         });
 
-        ("index.js".to_string(), result.js)
+        ("index.js".to_string(), result.js, result.source_map)
     } else {
         eprintln!("Input path does not exist: {}", input_path.display());
         std::process::exit(1);
@@ -84,24 +95,70 @@ fn cmd_build(args: &[String]) {
     );
     let bytes = bundle.to_bytes();
 
-    std::fs::write(&output, &bytes).expect("Failed to write .appbundle");
+    // Create output directory
+    std::fs::create_dir_all(&outdir).expect("Failed to create output directory");
 
+    // Write .appbundle
+    let bundle_path = PathBuf::from(&outdir).join("app.appbundle");
+    std::fs::write(&bundle_path, &bytes).expect("Failed to write .appbundle");
+
+    // Write source map (if available)
+    let source_map_file = if let Some(ref map) = source_map {
+        let map_path = PathBuf::from(&outdir).join("app.appbundle.map");
+        std::fs::write(&map_path, map).expect("Failed to write source map");
+        Some("app.appbundle.map".to_string())
+    } else {
+        None
+    };
+
+    // Content hash from appbundle header (bytes 8..40)
+    let content_hash = format!(
+        "sha256:{}",
+        bytes[8..40]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
+
+    // Write manifest.json
+    let manifest = serde_json::json!({
+        "name": app_name,
+        "version": 1,
+        "entry": entry_name,
+        "modules": bundle.module_names(),
+        "bundle_file": "app.appbundle",
+        "bundle_size": bytes.len(),
+        "source_size": source.len(),
+        "content_hash": content_hash,
+        "source_map": source_map_file,
+        "compiler": format!("appbase {}", env!("CARGO_PKG_VERSION")),
+        "built_at": utc_now_iso8601(),
+    });
+    let manifest_path = PathBuf::from(&outdir).join("manifest.json");
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .expect("Failed to write manifest.json");
+
+    // Summary
     let source_len = source.len();
     let bundle_len = bytes.len();
-    eprintln!("Built {output}:");
+    eprintln!("Built {app_name} -> {outdir}/");
     eprintln!(
-        "  Source:    {source_len} bytes ({:.1}KB)",
+        "  app.appbundle:     {:.1}KB ({:.1}% of {:.1}KB source)",
+        bundle_len as f64 / 1024.0,
+        bundle_len as f64 / source_len as f64 * 100.0,
         source_len as f64 / 1024.0
     );
-    eprintln!(
-        "  Bundle:    {bundle_len} bytes ({:.1}KB)",
-        bundle_len as f64 / 1024.0
-    );
-    eprintln!(
-        "  Ratio:     {:.1}%",
-        bundle_len as f64 / source_len as f64 * 100.0
-    );
-    eprintln!("  Entry:     {entry_name}");
+    if source_map_file.is_some() {
+        eprintln!(
+            "  app.appbundle.map: {:.1}KB",
+            source_map.as_ref().unwrap().len() as f64 / 1024.0
+        );
+    }
+    eprintln!("  manifest.json:     metadata");
+    eprintln!("  hash:              {content_hash}");
 }
 
 fn cmd_inspect(args: &[String]) {
@@ -393,10 +450,35 @@ fn print_usage() {
     eprintln!("appbase — AI-native full-stack app platform");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  appbase build   <dir-or-file> [--output=app.appbundle] [--minify]");
+    eprintln!("  appbase build   <dir-or-file> [--outdir=dist] [--minify]");
     eprintln!("  appbase inspect <file.appbundle>");
     eprintln!("  appbase serve   <server.js> [--static=index.html] [--port=3000] [--db=appbase.db]");
     eprintln!("  appbase dev     <entrypoint> [--port=3000] [--compiler=appbase-compile]");
+}
+
+// --- Build helpers ---
+
+fn read_package_name(dir: &PathBuf) -> Option<String> {
+    let pkg = dir.join("package.json");
+    let text = std::fs::read_to_string(pkg).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&text).ok()?;
+    parsed.get("name")?.as_str().map(|s| s.to_string())
+}
+
+fn utc_now_iso8601() -> String {
+    let output = std::process::Command::new("date")
+        .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if output.is_empty() {
+        "unknown".to_string()
+    } else {
+        output
+    }
 }
 
 // --- CLI helpers ---
