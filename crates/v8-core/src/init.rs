@@ -33,7 +33,7 @@ pub fn init_v8() {
 
 /// Read the current thread's CPU time via CLOCK_THREAD_CPUTIME_ID.
 /// Only counts actual CPU cycles — I/O wait is excluded.
-pub(crate) fn thread_cpu_time() -> Duration {
+pub fn thread_cpu_time() -> Duration {
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -75,21 +75,21 @@ pub struct HttpResult {
 // ===========================================================================
 
 /// Embedded Fetch API polyfill -- loaded after globals are set up.
-pub(crate) const FETCH_JS: &str = include_str!("embed/fetch.js");
+pub const FETCH_JS: &str = include_str!("embed/fetch.js");
 
 /// Embedded URL/URLSearchParams polyfill backed by ada-url native parser.
-pub(crate) const URL_JS: &str = include_str!("embed/url.js");
+pub const URL_JS: &str = include_str!("embed/url.js");
 
 /// Embedded crypto polyfill (getRandomValues, SubtleCrypto.digest, base64 helpers).
-pub(crate) const CRYPTO_JS: &str = include_str!("embed/crypto.js");
+pub const CRYPTO_JS: &str = include_str!("embed/crypto.js");
 
 /// Embedded ReadableStream polyfill (backed by native __streams callbacks).
-pub(crate) const STREAMS_JS: &str = include_str!("embed/streams.js");
+pub const STREAMS_JS: &str = include_str!("embed/streams.js");
 
 
 /// The JSON-RPC dispatch function compiled once and reused for every request.
 /// Handles both sync and async (Promise-returning) handlers.
-pub(crate) const DISPATCH_JS: &str = r#"(function(__req_json) {
+pub const DISPATCH_JS: &str = r#"(function(__req_json) {
     var req = JSON.parse(__req_json);
     var fn = __rpc[req.method];
     if (!fn) return JSON.stringify({jsonrpc:"2.0",error:{code:-32601,message:"not found"},id:req.id});
@@ -116,7 +116,7 @@ pub(crate) const DISPATCH_JS: &str = r#"(function(__req_json) {
 ///
 /// Shared by both `Isolate::ensure_initialized` and `ConcurrentIsolate::ensure_initialized`.
 /// Returns the compiled dispatch `Global<Function>`.
-pub(crate) fn load_polyfills_and_modules(
+pub fn load_polyfills_and_modules(
     scope: &mut v8::PinScope,
     modules: &[crate::modules::ModuleEntry],
 ) -> v8::Global<v8::Function> {
@@ -320,7 +320,7 @@ fn set_interval_callback(
 /// Install console, timers, fetch, URL, KV, crypto, env on the global object.
 ///
 /// Callbacks from `#[appbase_op]` modules are referenced as `crate::{mod}::{fn}_callback`.
-pub(crate) fn setup_globals(scope: &mut v8::PinScope) {
+pub fn setup_globals(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
 
     // console.log/warn/error/info

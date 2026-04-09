@@ -1,8 +1,8 @@
 //! QPS benchmark -- raw V8 per-request model with persistent context + event loop.
 //! Compares sync, async, CPU-heavy, and multi-threaded scenarios.
 
-use appbase_runtime::{init_v8, Isolate, IsolatePool, ModuleEntry};
-use appbase_runtime::state::{RequestKind, RequestReply};
+use appbase_runtime_tokio::{init_v8, Isolate, IsolatePool, ModuleEntry};
+use appbase_runtime_tokio::state::{RequestKind, RequestReply};
 use std::time::Instant;
 
 const RPC_BODY: &str = r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#;
@@ -230,8 +230,8 @@ fn main() {
     // =========================================================================
     println!("\n=== Runtime Model (serial JS, concurrent I/O) ===\n");
 
-    use appbase_runtime::runtime::Runtime;
-    use appbase_runtime::state::IncomingRequest;
+    use appbase_runtime_tokio::runtime::Runtime;
+    use appbase_runtime_tokio::state::IncomingRequest;
     use std::sync::atomic::{AtomicU64, Ordering};
     use tokio_util::sync::CancellationToken;
 
@@ -243,7 +243,7 @@ fn main() {
         next_id: &AtomicU64,
         body: &str,
         n: u64,
-    ) -> Vec<Result<appbase_runtime::RequestResult, String>> {
+    ) -> Vec<Result<appbase_runtime_tokio::RequestResult, String>> {
         let mut reply_rxs = Vec::new();
         // Send all requests at once
         for _ in 0..n {

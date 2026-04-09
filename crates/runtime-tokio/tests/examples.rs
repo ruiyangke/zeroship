@@ -1,7 +1,7 @@
 //! Integration tests that run real example apps against the runtime.
 //! Each test loads an example from examples/ and exercises its API.
 
-use appbase_runtime::{init_v8, Isolate, ModuleEntry};
+use appbase_runtime_tokio::{init_v8, Isolate, ModuleEntry};
 
 fn load_example(name: &str) -> Isolate {
     let path = format!(

@@ -23,13 +23,13 @@ use crate::state::SharedState;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
-pub(crate) enum Curve {
+pub enum Curve {
     P256,
     P384,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum KeyData {
+pub enum KeyData {
     Symmetric { raw: Vec<u8> },
     EcPrivate { pkcs8_der: Vec<u8>, curve: Curve },
     EcPublic { raw: Vec<u8>, curve: Curve },
@@ -133,7 +133,7 @@ fn crypto_random_uuid() -> String {
 ///
 /// Hand-written V8 callback (not `#[appbase_op]`) because we need direct access
 /// to the TypedArray backing store — same approach as workerd.
-pub(crate) fn crypto_get_random_values_callback(
+pub fn crypto_get_random_values_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,

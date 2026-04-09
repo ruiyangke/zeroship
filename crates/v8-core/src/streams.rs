@@ -53,7 +53,7 @@ fn resolve_with_done(
 // stream_create — allocate a new stream_id
 // ---------------------------------------------------------------------------
 
-pub(crate) fn stream_create_callback(
+pub fn stream_create_callback(
     scope: &mut v8::PinScope,
     _args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
@@ -77,7 +77,7 @@ pub(crate) fn stream_create_callback(
 // stream_read — returns Promise<{value, done}>
 // ---------------------------------------------------------------------------
 
-pub(crate) fn stream_read_callback(
+pub fn stream_read_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
@@ -124,7 +124,7 @@ pub(crate) fn stream_read_callback(
 // stream_enqueue — push a chunk to the stream
 // ---------------------------------------------------------------------------
 
-pub(crate) fn stream_enqueue_callback(
+pub fn stream_enqueue_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
@@ -183,7 +183,7 @@ pub(crate) fn stream_enqueue_callback(
 // stream_close — mark stream as closed
 // ---------------------------------------------------------------------------
 
-pub(crate) fn stream_close_callback(
+pub fn stream_close_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
@@ -230,7 +230,7 @@ pub(crate) fn stream_close_callback(
 // stream_error — mark stream as closed with an error
 // ---------------------------------------------------------------------------
 
-pub(crate) fn stream_error_callback(
+pub fn stream_error_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
@@ -273,7 +273,7 @@ pub(crate) fn stream_error_callback(
 ///
 /// This is the bridge between background tokio tasks (streaming fetch) and the
 /// V8 ReadableStream infrastructure.
-pub(crate) fn push_stream_chunk(
+pub fn push_stream_chunk(
     scope: &mut v8::PinScope,
     state: &SharedState,
     stream_id: u32,

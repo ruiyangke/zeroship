@@ -21,9 +21,9 @@ use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::init::{init_v8, load_polyfills_and_modules, RequestResult};
-use crate::modules::ModuleEntry;
-use crate::state::{
+use appbase_v8_core::init::{init_v8, load_polyfills_and_modules, RequestResult};
+use appbase_v8_core::modules::ModuleEntry;
+use appbase_v8_core::state::{
     DispatchResult, HttpStreamResult, IncomingRequest, OpResult, RequestKind, RequestReply,
     RuntimeState, SharedState, SpawnedTimer, TimerResult,
 };
@@ -354,7 +354,7 @@ pub struct Runtime {
     shutdown: CancellationToken,
 
     #[cfg(target_os = "linux")]
-    cpu_timer: Option<crate::cpu_timer::CpuTimer>,
+    cpu_timer: Option<appbase_v8_core::cpu_timer::CpuTimer>,
     #[cfg(target_os = "linux")]
     cpu_timer_active: bool,
 
@@ -496,11 +496,11 @@ impl Runtime {
         // Create POSIX CPU timer (Linux only, must be on the isolate thread)
         #[cfg(target_os = "linux")]
         if self.cpu_limit.is_some() {
-            let system = crate::cpu_timer::CpuTimerSystem::get_or_init();
+            let system = appbase_v8_core::cpu_timer::CpuTimerSystem::get_or_init();
             let app_id = 0u64; // single-app mode for now
             let v8_handle = self.isolate.thread_safe_handle();
             system.register(app_id, v8_handle);
-            match crate::cpu_timer::CpuTimer::new(app_id) {
+            match appbase_v8_core::cpu_timer::CpuTimer::new(app_id) {
                 Ok(timer) => self.cpu_timer = Some(timer),
                 Err(e) => eprintln!("[cpu-timer] Failed: {e}"),
             }
@@ -597,6 +597,21 @@ impl Runtime {
     /// Move newly spawned ops and timers from `RuntimeState` into the
     /// `FuturesUnordered` collections so `tokio::select!` can poll them.
     fn collect_new_tasks(&mut self) {
+        // Drain spawned fetches first (needs state + self.stream_events_tx)
+        let fetches: Vec<appbase_v8_core::state::FetchRequest> = {
+            self.state.borrow_mut().spawned_fetches.drain(..).collect()
+        };
+        for fetch_req in fetches {
+            let server_handle = self.state.borrow().server_handle.clone();
+            let stx = self.state.borrow().stream_events_tx.clone();
+            let future = crate::fetch::execute_fetch(
+                fetch_req,
+                server_handle.as_ref(),
+                stx,
+            );
+            self.pending_ops.push(future);
+        }
+
         {
             let mut s = self.state.borrow_mut();
 
@@ -651,7 +666,7 @@ impl Runtime {
             // ONE enter_v8 for fire_timer + check settled + extract results
             let settled_results: Vec<(u64, PendingRequest, SettledResult)> =
                 enter_v8!(self, |scope| {
-                    crate::request::fire_timer_callback(scope, &self.state, timer_id);
+                    appbase_v8_core::request::fire_timer_callback(scope, &self.state, timer_id);
 
                     // Check settled promises IN THE SAME SCOPE
                     let settled_ids: Vec<u64> = self
@@ -774,7 +789,7 @@ impl Runtime {
             };
 
             enter_v8!(self, |scope| {
-                crate::request::dispatch_request(scope, &self.state, dispatch_fn, &body)
+                appbase_v8_core::request::dispatch_request(scope, &self.state, dispatch_fn, &body)
             })
         };
 
@@ -1081,7 +1096,7 @@ impl Runtime {
                 let settled_results: Vec<(u64, PendingRequest, SettledResult)> =
                     enter_v8!(self, |scope| {
                         // Resolve the op promise
-                        crate::request::resolve_op(scope, &self.state, op_id, &value);
+                        appbase_v8_core::request::resolve_op(scope, &self.state, op_id, &value);
 
                         // Check settled promises IN THE SAME SCOPE
                         let settled_ids: Vec<u64> = self
@@ -1144,7 +1159,7 @@ impl Runtime {
                 } else {
                     // Slow path: push into V8 ReadableStream.
                     enter_v8!(self, |scope| {
-                        crate::streams::push_stream_chunk(scope, &self.state, stream_id, &data, done);
+                        appbase_v8_core::streams::push_stream_chunk(scope, &self.state, stream_id, &data, done);
                     });
                 }
             }
@@ -1177,7 +1192,7 @@ impl Runtime {
         // ONE enter_v8 for fire_timer + check settled + extract results
         let settled_results: Vec<(u64, PendingRequest, SettledResult)> =
             enter_v8!(self, |scope| {
-                crate::request::fire_timer_callback(scope, &self.state, id);
+                appbase_v8_core::request::fire_timer_callback(scope, &self.state, id);
 
                 // Check settled promises IN THE SAME SCOPE
                 let settled_ids: Vec<u64> = self
@@ -1361,8 +1376,8 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::init::RequestResult;
-    use crate::modules::ModuleEntry;
+    use appbase_v8_core::init::RequestResult;
+    use appbase_v8_core::modules::ModuleEntry;
 
     /// Unwrap a `RequestReply::Complete` into `RequestResult`, panicking on `Stream`.
     fn unwrap_complete(reply: RequestReply) -> RequestResult {

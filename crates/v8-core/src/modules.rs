@@ -23,14 +23,14 @@ struct CompiledModule {
 }
 
 /// Module registry stored in V8 isolate slot.
-pub(crate) struct ModuleRegistry {
+pub struct ModuleRegistry {
     modules: HashMap<String, CompiledModule>,
 }
 
-pub(crate) type SharedRegistry = Rc<RefCell<ModuleRegistry>>;
+pub type SharedRegistry = Rc<RefCell<ModuleRegistry>>;
 
 impl ModuleRegistry {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             modules: HashMap::new(),
         }
@@ -42,7 +42,7 @@ impl ModuleRegistry {
 /// `entries[0]` is the entrypoint module. Additional entries are imported modules
 /// (the runtime resolves imports via the module registry).
 /// Returns the entrypoint module's namespace object (contains the exports).
-pub(crate) fn load_modules(
+pub fn load_modules(
     scope: &mut v8::PinScope,
     entries: &[ModuleEntry],
 ) -> Result<v8::Global<v8::Value>, String> {

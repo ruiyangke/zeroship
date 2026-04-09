@@ -7,10 +7,10 @@
 //! POST /rpc -> dispatch to V8 -> JSON-RPC response
 //! GET /health -> {"status":"ok"}
 
-use appbase_runtime::modules::ModuleEntry;
-use appbase_runtime::runtime::Runtime;
-use appbase_runtime::state::{IncomingRequest, RequestKind, RequestReply};
-use appbase_runtime::init_v8;
+use appbase_runtime_tokio::modules::ModuleEntry;
+use appbase_runtime_tokio::runtime::Runtime;
+use appbase_runtime_tokio::state::{IncomingRequest, RequestKind, RequestReply};
+use appbase_runtime_tokio::init_v8;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -121,7 +121,7 @@ impl Dispatcher {
         }
     }
 
-    async fn dispatch(&self, body: String) -> Result<appbase_runtime::init::RequestResult, String> {
+    async fn dispatch(&self, body: String) -> Result<appbase_runtime_tokio::RequestResult, String> {
         let idx = (self.next.fetch_add(1, Ordering::Relaxed) as usize) % self.senders.len();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();

@@ -42,7 +42,7 @@ pub struct RuntimeState {
     pub next_op_id: u32,
 
     /// Callbacks for live timers (setTimeout / setInterval), keyed by timer-id.
-    pub(crate) timer_callbacks: HashMap<u32, TimerCallback>,
+    pub timer_callbacks: HashMap<u32, TimerCallback>,
     /// Monotonically increasing timer-id counter.
     pub next_timer_id: u32,
     /// Maps timer-id → request-id that owns it (for per-request cleanup).
@@ -59,7 +59,10 @@ pub struct RuntimeState {
     pub spawned_timers: Vec<SpawnedTimer>,
     /// Timer IDs ready to fire immediately (delay == 0).
     /// Drained by the Runtime after each enter_v8, avoiding tokio::time::sleep overhead.
-    pub(crate) ready_timers: Vec<u32>,
+    pub ready_timers: Vec<u32>,
+
+    /// Fetch requests queued by V8 callbacks, drained by the runtime executor.
+    pub spawned_fetches: Vec<FetchRequest>,
 
     /// The request currently being executed (None between requests).
     pub executing_request_id: Option<u64>,
@@ -75,7 +78,7 @@ pub struct RuntimeState {
     pub env_vars: HashMap<String, String>,
 
     /// WebCrypto key store, keyed by key-id.
-    pub(crate) key_store: HashMap<u32, crate::crypto::KeyData>,
+    pub key_store: HashMap<u32, crate::crypto::KeyData>,
     /// Monotonically increasing key-id counter.
     pub next_key_id: u32,
 
@@ -97,7 +100,6 @@ pub struct RuntimeState {
 pub type SharedState = Rc<RefCell<RuntimeState>>;
 
 impl RuntimeState {
-    /// Create a new `RuntimeState` seeded with the given environment variables.
     /// Create a new `RuntimeState` seeded with the given environment variables
     /// and an optional handle to the server's multi-threaded tokio runtime.
     pub fn new(env_vars: HashMap<String, String>, server_handle: Option<TokioHandle>) -> Self {
@@ -115,6 +117,7 @@ impl RuntimeState {
             spawned_ops: Vec::new(),
             spawned_timers: Vec::new(),
             ready_timers: Vec::new(),
+            spawned_fetches: Vec::new(),
 
             executing_request_id: None,
             executing_request_cancel: None,
@@ -133,6 +136,23 @@ impl RuntimeState {
             outbound_streams: HashSet::new(),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// FetchRequest — queued by V8 callback, executed by runtime
+// ---------------------------------------------------------------------------
+
+/// A fetch request queued by the V8 `__rawFetch` callback.
+/// The runtime executor drains these and spawns the actual HTTP I/O.
+pub struct FetchRequest {
+    pub op_id: u32,
+    pub stream_id: u32,
+    pub request_id: Option<u64>,
+    pub method: String,
+    pub url: String,
+    pub headers_json: String,
+    pub body: Option<String>,
+    pub cancel: Option<CancellationToken>,
 }
 
 // ---------------------------------------------------------------------------

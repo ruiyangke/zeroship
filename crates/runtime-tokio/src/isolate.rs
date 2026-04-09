@@ -11,10 +11,10 @@ use std::collections::HashMap;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::init::{HttpResult, RequestResult};
-use crate::modules::ModuleEntry;
+use appbase_v8_core::init::{HttpResult, RequestResult};
+use appbase_v8_core::modules::ModuleEntry;
 use crate::runtime::Runtime;
-use crate::state::{IncomingRequest, RequestKind, RequestReply};
+use appbase_v8_core::state::{IncomingRequest, RequestKind, RequestReply};
 
 // HTTP dispatch is now handled natively by Runtime.handle_http_request()
 // which calls onRequest(Request) directly and inspects the V8 Response object.

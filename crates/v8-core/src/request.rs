@@ -18,7 +18,7 @@ use crate::state::{DispatchResult, SharedState};
 /// - `DispatchResult::Sync(json)` — synchronous result or already-fulfilled promise.
 /// - `DispatchResult::Async(promise)` — promise is still pending.
 /// - `DispatchResult::Error(msg)` — JS exception, rejected promise, or body too large.
-pub(crate) fn dispatch_request(
+pub fn dispatch_request(
     scope: &mut v8::PinScope,
     _state: &SharedState,
     dispatch_fn: &v8::Global<v8::Function>,
@@ -82,7 +82,7 @@ pub(crate) fn dispatch_request(
 /// from `value`, and resolves the promise. If the value string is too large
 /// for V8, the promise is rejected with an error message. Runs a microtask
 /// checkpoint after resolution.
-pub(crate) fn resolve_op(
+pub fn resolve_op(
     scope: &mut v8::PinScope,
     state: &SharedState,
     op_id: u32,
@@ -116,7 +116,7 @@ pub(crate) fn resolve_op(
 /// function with `undefined` as `this` and no arguments. For `setInterval`
 /// timers (`interval.is_some()`), re-inserts the callback for the next fire.
 /// Runs a microtask checkpoint after the call.
-pub(crate) fn fire_timer_callback(
+pub fn fire_timer_callback(
     scope: &mut v8::PinScope,
     state: &SharedState,
     timer_id: u32,
@@ -142,7 +142,7 @@ pub(crate) fn fire_timer_callback(
 /// Extract the result of a settled promise.
 ///
 /// Returns `Ok(json)` if fulfilled, `Err(msg)` if rejected or still pending.
-pub(crate) fn extract_promise_result(
+pub fn extract_promise_result(
     scope: &mut v8::PinScope,
     promise: &v8::Global<v8::Promise>,
 ) -> Result<String, String> {

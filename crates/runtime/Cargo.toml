@@ -2,41 +2,9 @@
 name = "appbase-runtime"
 version = "0.1.0"
 edition = "2024"
-description = "appbase V8 runtime — ESM modules, crypto, fetch, URL, timers, KV, event loop"
 
 [dependencies]
-v8 = "147"
-libc = "0.2"
-serde_json = "1"
-tokio = { version = "1", features = ["full"] }
-hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-http-body-util = "0.1"
-bytes = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-url = "2"
-ada-url = "3.4.4"
-aws-lc-rs = "1"
-base64 = "0.22"
-appbase-runtime-macros = { path = "../runtime_macros" }
-futures = "0.3"
-tokio-util = { version = "0.7", features = ["rt"] }
-mimalloc = { version = "0.1", default-features = false }
-
-[[bench]]
-name = "v8_qps"
-harness = false
-
-[[bin]]
-name = "v8-server"
-path = "src/server.rs"
-
-[[bin]]
-name = "echo-server"
-path = "benches/echo_server.rs"
-
-[dev-dependencies]
-appbase-compiler = { path = "../compiler" }
+appbase-runtime-tokio = { path = "../runtime-tokio" }
 
 [lints]
 workspace = true

@@ -8,7 +8,7 @@ use appbase_runtime_macros::appbase_op;
 /// V8 callback: `__urlParse(input, base?) → Object | null`
 ///
 /// Returns a V8 Object with all URL components directly — no JSON serialization.
-pub(crate) fn url_parse_callback(
+pub fn url_parse_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
