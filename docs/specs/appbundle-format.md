@@ -37,7 +37,7 @@ The bundle carries only code and integrity. All metadata (app name, version, exp
 └──────────────────────────────────────────────┘
 ```
 
-All multi-byte integers are unsigned big-endian.
+All multi-byte integers are unsigned little-endian (native on x86, ARM, RISC-V — zero conversion cost).
 
 ## Header
 
