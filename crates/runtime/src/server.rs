@@ -11,17 +11,9 @@ use appbase_runtime::modules::ModuleEntry;
 use appbase_runtime::runtime::Runtime;
 use appbase_runtime::state::{IncomingRequest, RequestKind, RequestReply};
 use appbase_runtime::init_v8;
-use bytes::Bytes;
-use http_body_util::Full;
-use hyper::body::Incoming;
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
-use std::net::SocketAddr;
+use ntex::web::{self, HttpResponse};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 /// Default JS loaded when no --js flag is provided.
@@ -146,59 +138,34 @@ impl Dispatcher {
 }
 
 // ===========================================================================
-// HTTP handler
+// HTTP handlers
 // ===========================================================================
 
-/// Static header value for "application/json" — avoids per-request allocation.
-static JSON_CT: hyper::header::HeaderValue = hyper::header::HeaderValue::from_static("application/json");
-
-async fn handle_request(
-    req: Request<Incoming>,
-    dispatcher: Arc<Dispatcher>,
-) -> Result<Response<Full<Bytes>>, hyper::Error> {
-    match (req.method().clone(), req.uri().path()) {
-        (hyper::Method::GET, "/health") => {
-            let mut resp = Response::new(Full::new(Bytes::from(r#"{"status":"ok"}"#)));
-            resp.headers_mut().insert(hyper::header::CONTENT_TYPE, JSON_CT.clone());
-            Ok(resp)
-        }
-        (hyper::Method::POST, "/rpc") => {
-            let body_bytes = http_body_util::BodyExt::collect(req.into_body())
-                .await
-                .unwrap()
-                .to_bytes();
-            let body_str = String::from_utf8(body_bytes.into()).unwrap_or_default();
-
-            match dispatcher.dispatch(body_str).await {
-                Ok(result) => {
-                    let mut resp = Response::new(Full::new(Bytes::from(result.json)));
-                    resp.headers_mut().insert(hyper::header::CONTENT_TYPE, JSON_CT.clone());
-                    Ok(resp)
-                }
-                Err(e) => {
-                    let mut resp = Response::new(Full::new(Bytes::from(format!(
-                        r#"{{"error":"{}"}}"#,
-                        e.replace('"', "\\\"")
-                    ))));
-                    *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-                    resp.headers_mut().insert(hyper::header::CONTENT_TYPE, JSON_CT.clone());
-                    Ok(resp)
-                }
-            }
-        }
-        _ => {
-            let mut resp = Response::new(Full::new(Bytes::from("Not Found")));
-            *resp.status_mut() = StatusCode::NOT_FOUND;
-            Ok(resp)
-        }
+async fn handle_rpc(
+    body: String,
+    dispatcher: web::types::State<Arc<Dispatcher>>,
+) -> HttpResponse {
+    match dispatcher.dispatch(body).await {
+        Ok(result) => HttpResponse::Ok()
+            .content_type("application/json")
+            .body(result.json),
+        Err(e) => HttpResponse::InternalServerError()
+            .content_type("application/json")
+            .body(format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\""))),
     }
+}
+
+async fn handle_health() -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("application/json")
+        .body(r#"{"status":"ok"}"#)
 }
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-#[tokio::main]
-async fn main() {
+#[ntex::main]
+async fn main() -> std::io::Result<()> {
     init_v8();
 
     let mode = std::env::args()
@@ -227,25 +194,19 @@ async fn main() {
 
     let dispatcher = Arc::new(Dispatcher::new(num_workers));
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = TcpListener::bind(addr).await.unwrap();
-    eprintln!("[v8-server] http://{addr}");
+    eprintln!("[v8-server] http://0.0.0.0:{port}");
 
-    loop {
-        let (stream, _) = listener.accept().await.unwrap();
-        let io = TokioIo::new(stream);
-        let dispatcher = dispatcher.clone();
-
-        tokio::task::spawn(async move {
-            let service = service_fn(move |req| {
-                let d = dispatcher.clone();
-                handle_request(req, d)
-            });
-            if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
-                if !e.is_incomplete_message() {
-                    eprintln!("[v8-server] Error: {e}");
-                }
-            }
-        });
-    }
+    web::server(move || {
+        web::App::new()
+            .state(dispatcher.clone())
+            .service(
+                web::resource("/rpc").route(web::post().to(handle_rpc)),
+            )
+            .service(
+                web::resource("/health").route(web::get().to(handle_health)),
+            )
+    })
+    .bind(format!("0.0.0.0:{port}"))?
+    .run()
+    .await
 }

@@ -22,6 +22,7 @@ appbase-runtime-macros = { path = "../runtime_macros" }
 futures = "0.3"
 tokio-util = { version = "0.7", features = ["rt"] }
 mimalloc = { version = "0.1", default-features = false }
+ntex = { version = "2", features = ["tokio"] }
 
 [[bench]]
 name = "v8_qps"
