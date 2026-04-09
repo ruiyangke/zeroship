@@ -3,7 +3,7 @@
 //! Consolidates everything needed to boot an isolate:
 //! - `init_v8()` — one-time V8 platform init
 //! - `setup_globals()` — console, timers, fetch, URL, KV, crypto, env, streams
-//! - Polyfill constants (`FETCH_JS`, `URL_JS`, `CRYPTO_JS`, `STREAMS_JS`)
+//! - Polyfill constants (`FETCH_JS`, `URL_JS`, `CRYPTO_JS`, `STREAMS_JS`, `EVENTS_JS`, `BLOB_JS`, `FORMDATA_JS`)
 //! - Dispatch scripts (`DISPATCH_JS`)
 //! - Result types (`RequestResult`, `HttpResult`)
 
@@ -83,9 +83,17 @@ pub const URL_JS: &str = include_str!("../embed/url.js");
 /// Embedded crypto polyfill (getRandomValues, SubtleCrypto.digest, base64 helpers).
 pub const CRYPTO_JS: &str = include_str!("../embed/crypto.js");
 
-/// Embedded ReadableStream polyfill (backed by native __streams callbacks).
+/// Embedded ReadableStream/WritableStream/TransformStream polyfill (backed by native __streams callbacks).
 pub const STREAMS_JS: &str = include_str!("../embed/streams.js");
 
+/// Embedded Event/CustomEvent/EventTarget polyfill.
+pub const EVENTS_JS: &str = include_str!("../embed/events.js");
+
+/// Embedded Blob/File polyfill.
+pub const BLOB_JS: &str = include_str!("../embed/blob.js");
+
+/// Embedded FormData polyfill.
+pub const FORMDATA_JS: &str = include_str!("../embed/formdata.js");
 
 /// The JSON-RPC dispatch function compiled once and reused for every request.
 /// Handles both sync and async (Promise-returning) handlers.
@@ -123,7 +131,7 @@ pub fn load_polyfills_and_modules(
     setup_globals(scope);
 
     // Load polyfills
-    for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS] {
+    for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS, EVENTS_JS, BLOB_JS, FORMDATA_JS] {
         let code = v8::String::new(scope, polyfill).unwrap();
         let script = v8::Script::compile(scope, code, None).unwrap();
         script.run(scope).unwrap();

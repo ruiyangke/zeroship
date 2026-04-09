@@ -298,13 +298,30 @@
     };
 
     proto.blob = function() {
-      return this.text().then(function() {
-        return Promise.reject(new Error("Blob is not supported in this environment"));
+      return this.arrayBuffer().then(function(buf) {
+        return new Blob([new Uint8Array(buf)], { type: "" });
       });
     };
 
     proto.formData = function() {
-      return Promise.reject(new Error("FormData is not supported in this environment"));
+      // Basic application/x-www-form-urlencoded parsing
+      var ct = "";
+      if (this.headers) ct = this.headers.get("content-type") || "";
+
+      if (ct.indexOf("application/x-www-form-urlencoded") !== -1) {
+        return this.text().then(function(text) {
+          var fd = new FormData();
+          var pairs = text.split("&");
+          for (var i = 0; i < pairs.length; i++) {
+            var eq = pairs[i].indexOf("=");
+            if (eq === -1) continue;
+            fd.append(decodeURIComponent(pairs[i].slice(0, eq).replace(/\+/g, " ")),
+                      decodeURIComponent(pairs[i].slice(eq + 1).replace(/\+/g, " ")));
+          }
+          return fd;
+        });
+      }
+      return Promise.reject(new TypeError("Could not parse body as FormData"));
     };
   }
 
