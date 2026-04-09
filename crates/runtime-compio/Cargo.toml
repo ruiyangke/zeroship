@@ -16,6 +16,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 mimalloc = { version = "0.1", default-features = false }
 bytes = "1"
 socket2 = { version = "0.5", features = ["all"] }
+itoa = "1"
 
 # For fetch: use a background tokio thread with reqwest (temporary)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

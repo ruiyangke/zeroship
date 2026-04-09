@@ -59,11 +59,14 @@ async fn handle_connection(
 ) {
     // Accumulation buffer for incoming data
     let mut data = Vec::with_capacity(8192);
+    // Reusable read buffer — compio takes ownership then returns it
+    let mut read_buf = Vec::with_capacity(4096);
 
     loop {
-        // Read into a fresh buffer (compio takes ownership)
-        let read_buf = Vec::with_capacity(4096);
-        let BufResult(result, read_buf) = stream.read(read_buf).await;
+        // Reuse the read buffer across reads (avoid allocation per read)
+        read_buf.clear();
+        let BufResult(result, returned_buf) = stream.read(read_buf).await;
+        read_buf = returned_buf;
 
         let n = match result {
             Ok(0) => return,   // connection closed
@@ -74,12 +77,15 @@ async fn handle_connection(
         // Append the read data to our accumulation buffer
         data.extend_from_slice(&read_buf[..n]);
 
+        // Cursor: track how far we've consumed instead of drain() per request
+        let mut consumed = 0;
+
         // Try to parse one or more HTTP requests from the accumulated data
         loop {
             let mut headers = [httparse::EMPTY_HEADER; 32];
             let mut req = httparse::Request::new(&mut headers);
 
-            let header_len = match req.parse(&data) {
+            let header_len = match req.parse(&data[consumed..]) {
                 Ok(httparse::Status::Complete(len)) => len,
                 Ok(httparse::Status::Partial) => break, // need more data
                 Err(_) => return,                       // parse error
@@ -97,11 +103,11 @@ async fn handle_connection(
                 .unwrap_or(0);
 
             let total_len = header_len + content_length;
-            if data.len() < total_len {
+            if data.len() - consumed < total_len {
                 break; // need more body data
             }
 
-            let body_bytes = &data[header_len..total_len];
+            let body_bytes = &data[consumed + header_len..consumed + total_len];
 
             // Route
             let response_bytes: Vec<u8> = match (method, path) {
@@ -118,22 +124,54 @@ async fn handle_connection(
                 return;
             }
 
-            // Consume the processed request from the buffer
-            data.drain(..total_len);
+            // Advance cursor past this request
+            consumed += total_len;
 
-            if data.is_empty() {
+            if consumed >= data.len() {
                 break; // no more data, go back to reading
             }
             // Otherwise loop to parse next pipelined request
         }
+
+        // Drain consumed bytes once (not per-request)
+        if consumed >= data.len() {
+            data.clear();
+        } else if consumed > 0 {
+            data.drain(..consumed);
+        }
     }
+}
+
+/// Static 503 response (avoids repeated .to_vec() at each call site).
+const SERVICE_UNAVAILABLE: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
+
+/// Build an HTTP 200 JSON response without format!() overhead.
+/// Uses itoa for Content-Length and direct byte assembly.
+fn build_json_response(body: &str) -> Vec<u8> {
+    const PREFIX: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ";
+    const SEPARATOR: &[u8] = b"\r\n\r\n";
+
+    let mut len_buf = itoa::Buffer::new();
+    let len_str = len_buf.format(body.len());
+    let total = PREFIX.len() + len_str.len() + SEPARATOR.len() + body.len();
+
+    let mut buf = Vec::with_capacity(total);
+    buf.extend_from_slice(PREFIX);
+    buf.extend_from_slice(len_str.as_bytes());
+    buf.extend_from_slice(SEPARATOR);
+    buf.extend_from_slice(body.as_bytes());
+    buf
 }
 
 async fn dispatch_rpc(
     body_bytes: &[u8],
     req_tx: &tokio::sync::mpsc::Sender<IncomingRequest>,
 ) -> Vec<u8> {
-    let body_str = String::from_utf8_lossy(body_bytes).into_owned();
+    // Validate UTF-8 without the lossy copy
+    let body_str = match std::str::from_utf8(body_bytes) {
+        Ok(s) => s.to_owned(),
+        Err(_) => return SERVICE_UNAVAILABLE.to_vec(),
+    };
 
     let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
@@ -149,13 +187,13 @@ async fn dispatch_rpc(
         .await
         .is_err()
     {
-        return b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n".to_vec();
+        return SERVICE_UNAVAILABLE.to_vec();
     }
 
     let reply = match reply_rx.await {
         Ok(reply) => reply,
         Err(_) => {
-            return b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n".to_vec();
+            return SERVICE_UNAVAILABLE.to_vec();
         }
     };
 
@@ -165,12 +203,7 @@ async fn dispatch_rpc(
         Err(e) => format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\"")),
     };
 
-    format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-        response_body.len(),
-        response_body
-    )
-    .into_bytes()
+    build_json_response(&response_body)
 }
 
 // ===========================================================================
