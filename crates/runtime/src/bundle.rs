@@ -32,14 +32,8 @@ struct BundleModule {
     compressed_size: u32,
     /// Size of the original (uncompressed) source.
     original_size: u32,
-    /// Size of the zstd-compressed source map (0 = none).
-    compressed_srcmap_size: u32,
-    /// Size of the original source map (0 = none).
-    original_srcmap_size: u32,
     /// Source (UTF-8 string) — only populated on first access.
     source: String,
-    /// Source map (UTF-8 string) — kept for writing; not lazily cached.
-    source_map: Option<String>,
     /// Whether `source` has been decompressed from the data section.
     decompressed: bool,
 }
@@ -176,9 +170,8 @@ impl AppBundle {
             let module_type = ModuleType::from_u8(bytes[pos])?;
             pos += 1;
 
-            // data_offset, compressed_size, original_size: u32 LE each
-            // compressed_srcmap_size, original_srcmap_size: u32 LE each
-            if pos + 20 > bytes.len() {
+            // data_offset, compressed_size, original_size: u32 LE each (15 fixed bytes total)
+            if pos + 12 > bytes.len() {
                 return Err(BundleError::TooShort);
             }
             let data_offset = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap());
@@ -187,10 +180,6 @@ impl AppBundle {
             pos += 4;
             let original_size = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap());
             pos += 4;
-            let compressed_srcmap_size = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap());
-            pos += 4;
-            let original_srcmap_size = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap());
-            pos += 4;
 
             order.push(specifier.clone());
             modules.insert(specifier, BundleModule {
@@ -198,10 +187,7 @@ impl AppBundle {
                 data_offset,
                 compressed_size,
                 original_size,
-                compressed_srcmap_size,
-                original_srcmap_size,
                 source: String::new(),
-                source_map: None,
                 decompressed: false,
             });
         }
@@ -228,14 +214,12 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, BundleError> {
 impl AppBundle {
     /// Serialize the bundle to the `.appbundle` binary format.
     pub fn to_bytes(&self) -> Vec<u8> {
-        // Pass 1: compress all sources (and source maps).
+        // Pass 1: compress all sources.
         struct Compressed {
             specifier: String,
             module_type: ModuleType,
             source_compressed: Vec<u8>,
             original_size: u32,
-            srcmap_compressed: Vec<u8>,
-            original_srcmap_size: u32,
         }
 
         let mut entries: Vec<Compressed> = Vec::with_capacity(self.order.len());
@@ -244,37 +228,25 @@ impl AppBundle {
             let source_bytes = m.source.as_bytes();
             let source_compressed = zstd::encode_all(source_bytes, ZSTD_LEVEL).unwrap();
 
-            let (srcmap_compressed, original_srcmap_size) = match &m.source_map {
-                Some(sm) => {
-                    let compressed = zstd::encode_all(sm.as_bytes(), ZSTD_LEVEL).unwrap();
-                    (compressed, sm.len() as u32)
-                }
-                None => (Vec::new(), 0),
-            };
-
             entries.push(Compressed {
                 specifier: spec.clone(),
                 module_type: m.module_type,
                 source_compressed,
                 original_size: source_bytes.len() as u32,
-                srcmap_compressed,
-                original_srcmap_size,
             });
         }
 
         // Pass 2: compute data offsets and write.
-        // Data offset = cumulative sum of compressed source + compressed srcmap sizes.
         let mut data_offsets = Vec::with_capacity(entries.len());
         let mut offset: u32 = 0;
         for e in &entries {
             data_offsets.push(offset);
             offset += e.source_compressed.len() as u32;
-            offset += e.srcmap_compressed.len() as u32;
         }
 
         // Pre-calculate total size for the output buffer.
         let index_size: usize = 4 + entries.iter().map(|e| {
-            2 + e.specifier.len() + 1 + 20 // spec_len(2) + spec + type(1) + 5*u32(20)
+            2 + e.specifier.len() + 1 + 12 // spec_len(2) + spec + type(1) + 3*u32(12)
         }).sum::<usize>();
         let data_size = offset as usize;
         let total = HEADER_SIZE + index_size + data_size;
@@ -297,16 +269,11 @@ impl AppBundle {
             buf.extend_from_slice(&data_offsets[i].to_le_bytes());
             buf.extend_from_slice(&(e.source_compressed.len() as u32).to_le_bytes());
             buf.extend_from_slice(&e.original_size.to_le_bytes());
-            buf.extend_from_slice(&(e.srcmap_compressed.len() as u32).to_le_bytes());
-            buf.extend_from_slice(&e.original_srcmap_size.to_le_bytes());
         }
 
-        // Data section: interleaved [source][srcmap] per module
+        // Data section: concatenated compressed sources.
         for e in &entries {
             buf.extend_from_slice(&e.source_compressed);
-            if !e.srcmap_compressed.is_empty() {
-                buf.extend_from_slice(&e.srcmap_compressed);
-            }
         }
 
         // Compute SHA-256 of bytes 40 → end, write into bytes 8..40
@@ -324,23 +291,20 @@ impl AppBundle {
 impl AppBundle {
     /// Create a bundle from in-memory modules.
     ///
-    /// Each tuple: `(specifier, module_type, source, optional_source_map)`.
+    /// Each tuple: `(specifier, module_type, source)`.
     /// The first entry becomes the entry module.
-    pub fn new(entry: &str, modules: Vec<(String, ModuleType, String, Option<String>)>) -> Self {
+    pub fn new(entry: &str, modules: Vec<(String, ModuleType, String)>) -> Self {
         let mut map = HashMap::with_capacity(modules.len());
         let mut order = Vec::with_capacity(modules.len());
 
-        for (specifier, module_type, source, source_map) in modules {
+        for (specifier, module_type, source) in modules {
             order.push(specifier.clone());
             map.insert(specifier, BundleModule {
                 module_type,
                 data_offset: 0,
                 compressed_size: 0,
                 original_size: source.len() as u32,
-                compressed_srcmap_size: 0,
-                original_srcmap_size: source_map.as_ref().map_or(0, |s| s.len() as u32),
                 source,
-                source_map,
                 decompressed: true, // already in memory
             });
         }
@@ -368,6 +332,9 @@ impl AppBundle {
         if !m.decompressed {
             let start = m.data_offset as usize;
             let end = start + m.compressed_size as usize;
+            if end > self.data.len() {
+                return None;
+            }
             let compressed = &self.data[start..end];
             let decompressed = zstd::decode_all(compressed).ok()?;
             m.source = String::from_utf8(decompressed).ok()?;
@@ -375,21 +342,6 @@ impl AppBundle {
         }
         // Re-borrow as immutable.
         Some(&self.modules[specifier].source)
-    }
-
-    /// Decompress and return the source map for `specifier` (not cached).
-    pub fn get_source_map(&self, specifier: &str) -> Option<String> {
-        let m = self.modules.get(specifier)?;
-        if m.compressed_srcmap_size == 0 {
-            // If created in-memory, source_map may already be present.
-            return m.source_map.clone();
-        }
-        // Source map is located right after the compressed source in the data section.
-        let start = m.data_offset as usize + m.compressed_size as usize;
-        let end = start + m.compressed_srcmap_size as usize;
-        let compressed = &self.data[start..end];
-        let decompressed = zstd::decode_all(compressed).ok()?;
-        String::from_utf8(decompressed).ok()
     }
 
     /// Decompress ALL modules and return as `Vec<ModuleEntry>` for `load_modules()`.
@@ -423,11 +375,11 @@ impl AppBundle {
 mod tests {
     use super::*;
 
-    fn sample_modules() -> Vec<(String, ModuleType, String, Option<String>)> {
+    fn sample_modules() -> Vec<(String, ModuleType, String)> {
         vec![
-            ("index.js".into(), ModuleType::EsModule, "export default 42;".into(), None),
-            ("utils.js".into(), ModuleType::EsModule, "export function add(a,b){return a+b}".into(), None),
-            ("data.json".into(), ModuleType::Json, r#"{"key":"value"}"#.into(), None),
+            ("index.js".into(), ModuleType::EsModule, "export default 42;".into()),
+            ("utils.js".into(), ModuleType::EsModule, "export function add(a,b){return a+b}".into()),
+            ("data.json".into(), ModuleType::Json, r#"{"key":"value"}"#.into()),
         ]
     }
 
@@ -438,7 +390,7 @@ mod tests {
         let bytes = bundle.to_bytes();
         let mut loaded = AppBundle::from_bytes(&bytes).unwrap();
 
-        for (specifier, _, source, _) in &mods {
+        for (specifier, _, source) in &mods {
             let got = loaded.get_source(specifier).unwrap();
             assert_eq!(got, source, "source mismatch for {specifier}");
         }
@@ -447,8 +399,8 @@ mod tests {
     #[test]
     fn lazy_decompression() {
         let mods = vec![
-            ("a.js".into(), ModuleType::EsModule, "console.log('a');".into(), None),
-            ("b.js".into(), ModuleType::EsModule, "console.log('b');".into(), None),
+            ("a.js".into(), ModuleType::EsModule, "console.log('a');".into()),
+            ("b.js".into(), ModuleType::EsModule, "console.log('b');".into()),
         ];
         let bundle = AppBundle::new("a.js", mods);
         let bytes = bundle.to_bytes();
@@ -492,8 +444,8 @@ mod tests {
         // Module "bad.js" has content that is valid UTF-8 but we'll verify
         // it's never decompressed when we only access "good.js".
         let mods = vec![
-            ("good.js".into(), ModuleType::EsModule, "export const x = 1;".into(), None),
-            ("bad.js".into(), ModuleType::EsModule, "this is fine as source".into(), None),
+            ("good.js".into(), ModuleType::EsModule, "export const x = 1;".into()),
+            ("bad.js".into(), ModuleType::EsModule, "this is fine as source".into()),
         ];
         let bundle = AppBundle::new("good.js", mods);
         let mut bytes = bundle.to_bytes();
@@ -525,7 +477,7 @@ mod tests {
     #[test]
     fn empty_bundle() {
         let bundle = AppBundle::new("index.js", vec![
-            ("index.js".into(), ModuleType::EsModule, "x".into(), None),
+            ("index.js".into(), ModuleType::EsModule, "x".into()),
         ]);
         let mut bytes = bundle.to_bytes();
 
@@ -539,19 +491,4 @@ mod tests {
         assert!(matches!(result, Err(BundleError::EmptyBundle)));
     }
 
-    #[test]
-    fn source_map_round_trip() {
-        let source = "export function hello() { return 'world'; }";
-        let source_map = r#"{"version":3,"sources":["hello.ts"],"mappings":"AAAA"}"#;
-
-        let mods = vec![
-            ("hello.js".into(), ModuleType::EsModule, source.into(), Some(source_map.into())),
-        ];
-        let bundle = AppBundle::new("hello.js", mods);
-        let bytes = bundle.to_bytes();
-        let mut loaded = AppBundle::from_bytes(&bytes).unwrap();
-
-        assert_eq!(loaded.get_source("hello.js").unwrap(), source);
-        assert_eq!(loaded.get_source_map("hello.js").unwrap(), source_map);
-    }
 }
