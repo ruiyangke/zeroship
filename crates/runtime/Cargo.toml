@@ -34,6 +34,10 @@ mimalloc = { version = "0.1", default-features = false }
 itoa = "1"
 socket2 = { version = "0.5", features = ["all"] }
 
+# Bundle format
+zstd = "0.13"
+sha2 = "0.10"
+
 # Proc macros
 appbase-runtime-macros = { path = "../runtime-macros" }
 

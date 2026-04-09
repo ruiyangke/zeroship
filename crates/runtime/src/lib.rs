@@ -12,6 +12,7 @@ pub mod url;
 pub mod channel;
 pub mod runtime;
 pub mod storage;
+pub mod bundle;
 
 #[cfg(target_os = "linux")]
 pub mod cpu_timer;
@@ -23,3 +24,4 @@ pub use state::{SharedState, RuntimeState, OpResult, FetchRequest, StreamState, 
 pub use storage::AppStorage;
 pub use runtime::{Runtime, DispatchOutcome, HttpDispatchResult, AsyncWork, AsyncEvent};
 pub use channel::{ResultSender, ResultReceiver, StreamWriter, StreamReader};
+pub use bundle::AppBundle;
