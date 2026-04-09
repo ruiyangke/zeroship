@@ -166,7 +166,7 @@ fn resolve_callback<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::init::init_v8;
+    use crate::v8::init::init_v8;
 
     fn run_modules(entries: &[ModuleEntry]) -> Result<v8::OwnedIsolate, String> {
         init_v8();

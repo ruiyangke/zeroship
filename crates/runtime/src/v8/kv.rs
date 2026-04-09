@@ -4,7 +4,7 @@
 
 use appbase_runtime_macros::appbase_op;
 
-use crate::state::SharedState;
+use crate::v8::state::SharedState;
 
 #[appbase_op(state)]
 fn kv_get(state: SharedState, key: String) -> Option<String> {

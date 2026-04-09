@@ -2,9 +2,47 @@
 name = "appbase-runtime"
 version = "0.1.0"
 edition = "2024"
+description = "appbase V8 runtime — compio/io_uring, ESM modules, WebCrypto, fetch, streaming"
 
 [dependencies]
-appbase-runtime-compio = { path = "../runtime-compio" }
+# V8
+v8 = "147"
+libc = "0.2"
+serde_json = "1"
+
+# Crypto
+aws-lc-rs = "1"
+base64 = "0.22"
+
+# URL
+url = "2"
+ada-url = "3.4.4"
+
+# Async
+futures = "0.3"
+
+# compio event loop
+compio = { version = "0.18", features = ["time", "macros", "bytes"] }
+
+# HTTP client (fetch)
+cyper = { version = "0.8", default-features = false, features = ["rustls", "json"] }
+http = "1"
+httparse = "1"
+
+# Utilities
+mimalloc = { version = "0.1", default-features = false }
+itoa = "1"
+socket2 = { version = "0.5", features = ["all"] }
+
+# Proc macros
+appbase-runtime-macros = { path = "../runtime_macros" }
+
+[[bin]]
+name = "v8-server-compio"
+path = "src/server.rs"
+
+[dev-dependencies]
+appbase-compiler = { path = "../compiler" }
 
 [lints]
 workspace = true

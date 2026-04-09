@@ -16,7 +16,7 @@ use aws_lc_rs::rsa::{
 };
 use aws_lc_rs::signature::KeyPair;
 
-use crate::state::SharedState;
+use crate::v8::state::SharedState;
 
 // ---------------------------------------------------------------------------
 // Crypto key store types
@@ -185,14 +185,14 @@ pub fn crypto_get_random_values_callback(
 /// Zero-serialization: takes ArrayBuffer directly, returns ArrayBuffer.
 /// No base64 encode/decode overhead.
 #[appbase_op]
-fn crypto_digest(algo: String, data: Vec<u8>) -> Result<Vec<u8>, crate::ops::OpError> {
+fn crypto_digest(algo: String, data: Vec<u8>) -> Result<Vec<u8>, crate::v8::ops::OpError> {
     let algorithm = match algo.as_str() {
         "SHA-1" => &aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY,
         "SHA-256" => &aws_lc_rs::digest::SHA256,
         "SHA-384" => &aws_lc_rs::digest::SHA384,
         "SHA-512" => &aws_lc_rs::digest::SHA512,
         _ => {
-            return Err(crate::ops::OpError::type_error(format!(
+            return Err(crate::v8::ops::OpError::type_error(format!(
                 "Unsupported digest: {algo}"
             )))
         }
@@ -206,18 +206,18 @@ fn crypto_digest(algo: String, data: Vec<u8>) -> Result<Vec<u8>, crate::ops::OpE
 // ---------------------------------------------------------------------------
 
 /// Parse named curve from an algorithm value (has `namedCurve` field directly).
-fn parse_curve_from_algo(algo: &serde_json::Value) -> Result<Curve, crate::ops::OpError> {
+fn parse_curve_from_algo(algo: &serde_json::Value) -> Result<Curve, crate::v8::ops::OpError> {
     match algo["namedCurve"].as_str().unwrap_or("") {
         "P-256" => Ok(Curve::P256),
         "P-384" => Ok(Curve::P384),
-        other => Err(crate::ops::OpError::type_error(format!(
+        other => Err(crate::v8::ops::OpError::type_error(format!(
             "Unsupported curve: {other}"
         ))),
     }
 }
 
 /// Parse named curve from a wrapper params object (has `algorithm.namedCurve`).
-fn parse_curve(p: &serde_json::Value) -> Result<Curve, crate::ops::OpError> {
+fn parse_curve(p: &serde_json::Value) -> Result<Curve, crate::v8::ops::OpError> {
     parse_curve_from_algo(&p["algorithm"])
 }
 
@@ -235,9 +235,9 @@ fn parse_curve(p: &serde_json::Value) -> Result<Curve, crate::ops::OpError> {
 /// payloads, so the JSON overhead is negligible.  Bulk key material uses the zero-copy
 /// ArrayBuffer bridge.
 #[appbase_op(state)]
-fn crypto_import_key(state: SharedState, format: String, key_data: Vec<u8>, algo_json: String) -> Result<String, crate::ops::OpError> {
+fn crypto_import_key(state: SharedState, format: String, key_data: Vec<u8>, algo_json: String) -> Result<String, crate::v8::ops::OpError> {
     let p: serde_json::Value = serde_json::from_str(&algo_json)
-        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid algo params: {e}")))?;
+        .map_err(|e| crate::v8::ops::OpError::type_error(format!("Invalid algo params: {e}")))?;
 
     let algo_name = p["name"]
         .as_str()
@@ -294,7 +294,7 @@ fn crypto_import_key(state: SharedState, format: String, key_data: Vec<u8>, algo
             "private",
         ),
         _ => {
-            return Err(crate::ops::OpError::type_error(format!(
+            return Err(crate::v8::ops::OpError::type_error(format!(
                 "Unsupported import: algorithm={algo_name}, format={format}"
             )))
         }
@@ -316,12 +316,12 @@ fn crypto_import_key(state: SharedState, format: String, key_data: Vec<u8>, algo
 ///
 /// Zero-serialization: key material returned as ArrayBuffer.
 #[appbase_op(state)]
-fn crypto_export_key(state: SharedState, format: String, key_id: u32) -> Result<Vec<u8>, crate::ops::OpError> {
+fn crypto_export_key(state: SharedState, format: String, key_id: u32) -> Result<Vec<u8>, crate::v8::ops::OpError> {
     let s = state.borrow();
     let key = s
         .key_store
         .get(&key_id)
-        .ok_or_else(|| crate::ops::OpError::type_error("Key not found"))?;
+        .ok_or_else(|| crate::v8::ops::OpError::type_error("Key not found"))?;
 
     let bytes = match (key, format.as_str()) {
         (KeyData::Symmetric { raw }, "raw") => raw.clone(),
@@ -332,7 +332,7 @@ fn crypto_export_key(state: SharedState, format: String, key_id: u32) -> Result<
         (KeyData::Ed25519Private { pkcs8_der }, "pkcs8") => pkcs8_der.clone(),
         (KeyData::Ed25519Public { raw }, "raw") => raw.clone(),
         _ => {
-            return Err(crate::ops::OpError::type_error(
+            return Err(crate::v8::ops::OpError::type_error(
                 "Unsupported export format for this key type",
             ))
         }
@@ -354,9 +354,9 @@ fn crypto_export_key(state: SharedState, format: String, key_id: u32) -> Result<
 fn crypto_generate_key(
     state: SharedState,
     params: String,
-) -> Result<String, crate::ops::OpError> {
+) -> Result<String, crate::v8::ops::OpError> {
     let p: serde_json::Value = serde_json::from_str(&params)
-        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid params: {e}")))?;
+        .map_err(|e| crate::v8::ops::OpError::type_error(format!("Invalid params: {e}")))?;
 
     let algo_name = p["algorithm"]["name"]
         .as_str()
@@ -379,7 +379,7 @@ fn crypto_generate_key(
             }) / 8;
             let mut raw = vec![0u8; len as usize];
             aws_lc_rs::rand::fill(&mut raw)
-                .map_err(|e| crate::ops::OpError::error(format!("{e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("{e}")))?;
             let mut s = state.borrow_mut();
             let id = s.next_key_id;
             s.next_key_id += 1;
@@ -389,13 +389,13 @@ fn crypto_generate_key(
         "AES-GCM" | "AES-CBC" | "AES-CTR" | "AES-KW" => {
             let len = p["algorithm"]["length"].as_u64().unwrap_or(256) / 8;
             if len != 16 && len != 24 && len != 32 {
-                return Err(crate::ops::OpError::type_error(
+                return Err(crate::v8::ops::OpError::type_error(
                     "AES key length must be 128, 192, or 256",
                 ));
             }
             let mut raw = vec![0u8; len as usize];
             aws_lc_rs::rand::fill(&mut raw)
-                .map_err(|e| crate::ops::OpError::error(format!("{e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("{e}")))?;
             let mut s = state.borrow_mut();
             let id = s.next_key_id;
             s.next_key_id += 1;
@@ -410,12 +410,12 @@ fn crypto_generate_key(
             };
             let pkcs8 = aws_lc_rs::signature::EcdsaKeyPair::generate_pkcs8(alg, &rng)
                 .map_err(|e| {
-                    crate::ops::OpError::error(format!("Key generation failed: {e}"))
+                    crate::v8::ops::OpError::error(format!("Key generation failed: {e}"))
                 })?;
             let key_pair =
                 aws_lc_rs::signature::EcdsaKeyPair::from_pkcs8(alg, pkcs8.as_ref())
                     .map_err(|e| {
-                        crate::ops::OpError::error(format!("Key parse failed: {e}"))
+                        crate::v8::ops::OpError::error(format!("Key parse failed: {e}"))
                     })?;
             let pub_key = key_pair.public_key().as_ref().to_vec();
 
@@ -441,11 +441,11 @@ fn crypto_generate_key(
         "ED25519" => {
             let pkcs8 = aws_lc_rs::signature::Ed25519KeyPair::generate_pkcs8(&rng)
                 .map_err(|e| {
-                    crate::ops::OpError::error(format!("Key generation failed: {e}"))
+                    crate::v8::ops::OpError::error(format!("Key generation failed: {e}"))
                 })?;
             let key_pair =
                 aws_lc_rs::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).map_err(
-                    |e| crate::ops::OpError::error(format!("Key parse failed: {e}")),
+                    |e| crate::v8::ops::OpError::error(format!("Key parse failed: {e}")),
                 )?;
             let pub_key = key_pair.public_key().as_ref().to_vec();
 
@@ -467,7 +467,7 @@ fn crypto_generate_key(
                     .to_string(),
             )
         }
-        _ => Err(crate::ops::OpError::type_error(format!(
+        _ => Err(crate::v8::ops::OpError::type_error(format!(
             "Unsupported generateKey algorithm: {algo_name}"
         ))),
     }
@@ -481,7 +481,7 @@ fn crypto_generate_key(
 ///
 /// Zero-serialization: data passed as ArrayBuffer, signature returned as ArrayBuffer.
 #[appbase_op(state)]
-fn crypto_sign(state: SharedState, algo: String, hash: String, key_id: u32, data: Vec<u8>) -> Result<Vec<u8>, crate::ops::OpError> {
+fn crypto_sign(state: SharedState, algo: String, hash: String, key_id: u32, data: Vec<u8>) -> Result<Vec<u8>, crate::v8::ops::OpError> {
     let algo_name = algo.to_uppercase();
     let hash = hash.to_uppercase();
 
@@ -489,7 +489,7 @@ fn crypto_sign(state: SharedState, algo: String, hash: String, key_id: u32, data
     let key = s
         .key_store
         .get(&key_id)
-        .ok_or_else(|| crate::ops::OpError::type_error("Key not found"))?;
+        .ok_or_else(|| crate::v8::ops::OpError::type_error("Key not found"))?;
 
     match (algo_name.as_str(), key) {
         ("HMAC", KeyData::Symmetric { raw }) => {
@@ -499,7 +499,7 @@ fn crypto_sign(state: SharedState, algo: String, hash: String, key_id: u32, data
                 "SHA-384" => aws_lc_rs::hmac::HMAC_SHA384,
                 "SHA-512" => aws_lc_rs::hmac::HMAC_SHA512,
                 _ => {
-                    return Err(crate::ops::OpError::type_error(format!(
+                    return Err(crate::v8::ops::OpError::type_error(format!(
                         "Unsupported HMAC hash: {hash}"
                     )))
                 }
@@ -517,7 +517,7 @@ fn crypto_sign(state: SharedState, algo: String, hash: String, key_id: u32, data
                     &aws_lc_rs::signature::ECDSA_P384_SHA384_ASN1_SIGNING
                 }
                 _ => {
-                    return Err(crate::ops::OpError::type_error(
+                    return Err(crate::v8::ops::OpError::type_error(
                         "Unsupported ECDSA curve/hash combo",
                     ))
                 }
@@ -525,16 +525,16 @@ fn crypto_sign(state: SharedState, algo: String, hash: String, key_id: u32, data
             let rng = aws_lc_rs::rand::SystemRandom::new();
             let key_pair =
                 aws_lc_rs::signature::EcdsaKeyPair::from_pkcs8(alg, pkcs8_der)
-                    .map_err(|e| crate::ops::OpError::error(format!("Invalid ECDSA key: {e}")))?;
+                    .map_err(|e| crate::v8::ops::OpError::error(format!("Invalid ECDSA key: {e}")))?;
             let sig = key_pair
                 .sign(&rng, &data)
-                .map_err(|e| crate::ops::OpError::error(format!("ECDSA sign failed: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("ECDSA sign failed: {e}")))?;
             Ok(sig.as_ref().to_vec())
         }
         ("ED25519", KeyData::Ed25519Private { pkcs8_der }) => {
             let key_pair =
                 aws_lc_rs::signature::Ed25519KeyPair::from_pkcs8(pkcs8_der).map_err(|e| {
-                    crate::ops::OpError::error(format!("Invalid Ed25519 key: {e}"))
+                    crate::v8::ops::OpError::error(format!("Invalid Ed25519 key: {e}"))
                 })?;
             let sig = key_pair.sign(&data);
             Ok(sig.as_ref().to_vec())
@@ -545,19 +545,19 @@ fn crypto_sign(state: SharedState, algo: String, hash: String, key_id: u32, data
                 "SHA-384" => &aws_lc_rs::signature::RSA_PKCS1_SHA384,
                 "SHA-512" => &aws_lc_rs::signature::RSA_PKCS1_SHA512,
                 _ => {
-                    return Err(crate::ops::OpError::type_error(format!(
+                    return Err(crate::v8::ops::OpError::type_error(format!(
                         "Unsupported RSA hash: {hash}"
                     )))
                 }
             };
             let key_pair =
                 aws_lc_rs::signature::RsaKeyPair::from_pkcs8(pkcs8_der)
-                    .map_err(|e| crate::ops::OpError::error(format!("Invalid RSA key: {e}")))?;
+                    .map_err(|e| crate::v8::ops::OpError::error(format!("Invalid RSA key: {e}")))?;
             let rng = aws_lc_rs::rand::SystemRandom::new();
             let mut sig = vec![0u8; key_pair.public_modulus_len()];
             key_pair
                 .sign(padding, &rng, &data, &mut sig)
-                .map_err(|e| crate::ops::OpError::error(format!("RSA sign failed: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("RSA sign failed: {e}")))?;
             Ok(sig)
         }
         ("RSA-PSS", KeyData::RsaPrivate { pkcs8_der }) => {
@@ -566,24 +566,24 @@ fn crypto_sign(state: SharedState, algo: String, hash: String, key_id: u32, data
                 "SHA-384" => &aws_lc_rs::signature::RSA_PSS_SHA384,
                 "SHA-512" => &aws_lc_rs::signature::RSA_PSS_SHA512,
                 _ => {
-                    return Err(crate::ops::OpError::type_error(format!(
+                    return Err(crate::v8::ops::OpError::type_error(format!(
                         "Unsupported RSA-PSS hash: {hash}"
                     )))
                 }
             };
             let key_pair =
                 aws_lc_rs::signature::RsaKeyPair::from_pkcs8(pkcs8_der)
-                    .map_err(|e| crate::ops::OpError::error(format!("Invalid RSA key: {e}")))?;
+                    .map_err(|e| crate::v8::ops::OpError::error(format!("Invalid RSA key: {e}")))?;
             let rng = aws_lc_rs::rand::SystemRandom::new();
             let mut sig = vec![0u8; key_pair.public_modulus_len()];
             key_pair
                 .sign(padding, &rng, &data, &mut sig)
                 .map_err(|e| {
-                    crate::ops::OpError::error(format!("RSA-PSS sign failed: {e}"))
+                    crate::v8::ops::OpError::error(format!("RSA-PSS sign failed: {e}"))
                 })?;
             Ok(sig)
         }
-        _ => Err(crate::ops::OpError::type_error(format!(
+        _ => Err(crate::v8::ops::OpError::type_error(format!(
             "Cannot sign with {algo_name} and this key type"
         ))),
     }
@@ -603,7 +603,7 @@ fn crypto_sign(state: SharedState, algo: String, hash: String, key_id: u32, data
 /// truthy-but-wrong value like `"false"` (a non-empty string) never leaks through.
 /// (Audit item C-12.)
 #[appbase_op(state)]
-fn crypto_verify(state: SharedState, algo: String, hash: String, key_id: u32, data: Vec<u8>, signature: Vec<u8>) -> Result<String, crate::ops::OpError> {
+fn crypto_verify(state: SharedState, algo: String, hash: String, key_id: u32, data: Vec<u8>, signature: Vec<u8>) -> Result<String, crate::v8::ops::OpError> {
     let algo_name = algo.to_uppercase();
     let hash = hash.to_uppercase();
 
@@ -611,7 +611,7 @@ fn crypto_verify(state: SharedState, algo: String, hash: String, key_id: u32, da
     let key = s
         .key_store
         .get(&key_id)
-        .ok_or_else(|| crate::ops::OpError::type_error("Key not found"))?;
+        .ok_or_else(|| crate::v8::ops::OpError::type_error("Key not found"))?;
 
     let valid = match (algo_name.as_str(), key) {
         ("HMAC", KeyData::Symmetric { raw }) => {
@@ -621,7 +621,7 @@ fn crypto_verify(state: SharedState, algo: String, hash: String, key_id: u32, da
                 "SHA-384" => aws_lc_rs::hmac::HMAC_SHA384,
                 "SHA-512" => aws_lc_rs::hmac::HMAC_SHA512,
                 _ => {
-                    return Err(crate::ops::OpError::type_error(format!(
+                    return Err(crate::v8::ops::OpError::type_error(format!(
                         "Unsupported HMAC hash: {hash}"
                     )))
                 }
@@ -634,7 +634,7 @@ fn crypto_verify(state: SharedState, algo: String, hash: String, key_id: u32, da
                 (Curve::P256, "SHA-256") => &aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1,
                 (Curve::P384, "SHA-384") => &aws_lc_rs::signature::ECDSA_P384_SHA384_ASN1,
                 _ => {
-                    return Err(crate::ops::OpError::type_error(
+                    return Err(crate::v8::ops::OpError::type_error(
                         "Unsupported ECDSA curve/hash combo",
                     ))
                 }
@@ -655,7 +655,7 @@ fn crypto_verify(state: SharedState, algo: String, hash: String, key_id: u32, da
                 "SHA-384" => &aws_lc_rs::signature::RSA_PKCS1_2048_8192_SHA384,
                 "SHA-512" => &aws_lc_rs::signature::RSA_PKCS1_2048_8192_SHA512,
                 _ => {
-                    return Err(crate::ops::OpError::type_error(format!(
+                    return Err(crate::v8::ops::OpError::type_error(format!(
                         "Unsupported RSA hash: {hash}"
                     )))
                 }
@@ -669,7 +669,7 @@ fn crypto_verify(state: SharedState, algo: String, hash: String, key_id: u32, da
                 "SHA-384" => &aws_lc_rs::signature::RSA_PSS_2048_8192_SHA384,
                 "SHA-512" => &aws_lc_rs::signature::RSA_PSS_2048_8192_SHA512,
                 _ => {
-                    return Err(crate::ops::OpError::type_error(format!(
+                    return Err(crate::v8::ops::OpError::type_error(format!(
                         "Unsupported RSA-PSS hash: {hash}"
                     )))
                 }
@@ -678,12 +678,12 @@ fn crypto_verify(state: SharedState, algo: String, hash: String, key_id: u32, da
             pub_key.verify(&data, &signature).is_ok()
         }
         ("HMAC", _) => {
-            return Err(crate::ops::OpError::type_error(
+            return Err(crate::v8::ops::OpError::type_error(
                 "HMAC verify requires a symmetric key",
             ))
         }
         _ => {
-            return Err(crate::ops::OpError::type_error(format!(
+            return Err(crate::v8::ops::OpError::type_error(format!(
                 "Cannot verify with {algo_name} and this key type"
             )))
         }
@@ -696,12 +696,12 @@ fn crypto_verify(state: SharedState, algo: String, hash: String, key_id: u32, da
 // Helpers for encrypt/decrypt
 // ---------------------------------------------------------------------------
 
-fn oaep_algo_for_hash(hash: &str) -> Result<&'static OaepAlgorithm, crate::ops::OpError> {
+fn oaep_algo_for_hash(hash: &str) -> Result<&'static OaepAlgorithm, crate::v8::ops::OpError> {
     match hash {
         "SHA-256" => Ok(&OAEP_SHA256_MGF1SHA256),
         "SHA-384" => Ok(&OAEP_SHA384_MGF1SHA384),
         "SHA-512" => Ok(&OAEP_SHA512_MGF1SHA512),
-        _ => Err(crate::ops::OpError::type_error(format!(
+        _ => Err(crate::v8::ops::OpError::type_error(format!(
             "Unsupported RSA-OAEP hash: {hash}"
         ))),
     }
@@ -723,9 +723,9 @@ fn oaep_algo_for_hash(hash: &str) -> Result<&'static OaepAlgorithm, crate::ops::
 /// op signature and JS polyfill.  Bulk plaintext/ciphertext always uses the zero-copy
 /// ArrayBuffer bridge.
 #[appbase_op(state)]
-fn crypto_encrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<u8>) -> Result<Vec<u8>, crate::ops::OpError> {
+fn crypto_encrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<u8>) -> Result<Vec<u8>, crate::v8::ops::OpError> {
     let p: serde_json::Value = serde_json::from_str(&algo_json)
-        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid algo params: {e}")))?;
+        .map_err(|e| crate::v8::ops::OpError::type_error(format!("Invalid algo params: {e}")))?;
 
     let algo_name = p["name"]
         .as_str()
@@ -740,16 +740,16 @@ fn crypto_encrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<
     let key = s
         .key_store
         .get(&key_id)
-        .ok_or_else(|| crate::ops::OpError::type_error("Key not found"))?;
+        .ok_or_else(|| crate::v8::ops::OpError::type_error("Key not found"))?;
 
     match (algo_name.as_str(), key) {
         ("AES-GCM", KeyData::Symmetric { raw }) => {
             let iv_b64 = p["iv"].as_str().unwrap_or("");
             let iv_bytes = B64
                 .decode(iv_b64)
-                .map_err(|e| crate::ops::OpError::type_error(format!("Invalid IV: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::type_error(format!("Invalid IV: {e}")))?;
             if iv_bytes.len() != 12 {
-                return Err(crate::ops::OpError::type_error(
+                return Err(crate::v8::ops::OpError::type_error(
                     "AES-GCM IV must be 12 bytes",
                 ));
             }
@@ -758,21 +758,21 @@ fn crypto_encrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<
                 16 => &AES_128_GCM,
                 32 => &AES_256_GCM,
                 _ => {
-                    return Err(crate::ops::OpError::type_error(
+                    return Err(crate::v8::ops::OpError::type_error(
                         "AES-GCM key must be 16 or 32 bytes",
                     ))
                 }
             };
 
             let unbound = UnboundKey::new(aead_alg, raw)
-                .map_err(|e| crate::ops::OpError::error(format!("AES-GCM key error: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("AES-GCM key error: {e}")))?;
             let less_safe = LessSafeKey::new(unbound);
             let nonce = Nonce::try_assume_unique_for_key(&iv_bytes)
-                .map_err(|e| crate::ops::OpError::error(format!("Nonce error: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("Nonce error: {e}")))?;
 
             let aad = if let Some(aad_b64) = p["additionalData"].as_str() {
                 let aad_bytes = B64.decode(aad_b64).map_err(|e| {
-                    crate::ops::OpError::type_error(format!("Invalid AAD: {e}"))
+                    crate::v8::ops::OpError::type_error(format!("Invalid AAD: {e}"))
                 })?;
                 Aad::from(aad_bytes)
             } else {
@@ -782,7 +782,7 @@ fn crypto_encrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<
             let mut in_out = data;
             less_safe
                 .seal_in_place_append_tag(nonce, aad, &mut in_out)
-                .map_err(|e| crate::ops::OpError::error(format!("AES-GCM encrypt: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("AES-GCM encrypt: {e}")))?;
 
             Ok(in_out)
         }
@@ -790,9 +790,9 @@ fn crypto_encrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<
             let iv_b64 = p["iv"].as_str().unwrap_or("");
             let iv_bytes = B64
                 .decode(iv_b64)
-                .map_err(|e| crate::ops::OpError::type_error(format!("Invalid IV: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::type_error(format!("Invalid IV: {e}")))?;
             if iv_bytes.len() != 16 {
-                return Err(crate::ops::OpError::type_error(
+                return Err(crate::v8::ops::OpError::type_error(
                     "AES-CBC IV must be 16 bytes",
                 ));
             }
@@ -801,16 +801,16 @@ fn crypto_encrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<
                 16 => &AES_128,
                 32 => &AES_256,
                 _ => {
-                    return Err(crate::ops::OpError::type_error(
+                    return Err(crate::v8::ops::OpError::type_error(
                         "AES-CBC key must be 16 or 32 bytes",
                     ))
                 }
             };
 
             let unbound = UnboundCipherKey::new(cipher_alg, raw)
-                .map_err(|e| crate::ops::OpError::error(format!("AES-CBC key error: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("AES-CBC key error: {e}")))?;
             let enc_key = PaddedBlockEncryptingKey::cbc_pkcs7(unbound)
-                .map_err(|e| crate::ops::OpError::error(format!("AES-CBC init error: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("AES-CBC init error: {e}")))?;
 
             let iv_array: [u8; 16] = iv_bytes.as_slice().try_into().unwrap();
             let ctx = EncryptionContext::Iv128(FixedLength::<IV_LEN_128_BIT>::from(iv_array));
@@ -818,7 +818,7 @@ fn crypto_encrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<
             let mut in_out = data;
             enc_key
                 .less_safe_encrypt(&mut in_out, ctx)
-                .map_err(|e| crate::ops::OpError::error(format!("AES-CBC encrypt: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("AES-CBC encrypt: {e}")))?;
 
             Ok(in_out)
         }
@@ -826,13 +826,13 @@ fn crypto_encrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<
             let oaep_alg = oaep_algo_for_hash(&hash)?;
 
             let pub_key = PublicEncryptingKey::from_der(spki_der)
-                .map_err(|e| crate::ops::OpError::error(format!("RSA public key error: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("RSA public key error: {e}")))?;
             let oaep_key = OaepPublicEncryptingKey::new(pub_key)
-                .map_err(|e| crate::ops::OpError::error(format!("RSA-OAEP init error: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("RSA-OAEP init error: {e}")))?;
 
             let label = if let Some(label_b64) = p["label"].as_str() {
                 let label_bytes = B64.decode(label_b64).map_err(|e| {
-                    crate::ops::OpError::type_error(format!("Invalid label: {e}"))
+                    crate::v8::ops::OpError::type_error(format!("Invalid label: {e}"))
                 })?;
                 Some(label_bytes)
             } else {
@@ -847,11 +847,11 @@ fn crypto_encrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<
                     &mut ciphertext,
                     label.as_deref(),
                 )
-                .map_err(|e| crate::ops::OpError::error(format!("RSA-OAEP encrypt: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("RSA-OAEP encrypt: {e}")))?;
 
             Ok(ct.to_vec())
         }
-        _ => Err(crate::ops::OpError::type_error(format!(
+        _ => Err(crate::v8::ops::OpError::type_error(format!(
             "Cannot encrypt with {algo_name} and this key type"
         ))),
     }
@@ -870,9 +870,9 @@ fn crypto_encrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<
 /// AAD, and label are small structured params that stay base64-in-JSON.  See the
 /// encrypt doc comment for the full explanation.
 #[appbase_op(state)]
-fn crypto_decrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<u8>) -> Result<Vec<u8>, crate::ops::OpError> {
+fn crypto_decrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<u8>) -> Result<Vec<u8>, crate::v8::ops::OpError> {
     let p: serde_json::Value = serde_json::from_str(&algo_json)
-        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid algo params: {e}")))?;
+        .map_err(|e| crate::v8::ops::OpError::type_error(format!("Invalid algo params: {e}")))?;
 
     let algo_name = p["name"]
         .as_str()
@@ -887,16 +887,16 @@ fn crypto_decrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<
     let key = s
         .key_store
         .get(&key_id)
-        .ok_or_else(|| crate::ops::OpError::type_error("Key not found"))?;
+        .ok_or_else(|| crate::v8::ops::OpError::type_error("Key not found"))?;
 
     match (algo_name.as_str(), key) {
         ("AES-GCM", KeyData::Symmetric { raw }) => {
             let iv_b64 = p["iv"].as_str().unwrap_or("");
             let iv_bytes = B64
                 .decode(iv_b64)
-                .map_err(|e| crate::ops::OpError::type_error(format!("Invalid IV: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::type_error(format!("Invalid IV: {e}")))?;
             if iv_bytes.len() != 12 {
-                return Err(crate::ops::OpError::type_error(
+                return Err(crate::v8::ops::OpError::type_error(
                     "AES-GCM IV must be 12 bytes",
                 ));
             }
@@ -905,21 +905,21 @@ fn crypto_decrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<
                 16 => &AES_128_GCM,
                 32 => &AES_256_GCM,
                 _ => {
-                    return Err(crate::ops::OpError::type_error(
+                    return Err(crate::v8::ops::OpError::type_error(
                         "AES-GCM key must be 16 or 32 bytes",
                     ))
                 }
             };
 
             let unbound = UnboundKey::new(aead_alg, raw)
-                .map_err(|e| crate::ops::OpError::error(format!("AES-GCM key error: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("AES-GCM key error: {e}")))?;
             let less_safe = LessSafeKey::new(unbound);
             let nonce = Nonce::try_assume_unique_for_key(&iv_bytes)
-                .map_err(|e| crate::ops::OpError::error(format!("Nonce error: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("Nonce error: {e}")))?;
 
             let aad = if let Some(aad_b64) = p["additionalData"].as_str() {
                 let aad_bytes = B64.decode(aad_b64).map_err(|e| {
-                    crate::ops::OpError::type_error(format!("Invalid AAD: {e}"))
+                    crate::v8::ops::OpError::type_error(format!("Invalid AAD: {e}"))
                 })?;
                 Aad::from(aad_bytes)
             } else {
@@ -929,7 +929,7 @@ fn crypto_decrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<
             let mut in_out = data;
             let plaintext = less_safe
                 .open_in_place(nonce, aad, &mut in_out)
-                .map_err(|e| crate::ops::OpError::error(format!("AES-GCM decrypt: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("AES-GCM decrypt: {e}")))?;
 
             Ok(plaintext.to_vec())
         }
@@ -937,9 +937,9 @@ fn crypto_decrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<
             let iv_b64 = p["iv"].as_str().unwrap_or("");
             let iv_bytes = B64
                 .decode(iv_b64)
-                .map_err(|e| crate::ops::OpError::type_error(format!("Invalid IV: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::type_error(format!("Invalid IV: {e}")))?;
             if iv_bytes.len() != 16 {
-                return Err(crate::ops::OpError::type_error(
+                return Err(crate::v8::ops::OpError::type_error(
                     "AES-CBC IV must be 16 bytes",
                 ));
             }
@@ -948,16 +948,16 @@ fn crypto_decrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<
                 16 => &AES_128,
                 32 => &AES_256,
                 _ => {
-                    return Err(crate::ops::OpError::type_error(
+                    return Err(crate::v8::ops::OpError::type_error(
                         "AES-CBC key must be 16 or 32 bytes",
                     ))
                 }
             };
 
             let unbound = UnboundCipherKey::new(cipher_alg, raw)
-                .map_err(|e| crate::ops::OpError::error(format!("AES-CBC key error: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("AES-CBC key error: {e}")))?;
             let dec_key = PaddedBlockDecryptingKey::cbc_pkcs7(unbound)
-                .map_err(|e| crate::ops::OpError::error(format!("AES-CBC init error: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("AES-CBC init error: {e}")))?;
 
             let iv_array: [u8; 16] = iv_bytes.as_slice().try_into().unwrap();
             let ctx = DecryptionContext::Iv128(FixedLength::<IV_LEN_128_BIT>::from(iv_array));
@@ -965,7 +965,7 @@ fn crypto_decrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<
             let mut in_out = data;
             let plaintext = dec_key
                 .decrypt(&mut in_out, ctx)
-                .map_err(|e| crate::ops::OpError::error(format!("AES-CBC decrypt: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("AES-CBC decrypt: {e}")))?;
 
             Ok(plaintext.to_vec())
         }
@@ -973,13 +973,13 @@ fn crypto_decrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<
             let oaep_alg = oaep_algo_for_hash(&hash)?;
 
             let priv_key = PrivateDecryptingKey::from_pkcs8(pkcs8_der)
-                .map_err(|e| crate::ops::OpError::error(format!("RSA private key error: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("RSA private key error: {e}")))?;
             let oaep_key = OaepPrivateDecryptingKey::new(priv_key)
-                .map_err(|e| crate::ops::OpError::error(format!("RSA-OAEP init error: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("RSA-OAEP init error: {e}")))?;
 
             let label = if let Some(label_b64) = p["label"].as_str() {
                 let label_bytes = B64.decode(label_b64).map_err(|e| {
-                    crate::ops::OpError::type_error(format!("Invalid label: {e}"))
+                    crate::v8::ops::OpError::type_error(format!("Invalid label: {e}"))
                 })?;
                 Some(label_bytes)
             } else {
@@ -994,11 +994,11 @@ fn crypto_decrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<
                     &mut plaintext,
                     label.as_deref(),
                 )
-                .map_err(|e| crate::ops::OpError::error(format!("RSA-OAEP decrypt: {e}")))?;
+                .map_err(|e| crate::v8::ops::OpError::error(format!("RSA-OAEP decrypt: {e}")))?;
 
             Ok(pt.to_vec())
         }
-        _ => Err(crate::ops::OpError::type_error(format!(
+        _ => Err(crate::v8::ops::OpError::type_error(format!(
             "Cannot decrypt with {algo_name} and this key type"
         ))),
     }
@@ -1025,7 +1025,7 @@ impl aws_lc_rs::hkdf::KeyType for DeriveLen {
 fn crypto_derive_bits_inner(
     state: &SharedState,
     p: &serde_json::Value,
-) -> Result<Vec<u8>, crate::ops::OpError> {
+) -> Result<Vec<u8>, crate::v8::ops::OpError> {
     let algo_name = p["algorithm"]["name"]
         .as_str()
         .unwrap_or("")
@@ -1038,7 +1038,7 @@ fn crypto_derive_bits_inner(
         .to_uppercase();
 
     if length == 0 || length % 8 != 0 {
-        return Err(crate::ops::OpError::type_error(
+        return Err(crate::v8::ops::OpError::type_error(
             "length must be a positive multiple of 8",
         ));
     }
@@ -1048,12 +1048,12 @@ fn crypto_derive_bits_inner(
     let key = s
         .key_store
         .get(&key_id)
-        .ok_or_else(|| crate::ops::OpError::type_error("Key not found"))?;
+        .ok_or_else(|| crate::v8::ops::OpError::type_error("Key not found"))?;
 
     let raw = match key {
         KeyData::Symmetric { raw } => raw,
         _ => {
-            return Err(crate::ops::OpError::type_error(
+            return Err(crate::v8::ops::OpError::type_error(
                 "deriveBits requires a symmetric key",
             ))
         }
@@ -1066,18 +1066,18 @@ fn crypto_derive_bits_inner(
                 "SHA-384" => aws_lc_rs::hkdf::HKDF_SHA384,
                 "SHA-512" => aws_lc_rs::hkdf::HKDF_SHA512,
                 _ => {
-                    return Err(crate::ops::OpError::type_error(format!(
+                    return Err(crate::v8::ops::OpError::type_error(format!(
                         "Unsupported HKDF hash: {hash}"
                     )))
                 }
             };
             let salt_b64 = p["algorithm"]["salt"].as_str().unwrap_or("");
             let salt_bytes = B64.decode(salt_b64).map_err(|e| {
-                crate::ops::OpError::type_error(format!("Invalid salt: {e}"))
+                crate::v8::ops::OpError::type_error(format!("Invalid salt: {e}"))
             })?;
             let info_b64 = p["algorithm"]["info"].as_str().unwrap_or("");
             let info_bytes = B64.decode(info_b64).map_err(|e| {
-                crate::ops::OpError::type_error(format!("Invalid info: {e}"))
+                crate::v8::ops::OpError::type_error(format!("Invalid info: {e}"))
             })?;
 
             let salt = aws_lc_rs::hkdf::Salt::new(hkdf_alg, &salt_bytes);
@@ -1085,10 +1085,10 @@ fn crypto_derive_bits_inner(
             let info_refs: &[&[u8]] = &[&info_bytes];
             let okm = prk
                 .expand(info_refs, DeriveLen(byte_len))
-                .map_err(|_| crate::ops::OpError::error("HKDF expand failed"))?;
+                .map_err(|_| crate::v8::ops::OpError::error("HKDF expand failed"))?;
             let mut out = vec![0u8; byte_len];
             okm.fill(&mut out)
-                .map_err(|_| crate::ops::OpError::error("HKDF fill failed"))?;
+                .map_err(|_| crate::v8::ops::OpError::error("HKDF fill failed"))?;
             Ok(out)
         }
         "PBKDF2" => {
@@ -1097,24 +1097,24 @@ fn crypto_derive_bits_inner(
                 "SHA-384" => aws_lc_rs::pbkdf2::PBKDF2_HMAC_SHA384,
                 "SHA-512" => aws_lc_rs::pbkdf2::PBKDF2_HMAC_SHA512,
                 _ => {
-                    return Err(crate::ops::OpError::type_error(format!(
+                    return Err(crate::v8::ops::OpError::type_error(format!(
                         "Unsupported PBKDF2 hash: {hash}"
                     )))
                 }
             };
             let salt_b64 = p["algorithm"]["salt"].as_str().unwrap_or("");
             let salt_bytes = B64.decode(salt_b64).map_err(|e| {
-                crate::ops::OpError::type_error(format!("Invalid salt: {e}"))
+                crate::v8::ops::OpError::type_error(format!("Invalid salt: {e}"))
             })?;
             let iterations = p["algorithm"]["iterations"].as_u64().unwrap_or(1000) as u32;
             let iterations = std::num::NonZeroU32::new(iterations)
-                .ok_or_else(|| crate::ops::OpError::type_error("iterations must be > 0"))?;
+                .ok_or_else(|| crate::v8::ops::OpError::type_error("iterations must be > 0"))?;
 
             let mut out = vec![0u8; byte_len];
             aws_lc_rs::pbkdf2::derive(pbkdf2_alg, iterations, &salt_bytes, raw, &mut out);
             Ok(out)
         }
-        _ => Err(crate::ops::OpError::type_error(format!(
+        _ => Err(crate::v8::ops::OpError::type_error(format!(
             "Unsupported deriveBits algorithm: {algo_name}"
         ))),
     }
@@ -1125,9 +1125,9 @@ fn crypto_derive_bits_inner(
 /// Zero-serialization: derived bits returned as ArrayBuffer.
 /// Params stay as JSON (salt/info are small structured data).
 #[appbase_op(state)]
-fn crypto_derive_bits(state: SharedState, params: String) -> Result<Vec<u8>, crate::ops::OpError> {
+fn crypto_derive_bits(state: SharedState, params: String) -> Result<Vec<u8>, crate::v8::ops::OpError> {
     let p: serde_json::Value = serde_json::from_str(&params)
-        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid params: {e}")))?;
+        .map_err(|e| crate::v8::ops::OpError::type_error(format!("Invalid params: {e}")))?;
     crypto_derive_bits_inner(&state, &p)
 }
 
@@ -1137,9 +1137,9 @@ fn crypto_derive_bits(state: SharedState, params: String) -> Result<Vec<u8>, cra
 /// Key derivation is an infrequent setup operation with small structured payloads,
 /// so the JSON overhead is negligible.
 #[appbase_op(state)]
-fn crypto_derive_key(state: SharedState, params: String) -> Result<String, crate::ops::OpError> {
+fn crypto_derive_key(state: SharedState, params: String) -> Result<String, crate::v8::ops::OpError> {
     let p: serde_json::Value = serde_json::from_str(&params)
-        .map_err(|e| crate::ops::OpError::type_error(format!("Invalid params: {e}")))?;
+        .map_err(|e| crate::v8::ops::OpError::type_error(format!("Invalid params: {e}")))?;
 
     let derived_algo = &p["derivedKeyAlgorithm"];
     let derived_name = derived_algo["name"]
@@ -1163,7 +1163,7 @@ fn crypto_derive_key(state: SharedState, params: String) -> Result<String, crate
             _ => 256,
         }
     } else {
-        return Err(crate::ops::OpError::type_error(
+        return Err(crate::v8::ops::OpError::type_error(
             "derivedKeyAlgorithm must specify length",
         ));
     };

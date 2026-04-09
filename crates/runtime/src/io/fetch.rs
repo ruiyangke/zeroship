@@ -6,8 +6,8 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use appbase_v8_core::fetch::{error_json, validate_url, parse_headers, MAX_RESPONSE_SIZE};
-use appbase_v8_core::state::{FetchRequest, OpResult};
+use crate::v8::fetch::{error_json, validate_url, parse_headers, MAX_RESPONSE_SIZE};
+use crate::v8::state::{FetchRequest, OpResult};
 
 /// Shared cyper Client — reuses connections across requests.
 /// cyper::Client is Arc-based and Send+Sync; the underlying CompioExecutor

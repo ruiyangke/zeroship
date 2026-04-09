@@ -7,7 +7,7 @@
 
 use std::net::IpAddr;
 
-use crate::state::{FetchRequest, SharedState};
+use crate::v8::state::{FetchRequest, SharedState};
 
 /// Maximum response body size: 10 MB.
 pub const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;

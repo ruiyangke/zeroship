@@ -12,7 +12,7 @@
 //! the common SSE pattern where `controller.enqueue()` is called from a
 //! setTimeout callback while `reader.read()` is awaited.
 
-use crate::state::{SharedState, StreamState};
+use crate::v8::state::{SharedState, StreamState};
 
 /// Resolve a PromiseResolver with `{value: Uint8Array(data), done: false}`.
 fn resolve_with_chunk(
@@ -96,7 +96,7 @@ pub fn stream_read_callback(
     // Lazy-create StreamState if it doesn't exist yet (streaming fetch path:
     // stream_id is allocated in the fetch callback but StreamState is deferred).
     let stream = s.streams.entry(stream_id).or_insert_with(|| {
-        crate::state::StreamState {
+        crate::v8::state::StreamState {
             pending_read: None,
             buffer: Vec::new(),
             closed: false,
@@ -157,24 +157,11 @@ pub fn stream_enqueue_callback(
         let resolver = v8::Local::new(scope, &resolver_global);
         resolve_with_chunk(scope, resolver, &data);
     } else {
-        // Check if this is an outbound stream (registered for HTTP streaming).
-        // If so, forward via stream_events channel for the StreamForwarder.
-        let is_outbound = state.borrow().outbound_streams.contains(&stream_id);
-        if is_outbound {
-            let s = state.borrow();
-            if let Some(tx) = &s.stream_events_tx {
-                let _ = tx.try_send(crate::state::OpResult::StreamChunk {
-                    stream_id,
-                    data,
-                    done: false,
-                });
-            }
-        } else {
-            // Inbound stream — buffer the chunk for later JS reads.
-            let mut s = state.borrow_mut();
-            if let Some(stream) = s.streams.get_mut(&stream_id) {
-                stream.buffer.push(data);
-            }
+        // Buffer the chunk — the runtime layer will forward outbound stream
+        // chunks via StreamForwarder when draining new tasks.
+        let mut s = state.borrow_mut();
+        if let Some(stream) = s.streams.get_mut(&stream_id) {
+            stream.buffer.push(data);
         }
     }
 }
@@ -195,29 +182,16 @@ pub fn stream_close_callback(
         .expect("RuntimeState not in isolate slot")
         .clone();
 
-    let (pending, is_outbound) = {
+    let pending = {
         let mut s = state.borrow_mut();
-        let is_outbound = s.outbound_streams.remove(&stream_id);
-        let pending = if let Some(stream) = s.streams.get_mut(&stream_id) {
+        s.outbound_streams.remove(&stream_id);
+        if let Some(stream) = s.streams.get_mut(&stream_id) {
             stream.closed = true;
             stream.pending_read.take()
         } else {
             None
-        };
-        (pending, is_outbound)
-    };
-
-    // For outbound streams, send a done event to close the StreamForwarder.
-    if is_outbound {
-        let s = state.borrow();
-        if let Some(tx) = &s.stream_events_tx {
-            let _ = tx.try_send(crate::state::OpResult::StreamChunk {
-                stream_id,
-                data: Vec::new(),
-                done: true,
-            });
         }
-    }
+    };
 
     // If there's a pending read, resolve it with {done: true}.
     if let Some(resolver_global) = pending {
@@ -286,7 +260,7 @@ pub fn push_stream_chunk(
             let mut s = state.borrow_mut();
             // Lazy-create StreamState if it doesn't exist yet
             let stream = s.streams.entry(stream_id).or_insert_with(|| {
-                crate::state::StreamState {
+                crate::v8::state::StreamState {
                     pending_read: None,
                     buffer: Vec::new(),
                     closed: false,

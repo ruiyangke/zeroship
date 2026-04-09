@@ -5,7 +5,7 @@
 
 use appbase_runtime_macros::appbase_op;
 
-use crate::state::SharedState;
+use crate::v8::state::SharedState;
 
 /// `env.get(key) → string | null`
 ///

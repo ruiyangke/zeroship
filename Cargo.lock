@@ -111,23 +111,22 @@ dependencies = [
 name = "appbase-runtime"
 version = "0.1.0"
 dependencies = [
- "appbase-runtime-compio",
-]
-
-[[package]]
-name = "appbase-runtime-compio"
-version = "0.1.0"
-dependencies = [
- "appbase-v8-core",
+ "ada-url",
+ "appbase-compiler",
+ "appbase-runtime-macros",
+ "aws-lc-rs",
+ "base64",
  "compio",
  "cyper",
  "futures",
  "http",
  "httparse",
  "itoa",
+ "libc",
  "mimalloc",
  "serde_json",
  "socket2 0.5.10",
+ "url",
  "v8",
 ]
 
@@ -138,24 +137,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "appbase-v8-core"
-version = "0.1.0"
-dependencies = [
- "ada-url",
- "appbase-runtime-macros",
- "aws-lc-rs",
- "base64",
- "bytes",
- "futures",
- "libc",
- "serde_json",
- "tokio",
- "tokio-util",
- "url",
- "v8",
 ]
 
 [[package]]
@@ -4051,7 +4032,6 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
- "futures-util",
  "pin-project-lite",
  "tokio",
 ]

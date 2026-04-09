@@ -1,8 +1,7 @@
-//! Shared runtime state — types for the tokio select! event loop.
+//! Shared runtime state — types for the event loop.
 //!
-//! `RuntimeState` replaces `EventLoopInner` from the old tick/park event loop.
-//! All V8 callback state lives here, behind an `Rc<RefCell<>>` so callbacks
-//! can borrow it without crossing thread boundaries.
+//! `RuntimeState` holds all V8 callback state, behind an `Rc<RefCell<>>` so
+//! callbacks can borrow it without crossing thread boundaries.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -11,19 +10,16 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
 
-use tokio::runtime::Handle as TokioHandle;
-use tokio_util::sync::CancellationToken;
-
-use crate::timers::TimerCallback;
+use crate::v8::timers::TimerCallback;
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Capacity of the channel that delivers `IncomingRequest`s to the runtime.
+/// Capacity of the channel that delivers requests to the runtime.
 pub const REQUEST_CHANNEL_CAPACITY: usize = 256;
 
-/// Maximum number of concurrent in-flight async ops (fetch, kv, …).
+/// Maximum number of concurrent in-flight async ops (fetch, kv, ...).
 pub const MAX_PENDING_OPS: usize = 1024;
 
 // ---------------------------------------------------------------------------
@@ -45,7 +41,7 @@ pub struct RuntimeState {
     pub timer_callbacks: HashMap<u32, TimerCallback>,
     /// Monotonically increasing timer-id counter.
     pub next_timer_id: u32,
-    /// Maps timer-id → request-id that owns it (for per-request cleanup).
+    /// Maps timer-id -> request-id that owns it (for per-request cleanup).
     pub timer_owner: HashMap<u32, u64>,
 
     /// Active ReadableStream instances, keyed by stream-id.
@@ -53,12 +49,12 @@ pub struct RuntimeState {
     /// Monotonically increasing stream-id counter.
     pub next_stream_id: u32,
 
-    /// Futures for in-flight async ops (fetch, kv, …).
+    /// Futures for in-flight async ops (fetch, kv, ...).
     pub spawned_ops: Vec<Pin<Box<dyn Future<Output = OpResult>>>>,
     /// Timers queued to be armed on the next event-loop iteration.
     pub spawned_timers: Vec<SpawnedTimer>,
     /// Timer IDs ready to fire immediately (delay == 0).
-    /// Drained by the Runtime after each enter_v8, avoiding tokio::time::sleep overhead.
+    /// Drained by the Runtime after each enter_v8, avoiding sleep overhead.
     pub ready_timers: Vec<u32>,
 
     /// Fetch requests queued by V8 callbacks, drained by the runtime executor.
@@ -66,8 +62,8 @@ pub struct RuntimeState {
 
     /// The request currently being executed (None between requests).
     pub executing_request_id: Option<u64>,
-    /// Token used to cancel the current request's I/O tasks.
-    pub executing_request_cancel: Option<CancellationToken>,
+    /// Cancellation flag for the current request (unused in compio path, kept for API compat).
+    pub executing_request_cancel: Option<()>,
 
     /// Per-request log lines accumulated during execution.
     pub per_request_logs: HashMap<u64, Vec<String>>,
@@ -78,21 +74,13 @@ pub struct RuntimeState {
     pub env_vars: HashMap<String, String>,
 
     /// WebCrypto key store, keyed by key-id.
-    pub key_store: HashMap<u32, crate::crypto::KeyData>,
+    pub key_store: HashMap<u32, crate::v8::crypto::KeyData>,
     /// Monotonically increasing key-id counter.
     pub next_key_id: u32,
 
-    /// Optional handle to the server's multi-threaded tokio runtime.
-    /// When set, fetch futures are spawned on this handle for multi-threaded I/O,
-    /// with results delivered back via oneshot channels.
-    pub server_handle: Option<TokioHandle>,
-
-    /// Channel for stream events that bypass V8 (e.g. outbound HTTP stream chunks).
-    pub stream_events_tx: Option<tokio::sync::mpsc::Sender<OpResult>>,
-
     /// Stream IDs that have outbound StreamForwarders (HTTP streaming responses).
     /// When a stream_id is in this set, `stream_enqueue_callback` forwards chunks
-    /// via `stream_events_tx` instead of buffering them for JS reads.
+    /// via the stream events channel instead of buffering them for JS reads.
     pub outbound_streams: HashSet<u32>,
 }
 
@@ -100,9 +88,8 @@ pub struct RuntimeState {
 pub type SharedState = Rc<RefCell<RuntimeState>>;
 
 impl RuntimeState {
-    /// Create a new `RuntimeState` seeded with the given environment variables
-    /// and an optional handle to the server's multi-threaded tokio runtime.
-    pub fn new(env_vars: HashMap<String, String>, server_handle: Option<TokioHandle>) -> Self {
+    /// Create a new `RuntimeState` seeded with the given environment variables.
+    pub fn new(env_vars: HashMap<String, String>, _server_handle: Option<()>) -> Self {
         Self {
             pending_resolvers: HashMap::new(),
             next_op_id: 1,
@@ -130,9 +117,6 @@ impl RuntimeState {
             key_store: HashMap::new(),
             next_key_id: 1,
 
-            server_handle,
-
-            stream_events_tx: None,
             outbound_streams: HashSet::new(),
         }
     }
@@ -152,7 +136,7 @@ pub struct FetchRequest {
     pub url: String,
     pub headers_json: String,
     pub body: Option<String>,
-    pub cancel: Option<CancellationToken>,
+    pub cancel: Option<()>,
 }
 
 // ---------------------------------------------------------------------------
@@ -234,63 +218,4 @@ pub enum DispatchResult {
     Async(v8::Global<v8::Promise>),
     /// Dispatch failed; value is the error message.
     Error(String),
-}
-
-// ---------------------------------------------------------------------------
-// Incoming request
-// ---------------------------------------------------------------------------
-
-/// An HTTP request arriving from the Tokio accept loop, routed to the isolate.
-pub struct IncomingRequest {
-    /// Unique request ID (monotonically increasing per isolate).
-    pub id: u64,
-    /// What kind of request this is (JSON-RPC or native HTTP).
-    pub kind: RequestKind,
-    /// One-shot channel to send the response back to the HTTP layer.
-    pub reply: tokio::sync::oneshot::Sender<Result<RequestReply, String>>,
-    /// Token that the HTTP layer cancels when the client disconnects.
-    pub cancel: CancellationToken,
-}
-
-/// Discriminant for how the request should be dispatched inside V8.
-pub enum RequestKind {
-    /// JSON-RPC request body — dispatched via the `__dispatch` function.
-    Rpc(String),
-    /// Native HTTP request — dispatched via `onRequest(Request)` with direct
-    /// V8 Response object inspection (no JSON serialization).
-    Http {
-        method: String,
-        url: String,
-        headers: String,
-        body: String,
-    },
-}
-
-/// Reply from the Runtime back to the HTTP layer.
-#[derive(Debug)]
-pub enum RequestReply {
-    /// Complete response — body is fully buffered.
-    Complete(crate::init::RequestResult),
-    /// Streaming response — headers ready, body arrives via channel.
-    Stream(HttpStreamResult),
-}
-
-/// Streaming HTTP response — headers sent immediately, body streams via channel.
-pub struct HttpStreamResult {
-    pub status: u16,
-    pub headers: Vec<(String, String)>,
-    pub body_rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
-    pub cpu_time: std::time::Duration,
-    pub logs: Vec<String>,
-}
-
-impl std::fmt::Debug for HttpStreamResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HttpStreamResult")
-            .field("status", &self.status)
-            .field("headers", &self.headers)
-            .field("cpu_time", &self.cpu_time)
-            .field("logs", &self.logs)
-            .finish_non_exhaustive()
-    }
 }
