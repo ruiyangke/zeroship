@@ -10,6 +10,7 @@ use appbase_platform::core::config::{AppbaseConfig, IsolateConfig, ServerConfig}
 use appbase_platform::core::plugin::{Plugin, PluginFactory};
 use appbase_platform::server::router;
 use appbase_runtime::bundle::{AppBundle, ModuleType};
+use appbase_runtime::modules::ModuleEntry;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,6 +24,7 @@ fn main() {
         "build" => cmd_build(&args),
         "inspect" => cmd_inspect(&args),
         "serve" => cmd_serve(&args),
+        "platform" => cmd_platform(&args),
         "dev" => cmd_dev(&args),
         _ => print_usage(),
     }
@@ -195,9 +197,117 @@ fn cmd_inspect(args: &[String]) {
 }
 
 fn cmd_serve(args: &[String]) {
+    let input = args.get(2).expect(
+        "Usage: appbase serve <file-or-dir> [--port=3000] [--workers=0] [--cpu-limit=MS] [--wall-timeout=MS]",
+    );
+    let port = flag_u16(args, "--port=").unwrap_or(3000);
+
+    let workers: usize = flag_str(args, "--workers=")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    let cpu_limit: Option<Duration> = flag_str(args, "--cpu-limit=")
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_millis);
+
+    let wall_timeout: Option<Duration> = flag_str(args, "--wall-timeout=")
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_millis);
+
+    let input_path = PathBuf::from(input);
+
+    let modules = if input.ends_with(".appbundle") {
+        // Mode 1: load pre-built .appbundle
+        load_from_appbundle(&input_path)
+    } else if input_path.is_dir() {
+        // Mode 2: build from directory (esbuild)
+        build_and_load_dir(&input_path)
+    } else {
+        // Mode 2: single JS/TS file
+        build_and_load_file(&input_path)
+    };
+
+    eprintln!("[appbase] Starting server on port {port}");
+
+    appbase_runtime::serve::start_server(modules, appbase_runtime::serve::ServerOptions {
+        port,
+        workers,
+        cpu_limit,
+        wall_timeout,
+    });
+}
+
+fn load_from_appbundle(path: &PathBuf) -> Vec<ModuleEntry> {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| {
+        eprintln!("Failed to read {}: {e}", path.display());
+        std::process::exit(1);
+    });
+    let mut bundle = AppBundle::from_bytes(&bytes).unwrap_or_else(|e| {
+        eprintln!("Invalid .appbundle: {e}");
+        std::process::exit(1);
+    });
+
+    let info = bundle.all_module_info();
+    eprintln!(
+        "[appbase] Loaded {} ({} modules, {:.1}KB)",
+        path.display(),
+        info.len(),
+        bytes.len() as f64 / 1024.0
+    );
+
+    bundle.to_module_entries()
+}
+
+fn build_and_load_dir(dir: &PathBuf) -> Vec<ModuleEntry> {
+    use appbase_compiler::bundler::{bundle, BundleOptions};
+
+    let options = BundleOptions {
+        entry: String::new(),
+        minify: false,
+        sourcemap: false,
+        ..Default::default()
+    };
+
+    let result = bundle(dir, &options).unwrap_or_else(|e| {
+        eprintln!("Build failed: {e}");
+        std::process::exit(1);
+    });
+
+    eprintln!(
+        "[appbase] Built {:.1}KB from {}",
+        result.js.len() as f64 / 1024.0,
+        dir.display()
+    );
+
+    vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: result.js,
+    }]
+}
+
+fn build_and_load_file(path: &PathBuf) -> Vec<ModuleEntry> {
+    let source = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("Failed to read {}: {e}", path.display());
+        std::process::exit(1);
+    });
+    let name = path.file_name().unwrap().to_string_lossy().to_string();
+
+    eprintln!(
+        "[appbase] Loaded {} ({:.1}KB)",
+        path.display(),
+        source.len() as f64 / 1024.0
+    );
+
+    vec![ModuleEntry {
+        specifier: name,
+        source,
+    }]
+}
+
+fn cmd_platform(args: &[String]) {
     let script = args
         .get(2)
-        .expect("Usage: appbase serve <server.js> [--static=index.html] [--port=3000] [--db=appbase.db] [--config=appbase.toml]");
+        .expect("Usage: appbase platform <server.js> [--static=index.html] [--port=3000] [--db=appbase.db] [--config=appbase.toml]");
     let port = flag_u16(args, "--port=").unwrap_or(3000);
     let static_file = flag_str(args, "--static=");
     let data_dir = PathBuf::from("data");
@@ -450,10 +560,13 @@ fn print_usage() {
     eprintln!("appbase — AI-native full-stack app platform");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  appbase build   <dir-or-file> [--outdir=dist] [--minify]");
-    eprintln!("  appbase inspect <file.appbundle>");
-    eprintln!("  appbase serve   <server.js> [--static=index.html] [--port=3000] [--db=appbase.db]");
-    eprintln!("  appbase dev     <entrypoint> [--port=3000] [--compiler=appbase-compile]");
+    eprintln!("  appbase build    <dir-or-file> [--outdir=dist] [--minify]");
+    eprintln!("  appbase inspect  <file.appbundle>");
+    eprintln!("  appbase serve    <file-or-dir> [--port=3000] [--workers=0]");
+    eprintln!("                   Serve a .appbundle, JS file, or project directory");
+    eprintln!("  appbase platform <server.js> [--static=index.html] [--port=3000] [--db=appbase.db]");
+    eprintln!("                   Start the full platform (database, metering, plugins)");
+    eprintln!("  appbase dev      <entrypoint> [--port=3000]");
 }
 
 // --- Build helpers ---
