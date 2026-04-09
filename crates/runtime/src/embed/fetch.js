@@ -671,6 +671,27 @@
       }
       return buf.subarray(0, pos);
     };
+    TextEncoder.prototype.encodeInto = function(str, dest) {
+      var encoded = this.encode(str);
+      var len = Math.min(encoded.length, dest.length);
+      dest.set(encoded.subarray(0, len));
+      // Count how many source chars were consumed
+      var read = 0, written = 0, i = 0;
+      while (written < len && i < str.length) {
+        var c = str.charCodeAt(i);
+        var bytes;
+        if (c < 0x80) bytes = 1;
+        else if (c < 0x800) bytes = 2;
+        else if (c >= 0xd800 && c <= 0xdbff) { bytes = 4; i++; read++; }
+        else bytes = 3;
+        if (written + bytes > len) break;
+        written += bytes;
+        read++;
+        i++;
+      }
+      return { read: read, written: len };
+    };
+    TextEncoder.prototype.encoding = "utf-8";
   }
 
   if (typeof TextDecoder === "undefined") {

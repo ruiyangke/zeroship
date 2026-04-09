@@ -199,6 +199,45 @@ fn console_log_callback(
 }
 
 // ===========================================================================
+// queueMicrotask — schedules a callback to run after current JS completes
+// ===========================================================================
+
+fn queue_microtask_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    if args.length() < 1 || !args.get(0).is_function() {
+        return;
+    }
+    let func = v8::Local::<v8::Function>::try_from(args.get(0)).unwrap();
+    // Schedule via Promise.resolve().then(callback)
+    // This enqueues the callback as a microtask that runs at the next checkpoint.
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let promise = resolver.get_promise(scope);
+    let undefined = v8::undefined(scope);
+    resolver.resolve(scope, undefined.into());
+    promise.then(scope, func);
+}
+
+// ===========================================================================
+// performance.now — high-resolution monotonic timestamp in milliseconds
+// ===========================================================================
+
+/// Start time for performance.now() — set once per isolate.
+static PERF_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+fn performance_now_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let start = PERF_START.get_or_init(std::time::Instant::now);
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    rv.set(v8::Number::new(scope, elapsed_ms).into());
+}
+
+// ===========================================================================
 // Timer callbacks (take v8::Function args — stays manual)
 // ===========================================================================
 
@@ -336,6 +375,8 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
         console.set(scope, error_key.into(), log_fn.into());
         let info_key = v8::String::new(scope, "info").unwrap();
         console.set(scope, info_key.into(), log_fn.into());
+        let debug_key = v8::String::new(scope, "debug").unwrap();
+        console.set(scope, debug_key.into(), log_fn.into());
 
         let console_key = v8::String::new(scope, "console").unwrap();
         global.set(scope, console_key.into(), console.into());
@@ -367,6 +408,33 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
         let f = v8::Function::new(scope, clear_timeout_callback).unwrap();
         let key = v8::String::new(scope, "clearInterval").unwrap();
         global.set(scope, key.into(), f.into());
+    }
+
+    // queueMicrotask
+    {
+        let f = v8::Function::new(scope, queue_microtask_callback).unwrap();
+        let key = v8::String::new(scope, "queueMicrotask").unwrap();
+        global.set(scope, key.into(), f.into());
+    }
+
+    // performance.now
+    {
+        let perf = v8::Object::new(scope);
+        let f = v8::Function::new(scope, performance_now_callback).unwrap();
+        let key = v8::String::new(scope, "now").unwrap();
+        perf.set(scope, key.into(), f.into());
+        let perf_key = v8::String::new(scope, "performance").unwrap();
+        global.set(scope, perf_key.into(), perf.into());
+    }
+
+    // navigator.userAgent
+    {
+        let nav = v8::Object::new(scope);
+        let ua = v8::String::new(scope, "appbase/1.0").unwrap();
+        let ua_key = v8::String::new(scope, "userAgent").unwrap();
+        nav.set(scope, ua_key.into(), ua.into());
+        let nav_key = v8::String::new(scope, "navigator").unwrap();
+        global.set(scope, nav_key.into(), nav.into());
     }
 
     // __rawFetch (native HTTP fetch)

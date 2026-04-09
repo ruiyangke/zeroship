@@ -65,6 +65,7 @@ URLSearchParams.prototype.entries = function() { var a = this._params, i = 0; re
 URLSearchParams.prototype.keys = function() { var a = this._params, i = 0; return { next: function() { return i >= a.length ? { done: true } : { done: false, value: a[i++][0] }; }, [Symbol.iterator]: function() { return this; } }; };
 URLSearchParams.prototype.values = function() { var a = this._params, i = 0; return { next: function() { return i >= a.length ? { done: true } : { done: false, value: a[i++][1] }; }, [Symbol.iterator]: function() { return this; } }; };
 URLSearchParams.prototype[Symbol.iterator] = function() { return this.entries(); };
+Object.defineProperty(URLSearchParams.prototype, "size", { get: function() { return this._params.length; } });
 
 // =========================================================================
 // URL (backed by ada-url native parser)
