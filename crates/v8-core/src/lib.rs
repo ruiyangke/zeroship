@@ -13,6 +13,7 @@ pub mod env;
 pub mod url;
 pub mod ops;
 pub mod storage;
+pub mod http;
 
 #[cfg(target_os = "linux")]
 pub mod cpu_timer;
@@ -23,3 +24,4 @@ pub use modules::ModuleEntry;
 pub use state::{SharedState, RuntimeState, IncomingRequest, RequestReply, RequestKind,
                 OpResult, FetchRequest, HttpStreamResult, StreamState, SpawnedTimer};
 pub use storage::AppStorage;
+pub use http::{ResponseInfo, SettledResult};
