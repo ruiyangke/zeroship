@@ -5,6 +5,13 @@
 //!
 //! Uses httparse for zero-copy HTTP parsing and compio for io_uring I/O.
 //! Connection handlers call V8 directly via Rc<RefCell<Runtime>> — no channel.
+//!
+//! ## Async dispatch architecture
+//!
+//! Sync handlers (ping, fib): `dispatch_start` → Complete → immediate response.
+//! Async handlers (setTimeout, fetch): `dispatch_start` → Pending → await oneshot.
+//! A pump task owns `AsyncWork`, polls pending ops/timers, enters V8 briefly
+//! to resolve promises, and sends results via the oneshot channels.
 
 #![allow(unsafe_code)]
 
@@ -14,10 +21,12 @@ use std::rc::Rc;
 
 use appbase_runtime_compio::modules::ModuleEntry;
 use appbase_runtime_compio::runtime::Runtime;
+use appbase_runtime_compio::{AsyncWork, AsyncEvent, DispatchOutcome};
 use appbase_runtime_compio::init_v8;
 use compio::buf::BufResult;
 use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
+use futures::StreamExt;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -101,7 +110,7 @@ async fn handle_connection(
             let response_bytes: Vec<u8> = match (method, path) {
                 ("GET", "/health") => HEALTH_RESPONSE.to_vec(),
                 ("POST", "/rpc") => {
-                    dispatch_rpc(body_bytes, &runtime)
+                    dispatch_rpc(body_bytes, &runtime).await
                 }
                 _ => NOT_FOUND_RESPONSE.to_vec(),
             };
@@ -148,9 +157,14 @@ fn build_json_response(body: &str) -> Vec<u8> {
     buf
 }
 
-/// Dispatch a JSON-RPC request directly into V8 (no channel).
-/// The RefCell borrow is scoped — NOT held across any .await point.
-fn dispatch_rpc(
+/// Dispatch a JSON-RPC request into V8 with async support.
+///
+/// - Sync handlers: borrow Runtime briefly, return immediately.
+/// - Async handlers: borrow Runtime briefly for dispatch_start, then release
+///   the borrow and await the oneshot (pump task drives the promise to settlement).
+///
+/// The RefCell borrow is NEVER held across any .await point.
+async fn dispatch_rpc(
     body_bytes: &[u8],
     runtime: &Rc<RefCell<Runtime>>,
 ) -> Vec<u8> {
@@ -159,11 +173,105 @@ fn dispatch_rpc(
         Err(_) => return SERVICE_UNAVAILABLE.to_vec(),
     };
 
-    let result = runtime.borrow_mut().dispatch_rpc(body_str);
+    // Phase 1: dispatch into V8 (scoped borrow)
+    let outcome = runtime.borrow_mut().dispatch_start(body_str);
 
-    match result {
-        Ok(req_result) => build_json_response(&req_result.json),
-        Err(e) => build_json_response(&format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\""))),
+    // Phase 2: handle outcome
+    match outcome {
+        DispatchOutcome::Complete(Ok(result)) => {
+            build_json_response(&result.json)
+        }
+        DispatchOutcome::Complete(Err(e)) => {
+            build_json_response(&format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\"")))
+        }
+        DispatchOutcome::Pending(rx) => {
+            // Await the pump task settling this promise.
+            // The RefCell borrow is NOT held here — other tasks can run.
+            match rx.await {
+                Ok(Ok(result)) => build_json_response(&result.json),
+                Ok(Err(e)) => {
+                    build_json_response(&format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\"")))
+                }
+                Err(_) => {
+                    // Oneshot dropped — pump shut down
+                    SERVICE_UNAVAILABLE.to_vec()
+                }
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// Pump task — drives async V8 work (ops, timers) to completion
+// ===========================================================================
+
+/// Background task that owns `AsyncWork` and drives pending ops/timers.
+///
+/// On each iteration:
+/// 1. Drain newly spawned tasks from Runtime into AsyncWork
+/// 2. Wait for the next op or timer to complete (truly async — compio wakes us)
+/// 3. Briefly borrow Runtime to enter V8 and handle the result
+/// 4. Check if any promises settled, send results via oneshot channels
+///
+/// The RefCell borrow on Runtime is scoped and NEVER held across .await.
+async fn pump_task(runtime: Rc<RefCell<Runtime>>, mut work: AsyncWork) {
+    loop {
+        // Drain any newly spawned tasks (from dispatch_start calls)
+        {
+            let mut rt = runtime.borrow_mut();
+            rt.drain_new_tasks_into(&mut work);
+        }
+
+        // If no pending work and no pending requests, just yield and check again
+        let has_pending = {
+            let rt = runtime.borrow();
+            rt.has_pending_requests()
+        };
+        if work.pending_ops.is_empty() && work.pending_timers.is_empty() && !has_pending {
+            // Nothing to do — sleep briefly to avoid busy-spin, then check again
+            compio::time::sleep(std::time::Duration::from_millis(1)).await;
+            continue;
+        }
+
+        // Wait for the next event from pending ops or timers.
+        // This is a true async wait — compio's reactor wakes us when I/O
+        // completes or a timer fires. No busy-spinning.
+        let event = {
+            // Use futures::select! to wait for whichever completes first.
+            // If one collection is empty, select_next_some would never resolve,
+            // so we guard with is_empty checks.
+            let has_ops = !work.pending_ops.is_empty();
+            let has_timers = !work.pending_timers.is_empty();
+
+            match (has_ops, has_timers) {
+                (true, true) => {
+                    futures::select! {
+                        r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
+                        r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
+                    }
+                }
+                (true, false) => {
+                    let r = work.pending_ops.select_next_some().await;
+                    Some(AsyncEvent::Op(r))
+                }
+                (false, true) => {
+                    let r = work.pending_timers.select_next_some().await;
+                    Some(AsyncEvent::Timer(r))
+                }
+                (false, false) => {
+                    // No futures to poll — yield so connection handlers can dispatch
+                    compio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    None
+                }
+            }
+        };
+
+        if let Some(event) = event {
+            // Briefly borrow Runtime to enter V8 and handle the event
+            let mut rt = runtime.borrow_mut();
+            rt.handle_async_event(event, &mut work);
+            // drain_new_tasks_into is called inside handle_async_event
+        }
     }
 }
 
@@ -220,7 +328,7 @@ fn run_single_worker(port: u16, use_reuseport: bool, worker_id: Option<usize>) {
                 Runtime::new_direct(server_modules(), HashMap::new()),
             ));
 
-            // Warmup: dispatch a ping directly
+            // Warmup: dispatch a ping directly (uses dispatch_rpc for sync)
             {
                 let result = runtime.borrow_mut().dispatch_rpc(
                     r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":0}"#,
@@ -229,6 +337,18 @@ fn run_single_worker(port: u16, use_reuseport: bool, worker_id: Option<usize>) {
                     eprintln!("[v8-server-compio] warmup failed: {e}");
                 }
             }
+
+            // Spawn the pump task — owns AsyncWork, polls pending ops/timers,
+            // briefly borrows Runtime to enter V8 and resolve promises.
+            let mut async_work = AsyncWork::new();
+
+            // Initial drain: pick up any tasks from warmup
+            runtime.borrow_mut().drain_new_tasks_into(&mut async_work);
+
+            let rt_pump = runtime.clone();
+            compio::runtime::spawn(async move {
+                pump_task(rt_pump, async_work).await;
+            }).detach();
 
             // Accept loop
             loop {

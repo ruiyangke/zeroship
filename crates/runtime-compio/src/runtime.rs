@@ -5,6 +5,22 @@
 //!
 //! The main difference: `compio::time::sleep` replaces `tokio::time::sleep`,
 //! and `futures::select!` replaces `tokio::select!`.
+//!
+//! ## Async dispatch architecture
+//!
+//! V8 is single-threaded. Multiple compio connection tasks share one Runtime
+//! via `Rc<RefCell<Runtime>>`. The key constraint: the RefCell borrow must
+//! NEVER be held across an `.await` point.
+//!
+//! **Sync handlers** (ping, fib, uuid): `dispatch_start` returns
+//! `DispatchOutcome::Complete` — the connection handler gets the result
+//! immediately, no channel, no pump involvement.
+//!
+//! **Async handlers** (setTimeout, fetch, crypto): `dispatch_start` returns
+//! `DispatchOutcome::Pending` with a oneshot receiver. A background **pump
+//! task** owns the `AsyncWork` (FuturesUnordered for ops + timers), polls
+//! them, and briefly borrows Runtime to enter V8 and resolve promises.
+//! When a promise settles, the pump sends the result via the oneshot.
 
 #![allow(unsafe_code)]
 
@@ -27,6 +43,44 @@ use appbase_v8_core::state::{
 };
 
 // ---------------------------------------------------------------------------
+// DispatchOutcome — result of dispatch_start
+// ---------------------------------------------------------------------------
+
+/// Outcome of `dispatch_start` — tells the connection handler what to do.
+pub enum DispatchOutcome {
+    /// Sync handler completed immediately. No pump involvement needed.
+    Complete(Result<RequestResult, String>),
+    /// Async handler: promise is pending. Await the receiver for the result.
+    Pending(tokio::sync::oneshot::Receiver<Result<RequestResult, String>>),
+}
+
+// ---------------------------------------------------------------------------
+// AsyncWork — owned by the pump task, NOT by Runtime
+// ---------------------------------------------------------------------------
+
+/// Async futures extracted from Runtime so the pump task can poll them
+/// without holding a RefCell borrow on Runtime across await points.
+pub struct AsyncWork {
+    pub pending_ops: FuturesUnordered<Pin<Box<dyn Future<Output = OpResult>>>>,
+    pub pending_timers: FuturesUnordered<Pin<Box<dyn Future<Output = TimerResult>>>>,
+}
+
+impl AsyncWork {
+    pub fn new() -> Self {
+        Self {
+            pending_ops: FuturesUnordered::new(),
+            pending_timers: FuturesUnordered::new(),
+        }
+    }
+}
+
+/// Event from AsyncWork that the pump delivers to Runtime for V8 processing.
+pub enum AsyncEvent {
+    Op(OpResult),
+    Timer(TimerResult),
+}
+
+// ---------------------------------------------------------------------------
 // PendingRequest — tracking for in-flight async requests
 // ---------------------------------------------------------------------------
 
@@ -35,7 +89,10 @@ struct PendingRequest {
     #[allow(dead_code)]
     id: u64,
     promise: v8::Global<v8::Promise>,
-    reply: tokio::sync::oneshot::Sender<Result<RequestReply, String>>,
+    /// Reply channel for the channel-based event loop (legacy mode).
+    reply_channel: Option<tokio::sync::oneshot::Sender<Result<RequestReply, String>>>,
+    /// Reply channel for direct-dispatch async mode (pump task).
+    reply_direct: Option<tokio::sync::oneshot::Sender<Result<RequestResult, String>>>,
     cpu_accumulated: Duration,
     wall_start: Instant,
     cancel: CancellationToken,
@@ -74,7 +131,11 @@ pub struct Runtime {
     pub(crate) state: SharedState,
 
     pending_requests: HashMap<u64, PendingRequest>,
+    next_direct_request_id: u64,
+
+    /// Used by the legacy channel-based `run()` event loop.
     pending_ops: FuturesUnordered<Pin<Box<dyn Future<Output = OpResult>>>>,
+    /// Used by the legacy channel-based `run()` event loop.
     pending_timers: FuturesUnordered<Pin<Box<dyn Future<Output = TimerResult>>>>,
 
     request_rx: Option<tokio::sync::mpsc::Receiver<IncomingRequest>>,
@@ -146,6 +207,7 @@ impl Runtime {
             modules,
             state,
             pending_requests: HashMap::new(),
+            next_direct_request_id: 1,
             pending_ops: FuturesUnordered::new(),
             pending_timers: FuturesUnordered::new(),
             request_rx,
@@ -242,6 +304,346 @@ impl Runtime {
     }
 
     // -----------------------------------------------------------------------
+    // Two-phase async dispatch (used with pump task)
+    // -----------------------------------------------------------------------
+
+    /// Phase 1: Dispatch a request into V8. Returns immediately.
+    ///
+    /// - **Sync handler**: returns `DispatchOutcome::Complete(Ok(result))`
+    /// - **Async handler**: stores a `PendingRequest`, returns
+    ///   `DispatchOutcome::Pending(receiver)` — the pump task will send the
+    ///   result when the promise settles.
+    /// - **Error**: returns `DispatchOutcome::Complete(Err(msg))`
+    ///
+    /// The caller must NOT hold the RefCell borrow across any `.await`.
+    pub fn dispatch_start(&mut self, body: &str) -> DispatchOutcome {
+        self.ensure_initialized();
+
+        let dispatch_fn = match &self.dispatch_fn {
+            Some(f) => f,
+            None => {
+                return DispatchOutcome::Complete(Err("Isolate not initialized".to_string()));
+            }
+        };
+
+        let request_id = self.next_direct_request_id;
+        self.next_direct_request_id += 1;
+
+        let wall_start = Instant::now();
+
+        let dispatch_result = enter_v8!(self, |scope| {
+            appbase_v8_core::request::dispatch_request(scope, &self.state, dispatch_fn, body)
+        });
+
+        let cpu_dispatch = wall_start.elapsed();
+
+        match dispatch_result {
+            DispatchResult::Sync(json) => {
+                let logs = self.drain_request_logs(0);
+                DispatchOutcome::Complete(Ok(RequestResult {
+                    json,
+                    cpu_time: cpu_dispatch,
+                    wall_time: cpu_dispatch,
+                    logs,
+                }))
+            }
+            DispatchResult::Async(promise) => {
+                // Try to settle inline first (microtask checkpoint already ran in enter_v8)
+                let result = enter_v8!(self, |scope| {
+                    appbase_v8_core::request::extract_promise_result(scope, &promise)
+                });
+
+                let cpu_total = wall_start.elapsed();
+
+                match result {
+                    Ok(json) => {
+                        // Promise settled synchronously (e.g. Promise.resolve chains)
+                        let logs = self.drain_request_logs(0);
+                        DispatchOutcome::Complete(Ok(RequestResult {
+                            json,
+                            cpu_time: cpu_total,
+                            wall_time: cpu_total,
+                            logs,
+                        }))
+                    }
+                    Err(_) => {
+                        // Promise is truly pending — needs the pump to drive it
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        self.pending_requests.insert(request_id, PendingRequest {
+                            id: request_id,
+                            promise,
+                            reply_channel: None,
+                            reply_direct: Some(tx),
+                            cpu_accumulated: cpu_total,
+                            wall_start,
+                            cancel: CancellationToken::new(),
+                        });
+                        DispatchOutcome::Pending(rx)
+                    }
+                }
+            }
+            DispatchResult::Error(msg) => {
+                DispatchOutcome::Complete(Err(msg))
+            }
+        }
+    }
+
+    /// Drain newly spawned ops/timers/fetches from RuntimeState into the
+    /// external `AsyncWork` (for the pump task).
+    pub fn drain_new_tasks_into(&mut self, work: &mut AsyncWork) {
+        // Fast path
+        {
+            let s = self.state.borrow();
+            if s.spawned_ops.is_empty()
+                && s.spawned_timers.is_empty()
+                && s.spawned_fetches.is_empty()
+                && s.ready_timers.is_empty()
+            {
+                return;
+            }
+        }
+
+        // Drain spawned fetches
+        let fetches: Vec<appbase_v8_core::state::FetchRequest> = {
+            self.state.borrow_mut().spawned_fetches.drain(..).collect()
+        };
+        for fetch_req in fetches {
+            let future = crate::fetch::execute_fetch(fetch_req);
+            work.pending_ops.push(future);
+        }
+
+        {
+            let mut s = self.state.borrow_mut();
+
+            for op_future in s.spawned_ops.drain(..) {
+                work.pending_ops.push(op_future);
+            }
+
+            for timer in s.spawned_timers.drain(..) {
+                let SpawnedTimer { id, delay, interval } = timer;
+                work.pending_timers.push(Box::pin(async move {
+                    compio::time::sleep(delay).await;
+                    TimerResult { id, interval }
+                }));
+            }
+        }
+
+        // Fire zero-delay timers inline
+        self.fire_ready_timers_pump(work);
+    }
+
+    /// Handle an async event from the pump (op completed or timer fired).
+    /// Enters V8 briefly to resolve the op/timer, checks settled promises,
+    /// and sends results via oneshot channels.
+    pub fn handle_async_event(&mut self, event: AsyncEvent, work: &mut AsyncWork) {
+        match event {
+            AsyncEvent::Op(result) => self.handle_op_result_pump(result, work),
+            AsyncEvent::Timer(timer) => self.handle_timer_pump(timer, work),
+        }
+    }
+
+    /// Handle a completed op result (pump path). Enters V8 to resolve the
+    /// promise, then checks if any pending requests settled.
+    fn handle_op_result_pump(&mut self, result: OpResult, work: &mut AsyncWork) {
+        match result {
+            OpResult::Completed { op_id, value, request_id } => {
+                if let Some(rid) = request_id {
+                    let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
+                    let mut s = self.state.borrow_mut();
+                    s.executing_request_id = Some(rid);
+                    s.executing_request_cancel = cancel;
+                }
+
+                let start = Instant::now();
+
+                let settled_results = enter_v8!(self, |scope| {
+                    appbase_v8_core::request::resolve_op(scope, &self.state, op_id, &value);
+                    collect_settled_promises(scope, &mut self.pending_requests)
+                });
+
+                let cpu_elapsed = start.elapsed();
+
+                if let Some(rid) = request_id {
+                    if let Some(req) = self.pending_requests.get_mut(&rid) {
+                        req.cpu_accumulated += cpu_elapsed;
+                    }
+                }
+
+                for (id, req, settled) in settled_results {
+                    self.send_settled_reply_any(id, req, settled, cpu_elapsed);
+                }
+
+                self.cleanup_cancelled_requests();
+                self.clear_executing_request();
+
+                // Drain new tasks spawned by the V8 callback
+                self.drain_new_tasks_into(work);
+            }
+            OpResult::StreamChunk { stream_id, data, done } => {
+                enter_v8!(self, |scope| {
+                    appbase_v8_core::streams::push_stream_chunk(scope, &self.state, stream_id, &data, done);
+                });
+            }
+            OpResult::Cancelled => {}
+        }
+    }
+
+    /// Handle a timer firing (pump path). Enters V8 to fire the callback,
+    /// then checks settled promises.
+    fn handle_timer_pump(&mut self, timer: TimerResult, work: &mut AsyncWork) {
+        let TimerResult { id, interval } = timer;
+
+        let owner_request_id = self.state.borrow().timer_owner.get(&id).copied();
+
+        if let Some(rid) = owner_request_id {
+            let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
+            let mut s = self.state.borrow_mut();
+            s.executing_request_id = Some(rid);
+            s.executing_request_cancel = cancel;
+        }
+
+        let start = Instant::now();
+
+        let settled_results = enter_v8!(self, |scope| {
+            appbase_v8_core::request::fire_timer_callback(scope, &self.state, id);
+            collect_settled_promises(scope, &mut self.pending_requests)
+        });
+
+        let cpu_elapsed = start.elapsed();
+
+        if let Some(rid) = owner_request_id {
+            if let Some(req) = self.pending_requests.get_mut(&rid) {
+                req.cpu_accumulated += cpu_elapsed;
+            }
+        }
+
+        // Re-arm interval timers
+        if let Some(interval_dur) = interval {
+            let timer_id = id;
+            work.pending_timers.push(Box::pin(async move {
+                compio::time::sleep(interval_dur).await;
+                TimerResult { id: timer_id, interval: Some(interval_dur) }
+            }));
+        } else {
+            self.state.borrow_mut().timer_owner.remove(&id);
+        }
+
+        for (id, req, settled) in settled_results {
+            self.send_settled_reply_any(id, req, settled, cpu_elapsed);
+        }
+
+        self.cleanup_cancelled_requests();
+        self.clear_executing_request();
+
+        // Drain new tasks spawned by the V8 callback
+        self.drain_new_tasks_into(work);
+    }
+
+    // collect_settled_promises is a free function below (avoids double-borrow
+    // when called inside enter_v8! which already borrows self.isolate).
+
+    /// Fire zero-delay timers, draining new tasks into external AsyncWork.
+    fn fire_ready_timers_pump(&mut self, work: &mut AsyncWork) {
+        loop {
+            let timer_id = {
+                let mut s = self.state.borrow_mut();
+                if s.ready_timers.is_empty() { None } else { Some(s.ready_timers.remove(0)) }
+            };
+            let Some(timer_id) = timer_id else { break };
+
+            let owner_request_id = self.state.borrow().timer_owner.get(&timer_id).copied();
+
+            if let Some(rid) = owner_request_id {
+                let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
+                let mut s = self.state.borrow_mut();
+                s.executing_request_id = Some(rid);
+                s.executing_request_cancel = cancel;
+            }
+
+            let start = Instant::now();
+
+            let settled_results = enter_v8!(self, |scope| {
+                appbase_v8_core::request::fire_timer_callback(scope, &self.state, timer_id);
+                collect_settled_promises(scope, &mut self.pending_requests)
+            });
+
+            let cpu_elapsed = start.elapsed();
+
+            if let Some(rid) = owner_request_id {
+                if let Some(req) = self.pending_requests.get_mut(&rid) {
+                    req.cpu_accumulated += cpu_elapsed;
+                }
+            }
+
+            self.state.borrow_mut().timer_owner.remove(&timer_id);
+
+            for (id, req, settled) in settled_results {
+                self.send_settled_reply_any(id, req, settled, cpu_elapsed);
+            }
+
+            self.cleanup_cancelled_requests();
+            self.clear_executing_request();
+
+            // Drain new spawned ops/timers from the callback
+            {
+                let mut s = self.state.borrow_mut();
+                for op_future in s.spawned_ops.drain(..) {
+                    work.pending_ops.push(op_future);
+                }
+                for timer in s.spawned_timers.drain(..) {
+                    let SpawnedTimer { id, delay, interval } = timer;
+                    work.pending_timers.push(Box::pin(async move {
+                        compio::time::sleep(delay).await;
+                        TimerResult { id, interval }
+                    }));
+                }
+            }
+        }
+    }
+
+    /// Send a settled reply via whichever channel is present (direct or legacy).
+    fn send_settled_reply_any(
+        &mut self,
+        id: u64,
+        req: PendingRequest,
+        settled: Result<String, String>,
+        cpu_elapsed: Duration,
+    ) {
+        let cpu_time = req.cpu_accumulated + cpu_elapsed;
+        let wall_time = req.wall_start.elapsed();
+
+        match settled {
+            Ok(json) => {
+                let logs = self.drain_request_logs(id);
+                let result = RequestResult {
+                    json,
+                    cpu_time,
+                    wall_time,
+                    logs,
+                };
+                // Try direct (pump) channel first
+                if let Some(tx) = req.reply_direct {
+                    let _ = tx.send(Ok(result));
+                } else if let Some(tx) = req.reply_channel {
+                    let _ = tx.send(Ok(RequestReply::Complete(result)));
+                }
+            }
+            Err(msg) => {
+                if let Some(tx) = req.reply_direct {
+                    let _ = tx.send(Err(msg));
+                } else if let Some(tx) = req.reply_channel {
+                    let _ = tx.send(Err(msg));
+                }
+            }
+        }
+    }
+
+    /// Returns true if there are pending async requests.
+    pub fn has_pending_requests(&self) -> bool {
+        !self.pending_requests.is_empty()
+    }
+
+    // -----------------------------------------------------------------------
     // Main event loop
     // -----------------------------------------------------------------------
 
@@ -256,7 +658,11 @@ impl Runtime {
             if self.isolate.is_execution_terminating() {
                 self.isolate.cancel_terminate_execution();
                 for (_id, req) in self.pending_requests.drain() {
-                    let _ = req.reply.send(Err("CPU time limit exceeded".to_string()));
+                    if let Some(tx) = req.reply_direct {
+                        let _ = tx.send(Err("CPU time limit exceeded".into()));
+                    } else if let Some(tx) = req.reply_channel {
+                        let _ = tx.send(Err("CPU time limit exceeded".into()));
+                    }
                 }
             }
 
@@ -492,7 +898,8 @@ impl Runtime {
                 self.pending_requests.insert(id, PendingRequest {
                     id,
                     promise,
-                    reply,
+                    reply_channel: Some(reply),
+                    reply_direct: None,
                     cpu_accumulated: elapsed,
                     wall_start,
                     cancel: cancel.clone(),
@@ -700,21 +1107,7 @@ impl Runtime {
         settled: Result<String, String>,
         cpu_elapsed: Duration,
     ) {
-        let cpu_time = req.cpu_accumulated + cpu_elapsed;
-        match settled {
-            Ok(json) => {
-                let logs = self.drain_request_logs(id);
-                let _ = req.reply.send(Ok(RequestReply::Complete(RequestResult {
-                    json,
-                    cpu_time,
-                    wall_time: req.wall_start.elapsed(),
-                    logs,
-                })));
-            }
-            Err(msg) => {
-                let _ = req.reply.send(Err(msg));
-            }
-        }
+        self.send_settled_reply_any(id, req, settled, cpu_elapsed);
     }
 
     fn drain_request_logs(&mut self, request_id: u64) -> Vec<String> {
@@ -741,7 +1134,11 @@ impl Runtime {
         for id in cancelled {
             if let Some(req) = self.pending_requests.remove(&id) {
                 let _logs = self.drain_request_logs(id);
-                let _ = req.reply.send(Err("Request timed out".into()));
+                if let Some(tx) = req.reply_direct {
+                    let _ = tx.send(Err("Request timed out".into()));
+                } else if let Some(tx) = req.reply_channel {
+                    let _ = tx.send(Err("Request timed out".into()));
+                }
             }
         }
     }
@@ -754,7 +1151,45 @@ impl Runtime {
             rx.close();
         }
         for (_id, req) in self.pending_requests.drain() {
-            let _ = req.reply.send(Err("Isolate shutting down".to_string()));
+            if let Some(tx) = req.reply_direct {
+                let _ = tx.send(Err("Isolate shutting down".into()));
+            } else if let Some(tx) = req.reply_channel {
+                let _ = tx.send(Err("Isolate shutting down".into()));
+            }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Free function: collect settled promises (avoids double-borrow in enter_v8!)
+// ---------------------------------------------------------------------------
+
+/// Check which pending requests have settled promises and extract their results.
+/// Takes the pending_requests map directly to avoid borrowing all of `self`
+/// inside an `enter_v8!` block (which already borrows `self.isolate`).
+fn collect_settled_promises(
+    scope: &mut v8::PinScope,
+    pending_requests: &mut HashMap<u64, PendingRequest>,
+) -> Vec<(u64, PendingRequest, Result<String, String>)> {
+    let settled_ids: Vec<u64> = pending_requests
+        .iter()
+        .filter_map(|(&id, req)| {
+            let p = v8::Local::new(scope, &req.promise);
+            if p.state() != v8::PromiseState::Pending {
+                Some(id)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    settled_ids
+        .into_iter()
+        .filter_map(|id| {
+            let req = pending_requests.remove(&id)?;
+            let result =
+                appbase_v8_core::request::extract_promise_result(scope, &req.promise);
+            Some((id, req, result))
+        })
+        .collect()
 }
