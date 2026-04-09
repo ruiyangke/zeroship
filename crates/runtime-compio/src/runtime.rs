@@ -145,6 +145,11 @@ pub struct Runtime {
     /// dispatch_start sends a signal here after spawning timers/ops so the
     /// pump doesn't have to poll on a 1ms sleep.
     pump_notify_tx: Option<futures::channel::mpsc::Sender<()>>,
+
+    /// Optional per-request CPU time limit.
+    cpu_limit: Option<Duration>,
+    /// Optional per-request wall time limit.
+    wall_timeout: Option<Duration>,
 }
 
 // SAFETY: Runtime is only used on a single compio thread.
@@ -155,8 +160,10 @@ impl Runtime {
     pub fn new_direct(
         modules: Vec<ModuleEntry>,
         env_vars: HashMap<String, String>,
+        cpu_limit: Option<Duration>,
+        wall_timeout: Option<Duration>,
     ) -> Self {
-        Self::new_inner(modules, None, CancellationToken::new(), env_vars)
+        Self::new_inner(modules, None, CancellationToken::new(), env_vars, cpu_limit, wall_timeout)
     }
 
     /// Create a new `Runtime` with a channel receiver (legacy mode).
@@ -165,8 +172,10 @@ impl Runtime {
         request_rx: tokio::sync::mpsc::Receiver<IncomingRequest>,
         shutdown: CancellationToken,
         env_vars: HashMap<String, String>,
+        cpu_limit: Option<Duration>,
+        wall_timeout: Option<Duration>,
     ) -> Self {
-        Self::new_inner(modules, Some(request_rx), shutdown, env_vars)
+        Self::new_inner(modules, Some(request_rx), shutdown, env_vars, cpu_limit, wall_timeout)
     }
 
     fn new_inner(
@@ -174,6 +183,8 @@ impl Runtime {
         request_rx: Option<tokio::sync::mpsc::Receiver<IncomingRequest>>,
         shutdown: CancellationToken,
         env_vars: HashMap<String, String>,
+        cpu_limit: Option<Duration>,
+        wall_timeout: Option<Duration>,
     ) -> Self {
         init_v8();
 
@@ -218,12 +229,24 @@ impl Runtime {
             request_rx,
             shutdown,
             pump_notify_tx: None,
+            cpu_limit,
+            wall_timeout,
         }
     }
 
     /// Set the pump notification sender. The pump task holds the receiver.
     pub fn set_pump_notify(&mut self, tx: futures::channel::mpsc::Sender<()>) {
         self.pump_notify_tx = Some(tx);
+    }
+
+    /// Optional per-request CPU time limit.
+    pub fn cpu_limit(&self) -> Option<Duration> {
+        self.cpu_limit
+    }
+
+    /// Optional per-request wall time limit.
+    pub fn wall_timeout(&self) -> Option<Duration> {
+        self.wall_timeout
     }
 
     /// Wake the pump task so it can drain newly added work.
@@ -379,6 +402,12 @@ impl Runtime {
 
                 match result {
                     Ok(json) => {
+                        // CPU limit check for inline-settled async requests
+                        if let Some(limit) = self.cpu_limit {
+                            if cpu_total > limit {
+                                return DispatchOutcome::Complete(Err("CPU time limit exceeded".into()));
+                            }
+                        }
                         // Promise settled synchronously (e.g. Promise.resolve chains, setTimeout(0))
                         let logs = self.drain_request_logs(0);
                         DispatchOutcome::Complete(Ok(RequestResult {
@@ -497,6 +526,11 @@ impl Runtime {
                     self.send_settled_reply_any(id, req, settled, cpu_elapsed);
                 }
 
+                // CPU limit check for the owning request
+                if let Some(rid) = request_id {
+                    self.check_cpu_limit(rid);
+                }
+
                 self.cleanup_cancelled_requests();
                 self.clear_executing_request();
 
@@ -539,6 +573,11 @@ impl Runtime {
             if let Some(req) = self.pending_requests.get_mut(&rid) {
                 req.cpu_accumulated += cpu_elapsed;
             }
+        }
+
+        // CPU limit check for the owning request
+        if let Some(rid) = owner_request_id {
+            self.check_cpu_limit(rid);
         }
 
         // Re-arm interval timers
@@ -615,6 +654,11 @@ impl Runtime {
                 if let Some(req) = self.pending_requests.get_mut(&rid) {
                     req.cpu_accumulated += cpu_elapsed;
                 }
+            }
+
+            // CPU limit check for the owning request
+            if let Some(rid) = owner_request_id {
+                self.check_cpu_limit(rid);
             }
 
             self.state.borrow_mut().timer_owner.remove(&timer_id);
@@ -847,6 +891,11 @@ impl Runtime {
                 }
             }
 
+            // CPU limit check for the owning request
+            if let Some(rid) = owner_request_id {
+                self.check_cpu_limit(rid);
+            }
+
             self.state.borrow_mut().timer_owner.remove(&timer_id);
 
             for (id, req, settled) in settled_results {
@@ -1013,6 +1062,11 @@ impl Runtime {
                     self.send_settled_reply(id, req, settled, cpu_elapsed);
                 }
 
+                // CPU limit check for the owning request
+                if let Some(rid) = request_id {
+                    self.check_cpu_limit(rid);
+                }
+
                 self.cleanup_cancelled_requests();
                 self.clear_executing_request();
             }
@@ -1080,6 +1134,11 @@ impl Runtime {
             if let Some(req) = self.pending_requests.get_mut(&rid) {
                 req.cpu_accumulated += cpu_elapsed;
             }
+        }
+
+        // CPU limit check for the owning request
+        if let Some(rid) = owner_request_id {
+            self.check_cpu_limit(rid);
         }
 
         // Re-arm interval timers
@@ -1164,6 +1223,22 @@ impl Runtime {
         let mut s = self.state.borrow_mut();
         s.executing_request_id = None;
         s.executing_request_cancel = None;
+    }
+
+    /// Check if a pending request has exceeded its CPU limit. If so, remove
+    /// it and send an error via the reply channel.
+    fn check_cpu_limit(&mut self, request_id: u64) {
+        let Some(cpu_limit) = self.cpu_limit else { return };
+        let Some(req) = self.pending_requests.get(&request_id) else { return };
+        if req.cpu_accumulated > cpu_limit {
+            let req = self.pending_requests.remove(&request_id).unwrap();
+            let _logs = self.drain_request_logs(request_id);
+            if let Some(tx) = req.reply_direct {
+                let _ = tx.send(Err("CPU time limit exceeded".into()));
+            } else if let Some(tx) = req.reply_channel {
+                let _ = tx.send(Err("CPU time limit exceeded".into()));
+            }
+        }
     }
 
     fn cleanup_cancelled_requests(&mut self) {

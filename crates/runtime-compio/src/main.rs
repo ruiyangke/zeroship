@@ -26,7 +26,7 @@ use appbase_runtime_compio::init_v8;
 use compio::buf::BufResult;
 use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -187,14 +187,34 @@ async fn dispatch_rpc(
         DispatchOutcome::Pending(rx) => {
             // Await the pump task settling this promise.
             // The RefCell borrow is NOT held here — other tasks can run.
-            match rx.await {
-                Ok(Ok(result)) => build_json_response(&result.json),
-                Ok(Err(e)) => {
-                    build_json_response(&format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\"")))
+            let wall_limit = runtime.borrow().wall_timeout();
+            if let Some(wall_limit) = wall_limit {
+                // Race the reply against the wall timeout
+                futures::select! {
+                    result = rx.fuse() => {
+                        match result {
+                            Ok(Ok(r)) => build_json_response(&r.json),
+                            Ok(Err(e)) => {
+                                let escaped = e.replace('"', "\\\"");
+                                build_json_response(&format!(r#"{{"error":"{escaped}"}}"#))
+                            }
+                            Err(_) => SERVICE_UNAVAILABLE.to_vec(),
+                        }
+                    }
+                    _ = compio::time::sleep(wall_limit).fuse() => {
+                        build_json_response(r#"{"error":"Request timed out"}"#)
+                    }
                 }
-                Err(_) => {
-                    // Oneshot dropped — pump shut down
-                    SERVICE_UNAVAILABLE.to_vec()
+            } else {
+                match rx.await {
+                    Ok(Ok(result)) => build_json_response(&result.json),
+                    Ok(Err(e)) => {
+                        build_json_response(&format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\"")))
+                    }
+                    Err(_) => {
+                        // Oneshot dropped — pump shut down
+                        SERVICE_UNAVAILABLE.to_vec()
+                    }
                 }
             }
         }
@@ -322,8 +342,9 @@ fn run_single_worker(port: u16, use_reuseport: bool, worker_id: Option<usize>) {
             }
 
             // Create Runtime directly — no channel, no V8 loop task
+            // No timeouts in the benchmark server (same as runtime-tokio's server.rs)
             let runtime = Rc::new(RefCell::new(
-                Runtime::new_direct(server_modules(), HashMap::new()),
+                Runtime::new_direct(server_modules(), HashMap::new(), None, None),
             ));
 
             // Warmup: dispatch a ping directly (uses dispatch_rpc for sync)
