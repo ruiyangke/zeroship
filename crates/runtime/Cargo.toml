@@ -45,6 +45,10 @@ appbase-runtime-macros = { path = "../runtime-macros" }
 name = "v8-server-compio"
 path = "src/server.rs"
 
+[[bin]]
+name = "echo-server"
+path = "src/echo_server.rs"
+
 [dev-dependencies]
 appbase-compiler = { path = "../compiler" }
 

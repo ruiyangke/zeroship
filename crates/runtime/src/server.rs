@@ -595,6 +595,7 @@ fn run_single_worker(
     worker_id: Option<usize>,
     cpu_limit: Option<Duration>,
     wall_timeout: Option<Duration>,
+    modules: Vec<ModuleEntry>,
 ) {
     compio::runtime::RuntimeBuilder::new()
         .build()
@@ -619,7 +620,7 @@ fn run_single_worker(
             // Create Runtime directly — no channel, no V8 loop task
             // No timeouts in the benchmark server (same as runtime-tokio's server.rs)
             let runtime = Rc::new(RefCell::new(
-                Runtime::new_direct(server_modules(), HashMap::new(), cpu_limit, wall_timeout),
+                Runtime::new_direct(modules, HashMap::new(), cpu_limit, wall_timeout),
             ));
 
             // Warmup: dispatch a ping directly (uses dispatch_rpc for sync)
@@ -691,16 +692,20 @@ fn main() {
         );
     }
 
+    // Build appbundle modules ONCE, then clone for each worker
+    let modules = server_modules();
+
     if num_workers <= 1 {
-        run_single_worker(port, false, None, cpu_limit, wall_timeout);
+        run_single_worker(port, false, None, cpu_limit, wall_timeout, modules);
     } else {
         eprintln!("[v8-server-compio] {num_workers} workers on port {port}");
         let mut handles = Vec::new();
         for i in 0..num_workers {
+            let worker_modules = modules.clone();
             let handle = std::thread::Builder::new()
                 .name(format!("compio-worker-{i}"))
                 .spawn(move || {
-                    run_single_worker(port, true, Some(i), cpu_limit, wall_timeout);
+                    run_single_worker(port, true, Some(i), cpu_limit, wall_timeout, worker_modules);
                 })
                 .unwrap();
             handles.push(handle);
