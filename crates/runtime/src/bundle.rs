@@ -492,3 +492,200 @@ mod tests {
     }
 
 }
+
+#[cfg(test)]
+mod stress_tests {
+    use super::*;
+
+    /// Generate a realistic JS module with functions, imports, and comments
+    fn generate_realistic_module(name: &str, size_kb: usize) -> String {
+        let mut source = format!("// Module: {name}\n");
+        source.push_str("'use strict';\n\n");
+        
+        // Add some imports
+        source.push_str("// Simulated imports (would be resolved by bundler)\n");
+        
+        // Generate functions until we hit target size
+        let mut fn_count = 0;
+        while source.len() < size_kb * 1024 {
+            source.push_str(&format!(
+                r#"
+export function handler_{fn_count}(req) {{
+    const data = JSON.parse(req.body);
+    const result = {{
+        id: data.id || Math.random().toString(36).slice(2),
+        name: data.name || "default",
+        timestamp: Date.now(),
+        processed: true,
+        metadata: {{
+            handler: "handler_{fn_count}",
+            module: "{name}",
+            version: "1.0.0"
+        }}
+    }};
+    return new Response(JSON.stringify(result), {{
+        headers: {{ "Content-Type": "application/json" }}
+    }});
+}}
+"#
+            ));
+            fn_count += 1;
+        }
+        
+        source.push_str(&format!("\n// Module {name}: {fn_count} handlers, {} bytes\n", source.len()));
+        source
+    }
+
+    #[test]
+    fn stress_single_large_module() {
+        // Single 500KB module (typical bundled app)
+        let source = generate_realistic_module("app", 500);
+        let original_len = source.len();
+        
+        let bundle = AppBundle::new("app.js", vec![
+            ("app.js".into(), ModuleType::EsModule, source.clone()),
+        ]);
+        
+        let bytes = bundle.to_bytes();
+        let compression_ratio = bytes.len() as f64 / original_len as f64;
+        
+        eprintln!("Single 500KB module:");
+        eprintln!("  Original: {} bytes", original_len);
+        eprintln!("  Bundle:   {} bytes", bytes.len());
+        eprintln!("  Ratio:    {:.1}%", compression_ratio * 100.0);
+        
+        // Verify round-trip
+        let mut loaded = AppBundle::from_bytes(&bytes).unwrap();
+        let got = loaded.get_source("app.js").unwrap();
+        assert_eq!(got, source);
+        assert!(compression_ratio < 0.5, "Should compress to <50%");
+    }
+
+    #[test]
+    fn stress_many_small_modules() {
+        // 1000 small modules (unbundled app with many files)
+        let mut modules = Vec::new();
+        let mut total_source_size = 0;
+        
+        // Entry module imports 10 modules
+        let mut entry = String::from("// Entry module\n");
+        for i in 0..10 {
+            entry.push_str(&format!("import {{ handler_{i} }} from './mod_{i}.js';\n"));
+        }
+        entry.push_str("export function ping() { return 'pong'; }\n");
+        total_source_size += entry.len();
+        modules.push(("index.js".into(), ModuleType::EsModule, entry));
+        
+        // 999 modules of varying sizes
+        for i in 0..999 {
+            let size_kb = (i % 10) + 1; // 1KB to 10KB
+            let source = generate_realistic_module(&format!("mod_{i}"), size_kb);
+            total_source_size += source.len();
+            modules.push((format!("mod_{i}.js"), ModuleType::EsModule, source));
+        }
+        
+        let bundle = AppBundle::new("index.js", modules);
+        let bytes = bundle.to_bytes();
+        
+        eprintln!("\n1000 modules:");
+        eprintln!("  Total source: {} bytes ({:.1} MB)", total_source_size, total_source_size as f64 / 1_048_576.0);
+        eprintln!("  Bundle size:  {} bytes ({:.1} MB)", bytes.len(), bytes.len() as f64 / 1_048_576.0);
+        eprintln!("  Ratio:        {:.1}%", bytes.len() as f64 / total_source_size as f64 * 100.0);
+        
+        // Parse and measure
+        let start = std::time::Instant::now();
+        let mut loaded = AppBundle::from_bytes(&bytes).unwrap();
+        let parse_time = start.elapsed();
+        eprintln!("  Parse time:   {:?}", parse_time);
+        
+        assert_eq!(loaded.entry(), "index.js");
+        
+        // Access only the entry module (lazy — others untouched)
+        let start = std::time::Instant::now();
+        let entry_source = loaded.get_source("index.js").unwrap();
+        let decompress_time = start.elapsed();
+        eprintln!("  Entry decompress: {:?}", decompress_time);
+        assert!(entry_source.contains("ping"));
+        
+        // Verify only entry was decompressed
+        assert!(loaded.is_decompressed("index.js"));
+        assert!(!loaded.is_decompressed("mod_0.js"));
+        assert!(!loaded.is_decompressed("mod_999.js"));
+        
+        // Access 10 imported modules
+        let start = std::time::Instant::now();
+        for i in 0..10 {
+            loaded.get_source(&format!("mod_{i}.js")).unwrap();
+        }
+        let import_time = start.elapsed();
+        eprintln!("  10 imports decompress: {:?}", import_time);
+        
+        // Verify 990 modules still compressed
+        assert!(!loaded.is_decompressed("mod_10.js"));
+        assert!(!loaded.is_decompressed("mod_500.js"));
+        assert!(!loaded.is_decompressed("mod_999.js"));
+        
+        // Performance assertions
+        assert!(parse_time.as_millis() < 100, "Parse should be <100ms, got {:?}", parse_time);
+        assert!(decompress_time.as_millis() < 10, "Decompress should be <10ms, got {:?}", decompress_time);
+    }
+
+    #[test]
+    fn stress_mixed_module_types() {
+        let mut modules = Vec::new();
+        
+        // ES module entry
+        modules.push(("index.js".into(), ModuleType::EsModule, 
+            "import config from './config.json';\nimport tmpl from './template.txt';\nexport function ping() { return config.name; }".into()));
+        
+        // JSON config
+        modules.push(("config.json".into(), ModuleType::Json,
+            r#"{"name":"my-app","version":"1.0.0","settings":{"debug":false,"maxRetries":3}}"#.into()));
+        
+        // Text template
+        modules.push(("template.txt".into(), ModuleType::Text,
+            "Hello, {{name}}! Welcome to {{app}}.".into()));
+        
+        // Large data blob (simulated binary as text for this test)
+        let data = "x".repeat(100_000);
+        modules.push(("large-data.bin".into(), ModuleType::Data, data.clone()));
+        
+        let bundle = AppBundle::new("index.js", modules);
+        let bytes = bundle.to_bytes();
+        
+        eprintln!("\nMixed types:");
+        eprintln!("  Bundle size: {} bytes", bytes.len());
+        
+        let mut loaded = AppBundle::from_bytes(&bytes).unwrap();
+        
+        assert_eq!(loaded.get_source("index.js").unwrap(), 
+            "import config from './config.json';\nimport tmpl from './template.txt';\nexport function ping() { return config.name; }");
+        assert_eq!(loaded.get_source("config.json").unwrap(),
+            r#"{"name":"my-app","version":"1.0.0","settings":{"debug":false,"maxRetries":3}}"#);
+        assert_eq!(loaded.get_source("template.txt").unwrap(),
+            "Hello, {{name}}! Welcome to {{app}}.");
+        assert_eq!(loaded.get_source("large-data.bin").unwrap(), data);
+    }
+
+    #[test]
+    fn stress_repeated_integrity_check() {
+        // Verify integrity check catches corruption at various positions
+        let modules = vec![
+            ("a.js".into(), ModuleType::EsModule, "export const a = 1;".repeat(100)),
+            ("b.js".into(), ModuleType::EsModule, "export const b = 2;".repeat(100)),
+            ("c.js".into(), ModuleType::EsModule, "export const c = 3;".repeat(100)),
+        ];
+        let bundle = AppBundle::new("a.js", modules);
+        let original = bundle.to_bytes();
+        
+        // Corrupt every 100th byte after the header — hash check should catch all
+        let total_positions = (original.len() - 40) / 100;
+        for pos in (40..original.len()).step_by(100) {
+            let mut bytes = original.clone();
+            bytes[pos] ^= 0xFF;
+            let result = AppBundle::from_bytes(&bytes);
+            assert!(result.is_err(), "Corruption at byte {pos} was not detected (file len={})", original.len());
+        }
+        eprintln!("\nIntegrity stress: all {total_positions} corruptions detected");
+    }
+}
