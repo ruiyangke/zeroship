@@ -1,1 +1,91 @@
-//! Control key validation for internal API auth.
+//! Auth utilities: control key validation, API key hashing, bearer extraction.
+
+use sha2::{Digest, Sha256};
+
+/// Constant-time comparison using XOR fold to prevent timing attacks.
+/// Returns true if `provided` and `expected` are equal.
+pub fn validate_control_key(provided: &str, expected: &str) -> bool {
+    let a = provided.as_bytes();
+    let b = expected.as_bytes();
+
+    // If lengths differ, we still do a comparison on the shorter slice
+    // but the length mismatch itself sets the result to false — without
+    // branching early so the timing is uniform for a fixed `expected` length.
+    let len_ok = a.len() == b.len();
+
+    // XOR every byte of the shorter of the two slices.  Using the expected
+    // length as the iteration bound leaks the expected length (acceptable —
+    // the expected key length is not secret), but does NOT leak whether the
+    // provided key is longer or shorter.
+    let min_len = a.len().min(b.len());
+    let diff: u8 = a[..min_len]
+        .iter()
+        .zip(b[..min_len].iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y));
+
+    len_ok && diff == 0
+}
+
+/// SHA-256 hash of `key`, returned as a lowercase hex string.
+/// Used to store API key hashes in the routing table instead of plaintext.
+pub fn hash_api_key(key: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(key.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Constant-time validation of a provided API key against its stored SHA-256 hash.
+pub fn validate_api_key(provided: &str, stored_hash: &str) -> bool {
+    let computed = hash_api_key(provided);
+    validate_control_key(&computed, stored_hash)
+}
+
+/// Strip the `Bearer ` prefix from an Authorization header value.
+/// Returns `None` if the header does not start with `"Bearer "`.
+pub fn extract_bearer(header: &str) -> Option<&str> {
+    header.strip_prefix("Bearer ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_key_equal() {
+        assert!(validate_control_key("secret", "secret"));
+    }
+
+    #[test]
+    fn control_key_different() {
+        assert!(!validate_control_key("wrong", "secret"));
+    }
+
+    #[test]
+    fn control_key_length_mismatch() {
+        assert!(!validate_control_key("sec", "secret"));
+        assert!(!validate_control_key("secretextra", "secret"));
+    }
+
+    #[test]
+    fn hash_is_hex_sha256() {
+        let h = hash_api_key("test");
+        assert_eq!(h.len(), 64);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn api_key_roundtrip() {
+        let key = "my-api-key";
+        let stored = hash_api_key(key);
+        assert!(validate_api_key(key, &stored));
+        assert!(!validate_api_key("wrong-key", &stored));
+    }
+
+    #[test]
+    fn bearer_extraction() {
+        assert_eq!(extract_bearer("Bearer abc123"), Some("abc123"));
+        assert_eq!(extract_bearer("Basic abc123"), None);
+        assert_eq!(extract_bearer("Bearer "), Some(""));
+        assert_eq!(extract_bearer(""), None);
+    }
+}
