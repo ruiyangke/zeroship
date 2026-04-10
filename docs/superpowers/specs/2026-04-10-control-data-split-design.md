@@ -4,12 +4,23 @@
 
 Split the monolith `appbase platform` into a stateful control plane (owns Postgres, manages apps/billing) and stateless data plane workers (run V8 isolates, handle user traffic). Workers sync via HTTP pull + WebSocket hints. Bundle storage abstracted via VFS (local filesystem or S3).
 
+## Key Decisions (from benchmarks)
+
+| Decision | Choice | Evidence |
+|---|---|---|
+| HTTP framework | **ntex + compio** | Matches raw httparse at scale (191K vs 196K req/s), gives routing/middleware/HTTP2/WS for free |
+| V8 dispatch model | **Option B: V8 on HTTP thread** | 28% faster than flume v8pool at 16 cores (191K vs 139K), matches workerd |
+| Database | **appbase-pg (compio-native)** | 23 integration tests passing, no tokio dependency |
+| Bundle storage | **VFS: content-addressed by app_id, integrity via SHA-256** | Tenant-isolated paths, hash for change detection only |
+| Sync mechanism | **HTTP pull (5s) + WebSocket hints** | Self-healing, no message loss, validated by Cloudflare/Lambda/K8s patterns |
+| App identity | **UUID app_id + human-readable name** | deploy_hash (SHA-256) for change detection |
+
 ## Architecture
 
 ```
                          ┌──────────────────────────────┐
                          │        Control Plane          │
-                         │     (1 instance, stateful)    │
+                         │     (ntex + compio, 1 inst)   │
                          │                               │
    Admin/CLI ───────────→│  Public:  /api/apps/*         │
                          │  Internal:/internal/versions  │
@@ -26,15 +37,29 @@ Split the monolith `appbase platform` into a stateful control plane (owns Postgr
                     ▼               ▼               ▼
           ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
           │ Data Plane 1 │ │ Data Plane 2 │ │ Data Plane N │
-          │  (stateless) │ │  (stateless) │ │  (stateless) │
+          │(ntex+compio) │ │(ntex+compio) │ │(ntex+compio) │
           │              │ │              │ │              │
- Users ──→│ compio HTTP  │ │ compio HTTP  │ │ compio HTTP  │
-          │ V8Pool       │ │ V8Pool       │ │ V8Pool       │
-          │ enforcement  │ │ enforcement  │ │ enforcement  │
-          │              │ │              │ │              │
+ Users ──→│ Option B:    │ │ Option B:    │ │ Option B:    │
+          │ V8 per thread│ │ V8 per thread│ │ V8 per thread│
+          │ No flume     │ │ No flume     │ │ No flume     │
           │ No Postgres  │ │ No Postgres  │ │ No Postgres  │
           └──────────────┘ └──────────────┘ └──────────────┘
 ```
+
+### Data Plane Worker Thread Model (Option B)
+
+```
+ntex worker thread 1:              ntex worker thread 2:
+  compio event loop                  compio event loop
+  ├─ HTTP accept + parse             ├─ HTTP accept + parse
+  ├─ apps: HashMap<UUID, Runtime>    ├─ apps: HashMap<UUID, Runtime>
+  │   ├─ "foo" → V8 Runtime         │   ├─ "foo" → V8 Runtime
+  │   ├─ "bar" → V8 Runtime         │   ├─ "baz" → V8 Runtime
+  │   └─ LRU eviction               │   └─ LRU eviction
+  └─ pump task (timers, fetch)       └─ pump task (timers, fetch)
+```
+
+No flume channels, no cross-thread dispatch. Each thread independently loads apps from control plane. Same app may exist on multiple threads — kernel distributes connections.
 
 ## Database Schema
 
@@ -86,7 +111,7 @@ Two implementations:
 
 **LocalFs**: `./bundles/{app_id}/bundle.appbundle` — single-server, dev, testing.
 
-**S3**: `s3://bucket/{app_id}/bundle.appbundle` — multi-server production. Data plane can pull directly via pre-signed URL or proxied through control plane.
+**S3**: `s3://bucket/{app_id}/bundle.appbundle` — multi-server production.
 
 Storage is tenant-isolated by app_id path. The deploy_hash is used only for change detection and integrity verification, not as a storage key.
 
@@ -121,7 +146,7 @@ Server pushes:
   { "type": "plan_change", "app_id": "uuid", "plan": "pro" }
 ```
 
-On hint, data plane fetches the bundle immediately instead of waiting for the next poll cycle. If the WebSocket disconnects, the 5s poll is the fallback. The push is a performance optimization, not the source of truth.
+Push is a performance optimization. Pull is the source of truth.
 
 ### Usage reporting (every 10s)
 
@@ -136,14 +161,10 @@ Body: {
 }
 ```
 
-Control plane aggregates deltas into the `usage` table.
-
 ### Authentication
 
-Data plane authenticates to control plane with a shared secret:
-- CLI flag: `--control-key=<secret>`
-- Env var fallback: `APPBASE_CONTROL_KEY`
-- Sent as `Authorization: Bearer <key>` on all /internal/* requests
+Shared secret: `--control-key=<secret>` or `APPBASE_CONTROL_KEY` env var.
+Sent as `Authorization: Bearer <key>` on all /internal/* requests.
 
 ## Public Admin API
 
@@ -158,27 +179,39 @@ GET    /api/apps/:id/usage       Get usage counters
 POST   /api/apps/:id/rollback   Set deploy_hash to previous value
 ```
 
-Admin API authenticated via API key (per-app) or master key (global admin).
-
 ## Data Plane Request Flow
 
 ```
-User HTTP request arrives:
+User HTTP request arrives at ntex worker thread:
   │
-  ├─ Parse HTTP (compio httparse)
+  ├─ Parse HTTP (ntex, compio io_uring)
   ├─ Extract app_id from path: /apps/{app_id}/rpc
   │
-  ├─ App in local V8Pool?
-  │   ├─ Yes → rate limit (atomic) → dispatch to V8 → respond
-  │   └─ No  → GET /internal/bundles/{app_id}
+  ├─ App in thread-local HashMap?
+  │   ├─ Yes → rate limit (atomic) → dispatch_rpc on same thread → respond
+  │   └─ No  → GET /internal/bundles/{app_id} from control plane
   │            → verify sha256(bundle) == expected hash
-  │            → load into V8Pool → dispatch → respond
+  │            → create V8 Runtime on this thread → dispatch → respond
   │
   ├─ Record usage (atomic in-memory counters)
   └─ Background: flush counters to control plane every 10s
 ```
 
-App routing for v1: path prefix `/apps/{app_id}/rpc`. Future: Host header (`myapp.appbase.dev`).
+## Deploy Flow
+
+```
+1. CLI:     appbase deploy myapp/ --control=https://control.example.com
+2. CLI:     Compile JS → .appbundle (SWC + esbuild + zstd)
+3. CLI:     POST /api/apps/myapp/deploy (multipart: .appbundle)
+4. Control: hash = sha256(appbundle)
+5. Control: bundle_store.put(app_id, bytes)
+6. Control: UPDATE apps SET deploy_hash = $1, updated_at = NOW() WHERE name = $2
+7. Control: Push WS event { type: "deploy", app_id, hash }
+8. Worker:  Receives hint (or polls within 5s)
+9. Worker:  GET /internal/bundles/{app_id}
+10. Worker: Verify sha256(bytes) == hash
+11. Worker: Load into thread-local V8 Runtime, start serving
+```
 
 ## Crate Structure
 
@@ -186,29 +219,28 @@ App routing for v1: path prefix `/apps/{app_id}/rpc`. Future: Host header (`myap
 crates/
 ├── runtime/          V8 engine (unchanged)
 ├── runtime-macros/   Proc macros (unchanged)
-├── pg/               PostgreSQL driver (unchanged)
+├── pg/               PostgreSQL driver (compio-native)
 ├── compiler/         SWC + esbuild (unchanged)
 ├── common/           Shared types + VFS
 │   ├── types.rs      AppRecord, VersionMap, UsageReport
 │   ├── vfs.rs        BundleStore trait + LocalFs + S3
 │   └── auth.rs       Worker key validation
-├── control/          Control plane server
-│   ├── main.rs       Entry point (compio HTTP)
+├── control/          Control plane server (ntex + compio)
+│   ├── main.rs       Entry point
 │   ├── api.rs        Public admin API
 │   ├── internal.rs   Internal API for workers
 │   ├── registry.rs   App CRUD (uses appbase-pg)
 │   └── metering.rs   Usage aggregation
-├── worker/           Data plane server
-│   ├── main.rs       Entry point (compio HTTP + V8Pool)
+├── worker/           Data plane server (ntex + compio + Option B)
+│   ├── main.rs       Entry point
 │   ├── sync.rs       Poll loop + WebSocket hints
-│   ├── handler.rs    Request dispatch + enforcement
-│   └── cache.rs      Local bundle cache
-└── cli/              CLI commands
-    ├── appbase serve      Single-tenant (unchanged)
+│   ├── handler.rs    Request dispatch (V8 per thread, no flume)
+│   └── cache.rs      Thread-local app cache + LRU
+└── cli/
+    ├── appbase serve      Single-tenant, raw httparse (unchanged)
     ├── appbase control    Start control plane
     ├── appbase worker     Start data plane worker
-    ├── appbase deploy     Deploy to control plane
-    └── appbase build      Compile only (unchanged)
+    └── appbase deploy     Deploy to control plane
 ```
 
 Dependency graph:
@@ -220,33 +252,21 @@ common  → (no runtime deps)
 
 No circular dependencies. Worker never imports pg. Control never imports runtime.
 
-## Deploy Flow
+## Benchmark Results
 
-```
-1. CLI:   appbase deploy myapp/ --control=https://control.example.com
-2. CLI:   Compile JS → .appbundle (SWC + esbuild + zstd)
-3. CLI:   POST /api/apps/myapp/deploy (multipart: .appbundle)
-4. Control: hash = sha256(appbundle)
-5. Control: bundle_store.put(app_id, bytes)
-6. Control: UPDATE apps SET deploy_hash = $1, updated_at = NOW() WHERE name = $2
-7. Control: Push WS event { type: "deploy", app_id, hash }
-8. Worker:  Receives hint (or polls within 5s)
-9. Worker:  GET /internal/bundles/{app_id}
-10. Worker: Verify sha256(bytes) == hash
-11. Worker: Load into V8Pool, start serving new version
-```
+### ntex + compio vs raw httparse (with V8, 16 cores)
 
-## Rollback
+| Endpoint | raw httparse | ntex + compio | Diff |
+|---|---|---|---|
+| RPC ping | 196,207 | 203,621 | +4% |
+| HTTP handler | 189,524 | 202,178 | +7% |
+| health | 206,235 | 198,484 | -4% |
 
-```
-1. Admin:  POST /api/apps/myapp/rollback { hash: "previous_hash" }
-2. Control: Verify bundle exists in VFS
-3. Control: UPDATE apps SET deploy_hash = $1, updated_at = NOW()
-4. Control: Push WS event
-5. Worker:  Pulls the old bundle (still in VFS), reloads
-```
+### Option B vs flume v8pool (ntex + compio, 16 cores)
 
-Old bundles are kept in VFS until explicitly garbage-collected.
+| Endpoint | Option B (direct) | flume (1 V8 thread) | Diff |
+|---|---|---|---|
+| RPC ping | 191,186 | 138,574 | **+38%** |
 
 ## Security
 
@@ -264,3 +284,4 @@ Old bundles are kept in VFS until explicitly garbage-collected.
 - Auto-scaling data plane workers
 - Bundle garbage collection
 - Encrypted bundles at rest
+- HTTP/2 (ntex supports it, enable when needed with TLS)
