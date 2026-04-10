@@ -1,0 +1,27 @@
+[package]
+name = "appbase-pg"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal PostgreSQL driver for compio/io_uring"
+
+[dependencies]
+postgres-protocol = "0.6"
+postgres-types = "0.2"
+bytes = "1"
+url = "2"
+compio = { version = "0.18", features = ["io", "net", "runtime", "macros", "time"] }
+
+[dependencies.compio-tls]
+version = "0.9"
+features = ["native-tls"]
+optional = true
+
+[features]
+default = []
+tls = ["dep:compio-tls"]
+
+[dev-dependencies]
+compio = { version = "0.18", features = ["io", "net", "runtime", "macros", "time"] }
+
+[lints]
+workspace = true

@@ -5,6 +5,7 @@ members = [
     "crates/compiler",
     "crates/platform",
     "crates/cli",
+    "crates/pg",
 ]
 resolver = "3"
 
