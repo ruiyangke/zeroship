@@ -1,13 +1,12 @@
 //! Internal API handlers — worker-facing endpoints.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use ntex::web;
 use ntex::web::types::{Json, Path, State};
-use serde::Deserialize;
 use uuid::Uuid;
 
+use appbase_common::types::UsageReport;
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
@@ -28,16 +27,6 @@ fn check_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpRespo
                 .json(&serde_json::json!({"error":"unauthorized"})),
         ),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Request bodies
-// ---------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-pub struct UsageReport {
-    pub app_id: Uuid,
-    pub counters: HashMap<String, i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -77,8 +66,7 @@ pub async fn get_bundle(
                 .json(&serde_json::json!({"error":"invalid uuid"}))
         }
     };
-    let app_id_str = uid.to_string();
-    match state.vfs.get(&app_id_str) {
+    match state.vfs.get(&uid.to_string()) {
         Ok(data) => web::HttpResponse::Ok()
             .content_type("application/octet-stream")
             .body(data),
@@ -104,6 +92,8 @@ pub async fn get_routes(
     }
 }
 
+/// POST /internal/usage — accept usage report from workers.
+/// Uses common::types::UsageReport { worker_id, counters: { app_id → AppUsage } }
 pub async fn report_usage(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,
@@ -112,14 +102,21 @@ pub async fn report_usage(
     if let Some(resp) = check_auth(&req, &state) {
         return resp;
     }
-    for (resource, delta) in &body.counters {
-        if let Err(e) = state
-            .registry
-            .record_usage(&body.app_id, resource, *delta)
-            .await
-        {
-            return web::HttpResponse::InternalServerError()
-                .json(&serde_json::json!({"error": e.to_string()}));
+    for (app_id, usage) in &body.counters {
+        let deltas = [
+            ("requests", usage.requests as i64),
+            ("cpu_us", usage.cpu_us as i64),
+            ("wall_us", usage.wall_us as i64),
+            ("egress_bytes", usage.egress_bytes as i64),
+            ("ingress_bytes", usage.ingress_bytes as i64),
+        ];
+        for (resource, delta) in &deltas {
+            if *delta > 0 {
+                if let Err(e) = state.registry.record_usage(app_id, resource, *delta).await {
+                    return web::HttpResponse::InternalServerError()
+                        .json(&serde_json::json!({"error": e.to_string()}));
+                }
+            }
         }
     }
     web::HttpResponse::Ok().json(&serde_json::json!({"recorded": true}))

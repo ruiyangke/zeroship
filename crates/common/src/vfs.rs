@@ -58,7 +58,7 @@ pub type VfsResult<T> = Result<T, VfsError>;
 /// Abstraction over storage backends for `.appbundle` files.
 ///
 /// All methods are synchronous; implementations are expected to use blocking I/O.
-pub trait BundleStore {
+pub trait BundleStore: Send + Sync {
     /// Store a bundle for `app_id`, overwriting any previous data.
     fn put(&self, app_id: &str, data: &[u8]) -> VfsResult<()>;
 

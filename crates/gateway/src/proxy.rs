@@ -11,7 +11,9 @@ static NEXT_WORKER: AtomicUsize = AtomicUsize::new(0);
 pub async fn forward(
     worker_urls: &[String],
     app_id: &Uuid,
-    body: &str,
+    plan_id: &str,
+    request_id: &Uuid,
+    body: &[u8],
 ) -> Result<HttpResponse, String> {
     if worker_urls.is_empty() {
         return Err("no workers configured".into());
@@ -30,12 +32,24 @@ pub async fn forward(
     let addr = format!("{host}:{port}");
     let mut stream = TcpStream::connect(&addr).await.map_err(|e| e.to_string())?;
 
-    let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-App-Id: {app_id}\r\nConnection: close\r\n\r\n{body}",
+    // Build request with all required headers (spec: X-App-Id, X-Plan-Id, X-Request-Id)
+    let header = format!(
+        "POST {path} HTTP/1.1\r\n\
+         Host: {host}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         X-App-Id: {app_id}\r\n\
+         X-Plan-Id: {plan_id}\r\n\
+         X-Request-Id: {request_id}\r\n\
+         Connection: close\r\n\
+         \r\n",
         body.len()
     );
 
-    let BufResult(r, _) = stream.write_all(request.into_bytes()).await;
+    let mut request_bytes = header.into_bytes();
+    request_bytes.extend_from_slice(body);
+
+    let BufResult(r, _) = stream.write_all(request_bytes).await;
     r.map_err(|e| e.to_string())?;
 
     // Read response
@@ -72,11 +86,12 @@ pub async fn forward(
     );
     builder.content_type("application/json");
 
-    // Forward cpu-time header if present
+    // Forward headers from worker response
     for line in header.lines().skip(1) {
         if let Some((name, value)) = line.split_once(": ") {
-            if name.eq_ignore_ascii_case("x-cpu-time-ms") {
-                builder.set_header("x-cpu-time-ms", value.to_string());
+            let lname = name.to_ascii_lowercase();
+            if lname == "x-cpu-time-ms" || lname == "x-wall-time-ms" {
+                builder.set_header(name, value.to_string());
             }
         }
     }

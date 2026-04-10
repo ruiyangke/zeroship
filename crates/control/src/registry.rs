@@ -64,6 +64,7 @@ impl Registry {
                 plan_id TEXT NOT NULL DEFAULT 'free',
                 deploy_hash TEXT,
                 api_key TEXT NOT NULL,
+                api_key_hash TEXT NOT NULL DEFAULT '',
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )",
@@ -135,11 +136,12 @@ impl Registry {
         }
 
         let api_key = Uuid::new_v4().to_string();
+        let key_hash = hash_api_key(&api_key);
         let mut conn = self.conn().await?;
 
         conn.execute(
-            "INSERT INTO apps (name, plan_id, api_key) VALUES ($1, $2, $3)",
-            &[&name, &plan_id, &api_key],
+            "INSERT INTO apps (name, plan_id, api_key, api_key_hash) VALUES ($1, $2, $3, $4)",
+            &[&name, &plan_id, &api_key, &key_hash],
         )
         .await?;
 
@@ -252,20 +254,19 @@ impl Registry {
         let mut conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT id, name, plan_id, api_key, deploy_hash FROM apps",
+                "SELECT id, name, plan_id, api_key_hash, deploy_hash FROM apps",
                 &[],
             )
             .await?;
         let mut map = HashMap::new();
         for row in &rows {
             let id: Uuid = row.get("id");
-            let api_key: String = row.get("api_key");
             map.insert(
                 id,
                 RouteEntry {
                     name: row.get("name"),
                     plan_id: row.get("plan_id"),
-                    api_key_hash: hash_api_key(&api_key),
+                    api_key_hash: row.get("api_key_hash"),
                     deploy_hash: row.get("deploy_hash"),
                 },
             );

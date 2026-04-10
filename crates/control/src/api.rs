@@ -33,6 +33,29 @@ pub struct SetPlanBody {
 }
 
 // ---------------------------------------------------------------------------
+// Admin auth — require master key on all mutating endpoints
+// ---------------------------------------------------------------------------
+
+fn check_admin_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
+    if state.master_key.is_empty() {
+        return None; // No master key configured — allow all (dev mode)
+    }
+    let header = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let token = appbase_common::auth::extract_bearer(header);
+    match token {
+        Some(key) if appbase_common::auth::validate_control_key(key, &state.master_key) => None,
+        _ => Some(
+            web::HttpResponse::Unauthorized()
+                .json(&serde_json::json!({"error":"unauthorized — master key required"})),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Error → HttpResponse
 // ---------------------------------------------------------------------------
 
@@ -57,9 +80,11 @@ fn error_response(e: RegistryError) -> web::HttpResponse {
 // ---------------------------------------------------------------------------
 
 pub async fn create_app(
+    req: web::HttpRequest,
     state: State<Arc<AppState>>,
     body: Json<CreateAppBody>,
 ) -> web::HttpResponse {
+    if let Some(resp) = check_admin_auth(&req, &state) { return resp; }
     match state.registry.create_app(&body.name, &body.plan_id).await {
         Ok(record) => web::HttpResponse::Created().json(&record),
         Err(e) => error_response(e),
@@ -90,7 +115,8 @@ pub async fn get_app(state: State<Arc<AppState>>, id: Path<String>) -> web::Http
     }
 }
 
-pub async fn delete_app(state: State<Arc<AppState>>, id: Path<String>) -> web::HttpResponse {
+pub async fn delete_app(req: web::HttpRequest, state: State<Arc<AppState>>, id: Path<String>) -> web::HttpResponse {
+    if let Some(resp) = check_admin_auth(&req, &state) { return resp; }
     let uid = match id.parse::<Uuid>() {
         Ok(u) => u,
         Err(_) => {
@@ -119,10 +145,12 @@ pub async fn delete_app(state: State<Arc<AppState>>, id: Path<String>) -> web::H
 }
 
 pub async fn deploy(
+    req: web::HttpRequest,
     state: State<Arc<AppState>>,
     id: Path<String>,
     body: Bytes,
 ) -> web::HttpResponse {
+    if let Some(resp) = check_admin_auth(&req, &state) { return resp; }
     let uid = match id.parse::<Uuid>() {
         Ok(u) => u,
         Err(_) => {
@@ -156,10 +184,12 @@ pub async fn deploy(
 }
 
 pub async fn set_plan(
+    req: web::HttpRequest,
     state: State<Arc<AppState>>,
     id: Path<String>,
     body: Json<SetPlanBody>,
 ) -> web::HttpResponse {
+    if let Some(resp) = check_admin_auth(&req, &state) { return resp; }
     let uid = match id.parse::<Uuid>() {
         Ok(u) => u,
         Err(_) => {

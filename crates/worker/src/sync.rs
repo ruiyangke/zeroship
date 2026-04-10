@@ -70,6 +70,16 @@ async fn sync_once(config: &WorkerConfig) -> Result<(), String> {
         }
     }
 
+    // Evict apps that are no longer in the version map
+    let local_app_ids = cache::all_app_ids();
+    for local_id in &local_app_ids {
+        if !versions.contains_key(local_id) {
+            eprintln!("[worker-sync] evicting deleted app {local_id}");
+            cache::evict_app(local_id);
+            cache::remove_hash(local_id);
+        }
+    }
+
     Ok(())
 }
 

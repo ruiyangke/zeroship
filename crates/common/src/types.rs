@@ -10,6 +10,7 @@ pub struct AppRecord {
     pub name: String,
     pub plan_id: String,
     pub deploy_hash: Option<String>,
+    #[serde(skip_serializing)]
     pub api_key: String,
     pub created_at: String,
     pub updated_at: String,
@@ -53,7 +54,7 @@ pub struct AppUsage {
 pub enum ControlEvent {
     Deploy { app_id: Uuid, hash: String },
     Delete { app_id: Uuid },
-    PlanChange { app_id: Uuid, plan_id: Uuid },
+    PlanChange { app_id: Uuid, plan_id: String },
 }
 
 /// Canonical errors for appbase-common operations.

@@ -129,6 +129,17 @@ pub fn has_app(app_id: &Uuid) -> bool {
     })
 }
 
+/// Get all app IDs currently loaded in the cache.
+pub fn all_app_ids() -> Vec<Uuid> {
+    CACHE.with(|c| {
+        let cache = c.borrow();
+        cache
+            .as_ref()
+            .map(|c| c.isolates.keys().copied().collect())
+            .unwrap_or_default()
+    })
+}
+
 // Deploy hash tracking — separate thread-local map.
 thread_local! {
     static HASHES: RefCell<HashMap<Uuid, String>> = RefCell::new(HashMap::new());
