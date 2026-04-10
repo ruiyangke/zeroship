@@ -1,0 +1,22 @@
+[package]
+name = "appbase-gateway"
+version = "0.1.0"
+edition = "2021"
+description = "appbase gateway — auth, rate limit, proxy to workers"
+
+[[bin]]
+name = "appbase-gate"
+path = "src/main.rs"
+
+[dependencies]
+appbase-common = { path = "../common" }
+ntex = { version = "3", features = ["compio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+compio = { version = "0.18", features = ["io", "net", "runtime", "macros", "time"] }
+url = "2"
+mimalloc = "0.1"
+
+[lints]
+workspace = true

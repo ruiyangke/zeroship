@@ -9,6 +9,7 @@ members = [
     "crates/pg",
     "crates/control",
     "crates/worker",
+    "crates/gateway",
 ]
 resolver = "3"
 exclude = ["crates/runtime/benches/ntex-bench"]
