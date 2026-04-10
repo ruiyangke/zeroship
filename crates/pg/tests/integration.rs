@@ -296,3 +296,518 @@ async fn wrong_password() {
         other => panic!("expected Auth or Postgres error, got: {other}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Helper: create the complex test table
+// ---------------------------------------------------------------------------
+
+const COMPLEX_TABLE: &str = "pg_complex_test";
+
+async fn create_complex_table(conn: &mut Conn) {
+    conn.execute(&format!("DROP TABLE IF EXISTS {COMPLEX_TABLE}"), &[])
+        .await
+        .unwrap();
+    conn.execute(
+        &format!(
+            "CREATE TABLE {COMPLEX_TABLE} (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                value BIGINT DEFAULT 0,
+                data BYTEA,
+                flag BOOLEAN DEFAULT false,
+                score DOUBLE PRECISION,
+                small_num SMALLINT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+}
+
+async fn drop_complex_table(conn: &mut Conn) {
+    conn.execute(&format!("DROP TABLE IF EXISTS {COMPLEX_TABLE}"), &[])
+        .await
+        .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 12. large_result_set
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn large_result_set() {
+    let url = require_pg().await;
+    let mut conn = Conn::connect(&url).await.unwrap();
+
+    create_complex_table(&mut conn).await;
+
+    // INSERT 1000 rows
+    for i in 0..1000i64 {
+        conn.execute(
+            &format!("INSERT INTO {COMPLEX_TABLE} (name, value) VALUES ($1, $2)"),
+            &[&format!("row_{i}"), &i],
+        )
+        .await
+        .unwrap();
+    }
+
+    // SELECT all
+    let rows = conn
+        .query(
+            &format!("SELECT id, name, value FROM {COMPLEX_TABLE} ORDER BY id"),
+            &[],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 1000);
+
+    // Verify a sampling of values
+    for (idx, row) in rows.iter().enumerate() {
+        let name: &str = row.get("name");
+        let value: i64 = row.get("value");
+        assert_eq!(name, format!("row_{idx}"));
+        assert_eq!(value, idx as i64);
+    }
+
+    drop_complex_table(&mut conn).await;
+    conn.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 13. concurrent_connections
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn concurrent_connections() {
+    let url = require_pg().await;
+    let pool = Pool::connect(&url, 5).await.unwrap();
+
+    // Acquire 5 connections, run a query on each, verify all succeed
+    let mut results = Vec::new();
+    for i in 0..5i32 {
+        let mut conn = pool.get().await.unwrap();
+        let rows = conn.query("SELECT $1::int4 as val", &[&i]).await.unwrap();
+        results.push(rows[0].get::<i32>("val"));
+    }
+
+    assert_eq!(results, vec![0, 1, 2, 3, 4]);
+}
+
+// ---------------------------------------------------------------------------
+// 14. text_types
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn text_types() {
+    let url = require_pg().await;
+    let mut conn = Conn::connect(&url).await.unwrap();
+
+    create_complex_table(&mut conn).await;
+
+    // Empty string
+    conn.execute(
+        &format!("INSERT INTO {COMPLEX_TABLE} (name) VALUES ($1)"),
+        &[&""],
+    )
+    .await
+    .unwrap();
+
+    // Unicode: emoji + CJK
+    let unicode_str = "Hello 🌍🎉 你好世界 こんにちは";
+    conn.execute(
+        &format!("INSERT INTO {COMPLEX_TABLE} (name) VALUES ($1)"),
+        &[&unicode_str],
+    )
+    .await
+    .unwrap();
+
+    // Very long string (10KB)
+    let long_str = "A".repeat(10 * 1024);
+    conn.execute(
+        &format!("INSERT INTO {COMPLEX_TABLE} (name) VALUES ($1)"),
+        &[&long_str.as_str()],
+    )
+    .await
+    .unwrap();
+
+    // Special chars: quotes, backslashes, newlines
+    let special_str = "it's a \"test\"\\with\nnewlines\tand\ttabs";
+    conn.execute(
+        &format!("INSERT INTO {COMPLEX_TABLE} (name) VALUES ($1)"),
+        &[&special_str],
+    )
+    .await
+    .unwrap();
+
+    // SELECT all back and verify
+    let rows = conn
+        .query(
+            &format!("SELECT name FROM {COMPLEX_TABLE} ORDER BY id"),
+            &[],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[0].get::<&str>("name"), "");
+    assert_eq!(rows[1].get::<&str>("name"), unicode_str);
+    assert_eq!(rows[2].get::<&str>("name"), long_str.as_str());
+    assert_eq!(rows[3].get::<&str>("name"), special_str);
+
+    drop_complex_table(&mut conn).await;
+    conn.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 15. numeric_types
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn numeric_types() {
+    let url = require_pg().await;
+    let mut conn = Conn::connect(&url).await.unwrap();
+
+    create_complex_table(&mut conn).await;
+
+    let small: i16 = -123;
+    let medium: i32 = 42_000;
+    let large: i64 = 9_000_000_000i64;
+    let float_s: f32 = 3.14;
+    let float_d: f64 = 2.718281828459045;
+    let flag: bool = true;
+
+    conn.execute(
+        &format!(
+            "INSERT INTO {COMPLEX_TABLE} (name, small_num, value, score, flag) \
+             VALUES ($1, $2, $3, $4, $5)"
+        ),
+        &[&"numeric_test", &small, &large, &float_d, &flag],
+    )
+    .await
+    .unwrap();
+
+    let rows = conn
+        .query(
+            &format!(
+                "SELECT small_num, value, score, flag FROM {COMPLEX_TABLE} WHERE name = $1"
+            ),
+            &[&"numeric_test"],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row.get::<i16>("small_num"), small);
+    assert_eq!(row.get::<i64>("value"), large);
+    assert_eq!(row.get::<f64>("score"), float_d);
+    assert_eq!(row.get::<bool>("flag"), flag);
+
+    // Test i32 and f32 via direct SELECT with casts
+    let rows = conn
+        .query("SELECT $1::int4 as i, $2::float4 as f", &[&medium, &float_s])
+        .await
+        .unwrap();
+    assert_eq!(rows[0].get::<i32>("i"), medium);
+    assert_eq!(rows[0].get::<f32>("f"), float_s);
+
+    drop_complex_table(&mut conn).await;
+    conn.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 16. binary_data
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn binary_data() {
+    let url = require_pg().await;
+    let mut conn = Conn::connect(&url).await.unwrap();
+
+    create_complex_table(&mut conn).await;
+
+    // Binary data with null bytes, 0xFF, and various byte patterns
+    let binary: Vec<u8> = (0..=255).collect();
+    // Also test a chunk with embedded nulls
+    let mut with_nulls = vec![0u8, 1, 0, 0, 255, 254, 0, 128];
+    with_nulls.extend_from_slice(&binary);
+
+    conn.execute(
+        &format!("INSERT INTO {COMPLEX_TABLE} (name, data) VALUES ($1, $2)"),
+        &[&"binary_test", &with_nulls.as_slice()],
+    )
+    .await
+    .unwrap();
+
+    let rows = conn
+        .query(
+            &format!("SELECT data FROM {COMPLEX_TABLE} WHERE name = $1"),
+            &[&"binary_test"],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    let data: &[u8] = rows[0].get("data");
+    assert_eq!(data, with_nulls.as_slice());
+
+    drop_complex_table(&mut conn).await;
+    conn.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 17. multiple_statements_sequential
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn multiple_statements_sequential() {
+    let url = require_pg().await;
+    let mut conn = Conn::connect(&url).await.unwrap();
+
+    create_complex_table(&mut conn).await;
+
+    // Run 20 different queries on the same connection
+    for i in 0..20i64 {
+        conn.execute(
+            &format!("INSERT INTO {COMPLEX_TABLE} (name, value) VALUES ($1, $2)"),
+            &[&format!("seq_{i}"), &i],
+        )
+        .await
+        .unwrap();
+    }
+
+    // Also do 20 SELECT queries
+    for i in 0..20i64 {
+        let rows = conn
+            .query(
+                &format!("SELECT value FROM {COMPLEX_TABLE} WHERE name = $1"),
+                &[&format!("seq_{i}")],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get::<i64>("value"), i);
+    }
+
+    // Verify connection still healthy
+    assert_eq!(conn.status(), b'I');
+
+    drop_complex_table(&mut conn).await;
+    conn.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 18. transaction_rollback_explicit
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn transaction_rollback_explicit() {
+    let url = require_pg().await;
+    let mut conn = Conn::connect(&url).await.unwrap();
+
+    create_complex_table(&mut conn).await;
+
+    // BEGIN, INSERT, explicit ROLLBACK
+    {
+        let mut tx = conn.begin().await.unwrap();
+        tx.execute(
+            &format!("INSERT INTO {COMPLEX_TABLE} (name) VALUES ($1)"),
+            &[&"should_not_exist"],
+        )
+        .await
+        .unwrap();
+        tx.rollback().await.unwrap();
+    }
+
+    // Verify data not present
+    let rows = conn
+        .query(
+            &format!("SELECT name FROM {COMPLEX_TABLE} WHERE name = $1"),
+            &[&"should_not_exist"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 0);
+
+    // Connection should be idle
+    assert_eq!(conn.status(), b'I');
+
+    drop_complex_table(&mut conn).await;
+    conn.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 19. error_recovery_in_transaction
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn error_recovery_in_transaction() {
+    let url = require_pg().await;
+    let mut conn = Conn::connect(&url).await.unwrap();
+
+    create_complex_table(&mut conn).await;
+
+    // BEGIN
+    conn.execute("BEGIN", &[]).await.unwrap();
+    assert_eq!(conn.status(), b'T');
+
+    // INSERT (succeeds)
+    conn.execute(
+        &format!("INSERT INTO {COMPLEX_TABLE} (name, value) VALUES ($1, $2)"),
+        &[&"good_row", &1i64],
+    )
+    .await
+    .unwrap();
+
+    // INSERT with constraint violation: name is NOT NULL, so pass a duplicate
+    // primary key to cause a unique violation
+    let err = conn
+        .execute(
+            &format!("INSERT INTO {COMPLEX_TABLE} (id, name) VALUES (1, $1)"),
+            &[&"dup_id"],
+        )
+        .await;
+
+    // The insert should fail (duplicate key or we can also trigger NOT NULL)
+    assert!(err.is_err(), "expected constraint violation");
+
+    // Transaction should be in error state
+    assert_eq!(conn.status(), b'E', "expected transaction error state");
+
+    // ROLLBACK to recover
+    conn.execute("ROLLBACK", &[]).await.unwrap();
+    assert_eq!(conn.status(), b'I');
+
+    // Verify connection is usable again
+    let rows = conn.query("SELECT 1 as ok", &[]).await.unwrap();
+    assert_eq!(rows[0].get::<i32>("ok"), 1);
+
+    // Verify the good_row was rolled back too
+    let rows = conn
+        .query(
+            &format!("SELECT name FROM {COMPLEX_TABLE} WHERE name = $1"),
+            &[&"good_row"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 0);
+
+    drop_complex_table(&mut conn).await;
+    conn.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 20. null_in_params
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn null_in_params() {
+    let url = require_pg().await;
+    let mut conn = Conn::connect(&url).await.unwrap();
+
+    let rows = conn
+        .query("SELECT $1::text as val", &[&None::<&str>])
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    let val: Option<&str> = rows[0].get("val");
+    assert!(val.is_none(), "expected NULL, got {val:?}");
+
+    conn.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 21. pool_exhaustion
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn pool_exhaustion() {
+    let url = require_pg().await;
+    let pool = Pool::connect(&url, 2).await.unwrap();
+
+    // Acquire 2 connections without returning them
+    let _c1 = pool.get().await.unwrap();
+    let _c2 = pool.get().await.unwrap();
+
+    // Third acquisition should fail
+    let err = pool.get().await;
+    match err {
+        Err(Error::Pool(_)) => { /* expected */ }
+        Err(other) => panic!("expected Error::Pool, got: {other}"),
+        Ok(_) => panic!("expected pool exhaustion error, but got a connection"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 22. returning_clause
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn returning_clause() {
+    let url = require_pg().await;
+    let mut conn = Conn::connect(&url).await.unwrap();
+
+    create_complex_table(&mut conn).await;
+
+    // INSERT with RETURNING
+    let rows = conn
+        .query(
+            &format!(
+                "INSERT INTO {COMPLEX_TABLE} (name, value) VALUES ($1, $2) RETURNING id, value"
+            ),
+            &[&"ret_test", &42i64],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    let id: i32 = rows[0].get("id");
+    let value: i64 = rows[0].get("value");
+    assert!(id > 0, "expected positive id, got {id}");
+    assert_eq!(value, 42);
+
+    drop_complex_table(&mut conn).await;
+    conn.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 23. update_with_returning
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn update_with_returning() {
+    let url = require_pg().await;
+    let mut conn = Conn::connect(&url).await.unwrap();
+
+    create_complex_table(&mut conn).await;
+
+    // Insert a row with value=10
+    conn.execute(
+        &format!("INSERT INTO {COMPLEX_TABLE} (name, value) VALUES ($1, $2)"),
+        &[&"upd_test", &10i64],
+    )
+    .await
+    .unwrap();
+
+    // UPDATE with RETURNING
+    let rows = conn
+        .query(
+            &format!(
+                "UPDATE {COMPLEX_TABLE} SET value = value + 1 WHERE name = $1 RETURNING value"
+            ),
+            &[&"upd_test"],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    let value: i64 = rows[0].get("value");
+    assert_eq!(value, 11);
+
+    drop_complex_table(&mut conn).await;
+    conn.close().await.unwrap();
+}
