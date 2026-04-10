@@ -19,12 +19,17 @@ use crate::AppState;
 #[derive(Deserialize)]
 pub struct CreateAppBody {
     pub name: String,
-    pub plan_id: Uuid,
+    #[serde(default = "default_plan")]
+    pub plan_id: String,
+}
+
+fn default_plan() -> String {
+    "free".to_string()
 }
 
 #[derive(Deserialize)]
 pub struct SetPlanBody {
-    pub plan_id: Uuid,
+    pub plan_id: String,
 }
 
 // ---------------------------------------------------------------------------

@@ -8,18 +8,18 @@ use uuid::Uuid;
 pub struct AppRecord {
     pub id: Uuid,
     pub name: String,
-    pub plan_id: Uuid,
+    pub plan_id: String,
     pub deploy_hash: Option<String>,
     pub api_key: String,
-    pub created_at: u64,
-    pub updated_at: u64,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// A routing entry resolved from an incoming request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteEntry {
     pub name: String,
-    pub plan_id: Uuid,
+    pub plan_id: String,
     pub api_key_hash: String,
     pub deploy_hash: Option<String>,
 }
@@ -33,7 +33,7 @@ pub type RouteMap = HashMap<Uuid, RouteEntry>;
 /// Usage counters reported by a worker to the control plane.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageReport {
-    pub worker_id: Uuid,
+    pub worker_id: String,
     pub counters: HashMap<Uuid, AppUsage>,
 }
 

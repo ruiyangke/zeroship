@@ -61,11 +61,11 @@ impl Registry {
             "CREATE TABLE IF NOT EXISTS apps (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 name TEXT NOT NULL UNIQUE,
-                plan_id UUID NOT NULL,
+                plan_id TEXT NOT NULL DEFAULT 'free',
                 deploy_hash TEXT,
                 api_key TEXT NOT NULL,
-                created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint),
-                updated_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint)
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )",
             &[],
         )
@@ -89,7 +89,7 @@ impl Registry {
                 app_id UUID NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
                 period TEXT NOT NULL,
                 counters JSONB NOT NULL,
-                created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::bigint)
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )",
             &[],
         )
@@ -121,7 +121,7 @@ impl Registry {
     pub async fn create_app(
         &self,
         name: &str,
-        plan_id: &Uuid,
+        plan_id: &str,
     ) -> Result<AppRecord, RegistryError> {
         if name.is_empty()
             || name.len() > 64
@@ -139,13 +139,13 @@ impl Registry {
 
         conn.execute(
             "INSERT INTO apps (name, plan_id, api_key) VALUES ($1, $2, $3)",
-            &[&name, plan_id, &api_key],
+            &[&name, &plan_id, &api_key],
         )
         .await?;
 
         let rows = conn
             .query(
-                "SELECT id, name, plan_id, deploy_hash, api_key, created_at, updated_at \
+                "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
                  FROM apps WHERE name = $1",
                 &[&name],
             )
@@ -161,7 +161,7 @@ impl Registry {
         let mut conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT id, name, plan_id, deploy_hash, api_key, created_at, updated_at \
+                "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
                  FROM apps WHERE id = $1",
                 &[id],
             )
@@ -174,7 +174,7 @@ impl Registry {
         let mut conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT id, name, plan_id, deploy_hash, api_key, created_at, updated_at \
+                "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
                  FROM apps WHERE name = $1",
                 &[&name],
             )
@@ -187,7 +187,7 @@ impl Registry {
         let mut conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT id, name, plan_id, deploy_hash, api_key, created_at, updated_at \
+                "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
                  FROM apps ORDER BY name",
                 &[],
             )
@@ -210,7 +210,7 @@ impl Registry {
         let n = conn
             .execute(
                 "UPDATE apps SET deploy_hash = $1, \
-                 updated_at = (EXTRACT(EPOCH FROM NOW())::bigint) WHERE id = $2",
+                 updated_at = NOW() WHERE id = $2",
                 &[&hash, id],
             )
             .await?;
@@ -218,13 +218,13 @@ impl Registry {
     }
 
     /// Change the plan for an app.
-    pub async fn set_plan(&self, id: &Uuid, plan_id: &Uuid) -> Result<bool, RegistryError> {
+    pub async fn set_plan(&self, id: &Uuid, plan_id: &str) -> Result<bool, RegistryError> {
         let mut conn = self.conn().await?;
         let n = conn
             .execute(
                 "UPDATE apps SET plan_id = $1, \
-                 updated_at = (EXTRACT(EPOCH FROM NOW())::bigint) WHERE id = $2",
-                &[plan_id, id],
+                 updated_at = NOW() WHERE id = $2",
+                &[&plan_id, id],
             )
             .await?;
         Ok(n > 0)
@@ -327,7 +327,7 @@ fn row_to_record(row: &appbase_pg::Row) -> AppRecord {
         plan_id: row.get("plan_id"),
         deploy_hash: row.get("deploy_hash"),
         api_key: row.get("api_key"),
-        created_at: row.get::<i64>("created_at") as u64,
-        updated_at: row.get::<i64>("updated_at") as u64,
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
     }
 }
