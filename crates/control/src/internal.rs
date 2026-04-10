@@ -1,31 +1,126 @@
 //! Internal API handlers — worker-facing endpoints.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use ntex::web;
-use ntex::web::types::State;
+use ntex::web::types::{Json, Path, State};
+use serde::Deserialize;
+use uuid::Uuid;
 
 use crate::AppState;
 
-pub async fn get_versions(_state: State<Arc<AppState>>) -> web::HttpResponse {
-    web::HttpResponse::Ok().finish()
+// ---------------------------------------------------------------------------
+// Auth helper
+// ---------------------------------------------------------------------------
+
+fn check_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
+    let header = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let token = appbase_common::auth::extract_bearer(header);
+    match token {
+        Some(key) if appbase_common::auth::validate_control_key(key, &state.control_key) => None,
+        _ => Some(
+            web::HttpResponse::Unauthorized()
+                .json(&serde_json::json!({"error":"unauthorized"})),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Request bodies
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct UsageReport {
+    pub app_id: Uuid,
+    pub counters: HashMap<String, i64>,
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+pub async fn health() -> web::HttpResponse {
+    web::HttpResponse::Ok().json(&serde_json::json!({"status":"ok"}))
+}
+
+pub async fn get_versions(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Some(resp) = check_auth(&req, &state) {
+        return resp;
+    }
+    match state.registry.get_versions().await {
+        Ok(versions) => web::HttpResponse::Ok().json(&versions),
+        Err(e) => web::HttpResponse::InternalServerError()
+            .json(&serde_json::json!({"error": e.to_string()})),
+    }
 }
 
 pub async fn get_bundle(
-    _state: State<Arc<AppState>>,
-    _app_id: ntex::web::types::Path<String>,
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    app_id: Path<String>,
 ) -> web::HttpResponse {
-    web::HttpResponse::Ok().finish()
+    if let Some(resp) = check_auth(&req, &state) {
+        return resp;
+    }
+    let uid = match app_id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error":"invalid uuid"}))
+        }
+    };
+    let app_id_str = uid.to_string();
+    match state.vfs.get(&app_id_str) {
+        Ok(data) => web::HttpResponse::Ok()
+            .content_type("application/octet-stream")
+            .body(data),
+        Err(appbase_common::vfs::VfsError::NotFound(_)) => {
+            web::HttpResponse::NotFound().json(&serde_json::json!({"error":"bundle not found"}))
+        }
+        Err(e) => web::HttpResponse::InternalServerError()
+            .json(&serde_json::json!({"error": e.to_string()})),
+    }
 }
 
-pub async fn get_routes(_state: State<Arc<AppState>>) -> web::HttpResponse {
-    web::HttpResponse::Ok().finish()
+pub async fn get_routes(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Some(resp) = check_auth(&req, &state) {
+        return resp;
+    }
+    match state.registry.get_routes().await {
+        Ok(routes) => web::HttpResponse::Ok().json(&routes),
+        Err(e) => web::HttpResponse::InternalServerError()
+            .json(&serde_json::json!({"error": e.to_string()})),
+    }
 }
 
-pub async fn report_usage(_state: State<Arc<AppState>>) -> web::HttpResponse {
-    web::HttpResponse::Ok().finish()
-}
-
-pub async fn health() -> web::HttpResponse {
-    web::HttpResponse::Ok().finish()
+pub async fn report_usage(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    body: Json<UsageReport>,
+) -> web::HttpResponse {
+    if let Some(resp) = check_auth(&req, &state) {
+        return resp;
+    }
+    for (resource, delta) in &body.counters {
+        if let Err(e) = state
+            .registry
+            .record_usage(&body.app_id, resource, *delta)
+            .await
+        {
+            return web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error": e.to_string()}));
+        }
+    }
+    web::HttpResponse::Ok().json(&serde_json::json!({"recorded": true}))
 }
