@@ -562,7 +562,7 @@ fn compute_ws_accept_key(key: &str) -> String {
     use sha1::Digest;
     let mut hasher = sha1::Sha1::new();
     hasher.update(key.trim().as_bytes());
-    hasher.update(b"258EAFA5-E914-47DA-95CA-5AB5DC65C735");
+    hasher.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
     base64::Engine::encode(&base64::engine::general_purpose::STANDARD, hasher.finalize())
 }
 
