@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/common",
     "crates/runtime",
     "crates/runtime-macros",
     "crates/compiler",
@@ -8,6 +9,7 @@ members = [
     "crates/pg",
 ]
 resolver = "3"
+exclude = ["crates/runtime/benches/ntex-bench"]
 
 [workspace.lints.rust]
 unsafe_code = "deny"
