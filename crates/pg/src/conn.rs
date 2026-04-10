@@ -807,6 +807,7 @@ fn encode_params(params: &[&(dyn ToSql + Sync)]) -> Result<Vec<Option<Vec<u8>>>>
         Type::FLOAT4,
         Type::FLOAT8,
         Type::BOOL,
+        Type::UUID,
         Type::TEXT,
         Type::VARCHAR,
         Type::BYTEA,
