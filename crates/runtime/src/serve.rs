@@ -722,6 +722,7 @@ async fn handle_websocket_upgrade(
         .map(|(_, v)| v.as_str())
         .unwrap_or("");
 
+
     if ws_key.is_empty() {
         let response = build_http_response(400, &[], "Missing Sec-WebSocket-Key");
         let BufResult(r, _) = stream.write_all(response).await;
