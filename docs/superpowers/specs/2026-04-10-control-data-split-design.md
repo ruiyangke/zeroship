@@ -1,24 +1,29 @@
-# appbase-control / appbase-worker: Control Plane & Data Plane
+# appbase-control / appbase-gate / appbase-worker
 
 ## Goal
 
-Split the monolith `appbase platform` into:
-- **appbase-control**: stateful control plane (Postgres, VFS, admin API, internal API for workers)
-- **appbase-worker**: stateless data plane (V8 isolates, user traffic, no DB)
+Split the monolith `appbase platform` into three components:
+- **appbase-control**: stateful control plane (Postgres, VFS, admin API, internal API)
+- **appbase-gate**: smart gateway (auth, rate limit, quota, route → worker)
+- **appbase-worker**: stateless compute (V8 isolates only, no auth, no DB)
 
-Workers sync via HTTP pull + WebSocket hints. Bundle storage abstracted via VFS (local filesystem or S3).
+```
+Users → gate (auth, enforce, route) → worker (V8 compute)
+Admin → control (API, DB, VFS)
+gate ↔ control (routing table sync)
+worker ↔ control (bundle sync, usage reporting)
+```
 
 ## Key Decisions (validated by benchmarks and stress tests)
 
 | Decision | Choice | Evidence |
 |---|---|---|
-| HTTP framework | **ntex + compio** | Matches raw httparse at scale (191K vs 196K req/s at 16 cores), gives routing/middleware/HTTP2/WS for free |
-| V8 dispatch model | **Option B: V8 on HTTP thread** | 38% faster than flume v8pool at 16 cores (191K vs 139K req/s), matches workerd model |
-| Database | **appbase-pg (compio-native)** | 23 integration tests passing, no tokio dependency |
-| Bundle storage | **VFS: tenant-isolated by app_id, integrity via SHA-256** | deploy_hash for change detection only, not as storage key |
-| Sync mechanism | **HTTP pull (5s) + WebSocket hints** | Self-healing, validated by Cloudflare/Lambda/K8s patterns |
-| App identity | **UUID app_id + human-readable name** | deploy_hash (SHA-256) for change detection |
-| Naming | **appbase-control / appbase-worker** | Descriptive, K8s-style |
+| HTTP framework | **ntex + compio** | Matches raw httparse at scale (191K vs 196K req/s at 16 cores) |
+| V8 dispatch | **Option B: V8 on HTTP thread** | 38% faster than flume v8pool (191K vs 139K req/s) |
+| Database | **appbase-pg (compio-native)** | 23 tests passing, no tokio |
+| Bundle storage | **VFS: tenant-isolated by app_id** | deploy_hash for change detection |
+| Sync | **HTTP pull (5s) + WebSocket hints** | Self-healing, validated by CF/Lambda/K8s |
+| App identity | **UUID + human name** | deploy_hash (SHA-256) |
 
 ## Architecture
 
@@ -27,45 +32,150 @@ Workers sync via HTTP pull + WebSocket hints. Bundle storage abstracted via VFS 
                          │      appbase-control          │
                          │     (ntex + compio, 1 inst)   │
                          │                               │
-   Admin/CLI ───────────→│  Public:  /api/apps/*         │
-                         │  Internal:/internal/versions  │
-                         │          /internal/bundles/*  │
-                         │          /internal/usage      │
-                         │          /internal/events (WS)│
+   Admin/CLI ───────────→│  /api/apps/*                  │
+                         │  /internal/versions           │
+                         │  /internal/bundles/*          │
+                         │  /internal/routes    (NEW)    │
+                         │  /internal/usage              │
+                         │  /internal/events (WS)        │
                          │                               │
                          │  Postgres (appbase-pg)        │
                          │  VFS (LocalFs or S3)          │
                          └──────────┬───────────────────┘
                                     │
-                    ┌───────────────┼───────────────┐
-                    │               │               │
-                    ▼               ▼               ▼
-          ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-          │appbase-worker│ │appbase-worker│ │appbase-worker│
-          │(ntex+compio) │ │(ntex+compio) │ │(ntex+compio) │
-          │              │ │              │ │              │
- Users ──→│ V8 per thread│ │ V8 per thread│ │ V8 per thread│
-          │ No flume     │ │ No flume     │ │ No flume     │
-          │ No Postgres  │ │ No Postgres  │ │ No Postgres  │
-          └──────────────┘ └──────────────┘ └──────────────┘
+                         ┌──────────┴───────────────────┐
+                         │                              │
+                         ▼                              ▼
+          ┌──────────────────────┐        ┌──────────────────────┐
+          │    appbase-gate      │        │   appbase-worker ×N  │
+          │   (ntex + compio)    │        │   (ntex + compio)    │
+          │                      │        │                      │
+ Users ──→│ 1. Resolve app_id   │        │  V8 per thread       │
+          │ 2. Auth (API key)   │  HTTP  │  No auth             │
+          │ 3. Rate limit       │───────→│  No rate limit       │
+          │ 4. Concurrency      │        │  No DB               │
+          │ 5. Quota check      │        │  Pure compute        │
+          │ 6. Proxy → worker   │        │                      │
+          └──────────────────────┘        └──────────────────────┘
 ```
 
-## Worker Thread Model (Option B)
+### Component Responsibilities
 
-Each ntex worker thread owns a thread-local `HashMap<UUID, Runtime>`. Only one isolate is active at a time per thread (V8 requires LIFO enter/exit order — validated by stress test).
+| Responsibility | control | gate | worker |
+|---|---|---|---|
+| Postgres | Yes | No | No |
+| VFS (bundles) | Yes | No | No |
+| Admin API | Yes | No | No |
+| App routing | No | **Yes** | No |
+| API key auth | No | **Yes** | No |
+| Rate limiting | No | **Yes** (global) | No |
+| Concurrency guard | No | **Yes** | No |
+| Quota check | No | **Yes** | No |
+| HTTP proxy | No | **Yes** | No |
+| V8 execution | No | No | **Yes** |
+| Bundle sync | No | No | **Yes** |
+| Usage recording | No | No | **Yes** |
+
+## Gateway (appbase-gate)
+
+### Sync with control plane
+
+Gateway polls control plane for a routing table — app metadata needed for auth and enforcement:
+
+```
+Gate → GET /internal/routes
+       Auth: Bearer <control-key>
+→ {
+    "a3f8c2e1-...": {
+      "name": "myapp",
+      "plan_id": "pro",
+      "api_key_hash": "sha256...",
+      "deploy_hash": "abc123..."
+    },
+    ...
+  }
+```
+
+Polled every 5s. Cached in-memory as `HashMap<UUID, RouteEntry>`. Also indexed by name for path/host lookup.
+
+### Request flow
+
+```
+User: POST /apps/myapp/rpc
+  │
+  ├─ 1. Parse HTTP (ntex)
+  ├─ 2. Extract app name from path → lookup route entry
+  │     404 if app not found
+  ├─ 3. Auth: validate API key from X-Api-Key header
+  │     401 if invalid/missing
+  ├─ 4. Rate limit: token bucket per app (lock-free CAS)
+  │     429 if exceeded
+  ├─ 5. Concurrency: CAS counter per app
+  │     429 if exceeded
+  ├─ 6. Quota: check plan limits
+  │     429 if exceeded
+  ├─ 7. Proxy to worker:
+  │     POST http://worker:8080/dispatch/{app_id}
+  │     Headers: X-App-Id, X-Plan-Id, X-Request-Id
+  │     Body: original request body
+  ├─ 8. Forward worker response to user
+  │     Add headers: X-Cpu-Time, X-Wall-Time, RateLimit-*
+  └─ 9. Release concurrency guard (RAII drop)
+```
+
+### Worker selection
+
+For v1: round-robin or random across configured worker addresses. No sticky sessions.
+
+```
+--workers=http://w1:8080,http://w2:8080,http://w3:8080
+```
+
+Future: health-check aware, least-connections, sticky by app_id.
+
+## Worker (appbase-worker)
+
+### Internal dispatch API
+
+Worker exposes a single internal endpoint. Gateway is the only caller.
+
+```
+POST /dispatch/{app_id}
+  Headers:
+    X-App-Id: uuid
+    X-Plan-Id: pro
+    X-Request-Id: uuid
+  Body: raw request body (JSON-RPC or HTTP)
+  
+  → V8 dispatch_rpc → response
+```
+
+No auth on this endpoint — worker trusts gateway. Worker should only be reachable from gateway (private network / firewall).
+
+### Thread model (Option B, unchanged)
 
 ```
 ntex worker thread 1:              ntex worker thread 2:
   compio event loop                  compio event loop
-  ├─ HTTP accept + parse             ├─ HTTP accept + parse
   ├─ apps: HashMap<UUID, Runtime>    ├─ apps: HashMap<UUID, Runtime>
   │   ├─ app-A → V8 Runtime         │   ├─ app-A → V8 Runtime
   │   ├─ app-B → V8 Runtime         │   ├─ app-C → V8 Runtime
   │   └─ LRU eviction               │   └─ LRU eviction
   └─ pump task (timers, fetch)       └─ pump task (timers, fetch)
+```
 
-  Request flow (same thread, no channel):
-    HTTP parse → lookup app → dispatch_rpc → respond
+### Bundle sync (unchanged)
+
+```
+Worker → GET /internal/versions → compare hashes → pull changed bundles
+Worker → WS /internal/events → instant deploy hints
+```
+
+### Usage reporting (unchanged)
+
+```
+Worker → POST /internal/usage (every 10s)
+{ "worker_id": "w1", "counters": { "app-uuid": { "requests": 142, "cpu_us": 50000 } } }
 ```
 
 ### Capacity (validated)
@@ -75,14 +185,36 @@ ntex worker thread 1:              ntex worker thread 2:
 | Memory per idle isolate | ~1 MB |
 | 1,000 isolates RSS | ~1 GB |
 | Isolate creation time | ~1.5 ms each |
-| Dispatch latency | ~2.3 ms each (cold, first call) |
-| Max isolates (16 GB server) | ~10,000 (with 6 GB headroom) |
+| Max isolates (16 GB server) | ~10,000 |
 
-Tested: 1,000 isolates created and dispatched successfully in a single process.
+## Control Plane (appbase-control)
 
-### V8 constraint
+### Admin API (public)
 
-V8 `OwnedIsolate` instances must be entered/exited in LIFO (stack) order. In Option B, only one isolate is active per thread at any time — `dispatch_rpc` enters V8, executes, exits, then the next request can use a different isolate. No concurrent V8 entry on the same thread.
+```
+POST   /api/apps                 Create app { name, plan_id }
+GET    /api/apps                 List apps
+GET    /api/apps/:id             Get app details
+DELETE /api/apps/:id             Delete app + bundle
+POST   /api/apps/:id/deploy     Deploy .appbundle (multipart upload)
+PUT    /api/apps/:id/plan        Set plan { plan_id }
+GET    /api/apps/:id/usage       Get usage counters
+POST   /api/apps/:id/rollback   Rollback to previous deploy_hash
+```
+
+Authenticated via per-app API key or master key.
+
+### Internal API (for gate + worker)
+
+```
+GET  /internal/versions          → { app_id → deploy_hash }          (worker)
+GET  /internal/bundles/{app_id}  → raw .appbundle bytes              (worker)
+GET  /internal/routes            → { app_id → { name, plan, key } }  (gate)
+POST /internal/usage             ← usage counters from workers       (worker)
+WS   /internal/events            ← deploy/delete hints               (gate + worker)
+```
+
+All /internal/* authenticated via shared `control-key`.
 
 ## Database Schema (Postgres)
 
@@ -113,11 +245,6 @@ CREATE TABLE usage_history (
 CREATE INDEX idx_usage_history_app ON usage_history(app_id, period);
 ```
 
-- `id`: UUID, auto-generated
-- `name`: human-readable, unique (e.g. "myapp")
-- `deploy_hash`: SHA-256 hex of the live .appbundle, NULL if never deployed
-- Code lives in VFS, not Postgres
-
 ## VFS — Bundle Storage
 
 ```rust
@@ -129,98 +256,26 @@ pub trait BundleStore: Send + Sync {
 }
 ```
 
-**LocalFs**: `./bundles/{app_id}/bundle.appbundle` — single-server, dev, testing.
+**LocalFs**: `./bundles/{app_id}/bundle.appbundle`
+**S3**: `s3://bucket/{app_id}/bundle.appbundle`
 
-**S3**: `s3://bucket/{app_id}/bundle.appbundle` — multi-server production.
-
-Storage is tenant-isolated by app_id path. deploy_hash is for change detection and integrity verification only.
-
-## Sync Protocol
-
-### Version polling (every 5s)
-
-```
-Worker → GET /internal/versions
-         Auth: Bearer <worker-key>
-→ { "app-uuid-1": "sha256hex", "app-uuid-2": "sha256hex" }
-
-Worker compares with local cache:
-  - Hash matches → skip
-  - Hash differs → GET /internal/bundles/{app_id} → reload isolate
-  - New app → pull + load
-  - Missing app → evict isolate
-```
-
-### WebSocket hints (instant deploys)
-
-```
-Worker → WS /internal/events?key=<worker-key>
-Server pushes: { "type": "deploy", "app_id": "uuid", "hash": "sha256" }
-               { "type": "delete", "app_id": "uuid" }
-```
-
-Push is optimization. Pull is source of truth. If WS disconnects, 5s poll catches up.
-
-### Usage reporting (every 10s)
-
-```
-Worker → POST /internal/usage
-         Auth: Bearer <worker-key>
-{ "worker_id": "w1", "counters": { "app-uuid": { "requests": 142, "cpu_us": 50000 } } }
-```
-
-### Authentication
-
-Shared secret via `--control-key=<secret>` or `APPBASE_CONTROL_KEY` env var.
-All /internal/* requests require `Authorization: Bearer <key>`.
-
-## Admin API (appbase-control)
-
-```
-POST   /api/apps                 Create app { name, plan_id }
-GET    /api/apps                 List apps
-GET    /api/apps/:id             Get app details
-DELETE /api/apps/:id             Delete app + bundle
-POST   /api/apps/:id/deploy     Deploy .appbundle (multipart upload)
-PUT    /api/apps/:id/plan        Set plan { plan_id }
-GET    /api/apps/:id/usage       Get usage counters
-POST   /api/apps/:id/rollback   Rollback to previous deploy_hash
-```
-
-Authenticated via per-app API key or master key.
-
-## Request Flow (appbase-worker)
-
-```
-User request → ntex worker thread:
-  │
-  ├─ Parse HTTP
-  ├─ Extract app_id from path: /apps/{app_id}/rpc
-  │
-  ├─ App in thread-local HashMap?
-  │   ├─ Yes → rate limit (atomic) → dispatch_rpc → respond
-  │   └─ No  → GET /internal/bundles/{app_id}
-  │            → verify sha256 == expected hash
-  │            → create Runtime → dispatch → respond
-  │
-  ├─ Record usage (atomic in-memory)
-  └─ Background: flush to control plane every 10s
-```
+Tenant-isolated by app_id path.
 
 ## Deploy Flow
 
 ```
-1. CLI:     appbase deploy myapp/ --control=https://control.example.com
-2. CLI:     Compile JS → .appbundle
-3. CLI:     POST /api/apps/myapp/deploy (multipart)
-4. Control: hash = sha256(appbundle)
-5. Control: vfs.put(app_id, bytes)
-6. Control: UPDATE apps SET deploy_hash = $1 WHERE name = $2
-7. Control: Push WS event { type: "deploy", app_id, hash }
-8. Worker:  Receives hint (or polls within 5s)
-9. Worker:  GET /internal/bundles/{app_id}
-10. Worker: Verify sha256 == hash
-11. Worker: Load into thread-local Runtime
+ 1. CLI:     appbase deploy myapp/ --control=https://control.example.com
+ 2. CLI:     Compile JS → .appbundle
+ 3. CLI:     POST /api/apps/myapp/deploy (multipart)
+ 4. Control: hash = sha256(appbundle)
+ 5. Control: vfs.put(app_id, bytes)
+ 6. Control: UPDATE apps SET deploy_hash = $1 WHERE name = $2
+ 7. Control: Push WS event { type: "deploy", app_id, hash }
+ 8. Gate:    Receives hint → updates routing table (deploy_hash changed)
+ 9. Worker:  Receives hint (or polls within 5s)
+10. Worker:  GET /internal/bundles/{app_id}
+11. Worker:  Verify sha256 == hash
+12. Worker:  Load into thread-local V8 Runtime
 ```
 
 ## Crate Structure
@@ -233,24 +288,32 @@ crates/
 ├── compiler/         SWC + esbuild (unchanged)
 ├── common/           NEW — shared types + VFS
 │   ├── lib.rs
-│   ├── types.rs      AppRecord, VersionMap, UsageReport
+│   ├── types.rs      AppRecord, RouteEntry, VersionMap, UsageReport
 │   ├── vfs.rs        BundleStore trait + LocalFs + S3
-│   └── auth.rs       Worker key validation
+│   └── auth.rs       Control key validation
 ├── control/          NEW — appbase-control binary
 │   ├── main.rs       Entry point (ntex + compio)
 │   ├── api.rs        Public admin API routes
-│   ├── internal.rs   Internal API for workers
+│   ├── internal.rs   Internal API for gate + worker
 │   ├── registry.rs   App CRUD (uses appbase-pg)
 │   └── metering.rs   Usage aggregation from workers
+├── gateway/          NEW — appbase-gate binary
+│   ├── main.rs       Entry point (ntex + compio)
+│   ├── router.rs     Route resolution (path/host → app_id)
+│   ├── auth.rs       API key validation (hash compare)
+│   ├── enforce.rs    Rate limit + concurrency + quota (lock-free)
+│   ├── proxy.rs      HTTP proxy to workers (round-robin)
+│   └── sync.rs       Poll control plane for routing table
 ├── worker/           NEW — appbase-worker binary
 │   ├── main.rs       Entry point (ntex + compio)
-│   ├── sync.rs       Poll loop + WebSocket hint channel
-│   ├── handler.rs    Request dispatch (V8 per thread)
+│   ├── sync.rs       Poll control plane for bundles + WS hints
+│   ├── handler.rs    /dispatch/{app_id} → V8 dispatch (per thread)
 │   └── cache.rs      Thread-local app cache + LRU eviction
-├── platform/         DEPRECATED — replaced by control + worker
+├── platform/         DEPRECATED — replaced by control + gate + worker
 └── cli/
     ├── appbase serve      Single-tenant, raw httparse (unchanged)
     ├── appbase control    Start control plane
+    ├── appbase gate       Start gateway
     ├── appbase worker     Start data plane worker
     ├── appbase deploy     Deploy to control plane
     └── appbase build      Compile only (unchanged)
@@ -260,43 +323,52 @@ crates/
 
 ```
 control → common, pg, ntex, serde, uuid
+gateway → common, ntex, cyper (HTTP proxy client), serde
 worker  → common, runtime, ntex, serde
 common  → serde (no runtime dependency)
 ```
 
-No circular dependencies. Worker never imports pg. Control never imports runtime.
+No circular dependencies. Gateway never imports runtime or pg. Worker never imports pg. Control never imports runtime.
 
-### CLI flags
+### CLI Flags
 
 **appbase control:**
 ```
 --port=3000              HTTP listen port
 --db=postgres://...      Postgres connection URL
---bundles=./bundles      VFS path (local) or s3://bucket (S3)
+--bundles=./bundles      VFS path (local) or s3://bucket
 --master-key=<secret>    Admin master key
---control-key=<secret>   Shared secret for worker auth
+--control-key=<secret>   Shared secret for gate + worker auth
+```
+
+**appbase gate:**
+```
+--port=80                Public listen port
+--control=http://...     Control plane URL
+--control-key=<secret>   Auth for internal API
+--workers=http://w1:8080,http://w2:8080   Worker addresses
+--poll-interval=5        Route table sync interval (seconds)
 ```
 
 **appbase worker:**
 ```
---port=8080              HTTP listen port
+--port=8080              Internal listen port (gate → worker)
 --workers=16             ntex worker threads (default: num_cpus)
 --control=http://...     Control plane URL
---control-key=<secret>   Shared secret for control plane auth
---max-isolates=200       Max V8 isolates per worker thread (LRU eviction)
---poll-interval=5        Sync poll interval in seconds
+--control-key=<secret>   Auth for internal API
+--max-isolates=200       Max V8 isolates per worker thread (LRU)
+--poll-interval=5        Bundle sync interval (seconds)
 ```
 
 ## Migration from platform crate
 
-1. Extract shared types → `crates/common/`
-2. Move AppRegistry + metering → `crates/control/`
-3. Move V8Pool + enforcement → `crates/worker/` (rewrite to Option B)
-4. Remove flume dependency from worker
-5. Remove sqlx, tokio, axum from workspace
-6. Deprecate `crates/platform/`
-
-The enforcement code (rate limit, concurrency, quota) moves to worker unchanged — it's already lock-free atomics with no runtime dependency.
+1. Extract shared types (AppRecord, RegistryError, etc.) → `crates/common/`
+2. Move enforcement (rate limit, concurrency, quota) → `crates/gateway/enforce.rs`
+3. Move AppRegistry + metering → `crates/control/`
+4. Rewrite V8 dispatch as Option B → `crates/worker/`
+5. Build gateway as new component → `crates/gateway/`
+6. Remove flume, sqlx, tokio, axum from workspace
+7. Deprecate `crates/platform/`
 
 ## Benchmark Results
 
@@ -324,12 +396,13 @@ The enforcement code (rate limit, concurrency, quota) moves to worker unchanged 
 
 ## Security
 
-- /internal/* requires worker key (shared secret, Bearer token)
+- /internal/* requires control-key (shared secret, Bearer token)
+- Gateway validates user API keys (hash comparison, not plaintext)
+- Worker only reachable from gateway (private network / firewall)
 - Bundle storage tenant-isolated by app_id path
-- deploy_hash is for integrity, not access control
+- deploy_hash for integrity, not access control
 - S3 buckets private; access via pre-signed URL or control plane proxy
 - Admin API requires per-app API key or master key
-- V8 isolates are process-isolated per worker (no shared memory between apps)
 
 ## Scope Exclusions (v1)
 
@@ -341,3 +414,5 @@ The enforcement code (rate limit, concurrency, quota) moves to worker unchanged 
 - Encrypted bundles at rest — v2
 - HTTP/2 (ntex supports it, enable with TLS)
 - V8 snapshots (faster cold start) — separate effort
+- Sticky sessions in gateway — v2
+- Worker health checks in gateway — v2
