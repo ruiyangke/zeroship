@@ -132,6 +132,7 @@ dependencies = [
  "postgres-protocol",
  "postgres-types",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -191,6 +192,24 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "appbase-worker"
+version = "0.1.0"
+dependencies = [
+ "appbase-common",
+ "appbase-runtime",
+ "compio",
+ "futures",
+ "hex",
+ "mimalloc",
+ "ntex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -3331,6 +3350,7 @@ dependencies = [
  "bytes",
  "fallible-iterator",
  "postgres-protocol",
+ "uuid",
 ]
 
 [[package]]

@@ -1,0 +1,78 @@
+mod handler;
+mod sync;
+mod cache;
+
+use std::sync::Arc;
+use ntex::web;
+use appbase_runtime::init::init_v8;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[allow(missing_debug_implementations)]
+pub struct WorkerConfig {
+    pub control_url: String,
+    pub control_key: String,
+    pub max_isolates: usize,
+    pub poll_interval_secs: u64,
+}
+
+#[ntex::main]
+async fn main() -> std::io::Result<()> {
+    init_v8();
+
+    let args: Vec<String> = std::env::args().collect();
+    let port = arg_or_env(&args, "--port", "WORKER_PORT", "8080");
+    let workers = arg_or_env(
+        &args,
+        "--workers",
+        "WORKER_THREADS",
+        &std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .to_string(),
+    );
+    let control_url = arg_or_env(&args, "--control", "CONTROL_URL", "http://localhost:9090");
+    let control_key = arg_or_env(&args, "--control-key", "CONTROL_KEY", "");
+    let max_isolates = arg_or_env(&args, "--max-isolates", "MAX_ISOLATES", "200");
+    let poll_interval = arg_or_env(&args, "--poll-interval", "POLL_INTERVAL", "5");
+
+    let config = Arc::new(WorkerConfig {
+        control_url,
+        control_key,
+        max_isolates: max_isolates.parse().unwrap_or(200),
+        poll_interval_secs: poll_interval.parse().unwrap_or(5),
+    });
+
+    let workers_count: usize = workers.parse().unwrap_or(1);
+    let bind_addr = format!("0.0.0.0:{port}");
+    eprintln!("[appbase-worker] http://{bind_addr} ({workers_count} threads)");
+
+    web::server(async move || {
+        let config = config.clone();
+        // Initialize thread-local V8 cache
+        cache::init_cache(config.max_isolates);
+        // Start background sync on this thread
+        sync::start_sync(config.clone());
+
+        web::App::new()
+            .state(config)
+            .service(web::resource("/dispatch/{app_id}").route(web::post().to(handler::dispatch)))
+            .service(web::resource("/health").route(web::get().to(|| async {
+                web::HttpResponse::Ok().body(r#"{"status":"ok"}"#)
+            })))
+    })
+    .workers(workers_count)
+    .bind(&bind_addr)?
+    .run()
+    .await
+}
+
+fn arg_or_env(args: &[String], flag: &str, env_key: &str, default: &str) -> String {
+    for pair in args.windows(2) {
+        if pair[0] == flag {
+            return pair[1].clone();
+        }
+    }
+    std::env::var(env_key).unwrap_or_else(|_| default.to_string())
+}

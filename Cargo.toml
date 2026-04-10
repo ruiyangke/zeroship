@@ -8,6 +8,7 @@ members = [
     "crates/cli",
     "crates/pg",
     "crates/control",
+    "crates/worker",
 ]
 resolver = "3"
 exclude = ["crates/runtime/benches/ntex-bench"]

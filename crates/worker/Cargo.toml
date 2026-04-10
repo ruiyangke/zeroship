@@ -1,0 +1,26 @@
+[package]
+name = "appbase-worker"
+version = "0.1.0"
+edition = "2021"
+description = "appbase data plane — V8 compute worker"
+
+[[bin]]
+name = "appbase-worker"
+path = "src/main.rs"
+
+[dependencies]
+appbase-common = { path = "../common" }
+appbase-runtime = { path = "../runtime" }
+ntex = { version = "3", features = ["compio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+compio = { version = "0.18", features = ["time", "macros"] }
+futures = "0.3"
+mimalloc = "0.1"
+sha2 = "0.10"
+hex = "0.4"
+url = "2"
+
+[lints]
+workspace = true
