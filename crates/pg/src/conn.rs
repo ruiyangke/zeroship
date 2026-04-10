@@ -49,7 +49,8 @@ pub struct Conn {
     #[allow(dead_code)]
     params: HashMap<String, String>,
     status: u8,
-    pub(crate) needs_rollback: bool,
+    /// Whether this connection has a dropped transaction that needs rollback.
+    pub needs_rollback: bool,
 }
 
 impl Conn {
@@ -311,7 +312,7 @@ impl Conn {
         // Encode params as text-format bytes
         let param_values = encode_params(params)?;
 
-        // Bind (unnamed portal ← unnamed statement, all text format)
+        // Bind (unnamed portal ← unnamed statement, text params, binary results)
         let param_refs: Vec<Option<&[u8]>> = param_values
             .iter()
             .map(|v| v.as_ref().map(|b| b.as_ref()))
@@ -319,7 +320,7 @@ impl Conn {
         frontend::bind(
             "",
             "",
-            std::iter::empty(),
+            std::iter::once(1i16),    // param format codes: 1 = binary for all
             param_refs,
             |val: Option<&[u8]>, buf: &mut BytesMut| match val {
                 Some(bytes) => {
@@ -328,7 +329,7 @@ impl Conn {
                 }
                 None => Ok(ProtoIsNull::Yes),
             },
-            std::iter::empty(),
+            std::iter::once(1i16),    // result format codes: 1 = binary for all columns
             &mut buf,
         )
         .map_err(bind_error)?;
@@ -349,55 +350,65 @@ impl Conn {
 
         // Read responses: ParseComplete → BindComplete → RowDescription → DataRow* → CommandComplete → ReadyForQuery
         // On ErrorResponse, drain until ReadyForQuery.
+        // NoticeResponse can appear anywhere and is silently skipped.
 
         // ParseComplete
-        match read_message(&mut self.stream).await? {
-            backend::Message::ParseComplete => {}
-            backend::Message::ErrorResponse(body) => {
-                let err = parse_error_response(body);
-                drain_until_ready(&mut self.stream, &mut self.status).await?;
-                return Err(err);
-            }
-            other => {
-                return Err(Error::Protocol(format!(
-                    "expected ParseComplete, got {}",
-                    msg_tag(&other)
-                )));
+        loop {
+            match read_message(&mut self.stream).await? {
+                backend::Message::ParseComplete => break,
+                backend::Message::NoticeResponse(_) => continue,
+                backend::Message::ErrorResponse(body) => {
+                    let err = parse_error_response(body);
+                    drain_until_ready(&mut self.stream, &mut self.status).await?;
+                    return Err(err);
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "expected ParseComplete, got {}",
+                        msg_tag(&other)
+                    )));
+                }
             }
         }
 
         // BindComplete
-        match read_message(&mut self.stream).await? {
-            backend::Message::BindComplete => {}
-            backend::Message::ErrorResponse(body) => {
-                let err = parse_error_response(body);
-                drain_until_ready(&mut self.stream, &mut self.status).await?;
-                return Err(err);
-            }
-            other => {
-                return Err(Error::Protocol(format!(
-                    "expected BindComplete, got {}",
-                    msg_tag(&other)
-                )));
+        loop {
+            match read_message(&mut self.stream).await? {
+                backend::Message::BindComplete => break,
+                backend::Message::NoticeResponse(_) => continue,
+                backend::Message::ErrorResponse(body) => {
+                    let err = parse_error_response(body);
+                    drain_until_ready(&mut self.stream, &mut self.status).await?;
+                    return Err(err);
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "expected BindComplete, got {}",
+                        msg_tag(&other)
+                    )));
+                }
             }
         }
 
         // RowDescription (or NoData for non-SELECT)
-        let columns: Arc<Vec<Column>> = match read_message(&mut self.stream).await? {
-            backend::Message::RowDescription(body) => {
-                Arc::new(parse_row_description(body)?)
-            }
-            backend::Message::NoData => Arc::new(Vec::new()),
-            backend::Message::ErrorResponse(body) => {
-                let err = parse_error_response(body);
-                drain_until_ready(&mut self.stream, &mut self.status).await?;
-                return Err(err);
-            }
-            other => {
-                return Err(Error::Protocol(format!(
-                    "expected RowDescription or NoData, got {}",
-                    msg_tag(&other)
-                )));
+        let columns: Arc<Vec<Column>> = loop {
+            match read_message(&mut self.stream).await? {
+                backend::Message::RowDescription(body) => {
+                    break Arc::new(parse_row_description(body)?);
+                }
+                backend::Message::NoData => break Arc::new(Vec::new()),
+                backend::Message::NoticeResponse(_) => continue,
+                backend::Message::ErrorResponse(body) => {
+                    let err = parse_error_response(body);
+                    drain_until_ready(&mut self.stream, &mut self.status).await?;
+                    return Err(err);
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "expected RowDescription or NoData, got {}",
+                        msg_tag(&other)
+                    )));
+                }
             }
         };
 
@@ -410,6 +421,7 @@ impl Conn {
                 }
                 backend::Message::CommandComplete(_) => break,
                 backend::Message::EmptyQueryResponse => break,
+                backend::Message::NoticeResponse(_) => continue,
                 backend::Message::ErrorResponse(body) => {
                     let err = parse_error_response(body);
                     drain_until_ready(&mut self.stream, &mut self.status).await?;
@@ -425,15 +437,19 @@ impl Conn {
         }
 
         // ReadyForQuery
-        match read_message(&mut self.stream).await? {
-            backend::Message::ReadyForQuery(body) => {
-                self.status = body.status();
-            }
-            other => {
-                return Err(Error::Protocol(format!(
-                    "expected ReadyForQuery, got {}",
-                    msg_tag(&other)
-                )));
+        loop {
+            match read_message(&mut self.stream).await? {
+                backend::Message::ReadyForQuery(body) => {
+                    self.status = body.status();
+                    break;
+                }
+                backend::Message::NoticeResponse(_) => continue,
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "expected ReadyForQuery, got {}",
+                        msg_tag(&other)
+                    )));
+                }
             }
         }
 
@@ -461,11 +477,11 @@ impl Conn {
             .map(|v| v.as_ref().map(|b| b.as_ref()))
             .collect();
 
-        // Bind
+        // Bind (binary params, no result format needed for execute)
         frontend::bind(
             "",
             "",
-            std::iter::empty(),
+            std::iter::once(1i16),    // param format codes: 1 = binary for all
             param_refs,
             |val: Option<&[u8]>, buf: &mut BytesMut| match val {
                 Some(bytes) => {
@@ -490,34 +506,40 @@ impl Conn {
         self.stream.flush().await?;
 
         // ParseComplete
-        match read_message(&mut self.stream).await? {
-            backend::Message::ParseComplete => {}
-            backend::Message::ErrorResponse(body) => {
-                let err = parse_error_response(body);
-                drain_until_ready(&mut self.stream, &mut self.status).await?;
-                return Err(err);
-            }
-            other => {
-                return Err(Error::Protocol(format!(
-                    "expected ParseComplete, got {}",
-                    msg_tag(&other)
-                )));
+        loop {
+            match read_message(&mut self.stream).await? {
+                backend::Message::ParseComplete => break,
+                backend::Message::NoticeResponse(_) => continue,
+                backend::Message::ErrorResponse(body) => {
+                    let err = parse_error_response(body);
+                    drain_until_ready(&mut self.stream, &mut self.status).await?;
+                    return Err(err);
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "expected ParseComplete, got {}",
+                        msg_tag(&other)
+                    )));
+                }
             }
         }
 
         // BindComplete
-        match read_message(&mut self.stream).await? {
-            backend::Message::BindComplete => {}
-            backend::Message::ErrorResponse(body) => {
-                let err = parse_error_response(body);
-                drain_until_ready(&mut self.stream, &mut self.status).await?;
-                return Err(err);
-            }
-            other => {
-                return Err(Error::Protocol(format!(
-                    "expected BindComplete, got {}",
-                    msg_tag(&other)
-                )));
+        loop {
+            match read_message(&mut self.stream).await? {
+                backend::Message::BindComplete => break,
+                backend::Message::NoticeResponse(_) => continue,
+                backend::Message::ErrorResponse(body) => {
+                    let err = parse_error_response(body);
+                    drain_until_ready(&mut self.stream, &mut self.status).await?;
+                    return Err(err);
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "expected BindComplete, got {}",
+                        msg_tag(&other)
+                    )));
+                }
             }
         }
 
@@ -536,6 +558,7 @@ impl Conn {
                     break;
                 }
                 backend::Message::EmptyQueryResponse => break,
+                backend::Message::NoticeResponse(_) => continue,
                 backend::Message::ErrorResponse(body) => {
                     let err = parse_error_response(body);
                     drain_until_ready(&mut self.stream, &mut self.status).await?;
@@ -551,15 +574,19 @@ impl Conn {
         }
 
         // ReadyForQuery
-        match read_message(&mut self.stream).await? {
-            backend::Message::ReadyForQuery(body) => {
-                self.status = body.status();
-            }
-            other => {
-                return Err(Error::Protocol(format!(
-                    "expected ReadyForQuery, got {}",
-                    msg_tag(&other)
-                )));
+        loop {
+            match read_message(&mut self.stream).await? {
+                backend::Message::ReadyForQuery(body) => {
+                    self.status = body.status();
+                    break;
+                }
+                backend::Message::NoticeResponse(_) => continue,
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "expected ReadyForQuery, got {}",
+                        msg_tag(&other)
+                    )));
+                }
             }
         }
 
@@ -767,17 +794,50 @@ fn bind_error(e: frontend::BindError) -> Error {
     }
 }
 
-/// Encode query parameters as text-format byte buffers.
+/// Encode query parameters as binary-format byte buffers.
+///
+/// Tries common PostgreSQL types via `to_sql_checked()` in order of popularity.
+/// The first type that succeeds is used. This approach works because
+/// `to_sql_checked()` does runtime type checking and returns an error if the
+/// Rust type doesn't match the requested PostgreSQL type.
 fn encode_params(params: &[&(dyn ToSql + Sync)]) -> Result<Vec<Option<Vec<u8>>>> {
+    static TRY_TYPES: &[Type] = &[
+        Type::INT4,
+        Type::INT8,
+        Type::FLOAT4,
+        Type::FLOAT8,
+        Type::BOOL,
+        Type::TEXT,
+        Type::VARCHAR,
+        Type::BYTEA,
+        Type::OID,
+        Type::INT2,
+    ];
+
     let mut out = Vec::with_capacity(params.len());
     for param in params {
-        let mut buf = BytesMut::new();
-        match param
-            .to_sql_checked(&Type::TEXT, &mut buf)
-            .map_err(|e| Error::Protocol(format!("param encode: {e}")))?
-        {
-            postgres_types::IsNull::Yes => out.push(None),
-            postgres_types::IsNull::No => out.push(Some(buf.to_vec())),
+        let mut encoded = None;
+        for pg_type in TRY_TYPES {
+            let mut buf = BytesMut::new();
+            match param.to_sql_checked(pg_type, &mut buf) {
+                Ok(postgres_types::IsNull::Yes) => {
+                    encoded = Some(None);
+                    break;
+                }
+                Ok(postgres_types::IsNull::No) => {
+                    encoded = Some(Some(buf.to_vec()));
+                    break;
+                }
+                Err(_) => continue,
+            }
+        }
+        match encoded {
+            Some(v) => out.push(v),
+            None => {
+                return Err(Error::Protocol(
+                    "param encode: no supported type found".to_string(),
+                ));
+            }
         }
     }
     Ok(out)
