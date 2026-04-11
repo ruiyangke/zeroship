@@ -1,0 +1,87 @@
+WebSocket Benchmark Results — 2026-04-09
+Machine: Linux (16 cores), Hetzner
+Tool: Node.js ws_benchmark.js, echo handler, 10s per test
+
+==========================================================
+BEFORE optimization (polling pump, dynamic V8 lookups)
+==========================================================
+
+64-byte payload, 50 clients:
+  appbase compio (1 worker)     46,266 msg/s  avg=1.08ms  p99=2.21ms  p999=3.28ms
+  Node.js v22.22.2              55,986 msg/s  avg=0.89ms  p99=1.80ms  p999=2.61ms
+
+64-byte payload, 200 clients:
+  appbase compio (1 worker)     44,646 msg/s  avg=4.48ms  p99=7.93ms  p999=9.49ms
+  Node.js v22.22.2              52,608 msg/s  avg=3.80ms  p99=7.07ms  p999=8.72ms
+
+1KB payload, 50 clients:
+  appbase compio (1 worker)     36,961 msg/s  avg=1.35ms  p99=3.04ms  p999=11.90ms
+  Node.js v22.22.2              49,020 msg/s  avg=1.02ms  p99=2.09ms  p999=2.91ms
+
+  Bugs: 200-client and 1KB tests would hang (stall in polling pump).
+
+==========================================================
+AFTER optimization (event-driven pump, cached V8 handles)
+==========================================================
+
+64-byte payload, 50 clients:
+  appbase compio (1 worker)     46,257 msg/s  avg=1.10ms  p99=2.16ms  p999=3.01ms
+  Node.js v22.22.2              55,986 msg/s  avg=0.89ms  p99=1.80ms  p999=2.61ms
+
+64-byte payload, 200 clients:
+  appbase compio (1 worker)     43,935 msg/s  avg=4.55ms  p99=7.59ms  p999=9.40ms
+  Node.js v22.22.2              52,608 msg/s  avg=3.80ms  p99=7.07ms  p999=8.72ms
+
+1KB payload, 50 clients:
+  appbase compio (1 worker)     40,629 msg/s  avg=1.23ms  p99=2.45ms  p999=3.45ms
+  Node.js v22.22.2              49,020 msg/s  avg=1.02ms  p99=2.09ms  p999=2.91ms
+
+  +10% on 1KB payload, p999 from 11.9ms → 3.45ms (3.4x better tail latency)
+  200 clients: stable, no stalls.
+
+==========================================================
+CPU profile comparison (perf, 50 clients, 64B echo)
+==========================================================
+
+Category               BEFORE    AFTER     Change
+V8_ENGINE              23.2%     16.4%     -6.8pp (handle caching)
+COMPIO_IO              11.1%     28.0%     +16.9pp (now the floor)
+SYSCALL                 6.0%     14.5%     +8.5pp (io_uring enter)
+WS_FRAMING              n/a       7.0%     (reclassified)
+WS_V8_DISPATCH          n/a       5.1%     (down from 18.5% with children)
+ASYNC_RUNTIME           4.7%      3.7%     -1.0pp (Fuse removal)
+ALLOCATOR               6.5%      5.8%     -0.7pp
+STRING/HASH             n/a       1.2%     (lossy→from_utf8)
+
+Top function is now syscall (13.85%) = irreducible io_uring cost.
+Profile is flat — no function above 3.2% in userspace.
+
+==========================================================
+Optimizations applied
+==========================================================
+
+1. Cached V8 handles: resolve __wsRegistry[id]._onMessage/_onClose once at
+   ws.accept() time, store as v8::Global. Eliminates 3 property lookups per
+   message (-6.8% V8_ENGINE). call_ws_method is now fallback-only.
+
+2. Event-driven pump: replaced 10ms sleep()+select! polling with WsPollBoth
+   custom future (Rc<Cell<bool>> flag + Waker). Fixed 200-client stall.
+
+3. Removed Fuse/select! overhead: hand-rolled WsPollBoth polls TCP read and
+   outgoing notification without Fuse wrappers (-1% async overhead).
+
+4. Eliminated from_utf8_lossy: use String::from_utf8 (fast path, no scan).
+   Removed redundant incoming buffer push (message delivered directly via V8).
+
+==========================================================
+Remaining bottleneck
+==========================================================
+
+io_uring syscall + compio runtime = 42.5% of CPU. This is the I/O floor.
+V8 Function::Call + JS execution = ~16%. This is the JS floor.
+Together = ~59%. Remaining 41% is framework overhead (task scheduling,
+buffer management, waker machinery).
+
+Node.js advantage: ws library echoes in C++ without entering V8. Our
+architecture requires V8 enter/exit per message because the handler is JS.
+This is by design (user code flexibility > raw echo perf).

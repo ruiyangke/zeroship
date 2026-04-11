@@ -7,7 +7,7 @@
 //! - `__wsSend(ws_id, data)` — queue a text message on the outgoing buffer
 //! - `__wsClose(ws_id, code, reason)` — initiate close
 
-use crate::state::{SharedState, WebSocketState, WsMessage};
+use crate::state::{SharedState, WsCachedHandles, WebSocketState, WsMessage};
 
 // ---------------------------------------------------------------------------
 // __wsCreatePair() → u32 (returns first ID; second is first + 1)
@@ -71,6 +71,9 @@ pub fn ws_accept_callback(
 ) {
     let ws_id = args.get(0).uint32_value(scope).unwrap_or(0);
 
+    // Resolve and cache V8 handles for this WebSocket (avoids 3 lookups per message).
+    let cached = resolve_ws_handles(scope, ws_id);
+
     let state: SharedState = scope
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")
@@ -79,7 +82,39 @@ pub fn ws_accept_callback(
     let mut s = state.borrow_mut();
     if let Some(ws) = s.websockets.get_mut(&ws_id) {
         ws.accepted = true;
+        ws.cached_handles = cached;
     }
+}
+
+/// Resolve __wsRegistry[ws_id]._onMessage and ._onClose once, return cached globals.
+fn resolve_ws_handles(
+    scope: &mut v8::PinScope,
+    ws_id: u32,
+) -> Option<WsCachedHandles> {
+    let global = scope.get_current_context().global(scope);
+
+    let registry_key = v8::String::new(scope, "__wsRegistry").unwrap();
+    let registry_val = global.get(scope, registry_key.into())?;
+    let registry_obj = registry_val.to_object(scope)?;
+
+    let id_key = v8::String::new(scope, &ws_id.to_string()).unwrap();
+    let ws_val = registry_obj.get(scope, id_key.into())?;
+    if ws_val.is_undefined() || ws_val.is_null() { return None; }
+    let ws_obj = ws_val.to_object(scope)?;
+
+    let on_message_key = v8::String::new(scope, "_onMessage").unwrap();
+    let on_message_val = ws_obj.get(scope, on_message_key.into())?;
+    let on_message = v8::Local::<v8::Function>::try_from(on_message_val).ok()?;
+
+    let on_close_key = v8::String::new(scope, "_onClose").unwrap();
+    let on_close_val = ws_obj.get(scope, on_close_key.into())?;
+    let on_close = v8::Local::<v8::Function>::try_from(on_close_val).ok()?;
+
+    Some(WsCachedHandles {
+        ws_obj: v8::Global::new(scope, ws_obj),
+        on_message: v8::Global::new(scope, on_message),
+        on_close: v8::Global::new(scope, on_close),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -112,9 +147,10 @@ pub fn ws_send_callback(
         }
     }
 
-    // Also queue on our outgoing (for the TCP pump to drain).
+    // Also queue on our outgoing (for the TCP pump to drain) and wake the pump.
     if let Some(ws) = s.websockets.get_mut(&ws_id) {
         ws.outgoing.push_back(WsMessage::Text(data));
+        ws.notify_outgoing();
     }
 }
 
@@ -141,5 +177,6 @@ pub fn ws_close_callback(
         ws.close_code = Some(code);
         ws.close_reason = Some(reason.clone());
         ws.outgoing.push_back(WsMessage::Close(code, reason));
+        ws.notify_outgoing();
     }
 }

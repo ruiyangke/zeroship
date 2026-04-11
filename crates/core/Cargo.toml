@@ -1,0 +1,16 @@
+[package]
+name = "appbase-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core types, VFS, and auth for the appbase platform"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

@@ -95,10 +95,24 @@ export async function aesEncrypt() {
 // ECDSA P-256 cached keypair
 var _ecKp = null;
 // =========================================================================
-// HTTP handler (onRequest)
+// HTTP handler (onRequest) — also handles WebSocket upgrades
 // =========================================================================
 
 export function onRequest(req) {
+    // WebSocket upgrade
+    if (req.headers.get("upgrade") === "websocket") {
+        var pair = new WebSocketPair();
+        var client = pair[0];
+        var server = pair[1];
+
+        server.accept();
+        server.addEventListener("message", function(event) {
+            server.send(event.data);
+        });
+
+        return new Response(null, { status: 101, webSocket: client });
+    }
+
     return new Response(JSON.stringify({ method: req.method, url: req.url }), {
         status: 200,
         headers: { "Content-Type": "application/json" },

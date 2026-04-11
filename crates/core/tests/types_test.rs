@@ -1,4 +1,4 @@
-use appbase_common::types::{AppUsage, ControlEvent, RouteEntry, UsageReport};
+use appbase_core::types::{AppUsage, ControlEvent, RouteEntry, UsageReport};
 use std::collections::HashMap;
 use uuid::Uuid;
 

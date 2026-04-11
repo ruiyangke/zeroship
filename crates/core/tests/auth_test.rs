@@ -1,4 +1,4 @@
-use appbase_common::auth::{extract_bearer, hash_api_key, validate_api_key, validate_control_key};
+use appbase_core::auth::{extract_bearer, hash_api_key, validate_api_key, validate_control_key};
 
 #[test]
 fn control_key_valid() {

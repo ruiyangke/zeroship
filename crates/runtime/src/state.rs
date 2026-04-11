@@ -3,11 +3,12 @@
 //! `RuntimeState` holds all V8 callback state, behind an `Rc<RefCell<>>` so
 //! callbacks can borrow it without crossing thread boundaries.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::task::Waker;
 use std::time::Duration;
 
 // ---------------------------------------------------------------------------
@@ -100,6 +101,22 @@ pub enum WsMessage {
     Close(u16, String),
 }
 
+/// Cached V8 handles for fast WebSocket dispatch (avoids 3 property lookups per message).
+pub struct WsCachedHandles {
+    /// The JS WebSocket object itself.
+    pub ws_obj: v8::Global<v8::Object>,
+    /// Cached `ws._onMessage` function.
+    pub on_message: v8::Global<v8::Function>,
+    /// Cached `ws._onClose` function.
+    pub on_close: v8::Global<v8::Function>,
+}
+
+impl std::fmt::Debug for WsCachedHandles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsCachedHandles").finish()
+    }
+}
+
 /// Per-WebSocket state tracked in RuntimeState.
 #[derive(Debug)]
 pub struct WebSocketState {
@@ -117,6 +134,12 @@ pub struct WebSocketState {
     pub close_code: Option<u16>,
     /// Close reason (set when close is initiated).
     pub close_reason: Option<String>,
+    /// Notification flag: set to true when outgoing messages are queued.
+    pub outgoing_ready: Rc<Cell<bool>>,
+    /// Waker for the bidirectional pump (woken when outgoing_ready is set).
+    pub pump_waker: Rc<RefCell<Option<Waker>>>,
+    /// Cached V8 handles — resolved once at accept, used for every message.
+    pub cached_handles: Option<WsCachedHandles>,
 }
 
 impl WebSocketState {
@@ -130,6 +153,17 @@ impl WebSocketState {
             outgoing: VecDeque::new(),
             close_code: None,
             close_reason: None,
+            outgoing_ready: Rc::new(Cell::new(false)),
+            pump_waker: Rc::new(RefCell::new(None)),
+            cached_handles: None,
+        }
+    }
+
+    /// Signal that outgoing data is available — wake the pump if sleeping.
+    pub fn notify_outgoing(&self) {
+        self.outgoing_ready.set(true);
+        if let Some(waker) = self.pump_waker.borrow_mut().take() {
+            waker.wake();
         }
     }
 }

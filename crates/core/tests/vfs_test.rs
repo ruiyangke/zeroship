@@ -1,4 +1,4 @@
-use appbase_common::vfs::{BundleStore, LocalFs, VfsError};
+use appbase_core::vfs::{BundleStore, LocalFs, VfsError};
 
 fn temp_dir(suffix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(

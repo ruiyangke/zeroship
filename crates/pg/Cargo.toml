@@ -5,17 +5,16 @@ edition = "2021"
 description = "Minimal PostgreSQL driver for compio/io_uring"
 
 [dependencies]
-postgres-protocol = "0.6"
-postgres-types = { version = "0.2", features = ["with-uuid-1"] }
-uuid = { version = "1", features = ["v4"] }
-bytes = "1"
-url = "2"
-fallible-iterator = "0.2"
-compio = { version = "0.18", features = ["io", "net", "runtime", "macros", "time"] }
+postgres-protocol = { workspace = true }
+postgres-types = { workspace = true }
+uuid = { workspace = true }
+bytes = { workspace = true }
+url = { workspace = true }
+fallible-iterator = { workspace = true }
+compio = { workspace = true }
 
 [dependencies.compio-tls]
-version = "0.9"
-features = ["native-tls"]
+workspace = true
 optional = true
 
 [features]
@@ -23,7 +22,7 @@ default = []
 tls = ["dep:compio-tls"]
 
 [dev-dependencies]
-compio = { version = "0.18", features = ["io", "net", "runtime", "macros", "time"] }
+compio = { workspace = true }
 
 [lints]
 workspace = true

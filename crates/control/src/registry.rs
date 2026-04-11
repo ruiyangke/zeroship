@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 
-use appbase_common::auth::hash_api_key;
-use appbase_common::types::{AppRecord, RouteEntry, RouteMap, VersionMap};
+use appbase_core::auth::hash_api_key;
+use appbase_core::types::{AppRecord, RouteEntry, RouteMap, VersionMap};
 use appbase_pg::Conn;
 use uuid::Uuid;
 

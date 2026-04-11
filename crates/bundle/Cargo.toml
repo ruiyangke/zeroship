@@ -5,8 +5,8 @@ edition = "2021"
 description = ".appbundle binary format — read, write, lazy decompression"
 
 [dependencies]
-sha2 = "0.10"
-zstd = "0.13"
+sha2 = { workspace = true }
+zstd = { workspace = true }
 
 [lints]
 workspace = true

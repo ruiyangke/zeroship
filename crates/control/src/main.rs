@@ -7,7 +7,7 @@ mod registry;
 
 use std::sync::Arc;
 
-use appbase_common::vfs::{BundleStore, LocalFs};
+use appbase_core::vfs::{BundleStore, LocalFs};
 use ntex::web;
 
 use registry::Registry;

@@ -6,44 +6,44 @@ description = "appbase V8 runtime — compio/io_uring, ESM modules, WebCrypto, f
 
 [dependencies]
 # V8
-v8 = "147"
-libc = "0.2"
-serde_json = "1"
+v8 = { workspace = true }
+libc = { workspace = true }
+serde_json = { workspace = true }
 
 # Crypto
-aws-lc-rs = "1"
-base64 = "0.22"
+aws-lc-rs = { workspace = true }
+base64 = { workspace = true }
 
 # URL
-url = "2"
-ada-url = "3.4.4"
+url = { workspace = true }
+ada-url = { workspace = true }
 
 # Async
-futures = "0.3"
+futures = { workspace = true }
 
 # compio event loop
-compio = { version = "0.18", features = ["time", "macros", "bytes"] }
+compio = { workspace = true, features = ["time", "macros", "bytes"] }
 
 # HTTP client (fetch)
-cyper = { version = "0.8", default-features = false, features = ["rustls", "json"] }
-http = "1"
-httparse = "1"
+cyper = { workspace = true }
+http = { workspace = true }
+httparse = { workspace = true }
 
 # Utilities
-mimalloc = { version = "0.1", default-features = false }
-itoa = "1"
-socket2 = { version = "0.5", features = ["all"] }
+mimalloc = { workspace = true }
+itoa = { workspace = true }
+socket2 = { workspace = true }
 
 # Bundle format
-appbase-bundle = { path = "../bundle" }
-zstd = "0.13"
-sha2 = "0.10"
+appbase-bundle = { workspace = true }
+zstd = { workspace = true }
+sha2 = { workspace = true }
 
 # WebSocket handshake (SHA-1 for Sec-WebSocket-Accept per RFC 6455)
-sha1 = "0.10"
+sha1 = { workspace = true }
 
 # Proc macros
-appbase-runtime-macros = { path = "../runtime-macros" }
+appbase-runtime-macros = { workspace = true }
 
 [[bin]]
 name = "v8-server-compio"
@@ -54,7 +54,7 @@ name = "echo-server"
 path = "src/echo_server.rs"
 
 [dev-dependencies]
-appbase-compiler = { path = "../compiler" }
+appbase-compiler = { workspace = true }
 
 [lints]
 workspace = true

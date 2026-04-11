@@ -6,7 +6,7 @@ use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::TcpStream;
 use uuid::Uuid;
 
-use appbase_common::types::{RouteEntry, RouteMap};
+use appbase_core::types::{RouteEntry, RouteMap};
 
 use crate::GateState;
 

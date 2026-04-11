@@ -26,7 +26,7 @@
             hey
             esbuild
             # Profiling
-            perf
+            linuxPackages.perf
             cargo-flamegraph
           ];
 
