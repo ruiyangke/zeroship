@@ -17,6 +17,7 @@ uuid = { workspace = true }
 compio = { workspace = true }
 url = { workspace = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+httparse = { workspace = true }
 mimalloc = { workspace = true }
 
 [lints]

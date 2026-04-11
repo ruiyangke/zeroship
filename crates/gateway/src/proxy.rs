@@ -8,9 +8,9 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use compio::buf::BufResult;
-use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpStream, UnixStream};
 use ntex::web::HttpResponse;
 use uuid::Uuid;
@@ -181,6 +181,9 @@ pub async fn forward(
     result
 }
 
+/// Timeout for connecting and reading from workers.
+const WORKER_TIMEOUT: Duration = Duration::from_secs(30);
+
 async fn forward_to_worker(
     worker_url: &str,
     app_id: &Uuid,
@@ -190,23 +193,66 @@ async fn forward_to_worker(
 ) -> Result<HttpResponse, String> {
     let key = pool_key(worker_url);
     let path = format!("/dispatch/{app_id}");
-    let host = if worker_url.starts_with("unix://") { "localhost" } else {
-        // Extract host from URL
-        url::Url::parse(worker_url).ok()
-            .and_then(|u| u.host_str().map(|s| s.to_string()))
-            .unwrap_or_else(|| "localhost".to_string())
-            .leak() // safe: worker URLs are static for the process lifetime
-    };
 
-    // Get pooled connection or create new
+    // Cache host extraction (no .leak())
+    let host = extract_host(worker_url);
+
+    // Get pooled connection or create new (with timeout)
     let mut stream = match CONN_POOL.with(|p| p.borrow_mut().take(&key)) {
         Some(s) => s,
         None => {
-            let (s, _, _) = connect(worker_url).await?;
+            let (s, _, _) = compio::time::timeout(WORKER_TIMEOUT, connect(worker_url))
+                .await
+                .map_err(|_| "connect timeout".to_string())?
+                .map_err(|e| format!("connect: {e}"))?;
             s
         }
     };
 
+    // Build request (no clone — rebuild on retry if needed)
+    let request = build_request(&path, &host, app_id, plan_id, request_id, body);
+
+    if stream.write_all(request).await.is_err() {
+        // Stale connection — reconnect with timeout
+        let (new_stream, _, _) = compio::time::timeout(WORKER_TIMEOUT, connect(worker_url))
+            .await
+            .map_err(|_| "reconnect timeout".to_string())?
+            .map_err(|e| format!("reconnect: {e}"))?;
+        stream = new_stream;
+        let retry_request = build_request(&path, &host, app_id, plan_id, request_id, body);
+        stream.write_all(retry_request).await.map_err(|e| format!("write: {e}"))?;
+    }
+
+    // Read response with timeout and httparse
+    let (status, headers, response_body) = compio::time::timeout(
+        WORKER_TIMEOUT,
+        read_http_response(&mut stream),
+    )
+    .await
+    .map_err(|_| "read timeout".to_string())?
+    .map_err(|e| format!("read: {e}"))?;
+
+    // Return connection to pool if healthy
+    CONN_POOL.with(|p| p.borrow_mut().put(key, stream));
+
+    // Build gateway response — forward all non-hop-by-hop headers
+    let mut builder = HttpResponse::build(
+        ntex::http::StatusCode::from_u16(status).unwrap_or(ntex::http::StatusCode::BAD_GATEWAY),
+    );
+
+    let hop_by_hop = ["connection", "keep-alive", "transfer-encoding",
+                      "te", "trailer", "upgrade", "proxy-authorization", "proxy-authenticate"];
+    for (name, value) in &headers {
+        let lname = name.to_ascii_lowercase();
+        if !hop_by_hop.contains(&lname.as_str()) {
+            builder.set_header(name.as_str(), value.as_str());
+        }
+    }
+
+    Ok(builder.body(response_body))
+}
+
+fn build_request(path: &str, host: &str, app_id: &Uuid, plan_id: &str, request_id: &Uuid, body: &[u8]) -> Vec<u8> {
     let header = format!(
         "POST {path} HTTP/1.1\r\n\
          Host: {host}\r\n\
@@ -219,75 +265,75 @@ async fn forward_to_worker(
          \r\n",
         body.len()
     );
+    let mut bytes = header.into_bytes();
+    bytes.extend_from_slice(body);
+    bytes
+}
 
-    let mut request_bytes = header.into_bytes();
-    request_bytes.extend_from_slice(body);
-
-    if stream.write_all(request_bytes.clone()).await.is_err() {
-        // Stale connection — reconnect and retry
-        let (new_stream, _, _) = connect(worker_url).await?;
-        stream = new_stream;
-        stream.write_all(request_bytes).await.map_err(|e| e.to_string())?;
+fn extract_host(worker_url: &str) -> String {
+    if worker_url.starts_with("unix://") {
+        "localhost".to_string()
+    } else {
+        url::Url::parse(worker_url).ok()
+            .and_then(|u| u.host_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "localhost".to_string())
     }
+}
 
-    // Read response with Content-Length framing
-    let mut response = Vec::with_capacity(4096);
-    let mut header_end = None;
+/// Read a full HTTP response using httparse, supporting both Content-Length and close-delimited.
+async fn read_http_response(stream: &mut Stream) -> Result<(u16, Vec<(String, String)>, Vec<u8>), String> {
+    let mut buf = Vec::with_capacity(4096);
+    let mut header_len = 0;
+    let mut status = 200u16;
     let mut content_length: Option<usize> = None;
+    let mut headers_parsed = Vec::new();
+    let mut headers_done = false;
 
     loop {
-        let buf = vec![0u8; 4096];
-        let BufResult(r, returned) = stream.read(buf).await;
+        let read_buf = vec![0u8; 4096];
+        let BufResult(r, returned) = stream.read(read_buf).await;
         let n = r.map_err(|e| e.to_string())?;
         if n == 0 { break; }
-        response.extend_from_slice(&returned[..n]);
+        buf.extend_from_slice(&returned[..n]);
 
-        if header_end.is_none() {
-            if let Some(pos) = response.windows(4).position(|w| w == b"\r\n\r\n") {
-                header_end = Some(pos);
-                let hdr = std::str::from_utf8(&response[..pos]).unwrap_or("");
-                for line in hdr.lines() {
-                    if let Some(val) = line.strip_prefix("Content-Length: ")
-                        .or_else(|| line.strip_prefix("content-length: "))
-                    {
-                        content_length = val.trim().parse().ok();
+        if !headers_done {
+            let mut parsed_headers = [httparse::EMPTY_HEADER; 32];
+            let mut resp = httparse::Response::new(&mut parsed_headers);
+            match resp.parse(&buf) {
+                Ok(httparse::Status::Complete(len)) => {
+                    header_len = len;
+                    status = resp.code.unwrap_or(502);
+                    headers_done = true;
+
+                    for h in resp.headers.iter() {
+                        let name = h.name.to_string();
+                        let value = String::from_utf8_lossy(h.value).to_string();
+                        if name.eq_ignore_ascii_case("content-length") {
+                            content_length = value.trim().parse().ok();
+                        }
+                        headers_parsed.push((name, value));
                     }
                 }
+                Ok(httparse::Status::Partial) => continue,
+                Err(e) => return Err(format!("parse: {e}")),
             }
         }
 
-        if let (Some(he), Some(cl)) = (header_end, content_length) {
-            if response.len() >= he + 4 + cl { break; }
-        }
-    }
-
-    let he = header_end.ok_or("no header end")?;
-    let header_str = std::str::from_utf8(&response[..he]).map_err(|e| e.to_string())?;
-    let body_start = he + 4;
-    let body_end = content_length.map(|cl| body_start + cl).unwrap_or(response.len());
-    let body_bytes = &response[body_start..body_end];
-
-    // Return to pool if healthy
-    if content_length.is_some() {
-        CONN_POOL.with(|p| p.borrow_mut().put(key, stream));
-    }
-
-    let status = header_str.split_whitespace().nth(1)
-        .and_then(|s| s.parse::<u16>().ok()).unwrap_or(502);
-
-    let mut builder = HttpResponse::build(
-        ntex::http::StatusCode::from_u16(status).unwrap_or(ntex::http::StatusCode::BAD_GATEWAY),
-    );
-    builder.content_type("application/json");
-
-    for line in header_str.lines().skip(1) {
-        if let Some((name, value)) = line.split_once(": ") {
-            let lname = name.to_ascii_lowercase();
-            if lname == "x-cpu-time-ms" || lname == "x-wall-time-ms" {
-                builder.set_header(name, value.to_string());
+        // Check if we have the full body
+        if headers_done {
+            if let Some(cl) = content_length {
+                if buf.len() >= header_len + cl { break; }
             }
+            // No Content-Length: read until connection close (handled by n == 0 above)
         }
     }
 
-    Ok(builder.body(body_bytes.to_vec()))
+    if !headers_done {
+        return Err("incomplete response".to_string());
+    }
+
+    let body_end = content_length.map(|cl| header_len + cl).unwrap_or(buf.len());
+    let body = buf[header_len..body_end].to_vec();
+
+    Ok((status, headers_parsed, body))
 }
