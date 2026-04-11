@@ -285,6 +285,22 @@ impl Runtime {
         }
     }
 
+    /// Exit the V8 isolate so another isolate can be entered on this thread.
+    /// Must be called after `new_direct` when storing multiple runtimes.
+    /// # Safety
+    /// The isolate must not be used between `exit_isolate` and `enter_isolate`.
+    pub fn exit_isolate(&mut self) {
+        unsafe { self.isolate.exit(); }
+    }
+
+    /// Enter the V8 isolate before dispatching requests.
+    /// Must be paired with `exit_isolate` after dispatch is done.
+    /// # Safety
+    /// Only one isolate can be entered at a time per thread.
+    pub fn enter_isolate(&mut self) {
+        unsafe { self.isolate.enter(); }
+    }
+
     /// Set the pump notification sender. The pump task holds the receiver.
     pub fn set_pump_notify(&mut self, tx: futures::channel::mpsc::Sender<()>) {
         self.pump_notify_tx = Some(tx);

@@ -73,7 +73,7 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8]) -> bool {
             None,
         )));
 
-        // Warmup
+        // Warmup (isolate is entered after new_direct)
         {
             let result = rt
                 .borrow_mut()
@@ -82,6 +82,10 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8]) -> bool {
                 eprintln!("[worker] warmup warning for {app_id}: {e}");
             }
         }
+
+        // Exit isolate so other isolates can be created/entered on this thread.
+        // The handler will enter/exit around each dispatch_rpc call.
+        rt.borrow_mut().exit_isolate();
 
         // Start pump task for async V8 ops
         let mut async_work = AsyncWork::new();

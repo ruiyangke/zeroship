@@ -32,10 +32,13 @@ pub async fn dispatch(
         }
     };
 
-    // Dispatch to V8 on this thread — no channel needed since V8 is thread-local.
+    // Enter isolate, dispatch, exit. V8 requires only one isolate entered at a time.
     let result = {
         let mut rt = runtime.borrow_mut();
-        rt.dispatch_rpc(&body)
+        rt.enter_isolate();
+        let r = rt.dispatch_rpc(&body);
+        rt.exit_isolate();
+        r
     };
 
     match result {
