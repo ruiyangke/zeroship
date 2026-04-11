@@ -15,99 +15,16 @@ use ntex::web::HttpResponse;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
-// xxHash64 (inline, no external dep)
+// CHWBL Hash Ring (uses XXH3 — fastest hash with excellent distribution)
 // ---------------------------------------------------------------------------
 
-const XXHASH_PRIME1: u64 = 0x9E3779B185EBCA87;
-const XXHASH_PRIME2: u64 = 0xC2B2AE3D27D4EB4F;
-const XXHASH_PRIME3: u64 = 0x165667B19E3779F9;
-const XXHASH_PRIME5: u64 = 0x27D4EB2F165667C5;
-
-fn xxhash64(data: &[u8]) -> u64 {
-    let seed: u64 = 0;
-    let len = data.len() as u64;
-    let mut h: u64;
-
-    if data.len() < 32 {
-        h = seed.wrapping_add(XXHASH_PRIME5);
-    } else {
-        let mut v1 = seed.wrapping_add(XXHASH_PRIME1).wrapping_add(XXHASH_PRIME2);
-        let mut v2 = seed.wrapping_add(XXHASH_PRIME2);
-        let mut v3 = seed;
-        let mut v4 = seed.wrapping_sub(XXHASH_PRIME1);
-        let mut i = 0;
-        while i + 32 <= data.len() {
-            v1 = xxh64_round(v1, read_u64(&data[i..]));
-            v2 = xxh64_round(v2, read_u64(&data[i + 8..]));
-            v3 = xxh64_round(v3, read_u64(&data[i + 16..]));
-            v4 = xxh64_round(v4, read_u64(&data[i + 24..]));
-            i += 32;
-        }
-        h = v1.rotate_left(1)
-            .wrapping_add(v2.rotate_left(7))
-            .wrapping_add(v3.rotate_left(12))
-            .wrapping_add(v4.rotate_left(18));
-        h = xxh64_merge(h, v1);
-        h = xxh64_merge(h, v2);
-        h = xxh64_merge(h, v3);
-        h = xxh64_merge(h, v4);
-    }
-
-    h = h.wrapping_add(len);
-
-    // Process remaining bytes
-    let mut i = data.len() & !31;
-    while i + 8 <= data.len() {
-        h ^= xxh64_round(0, read_u64(&data[i..]));
-        h = h.rotate_left(27).wrapping_mul(XXHASH_PRIME1).wrapping_add(XXHASH_PRIME2 + XXHASH_PRIME3); // approximation
-        i += 8;
-    }
-    while i + 4 <= data.len() {
-        h ^= (read_u32(&data[i..]) as u64).wrapping_mul(XXHASH_PRIME1);
-        h = h.rotate_left(23).wrapping_mul(XXHASH_PRIME2).wrapping_add(XXHASH_PRIME3);
-        i += 4;
-    }
-    while i < data.len() {
-        h ^= (data[i] as u64).wrapping_mul(XXHASH_PRIME5);
-        h = h.rotate_left(11).wrapping_mul(XXHASH_PRIME1);
-        i += 1;
-    }
-
-    // Avalanche
-    h ^= h >> 33;
-    h = h.wrapping_mul(XXHASH_PRIME2);
-    h ^= h >> 29;
-    h = h.wrapping_mul(XXHASH_PRIME3);
-    h ^= h >> 32;
-    h
-}
-
+/// XXH3 hash — ~2ns per call, uses SIMD when available.
 #[inline]
-fn xxh64_round(acc: u64, input: u64) -> u64 {
-    acc.wrapping_add(input.wrapping_mul(XXHASH_PRIME2))
-        .rotate_left(31)
-        .wrapping_mul(XXHASH_PRIME1)
+fn hash_bytes(data: &[u8]) -> u64 {
+    xxhash_rust::xxh3::xxh3_64(data)
 }
 
-#[inline]
-fn xxh64_merge(acc: u64, val: u64) -> u64 {
-    let val = xxh64_round(0, val);
-    (acc ^ val).wrapping_mul(XXHASH_PRIME1).wrapping_add(XXHASH_PRIME2 + XXHASH_PRIME3) // approximation
-}
 
-#[inline]
-fn read_u64(data: &[u8]) -> u64 {
-    u64::from_le_bytes(data[..8].try_into().unwrap())
-}
-
-#[inline]
-fn read_u32(data: &[u8]) -> u32 {
-    u32::from_le_bytes(data[..4].try_into().unwrap())
-}
-
-// ---------------------------------------------------------------------------
-// CHWBL Hash Ring
-// ---------------------------------------------------------------------------
 
 const VNODES_PER_WORKER: usize = 150;
 
@@ -125,7 +42,7 @@ impl HashRing {
         for (idx, url) in worker_urls.iter().enumerate() {
             for i in 0..VNODES_PER_WORKER {
                 let key = format!("{url}-vnode-{i}");
-                ring.insert(xxhash64(key.as_bytes()), idx);
+                ring.insert(hash_bytes(key.as_bytes()), idx);
             }
         }
 
@@ -142,7 +59,7 @@ impl HashRing {
     }
 
     pub fn select(&self, app_id: &Uuid) -> (usize, &str) {
-        let hash = xxhash64(app_id.as_bytes());
+        let hash = hash_bytes(app_id.as_bytes());
         let candidates = self.ring.range(hash..).chain(self.ring.iter());
 
         for (_, &worker_idx) in candidates {
