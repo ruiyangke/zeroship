@@ -35,6 +35,7 @@ itoa = "1"
 socket2 = { version = "0.5", features = ["all"] }
 
 # Bundle format
+appbase-bundle = { path = "../bundle" }
 zstd = "0.13"
 sha2 = "0.10"
 

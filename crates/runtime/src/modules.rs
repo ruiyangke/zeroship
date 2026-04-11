@@ -15,12 +15,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
-/// A pre-resolved module to be loaded into V8.
-#[derive(Debug, Clone)]
-pub struct ModuleEntry {
-    pub specifier: String,
-    pub source: String,
-}
+pub use appbase_bundle::ModuleEntry;
 
 /// Module registry stored in V8 isolate slot.
 pub struct ModuleRegistry {

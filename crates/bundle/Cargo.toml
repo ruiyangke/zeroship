@@ -1,0 +1,12 @@
+[package]
+name = "appbase-bundle"
+version = "0.1.0"
+edition = "2021"
+description = ".appbundle binary format — read, write, lazy decompression"
+
+[dependencies]
+sha2 = "0.10"
+zstd = "0.13"
+
+[lints]
+workspace = true

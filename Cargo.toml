@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/common",
+    "crates/bundle",
     "crates/runtime",
     "crates/runtime-macros",
     "crates/compiler",

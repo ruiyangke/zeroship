@@ -9,6 +9,7 @@ name = "appbase-worker"
 path = "src/main.rs"
 
 [dependencies]
+appbase-bundle = { path = "../bundle" }
 appbase-common = { path = "../common" }
 appbase-runtime = { path = "../runtime" }
 ntex = { version = "3", features = ["compio"] }

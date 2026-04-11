@@ -45,7 +45,7 @@ pub fn get_runtime(app_id: &Uuid) -> Option<Rc<RefCell<Runtime>>> {
 
 /// Load an app from bundle bytes. Creates V8 runtime + starts pump task.
 pub fn load_app(app_id: Uuid, bundle_bytes: &[u8]) -> bool {
-    let mut bundle = match appbase_runtime::bundle::AppBundle::from_bytes(bundle_bytes) {
+    let mut bundle = match appbase_bundle::AppBundle::from_bytes(bundle_bytes) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("[worker] failed to parse bundle for {app_id}: {e}");

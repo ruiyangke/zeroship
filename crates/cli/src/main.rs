@@ -6,8 +6,7 @@
 //!   appbase serve   <file-or-dir> [--port=3000] [--workers=0]
 //!   appbase deploy  <dir-or-file> --app=<id> [--control=URL] [--key=KEY]
 
-use appbase_runtime::bundle::{AppBundle, ModuleType};
-use appbase_runtime::modules::ModuleEntry;
+use appbase_bundle::{AppBundle, ModuleType, ModuleEntry};
 use std::path::PathBuf;
 
 fn main() {
