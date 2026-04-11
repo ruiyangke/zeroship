@@ -24,6 +24,7 @@ fn main() {
         "build" => cmd_build(&args),
         "inspect" => cmd_inspect(&args),
         "serve" => cmd_serve(&args),
+        "deploy" => cmd_deploy(&args),
         "platform" => cmd_platform(&args),
         "dev" => cmd_dev(&args),
         _ => print_usage(),
@@ -304,6 +305,119 @@ fn build_and_load_file(path: &PathBuf) -> Vec<ModuleEntry> {
     }]
 }
 
+fn cmd_deploy(args: &[String]) {
+    let input = args.get(2).expect(
+        "Usage: appbase deploy <dir-or-file> --app=<name-or-id> [--control=http://localhost:9090] [--key=<master-key>]",
+    );
+    let app = flag_str(args, "--app=").expect("--app=<name-or-id> is required");
+    let control_url = flag_str(args, "--control=")
+        .or_else(|| std::env::var("APPBASE_CONTROL_URL").ok())
+        .unwrap_or_else(|| "http://localhost:9090".into());
+    let master_key = flag_str(args, "--key=")
+        .or_else(|| std::env::var("APPBASE_MASTER_KEY").ok())
+        .unwrap_or_else(|| "".into());
+
+    let input_path = PathBuf::from(input);
+
+    // Step 1: Build .appbundle (same logic as cmd_build)
+    let (entry_name, source) = if input_path.is_file() {
+        let source = std::fs::read_to_string(&input_path).expect("Failed to read input file");
+        let name = input_path.file_name().unwrap().to_string_lossy().to_string();
+        (name, source)
+    } else if input_path.is_dir() {
+        use appbase_compiler::bundler::{bundle, BundleOptions};
+        let options = BundleOptions {
+            entry: String::new(),
+            minify: false,
+            sourcemap: false,
+            ..Default::default()
+        };
+        let result = bundle(&input_path, &options).unwrap_or_else(|e| {
+            eprintln!("Build failed: {e}");
+            std::process::exit(1);
+        });
+        ("index.js".to_string(), result.js)
+    } else {
+        eprintln!("Input path does not exist: {}", input_path.display());
+        std::process::exit(1);
+    };
+
+    let module_type = if entry_name.ends_with(".json") {
+        ModuleType::Json
+    } else {
+        ModuleType::EsModule
+    };
+
+    let bundle = AppBundle::new(
+        &entry_name,
+        vec![(entry_name.clone(), module_type, source.clone())],
+    );
+    let bundle_bytes = bundle.to_bytes();
+
+    eprintln!(
+        "Built .appbundle: {:.1}KB ({:.0}% of {:.1}KB source)",
+        bundle_bytes.len() as f64 / 1024.0,
+        bundle_bytes.len() as f64 / source.len() as f64 * 100.0,
+        source.len() as f64 / 1024.0,
+    );
+
+    // Step 2: Upload to control plane
+    // Use a simple blocking HTTP request (no async needed for CLI)
+    let deploy_url = format!("{control_url}/api/apps/{app}/deploy");
+    eprintln!("Deploying to {deploy_url}...");
+
+    let response = std::process::Command::new("curl")
+        .args([
+            "-s", "-w", "\n%{http_code}",
+            "-X", "POST",
+            &deploy_url,
+            "-H", &format!("Authorization: Bearer {master_key}"),
+            "-H", "Content-Type: application/octet-stream",
+            "--data-binary", "@-",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                stdin.write_all(&bundle_bytes).ok();
+            }
+            child.wait_with_output()
+        });
+
+    match response {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let lines: Vec<&str> = stdout.trim().rsplitn(2, '\n').collect();
+            let (status_str, body) = if lines.len() == 2 {
+                (lines[0], lines[1])
+            } else {
+                (lines[0], "")
+            };
+
+            let status: u16 = status_str.parse().unwrap_or(0);
+            if status == 200 {
+                eprintln!("Deployed successfully!");
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+                    if let Some(hash) = json.get("deploy_hash").and_then(|h| h.as_str()) {
+                        eprintln!("  deploy_hash: {hash}");
+                    }
+                }
+            } else {
+                eprintln!("Deploy failed (HTTP {status}): {body}");
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to run curl: {e}");
+            eprintln!("Make sure curl is installed and the control plane is running.");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn cmd_platform(args: &[String]) {
     let script = args
         .get(2)
@@ -564,8 +678,10 @@ fn print_usage() {
     eprintln!("  appbase inspect  <file.appbundle>");
     eprintln!("  appbase serve    <file-or-dir> [--port=3000] [--workers=0]");
     eprintln!("                   Serve a .appbundle, JS file, or project directory");
+    eprintln!("  appbase deploy   <dir-or-file> --app=<name-or-id> [--control=URL] [--key=KEY]");
+    eprintln!("                   Build and deploy to the control plane");
     eprintln!("  appbase platform <server.js> [--static=index.html] [--port=3000] [--db=appbase.db]");
-    eprintln!("                   Start the full platform (database, metering, plugins)");
+    eprintln!("                   Start the full platform (legacy monolith)");
     eprintln!("  appbase dev      <entrypoint> [--port=3000]");
 }
 

@@ -86,7 +86,12 @@ pub async fn create_app(
 ) -> web::HttpResponse {
     if let Some(resp) = check_admin_auth(&req, &state) { return resp; }
     match state.registry.create_app(&body.name, &body.plan_id).await {
-        Ok(record) => web::HttpResponse::Created().json(&record),
+        Ok(record) => {
+            // Include api_key in the create response (it's skipped from normal serialization)
+            let mut json = serde_json::to_value(&record).unwrap();
+            json["api_key"] = serde_json::Value::String(record.api_key.clone());
+            web::HttpResponse::Created().json(&json)
+        }
         Err(e) => error_response(e),
     }
 }
