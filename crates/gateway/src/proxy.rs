@@ -110,14 +110,12 @@ impl std::fmt::Debug for HashRing {
     }
 }
 
-/// FNV-1a hash (fast, good distribution, no external dep)
+/// SHA-256 truncated to u64 — excellent distribution for consistent hashing.
+/// FNV-1a clusters badly with sequential inputs (worker IPs, app UUIDs).
 fn hash_bytes(data: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for &byte in data {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
+    use sha2::{Sha256, Digest};
+    let hash = Sha256::digest(data);
+    u64::from_le_bytes(hash[..8].try_into().unwrap())
 }
 
 // ---------------------------------------------------------------------------

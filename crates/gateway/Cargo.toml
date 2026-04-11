@@ -16,6 +16,7 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 compio = { workspace = true }
 url = { workspace = true }
+sha2 = { workspace = true }
 mimalloc = { workspace = true }
 
 [lints]
