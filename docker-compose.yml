@@ -1,0 +1,88 @@
+# appbase platform — multi-node simulation
+#
+# Usage:
+#   docker compose up -d                          # default: 1 gw + 3 workers
+#   docker compose up -d --scale worker=10        # scale to 10 workers
+#   docker compose logs -f                        # watch all logs
+#   docker compose down -v                        # tear down
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: appbase
+      POSTGRES_DB: appbase
+    ports:
+      - "5440:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  control:
+    build: .
+    command: >
+      appbase-control
+        --port 9090
+        --db postgres://postgres:appbase@postgres:5432/appbase
+        --bundles /data/bundles
+        --control-key platform-key
+        --master-key master-key
+    ports:
+      - "9090:9090"
+    volumes:
+      - bundles:/data/bundles
+    security_opt:
+      - seccomp:unconfined
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  gateway:
+    build: .
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        sleep 3
+        WORKERS=""
+        for ip in $$(getent hosts worker | awk '{print $$1}'); do
+          [ -n "$$WORKERS" ] && WORKERS="$$WORKERS,"
+          WORKERS="$${WORKERS}http://$${ip}:8080"
+        done
+        [ -z "$$WORKERS" ] && WORKERS="http://worker:8080"
+        echo "[gateway] workers: $$WORKERS"
+        exec appbase-gate \
+          --port 8000 \
+          --control http://control:9090 \
+          --control-key platform-key \
+          --workers "$$WORKERS" \
+          --poll-interval 3
+    ports:
+      - "8000:8000"
+    security_opt:
+      - seccomp:unconfined
+    depends_on:
+      - control
+      - worker
+
+  worker:
+    build: .
+    command: >
+      appbase-worker
+        --port 8080
+        --workers 4
+        --control http://control:9090
+        --control-key platform-key
+        --max-isolates 200
+        --poll-interval 3
+    deploy:
+      replicas: 3
+    security_opt:
+      - seccomp:unconfined
+    depends_on:
+      - control
+
+volumes:
+  bundles:
