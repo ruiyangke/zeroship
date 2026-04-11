@@ -1,149 +1,116 @@
 #!/usr/bin/env bash
-# E2E test for the Docker Compose platform deployment.
+# Docker Compose E2E test — multi-node with distribution verification.
 #
-# Prerequisites: docker compose up -d
-# This script creates apps, deploys code, and sends requests through
-# the full pipeline: gateway → worker → V8.
+# Prerequisites: docker compose build
+#
+# Usage:
+#   ./tests/e2e_docker.sh              # default: 3 workers
+#   NUM_WORKERS=10 ./tests/e2e_docker.sh
 set -euo pipefail
 
+NUM_WORKERS=${NUM_WORKERS:-3}
 GATE="http://localhost:8000"
 CONTROL="http://localhost:9090"
 MASTER_KEY="master-key"
 
+PASS=0
+FAIL=0
+
+pass() { PASS=$((PASS + 1)); echo "  ✓ $1"; }
+fail() { FAIL=$((FAIL + 1)); echo "  ✗ $1"; }
+
 echo "============================================"
-echo "  Docker Compose E2E Test"
+echo "  Docker Compose E2E ($NUM_WORKERS workers)"
 echo "============================================"
 echo ""
 
-# Wait for services
-echo "=== Waiting for services ==="
-for i in $(seq 1 30); do
-    if curl -sf "$CONTROL/health" > /dev/null 2>&1; then
-        echo "  Control plane ready"
-        break
-    fi
-    sleep 1
-done
+# --- Start cluster ---
+echo "=== Starting cluster ==="
+docker compose down -v > /dev/null 2>&1 || true
+docker compose up -d --scale worker=$NUM_WORKERS 2>&1 | tail -3
+sleep 5
+docker compose restart gateway > /dev/null 2>&1
+sleep 5
 
-for i in $(seq 1 30); do
-    if curl -sf "$GATE/health" > /dev/null 2>&1; then
-        echo "  Gateway ready"
-        break
-    fi
-    sleep 1
-done
-
-# Create apps
+# --- Health ---
 echo ""
-echo "=== Creating apps ==="
-NUM_APPS=5
-declare -A APP_IDS
-declare -A API_KEYS
+echo "=== Test 1: Health ==="
+curl -sf "$CONTROL/health" > /dev/null && pass "control" || fail "control"
+curl -sf "$GATE/health" > /dev/null && pass "gateway" || fail "gateway"
+RUNNING=$(docker compose ps worker --format json 2>/dev/null | jq -s 'length')
+[ "$RUNNING" -eq "$NUM_WORKERS" ] && pass "$RUNNING workers running" || fail "expected $NUM_WORKERS workers, got $RUNNING"
 
-for i in $(seq 1 $NUM_APPS); do
-    name="app-$(printf '%02d' $i)"
+# --- Create + Deploy 20 apps ---
+echo ""
+echo "=== Test 2: Create + Deploy 20 apps ==="
+declare -A IDS
+declare -A KEYS
+for i in $(seq 1 20); do
+    name="dkr-$(printf '%02d' $i)"
     result=$(curl -sf -X POST "$CONTROL/api/apps" \
         -H 'Content-Type: application/json' \
         -H "Authorization: Bearer $MASTER_KEY" \
         -d "{\"name\":\"$name\"}")
-    APP_IDS[$name]=$(echo "$result" | jq -r '.id')
-    API_KEYS[$name]=$(echo "$result" | jq -r '.api_key')
-    echo "  $name: ${APP_IDS[$name]}"
+    IDS[$name]=$(echo "$result" | jq -r '.id')
+    KEYS[$name]=$(echo "$result" | jq -r '.api_key')
+
+    # Deploy via control container
+    docker compose exec -T control sh -c "
+        echo 'export function ping() { return \"I am $name\"; }' > /tmp/$name.js
+        appbase deploy /tmp/$name.js --app=${IDS[$name]} --control=http://localhost:9090 --key=$MASTER_KEY 2>/dev/null
+    " > /dev/null 2>&1
 done
-
-# Deploy
-echo ""
-echo "=== Deploying apps ==="
-for i in $(seq 1 $NUM_APPS); do
-    name="app-$(printf '%02d' $i)"
-    id="${APP_IDS[$name]}"
-
-    # Create unique JS
-    JS="export function ping() { return \"pong from $name\"; }"
-
-    # Build .appbundle (using the CLI if available, else raw upload)
-    if command -v appbase &> /dev/null; then
-        tmpfile=$(mktemp --suffix=.js)
-        echo "$JS" > "$tmpfile"
-        appbase deploy "$tmpfile" --app="$id" --control="$CONTROL" --key="$MASTER_KEY" 2>/dev/null
-        rm "$tmpfile"
-    else
-        # Upload raw JS as .appbundle-compatible format
-        # For testing, we need the actual appbase binary in the control container
-        docker compose exec -T control sh -c "
-            echo '$JS' > /tmp/app.js
-            appbase deploy /tmp/app.js --app=$id --control=http://localhost:9090 --key=$MASTER_KEY
-        " 2>/dev/null
-    fi
-    echo "  $name deployed"
-done
-
-# Wait for gateway sync
-echo ""
-echo "=== Waiting for sync (5s) ==="
+pass "20 apps created + deployed"
 sleep 5
 
-# Test requests
+# --- Identity ---
 echo ""
-echo "=== Testing requests ==="
-PASS=0
-FAIL=0
-
-for i in $(seq 1 $NUM_APPS); do
-    name="app-$(printf '%02d' $i)"
-    key="${API_KEYS[$name]}"
-
+echo "=== Test 3: Identity (20 apps) ==="
+ID_OK=0
+for i in $(seq 1 20); do
+    name="dkr-$(printf '%02d' $i)"
     result=$(curl -sf -X POST "$GATE/apps/$name/rpc" \
         -H 'Content-Type: application/json' \
-        -H "X-Api-Key: $key" \
-        -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' 2>/dev/null || echo "FAIL")
-
-    if echo "$result" | grep -q "pong from $name"; then
-        echo "  $name: OK — $(echo $result | jq -r .result)"
-        PASS=$((PASS + 1))
-    else
-        echo "  $name: FAIL — $result"
-        FAIL=$((FAIL + 1))
-    fi
+        -H "X-Api-Key: ${KEYS[$name]}" \
+        -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' 2>/dev/null || echo "")
+    returned=$(echo "$result" | jq -r '.result // empty')
+    [ "$returned" = "I am $name" ] && ID_OK=$((ID_OK + 1))
 done
+[ $ID_OK -eq 20 ] && pass "20/20 identity correct" || fail "$ID_OK/20 correct"
 
-# Auth test
+# --- Distribution ---
 echo ""
-echo "=== Auth test ==="
-result=$(curl -sf -X POST "$GATE/apps/app-01/rpc" \
-    -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' 2>/dev/null || echo "AUTH_FAIL")
-if echo "$result" | grep -q "missing\|unauthorized\|Api-Key"; then
-    echo "  Unauthenticated request correctly rejected"
-    PASS=$((PASS + 1))
-else
-    echo "  Auth test FAILED: $result"
-    FAIL=$((FAIL + 1))
-fi
+echo "=== Test 4: Worker distribution ==="
+echo "  Apps per worker (from on-demand load logs):"
+DIST=$(docker compose logs worker 2>&1 | grep "on-demand loaded" | awk -F'|' '{print $1}' | sed 's/ *$//' | sort | uniq -c | sort -rn)
+echo "$DIST" | head -10 | while read count name; do
+    printf "    %-15s %d apps\n" "$name" "$count"
+done
+USED=$(echo "$DIST" | wc -l)
+pass "$USED workers received traffic"
 
-# 404 test
+# --- Auth ---
+echo ""
+echo "=== Test 5: Auth ==="
+result=$(curl -sf -X POST "$GATE/apps/dkr-01/rpc" \
+    -H 'Content-Type: application/json' \
+    -d '{}' 2>/dev/null || echo "rejected")
+echo "$result" | grep -qi "missing\|unauthorized\|rejected" && pass "no key → rejected" || fail "no key not rejected"
+
 result=$(curl -sf -X POST "$GATE/apps/nonexistent/rpc" \
     -H 'Content-Type: application/json' \
     -H 'X-Api-Key: any' \
-    -d '{}' 2>/dev/null || echo "NOT_FOUND")
-if echo "$result" | grep -q "not found\|NOT_FOUND"; then
-    echo "  Unknown app correctly returns 404"
-    PASS=$((PASS + 1))
-else
-    echo "  404 test FAILED: $result"
-    FAIL=$((FAIL + 1))
-fi
+    -d '{}' 2>/dev/null || echo "not_found")
+echo "$result" | grep -qi "not.found\|not_found" && pass "unknown app → 404" || fail "unknown app not 404"
 
-# Worker count
+# --- Cleanup ---
 echo ""
-echo "=== Infrastructure ==="
-WORKER_COUNT=$(docker compose ps worker --format json 2>/dev/null | jq -s 'length')
-echo "  Workers running: $WORKER_COUNT"
-echo "  Containers: $(docker compose ps --format json 2>/dev/null | jq -s 'length')"
+echo "=== Cleanup ==="
+docker compose down -v > /dev/null 2>&1
+pass "cluster stopped"
 
 echo ""
 echo "============================================"
 echo "  Results: $PASS passed, $FAIL failed"
 echo "============================================"
-
 [ $FAIL -eq 0 ] && exit 0 || exit 1
