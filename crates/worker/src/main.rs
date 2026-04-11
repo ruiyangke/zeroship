@@ -44,15 +44,20 @@ async fn main() -> std::io::Result<()> {
         poll_interval_secs: poll_interval.parse().unwrap_or(5),
     });
 
+    let socket_path = arg_or_env(&args, "--socket", "WORKER_SOCKET", "");
     let workers_count: usize = workers.parse().unwrap_or(1);
     let bind_addr = format!("0.0.0.0:{port}");
-    eprintln!("[appbase-worker] http://{bind_addr} ({workers_count} threads)");
 
-    web::server(async move || {
+    eprintln!("[appbase-worker] http://{bind_addr} ({workers_count} threads)");
+    if !socket_path.is_empty() {
+        eprintln!("[appbase-worker] unix://{socket_path}");
+        // Remove stale socket file
+        let _ = std::fs::remove_file(&socket_path);
+    }
+
+    let mut server = web::server(async move || {
         let config = config.clone();
-        // Initialize thread-local V8 cache
         cache::init_cache(config.max_isolates);
-        // Start background sync on this thread
         sync::start_sync(config.clone());
 
         web::App::new()
@@ -63,9 +68,14 @@ async fn main() -> std::io::Result<()> {
             })))
     })
     .workers(workers_count)
-    .bind(&bind_addr)?
-    .run()
-    .await
+    .bind(&bind_addr)?;
+
+    // Also listen on Unix domain socket if configured
+    if !socket_path.is_empty() {
+        server = server.bind_uds(&socket_path)?;
+    }
+
+    server.run().await
 }
 
 fn arg_or_env(args: &[String], flag: &str, env_key: &str, default: &str) -> String {
