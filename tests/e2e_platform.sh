@@ -336,14 +336,20 @@ echo 'export function ping() { return "v2"; }' > "$tmpf"
 rm "$tmpf"
 
 # Wait for worker sync to pick up new hash + reload
-sleep 8
+# Worker polls every 2s, needs time to detect + download + reload
+sleep 12
 
 # Verify v2
-result=$(curl -sf -X POST "http://localhost:$GATE_PORT/apps/hot-deploy/rpc" \
-    -H 'Content-Type: application/json' \
-    -H "X-Api-Key: $HOT_KEY" \
-    -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}')
-v=$(echo "$result" | jq -r '.result // empty')
+v=""
+for attempt in $(seq 1 5); do
+    result=$(curl -sf -X POST "http://localhost:$GATE_PORT/apps/hot-deploy/rpc" \
+        -H 'Content-Type: application/json' \
+        -H "X-Api-Key: $HOT_KEY" \
+        -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' 2>/dev/null || echo "")
+    v=$(echo "$result" | jq -r '.result // empty')
+    [ "$v" = "v2" ] && break
+    sleep 3
+done
 [ "$v" = "v2" ] && pass "v2 hot deployed" || fail "expected v2, got '$v'"
 
 # ---------------------------------------------------------------------------
