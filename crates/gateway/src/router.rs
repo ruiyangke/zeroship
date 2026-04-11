@@ -40,10 +40,10 @@ pub async fn handle(
         Err(resp) => return resp,
     };
 
-    // 5. Proxy to worker with proper headers
+    // 5. Proxy to worker via CHWBL hash ring
     let request_id = Uuid::new_v4();
     let mut response = match proxy::forward(
-        &state.config.worker_urls,
+        &state.hash_ring,
         &app_id,
         &route.plan_id,
         &request_id,
@@ -60,18 +60,14 @@ pub async fn handle(
 
     // 6. Add response headers
     let wall_ms = wall_start.elapsed().as_secs_f64() * 1000.0;
-    response
-        .headers_mut()
-        .insert(
-            ntex::http::header::HeaderName::from_static("x-wall-time-ms"),
-            ntex::http::header::HeaderValue::from_str(&format!("{wall_ms:.2}")).unwrap(),
-        );
-    response
-        .headers_mut()
-        .insert(
-            ntex::http::header::HeaderName::from_static("x-request-id"),
-            ntex::http::header::HeaderValue::from_str(&request_id.to_string()).unwrap(),
-        );
+    response.headers_mut().insert(
+        ntex::http::header::HeaderName::from_static("x-wall-time-ms"),
+        ntex::http::header::HeaderValue::from_str(&format!("{wall_ms:.2}")).unwrap(),
+    );
+    response.headers_mut().insert(
+        ntex::http::header::HeaderName::from_static("x-request-id"),
+        ntex::http::header::HeaderValue::from_str(&request_id.to_string()).unwrap(),
+    );
 
     response
 }

@@ -25,7 +25,6 @@ async fn sync_loop(config: Arc<WorkerConfig>) {
 }
 
 async fn sync_once(config: &WorkerConfig) -> Result<(), String> {
-    // Fetch version map from control plane
     let url = format!("{}/internal/versions", config.control_url);
 
     let response =
@@ -34,49 +33,51 @@ async fn sync_once(config: &WorkerConfig) -> Result<(), String> {
     let versions: HashMap<Uuid, Option<String>> =
         serde_json::from_str(&response).map_err(|e| format!("parse versions: {e}"))?;
 
-    // Compare with local state
-    for (app_id, remote_hash) in &versions {
-        let local_hash = cache::get_hash(app_id);
-        let needs_update = match (&local_hash, remote_hash) {
-            (None, Some(_)) => true,              // New app
-            (Some(l), Some(r)) if l != r => true, // Updated
-            _ => false,
-        };
-
-        if needs_update {
-            if let Some(hash) = remote_hash {
-                let bundle_url = format!("{}/internal/bundles/{}", config.control_url, app_id);
-                match http_get_bytes(&bundle_url, &config.control_key).await {
-                    Ok(bytes) => {
-                        // Verify hash
-                        let computed = hex::encode(Sha256::digest(&bytes));
-                        if computed != *hash {
-                            eprintln!(
-                                "[worker-sync] hash mismatch for {app_id}: expected {hash}, got {computed}"
-                            );
-                            continue;
-                        }
-                        if cache::load_app(*app_id, &bytes) {
-                            cache::set_hash(*app_id, hash.clone());
-                            eprintln!(
-                                "[worker-sync] loaded {app_id} (hash: {}...)",
-                                &hash[..hash.len().min(8)]
-                            );
-                        }
-                    }
-                    Err(e) => eprintln!("[worker-sync] fetch bundle {app_id}: {e}"),
-                }
-            }
-        }
-    }
-
-    // Evict apps that are no longer in the version map
+    // Only update apps that are ALREADY cached (not new ones — those load on-demand).
     let local_app_ids = cache::all_app_ids();
     for local_id in &local_app_ids {
-        if !versions.contains_key(local_id) {
-            eprintln!("[worker-sync] evicting deleted app {local_id}");
-            cache::evict_app(local_id);
-            cache::remove_hash(local_id);
+        match versions.get(local_id) {
+            // App still exists — check if hash changed (deploy)
+            Some(Some(remote_hash)) => {
+                let local_hash = cache::get_hash(local_id);
+                let needs_update = match &local_hash {
+                    Some(lh) if lh != remote_hash => true, // hash changed = new deploy
+                    None => true,                           // no hash tracked (shouldn't happen)
+                    _ => false,                             // same hash, skip
+                };
+
+                if needs_update {
+                    let bundle_url =
+                        format!("{}/internal/bundles/{}", config.control_url, local_id);
+                    match http_get_bytes(&bundle_url, &config.control_key).await {
+                        Ok(bytes) => {
+                            let computed = hex::encode(Sha256::digest(&bytes));
+                            if computed != *remote_hash {
+                                eprintln!(
+                                    "[worker-sync] hash mismatch for {local_id}: expected {remote_hash}, got {computed}"
+                                );
+                                continue;
+                            }
+                            if cache::load_app(*local_id, &bytes) {
+                                cache::set_hash(*local_id, remote_hash.clone());
+                                eprintln!(
+                                    "[worker-sync] updated {local_id} (hash: {}...)",
+                                    &remote_hash[..remote_hash.len().min(8)]
+                                );
+                            }
+                        }
+                        Err(e) => eprintln!("[worker-sync] fetch bundle {local_id}: {e}"),
+                    }
+                }
+            }
+            // App deleted from control plane — evict
+            None => {
+                eprintln!("[worker-sync] evicting deleted app {local_id}");
+                cache::evict_app(local_id);
+                cache::remove_hash(local_id);
+            }
+            // App exists but no deploy yet (deploy_hash is null) — skip
+            Some(None) => {}
         }
     }
 
@@ -90,8 +91,8 @@ async fn http_get(url: &str, auth_key: &str) -> Result<String, String> {
 }
 
 /// Simple HTTP GET returning response body as bytes.
-/// Uses a raw TCP connection for minimal deps.
-async fn http_get_bytes(url: &str, auth_key: &str) -> Result<Vec<u8>, String> {
+/// Public so handler.rs can use it for on-demand bundle loading.
+pub async fn http_get_bytes(url: &str, auth_key: &str) -> Result<Vec<u8>, String> {
     use compio::buf::BufResult;
     use compio::io::{AsyncRead, AsyncWriteExt};
     use compio::net::TcpStream;
@@ -111,7 +112,6 @@ async fn http_get_bytes(url: &str, auth_key: &str) -> Result<Vec<u8>, String> {
     let BufResult(r, _) = stream.write_all(request.into_bytes()).await;
     r.map_err(|e| e.to_string())?;
 
-    // Read all response bytes
     let mut response = Vec::new();
     loop {
         let buf = vec![0u8; 8192];
@@ -123,13 +123,11 @@ async fn http_get_bytes(url: &str, auth_key: &str) -> Result<Vec<u8>, String> {
         response.extend_from_slice(&returned[..n]);
     }
 
-    // Find body after \r\n\r\n
     let header_end = response
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
         .ok_or("no HTTP header end")?;
 
-    // Check status
     let header = std::str::from_utf8(&response[..header_end]).map_err(|e| e.to_string())?;
     if !header.starts_with("HTTP/1.1 200") && !header.starts_with("HTTP/1.0 200") {
         let status_line = header.lines().next().unwrap_or("unknown");
