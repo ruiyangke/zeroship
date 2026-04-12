@@ -68,6 +68,7 @@ syn = { version = "2", features = ["full"] }
 appbase-bundle = { path = "crates/bundle" }
 appbase-core = { path = "crates/core" }
 appbase-pg = { path = "crates/pg" }
+appbase-plugin-db = { path = "crates/plugin-db" }
 appbase-runtime = { path = "crates/runtime" }
 appbase-runtime-macros = { path = "crates/runtime-macros" }
 appbase-compiler = { path = "crates/compiler" }
