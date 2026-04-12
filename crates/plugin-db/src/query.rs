@@ -327,6 +327,70 @@ pub fn build_update_one(
     Ok(BuiltQuery { sql, params })
 }
 
+/// Build an INSERT query for multiple documents:
+/// `INSERT INTO "app_id"."collection" ("col1", "col2") VALUES ($1, $2), ($3, $4) RETURNING *`
+///
+/// All docs must have the same column set (defined by the first document).
+pub fn build_insert_many(
+    app_id: &str,
+    collection: &str,
+    docs: &Value,
+) -> Result<BuiltQuery, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+
+    let arr = docs.as_array().ok_or_else(|| {
+        QueryError::InvalidFilter("insertMany: docs must be an array".to_string())
+    })?;
+
+    if arr.is_empty() {
+        return Err(QueryError::InvalidFilter(
+            "insertMany: docs array cannot be empty".to_string(),
+        ));
+    }
+
+    let schema = quote_ident(app_id);
+    let table = quote_ident(collection);
+
+    // Use the first document to define the column set
+    let first = arr[0].as_object().ok_or_else(|| {
+        QueryError::InvalidFilter("insertMany: each document must be an object".to_string())
+    })?;
+
+    if first.is_empty() {
+        return Err(QueryError::InvalidFilter(
+            "insertMany: documents cannot be empty".to_string(),
+        ));
+    }
+
+    let column_names: Vec<&String> = first.keys().collect();
+    let columns: Vec<String> = column_names.iter().map(|k| quote_ident(k)).collect();
+
+    let mut params: Vec<String> = Vec::new();
+    let mut value_groups: Vec<String> = Vec::new();
+
+    for doc in arr {
+        let obj = doc.as_object().ok_or_else(|| {
+            QueryError::InvalidFilter("insertMany: each document must be an object".to_string())
+        })?;
+        let mut placeholders = Vec::new();
+        for key in &column_names {
+            let val = obj.get(*key).unwrap_or(&Value::Null);
+            params.push(value_to_param(val));
+            placeholders.push(format!("${}", params.len()));
+        }
+        value_groups.push(format!("({})", placeholders.join(", ")));
+    }
+
+    let sql = format!(
+        "INSERT INTO {schema}.{table} ({}) VALUES {} RETURNING *",
+        columns.join(", "),
+        value_groups.join(", ")
+    );
+
+    Ok(BuiltQuery { sql, params })
+}
+
 /// Build a DELETE query: `DELETE FROM "app_id"."collection" WHERE ... RETURNING *`
 pub fn build_delete_one(
     app_id: &str,
@@ -807,5 +871,28 @@ mod tests {
         assert!(q.sql.contains(r#""views" = "views" + $"#), "sql: {}", q.sql);
         assert!(q.params.contains(&"New".to_string()));
         assert!(q.params.contains(&"1".to_string()));
+    }
+
+    #[test]
+    fn test_insert_many() {
+        let docs = json!([
+            {"name": "alice", "age": 30},
+            {"name": "bob",   "age": 25}
+        ]);
+        let q = build_insert_many("app1", "users", &docs).unwrap();
+        assert!(q.sql.starts_with(r#"INSERT INTO "app1"."users""#), "sql: {}", q.sql);
+        assert!(q.sql.contains("VALUES"), "sql: {}", q.sql);
+        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        // Two docs × two columns = 4 params
+        assert_eq!(q.params.len(), 4, "params: {:?}", q.params);
+        assert!(q.sql.contains("($1, $2)"), "sql: {}", q.sql);
+        assert!(q.sql.contains("($3, $4)"), "sql: {}", q.sql);
+    }
+
+    #[test]
+    fn test_insert_many_empty() {
+        let docs = json!([]);
+        let result = build_insert_many("app1", "users", &docs);
+        assert!(result.is_err(), "expected error for empty array");
     }
 }

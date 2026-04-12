@@ -626,6 +626,57 @@ pub fn delete_one(
 }
 
 // ---------------------------------------------------------------------------
+// Callback: insertMany(collection, docsJson)
+// ---------------------------------------------------------------------------
+
+/// `appbase.db.insertMany(collection, docsJson)` → Promise<array>
+pub fn insert_many(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+    let Some(docs) = parse_json_arg(scope, &args, 1) else {
+        return;
+    };
+
+    let app_id = get_app_id(&state);
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    let bq = match query::build_insert_many(&app_id, &collection, &docs) {
+        Ok(q) => q,
+        Err(e) => {
+            state.borrow_mut().spawned_ops.push(Box::pin(async move {
+                OpResult::Completed {
+                    op_id,
+                    value: error_json(&e.to_string()),
+                    request_id,
+                }
+            }));
+            rv.set(promise.into());
+            return;
+        }
+    };
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let value = match exec_mutation(bq).await {
+            Ok(json) => json, // Return the full array of inserted rows
+            Err(e) => error_json(&e),
+        };
+        OpResult::Completed { op_id, value, request_id }
+    }));
+
+    rv.set(promise.into());
+}
+
+// ---------------------------------------------------------------------------
 // Callback: count(collection, filterJson)
 // ---------------------------------------------------------------------------
 

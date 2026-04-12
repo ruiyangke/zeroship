@@ -119,6 +119,7 @@ impl NativePlugin for DbPlugin {
         r.add("findOne", callbacks::find_one);
         r.add("find", callbacks::find);
         r.add("insert", callbacks::insert);
+        r.add("insertMany", callbacks::insert_many);
         r.add("updateOne", callbacks::update_one);
         r.add("deleteOne", callbacks::delete_one);
         r.add("count", callbacks::count);
