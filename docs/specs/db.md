@@ -83,11 +83,36 @@ const users = model("users", {
 Every model gets these columns automatically (not declared by the creator):
 - `id` — `UUID PRIMARY KEY DEFAULT gen_random_uuid()`
 - `created_at` — `TIMESTAMPTZ DEFAULT NOW()`
-- `updated_at` — `TIMESTAMPTZ DEFAULT NOW()` (updated on every UPDATE)
+- `updated_at` — `TIMESTAMPTZ DEFAULT NOW()` (auto-updated on every UPDATE)
+
+### Model Options (third argument)
+
+```javascript
+const orders = model("orders", {
+  customer:   t.ref(users).required(),
+  status:     t.string().required().default("pending"),
+  total:      t.number().required().default(0),
+  created_at: t.date(),
+}, {
+  // Compound indexes
+  indexes: [
+    { fields: ["customer", "status"] },
+    { fields: ["created_at"], order: "DESC" },
+    { fields: ["status"], where: "status != 'archived'" },  // partial index
+  ],
+  // Compound unique constraints
+  unique: [
+    ["customer", "status"],   // one active order per customer per status
+  ],
+  // Soft delete: delete() sets deleted_at instead of removing rows
+  // find() auto-filters deleted_at IS NULL
+  softDelete: true,
+  // Disable auto timestamps
+  timestamps: false,
+});
+```
 
 ### Generated SQL
-
-The model above generates:
 
 ```sql
 CREATE TABLE app_{app_id}.users (
@@ -139,6 +164,17 @@ const created = await users.insertMany([
 
 Validation runs before INSERT. Missing required fields, wrong types, constraint violations → throws with a clear error message before hitting Postgres.
 
+### Upsert (insert or update)
+
+```javascript
+// Insert if not exists, update if exists (matched by unique field)
+const user = await users.upsert(
+  { email: "alice@example.com" },                    // match key (must be unique field)
+  { name: "Alice", email: "alice@example.com", role: "admin" }  // full document
+);
+// → INSERT ... ON CONFLICT (email) DO UPDATE SET name = $1, role = $2 RETURNING *
+```
+
 ### Find
 
 ```javascript
@@ -149,17 +185,26 @@ const user = await users.findOne({ email: "alice@example.com" });
 // Find many with chaining
 const results = await users
   .find({ role: "admin" })
-  .sort({ name: 1 })     // 1 = ASC, -1 = DESC
+  .select("name", "email")      // only return these fields (projection)
+  .sort({ name: 1 })            // 1 = ASC, -1 = DESC
   .limit(20)
-  .skip(40);              // offset for pagination
-// → [{ id, name, ... }, ...]
+  .skip(40);                     // offset for pagination
+// → [{ name, email }, ...]
 
-// Cursor-based pagination (preferred over skip)
+// Cursor-based pagination (preferred over skip for large datasets)
 const page = await users
   .find({ role: "user" })
   .sort({ created_at: -1 })
-  .after(lastCursor)      // created_at of last item from previous page
+  .after(lastCursor)             // created_at of last item from previous page
   .limit(20);
+
+// Distinct values
+const categories = await products.distinct("category");
+// → ["electronics", "food", "clothing"]
+// → SELECT DISTINCT category FROM products
+
+// Distinct with filter
+const activeCategories = await products.distinct("category", { stock: { $gt: 0 } });
 ```
 
 ### Update
@@ -189,6 +234,14 @@ const result = await products.update(
   { stock: { $dec: 1 } }
 );
 if (result.updated === 0) throw new Error("Out of stock");
+
+// Find, update, and return the document (atomic)
+const job = await queue.findOneAndUpdate(
+  { status: "pending" },
+  { status: "processing", worker: workerId },
+  { sort: { priority: -1 }, returnNew: true }  // return doc AFTER update
+);
+// → { id, status: "processing", worker: "w1", ... } or null
 ```
 
 ### Delete
@@ -200,6 +253,18 @@ await users.delete({ id: "uuid" });
 // Delete many
 await sessions.delete({ expires_at: { $lt: new Date() } });
 // → { deleted: 42 }
+
+// Find, delete, and return the document (atomic)
+const job = await queue.findOneAndDelete(
+  { status: "pending" },
+  { sort: { created_at: 1 } }   // oldest first
+);
+// → { id, status: "pending", ... } or null (if none pending)
+
+// Soft delete (if model has softDelete: true)
+// delete() sets deleted_at = NOW() instead of removing the row
+// find() auto-filters deleted_at IS NULL
+// Use find({ includeDeleted: true }) to see soft-deleted rows
 ```
 
 ### Count / Exists
@@ -230,6 +295,10 @@ const exists = await users.exists({ email: "alice@example.com" });
 // Pattern
 { field: { $like: "%pattern%" } }   // WHERE field LIKE '%pattern%'
 { field: { $ilike: "%pattern%" } }  // WHERE field ILIKE '%pattern%' (case-insensitive)
+
+// Full-text search (Postgres tsvector)
+{ field: { $search: "chocolate cake recipe" } }
+// → WHERE to_tsvector('english', field) @@ plainto_tsquery('english', $1)
 
 // Null
 { field: null }                     // WHERE field IS NULL
@@ -263,11 +332,38 @@ const exists = await users.exists({ email: "alice@example.com" });
 { field: { $addToSet: value } }    // append only if not present
 ```
 
+## Populate (eager loading)
+
+Avoid N+1 queries when loading references:
+
+```javascript
+// Without populate: 2 queries
+const post = await posts.findOne({ id: postId });
+const author = await users.findOne({ id: post.author });
+
+// With populate: 1 query (JOIN under the hood)
+const post = await posts.findOne({ id: postId }).populate("author");
+// → { id, title, author: { id, name, email, ... }, ... }
+// → SELECT p.*, row_to_json(u.*) as author FROM posts p JOIN users u ON p.author = u.id
+
+// Populate multiple refs
+const order = await orders
+  .findOne({ id: orderId })
+  .populate("customer")
+  .populate("assignee");
+
+// Populate on find (many)
+const posts = await posts
+  .find({ category: "tech" })
+  .populate("author")
+  .sort({ created_at: -1 })
+  .limit(20);
+```
+
 ## Transactions
 
 ```javascript
 await db.transaction(async (tx) => {
-  // tx provides the same collection API
   const order = await tx.orders.insert({
     customer: userId,
     total: 0,
@@ -297,7 +393,6 @@ Transactions use Postgres `BEGIN`/`COMMIT`/`ROLLBACK`. All operations within `tx
 ## Raw SQL
 
 ```javascript
-// For complex queries the document API can't express
 const result = await db.query(
   "SELECT category, COUNT(*), AVG(price) FROM products GROUP BY category HAVING COUNT(*) > 5",
   []
@@ -313,6 +408,49 @@ const affected = await db.execute(
 
 Raw SQL always runs within the app's schema (`search_path = app_{app_id}`). Apps cannot escape their schema.
 
+## Error Handling
+
+All database operations throw structured errors:
+
+```javascript
+try {
+  await users.insert({ name: "Alice", email: "existing@example.com" });
+} catch (e) {
+  e.code;      // "UNIQUE_VIOLATION"
+  e.field;     // "email"
+  e.message;   // "email already exists"
+}
+```
+
+### Error codes
+
+| Code | When | Example |
+|---|---|---|
+| `VALIDATION_ERROR` | Input fails schema validation | `{ name: 123 }` when name is string |
+| `REQUIRED_FIELD` | Missing required field | `insert({})` when name is required |
+| `UNIQUE_VIOLATION` | Duplicate value on unique field | Duplicate email |
+| `FOREIGN_KEY_VIOLATION` | Referenced record doesn't exist | Invalid author ID |
+| `CHECK_VIOLATION` | Check constraint failed | age = -1 when min is 0 |
+| `NOT_FOUND` | findOneAndUpdate/Delete found nothing | No matching doc |
+| `TRANSACTION_FAILED` | Transaction rolled back | Thrown error inside tx |
+| `CONNECTION_ERROR` | Database unreachable | Postgres down |
+
+Errors have `.code` (machine-readable), `.field` (which field, if applicable), and `.message` (human-readable). Creators can catch and handle specific codes:
+
+```javascript
+try {
+  await users.insert(input);
+} catch (e) {
+  if (e.code === "UNIQUE_VIOLATION") {
+    return Response.json({ error: "Email already taken" }, { status: 409 });
+  }
+  if (e.code === "VALIDATION_ERROR") {
+    return Response.json({ error: e.message, field: e.field }, { status: 400 });
+  }
+  throw e; // unexpected error
+}
+```
+
 ## Validation
 
 ### Automatic (on every insert/update)
@@ -325,16 +463,16 @@ const users = model("users", {
 });
 
 await users.insert({ name: "", email: "a@b.com" });
-// Error: { field: "name", message: "must be at least 1 character" }
+// Error: { code: "VALIDATION_ERROR", field: "name", message: "must be at least 1 character" }
 
 await users.insert({ name: "Alice", email: "a@b.com", age: "thirty" });
-// Error: { field: "age", message: "expected number, got string" }
+// Error: { code: "VALIDATION_ERROR", field: "age", message: "expected number, got string" }
 
 await users.insert({ name: "Alice" });
-// Error: { field: "email", message: "required" }
+// Error: { code: "REQUIRED_FIELD", field: "email", message: "required" }
 ```
 
-Validation runs in the native callback before SQL is generated. Errors are returned as structured objects, not SQL error strings.
+Validation runs in the native callback before SQL is generated.
 
 ### Explicit validation
 
@@ -350,7 +488,7 @@ const result = users.validate({ name: "", age: -1 });
 //   ]
 // }
 
-// Partial validation (for updates)
+// Partial validation (for updates — only validate provided fields)
 const result = users.validate({ age: -1 }, { partial: true });
 // { ok: false, errors: [{ field: "age", message: "must be >= 0" }] }
 ```
@@ -360,11 +498,9 @@ const result = users.validate({ age: -1 }, { partial: true });
 ```javascript
 import { z } from "zod";  // npm install zod (creator's choice)
 
-// Generate a Zod schema from the model
 const UserInput = users.toZod(z);
 // Equivalent to: z.object({ name: z.string().min(1).max(100), email: z.string(), ... })
 
-// Use Zod's ecosystem (transforms, refinements, etc.)
 const parsed = UserInput.parse(input);
 ```
 
@@ -383,6 +519,8 @@ On every deploy, the platform compares the old model definition with the new one
 | Add new model (collection) | `CREATE TABLE` |
 | Change default value | `ALTER TABLE ALTER COLUMN SET DEFAULT` |
 | Add check constraint | `ALTER TABLE ADD CONSTRAINT` |
+| Add unique constraint | `ALTER TABLE ADD CONSTRAINT ... UNIQUE` |
+| Make required field optional | `ALTER TABLE ALTER COLUMN DROP NOT NULL` |
 
 ### Dangerous migrations (blocked with error)
 
@@ -399,23 +537,37 @@ The platform stores the previous model definition per app. On deploy, it diffs o
 ## Indexes
 
 ```javascript
-// Single-field index
+// Single-field index (on the field definition)
 const products = model("products", {
-  category: t.string().index(),        // CREATE INDEX on category
+  category: t.string().index(),
   price:    t.number(),
 });
 
-// Compound index (declared on the model)
+// Compound and advanced indexes (in model options)
 const orders = model("orders", {
-  customer: t.ref(users).required(),
-  status:   t.string().required(),
+  customer:   t.ref(users).required(),
+  status:     t.string().required(),
   created_at: t.date(),
 }, {
   indexes: [
     { fields: ["customer", "status"] },                    // compound index
     { fields: ["created_at"], order: "DESC" },             // descending
     { fields: ["status"], where: "status != 'archived'" }, // partial index
-  ]
+  ],
+  unique: [
+    ["customer", "status"],   // compound unique constraint
+  ],
+});
+
+// Full-text search index (auto-created when $search is used)
+const posts = model("posts", {
+  title:   t.string().required(),
+  content: t.text(),
+}, {
+  indexes: [
+    { fields: ["title", "content"], type: "fulltext" },
+    // → CREATE INDEX idx_posts_fts ON posts USING GIN (to_tsvector('english', title || ' ' || content))
+  ],
 });
 ```
 
@@ -428,21 +580,21 @@ const users = model("users", {
 
 const posts = model("posts", {
   title:  t.string().required(),
-  author: t.ref(users).required(),        // FK to users.id
-  parent: t.ref("posts"),                 // self-reference (replies)
+  author: t.ref(users).required(),        // FK to users.id, ON DELETE CASCADE
+  parent: t.ref("posts"),                 // self-reference (replies), ON DELETE SET NULL
 });
 
 // Insert with reference
 const post = await posts.insert({
   title: "Hello",
-  author: user.id,       // pass the UUID
+  author: user.id,
 });
 
-// Query with reference (no auto-join — explicit)
-const post = await posts.findOne({ id: "..." });
-const author = await users.findOne({ id: post.author });
+// Query with populate (auto-join)
+const post = await posts.findOne({ id: postId }).populate("author");
+// → { id, title, author: { id, name, ... }, ... }
 
-// For joins, use raw SQL
+// For complex joins, use raw SQL
 const result = await db.query(`
   SELECT p.title, u.name as author_name
   FROM posts p JOIN users u ON p.author = u.id
@@ -450,9 +602,32 @@ const result = await db.query(`
 `, [postId]);
 ```
 
-References create real Postgres foreign keys with `ON DELETE` behavior:
-- `t.ref(users)` → `ON DELETE SET NULL` (nullable ref)
-- `t.ref(users).required()` → `ON DELETE CASCADE` (required ref — delete parent deletes children)
+ON DELETE behavior:
+- `t.ref(model)` → `ON DELETE SET NULL` (nullable reference)
+- `t.ref(model).required()` → `ON DELETE CASCADE` (required — delete parent deletes children)
+
+## Soft Delete
+
+```javascript
+const posts = model("posts", {
+  title: t.string().required(),
+  content: t.text(),
+}, {
+  softDelete: true,  // enables soft delete behavior
+});
+
+// delete() sets deleted_at = NOW() instead of removing the row
+await posts.delete({ id: postId });
+
+// find() auto-filters deleted_at IS NULL
+const active = await posts.find({});           // only non-deleted
+const all = await posts.find({}).withDeleted(); // include soft-deleted
+const deleted = await posts.find({}).onlyDeleted(); // only soft-deleted
+
+// Permanently remove (bypass soft delete)
+await posts.destroy({ id: postId });
+// → DELETE FROM posts WHERE id = $1
+```
 
 ## Connection Architecture
 
@@ -479,20 +654,23 @@ Per-thread pool (Rc-based, appbase-pg):
 Every database operation increments billing counters via the `Meter` trait:
 
 ```
-insert()      → meter.increment("db.writes", 1)
-insertMany(n) → meter.increment("db.writes", n)
-find()        → meter.increment("db.reads", 1)
-findOne()     → meter.increment("db.reads", 1)
-update()      → meter.increment("db.writes", 1)
-delete()      → meter.increment("db.writes", 1)
-count()       → meter.increment("db.reads", 1)
-db.query()    → meter.increment("db.queries", 1)
-db.execute()  → meter.increment("db.queries", 1)
+insert()            → meter.increment("db.writes", 1)
+insertMany(n)       → meter.increment("db.writes", n)
+find()              → meter.increment("db.reads", 1)
+findOne()           → meter.increment("db.reads", 1)
+update()            → meter.increment("db.writes", 1)
+delete()            → meter.increment("db.writes", 1)
+count()             → meter.increment("db.reads", 1)
+upsert()            → meter.increment("db.writes", 1)
+findOneAndUpdate()  → meter.increment("db.writes", 1)
+findOneAndDelete()  → meter.increment("db.writes", 1)
+db.query()          → meter.increment("db.queries", 1)
+db.execute()        → meter.increment("db.queries", 1)
 ```
 
 Row-based metering (for finer billing):
 ```
-find() returns 50 rows → meter.increment("db.rows_read", 50)
+find() returns 50 rows  → meter.increment("db.rows_read", 50)
 update() affects 3 rows → meter.increment("db.rows_written", 3)
 ```
 
