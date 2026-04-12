@@ -491,6 +491,187 @@ pub fn build_delete_one(
     Ok(BuiltQuery { sql, params })
 }
 
+/// Build an aggregate query from a pipeline of stages.
+///
+/// Supported stages:
+/// - `$match`  → WHERE clause
+/// - `$group`  → SELECT aggregates + optional GROUP BY
+/// - `$having` → HAVING clause
+/// - `$sort`   → ORDER BY
+/// - `$limit`  → LIMIT N
+pub fn build_aggregate(
+    app_id: &str,
+    collection: &str,
+    pipeline: &Value,
+) -> Result<BuiltQuery, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+
+    let schema = quote_ident(app_id);
+    let table = quote_ident(collection);
+
+    let stages = pipeline.as_array().ok_or_else(|| {
+        QueryError::InvalidFilter("aggregate: pipeline must be an array".to_string())
+    })?;
+
+    let mut params: Vec<String> = Vec::new();
+    let mut where_clause = String::new();
+    let mut select_cols: Vec<String> = Vec::new();
+    let mut group_by_cols: Vec<String> = Vec::new();
+    let mut having_clause = String::new();
+    let mut order_clause = String::new();
+    let mut limit_clause = String::new();
+
+    for stage in stages {
+        let obj = stage.as_object().ok_or_else(|| {
+            QueryError::InvalidFilter("aggregate: each stage must be an object".to_string())
+        })?;
+
+        if let Some(match_val) = obj.get("$match") {
+            where_clause = build_where(match_val, &mut params)?;
+        } else if let Some(group_val) = obj.get("$group") {
+            let group_obj = group_val.as_object().ok_or_else(|| {
+                QueryError::InvalidFilter("aggregate: $group must be an object".to_string())
+            })?;
+
+            // Handle optional `by` field
+            if let Some(by_val) = group_obj.get("by") {
+                match by_val {
+                    Value::String(s) => {
+                        let col = quote_ident(s);
+                        select_cols.push(col.clone());
+                        group_by_cols.push(col);
+                    }
+                    Value::Array(arr) => {
+                        for item in arr {
+                            let s = item.as_str().ok_or_else(|| {
+                                QueryError::InvalidFilter(
+                                    "aggregate: $group.by array elements must be strings"
+                                        .to_string(),
+                                )
+                            })?;
+                            let col = quote_ident(s);
+                            select_cols.push(col.clone());
+                            group_by_cols.push(col);
+                        }
+                    }
+                    _ => {
+                        return Err(QueryError::InvalidFilter(
+                            "aggregate: $group.by must be a string or array".to_string(),
+                        ));
+                    }
+                }
+            }
+
+            // Process aggregation functions
+            for (alias, agg_val) in group_obj {
+                if alias == "by" {
+                    continue;
+                }
+                let agg_obj = agg_val.as_object().ok_or_else(|| {
+                    QueryError::InvalidFilter(format!(
+                        "aggregate: $group.{alias} must be an object"
+                    ))
+                })?;
+
+                let op_key = agg_obj.keys().find(|k| k.starts_with('$')).ok_or_else(|| {
+                    QueryError::InvalidFilter(format!(
+                        "aggregate: $group.{alias} must have an aggregation operator"
+                    ))
+                })?;
+                let op_val = &agg_obj[op_key];
+
+                let agg_expr = match op_key.as_str() {
+                    "$count" => "COUNT(*)".to_string(),
+                    "$sum" => {
+                        let field = op_val.as_str().ok_or_else(|| {
+                            QueryError::InvalidFilter(
+                                "$sum requires a field name string".to_string(),
+                            )
+                        })?;
+                        format!("SUM({})", quote_ident(field))
+                    }
+                    "$avg" => {
+                        let field = op_val.as_str().ok_or_else(|| {
+                            QueryError::InvalidFilter(
+                                "$avg requires a field name string".to_string(),
+                            )
+                        })?;
+                        format!("AVG({})", quote_ident(field))
+                    }
+                    "$min" => {
+                        let field = op_val.as_str().ok_or_else(|| {
+                            QueryError::InvalidFilter(
+                                "$min requires a field name string".to_string(),
+                            )
+                        })?;
+                        format!("MIN({})", quote_ident(field))
+                    }
+                    "$max" => {
+                        let field = op_val.as_str().ok_or_else(|| {
+                            QueryError::InvalidFilter(
+                                "$max requires a field name string".to_string(),
+                            )
+                        })?;
+                        format!("MAX({})", quote_ident(field))
+                    }
+                    other => {
+                        return Err(QueryError::InvalidFilter(format!(
+                            "aggregate: unsupported aggregation operator: {other}"
+                        )));
+                    }
+                };
+
+                select_cols.push(format!("{agg_expr} AS {}", quote_ident(alias)));
+            }
+        } else if let Some(having_val) = obj.get("$having") {
+            having_clause = build_where(having_val, &mut params)?;
+        } else if let Some(sort_val) = obj.get("$sort") {
+            order_clause = build_order_by(sort_val)?;
+        } else if let Some(limit_val) = obj.get("$limit") {
+            let n = limit_val.as_i64().ok_or_else(|| {
+                QueryError::InvalidFilter("aggregate: $limit must be an integer".to_string())
+            })?;
+            limit_clause = format!("{n}");
+        }
+    }
+
+    let select_expr = if select_cols.is_empty() {
+        "*".to_string()
+    } else {
+        select_cols.join(", ")
+    };
+
+    let mut sql = format!("SELECT {select_expr} FROM {schema}.{table}");
+
+    if !where_clause.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_clause);
+    }
+
+    if !group_by_cols.is_empty() {
+        sql.push_str(" GROUP BY ");
+        sql.push_str(&group_by_cols.join(", "));
+    }
+
+    if !having_clause.is_empty() {
+        sql.push_str(" HAVING ");
+        sql.push_str(&having_clause);
+    }
+
+    if !order_clause.is_empty() {
+        sql.push_str(" ORDER BY ");
+        sql.push_str(&order_clause);
+    }
+
+    if !limit_clause.is_empty() {
+        sql.push_str(" LIMIT ");
+        sql.push_str(&limit_clause);
+    }
+
+    Ok(BuiltQuery { sql, params })
+}
+
 /// Build a SELECT DISTINCT query:
 /// `SELECT DISTINCT "field" FROM "schema"."table" WHERE ... ORDER BY "field"`
 pub fn build_distinct(
@@ -1069,5 +1250,52 @@ mod tests {
         );
         assert!(q.sql.contains(r#"ORDER BY "role""#), "sql: {}", q.sql);
         assert_eq!(q.params, vec!["true"]);
+    }
+
+    #[test]
+    fn test_aggregate_basic() {
+        let pipeline = json!([
+            {"$match": {"active": true}},
+            {"$group": {"by": "country", "count": {"$count": true}}},
+            {"$sort": {"count": -1}},
+            {"$limit": 5}
+        ]);
+        let q = build_aggregate("app1", "users", &pipeline).unwrap();
+        assert!(q.sql.contains(r#"SELECT "country", COUNT(*) AS "count""#), "sql: {}", q.sql);
+        assert!(q.sql.contains("WHERE"), "sql: {}", q.sql);
+        assert!(q.sql.contains("GROUP BY"), "sql: {}", q.sql);
+        assert!(q.sql.contains("ORDER BY"), "sql: {}", q.sql);
+        assert!(q.sql.contains("LIMIT 5"), "sql: {}", q.sql);
+    }
+
+    #[test]
+    fn test_aggregate_multi_group() {
+        let pipeline = json!([
+            {"$group": {"by": ["country", "city"], "total": {"$sum": "revenue"}}}
+        ]);
+        let q = build_aggregate("app1", "orders", &pipeline).unwrap();
+        assert!(q.sql.contains(r#"GROUP BY "country", "city""#), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#"SUM("revenue") AS "total""#), "sql: {}", q.sql);
+    }
+
+    #[test]
+    fn test_aggregate_having() {
+        let pipeline = json!([
+            {"$group": {"by": "category", "cnt": {"$count": true}}},
+            {"$having": {"cnt": {"$gte": 10}}}
+        ]);
+        let q = build_aggregate("app1", "products", &pipeline).unwrap();
+        assert!(q.sql.contains("HAVING"), "sql: {}", q.sql);
+        assert!(q.sql.contains("GROUP BY"), "sql: {}", q.sql);
+    }
+
+    #[test]
+    fn test_aggregate_no_group() {
+        let pipeline = json!([
+            {"$match": {"active": true}}
+        ]);
+        let q = build_aggregate("app1", "users", &pipeline).unwrap();
+        assert!(q.sql.starts_with("SELECT * FROM"), "sql: {}", q.sql);
+        assert!(!q.sql.contains("GROUP BY"), "sql: {}", q.sql);
     }
 }

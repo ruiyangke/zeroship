@@ -678,6 +678,57 @@ pub fn insert_many(
 }
 
 // ---------------------------------------------------------------------------
+// Callback: aggregate(collection, pipelineJson)
+// ---------------------------------------------------------------------------
+
+/// `appbase.db.aggregate(collection, pipelineJson)` → Promise<array>
+pub fn aggregate(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+    let Some(pipeline) = parse_json_arg(scope, &args, 1) else {
+        return;
+    };
+
+    let app_id = get_app_id(&state);
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    let bq = match query::build_aggregate(&app_id, &collection, &pipeline) {
+        Ok(q) => q,
+        Err(e) => {
+            state.borrow_mut().spawned_ops.push(Box::pin(async move {
+                OpResult::Completed {
+                    op_id,
+                    value: error_json(&e.to_string()),
+                    request_id,
+                }
+            }));
+            rv.set(promise.into());
+            return;
+        }
+    };
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let value = match exec_query(bq).await {
+            Ok(json) => json,
+            Err(e) => error_json(&e),
+        };
+        OpResult::Completed { op_id, value, request_id }
+    }));
+
+    rv.set(promise.into());
+}
+
+// ---------------------------------------------------------------------------
 // Callback: distinct(collection, field, filterJson)
 // ---------------------------------------------------------------------------
 
