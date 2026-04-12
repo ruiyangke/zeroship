@@ -134,6 +134,12 @@ impl Row {
     pub fn columns(&self) -> &[Column] {
         &self.columns
     }
+
+    /// Returns the raw bytes for a column by name, or None if NULL.
+    pub fn raw_value(&self, column: &str) -> Option<&[u8]> {
+        let idx = self.columns.iter().position(|c| c.name == column)?;
+        self.values[idx].as_deref()
+    }
 }
 
 impl std::fmt::Debug for Row {

@@ -68,6 +68,12 @@ impl Pool {
         conn.query(sql, params).await
     }
 
+    /// Convenience: query with text-format string parameters.
+    pub async fn query_text_params(&self, sql: &str, params: &[&str]) -> Result<Vec<Row>> {
+        let mut conn = self.get().await?;
+        conn.query_text_params(sql, params).await
+    }
+
     /// Convenience: acquire a connection, execute a statement, return the connection.
     pub async fn execute(&self, sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<u64> {
         let mut conn = self.get().await?;

@@ -164,13 +164,10 @@ async fn exec_query(bq: BuiltQuery) -> Result<String, String> {
 
     let pool = pool.ok_or_else(|| "db: pool not initialized".to_string())?;
 
-    // Convert String params to references for the query call.
-    // appbase-pg uses text params via ToSql trait — &str implements ToSql.
-    let param_refs: Vec<&(dyn appbase_pg::ToSql + Sync)> =
-        bq.params.iter().map(|s| s as &(dyn appbase_pg::ToSql + Sync)).collect();
+    let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
 
     let rows = pool
-        .query(&bq.sql, &param_refs)
+        .query_text_params(&bq.sql, &param_refs)
         .await
         .map_err(|e| format!("db query error: {e}"))?;
 
@@ -186,16 +183,15 @@ async fn exec_count(bq: BuiltQuery) -> Result<String, String> {
 
     let pool = DB_POOL.with(|p| {
         let borrow = p.borrow();
-        borrow.as_ref().map(Rc::clone)
+        borrow.as_ref().map(std::rc::Rc::clone)
     });
 
     let pool = pool.ok_or_else(|| "db: pool not initialized".to_string())?;
 
-    let param_refs: Vec<&(dyn appbase_pg::ToSql + Sync)> =
-        bq.params.iter().map(|s| s as &(dyn appbase_pg::ToSql + Sync)).collect();
+    let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
 
     let rows = pool
-        .query(&bq.sql, &param_refs)
+        .query_text_params(&bq.sql, &param_refs)
         .await
         .map_err(|e| format!("db query error: {e}"))?;
 
@@ -221,11 +217,10 @@ async fn exec_mutation(bq: BuiltQuery) -> Result<String, String> {
 
     let pool = pool.ok_or_else(|| "db: pool not initialized".to_string())?;
 
-    let param_refs: Vec<&(dyn appbase_pg::ToSql + Sync)> =
-        bq.params.iter().map(|s| s as &(dyn appbase_pg::ToSql + Sync)).collect();
+    let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
 
     let rows = pool
-        .query(&bq.sql, &param_refs)
+        .query_text_params(&bq.sql, &param_refs)
         .await
         .map_err(|e| format!("db mutation error: {e}"))?;
 

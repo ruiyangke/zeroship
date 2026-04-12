@@ -456,6 +456,168 @@ impl Conn {
         Ok(rows)
     }
 
+    /// Query with text-format string parameters.
+    ///
+    /// Unlike `query()` which sends params in binary format, this method
+    /// sends all params as text strings (format code 0). Postgres will
+    /// auto-cast text params to the target column types, making this safe
+    /// for expressions like `col = col + $1` where `$1` is a text "1".
+    ///
+    /// Results are still returned in binary format.
+    pub async fn query_text_params(
+        &mut self,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<Vec<Row>> {
+        let mut buf = BytesMut::new();
+
+        // Parse (unnamed statement, no type hints)
+        frontend::parse("", sql, std::iter::empty::<u32>(), &mut buf)
+            .map_err(|e| Error::Protocol(e.to_string()))?;
+
+        // Params as text bytes
+        let param_refs: Vec<Option<&[u8]>> = params
+            .iter()
+            .map(|s| Some(s.as_bytes() as &[u8]))
+            .collect();
+
+        // Bind with text format for params (0), binary for results (1)
+        frontend::bind(
+            "",
+            "",
+            std::iter::once(0i16),    // param format: 0 = text
+            param_refs,
+            |val: Option<&[u8]>, buf: &mut BytesMut| match val {
+                Some(bytes) => {
+                    buf.extend_from_slice(bytes);
+                    Ok(ProtoIsNull::No)
+                }
+                None => Ok(ProtoIsNull::Yes),
+            },
+            std::iter::once(1i16),    // result format: 1 = binary
+            &mut buf,
+        )
+        .map_err(bind_error)?;
+
+        // Describe portal
+        frontend::describe(b'P', "", &mut buf)
+            .map_err(|e| Error::Protocol(e.to_string()))?;
+
+        // Execute (fetch all)
+        frontend::execute("", 0, &mut buf)
+            .map_err(|e| Error::Protocol(e.to_string()))?;
+
+        // Sync
+        frontend::sync(&mut buf);
+
+        self.stream.write_bytes(&buf);
+        self.stream.flush().await?;
+
+        // Reuse the same response parsing as query()
+        // ParseComplete
+        loop {
+            match read_message(&mut self.stream).await? {
+                backend::Message::ParseComplete => break,
+                backend::Message::NoticeResponse(_) => continue,
+                backend::Message::ErrorResponse(body) => {
+                    let err = parse_error_response(body);
+                    drain_until_ready(&mut self.stream, &mut self.status).await?;
+                    return Err(err);
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "expected ParseComplete, got {}",
+                        msg_tag(&other)
+                    )));
+                }
+            }
+        }
+
+        // BindComplete
+        loop {
+            match read_message(&mut self.stream).await? {
+                backend::Message::BindComplete => break,
+                backend::Message::NoticeResponse(_) => continue,
+                backend::Message::ErrorResponse(body) => {
+                    let err = parse_error_response(body);
+                    drain_until_ready(&mut self.stream, &mut self.status).await?;
+                    return Err(err);
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "expected BindComplete, got {}",
+                        msg_tag(&other)
+                    )));
+                }
+            }
+        }
+
+        // RowDescription
+        let columns = loop {
+            match read_message(&mut self.stream).await? {
+                backend::Message::RowDescription(body) => {
+                    break Arc::new(parse_row_description(body)?);
+                }
+                backend::Message::NoData => break Arc::new(Vec::new()),
+                backend::Message::NoticeResponse(_) => continue,
+                backend::Message::ErrorResponse(body) => {
+                    let err = parse_error_response(body);
+                    drain_until_ready(&mut self.stream, &mut self.status).await?;
+                    return Err(err);
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "expected RowDescription, got {}",
+                        msg_tag(&other)
+                    )));
+                }
+            }
+        };
+
+        // DataRow* → CommandComplete
+        let mut rows = Vec::new();
+        loop {
+            match read_message(&mut self.stream).await? {
+                backend::Message::DataRow(body) => {
+                    rows.push(parse_data_row(body, &columns)?);
+                }
+                backend::Message::CommandComplete(_) => break,
+                backend::Message::EmptyQueryResponse => break,
+                backend::Message::NoticeResponse(_) => continue,
+                backend::Message::ErrorResponse(body) => {
+                    let err = parse_error_response(body);
+                    drain_until_ready(&mut self.stream, &mut self.status).await?;
+                    return Err(err);
+                }
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "expected DataRow or CommandComplete, got {}",
+                        msg_tag(&other)
+                    )));
+                }
+            }
+        }
+
+        // ReadyForQuery
+        loop {
+            match read_message(&mut self.stream).await? {
+                backend::Message::ReadyForQuery(body) => {
+                    self.status = body.status();
+                    break;
+                }
+                backend::Message::NoticeResponse(_) => continue,
+                other => {
+                    return Err(Error::Protocol(format!(
+                        "expected ReadyForQuery, got {}",
+                        msg_tag(&other)
+                    )));
+                }
+            }
+        }
+
+        Ok(rows)
+    }
+
     /// Execute a statement, returning the number of affected rows.
     ///
     /// Like `query()` but skips Describe and does not collect rows.
@@ -477,7 +639,7 @@ impl Conn {
             .map(|v| v.as_ref().map(|b| b.as_ref()))
             .collect();
 
-        // Bind (binary params, no result format needed for execute)
+        // Bind (text params, no result format needed for execute)
         frontend::bind(
             "",
             "",
