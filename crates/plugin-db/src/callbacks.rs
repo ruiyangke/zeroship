@@ -57,13 +57,37 @@ fn require_string_arg(
     }
 }
 
-/// Parse a JSON string argument, defaulting to `{}` if absent.
+/// Parse a V8 value as a JSON object argument, defaulting to `{}` if absent.
+/// Accepts both JS objects (serialized via JSON.stringify) and JSON strings.
 fn parse_json_arg(
     scope: &mut v8::PinScope<'_, '_>,
     args: &v8::FunctionCallbackArguments,
     index: i32,
 ) -> Option<Value> {
-    let raw = get_string_arg(scope, args, index).unwrap_or_default();
+    if args.length() <= index {
+        return Some(Value::Object(serde_json::Map::new()));
+    }
+    let val = args.get(index);
+    if val.is_null_or_undefined() {
+        return Some(Value::Object(serde_json::Map::new()));
+    }
+
+    // If it's a JS object/array, use V8's JSON.stringify to serialize it
+    let raw = if val.is_object() || val.is_array() {
+        match v8::json::stringify(scope, val) {
+            Some(s) => s.to_rust_string_lossy(scope),
+            None => {
+                let msg = v8::String::new(scope, "db: failed to serialize argument to JSON").unwrap();
+                let exc = v8::Exception::type_error(scope, msg);
+                scope.throw_exception(exc);
+                return None;
+            }
+        }
+    } else {
+        // String or primitive — use as-is
+        val.to_rust_string_lossy(scope)
+    };
+
     if raw.is_empty() {
         return Some(Value::Object(serde_json::Map::new()));
     }
@@ -155,6 +179,11 @@ async fn exec_query(bq: BuiltQuery) -> Result<String, String> {
 
 /// Execute a built query expecting a count result.
 async fn exec_count(bq: BuiltQuery) -> Result<String, String> {
+    let has_pool = DB_POOL.with(|p| p.borrow().is_some());
+    if !has_pool {
+        crate::init_pool_async().await.map_err(|e| format!("db: lazy init failed: {e}"))?;
+    }
+
     let pool = DB_POOL.with(|p| {
         let borrow = p.borrow();
         borrow.as_ref().map(Rc::clone)
@@ -180,6 +209,11 @@ async fn exec_count(bq: BuiltQuery) -> Result<String, String> {
 
 /// Execute an insert/update/delete query, returning the affected rows.
 async fn exec_mutation(bq: BuiltQuery) -> Result<String, String> {
+    let has_pool = DB_POOL.with(|p| p.borrow().is_some());
+    if !has_pool {
+        crate::init_pool_async().await.map_err(|e| format!("db: lazy init failed: {e}"))?;
+    }
+
     let pool = DB_POOL.with(|p| {
         let borrow = p.borrow();
         borrow.as_ref().map(Rc::clone)
@@ -266,6 +300,28 @@ fn column_to_json(row: &appbase_pg::Row, name: &str, oid: u32) -> Value {
             Ok(v) => Value::String(v.to_string()),
             Err(_) => Value::Null,
         },
+        // TIMESTAMP = 1114, TIMESTAMPTZ = 1184
+        // Postgres sends as i64 microseconds since 2000-01-01 00:00:00 UTC.
+        // Return as Unix milliseconds (number) — matches JS Date.now() / new Date(ts).
+        1114 | 1184 => match row.raw_value(name) {
+            Some(bytes) if bytes.len() == 8 => {
+                let pg_usec = i64::from_be_bytes(bytes.try_into().unwrap());
+                // 2000-01-01 = 946684800 seconds since Unix epoch
+                let unix_ms = pg_usec / 1_000 + 946_684_800_000;
+                Value::Number(serde_json::Number::from(unix_ms))
+            }
+            _ => Value::Null,
+        },
+        // DATE = 1082 — i32 days since 2000-01-01
+        // Return as Unix milliseconds at midnight UTC.
+        1082 => match row.raw_value(name) {
+            Some(bytes) if bytes.len() == 4 => {
+                let pg_days = i32::from_be_bytes(bytes.try_into().unwrap());
+                let unix_ms = (pg_days as i64 + 10957) * 86_400_000;
+                Value::Number(serde_json::Number::from(unix_ms))
+            }
+            _ => Value::Null,
+        },
         // JSON = 114, JSONB = 3802
         114 | 3802 => match row.try_get::<String>(name) {
             Ok(s) => serde_json::from_str(&s).unwrap_or(Value::String(s)),
@@ -311,7 +367,7 @@ pub fn find_one(
     let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let bq = match query::build_find(&app_id, &collection, &filter, Some(1), None, None) {
+    let bq = match query::build_find(&app_id, &collection, &filter, Some(1), None, None, None) {
         Ok(q) => q,
         Err(e) => {
             // Resolve immediately with error
@@ -374,7 +430,7 @@ pub fn find(
     let order_by = opts.get("orderBy");
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let bq = match query::build_find(&app_id, &collection, &filter, limit, offset, order_by) {
+    let bq = match query::build_find(&app_id, &collection, &filter, limit, offset, order_by, None) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {

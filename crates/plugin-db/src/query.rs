@@ -61,6 +61,25 @@ fn validate_collection(name: &str) -> Result<(), QueryError> {
     Ok(())
 }
 
+/// Validate an app_id (schema name): alphanumeric + underscores + hyphens.
+/// UUIDs contain hyphens. Schema names are always double-quoted in SQL.
+fn validate_schema(name: &str) -> Result<(), QueryError> {
+    if name.is_empty() {
+        return Err(QueryError::InvalidCollection(
+            "schema name cannot be empty".to_string(),
+        ));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(QueryError::InvalidCollection(format!(
+            "invalid schema name: {name}"
+        )));
+    }
+    Ok(())
+}
+
 /// Quote an identifier (table or column name) with double-quotes.
 /// Escapes any embedded double-quotes by doubling them.
 fn quote_ident(name: &str) -> String {
@@ -75,9 +94,10 @@ pub fn build_find(
     limit: Option<i64>,
     offset: Option<i64>,
     order_by: Option<&Value>,
+    _select: Option<&Value>,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_collection(app_id)?;
+    validate_schema(app_id)?;
 
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
@@ -116,7 +136,7 @@ pub fn build_count(
     filter: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_collection(app_id)?;
+    validate_schema(app_id)?;
 
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
@@ -140,7 +160,7 @@ pub fn build_insert(
     doc: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_collection(app_id)?;
+    validate_schema(app_id)?;
 
     let obj = doc
         .as_object()
@@ -182,7 +202,7 @@ pub fn build_update_one(
     update: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_collection(app_id)?;
+    validate_schema(app_id)?;
 
     let update_obj = update
         .as_object()
@@ -247,7 +267,7 @@ pub fn build_delete_one(
     filter: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_collection(app_id)?;
+    validate_schema(app_id)?;
 
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
@@ -312,6 +332,12 @@ fn build_where(filter: &Value, params: &mut Vec<String>) -> Result<String, Query
                                 sub.iter().filter(|s| !s.is_empty()).map(String::as_str).collect();
                             if !non_empty.is_empty() {
                                 conditions.push(format!("({})", non_empty.join(" OR ")));
+                            }
+                        }
+                        "$not" => {
+                            let sub = build_where(value, params)?;
+                            if !sub.is_empty() {
+                                conditions.push(format!("NOT ({sub})"));
                             }
                         }
                         other => {
@@ -423,6 +449,23 @@ fn build_field_condition(
                         params.push(pattern.to_string());
                         format!("{col} LIKE ${}", params.len())
                     }
+                    "$ilike" => {
+                        let pattern = val.as_str().ok_or_else(|| {
+                            QueryError::InvalidFilter("$ilike must be a string".to_string())
+                        })?;
+                        params.push(pattern.to_string());
+                        format!("{col} ILIKE ${}", params.len())
+                    }
+                    "$search" => {
+                        let query_text = val.as_str().ok_or_else(|| {
+                            QueryError::InvalidFilter("$search must be a string".to_string())
+                        })?;
+                        params.push(query_text.to_string());
+                        format!(
+                            "to_tsvector('english', {col}) @@ plainto_tsquery('english', ${})",
+                            params.len()
+                        )
+                    }
                     other => {
                         return Err(QueryError::InvalidFilter(format!(
                             "unsupported operator: {other}"
@@ -516,7 +559,7 @@ mod tests {
     #[test]
     fn test_simple_eq_filter() {
         let filter = json!({"name": "alice"});
-        let q = build_find("app1", "users", &filter, None, None, None).unwrap();
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
         assert_eq!(q.sql, r#"SELECT * FROM "app1"."users" WHERE "name" = $1"#);
         assert_eq!(q.params, vec!["alice"]);
     }
@@ -524,7 +567,7 @@ mod tests {
     #[test]
     fn test_comparison_operators() {
         let filter = json!({"age": {"$gte": 18, "$lt": 65}});
-        let q = build_find("app1", "users", &filter, None, None, None).unwrap();
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains(r#""age" >= $1"#));
         assert!(q.sql.contains(r#""age" < $2"#));
         assert_eq!(q.params.len(), 2);
@@ -533,7 +576,7 @@ mod tests {
     #[test]
     fn test_in_operator() {
         let filter = json!({"status": {"$in": ["active", "pending"]}});
-        let q = build_find("app1", "users", &filter, None, None, None).unwrap();
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains(r#""status" IN ($1, $2)"#));
         assert_eq!(q.params, vec!["active", "pending"]);
     }
@@ -541,7 +584,7 @@ mod tests {
     #[test]
     fn test_or_combinator() {
         let filter = json!({"$or": [{"name": "alice"}, {"name": "bob"}]});
-        let q = build_find("app1", "users", &filter, None, None, None).unwrap();
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains("OR"));
         assert_eq!(q.params, vec!["alice", "bob"]);
     }
@@ -549,7 +592,7 @@ mod tests {
     #[test]
     fn test_empty_filter() {
         let filter = json!({});
-        let q = build_find("app1", "users", &filter, None, None, None).unwrap();
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
         assert_eq!(q.sql, r#"SELECT * FROM "app1"."users""#);
         assert!(q.params.is_empty());
     }
@@ -557,14 +600,14 @@ mod tests {
     #[test]
     fn test_null_filter() {
         let filter = Value::Null;
-        let q = build_find("app1", "users", &filter, None, None, None).unwrap();
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
         assert_eq!(q.sql, r#"SELECT * FROM "app1"."users""#);
     }
 
     #[test]
     fn test_limit_offset() {
         let filter = json!({});
-        let q = build_find("app1", "users", &filter, Some(10), Some(20), None).unwrap();
+        let q = build_find("app1", "users", &filter, Some(10), Some(20), None, None).unwrap();
         assert!(q.sql.contains("LIMIT 10"));
         assert!(q.sql.contains("OFFSET 20"));
     }
@@ -581,14 +624,14 @@ mod tests {
     #[test]
     fn test_invalid_collection() {
         let filter = json!({});
-        let result = build_find("app1", "users; DROP TABLE", &filter, None, None, None);
+        let result = build_find("app1", "users; DROP TABLE", &filter, None, None, None, None);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_exists_operator() {
         let filter = json!({"email": {"$exists": true}});
-        let q = build_find("app1", "users", &filter, None, None, None).unwrap();
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains(r#""email" IS NOT NULL"#));
         assert!(q.params.is_empty());
     }
@@ -599,5 +642,32 @@ mod tests {
         let q = build_count("app1", "users", &filter).unwrap();
         assert!(q.sql.contains("SELECT COUNT(*)"));
         assert_eq!(q.params, vec!["true"]);
+    }
+
+    #[test]
+    fn test_ilike_operator() {
+        let filter = json!({"name": {"$ilike": "%alice%"}});
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        assert_eq!(q.sql, r#"SELECT * FROM "app1"."users" WHERE "name" ILIKE $1"#);
+        assert_eq!(q.params, vec!["%alice%"]);
+    }
+
+    #[test]
+    fn test_search_operator() {
+        let filter = json!({"bio": {"$search": "rust developer"}});
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        assert_eq!(
+            q.sql,
+            r#"SELECT * FROM "app1"."users" WHERE to_tsvector('english', "bio") @@ plainto_tsquery('english', $1)"#
+        );
+        assert_eq!(q.params, vec!["rust developer"]);
+    }
+
+    #[test]
+    fn test_not_operator() {
+        let filter = json!({"$not": {"role": "admin"}});
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        assert_eq!(q.sql, r#"SELECT * FROM "app1"."users" WHERE NOT ("role" = $1)"#);
+        assert_eq!(q.params, vec!["admin"]);
     }
 }
