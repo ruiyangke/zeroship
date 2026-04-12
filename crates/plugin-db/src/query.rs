@@ -491,6 +491,34 @@ pub fn build_delete_one(
     Ok(BuiltQuery { sql, params })
 }
 
+/// Build a SELECT DISTINCT query:
+/// `SELECT DISTINCT "field" FROM "schema"."table" WHERE ... ORDER BY "field"`
+pub fn build_distinct(
+    app_id: &str,
+    collection: &str,
+    field: &str,
+    filter: &Value,
+) -> Result<BuiltQuery, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+
+    let schema = quote_ident(app_id);
+    let table = quote_ident(collection);
+    let col = quote_ident(field);
+
+    let mut params: Vec<String> = Vec::new();
+    let where_clause = build_where(filter, &mut params)?;
+
+    let mut sql = format!("SELECT DISTINCT {col} FROM {schema}.{table}");
+    if !where_clause.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_clause);
+    }
+    sql.push_str(&format!(" ORDER BY {col}"));
+
+    Ok(BuiltQuery { sql, params })
+}
+
 // ---------------------------------------------------------------------------
 // WHERE clause builder
 // ---------------------------------------------------------------------------
@@ -1015,5 +1043,31 @@ mod tests {
         let filter = json!({});
         let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
         assert!(q.sql.starts_with(r#"SELECT * FROM"#), "sql: {}", q.sql);
+    }
+
+    #[test]
+    fn test_distinct() {
+        let filter = json!({});
+        let q = build_distinct("app1", "users", "country", &filter).unwrap();
+        assert!(
+            q.sql.starts_with(r#"SELECT DISTINCT "country" FROM "app1"."users""#),
+            "sql: {}",
+            q.sql
+        );
+        assert!(q.sql.contains(r#"ORDER BY "country""#), "sql: {}", q.sql);
+        assert!(q.params.is_empty());
+    }
+
+    #[test]
+    fn test_distinct_with_filter() {
+        let filter = json!({"active": true});
+        let q = build_distinct("app1", "users", "role", &filter).unwrap();
+        assert!(
+            q.sql.contains(r#"SELECT DISTINCT "role" FROM "app1"."users" WHERE"#),
+            "sql: {}",
+            q.sql
+        );
+        assert!(q.sql.contains(r#"ORDER BY "role""#), "sql: {}", q.sql);
+        assert_eq!(q.params, vec!["true"]);
     }
 }

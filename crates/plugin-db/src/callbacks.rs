@@ -678,6 +678,74 @@ pub fn insert_many(
 }
 
 // ---------------------------------------------------------------------------
+// Callback: distinct(collection, field, filterJson)
+// ---------------------------------------------------------------------------
+
+/// `appbase.db.distinct(collection, field, filterJson)` → Promise<array>
+pub fn distinct(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+    let Some(field) = require_string_arg(scope, &args, 1, "field") else {
+        return;
+    };
+    let Some(filter) = parse_json_arg(scope, &args, 2) else {
+        return;
+    };
+
+    let app_id = get_app_id(&state);
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    let bq = match query::build_distinct(&app_id, &collection, &field, &filter) {
+        Ok(q) => q,
+        Err(e) => {
+            state.borrow_mut().spawned_ops.push(Box::pin(async move {
+                OpResult::Completed {
+                    op_id,
+                    value: error_json(&e.to_string()),
+                    request_id,
+                }
+            }));
+            rv.set(promise.into());
+            return;
+        }
+    };
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let value = match exec_query(bq).await {
+            Ok(json) => {
+                // Extract single-column values into a flat array
+                let rows: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
+                let flat: Vec<Value> = rows
+                    .into_iter()
+                    .filter_map(|row| {
+                        if let Value::Object(map) = row {
+                            map.into_values().next()
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                Value::Array(flat).to_string()
+            }
+            Err(e) => error_json(&e),
+        };
+        OpResult::Completed { op_id, value, request_id }
+    }));
+
+    rv.set(promise.into());
+}
+
+// ---------------------------------------------------------------------------
 // Callback: updateMany(collection, filterJson, updateJson)
 // ---------------------------------------------------------------------------
 

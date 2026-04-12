@@ -125,6 +125,7 @@ impl NativePlugin for DbPlugin {
         r.add("deleteOne", callbacks::delete_one);
         r.add("deleteMany", callbacks::delete_many);
         r.add("count", callbacks::count);
+        r.add("distinct", callbacks::distinct);
     }
 
     fn shutdown(&self) {
