@@ -428,9 +428,10 @@ pub fn find(
     let limit = opts.get("limit").and_then(Value::as_i64);
     let offset = opts.get("offset").and_then(Value::as_i64);
     let order_by = opts.get("orderBy");
+    let select = opts.get("select");
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let bq = match query::build_find(&app_id, &collection, &filter, limit, offset, order_by, None) {
+    let bq = match query::build_find(&app_id, &collection, &filter, limit, offset, order_by, select) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {

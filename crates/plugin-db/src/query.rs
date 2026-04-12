@@ -86,7 +86,7 @@ fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-/// Build a SELECT query: `SELECT * FROM "app_id"."collection" WHERE ... LIMIT ... OFFSET ...`
+/// Build a SELECT query: `SELECT [cols|*] FROM "app_id"."collection" WHERE ... LIMIT ... OFFSET ...`
 pub fn build_find(
     app_id: &str,
     collection: &str,
@@ -94,7 +94,7 @@ pub fn build_find(
     limit: Option<i64>,
     offset: Option<i64>,
     order_by: Option<&Value>,
-    _select: Option<&Value>,
+    select: Option<&Value>,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
@@ -105,7 +105,24 @@ pub fn build_find(
     let mut params: Vec<String> = Vec::new();
     let where_clause = build_where(filter, &mut params)?;
 
-    let mut sql = format!("SELECT * FROM {schema}.{table}");
+    // Build SELECT column list from projection, or default to *
+    let select_expr = match select {
+        Some(Value::Array(arr)) if !arr.is_empty() => {
+            let cols: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(quote_ident)
+                .collect();
+            if cols.is_empty() {
+                "*".to_string()
+            } else {
+                cols.join(", ")
+            }
+        }
+        _ => "*".to_string(),
+    };
+
+    let mut sql = format!("SELECT {select_expr} FROM {schema}.{table}");
     if !where_clause.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&where_clause);
@@ -979,5 +996,24 @@ mod tests {
         assert!(!q.sql.contains("WHERE"), "sql: {}", q.sql);
         assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
         assert!(q.params.is_empty());
+    }
+
+    #[test]
+    fn test_find_with_select() {
+        let filter = json!({});
+        let select = json!(["name", "email"]);
+        let q = build_find("app1", "users", &filter, None, None, None, Some(&select)).unwrap();
+        assert!(
+            q.sql.contains(r#"SELECT "name", "email" FROM"#),
+            "sql: {}",
+            q.sql
+        );
+    }
+
+    #[test]
+    fn test_find_without_select() {
+        let filter = json!({});
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        assert!(q.sql.starts_with(r#"SELECT * FROM"#), "sql: {}", q.sql);
     }
 }
