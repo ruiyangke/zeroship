@@ -1,11 +1,11 @@
-# appbase:db — Database Module
+# @appbase/db — Database SDK
 
 ## Overview
 
-`appbase:db` provides a document-style API backed by real Postgres columns. Creators define models with a type-safe builder (`t.string().required()`), get automatic schema migrations on deploy, built-in validation, and a MongoDB-like query API. No raw SQL is exposed — the API generates parameterized SQL internally, preventing injection and cross-tenant access.
+`@appbase/db` provides a document-style API backed by real Postgres columns. Creators define models with a type-safe builder (`t.string().required()`), get automatic schema migrations on deploy, built-in validation, and a MongoDB-like query API. No raw SQL is exposed — the SDK generates structured calls to the native `appbase.db.*` primitives, which build parameterized SQL internally.
 
 ```javascript
-import { model, t, db } from "appbase:db";
+import { model, t } from "@appbase/db";
 
 const users = model("users", {
   name:  t.string().required(),
@@ -18,17 +18,49 @@ const user = await users.insert({ name: "Alice", email: "alice@example.com" });
 const admins = await users.find({ role: "admin" }).sort({ name: 1 }).limit(10);
 ```
 
-## Module Resolution
+## Architecture
 
 ```
-import { model, t, db } from "appbase:db"
-  → V8 resolve_callback detects "appbase:" prefix
-  → loads embed/db.js (compiled into binary)
-  → db.js calls native callbacks (__dbInsert, __dbFind, etc.)
-  → native callbacks generate parameterized SQL
-  → appbase-pg executes against Postgres
-  → results returned to V8
+@appbase/db (npm package, JS/TS)       ← high-level SDK, evolves fast
+  model(), t, Collection, Query
+  Validation, error mapping
+  │
+  │ calls appbase.db.* (structured JSON, not SQL)
+  ▼
+appbase.db.* (Rust, global primitives)  ← security boundary, stable kernel
+  appbase.db.find(collection, filterJson, optsJson)
+  appbase.db.insert(collection, docJson)
+  appbase.db.updateOne(collection, filterJson, changesJson)
+  │
+  │ validates → builds parameterized SQL → executes
+  ▼
+appbase-pg → Postgres
 ```
+
+`@appbase/db` is a standard npm package. Creators install it with `npm install @appbase/db`. The compiler (esbuild) bundles it into the `.appbundle` like any other dependency.
+
+The `appbase.db.*` global namespace is the native primitive layer — registered by Rust before any user code runs, frozen (can't be modified), and enforces security (schema isolation, operator whitelist, parameterized queries).
+
+### Native primitives (`appbase.db.*`)
+
+These are the low-level "syscalls" that the SDK calls. SDK authors may use these directly; app creators use the SDK instead.
+
+```typescript
+appbase.db.find(collection, filterJson, optsJson)         → Promise<string>
+appbase.db.findOne(collection, filterJson, optsJson)       → Promise<string | null>
+appbase.db.insert(collection, docJson)                     → Promise<string>
+appbase.db.insertMany(collection, docsJson)                → Promise<string>
+appbase.db.updateOne(collection, filterJson, changesJson)  → Promise<string>
+appbase.db.updateMany(collection, filterJson, changesJson) → Promise<string>
+appbase.db.deleteOne(collection, filterJson)               → Promise<string>
+appbase.db.deleteMany(collection, filterJson)              → Promise<string>
+appbase.db.count(collection, filterJson)                   → Promise<number>
+appbase.db.aggregate(collection, pipelineJson)             → Promise<string>
+appbase.db.distinct(collection, field, filterJson)         → Promise<string>
+appbase.db.registerModel(name, schemaJson, optionsJson)    → void
+```
+
+All arguments and return values are JSON strings. The native layer validates everything: collection names (must be registered), filter operators (whitelisted), field names (must exist in model). SQL injection is impossible — user input never touches SQL strings.
 
 ## Security Model
 
@@ -82,7 +114,7 @@ t.ref(otherModel)       // UUID REFERENCES other_table(id)
 ### Model
 
 ```javascript
-import { model, t } from "appbase:db";
+import { model, t } from "@appbase/db";
 
 const users = model("users", {
   name:     t.string().required().min(1).max(100),
@@ -590,16 +622,21 @@ const posts = model("posts", {
 
 ```
 Worker thread:
-  ntex handler → V8 isolate → db.find() → __dbFind callback
+  ntex handler → V8 isolate → @appbase/db → appbase.db.find()
+    → Rust native callback
+    → validate collection + filter + operators
+    → build parameterized SQL
     → RuntimeState.db_pool (Rc<Pool>, per-thread)
     → SET search_path TO app_{app_id}
-    → parameterized SQL → Postgres → rows → V8
+    → appbase-pg → Postgres → rows → JSON → V8
 
 Per-thread: 8 idle connections, shared across all isolates
 32 threads × 8 connections = 256 max per worker
 ```
 
 ## Metering
+
+Every operation calls `appbase.meter.increment()`:
 
 ```
 insert()            → db.writes +1
@@ -620,16 +657,26 @@ count()             → db.reads +1
 ## Implementation
 
 ```
-Runtime:
-  embed/db.js             JS polyfill (model, t, API → native callbacks)
-  src/db_callbacks.rs     Native V8 callbacks
-  src/query_builder.rs    Filters/updates/aggregations → parameterized SQL
-  src/schema_manager.rs   Model definition → CREATE TABLE / ALTER TABLE
-  src/validator.rs        Type + constraint validation
+Two layers:
+
+1. npm package (@appbase/db):
+   packages/db/src/index.ts       — model(), t, Collection, Query
+   packages/db/src/query.ts       — Query chain builder
+   packages/db/src/validator.ts   — type + constraint checking (JS)
+   packages/db/src/types.ts       — TypeScript types
+   packages/db/package.json       — { "name": "@appbase/db" }
+
+2. Rust native primitives (appbase.db.*):
+   runtime/src/db_callbacks.rs    — register appbase.db.* on globalThis
+   runtime/src/query_builder.rs   — filter/update/aggregate JSON → parameterized SQL
+   runtime/src/schema_manager.rs  — model definition → CREATE TABLE / ALTER TABLE
 
 Control plane:
-  On deploy: read model definitions → diff with stored schema → migrate
+  On deploy: read model definitions from app code → diff with stored schema → migrate
 
 Worker:
   Inject Postgres Pool into RuntimeState (per-thread, Rc-based)
+
+Type declarations (@appbase/types):
+  packages/types/globals.d.ts     — declares appbase.db.*, appbase.auth.*, etc.
 ```

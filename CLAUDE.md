@@ -73,37 +73,85 @@ crates/
 - E2E tests (20/20 passing), benchmarks (354K req/s pipeline)
 - Zero tokio in the entire stack
 
+## SDK Architecture
+
+Two layers: native primitives (Rust kernel) and npm packages (JS ecosystem).
+
+### Native primitives (`appbase.*` global)
+
+Registered by Rust on every V8 isolate. The "syscalls" of the platform — stable, secure, low-level:
+
+```
+appbase.db.*       — structured database operations (no raw SQL)
+appbase.auth.*     — password hashing, JWT sign/verify
+appbase.storage.*  — object storage put/get/delete
+appbase.kv.*       — key-value get/set/delete
+appbase.meter.*    — billing counter increment
+```
+
+Creators don't call these directly. SDK packages wrap them.
+
+### SDK packages (`@appbase/*` npm scope)
+
+High-level APIs published as standard npm packages. Creators install and import them:
+
+```javascript
+import { model, t } from "@appbase/db";
+import { auth } from "@appbase/auth";
+import { storage } from "@appbase/storage";
+import { kv } from "@appbase/kv";
+```
+
+SDK packages call `appbase.*` primitives internally. They handle validation, query building, error mapping, and TypeScript types. They evolve independently of the Rust runtime.
+
+### Extensibility
+
+Features that compose existing primitives are pure JS packages — no Rust needed:
+
+```
+Needs Rust (new primitive):        Pure JS (npm package):
+  New storage backend               @appbase/email (calls fetch)
+  New database engine                @appbase/payments (calls fetch to Stripe)
+  Low-level crypto ops               @appbase/ai (calls fetch to OpenAI/Claude)
+                                     @appbase/permissions (uses db + auth)
+                                     @appbase/analytics (uses db)
+                                     Third-party: @cooldev/appbase-redis
+```
+
+~90% of new features are pure JS. The native layer is the stable kernel.
+
 ## What's next
 
 ### Phase 2: Creator platform (the product)
 
-Per-app services that let creators ship apps without managing infrastructure:
-
-- **Per-app auth** — app_users table, signUp/signIn/verify exposed to V8
-- **Per-app database** — Postgres schema isolation, db.query()/db.execute() in V8
-- **Per-app storage** — S3-compatible object storage, storage.put()/get() in V8
-- **Stripe Connect** — creators connect their Stripe, end users subscribe, revenue splits automatically
-- **Creator dashboard** — web UI for managing apps, pricing, revenue, analytics
+- **@appbase/db** — per-app database, model builder, document API, auto-migration
+- **@appbase/auth** — per-app user accounts, signUp/signIn/verify, JWT sessions
+- **@appbase/storage** — per-app file storage, put/get/delete
+- **Stripe Connect** — creators connect Stripe, end users subscribe, revenue splits
+- **Creator dashboard** — web UI for apps, pricing, revenue, analytics
 - **Custom domains** — {app-name}.appbase.dev + creator's own domain
 
 ### Phase 3: AI app builder (the differentiator)
 
 - Creator describes the app in natural language
-- AI generates: V8 app code, database schema, auth flow, pricing page
+- AI generates: app code, database schema, auth flow, pricing page
 - One-click deploy to the platform
 - Iterative: "add a feature that..." → AI updates the app
 
 ### Phase 4: Ecosystem
 
-- **KV Store** — sessions, cache, feature flags (fast, per-app)
-- **Message Queue** — async jobs, webhooks, event processing
-- **Cron** — scheduled tasks
+- **@appbase/kv** — sessions, cache, feature flags
+- **@appbase/email** — transactional email (via Resend/Sendgrid)
+- **@appbase/payments** — Stripe wrapper for subscriptions
+- **@appbase/ai** — LLM inference wrapper
 - **Marketplace** — discover and install published apps
 
 ## Specs
 
-- `docs/specs/appbundle-format.md` — binary bundle format
+- `docs/specs/api-design-guidelines.md` — 10 principles for AI-friendly APIs
+- `docs/specs/db.md` — @appbase/db: model builder, document API, aggregation
 - `docs/specs/billing-metering.md` — Meter trait, 25+ metrics, pricing, spending limits
+- `docs/specs/appbundle-format.md` — binary bundle format
 - `docs/specs/websocket-design.md` — WebSocketPair, RFC 6455
 
 ## Development
