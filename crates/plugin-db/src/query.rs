@@ -391,6 +391,61 @@ pub fn build_insert_many(
     Ok(BuiltQuery { sql, params })
 }
 
+/// Build an UPDATE query for multiple rows (no LIMIT 1):
+/// `UPDATE "app_id"."collection" SET ... WHERE ... RETURNING *`
+pub fn build_update_many(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    update: &Value,
+) -> Result<BuiltQuery, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+
+    let schema = quote_ident(app_id);
+    let table = quote_ident(collection);
+
+    let mut params: Vec<String> = Vec::new();
+    let set_clauses = build_set_clauses(update, &mut params)?;
+
+    let where_clause = build_where(filter, &mut params)?;
+
+    let mut sql = format!("UPDATE {schema}.{table} SET {}", set_clauses.join(", "));
+    if !where_clause.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_clause);
+    }
+    sql.push_str(" RETURNING *");
+
+    Ok(BuiltQuery { sql, params })
+}
+
+/// Build a DELETE query for multiple rows (no LIMIT 1):
+/// `DELETE FROM "app_id"."collection" WHERE ... RETURNING *`
+pub fn build_delete_many(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+) -> Result<BuiltQuery, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+
+    let schema = quote_ident(app_id);
+    let table = quote_ident(collection);
+
+    let mut params: Vec<String> = Vec::new();
+    let where_clause = build_where(filter, &mut params)?;
+
+    let mut sql = format!("DELETE FROM {schema}.{table}");
+    if !where_clause.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_clause);
+    }
+    sql.push_str(" RETURNING *");
+
+    Ok(BuiltQuery { sql, params })
+}
+
 /// Build a DELETE query: `DELETE FROM "app_id"."collection" WHERE ... RETURNING *`
 pub fn build_delete_one(
     app_id: &str,
@@ -894,5 +949,35 @@ mod tests {
         let docs = json!([]);
         let result = build_insert_many("app1", "users", &docs);
         assert!(result.is_err(), "expected error for empty array");
+    }
+
+    #[test]
+    fn test_update_many() {
+        let filter = json!({"active": true});
+        let update = json!({"status": "verified"});
+        let q = build_update_many("app1", "users", &filter, &update).unwrap();
+        assert!(q.sql.starts_with(r#"UPDATE "app1"."users" SET"#), "sql: {}", q.sql);
+        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        // Must NOT contain ctid subquery (that's updateOne's approach)
+        assert!(!q.sql.contains("ctid"), "sql should not contain ctid: {}", q.sql);
+    }
+
+    #[test]
+    fn test_delete_many() {
+        let filter = json!({"active": false});
+        let q = build_delete_many("app1", "users", &filter).unwrap();
+        assert!(q.sql.starts_with(r#"DELETE FROM "app1"."users""#), "sql: {}", q.sql);
+        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        assert!(!q.sql.contains("ctid"), "sql should not contain ctid: {}", q.sql);
+        assert_eq!(q.params, vec!["false"]);
+    }
+
+    #[test]
+    fn test_delete_many_no_filter() {
+        let filter = json!({});
+        let q = build_delete_many("app1", "users", &filter).unwrap();
+        assert!(!q.sql.contains("WHERE"), "sql: {}", q.sql);
+        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        assert!(q.params.is_empty());
     }
 }

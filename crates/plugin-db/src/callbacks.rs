@@ -677,6 +677,119 @@ pub fn insert_many(
 }
 
 // ---------------------------------------------------------------------------
+// Callback: updateMany(collection, filterJson, updateJson)
+// ---------------------------------------------------------------------------
+
+/// `appbase.db.updateMany(collection, filterJson, updateJson)` → Promise<{ updated: number }>
+pub fn update_many(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+    let Some(filter) = parse_json_arg(scope, &args, 1) else {
+        return;
+    };
+    let Some(update) = parse_json_arg(scope, &args, 2) else {
+        return;
+    };
+
+    let app_id = get_app_id(&state);
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    let bq = match query::build_update_many(&app_id, &collection, &filter, &update) {
+        Ok(q) => q,
+        Err(e) => {
+            state.borrow_mut().spawned_ops.push(Box::pin(async move {
+                OpResult::Completed {
+                    op_id,
+                    value: error_json(&e.to_string()),
+                    request_id,
+                }
+            }));
+            rv.set(promise.into());
+            return;
+        }
+    };
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let value = match exec_mutation(bq).await {
+            Ok(json) => {
+                let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
+                let n = arr.len();
+                serde_json::json!({ "updated": n }).to_string()
+            }
+            Err(e) => error_json(&e),
+        };
+        OpResult::Completed { op_id, value, request_id }
+    }));
+
+    rv.set(promise.into());
+}
+
+// ---------------------------------------------------------------------------
+// Callback: deleteMany(collection, filterJson)
+// ---------------------------------------------------------------------------
+
+/// `appbase.db.deleteMany(collection, filterJson)` → Promise<{ deleted: number }>
+pub fn delete_many(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+    let Some(filter) = parse_json_arg(scope, &args, 1) else {
+        return;
+    };
+
+    let app_id = get_app_id(&state);
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    let bq = match query::build_delete_many(&app_id, &collection, &filter) {
+        Ok(q) => q,
+        Err(e) => {
+            state.borrow_mut().spawned_ops.push(Box::pin(async move {
+                OpResult::Completed {
+                    op_id,
+                    value: error_json(&e.to_string()),
+                    request_id,
+                }
+            }));
+            rv.set(promise.into());
+            return;
+        }
+    };
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let value = match exec_mutation(bq).await {
+            Ok(json) => {
+                let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
+                let n = arr.len();
+                serde_json::json!({ "deleted": n }).to_string()
+            }
+            Err(e) => error_json(&e),
+        };
+        OpResult::Completed { op_id, value, request_id }
+    }));
+
+    rv.set(promise.into());
+}
+
+// ---------------------------------------------------------------------------
 // Callback: count(collection, filterJson)
 // ---------------------------------------------------------------------------
 
