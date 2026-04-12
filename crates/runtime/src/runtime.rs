@@ -198,6 +198,8 @@ pub struct Runtime {
     pub(crate) initialized: bool,
     pub(crate) modules: Vec<ModuleEntry>,
     pub(crate) state: SharedState,
+    /// Plugins registered on appbase.* namespace.
+    plugins: Vec<Box<dyn crate::plugin::NativePlugin>>,
 
     /// Stream forwarders: stream_id -> StreamForwarder for outbound HTTP streams.
     stream_forwarders: HashMap<u32, StreamForwarder>,
@@ -233,6 +235,18 @@ impl Runtime {
         env_vars: HashMap<String, String>,
         cpu_limit: Option<Duration>,
         wall_timeout: Option<Duration>,
+    ) -> Self {
+        Self::new_with_plugins(modules, env_vars, cpu_limit, wall_timeout, Vec::new())
+    }
+
+    /// Create a new runtime with plugins.
+    /// Plugins register native functions on `appbase.{namespace}.*`.
+    pub fn new_with_plugins(
+        modules: Vec<ModuleEntry>,
+        env_vars: HashMap<String, String>,
+        cpu_limit: Option<Duration>,
+        wall_timeout: Option<Duration>,
+        plugins: Vec<Box<dyn crate::plugin::NativePlugin>>,
     ) -> Self {
         init_v8();
 
@@ -272,6 +286,7 @@ impl Runtime {
             initialized: false,
             modules,
             state,
+            plugins,
             stream_forwarders: HashMap::new(),
             pending_requests: HashMap::new(),
             next_direct_request_id: 1,
@@ -344,7 +359,7 @@ impl Runtime {
             v8::scope!(let handle_scope, &mut self.isolate);
             let context = v8::Local::new(handle_scope, &self.context);
             let scope = &mut v8::ContextScope::new(handle_scope, context);
-            self.dispatch_fn = Some(load_polyfills_and_modules(scope, &modules));
+            self.dispatch_fn = Some(load_polyfills_and_modules(scope, &modules, &self.plugins));
 
             // Check if __rpc.onRequest is a function. If so, cache a Global ref
             // for the native HTTP dispatch path.

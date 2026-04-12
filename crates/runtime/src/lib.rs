@@ -15,6 +15,7 @@ pub mod runtime;
 pub mod storage;
 pub mod bundle;
 pub mod serve;
+pub mod plugin;
 
 #[cfg(target_os = "linux")]
 pub mod cpu_timer;
@@ -28,3 +29,4 @@ pub use runtime::{Runtime, DispatchOutcome, HttpDispatchResult, AsyncWork, Async
 pub use channel::{ResultSender, ResultReceiver, StreamWriter, StreamReader};
 pub use bundle::{AppBundle, ModuleType, ModuleInfo};
 pub use serve::{start_server, ServerOptions};
+pub use plugin::{NativePlugin, NativeRegistrar, PluginConfig};

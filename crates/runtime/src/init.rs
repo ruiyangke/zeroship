@@ -132,8 +132,12 @@ pub const DISPATCH_JS: &str = r#"(function(__req_json) {
 pub fn load_polyfills_and_modules(
     scope: &mut v8::PinScope,
     modules: &[crate::modules::ModuleEntry],
+    plugins: &[Box<dyn crate::plugin::NativePlugin>],
 ) -> v8::Global<v8::Function> {
     setup_globals(scope);
+
+    // Register plugins on appbase.* namespace
+    crate::plugin::register_plugins(scope, plugins);
 
     // Load polyfills
     for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS, EVENTS_JS, BLOB_JS, FORMDATA_JS, WEBSOCKET_JS] {
