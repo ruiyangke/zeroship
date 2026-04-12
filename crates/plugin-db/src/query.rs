@@ -194,7 +194,108 @@ pub fn build_insert(
     Ok(BuiltQuery { sql, params })
 }
 
-/// Build an UPDATE query: `UPDATE "app_id"."collection" SET ... WHERE ... RETURNING *`
+/// Build SET clauses from an update object, supporting update operators.
+///
+/// Walks each key in `update`:
+/// - If the value is `{ "$op": val }` where `$op` is a known update operator,
+///   generates operator-specific SQL.
+/// - Otherwise treats it as a plain `$set` (`"col" = $N`).
+///
+/// Supported operators:
+/// - `$set`      — `"col" = $N`
+/// - `$inc`      — `"col" = "col" + $N`
+/// - `$dec`      — `"col" = "col" - $N`
+/// - `$mul`      — `"col" = "col" * $N`
+/// - `$push`     — `"col" = "col" || to_jsonb($N::text)`
+/// - `$pull`     — `"col" = "col" - $N`
+/// - `$addToSet` — `"col" = CASE WHEN "col" @> to_jsonb($N::text) THEN "col" ELSE "col" || to_jsonb($N::text) END`
+pub fn build_set_clauses(
+    update: &Value,
+    params: &mut Vec<String>,
+) -> Result<Vec<String>, QueryError> {
+    let update_obj = update
+        .as_object()
+        .ok_or_else(|| QueryError::InvalidFilter("update must be an object".to_string()))?;
+
+    // Support { $set: { field: value } } top-level syntax
+    let fields: Vec<(&String, &Value)> = if let Some(set_val) = update_obj.get("$set") {
+        let obj = set_val
+            .as_object()
+            .ok_or_else(|| QueryError::InvalidFilter("$set must be an object".to_string()))?;
+        obj.iter().collect()
+    } else {
+        update_obj.iter().collect()
+    };
+
+    if fields.is_empty() {
+        return Err(QueryError::InvalidFilter(
+            "update fields cannot be empty".to_string(),
+        ));
+    }
+
+    let mut set_clauses = Vec::new();
+
+    for (key, value) in fields {
+        let col = quote_ident(key);
+
+        // Check if the value is an operator object: { "$op": val }
+        if let Some(ops) = value.as_object() {
+            if let Some(op_key) = ops.keys().find(|k| k.starts_with('$')) {
+                let op = op_key.as_str();
+                let op_val = &ops[op_key];
+
+                let clause = match op {
+                    "$set" => {
+                        params.push(value_to_param(op_val));
+                        format!("{col} = ${}", params.len())
+                    }
+                    "$inc" => {
+                        params.push(value_to_param(op_val));
+                        format!("{col} = {col} + ${}", params.len())
+                    }
+                    "$dec" => {
+                        params.push(value_to_param(op_val));
+                        format!("{col} = {col} - ${}", params.len())
+                    }
+                    "$mul" => {
+                        params.push(value_to_param(op_val));
+                        format!("{col} = {col} * ${}", params.len())
+                    }
+                    "$push" => {
+                        params.push(value_to_param(op_val));
+                        format!("{col} = {col} || to_jsonb(${}::text)", params.len())
+                    }
+                    "$pull" => {
+                        params.push(value_to_param(op_val));
+                        format!("{col} = {col} - ${}", params.len())
+                    }
+                    "$addToSet" => {
+                        params.push(value_to_param(op_val));
+                        let n = params.len();
+                        format!(
+                            "{col} = CASE WHEN {col} @> to_jsonb(${n}::text) THEN {col} ELSE {col} || to_jsonb(${n}::text) END"
+                        )
+                    }
+                    other => {
+                        return Err(QueryError::InvalidFilter(format!(
+                            "unsupported update operator: {other}"
+                        )));
+                    }
+                };
+                set_clauses.push(clause);
+                continue;
+            }
+        }
+
+        // Plain field: value — treat as $set
+        params.push(value_to_param(value));
+        set_clauses.push(format!("{col} = ${}", params.len()));
+    }
+
+    Ok(set_clauses)
+}
+
+/// Build an UPDATE query: `UPDATE "app_id"."collection" SET ... WHERE ctid = (...) RETURNING *`
 pub fn build_update_one(
     app_id: &str,
     collection: &str,
@@ -204,50 +305,16 @@ pub fn build_update_one(
     validate_collection(collection)?;
     validate_schema(app_id)?;
 
-    let update_obj = update
-        .as_object()
-        .ok_or_else(|| QueryError::InvalidFilter("update must be an object".to_string()))?;
-
-    // Support both { field: value } and { $set: { field: value } } syntax
-    let fields = if let Some(set_val) = update_obj.get("$set") {
-        set_val
-            .as_object()
-            .ok_or_else(|| QueryError::InvalidFilter("$set must be an object".to_string()))?
-    } else {
-        update_obj
-    };
-
-    if fields.is_empty() {
-        return Err(QueryError::InvalidFilter(
-            "update fields cannot be empty".to_string(),
-        ));
-    }
-
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
-    let mut set_clauses = Vec::new();
-
-    for (key, value) in fields {
-        params.push(value_to_param(value));
-        set_clauses.push(format!("{} = ${}", quote_ident(key), params.len()));
-    }
+    let set_clauses = build_set_clauses(update, &mut params)?;
 
     let where_clause = build_where(filter, &mut params)?;
 
-    let mut sql = format!(
-        "UPDATE {schema}.{table} SET {}",
-        set_clauses.join(", ")
-    );
-
-    if !where_clause.is_empty() {
-        sql.push_str(" WHERE ");
-        sql.push_str(&where_clause);
-    }
-
     // LIMIT 1 for updateOne — use a subquery with ctid for Postgres
-    sql = format!(
+    let sql = format!(
         "UPDATE {schema}.{table} SET {} WHERE ctid = (SELECT ctid FROM {schema}.{table}{} LIMIT 1) RETURNING *",
         set_clauses.join(", "),
         if where_clause.is_empty() {
@@ -669,5 +736,76 @@ mod tests {
         let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
         assert_eq!(q.sql, r#"SELECT * FROM "app1"."users" WHERE NOT ("role" = $1)"#);
         assert_eq!(q.params, vec!["admin"]);
+    }
+
+    #[test]
+    fn test_update_inc() {
+        let filter = json!({"id": 1});
+        let update = json!({"views": {"$inc": 1}});
+        let q = build_update_one("app1", "posts", &filter, &update).unwrap();
+        assert!(q.sql.contains(r#""views" = "views" + $1"#), "sql: {}", q.sql);
+        assert_eq!(q.params[0], "1");
+    }
+
+    #[test]
+    fn test_update_dec() {
+        let filter = json!({"id": 1});
+        let update = json!({"stock": {"$dec": 1}});
+        let q = build_update_one("app1", "items", &filter, &update).unwrap();
+        assert!(q.sql.contains(r#""stock" = "stock" - $1"#), "sql: {}", q.sql);
+        assert_eq!(q.params[0], "1");
+    }
+
+    #[test]
+    fn test_update_mul() {
+        let filter = json!({"id": 1});
+        let update = json!({"price": {"$mul": 1.1}});
+        let q = build_update_one("app1", "items", &filter, &update).unwrap();
+        assert!(q.sql.contains(r#""price" = "price" * $1"#), "sql: {}", q.sql);
+        assert_eq!(q.params[0], "1.1");
+    }
+
+    #[test]
+    fn test_update_push() {
+        let filter = json!({"id": 1});
+        let update = json!({"tags": {"$push": "new"}});
+        let q = build_update_one("app1", "posts", &filter, &update).unwrap();
+        assert!(
+            q.sql.contains(r#""tags" = "tags" || to_jsonb($1::text)"#),
+            "sql: {}",
+            q.sql
+        );
+        assert_eq!(q.params[0], "new");
+    }
+
+    #[test]
+    fn test_update_pull() {
+        let filter = json!({"id": 1});
+        let update = json!({"tags": {"$pull": "old"}});
+        let q = build_update_one("app1", "posts", &filter, &update).unwrap();
+        assert!(q.sql.contains(r#""tags" = "tags" - $1"#), "sql: {}", q.sql);
+        assert_eq!(q.params[0], "old");
+    }
+
+    #[test]
+    fn test_update_add_to_set() {
+        let filter = json!({"id": 1});
+        let update = json!({"tags": {"$addToSet": "unique"}});
+        let q = build_update_one("app1", "posts", &filter, &update).unwrap();
+        assert!(q.sql.contains("CASE WHEN"), "sql: {}", q.sql);
+        assert!(q.sql.contains("@>"), "sql: {}", q.sql);
+        assert_eq!(q.params[0], "unique");
+    }
+
+    #[test]
+    fn test_update_mixed_operators() {
+        let filter = json!({"id": 1});
+        let update = json!({"name": "New", "views": {"$inc": 1}});
+        let q = build_update_one("app1", "posts", &filter, &update).unwrap();
+        // Both plain set and $inc should appear
+        assert!(q.sql.contains(r#""name" = $"#), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#""views" = "views" + $"#), "sql: {}", q.sql);
+        assert!(q.params.contains(&"New".to_string()));
+        assert!(q.params.contains(&"1".to_string()));
     }
 }
