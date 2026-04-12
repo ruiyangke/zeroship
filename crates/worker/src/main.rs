@@ -13,6 +13,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 pub struct WorkerConfig {
     pub control_url: String,
     pub control_key: String,
+    pub db_url: Option<String>,
     pub max_isolates: usize,
     pub poll_interval_secs: u64,
 }
@@ -36,10 +37,12 @@ async fn main() -> std::io::Result<()> {
     let control_key = arg_or_env(&args, "--control-key", "CONTROL_KEY", "");
     let max_isolates = arg_or_env(&args, "--max-isolates", "MAX_ISOLATES", "200");
     let poll_interval = arg_or_env(&args, "--poll-interval", "POLL_INTERVAL", "5");
+    let db_url = arg_or_env(&args, "--db", "DATABASE_URL", "");
 
     let config = Arc::new(WorkerConfig {
         control_url,
         control_key,
+        db_url: if db_url.is_empty() { None } else { Some(db_url) },
         max_isolates: max_isolates.parse().unwrap_or(200),
         poll_interval_secs: poll_interval.parse().unwrap_or(5),
     });
@@ -57,7 +60,7 @@ async fn main() -> std::io::Result<()> {
 
     let mut server = web::server(async move || {
         let config = config.clone();
-        cache::init_cache(config.max_isolates);
+        cache::init_cache(config.max_isolates, config.db_url.clone());
         sync::start_sync(config.clone());
 
         web::App::new()

@@ -16,7 +16,7 @@ use appbase_runtime::state::{OpResult, SharedState};
 use serde_json::Value;
 
 use crate::query::{self, BuiltQuery};
-use crate::{ensure_pool, DB_POOL};
+use crate::DB_POOL;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -125,7 +125,14 @@ fn setup_promise<'s>(
 }
 
 /// Execute a built query via the pool and return JSON string result.
+/// Lazily creates the pool on first use if not yet initialized.
 async fn exec_query(bq: BuiltQuery) -> Result<String, String> {
+    // Lazy pool init: if no pool yet, create one now
+    let has_pool = DB_POOL.with(|p| p.borrow().is_some());
+    if !has_pool {
+        crate::init_pool_async().await.map_err(|e| format!("db: lazy init failed: {e}"))?;
+    }
+
     let pool = DB_POOL.with(|p| {
         let borrow = p.borrow();
         borrow.as_ref().map(Rc::clone)
@@ -300,9 +307,6 @@ pub fn find_one(
         return;
     };
 
-    if ensure_pool(scope).is_none() {
-        return;
-    }
 
     let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
@@ -363,9 +367,6 @@ pub fn find(
     };
     let opts = parse_json_arg(scope, &args, 2).unwrap_or(Value::Object(serde_json::Map::new()));
 
-    if ensure_pool(scope).is_none() {
-        return;
-    }
 
     let app_id = get_app_id(&state);
     let limit = opts.get("limit").and_then(Value::as_i64);
@@ -421,9 +422,6 @@ pub fn insert(
         return;
     };
 
-    if ensure_pool(scope).is_none() {
-        return;
-    }
 
     let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
@@ -483,9 +481,6 @@ pub fn update_one(
         return;
     };
 
-    if ensure_pool(scope).is_none() {
-        return;
-    }
 
     let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
@@ -541,9 +536,6 @@ pub fn delete_one(
         return;
     };
 
-    if ensure_pool(scope).is_none() {
-        return;
-    }
 
     let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
@@ -599,9 +591,6 @@ pub fn count(
         return;
     };
 
-    if ensure_pool(scope).is_none() {
-        return;
-    }
 
     let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);

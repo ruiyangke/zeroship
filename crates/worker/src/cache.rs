@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 use uuid::Uuid;
 
+use appbase_runtime::plugin::NativePlugin;
 use appbase_runtime::runtime::{AsyncEvent, AsyncWork, Runtime};
 
 struct IsolateEntry {
@@ -18,15 +19,43 @@ struct AppCache {
 
 thread_local! {
     static CACHE: RefCell<Option<AppCache>> = const { RefCell::new(None) };
+    static DB_URL: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
-pub fn init_cache(max_size: usize) {
+pub fn init_cache(max_size: usize, db_url: Option<String>) {
     CACHE.with(|c| {
         *c.borrow_mut() = Some(AppCache {
             isolates: HashMap::new(),
             max_size,
         });
     });
+    if let Some(url) = db_url {
+        DB_URL.with(|u| *u.borrow_mut() = Some(url));
+    }
+}
+
+/// Initialize async resources (DB pool). Must be called on compio runtime.
+pub async fn init_async() {
+    if DB_URL.with(|u| u.borrow().is_some()) {
+        if let Err(e) = appbase_plugin_db::init_pool_async().await {
+            eprintln!("[worker] db pool init failed: {e}");
+        }
+    }
+}
+
+/// Create plugins for a new Runtime.
+fn create_plugins() -> Vec<Box<dyn NativePlugin>> {
+    let mut plugins: Vec<Box<dyn NativePlugin>> = Vec::new();
+    if DB_URL.with(|u| u.borrow().is_some()) {
+        let plugin = appbase_plugin_db::DbPlugin::new();
+        let config = std::sync::Arc::new(appbase_runtime::plugin::PluginConfig {
+            db_url: DB_URL.with(|u| u.borrow().clone()),
+            ..Default::default()
+        });
+        plugin.init(&config);
+        plugins.push(Box::new(plugin));
+    }
+    plugins
 }
 
 /// Get or create a V8 runtime for an app. Returns None if the app isn't loaded.
@@ -66,11 +95,16 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8]) -> bool {
         // Remove old runtime if exists
         cache.isolates.remove(&app_id);
 
-        let rt = Rc::new(RefCell::new(Runtime::new_direct(
+        let plugins = create_plugins();
+        let mut env_vars = HashMap::new();
+        env_vars.insert("APP_ID".to_string(), app_id.to_string());
+
+        let rt = Rc::new(RefCell::new(Runtime::new_with_plugins(
             modules,
-            HashMap::new(),
+            env_vars,
             None,
             None,
+            plugins,
         )));
 
         // Warmup (isolate is entered after new_direct)
