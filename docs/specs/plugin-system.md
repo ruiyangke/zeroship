@@ -2,180 +2,235 @@
 
 ## Overview
 
-The runtime is a kernel. Plugins are drivers. The runtime provides V8, Web APIs (fetch, crypto, console, timers), and a plugin registration API. Platform features (database, auth, storage, KV) are plugins that register native functions on the `appbase.*` global namespace.
-
-```
-Runtime (kernel):
-  V8 isolate, module loading, event loop, Web APIs
-  NativePlugin trait — the extension point
-
-Plugins (drivers):
-  plugin-db      → appbase.db.*
-  plugin-auth    → appbase.auth.*
-  plugin-storage → appbase.storage.*
-  plugin-kv      → appbase.kv.*
-
-Worker (assembler):
-  Creates Runtime with chosen plugins
-  Each plugin gets its own namespace on appbase.*
-```
+The runtime is a kernel. Plugins are drivers. The runtime provides V8, Web APIs (fetch, crypto, console, timers), and a plugin registration API. Platform features (database, auth, storage, KV) are plugins that register native functions on the `appbase.*` global.
 
 ## Design
 
 ### NativePlugin trait
 
 ```rust
-/// A native extension that registers functions on the appbase.* global.
-pub trait NativePlugin: Send {
+pub trait NativePlugin: Send + Sync {
     /// Namespace under appbase.* (e.g., "db", "auth", "storage", "kv").
-    /// Must be a valid JS identifier: lowercase, alphanumeric, no dots.
     fn namespace(&self) -> &str;
 
-    /// Register native functions. Called once per V8 isolate at creation time.
-    /// The registrar provides the V8 scope and the namespace object.
+    /// Human-readable name for logging.
+    fn name(&self) -> &str { self.namespace() }
+
+    /// Called once per worker thread. Set up thread-local resources
+    /// (connection pools, caches). Async — can connect to databases.
+    async fn init(&self, config: &Arc<WorkerConfig>);
+
+    /// Called once per V8 isolate. Register functions on appbase.{namespace}.
     fn register(&self, registrar: &mut NativeRegistrar);
 
-    /// Optional: called when the isolate is about to be destroyed.
-    /// Use for cleanup (close connections, flush buffers).
-    fn on_destroy(&self) {}
-
-    /// Optional: human-readable name for logging/debugging.
-    fn name(&self) -> &str { self.namespace() }
+    /// Called on worker shutdown. Close connections, flush buffers.
+    async fn shutdown(&self) {}
 }
 ```
+
+Three hooks. No context object. No per-request hooks.
 
 ### NativeRegistrar
 
 ```rust
-/// Passed to plugins during registration. Provides methods to add
-/// native functions to the plugin's namespace object.
 pub struct NativeRegistrar<'a, 'b> {
     scope: &'a mut v8::PinScope<'b>,
     namespace_obj: v8::Local<'b, v8::Object>,
-    state: SharedState,
 }
 
-impl<'a, 'b> NativeRegistrar<'a, 'b> {
-    /// Register a synchronous native function.
-    /// Accessible as appbase.{namespace}.{name}()
-    pub fn add_sync(
-        &mut self,
-        name: &str,
-        callback: impl Fn(&mut v8::PinScope, v8::FunctionCallbackArguments, v8::ReturnValue) + 'static,
-    );
+impl NativeRegistrar {
+    /// Register a native function as appbase.{namespace}.{name}
+    pub fn add(&mut self, name: &str, callback: v8::FunctionCallback);
+}
+```
 
-    /// Register an async native function that returns a Promise.
-    /// Accessible as await appbase.{namespace}.{name}()
-    pub fn add_async(
-        &mut self,
-        name: &str,
-        callback: impl Fn(&mut v8::PinScope, v8::FunctionCallbackArguments) -> Pin<Box<dyn Future<Output = Result<String, String>>>> + 'static,
-    );
+That's it. One method. Adds a V8 function to the namespace object.
 
-    /// Register a constant value.
-    /// Accessible as appbase.{namespace}.{name}
-    pub fn add_value(&mut self, name: &str, value: v8::Local<'b, v8::Value>);
+### How callbacks access everything they need
 
-    /// Get the shared runtime state (for accessing app_id, meter, etc.)
-    pub fn state(&self) -> &SharedState;
+No context passing. No dependency injection. The V8 scope is the context:
+
+```rust
+fn find_one_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    // App ID — from RuntimeState (set by worker before each dispatch)
+    let state: SharedState = scope.get_slot::<SharedState>().unwrap().clone();
+    let app_id = state.borrow().app_id.clone().unwrap();
+
+    // Meter — from RuntimeState
+    state.borrow().meter.increment("db.reads", 1);
+
+    // Pool — from thread_local (set by plugin's init)
+    DB_POOL.with(|p| { /* query */ });
+
+    // Args — from V8
+    let collection = args.get(0).to_rust_string_lossy(scope);
+    let filter = args.get(1).to_rust_string_lossy(scope);
+}
+```
+
+```
+What the callback needs:       Where it gets it:
+  app_id                        scope → RuntimeState.app_id
+  meter                         scope → RuntimeState.meter
+  connection pool               thread_local! (set in init)
+  function arguments            args (from V8)
+  config (db_url, etc.)         self.config (immutable, Send+Sync)
+```
+
+### Plugin state: thread_local
+
+Plugins store per-thread resources (connection pools, caches) in `thread_local!`. The plugin struct itself is `Send + Sync` and holds only immutable config:
+
+```rust
+pub struct DbPlugin {
+    db_url: String,     // immutable, Send + Sync
+}
+
+thread_local! {
+    static DB_POOL: RefCell<Option<Pool>> = RefCell::new(None);
+}
+
+impl NativePlugin for DbPlugin {
+    fn namespace(&self) -> &str { "db" }
+
+    async fn init(&self, config: &Arc<WorkerConfig>) {
+        let pool = Pool::connect(&config.db_url, 8).await.unwrap();
+        DB_POOL.with(|p| *p.borrow_mut() = Some(pool));
+    }
+
+    fn register(&self, r: &mut NativeRegistrar) {
+        r.add("findOne", find_one_callback);
+        r.add("find", find_callback);
+        r.add("insert", insert_callback);
+        r.add("insertMany", insert_many_callback);
+        r.add("updateOne", update_one_callback);
+        r.add("updateMany", update_many_callback);
+        r.add("deleteOne", delete_one_callback);
+        r.add("deleteMany", delete_many_callback);
+        r.add("count", count_callback);
+        r.add("aggregate", aggregate_callback);
+        r.add("distinct", distinct_callback);
+        r.add("registerModel", register_model_callback);
+    }
+
+    async fn shutdown(&self) {
+        DB_POOL.with(|p| p.borrow_mut().take()); // drop pool
+    }
 }
 ```
 
 ### How the runtime uses plugins
 
 ```rust
-// runtime/src/runtime.rs
-
-pub struct Runtime {
-    isolate: v8::OwnedIsolate,
-    context: v8::Global<v8::Context>,
-    plugins: Vec<Box<dyn NativePlugin>>,
-    // ... existing fields
-}
-
 impl Runtime {
     pub fn new(
         modules: Vec<ModuleEntry>,
-        plugins: Vec<Box<dyn NativePlugin>>,
-        env_vars: HashMap<String, String>,
-        cpu_limit: Option<Duration>,
-        wall_timeout: Option<Duration>,
+        plugins: &[Box<dyn NativePlugin>],
+        // ... other args
     ) -> Self {
-        // ... existing V8 setup ...
+        // ... V8 setup ...
 
-        // Create appbase global namespace
+        // Create appbase global
         enter_v8!(self, |scope| {
             let global = scope.get_current_context().global(scope);
             let appbase = v8::Object::new(scope);
 
-            // Register each plugin
-            for plugin in &plugins {
-                let ns_name = plugin.namespace();
+            for plugin in plugins {
                 let ns_obj = v8::Object::new(scope);
-                let mut registrar = NativeRegistrar {
-                    scope,
-                    namespace_obj: ns_obj,
-                    state: self.state.clone(),
-                };
+                let mut registrar = NativeRegistrar { scope, namespace_obj: ns_obj };
                 plugin.register(&mut registrar);
 
-                // Freeze the namespace (prevent modification)
                 freeze_object(scope, ns_obj);
-                let key = v8::String::new(scope, ns_name).unwrap();
+                let key = v8::String::new(scope, plugin.namespace()).unwrap();
                 appbase.set(scope, key.into(), ns_obj.into());
             }
 
-            // Freeze appbase itself
             freeze_object(scope, appbase);
             let key = v8::String::new(scope, "appbase").unwrap();
             global.set(scope, key.into(), appbase.into());
         });
-
-        Self { isolate, context, plugins, ... }
     }
 }
 ```
+
+## Lifecycle
+
+```
+Worker starts
+  │
+  ├─ 1. Construct plugins (once)
+  │     let db = DbPlugin::new(&config.db_url);
+  │     let auth = AuthPlugin::new(&config.jwt_secret);
+  │
+  ├─ 2. init() per thread (once per worker thread)
+  │     db.init(config).await     → Pool::connect, store in thread_local
+  │     auth.init(config).await   → load JWT keys
+  │
+  │    ┌─── repeats per isolate ───────────────────────────────┐
+  │    │                                                       │
+  │    │ 3. Create V8 isolate                                  │
+  │    │    register() called for each plugin                  │
+  │    │    → appbase.db.find, .insert, ... added to global    │
+  │    │    → appbase.auth.hash, .signJwt, ... added           │
+  │    │    → appbase object frozen                            │
+  │    │                                                       │
+  │    │   ┌─── repeats per request ──────────────────────┐    │
+  │    │   │                                              │    │
+  │    │   │ 4. Worker sets state.app_id = "app_abc"      │    │
+  │    │   │ 5. V8 executes app code                      │    │
+  │    │   │    → appbase.db.find() → callback             │    │
+  │    │   │      → reads app_id from state               │    │
+  │    │   │      → reads pool from thread_local          │    │
+  │    │   │      → queries Postgres                      │    │
+  │    │   │ 6. Worker clears state.app_id                │    │
+  │    │   │                                              │    │
+  │    │   └──────────────────────────────────────────────┘    │
+  │    │                                                       │
+  │    │ 7. Isolate destroyed (eviction / hot deploy)          │
+  │    │    (pool and thread_locals survive — they're per-thread)│
+  │    │                                                       │
+  │    └───────────────────────────────────────────────────────┘
+  │
+  └─ 8. Worker shutdown
+        db.shutdown().await     → drop pool
+        auth.shutdown().await   → flush
+```
+
+Key insight: `init()` runs once per thread. `register()` runs once per isolate. Thread-local state (pools) survives isolate destruction — they're reused across isolates on the same thread.
 
 ## Plugin implementations
 
 ### plugin-db
 
 ```rust
-// crates/plugin-db/src/lib.rs
+pub struct DbPlugin { db_url: String }
 
-use appbase_runtime::{NativePlugin, NativeRegistrar};
-use appbase_pg::Pool;
-
-pub struct DbPlugin {
-    db_url: String,
-}
-
-impl DbPlugin {
-    pub fn new(db_url: &str) -> Self {
-        Self { db_url: db_url.to_string() }
-    }
-}
+thread_local! { static DB_POOL: RefCell<Option<Pool>> = RefCell::new(None); }
 
 impl NativePlugin for DbPlugin {
     fn namespace(&self) -> &str { "db" }
-    fn name(&self) -> &str { "database" }
+
+    async fn init(&self, config: &Arc<WorkerConfig>) {
+        let pool = Pool::connect(&config.db_url, 8).await.unwrap();
+        DB_POOL.with(|p| *p.borrow_mut() = Some(pool));
+    }
 
     fn register(&self, r: &mut NativeRegistrar) {
-        // Store db_url in isolate state for lazy pool creation
-        // (pool is Rc-based, created per-thread on first use)
-
-        r.add_async("find", callbacks::find);
-        r.add_async("findOne", callbacks::find_one);
-        r.add_async("insert", callbacks::insert);
-        r.add_async("insertMany", callbacks::insert_many);
-        r.add_async("updateOne", callbacks::update_one);
-        r.add_async("updateMany", callbacks::update_many);
-        r.add_async("deleteOne", callbacks::delete_one);
-        r.add_async("deleteMany", callbacks::delete_many);
-        r.add_async("count", callbacks::count);
-        r.add_async("aggregate", callbacks::aggregate);
-        r.add_async("distinct", callbacks::distinct);
-        r.add_sync("registerModel", callbacks::register_model);
+        r.add("find", callbacks::find);
+        r.add("findOne", callbacks::find_one);
+        r.add("insert", callbacks::insert);
+        r.add("updateOne", callbacks::update_one);
+        r.add("updateMany", callbacks::update_many);
+        r.add("deleteOne", callbacks::delete_one);
+        r.add("deleteMany", callbacks::delete_many);
+        r.add("count", callbacks::count);
+        r.add("aggregate", callbacks::aggregate);
+        r.add("distinct", callbacks::distinct);
+        r.add("registerModel", callbacks::register_model);
     }
 }
 ```
@@ -183,20 +238,18 @@ impl NativePlugin for DbPlugin {
 ### plugin-auth
 
 ```rust
-// crates/plugin-auth/src/lib.rs
-
-pub struct AuthPlugin {
-    jwt_secret: String,
-}
+pub struct AuthPlugin { jwt_secret: String }
 
 impl NativePlugin for AuthPlugin {
     fn namespace(&self) -> &str { "auth" }
 
+    async fn init(&self, _config: &Arc<WorkerConfig>) {}
+
     fn register(&self, r: &mut NativeRegistrar) {
-        r.add_async("hash", callbacks::hash);             // argon2 hash
-        r.add_async("verifyHash", callbacks::verify_hash); // argon2 verify
-        r.add_sync("signJwt", callbacks::sign_jwt);        // sync — fast
-        r.add_sync("verifyJwt", callbacks::verify_jwt);    // sync — fast
+        r.add("hash", callbacks::hash);
+        r.add("verifyHash", callbacks::verify_hash);
+        r.add("signJwt", callbacks::sign_jwt);
+        r.add("verifyJwt", callbacks::verify_jwt);
     }
 }
 ```
@@ -204,20 +257,18 @@ impl NativePlugin for AuthPlugin {
 ### plugin-storage
 
 ```rust
-// crates/plugin-storage/src/lib.rs
-
-pub struct StoragePlugin {
-    backend: Box<dyn StorageBackend>,  // LocalFs or S3
-}
+pub struct StoragePlugin { backend: Arc<dyn StorageBackend> }
 
 impl NativePlugin for StoragePlugin {
     fn namespace(&self) -> &str { "storage" }
 
+    async fn init(&self, _config: &Arc<WorkerConfig>) {}
+
     fn register(&self, r: &mut NativeRegistrar) {
-        r.add_async("put", callbacks::put);
-        r.add_async("get", callbacks::get);
-        r.add_async("delete", callbacks::delete);
-        r.add_async("exists", callbacks::exists);
+        r.add("put", callbacks::put);
+        r.add("get", callbacks::get);
+        r.add("delete", callbacks::delete);
+        r.add("exists", callbacks::exists);
     }
 }
 ```
@@ -225,78 +276,21 @@ impl NativePlugin for StoragePlugin {
 ### plugin-kv
 
 ```rust
-// crates/plugin-kv/src/lib.rs
+pub struct KvPlugin;
 
-pub struct KvPlugin {
-    // v1: in-memory HashMap per isolate
-    // v2: Redis
-}
+thread_local! { static KV_STORE: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new()); }
 
 impl NativePlugin for KvPlugin {
     fn namespace(&self) -> &str { "kv" }
 
+    async fn init(&self, _config: &Arc<WorkerConfig>) {}
+
     fn register(&self, r: &mut NativeRegistrar) {
-        r.add_async("get", callbacks::get);
-        r.add_async("set", callbacks::set);
-        r.add_async("delete", callbacks::delete);
-        r.add_async("list", callbacks::list);
+        r.add("get", callbacks::get);
+        r.add("set", callbacks::set);
+        r.add("delete", callbacks::delete);
     }
 }
-```
-
-## Crate structure
-
-```
-crates/
-├── runtime/              Kernel — V8, event loop, Web APIs, NativePlugin trait
-│   ├── src/plugin.rs     NativePlugin trait + NativeRegistrar
-│   ├── src/runtime.rs    Runtime::new() accepts plugins
-│   └── src/init.rs       setup_globals (Web APIs + plugin registration)
-│
-├── plugin-db/            Database plugin
-│   ├── src/lib.rs        DbPlugin: impl NativePlugin
-│   ├── src/callbacks.rs  find, insert, update, delete V8 callbacks
-│   ├── src/query.rs      filter → parameterized SQL
-│   ├── src/validate.rs   model validation
-│   ├── src/migrate.rs    schema diffing + ALTER TABLE
-│   └── Cargo.toml        deps: runtime, pg
-│
-├── plugin-auth/          Auth plugin
-│   ├── src/lib.rs        AuthPlugin: impl NativePlugin
-│   ├── src/callbacks.rs  hash, verifyHash, signJwt, verifyJwt
-│   └── Cargo.toml        deps: runtime, argon2, jsonwebtoken
-│
-├── plugin-storage/       Storage plugin
-│   ├── src/lib.rs        StoragePlugin: impl NativePlugin
-│   ├── src/callbacks.rs  put, get, delete
-│   ├── src/backend.rs    StorageBackend trait (LocalFs, S3)
-│   └── Cargo.toml        deps: runtime
-│
-├── plugin-kv/            KV plugin
-│   ├── src/lib.rs        KvPlugin: impl NativePlugin
-│   ├── src/callbacks.rs  get, set, delete, list
-│   └── Cargo.toml        deps: runtime
-│
-├── worker/               Assembles plugins
-│   ├── src/main.rs       creates Runtime with plugins
-│   └── Cargo.toml        deps: runtime, plugin-db, plugin-auth, ...
-│
-└── pg/                   Postgres driver (used by plugin-db)
-```
-
-### Dependency graph
-
-```
-runtime ← plugin-db ← worker
-        ← plugin-auth ← worker
-        ← plugin-storage ← worker
-        ← plugin-kv ← worker
-        ← pg ← plugin-db
-
-runtime does NOT depend on any plugin.
-Plugins depend on runtime (for the NativePlugin trait).
-Worker depends on all plugins it wants.
-pg is used by plugin-db, not by runtime.
 ```
 
 ## Worker assembles plugins
@@ -305,121 +299,139 @@ pg is used by plugin-db, not by runtime.
 // worker/src/main.rs
 
 fn create_runtime(modules: Vec<ModuleEntry>, config: &WorkerConfig) -> Runtime {
-    let mut plugins: Vec<Box<dyn NativePlugin>> = Vec::new();
+    let plugins: Vec<Box<dyn NativePlugin>> = vec![
+        Box::new(DbPlugin::new(&config.db_url)),
+        Box::new(AuthPlugin::new(&config.jwt_secret)),
+        Box::new(StoragePlugin::new(&config.storage_path)),
+        Box::new(KvPlugin::new()),
+    ];
 
-    // Always include
-    plugins.push(Box::new(DbPlugin::new(&config.db_url)));
-    plugins.push(Box::new(AuthPlugin::new(&config.jwt_secret)));
-    plugins.push(Box::new(KvPlugin::new()));
-
-    // Optional — based on config
-    if let Some(storage_path) = &config.storage_path {
-        plugins.push(Box::new(StoragePlugin::new_local(storage_path)));
-    }
-
-    Runtime::new(modules, plugins, HashMap::new(), config.cpu_limit, config.wall_timeout)
+    Runtime::new(modules, &plugins, HashMap::new(), config.cpu_limit, config.wall_timeout)
 }
+```
+
+## Crate structure
+
+```
+crates/
+├── runtime/              Kernel — V8, Web APIs, NativePlugin trait
+│   ├── src/plugin.rs     NativePlugin trait + NativeRegistrar
+│   ├── src/runtime.rs    Runtime::new() accepts &[Box<dyn NativePlugin>]
+│   └── src/init.rs       setup appbase.* from plugins
+│
+├── plugin-db/            Database
+│   ├── src/lib.rs        DbPlugin
+│   ├── src/callbacks.rs  V8 callbacks
+│   ├── src/query.rs      filter → SQL
+│   ├── src/validate.rs   schema validation
+│   └── src/migrate.rs    auto-migration
+│
+├── plugin-auth/          Authentication
+│   ├── src/lib.rs        AuthPlugin
+│   └── src/callbacks.rs  hash, JWT
+│
+├── plugin-storage/       Object storage
+│   ├── src/lib.rs        StoragePlugin
+│   └── src/backend.rs    LocalFs / S3
+│
+├── plugin-kv/            Key-value
+│   └── src/lib.rs        KvPlugin
+│
+├── worker/               Assembles everything
+│   └── Cargo.toml        deps: runtime, plugin-db, plugin-auth, ...
+│
+└── pg/                   Postgres driver (used by plugin-db)
+```
+
+### Dependency graph
+
+```
+runtime  ← plugin-db ← worker
+         ← plugin-auth ← worker
+         ← plugin-storage ← worker
+         ← plugin-kv ← worker
+         ← pg ← plugin-db
+
+runtime does NOT depend on any plugin.
+Plugins depend on runtime (for the trait).
+Worker depends on all plugins it needs.
 ```
 
 ## Security
 
-### Namespace isolation
-
-Each plugin gets its own frozen namespace. Plugins cannot:
-- Access other plugins' namespaces
-- Modify the `appbase` global after registration
-- Access V8 internals outside of their callbacks
+### Frozen namespace
 
 ```javascript
-// User code cannot modify primitives:
-appbase.db.find = () => "hacked";    // TypeError: Cannot assign to read-only property
-appbase.db.drop = () => {};           // TypeError: Cannot add property
-delete appbase.db;                    // TypeError: Cannot delete property
-appbase.evil = {};                    // TypeError: Cannot add property
+appbase.db.find = () => "hacked";    // TypeError: read-only
+appbase.db.evil = () => {};           // TypeError: not extensible
+delete appbase.db;                    // TypeError: non-configurable
+appbase.foo = {};                     // TypeError: frozen
 ```
 
-### Plugin callback safety
+`Object.freeze()` applied to `appbase` and every namespace object. User code cannot modify, extend, or delete any primitive.
 
-All plugin callbacks:
-- Receive the app_id from RuntimeState (set per-request)
-- Must scope operations to the app (e.g., SET search_path)
-- Must use the Meter trait for billing
-- Must validate all input from V8 (strings, not trusted)
+### Callback safety
 
-### Plugin state
+Every callback must:
+- Read `app_id` from `RuntimeState` (never trust V8 args for identity)
+- Scope all operations to the app's schema
+- Validate all V8 string input (collection names, filters, operators)
+- Use parameterized SQL (never interpolate)
+- Call `meter.increment()` for billing
 
-Plugins may need per-thread state (connection pools, caches). This is stored in RuntimeState via a typed slot:
+### Collection name validation
 
 ```rust
-impl RuntimeState {
-    /// Get plugin-specific state by type.
-    pub fn plugin_state<T: 'static>(&self) -> Option<&T>;
-
-    /// Set plugin-specific state.
-    pub fn set_plugin_state<T: 'static>(&mut self, state: T);
-}
-
-// In DbPlugin:
-fn register(&self, r: &mut NativeRegistrar) {
-    // Create per-thread pool, store in state
-    let pool = Pool::connect_lazy(&self.db_url, 8);
-    r.state().borrow_mut().set_plugin_state(pool);
-    // ...
-}
-
-// In callbacks:
-fn find_callback(scope: &mut v8::PinScope, args: ...) {
-    let state = get_state(scope);
-    let pool: &Pool = state.plugin_state::<Pool>().unwrap();
-    // use pool
+fn validate_collection(name: &str, registered_models: &HashSet<String>) -> Result<()> {
+    if !registered_models.contains(name) {
+        return Err(DbError::new("UNKNOWN_COLLECTION", "not found"));
+    }
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return Err(DbError::new("INVALID_COLLECTION", "invalid name"));
+    }
+    Ok(())
 }
 ```
 
 ## Metering
 
-Plugins access the meter through the registrar's state:
+Plugins call `meter.increment()` via RuntimeState:
 
 ```rust
 fn find_callback(scope: &mut v8::PinScope, args: ...) {
     let state = get_state(scope);
 
     // Execute query
-    let rows = pool.query(&sql, &params).await?;
+    let rows = /* ... */;
 
-    // Record billing metrics
-    state.meter.increment("db.reads", 1);
-    state.meter.increment("db.rows_read", rows.len() as u64);
+    // Record billing
+    state.borrow().meter.increment("db.reads", 1);
+    state.borrow().meter.increment("db.rows_read", rows.len() as u64);
 }
 ```
 
-Each plugin defines its own metric names (namespaced: `db.*`, `auth.*`, `storage.*`). The billing system aggregates all metrics regardless of which plugin produced them.
+Metric names are namespaced by plugin: `db.*`, `auth.*`, `storage.*`, `kv.*`.
 
 ## Adding a new plugin
 
-1. Create crate: `crates/plugin-foo/`
-2. Implement `NativePlugin` trait
-3. Add to worker's `Cargo.toml` and `create_runtime()`
-4. Publish corresponding npm SDK: `@appbase/foo`
-5. Document: `appbase.foo.*` primitives + `@appbase/foo` SDK API
-
-No changes to the runtime crate. No changes to existing plugins.
+1. Create `crates/plugin-foo/`
+2. Implement `NativePlugin` (namespace, init, register)
+3. Add to `worker/Cargo.toml` and `create_runtime()`
+4. Publish SDK: `@appbase/foo` on npm
+5. Done — no changes to runtime or existing plugins
 
 ```rust
-// Example: crates/plugin-email/src/lib.rs
+// crates/plugin-foo/src/lib.rs
+pub struct FooPlugin;
 
-pub struct EmailPlugin {
-    api_key: String,
-    provider: String,  // "resend", "sendgrid"
-}
-
-impl NativePlugin for EmailPlugin {
-    fn namespace(&self) -> &str { "email" }
-
+impl NativePlugin for FooPlugin {
+    fn namespace(&self) -> &str { "foo" }
+    async fn init(&self, _config: &Arc<WorkerConfig>) {}
     fn register(&self, r: &mut NativeRegistrar) {
-        r.add_async("send", callbacks::send);
+        r.add("bar", callbacks::bar);
     }
 }
 
-// callback uses fetch() internally — no new native capability needed
-// but registered as a native plugin for metering + config injection
+// JS: await appbase.foo.bar("hello")
+// SDK: import { foo } from "@appbase/foo"
 ```
