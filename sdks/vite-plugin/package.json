@@ -1,0 +1,33 @@
+{
+  "name": "@zeroship/vite-plugin",
+  "version": "0.1.0",
+  "description": "Vite plugin for zeroship — full-stack apps with \"use server\" convention",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "node --import tsx --test tests/*.test.ts"
+  },
+  "peerDependencies": {
+    "vite": ">=5.0.0"
+  },
+  "dependencies": {
+    "@swc/core": "^1.11.0"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0",
+    "typescript": "^5.0.0",
+    "tsx": "^4.0.0",
+    "@types/node": "^22.0.0"
+  },
+  "license": "MIT"
+}
