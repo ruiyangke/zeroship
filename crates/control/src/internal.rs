@@ -92,6 +92,72 @@ pub async fn get_routes(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Asset serving
+// ---------------------------------------------------------------------------
+
+/// Return the MIME content type for a file extension.
+fn content_type_for_ext(path: &str) -> &'static str {
+    if let Some(ext) = path.rsplit('.').next() {
+        match ext.to_ascii_lowercase().as_str() {
+            "html" => "text/html; charset=utf-8",
+            "js" | "mjs" => "application/javascript; charset=utf-8",
+            "css" => "text/css; charset=utf-8",
+            "json" => "application/json; charset=utf-8",
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "svg" => "image/svg+xml",
+            "ico" => "image/x-icon",
+            "woff" => "font/woff",
+            "woff2" => "font/woff2",
+            "ttf" => "font/ttf",
+            "webp" => "image/webp",
+            "txt" => "text/plain; charset=utf-8",
+            "xml" => "application/xml; charset=utf-8",
+            "webmanifest" => "application/manifest+json",
+            _ => "application/octet-stream",
+        }
+    } else {
+        "application/octet-stream"
+    }
+}
+
+/// GET /internal/assets/{app_id}/{path:.*} — serve a static asset to the gateway.
+pub async fn get_asset(
+    state: State<Arc<AppState>>,
+    path: web::types::Path<(String, String)>,
+) -> web::HttpResponse {
+    let (app_id, asset_path) = path.into_inner();
+
+    // No auth required — the gateway calls this, and static assets are public.
+    let uid = match app_id.parse::<uuid::Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error":"invalid uuid"}))
+        }
+    };
+
+    let app_id_str = uid.to_string();
+    match state.vfs.get_asset(&app_id_str, &asset_path) {
+        Ok(data) => {
+            let ct = content_type_for_ext(&asset_path);
+            web::HttpResponse::Ok()
+                .content_type(ct)
+                .body(data)
+        }
+        Err(appbase_core::vfs::VfsError::NotFound(_)) => {
+            web::HttpResponse::NotFound()
+                .json(&serde_json::json!({"error":"asset not found"}))
+        }
+        Err(e) => {
+            web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error": e.to_string()}))
+        }
+    }
+}
+
 /// POST /internal/usage — accept usage report from workers.
 /// Uses common::types::UsageReport { worker_id, counters: { app_id → AppUsage } }
 pub async fn report_usage(

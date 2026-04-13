@@ -224,3 +224,40 @@ pub async fn get_usage(state: State<Arc<AppState>>, id: Path<String>) -> web::Ht
         Err(e) => error_response(e),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Asset upload
+// ---------------------------------------------------------------------------
+
+pub async fn upload_asset(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    path: Path<(String, String)>,
+    body: Bytes,
+) -> web::HttpResponse {
+    if let Some(resp) = check_admin_auth(&req, &state) {
+        return resp;
+    }
+    let (id, asset_path) = path.into_inner();
+    let uid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error":"invalid uuid"}))
+        }
+    };
+
+    if asset_path.is_empty() {
+        return web::HttpResponse::BadRequest()
+            .json(&serde_json::json!({"error":"asset path required"}));
+    }
+
+    let app_id_str = uid.to_string();
+    if let Err(e) = state.vfs.put_asset(&app_id_str, &asset_path, &body) {
+        return web::HttpResponse::InternalServerError()
+            .json(&serde_json::json!({"error": e.to_string()}));
+    }
+
+    web::HttpResponse::Ok()
+        .json(&serde_json::json!({"uploaded": asset_path, "size": body.len()}))
+}
