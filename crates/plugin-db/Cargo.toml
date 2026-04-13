@@ -11,5 +11,9 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 v8 = { workspace = true }
 
+[dev-dependencies]
+compio = { workspace = true }
+serde_json = { workspace = true }
+
 [lints]
 workspace = true
