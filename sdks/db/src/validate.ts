@@ -1,0 +1,135 @@
+import { NormalizedSchema } from "./schema.js";
+import { FieldDef } from "./types.js";
+import { ValidationError, FieldError } from "./errors.js";
+
+type Doc = Record<string, unknown>;
+
+function checkField(
+  key: string,
+  value: unknown,
+  def: FieldDef,
+  errors: Record<string, FieldError>
+): void {
+  const { type, min, max, enum: enumVals, pattern } = def;
+
+  // Type check
+  if (type === "string") {
+    if (typeof value !== "string") {
+      errors[key] = { path: key, message: `${key} must be a string` };
+      return;
+    }
+    if (min !== undefined && value.length < min) {
+      errors[key] = {
+        path: key,
+        message: `${key} must be at least ${min} characters`,
+      };
+      return;
+    }
+    if (max !== undefined && value.length > max) {
+      errors[key] = {
+        path: key,
+        message: `${key} must be at most ${max} characters`,
+      };
+      return;
+    }
+    if (pattern !== undefined && !pattern.test(value)) {
+      errors[key] = {
+        path: key,
+        message: `${key} does not match the required pattern`,
+      };
+      return;
+    }
+  } else if (type === "number") {
+    if (typeof value !== "number") {
+      errors[key] = { path: key, message: `${key} must be a number` };
+      return;
+    }
+    if (min !== undefined && value < min) {
+      errors[key] = {
+        path: key,
+        message: `${key} must be at least ${min}`,
+      };
+      return;
+    }
+    if (max !== undefined && value > max) {
+      errors[key] = {
+        path: key,
+        message: `${key} must be at most ${max}`,
+      };
+      return;
+    }
+  } else if (type === "boolean") {
+    if (typeof value !== "boolean") {
+      errors[key] = { path: key, message: `${key} must be a boolean` };
+      return;
+    }
+  } else if (type === "date") {
+    if (!(value instanceof Date) && typeof value !== "string") {
+      errors[key] = {
+        path: key,
+        message: `${key} must be a Date or date string`,
+      };
+      return;
+    }
+  } else if (type === "array") {
+    if (!Array.isArray(value)) {
+      errors[key] = { path: key, message: `${key} must be an array` };
+      return;
+    }
+  }
+
+  // Enum check
+  if (enumVals !== undefined && !enumVals.includes(value)) {
+    errors[key] = {
+      path: key,
+      message: `${key} must be one of: ${enumVals.join(", ")}`,
+    };
+    return;
+  }
+}
+
+export function validateDoc(doc: Doc, schema: NormalizedSchema): Doc {
+  const errors: Record<string, FieldError> = {};
+  const result: Doc = { ...doc };
+
+  for (const [key, def] of Object.entries(schema)) {
+    const value = result[key];
+    const missing = value === undefined || value === null;
+
+    if (missing) {
+      if (def.default !== undefined) {
+        result[key] =
+          typeof def.default === "function" ? def.default() : def.default;
+      } else if (def.required) {
+        errors[key] = { path: key, message: `${key} is required` };
+      }
+      continue;
+    }
+
+    checkField(key, value, def, errors);
+  }
+
+  if (Object.keys(errors).length > 0) {
+    throw new ValidationError(errors);
+  }
+
+  return result;
+}
+
+export function validatePartial(doc: Doc, schema: NormalizedSchema): Doc {
+  const errors: Record<string, FieldError> = {};
+  const result: Doc = { ...doc };
+
+  for (const [key, value] of Object.entries(result)) {
+    const def = schema[key];
+    if (!def) continue;
+    if (value === undefined || value === null) continue;
+    checkField(key, value, def, errors);
+  }
+
+  if (Object.keys(errors).length > 0) {
+    throw new ValidationError(errors);
+  }
+
+  return result;
+}
