@@ -1,0 +1,14 @@
+{
+  "name": "@appbase/db",
+  "version": "0.1.0",
+  "description": "Mongoose-compatible database SDK for appbase",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "test": "node --import tsx --test tests/*.test.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}
