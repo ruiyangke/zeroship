@@ -87,6 +87,30 @@ describe("mapFilterOutbound (outbound)", () => {
     assert.equal(not.id, "abc");
     assert.equal(not._id, undefined);
   });
+
+  // I5: createdAt/updatedAt outbound mapping
+  test("createdAt → created_at in simple filter", () => {
+    const result = mapFilterOutbound({ createdAt: "2024-01-01" });
+    assert.equal(result.created_at, "2024-01-01");
+    assert.equal(result.createdAt, undefined);
+  });
+
+  test("updatedAt → updated_at in simple filter", () => {
+    const result = mapFilterOutbound({ updatedAt: "2024-06-01" });
+    assert.equal(result.updated_at, "2024-06-01");
+    assert.equal(result.updatedAt, undefined);
+  });
+
+  test("createdAt/updatedAt deep mapping inside $and", () => {
+    const result = mapFilterOutbound({
+      $and: [{ createdAt: "2024-01-01" }, { updatedAt: "2024-06-01" }],
+    }) as Record<string, unknown>;
+    const and = result.$and as Record<string, unknown>[];
+    assert.equal(and[0].created_at, "2024-01-01");
+    assert.equal(and[0].createdAt, undefined);
+    assert.equal(and[1].updated_at, "2024-06-01");
+    assert.equal(and[1].updatedAt, undefined);
+  });
 });
 
 describe("translateAggregatePipeline", () => {

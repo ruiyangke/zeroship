@@ -150,6 +150,42 @@ describe("validateDoc", () => {
   });
 });
 
+describe("validateDoc — array and enum edge cases", () => {
+  // I1: enum check should not fire on arrays
+  test("enum check does not run on array fields", () => {
+    const schema = normalizeSchema({ tags: t.array(t.string()).enum("a", "b") });
+    // Array value should not be rejected by enum (enum is for scalar types only)
+    assert.doesNotThrow(() => validateDoc({ tags: ["x", "y"] }, schema));
+  });
+
+  // I2: array item type validation
+  test("array item validation: rejects wrong item type (string array, number given)", () => {
+    const schema = normalizeSchema({ tags: t.array(t.string()) });
+    assert.throws(
+      () => validateDoc({ tags: ["ok", 42] }, schema),
+      ValidationError
+    );
+  });
+
+  test("array item validation: accepts all correct items", () => {
+    const schema = normalizeSchema({ scores: t.array(t.number()) });
+    assert.doesNotThrow(() => validateDoc({ scores: [1, 2, 3] }, schema));
+  });
+
+  test("array item validation: empty array always passes", () => {
+    const schema = normalizeSchema({ tags: t.array(t.string()) });
+    assert.doesNotThrow(() => validateDoc({ tags: [] }, schema));
+  });
+
+  test("array item validation: rejects boolean item in number array", () => {
+    const schema = normalizeSchema({ scores: t.array(t.number()) });
+    assert.throws(
+      () => validateDoc({ scores: [1, true] }, schema),
+      ValidationError
+    );
+  });
+});
+
 describe("validatePartial", () => {
   test("does not require required fields", () => {
     const schema = normalizeSchema({ name: t.string().required() });

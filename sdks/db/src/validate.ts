@@ -1,9 +1,19 @@
+/**
+ * Document validation for @appbase/db.
+ * Validates documents and partial update objects against a NormalizedSchema,
+ * collecting all field errors before throwing a single ValidationError.
+ */
 import { NormalizedSchema } from "./schema.js";
 import { FieldDef } from "./types.js";
 import { ValidationError, FieldError } from "./errors.js";
 
 type Doc = Record<string, unknown>;
 
+/**
+ * Validates a single field value against its FieldDef.
+ * Appends a FieldError to `errors` if the value is invalid; otherwise returns
+ * without side effects.
+ */
 function checkField(
   key: string,
   value: unknown,
@@ -76,10 +86,33 @@ function checkField(
       errors[key] = { path: key, message: `${key} must be an array` };
       return;
     }
+    // Validate each array element against the declared item type.
+    if (def.items !== undefined) {
+      const itemType = def.items;
+      for (let i = 0; i < value.length; i++) {
+        const elem = value[i];
+        let ok = true;
+        if (itemType === "string") ok = typeof elem === "string";
+        else if (itemType === "number") ok = typeof elem === "number";
+        else if (itemType === "boolean") ok = typeof elem === "boolean";
+        else if (itemType === "date") ok = elem instanceof Date || typeof elem === "string";
+        if (!ok) {
+          errors[key] = {
+            path: key,
+            message: `${key}[${i}] must be a ${itemType}`,
+          };
+          return;
+        }
+      }
+    }
   }
 
-  // Enum check
-  if (enumVals !== undefined && !enumVals.includes(value)) {
+  // Enum check — only meaningful for scalar types, not for arrays/objects.
+  if (
+    enumVals !== undefined &&
+    (type === "string" || type === "number" || type === "boolean") &&
+    !enumVals.includes(value)
+  ) {
     errors[key] = {
       path: key,
       message: `${key} must be one of: ${enumVals.join(", ")}`,
@@ -88,6 +121,12 @@ function checkField(
   }
 }
 
+/**
+ * Validates a full document against the schema.
+ * Applies default values for missing optional fields, throws ValidationError
+ * if any required fields are absent or any field value is invalid.
+ * Returns the (possibly default-filled) document on success.
+ */
 export function validateDoc(doc: Doc, schema: NormalizedSchema): Doc {
   const errors: Record<string, FieldError> = {};
   const result: Doc = { ...doc };
@@ -116,6 +155,11 @@ export function validateDoc(doc: Doc, schema: NormalizedSchema): Doc {
   return result;
 }
 
+/**
+ * Validates a partial document (e.g. an update's $set payload) against the schema.
+ * Does not require required fields or apply defaults — only validates the fields
+ * that are present. Throws ValidationError if any present field is invalid.
+ */
 export function validatePartial(doc: Doc, schema: NormalizedSchema): Doc {
   const errors: Record<string, FieldError> = {};
   const result: Doc = { ...doc };

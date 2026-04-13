@@ -1,3 +1,8 @@
+/**
+ * Lazy query builder for @appbase/db.
+ * A Query is a thenable that collects sort/limit/skip/select options and
+ * executes the native find call only when awaited or .then() is called.
+ */
 import { mapResultDoc } from "./utils.js";
 
 type PlainObject = Record<string, unknown>;
@@ -8,6 +13,10 @@ type NativeFn = (
   opts: PlainObject
 ) => Promise<string>;
 
+/**
+ * Chainable query object returned by `Collection.find()`.
+ * Collects query options lazily and executes via the native layer when awaited.
+ */
 export class Query {
   private _collection: string;
   private _filter: PlainObject;
@@ -18,6 +27,7 @@ export class Query {
   private _skip: number | undefined;
   private _select: string[] | undefined;
 
+  /** @internal */
   constructor(
     collection: string,
     filter: PlainObject,
@@ -28,21 +38,28 @@ export class Query {
     this._native = native;
   }
 
+  /** Sets the sort order. Pass `{ field: 1 }` for ascending, `{ field: -1 }` for descending. */
   sort(obj: PlainObject): this {
     this._sort = obj;
     return this;
   }
 
+  /** Limits the number of documents returned. */
   limit(n: number): this {
     this._limit = n;
     return this;
   }
 
+  /** Skips the first `n` documents (for pagination). */
   skip(n: number): this {
     this._skip = n;
     return this;
   }
 
+  /**
+   * Restricts the returned fields.
+   * Accepts either a space-separated string (`"name age"`) or an array of field names.
+   */
   select(s: string | string[]): this {
     if (Array.isArray(s)) {
       this._select = s;
@@ -52,13 +69,18 @@ export class Query {
     return this;
   }
 
+  /**
+   * Makes Query thenable so it can be used with `await`.
+   * Executes the query and passes results to `resolve`; calls `reject` on error.
+   */
   then(
     resolve: (value: PlainObject[]) => unknown,
-    reject: (reason: unknown) => unknown
+    reject?: (reason: unknown) => unknown
   ): Promise<unknown> {
     return this._exec().then(resolve, reject);
   }
 
+  /** Executes the query and returns the mapped result documents. */
   async _exec(): Promise<PlainObject[]> {
     const opts: PlainObject = {};
     if (this._sort !== undefined) opts["sort"] = this._sort;

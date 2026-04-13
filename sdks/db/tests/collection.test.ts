@@ -288,6 +288,74 @@ describe("Collection.updateOne()", () => {
       (err: unknown) => err instanceof ValidationError
     );
   });
+
+  // C2: _id/createdAt/updatedAt mapping in $set
+  test("maps _id → id inside $set update", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    await col.updateOne({ name: "Alice" }, { $set: { _id: "new-id" } });
+    const update = calls[0].args[2] as PlainObject;
+    const setFields = update.$set as PlainObject;
+    assert.equal(setFields.id, "new-id");
+    assert.equal(setFields._id, undefined);
+  });
+
+  test("maps createdAt → created_at inside $set update", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    await col.updateOne({ name: "Alice" }, { $set: { createdAt: "2024-01-01" } });
+    const update = calls[0].args[2] as PlainObject;
+    const setFields = update.$set as PlainObject;
+    assert.equal(setFields.created_at, "2024-01-01");
+    assert.equal(setFields.createdAt, undefined);
+  });
+
+  test("maps updatedAt → updated_at inside $set update", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    await col.updateOne({ name: "Alice" }, { $set: { updatedAt: "2024-06-01" } });
+    const update = calls[0].args[2] as PlainObject;
+    const setFields = update.$set as PlainObject;
+    assert.equal(setFields.updated_at, "2024-06-01");
+    assert.equal(setFields.updatedAt, undefined);
+  });
+
+  // I4: updateOne return value edge cases
+  test("returns { matchedCount: 0 } when native returns empty string", async () => {
+    const { native } = makeMockNative({
+      updateOne: () => Promise.resolve("null"),
+    });
+    const col = new Collection("users", schema, native);
+    const result = await col.updateOne({ name: "Ghost" }, { $set: { age: 5 } });
+    assert.deepEqual(result, { matchedCount: 0, modifiedCount: 0 });
+  });
+
+  // C3: $push/$addToSet validation
+  test("$push value validated against array item type: valid", async () => {
+    const { native } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    await assert.doesNotReject(
+      () => col.updateOne({ name: "Alice" }, { $push: { tags: "newtag" } })
+    );
+  });
+
+  test("$push value validated against array item type: invalid throws", async () => {
+    const { native } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    await assert.rejects(
+      () => col.updateOne({ name: "Alice" }, { $push: { tags: 42 as unknown as string } }),
+      (err: unknown) => err instanceof ValidationError
+    );
+  });
+
+  test("$addToSet value validated against array item type: invalid throws", async () => {
+    const { native } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    await assert.rejects(
+      () => col.updateOne({ name: "Alice" }, { $addToSet: { tags: true as unknown as string } }),
+      (err: unknown) => err instanceof ValidationError
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -308,6 +376,27 @@ describe("Collection.updateMany()", () => {
     await col.updateMany({ _id: "x" }, { $set: { name: "Y" } });
     const filter = calls[0].args[1] as PlainObject;
     assert.equal(filter.id, "x");
+  });
+
+  // C2: _id/createdAt/updatedAt mapping in $set for updateMany
+  test("maps _id → id inside $set in updateMany", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    await col.updateMany({ role: "user" }, { $set: { _id: "x" } });
+    const update = calls[0].args[2] as PlainObject;
+    const setFields = update.$set as PlainObject;
+    assert.equal(setFields.id, "x");
+    assert.equal(setFields._id, undefined);
+  });
+
+  // C3: $push/$addToSet in updateMany
+  test("$push invalid value in updateMany throws", async () => {
+    const { native } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    await assert.rejects(
+      () => col.updateMany({ role: "user" }, { $push: { tags: 99 as unknown as string } }),
+      (err: unknown) => err instanceof ValidationError
+    );
   });
 });
 
@@ -422,6 +511,30 @@ describe("Collection.distinct()", () => {
     const col = new Collection("users", schema, native);
     await col.distinct("role");
     assert.deepEqual(calls[0].args[2], {});
+  });
+});
+
+// ---------------------------------------------------------------------------
+// I5: createdAt/updatedAt outbound in filters
+// ---------------------------------------------------------------------------
+
+describe("Collection — createdAt/updatedAt filter mapping", () => {
+  test("findOne maps createdAt → created_at in filter", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    await col.findOne({ createdAt: "2024-01-01" });
+    const filter = calls[0].args[1] as PlainObject;
+    assert.equal(filter.created_at, "2024-01-01");
+    assert.equal(filter.createdAt, undefined);
+  });
+
+  test("countDocuments maps updatedAt → updated_at in filter", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    await col.countDocuments({ updatedAt: "2024-06-01" });
+    const filter = calls[0].args[1] as PlainObject;
+    assert.equal(filter.updated_at, "2024-06-01");
+    assert.equal(filter.updatedAt, undefined);
   });
 });
 

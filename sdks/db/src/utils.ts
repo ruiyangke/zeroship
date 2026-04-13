@@ -1,9 +1,20 @@
+/**
+ * Field-name mapping utilities for @appbase/db.
+ * Converts between the JS-facing camelCase API names (_id, createdAt, updatedAt)
+ * and the native snake_case / plain names used by the underlying data layer.
+ */
 type PlainObject = Record<string, unknown>;
 
 // ---------------------------------------------------------------------------
 // Inbound mapping: native result → user-facing doc
 // id → _id, created_at → createdAt, updated_at → updatedAt
 // ---------------------------------------------------------------------------
+
+/**
+ * Maps a native result document to the user-facing shape.
+ * Renames `id`→`_id`, `created_at`→`createdAt`, `updated_at`→`updatedAt`.
+ * All other fields are passed through unchanged.
+ */
 export function mapResultDoc(doc: PlainObject): PlainObject {
   const result: PlainObject = {};
   for (const [key, val] of Object.entries(doc)) {
@@ -22,13 +33,24 @@ export function mapResultDoc(doc: PlainObject): PlainObject {
 
 // ---------------------------------------------------------------------------
 // Outbound mapping: user filter → native filter
-// _id → id (deep, handles $and/$or/$not)
+// _id → id, createdAt → created_at, updatedAt → updated_at (deep, handles $and/$or/$not)
 // ---------------------------------------------------------------------------
+
+/**
+ * Maps a user-supplied filter to the native format.
+ * Renames `_id`→`id`, `createdAt`→`created_at`, `updatedAt`→`updated_at`.
+ * Recurses into `$and`, `$or`, and `$not` operators so field names are
+ * translated at every nesting level.
+ */
 export function mapFilterOutbound(filter: PlainObject): PlainObject {
   const result: PlainObject = {};
   for (const [key, val] of Object.entries(filter)) {
     if (key === "_id") {
       result["id"] = val;
+    } else if (key === "createdAt") {
+      result["created_at"] = val;
+    } else if (key === "updatedAt") {
+      result["updated_at"] = val;
     } else if (key === "$and" || key === "$or") {
       result[key] = (val as PlainObject[]).map(mapFilterOutbound);
     } else if (key === "$not") {
@@ -36,6 +58,45 @@ export function mapFilterOutbound(filter: PlainObject): PlainObject {
     } else {
       result[key] = val;
     }
+  }
+  return result;
+}
+
+/**
+ * Maps an update object's field names from user-facing to native format.
+ * Handles both `$set`/`$unset` operator objects and bare top-level field maps.
+ * Does NOT touch `$push`/`$addToSet`/`$inc`/`$dec`/`$mul` — those are handled
+ * separately by the collection layer.
+ */
+export function mapUpdateOutbound(update: PlainObject): PlainObject {
+  const result: PlainObject = {};
+  for (const [key, val] of Object.entries(update)) {
+    if ((key === "$set" || key === "$unset") && typeof val === "object" && val !== null) {
+      result[key] = mapUpdateFields(val as PlainObject);
+    } else if (key.startsWith("$")) {
+      // Other operators ($push, $addToSet, $inc, etc.) — pass through unchanged.
+      result[key] = val;
+    } else {
+      // Bare field — apply name mapping.
+      result[mapFieldName(key)] = val;
+    }
+  }
+  return result;
+}
+
+/** Maps a single user-facing field name to its native counterpart. */
+function mapFieldName(key: string): string {
+  if (key === "_id") return "id";
+  if (key === "createdAt") return "created_at";
+  if (key === "updatedAt") return "updated_at";
+  return key;
+}
+
+/** Applies mapFieldName to every key in a plain object. */
+function mapUpdateFields(fields: PlainObject): PlainObject {
+  const result: PlainObject = {};
+  for (const [k, v] of Object.entries(fields)) {
+    result[mapFieldName(k)] = v;
   }
   return result;
 }
@@ -48,6 +109,7 @@ function stripDollar(val: string): string {
   return val.startsWith("$") ? val.slice(1) : val;
 }
 
+/** Translates a single MongoDB accumulator expression to the native equivalent. */
 function translateAccumulator(
   acc: unknown
 ): unknown {
@@ -87,6 +149,7 @@ function translateAccumulator(
   return acc;
 }
 
+/** Translates a MongoDB $group `_id` value to the native `by` format. */
 function translateGroupId(
   id: unknown
 ): { by: string | string[] } {
@@ -110,6 +173,7 @@ function translateGroupId(
   return { by: String(id) };
 }
 
+/** Translates a single MongoDB aggregate stage to the native format. */
 function translateStage(stage: PlainObject): PlainObject {
   if ("$group" in stage) {
     const group = stage["$group"] as PlainObject;
@@ -138,6 +202,10 @@ function translateStage(stage: PlainObject): PlainObject {
   return stage;
 }
 
+/**
+ * Translates a full MongoDB-style aggregate pipeline to the native format.
+ * Each stage is translated individually; unrecognized stages pass through as-is.
+ */
 export function translateAggregatePipeline(
   pipeline: PlainObject[]
 ): PlainObject[] {

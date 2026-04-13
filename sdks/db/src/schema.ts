@@ -1,5 +1,10 @@
+/**
+ * Schema normalization: converts Mongoose-style schema definitions and TypeBuilder
+ * instances into a unified NormalizedSchema used by the rest of the SDK.
+ */
 import { TypeBuilder, FieldDef, PrimitiveTypeName } from "./types.js";
 
+/** A normalized schema mapping field names to their FieldDef. */
 export type NormalizedSchema = Record<string, FieldDef>;
 
 type MongooseConstructor =
@@ -23,6 +28,7 @@ interface MongooseFieldDef {
 
 type SchemaInput = Record<string, MongooseFieldDef | TypeBuilder | unknown>;
 
+/** Maps a Mongoose constructor (String, Number, …) to our internal PrimitiveTypeName. */
 function mapConstructorType(ctor: MongooseConstructor): PrimitiveTypeName {
   switch (ctor) {
     case String:
@@ -40,6 +46,30 @@ function mapConstructorType(ctor: MongooseConstructor): PrimitiveTypeName {
   }
 }
 
+/** Returns true when the set of valid bare constructor values matches. */
+function isBareConstructor(val: unknown): val is MongooseConstructor {
+  return (
+    val === String ||
+    val === Number ||
+    val === Boolean ||
+    val === Date ||
+    val === Object
+  );
+}
+
+/**
+ * Returns true when the value is a single-element array whose element is a bare
+ * constructor — the Mongoose shorthand for an array field: `[String]`.
+ */
+function isBareArrayConstructor(val: unknown): val is [MongooseConstructor] {
+  return (
+    Array.isArray(val) &&
+    val.length === 1 &&
+    isBareConstructor(val[0])
+  );
+}
+
+/** Returns true when the value looks like a Mongoose-style field definition object. */
 function isMongooseFieldDef(val: unknown): val is MongooseFieldDef {
   if (val === null || typeof val !== "object") return false;
   const v = val as Record<string, unknown>;
@@ -54,6 +84,16 @@ function isMongooseFieldDef(val: unknown): val is MongooseFieldDef {
   );
 }
 
+/**
+ * Converts a SchemaInput (Mongoose-style or TypeBuilder) into a NormalizedSchema.
+ *
+ * Handles three input forms per field:
+ *   1. TypeBuilder instance — `t.string().required()`
+ *   2. Mongoose object def — `{ type: String, required: true }`
+ *   3. Bare constructor shorthand — `String`, `Number`, `[String]`
+ *
+ * Fields that match none of these forms are silently skipped.
+ */
 export function normalizeSchema(input: SchemaInput): NormalizedSchema {
   const result: NormalizedSchema = {};
 
@@ -61,8 +101,10 @@ export function normalizeSchema(input: SchemaInput): NormalizedSchema {
     const val = rawVal as unknown;
 
     if (val instanceof TypeBuilder) {
+      // Form 1: TypeBuilder instance
       result[key] = { ...val._def };
     } else if (isMongooseFieldDef(val)) {
+      // Form 2: Mongoose object definition { type: Constructor, ... }
       const mdef = val as MongooseFieldDef;
       const fieldDef: FieldDef = {} as FieldDef;
 
@@ -84,6 +126,12 @@ export function normalizeSchema(input: SchemaInput): NormalizedSchema {
       if (mdef.match !== undefined) fieldDef.pattern = mdef.match;
 
       result[key] = fieldDef;
+    } else if (isBareArrayConstructor(val)) {
+      // Form 3b: bare array shorthand — [String], [Number], etc.
+      result[key] = { type: "array", items: mapConstructorType(val[0]) };
+    } else if (isBareConstructor(val)) {
+      // Form 3a: bare constructor shorthand — String, Number, Boolean, Date, Object
+      result[key] = { type: mapConstructorType(val) };
     }
   }
 

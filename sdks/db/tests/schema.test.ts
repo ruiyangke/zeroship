@@ -93,4 +93,49 @@ describe("normalizeSchema", () => {
     assert.equal(schema.age.type, "number");
     assert.equal(schema.age.min, 0);
   });
+
+  // C1: bare constructor shorthand
+  test("Bare constructor: String → string", () => {
+    const schema = normalizeSchema({ name: String });
+    assert.equal(schema.name.type, "string");
+  });
+
+  test("Bare constructor: Number → number", () => {
+    const schema = normalizeSchema({ count: Number });
+    assert.equal(schema.count.type, "number");
+  });
+
+  test("Bare constructor: Boolean → boolean", () => {
+    const schema = normalizeSchema({ active: Boolean });
+    assert.equal(schema.active.type, "boolean");
+  });
+
+  test("Bare constructor: Date → date", () => {
+    const schema = normalizeSchema({ createdAt: Date });
+    assert.equal(schema.createdAt.type, "date");
+  });
+
+  test("Bare constructor: Object → json", () => {
+    const schema = normalizeSchema({ meta: Object });
+    assert.equal(schema.meta.type, "json");
+  });
+
+  test("Bare array shorthand: [String] → array with items=string", () => {
+    const schema = normalizeSchema({ tags: [String] });
+    assert.equal(schema.tags.type, "array");
+    assert.equal(schema.tags.items, "string");
+  });
+
+  test("Bare array shorthand: [Number] → array with items=number", () => {
+    const schema = normalizeSchema({ scores: [Number] });
+    assert.equal(schema.scores.type, "array");
+    assert.equal(schema.scores.items, "number");
+  });
+
+  test("Mixed: bare constructor alongside builder", () => {
+    const schema = normalizeSchema({ name: String, age: t.number().min(0) });
+    assert.equal(schema.name.type, "string");
+    assert.equal(schema.age.type, "number");
+    assert.equal(schema.age.min, 0);
+  });
 });
