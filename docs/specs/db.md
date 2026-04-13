@@ -2,116 +2,112 @@
 
 ## Overview
 
-`@appbase/db` provides a document-style API backed by real Postgres columns. Creators define models with a type-safe builder (`t.string().required()`), get automatic schema migrations on deploy, built-in validation, and a MongoDB-like query API. No raw SQL is exposed — the SDK generates structured calls to the native `appbase.db.*` primitives, which build parameterized SQL internally.
+`@appbase/db` provides a Mongoose-inspired API backed by real Postgres columns. Creators define models with familiar schema syntax, get built-in validation, query chaining, and a `{ data, error }` return pattern. No raw SQL is exposed — the SDK calls `appbase.db.*` native primitives, which build parameterized SQL internally.
+
+Based on Mongoose conventions (for LLM compatibility) with key improvements:
+- `{ data, error }` returns instead of throwing — explicit, no try/catch needed
+- `id` not `_id` — Postgres convention, no MongoDB legacy
+- Per-field update operators — `{ views: { $inc: 1 } }` reads naturally
+- `createdAt`/`updatedAt` as Unix ms numbers — JS-native
+- Real JOINs backed by Postgres — not N+1 populate
 
 ```javascript
-import { model, t } from "@appbase/db";
+import { model } from "@appbase/db";
 
 const users = model("users", {
-  name:  t.string().required(),
-  email: t.string().required().unique(),
-  age:   t.number(),
-  role:  t.string().default("user"),
+  name:  { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  role:  { type: String, enum: ["user", "admin"], default: "user" },
 });
 
-const user = await users.insert({ name: "Alice", email: "alice@example.com" });
-const admins = await users.find({ role: "admin" }).sort({ name: 1 }).limit(10);
+const { data: user, error } = await users.create({ name: "Alice", email: "alice@example.com" });
+const { data: admins } = await users.find({ role: "admin" }).sort({ name: 1 }).limit(10);
 ```
 
 ## Architecture
 
 ```
-@appbase/db (npm package, JS/TS)       ← high-level SDK, evolves fast
-  model(), t, Collection, Query
-  Validation, error mapping
-  │
-  │ calls appbase.db.* (structured JSON, not SQL)
+Creator code
+  │  import { model } from "@appbase/db"
   ▼
-appbase.db.* (Rust, global primitives)  ← security boundary, stable kernel
-  appbase.db.find(collection, filterJson, optsJson)
-  appbase.db.insert(collection, docJson)
-  appbase.db.updateOne(collection, filterJson, changesJson)
+@appbase/db (JS/TS, npm package)         ← SDK layer: validation, chaining, { data, error }
+  model(), t, Collection, Query
   │
-  │ validates → builds parameterized SQL → executes
+  │  calls appbase.db.* with per-field operator format
+  ▼
+appbase.db.* (Rust, frozen global)       ← native layer: security boundary, SQL generation
+  appbase.db.find(collection, filter, opts)
+  appbase.db.insert(collection, doc)
+  appbase.db.updateOne(collection, filter, update)
+  │
+  │  validates → parameterized SQL → executes
   ▼
 appbase-pg → Postgres
 ```
 
-`@appbase/db` is a standard npm package. Creators install it with `npm install @appbase/db`. The compiler (esbuild) bundles it into the `.appbundle` like any other dependency.
-
-The `appbase.db.*` global namespace is the native primitive layer — registered by Rust before any user code runs, frozen (can't be modified), and enforces security (schema isolation, operator whitelist, parameterized queries).
+The SDK is a standard npm package bundled by esbuild into the `.appbundle`. The native `appbase.db.*` global is registered by Rust, frozen, and enforces schema isolation + parameterized queries.
 
 ### Native primitives (`appbase.db.*`)
 
-These are the low-level "syscalls" that the SDK calls. SDK authors may use these directly; app creators use the SDK instead.
+Low-level "syscalls" the SDK calls. SDK authors may use these directly.
 
 ```typescript
-appbase.db.find(collection, filterJson, optsJson)         → Promise<string>
-appbase.db.findOne(collection, filterJson, optsJson)       → Promise<string | null>
-appbase.db.insert(collection, docJson)                     → Promise<string>
-appbase.db.insertMany(collection, docsJson)                → Promise<string>
-appbase.db.updateOne(collection, filterJson, changesJson)  → Promise<string>
-appbase.db.updateMany(collection, filterJson, changesJson) → Promise<string>
-appbase.db.deleteOne(collection, filterJson)               → Promise<string>
-appbase.db.deleteMany(collection, filterJson)              → Promise<string>
-appbase.db.count(collection, filterJson)                   → Promise<number>
-appbase.db.aggregate(collection, pipelineJson)             → Promise<string>
-appbase.db.distinct(collection, field, filterJson)         → Promise<string>
-appbase.db.registerModel(name, schemaJson, optionsJson)    → void
+appbase.db.find(collection, filter, opts)          → Promise<string>
+appbase.db.findOne(collection, filter)             → Promise<string | null>
+appbase.db.insert(collection, doc)                 → Promise<string>
+appbase.db.insertMany(collection, docs)            → Promise<string>
+appbase.db.updateOne(collection, filter, update)   → Promise<string>
+appbase.db.updateMany(collection, filter, update)  → Promise<string>
+appbase.db.deleteOne(collection, filter)           → Promise<string>
+appbase.db.deleteMany(collection, filter)          → Promise<string>
+appbase.db.count(collection, filter)               → Promise<string>
+appbase.db.aggregate(collection, pipeline)         → Promise<string>
+appbase.db.distinct(collection, field, filter)     → Promise<string>
 ```
 
-All arguments and return values are JSON strings. The native layer validates everything: collection names (must be registered), filter operators (whitelisted), field names (must exist in model). SQL injection is impossible — user input never touches SQL strings.
+The native layer uses per-field operator format: `{ views: { $inc: 1 } }`. The SDK translates Mongoose top-level format (`{ $inc: { views: 1 } }`) before calling native.
 
 ## Security Model
 
-No raw SQL is exposed to app code. All queries are generated by the platform.
+No raw SQL is exposed. All queries are parameterized.
 
 ```
 Apps CAN:                              Apps CANNOT:
-  ✅ CRUD (insert, find, update, delete)  ❌ Raw SQL
-  ✅ Aggregate (group, sum, avg)           ❌ Access other app's schema
-  ✅ Populate / lookup (controlled JOINs)  ❌ DDL (CREATE, ALTER, DROP)
-  ✅ Transactions                          ❌ System tables (pg_catalog)
-  ✅ Full-text search ($search)            ❌ SET commands
-  ✅ Pagination                            ❌ COPY, EXPLAIN, VACUUM
+  CRUD (insert, find, update, delete)    Raw SQL
+  Aggregate (group, sum, avg)            Access other app's schema
+  Full-text search ($search)             DDL (CREATE, ALTER, DROP)
+  Pagination                             System tables (pg_catalog)
 ```
-
-SQL injection is impossible — user input is always parameterized (`$1`, `$2`).
 
 ## Schema Definition
 
-### Type Builder (`t`)
+Two styles, both produce the same internal representation.
+
+### Mongoose style (recommended for LLM compatibility)
 
 ```javascript
-// Types
-t.string()              // TEXT
-t.text()                // TEXT (alias)
-t.number()              // NUMERIC
-t.integer()             // INTEGER
-t.boolean()             // BOOLEAN
-t.date()                // TIMESTAMPTZ
-t.json()                // JSONB
-t.array(t.string())     // JSONB array
+import { model } from "@appbase/db";
 
-// Reference
-t.ref(otherModel)       // UUID REFERENCES other_table(id)
+const users = model("users", {
+  name:     { type: String, required: true, minlength: 1, maxlength: 100 },
+  email:    { type: String, required: true, unique: true, match: /^[^@]+@[^@]+$/ },
+  age:      { type: Number, min: 0, max: 150 },
+  role:     { type: String, enum: ["user", "admin", "moderator"], default: "user" },
+  bio:      { type: String },
+  settings: { type: Object },
+  tags:     { type: [String] },
+});
 
-// Modifiers (chainable)
-.required()             // NOT NULL
-.unique()               // UNIQUE constraint
-.index()                // CREATE INDEX
-.default(value)         // DEFAULT
-.check(expr)            // CHECK constraint
-
-// Validation (enforced at runtime before SQL)
-.min(n)                 // string: min length, number: min value
-.max(n)                 // string: max length, number: max value
-.pattern(regex)         // must match regex
-.enum("a", "b", "c")   // must be one of
-.trim()                 // auto-trim whitespace
+// Shorthand also works (bare constructors)
+const simple = model("simple", {
+  name: String,
+  count: Number,
+  active: Boolean,
+  tags: [String],
+});
 ```
 
-### Model
+### Builder style (alternative)
 
 ```javascript
 import { model, t } from "@appbase/db";
@@ -119,158 +115,143 @@ import { model, t } from "@appbase/db";
 const users = model("users", {
   name:     t.string().required().min(1).max(100),
   email:    t.string().required().unique().pattern(/^[^@]+@[^@]+$/),
-  age:      t.number().integer().min(0).max(150),
+  age:      t.number().min(0).max(150),
   role:     t.string().enum("user", "admin", "moderator").default("user"),
-  bio:      t.text(),
-  avatar:   t.string(),
+  bio:      t.string(),
   settings: t.json(),
   tags:     t.array(t.string()),
 });
 ```
 
-Auto-generated columns (not declared by creator):
-- `id` — `UUID PRIMARY KEY DEFAULT gen_random_uuid()`
-- `created_at` — `TIMESTAMPTZ DEFAULT NOW()`
-- `updated_at` — `TIMESTAMPTZ DEFAULT NOW()` (auto-updated)
+### Type mapping
 
-### Model Options (third argument)
+| JS Constructor | Builder | Postgres |
+|---|---|---|
+| `String` | `t.string()` | TEXT |
+| `Number` | `t.number()` | NUMERIC |
+| `Boolean` | `t.boolean()` | BOOLEAN |
+| `Date` | `t.date()` | TIMESTAMPTZ |
+| `Object` | `t.json()` | JSONB |
+| `[String]` | `t.array(t.string())` | JSONB |
+
+### Validators
+
+| Validator | Mongoose syntax | Builder syntax | Applies to |
+|---|---|---|---|
+| required | `required: true` | `.required()` | all |
+| default | `default: value` | `.default(value)` | all |
+| unique | `unique: true` | `.unique()` | all |
+| min | `min: 0` | `.min(0)` | Number |
+| max | `max: 150` | `.max(150)` | Number |
+| minlength | `minlength: 1` | `.min(1)` | String (length) |
+| maxlength | `maxlength: 100` | `.max(100)` | String (length) |
+| match | `match: /regex/` | `.pattern(/regex/)` | String |
+| enum | `enum: ["a", "b"]` | `.enum("a", "b")` | String |
+| index | `index: true` | `.index()` | all |
+
+### Auto-generated fields
+
+Not declared by creator. Added by the database automatically:
+
+- `id` — `SERIAL PRIMARY KEY` or `UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+- `createdAt` — mapped from `created_at TIMESTAMPTZ DEFAULT NOW()` — returned as Unix ms number
+- `updatedAt` — mapped from `updated_at TIMESTAMPTZ DEFAULT NOW()` — returned as Unix ms number
+
+## Return Pattern
+
+Every SDK method returns `{ data, error }` — never throws.
 
 ```javascript
-const orders = model("orders", { ... }, {
-  indexes: [
-    { fields: ["customer", "status"] },
-    { fields: ["created_at"], order: "DESC" },
-    { fields: ["status"], where: "status != 'archived'" },
-    { fields: ["title", "content"], type: "fulltext" },
-  ],
-  unique: [
-    ["customer", "status"],
-  ],
-  softDelete: true,
-  timestamps: false,
-});
+// Success
+const { data, error } = await users.create({ name: "Alice", email: "a@b.com" });
+// data = { id: 1, name: "Alice", email: "a@b.com", role: "user", createdAt: 1713000000000, updatedAt: 1713000000000 }
+// error = null
+
+// Failure
+const { data, error } = await users.create({ name: "" });
+// data = null
+// error = { name: "ValidationError", errors: { name: { message: "required", path: "name" } } }
+
+// Duplicate key
+const { data, error } = await users.create({ name: "Alice", email: "existing@b.com" });
+// data = null
+// error = { code: 11000, message: "duplicate key error: email" }
 ```
 
-### Generated SQL
-
-```sql
-CREATE TABLE app_{app_id}.users (
-    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name       TEXT NOT NULL CHECK (length(name) >= 1 AND length(name) <= 100),
-    email      TEXT NOT NULL UNIQUE,
-    age        INTEGER CHECK (age >= 0 AND age <= 150),
-    role       TEXT DEFAULT 'user' CHECK (role IN ('user', 'admin', 'moderator')),
-    bio        TEXT,
-    avatar     TEXT,
-    settings   JSONB DEFAULT '{}',
-    tags       JSONB DEFAULT '[]',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-```
-
-Real columns. Real types. Real indexes. JSONB only for `t.json()` and `t.array()`.
-
-## Per-App Isolation
-
-Each app gets its own Postgres schema:
-
-```sql
-CREATE SCHEMA app_abc123;
-SET search_path TO app_abc123;
-```
-
-The runtime sets `search_path` before every query. Apps cannot access each other's tables.
+No try/catch needed. Errors are values, not exceptions.
 
 ## Complete API Reference
 
 ### Create
 
 ```javascript
-// Insert one — returns the created document
-const user = await users.insert({ name: "Alice", email: "alice@example.com" });
-// → { id: "uuid", name: "Alice", email: "alice@example.com", role: "user", created_at: "...", updated_at: "..." }
+// Insert one
+const { data } = await users.create({ name: "Alice", email: "alice@example.com" });
+// → { id: 1, name: "Alice", email: "alice@example.com", role: "user", createdAt: ..., updatedAt: ... }
 
-// Insert many — returns array of created documents
-const created = await users.insertMany([
+// Insert (alias for create)
+const { data } = await users.insert({ name: "Alice", email: "alice@example.com" });
+
+// Insert many
+const { data } = await users.insertMany([
   { name: "Bob", email: "bob@example.com" },
   { name: "Carol", email: "carol@example.com" },
 ]);
-// → [{ id: "uuid", ... }, { id: "uuid", ... }]
-
-// Upsert — insert or update by unique field, returns the document
-const user = await users.upsert(
-  { email: "alice@example.com" },
-  { name: "Alice", email: "alice@example.com", role: "admin" }
-);
-// → { id: "uuid", name: "Alice", role: "admin", ... }
+// → [{ id: 2, ... }, { id: 3, ... }]
 ```
 
 ### Read
 
 ```javascript
 // Find one — returns document or null
-const user = await users.findOne({ email: "alice@example.com" });
+const { data } = await users.findOne({ email: "alice@example.com" });
 // → { id, name, email, ... } or null
 
-// Find many — returns array, supports chaining
-const results = await users
+// Find by ID (shorthand)
+const { data } = await users.findById(1);
+
+// Find many — returns Query (thenable), supports chaining
+const { data } = await users
   .find({ role: "admin" })
-  .select("name", "email")         // projection: only these fields
-  .sort({ name: 1 })               // 1 = ASC, -1 = DESC
-  .limit(20)                        // max results
-  .skip(40);                        // offset
+  .select("name email")           // projection: only these fields
+  .sort({ name: 1 })              // 1 = ASC, -1 = DESC
+  .limit(20)                       // max results
+  .skip(40);                       // offset
 // → [{ name, email }, ...]
 
-// Paginate — cursor-based, returns { data, nextCursor, hasMore }
-const page = await users
-  .find({ role: "user" })
-  .sort({ created_at: -1 })
-  .paginate(20, lastCursor);
-// → { data: [{ id, name, ... }], nextCursor: "2026-04-12T...", hasMore: true }
-
-// First page (no cursor)
-const first = await users
-  .find({ role: "user" })
-  .sort({ created_at: -1 })
-  .paginate(20);
-
-// Distinct values
-const categories = await products.distinct("category");
-// → ["electronics", "food", "clothing"]
-
-// Distinct with filter
-const active = await products.distinct("category", { stock: { $gt: 0 } });
-
 // Count
-const total = await users.count({ role: "admin" });
+const { data: count } = await users.countDocuments({ role: "admin" });
 // → 5
 
+// Distinct values
+const { data: roles } = await users.distinct("role");
+// → ["user", "admin", "moderator"]
+
 // Exists
-const exists = await users.exists({ email: "alice@example.com" });
+const { data: exists } = await users.exists({ email: "alice@example.com" });
 // → true
 ```
 
 ### Update
 
 ```javascript
-// Update one — returns { updated: 0 | 1 }
-await users.updateOne(
-  { id: "uuid" },
+// Update one — returns { matchedCount, modifiedCount }
+const { data } = await users.updateOne(
+  { id: 1 },
   { name: "Alice Smith", role: "admin" }
 );
-// → { updated: 1 }
+// → { matchedCount: 1, modifiedCount: 1 }
 
-// Update many — returns { updated: n }
-await users.updateMany(
+// Update many
+const { data } = await users.updateMany(
   { role: "user" },
   { role: "member" }
 );
-// → { updated: 342 }
+// → { matchedCount: 342, modifiedCount: 342 }
 
-// Atomic operations
-await products.updateOne(
-  { id: "uuid" },
+// Atomic operations (per-field operators)
+const { data } = await products.updateOne(
+  { id: 1 },
   {
     stock: { $dec: 1 },
     sold:  { $inc: 1 },
@@ -278,64 +259,67 @@ await products.updateOne(
   }
 );
 
+// Mongoose-style top-level operators also work (translated by SDK)
+const { data } = await products.updateOne(
+  { id: 1 },
+  { $inc: { views: 1 }, $push: { tags: "popular" } }
+);
+
 // Optimistic lock (conditional update)
-const result = await products.updateOne(
-  { id: "uuid", stock: { $gte: 1 } },
+const { data } = await products.updateOne(
+  { id: 1, stock: { $gte: 1 } },
   { stock: { $dec: 1 } }
 );
-if (result.updated === 0) throw new Error("Out of stock");
-
-// Find, update, and return the document (atomic)
-const job = await queue.findOneAndUpdate(
-  { status: "pending" },
-  { status: "processing", worker: workerId },
-  { sort: { priority: -1 }, returnNew: true }
-);
-// → { id, status: "processing", ... } or null
+if (data.matchedCount === 0) throw new Error("Out of stock");
 ```
 
 ### Delete
 
 ```javascript
-// Delete one — returns { deleted: 0 | 1 }
-await users.deleteOne({ id: "uuid" });
-// → { deleted: 1 }
+// Delete one — returns { deletedCount }
+const { data } = await users.deleteOne({ id: 1 });
+// → { deletedCount: 1 }
 
-// Delete many — returns { deleted: n }
-await sessions.deleteMany({ expires_at: { $lt: new Date() } });
-// → { deleted: 42 }
-
-// Find, delete, and return the document (atomic dequeue)
-const job = await queue.findOneAndDelete(
-  { status: "pending" },
-  { sort: { created_at: 1 } }
-);
-// → { id, ... } or null
+// Delete many
+const { data } = await sessions.deleteMany({ expiresAt: { $lt: Date.now() } });
+// → { deletedCount: 42 }
 ```
 
-### Soft Delete
-
-For models with `softDelete: true`:
+### Aggregate
 
 ```javascript
-// deleteOne/deleteMany set deleted_at = NOW() instead of removing
-await posts.deleteOne({ id: postId });
+const { data } = await products.aggregate([
+  { $match: { status: "active" } },
+  { $group: { by: "category", count: { $count: true }, avgPrice: { $avg: "price" } } },
+  { $having: { count: { $gt: 5 } } },
+  { $sort: { count: -1 } },
+  { $limit: 10 },
+]);
+// → [{ category: "food", count: 42, avgPrice: 5.5 }]
 
-// find() auto-excludes soft-deleted
-await posts.find({});                     // WHERE deleted_at IS NULL
-await posts.find({}).withDeleted();       // include soft-deleted
-await posts.find({}).onlyDeleted();       // only soft-deleted
+// Mongoose-style aggregate also works (SDK translates)
+const { data } = await products.aggregate([
+  { $match: { status: "active" } },
+  { $group: { _id: "$category", count: { $sum: 1 }, avgPrice: { $avg: "$price" } } },
+  { $sort: { count: -1 } },
+]);
+```
 
-// Force hard delete (bypass soft delete)
-await posts.deleteOne({ id: postId }).force();
-await posts.deleteMany({ old: true }).force();
+### Aggregation operators
+
+```javascript
+{ $count: true }                 // COUNT(*)
+{ $sum: "field" }                // SUM(field)
+{ $avg: "field" }                // AVG(field)
+{ $min: "field" }                // MIN(field)
+{ $max: "field" }                // MAX(field)
 ```
 
 ## Filter Operators
 
 ```javascript
 // Comparison
-{ field: value }                    // WHERE field = value
+{ field: value }                    // WHERE field = value (implicit eq)
 { field: { $gt: n } }              // WHERE field > n
 { field: { $gte: n } }             // WHERE field >= n
 { field: { $lt: n } }              // WHERE field < n
@@ -348,11 +332,10 @@ await posts.deleteMany({ old: true }).force();
 
 // Pattern
 { field: { $like: "%pattern%" } }   // WHERE field LIKE '%pattern%'
-{ field: { $ilike: "%pattern%" } }  // WHERE field ILIKE '%pattern%'
+{ field: { $ilike: "%pattern%" } }  // WHERE field ILIKE '%pattern%' (case insensitive)
 
 // Full-text search
 { field: { $search: "chocolate cake" } }
-// → WHERE to_tsvector('english', field) @@ plainto_tsquery('english', $1)
 
 // Null
 { field: null }                     // WHERE field IS NULL
@@ -370,253 +353,62 @@ await posts.deleteMany({ old: true }).force();
 
 ## Update Operators
 
-```javascript
-// Set
-{ field: value }                    // field = value (implicit)
-{ field: { $set: value } }         // field = value (explicit)
+Per-field format (native):
 
-// Numeric
+```javascript
+{ field: value }                    // field = value (implicit set)
+{ field: { $set: value } }         // field = value (explicit set)
 { field: { $inc: n } }             // field = field + n
 { field: { $dec: n } }             // field = field - n
 { field: { $mul: n } }             // field = field * n
-
-// Array (JSONB array columns)
-{ field: { $push: value } }        // append
-{ field: { $pull: value } }        // remove
-{ field: { $addToSet: value } }    // append if not present
+{ field: { $push: value } }        // JSONB array append
+{ field: { $pull: value } }        // JSONB array remove
+{ field: { $addToSet: value } }    // JSONB array append if not present
 ```
 
-## Aggregation
-
-### Pipeline
+Mongoose top-level format (also accepted, SDK translates):
 
 ```javascript
-const stats = await products.aggregate()
-  .match({ status: "active" })
-  .group("category", {
-    count:    { $count: true },
-    avgPrice: { $avg: "price" },
-    total:    { $sum: "price" },
-    minPrice: { $min: "price" },
-    maxPrice: { $max: "price" },
-  })
-  .having({ count: { $gt: 5 } })
-  .sort({ total: -1 })
-  .limit(10);
-// → [{ category: "food", count: 42, avgPrice: 5.5, total: 231, ... }]
+{ $set: { name: "Bob" } }
+{ $inc: { views: 1 } }
+{ $push: { tags: "new" } }
 ```
 
-### Group by multiple fields
+## Per-App Isolation
 
-```javascript
-const daily = await orders.aggregate()
-  .match({ status: "paid" })
-  .group({ day: { $dateTrunc: ["created_at", "day"] }, category: "category" }, {
-    revenue: { $sum: "total" },
-    orders:  { $count: true },
-  })
-  .sort({ day: -1 });
+Each app gets its own Postgres schema (UUID-based):
+
+```sql
+SELECT * FROM "app-uuid"."users" WHERE ...
 ```
 
-### Aggregation operators
-
-```javascript
-{ $count: true }                 // COUNT(*)
-{ $sum: "field" }                // SUM(field)
-{ $avg: "field" }                // AVG(field)
-{ $min: "field" }                // MIN(field)
-{ $max: "field" }                // MAX(field)
-{ $first: "field" }              // first value
-{ $last: "field" }               // last value
-{ $collect: "field" }            // ARRAY_AGG(field)
-{ $countDistinct: "field" }      // COUNT(DISTINCT field)
-```
-
-### Date functions
-
-```javascript
-{ $dateTrunc: ["field", "day"] }     // date_trunc('day', field)
-{ $dateTrunc: ["field", "week"] }
-{ $dateTrunc: ["field", "month"] }
-{ $dateTrunc: ["field", "year"] }
-{ $extract: ["field", "hour"] }      // EXTRACT(hour FROM field)
-{ $extract: ["field", "dow"] }       // day of week
-```
-
-### Shorthand
-
-```javascript
-// Count by field
-await users.countBy("role");
-// → { admin: 5, user: 342, moderator: 12 }
-// SQL: SELECT role, COUNT(*) FROM users GROUP BY role
-```
-
-## Populate and Lookup
-
-### Populate (eager load refs)
-
-```javascript
-// findOne + populate
-const post = await posts.findOne({ id: postId }).populate("author");
-// → { id, title, author: { id, name, email, ... } }
-
-// find + populate
-const results = await posts
-  .find({ category: "tech" })
-  .populate("author")
-  .sort({ created_at: -1 })
-  .limit(20);
-
-// Multiple refs
-const order = await orders
-  .findOne({ id: orderId })
-  .populate("customer")
-  .populate("assignee");
-```
-
-### Lookup (cross-collection JOIN)
-
-```javascript
-const ordersWithProducts = await orders
-  .find({ status: "pending" })
-  .lookup({
-    from: products,
-    localField: "product_id",
-    foreignField: "id",
-    as: "product",
-  })
-  .sort({ created_at: -1 });
-// → [{ id, product_id, product: { id, name, price, ... }, ... }]
-// SQL: LEFT JOIN products ON orders.product_id = products.id
-```
-
-## Transactions
-
-```javascript
-await db.transaction(async (tx) => {
-  const order = await tx.orders.insert({
-    customer: userId, total: 0, status: "pending",
-  });
-
-  let total = 0;
-  for (const item of cart) {
-    const result = await tx.products.updateOne(
-      { id: item.productId, stock: { $gte: item.qty } },
-      { stock: { $dec: item.qty } }
-    );
-    if (result.updated === 0) throw new Error("Out of stock");
-    total += item.price * item.qty;
-  }
-
-  await tx.orders.updateOne({ id: order.id }, { total });
-  return order;
-  // auto-commits on return, auto-rollbacks on throw
-});
-```
-
-## Error Handling
-
-```javascript
-try {
-  await users.insert({ name: "Alice", email: "existing@example.com" });
-} catch (e) {
-  e.code;      // "UNIQUE_VIOLATION"
-  e.field;     // "email"
-  e.message;   // "email already exists"
-}
-```
-
-### Error codes
-
-| Code | When |
-|---|---|
-| `VALIDATION_ERROR` | Input fails schema validation |
-| `REQUIRED_FIELD` | Missing required field |
-| `UNIQUE_VIOLATION` | Duplicate on unique field |
-| `FOREIGN_KEY_VIOLATION` | Referenced record doesn't exist |
-| `CHECK_VIOLATION` | Check constraint failed |
-| `NOT_FOUND` | findOneAndUpdate/Delete matched nothing |
-| `TRANSACTION_FAILED` | Transaction rolled back |
-| `CONNECTION_ERROR` | Database unreachable |
+The `app_id` is injected by the Rust runtime from `env_vars`, not from user code. `globalThis.appbase` is frozen — creators cannot override the schema.
 
 ## Validation
 
-### Automatic
-
-Runs on every `insert`, `insertMany`, `upsert`, `updateOne`, `updateMany`.
+Runs in the SDK (JS) before every `create()`, `insertMany()`, `updateOne()`, `updateMany()`.
 
 ```javascript
-await users.insert({ name: "" });
-// throws: { code: "VALIDATION_ERROR", field: "name", message: "must be at least 1 character" }
+// Fails validation — returns error, doesn't hit database
+const { error } = await users.create({ name: "" });
+// error = { name: "ValidationError", errors: { name: { message: "name is required", path: "name" } } }
 
-await users.insert({ name: "Alice", age: "thirty" });
-// throws: { code: "VALIDATION_ERROR", field: "age", message: "expected number, got string" }
+// Type mismatch
+const { error } = await users.create({ name: "Alice", age: "thirty" });
+// error = { name: "ValidationError", errors: { age: { message: "age must be a number", path: "age" } } }
 
-await users.insert({ name: "Alice" });
-// throws: { code: "REQUIRED_FIELD", field: "email", message: "required" }
+// On update: only validates provided fields (partial)
+const { error } = await users.updateOne({ id: 1 }, { age: -1 });
+// error = { name: "ValidationError", errors: { age: { message: "age must be at least 0", path: "age" } } }
 ```
 
-### Explicit
+## Error Codes
 
-```javascript
-const result = users.validate({ name: "", age: -1 });
-// { ok: false, errors: [
-//   { field: "name", message: "must be at least 1 character" },
-//   { field: "email", message: "required" },
-//   { field: "age", message: "must be >= 0" },
-// ]}
-
-// Partial (for updates)
-users.validate({ age: -1 }, { partial: true });
-```
-
-### Zod interop
-
-```javascript
-import { z } from "zod";
-const UserInput = users.toZod(z);
-const parsed = UserInput.parse(input);
-```
-
-## Auto-Migration
-
-On deploy: platform diffs old model → new model → generates ALTER statements.
-
-### Safe (automatic)
-
-| Change | SQL |
+| Code | When |
 |---|---|
-| Add field | `ALTER TABLE ADD COLUMN` |
-| Add field with default | `ALTER TABLE ADD COLUMN ... DEFAULT` |
-| Add/remove index | `CREATE INDEX` / `DROP INDEX` |
-| Add model | `CREATE TABLE` |
-| Change default | `ALTER TABLE ALTER COLUMN SET DEFAULT` |
-| Add constraint | `ALTER TABLE ADD CONSTRAINT` |
-| Make required → optional | `ALTER TABLE ALTER COLUMN DROP NOT NULL` |
-
-### Dangerous (blocked)
-
-| Change | Workaround |
-|---|---|
-| Remove required field | Make optional first, then remove |
-| Change field type | Add new field, migrate, remove old |
-| Add required without default | Add with default, then remove default |
-| Rename field | Add new, copy, remove old |
-| Delete model | Must confirm via dashboard |
-
-## References
-
-```javascript
-const posts = model("posts", {
-  title:  t.string().required(),
-  author: t.ref(users).required(),   // ON DELETE CASCADE
-  parent: t.ref("posts"),            // self-reference, ON DELETE SET NULL
-});
-```
-
-- `t.ref(model)` → `ON DELETE SET NULL` (nullable)
-- `t.ref(model).required()` → `ON DELETE CASCADE` (required)
+| `ValidationError` | Input fails schema validation |
+| `11000` | Duplicate on unique field (Mongoose-compatible code) |
+| DB error message | Other Postgres errors |
 
 ## Connection Architecture
 
@@ -625,58 +417,58 @@ Worker thread:
   ntex handler → V8 isolate → @appbase/db → appbase.db.find()
     → Rust native callback
     → validate collection + filter + operators
-    → build parameterized SQL
-    → RuntimeState.db_pool (Rc<Pool>, per-thread)
-    → SET search_path TO app_{app_id}
+    → build parameterized SQL (text-format params)
+    → query_text_params via Rc<Pool> (per-thread)
     → appbase-pg → Postgres → rows → JSON → V8
 
 Per-thread: 8 idle connections, shared across all isolates
 32 threads × 8 connections = 256 max per worker
 ```
 
-## Metering
-
-Every operation calls `appbase.meter.increment()`:
-
-```
-insert()            → db.writes +1
-insertMany(n)       → db.writes +n
-findOne()           → db.reads +1
-find()              → db.reads +1, db.rows_read +len
-updateOne()         → db.writes +1
-updateMany()        → db.writes +1, db.rows_written +n
-deleteOne()         → db.writes +1
-deleteMany()        → db.writes +1, db.rows_written +n
-upsert()            → db.writes +1
-findOneAndUpdate()  → db.writes +1
-findOneAndDelete()  → db.writes +1
-aggregate()         → db.reads +1, db.rows_read +len
-count()             → db.reads +1
-```
-
 ## Implementation
 
 ```
-Two layers:
+SDK (sdks/db/):
+  src/index.ts        — export { model, t }
+  src/model.ts        — model(name, schema) → Collection
+  src/collection.ts   — Collection class with { data, error } methods
+  src/query.ts        — Query thenable (sort/limit/skip/select)
+  src/schema.ts       — normalizeSchema() for both styles
+  src/types.ts        — t builder + TypeBuilder + FieldDef
+  src/validate.ts     — validateDoc(), validatePartial()
+  src/errors.ts       — ValidationError, mapNativeError()
+  src/utils.ts        — field mapping, aggregate translation
 
-1. npm package (@appbase/db):
-   packages/db/src/index.ts       — model(), t, Collection, Query
-   packages/db/src/query.ts       — Query chain builder
-   packages/db/src/validator.ts   — type + constraint checking (JS)
-   packages/db/src/types.ts       — TypeScript types
-   packages/db/package.json       — { "name": "@appbase/db" }
+Native (crates/plugin-db/):
+  src/lib.rs          — DbPlugin (NativePlugin trait)
+  src/callbacks.rs    — V8 callbacks for appbase.db.*
+  src/query.rs        — filter/update/aggregate JSON → parameterized SQL
 
-2. Rust native primitives (appbase.db.*):
-   runtime/src/db_callbacks.rs    — register appbase.db.* on globalThis
-   runtime/src/query_builder.rs   — filter/update/aggregate JSON → parameterized SQL
-   runtime/src/schema_manager.rs  — model definition → CREATE TABLE / ALTER TABLE
-
-Control plane:
-  On deploy: read model definitions from app code → diff with stored schema → migrate
-
-Worker:
-  Inject Postgres Pool into RuntimeState (per-thread, Rc-based)
-
-Type declarations (@appbase/types):
-  packages/types/globals.d.ts     — declares appbase.db.*, appbase.auth.*, etc.
+214 SDK tests (unit + robustness)
+89 native tests (69 unit + 20 integration)
 ```
+
+## What's Implemented
+
+- 11 native primitives (find, findOne, insert, insertMany, updateOne, updateMany, deleteOne, deleteMany, count, distinct, aggregate)
+- Full filter operators ($eq, $ne, $gt, $gte, $lt, $lte, $in, $nin, $like, $ilike, $search, $and, $or, $not)
+- Full update operators ($set, $inc, $dec, $mul, $push, $pull, $addToSet)
+- Aggregation pipeline ($match, $group, $having, $sort, $limit) with $count, $sum, $avg, $min, $max
+- Schema definition (both Mongoose and builder styles)
+- Validation (required, type, min/max, enum, pattern)
+- Query chaining (.find().sort().limit().skip().select())
+- Field mapping (id↔_id equivalent, camelCase↔snake_case for auto fields)
+- E2E tested through full platform pipeline
+
+## What's Deferred
+
+- `{ data, error }` return pattern (current: returns data directly or throws)
+- `findById(id)` — trivial alias
+- `exists(filter)` — trivial wrapper
+- `findOneAndUpdate` / `findOneAndDelete` — atomic read-modify-return
+- Auto-migration (registerModel + schema diffing)
+- Transactions
+- Populate / lookup (JOINs)
+- Soft delete
+- Cursor pagination
+- Realtime subscriptions
