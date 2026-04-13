@@ -15,7 +15,7 @@ import {
 import { Query } from "./query.js";
 import { PlainObject, Result, ok, err } from "./types.js";
 
-/** Interface that the native appbase.db.* layer must satisfy. */
+/** Interface that the native zeroship.db.* layer must satisfy. */
 export interface NativeDb {
   insert(collection: string, doc: unknown): Promise<string>;
   insertMany(collection: string, docs: unknown): Promise<string>;

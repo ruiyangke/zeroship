@@ -1,6 +1,6 @@
-//! # appbase-server
+//! # zeroship-server
 //!
-//! HTTP server for the appbase platform.
+//! HTTP server for the zeroship platform.
 //!
 //! - `router`: axum routes for RPC, static serving, health, stats
 //! - `middleware`: Tower layers for CORS, compression, tracing, CPU time headers

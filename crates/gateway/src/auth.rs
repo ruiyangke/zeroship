@@ -1,5 +1,5 @@
-use appbase_core::auth::validate_api_key;
-use appbase_core::types::RouteEntry;
+use zeroship_core::auth::validate_api_key;
+use zeroship_core::types::RouteEntry;
 use ntex::web::{HttpRequest, HttpResponse};
 
 pub fn check_api_key(req: &HttpRequest, route: &RouteEntry) -> Result<(), HttpResponse> {

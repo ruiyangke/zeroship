@@ -1,8 +1,8 @@
-# @appbase/db — Database SDK
+# @zeroship/db — Database SDK
 
 ## Overview
 
-`@appbase/db` provides a Mongoose-inspired API backed by real Postgres columns. Creators define models with familiar schema syntax, get built-in validation, query chaining, and a `{ data, error }` return pattern. No raw SQL is exposed — the SDK calls `appbase.db.*` native primitives, which build parameterized SQL internally.
+`@zeroship/db` provides a Mongoose-inspired API backed by real Postgres columns. Creators define models with familiar schema syntax, get built-in validation, query chaining, and a `{ data, error }` return pattern. No raw SQL is exposed — the SDK calls `zeroship.db.*` native primitives, which build parameterized SQL internally.
 
 Based on Mongoose conventions (for LLM compatibility) with key improvements:
 - `{ data, error }` returns instead of throwing — explicit, no try/catch needed
@@ -12,7 +12,7 @@ Based on Mongoose conventions (for LLM compatibility) with key improvements:
 - Real JOINs backed by Postgres — not N+1 populate
 
 ```javascript
-import { model } from "@appbase/db";
+import { model } from "@zeroship/db";
 
 const users = model("users", {
   name:  { type: String, required: true },
@@ -28,41 +28,41 @@ const { data: admins } = await users.find({ role: "admin" }).sort({ name: 1 }).l
 
 ```
 Creator code
-  │  import { model } from "@appbase/db"
+  │  import { model } from "@zeroship/db"
   ▼
-@appbase/db (JS/TS, npm package)         ← SDK layer: validation, chaining, { data, error }
+@zeroship/db (JS/TS, npm package)         ← SDK layer: validation, chaining, { data, error }
   model(), t, Collection, Query
   │
-  │  calls appbase.db.* with per-field operator format
+  │  calls zeroship.db.* with per-field operator format
   ▼
-appbase.db.* (Rust, frozen global)       ← native layer: security boundary, SQL generation
-  appbase.db.find(collection, filter, opts)
-  appbase.db.insert(collection, doc)
-  appbase.db.updateOne(collection, filter, update)
+zeroship.db.* (Rust, frozen global)       ← native layer: security boundary, SQL generation
+  zeroship.db.find(collection, filter, opts)
+  zeroship.db.insert(collection, doc)
+  zeroship.db.updateOne(collection, filter, update)
   │
   │  validates → parameterized SQL → executes
   ▼
-appbase-pg → Postgres
+zeroship-pg → Postgres
 ```
 
-The SDK is a standard npm package bundled by esbuild into the `.appbundle`. The native `appbase.db.*` global is registered by Rust, frozen, and enforces schema isolation + parameterized queries.
+The SDK is a standard npm package bundled by esbuild into the `.appbundle`. The native `zeroship.db.*` global is registered by Rust, frozen, and enforces schema isolation + parameterized queries.
 
-### Native primitives (`appbase.db.*`)
+### Native primitives (`zeroship.db.*`)
 
 Low-level "syscalls" the SDK calls. SDK authors may use these directly.
 
 ```typescript
-appbase.db.find(collection, filter, opts)          → Promise<string>
-appbase.db.findOne(collection, filter)             → Promise<string | null>
-appbase.db.insert(collection, doc)                 → Promise<string>
-appbase.db.insertMany(collection, docs)            → Promise<string>
-appbase.db.updateOne(collection, filter, update)   → Promise<string>
-appbase.db.updateMany(collection, filter, update)  → Promise<string>
-appbase.db.deleteOne(collection, filter)           → Promise<string>
-appbase.db.deleteMany(collection, filter)          → Promise<string>
-appbase.db.count(collection, filter)               → Promise<string>
-appbase.db.aggregate(collection, pipeline)         → Promise<string>
-appbase.db.distinct(collection, field, filter)     → Promise<string>
+zeroship.db.find(collection, filter, opts)          → Promise<string>
+zeroship.db.findOne(collection, filter)             → Promise<string | null>
+zeroship.db.insert(collection, doc)                 → Promise<string>
+zeroship.db.insertMany(collection, docs)            → Promise<string>
+zeroship.db.updateOne(collection, filter, update)   → Promise<string>
+zeroship.db.updateMany(collection, filter, update)  → Promise<string>
+zeroship.db.deleteOne(collection, filter)           → Promise<string>
+zeroship.db.deleteMany(collection, filter)          → Promise<string>
+zeroship.db.count(collection, filter)               → Promise<string>
+zeroship.db.aggregate(collection, pipeline)         → Promise<string>
+zeroship.db.distinct(collection, field, filter)     → Promise<string>
 ```
 
 The native layer uses per-field operator format: `{ views: { $inc: 1 } }`. The SDK translates Mongoose top-level format (`{ $inc: { views: 1 } }`) before calling native.
@@ -86,7 +86,7 @@ Two styles, both produce the same internal representation.
 ### Mongoose style (recommended for LLM compatibility)
 
 ```javascript
-import { model } from "@appbase/db";
+import { model } from "@zeroship/db";
 
 const users = model("users", {
   name:     { type: String, required: true, minlength: 1, maxlength: 100 },
@@ -110,7 +110,7 @@ const simple = model("simple", {
 ### Builder style (alternative)
 
 ```javascript
-import { model, t } from "@appbase/db";
+import { model, t } from "@zeroship/db";
 
 const users = model("users", {
   name:     t.string().required().min(1).max(100),
@@ -382,7 +382,7 @@ Each app gets its own Postgres schema (UUID-based):
 SELECT * FROM "app-uuid"."users" WHERE ...
 ```
 
-The `app_id` is injected by the Rust runtime from `env_vars`, not from user code. `globalThis.appbase` is frozen — creators cannot override the schema.
+The `app_id` is injected by the Rust runtime from `env_vars`, not from user code. `globalThis.zeroship` is frozen — creators cannot override the schema.
 
 ## Validation
 
@@ -414,12 +414,12 @@ const { error } = await users.updateOne({ id: 1 }, { age: -1 });
 
 ```
 Worker thread:
-  ntex handler → V8 isolate → @appbase/db → appbase.db.find()
+  ntex handler → V8 isolate → @zeroship/db → zeroship.db.find()
     → Rust native callback
     → validate collection + filter + operators
     → build parameterized SQL (text-format params)
     → query_text_params via Rc<Pool> (per-thread)
-    → appbase-pg → Postgres → rows → JSON → V8
+    → zeroship-pg → Postgres → rows → JSON → V8
 
 Per-thread: 8 idle connections, shared across all isolates
 32 threads × 8 connections = 256 max per worker
@@ -441,7 +441,7 @@ SDK (sdks/db/):
 
 Native (crates/plugin-db/):
   src/lib.rs          — DbPlugin (NativePlugin trait)
-  src/callbacks.rs    — V8 callbacks for appbase.db.*
+  src/callbacks.rs    — V8 callbacks for zeroship.db.*
   src/query.rs        — filter/update/aggregate JSON → parameterized SQL
 
 214 SDK tests (unit + robustness)

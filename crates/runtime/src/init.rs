@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use appbase_runtime_macros::appbase_op;
+use zeroship_runtime_macros::zeroship_op;
 
 use crate::state::SharedState;
 use crate::state::TimerCallback;
@@ -136,7 +136,7 @@ pub fn load_polyfills_and_modules(
 ) -> v8::Global<v8::Function> {
     setup_globals(scope);
 
-    // Register plugins on appbase.* namespace
+    // Register plugins on zeroship.* namespace
     crate::plugin::register_plugins(scope, plugins);
 
     // Load polyfills
@@ -375,7 +375,7 @@ fn set_interval_callback(
 
 /// Install console, timers, fetch, URL, KV, crypto, env on the global object.
 ///
-/// Callbacks from `#[appbase_op]` modules are referenced as `crate::{mod}::{fn}_callback`.
+/// Callbacks from `#[zeroship_op]` modules are referenced as `crate::{mod}::{fn}_callback`.
 pub fn setup_globals(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
 
@@ -447,7 +447,7 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
     // navigator.userAgent
     {
         let nav = v8::Object::new(scope);
-        let ua = v8::String::new(scope, "appbase/1.0").unwrap();
+        let ua = v8::String::new(scope, "zeroship/1.0").unwrap();
         let ua_key = v8::String::new(scope, "userAgent").unwrap();
         nav.set(scope, ua_key.into(), ua.into());
         let nav_key = v8::String::new(scope, "navigator").unwrap();
@@ -600,7 +600,7 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
 /// `env.get(key) → string | null`
 ///
 /// Reads from the per-app environment variables injected at deploy time.
-#[appbase_op(state)]
+#[zeroship_op(state)]
 fn env_get(state: SharedState, key: String) -> Option<String> {
     state.borrow().env_vars.get(&key).cloned()
 }

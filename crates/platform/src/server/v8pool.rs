@@ -8,10 +8,10 @@
 
 use crate::core::config::IsolateConfig;
 use crate::core::types::{IsolateStats, PoolStats, RpcResult};
-use appbase_runtime::modules::ModuleEntry;
-use appbase_runtime::init_v8;
-use appbase_runtime::runtime::Runtime;
-use appbase_runtime::{AsyncWork, AsyncEvent, DispatchOutcome};
+use zeroship_runtime::modules::ModuleEntry;
+use zeroship_runtime::init_v8;
+use zeroship_runtime::runtime::Runtime;
+use zeroship_runtime::{AsyncWork, AsyncEvent, DispatchOutcome};
 
 use std::cell::RefCell;
 use std::collections::HashMap;

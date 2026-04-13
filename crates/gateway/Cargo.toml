@@ -1,15 +1,15 @@
 [package]
-name = "appbase-gateway"
+name = "zeroship-gateway"
 version = "0.1.0"
 edition = "2021"
-description = "appbase gateway — auth, rate limit, proxy to workers"
+description = "zeroship gateway — auth, rate limit, proxy to workers"
 
 [[bin]]
-name = "appbase-gate"
+name = "zeroship-gate"
 path = "src/main.rs"
 
 [dependencies]
-appbase-core = { workspace = true }
+zeroship-core = { workspace = true }
 ntex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -15,7 +15,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
-pub use appbase_bundle::ModuleEntry;
+pub use zeroship_bundle::ModuleEntry;
 
 /// Module registry stored in V8 isolate slot.
 pub struct ModuleRegistry {

@@ -4,13 +4,13 @@
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 
-const APPBASE_URL = process.env.APPBASE_URL || "http://localhost:3333";
-const APPBASE_KEY = process.env.APPBASE_MASTER_KEY || "dev-master-key";
+const ZEROSHIP_URL = process.env.ZEROSHIP_URL || "http://localhost:3333";
+const ZEROSHIP_KEY = process.env.ZEROSHIP_MASTER_KEY || "dev-master-key";
 
 export const listApps = tool(
   async () => {
-    const res = await fetch(`${APPBASE_URL}/api/apps`, {
-      headers: { Authorization: `Bearer ${APPBASE_KEY}` },
+    const res = await fetch(`${ZEROSHIP_URL}/api/apps`, {
+      headers: { Authorization: `Bearer ${ZEROSHIP_KEY}` },
     });
 
     if (!res.ok) {
@@ -32,7 +32,7 @@ export const listApps = tool(
   },
   {
     name: "list_apps",
-    description: "List all apps currently deployed on the appbase platform.",
+    description: "List all apps currently deployed on the zeroship platform.",
     schema: z.object({}),
   }
 );

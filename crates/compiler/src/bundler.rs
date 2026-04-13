@@ -220,7 +220,7 @@ pub fn bundle(project_dir: &Path, options: &BundleOptions) -> Result<BundleResul
     // When sourcemap is requested, use external mode with a temp outfile so
     // esbuild writes both bundled.js and bundled.js.map as separate files.
     let tmp_dir = if options.sourcemap {
-        let dir = std::env::temp_dir().join(format!("appbase-build-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("zeroship-build-{}", std::process::id()));
         std::fs::create_dir_all(&dir).map_err(|e| {
             BundleError::CompileError(format!("Failed to create temp dir: {e}"))
         })?;
@@ -305,7 +305,7 @@ mod tests {
     fn temp_dir() -> std::path::PathBuf {
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "appbase-bundler-test-{}-{}",
+            "zeroship-bundler-test-{}-{}",
             std::process::id(),
             id
         ));
@@ -373,7 +373,7 @@ mod tests {
             r#"
 import { greet } from "./utils";
 export function onRequest(req: Request): Response {
-    return new Response(greet("appbase"));
+    return new Response(greet("zeroship"));
 }
 "#,
         )

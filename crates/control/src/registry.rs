@@ -1,10 +1,10 @@
-//! Registry — application CRUD backed by PostgreSQL (appbase-pg).
+//! Registry — application CRUD backed by PostgreSQL (zeroship-pg).
 
 use std::collections::HashMap;
 
-use appbase_core::auth::hash_api_key;
-use appbase_core::types::{AppRecord, RouteEntry, RouteMap, VersionMap};
-use appbase_pg::Conn;
+use zeroship_core::auth::hash_api_key;
+use zeroship_core::types::{AppRecord, RouteEntry, RouteMap, VersionMap};
+use zeroship_pg::Conn;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -30,8 +30,8 @@ impl std::fmt::Display for RegistryError {
     }
 }
 
-impl From<appbase_pg::Error> for RegistryError {
-    fn from(e: appbase_pg::Error) -> Self {
+impl From<zeroship_pg::Error> for RegistryError {
+    fn from(e: zeroship_pg::Error) -> Self {
         let msg = e.to_string();
         if msg.contains("duplicate key") || msg.contains("unique") || msg.contains("23505") {
             Self::AlreadyExists(msg)
@@ -321,7 +321,7 @@ impl Registry {
 ///
 /// Columns: id (UUID), name (TEXT), plan_id (UUID), deploy_hash (TEXT | NULL),
 ///          api_key (TEXT), created_at (BIGINT), updated_at (BIGINT).
-fn row_to_record(row: &appbase_pg::Row) -> AppRecord {
+fn row_to_record(row: &zeroship_pg::Row) -> AppRecord {
     AppRecord {
         id: row.get("id"),
         name: row.get("name"),

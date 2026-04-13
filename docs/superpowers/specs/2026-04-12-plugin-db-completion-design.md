@@ -1,6 +1,6 @@
 # plugin-db Completion — Native Primitives
 
-Complete the `appbase.db.*` native primitives layer to match the full spec (`docs/specs/db.md`).
+Complete the `zeroship.db.*` native primitives layer to match the full spec (`docs/specs/db.md`).
 
 ## Context
 
@@ -158,8 +158,8 @@ Each step compiles and can be tested independently:
 
 ## 6. Verification
 
-1. `cargo test -p appbase-plugin-db` — unit tests for all query builders
-2. Build: `cargo build --release -p appbase-worker`
+1. `cargo test -p zeroship-plugin-db` — unit tests for all query builders
+2. Build: `cargo build --release -p zeroship-worker`
 3. E2E test against running platform:
    - insertMany: batch insert 3 notes, verify all returned
    - updateMany: update all notes, verify `{ updated: 3 }`

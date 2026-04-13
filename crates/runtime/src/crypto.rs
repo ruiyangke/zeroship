@@ -1,6 +1,6 @@
 //! Crypto APIs for V8 apps — backed by aws-lc-rs.
 
-use appbase_runtime_macros::appbase_op;
+use zeroship_runtime_macros::zeroship_op;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 
@@ -112,7 +112,7 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 ///
 /// RFC 4122 v4 UUID. Uses thread-local buffered CSPRNG + manual hex formatting
 /// (same approach as Cloudflare workerd).
-#[appbase_op]
+#[zeroship_op]
 fn crypto_random_uuid() -> String {
     let mut b = [0u8; 16];
     fast_random(&mut b);
@@ -131,7 +131,7 @@ fn crypto_random_uuid() -> String {
 
 /// `crypto.getRandomValues(typedArray)` — fills TypedArray directly, zero copies.
 ///
-/// Hand-written V8 callback (not `#[appbase_op]`) because we need direct access
+/// Hand-written V8 callback (not `#[zeroship_op]`) because we need direct access
 /// to the TypedArray backing store — same approach as workerd.
 pub fn crypto_get_random_values_callback(
     scope: &mut v8::PinScope,
@@ -184,7 +184,7 @@ pub fn crypto_get_random_values_callback(
 ///
 /// Zero-serialization: takes ArrayBuffer directly, returns ArrayBuffer.
 /// No base64 encode/decode overhead.
-#[appbase_op]
+#[zeroship_op]
 fn crypto_digest(algo: String, data: Vec<u8>) -> Result<Vec<u8>, crate::state::OpError> {
     let algorithm = match algo.as_str() {
         "SHA-1" => &aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY,
@@ -234,7 +234,7 @@ fn parse_curve(p: &serde_json::Value) -> Result<Curve, crate::state::OpError> {
 /// result use JSON serialization.  These are infrequent setup operations with tiny
 /// payloads, so the JSON overhead is negligible.  Bulk key material uses the zero-copy
 /// ArrayBuffer bridge.
-#[appbase_op(state)]
+#[zeroship_op(state)]
 fn crypto_import_key(state: SharedState, format: String, key_data: Vec<u8>, algo_json: String) -> Result<String, crate::state::OpError> {
     let p: serde_json::Value = serde_json::from_str(&algo_json)
         .map_err(|e| crate::state::OpError::type_error(format!("Invalid algo params: {e}")))?;
@@ -315,7 +315,7 @@ fn crypto_import_key(state: SharedState, format: String, key_data: Vec<u8>, algo
 /// `__cryptoExportKey(format, keyId) → ArrayBuffer`
 ///
 /// Zero-serialization: key material returned as ArrayBuffer.
-#[appbase_op(state)]
+#[zeroship_op(state)]
 fn crypto_export_key(state: SharedState, format: String, key_id: u32) -> Result<Vec<u8>, crate::state::OpError> {
     let s = state.borrow();
     let key = s
@@ -350,7 +350,7 @@ fn crypto_export_key(state: SharedState, format: String, key_id: u32) -> Result<
 /// Design note (audit items C-8, C-9): params and result use JSON serialization.
 /// Key generation is an infrequent setup operation with small structured payloads,
 /// so the JSON overhead is negligible.
-#[appbase_op(state)]
+#[zeroship_op(state)]
 fn crypto_generate_key(
     state: SharedState,
     params: String,
@@ -480,7 +480,7 @@ fn crypto_generate_key(
 /// `__cryptoSign(algo, hash, keyId, data: ArrayBuffer) → ArrayBuffer`
 ///
 /// Zero-serialization: data passed as ArrayBuffer, signature returned as ArrayBuffer.
-#[appbase_op(state)]
+#[zeroship_op(state)]
 fn crypto_sign(state: SharedState, algo: String, hash: String, key_id: u32, data: Vec<u8>) -> Result<Vec<u8>, crate::state::OpError> {
     let algo_name = algo.to_uppercase();
     let hash = hash.to_uppercase();
@@ -598,11 +598,11 @@ fn crypto_sign(state: SharedState, algo: String, hash: String, key_id: u32, data
 /// Zero-serialization: data and signature passed as ArrayBuffer.
 ///
 /// Returns the string `"true"` or `"false"` rather than a native boolean because the
-/// `#[appbase_op]` macro's return path is `Result<String, OpError>`.  The JS polyfill
+/// `#[zeroship_op]` macro's return path is `Result<String, OpError>`.  The JS polyfill
 /// in `crypto.js` converts this with a strict comparison (`result === "true"`) so a
 /// truthy-but-wrong value like `"false"` (a non-empty string) never leaks through.
 /// (Audit item C-12.)
-#[appbase_op(state)]
+#[zeroship_op(state)]
 fn crypto_verify(state: SharedState, algo: String, hash: String, key_id: u32, data: Vec<u8>, signature: Vec<u8>) -> Result<String, crate::state::OpError> {
     let algo_name = algo.to_uppercase();
     let hash = hash.to_uppercase();
@@ -722,7 +722,7 @@ fn oaep_algo_for_hash(hash: &str) -> Result<&'static OaepAlgorithm, crate::state
 /// base64 overhead is negligible and keeping them in a single JSON object simplifies the
 /// op signature and JS polyfill.  Bulk plaintext/ciphertext always uses the zero-copy
 /// ArrayBuffer bridge.
-#[appbase_op(state)]
+#[zeroship_op(state)]
 fn crypto_encrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<u8>) -> Result<Vec<u8>, crate::state::OpError> {
     let p: serde_json::Value = serde_json::from_str(&algo_json)
         .map_err(|e| crate::state::OpError::type_error(format!("Invalid algo params: {e}")))?;
@@ -869,7 +869,7 @@ fn crypto_encrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<
 /// Design note (audit items C-1, C-2, C-3): same rationale as `crypto_encrypt` — IV,
 /// AAD, and label are small structured params that stay base64-in-JSON.  See the
 /// encrypt doc comment for the full explanation.
-#[appbase_op(state)]
+#[zeroship_op(state)]
 fn crypto_decrypt(state: SharedState, algo_json: String, key_id: u32, data: Vec<u8>) -> Result<Vec<u8>, crate::state::OpError> {
     let p: serde_json::Value = serde_json::from_str(&algo_json)
         .map_err(|e| crate::state::OpError::type_error(format!("Invalid algo params: {e}")))?;
@@ -1124,7 +1124,7 @@ fn crypto_derive_bits_inner(
 ///
 /// Zero-serialization: derived bits returned as ArrayBuffer.
 /// Params stay as JSON (salt/info are small structured data).
-#[appbase_op(state)]
+#[zeroship_op(state)]
 fn crypto_derive_bits(state: SharedState, params: String) -> Result<Vec<u8>, crate::state::OpError> {
     let p: serde_json::Value = serde_json::from_str(&params)
         .map_err(|e| crate::state::OpError::type_error(format!("Invalid params: {e}")))?;
@@ -1136,7 +1136,7 @@ fn crypto_derive_bits(state: SharedState, params: String) -> Result<Vec<u8>, cra
 /// Design note (audit items C-10, C-11): params and result use JSON serialization.
 /// Key derivation is an infrequent setup operation with small structured payloads,
 /// so the JSON overhead is negligible.
-#[appbase_op(state)]
+#[zeroship_op(state)]
 fn crypto_derive_key(state: SharedState, params: String) -> Result<String, crate::state::OpError> {
     let p: serde_json::Value = serde_json::from_str(&params)
         .map_err(|e| crate::state::OpError::type_error(format!("Invalid params: {e}")))?;

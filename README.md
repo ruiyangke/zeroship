@@ -1,8 +1,8 @@
-# appbase
+# zeroship
 
 **AI-native app platform — describe what you want, deploy in seconds.**
 
-appbase runs JavaScript apps in sandboxed V8 isolates with built-in metering, multi-tenant routing, and a control plane API. Write your app in JavaScript or TypeScript — from a single file to a full multi-module project — deploy via API or dashboard, and call your functions over HTTP.
+zeroship runs JavaScript apps in sandboxed V8 isolates with built-in metering, multi-tenant routing, and a control plane API. Write your app in JavaScript or TypeScript — from a single file to a full multi-module project — deploy via API or dashboard, and call your functions over HTTP.
 
 ## Key Features
 
@@ -12,7 +12,7 @@ appbase runs JavaScript apps in sandboxed V8 isolates with built-in metering, mu
 - **Built-in Metering** — CPU time, request count, egress bytes, per-app quotas with IETF RateLimit headers
 - **Fetch API** — full `fetch()` support inside isolates with SSRF protection
 - **KV Store** — per-isolate in-memory key-value store (`kv.get`, `kv.set`, `kv.delete`, `kv.list`)
-- **Plan-Based Quotas** — free and pro tiers with configurable limits in `appbase.toml`
+- **Plan-Based Quotas** — free and pro tiers with configurable limits in `zeroship.toml`
 - **Control Plane API** — create, deploy, delete apps; manage plans; view logs
 - **Web Dashboard** — React-based UI for managing apps, viewing usage, deploying code
 - **AI Agent** — describe what you want, the agent generates code, deploys, and tests it
@@ -41,7 +41,7 @@ var __rpc = {
 ### 3. Run
 
 ```bash
-./target/release/appbase-cli serve server.js --port=3000
+./target/release/zeroship-cli serve server.js --port=3000
 ```
 
 Your app is live. Call it:
@@ -58,7 +58,7 @@ curl -X POST http://localhost:3000/rpc \
 
 ```
                     ┌─────────────────────────────────────────────┐
-                    │              appbase server                  │
+                    │              zeroship server                  │
                     │                                             │
   HTTP request      │  ┌──────────┐    ┌────────────────────┐    │
  ──────────────────►│  │  Router   │───►│  Enforcement       │    │
@@ -225,10 +225,10 @@ Repeating timers within the isolate's event loop.
 
 ### `env.get(key)`
 
-Read per-app configuration from process environment variables. Keys are mapped to `APPBASE_APP_{KEY}` (uppercased). Returns the value as a string, or `null` if not set.
+Read per-app configuration from process environment variables. Keys are mapped to `ZEROSHIP_APP_{KEY}` (uppercased). Returns the value as a string, or `null` if not set.
 
 ```javascript
-// Set APPBASE_APP_API_KEY=secret123 in the server environment
+// Set ZEROSHIP_APP_API_KEY=secret123 in the server environment
 var key = env.get("api_key"); // "secret123"
 ```
 
@@ -238,7 +238,7 @@ var key = env.get("api_key"); // "secret123"
 
 ## Dashboard
 
-The web dashboard provides a UI for managing your appbase instance.
+The web dashboard provides a UI for managing your zeroship instance.
 
 The dashboard provides a single-page interface with a sidebar for navigation. The main views include a system overview with health indicators and usage graphs, an app list with inline status badges, a code editor with deploy button, and an AI chat panel for generating apps from natural language.
 
@@ -258,7 +258,7 @@ npm install
 npm run dev
 ```
 
-The dashboard connects to the appbase API and authenticates with the master key.
+The dashboard connects to the zeroship API and authenticates with the master key.
 
 ## AI Agent
 
@@ -287,7 +287,7 @@ The AI agent generates and deploys apps from natural language descriptions. It u
 
 ## Configuration
 
-### appbase.toml
+### zeroship.toml
 
 ```toml
 [server]
@@ -336,19 +336,19 @@ plan = "pro"
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `APPBASE_MASTER_KEY` | Master key for admin API authentication | `dev-master-key` |
-| `APPBASE_APP_*` | Per-app config variables, readable via `env.get(key)` in JS (e.g., `APPBASE_APP_API_KEY` is read as `env.get("api_key")`) | — |
+| `ZEROSHIP_MASTER_KEY` | Master key for admin API authentication | `dev-master-key` |
+| `ZEROSHIP_APP_*` | Per-app config variables, readable via `env.get(key)` in JS (e.g., `ZEROSHIP_APP_API_KEY` is read as `env.get("api_key")`) | — |
 
 ### CLI Arguments
 
 ```
-appbase serve <server.js> [options]
+zeroship serve <server.js> [options]
 
 Options:
   --port=PORT        HTTP port (default: 3000)
-  --db=PATH          SQLite database path (default: appbase.db)
+  --db=PATH          SQLite database path (default: zeroship.db)
   --static=PATH      Static HTML file to serve on non-API routes
-  --config=PATH      Config file path (default: appbase.toml)
+  --config=PATH      Config file path (default: zeroship.toml)
 ```
 
 ## Development
@@ -368,7 +368,7 @@ cargo build --release
 cargo test
 
 # Run the server
-./target/release/appbase-cli serve examples/test_app.js --port=3000
+./target/release/zeroship-cli serve examples/test_app.js --port=3000
 
 # Build the dashboard
 cd web/dashboard && npm install && npm run build
@@ -378,7 +378,7 @@ cd web/dashboard && npm install && npm run build
 
 ```
 crates/
-  cli/          — CLI entry point (appbase serve, appbase dev)
+  cli/          — CLI entry point (zeroship serve, zeroship dev)
   server/       — Axum HTTP router, V8 pool, middleware
   core/         — Shared types, config, plugin trait
   control/      — App registry (SQLite/Postgres via sqlx)

@@ -4,8 +4,8 @@ use std::rc::Rc;
 
 use uuid::Uuid;
 
-use appbase_runtime::plugin::NativePlugin;
-use appbase_runtime::runtime::{AsyncEvent, AsyncWork, Runtime};
+use zeroship_runtime::plugin::NativePlugin;
+use zeroship_runtime::runtime::{AsyncEvent, AsyncWork, Runtime};
 
 struct IsolateEntry {
     runtime: Rc<RefCell<Runtime>>,
@@ -37,7 +37,7 @@ pub fn init_cache(max_size: usize, db_url: Option<String>) {
 /// Initialize async resources (DB pool). Must be called on compio runtime.
 pub async fn init_async() {
     if DB_URL.with(|u| u.borrow().is_some()) {
-        if let Err(e) = appbase_plugin_db::init_pool_async().await {
+        if let Err(e) = zeroship_plugin_db::init_pool_async().await {
             eprintln!("[worker] db pool init failed: {e}");
         }
     }
@@ -47,8 +47,8 @@ pub async fn init_async() {
 fn create_plugins() -> Vec<Box<dyn NativePlugin>> {
     let mut plugins: Vec<Box<dyn NativePlugin>> = Vec::new();
     if DB_URL.with(|u| u.borrow().is_some()) {
-        let plugin = appbase_plugin_db::DbPlugin::new();
-        let config = std::sync::Arc::new(appbase_runtime::plugin::PluginConfig {
+        let plugin = zeroship_plugin_db::DbPlugin::new();
+        let config = std::sync::Arc::new(zeroship_runtime::plugin::PluginConfig {
             db_url: DB_URL.with(|u| u.borrow().clone()),
             ..Default::default()
         });
@@ -74,7 +74,7 @@ pub fn get_runtime(app_id: &Uuid) -> Option<Rc<RefCell<Runtime>>> {
 
 /// Load an app from bundle bytes. Creates V8 runtime + starts pump task.
 pub fn load_app(app_id: Uuid, bundle_bytes: &[u8]) -> bool {
-    let mut bundle = match appbase_bundle::AppBundle::from_bytes(bundle_bytes) {
+    let mut bundle = match zeroship_bundle::AppBundle::from_bytes(bundle_bytes) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("[worker] failed to parse bundle for {app_id}: {e}");
@@ -211,7 +211,7 @@ fn evict_lru(cache: &mut AppCache) {
 }
 
 /// Pump task — drives async V8 operations (timers, fetch).
-/// Copied from `appbase_runtime::serve` — must stay in sync.
+/// Copied from `zeroship_runtime::serve` — must stay in sync.
 async fn pump_task(
     runtime: Rc<RefCell<Runtime>>,
     mut work: AsyncWork,

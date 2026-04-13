@@ -215,7 +215,7 @@ mod tests {
 
     fn temp_dir() -> PathBuf {
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("appbase-storage-test-{id}"));
+        let dir = std::env::temp_dir().join(format!("zeroship-storage-test-{id}"));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }

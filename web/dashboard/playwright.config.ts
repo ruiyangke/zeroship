@@ -9,7 +9,7 @@ export default defineConfig({
     headless: true,
   },
   // Servers must be started manually before running tests:
-  //   1. APPBASE_MASTER_KEY=e2e-test-key appbase serve server.js --port=3335
+  //   1. ZEROSHIP_MASTER_KEY=e2e-test-key zeroship serve server.js --port=3335
   //   2. cd web/dashboard && npx vite --port 5173  (for UI tests only)
   projects: [
     {

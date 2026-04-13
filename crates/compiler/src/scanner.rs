@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn discovers_routes() {
-        let dir = std::env::temp_dir().join(format!("appbase-scanner-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("zeroship-scanner-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
 
         setup_fixture(&dir, &[

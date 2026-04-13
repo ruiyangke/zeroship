@@ -1,18 +1,18 @@
 [package]
-name = "appbase-worker"
+name = "zeroship-worker"
 version = "0.1.0"
 edition = "2021"
-description = "appbase data plane — V8 compute worker"
+description = "zeroship data plane — V8 compute worker"
 
 [[bin]]
-name = "appbase-worker"
+name = "zeroship-worker"
 path = "src/main.rs"
 
 [dependencies]
-appbase-bundle = { workspace = true }
-appbase-core = { workspace = true }
-appbase-runtime = { workspace = true }
-appbase-plugin-db = { workspace = true }
+zeroship-bundle = { workspace = true }
+zeroship-core = { workspace = true }
+zeroship-runtime = { workspace = true }
+zeroship-plugin-db = { workspace = true }
 ntex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

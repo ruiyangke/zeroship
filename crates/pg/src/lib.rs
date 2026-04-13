@@ -1,8 +1,8 @@
-//! appbase-pg — minimal PostgreSQL driver for compio/io_uring.
+//! zeroship-pg — minimal PostgreSQL driver for compio/io_uring.
 //!
 //! Uses `postgres-protocol` for wire format encoding/decoding and SCRAM-SHA-256
 //! authentication. Provides buffered compio I/O, connection pool, and a simple
-//! query API for the appbase platform.
+//! query API for the zeroship platform.
 
 mod conn;
 mod pool;

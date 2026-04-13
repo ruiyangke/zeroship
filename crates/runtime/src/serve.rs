@@ -1,14 +1,14 @@
-//! Reusable compio HTTP server for appbase.
+//! Reusable compio HTTP server for zeroship.
 //!
 //! Extracted from `server.rs` (the v8-server-compio binary) so that both the
-//! benchmark binary and the CLI (`appbase serve`) can share the same server
+//! benchmark binary and the CLI (`zeroship serve`) can share the same server
 //! logic.
 //!
 //! ## Usage
 //!
 //! ```ignore
-//! use appbase_runtime::serve::{start_server, ServerOptions};
-//! use appbase_runtime::ModuleEntry;
+//! use zeroship_runtime::serve::{start_server, ServerOptions};
+//! use zeroship_runtime::ModuleEntry;
 //!
 //! let modules = vec![ModuleEntry { specifier: "index.js".into(), source: "...".into() }];
 //! start_server(modules, ServerOptions { port: 3000, ..Default::default() });
@@ -75,7 +75,7 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
 
     if options.cpu_limit.is_some() || options.wall_timeout.is_some() {
         eprintln!(
-            "[appbase] cpu_limit={:?} wall_timeout={:?}",
+            "[zeroship] cpu_limit={:?} wall_timeout={:?}",
             options.cpu_limit, options.wall_timeout
         );
     }
@@ -90,7 +90,7 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
             modules,
         );
     } else {
-        eprintln!("[appbase] {num_workers} workers on port {}", options.port);
+        eprintln!("[zeroship] {num_workers} workers on port {}", options.port);
         let mut handles = Vec::new();
         for i in 0..num_workers {
             let worker_modules = modules.clone();
@@ -1022,9 +1022,9 @@ fn run_single_worker(
             };
 
             if let Some(id) = worker_id {
-                eprintln!("[appbase] worker {id} ready on port {port}");
+                eprintln!("[zeroship] worker {id} ready on port {port}");
             } else {
-                eprintln!("[appbase] http://0.0.0.0:{port}");
+                eprintln!("[zeroship] http://0.0.0.0:{port}");
             }
 
             let runtime = Rc::new(RefCell::new(
@@ -1037,7 +1037,7 @@ fn run_single_worker(
                     r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":0}"#,
                 );
                 if let Err(e) = result {
-                    eprintln!("[appbase] warmup failed: {e}");
+                    eprintln!("[zeroship] warmup failed: {e}");
                 }
             }
 

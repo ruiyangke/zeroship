@@ -1,7 +1,7 @@
 {
-  "name": "@appbase/db",
+  "name": "@zeroship/db",
   "version": "0.1.0",
-  "description": "Mongoose-compatible database SDK for appbase",
+  "description": "Mongoose-compatible database SDK for zeroship",
   "main": "dist/index.js",
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -9,7 +9,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/appbase-dev/appbase",
+    "url": "https://github.com/zeroship-dev/zeroship",
     "directory": "sdks/db"
   },
   "files": ["dist", "src"],

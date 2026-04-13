@@ -7,15 +7,15 @@
 //!
 //! ```ignore
 //! // Sync, no state:
-//! #[appbase_op]
+//! #[zeroship_op]
 //! fn url_can_parse(input: String, base: Option<String>) -> bool { ... }
 //!
 //! // Sync, with shared state:
-//! #[appbase_op(state)]
+//! #[zeroship_op(state)]
 //! fn kv_get(state: SharedState, key: String) -> Option<String> { ... }
 //!
 //! // Async (returns Promise, state plumbing is auto-generated):
-//! #[appbase_op(async)]
+//! #[zeroship_op(async)]
 //! async fn op_fetch(method: String, url: String) -> String { ... }
 //! ```
 //!
@@ -35,7 +35,7 @@ use syn::{
 // ---------------------------------------------------------------------------
 
 #[proc_macro_attribute]
-pub fn appbase_op(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn zeroship_op(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr_str = attr.to_string();
     let is_async = attr_str.contains("async");
     let needs_state = attr_str.contains("state");

@@ -1,4 +1,4 @@
-use appbase_pg::{Conn, Error, Pool};
+use zeroship_pg::{Conn, Error, Pool};
 
 fn test_url() -> String {
     std::env::var("PG_TEST_URL")

@@ -2,7 +2,7 @@
  * Dashboard UI E2E tests — comprehensive browser tests.
  *
  * Requires: Chromium (via Nix playwright-test or npx playwright install)
- * Servers: appbase on :3335, vite on :5173
+ * Servers: zeroship on :3335, vite on :5173
  */
 import { test, expect, type Page } from "@playwright/test";
 
@@ -12,7 +12,7 @@ const API = "http://localhost:3335";
 /** Helper: login and navigate to authenticated state */
 async function login(page: Page) {
   await page.goto("/");
-  await page.evaluate((key) => localStorage.setItem("appbase_key", key), MASTER_KEY);
+  await page.evaluate((key) => localStorage.setItem("zeroship_key", key), MASTER_KEY);
   await page.goto("/");
   await expect(page.locator("text=overview").first()).toBeVisible({ timeout: 10000 });
 }
@@ -57,7 +57,7 @@ test.describe("Login Page", () => {
     await page.click('button[type="submit"]');
     await expect(page.locator("text=overview").first()).toBeVisible({ timeout: 10000 });
     // Verify key is stored
-    const key = await page.evaluate(() => localStorage.getItem("appbase_key"));
+    const key = await page.evaluate(() => localStorage.getItem("zeroship_key"));
     expect(key).toBe(MASTER_KEY);
   });
 
@@ -295,7 +295,7 @@ test.describe("Logout", () => {
     // Should show login page
     await expect(page.locator('input[type="password"]')).toBeVisible({ timeout: 5000 });
     // Key should be cleared
-    const key = await page.evaluate(() => localStorage.getItem("appbase_key"));
+    const key = await page.evaluate(() => localStorage.getItem("zeroship_key"));
     expect(key).toBeNull();
   });
 });

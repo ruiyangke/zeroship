@@ -41,7 +41,7 @@
 [node] http://0.0.0.0:4003 (Node.js v22.22.2)
 [node] http://0.0.0.0:4003 (Node.js v22.22.2)
 All servers ready.
-appbase Runtime Benchmark
+zeroship Runtime Benchmark
 Date: 2026-04-09
 Machine: Linux (16 cores)
 Tool: wrk, 4 threads, 50 connections, 10s per test

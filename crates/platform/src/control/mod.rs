@@ -1,4 +1,4 @@
-//! Control plane for appbase — app registry, deploy, plan management.
+//! Control plane for zeroship — app registry, deploy, plan management.
 //!
 //! Defines the `AppRegistry` trait (the boundary between control and data planes)
 //! and provides `SqlxRegistry` as the default implementation backed by SQLite or Postgres.

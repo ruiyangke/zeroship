@@ -11,7 +11,7 @@ Servers:
 Changes since 2026-04-01:
   - ESM module system (replaced script mode)
   - URL/URLSearchParams polyfill (ada-url native)
-  - #[appbase_op] proc macro (zero overhead, generates identical code)
+  - #[zeroship_op] proc macro (zero overhead, generates identical code)
   - Per-app env vars (HashMap instead of process env)
   - Fix: copy module namespace exports to plain object (avoids exotic object overhead)
 

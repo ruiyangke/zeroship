@@ -1,4 +1,4 @@
-import { test } from '../../packages/appbase/src/test.js'
+import { test } from '../../packages/zeroship/src/test.js'
 import assert from 'node:assert/strict'
 
 test('addTodo returns a todo with id and text', async ({ rpc }) => {

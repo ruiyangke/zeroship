@@ -1,8 +1,8 @@
 [package]
-name = "appbase-core"
+name = "zeroship-core"
 version = "0.1.0"
 edition = "2021"
-description = "Core types, VFS, and auth for the appbase platform"
+description = "Core types, VFS, and auth for the zeroship platform"
 
 [dependencies]
 serde = { workspace = true }

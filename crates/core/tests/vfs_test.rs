@@ -1,8 +1,8 @@
-use appbase_core::vfs::{BundleStore, LocalFs, VfsError};
+use zeroship_core::vfs::{BundleStore, LocalFs, VfsError};
 
 fn temp_dir(suffix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
-        "appbase-vfs-test-{}-{}",
+        "zeroship-vfs-test-{}-{}",
         std::process::id(),
         suffix
     ))

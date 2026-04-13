@@ -3,7 +3,7 @@
 //! Exposes `__urlParse(input, base?)` and `__urlCanParse(input, base?)` to JS.
 //! The JS `URL` class wraps these native calls for spec-compliant URL parsing.
 
-use appbase_runtime_macros::appbase_op;
+use zeroship_runtime_macros::zeroship_op;
 
 /// V8 callback: `__urlParse(input, base?) → Object | null`
 ///
@@ -56,7 +56,7 @@ pub fn url_parse_callback(
 }
 
 /// `__urlCanParse(input, base?) → boolean`
-#[appbase_op]
+#[zeroship_op]
 fn url_can_parse(input: String, base: Option<String>) -> bool {
     ada_url::Url::can_parse(&input, base.as_deref())
 }

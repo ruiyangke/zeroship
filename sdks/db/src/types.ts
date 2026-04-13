@@ -1,5 +1,5 @@
 /**
- * Core type definitions and the `t` type-builder API for @appbase/db.
+ * Core type definitions and the `t` type-builder API for @zeroship/db.
  * Use `t.string()`, `t.number()`, etc. to declare schema fields with optional
  * constraints, then pass the result to `model()`.
  */

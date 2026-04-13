@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# WebSocket benchmark: appbase compio vs Node.js
+# WebSocket benchmark: zeroship compio vs Node.js
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -56,14 +56,14 @@ echo "========================================================="
 
 echo ""
 echo "--- 50 clients ---"
-run_ws "appbase compio (1 worker)" "ws://localhost:$PORT_COMPIO_1" 50
-run_ws "appbase compio ($(nproc) workers)" "ws://localhost:$PORT_COMPIO_N" 50
+run_ws "zeroship compio (1 worker)" "ws://localhost:$PORT_COMPIO_1" 50
+run_ws "zeroship compio ($(nproc) workers)" "ws://localhost:$PORT_COMPIO_N" 50
 run_ws "Node.js $(node --version)" "ws://localhost:$PORT_NODE" 50
 
 echo ""
 echo "--- 100 clients ---"
-run_ws "appbase compio (1 worker)" "ws://localhost:$PORT_COMPIO_1" 100
-run_ws "appbase compio ($(nproc) workers)" "ws://localhost:$PORT_COMPIO_N" 100
+run_ws "zeroship compio (1 worker)" "ws://localhost:$PORT_COMPIO_1" 100
+run_ws "zeroship compio ($(nproc) workers)" "ws://localhost:$PORT_COMPIO_N" 100
 run_ws "Node.js $(node --version)" "ws://localhost:$PORT_NODE" 100
 
 echo ""

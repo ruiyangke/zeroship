@@ -1,4 +1,4 @@
-//! V8 callbacks for `appbase.db.*` methods.
+//! V8 callbacks for `zeroship.db.*` methods.
 //!
 //! Each callback:
 //! 1. Reads arguments from V8
@@ -12,7 +12,7 @@
 
 use std::rc::Rc;
 
-use appbase_runtime::state::{OpResult, SharedState};
+use zeroship_runtime::state::{OpResult, SharedState};
 use serde_json::Value;
 
 use crate::query::{self, BuiltQuery};
@@ -228,7 +228,7 @@ async fn exec_mutation(bq: BuiltQuery) -> Result<String, String> {
 }
 
 /// Convert rows to a JSON array string.
-fn rows_to_json(rows: &[appbase_pg::Row]) -> String {
+fn rows_to_json(rows: &[zeroship_pg::Row]) -> String {
     let arr: Vec<Value> = rows.iter().map(row_to_json).collect();
     Value::Array(arr).to_string()
 }
@@ -243,7 +243,7 @@ fn rows_to_json(rows: &[appbase_pg::Row]) -> String {
 /// - UUID → string
 /// - JSONB/JSON → parsed JSON value
 /// - Everything else → string (via text representation)
-fn row_to_json(row: &appbase_pg::Row) -> Value {
+fn row_to_json(row: &zeroship_pg::Row) -> Value {
     let mut obj = serde_json::Map::new();
     for col in row.columns() {
         let key = col.name.clone();
@@ -254,7 +254,7 @@ fn row_to_json(row: &appbase_pg::Row) -> Value {
 }
 
 /// Convert a single column value to JSON based on its OID.
-fn column_to_json(row: &appbase_pg::Row, name: &str, oid: u32) -> Value {
+fn column_to_json(row: &zeroship_pg::Row, name: &str, oid: u32) -> Value {
     // Try to get the value — if it's NULL, return null
     // OIDs from postgres_types::Type constants
     match oid {
@@ -348,7 +348,7 @@ fn error_json(msg: &str) -> String {
 // Callback: findOne(collection, filterJson, optsJson)
 // ---------------------------------------------------------------------------
 
-/// `appbase.db.findOne(collection, filterJson)` → Promise<object|null>
+/// `zeroship.db.findOne(collection, filterJson)` → Promise<object|null>
 pub fn find_one(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -405,7 +405,7 @@ pub fn find_one(
 // Callback: find(collection, filterJson, optsJson)
 // ---------------------------------------------------------------------------
 
-/// `appbase.db.find(collection, filterJson, optsJson)` → Promise<array>
+/// `zeroship.db.find(collection, filterJson, optsJson)` → Promise<array>
 ///
 /// optsJson: `{ "limit": N, "offset": N, "orderBy": {...} }`
 pub fn find(
@@ -464,7 +464,7 @@ pub fn find(
 // Callback: insert(collection, docJson)
 // ---------------------------------------------------------------------------
 
-/// `appbase.db.insert(collection, docJson)` → Promise<object>
+/// `zeroship.db.insert(collection, docJson)` → Promise<object>
 pub fn insert(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -520,7 +520,7 @@ pub fn insert(
 // Callback: updateOne(collection, filterJson, updateJson)
 // ---------------------------------------------------------------------------
 
-/// `appbase.db.updateOne(collection, filterJson, updateJson)` → Promise<object|null>
+/// `zeroship.db.updateOne(collection, filterJson, updateJson)` → Promise<object|null>
 pub fn update_one(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -578,7 +578,7 @@ pub fn update_one(
 // Callback: deleteOne(collection, filterJson)
 // ---------------------------------------------------------------------------
 
-/// `appbase.db.deleteOne(collection, filterJson)` → Promise<object|null>
+/// `zeroship.db.deleteOne(collection, filterJson)` → Promise<object|null>
 pub fn delete_one(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -633,7 +633,7 @@ pub fn delete_one(
 // Callback: insertMany(collection, docsJson)
 // ---------------------------------------------------------------------------
 
-/// `appbase.db.insertMany(collection, docsJson)` → Promise<array>
+/// `zeroship.db.insertMany(collection, docsJson)` → Promise<array>
 pub fn insert_many(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -684,7 +684,7 @@ pub fn insert_many(
 // Callback: aggregate(collection, pipelineJson)
 // ---------------------------------------------------------------------------
 
-/// `appbase.db.aggregate(collection, pipelineJson)` → Promise<array>
+/// `zeroship.db.aggregate(collection, pipelineJson)` → Promise<array>
 pub fn aggregate(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -735,7 +735,7 @@ pub fn aggregate(
 // Callback: distinct(collection, field, filterJson)
 // ---------------------------------------------------------------------------
 
-/// `appbase.db.distinct(collection, field, filterJson)` → Promise<array>
+/// `zeroship.db.distinct(collection, field, filterJson)` → Promise<array>
 pub fn distinct(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -803,7 +803,7 @@ pub fn distinct(
 // Callback: updateMany(collection, filterJson, updateJson)
 // ---------------------------------------------------------------------------
 
-/// `appbase.db.updateMany(collection, filterJson, updateJson)` → Promise<{ updated: number }>
+/// `zeroship.db.updateMany(collection, filterJson, updateJson)` → Promise<{ updated: number }>
 pub fn update_many(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -861,7 +861,7 @@ pub fn update_many(
 // Callback: deleteMany(collection, filterJson)
 // ---------------------------------------------------------------------------
 
-/// `appbase.db.deleteMany(collection, filterJson)` → Promise<{ deleted: number }>
+/// `zeroship.db.deleteMany(collection, filterJson)` → Promise<{ deleted: number }>
 pub fn delete_many(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -916,7 +916,7 @@ pub fn delete_many(
 // Callback: count(collection, filterJson)
 // ---------------------------------------------------------------------------
 
-/// `appbase.db.count(collection, filterJson)` → Promise<{ count: number }>
+/// `zeroship.db.count(collection, filterJson)` → Promise<{ count: number }>
 pub fn count(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,

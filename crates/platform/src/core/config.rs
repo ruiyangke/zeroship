@@ -1,8 +1,8 @@
-//! Configuration types for the appbase platform.
+//! Configuration types for the zeroship platform.
 //!
 //! These structs define all configurable behavior of the runtime.
 //! They can be constructed from:
-//! - `appbase.toml` config file
+//! - `zeroship.toml` config file
 //! - CLI arguments
 //! - The Builder API
 //! - Environment variables
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// Top-level configuration for an appbase instance.
+/// Top-level configuration for an zeroship instance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppbaseConfig {
     /// HTTP server configuration.

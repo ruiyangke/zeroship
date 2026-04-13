@@ -1,4 +1,4 @@
-//! # appbase-enforcement
+//! # zeroship-enforcement
 //!
 //! Rate limiting, quota enforcement, concurrency control, and entitlements.
 //!

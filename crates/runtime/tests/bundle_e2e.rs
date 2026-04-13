@@ -3,9 +3,9 @@
 mod common;
 use common::*;
 
-use appbase_runtime::bundle::{AppBundle, ModuleType};
-use appbase_runtime::{init_v8, ModuleEntry};
-use appbase_runtime::runtime::Runtime;
+use zeroship_runtime::bundle::{AppBundle, ModuleType};
+use zeroship_runtime::{init_v8, ModuleEntry};
+use zeroship_runtime::runtime::Runtime;
 use std::collections::HashMap;
 
 /// Load the esbuild-bundled JS at compile time

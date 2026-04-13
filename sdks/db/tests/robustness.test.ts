@@ -1,5 +1,5 @@
 /**
- * Robustness test suite for @appbase/db
+ * Robustness test suite for @zeroship/db
  * Covers: native layer failures, malicious inputs, type coercion edge cases,
  * deeply nested filters, query edge cases, validation edge cases, aggregate edge cases.
  */

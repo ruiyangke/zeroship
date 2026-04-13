@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Complete all missing `appbase.db.*` native primitives and operators so the plugin matches the full spec.
+**Goal:** Complete all missing `zeroship.db.*` native primitives and operators so the plugin matches the full spec.
 
 **Architecture:** Add missing filter operators, update operators, and 5 new primitives (insertMany, updateMany, deleteMany, distinct, aggregate) to the existing query builder + V8 callback architecture. All changes are in `crates/plugin-db/src/` across three files.
 
@@ -60,7 +60,7 @@ fn test_not_operator() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p appbase-plugin-db -- test_ilike test_search test_not -v`
+Run: `cargo test -p zeroship-plugin-db -- test_ilike test_search test_not -v`
 Expected: FAIL (unsupported operator)
 
 - [ ] **Step 3: Add $ilike and $search to build_field_condition()**
@@ -102,7 +102,7 @@ In `query.rs`, inside `build_where()`, add this arm after the `"$or"` arm (befor
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cargo test -p appbase-plugin-db -v`
+Run: `cargo test -p zeroship-plugin-db -v`
 Expected: ALL PASS
 
 - [ ] **Step 6: Commit**
@@ -186,7 +186,7 @@ fn test_update_mixed_operators() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p appbase-plugin-db -- test_update_inc test_update_dec test_update_mul test_update_push test_update_pull test_update_add test_update_mixed -v`
+Run: `cargo test -p zeroship-plugin-db -- test_update_inc test_update_dec test_update_mul test_update_push test_update_pull test_update_add test_update_mixed -v`
 Expected: FAIL
 
 - [ ] **Step 3: Extract build_set_clauses() helper and add all operators**
@@ -316,7 +316,7 @@ pub fn build_update_one(
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cargo test -p appbase-plugin-db -v`
+Run: `cargo test -p zeroship-plugin-db -v`
 Expected: ALL PASS
 
 - [ ] **Step 6: Commit**
@@ -363,7 +363,7 @@ fn test_insert_many_empty() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p appbase-plugin-db -- test_insert_many -v`
+Run: `cargo test -p zeroship-plugin-db -- test_insert_many -v`
 Expected: FAIL (function not found)
 
 - [ ] **Step 3: Add build_insert_many() to query.rs**
@@ -437,7 +437,7 @@ Add after the `insert` callback:
 // Callback: insertMany(collection, docsJson)
 // ---------------------------------------------------------------------------
 
-/// `appbase.db.insertMany(collection, docsJson)` -> Promise<array>
+/// `zeroship.db.insertMany(collection, docsJson)` -> Promise<array>
 pub fn insert_many(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -495,7 +495,7 @@ r.add("insertMany", callbacks::insert_many);
 
 - [ ] **Step 6: Run tests and build**
 
-Run: `cargo test -p appbase-plugin-db -v && cargo build --release -p appbase-worker 2>&1 | tail -3`
+Run: `cargo test -p zeroship-plugin-db -v && cargo build --release -p zeroship-worker 2>&1 | tail -3`
 Expected: ALL PASS, build succeeds
 
 - [ ] **Step 7: Commit**
@@ -551,7 +551,7 @@ fn test_delete_many_no_filter() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p appbase-plugin-db -- test_update_many test_delete_many -v`
+Run: `cargo test -p zeroship-plugin-db -- test_update_many test_delete_many -v`
 Expected: FAIL
 
 - [ ] **Step 3: Add build_update_many() to query.rs**
@@ -629,7 +629,7 @@ Add to `callbacks.rs`. These return `{ updated: N }` and `{ deleted: N }` respec
 // Callback: updateMany(collection, filterJson, updateJson)
 // ---------------------------------------------------------------------------
 
-/// `appbase.db.updateMany(collection, filterJson, updateJson)` -> Promise<{ updated: N }>
+/// `zeroship.db.updateMany(collection, filterJson, updateJson)` -> Promise<{ updated: N }>
 pub fn update_many(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -686,7 +686,7 @@ pub fn update_many(
 // Callback: deleteMany(collection, filterJson)
 // ---------------------------------------------------------------------------
 
-/// `appbase.db.deleteMany(collection, filterJson)` -> Promise<{ deleted: N }>
+/// `zeroship.db.deleteMany(collection, filterJson)` -> Promise<{ deleted: N }>
 pub fn delete_many(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -748,7 +748,7 @@ r.add("deleteMany", callbacks::delete_many);
 
 - [ ] **Step 7: Run tests and build**
 
-Run: `cargo test -p appbase-plugin-db -v && cargo build --release -p appbase-worker 2>&1 | tail -3`
+Run: `cargo test -p zeroship-plugin-db -v && cargo build --release -p zeroship-worker 2>&1 | tail -3`
 Expected: ALL PASS, build succeeds
 
 - [ ] **Step 8: Commit**
@@ -789,7 +789,7 @@ fn test_find_without_select() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p appbase-plugin-db -- test_find_with_select test_find_without_select -v`
+Run: `cargo test -p zeroship-plugin-db -- test_find_with_select test_find_without_select -v`
 Expected: FAIL (wrong number of arguments)
 
 - [ ] **Step 3: Add select parameter to build_find()**
@@ -849,7 +849,7 @@ Update all existing tests that call `build_find` to add `None` as the last argum
 
 - [ ] **Step 5: Run tests and build**
 
-Run: `cargo test -p appbase-plugin-db -v && cargo build --release -p appbase-worker 2>&1 | tail -3`
+Run: `cargo test -p zeroship-plugin-db -v && cargo build --release -p zeroship-worker 2>&1 | tail -3`
 Expected: ALL PASS
 
 - [ ] **Step 6: Commit**
@@ -928,7 +928,7 @@ pub fn build_distinct(
 // Callback: distinct(collection, field, filterJson)
 // ---------------------------------------------------------------------------
 
-/// `appbase.db.distinct(collection, field, filterJson)` -> Promise<array>
+/// `zeroship.db.distinct(collection, field, filterJson)` -> Promise<array>
 pub fn distinct(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -996,7 +996,7 @@ r.add("distinct", callbacks::distinct);
 
 - [ ] **Step 5: Run tests and build**
 
-Run: `cargo test -p appbase-plugin-db -v && cargo build --release -p appbase-worker 2>&1 | tail -3`
+Run: `cargo test -p zeroship-plugin-db -v && cargo build --release -p zeroship-worker 2>&1 | tail -3`
 Expected: ALL PASS
 
 - [ ] **Step 6: Commit**
@@ -1260,7 +1260,7 @@ pub fn build_aggregate(
 // Callback: aggregate(collection, pipelineJson)
 // ---------------------------------------------------------------------------
 
-/// `appbase.db.aggregate(collection, pipelineJson)` -> Promise<array>
+/// `zeroship.db.aggregate(collection, pipelineJson)` -> Promise<array>
 pub fn aggregate(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -1316,7 +1316,7 @@ r.add("aggregate", callbacks::aggregate);
 
 - [ ] **Step 5: Run tests and build**
 
-Run: `cargo test -p appbase-plugin-db -v && cargo build --release -p appbase-worker 2>&1 | tail -3`
+Run: `cargo test -p zeroship-plugin-db -v && cargo build --release -p zeroship-worker 2>&1 | tail -3`
 Expected: ALL PASS
 
 - [ ] **Step 6: Commit**
@@ -1336,7 +1336,7 @@ git commit -m "feat(plugin-db): add aggregate primitive with pipeline stages"
 - [ ] **Step 1: Build**
 
 ```bash
-cargo build --release -p appbase-worker -p appbase-control -p appbase-gateway -p appbase
+cargo build --release -p zeroship-worker -p zeroship-control -p zeroship-gateway -p zeroship
 ```
 
 - [ ] **Step 2: Start platform and create test app**
@@ -1349,32 +1349,32 @@ Deploy a JS app that exports functions exercising every new primitive:
 
 ```javascript
 export async function testInsertMany() {
-    return await appbase.db.insertMany("notes", [
+    return await zeroship.db.insertMany("notes", [
         { title: "A", body: "first", category: "tech", views: 0, tags: [] },
         { title: "B", body: "second", category: "tech", views: 0, tags: [] },
         { title: "C", body: "third", category: "food", views: 0, tags: [] },
     ]);
 }
 export async function testUpdateMany() {
-    return await appbase.db.updateMany("notes", { category: "tech" }, { views: { $inc: 1 } });
+    return await zeroship.db.updateMany("notes", { category: "tech" }, { views: { $inc: 1 } });
 }
 export async function testDeleteMany() {
-    return await appbase.db.deleteMany("notes", { category: "food" });
+    return await zeroship.db.deleteMany("notes", { category: "food" });
 }
 export async function testDistinct() {
-    return await appbase.db.distinct("notes", "category", {});
+    return await zeroship.db.distinct("notes", "category", {});
 }
 export async function testAggregate() {
-    return await appbase.db.aggregate("notes", [
+    return await zeroship.db.aggregate("notes", [
         { $group: { by: "category", count: { $count: true }, total_views: { $sum: "views" } } },
         { $sort: { count: -1 } }
     ]);
 }
 export async function testFindSelect() {
-    return await appbase.db.find("notes", {}, { select: ["title", "category"] });
+    return await zeroship.db.find("notes", {}, { select: ["title", "category"] });
 }
 export async function testIlike() {
-    return await appbase.db.find("notes", { title: { $ilike: "%a%" } }, {});
+    return await zeroship.db.find("notes", { title: { $ilike: "%a%" } }, {});
 }
 ```
 

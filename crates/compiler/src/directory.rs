@@ -119,14 +119,14 @@ mod tests {
 
     #[test]
     fn compiles_directory() {
-        let dir = std::env::temp_dir().join(format!("appbase-dircompile-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("zeroship-dircompile-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
 
         setup_fixture(&dir, &[
             ("layout.jsx", "export default function Layout({ children }) { return <div>{children}</div> }"),
             ("page.jsx", "export default function Home() { return <h1>Home</h1> }"),
             ("todos/page.jsx", "export default function Todos() { return <div>Todos</div> }"),
-            ("todos/server.js", r#"import { db } from 'appbase'
+            ("todos/server.js", r#"import { db } from 'zeroship'
 const todos = db.collection('todos')
 export async function getTodos() { return todos.find() }
 export async function addTodo(text) { return todos.insert({ text, done: false }) }

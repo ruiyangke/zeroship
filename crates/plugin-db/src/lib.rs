@@ -1,12 +1,12 @@
-//! Database plugin — `appbase.db.*` native primitives.
+//! Database plugin — `zeroship.db.*` native primitives.
 //!
 //! Provides MongoDB-style CRUD operations backed by PostgreSQL:
-//! - `appbase.db.findOne(collection, filterJson)` → Promise
-//! - `appbase.db.find(collection, filterJson, optsJson)` → Promise
-//! - `appbase.db.insert(collection, docJson)` → Promise
-//! - `appbase.db.updateOne(collection, filterJson, updateJson)` → Promise
-//! - `appbase.db.deleteOne(collection, filterJson)` → Promise
-//! - `appbase.db.count(collection, filterJson)` → Promise
+//! - `zeroship.db.findOne(collection, filterJson)` → Promise
+//! - `zeroship.db.find(collection, filterJson, optsJson)` → Promise
+//! - `zeroship.db.insert(collection, docJson)` → Promise
+//! - `zeroship.db.updateOne(collection, filterJson, updateJson)` → Promise
+//! - `zeroship.db.deleteOne(collection, filterJson)` → Promise
+//! - `zeroship.db.count(collection, filterJson)` → Promise
 //!
 //! Each app gets its own PostgreSQL schema (`"app_id".*`) for data isolation.
 //! The pool is created lazily on first use (one per worker thread).
@@ -15,8 +15,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use appbase_pg::Pool;
-use appbase_runtime::plugin::{NativePlugin, NativeRegistrar, PluginConfig};
+use zeroship_pg::Pool;
+use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar, PluginConfig};
 
 pub mod callbacks;
 pub mod query;
@@ -77,7 +77,7 @@ pub(crate) fn ensure_pool(scope: &mut v8::PinScope<'_, '_>) -> Option<()> {
 // DbPlugin
 // ---------------------------------------------------------------------------
 
-/// The database plugin — registers `appbase.db.*` methods.
+/// The database plugin — registers `zeroship.db.*` methods.
 pub struct DbPlugin;
 
 impl std::fmt::Debug for DbPlugin {
@@ -144,8 +144,8 @@ impl NativePlugin for DbPlugin {
 /// ```ignore
 /// let plugin = DbPlugin::new();
 /// plugin.init(&config);
-/// appbase_plugin_db::init_pool_async().await;
-/// // Now safe to run JS that calls appbase.db.*
+/// zeroship_plugin_db::init_pool_async().await;
+/// // Now safe to run JS that calls zeroship.db.*
 /// ```
 pub async fn init_pool_async() -> Result<(), String> {
     let url = DB_URL.with(|u| u.borrow().clone());

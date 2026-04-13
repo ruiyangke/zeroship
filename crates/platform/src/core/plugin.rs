@@ -1,4 +1,4 @@
-//! Plugin interface for the appbase runtime.
+//! Plugin interface for the zeroship runtime.
 //!
 //! Plugins extend the runtime with new capabilities (db, kv, auth, storage, etc.)
 //! Each plugin provides:

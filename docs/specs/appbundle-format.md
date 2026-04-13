@@ -6,7 +6,7 @@
 
 ## Overview
 
-`.appbundle` is a binary format for packaging JavaScript modules for the appbase runtime. It stores multiple ES modules with per-module zstd compression and a binary index for O(1) lookup by specifier.
+`.appbundle` is a binary format for packaging JavaScript modules for the zeroship runtime. It stores multiple ES modules with per-module zstd compression and a binary index for O(1) lookup by specifier.
 
 The bundle carries only code and integrity. Metadata (app name, version, exports) lives in the database. Source maps are stored separately in object storage.
 

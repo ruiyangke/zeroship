@@ -1,16 +1,16 @@
 /**
- * Top-level `model()` factory for @appbase/db.
+ * Top-level `model()` factory for @zeroship/db.
  * Creates a Collection bound to the current app's native database driver.
  */
 import { normalizeSchema } from "./schema.js";
 import { Collection, NativeDb } from "./collection.js";
 
-/** Returns the native appbase.db driver from the global scope, or throws if unavailable. */
+/** Returns the native zeroship.db driver from the global scope, or throws if unavailable. */
 function getNativeDb(): NativeDb {
-  if (typeof globalThis !== "undefined" && (globalThis as any).appbase?.db) {
-    return (globalThis as any).appbase.db as NativeDb;
+  if (typeof globalThis !== "undefined" && (globalThis as any).zeroship?.db) {
+    return (globalThis as any).zeroship.db as NativeDb;
   }
-  throw new Error("@appbase/db: native appbase.db.* not available — are you running inside appbase?");
+  throw new Error("@zeroship/db: native zeroship.db.* not available — are you running inside zeroship?");
 }
 
 /**

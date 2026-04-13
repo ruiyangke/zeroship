@@ -1,10 +1,10 @@
-# @appbase/db SDK Implementation Plan
+# @zeroship/db SDK Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the `@appbase/db` npm SDK — a Mongoose-compatible JS/TS package that wraps `appbase.db.*` native primitives with model definitions, validation, query chaining, and error mapping.
+**Goal:** Build the `@zeroship/db` npm SDK — a Mongoose-compatible JS/TS package that wraps `zeroship.db.*` native primitives with model definitions, validation, query chaining, and error mapping.
 
-**Architecture:** Pure TypeScript, no external dependencies. Runs inside V8 isolate, bundled by esbuild into .appbundle. Calls `globalThis.appbase.db.*` native methods. Two schema styles (Mongoose object + `t` builder) normalize to a shared internal format.
+**Architecture:** Pure TypeScript, no external dependencies. Runs inside V8 isolate, bundled by esbuild into .appbundle. Calls `globalThis.zeroship.db.*` native methods. Two schema styles (Mongoose object + `t` builder) normalize to a shared internal format.
 
 **Tech Stack:** TypeScript, no runtime deps, node:test for unit tests
 
@@ -14,7 +14,7 @@
 
 | File | Responsibility |
 |---|---|
-| `sdks/db/package.json` | Package metadata, name `@appbase/db` |
+| `sdks/db/package.json` | Package metadata, name `@zeroship/db` |
 | `sdks/db/tsconfig.json` | TS config |
 | `sdks/db/src/index.ts` | Public exports: `model`, `t` |
 | `sdks/db/src/types.ts` | `t` builder: `t.string()`, `t.number()`, etc. |
@@ -47,9 +47,9 @@
 
 ```json
 {
-  "name": "@appbase/db",
+  "name": "@zeroship/db",
   "version": "0.1.0",
-  "description": "Mongoose-compatible database SDK for appbase",
+  "description": "Mongoose-compatible database SDK for zeroship",
   "main": "src/index.ts",
   "types": "src/index.ts",
   "scripts": {
@@ -1291,7 +1291,7 @@ git commit -m "feat(sdk-db): Collection class with all CRUD methods"
 
 ---
 
-### Task 7: model() factory + index.ts + wiring to globalThis.appbase.db
+### Task 7: model() factory + index.ts + wiring to globalThis.zeroship.db
 
 **Files:**
 - Create: `sdks/db/src/model.ts`
@@ -1303,13 +1303,13 @@ git commit -m "feat(sdk-db): Collection class with all CRUD methods"
 import { normalizeSchema } from "./schema.js";
 import { Collection } from "./collection.js";
 
-// In the V8 runtime, appbase.db.* is on globalThis.appbase.db
+// In the V8 runtime, zeroship.db.* is on globalThis.zeroship.db
 // When running in Node.js tests, it won't exist — callers pass a mock.
 function getNativeDb(): any {
-  if (typeof globalThis !== "undefined" && (globalThis as any).appbase?.db) {
-    return (globalThis as any).appbase.db;
+  if (typeof globalThis !== "undefined" && (globalThis as any).zeroship?.db) {
+    return (globalThis as any).zeroship.db;
   }
-  throw new Error("@appbase/db: native appbase.db.* not available — are you running inside appbase?");
+  throw new Error("@zeroship/db: native zeroship.db.* not available — are you running inside zeroship?");
 }
 
 export function model(
@@ -1362,7 +1362,7 @@ git commit -m "feat(sdk-db): model() factory + complete public API"
 - [ ] **Step 1: Build the worker**
 
 ```bash
-cargo build --release -p appbase-worker -p appbase-control -p appbase-gateway -p appbase
+cargo build --release -p zeroship-worker -p zeroship-control -p zeroship-gateway -p zeroship
 ```
 
 - [ ] **Step 2: Start the platform**
@@ -1380,12 +1380,12 @@ CREATE TABLE "<app_id>"."users" (
 );
 ```
 
-- [ ] **Step 3: Deploy app that uses @appbase/db**
+- [ ] **Step 3: Deploy app that uses @zeroship/db**
 
 Create `test-app.js` that imports from the SDK (inline, since esbuild will bundle):
 
 ```javascript
-import { model } from "@appbase/db";
+import { model } from "@zeroship/db";
 
 const users = model("users", {
   name: { type: String, required: true },
@@ -1414,11 +1414,11 @@ export async function promoteUser(id) {
 }
 ```
 
-Deploy via `appbase deploy`.
+Deploy via `zeroship deploy`.
 
-Note: The compiler needs to resolve `@appbase/db` imports. This may require:
+Note: The compiler needs to resolve `@zeroship/db` imports. This may require:
 - Adding `sdks/db` as a dependency/symlink the compiler can find, OR
-- Configuring esbuild alias in the compiler to resolve `@appbase/db` → `sdks/db/src/index.ts`
+- Configuring esbuild alias in the compiler to resolve `@zeroship/db` → `sdks/db/src/index.ts`
 
 If the compiler cannot resolve the import, test with the SDK inlined directly in the app file.
 
@@ -1436,5 +1436,5 @@ If the compiler cannot resolve the import, test with the SDK inlined directly in
 
 ```bash
 git add sdks/db/ docs/superpowers/
-git commit -m "feat(sdk-db): @appbase/db SDK complete with E2E verification"
+git commit -m "feat(sdk-db): @zeroship/db SDK complete with E2E verification"
 ```

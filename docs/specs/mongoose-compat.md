@@ -1,6 +1,6 @@
 # Mongoose Compatibility Spec
 
-What @appbase/db must match from Mongoose so LLM-generated code works on first try.
+What @zeroship/db must match from Mongoose so LLM-generated code works on first try.
 
 ## Schema Definition
 
@@ -30,7 +30,7 @@ const users = model("users", {
 
 ### Type mapping
 
-| Mongoose | @appbase/db | Postgres |
+| Mongoose | @zeroship/db | Postgres |
 |---|---|---|
 | `String` | `"string"` | TEXT |
 | `Number` | `"number"` | NUMERIC |
@@ -41,7 +41,7 @@ const users = model("users", {
 
 ### Validators (per Mongoose docs)
 
-| Validator | Applies to | Mongoose syntax | @appbase/db status |
+| Validator | Applies to | Mongoose syntax | @zeroship/db status |
 |---|---|---|---|
 | `required` | all types | `required: true` | Implemented |
 | `default` | all types | `default: value` or `default: fn` | Implemented |
@@ -63,7 +63,7 @@ const users = model("users", {
 
 Mongoose adds `_id`, `createdAt`, `updatedAt` automatically when `timestamps: true`.
 
-@appbase/db always adds these (mapped from Postgres columns):
+@zeroship/db always adds these (mapped from Postgres columns):
 - `_id` ← `id` column
 - `createdAt` ← `created_at` column (number, Unix ms)
 - `updatedAt` ← `updated_at` column (number, Unix ms)
@@ -72,7 +72,7 @@ Mongoose adds `_id`, `createdAt`, `updatedAt` automatically when `timestamps: tr
 
 ### Must match Mongoose exactly
 
-| Method | Mongoose signature | @appbase/db status |
+| Method | Mongoose signature | @zeroship/db status |
 |---|---|---|
 | `create(doc)` | `Model.create(doc) → Promise<doc>` | Implemented |
 | `insertMany(docs)` | `Model.insertMany(docs) → Promise<docs[]>` | Implemented |
@@ -101,20 +101,20 @@ Mongoose adds `_id`, `createdAt`, `updatedAt` automatically when `timestamps: tr
 ```js
 { acknowledged: true, matchedCount: 1, modifiedCount: 1, upsertedCount: 0, upsertedId: null }
 ```
-@appbase/db currently returns `{ matchedCount, modifiedCount }` — missing `acknowledged`, `upsertedCount`, `upsertedId`.
+@zeroship/db currently returns `{ matchedCount, modifiedCount }` — missing `acknowledged`, `upsertedCount`, `upsertedId`.
 
 **deleteOne / deleteMany:**
 ```js
 { acknowledged: true, deletedCount: 1 }
 ```
-@appbase/db currently returns `{ deletedCount }` — missing `acknowledged`.
+@zeroship/db currently returns `{ deletedCount }` — missing `acknowledged`.
 
 **create:**
 ```js
 // Returns the full document with _id, createdAt, updatedAt
 { _id: "uuid", name: "Alice", role: "user", createdAt: ..., updatedAt: ... }
 ```
-@appbase/db matches this.
+@zeroship/db matches this.
 
 ## Query Chain (find returns thenable)
 
@@ -129,10 +129,10 @@ await Model.find(filter)
   .select({ name: 1 })      // object projection
   .limit(10)
   .skip(20)
-  .lean()                    // return plain objects (default in appbase)
+  .lean()                    // return plain objects (default in zeroship)
 ```
 
-| Method | Mongoose | @appbase/db status |
+| Method | Mongoose | @zeroship/db status |
 |---|---|---|
 | `.sort(obj)` | `{ field: 1 }` or `"-field"` | Implemented (object only, string shorthand missing) |
 | `.select(str)` | `"name email"` or `"-password"` | Implemented (include only, exclude missing) |
@@ -147,7 +147,7 @@ await Model.find(filter)
 
 ## Filter Operators
 
-| Operator | Mongoose | @appbase/db status |
+| Operator | Mongoose | @zeroship/db status |
 |---|---|---|
 | `{ field: value }` | implicit `$eq` | Implemented |
 | `{ field: { $eq: val } }` | explicit eq | Implemented |
@@ -167,7 +167,7 @@ await Model.find(filter)
 
 ## Update Operators
 
-| Operator | Mongoose | @appbase/db status |
+| Operator | Mongoose | @zeroship/db status |
 |---|---|---|
 | `{ $set: { field: val } }` | set field | Implemented |
 | `{ $unset: { field: "" } }` | remove field | **Not implemented** |
@@ -179,11 +179,11 @@ await Model.find(filter)
 | `{ $pop: { field: 1 } }` | array pop | **Not implemented** |
 | `{ $rename: { old: "new" } }` | rename field | **Not implemented** |
 
-Note: @appbase/db also supports `$dec` (decrement) which Mongoose does not have. Mongoose uses `{ $inc: { field: -1 } }` for decrement.
+Note: @zeroship/db also supports `$dec` (decrement) which Mongoose does not have. Mongoose uses `{ $inc: { field: -1 } }` for decrement.
 
 ## Aggregate Pipeline
 
-| Stage | Mongoose | @appbase/db status |
+| Stage | Mongoose | @zeroship/db status |
 |---|---|---|
 | `{ $match: filter }` | filter docs | Implemented |
 | `{ $group: { _id, ...accumulators } }` | group + aggregate | Implemented |
@@ -197,7 +197,7 @@ Note: @appbase/db also supports `$dec` (decrement) which Mongoose does not have.
 
 ### Accumulator operators
 
-| Operator | Mongoose | @appbase/db status |
+| Operator | Mongoose | @zeroship/db status |
 |---|---|---|
 | `{ $sum: "$field" }` | sum | Implemented |
 | `{ $sum: 1 }` | count | Implemented (translated to `$count`) |
@@ -219,7 +219,7 @@ Mongoose throws:
 { name: "MongoServerError", code: 11000, keyPattern: { field: 1 } }
 ```
 
-@appbase/db throws:
+@zeroship/db throws:
 ```js
 // Validation — matches Mongoose shape
 { name: "ValidationError", errors: { field: { message, path } } }
@@ -228,7 +228,7 @@ Mongoose throws:
 { code: 11000, message: "..." }
 ```
 
-Missing from @appbase/db: `kind`, `value` in validation errors, `keyPattern` in duplicate errors.
+Missing from @zeroship/db: `kind`, `value` in validation errors, `keyPattern` in duplicate errors.
 
 ## Gaps Summary (Priority Order)
 

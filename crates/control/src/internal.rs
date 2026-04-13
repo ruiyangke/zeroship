@@ -6,7 +6,7 @@ use ntex::web;
 use ntex::web::types::{Json, Path, State};
 use uuid::Uuid;
 
-use appbase_core::types::UsageReport;
+use zeroship_core::types::UsageReport;
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
@@ -19,9 +19,9 @@ fn check_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpRespo
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let token = appbase_core::auth::extract_bearer(header);
+    let token = zeroship_core::auth::extract_bearer(header);
     match token {
-        Some(key) if appbase_core::auth::validate_control_key(key, &state.control_key) => None,
+        Some(key) if zeroship_core::auth::validate_control_key(key, &state.control_key) => None,
         _ => Some(
             web::HttpResponse::Unauthorized()
                 .json(&serde_json::json!({"error":"unauthorized"})),
@@ -70,7 +70,7 @@ pub async fn get_bundle(
         Ok(data) => web::HttpResponse::Ok()
             .content_type("application/octet-stream")
             .body(data),
-        Err(appbase_core::vfs::VfsError::NotFound(_)) => {
+        Err(zeroship_core::vfs::VfsError::NotFound(_)) => {
             web::HttpResponse::NotFound().json(&serde_json::json!({"error":"bundle not found"}))
         }
         Err(e) => web::HttpResponse::InternalServerError()
@@ -147,7 +147,7 @@ pub async fn get_asset(
                 .content_type(ct)
                 .body(data)
         }
-        Err(appbase_core::vfs::VfsError::NotFound(_)) => {
+        Err(zeroship_core::vfs::VfsError::NotFound(_)) => {
             web::HttpResponse::NotFound()
                 .json(&serde_json::json!({"error":"asset not found"}))
         }

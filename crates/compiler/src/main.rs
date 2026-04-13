@@ -1,4 +1,4 @@
-use appbase_compiler::{compile_with_options, Target};
+use zeroship_compiler::{compile_with_options, Target};
 use std::fs;
 use std::path::Path;
 
@@ -6,7 +6,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     let input = args.get(1).expect(
-        "Usage: appbase-compile <file> [--target=rust|node] [--outdir=.dist] [--cdn=esm.sh|jsdelivr|skypack|none] [--json]"
+        "Usage: zeroship-compile <file> [--target=rust|node] [--outdir=.dist] [--cdn=esm.sh|jsdelivr|skypack|none] [--json]"
     );
     let target = args.iter()
         .find(|a| a.starts_with("--target="))
@@ -108,7 +108,7 @@ fn generate_html(client_js: &str, entry: &str, cdn: &str) -> String {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>appbase</title>
+  <title>zeroship</title>
   {import_map}
   <style>
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}

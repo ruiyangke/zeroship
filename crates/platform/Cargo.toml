@@ -1,12 +1,12 @@
 [package]
-name = "appbase-platform"
+name = "zeroship-platform"
 version = "0.1.0"
 edition = "2024"
 description = "Multi-tenant platform layer — control plane, metering, billing, enforcement, HTTP server"
 
 [dependencies]
 # Runtime (V8 isolate pool)
-appbase-runtime = { path = "../runtime" }
+zeroship-runtime = { path = "../runtime" }
 
 # Async
 async-trait = "0.1"

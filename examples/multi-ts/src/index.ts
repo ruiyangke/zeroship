@@ -8,7 +8,7 @@ import { VERSION } from "./config";
 const routes: Route[] = [
     {
         path: "/",
-        handler: () => jsonResponse({ message: "Hello from appbase!", version: VERSION }),
+        handler: () => jsonResponse({ message: "Hello from zeroship!", version: VERSION }),
     },
     {
         path: "/health",

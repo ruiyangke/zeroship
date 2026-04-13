@@ -2,13 +2,13 @@
 //!
 //! This is the v8-server-compio binary. It loads the embedded `scenarios.js`
 //! into an .appbundle and starts the compio HTTP server via the shared
-//! `appbase_runtime::serve` module.
+//! `zeroship_runtime::serve` module.
 
 use std::time::Duration;
 
-use appbase_runtime::bundle::{AppBundle, ModuleType};
-use appbase_runtime::modules::ModuleEntry;
-use appbase_runtime::serve::{start_server, ServerOptions};
+use zeroship_runtime::bundle::{AppBundle, ModuleType};
+use zeroship_runtime::modules::ModuleEntry;
+use zeroship_runtime::serve::{start_server, ServerOptions};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

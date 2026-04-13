@@ -1,17 +1,17 @@
 [package]
-name = "appbase"
+name = "zeroship"
 version = "0.1.0"
 edition = "2021"
-description = "appbase CLI — build, serve, deploy, inspect"
+description = "zeroship CLI — build, serve, deploy, inspect"
 
 [[bin]]
-name = "appbase"
+name = "zeroship"
 path = "src/main.rs"
 
 [dependencies]
-appbase-bundle = { workspace = true }
-appbase-runtime = { workspace = true }
-appbase-compiler = { workspace = true }
+zeroship-bundle = { workspace = true }
+zeroship-runtime = { workspace = true }
+zeroship-compiler = { workspace = true }
 serde_json = { workspace = true }
 
 [lints]

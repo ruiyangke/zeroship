@@ -1,7 +1,7 @@
 //! Runtime — compio event loop with V8 isolate.
 //!
 //! Same architecture as runtime-tokio's Runtime, but uses compio for timers
-//! and the outer event loop. V8 dispatch is identical (appbase-v8-core).
+//! and the outer event loop. V8 dispatch is identical (zeroship-v8-core).
 //!
 //! The main difference: `compio::time::sleep` replaces `tokio::time::sleep`,
 //! and `futures::select!` replaces `tokio::select!`.
@@ -198,7 +198,7 @@ pub struct Runtime {
     pub(crate) initialized: bool,
     pub(crate) modules: Vec<ModuleEntry>,
     pub(crate) state: SharedState,
-    /// Plugins registered on appbase.* namespace.
+    /// Plugins registered on zeroship.* namespace.
     plugins: Vec<Box<dyn crate::plugin::NativePlugin>>,
 
     /// Stream forwarders: stream_id -> StreamForwarder for outbound HTTP streams.
@@ -240,7 +240,7 @@ impl Runtime {
     }
 
     /// Create a new runtime with plugins.
-    /// Plugins register native functions on `appbase.{namespace}.*`.
+    /// Plugins register native functions on `zeroship.{namespace}.*`.
     pub fn new_with_plugins(
         modules: Vec<ModuleEntry>,
         env_vars: HashMap<String, String>,

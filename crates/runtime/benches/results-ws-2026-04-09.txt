@@ -7,15 +7,15 @@ BEFORE optimization (polling pump, dynamic V8 lookups)
 ==========================================================
 
 64-byte payload, 50 clients:
-  appbase compio (1 worker)     46,266 msg/s  avg=1.08ms  p99=2.21ms  p999=3.28ms
+  zeroship compio (1 worker)     46,266 msg/s  avg=1.08ms  p99=2.21ms  p999=3.28ms
   Node.js v22.22.2              55,986 msg/s  avg=0.89ms  p99=1.80ms  p999=2.61ms
 
 64-byte payload, 200 clients:
-  appbase compio (1 worker)     44,646 msg/s  avg=4.48ms  p99=7.93ms  p999=9.49ms
+  zeroship compio (1 worker)     44,646 msg/s  avg=4.48ms  p99=7.93ms  p999=9.49ms
   Node.js v22.22.2              52,608 msg/s  avg=3.80ms  p99=7.07ms  p999=8.72ms
 
 1KB payload, 50 clients:
-  appbase compio (1 worker)     36,961 msg/s  avg=1.35ms  p99=3.04ms  p999=11.90ms
+  zeroship compio (1 worker)     36,961 msg/s  avg=1.35ms  p99=3.04ms  p999=11.90ms
   Node.js v22.22.2              49,020 msg/s  avg=1.02ms  p99=2.09ms  p999=2.91ms
 
   Bugs: 200-client and 1KB tests would hang (stall in polling pump).
@@ -25,15 +25,15 @@ AFTER optimization (event-driven pump, cached V8 handles)
 ==========================================================
 
 64-byte payload, 50 clients:
-  appbase compio (1 worker)     46,257 msg/s  avg=1.10ms  p99=2.16ms  p999=3.01ms
+  zeroship compio (1 worker)     46,257 msg/s  avg=1.10ms  p99=2.16ms  p999=3.01ms
   Node.js v22.22.2              55,986 msg/s  avg=0.89ms  p99=1.80ms  p999=2.61ms
 
 64-byte payload, 200 clients:
-  appbase compio (1 worker)     43,935 msg/s  avg=4.55ms  p99=7.59ms  p999=9.40ms
+  zeroship compio (1 worker)     43,935 msg/s  avg=4.55ms  p99=7.59ms  p999=9.40ms
   Node.js v22.22.2              52,608 msg/s  avg=3.80ms  p99=7.07ms  p999=8.72ms
 
 1KB payload, 50 clients:
-  appbase compio (1 worker)     40,629 msg/s  avg=1.23ms  p99=2.45ms  p999=3.45ms
+  zeroship compio (1 worker)     40,629 msg/s  avg=1.23ms  p99=2.45ms  p999=3.45ms
   Node.js v22.22.2              49,020 msg/s  avg=1.02ms  p99=2.09ms  p999=2.91ms
 
   +10% on 1KB payload, p999 from 11.9ms → 3.45ms (3.4x better tail latency)

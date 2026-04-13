@@ -1,8 +1,8 @@
 {
-  "name": "appbase-agent",
+  "name": "zeroship-agent",
   "version": "0.1.0",
   "type": "module",
-  "description": "AI agent harness for appbase — generates and deploys apps via deepagents",
+  "description": "AI agent harness for zeroship — generates and deploys apps via deepagents",
   "scripts": {
     "dev": "bun run src/server.ts",
     "start": "bun run src/server.ts"

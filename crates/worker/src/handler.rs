@@ -4,7 +4,7 @@ use ntex::web::{self, HttpResponse};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use appbase_runtime::runtime::DispatchOutcome;
+use zeroship_runtime::runtime::DispatchOutcome;
 
 use crate::{cache, WorkerConfig};
 
@@ -84,7 +84,7 @@ pub async fn dispatch(
             loop {
                 if let Some(result) = rx.try_recv() {
                     break match result {
-                        Ok(appbase_runtime::HttpDispatchResult::Complete { body, .. }) => {
+                        Ok(zeroship_runtime::HttpDispatchResult::Complete { body, .. }) => {
                             make_response(&body, 0.0)
                         }
                         Ok(_) => make_error("unsupported HTTP result type"),

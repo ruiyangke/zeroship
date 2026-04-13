@@ -1,4 +1,4 @@
-//! Tower middleware stack for appbase HTTP server.
+//! Tower middleware stack for zeroship HTTP server.
 
 use axum::http::Method;
 use tower_http::compression::CompressionLayer;

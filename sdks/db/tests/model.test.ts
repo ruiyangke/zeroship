@@ -97,7 +97,7 @@ describe("model() — Mongoose schema", () => {
 // ---------------------------------------------------------------------------
 
 describe("model() — nativeOverride", () => {
-  test("uses provided mock native instead of globalThis.appbase.db", async () => {
+  test("uses provided mock native instead of globalThis.zeroship.db", async () => {
     let insertCalled = false;
     const mockNative: NativeDb = {
       ...makeMockNative(),
@@ -126,10 +126,10 @@ describe("model() — nativeOverride", () => {
 // ---------------------------------------------------------------------------
 
 describe("model() — missing native", () => {
-  test("throws clear error when no nativeOverride and globalThis.appbase.db is absent", () => {
-    // Save and clear any existing globalThis.appbase
-    const saved = (globalThis as any).appbase;
-    delete (globalThis as any).appbase;
+  test("throws clear error when no nativeOverride and globalThis.zeroship.db is absent", () => {
+    // Save and clear any existing globalThis.zeroship
+    const saved = (globalThis as any).zeroship;
+    delete (globalThis as any).zeroship;
 
     try {
       assert.throws(
@@ -137,8 +137,8 @@ describe("model() — missing native", () => {
         (err: unknown) => {
           assert.ok(err instanceof Error);
           assert.ok(
-            err.message.includes("native appbase.db"),
-            `Expected error about native appbase.db, got: ${err.message}`
+            err.message.includes("native zeroship.db"),
+            `Expected error about native zeroship.db, got: ${err.message}`
           );
           return true;
         }
@@ -146,7 +146,7 @@ describe("model() — missing native", () => {
     } finally {
       // Restore
       if (saved !== undefined) {
-        (globalThis as any).appbase = saved;
+        (globalThis as any).zeroship = saved;
       }
     }
   });

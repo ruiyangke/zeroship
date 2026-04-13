@@ -1,4 +1,4 @@
-//! JSON-RPC error codes for the appbase metering system.
+//! JSON-RPC error codes for the zeroship metering system.
 //!
 //! Per spec S8.4, each enforcement failure type has a distinct error code
 //! in the JSON-RPC reserved range (-32000 to -32099).

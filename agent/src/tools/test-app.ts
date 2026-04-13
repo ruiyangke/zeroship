@@ -4,11 +4,11 @@
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 
-const APPBASE_URL = process.env.APPBASE_URL || "http://localhost:3333";
+const ZEROSHIP_URL = process.env.ZEROSHIP_URL || "http://localhost:3333";
 
 export const testApp = tool(
   async ({ app_id, method, params }) => {
-    const res = await fetch(`${APPBASE_URL}/rpc`, {
+    const res = await fetch(`${ZEROSHIP_URL}/rpc`, {
       method: "POST",
       headers: {
         "X-App-Id": app_id,

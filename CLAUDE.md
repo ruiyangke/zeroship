@@ -1,4 +1,4 @@
-# appbase
+# zeroship
 
 A platform where anyone can create, launch, and monetize software — without writing code.
 
@@ -24,9 +24,9 @@ The creator never touches code, infrastructure, or ops. They focus on their prod
 Three components, zero tokio, everything on compio/io_uring:
 
 ```
-appbase-control    Stateful control plane (Postgres, VFS, admin API)
-appbase-gate       Smart gateway (auth, rate limit, CHWBL routing, proxy)
-appbase-worker     Stateless compute (V8 isolates, on-demand loading, LRU)
+zeroship-control    Stateful control plane (Postgres, VFS, admin API)
+zeroship-gate       Smart gateway (auth, rate limit, CHWBL routing, proxy)
+zeroship-worker     Stateless compute (V8 isolates, on-demand loading, LRU)
 ```
 
 ```
@@ -38,7 +38,7 @@ Admin/Creator → control (API, DB, VFS)
 
 - **Runtime**: V8 + compio/io_uring (394K req/s raw, 354K through full pipeline)
 - **HTTP framework**: ntex + compio (matches raw httparse at scale)
-- **Database**: appbase-pg (compio-native PostgreSQL driver, no tokio)
+- **Database**: zeroship-pg (compio-native PostgreSQL driver, no tokio)
 - **Routing**: CHWBL (Consistent Hashing with Bounded Loads, XXH3, 150 vnodes)
 - **Gateway → worker**: HTTP/1.1 keep-alive connection pool + Unix domain socket support
 - **Bundle format**: .appbundle (APPB magic, zstd compression, SHA-256 integrity, lazy decompression)
@@ -53,7 +53,7 @@ crates/
 ├── core/           Shared types (AppRecord, RouteEntry, UsageReport), VFS, auth
 ├── pg/             PostgreSQL driver (compio-native, 26 integration tests)
 ├── runtime/        V8 engine + compio event loop + fetch + WebSocket + crypto
-├── runtime-macros/ #[appbase_op] proc macro
+├── runtime-macros/ #[zeroship_op] proc macro
 ├── compiler/       SWC + esbuild → .appbundle
 ├── control/        Control plane binary (ntex + compio + Postgres)
 ├── gateway/        Gateway binary (ntex + compio, CHWBL, connection pool)
@@ -69,7 +69,7 @@ crates/
 - CHWBL routing with XXH3, connection pool, UDS support
 - On-demand V8 loading, LRU eviction, V8 isolate enter/exit for multi-app
 - Docker Compose deployment (tested at 50 workers)
-- CLI: appbase build, serve, deploy, inspect
+- CLI: zeroship build, serve, deploy, inspect
 - E2E tests (20/20 passing), benchmarks (354K req/s pipeline)
 - Zero tokio in the entire stack
 
@@ -77,32 +77,32 @@ crates/
 
 Two layers: native primitives (Rust kernel) and npm packages (JS ecosystem).
 
-### Native primitives (`appbase.*` global)
+### Native primitives (`zeroship.*` global)
 
 Registered by Rust on every V8 isolate. The "syscalls" of the platform — stable, secure, low-level:
 
 ```
-appbase.db.*       — structured database operations (no raw SQL)
-appbase.auth.*     — password hashing, JWT sign/verify
-appbase.storage.*  — object storage put/get/delete
-appbase.kv.*       — key-value get/set/delete
-appbase.meter.*    — billing counter increment
+zeroship.db.*       — structured database operations (no raw SQL)
+zeroship.auth.*     — password hashing, JWT sign/verify
+zeroship.storage.*  — object storage put/get/delete
+zeroship.kv.*       — key-value get/set/delete
+zeroship.meter.*    — billing counter increment
 ```
 
 Creators don't call these directly. SDK packages wrap them.
 
-### SDK packages (`@appbase/*` npm scope)
+### SDK packages (`@zeroship/*` npm scope)
 
 High-level APIs published as standard npm packages. Creators install and import them:
 
 ```javascript
-import { model, t } from "@appbase/db";
-import { auth } from "@appbase/auth";
-import { storage } from "@appbase/storage";
-import { kv } from "@appbase/kv";
+import { model, t } from "@zeroship/db";
+import { auth } from "@zeroship/auth";
+import { storage } from "@zeroship/storage";
+import { kv } from "@zeroship/kv";
 ```
 
-SDK packages call `appbase.*` primitives internally. They handle validation, query building, error mapping, and TypeScript types. They evolve independently of the Rust runtime.
+SDK packages call `zeroship.*` primitives internally. They handle validation, query building, error mapping, and TypeScript types. They evolve independently of the Rust runtime.
 
 ### Extensibility
 
@@ -110,12 +110,12 @@ Features that compose existing primitives are pure JS packages — no Rust neede
 
 ```
 Needs Rust (new primitive):        Pure JS (npm package):
-  New storage backend               @appbase/email (calls fetch)
-  New database engine                @appbase/payments (calls fetch to Stripe)
-  Low-level crypto ops               @appbase/ai (calls fetch to OpenAI/Claude)
-                                     @appbase/permissions (uses db + auth)
-                                     @appbase/analytics (uses db)
-                                     Third-party: @cooldev/appbase-redis
+  New storage backend               @zeroship/email (calls fetch)
+  New database engine                @zeroship/payments (calls fetch to Stripe)
+  Low-level crypto ops               @zeroship/ai (calls fetch to OpenAI/Claude)
+                                     @zeroship/permissions (uses db + auth)
+                                     @zeroship/analytics (uses db)
+                                     Third-party: @cooldev/zeroship-redis
 ```
 
 ~90% of new features are pure JS. The native layer is the stable kernel.
@@ -124,12 +124,12 @@ Needs Rust (new primitive):        Pure JS (npm package):
 
 ### Phase 2: Creator platform (the product)
 
-- **@appbase/db** — per-app database, model builder, document API, auto-migration
-- **@appbase/auth** — per-app user accounts, signUp/signIn/verify, JWT sessions
-- **@appbase/storage** — per-app file storage, put/get/delete
+- **@zeroship/db** — per-app database, model builder, document API, auto-migration
+- **@zeroship/auth** — per-app user accounts, signUp/signIn/verify, JWT sessions
+- **@zeroship/storage** — per-app file storage, put/get/delete
 - **Stripe Connect** — creators connect Stripe, end users subscribe, revenue splits
 - **Creator dashboard** — web UI for apps, pricing, revenue, analytics
-- **Custom domains** — {app-name}.appbase.dev + creator's own domain
+- **Custom domains** — {app-name}.zeroship.dev + creator's own domain
 
 ### Phase 3: AI app builder (the differentiator)
 
@@ -140,16 +140,16 @@ Needs Rust (new primitive):        Pure JS (npm package):
 
 ### Phase 4: Ecosystem
 
-- **@appbase/kv** — sessions, cache, feature flags
-- **@appbase/email** — transactional email (via Resend/Sendgrid)
-- **@appbase/payments** — Stripe wrapper for subscriptions
-- **@appbase/ai** — LLM inference wrapper
+- **@zeroship/kv** — sessions, cache, feature flags
+- **@zeroship/email** — transactional email (via Resend/Sendgrid)
+- **@zeroship/payments** — Stripe wrapper for subscriptions
+- **@zeroship/ai** — LLM inference wrapper
 - **Marketplace** — discover and install published apps
 
 ## Specs
 
 - `docs/specs/api-design-guidelines.md` — 10 principles for AI-friendly APIs
-- `docs/specs/db.md` — @appbase/db: model builder, document API, aggregation
+- `docs/specs/db.md` — @zeroship/db: model builder, document API, aggregation
 - `docs/specs/billing-metering.md` — Meter trait, 25+ metrics, pricing, spending limits
 - `docs/specs/appbundle-format.md` — binary bundle format
 - `docs/specs/websocket-design.md` — WebSocketPair, RFC 6455
@@ -161,15 +161,15 @@ Needs Rust (new primitive):        Pure JS (npm package):
 cargo build --release
 
 # Run single-tenant (dev)
-appbase serve myapp.js --port 3000
+zeroship serve myapp.js --port 3000
 
 # Run platform (production)
-appbase-control --port 9090 --db postgres://... --bundles ./bundles
-appbase-worker --port 8080 --workers 16 --control http://localhost:9090
-appbase-gate --port 80 --control http://localhost:9090 --workers http://localhost:8080
+zeroship-control --port 9090 --db postgres://... --bundles ./bundles
+zeroship-worker --port 8080 --workers 16 --control http://localhost:9090
+zeroship-gate --port 80 --control http://localhost:9090 --workers http://localhost:8080
 
 # Deploy an app
-appbase deploy ./src --app=<uuid> --control=http://localhost:9090 --key=<master-key>
+zeroship deploy ./src --app=<uuid> --control=http://localhost:9090 --key=<master-key>
 
 # Docker Compose (multi-node)
 docker compose up -d --scale worker=10
@@ -177,9 +177,9 @@ docker compose up -d --scale worker=10
 # Tests
 ./tests/e2e_platform.sh       # 20 E2E tests
 ./tests/bench_platform.sh     # performance benchmarks
-cargo test -p appbase-pg -- --test-threads=1  # 26 Postgres driver tests
-cargo test -p appbase-core    # 22 core tests
-cargo test -p appbase-bundle  # 10 bundle tests
+cargo test -p zeroship-pg -- --test-threads=1  # 26 Postgres driver tests
+cargo test -p zeroship-core    # 22 core tests
+cargo test -p zeroship-bundle  # 10 bundle tests
 ```
 
 ## Revenue model

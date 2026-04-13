@@ -1,5 +1,5 @@
 /**
- * Document validation for @appbase/db.
+ * Document validation for @zeroship/db.
  * Validates documents and partial update objects against a NormalizedSchema,
  * collecting all field errors before throwing a single ValidationError.
  */

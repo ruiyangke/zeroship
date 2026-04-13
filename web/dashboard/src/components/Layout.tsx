@@ -22,7 +22,7 @@ export default function Layout({ children, onLogout }: LayoutProps) {
       <aside className="w-[220px] min-w-[220px] bg-card border-r border-border flex flex-col">
         <div className="px-4 py-5">
           <h1 className="text-sm font-bold tracking-[0.15em] uppercase text-primary">
-            appbase
+            zeroship
           </h1>
           <div className="text-[11px] text-muted-foreground tracking-[0.05em] mt-0.5">
             control plane

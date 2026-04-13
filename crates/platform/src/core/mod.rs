@@ -1,20 +1,20 @@
-//! # appbase-core
+//! # zeroship-core
 //!
-//! Core interfaces for the appbase platform.
+//! Core interfaces for the zeroship platform.
 //! This crate defines the contracts that all other crates depend on.
 //! It contains **no implementation** — only traits, types, and config structs.
 //!
 //! ## Crate dependency graph
 //!
 //! ```text
-//! appbase-core          ← this crate (interfaces only)
+//! zeroship-core          ← this crate (interfaces only)
 //!   ↑
-//! appbase-isolate       ← V8 isolate management
-//! appbase-plugins       ← db, kv, env, auth, ...
+//! zeroship-isolate       ← V8 isolate management
+//! zeroship-plugins       ← db, kv, env, auth, ...
 //!   ↑
-//! appbase-server        ← HTTP layer (axum)
+//! zeroship-server        ← HTTP layer (axum)
 //!   ↑
-//! appbase (binary)      ← CLI, config, wiring
+//! zeroship (binary)      ← CLI, config, wiring
 //! ```
 
 pub mod billing;

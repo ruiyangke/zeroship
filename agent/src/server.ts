@@ -1,5 +1,5 @@
 /**
- * AI agent server for appbase — Bun + Hono.
+ * AI agent server for zeroship — Bun + Hono.
  *
  * POST /chat — streaming chat with the AI agent
  * GET  /health — health check
@@ -106,8 +106,8 @@ export default {
   fetch: app.fetch,
 };
 
-if (!process.env.APPBASE_MASTER_KEY) {
-  console.warn("\u26a0\ufe0f  APPBASE_MASTER_KEY not set \u2014 using dev-master-key");
+if (!process.env.ZEROSHIP_MASTER_KEY) {
+  console.warn("\u26a0\ufe0f  ZEROSHIP_MASTER_KEY not set \u2014 using dev-master-key");
 }
 
 console.log(`[agent] http://localhost:${port}`);

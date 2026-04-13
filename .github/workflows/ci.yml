@@ -31,12 +31,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: cargo build --release --bin appbase
+      - run: cargo build --release --bin zeroship
       - run: cd web/dashboard && npm ci
       - run: |
           mkdir -p /tmp/e2e/data
           echo 'var __rpc = { ping: function() { return "pong"; } };' > /tmp/e2e/server.js
-          cd /tmp/e2e && APPBASE_MASTER_KEY=ci-key $GITHUB_WORKSPACE/target/release/appbase serve server.js --port=3335 &
+          cd /tmp/e2e && ZEROSHIP_MASTER_KEY=ci-key $GITHUB_WORKSPACE/target/release/zeroship serve server.js --port=3335 &
           sleep 3
           cd $GITHUB_WORKSPACE/web/dashboard && npx playwright install --with-deps chromium
           npx playwright test e2e/backend-api.spec.ts

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cross-runtime benchmark: appbase compio vs Node.js
+# Cross-runtime benchmark: zeroship compio vs Node.js
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -57,7 +57,7 @@ echo "All servers ready." >&2
 # Helpers
 make_lua() {
     local method=$1 params=$2
-    local file="/tmp/appbase-bench-${method}.lua"
+    local file="/tmp/zeroship-bench-${method}.lua"
     cat > "$file" << EOF
 wrk.method = "POST"
 wrk.body = '{"jsonrpc":"2.0","method":"${method}","params":${params},"id":1}'
@@ -87,7 +87,7 @@ scenario() {
 }
 
 # Output
-echo "appbase Runtime Benchmark"
+echo "zeroship Runtime Benchmark"
 echo "Date: $(date -u +%Y-%m-%d)"
 echo "Machine: $(uname -s) ($(nproc) cores)"
 echo "Tool: wrk, ${THREADS} threads, ${CONNS} connections, ${DURATION} per test"

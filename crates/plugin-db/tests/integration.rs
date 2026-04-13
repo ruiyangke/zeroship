@@ -1,9 +1,9 @@
 //! Integration tests for plugin-db query builders against real Postgres.
 //!
 //! Requires: `docker start pg-test` (Postgres on port 5434)
-//! Run: `cargo test -p appbase-plugin-db --test integration -- --test-threads=1`
+//! Run: `cargo test -p zeroship-plugin-db --test integration -- --test-threads=1`
 
-use appbase_pg::{Conn, Pool};
+use zeroship_pg::{Conn, Pool};
 use serde_json::{json, Value};
 
 fn test_url() -> String {
@@ -54,21 +54,21 @@ async fn setup(pool: &Pool) {
 }
 
 /// Helper: build + execute a query, return parsed JSON array.
-async fn exec_query(pool: &Pool, bq: appbase_plugin_db::query::BuiltQuery) -> Vec<Value> {
+async fn exec_query(pool: &Pool, bq: zeroship_plugin_db::query::BuiltQuery) -> Vec<Value> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
     rows.iter().map(|r| row_to_json(r)).collect()
 }
 
 /// Helper: build + execute a mutation, return parsed JSON array.
-async fn exec_mutation(pool: &Pool, bq: appbase_plugin_db::query::BuiltQuery) -> Vec<Value> {
+async fn exec_mutation(pool: &Pool, bq: zeroship_plugin_db::query::BuiltQuery) -> Vec<Value> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
     rows.iter().map(|r| row_to_json(r)).collect()
 }
 
 /// Simplified row → JSON (just text columns for testing).
-fn row_to_json(row: &appbase_pg::Row) -> Value {
+fn row_to_json(row: &zeroship_pg::Row) -> Value {
     let mut obj = serde_json::Map::new();
     for col in row.columns() {
         let val = match col.oid {
@@ -120,7 +120,7 @@ fn row_to_json(row: &appbase_pg::Row) -> Value {
     Value::Object(obj)
 }
 
-use appbase_plugin_db::query::*;
+use zeroship_plugin_db::query::*;
 
 // ---------------------------------------------------------------------------
 // 1. Insert + find round-trip

@@ -1,5 +1,5 @@
 {
-  description = "appbase - AI-native app platform";
+  description = "zeroship - AI-native app platform";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

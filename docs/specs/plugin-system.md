@@ -2,7 +2,7 @@
 
 ## Overview
 
-The runtime is a kernel. Plugins are drivers. The runtime provides V8, Web APIs (fetch, crypto, console, timers), and a plugin registration API. Platform features (database, auth, storage, KV) are plugins that register native functions on the `appbase.*` global.
+The runtime is a kernel. Plugins are drivers. The runtime provides V8, Web APIs (fetch, crypto, console, timers), and a plugin registration API. Platform features (database, auth, storage, KV) are plugins that register native functions on the `zeroship.*` global.
 
 ## Design
 
@@ -10,7 +10,7 @@ The runtime is a kernel. Plugins are drivers. The runtime provides V8, Web APIs 
 
 ```rust
 pub trait NativePlugin: Send + Sync {
-    /// Namespace under appbase.* (e.g., "db", "auth", "storage", "kv").
+    /// Namespace under zeroship.* (e.g., "db", "auth", "storage", "kv").
     fn namespace(&self) -> &str;
 
     /// Human-readable name for logging.
@@ -20,7 +20,7 @@ pub trait NativePlugin: Send + Sync {
     /// (connection pools, caches). Async — can connect to databases.
     async fn init(&self, config: &Arc<WorkerConfig>);
 
-    /// Called once per V8 isolate. Register functions on appbase.{namespace}.
+    /// Called once per V8 isolate. Register functions on zeroship.{namespace}.
     fn register(&self, registrar: &mut NativeRegistrar);
 
     /// Called on worker shutdown. Close connections, flush buffers.
@@ -39,7 +39,7 @@ pub struct NativeRegistrar<'a, 'b> {
 }
 
 impl NativeRegistrar {
-    /// Register a native function as appbase.{namespace}.{name}
+    /// Register a native function as zeroship.{namespace}.{name}
     pub fn add(&mut self, name: &str, callback: v8::FunctionCallback);
 }
 ```
@@ -134,10 +134,10 @@ impl Runtime {
     ) -> Self {
         // ... V8 setup ...
 
-        // Create appbase global
+        // Create zeroship global
         enter_v8!(self, |scope| {
             let global = scope.get_current_context().global(scope);
-            let appbase = v8::Object::new(scope);
+            let zeroship = v8::Object::new(scope);
 
             for plugin in plugins {
                 let ns_obj = v8::Object::new(scope);
@@ -146,12 +146,12 @@ impl Runtime {
 
                 freeze_object(scope, ns_obj);
                 let key = v8::String::new(scope, plugin.namespace()).unwrap();
-                appbase.set(scope, key.into(), ns_obj.into());
+                zeroship.set(scope, key.into(), ns_obj.into());
             }
 
-            freeze_object(scope, appbase);
-            let key = v8::String::new(scope, "appbase").unwrap();
-            global.set(scope, key.into(), appbase.into());
+            freeze_object(scope, zeroship);
+            let key = v8::String::new(scope, "zeroship").unwrap();
+            global.set(scope, key.into(), zeroship.into());
         });
     }
 }
@@ -174,15 +174,15 @@ Worker starts
   │    │                                                       │
   │    │ 3. Create V8 isolate                                  │
   │    │    register() called for each plugin                  │
-  │    │    → appbase.db.find, .insert, ... added to global    │
-  │    │    → appbase.auth.hash, .signJwt, ... added           │
-  │    │    → appbase object frozen                            │
+  │    │    → zeroship.db.find, .insert, ... added to global    │
+  │    │    → zeroship.auth.hash, .signJwt, ... added           │
+  │    │    → zeroship object frozen                            │
   │    │                                                       │
   │    │   ┌─── repeats per request ──────────────────────┐    │
   │    │   │                                              │    │
   │    │   │ 4. Worker sets state.app_id = "app_abc"      │    │
   │    │   │ 5. V8 executes app code                      │    │
-  │    │   │    → appbase.db.find() → callback             │    │
+  │    │   │    → zeroship.db.find() → callback             │    │
   │    │   │      → reads app_id from state               │    │
   │    │   │      → reads pool from thread_local          │    │
   │    │   │      → queries Postgres                      │    │
@@ -317,7 +317,7 @@ crates/
 ├── runtime/              Kernel — V8, Web APIs, NativePlugin trait
 │   ├── src/plugin.rs     NativePlugin trait + NativeRegistrar
 │   ├── src/runtime.rs    Runtime::new() accepts &[Box<dyn NativePlugin>]
-│   └── src/init.rs       setup appbase.* from plugins
+│   └── src/init.rs       setup zeroship.* from plugins
 │
 ├── plugin-db/            Database
 │   ├── src/lib.rs        DbPlugin
@@ -362,13 +362,13 @@ Worker depends on all plugins it needs.
 ### Frozen namespace
 
 ```javascript
-appbase.db.find = () => "hacked";    // TypeError: read-only
-appbase.db.evil = () => {};           // TypeError: not extensible
-delete appbase.db;                    // TypeError: non-configurable
-appbase.foo = {};                     // TypeError: frozen
+zeroship.db.find = () => "hacked";    // TypeError: read-only
+zeroship.db.evil = () => {};           // TypeError: not extensible
+delete zeroship.db;                    // TypeError: non-configurable
+zeroship.foo = {};                     // TypeError: frozen
 ```
 
-`Object.freeze()` applied to `appbase` and every namespace object. User code cannot modify, extend, or delete any primitive.
+`Object.freeze()` applied to `zeroship` and every namespace object. User code cannot modify, extend, or delete any primitive.
 
 ### Callback safety
 
@@ -417,7 +417,7 @@ Metric names are namespaced by plugin: `db.*`, `auth.*`, `storage.*`, `kv.*`.
 1. Create `crates/plugin-foo/`
 2. Implement `NativePlugin` (namespace, init, register)
 3. Add to `worker/Cargo.toml` and `create_runtime()`
-4. Publish SDK: `@appbase/foo` on npm
+4. Publish SDK: `@zeroship/foo` on npm
 5. Done — no changes to runtime or existing plugins
 
 ```rust
@@ -432,6 +432,6 @@ impl NativePlugin for FooPlugin {
     }
 }
 
-// JS: await appbase.foo.bar("hello")
-// SDK: import { foo } from "@appbase/foo"
+// JS: await zeroship.foo.bar("hello")
+// SDK: import { foo } from "@zeroship/foo"
 ```

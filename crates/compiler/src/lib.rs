@@ -105,7 +105,7 @@ fn analyze(module: &Module) -> Analysis {
         }
     }
 
-    // Pass 1: Find taint sources (appbase imports except 'serve')
+    // Pass 1: Find taint sources (zeroship imports except 'serve')
     let mut taint_collector = TaintCollector {
         tainted: &mut a.tainted_bindings,
     };
@@ -146,7 +146,7 @@ struct TaintCollector<'a> {
 
 impl Visit for TaintCollector<'_> {
     fn visit_import_decl(&mut self, import: &ImportDecl) {
-        if import.src.value == "appbase" {
+        if import.src.value == "zeroship" {
             for spec in &import.specifiers {
                 if let ImportSpecifier::Named(named) = spec {
                     let name = named.local.sym.to_string();
@@ -365,7 +365,7 @@ impl VisitMut for ServerTransformer<'_> {
             match &item {
                 // Imports
                 ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => {
-                    if import.src.value == "appbase" {
+                    if import.src.value == "zeroship" {
                         if self.target == Target::Node {
                             // Keep but remove 'serve'
                             let mut import = import.clone();
@@ -380,7 +380,7 @@ impl VisitMut for ServerTransformer<'_> {
                                 keep.push(ModuleItem::ModuleDecl(ModuleDecl::Import(import)));
                             }
                         }
-                        // Rust target: drop all appbase imports
+                        // Rust target: drop all zeroship imports
                     } else {
                         keep.push(item);
                     }
@@ -500,9 +500,9 @@ impl VisitMut for ClientTransformer<'_> {
         let mut keep = Vec::new();
         for item in module.body.drain(..) {
             match &item {
-                // Remove appbase imports
+                // Remove zeroship imports
                 ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => {
-                    if import.src.value != "appbase" {
+                    if import.src.value != "zeroship" {
                         keep.push(item);
                     }
                 }
@@ -622,7 +622,7 @@ mod tests {
     #[test]
     fn basic_split() {
         let source = r#"
-import { db, serve } from 'appbase'
+import { db, serve } from 'zeroship'
 const todos = db.collection('todos')
 export async function addTodo(text) { return todos.insert({ text, done: false }) }
 export async function getTodos() { return todos.find() }
@@ -650,7 +650,7 @@ serve(App)
     #[test]
     fn use_server_directive() {
         let source = r#"
-import { serve } from 'appbase'
+import { serve } from 'zeroship'
 export async function getTime() {
   "use server"
   return Date.now()
@@ -668,7 +668,7 @@ serve(App)
     #[test]
     fn rust_target() {
         let source = r#"
-import { db, serve } from 'appbase'
+import { db, serve } from 'zeroship'
 const todos = db.collection('todos')
 export async function addTodo(text) { return todos.insert({ text }) }
 export async function getTodos() { return todos.find() }
@@ -685,7 +685,7 @@ serve(App)
     #[test]
     fn no_transitive_taint() {
         let source = r#"
-import { db, serve } from 'appbase'
+import { db, serve } from 'zeroship'
 const todos = db.collection('todos')
 export async function getTodos() { return todos.find() }
 export async function getActive() {
@@ -704,7 +704,7 @@ serve(App)
     #[test]
     fn typescript_support() {
         let source = r#"
-import { db, serve } from 'appbase'
+import { db, serve } from 'zeroship'
 interface Todo { id: string; text: string; done: boolean }
 const todos = db.collection('todos')
 export async function addTodo(text: string): Promise<Todo> {
@@ -721,7 +721,7 @@ serve(App)
     #[test]
     fn no_server_functions() {
         let source = r#"
-import { serve } from 'appbase'
+import { serve } from 'zeroship'
 function App() { return <div>hello</div> }
 serve(App)
 "#;

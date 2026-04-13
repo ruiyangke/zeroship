@@ -1,4 +1,4 @@
-//! Core types used across all appbase crates.
+//! Core types used across all zeroship crates.
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;

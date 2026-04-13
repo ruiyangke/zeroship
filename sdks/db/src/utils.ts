@@ -1,5 +1,5 @@
 /**
- * Field-name mapping utilities for @appbase/db.
+ * Field-name mapping utilities for @zeroship/db.
  * Converts between the JS-facing camelCase API names (_id, createdAt, updatedAt)
  * and the native snake_case / plain names used by the underlying data layer.
  */

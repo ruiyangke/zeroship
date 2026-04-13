@@ -1,12 +1,12 @@
 [package]
-name = "appbase-plugin-db"
+name = "zeroship-plugin-db"
 version = "0.1.0"
 edition = "2021"
-description = "Database plugin — appbase.db.* native primitives"
+description = "Database plugin — zeroship.db.* native primitives"
 
 [dependencies]
-appbase-runtime = { workspace = true }
-appbase-pg = { workspace = true }
+zeroship-runtime = { workspace = true }
+zeroship-pg = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 v8 = { workspace = true }

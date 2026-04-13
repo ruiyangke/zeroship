@@ -49,7 +49,7 @@ async fn main() -> std::io::Result<()> {
     let max_per_worker = 500u32;
 
     eprintln!(
-        "[appbase-gate] {} workers, CHWBL with 150 vnodes, max {max_per_worker} req/worker",
+        "[zeroship-gate] {} workers, CHWBL with 150 vnodes, max {max_per_worker} req/worker",
         num_workers
     );
 
@@ -71,7 +71,7 @@ async fn main() -> std::io::Result<()> {
     sync::start_sync(state.clone());
 
     let bind_addr = format!("0.0.0.0:{port}");
-    eprintln!("[appbase-gate] http://{bind_addr}");
+    eprintln!("[zeroship-gate] http://{bind_addr}");
 
     web::server(async move || {
         web::App::new()

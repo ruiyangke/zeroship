@@ -1,9 +1,9 @@
 /**
- * Todo App — minimal CRUD demo using @appbase/db
+ * Todo App — minimal CRUD demo using @zeroship/db
  *
  * Deploy:
  *   cd examples/todo-sdk && npm install
- *   appbase deploy . --app=<uuid> --control=http://localhost:9090 --key=<key>
+ *   zeroship deploy . --app=<uuid> --control=http://localhost:9090 --key=<key>
  *
  * API (JSON-RPC):
  *   addTodo(text)         → { data: { id, text, done, createdAt } }
@@ -13,7 +13,7 @@
  *   getStats()            → { data: { total, done, remaining } }
  */
 
-import { model } from "@appbase/db";
+import { model } from "@zeroship/db";
 
 const todos = model("todos", {
   text: { type: String, required: true, minlength: 1 },

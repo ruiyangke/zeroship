@@ -1,6 +1,6 @@
 # API Design Guidelines
 
-Rules for designing appbase platform APIs (`@appbase/db`, `@appbase/auth`, `@appbase/storage`, `@appbase/kv`, etc.). The goal: AI generates correct code on the first attempt, non-technical creators can read it, and there's exactly one way to do each thing.
+Rules for designing zeroship platform APIs (`@zeroship/db`, `@zeroship/auth`, `@zeroship/storage`, `@zeroship/kv`, etc.). The goal: AI generates correct code on the first attempt, non-technical creators can read it, and there's exactly one way to do each thing.
 
 ## Core Principles
 
@@ -31,8 +31,8 @@ app.use(cors());
 app.use(authMiddleware());
 
 // Good:
-import { db } from "@appbase/db";
-import { auth } from "@appbase/auth";
+import { db } from "@zeroship/db";
+import { auth } from "@zeroship/auth";
 // Just use them. Done.
 ```
 
@@ -45,8 +45,8 @@ A complete app feature should fit in one file. No config files, no directory con
 // models/recipe.js, routes/recipe.js, controllers/recipe.js, middleware/auth.js, config/db.js
 
 // Good: 1 file
-import { model, t } from "@appbase/db";
-import { auth } from "@appbase/auth";
+import { model, t } from "@zeroship/db";
+import { auth } from "@zeroship/auth";
 
 const recipes = model("recipes", {
   title: t.string().required(),
@@ -250,16 +250,16 @@ RATE_LIMITED           — too many requests
 
 ## Module Naming
 
-All platform modules use the `@appbase/` npm scope:
+All platform modules use the `@zeroship/` npm scope:
 
 ```javascript
-import { db, model, t } from "@appbase/db";
-import { auth } from "@appbase/auth";
-import { storage } from "@appbase/storage";
-import { kv } from "@appbase/kv";
-import { queue } from "@appbase/queue";
-import { ai } from "@appbase/ai";
-import { email } from "@appbase/email";
+import { db, model, t } from "@zeroship/db";
+import { auth } from "@zeroship/auth";
+import { storage } from "@zeroship/storage";
+import { kv } from "@zeroship/kv";
+import { queue } from "@zeroship/queue";
+import { ai } from "@zeroship/ai";
+import { email } from "@zeroship/email";
 ```
 
 - The module name is a single lowercase word
@@ -328,7 +328,7 @@ await db.connect();
 // NOW you can use it
 
 // Good:
-import { db } from "@appbase/db";
+import { db } from "@zeroship/db";
 await users.find({});  // works immediately
 ```
 
@@ -355,7 +355,7 @@ users.find(filter);
 
 ## Checklist for New APIs
 
-Before shipping any new `@appbase/*` package:
+Before shipping any new `@zeroship/*` package:
 
 - [ ] Can AI generate correct usage from just the method name?
 - [ ] Is there exactly one way to do each operation?

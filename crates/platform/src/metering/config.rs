@@ -1,7 +1,7 @@
 //! TOML config parsing for metering plans.
 //!
 //! Loads quota plans, default plan assignment, and per-app plan overrides
-//! from an `appbase.toml` configuration file.
+//! from an `zeroship.toml` configuration file.
 
 use crate::plan::{Period, QuotaDef, QuotaPlan, RateLimitDef};
 use std::collections::HashMap;
@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn test_load_example_config() {
-        let config = MeteringConfig::load("../../examples/appbase.toml")
+        let config = MeteringConfig::load("../../examples/zeroship.toml")
             .expect("Failed to load example config");
 
         assert_eq!(config.plans.len(), 2);
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn test_plan_for_app_with_override() {
-        let config = MeteringConfig::load("../../examples/appbase.toml")
+        let config = MeteringConfig::load("../../examples/zeroship.toml")
             .expect("Failed to load example config");
 
         // "default" app is assigned to "pro" plan
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn test_plan_for_app_falls_back_to_default() {
-        let config = MeteringConfig::load("../../examples/appbase.toml")
+        let config = MeteringConfig::load("../../examples/zeroship.toml")
             .expect("Failed to load example config");
 
         // Unknown app falls back to default plan ("free")
@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn test_free_plan_quotas() {
-        let config = MeteringConfig::load("../../examples/appbase.toml")
+        let config = MeteringConfig::load("../../examples/zeroship.toml")
             .expect("Failed to load example config");
 
         let free = config.plans.get("free").unwrap();
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn test_pro_plan_quotas() {
-        let config = MeteringConfig::load("../../examples/appbase.toml")
+        let config = MeteringConfig::load("../../examples/zeroship.toml")
             .expect("Failed to load example config");
 
         let pro = config.plans.get("pro").unwrap();

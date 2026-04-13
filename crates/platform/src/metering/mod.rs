@@ -1,9 +1,9 @@
-//! # appbase-metering
+//! # zeroship-metering
 //!
 //! Multi-tenant metering — per-app atomic usage counters, flush loop, and period rollover.
 //!
-//! Quota plan definitions are in `appbase-plan`.
-//! Enforcement (quota checking, rate limiting, concurrency, error codes) is in `appbase-enforcement`.
+//! Quota plan definitions are in `zeroship-plan`.
+//! Enforcement (quota checking, rate limiting, concurrency, error codes) is in `zeroship-enforcement`.
 //!
 //! - `meter`: Per-app atomic usage counters
 //! - `config`: TOML config parsing for metering plans

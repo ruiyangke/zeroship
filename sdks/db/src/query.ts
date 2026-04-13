@@ -1,5 +1,5 @@
 /**
- * Lazy query builder for @appbase/db.
+ * Lazy query builder for @zeroship/db.
  * A Query is a thenable that collects sort/limit/skip/select options and
  * executes the native find call only when awaited or .then() is called.
  */

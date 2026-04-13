@@ -65,13 +65,13 @@ quote = "1"
 syn = { version = "2", features = ["full"] }
 
 # Internal crates
-appbase-bundle = { path = "crates/bundle" }
-appbase-core = { path = "crates/core" }
-appbase-pg = { path = "crates/pg" }
-appbase-plugin-db = { path = "crates/plugin-db" }
-appbase-runtime = { path = "crates/runtime" }
-appbase-runtime-macros = { path = "crates/runtime-macros" }
-appbase-compiler = { path = "crates/compiler" }
+zeroship-bundle = { path = "crates/bundle" }
+zeroship-core = { path = "crates/core" }
+zeroship-pg = { path = "crates/pg" }
+zeroship-plugin-db = { path = "crates/plugin-db" }
+zeroship-runtime = { path = "crates/runtime" }
+zeroship-runtime-macros = { path = "crates/runtime-macros" }
+zeroship-compiler = { path = "crates/compiler" }
 
 # ---------------------------------------------------------------------------
 # Shared lints

@@ -98,7 +98,7 @@ Scenario                    concurrent(1)  conc-pool(16)  Node.js v22    vs Node
   Summary: Crypto Benchmark (in-process, req/s)
 =========================================================
 
-Operation                         appbase     Node.js v22    vs Node
+Operation                         zeroship     Node.js v22    vs Node
 randomUUID()                      297,681       780,942       0.4x  (Node native C++)
 getRandomValues(32)               259,282       323,310       0.8x  (close — was 0.5x before fix)
 SHA-256 digest                    144,745        77,609       1.9x

@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "appbase-agent",
+      "name": "zeroship-agent",
       "dependencies": {
         "@langchain/anthropic": "latest",
         "@langchain/core": "latest",

@@ -2,7 +2,7 @@ export default function RootLayout({ children }) {
   return (
     <div style={styles.shell}>
       <nav style={styles.nav}>
-        <span style={styles.logo}>&#9671; appbase</span>
+        <span style={styles.logo}>&#9671; zeroship</span>
         <div style={styles.links}>
           <a href="/" style={styles.link}>Home</a>
           <a href="/about" style={styles.link}>About</a>

@@ -1,12 +1,12 @@
-//! appbase CLI — build, serve, deploy, and inspect apps.
+//! zeroship CLI — build, serve, deploy, and inspect apps.
 //!
 //! Commands:
-//!   appbase build   <dir-or-file> [--outdir=dist] [--minify]
-//!   appbase inspect <file.appbundle>
-//!   appbase serve   <file-or-dir> [--port=3000] [--workers=0]
-//!   appbase deploy  <dir-or-file> --app=<id> [--control=URL] [--key=KEY]
+//!   zeroship build   <dir-or-file> [--outdir=dist] [--minify]
+//!   zeroship inspect <file.appbundle>
+//!   zeroship serve   <file-or-dir> [--port=3000] [--workers=0]
+//!   zeroship deploy  <dir-or-file> --app=<id> [--control=URL] [--key=KEY]
 
-use appbase_bundle::{AppBundle, ModuleType, ModuleEntry};
+use zeroship_bundle::{AppBundle, ModuleType, ModuleEntry};
 use std::path::PathBuf;
 
 fn main() {
@@ -29,7 +29,7 @@ fn main() {
 fn cmd_build(args: &[String]) {
     let input = args
         .get(2)
-        .expect("Usage: appbase build <dir-or-file> [--outdir=dist] [--minify]");
+        .expect("Usage: zeroship build <dir-or-file> [--outdir=dist] [--minify]");
     let outdir = flag_str(args, "--outdir=").unwrap_or_else(|| "dist".into());
     let minify = args.iter().any(|a| a == "--minify");
 
@@ -95,7 +95,7 @@ fn cmd_build(args: &[String]) {
         "source_size": source.len(),
         "content_hash": content_hash,
         "source_map": source_map_file,
-        "compiler": format!("appbase {}", env!("CARGO_PKG_VERSION")),
+        "compiler": format!("zeroship {}", env!("CARGO_PKG_VERSION")),
         "built_at": utc_now_iso8601(),
     });
     let manifest_path = PathBuf::from(&outdir).join("manifest.json");
@@ -131,7 +131,7 @@ fn cmd_build(args: &[String]) {
 fn cmd_inspect(args: &[String]) {
     let file = args
         .get(2)
-        .expect("Usage: appbase inspect <file.appbundle>");
+        .expect("Usage: zeroship inspect <file.appbundle>");
     let bytes = std::fs::read(file).expect("Failed to read file");
 
     let bundle = AppBundle::from_bytes(&bytes).unwrap_or_else(|e| {
@@ -165,7 +165,7 @@ fn cmd_inspect(args: &[String]) {
 
 fn cmd_serve(args: &[String]) {
     let input = args.get(2).expect(
-        "Usage: appbase serve <file-or-dir> [--port=3000] [--workers=0] [--cpu-limit=MS] [--wall-timeout=MS]",
+        "Usage: zeroship serve <file-or-dir> [--port=3000] [--workers=0] [--cpu-limit=MS] [--wall-timeout=MS]",
     );
     let port = flag_u16(args, "--port=").unwrap_or(3000);
     let workers: usize = flag_str(args, "--workers=")
@@ -188,11 +188,11 @@ fn cmd_serve(args: &[String]) {
         build_and_load_file(&input_path)
     };
 
-    eprintln!("[appbase] Starting server on port {port}");
+    eprintln!("[zeroship] Starting server on port {port}");
 
-    appbase_runtime::serve::start_server(
+    zeroship_runtime::serve::start_server(
         modules,
-        appbase_runtime::serve::ServerOptions {
+        zeroship_runtime::serve::ServerOptions {
             port,
             workers,
             cpu_limit,
@@ -207,14 +207,14 @@ fn cmd_serve(args: &[String]) {
 
 fn cmd_deploy(args: &[String]) {
     let input = args.get(2).expect(
-        "Usage: appbase deploy <dir-or-file> --app=<name-or-id> [--control=http://localhost:9090] [--key=<master-key>]",
+        "Usage: zeroship deploy <dir-or-file> --app=<name-or-id> [--control=http://localhost:9090] [--key=<master-key>]",
     );
     let app = flag_str(args, "--app=").expect("--app=<name-or-id> is required");
     let control_url = flag_str(args, "--control=")
-        .or_else(|| std::env::var("APPBASE_CONTROL_URL").ok())
+        .or_else(|| std::env::var("ZEROSHIP_CONTROL_URL").ok())
         .unwrap_or_else(|| "http://localhost:9090".into());
     let master_key = flag_str(args, "--key=")
-        .or_else(|| std::env::var("APPBASE_MASTER_KEY").ok())
+        .or_else(|| std::env::var("ZEROSHIP_MASTER_KEY").ok())
         .unwrap_or_default();
 
     let input_path = PathBuf::from(input);
@@ -420,16 +420,16 @@ fn walk_dir_inner(root: &PathBuf, current: &PathBuf, result: &mut Vec<(String, P
 // ---------------------------------------------------------------------------
 
 fn print_usage() {
-    eprintln!("appbase — JavaScript runtime powered by V8 + io_uring");
+    eprintln!("zeroship — JavaScript runtime powered by V8 + io_uring");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  appbase build    <dir-or-file> [--outdir=dist] [--minify]");
+    eprintln!("  zeroship build    <dir-or-file> [--outdir=dist] [--minify]");
     eprintln!("                   Compile JS/TS into an .appbundle");
-    eprintln!("  appbase inspect  <file.appbundle>");
+    eprintln!("  zeroship inspect  <file.appbundle>");
     eprintln!("                   Show .appbundle metadata");
-    eprintln!("  appbase serve    <file-or-dir> [--port=3000] [--workers=0]");
+    eprintln!("  zeroship serve    <file-or-dir> [--port=3000] [--workers=0]");
     eprintln!("                   Serve a .appbundle, JS file, or project directory");
-    eprintln!("  appbase deploy   <dir-or-file> --app=<id> [--control=URL] [--key=KEY]");
+    eprintln!("  zeroship deploy   <dir-or-file> --app=<id> [--control=URL] [--key=KEY]");
     eprintln!("                   Build and deploy to the control plane");
 }
 
@@ -448,7 +448,7 @@ fn compile_input(
             .to_string();
         (name, source, None)
     } else if input_path.is_dir() {
-        use appbase_compiler::bundler::{bundle, BundleOptions};
+        use zeroship_compiler::bundler::{bundle, BundleOptions};
         let options = BundleOptions {
             entry: String::new(),
             minify,
@@ -477,7 +477,7 @@ fn load_from_appbundle(path: &PathBuf) -> Vec<ModuleEntry> {
     });
     let info = bundle.all_module_info();
     eprintln!(
-        "[appbase] Loaded {} ({} modules, {:.1}KB)",
+        "[zeroship] Loaded {} ({} modules, {:.1}KB)",
         path.display(),
         info.len(),
         bytes.len() as f64 / 1024.0
@@ -486,7 +486,7 @@ fn load_from_appbundle(path: &PathBuf) -> Vec<ModuleEntry> {
 }
 
 fn build_and_load_dir(dir: &PathBuf) -> Vec<ModuleEntry> {
-    use appbase_compiler::bundler::{bundle, BundleOptions};
+    use zeroship_compiler::bundler::{bundle, BundleOptions};
     let options = BundleOptions {
         entry: String::new(),
         minify: false,
@@ -498,7 +498,7 @@ fn build_and_load_dir(dir: &PathBuf) -> Vec<ModuleEntry> {
         std::process::exit(1);
     });
     eprintln!(
-        "[appbase] Built {:.1}KB from {}",
+        "[zeroship] Built {:.1}KB from {}",
         result.js.len() as f64 / 1024.0,
         dir.display()
     );
@@ -515,7 +515,7 @@ fn build_and_load_file(path: &PathBuf) -> Vec<ModuleEntry> {
     });
     let name = path.file_name().unwrap().to_string_lossy().to_string();
     eprintln!(
-        "[appbase] Loaded {} ({:.1}KB)",
+        "[zeroship] Loaded {} ({:.1}KB)",
         path.display(),
         source.len() as f64 / 1024.0
     );

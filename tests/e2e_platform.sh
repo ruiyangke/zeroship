@@ -12,7 +12,7 @@
 #   8. Hot deploy (update code while serving)
 #
 # Prerequisites:
-#   - cargo build --release -p appbase-control -p appbase-gateway -p appbase-worker -p appbase
+#   - cargo build --release -p zeroship-control -p zeroship-gateway -p zeroship-worker -p zeroship
 #   - docker start pg-test (Postgres on port 5434)
 #
 # Usage:
@@ -39,12 +39,12 @@ fail() { FAIL=$((FAIL + 1)); echo "  ✗ $1"; }
 cleanup() {
     for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
     wait 2>/dev/null || true
-    rm -rf /tmp/appbase-e2e-*
+    rm -rf /tmp/zeroship-e2e-*
 }
 trap cleanup EXIT
 
 echo "============================================"
-echo "  appbase E2E Platform Test"
+echo "  zeroship E2E Platform Test"
 echo "============================================"
 echo ""
 
@@ -53,11 +53,11 @@ echo "=== Setup ==="
 for port in $CONTROL_PORT ${WORKER_PORTS[@]} $GATE_PORT; do
     lsof -ti :"$port" 2>/dev/null | xargs kill -9 2>/dev/null || true
 done
-rm -rf /tmp/appbase-e2e-bundles
+rm -rf /tmp/zeroship-e2e-bundles
 docker exec pg-test psql -U postgres -c "DROP TABLE IF EXISTS usage_history, usage, apps CASCADE" > /dev/null 2>&1
 
 # Start control
-"$BIN/appbase-control" --port $CONTROL_PORT --db "$DB_URL" --bundles /tmp/appbase-e2e-bundles \
+"$BIN/zeroship-control" --port $CONTROL_PORT --db "$DB_URL" --bundles /tmp/zeroship-e2e-bundles \
     --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" > /dev/null 2>&1 &
 PIDS+=($!)
 sleep 3
@@ -65,7 +65,7 @@ sleep 3
 # Start 3 separate workers (so we can verify routing)
 WORKER_URL_LIST=""
 for port in "${WORKER_PORTS[@]}"; do
-    "$BIN/appbase-worker" --port "$port" --workers 2 --control "http://localhost:$CONTROL_PORT" \
+    "$BIN/zeroship-worker" --port "$port" --workers 2 --control "http://localhost:$CONTROL_PORT" \
         --control-key "$CONTROL_KEY" --poll-interval 2 > /dev/null 2>&1 &
     PIDS+=($!)
     [ -n "$WORKER_URL_LIST" ] && WORKER_URL_LIST="$WORKER_URL_LIST,"
@@ -74,7 +74,7 @@ done
 sleep 2
 
 # Start gateway
-"$BIN/appbase-gate" --port $GATE_PORT --control "http://localhost:$CONTROL_PORT" \
+"$BIN/zeroship-gate" --port $GATE_PORT --control "http://localhost:$CONTROL_PORT" \
     --control-key "$CONTROL_KEY" --workers "$WORKER_URL_LIST" --poll-interval 2 > /dev/null 2>&1 &
 PIDS+=($!)
 sleep 3
@@ -109,7 +109,7 @@ API_KEY=$(echo "$APP" | jq -r '.api_key')
 # Deploy
 tmpf=$(mktemp --suffix=.js)
 echo 'export function ping() { return "lifecycle-ok"; }' > "$tmpf"
-DEPLOY=$("$BIN/appbase" deploy "$tmpf" --app="$APP_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" 2>&1)
+DEPLOY=$("$BIN/zeroship" deploy "$tmpf" --app="$APP_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" 2>&1)
 rm "$tmpf"
 echo "$DEPLOY" | grep -q "deploy_hash" && pass "deploy" || fail "deploy"
 
@@ -142,7 +142,7 @@ for i in $(seq 1 10); do
 
     tmpf=$(mktemp --suffix=.js)
     echo "export function ping() { return \"I am $name\"; }" > "$tmpf"
-    "$BIN/appbase" deploy "$tmpf" --app="${APP_IDS[$name]}" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
+    "$BIN/zeroship" deploy "$tmpf" --app="${APP_IDS[$name]}" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
     rm "$tmpf"
 done
 sleep 4
@@ -184,7 +184,7 @@ cat > "$tmpf" << 'JSEOF'
 let counter = 0;
 export function ping() { counter++; return { count: counter }; }
 JSEOF
-"$BIN/appbase" deploy "$tmpf" --app="$CID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
+"$BIN/zeroship" deploy "$tmpf" --app="$CID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
 rm "$tmpf"
 sleep 4
 
@@ -276,7 +276,7 @@ COLD_KEY=$(echo "$result" | jq -r '.api_key')
 
 tmpf=$(mktemp --suffix=.js)
 echo 'export function ping() { return "cold-ok"; }' > "$tmpf"
-"$BIN/appbase" deploy "$tmpf" --app="$COLD_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
+"$BIN/zeroship" deploy "$tmpf" --app="$COLD_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
 rm "$tmpf"
 sleep 3
 
@@ -317,7 +317,7 @@ HOT_KEY=$(echo "$result" | jq -r '.api_key')
 
 tmpf=$(mktemp --suffix=.js)
 echo 'export function ping() { return "v1"; }' > "$tmpf"
-"$BIN/appbase" deploy "$tmpf" --app="$HOT_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
+"$BIN/zeroship" deploy "$tmpf" --app="$HOT_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
 rm "$tmpf"
 sleep 3
 
@@ -332,7 +332,7 @@ v=$(echo "$result" | jq -r '.result // empty')
 # Deploy v2
 tmpf=$(mktemp --suffix=.js)
 echo 'export function ping() { return "v2"; }' > "$tmpf"
-"$BIN/appbase" deploy "$tmpf" --app="$HOT_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
+"$BIN/zeroship" deploy "$tmpf" --app="$HOT_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
 rm "$tmpf"
 
 # Wait for worker sync to pick up new hash + reload

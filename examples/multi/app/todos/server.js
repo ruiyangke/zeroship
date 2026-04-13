@@ -1,4 +1,4 @@
-import { db } from 'appbase'
+import { db } from 'zeroship'
 
 const todos = db.collection('todos')
 

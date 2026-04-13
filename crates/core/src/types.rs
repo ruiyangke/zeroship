@@ -57,7 +57,7 @@ pub enum ControlEvent {
     PlanChange { app_id: Uuid, plan_id: String },
 }
 
-/// Canonical errors for appbase-common operations.
+/// Canonical errors for zeroship-common operations.
 #[derive(Debug, thiserror::Error)]
 pub enum CommonError {
     #[error("not found")]

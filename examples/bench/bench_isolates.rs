@@ -1,4 +1,4 @@
-use appbase_runtime::v8::create_v8_runtime;
+use zeroship_runtime::v8::create_v8_runtime;
 
 fn rss_kb() -> usize {
     let status = std::fs::read_to_string("/proc/self/status").unwrap();
@@ -16,7 +16,7 @@ fn main() {
 
     let mut runtimes = Vec::new();
     for i in 1..=10 {
-        let db_path = format!("/tmp/appbase-iso-{}-{}.db", std::process::id(), i);
+        let db_path = format!("/tmp/zeroship-iso-{}-{}.db", std::process::id(), i);
         let (runtime, _rpc) = create_v8_runtime(&db_path).unwrap();
         runtimes.push((runtime, db_path.clone()));
 

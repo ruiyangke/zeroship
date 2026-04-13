@@ -1,5 +1,5 @@
 /**
- * Error types and native-error mapping for @appbase/db.
+ * Error types and native-error mapping for @zeroship/db.
  * Provides ValidationError for schema violations and mapNativeError for
  * translating raw native driver errors into typed JS errors.
  */

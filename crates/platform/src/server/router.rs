@@ -1,4 +1,4 @@
-//! Axum router for appbase — RPC dispatch with metering, quota enforcement, and admin API.
+//! Axum router for zeroship — RPC dispatch with metering, quota enforcement, and admin API.
 
 use crate::control::AppRegistry;
 use crate::core::config::AppbaseConfig;
@@ -182,12 +182,12 @@ pub async fn serve(state: AppState, host: &str, port: u16) -> Result<(), String>
         .await
         .map_err(|e| format!("Failed to bind {addr}: {e}"))?;
 
-    eprintln!("[appbase] http://{addr}");
+    eprintln!("[zeroship] http://{addr}");
 
     let server = axum::serve(listener, app)
         .with_graceful_shutdown(async {
             tokio::signal::ctrl_c().await.ok();
-            eprintln!("[appbase] Shutting down gracefully...");
+            eprintln!("[zeroship] Shutting down gracefully...");
         });
 
     server.await.map_err(|e| format!("Server error: {e}"))
@@ -533,7 +533,7 @@ async fn handle_static(State(state): State<AppState>) -> Response {
             .body(Body::from(html.clone()))
             .unwrap()
     } else {
-        json_response(StatusCode::OK, r#"{"status":"appbase running"}"#)
+        json_response(StatusCode::OK, r#"{"status":"zeroship running"}"#)
     }
 }
 

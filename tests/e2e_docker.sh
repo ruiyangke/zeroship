@@ -57,7 +57,7 @@ for i in $(seq 1 20); do
     # Deploy via control container
     docker compose exec -T control sh -c "
         echo 'export function ping() { return \"I am $name\"; }' > /tmp/$name.js
-        appbase deploy /tmp/$name.js --app=${IDS[$name]} --control=http://localhost:9090 --key=$MASTER_KEY 2>/dev/null
+        zeroship deploy /tmp/$name.js --app=${IDS[$name]} --control=http://localhost:9090 --key=$MASTER_KEY 2>/dev/null
     " > /dev/null 2>&1
 done
 pass "20 apps created + deployed"

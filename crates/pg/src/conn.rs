@@ -104,7 +104,7 @@ impl Conn {
                     ("user", cfg.user.as_str()),
                     ("database", cfg.database.as_str()),
                     ("client_encoding", "UTF8"),
-                    ("application_name", "appbase-pg"),
+                    ("application_name", "zeroship-pg"),
                 ],
                 &mut buf,
             )

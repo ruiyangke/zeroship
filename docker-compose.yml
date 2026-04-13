@@ -1,4 +1,4 @@
-# appbase platform — multi-node simulation
+# zeroship platform — multi-node simulation
 #
 # Usage:
 #   docker compose up -d                          # default: 1 gw + 3 workers
@@ -10,8 +10,8 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_PASSWORD: appbase
-      POSTGRES_DB: appbase
+      POSTGRES_PASSWORD: zeroship
+      POSTGRES_DB: zeroship
     ports:
       - "5440:5432"
     healthcheck:
@@ -23,9 +23,9 @@ services:
   control:
     build: .
     command: >
-      appbase-control
+      zeroship-control
         --port 9090
-        --db postgres://postgres:appbase@postgres:5432/appbase
+        --db postgres://postgres:zeroship@postgres:5432/zeroship
         --bundles /data/bundles
         --control-key platform-key
         --master-key master-key
@@ -53,7 +53,7 @@ services:
         done
         [ -z "$$WORKERS" ] && WORKERS="http://worker:8080"
         echo "[gateway] workers: $$WORKERS"
-        exec appbase-gate \
+        exec zeroship-gate \
           --port 8000 \
           --control http://control:9090 \
           --control-key platform-key \
@@ -70,7 +70,7 @@ services:
   worker:
     build: .
     command: >
-      appbase-worker
+      zeroship-worker
         --port 8080
         --workers 4
         --control http://control:9090

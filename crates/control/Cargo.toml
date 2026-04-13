@@ -1,16 +1,16 @@
 [package]
-name = "appbase-control"
+name = "zeroship-control"
 version = "0.1.0"
 edition = "2021"
-description = "appbase control plane — admin API, internal API, Postgres, VFS"
+description = "zeroship control plane — admin API, internal API, Postgres, VFS"
 
 [[bin]]
-name = "appbase-control"
+name = "zeroship-control"
 path = "src/main.rs"
 
 [dependencies]
-appbase-core = { workspace = true }
-appbase-pg = { workspace = true }
+zeroship-core = { workspace = true }
+zeroship-pg = { workspace = true }
 ntex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

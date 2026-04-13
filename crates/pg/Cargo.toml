@@ -1,5 +1,5 @@
 [package]
-name = "appbase-pg"
+name = "zeroship-pg"
 version = "0.1.0"
 edition = "2021"
 description = "Minimal PostgreSQL driver for compio/io_uring"

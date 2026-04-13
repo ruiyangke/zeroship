@@ -1,12 +1,12 @@
-//! # appbase-platform
+//! # zeroship-platform
 //!
-//! Multi-tenant platform layer for appbase. All platform concerns in a single crate:
+//! Multi-tenant platform layer for zeroship. All platform concerns in a single crate:
 //! core traits, plans, enforcement, metering, billing, control plane, HTTP server.
 //!
 //! ## Architecture
 //!
 //! ```text
-//! Layer 1: Runtime (appbase-runtime)
+//! Layer 1: Runtime (zeroship-runtime)
 //!   V8 isolate, ESM modules, crypto, fetch, URL, timers, KV
 //!   Zero platform deps — works standalone for local dev
 //!
@@ -19,7 +19,7 @@
 //!   control  — app registry, SQLite/Postgres
 //!   server   — axum HTTP, routing, V8 pool
 //!
-//! Layer 3: CLI (appbase binary)
+//! Layer 3: CLI (zeroship binary)
 //!   Thin wrapper dispatching to runtime or platform
 //! ```
 

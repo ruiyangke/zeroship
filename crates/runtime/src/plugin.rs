@@ -1,7 +1,7 @@
-//! Plugin system — extensible native functions on the `appbase.*` global.
+//! Plugin system — extensible native functions on the `zeroship.*` global.
 //!
 //! The runtime is a kernel. Plugins are drivers. Each plugin registers
-//! functions on `appbase.{namespace}.*` via the `NativePlugin` trait.
+//! functions on `zeroship.{namespace}.*` via the `NativePlugin` trait.
 //!
 //! The V8 scope IS the context — callbacks read app_id and meter from
 //! RuntimeState (via scope slot), and per-thread resources from thread_local.
@@ -33,7 +33,7 @@ impl Default for PluginConfig {
     }
 }
 
-/// A native extension that registers functions on `appbase.{namespace}.*`.
+/// A native extension that registers functions on `zeroship.{namespace}.*`.
 ///
 /// Plugins are the extension mechanism for the runtime. Each plugin:
 /// 1. Declares a namespace ("db", "auth", "storage", "kv")
@@ -45,7 +45,7 @@ impl Default for PluginConfig {
 /// - `meter`  → from `scope.get_slot::<SharedState>()` → `state.meter`
 /// - resources → from `thread_local!` (pools, caches — set in `init()`)
 pub trait NativePlugin: Send + Sync {
-    /// Namespace under `appbase.*`. Must be a valid JS identifier.
+    /// Namespace under `zeroship.*`. Must be a valid JS identifier.
     /// Examples: "db", "auth", "storage", "kv"
     fn namespace(&self) -> &str;
 
@@ -58,7 +58,7 @@ pub trait NativePlugin: Send + Sync {
     /// (connection pools, caches). Can do async I/O.
     fn init(&self, config: &Arc<PluginConfig>);
 
-    /// Called once per V8 isolate. Register functions on `appbase.{namespace}`.
+    /// Called once per V8 isolate. Register functions on `zeroship.{namespace}`.
     fn register(&self, registrar: &mut NativeRegistrar);
 
     /// Called on worker shutdown. Close connections, flush buffers.
@@ -85,7 +85,7 @@ impl NativeRegistrar {
         }
     }
 
-    /// Register a native function as `appbase.{namespace}.{name}`.
+    /// Register a native function as `zeroship.{namespace}.{name}`.
     ///
     /// The callback signature:
     /// `fn(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, rv: v8::ReturnValue)`
@@ -104,9 +104,9 @@ impl NativeRegistrar {
     }
 }
 
-/// Register all plugins on the `appbase` global namespace.
+/// Register all plugins on the `zeroship` global namespace.
 ///
-/// Creates `globalThis.appbase = { db: { ... }, auth: { ... }, ... }`
+/// Creates `globalThis.zeroship = { db: { ... }, auth: { ... }, ... }`
 /// and freezes the entire object tree to prevent modification by user code.
 pub(crate) fn register_plugins(scope: &mut v8::PinScope, plugins: &[Box<dyn NativePlugin>]) {
     if plugins.is_empty() {
@@ -114,7 +114,7 @@ pub(crate) fn register_plugins(scope: &mut v8::PinScope, plugins: &[Box<dyn Nati
     }
 
     let global = scope.get_current_context().global(scope);
-    let appbase = v8::Object::new(scope);
+    let zeroship = v8::Object::new(scope);
 
     // Collect namespace names for the freeze step
     let mut namespaces: Vec<String> = Vec::new();
@@ -139,18 +139,18 @@ pub(crate) fn register_plugins(scope: &mut v8::PinScope, plugins: &[Box<dyn Nati
         }
 
         let ns_key = v8::String::new(scope, ns_name).unwrap();
-        appbase.set(scope, ns_key.into(), ns_obj.into());
+        zeroship.set(scope, ns_key.into(), ns_obj.into());
         namespaces.push(ns_name.to_string());
     }
 
-    // Set appbase on global
-    let appbase_key = v8::String::new(scope, "appbase").unwrap();
-    global.set(scope, appbase_key.into(), appbase.into());
+    // Set zeroship on global
+    let zeroship_key = v8::String::new(scope, "zeroship").unwrap();
+    global.set(scope, zeroship_key.into(), zeroship.into());
 
     // Freeze everything in one script (no borrow conflicts)
-    let mut freeze_js = String::from("Object.freeze(globalThis.appbase);");
+    let mut freeze_js = String::from("Object.freeze(globalThis.zeroship);");
     for ns in &namespaces {
-        freeze_js.push_str(&format!("Object.freeze(globalThis.appbase.{ns});"));
+        freeze_js.push_str(&format!("Object.freeze(globalThis.zeroship.{ns});"));
     }
     let code = v8::String::new(scope, &freeze_js).unwrap();
     if let Some(script) = v8::Script::compile(scope, code, None) {

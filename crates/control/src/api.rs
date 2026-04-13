@@ -45,9 +45,9 @@ fn check_admin_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::Htt
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let token = appbase_core::auth::extract_bearer(header);
+    let token = zeroship_core::auth::extract_bearer(header);
     match token {
-        Some(key) if appbase_core::auth::validate_control_key(key, &state.master_key) => None,
+        Some(key) if zeroship_core::auth::validate_control_key(key, &state.master_key) => None,
         _ => Some(
             web::HttpResponse::Unauthorized()
                 .json(&serde_json::json!({"error":"unauthorized — master key required"})),
@@ -133,7 +133,7 @@ pub async fn delete_app(req: web::HttpRequest, state: State<Arc<AppState>>, id: 
     let app_id_str = uid.to_string();
     if let Err(e) = state.vfs.delete(&app_id_str) {
         match e {
-            appbase_core::vfs::VfsError::NotFound(_) => { /* ok */ }
+            zeroship_core::vfs::VfsError::NotFound(_) => { /* ok */ }
             other => {
                 return web::HttpResponse::InternalServerError()
                     .json(&serde_json::json!({"error": other.to_string()}));

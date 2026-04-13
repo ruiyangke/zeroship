@@ -1,4 +1,4 @@
-import { db, serve } from 'appbase'
+import { db, serve } from 'zeroship'
 
 const todos = db.collection('todos')
 
@@ -51,7 +51,7 @@ function App() {
       <div style={styles.container}>
         <header style={styles.header}>
           <div style={styles.logo}>&#9671;</div>
-          <h1 style={styles.title}>appbase</h1>
+          <h1 style={styles.title}>zeroship</h1>
           <p style={styles.subtitle}>single-file full-stack demo</p>
         </header>
 

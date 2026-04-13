@@ -9,17 +9,17 @@ import CreateApp from "./pages/CreateApp";
 import AIChat from "./pages/AIChat";
 
 function App() {
-  const [authed, setAuthed] = useState(() => !!localStorage.getItem("appbase_key"));
+  const [authed, setAuthed] = useState(() => !!localStorage.getItem("zeroship_key"));
 
   useEffect(() => {
-    const handler = () => setAuthed(!!localStorage.getItem("appbase_key"));
+    const handler = () => setAuthed(!!localStorage.getItem("zeroship_key"));
     window.addEventListener("storage", handler);
     return () => window.removeEventListener("storage", handler);
   }, []);
 
   const handleLogin = () => setAuthed(true);
   const handleLogout = () => {
-    localStorage.removeItem("appbase_key");
+    localStorage.removeItem("zeroship_key");
     setAuthed(false);
   };
 

@@ -18,12 +18,12 @@ PIDS=()
 cleanup() {
     for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
     wait 2>/dev/null || true
-    rm -rf /tmp/appbase-bench-*
+    rm -rf /tmp/zeroship-bench-*
 }
 trap cleanup EXIT
 
 echo "================================================================="
-echo "  appbase Platform Benchmark"
+echo "  zeroship Platform Benchmark"
 echo "  $(date -u +%Y-%m-%d) | $CORES cores | $(uname -m)"
 echo "================================================================="
 echo ""
@@ -32,21 +32,21 @@ echo ""
 for port in 9090 8080 8000 5100 5101; do
     lsof -ti :"$port" 2>/dev/null | xargs kill -9 2>/dev/null || true
 done
-rm -rf /tmp/appbase-bench-bundles
+rm -rf /tmp/zeroship-bench-bundles
 docker exec pg-test psql -U postgres -c "DROP TABLE IF EXISTS usage_history, usage, apps CASCADE" > /dev/null 2>&1
 
 # Start platform
-"$BIN/appbase-control" --port 9090 --db "postgres://postgres:test@localhost:5434/postgres" \
-    --bundles /tmp/appbase-bench-bundles --control-key bk --master-key bm > /dev/null 2>&1 &
+"$BIN/zeroship-control" --port 9090 --db "postgres://postgres:test@localhost:5434/postgres" \
+    --bundles /tmp/zeroship-bench-bundles --control-key bk --master-key bm > /dev/null 2>&1 &
 PIDS+=($!)
 sleep 3
 
-"$BIN/appbase-worker" --port 8080 --workers $CORES --control http://localhost:9090 \
+"$BIN/zeroship-worker" --port 8080 --workers $CORES --control http://localhost:9090 \
     --control-key bk --poll-interval 60 > /dev/null 2>&1 &
 PIDS+=($!)
 sleep 2
 
-"$BIN/appbase-gate" --port 8000 --control http://localhost:9090 \
+"$BIN/zeroship-gate" --port 8000 --control http://localhost:9090 \
     --control-key bk --workers http://localhost:8080 --poll-interval 60 > /dev/null 2>&1 &
 PIDS+=($!)
 sleep 3
@@ -59,9 +59,9 @@ APP=$(curl -sf -X POST http://localhost:9090/api/apps \
 APP_ID=$(echo "$APP" | jq -r '.id')
 API_KEY=$(echo "$APP" | jq -r '.api_key')
 
-mkdir -p /tmp/appbase-bench-app
-echo 'export function ping() { return "pong"; }' > /tmp/appbase-bench-app/index.js
-"$BIN/appbase" deploy /tmp/appbase-bench-app/index.js --app="$APP_ID" \
+mkdir -p /tmp/zeroship-bench-app
+echo 'export function ping() { return "pong"; }' > /tmp/zeroship-bench-app/index.js
+"$BIN/zeroship" deploy /tmp/zeroship-bench-app/index.js --app="$APP_ID" \
     --control=http://localhost:9090 --key=bm > /dev/null 2>&1
 
 # Baseline

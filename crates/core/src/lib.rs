@@ -1,4 +1,4 @@
-//! appbase-common — shared types and abstractions for the appbase platform.
+//! zeroship-common — shared types and abstractions for the zeroship platform.
 
 pub mod types;
 pub mod vfs;

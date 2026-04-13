@@ -15,11 +15,11 @@ export default function Login({ onLogin }: LoginProps) {
 
   const loginMutation = useMutation({
     mutationFn: async (masterKey: string) => {
-      localStorage.setItem("appbase_key", masterKey.trim());
+      localStorage.setItem("zeroship_key", masterKey.trim());
       try {
         await getHealth();
       } catch {
-        localStorage.removeItem("appbase_key");
+        localStorage.removeItem("zeroship_key");
         throw new Error(
           "connection failed -- check your key and that the server is running on :3333"
         );
@@ -38,7 +38,7 @@ export default function Login({ onLogin }: LoginProps) {
     <div className="flex items-center justify-center h-screen p-5">
       <div className="w-[400px] max-w-full">
         <h1 className="text-sm font-bold tracking-[0.15em] uppercase text-primary mb-1">
-          appbase
+          zeroship
         </h1>
         <div className="text-xs text-muted-foreground mb-6">
           enter master key to continue

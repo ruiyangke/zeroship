@@ -1,8 +1,8 @@
 /**
- * Notes App — full CRUD example using @appbase/db
+ * Notes App — full CRUD example using @zeroship/db
  *
  * Deploy:
- *   appbase deploy examples/notes-app --app=<uuid> --control=http://localhost:9090 --key=<key>
+ *   zeroship deploy examples/notes-app --app=<uuid> --control=http://localhost:9090 --key=<key>
  *
  * API (JSON-RPC):
  *   createNote(title, body, category?)   → { _id, title, body, category, views, createdAt }
@@ -18,7 +18,7 @@
  *   getStats()                           → [{ category, count, totalViews }]
  */
 
-import { model } from "@appbase/db";
+import { model } from "@zeroship/db";
 
 // --- Model definition (Mongoose style) ---
 

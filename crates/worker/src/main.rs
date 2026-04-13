@@ -4,7 +4,7 @@ mod cache;
 
 use std::sync::Arc;
 use ntex::web;
-use appbase_runtime::init::init_v8;
+use zeroship_runtime::init::init_v8;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -51,9 +51,9 @@ async fn main() -> std::io::Result<()> {
     let workers_count: usize = workers.parse().unwrap_or(1);
     let bind_addr = format!("0.0.0.0:{port}");
 
-    eprintln!("[appbase-worker] http://{bind_addr} ({workers_count} threads)");
+    eprintln!("[zeroship-worker] http://{bind_addr} ({workers_count} threads)");
     if !socket_path.is_empty() {
-        eprintln!("[appbase-worker] unix://{socket_path}");
+        eprintln!("[zeroship-worker] unix://{socket_path}");
         // Remove stale socket file
         let _ = std::fs::remove_file(&socket_path);
     }

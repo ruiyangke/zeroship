@@ -1,5 +1,5 @@
 // Todo App — client-side JS
-// Calls the appbase backend via JSON-RPC
+// Calls the zeroship backend via JSON-RPC
 
 const APP_NAME = "todo";
 

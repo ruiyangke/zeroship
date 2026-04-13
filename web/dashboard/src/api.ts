@@ -29,7 +29,7 @@ export type AllUsage = Record<string, Record<string, number>>;
 const API_BASE = '';
 
 function getKey(): string {
-  return localStorage.getItem("appbase_key") || "";
+  return localStorage.getItem("zeroship_key") || "";
 }
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {

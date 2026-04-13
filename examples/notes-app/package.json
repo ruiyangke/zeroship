@@ -3,6 +3,6 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@appbase/db": "file:../../sdks/db"
+    "@zeroship/db": "file:../../sdks/db"
   }
 }

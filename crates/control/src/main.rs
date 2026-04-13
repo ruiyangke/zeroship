@@ -1,4 +1,4 @@
-//! appbase-control — control plane binary.
+//! zeroship-control — control plane binary.
 
 mod api;
 mod internal;
@@ -7,7 +7,7 @@ mod registry;
 
 use std::sync::Arc;
 
-use appbase_core::vfs::{BundleStore, LocalFs};
+use zeroship_core::vfs::{BundleStore, LocalFs};
 use ntex::web;
 
 use registry::Registry;
@@ -43,7 +43,7 @@ async fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     let port = arg_or_env(&args, "--port", "CONTROL_PORT", "9090");
-    let db_url = arg_or_env(&args, "--db", "DATABASE_URL", "postgres://localhost/appbase");
+    let db_url = arg_or_env(&args, "--db", "DATABASE_URL", "postgres://localhost/zeroship");
     let bundles_dir = arg_or_env(&args, "--bundles", "BUNDLES_DIR", "./bundles");
     let control_key = arg_or_env(&args, "--control-key", "CONTROL_KEY", "");
     let master_key = arg_or_env(&args, "--master-key", "MASTER_KEY", "");
@@ -64,7 +64,7 @@ async fn main() -> std::io::Result<()> {
     });
 
     let bind_addr = format!("0.0.0.0:{port}");
-    eprintln!("appbase-control listening on {bind_addr}");
+    eprintln!("zeroship-control listening on {bind_addr}");
 
     web::server(async move || {
         web::App::new()

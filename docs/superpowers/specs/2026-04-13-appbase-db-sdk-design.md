@@ -1,22 +1,22 @@
-# @appbase/db SDK Design
+# @zeroship/db SDK Design
 
 ## Goal
 
-A Mongoose-compatible JS/TS SDK that wraps `appbase.db.*` native primitives. LLMs generate working code on first try because the API mirrors MongoDB/Mongoose — the most-documented database API in training data.
+A Mongoose-compatible JS/TS SDK that wraps `zeroship.db.*` native primitives. LLMs generate working code on first try because the API mirrors MongoDB/Mongoose — the most-documented database API in training data.
 
 ## Architecture
 
 ```
 Creator code
   │
-  │ import { model, t } from "@appbase/db"
+  │ import { model, t } from "@zeroship/db"
   ▼
-@appbase/db (JS — this SDK)
+@zeroship/db (JS — this SDK)
   model(), t, Collection, Query, validate
   │
-  │ calls appbase.db.* (JSON in, JSON out)
+  │ calls zeroship.db.* (JSON in, JSON out)
   ▼
-appbase.db.* (Rust native primitives)
+zeroship.db.* (Rust native primitives)
   parameterized SQL → Postgres
 ```
 
@@ -24,7 +24,7 @@ The SDK is a standard npm package. The compiler (esbuild) bundles it into the .a
 
 ## Location
 
-`sdks/db/` with `package.json` name `@appbase/db`.
+`sdks/db/` with `package.json` name `@zeroship/db`.
 
 ## Schema Definition
 
@@ -33,7 +33,7 @@ Two styles, both produce the same internal representation.
 ### Mongoose style
 
 ```js
-import { model } from "@appbase/db";
+import { model } from "@zeroship/db";
 
 const users = model("users", {
   name:  { type: String, required: true },
@@ -49,7 +49,7 @@ const users = model("users", {
 ### Builder style
 
 ```js
-import { model, t } from "@appbase/db";
+import { model, t } from "@zeroship/db";
 
 const users = model("users", {
   name:  t.string().required(),
@@ -178,7 +178,7 @@ const stats = await products.aggregate([
 ]);
 ```
 
-Note: aggregate uses `_id` for the group key (MongoDB convention). The SDK translates `_id` → `by` and `$sum: 1` → `$count: true` before calling the native `appbase.db.aggregate`.
+Note: aggregate uses `_id` for the group key (MongoDB convention). The SDK translates `_id` → `by` and `$sum: 1` → `$count: true` before calling the native `zeroship.db.aggregate`.
 
 ## Query Class
 
@@ -190,7 +190,7 @@ class Query {
   limit(n)     → Query
   skip(n)      → Query
   select(s)    → Query   // "name email" or ["name", "email"]
-  then(resolve, reject)  // triggers _exec() → appbase.db.find()
+  then(resolve, reject)  // triggers _exec() → zeroship.db.find()
 }
 ```
 
@@ -297,7 +297,7 @@ sdks/db/
     validate.ts     — validateDoc(), validatePartial()
     errors.ts       — ValidationError, DuplicateKeyError
     utils.ts        — field mapping (_id↔id, camelCase↔snake_case)
-  package.json      — { "name": "@appbase/db", "main": "src/index.ts" }
+  package.json      — { "name": "@zeroship/db", "main": "src/index.ts" }
   tsconfig.json
 ```
 
@@ -308,7 +308,7 @@ Unit tests in `sdks/db/src/__tests__/`:
 - `types.test.ts` — t builder produces correct definitions
 - `validate.test.ts` — all validation rules
 - `query.test.ts` — chain building, select parsing
-- `collection.test.ts` — method calls produce correct native calls (mock appbase.db.*)
+- `collection.test.ts` — method calls produce correct native calls (mock zeroship.db.*)
 - `errors.test.ts` — error mapping
 
 Integration test: deploy an app using the SDK through the full platform pipeline.

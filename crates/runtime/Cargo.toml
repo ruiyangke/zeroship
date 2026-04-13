@@ -1,8 +1,8 @@
 [package]
-name = "appbase-runtime"
+name = "zeroship-runtime"
 version = "0.1.0"
 edition = "2024"
-description = "appbase V8 runtime — compio/io_uring, ESM modules, WebCrypto, fetch, streaming"
+description = "zeroship V8 runtime — compio/io_uring, ESM modules, WebCrypto, fetch, streaming"
 
 [dependencies]
 # V8
@@ -35,7 +35,7 @@ itoa = { workspace = true }
 socket2 = { workspace = true }
 
 # Bundle format
-appbase-bundle = { workspace = true }
+zeroship-bundle = { workspace = true }
 zstd = { workspace = true }
 sha2 = { workspace = true }
 
@@ -43,7 +43,7 @@ sha2 = { workspace = true }
 sha1 = { workspace = true }
 
 # Proc macros
-appbase-runtime-macros = { workspace = true }
+zeroship-runtime-macros = { workspace = true }
 
 [[bin]]
 name = "v8-server-compio"
@@ -54,7 +54,7 @@ name = "echo-server"
 path = "src/echo_server.rs"
 
 [dev-dependencies]
-appbase-compiler = { workspace = true }
+zeroship-compiler = { workspace = true }
 
 [lints]
 workspace = true
