@@ -74,6 +74,14 @@ pub trait BundleStore: Send + Sync {
 
     /// Return `true` if a bundle exists for `app_id`, `false` otherwise.
     fn exists(&self, app_id: &str) -> VfsResult<bool>;
+
+    /// Store a static asset for `app_id` at the given `path`.
+    fn put_asset(&self, app_id: &str, path: &str, data: &[u8]) -> VfsResult<()>;
+
+    /// Retrieve a static asset for `app_id` at the given `path`.
+    ///
+    /// Returns [`VfsError::NotFound`] if the asset does not exist.
+    fn get_asset(&self, app_id: &str, path: &str) -> VfsResult<Vec<u8>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -101,6 +109,13 @@ impl LocalFs {
     /// Return the path to the bundle file for `app_id`.
     fn bundle_path(&self, app_id: &str) -> PathBuf {
         self.base_dir.join(app_id).join("bundle.appbundle")
+    }
+
+    /// Return the path to a static asset for `app_id`.
+    ///
+    /// Layout: `{base_dir}/{app_id}/assets/{path}`
+    fn asset_path(&self, app_id: &str, path: &str) -> PathBuf {
+        self.base_dir.join(app_id).join("assets").join(path)
     }
 }
 
@@ -139,5 +154,25 @@ impl BundleStore for LocalFs {
 
     fn exists(&self, app_id: &str) -> VfsResult<bool> {
         Ok(self.bundle_path(app_id).exists())
+    }
+
+    fn put_asset(&self, app_id: &str, path: &str, data: &[u8]) -> VfsResult<()> {
+        let full = self.asset_path(app_id, path);
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&full, data)?;
+        Ok(())
+    }
+
+    fn get_asset(&self, app_id: &str, path: &str) -> VfsResult<Vec<u8>> {
+        let full = self.asset_path(app_id, path);
+        match fs::read(&full) {
+            Ok(data) => Ok(data),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(VfsError::NotFound(format!("{app_id}/assets/{path}")))
+            }
+            Err(e) => Err(VfsError::Io(e)),
+        }
     }
 }
