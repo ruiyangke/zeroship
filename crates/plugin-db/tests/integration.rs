@@ -770,3 +770,60 @@ async fn timestamps_as_numbers() {
     assert!(ts > 1_577_836_800_000); // 2020-01-01
     assert!(ts < 2_000_000_000_000); // ~2033
 }
+
+// ---------------------------------------------------------------------------
+// 21. Postgres docs HAVING example (weather table)
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn aggregate_having_postgres_docs_example() {
+    let url = require_pg().await;
+    let pool = Pool::connect(&url, 2).await.unwrap();
+
+    // Set up weather table
+    pool.execute(&format!("DROP TABLE IF EXISTS \"{SCHEMA}\".\"weather\""), &[]).await.unwrap();
+    pool.execute(
+        &format!(
+            r#"CREATE TABLE "{SCHEMA}"."weather" (
+                city TEXT,
+                temp_lo INTEGER,
+                temp_hi INTEGER
+            )"#
+        ),
+        &[],
+    ).await.unwrap();
+
+    let docs = json!([
+        {"city": "San Francisco", "temp_lo": 46, "temp_hi": 50},
+        {"city": "San Francisco", "temp_lo": 43, "temp_hi": 57},
+        {"city": "San Francisco", "temp_lo": 35, "temp_hi": 65},
+        {"city": "Hayward", "temp_lo": 37, "temp_hi": 54},
+        {"city": "Hayward", "temp_lo": 38, "temp_hi": 52},
+        {"city": "Hayward", "temp_lo": 41, "temp_hi": 55}
+    ]);
+    let bq = build_insert_many(SCHEMA, "weather", &docs).unwrap();
+    exec_mutation(&pool, bq).await;
+
+    // Equivalent of: SELECT city, count(*), max(temp_lo)
+    //                FROM weather GROUP BY city HAVING max(temp_lo) < 42
+    let pipeline = json!([
+        {"$group": {
+            "by": "city",
+            "cnt": {"$count": true},
+            "max_temp": {"$max": "temp_lo"}
+        }},
+        {"$having": {"max_temp": {"$lt": 42}}}
+    ]);
+    let bq = build_aggregate(SCHEMA, "weather", &pipeline).unwrap();
+
+    // Verify SQL has the resolved expression, not the alias
+    assert!(bq.sql.contains("HAVING MAX(\"temp_lo\") < $"), "sql: {}", bq.sql);
+
+    let rows = exec_query(&pool, bq).await;
+
+    // Only Hayward has max(temp_lo) = 41 < 42
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["city"], "Hayward");
+    assert_eq!(rows[0]["cnt"], 3);
+    assert_eq!(rows[0]["max_temp"], 41);
+}
