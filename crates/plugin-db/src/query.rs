@@ -518,6 +518,8 @@ pub fn build_aggregate(
     let mut where_clause = String::new();
     let mut select_cols: Vec<String> = Vec::new();
     let mut group_by_cols: Vec<String> = Vec::new();
+    // Map alias → SQL expression for HAVING clause rewriting
+    let mut agg_exprs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut having_clause = String::new();
     let mut order_clause = String::new();
     let mut limit_clause = String::new();
@@ -622,10 +624,11 @@ pub fn build_aggregate(
                     }
                 };
 
+                agg_exprs.insert(alias.clone(), agg_expr.clone());
                 select_cols.push(format!("{agg_expr} AS {}", quote_ident(alias)));
             }
         } else if let Some(having_val) = obj.get("$having") {
-            having_clause = build_where(having_val, &mut params)?;
+            having_clause = build_having(having_val, &mut params, &agg_exprs)?;
         } else if let Some(sort_val) = obj.get("$sort") {
             order_clause = build_order_by(sort_val)?;
         } else if let Some(limit_val) = obj.get("$limit") {
@@ -698,6 +701,133 @@ pub fn build_distinct(
     sql.push_str(&format!(" ORDER BY {col}"));
 
     Ok(BuiltQuery { sql, params })
+}
+
+// ---------------------------------------------------------------------------
+// HAVING clause builder (resolves aliases to aggregate expressions)
+// ---------------------------------------------------------------------------
+
+/// Build a HAVING clause from a filter, replacing alias names with their
+/// aggregate SQL expressions. E.g. `{"cnt": {"$gt": 5}}` where `cnt` maps
+/// to `COUNT(*)` generates `COUNT(*) > $1` instead of `"cnt" > $1`.
+fn build_having(
+    filter: &Value,
+    params: &mut Vec<String>,
+    agg_exprs: &std::collections::HashMap<String, String>,
+) -> Result<String, QueryError> {
+    match filter {
+        Value::Null => Ok(String::new()),
+        Value::Object(map) if map.is_empty() => Ok(String::new()),
+        Value::Object(map) => {
+            let mut conditions = Vec::new();
+            for (key, value) in map {
+                if key.starts_with('$') {
+                    match key.as_str() {
+                        "$and" => {
+                            let arr = value.as_array().ok_or_else(|| {
+                                QueryError::InvalidFilter("$and must be an array".to_string())
+                            })?;
+                            let sub: Result<Vec<String>, _> = arr
+                                .iter()
+                                .map(|v| build_having(v, params, agg_exprs))
+                                .collect();
+                            let sub = sub?;
+                            let non_empty: Vec<&str> =
+                                sub.iter().filter(|s| !s.is_empty()).map(String::as_str).collect();
+                            if !non_empty.is_empty() {
+                                conditions.push(format!("({})", non_empty.join(" AND ")));
+                            }
+                        }
+                        "$or" => {
+                            let arr = value.as_array().ok_or_else(|| {
+                                QueryError::InvalidFilter("$or must be an array".to_string())
+                            })?;
+                            let sub: Result<Vec<String>, _> = arr
+                                .iter()
+                                .map(|v| build_having(v, params, agg_exprs))
+                                .collect();
+                            let sub = sub?;
+                            let non_empty: Vec<&str> =
+                                sub.iter().filter(|s| !s.is_empty()).map(String::as_str).collect();
+                            if !non_empty.is_empty() {
+                                conditions.push(format!("({})", non_empty.join(" OR ")));
+                            }
+                        }
+                        other => {
+                            return Err(QueryError::InvalidFilter(format!(
+                                "unsupported top-level operator in HAVING: {other}"
+                            )));
+                        }
+                    }
+                } else {
+                    // Resolve alias → aggregate expression, or fall back to quoted column
+                    let col = agg_exprs
+                        .get(key)
+                        .cloned()
+                        .unwrap_or_else(|| quote_ident(key));
+                    let cond = build_having_condition(&col, value, params)?;
+                    conditions.push(cond);
+                }
+            }
+            Ok(conditions.join(" AND "))
+        }
+        _ => Err(QueryError::InvalidFilter(
+            "HAVING filter must be an object or null".to_string(),
+        )),
+    }
+}
+
+/// Build a single HAVING condition. Like `build_field_condition` but takes
+/// a pre-resolved column expression (which may be an aggregate like `COUNT(*)`).
+fn build_having_condition(
+    col_expr: &str,
+    value: &Value,
+    params: &mut Vec<String>,
+) -> Result<String, QueryError> {
+    match value {
+        Value::Object(ops) if ops.keys().any(|k| k.starts_with('$')) => {
+            let mut parts = Vec::new();
+            for (op, val) in ops {
+                let cond = match op.as_str() {
+                    "$eq" => {
+                        params.push(value_to_param(val));
+                        format!("{col_expr} = ${}", params.len())
+                    }
+                    "$ne" => {
+                        params.push(value_to_param(val));
+                        format!("{col_expr} != ${}", params.len())
+                    }
+                    "$gt" => {
+                        params.push(value_to_param(val));
+                        format!("{col_expr} > ${}", params.len())
+                    }
+                    "$gte" => {
+                        params.push(value_to_param(val));
+                        format!("{col_expr} >= ${}", params.len())
+                    }
+                    "$lt" => {
+                        params.push(value_to_param(val));
+                        format!("{col_expr} < ${}", params.len())
+                    }
+                    "$lte" => {
+                        params.push(value_to_param(val));
+                        format!("{col_expr} <= ${}", params.len())
+                    }
+                    other => {
+                        return Err(QueryError::InvalidFilter(format!(
+                            "unsupported HAVING operator: {other}"
+                        )));
+                    }
+                };
+                parts.push(cond);
+            }
+            Ok(parts.join(" AND "))
+        }
+        _ => {
+            params.push(value_to_param(value));
+            Ok(format!("{col_expr} = ${}", params.len()))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1285,8 +1415,9 @@ mod tests {
             {"$having": {"cnt": {"$gte": 10}}}
         ]);
         let q = build_aggregate("app1", "products", &pipeline).unwrap();
-        assert!(q.sql.contains("HAVING"), "sql: {}", q.sql);
+        assert!(q.sql.contains("HAVING COUNT(*) >= $1"), "sql: {}", q.sql);
         assert!(q.sql.contains("GROUP BY"), "sql: {}", q.sql);
+        assert_eq!(q.params, vec!["10"]);
     }
 
     #[test]

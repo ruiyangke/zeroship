@@ -673,19 +673,19 @@ async fn aggregate_having() {
     let bq = build_insert_many(SCHEMA, "notes", &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
-    // Note: Postgres doesn't support column aliases in HAVING.
-    // Test aggregate without HAVING, then filter in the app layer.
+    // HAVING with alias → resolved to aggregate expression
     let pipeline = json!([
         {"$group": {
             "by": "category",
             "cnt": {"$count": true}
         }},
+        {"$having": {"cnt": {"$gt": 1}}},
         {"$sort": {"cnt": -1}}
     ]);
     let bq = build_aggregate(SCHEMA, "notes", &pipeline).unwrap();
     let rows = exec_query(&pool, bq).await;
-    // tech=3, food=1
-    assert_eq!(rows.len(), 2);
+    // Only tech has count > 1
+    assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["category"], "tech");
     assert_eq!(rows[0]["cnt"], 3);
 }
