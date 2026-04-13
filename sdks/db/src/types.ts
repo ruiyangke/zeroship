@@ -4,6 +4,9 @@
  * constraints, then pass the result to `model()`.
  */
 
+/** Generic plain object type used throughout the SDK. */
+export type PlainObject = Record<string, unknown>;
+
 /** Primitive field type names supported by the SDK. */
 export type PrimitiveTypeName = "string" | "number" | "boolean" | "date" | "json";
 /** Definition for an array field with a declared item type. */

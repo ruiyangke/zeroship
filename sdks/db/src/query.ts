@@ -4,8 +4,7 @@
  * executes the native find call only when awaited or .then() is called.
  */
 import { mapResultDoc } from "./utils.js";
-
-type PlainObject = Record<string, unknown>;
+import { PlainObject } from "./types.js";
 
 type NativeFn = (
   collection: string,

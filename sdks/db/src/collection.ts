@@ -13,8 +13,7 @@ import {
   translateAggregatePipeline,
 } from "./utils.js";
 import { Query } from "./query.js";
-
-type PlainObject = Record<string, unknown>;
+import { PlainObject } from "./types.js";
 
 /** Interface that the native appbase.db.* layer must satisfy. */
 export interface NativeDb {
@@ -131,6 +130,14 @@ export class Collection {
     } catch (err) {
       throw mapNativeError(String(err instanceof Error ? err.message : err));
     }
+  }
+
+  /**
+   * Alias for `create()`. Inserts a single document after validating it against the schema.
+   * Provided for spec compatibility — both `insert()` and `create()` are supported.
+   */
+  async insert(doc: PlainObject): Promise<PlainObject> {
+    return this.create(doc);
   }
 
   /**

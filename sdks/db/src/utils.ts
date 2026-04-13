@@ -3,7 +3,7 @@
  * Converts between the JS-facing camelCase API names (_id, createdAt, updatedAt)
  * and the native snake_case / plain names used by the underlying data layer.
  */
-type PlainObject = Record<string, unknown>;
+import { PlainObject } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Inbound mapping: native result → user-facing doc

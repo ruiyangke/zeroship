@@ -4,10 +4,10 @@
  * collecting all field errors before throwing a single ValidationError.
  */
 import { NormalizedSchema } from "./schema.js";
-import { FieldDef } from "./types.js";
+import { FieldDef, PlainObject } from "./types.js";
 import { ValidationError, FieldError } from "./errors.js";
 
-type Doc = Record<string, unknown>;
+type Doc = PlainObject;
 
 /**
  * Validates a single field value against its FieldDef.
@@ -74,7 +74,7 @@ function checkField(
       return;
     }
   } else if (type === "date") {
-    if (!(value instanceof Date) && typeof value !== "string") {
+    if (!(value instanceof Date) && (typeof value !== "string" || isNaN(Date.parse(value)))) {
       errors[key] = {
         path: key,
         message: `${key} must be a Date or date string`,
@@ -95,7 +95,7 @@ function checkField(
         if (itemType === "string") ok = typeof elem === "string";
         else if (itemType === "number") ok = typeof elem === "number";
         else if (itemType === "boolean") ok = typeof elem === "boolean";
-        else if (itemType === "date") ok = elem instanceof Date || typeof elem === "string";
+        else if (itemType === "date") ok = elem instanceof Date || (typeof elem === "string" && !isNaN(Date.parse(elem)));
         if (!ok) {
           errors[key] = {
             path: key,
