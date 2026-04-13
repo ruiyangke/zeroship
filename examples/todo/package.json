@@ -1,0 +1,8 @@
+{
+  "name": "todo",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@zeroship/db": "file:../../sdks/db"
+  }
+}

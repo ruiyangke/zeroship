@@ -514,6 +514,38 @@ fn build_and_load_file(path: &PathBuf) -> Vec<ModuleEntry> {
         std::process::exit(1);
     });
     let name = path.file_name().unwrap().to_string_lossy().to_string();
+
+    // For JSX/TSX files, run the SWC compiler to split server + client
+    if name.ends_with(".jsx") || name.ends_with(".tsx") {
+        let project_root = path.parent().unwrap_or(std::path::Path::new("."));
+        let result = zeroship_compiler::compile_with_options(
+            &source,
+            zeroship_compiler::Target::Rust,
+            false,
+            Some(project_root),
+        );
+
+        if !result.server.is_empty() {
+            eprintln!("[zeroship] Compiled {} → server + client", path.display());
+            let mut modules = vec![ModuleEntry {
+                specifier: "index.js".into(),
+                source: result.server,
+            }];
+
+            // If there's a client bundle with an entry component, generate HTML
+            if let Some(ref component) = result.entry_component {
+                let html = generate_client_html(&result.client, component);
+                modules.push(ModuleEntry {
+                    specifier: "__client.html".into(),
+                    source: html,
+                });
+                eprintln!("[zeroship] Generated client HTML (entry: {component})");
+            }
+
+            return modules;
+        }
+    }
+
     eprintln!(
         "[zeroship] Loaded {} ({:.1}KB)",
         path.display(),
@@ -523,6 +555,29 @@ fn build_and_load_file(path: &PathBuf) -> Vec<ModuleEntry> {
         specifier: name,
         source,
     }]
+}
+
+/// Generate an HTML page that loads React and renders the client bundle.
+fn generate_client_html(client_js: &str, entry_component: &str) -> String {
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>zeroship app</title>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script>
+{client_js}
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement({entry_component}));
+  </script>
+</body>
+</html>"#
+    )
 }
 
 fn read_package_name(dir: &PathBuf) -> Option<String> {
