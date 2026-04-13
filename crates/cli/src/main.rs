@@ -300,6 +300,119 @@ fn cmd_deploy(args: &[String]) {
             std::process::exit(1);
         }
     }
+
+    // Deploy static assets from public/ directory (if it exists)
+    let public_dir = if input_path.is_dir() {
+        input_path.join("public")
+    } else {
+        input_path
+            .parent()
+            .map(|p| p.join("public"))
+            .unwrap_or_else(|| PathBuf::from("public"))
+    };
+
+    if public_dir.is_dir() {
+        deploy_assets(&public_dir, &app, &control_url, &master_key);
+    }
+}
+
+/// Walk a directory and upload all files as static assets.
+fn deploy_assets(public_dir: &PathBuf, app: &str, control_url: &str, master_key: &str) {
+    let files = walk_dir(public_dir);
+    if files.is_empty() {
+        return;
+    }
+
+    eprintln!("Deploying {} static assets from {}...", files.len(), public_dir.display());
+
+    let mut uploaded = 0;
+    let mut total_bytes = 0usize;
+
+    for (rel_path, full_path) in &files {
+        let data = match std::fs::read(full_path) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("  WARN: skipping {rel_path}: {e}");
+                continue;
+            }
+        };
+        total_bytes += data.len();
+
+        let url = format!("{control_url}/api/apps/{app}/assets/{rel_path}");
+
+        let result = std::process::Command::new("curl")
+            .args([
+                "-s",
+                "-w", "\n%{http_code}",
+                "-X", "PUT",
+                &url,
+                "-H", &format!("Authorization: Bearer {master_key}"),
+                "-H", "Content-Type: application/octet-stream",
+                "--data-binary", "@-",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                if let Some(ref mut stdin) = child.stdin {
+                    stdin.write_all(&data).ok();
+                }
+                child.wait_with_output()
+            });
+
+        match result {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let status: u16 = stdout
+                    .trim()
+                    .rsplit('\n')
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                if status == 200 {
+                    uploaded += 1;
+                } else {
+                    eprintln!("  WARN: {rel_path} upload failed (HTTP {status})");
+                }
+            }
+            Err(e) => {
+                eprintln!("  WARN: {rel_path} upload failed: {e}");
+            }
+        }
+    }
+
+    eprintln!(
+        "Uploaded {uploaded}/{} assets ({:.1}KB total)",
+        files.len(),
+        total_bytes as f64 / 1024.0,
+    );
+}
+
+/// Recursively walk a directory, returning (relative_path, full_path) pairs.
+fn walk_dir(dir: &PathBuf) -> Vec<(String, PathBuf)> {
+    let mut result = Vec::new();
+    walk_dir_inner(dir, dir, &mut result);
+    result
+}
+
+fn walk_dir_inner(root: &PathBuf, current: &PathBuf, result: &mut Vec<(String, PathBuf)>) {
+    let entries = match std::fs::read_dir(current) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_dir_inner(root, &path, result);
+        } else if path.is_file() {
+            if let Ok(rel) = path.strip_prefix(root) {
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                result.push((rel_str, path.clone()));
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
