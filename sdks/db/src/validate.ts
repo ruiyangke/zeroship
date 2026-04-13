@@ -50,11 +50,11 @@ function checkField(
       return;
     }
   } else if (type === "number") {
-    if (typeof value !== "number") {
+    if (typeof value !== "number" || isNaN(value as number)) {
       errors[key] = { path: key, message: `${key} must be a number` };
       return;
     }
-    if (min !== undefined && value < min) {
+    if (min !== undefined && (value as number) < min) {
       errors[key] = {
         path: key,
         message: `${key} must be at least ${min}`,
@@ -133,7 +133,12 @@ export function validateDoc(doc: Doc, schema: NormalizedSchema): Doc {
 
   for (const [key, def] of Object.entries(schema)) {
     const value = result[key];
-    const missing = value === undefined || value === null;
+    // An empty string is treated as absent for required checks — a string field
+    // that requires a value should not accept "".
+    const missing =
+      value === undefined ||
+      value === null ||
+      (def.type === "string" && def.required && value === "");
 
     if (missing) {
       if (def.default !== undefined) {

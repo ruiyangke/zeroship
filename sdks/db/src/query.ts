@@ -88,7 +88,8 @@ export class Query {
     if (this._select !== undefined) opts["select"] = this._select;
 
     const raw = await this._native(this._collection, this._filter, opts);
-    const rows: PlainObject[] = typeof raw === "string" ? JSON.parse(raw) : (raw as unknown as PlainObject[]);
+    const parsed: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
+    const rows: PlainObject[] = Array.isArray(parsed) ? parsed : [];
     return rows.map(mapResultDoc);
   }
 }

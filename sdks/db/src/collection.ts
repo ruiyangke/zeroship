@@ -43,9 +43,12 @@ export interface NativeDb {
 }
 
 /** Parses a raw JSON string (or already-parsed value) from the native layer. */
-function parseRaw<T = unknown>(raw: string | null): T | null {
-  if (raw === null) return null;
-  if (typeof raw === "string") return JSON.parse(raw) as T;
+function parseRaw<T = unknown>(raw: string | null | undefined): T | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === "string") {
+    if (raw === "") return null;
+    return JSON.parse(raw) as T;
+  }
   return raw as unknown as T;
 }
 
