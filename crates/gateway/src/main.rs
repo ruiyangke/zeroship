@@ -83,6 +83,11 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/health").route(web::get().to(|| async {
                 web::HttpResponse::Ok().body(r#"{"status":"ok"}"#)
             })))
+            // Subdomain catch-all — must be last (lowest priority)
+            .service(
+                web::resource("/{tail:.*}")
+                    .route(web::route().to(router::handle_subdomain)),
+            )
     })
     .bind(&bind_addr)?
     .run()
