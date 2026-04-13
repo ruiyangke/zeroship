@@ -4,6 +4,7 @@ pub mod directory;
 
 use serde::Serialize;
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use swc_core::common::{sync::Lrc, FileName, SourceMap};
 use swc_core::ecma::ast::*;
 use swc_core::ecma::codegen::{text_writer::JsWriter, Emitter};
@@ -26,20 +27,33 @@ pub enum Target {
 }
 
 pub fn compile(source: &str, target: Target) -> CompileResult {
-    compile_with_options(source, target, false)
+    compile_with_options(source, target, false, None)
 }
 
-pub fn compile_with_options(source: &str, target: Target, minify: bool) -> CompileResult {
+/// Compile with a project root for module resolution.
+/// When `project_root` is provided, the compiler resolves imports to check
+/// for `"use server"` directives in dependencies.
+pub fn compile_with_options(
+    source: &str,
+    target: Target,
+    minify: bool,
+    project_root: Option<&Path>,
+) -> CompileResult {
     swc_core::common::GLOBALS.set(&Default::default(), || {
-        compile_inner(source, target, minify)
+        compile_inner(source, target, minify, project_root)
     })
 }
 
-fn compile_inner(source: &str, target: Target, minify: bool) -> CompileResult {
+fn compile_inner(
+    source: &str,
+    target: Target,
+    minify: bool,
+    project_root: Option<&Path>,
+) -> CompileResult {
     let cm: Lrc<SourceMap> = Default::default();
 
     let module = parse(source, &cm);
-    let analysis = analyze(&module);
+    let analysis = analyze(&module, project_root);
 
     let server_module = parse(source, &cm);
     let server = generate_server(server_module, &analysis, target, &cm, minify);
@@ -91,9 +105,11 @@ struct Analysis {
     exported_server_fns: Vec<String>,
     entry_component: Option<String>,
     has_file_directive: bool,
+    /// Module specifiers that have `"use server"` at file level.
+    server_modules: HashSet<String>,
 }
 
-fn analyze(module: &Module) -> Analysis {
+fn analyze(module: &Module, project_root: Option<&Path>) -> Analysis {
     let mut a = Analysis::default();
 
     // Check file-level "use server" directive
@@ -105,11 +121,16 @@ fn analyze(module: &Module) -> Analysis {
         }
     }
 
-    // Pass 1: Find taint sources (zeroship imports except 'serve')
+    // Resolve which imported modules have "use server" at file level
+    let server_modules = resolve_server_modules(module, project_root);
+
+    // Pass 1: Find taint sources — imports from "use server" modules
     let mut taint_collector = TaintCollector {
         tainted: &mut a.tainted_bindings,
+        server_modules: &server_modules,
     };
     module.visit_with(&mut taint_collector);
+    a.server_modules = server_modules;
 
     // Pass 2: Propagate taint to direct bindings
     let mut propagator = TaintPropagator {
@@ -138,15 +159,153 @@ fn analyze(module: &Module) -> Analysis {
     a
 }
 
+// --- Module resolution: check if imported modules have "use server" ---
+
+/// Resolve which imported modules have `"use server"` at file level.
+/// Returns a set of module specifiers (e.g. "@zeroship/db", "./api") that are server modules.
+fn resolve_server_modules(module: &Module, project_root: Option<&Path>) -> HashSet<String> {
+    let mut server_modules = HashSet::new();
+
+    for item in &module.body {
+        if let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item {
+            let src = import.src.value.as_str().unwrap_or_default().to_string();
+
+            // Skip 'serve' source — it's the client-side render function
+            if src == "zeroship" {
+                continue;
+            }
+
+            // Try to resolve the module and check for "use server"
+            if let Some(root) = project_root {
+                if is_server_module(&src, root) {
+                    server_modules.insert(src);
+                }
+            }
+        }
+    }
+
+    server_modules
+}
+
+/// Check if a module has `"use server"` as its first statement.
+/// Resolves the module path from `node_modules/` and reads the entry file.
+fn is_server_module(specifier: &str, project_root: &Path) -> bool {
+    let entry_path = resolve_module_entry(specifier, project_root);
+    let Some(path) = entry_path else { return false };
+    let Ok(source) = std::fs::read_to_string(&path) else { return false };
+
+    // Check if first non-empty line is "use server" (as a JS string expression)
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("/*") {
+            continue;
+        }
+        return trimmed == r#""use server""#
+            || trimmed == r#""use server";"#
+            || trimmed == "'use server'"
+            || trimmed == "'use server';";
+    }
+    false
+}
+
+/// Resolve a module specifier to a file path.
+/// Handles: bare specifiers (`@zeroship/db`) via node_modules lookup,
+/// and relative paths (`./api`) relative to project root.
+fn resolve_module_entry(specifier: &str, project_root: &Path) -> Option<PathBuf> {
+    if specifier.starts_with('.') {
+        // Relative import — resolve from project root
+        let candidates = [
+            format!("{specifier}.ts"),
+            format!("{specifier}.tsx"),
+            format!("{specifier}.js"),
+            format!("{specifier}.jsx"),
+            format!("{specifier}/index.ts"),
+            format!("{specifier}/index.js"),
+        ];
+        for candidate in &candidates {
+            let path = project_root.join(candidate);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+        return None;
+    }
+
+    // Bare specifier — look in node_modules
+    let pkg_dir = project_root.join("node_modules").join(specifier);
+    if !pkg_dir.exists() {
+        return None;
+    }
+
+    // Read package.json for entry point
+    let pkg_json = pkg_dir.join("package.json");
+    if let Ok(text) = std::fs::read_to_string(&pkg_json) {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+            // Check "exports" → "." → "import" or "default"
+            if let Some(exports) = parsed.get("exports") {
+                if let Some(dot) = exports.get(".") {
+                    for key in &["import", "default", "require"] {
+                        if let Some(serde_json::Value::String(p)) = dot.get(key) {
+                            let path = pkg_dir.join(p);
+                            if path.exists() { return Some(path); }
+                        }
+                    }
+                    // "." might be a direct string
+                    if let Some(p) = dot.as_str() {
+                        let path = pkg_dir.join(p);
+                        if path.exists() { return Some(path); }
+                    }
+                }
+            }
+
+            // Fallback: "module" or "main" field
+            for key in &["module", "main"] {
+                if let Some(serde_json::Value::String(p)) = parsed.get(key) {
+                    let path = pkg_dir.join(p);
+                    if path.exists() { return Some(path); }
+                }
+            }
+        }
+    }
+
+    // Fallback: common entry files
+    for name in &["index.ts", "index.js", "src/index.ts", "src/index.js"] {
+        let path = pkg_dir.join(name);
+        if path.exists() { return Some(path); }
+    }
+
+    None
+}
+
 // --- Pass 1: Collect taint sources ---
 
 struct TaintCollector<'a> {
     tainted: &'a mut HashSet<String>,
+    server_modules: &'a HashSet<String>,
 }
 
 impl Visit for TaintCollector<'_> {
     fn visit_import_decl(&mut self, import: &ImportDecl) {
-        if import.src.value == "zeroship" {
+        let src = import.src.value.as_str().unwrap_or_default().to_string();
+
+        // If this module was resolved as a "use server" module, taint all imports from it
+        if self.server_modules.contains(&src) {
+            for spec in &import.specifiers {
+                match spec {
+                    ImportSpecifier::Named(named) => {
+                        self.tainted.insert(named.local.sym.to_string());
+                    }
+                    ImportSpecifier::Default(default) => {
+                        self.tainted.insert(default.local.sym.to_string());
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
+
+        // Legacy: import { db, serve } from 'zeroship' — taint everything except 'serve'
+        if src == "zeroship" {
             for spec in &import.specifiers {
                 if let ImportSpecifier::Named(named) = spec {
                     let name = named.local.sym.to_string();
@@ -365,9 +524,11 @@ impl VisitMut for ServerTransformer<'_> {
             match &item {
                 // Imports
                 ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => {
-                    if import.src.value == "zeroship" {
+                    let src = import.src.value.as_str().unwrap_or_default().to_string();
+                    let is_server_module = src == "zeroship" || self.analysis.server_modules.contains(&src);
+                    if is_server_module {
                         if self.target == Target::Node {
-                            // Keep but remove 'serve'
+                            // Keep server imports but remove 'serve'
                             let mut import = import.clone();
                             import.specifiers.retain(|s| {
                                 if let ImportSpecifier::Named(n) = s {
@@ -380,7 +541,7 @@ impl VisitMut for ServerTransformer<'_> {
                                 keep.push(ModuleItem::ModuleDecl(ModuleDecl::Import(import)));
                             }
                         }
-                        // Rust target: drop all zeroship imports
+                        // Rust target: drop all server imports (primitives are on globalThis)
                     } else {
                         keep.push(item);
                     }
@@ -500,9 +661,11 @@ impl VisitMut for ClientTransformer<'_> {
         let mut keep = Vec::new();
         for item in module.body.drain(..) {
             match &item {
-                // Remove zeroship imports
+                // Remove server module imports from client
                 ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => {
-                    if import.src.value != "zeroship" {
+                    let src = import.src.value.as_str().unwrap_or_default().to_string();
+                    let is_server = src == "zeroship" || self.analysis.server_modules.contains(&src);
+                    if !is_server {
                         keep.push(item);
                     }
                 }
@@ -729,5 +892,221 @@ serve(App)
         assert!(result.server.is_empty());
         assert_eq!(result.server_functions.len(), 0);
         assert!(result.client.contains("App"));
+    }
+
+    // --- SDK tests: "use server" module resolution ---
+
+    /// Create a temp project dir with a mock `@zeroship/db` package
+    /// that has `"use server"` as its first line.
+    fn setup_mock_project() -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("zeroship-compiler-test-{}-{}", std::process::id(), id));
+        let pkg_dir = dir.join("node_modules/@zeroship/db");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+
+        // package.json
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name":"@zeroship/db","main":"src/index.ts"}"#,
+        ).unwrap();
+
+        // src/index.ts with "use server"
+        std::fs::create_dir_all(pkg_dir.join("src")).unwrap();
+        std::fs::write(
+            pkg_dir.join("src/index.ts"),
+            "\"use server\"\nexport function model() {}\nexport const t = {};\n",
+        ).unwrap();
+
+        dir
+    }
+
+    /// Create a mock `@zeroship/auth` package with "use server"
+    fn add_mock_auth(dir: &std::path::Path) {
+        let pkg_dir = dir.join("node_modules/@zeroship/auth");
+        std::fs::create_dir_all(pkg_dir.join("src")).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name":"@zeroship/auth","main":"src/index.ts"}"#,
+        ).unwrap();
+        std::fs::write(
+            pkg_dir.join("src/index.ts"),
+            "\"use server\"\nexport function hash() {}\nexport function verify() {}\n",
+        ).unwrap();
+    }
+
+    fn cleanup(dir: &std::path::Path) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sdk_import_basic_split() {
+        let dir = setup_mock_project();
+        let source = r#"
+import { model } from "@zeroship/db"
+import { serve } from 'zeroship'
+
+const todos = model("todos", { text: String, done: Boolean })
+
+export async function addTodo(text) { return todos.create({ text }) }
+export async function getTodos() { return todos.find({}) }
+
+function App() { return <div>hello</div> }
+serve(App)
+"#;
+        let result = compile_with_options(source, Target::Node, false, Some(&dir));
+
+        assert!(result.server.contains("addTodo"));
+        assert!(result.server.contains("getTodos"));
+        assert!(result.server.contains("model"));
+        assert!(!result.server.contains("App"));
+
+        assert!(result.client.contains("App"));
+        assert!(result.client.contains("fetch"));
+        assert!(!result.client.contains("@zeroship/db"));
+
+        assert_eq!(result.server_functions, vec!["addTodo", "getTodos"]);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn sdk_import_rust_target() {
+        let dir = setup_mock_project();
+        let source = r#"
+import { model } from "@zeroship/db"
+import { serve } from 'zeroship'
+
+const todos = model("todos", { text: String })
+
+export async function addTodo(text) { return todos.create({ text }) }
+export async function getTodos() { return todos.find({}) }
+
+function App() { return <div>hi</div> }
+serve(App)
+"#;
+        let result = compile_with_options(source, Target::Rust, false, Some(&dir));
+
+        assert!(!result.server.contains("import"));
+        assert!(!result.server.contains("export"));
+        assert!(result.server.contains("globalThis.__rpc"));
+        assert!(result.server.contains("addTodo"));
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn sdk_import_taint_propagation() {
+        let dir = setup_mock_project();
+        let source = r#"
+import { model } from "@zeroship/db"
+import { serve } from 'zeroship'
+
+const users = model("users", { name: String })
+
+export async function createUser(name) { return users.create({ name }) }
+export async function getCount() { return users.countDocuments({}) }
+
+export function formatName(name) { return name.trim().toLowerCase() }
+
+function App() { return <div>hi</div> }
+serve(App)
+"#;
+        let result = compile_with_options(source, Target::Node, false, Some(&dir));
+
+        assert!(result.server.contains("createUser"));
+        assert!(result.server.contains("getCount"));
+        assert!(!result.server.contains("formatName"));
+        assert!(result.client.contains("formatName"));
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn sdk_import_multiple_packages() {
+        let dir = setup_mock_project();
+        add_mock_auth(&dir);
+        let source = r#"
+import { model } from "@zeroship/db"
+import { hash } from "@zeroship/auth"
+import { serve } from 'zeroship'
+
+const users = model("users", { name: String, password: String })
+
+export async function register(name, password) {
+  const hashed = hash(password)
+  return users.create({ name, password: hashed })
+}
+
+function App() { return <div>hi</div> }
+serve(App)
+"#;
+        let result = compile_with_options(source, Target::Node, false, Some(&dir));
+
+        assert!(result.server.contains("register"));
+        assert!(!result.server.contains("App"));
+        assert!(result.client.contains("App"));
+        assert!(result.client.contains("fetch"));
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn sdk_import_with_use_server() {
+        let dir = setup_mock_project();
+        let source = r#"
+import { model } from "@zeroship/db"
+import { serve } from 'zeroship'
+
+const users = model("users", { name: String })
+
+export async function getUsers() { return users.find({}) }
+
+export async function getTime() {
+  "use server"
+  return Date.now()
+}
+
+function App() { return <div>hi</div> }
+serve(App)
+"#;
+        let result = compile_with_options(source, Target::Node, false, Some(&dir));
+
+        assert!(result.server.contains("getUsers"));
+        assert!(result.server.contains("getTime"));
+        assert!(result.server.contains("Date.now()"));
+        assert!(!result.server.contains("use server"));
+        assert_eq!(result.server_functions.len(), 2);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn non_server_module_not_tainted() {
+        // Module without "use server" should not taint imports
+        let dir = std::env::temp_dir().join(format!("zeroship-compiler-test-ns-{}", std::process::id()));
+        let pkg_dir = dir.join("node_modules/lodash");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name":"lodash","main":"index.js"}"#,
+        ).unwrap();
+        std::fs::write(
+            pkg_dir.join("index.js"),
+            "export function debounce() {}\n",
+        ).unwrap();
+
+        let source = r#"
+import { debounce } from "lodash"
+import { serve } from 'zeroship'
+
+const handler = debounce(() => {}, 100)
+
+export function handleClick() { handler() }
+
+function App() { return <div>hi</div> }
+serve(App)
+"#;
+        let result = compile_with_options(source, Target::Node, false, Some(&dir));
+
+        // handleClick uses debounce (NOT tainted) → should be client, not server
+        assert!(!result.server.contains("handleClick"));
+        assert!(result.client.contains("handleClick"));
+        cleanup(&dir);
     }
 }

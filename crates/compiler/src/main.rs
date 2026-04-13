@@ -37,7 +37,7 @@ fn main() {
         std::process::exit(1);
     });
 
-    let result = compile_with_options(&source, target, minify);
+    let result = compile_with_options(&source, target, minify, None);
 
     if json_mode {
         println!("{}", serde_json::to_string_pretty(&result).unwrap());

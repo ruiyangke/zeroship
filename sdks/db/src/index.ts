@@ -1,3 +1,5 @@
+"use server";
+
 export { model } from "./model.js";
 export { t, TypeBuilder, ok, err } from "./types.js";
 export type { FieldDef, PlainObject, Result } from "./types.js";
