@@ -1,3 +1,5 @@
+"use server"
+
 /**
  * HR System — full-featured example using @zeroship/db
  *

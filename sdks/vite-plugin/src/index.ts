@@ -259,7 +259,14 @@ export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
           // 6. Track for build report
           serverFunctionMap.set(relative(root, id), serverFns);
 
-          // 7. Transform: remove server fns, strip server imports, append stubs
+          // 7. Transform to client code
+          // For file-level "use server" modules: replace ENTIRE file with stubs
+          if (isFileServer) {
+            const stubs = serverFns.map(makeStub).join("\n\n");
+            return { code: stubs + "\n", map: null };
+          }
+
+          // For mixed files: remove server fns, keep client code, append stubs
           let result = code;
 
           // Remove "use server" directive
@@ -412,29 +419,19 @@ export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
         console.log("\n[zeroship] Building server bundle with Rolldown...");
 
         try {
-          // Use Vite's build API for the server environment
-          // This ensures rolldown is resolved through Vite's dependency tree
-          const vite = await import("vite" as string) as any;
-          await vite.build({
-            root,
-            configFile: false,
-            logLevel: "warn",
-            build: {
-              outDir: serverOut,
-              lib: {
-                entry: resolve(root, entry),
-                formats: ["es"],
-                fileName: "server",
-              },
-              rollupOptions: {
-                external: [],
-              },
-              minify: config.build?.minify !== false,
-              emptyOutDir: true,
-            },
-          });
+          // Use esbuild for server bundle — simple, fast, no Vite recursion
+          const { execSync } = await import("node:child_process" as string);
+          const { mkdirSync } = await import("node:fs" as string);
+          mkdirSync(serverOut, { recursive: true });
+          const outFile = resolve(serverOut, "server.js");
+          const entryFile = resolve(root, entry);
+          const minFlag = config.build?.minify !== false ? "--minify" : "";
+          execSync(
+            `npx esbuild ${entryFile} --bundle --format=esm --platform=neutral --main-fields=module,main --outfile=${outFile} ${minFlag}`.trim(),
+            { cwd: root, stdio: "pipe" }
+          );
 
-          console.log(`[zeroship] Server: ${serverOut}/server.js`);
+          console.log(`[zeroship] Server: ${outFile}`);
         } catch (e) {
           console.error("[zeroship] Server build failed:", e);
         }
