@@ -1,5 +1,5 @@
 /**
- * @zeroship/vite-plugin — full-stack Vite integration for zeroship.
+ * @zeroship/vite-plugin — full-stack Vite 8 integration for zeroship.
  *
  * Usage:
  *   import { zeroship } from '@zeroship/vite-plugin'
@@ -10,11 +10,16 @@
  *   - Replaces server function exports with RPC stubs in client code
  *   - Builds server code as .appbundle via zeroship CLI
  *   - In dev: runs a zeroship runtime alongside Vite, proxies /_rpc
- *   - In build: outputs dist/public/ (client) + dist/server/ (.appbundle)
+ *   - In build: outputs dist/ (client) + dist/server/ (.appbundle)
+ *
+ * Vite 8 compatibility:
+ *   - Uses hook filter feature for performance (only transforms TS/TSX/JS/JSX)
+ *   - Compatible with Rolldown bundler
+ *   - Environment-aware (client environment only — server is external)
  */
 
 import type { Plugin, ResolvedConfig, ViteDevServer } from "vite";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { resolve, relative, extname } from "node:path";
 import { analyzeModule, isServerModuleQuick } from "./analyze.js";
 import { transformToClient } from "./stub.js";
@@ -45,176 +50,200 @@ export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
   let isDev = false;
   let root = "";
 
-  // Track which modules are server modules (have "use server" at file level)
+  // Cache: module path → is "use server" module
   const serverModuleCache = new Map<string, boolean>();
-  // Track server functions per module for the build report
+  // Cache: resolved package specifier → is server package
+  const serverPackageCache = new Map<string, boolean>();
+  // Track server functions per file for build report
   const serverFunctionMap = new Map<string, string[]>();
+  // Known server module specifiers (resolved once at startup)
+  const knownServerSources = new Set<string>();
 
-  /** Check if a resolved module is a server module (cached) */
-  function isServerModule(id: string): boolean {
-    if (serverModuleCache.has(id)) return serverModuleCache.get(id)!;
-
+  /** Check if a file has "use server" at top (cached) */
+  function checkServerModule(filePath: string): boolean {
+    if (serverModuleCache.has(filePath)) return serverModuleCache.get(filePath)!;
     try {
-      const code = readFileSync(id, "utf-8");
+      const code = readFileSync(filePath, "utf-8");
       const result = isServerModuleQuick(code);
-      serverModuleCache.set(id, result);
+      serverModuleCache.set(filePath, result);
       return result;
     } catch {
+      serverModuleCache.set(filePath, false);
       return false;
     }
   }
 
-  /** Resolve a module specifier to an absolute path (for node_modules) */
-  function resolveServerModule(source: string): boolean {
-    // Check node_modules
-    const pkgDir = resolve(root, "node_modules", source);
-    if (!existsSync(pkgDir)) return false;
+  /** Check if an npm package is a server module (cached) */
+  function checkServerPackage(specifier: string): boolean {
+    if (serverPackageCache.has(specifier)) return serverPackageCache.get(specifier)!;
 
-    const pkgJson = resolve(pkgDir, "package.json");
-    if (!existsSync(pkgJson)) return false;
+    const pkgDir = resolve(root, "node_modules", specifier);
+    if (!existsSync(pkgDir)) {
+      serverPackageCache.set(specifier, false);
+      return false;
+    }
+
+    const pkgJsonPath = resolve(pkgDir, "package.json");
+    if (!existsSync(pkgJsonPath)) {
+      serverPackageCache.set(specifier, false);
+      return false;
+    }
 
     try {
-      const pkg = JSON.parse(readFileSync(pkgJson, "utf-8"));
-      // Find entry file
+      const pkg = JSON.parse(readFileSync(pkgJsonPath, "utf-8"));
       const entry =
         pkg.exports?.["."]?.import ??
         pkg.exports?.["."]?.default ??
-        pkg.exports?.["."] ??
+        (typeof pkg.exports?.["."] === "string" ? pkg.exports["."] : null) ??
         pkg.module ??
         pkg.main;
 
-      if (!entry) return false;
+      if (!entry) {
+        serverPackageCache.set(specifier, false);
+        return false;
+      }
+
       const entryPath = resolve(pkgDir, entry);
-      return isServerModule(entryPath);
+      const result = checkServerModule(entryPath);
+      serverPackageCache.set(specifier, result);
+      return result;
     } catch {
+      serverPackageCache.set(specifier, false);
       return false;
     }
   }
 
-  // Collect server modules from imports
-  const knownServerSources = new Set<string>();
+  /** Scan node_modules/@zeroship/* to find server packages */
+  function discoverServerPackages(): void {
+    const scopeDir = resolve(root, "node_modules", "@zeroship");
+    if (!existsSync(scopeDir)) return;
+
+    try {
+      for (const pkg of readdirSync(scopeDir)) {
+        const specifier = `@zeroship/${pkg}`;
+        if (checkServerPackage(specifier)) {
+          knownServerSources.add(specifier);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
 
   return [
-    // Plugin 1: Transform — detect "use server" and generate stubs
+    // Plugin 1: Transform — detect "use server" and generate RPC stubs
     {
       name: "zeroship:transform",
-      enforce: "pre",
+      enforce: "pre" as const,
 
-      configResolved(resolvedConfig) {
+      configResolved(resolvedConfig: ResolvedConfig) {
         config = resolvedConfig;
         isDev = config.command === "serve";
         root = config.root;
+
+        // Discover server packages on startup
+        discoverServerPackages();
       },
 
-      transform(code, id) {
-        // Only process TS/TSX/JS/JSX files in the project
-        const ext = extname(id);
-        if (![".ts", ".tsx", ".js", ".jsx"].includes(ext)) return null;
-        if (id.includes("node_modules")) return null;
+      // Vite 8 hook filter: only process source files, skip node_modules
+      transform: {
+        filter: {
+          id: {
+            include: /\.(ts|tsx|js|jsx)$/,
+            exclude: /node_modules/,
+          },
+        },
+        handler(code: string, id: string) {
+          // Analyze module for "use server"
+          const analysis = analyzeModule(code, id, knownServerSources);
 
-        // Scan imports for server modules (resolve once)
-        if (knownServerSources.size === 0) {
-          // Bootstrap: check @zeroship/* packages
-          const nmDir = resolve(root, "node_modules", "@zeroship");
-          if (existsSync(nmDir)) {
-            try {
-              const packages = require("node:fs").readdirSync(nmDir);
-              for (const pkg of packages) {
-                const source = `@zeroship/${pkg}`;
-                if (resolveServerModule(source)) {
-                  knownServerSources.add(source);
-                }
-              }
-            } catch {
-              // ignore
-            }
+          if (analysis.serverFunctions.length === 0) {
+            return null; // No server code — pass through
           }
-        }
 
-        // Analyze the module
-        const relPath = relative(root, id);
-        const analysis = analyzeModule(code, id, knownServerSources);
+          // Track for build report
+          const relPath = relative(root, id);
+          serverFunctionMap.set(relPath, analysis.serverFunctions);
 
-        if (analysis.serverFunctions.length === 0) {
-          return null; // No server code — pass through unchanged
-        }
+          // Replace server functions with RPC stubs
+          const clientCode = transformToClient(
+            code,
+            analysis.serverFunctions,
+            rpcEndpoint
+          );
 
-        // Track for build report
-        serverFunctionMap.set(relPath, analysis.serverFunctions);
-
-        // Replace server functions with RPC stubs
-        const clientCode = transformToClient(code, analysis.serverFunctions, rpcEndpoint);
-
-        return {
-          code: clientCode,
-          map: null, // TODO: source maps
-        };
+          return { code: clientCode, map: null };
+        },
       },
     },
 
-    // Plugin 2: Dev server — run zeroship runtime for API
+    // Plugin 2: Dev server — zeroship runtime + RPC proxy
     {
       name: "zeroship:dev-server",
 
       configureServer(server: ViteDevServer) {
         if (!isDev) return;
 
-        // Start zeroship dev server
+        // Start zeroship runtime for server functions
         startDevServer({
           root,
           port: devPort,
           serverEntry: options.serverEntry,
         });
 
-        // Proxy /_rpc to the zeroship dev server
+        // Proxy /_rpc → zeroship runtime /rpc
         server.middlewares.use((req, res, next) => {
-          if (req.url?.startsWith(rpcEndpoint)) {
-            // Rewrite to /rpc for the zeroship runtime
-            const targetUrl = `http://localhost:${devPort}/rpc`;
-            const proxyReq = require("node:http").request(
-              targetUrl,
-              { method: req.method, headers: req.headers },
-              (proxyRes: any) => {
-                res.writeHead(proxyRes.statusCode, proxyRes.headers);
-                proxyRes.pipe(res);
-              }
-            );
-            req.pipe(proxyReq);
-            proxyReq.on("error", () => {
-              res.writeHead(503);
-              res.end(JSON.stringify({ error: "Server not ready" }));
-            });
-          } else {
-            next();
+          if (!req.url?.startsWith(rpcEndpoint)) {
+            return next();
           }
+
+          const http = require("node:http");
+          const proxyReq = http.request(
+            `http://localhost:${devPort}/rpc`,
+            { method: req.method, headers: req.headers },
+            (proxyRes: any) => {
+              res.writeHead(proxyRes.statusCode, proxyRes.headers);
+              proxyRes.pipe(res);
+            }
+          );
+          req.pipe(proxyReq);
+          proxyReq.on("error", () => {
+            res.writeHead(503, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "zeroship server not ready" }));
+          });
         });
 
-        // Restart server on source file changes
-        server.watcher.on("change", (file) => {
-          if (file.endsWith(".ts") || file.endsWith(".tsx")) {
-            // Check if it's a server-relevant file
-            const relPath = relative(root, file);
-            if (
-              serverFunctionMap.has(relPath) ||
-              relPath.startsWith("src/index") ||
-              relPath.startsWith("src/server")
-            ) {
-              console.log(`[zeroship] Server file changed: ${relPath} — restarting`);
-              restartDevServer({ root, port: devPort, serverEntry: options.serverEntry });
-            }
-          }
-        });
       },
 
-      // Cleanup on server close
-      buildEnd() {
-        if (isDev) {
-          stopDevServer();
+      /** Use Vite's HMR hook for server code hot-restart */
+      handleHotUpdate({ file, server: _server }: { file: string; server: ViteDevServer }) {
+        const ext = extname(file);
+        if (![".ts", ".tsx", ".js", ".jsx"].includes(ext)) return;
+
+        const rel = relative(root, file);
+        const isServerFile =
+          serverFunctionMap.has(rel) ||
+          rel.startsWith("src/index") ||
+          rel.startsWith("src/server");
+
+        if (isServerFile) {
+          console.log(`[zeroship] Server code changed: ${rel} — restarting runtime`);
+          restartDevServer({
+            root,
+            port: devPort,
+            serverEntry: options.serverEntry,
+          });
+          // Invalidate server module cache so next transform re-analyzes
+          serverModuleCache.clear();
         }
+      },
+
+      buildEnd() {
+        if (isDev) stopDevServer();
       },
     },
 
-    // Plugin 3: Build — bundle server code after client build
+    // Plugin 3: Build — bundle server code after Vite finishes client
     {
       name: "zeroship:build",
 
@@ -235,24 +264,31 @@ export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
         });
 
         if (result) {
-          console.log(`[zeroship] Server bundle: ${result.bundlePath}`);
+          console.log(`[zeroship] Server: ${result.bundlePath}`);
           if (result.serverFunctions.length > 0) {
-            console.log(`[zeroship] Server functions: ${result.serverFunctions.join(", ")}`);
+            console.log(
+              `[zeroship] RPC endpoints: ${result.serverFunctions.join(", ")}`
+            );
           }
         } else {
-          console.log("[zeroship] No server code detected — client-only build");
+          console.log("[zeroship] No server code — client-only");
         }
 
-        // Report
+        // Build report
         if (serverFunctionMap.size > 0) {
           console.log("\n[zeroship] Server/client split:");
           for (const [file, fns] of serverFunctionMap) {
-            console.log(`  ${file}: ${fns.join(", ")} → RPC stubs`);
+            console.log(`  ${file}: ${fns.join(", ")}`);
           }
         }
       },
     },
   ];
 }
+
+// Re-export for convenience
+export { analyzeModule, isServerModuleQuick } from "./analyze.js";
+export { transformToClient, generateStubs } from "./stub.js";
+export { buildServerBundle } from "./server-bundle.js";
 
 export default zeroship;
