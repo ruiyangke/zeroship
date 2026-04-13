@@ -72,15 +72,24 @@ export function mapFilterOutbound(filter: PlainObject): PlainObject {
  * separately by the collection layer.
  */
 export function mapUpdateOutbound(update: PlainObject): PlainObject {
+  // The native layer expects per-field operators: { views: { $inc: 1 } }
+  // Mongoose uses top-level operators: { $inc: { views: 1 } }
+  // Transform Mongoose → native format, applying field name mapping.
   const result: PlainObject = {};
   for (const [key, val] of Object.entries(update)) {
-    if ((key === "$set" || key === "$unset") && typeof val === "object" && val !== null) {
-      result[key] = mapUpdateFields(val as PlainObject);
-    } else if (key.startsWith("$")) {
-      // Other operators ($push, $addToSet, $inc, etc.) — pass through unchanged.
-      result[key] = val;
+    if (key === "$set" && typeof val === "object" && val !== null) {
+      // $set fields become plain field:value
+      for (const [field, fieldVal] of Object.entries(val as PlainObject)) {
+        result[mapFieldName(field)] = fieldVal;
+      }
+    } else if (key.startsWith("$") && typeof val === "object" && val !== null) {
+      // $inc, $dec, $mul, $push, $pull, $addToSet — per-field operators
+      // { $inc: { views: 1, likes: 2 } } → { views: { $inc: 1 }, likes: { $inc: 2 } }
+      for (const [field, fieldVal] of Object.entries(val as PlainObject)) {
+        result[mapFieldName(field)] = { [key]: fieldVal };
+      }
     } else {
-      // Bare field — apply name mapping.
+      // Bare field — apply name mapping
       result[mapFieldName(key)] = val;
     }
   }

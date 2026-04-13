@@ -268,15 +268,15 @@ pub fn build_set_clauses(
                     }
                     "$inc" => {
                         params.push(value_to_param(op_val));
-                        format!("{col} = {col} + ${}", params.len())
+                        format!("{col} = {col} + ${}::numeric", params.len())
                     }
                     "$dec" => {
                         params.push(value_to_param(op_val));
-                        format!("{col} = {col} - ${}", params.len())
+                        format!("{col} = {col} - ${}::numeric", params.len())
                     }
                     "$mul" => {
                         params.push(value_to_param(op_val));
-                        format!("{col} = {col} * ${}", params.len())
+                        format!("{col} = {col} * ${}::numeric", params.len())
                     }
                     "$push" => {
                         params.push(value_to_param(op_val));
@@ -1218,7 +1218,7 @@ mod tests {
         let filter = json!({"id": 1});
         let update = json!({"views": {"$inc": 1}});
         let q = build_update_one("app1", "posts", &filter, &update).unwrap();
-        assert!(q.sql.contains(r#""views" = "views" + $1"#), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#""views" = "views" + $1::numeric"#), "sql: {}", q.sql);
         assert_eq!(q.params[0], "1");
     }
 
@@ -1227,7 +1227,7 @@ mod tests {
         let filter = json!({"id": 1});
         let update = json!({"stock": {"$dec": 1}});
         let q = build_update_one("app1", "items", &filter, &update).unwrap();
-        assert!(q.sql.contains(r#""stock" = "stock" - $1"#), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#""stock" = "stock" - $1::numeric"#), "sql: {}", q.sql);
         assert_eq!(q.params[0], "1");
     }
 
@@ -1236,7 +1236,7 @@ mod tests {
         let filter = json!({"id": 1});
         let update = json!({"price": {"$mul": 1.1}});
         let q = build_update_one("app1", "items", &filter, &update).unwrap();
-        assert!(q.sql.contains(r#""price" = "price" * $1"#), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#""price" = "price" * $1::numeric"#), "sql: {}", q.sql);
         assert_eq!(q.params[0], "1.1");
     }
 
@@ -1279,7 +1279,7 @@ mod tests {
         let q = build_update_one("app1", "posts", &filter, &update).unwrap();
         // Both plain set and $inc should appear
         assert!(q.sql.contains(r#""name" = $"#), "sql: {}", q.sql);
-        assert!(q.sql.contains(r#""views" = "views" + $"#), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#""views" = "views" + $"#) && q.sql.contains("::numeric"), "sql: {}", q.sql);
         assert!(q.params.contains(&"New".to_string()));
         assert!(q.params.contains(&"1".to_string()));
     }

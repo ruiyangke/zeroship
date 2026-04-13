@@ -290,34 +290,33 @@ describe("Collection.updateOne()", () => {
   });
 
   // C2: _id/createdAt/updatedAt mapping in $set
-  test("maps _id → id inside $set update", async () => {
+  test("maps _id → id inside $set update (flattened)", async () => {
     const { native, calls } = makeMockNative();
     const col = new Collection("users", schema, native);
     await col.updateOne({ name: "Alice" }, { $set: { _id: "new-id" } });
     const update = calls[0].args[2] as PlainObject;
-    const setFields = update.$set as PlainObject;
-    assert.equal(setFields.id, "new-id");
-    assert.equal(setFields._id, undefined);
+    // $set is flattened: { $set: { _id: "x" } } → { id: "x" }
+    assert.equal(update.id, "new-id");
+    assert.equal(update._id, undefined);
+    assert.equal(update.$set, undefined);
   });
 
-  test("maps createdAt → created_at inside $set update", async () => {
+  test("maps createdAt → created_at inside $set update (flattened)", async () => {
     const { native, calls } = makeMockNative();
     const col = new Collection("users", schema, native);
     await col.updateOne({ name: "Alice" }, { $set: { createdAt: "2024-01-01" } });
     const update = calls[0].args[2] as PlainObject;
-    const setFields = update.$set as PlainObject;
-    assert.equal(setFields.created_at, "2024-01-01");
-    assert.equal(setFields.createdAt, undefined);
+    assert.equal(update.created_at, "2024-01-01");
+    assert.equal(update.createdAt, undefined);
   });
 
-  test("maps updatedAt → updated_at inside $set update", async () => {
+  test("maps updatedAt → updated_at inside $set update (flattened)", async () => {
     const { native, calls } = makeMockNative();
     const col = new Collection("users", schema, native);
     await col.updateOne({ name: "Alice" }, { $set: { updatedAt: "2024-06-01" } });
     const update = calls[0].args[2] as PlainObject;
-    const setFields = update.$set as PlainObject;
-    assert.equal(setFields.updated_at, "2024-06-01");
-    assert.equal(setFields.updatedAt, undefined);
+    assert.equal(update.updated_at, "2024-06-01");
+    assert.equal(update.updatedAt, undefined);
   });
 
   // I4: updateOne return value edge cases
@@ -378,15 +377,15 @@ describe("Collection.updateMany()", () => {
     assert.equal(filter.id, "x");
   });
 
-  // C2: _id/createdAt/updatedAt mapping in $set for updateMany
+  // C2: _id/createdAt/updatedAt mapping in $set for updateMany (flattened)
   test("maps _id → id inside $set in updateMany", async () => {
     const { native, calls } = makeMockNative();
     const col = new Collection("users", schema, native);
     await col.updateMany({ role: "user" }, { $set: { _id: "x" } });
     const update = calls[0].args[2] as PlainObject;
-    const setFields = update.$set as PlainObject;
-    assert.equal(setFields.id, "x");
-    assert.equal(setFields._id, undefined);
+    assert.equal(update.id, "x");
+    assert.equal(update._id, undefined);
+    assert.equal(update.$set, undefined);
   });
 
   // C3: $push/$addToSet in updateMany
