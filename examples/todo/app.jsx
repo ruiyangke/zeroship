@@ -1,21 +1,28 @@
-import { db, serve } from 'zeroship'
+import { model } from '@zeroship/db'
+import { serve } from 'zeroship'
 
-const todos = db.collection('todos')
+const todos = model('todos', {
+  text: { type: String, required: true },
+  done: { type: Boolean, default: false },
+})
 
 export async function addTodo(text) {
-  return todos.insert({ text, done: false })
+  return await todos.create({ text })
 }
 
 export async function getTodos() {
-  return todos.find()
+  const { data } = await todos.find({}).sort({ createdAt: -1 })
+  return data
 }
 
 export async function toggleTodo(id, done) {
-  return todos.update(id, { done })
+  const { data } = await todos.updateOne({ id }, { done })
+  return data
 }
 
 export async function deleteTodo(id) {
-  return todos.delete(id)
+  const { data } = await todos.deleteOne({ id })
+  return data
 }
 
 function App() {
@@ -35,7 +42,7 @@ function App() {
   }
 
   const handleToggle = async (item) => {
-    await toggleTodo(item.id, !item.done)
+    await toggleTodo(item._id, !item.done)
     refresh()
   }
 
@@ -70,7 +77,7 @@ function App() {
 
         <ul style={styles.list}>
           {items.map(t => (
-            <li key={t.id} style={styles.item}>
+            <li key={t._id} style={styles.item}>
               <button
                 onClick={() => handleToggle(t)}
                 style={{
@@ -87,7 +94,7 @@ function App() {
                 {t.text}
               </span>
               <button
-                onClick={() => handleDelete(t.id)}
+                onClick={() => handleDelete(t._id)}
                 style={styles.deleteBtn}
               >
                 &times;
