@@ -1,0 +1,124 @@
+import { test, describe } from "node:test";
+import assert from "node:assert/strict";
+import { Query } from "../src/query.js";
+
+type PlainObject = Record<string, unknown>;
+
+function makeMockNative(rows: PlainObject[]) {
+  const calls: { collection: string; filter: PlainObject; opts: PlainObject }[] = [];
+  const fn = async (
+    collection: string,
+    filter: PlainObject,
+    opts: PlainObject
+  ): Promise<string> => {
+    calls.push({ collection, filter, opts });
+    return JSON.stringify(rows);
+  };
+  return { fn, calls };
+}
+
+describe("Query chain building", () => {
+  test("sort() returns this", () => {
+    const { fn } = makeMockNative([]);
+    const q = new Query("users", {}, fn);
+    assert.equal(q.sort({ name: 1 }), q);
+  });
+
+  test("limit() returns this", () => {
+    const { fn } = makeMockNative([]);
+    const q = new Query("users", {}, fn);
+    assert.equal(q.limit(10), q);
+  });
+
+  test("skip() returns this", () => {
+    const { fn } = makeMockNative([]);
+    const q = new Query("users", {}, fn);
+    assert.equal(q.skip(20), q);
+  });
+
+  test("select() returns this", () => {
+    const { fn } = makeMockNative([]);
+    const q = new Query("users", {}, fn);
+    assert.equal(q.select("name email"), q);
+  });
+
+  test("chains are independent per instance", () => {
+    const { fn } = makeMockNative([]);
+    const q1 = new Query("users", {}, fn).limit(5);
+    const q2 = new Query("users", {}, fn).limit(10);
+    assert.notEqual(q1, q2);
+  });
+});
+
+describe("Query select parsing", () => {
+  test("select string: space-separated → array in opts", async () => {
+    const { fn, calls } = makeMockNative([]);
+    const q = new Query("users", {}, fn).select("name email age");
+    await q._exec();
+    assert.deepEqual(calls[0].opts.select, ["name", "email", "age"]);
+  });
+
+  test("select array: passed through as-is", async () => {
+    const { fn, calls } = makeMockNative([]);
+    const q = new Query("users", {}, fn).select(["name", "email"]);
+    await q._exec();
+    assert.deepEqual(calls[0].opts.select, ["name", "email"]);
+  });
+
+  test("select single field string", async () => {
+    const { fn, calls } = makeMockNative([]);
+    const q = new Query("users", {}, fn).select("name");
+    await q._exec();
+    assert.deepEqual(calls[0].opts.select, ["name"]);
+  });
+});
+
+describe("Query thenable execution", () => {
+  test("await Query calls native with correct args", async () => {
+    const { fn, calls } = makeMockNative([]);
+    const filter = { active: true };
+    const q = new Query("users", filter, fn).sort({ name: 1 }).limit(5).skip(10);
+    await q;
+    assert.equal(calls[0].collection, "users");
+    assert.deepEqual(calls[0].filter, { active: true });
+    assert.deepEqual(calls[0].opts.sort, { name: 1 });
+    assert.equal(calls[0].opts.limit, 5);
+    assert.equal(calls[0].opts.skip, 10);
+  });
+
+  test("await Query maps result docs (id → _id)", async () => {
+    const { fn } = makeMockNative([
+      { id: "1", name: "Alice" },
+      { id: "2", name: "Bob" },
+    ]);
+    const q = new Query("users", {}, fn);
+    const results = await q;
+    assert.equal(results[0]._id, "1");
+    assert.equal(results[0].name, "Alice");
+    assert.equal(results[1]._id, "2");
+  });
+
+  test("await Query maps created_at → createdAt", async () => {
+    const { fn } = makeMockNative([
+      { id: "1", created_at: "2024-01-01", updated_at: "2024-06-01" },
+    ]);
+    const q = new Query("docs", {}, fn);
+    const results = await q;
+    assert.equal(results[0].createdAt, "2024-01-01");
+    assert.equal(results[0].updatedAt, "2024-06-01");
+  });
+
+  test("Query without options sends empty opts", async () => {
+    const { fn, calls } = makeMockNative([]);
+    const q = new Query("items", {}, fn);
+    await q;
+    assert.deepEqual(calls[0].opts, {});
+  });
+
+  test("Query.then is thenable (Promise.resolve compatibility)", async () => {
+    const { fn } = makeMockNative([{ id: "x" }]);
+    const q = new Query("items", {}, fn);
+    const results = await Promise.resolve(q);
+    assert.equal(results[0]._id, "x");
+  });
+});
