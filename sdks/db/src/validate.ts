@@ -122,6 +122,7 @@ function checkField(
 }
 
 /**
+ * @internal
  * Validates a full document against the schema.
  * Applies default values for missing optional fields, throws ValidationError
  * if any required fields are absent or any field value is invalid.
@@ -161,6 +162,7 @@ export function validateDoc(doc: Doc, schema: NormalizedSchema): Doc {
 }
 
 /**
+ * @internal
  * Validates a partial document (e.g. an update's $set payload) against the schema.
  * Does not require required fields or apply defaults — only validates the fields
  * that are present. Throws ValidationError if any present field is invalid.

@@ -87,9 +87,13 @@ export class Query {
     if (this._skip !== undefined) opts["skip"] = this._skip;
     if (this._select !== undefined) opts["select"] = this._select;
 
-    const raw = await this._native(this._collection, this._filter, opts);
-    const parsed: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
-    const rows: PlainObject[] = Array.isArray(parsed) ? parsed : [];
-    return rows.map(mapResultDoc);
+    try {
+      const raw = await this._native(this._collection, this._filter, opts);
+      const parsed: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
+      const rows: PlainObject[] = Array.isArray(parsed) ? parsed : [];
+      return rows.map(mapResultDoc);
+    } catch (e: any) {
+      throw new Error(`find query failed: ${e.message ?? e}`, { cause: e });
+    }
   }
 }

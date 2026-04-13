@@ -11,6 +11,7 @@ import { PlainObject } from "./types.js";
 // ---------------------------------------------------------------------------
 
 /**
+ * @internal
  * Maps a native result document to the user-facing shape.
  * Renames `id`→`_id`, `created_at`→`createdAt`, `updated_at`→`updatedAt`.
  * All other fields are passed through unchanged.
@@ -37,6 +38,7 @@ export function mapResultDoc(doc: PlainObject): PlainObject {
 // ---------------------------------------------------------------------------
 
 /**
+ * @internal
  * Maps a user-supplied filter to the native format.
  * Renames `_id`→`id`, `createdAt`→`created_at`, `updatedAt`→`updated_at`.
  * Recurses into `$and`, `$or`, and `$not` operators so field names are
@@ -63,6 +65,7 @@ export function mapFilterOutbound(filter: PlainObject): PlainObject {
 }
 
 /**
+ * @internal
  * Maps an update object's field names from user-facing to native format.
  * Handles both `$set`/`$unset` operator objects and bare top-level field maps.
  * Does NOT touch `$push`/`$addToSet`/`$inc`/`$dec`/`$mul` — those are handled
@@ -203,6 +206,7 @@ function translateStage(stage: PlainObject): PlainObject {
 }
 
 /**
+ * @internal
  * Translates a full MongoDB-style aggregate pipeline to the native format.
  * Each stage is translated individually; unrecognized stages pass through as-is.
  */

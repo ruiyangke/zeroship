@@ -34,10 +34,15 @@ export interface FieldDef {
  * `t.string().required().min(3).max(50)`.
  */
 export class TypeBuilder {
-  _def: FieldDef;
+  private _def: FieldDef;
 
   constructor(def: FieldDef) {
     this._def = { ...def };
+  }
+
+  /** Returns a frozen copy of the field definition. */
+  toFieldDef(): Readonly<FieldDef> {
+    return Object.freeze({ ...this._def });
   }
 
   /** Marks the field as required; validation will fail if the field is absent. */
@@ -126,7 +131,7 @@ export const t = {
    * `t.array(t.string())` produces `{ type: "array", items: "string" }`.
    */
   array(items: TypeBuilder): TypeBuilder {
-    const itemType = items._def.type as PrimitiveTypeName;
+    const itemType = items.toFieldDef().type as PrimitiveTypeName;
     return new TypeBuilder({ type: "array", items: itemType });
   },
 };

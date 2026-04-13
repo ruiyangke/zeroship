@@ -25,6 +25,7 @@ export class ValidationError extends Error {
 }
 
 /**
+ * @internal
  * Translates a raw native driver error message into a typed JS Error.
  * Unique/duplicate constraint violations are given `code: 11000` (MongoDB
  * convention) so callers can branch on error type without string matching.

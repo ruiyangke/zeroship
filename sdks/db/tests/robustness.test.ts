@@ -424,6 +424,30 @@ describe("query edge cases", () => {
     const results = await col.find({}).sort({});
     assert.ok(Array.isArray(results));
   });
+
+  test("Query._exec(): native returns malformed JSON → throws with clear message", async () => {
+    const fn = async (): Promise<string> => "{{{invalid";
+    const q = new Query("users", {}, fn);
+    await assert.rejects(
+      () => q._exec(),
+      (err: unknown) =>
+        err instanceof Error && (err as Error).message.includes("find query failed")
+    );
+  });
+
+  test("Query._exec(): native throws an Error → caught and re-thrown with cause", async () => {
+    const fn = async (): Promise<string> => {
+      throw new Error("native connection refused");
+    };
+    const q = new Query("users", {}, fn);
+    await assert.rejects(
+      () => q._exec(),
+      (err: unknown) =>
+        err instanceof Error &&
+        (err as Error).message.includes("find query failed") &&
+        (err as Error).message.includes("native connection refused")
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

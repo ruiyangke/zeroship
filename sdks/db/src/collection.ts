@@ -47,7 +47,11 @@ function parseRaw<T = unknown>(raw: string | null | undefined): T | null {
   if (raw === null || raw === undefined) return null;
   if (typeof raw === "string") {
     if (raw === "") return null;
-    return JSON.parse(raw) as T;
+    try {
+      return JSON.parse(raw) as T;
+    } catch (e: any) {
+      throw new Error(`failed to parse native response: ${e.message ?? e}`, { cause: e });
+    }
   }
   return raw as unknown as T;
 }

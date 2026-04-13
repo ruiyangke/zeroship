@@ -85,6 +85,7 @@ function isMongooseFieldDef(val: unknown): val is MongooseFieldDef {
 }
 
 /**
+ * @internal
  * Converts a SchemaInput (Mongoose-style or TypeBuilder) into a NormalizedSchema.
  *
  * Handles three input forms per field:
@@ -102,7 +103,7 @@ export function normalizeSchema(input: SchemaInput): NormalizedSchema {
 
     if (val instanceof TypeBuilder) {
       // Form 1: TypeBuilder instance
-      result[key] = { ...val._def };
+      result[key] = { ...val.toFieldDef() };
     } else if (isMongooseFieldDef(val)) {
       // Form 2: Mongoose object definition { type: Constructor, ... }
       const mdef = val as MongooseFieldDef;
