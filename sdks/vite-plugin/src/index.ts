@@ -278,12 +278,28 @@ export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
             );
           }
 
-          // Remove tainted variable declarations
+          // Remove tainted variable declarations (handles multi-line model() calls)
           for (const name of tainted) {
-            result = result.replace(
-              new RegExp(`^\\s*(const|let|var)\\s+${name}\\s*=.*$`, "gm"),
-              ""
-            );
+            const declPattern = new RegExp(`(const|let|var)\\s+${name}\\s*=`);
+            const match = declPattern.exec(result);
+            if (match) {
+              // Find the start of the line
+              let lineStart = result.lastIndexOf("\n", match.index) + 1;
+              // Find the end: scan for balanced parens/braces, then semicolon or newline
+              let pos = match.index + match[0].length;
+              let depth = 0;
+              let inStr: string | null = null;
+              while (pos < result.length) {
+                const ch = result[pos];
+                if (inStr) { if (ch === inStr && result[pos - 1] !== "\\") inStr = null; }
+                else if (ch === '"' || ch === "'" || ch === "`") { inStr = ch; }
+                else if (ch === "(" || ch === "{" || ch === "[") { depth++; }
+                else if (ch === ")" || ch === "}" || ch === "]") { depth--; }
+                else if (depth === 0 && (ch === ";" || ch === "\n")) { pos++; break; }
+                pos++;
+              }
+              result = result.slice(0, lineStart) + result.slice(pos);
+            }
           }
 
           // Append RPC stubs
@@ -396,20 +412,26 @@ export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
         console.log("\n[zeroship] Building server bundle with Rolldown...");
 
         try {
-          // Rolldown is available via Vite's dependency tree
-          const { build } = await import("rolldown" as string) as { build: Function };
-          await build({
-            input: resolve(root, entry),
-            output: {
-              dir: serverOut,
-              format: "esm",
-              entryFileNames: "server.js",
+          // Use Vite's build API for the server environment
+          // This ensures rolldown is resolved through Vite's dependency tree
+          const vite = await import("vite" as string) as any;
+          await vite.build({
+            root,
+            configFile: false,
+            logLevel: "warn",
+            build: {
+              outDir: serverOut,
+              lib: {
+                entry: resolve(root, entry),
+                formats: ["es"],
+                fileName: "server",
+              },
+              rollupOptions: {
+                external: [],
+              },
+              minify: config.build?.minify !== false,
+              emptyOutDir: true,
             },
-            platform: "neutral",
-            resolve: {
-              conditionNames: ["workerd", "worker", "import", "default"],
-            },
-            treeshake: true,
           });
 
           console.log(`[zeroship] Server: ${serverOut}/server.js`);
