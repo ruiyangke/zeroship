@@ -46,7 +46,101 @@ fn cmd_build(args: &[String]) {
             .unwrap_or_else(|| input_path.file_name().unwrap().to_string_lossy().to_string())
     };
 
-    // For JSX/TSX single files, run SWC compiler to split server + client
+    // Try dual bundle (server + client split) for directories
+    if input_path.is_dir() {
+        use zeroship_compiler::bundler::{dual_bundle, BundleOptions as BundleOpts};
+        let opts = BundleOpts {
+            entry: String::new(),
+            minify,
+            sourcemap: !minify,
+            ..Default::default()
+        };
+        match dual_bundle(&input_path, &opts) {
+            Ok(result) => {
+                let source = &result.server.js;
+                let bundle = AppBundle::new(
+                    "index.js",
+                    vec![("index.js".to_string(), ModuleType::EsModule, source.clone())],
+                );
+                let bytes = bundle.to_bytes();
+
+                std::fs::create_dir_all(&outdir).expect("Failed to create output directory");
+
+                // Write server .appbundle
+                let bundle_path = PathBuf::from(&outdir).join("app.appbundle");
+                std::fs::write(&bundle_path, &bytes).expect("Failed to write .appbundle");
+
+                // Write client bundle
+                if let Some(ref client) = result.client {
+                    let pub_dir = PathBuf::from(&outdir).join("public");
+                    std::fs::create_dir_all(&pub_dir).expect("Failed to create public dir");
+                    std::fs::write(pub_dir.join("app.js"), &client.js)
+                        .expect("Failed to write app.js");
+                    eprintln!("  client: {}/public/app.js ({:.1}KB)", outdir, client.size_bytes as f64 / 1024.0);
+
+                    // Generate index.html
+                    if let Some(ref component) = result.entry_component {
+                        let html = generate_client_html_external(component);
+                        std::fs::write(pub_dir.join("index.html"), &html)
+                            .expect("Failed to write index.html");
+                        eprintln!("  html:   {}/public/index.html", outdir);
+                    }
+                }
+
+                // Write source map
+                let source_map_file = if let Some(ref map) = result.server.source_map {
+                    let map_path = PathBuf::from(&outdir).join("app.appbundle.map");
+                    std::fs::write(&map_path, map).expect("Failed to write source map");
+                    Some("app.appbundle.map".to_string())
+                } else {
+                    None
+                };
+
+                let content_hash = format!(
+                    "sha256:{}",
+                    bytes[8..40].iter().map(|b| format!("{b:02x}")).collect::<String>()
+                );
+
+                let manifest = serde_json::json!({
+                    "name": app_name,
+                    "version": 1,
+                    "entry": "index.js",
+                    "modules": bundle.module_names(),
+                    "bundle_file": "app.appbundle",
+                    "bundle_size": bytes.len(),
+                    "source_size": source.len(),
+                    "content_hash": content_hash,
+                    "source_map": source_map_file,
+                    "server_functions": result.server_functions,
+                    "entry_component": result.entry_component,
+                    "has_client": result.client.is_some(),
+                    "compiler": format!("zeroship {}", env!("CARGO_PKG_VERSION")),
+                    "built_at": utc_now_iso8601(),
+                });
+                let manifest_path = PathBuf::from(&outdir).join("manifest.json");
+                std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap())
+                    .expect("Failed to write manifest.json");
+
+                eprintln!("Built {app_name} -> {outdir}/");
+                eprintln!("  app.appbundle:     {:.1}KB ({:.1}% of {:.1}KB source)",
+                    bytes.len() as f64 / 1024.0,
+                    bytes.len() as f64 / source.len() as f64 * 100.0,
+                    source.len() as f64 / 1024.0,
+                );
+                eprintln!("  hash:              {content_hash}");
+                if !result.server_functions.is_empty() {
+                    eprintln!("  server fns:        {}", result.server_functions.join(", "));
+                }
+                return;
+            }
+            Err(e) => {
+                eprintln!("Dual build failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Single file path (JSX/TSX or plain JS/TS)
     let (entry_name, source, source_map, client_html) = if input_path.is_file() && {
         let name = input_path.file_name().unwrap().to_string_lossy();
         name.ends_with(".jsx") || name.ends_with(".tsx")
@@ -86,11 +180,9 @@ fn cmd_build(args: &[String]) {
 
     std::fs::create_dir_all(&outdir).expect("Failed to create output directory");
 
-    // Write .appbundle
     let bundle_path = PathBuf::from(&outdir).join("app.appbundle");
     std::fs::write(&bundle_path, &bytes).expect("Failed to write .appbundle");
 
-    // Write client HTML if generated
     if let Some(ref html) = client_html {
         let client_dir = PathBuf::from(&outdir).join("public");
         std::fs::create_dir_all(&client_dir).expect("Failed to create public directory");
@@ -98,7 +190,6 @@ fn cmd_build(args: &[String]) {
         eprintln!("  client: {}/public/index.html", outdir);
     }
 
-    // Write source map
     let source_map_file = if let Some(ref map) = source_map {
         let map_path = PathBuf::from(&outdir).join("app.appbundle.map");
         std::fs::write(&map_path, map).expect("Failed to write source map");
@@ -586,7 +677,30 @@ fn build_and_load_file(path: &PathBuf) -> (Vec<ModuleEntry>, Option<String>) {
     }], None)
 }
 
-/// Generate an HTML page that loads React and renders the client bundle.
+/// Generate an HTML page that references an external app.js client bundle.
+fn generate_client_html_external(entry_component: &str) -> String {
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>zeroship app</title>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="app.js"></script>
+  <script>
+    ReactDOM.createRoot(document.getElementById("root")).render(React.createElement({entry_component}));
+  </script>
+</body>
+</html>"#
+    )
+}
+
+/// Generate an HTML page with inlined client JS (for single-file apps).
 fn generate_client_html(client_js: &str, entry_component: &str) -> String {
     format!(
         r#"<!DOCTYPE html>

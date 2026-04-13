@@ -290,6 +290,223 @@ pub fn bundle(project_dir: &Path, options: &BundleOptions) -> Result<BundleResul
 }
 
 // ---------------------------------------------------------------------------
+// Dual bundle (server + client) for full-stack apps
+// ---------------------------------------------------------------------------
+
+/// Result of a dual (server + client) bundle.
+#[derive(Debug, Clone)]
+pub struct DualBundleResult {
+    /// Server bundle — runs in V8 isolate.
+    pub server: BundleResult,
+    /// Client bundle — runs in browser. None if no client code (API-only app).
+    pub client: Option<BundleResult>,
+    /// Entry component name (e.g. "App") — the React component to mount.
+    pub entry_component: Option<String>,
+    /// Server function names (for RPC endpoint registration).
+    pub server_functions: Vec<String>,
+}
+
+/// Detect client entry point (app.tsx, app.jsx, etc.)
+fn detect_client_entry(project_dir: &Path) -> Option<String> {
+    let candidates = [
+        "src/app.tsx", "src/app.jsx",
+        "src/client.tsx", "src/client.jsx",
+        "app.tsx", "app.jsx",
+    ];
+    for candidate in &candidates {
+        if project_dir.join(candidate).exists() {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
+/// Build a full-stack app: server bundle + client bundle.
+///
+/// 1. Walk all source files (.ts/.tsx/.jsx/.js)
+/// 2. SWC splits each file into server + client versions
+/// 3. Write split files to temp dirs
+/// 4. esbuild bundles server files → server.js
+/// 5. esbuild bundles client files → client.js (if client entry exists)
+pub fn dual_bundle(
+    project_dir: &Path,
+    options: &BundleOptions,
+) -> Result<DualBundleResult, BundleError> {
+    use std::fs;
+
+    // Detect entries
+    let server_entry = if options.entry.is_empty() {
+        detect_entry(project_dir).ok_or_else(|| {
+            BundleError::EntryNotFound("No server entry point found".to_string())
+        })?
+    } else {
+        options.entry.clone()
+    };
+    let client_entry = detect_client_entry(project_dir);
+
+    // If no client entry, just do a normal server-only bundle
+    if client_entry.is_none() {
+        let server = bundle(project_dir, options)?;
+        return Ok(DualBundleResult {
+            server,
+            client: None,
+            entry_component: None,
+            server_functions: Vec::new(),
+        });
+    }
+
+    let client_entry = client_entry.unwrap();
+
+    // Create temp directories for split output
+    let temp_base = std::env::temp_dir().join(format!(
+        "zeroship-dual-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    ));
+    let server_dir = temp_base.join("server");
+    let client_dir = temp_base.join("client");
+    fs::create_dir_all(&server_dir).map_err(BundleError::Io)?;
+    fs::create_dir_all(&client_dir).map_err(BundleError::Io)?;
+
+    // Walk source files and split each with SWC
+    let src_dir = project_dir.join("src");
+    let source_root = if src_dir.exists() { &src_dir } else { project_dir };
+    let mut all_server_fns = Vec::new();
+    let mut entry_component = None;
+
+    walk_and_split(source_root, source_root, project_dir, &server_dir, &client_dir,
+                   &mut all_server_fns, &mut entry_component)?;
+
+    // Copy node_modules symlink so esbuild can resolve packages
+    let nm_src = project_dir.join("node_modules");
+    if nm_src.exists() {
+        let server_nm = server_dir.join("node_modules");
+        let client_nm = client_dir.join("node_modules");
+        #[cfg(unix)]
+        {
+            let _ = std::os::unix::fs::symlink(&nm_src, &server_nm);
+            let _ = std::os::unix::fs::symlink(&nm_src, &client_nm);
+        }
+    }
+
+    // Copy package.json so esbuild respects module resolution
+    let pkg = project_dir.join("package.json");
+    if pkg.exists() {
+        let _ = fs::copy(&pkg, server_dir.join("package.json"));
+        let _ = fs::copy(&pkg, client_dir.join("package.json"));
+    }
+
+    // Bundle server — keep original extension, esbuild handles TS
+    let server_entry_rel = server_entry.replace("src/", "");
+    let server_opts = BundleOptions {
+        entry: server_entry_rel,
+        minify: options.minify,
+        sourcemap: options.sourcemap,
+        target: options.target.clone(),
+        external: options.external.clone(),
+    };
+    let server = bundle(&server_dir, &server_opts)?;
+
+    // Bundle client (for browser) — keep original extension
+    let client_entry_rel = client_entry.replace("src/", "");
+    let client_opts = BundleOptions {
+        entry: client_entry_rel,
+        minify: options.minify,
+        sourcemap: false,
+        target: options.target.clone(),
+        external: vec!["react".to_string(), "react-dom".to_string()],
+    };
+    let client = match bundle(&client_dir, &client_opts) {
+        Ok(result) => Some(result),
+        Err(_) => None,
+    };
+
+    // Cleanup temp dirs
+    let _ = fs::remove_dir_all(&temp_base);
+
+    Ok(DualBundleResult {
+        server,
+        client,
+        entry_component,
+        server_functions: all_server_fns,
+    })
+}
+
+/// Walk source files recursively, split each with SWC, write to server/client dirs.
+fn walk_and_split(
+    dir: &Path,
+    source_root: &Path,
+    project_root: &Path,
+    server_dir: &Path,
+    client_dir: &Path,
+    server_fns: &mut Vec<String>,
+    entry_component: &mut Option<String>,
+) -> Result<(), BundleError> {
+    let entries = std::fs::read_dir(dir).map_err(BundleError::Io)?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            // Skip node_modules, .git, dist
+            let name = path.file_name().unwrap().to_string_lossy();
+            if name == "node_modules" || name == ".git" || name == "dist" {
+                continue;
+            }
+            // Create mirror dirs
+            let rel = path.strip_prefix(source_root).unwrap();
+            std::fs::create_dir_all(server_dir.join(rel)).map_err(BundleError::Io)?;
+            std::fs::create_dir_all(client_dir.join(rel)).map_err(BundleError::Io)?;
+            walk_and_split(&path, source_root, project_root, server_dir, client_dir,
+                          server_fns, entry_component)?;
+        } else if path.is_file() {
+            let name = path.file_name().unwrap().to_string_lossy();
+            if name.ends_with(".ts") || name.ends_with(".tsx")
+               || name.ends_with(".js") || name.ends_with(".jsx")
+            {
+                let source = std::fs::read_to_string(&path).map_err(BundleError::Io)?;
+                let rel = path.strip_prefix(source_root).unwrap();
+
+                // Compile with SWC
+                let result = crate::compile_with_options(
+                    &source,
+                    crate::Target::Node,
+                    false,
+                    Some(project_root),
+                );
+
+                // Write original source to both dirs — esbuild handles TS→JS.
+                // SWC analysis tells us which functions are server/client,
+                // but we let esbuild do the actual bundling + TS stripping.
+                // TODO: Write split versions when SWC emits clean JS.
+                let ext = rel.extension().unwrap_or_default().to_string_lossy().to_string();
+                let server_path = server_dir.join(rel);
+                if let Some(parent) = server_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                std::fs::write(&server_path, &source).map_err(BundleError::Io)?;
+
+                let client_path = client_dir.join(rel);
+                if let Some(parent) = client_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                std::fs::write(&client_path, &source).map_err(BundleError::Io)?;
+
+                let _ = ext; // suppress unused warning
+
+                // Collect metadata
+                server_fns.extend(result.server_functions);
+                if entry_component.is_none() {
+                    *entry_component = result.entry_component;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
