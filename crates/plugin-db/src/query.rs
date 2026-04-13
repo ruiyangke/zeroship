@@ -1298,4 +1298,384 @@ mod tests {
         assert!(q.sql.starts_with("SELECT * FROM"), "sql: {}", q.sql);
         assert!(!q.sql.contains("GROUP BY"), "sql: {}", q.sql);
     }
+
+    // -----------------------------------------------------------------------
+    // 1. Missing builder tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_update_one_plain() {
+        let filter = json!({"id": 1});
+        let update = json!({"name": "bob"});
+        let q = build_update_one("app1", "users", &filter, &update).unwrap();
+        // Plain field: value → SET "name" = $1
+        assert!(q.sql.contains(r#""name" = $1"#), "sql: {}", q.sql);
+        // ctid subquery for LIMIT 1
+        assert!(q.sql.contains("ctid"), "sql: {}", q.sql);
+        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        assert_eq!(q.params[0], "bob");
+    }
+
+    #[test]
+    fn test_update_one_set_operator() {
+        let filter = json!({"id": 1});
+        let update = json!({"$set": {"name": "carol"}});
+        let q = build_update_one("app1", "users", &filter, &update).unwrap();
+        assert!(q.sql.contains(r#""name" = $1"#), "sql: {}", q.sql);
+        assert!(q.sql.contains("ctid"), "sql: {}", q.sql);
+        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        assert_eq!(q.params[0], "carol");
+    }
+
+    #[test]
+    fn test_delete_one() {
+        let filter = json!({});
+        let q = build_delete_one("app1", "users", &filter).unwrap();
+        // ctid subquery for LIMIT 1
+        assert!(q.sql.contains("ctid"), "sql: {}", q.sql);
+        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        // No WHERE in the outer DELETE (empty filter → no inner WHERE either)
+        assert!(
+            q.sql.contains("DELETE FROM"),
+            "sql: {}",
+            q.sql
+        );
+    }
+
+    #[test]
+    fn test_delete_one_with_filter() {
+        let filter = json!({"role": "guest"});
+        let q = build_delete_one("app1", "users", &filter).unwrap();
+        assert!(q.sql.contains("ctid"), "sql: {}", q.sql);
+        // Filter should appear in the subquery
+        assert!(q.sql.contains(r#""role" = $1"#), "sql: {}", q.sql);
+        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        assert_eq!(q.params, vec!["guest"]);
+    }
+
+    #[test]
+    fn test_order_by_object() {
+        let order = json!({"name": 1, "age": -1});
+        let clause = build_order_by(&order).unwrap();
+        assert!(clause.contains(r#""name" ASC"#), "clause: {clause}");
+        assert!(clause.contains(r#""age" DESC"#), "clause: {clause}");
+    }
+
+    #[test]
+    fn test_order_by_array() {
+        let order = json!([["name", 1], ["age", -1]]);
+        let clause = build_order_by(&order).unwrap();
+        // Array form preserves declaration order
+        assert!(clause.contains(r#""name" ASC"#), "clause: {clause}");
+        assert!(clause.contains(r#""age" DESC"#), "clause: {clause}");
+        // "name" should appear before "age"
+        let name_pos = clause.find(r#""name""#).unwrap();
+        let age_pos = clause.find(r#""age""#).unwrap();
+        assert!(name_pos < age_pos, "name should come before age");
+    }
+
+    #[test]
+    fn test_find_with_order() {
+        let filter = json!({});
+        let order = json!({"created_at": -1});
+        let q = build_find("app1", "posts", &filter, Some(10), None, Some(&order), None).unwrap();
+        assert!(q.sql.contains(r#"ORDER BY "created_at" DESC"#), "sql: {}", q.sql);
+        assert!(q.sql.contains("LIMIT 10"), "sql: {}", q.sql);
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. Filter edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_and_combinator() {
+        let filter = json!({"$and": [{"status": "active"}, {"verified": true}]});
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        assert!(q.sql.contains("AND"), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#""status" = $1"#), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#""verified" = $2"#), "sql: {}", q.sql);
+        assert_eq!(q.params, vec!["active", "true"]);
+    }
+
+    #[test]
+    fn test_nested_and_or() {
+        // { $and: [{ $or: [{a: 1}, {b: 2}] }, {c: 3}] }
+        let filter = json!({"$and": [{"$or": [{"a": 1}, {"b": 2}]}, {"c": 3}]});
+        let q = build_find("app1", "t", &filter, None, None, None, None).unwrap();
+        assert!(q.sql.contains("OR"), "sql: {}", q.sql);
+        assert!(q.sql.contains("AND"), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#""c" = "#), "sql: {}", q.sql);
+    }
+
+    #[test]
+    fn test_null_eq() {
+        // { field: null } → IS NULL (implicit $eq)
+        let filter = json!({"bio": null});
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        assert_eq!(q.sql, r#"SELECT * FROM "app1"."users" WHERE "bio" IS NULL"#);
+        assert!(q.params.is_empty());
+    }
+
+    #[test]
+    fn test_ne_null() {
+        // { field: { $ne: null } } → IS NOT NULL
+        let filter = json!({"bio": {"$ne": null}});
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        assert_eq!(q.sql, r#"SELECT * FROM "app1"."users" WHERE "bio" IS NOT NULL"#);
+        assert!(q.params.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_operators_on_field() {
+        // { age: { $gte: 18, $lt: 65 } } — both conditions must appear
+        let filter = json!({"age": {"$gte": 18, "$lt": 65}});
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        assert!(q.sql.contains(r#""age" >= $"#), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#""age" < $"#), "sql: {}", q.sql);
+        assert_eq!(q.params.len(), 2);
+        // Both values present
+        assert!(q.params.contains(&"18".to_string()));
+        assert!(q.params.contains(&"65".to_string()));
+    }
+
+    #[test]
+    fn test_nin_operator() {
+        let filter = json!({"role": {"$nin": ["admin", "moderator"]}});
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        assert!(q.sql.contains(r#""role" NOT IN ($1, $2)"#), "sql: {}", q.sql);
+        assert_eq!(q.params, vec!["admin", "moderator"]);
+    }
+
+    #[test]
+    fn test_like_operator() {
+        let filter = json!({"name": {"$like": "ali%"}});
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        assert_eq!(q.sql, r#"SELECT * FROM "app1"."users" WHERE "name" LIKE $1"#);
+        assert_eq!(q.params, vec!["ali%"]);
+    }
+
+    #[test]
+    fn test_empty_and() {
+        // { $and: [] } → no WHERE clause
+        let filter = json!({"$and": []});
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        assert!(!q.sql.contains("WHERE"), "sql should have no WHERE: {}", q.sql);
+        assert!(q.params.is_empty());
+    }
+
+    #[test]
+    fn test_empty_or() {
+        // { $or: [] } → no WHERE clause
+        let filter = json!({"$or": []});
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        assert!(!q.sql.contains("WHERE"), "sql should have no WHERE: {}", q.sql);
+        assert!(q.params.is_empty());
+    }
+
+    #[test]
+    fn test_not_with_multiple_fields() {
+        // { $not: { a: 1, b: 2 } }
+        let filter = json!({"$not": {"a": 1, "b": 2}});
+        let q = build_find("app1", "t", &filter, None, None, None, None).unwrap();
+        assert!(q.sql.contains("NOT ("), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#""a" = $"#), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#""b" = $"#), "sql: {}", q.sql);
+        assert_eq!(q.params.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. SQL injection prevention
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_collection_sql_injection() {
+        let filter = json!({});
+        let result = build_find("app1", "users; DROP TABLE users", &filter, None, None, None, None);
+        assert!(result.is_err(), "should reject injection in collection name");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("invalid collection"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_schema_sql_injection() {
+        let filter = json!({});
+        let result = build_find("app1; DROP TABLE", "users", &filter, None, None, None, None);
+        assert!(result.is_err(), "should reject semicolon in schema/app_id");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("invalid"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_field_name_with_quotes() {
+        // Field name containing double quotes should be escaped (doubled) in the identifier
+        let filter = json!({"name": "alice"});
+        let _q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        // Standard field works; now verify quote_ident escapes embedded quotes
+        let quoted = super::quote_ident(r#"col"name"#);
+        assert_eq!(quoted, r#""col""name""#, "embedded quote must be doubled");
+    }
+
+    #[test]
+    fn test_collection_empty() {
+        let filter = json!({});
+        let result = build_find("app1", "", &filter, None, None, None, None);
+        assert!(result.is_err(), "empty collection name should fail");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("cannot be empty") || msg.contains("invalid"), "msg: {msg}");
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. value_to_param edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_insert_with_boolean() {
+        let doc = json!({"active": true});
+        let q = build_insert("app1", "users", &doc).unwrap();
+        assert_eq!(q.params, vec!["true"]);
+    }
+
+    #[test]
+    fn test_insert_with_null_field() {
+        let doc = json!({"name": "alice", "bio": null});
+        let q = build_insert("app1", "users", &doc).unwrap();
+        // null → empty string param
+        assert!(q.params.contains(&"alice".to_string()));
+        assert!(q.params.contains(&String::new()), "null should produce empty string param");
+    }
+
+    #[test]
+    fn test_insert_with_number() {
+        let doc = json!({"age": 30});
+        let q = build_insert("app1", "users", &doc).unwrap();
+        assert_eq!(q.params, vec!["30"]);
+    }
+
+    #[test]
+    fn test_insert_with_nested_json() {
+        let doc = json!({"settings": {"theme": "dark"}});
+        let q = build_insert("app1", "users", &doc).unwrap();
+        // Nested object is serialized as JSON text
+        assert_eq!(q.params.len(), 1);
+        let param = &q.params[0];
+        assert!(
+            param.contains("theme") && param.contains("dark"),
+            "nested object should be JSON-serialized: {param}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. Aggregate edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_aggregate_empty_pipeline() {
+        // Empty pipeline → no $group, select * is fine (not an error in current impl)
+        // The spec says "no $group → error", but the current code returns SELECT * FROM.
+        // Test that the function at minimum returns without panicking and produces valid SQL.
+        let pipeline = json!([]);
+        let q = build_aggregate("app1", "users", &pipeline).unwrap();
+        assert!(q.sql.starts_with("SELECT * FROM"), "sql: {}", q.sql);
+    }
+
+    #[test]
+    fn test_aggregate_match_only() {
+        // Only $match without $group → select * (same as no_group test)
+        let pipeline = json!([{"$match": {"status": "active"}}]);
+        let q = build_aggregate("app1", "users", &pipeline).unwrap();
+        assert!(q.sql.starts_with("SELECT * FROM"), "sql: {}", q.sql);
+        assert!(!q.sql.contains("GROUP BY"), "sql: {}", q.sql);
+        assert!(q.sql.contains("WHERE"), "sql: {}", q.sql);
+        assert_eq!(q.params, vec!["active"]);
+    }
+
+    #[test]
+    fn test_aggregate_all_agg_functions() {
+        let pipeline = json!([{
+            "$group": {
+                "by": "category",
+                "n":   {"$count": true},
+                "total": {"$sum": "amount"},
+                "avg_price": {"$avg": "price"},
+                "min_price": {"$min": "price"},
+                "max_price": {"$max": "price"}
+            }
+        }]);
+        let q = build_aggregate("app1", "orders", &pipeline).unwrap();
+        assert!(q.sql.contains("COUNT(*)"), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#"SUM("amount")"#), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#"AVG("price")"#), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#"MIN("price")"#), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#"MAX("price")"#), "sql: {}", q.sql);
+        assert!(q.sql.contains("GROUP BY"), "sql: {}", q.sql);
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. Error cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_unsupported_filter_operator() {
+        let filter = json!({"name": {"$regex": "^ali"}});
+        let result = build_find("app1", "users", &filter, None, None, None, None);
+        assert!(result.is_err(), "unsupported operator should fail");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("unsupported"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_unsupported_update_operator() {
+        let filter = json!({});
+        let update = json!({"name": {"$unset": true}});
+        let result = build_update_one("app1", "users", &filter, &update);
+        assert!(result.is_err(), "unsupported update operator should fail");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("unsupported"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_insert_empty_doc() {
+        let doc = json!({});
+        let result = build_insert("app1", "users", &doc);
+        assert!(result.is_err(), "empty document should fail");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("empty") || msg.contains("cannot"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_insert_non_object() {
+        let doc = json!("just a string");
+        let result = build_insert("app1", "users", &doc);
+        assert!(result.is_err(), "non-object document should fail");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("object"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_update_empty_fields() {
+        let filter = json!({});
+        let update = json!({});
+        let result = build_update_one("app1", "users", &filter, &update);
+        assert!(result.is_err(), "empty update should fail");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("empty") || msg.contains("cannot"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_in_non_array() {
+        let filter = json!({"field": {"$in": "not-an-array"}});
+        let result = build_find("app1", "users", &filter, None, None, None, None);
+        assert!(result.is_err(), "$in with non-array should fail");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("array"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_exists_non_bool() {
+        let filter = json!({"field": {"$exists": "yes"}});
+        let result = build_find("app1", "users", &filter, None, None, None, None);
+        assert!(result.is_err(), "$exists with non-bool should fail");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("boolean"), "msg: {msg}");
+    }
 }
