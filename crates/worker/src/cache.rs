@@ -221,7 +221,9 @@ async fn pump_task(
     loop {
         {
             let mut rt = runtime.borrow_mut();
+            rt.enter_isolate();
             rt.drain_new_tasks_into(&mut work);
+            rt.exit_isolate();
         }
 
         let event = {
@@ -257,7 +259,9 @@ async fn pump_task(
 
         if let Some(event) = event {
             let mut rt = runtime.borrow_mut();
+            rt.enter_isolate();
             rt.handle_async_event(event, &mut work);
+            rt.exit_isolate();
         }
     }
 }

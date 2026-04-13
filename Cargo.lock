@@ -121,12 +121,14 @@ version = "0.1.0"
 dependencies = [
  "appbase-core",
  "compio",
+ "httparse",
  "mimalloc",
  "ntex",
  "serde",
  "serde_json",
  "url",
  "uuid",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -141,6 +143,18 @@ dependencies = [
  "postgres-types",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "appbase-plugin-db"
+version = "0.1.0"
+dependencies = [
+ "appbase-pg",
+ "appbase-runtime",
+ "compio",
+ "serde_json",
+ "uuid",
+ "v8",
 ]
 
 [[package]]
@@ -185,6 +199,7 @@ version = "0.1.0"
 dependencies = [
  "appbase-bundle",
  "appbase-core",
+ "appbase-plugin-db",
  "appbase-runtime",
  "compio",
  "futures",
@@ -4750,6 +4765,12 @@ name = "writeable"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdd20c5420375476fbd4394763288da7eb0cc0b8c11deed431a91562af7335d3"
 
 [[package]]
 name = "yoke"
