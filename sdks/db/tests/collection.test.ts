@@ -214,10 +214,10 @@ describe("Collection.findOne()", () => {
 // ---------------------------------------------------------------------------
 
 describe("Collection.find()", () => {
-  test("returns a Query instance", () => {
+  test("returns a Query instance", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    const { Query } = require("../src/query.js");
+    const { Query } = await import("../src/query.js");
     const q = col.find({ active: true });
     assert.ok(q instanceof Query);
   });
