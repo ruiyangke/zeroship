@@ -92,10 +92,12 @@ describe("Query thenable execution", () => {
       { id: "2", name: "Bob" },
     ]);
     const q = new Query("users", {}, fn);
-    const results = await q;
-    assert.equal(results[0]._id, "1");
-    assert.equal(results[0].name, "Alice");
-    assert.equal(results[1]._id, "2");
+    const { data, error } = await q;
+    assert.equal(error, null);
+    assert.ok(data !== null);
+    assert.equal(data[0]._id, "1");
+    assert.equal(data[0].name, "Alice");
+    assert.equal(data[1]._id, "2");
   });
 
   test("await Query maps created_at → createdAt", async () => {
@@ -103,9 +105,11 @@ describe("Query thenable execution", () => {
       { id: "1", created_at: "2024-01-01", updated_at: "2024-06-01" },
     ]);
     const q = new Query("docs", {}, fn);
-    const results = await q;
-    assert.equal(results[0].createdAt, "2024-01-01");
-    assert.equal(results[0].updatedAt, "2024-06-01");
+    const { data, error } = await q;
+    assert.equal(error, null);
+    assert.ok(data !== null);
+    assert.equal(data[0].createdAt, "2024-01-01");
+    assert.equal(data[0].updatedAt, "2024-06-01");
   });
 
   test("Query without options sends empty opts", async () => {
@@ -118,7 +122,9 @@ describe("Query thenable execution", () => {
   test("Query.then is thenable (Promise.resolve compatibility)", async () => {
     const { fn } = makeMockNative([{ id: "x" }]);
     const q = new Query("items", {}, fn);
-    const results = await Promise.resolve(q);
-    assert.equal(results[0]._id, "x");
+    const { data, error } = await Promise.resolve(q);
+    assert.equal(error, null);
+    assert.ok(data !== null);
+    assert.equal(data[0]._id, "x");
   });
 });

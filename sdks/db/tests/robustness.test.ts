@@ -64,21 +64,20 @@ const schema = normalizeSchema({
 
 describe("native layer failures", () => {
   // Bug: malformed JSON from native.insert should not crash with an unhandled
-  // SyntaxError — it must be caught and re-thrown as a proper Error.
-  test("native.insert returns malformed JSON → should throw, not crash", async () => {
+  // SyntaxError — it must be caught and returned as a proper Error.
+  test("native.insert returns malformed JSON → returns error, not crash", async () => {
     const col = new Collection(
       "users",
       schema,
       makeNative({ insert: () => Promise.resolve("not valid JSON {{{") })
     );
-    await assert.rejects(
-      () => col.create({ name: "Alice" }),
-      (err: unknown) => err instanceof Error
-    );
+    const { data, error } = await col.create({ name: "Alice" });
+    assert.equal(data, null);
+    assert.ok(error instanceof Error);
   });
 
   // Bug: undefined return from native should not crash with a cryptic TypeError.
-  test("native.insert returns undefined → should throw, not crash", async () => {
+  test("native.insert returns undefined → returns error, not crash", async () => {
     const col = new Collection(
       "users",
       schema,
@@ -86,13 +85,12 @@ describe("native layer failures", () => {
         insert: () => Promise.resolve(undefined as unknown as string),
       })
     );
-    await assert.rejects(
-      () => col.create({ name: "Alice" }),
-      (err: unknown) => err instanceof Error
-    );
+    const { data, error } = await col.create({ name: "Alice" });
+    assert.equal(data, null);
+    assert.ok(error instanceof Error);
   });
 
-  test("native.insert throws an Error → caught and re-thrown via mapNativeError", async () => {
+  test("native.insert throws an Error → returned as error via mapNativeError", async () => {
     const col = new Collection(
       "users",
       schema,
@@ -100,10 +98,9 @@ describe("native layer failures", () => {
         insert: () => Promise.reject(new Error("connection timeout")),
       })
     );
-    await assert.rejects(
-      () => col.create({ name: "Alice" }),
-      (err: unknown) => err instanceof Error && (err as Error).message.includes("connection timeout")
-    );
+    const { data, error } = await col.create({ name: "Alice" });
+    assert.equal(data, null);
+    assert.ok(error instanceof Error && error.message.includes("connection timeout"));
   });
 
   // Bug: native.find returns "null" → JSON.parse("null") is null →
@@ -114,21 +111,23 @@ describe("native layer failures", () => {
       schema,
       makeNative({ find: () => Promise.resolve("null") })
     );
-    const results = await col.find({});
-    assert.ok(Array.isArray(results));
-    assert.equal(results.length, 0);
+    const { data, error } = await col.find({});
+    assert.equal(error, null);
+    assert.ok(Array.isArray(data));
+    assert.equal(data!.length, 0);
   });
 
   // Empty string from native.findOne is treated as "no result" — parseRaw maps
-  // empty string to null, so findOne returns null rather than throwing.
-  test("native.findOne returns empty string \"\" → should return null gracefully", async () => {
+  // empty string to null, so findOne returns null data rather than throwing.
+  test("native.findOne returns empty string \"\" → should return null data gracefully", async () => {
     const col = new Collection(
       "users",
       schema,
       makeNative({ findOne: () => Promise.resolve("") })
     );
-    const result = await col.findOne({ name: "Alice" });
-    assert.equal(result, null);
+    const { data, error } = await col.findOne({ name: "Alice" });
+    assert.equal(error, null);
+    assert.equal(data, null);
   });
 
   test("native.updateMany returns \"{}\" with no updated key → returns { modifiedCount: 0 }", async () => {
@@ -137,11 +136,12 @@ describe("native layer failures", () => {
       schema,
       makeNative({ updateMany: () => Promise.resolve("{}") })
     );
-    const result = await col.updateMany(
+    const { data, error } = await col.updateMany(
       { role: "user" },
       { $set: { role: "member" } }
     );
-    assert.deepEqual(result, { matchedCount: 0, modifiedCount: 0 });
+    assert.equal(error, null);
+    assert.deepEqual(data, { matchedCount: 0, modifiedCount: 0 });
   });
 
   test("native.deleteMany returns \"{}\" with no deleted key → returns { deletedCount: 0 }", async () => {
@@ -150,8 +150,9 @@ describe("native layer failures", () => {
       schema,
       makeNative({ deleteMany: () => Promise.resolve("{}") })
     );
-    const result = await col.deleteMany({ role: "user" });
-    assert.deepEqual(result, { deletedCount: 0 });
+    const { data, error } = await col.deleteMany({ role: "user" });
+    assert.equal(error, null);
+    assert.deepEqual(data, { deletedCount: 0 });
   });
 });
 
@@ -172,10 +173,11 @@ describe("malicious and weird inputs", () => {
 
   test("prototype pollution: filter with constructor key → passes through safely", async () => {
     const col = new Collection("users", schema, makeNative());
-    // Should not throw; native decides what to do with it
-    const result = await col.findOne({ constructor: "payload" } as PlainObject);
+    // Should not error; native decides what to do with it
+    const { data, error } = await col.findOne({ constructor: "payload" } as PlainObject);
     // Just verify it returned without crashing
-    assert.ok(result !== undefined);
+    assert.equal(error, null);
+    assert.ok(data !== undefined);
   });
 
   test("field named toString → works as regular field", () => {
@@ -209,8 +211,9 @@ describe("malicious and weird inputs", () => {
 
   test("unicode in collection name → SDK does not block it (native validates)", async () => {
     const col = new Collection("用户_🗂️", schema, makeNative());
-    const result = await col.create({ name: "Alice" });
-    assert.ok(result !== null);
+    const { data, error } = await col.create({ name: "Alice" });
+    assert.equal(error, null);
+    assert.ok(data !== null);
   });
 
   // Bug: empty string for a required field should fail validation.
@@ -229,28 +232,25 @@ describe("malicious and weird inputs", () => {
 // ---------------------------------------------------------------------------
 
 describe("type coercion edge cases", () => {
-  test("null passed as doc to create() → throws (ValidationError: required fields missing)", async () => {
+  test("null passed as doc to create() → returns error (ValidationError: required fields missing)", async () => {
     const col = new Collection("users", schema, makeNative());
-    await assert.rejects(
-      () => col.create(null as unknown as PlainObject),
-      (err: unknown) => err instanceof Error
-    );
+    const { data, error } = await col.create(null as unknown as PlainObject);
+    assert.equal(data, null);
+    assert.ok(error instanceof Error);
   });
 
-  test("undefined passed as doc to create() → throws", async () => {
+  test("undefined passed as doc to create() → returns error", async () => {
     const col = new Collection("users", schema, makeNative());
-    await assert.rejects(
-      () => col.create(undefined as unknown as PlainObject),
-      (err: unknown) => err instanceof Error
-    );
+    const { data, error } = await col.create(undefined as unknown as PlainObject);
+    assert.equal(data, null);
+    assert.ok(error instanceof Error);
   });
 
-  test("array passed as doc to create([{...}]) → throws (not a plain object)", async () => {
+  test("array passed as doc to create([{...}]) → returns error (not a plain object)", async () => {
     const col = new Collection("users", schema, makeNative());
-    await assert.rejects(
-      () => col.create([{ name: "Alice" }] as unknown as PlainObject),
-      (err: unknown) => err instanceof Error
-    );
+    const { data, error } = await col.create([{ name: "Alice" }] as unknown as PlainObject);
+    assert.equal(data, null);
+    assert.ok(error instanceof Error);
   });
 
   test("string passed as filter to find(\"query\") → should not silently succeed", async () => {
@@ -309,25 +309,28 @@ describe("type coercion edge cases", () => {
 describe("deeply nested filters", () => {
   test("3-level nesting: { $and: [{ $or: [{ $not: { name: 'x' } }] }] } → works", async () => {
     const col = new Collection("users", schema, makeNative());
-    const results = await col.find({ $and: [{ $or: [{ $not: { name: "x" } }] }] });
-    assert.ok(Array.isArray(results));
+    const { data, error } = await col.find({ $and: [{ $or: [{ $not: { name: "x" } }] }] });
+    assert.equal(error, null);
+    assert.ok(Array.isArray(data));
   });
 
   test("empty nested: { $and: [{ $or: [] }] } → produces valid filter", async () => {
     const col = new Collection("users", schema, makeNative());
-    const results = await col.find({ $and: [{ $or: [] }] });
-    assert.ok(Array.isArray(results));
+    const { data, error } = await col.find({ $and: [{ $or: [] }] });
+    assert.equal(error, null);
+    assert.ok(Array.isArray(data));
   });
 
   test("mixed logical operators with comparison operators → works", async () => {
     const col = new Collection("users", schema, makeNative());
-    const results = await col.find({
+    const { data, error } = await col.find({
       $or: [
         { name: "a" },
         { $and: [{ age: { $gt: 18 } }, { role: "admin" }] },
       ],
     });
-    assert.ok(Array.isArray(results));
+    assert.equal(error, null);
+    assert.ok(Array.isArray(data));
   });
 
   test("_id inside $not is mapped to id", async () => {
@@ -392,14 +395,16 @@ describe("query edge cases", () => {
 
   test("find({}).limit(0) → passes through to native (0 is valid)", async () => {
     const col = new Collection("users", schema, makeNative());
-    const results = await col.find({}).limit(0);
-    assert.ok(Array.isArray(results));
+    const { data, error } = await col.find({}).limit(0);
+    assert.equal(error, null);
+    assert.ok(Array.isArray(data));
   });
 
   test("find({}).limit(-1) → passes through to native (native decides)", async () => {
     const col = new Collection("users", schema, makeNative());
-    const results = await col.find({}).limit(-1);
-    assert.ok(Array.isArray(results));
+    const { data, error } = await col.find({}).limit(-1);
+    assert.equal(error, null);
+    assert.ok(Array.isArray(data));
   });
 
   test("find({}).select(\"\") → produces empty select array (native handles as SELECT *)", async () => {
@@ -421,31 +426,30 @@ describe("query edge cases", () => {
 
   test("find({}).sort({}) → empty sort passes through", async () => {
     const col = new Collection("users", schema, makeNative());
-    const results = await col.find({}).sort({});
-    assert.ok(Array.isArray(results));
+    const { data, error } = await col.find({}).sort({});
+    assert.equal(error, null);
+    assert.ok(Array.isArray(data));
   });
 
-  test("Query._exec(): native returns malformed JSON → throws with clear message", async () => {
+  test("Query._exec(): native returns malformed JSON → returns error with clear message", async () => {
     const fn = async (): Promise<string> => "{{{invalid";
     const q = new Query("users", {}, fn);
-    await assert.rejects(
-      () => q._exec(),
-      (err: unknown) =>
-        err instanceof Error && (err as Error).message.includes("find query failed")
-    );
+    const { data, error } = await q._exec();
+    assert.equal(data, null);
+    assert.ok(error instanceof Error && error.message.includes("find query failed"));
   });
 
-  test("Query._exec(): native throws an Error → caught and re-thrown with cause", async () => {
+  test("Query._exec(): native throws an Error → returned as error with cause", async () => {
     const fn = async (): Promise<string> => {
       throw new Error("native connection refused");
     };
     const q = new Query("users", {}, fn);
-    await assert.rejects(
-      () => q._exec(),
-      (err: unknown) =>
-        err instanceof Error &&
-        (err as Error).message.includes("find query failed") &&
-        (err as Error).message.includes("native connection refused")
+    const { data, error } = await q._exec();
+    assert.equal(data, null);
+    assert.ok(
+      error instanceof Error &&
+      error.message.includes("find query failed") &&
+      error.message.includes("native connection refused")
     );
   });
 });
@@ -519,13 +523,14 @@ describe("validation edge cases", () => {
 describe("aggregate edge cases", () => {
   test("empty pipeline [] → passes through to native", async () => {
     const col = new Collection("users", schema, makeNative());
-    const results = await col.aggregate([]);
-    assert.ok(Array.isArray(results));
+    const { data, error } = await col.aggregate([]);
+    assert.equal(error, null);
+    assert.ok(Array.isArray(data));
   });
 
   test("pipeline with unknown stage $lookup → passes through (not crash)", async () => {
     const col = new Collection("users", schema, makeNative());
-    const results = await col.aggregate([
+    const { data, error } = await col.aggregate([
       {
         $lookup: {
           from: "orders",
@@ -535,7 +540,8 @@ describe("aggregate edge cases", () => {
         },
       },
     ]);
-    assert.ok(Array.isArray(results));
+    assert.equal(error, null);
+    assert.ok(Array.isArray(data));
   });
 
   test("$group with no _id field → translateAggregatePipeline handles gracefully", () => {

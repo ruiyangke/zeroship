@@ -97,36 +97,34 @@ describe("Collection.create()", () => {
   test("returns doc with _id instead of id", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    const result = await col.create({ name: "Carol", age: 20 });
-    assert.ok("_id" in result);
-    assert.equal(result._id, "abc123");
+    const { data, error } = await col.create({ name: "Carol", age: 20 });
+    assert.equal(error, null);
+    assert.ok(data !== null && "_id" in data);
+    assert.equal(data._id, "abc123");
   });
 
-  test("throws ValidationError for missing required field", async () => {
+  test("returns ValidationError for missing required field", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await assert.rejects(
-      () => col.create({ age: 20 }),
-      (err: unknown) => err instanceof ValidationError
-    );
+    const { data, error } = await col.create({ age: 20 });
+    assert.equal(data, null);
+    assert.ok(error instanceof ValidationError);
   });
 
-  test("throws ValidationError for wrong type", async () => {
+  test("returns ValidationError for wrong type", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await assert.rejects(
-      () => col.create({ name: 42 as unknown as string }),
-      (err: unknown) => err instanceof ValidationError
-    );
+    const { data, error } = await col.create({ name: 42 as unknown as string });
+    assert.equal(data, null);
+    assert.ok(error instanceof ValidationError);
   });
 
-  test("throws ValidationError when number is below min", async () => {
+  test("returns ValidationError when number is below min", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await assert.rejects(
-      () => col.create({ name: "X", age: -5 }),
-      (err: unknown) => err instanceof ValidationError
-    );
+    const { data, error } = await col.create({ name: "X", age: -5 });
+    assert.equal(data, null);
+    assert.ok(error instanceof ValidationError);
   });
 
   test("maps native error to Error with code 11000 on duplicate", async () => {
@@ -134,10 +132,9 @@ describe("Collection.create()", () => {
       insert: () => Promise.reject(new Error("unique constraint violation")),
     });
     const col = new Collection("users", schema, native);
-    await assert.rejects(
-      () => col.create({ name: "Alice" }),
-      (err: unknown) => (err as { code?: number }).code === 11000
-    );
+    const { data, error } = await col.create({ name: "Alice" });
+    assert.equal(data, null);
+    assert.ok(error !== null && (error as { code?: number }).code === 11000);
   });
 });
 
@@ -160,18 +157,19 @@ describe("Collection.insertMany()", () => {
   test("returns array with _id mapped", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    const results = await col.insertMany([{ name: "A" }, { name: "B" }]);
-    assert.equal(results.length, 2);
-    assert.ok("_id" in results[0]);
+    const { data, error } = await col.insertMany([{ name: "A" }, { name: "B" }]);
+    assert.equal(error, null);
+    assert.ok(data !== null);
+    assert.equal(data.length, 2);
+    assert.ok("_id" in data[0]);
   });
 
-  test("throws ValidationError if any doc is invalid", async () => {
+  test("returns ValidationError if any doc is invalid", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await assert.rejects(
-      () => col.insertMany([{ name: "OK" }, { age: 10 }]),
-      (err: unknown) => err instanceof ValidationError
-    );
+    const { data, error } = await col.insertMany([{ name: "OK" }, { age: 10 }]);
+    assert.equal(data, null);
+    assert.ok(error instanceof ValidationError);
   });
 });
 
@@ -190,22 +188,24 @@ describe("Collection.findOne()", () => {
     assert.ok(!("_id" in filter));
   });
 
-  test("returns null when native returns null", async () => {
+  test("returns null data when native returns null", async () => {
     const { native } = makeMockNative({
       findOne: () => Promise.resolve(null),
     });
     const col = new Collection("users", schema, native);
-    const result = await col.findOne({ name: "Ghost" });
-    assert.equal(result, null);
+    const { data, error } = await col.findOne({ name: "Ghost" });
+    assert.equal(error, null);
+    assert.equal(data, null);
   });
 
   test("returns mapped doc (id → _id)", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    const result = await col.findOne({ name: "Alice" });
-    assert.ok(result !== null);
-    assert.equal(result._id, "xyz");
-    assert.equal(result.name, "Alice");
+    const { data, error } = await col.findOne({ name: "Alice" });
+    assert.equal(error, null);
+    assert.ok(data !== null);
+    assert.equal(data._id, "xyz");
+    assert.equal(data.name, "Alice");
   });
 });
 
@@ -235,9 +235,10 @@ describe("Collection.find()", () => {
   test("find() result docs have _id", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    const results = await col.find({});
-    assert.ok("_id" in results[0]);
-    assert.equal(results[0]._id, "1");
+    const { data, error } = await col.find({});
+    assert.equal(error, null);
+    assert.ok(data !== null && "_id" in data[0]);
+    assert.equal(data[0]._id, "1");
   });
 });
 
@@ -258,8 +259,9 @@ describe("Collection.updateOne()", () => {
   test("returns { matchedCount: 1, modifiedCount: 1 } on match", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    const result = await col.updateOne({ name: "Alice" }, { $set: { age: 31 } });
-    assert.deepEqual(result, { matchedCount: 1, modifiedCount: 1 });
+    const { data, error } = await col.updateOne({ name: "Alice" }, { $set: { age: 31 } });
+    assert.equal(error, null);
+    assert.deepEqual(data, { matchedCount: 1, modifiedCount: 1 });
   });
 
   test("returns { matchedCount: 0, modifiedCount: 0 } when no match", async () => {
@@ -267,26 +269,25 @@ describe("Collection.updateOne()", () => {
       updateOne: () => Promise.resolve(null as unknown as string),
     });
     const col = new Collection("users", schema, native);
-    const result = await col.updateOne({ name: "Ghost" }, { $set: { age: 5 } });
-    assert.deepEqual(result, { matchedCount: 0, modifiedCount: 0 });
+    const { data, error } = await col.updateOne({ name: "Ghost" }, { $set: { age: 5 } });
+    assert.equal(error, null);
+    assert.deepEqual(data, { matchedCount: 0, modifiedCount: 0 });
   });
 
-  test("validates $set fields", async () => {
+  test("returns ValidationError for invalid $set fields", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await assert.rejects(
-      () => col.updateOne({ name: "Alice" }, { $set: { age: "not-a-number" as unknown as number } }),
-      (err: unknown) => err instanceof ValidationError
-    );
+    const { data, error } = await col.updateOne({ name: "Alice" }, { $set: { age: "not-a-number" as unknown as number } });
+    assert.equal(data, null);
+    assert.ok(error instanceof ValidationError);
   });
 
-  test("validates top-level (non-$) fields", async () => {
+  test("returns ValidationError for invalid top-level (non-$) fields", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await assert.rejects(
-      () => col.updateOne({ name: "Alice" }, { age: "bad" as unknown as number }),
-      (err: unknown) => err instanceof ValidationError
-    );
+    const { data, error } = await col.updateOne({ name: "Alice" }, { age: "bad" as unknown as number });
+    assert.equal(data, null);
+    assert.ok(error instanceof ValidationError);
   });
 
   // C2: _id/createdAt/updatedAt mapping in $set
@@ -325,35 +326,34 @@ describe("Collection.updateOne()", () => {
       updateOne: () => Promise.resolve("null"),
     });
     const col = new Collection("users", schema, native);
-    const result = await col.updateOne({ name: "Ghost" }, { $set: { age: 5 } });
-    assert.deepEqual(result, { matchedCount: 0, modifiedCount: 0 });
+    const { data, error } = await col.updateOne({ name: "Ghost" }, { $set: { age: 5 } });
+    assert.equal(error, null);
+    assert.deepEqual(data, { matchedCount: 0, modifiedCount: 0 });
   });
 
   // C3: $push/$addToSet validation
   test("$push value validated against array item type: valid", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await assert.doesNotReject(
-      () => col.updateOne({ name: "Alice" }, { $push: { tags: "newtag" } })
-    );
+    const { data, error } = await col.updateOne({ name: "Alice" }, { $push: { tags: "newtag" } });
+    assert.equal(error, null);
+    assert.ok(data !== null);
   });
 
-  test("$push value validated against array item type: invalid throws", async () => {
+  test("$push value validated against array item type: invalid returns error", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await assert.rejects(
-      () => col.updateOne({ name: "Alice" }, { $push: { tags: 42 as unknown as string } }),
-      (err: unknown) => err instanceof ValidationError
-    );
+    const { data, error } = await col.updateOne({ name: "Alice" }, { $push: { tags: 42 as unknown as string } });
+    assert.equal(data, null);
+    assert.ok(error instanceof ValidationError);
   });
 
-  test("$addToSet value validated against array item type: invalid throws", async () => {
+  test("$addToSet value validated against array item type: invalid returns error", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await assert.rejects(
-      () => col.updateOne({ name: "Alice" }, { $addToSet: { tags: true as unknown as string } }),
-      (err: unknown) => err instanceof ValidationError
-    );
+    const { data, error } = await col.updateOne({ name: "Alice" }, { $addToSet: { tags: true as unknown as string } });
+    assert.equal(data, null);
+    assert.ok(error instanceof ValidationError);
   });
 });
 
@@ -365,8 +365,9 @@ describe("Collection.updateMany()", () => {
   test("returns { matchedCount: N, modifiedCount: N }", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    const result = await col.updateMany({ role: "user" }, { $set: { role: "member" } });
-    assert.deepEqual(result, { matchedCount: 3, modifiedCount: 3 });
+    const { data, error } = await col.updateMany({ role: "user" }, { $set: { role: "member" } });
+    assert.equal(error, null);
+    assert.deepEqual(data, { matchedCount: 3, modifiedCount: 3 });
   });
 
   test("maps filter _id → id", async () => {
@@ -389,13 +390,12 @@ describe("Collection.updateMany()", () => {
   });
 
   // C3: $push/$addToSet in updateMany
-  test("$push invalid value in updateMany throws", async () => {
+  test("$push invalid value in updateMany returns error", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await assert.rejects(
-      () => col.updateMany({ role: "user" }, { $push: { tags: 99 as unknown as string } }),
-      (err: unknown) => err instanceof ValidationError
-    );
+    const { data, error } = await col.updateMany({ role: "user" }, { $push: { tags: 99 as unknown as string } });
+    assert.equal(data, null);
+    assert.ok(error instanceof ValidationError);
   });
 });
 
@@ -407,8 +407,9 @@ describe("Collection.deleteOne()", () => {
   test("returns { deletedCount: 1 } when doc found", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    const result = await col.deleteOne({ name: "Alice" });
-    assert.deepEqual(result, { deletedCount: 1 });
+    const { data, error } = await col.deleteOne({ name: "Alice" });
+    assert.equal(error, null);
+    assert.deepEqual(data, { deletedCount: 1 });
   });
 
   test("returns { deletedCount: 0 } when no doc", async () => {
@@ -416,8 +417,9 @@ describe("Collection.deleteOne()", () => {
       deleteOne: () => Promise.resolve(null as unknown as string),
     });
     const col = new Collection("users", schema, native);
-    const result = await col.deleteOne({ name: "Ghost" });
-    assert.deepEqual(result, { deletedCount: 0 });
+    const { data, error } = await col.deleteOne({ name: "Ghost" });
+    assert.equal(error, null);
+    assert.deepEqual(data, { deletedCount: 0 });
   });
 
   test("maps _id → id in filter", async () => {
@@ -437,8 +439,9 @@ describe("Collection.deleteMany()", () => {
   test("returns { deletedCount: N } from native result", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    const result = await col.deleteMany({ role: "user" });
-    assert.deepEqual(result, { deletedCount: 5 });
+    const { data, error } = await col.deleteMany({ role: "user" });
+    assert.equal(error, null);
+    assert.deepEqual(data, { deletedCount: 5 });
   });
 
   test("maps _id → id in filter", async () => {
@@ -458,8 +461,9 @@ describe("Collection.countDocuments()", () => {
   test("returns count from native", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    const n = await col.countDocuments({});
-    assert.equal(n, 7);
+    const { data, error } = await col.countDocuments({});
+    assert.equal(error, null);
+    assert.equal(data, 7);
   });
 
   test("maps _id → id in filter", async () => {
@@ -486,8 +490,9 @@ describe("Collection.distinct()", () => {
   test("returns array of distinct values", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    const values = await col.distinct("role");
-    assert.deepEqual(values, ["admin", "user"]);
+    const { data, error } = await col.distinct("role");
+    assert.equal(error, null);
+    assert.deepEqual(data, ["admin", "user"]);
   });
 
   test("passes field name to native", async () => {
@@ -558,9 +563,10 @@ describe("Collection.aggregate()", () => {
   test("returns mapped docs (id → _id)", async () => {
     const { native } = makeMockNative();
     const col = new Collection("users", schema, native);
-    const results = await col.aggregate([{ $match: { role: "admin" } }]);
-    assert.ok("_id" in results[0]);
-    assert.equal(results[0]._id, "g1");
+    const { data, error } = await col.aggregate([{ $match: { role: "admin" } }]);
+    assert.equal(error, null);
+    assert.ok(data !== null && "_id" in data[0]);
+    assert.equal(data[0]._id, "g1");
   });
 
   test("passes $match with mapped filter", async () => {

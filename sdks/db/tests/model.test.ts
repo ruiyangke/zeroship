@@ -49,17 +49,19 @@ describe("model() — builder schema", () => {
   test("returned Collection has working create()", async () => {
     const native = makeMockNative();
     const Users = model("users", { name: t.string().required() }, native);
-    const result = await Users.create({ name: "Alice" });
-    assert.ok("_id" in result);
-    assert.equal(result.name, "Alice");
+    const { data, error } = await Users.create({ name: "Alice" });
+    assert.equal(error, null);
+    assert.ok(data !== null && "_id" in data);
+    assert.equal(data.name, "Alice");
   });
 
   test("returned Collection has working findOne()", async () => {
     const native = makeMockNative();
     const Users = model("users", { name: t.string() }, native);
-    const result = await Users.findOne({ name: "Alice" });
-    assert.ok(result !== null);
-    assert.equal(result._id, "xyz");
+    const { data, error } = await Users.findOne({ name: "Alice" });
+    assert.equal(error, null);
+    assert.ok(data !== null);
+    assert.equal(data._id, "xyz");
   });
 });
 
@@ -84,8 +86,9 @@ describe("model() — Mongoose schema", () => {
       name: { type: String, required: true },
     };
     const Users = model("users", schema, native);
-    const result = await Users.create({ name: "Bob" });
-    assert.ok("_id" in result);
+    const { data, error } = await Users.create({ name: "Bob" });
+    assert.equal(error, null);
+    assert.ok(data !== null && "_id" in data);
   });
 });
 
@@ -111,8 +114,10 @@ describe("model() — nativeOverride", () => {
   test("nativeOverride result is used (not globalThis)", async () => {
     const mockNative = makeMockNative();
     const Users = model("articles", { title: t.string().required() }, mockNative);
-    const result = await Users.create({ title: "Hello" });
-    assert.equal(result._id, "mock-id");
+    const { data, error } = await Users.create({ title: "Hello" });
+    assert.equal(error, null);
+    assert.ok(data !== null);
+    assert.equal(data._id, "mock-id");
   });
 });
 

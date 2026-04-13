@@ -7,6 +7,19 @@
 /** Generic plain object type used throughout the SDK. */
 export type PlainObject = Record<string, unknown>;
 
+/** Return type for all Collection methods. Never throws — errors are values. */
+export type Result<T> = { data: T; error: null } | { data: null; error: Error };
+
+/** Wraps a successful value in Result. */
+export function ok<T>(data: T): Result<T> {
+  return { data, error: null };
+}
+
+/** Wraps an error in Result. */
+export function err<T>(error: Error): Result<T> {
+  return { data: null, error };
+}
+
 /** Primitive field type names supported by the SDK. */
 export type PrimitiveTypeName = "string" | "number" | "boolean" | "date" | "json";
 /** Definition for an array field with a declared item type. */

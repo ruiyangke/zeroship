@@ -13,7 +13,7 @@ import {
   translateAggregatePipeline,
 } from "./utils.js";
 import { Query } from "./query.js";
-import { PlainObject } from "./types.js";
+import { PlainObject, Result, ok, err } from "./types.js";
 
 /** Interface that the native appbase.db.* layer must satisfy. */
 export interface NativeDb {
@@ -40,6 +40,18 @@ export interface NativeDb {
     filter: unknown
   ): Promise<string>;
   aggregate(collection: string, pipeline: unknown): Promise<string>;
+}
+
+/**
+ * Converts a caught value to an Error for inclusion in a Result.
+ * ValidationError instances are returned as-is (they are already well-typed).
+ * All other errors are passed through mapNativeError so that, e.g., unique
+ * constraint violations receive code 11000.
+ */
+function toResultError(e: unknown): Error {
+  if (e instanceof ValidationError) return e;
+  const msg = e instanceof Error ? e.message : String(e);
+  return mapNativeError(msg);
 }
 
 /** Parses a raw JSON string (or already-parsed value) from the native layer. */
@@ -128,14 +140,14 @@ export class Collection {
    * Inserts a single document after validating it against the schema.
    * Returns the persisted document with `_id`, `createdAt`, and `updatedAt` mapped.
    */
-  async create(doc: PlainObject): Promise<PlainObject> {
-    const validated = validateDoc(doc, this._schema);
+  async create(doc: PlainObject): Promise<Result<PlainObject>> {
     try {
+      const validated = validateDoc(doc, this._schema);
       const raw = await this._native.insert(this._name, validated);
       const result = parseRaw<PlainObject>(raw);
-      return mapResultDoc(result!);
-    } catch (err) {
-      throw mapNativeError(String(err instanceof Error ? err.message : err));
+      return ok(mapResultDoc(result!));
+    } catch (e) {
+      return err(toResultError(e));
     }
   }
 
@@ -143,7 +155,7 @@ export class Collection {
    * Alias for `create()`. Inserts a single document after validating it against the schema.
    * Provided for spec compatibility — both `insert()` and `create()` are supported.
    */
-  async insert(doc: PlainObject): Promise<PlainObject> {
+  async insert(doc: PlainObject): Promise<Result<PlainObject>> {
     return this.create(doc);
   }
 
@@ -151,14 +163,14 @@ export class Collection {
    * Inserts multiple documents after validating each one against the schema.
    * Returns the persisted documents with field names mapped to the user-facing shape.
    */
-  async insertMany(docs: PlainObject[]): Promise<PlainObject[]> {
-    const validated = docs.map((doc) => validateDoc(doc, this._schema));
+  async insertMany(docs: PlainObject[]): Promise<Result<PlainObject[]>> {
     try {
+      const validated = docs.map((doc) => validateDoc(doc, this._schema));
       const raw = await this._native.insertMany(this._name, validated);
       const results = parseRaw<PlainObject[]>(raw);
-      return (results ?? []).map(mapResultDoc);
-    } catch (err) {
-      throw mapNativeError(String(err instanceof Error ? err.message : err));
+      return ok((results ?? []).map(mapResultDoc));
+    } catch (e) {
+      return err(toResultError(e));
     }
   }
 
@@ -166,16 +178,16 @@ export class Collection {
    * Finds and returns the first document matching `filter`, or `null` if none exists.
    * Field names in `filter` are mapped outbound before the native call.
    */
-  async findOne(filter: PlainObject): Promise<PlainObject | null> {
-    const mapped = mapFilterOutbound(filter);
+  async findOne(filter: PlainObject): Promise<Result<PlainObject | null>> {
     try {
+      const mapped = mapFilterOutbound(filter);
       const raw = await this._native.findOne(this._name, mapped);
-      if (raw === null) return null;
+      if (raw === null) return ok(null);
       const result = parseRaw<PlainObject>(raw);
-      if (result === null) return null;
-      return mapResultDoc(result);
-    } catch (err) {
-      throw mapNativeError(String(err instanceof Error ? err.message : err));
+      if (result === null) return ok(null);
+      return ok(mapResultDoc(result));
+    } catch (e) {
+      return err(toResultError(e));
     }
   }
 
@@ -201,13 +213,13 @@ export class Collection {
   async updateOne(
     filter: PlainObject,
     update: PlainObject
-  ): Promise<{ matchedCount: number; modifiedCount: number }> {
-    const fields = extractUpdateFields(update);
-    validatePartial(fields, this._schema);
-    validateArrayPushOps(update, this._schema);
-    const mappedFilter = mapFilterOutbound(filter);
-    const mappedUpdate = mapUpdateOutbound(update);
+  ): Promise<Result<{ matchedCount: number; modifiedCount: number }>> {
     try {
+      const fields = extractUpdateFields(update);
+      validatePartial(fields, this._schema);
+      validateArrayPushOps(update, this._schema);
+      const mappedFilter = mapFilterOutbound(filter);
+      const mappedUpdate = mapUpdateOutbound(update);
       const raw = await this._native.updateOne(
         this._name,
         mappedFilter,
@@ -215,9 +227,9 @@ export class Collection {
       );
       const result = parseRaw(raw);
       const matched = result !== null && typeof result === "object" ? 1 : 0;
-      return { matchedCount: matched, modifiedCount: matched };
-    } catch (err) {
-      throw mapNativeError(String(err instanceof Error ? err.message : err));
+      return ok({ matchedCount: matched, modifiedCount: matched });
+    } catch (e) {
+      return err(toResultError(e));
     }
   }
 
@@ -230,13 +242,13 @@ export class Collection {
   async updateMany(
     filter: PlainObject,
     update: PlainObject
-  ): Promise<{ matchedCount: number; modifiedCount: number }> {
-    const fields = extractUpdateFields(update);
-    validatePartial(fields, this._schema);
-    validateArrayPushOps(update, this._schema);
-    const mappedFilter = mapFilterOutbound(filter);
-    const mappedUpdate = mapUpdateOutbound(update);
+  ): Promise<Result<{ matchedCount: number; modifiedCount: number }>> {
     try {
+      const fields = extractUpdateFields(update);
+      validatePartial(fields, this._schema);
+      validateArrayPushOps(update, this._schema);
+      const mappedFilter = mapFilterOutbound(filter);
+      const mappedUpdate = mapUpdateOutbound(update);
       const raw = await this._native.updateMany(
         this._name,
         mappedFilter,
@@ -244,9 +256,9 @@ export class Collection {
       );
       const result = parseRaw<{ updated: number }>(raw);
       const n = result?.updated ?? 0;
-      return { matchedCount: n, modifiedCount: n };
-    } catch (err) {
-      throw mapNativeError(String(err instanceof Error ? err.message : err));
+      return ok({ matchedCount: n, modifiedCount: n });
+    } catch (e) {
+      return err(toResultError(e));
     }
   }
 
@@ -254,14 +266,14 @@ export class Collection {
    * Deletes the first document matching `filter`.
    * Returns `{ deletedCount: 1 }` if a document was found, `{ deletedCount: 0 }` otherwise.
    */
-  async deleteOne(filter: PlainObject): Promise<{ deletedCount: number }> {
-    const mapped = mapFilterOutbound(filter);
+  async deleteOne(filter: PlainObject): Promise<Result<{ deletedCount: number }>> {
     try {
+      const mapped = mapFilterOutbound(filter);
       const raw = await this._native.deleteOne(this._name, mapped);
       const result = parseRaw(raw);
-      return { deletedCount: result !== null ? 1 : 0 };
-    } catch (err) {
-      throw mapNativeError(String(err instanceof Error ? err.message : err));
+      return ok({ deletedCount: result !== null ? 1 : 0 });
+    } catch (e) {
+      return err(toResultError(e));
     }
   }
 
@@ -269,14 +281,14 @@ export class Collection {
    * Deletes all documents matching `filter`.
    * Returns `{ deletedCount: N }` where N is the number of documents removed.
    */
-  async deleteMany(filter: PlainObject): Promise<{ deletedCount: number }> {
-    const mapped = mapFilterOutbound(filter);
+  async deleteMany(filter: PlainObject): Promise<Result<{ deletedCount: number }>> {
     try {
+      const mapped = mapFilterOutbound(filter);
       const raw = await this._native.deleteMany(this._name, mapped);
       const result = parseRaw<{ deleted: number }>(raw);
-      return { deletedCount: result?.deleted ?? 0 };
-    } catch (err) {
-      throw mapNativeError(String(err instanceof Error ? err.message : err));
+      return ok({ deletedCount: result?.deleted ?? 0 });
+    } catch (e) {
+      return err(toResultError(e));
     }
   }
 
@@ -284,14 +296,14 @@ export class Collection {
    * Counts documents matching `filter`. Defaults to counting all documents when
    * no filter is provided.
    */
-  async countDocuments(filter: PlainObject = {}): Promise<number> {
-    const mapped = mapFilterOutbound(filter);
+  async countDocuments(filter: PlainObject = {}): Promise<Result<number>> {
     try {
+      const mapped = mapFilterOutbound(filter);
       const raw = await this._native.count(this._name, mapped);
       const result = parseRaw<{ count: number }>(raw);
-      return result?.count ?? 0;
-    } catch (err) {
-      throw mapNativeError(String(err instanceof Error ? err.message : err));
+      return ok(result?.count ?? 0);
+    } catch (e) {
+      return err(toResultError(e));
     }
   }
 
@@ -299,14 +311,14 @@ export class Collection {
    * Returns the unique values of `field` across documents matching `filter`.
    * Defaults to all documents when no filter is provided.
    */
-  async distinct(field: string, filter: PlainObject = {}): Promise<unknown[]> {
-    const mapped = mapFilterOutbound(filter);
+  async distinct(field: string, filter: PlainObject = {}): Promise<Result<unknown[]>> {
     try {
+      const mapped = mapFilterOutbound(filter);
       const raw = await this._native.distinct(this._name, field, mapped);
       const result = parseRaw<unknown[]>(raw);
-      return result ?? [];
-    } catch (err) {
-      throw mapNativeError(String(err instanceof Error ? err.message : err));
+      return ok(result ?? []);
+    } catch (e) {
+      return err(toResultError(e));
     }
   }
 
@@ -314,14 +326,14 @@ export class Collection {
    * Runs an aggregation pipeline (MongoDB-style) and returns the mapped results.
    * `$group`, `$match`, and accumulator expressions are translated to the native format.
    */
-  async aggregate(pipeline: PlainObject[]): Promise<PlainObject[]> {
-    const translated = translateAggregatePipeline(pipeline);
+  async aggregate(pipeline: PlainObject[]): Promise<Result<PlainObject[]>> {
     try {
+      const translated = translateAggregatePipeline(pipeline);
       const raw = await this._native.aggregate(this._name, translated);
       const results = parseRaw<PlainObject[]>(raw);
-      return (results ?? []).map(mapResultDoc);
-    } catch (err) {
-      throw mapNativeError(String(err instanceof Error ? err.message : err));
+      return ok((results ?? []).map(mapResultDoc));
+    } catch (e) {
+      return err(toResultError(e));
     }
   }
 }
