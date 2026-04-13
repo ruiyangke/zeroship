@@ -317,8 +317,16 @@ fn column_to_json(row: &appbase_pg::Row, name: &str, oid: u32) -> Value {
             }
             _ => Value::Null,
         },
-        // JSON = 114, JSONB = 3802
-        114 | 3802 => match row.try_get::<String>(name) {
+        // JSONB = 3802 — binary format has 1-byte version prefix, strip it
+        3802 => match row.raw_value(name) {
+            Some(bytes) if bytes.len() > 1 => {
+                let json_str = std::str::from_utf8(&bytes[1..]).unwrap_or("null");
+                serde_json::from_str(json_str).unwrap_or(Value::Null)
+            }
+            _ => Value::Null,
+        },
+        // JSON = 114 — text format, no prefix
+        114 => match row.try_get::<String>(name) {
             Ok(s) => serde_json::from_str(&s).unwrap_or(Value::String(s)),
             Err(_) => Value::Null,
         },
