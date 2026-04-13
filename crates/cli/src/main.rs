@@ -46,7 +46,31 @@ fn cmd_build(args: &[String]) {
             .unwrap_or_else(|| input_path.file_name().unwrap().to_string_lossy().to_string())
     };
 
-    let (entry_name, source, source_map) = compile_input(&input_path, minify);
+    // For JSX/TSX single files, run SWC compiler to split server + client
+    let (entry_name, source, source_map, client_html) = if input_path.is_file() && {
+        let name = input_path.file_name().unwrap().to_string_lossy();
+        name.ends_with(".jsx") || name.ends_with(".tsx")
+    } {
+        let raw = std::fs::read_to_string(&input_path).expect("Failed to read input file");
+        let project_root = input_path.parent().unwrap_or(std::path::Path::new("."));
+        let result = zeroship_compiler::compile_with_options(
+            &raw,
+            zeroship_compiler::Target::Rust,
+            minify,
+            Some(project_root),
+        );
+        if !result.server.is_empty() {
+            let html = result.entry_component.as_ref().map(|component| {
+                generate_client_html(&result.client, component)
+            });
+            ("index.js".to_string(), result.server, None, html)
+        } else {
+            ("index.js".to_string(), raw, None, None)
+        }
+    } else {
+        let (name, source, map) = compile_input(&input_path, minify);
+        (name, source, map, None)
+    };
 
     let module_type = if entry_name.ends_with(".json") {
         ModuleType::Json
@@ -65,6 +89,14 @@ fn cmd_build(args: &[String]) {
     // Write .appbundle
     let bundle_path = PathBuf::from(&outdir).join("app.appbundle");
     std::fs::write(&bundle_path, &bytes).expect("Failed to write .appbundle");
+
+    // Write client HTML if generated
+    if let Some(ref html) = client_html {
+        let client_dir = PathBuf::from(&outdir).join("public");
+        std::fs::create_dir_all(&client_dir).expect("Failed to create public directory");
+        std::fs::write(client_dir.join("index.html"), html).expect("Failed to write index.html");
+        eprintln!("  client: {}/public/index.html", outdir);
+    }
 
     // Write source map
     let source_map_file = if let Some(ref map) = source_map {
@@ -185,7 +217,9 @@ fn cmd_serve(args: &[String]) {
     } else if input_path.is_dir() {
         build_and_load_dir(&input_path)
     } else {
-        build_and_load_file(&input_path)
+        let (mods, _client_html) = build_and_load_file(&input_path);
+        // Client HTML is written to dist/public/ by build — gateway serves it.
+        mods
     };
 
     eprintln!("[zeroship] Starting server on port {port}");
@@ -508,7 +542,7 @@ fn build_and_load_dir(dir: &PathBuf) -> Vec<ModuleEntry> {
     }]
 }
 
-fn build_and_load_file(path: &PathBuf) -> Vec<ModuleEntry> {
+fn build_and_load_file(path: &PathBuf) -> (Vec<ModuleEntry>, Option<String>) {
     let source = std::fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("Failed to read {}: {e}", path.display());
         std::process::exit(1);
@@ -527,22 +561,17 @@ fn build_and_load_file(path: &PathBuf) -> Vec<ModuleEntry> {
 
         if !result.server.is_empty() {
             eprintln!("[zeroship] Compiled {} → server + client", path.display());
-            let mut modules = vec![ModuleEntry {
+            let modules = vec![ModuleEntry {
                 specifier: "index.js".into(),
                 source: result.server,
             }];
 
-            // If there's a client bundle with an entry component, generate HTML
-            if let Some(ref component) = result.entry_component {
-                let html = generate_client_html(&result.client, component);
-                modules.push(ModuleEntry {
-                    specifier: "__client.html".into(),
-                    source: html,
-                });
+            let html = result.entry_component.as_ref().map(|component| {
                 eprintln!("[zeroship] Generated client HTML (entry: {component})");
-            }
+                generate_client_html(&result.client, component)
+            });
 
-            return modules;
+            return (modules, html);
         }
     }
 
@@ -551,10 +580,10 @@ fn build_and_load_file(path: &PathBuf) -> Vec<ModuleEntry> {
         path.display(),
         source.len() as f64 / 1024.0
     );
-    vec![ModuleEntry {
+    (vec![ModuleEntry {
         specifier: name,
         source,
-    }]
+    }], None)
 }
 
 /// Generate an HTML page that loads React and renders the client bundle.
