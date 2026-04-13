@@ -1,0 +1,8 @@
+{
+  "name": "todo-app",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@appbase/db": "file:../../sdks/db"
+  }
+}
