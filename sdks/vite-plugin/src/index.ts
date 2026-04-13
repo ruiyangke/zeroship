@@ -1,30 +1,24 @@
 /**
- * @zeroship/vite-plugin — full-stack Vite 8 integration for zeroship.
+ * @zeroship/vite-plugin — full-stack Vite 8 plugin for zeroship.
+ *
+ * Uses only Rolldown/Vite APIs — no @swc/core dependency.
  *
  * Usage:
  *   import { zeroship } from '@zeroship/vite-plugin'
  *   export default defineConfig({ plugins: [react(), zeroship()] })
  *
- * What it does:
- *   - Detects "use server" modules and functions via @swc/core AST analysis
- *   - Replaces server function exports with RPC stubs in client code
- *   - Builds server code as .appbundle via zeroship CLI
- *   - In dev: runs a zeroship runtime alongside Vite, proxies /_rpc
- *   - In build: outputs dist/ (client) + dist/server/ (.appbundle)
- *
- * Vite 8 compatibility:
- *   - Uses hook filter feature for performance (only transforms TS/TSX/JS/JSX)
- *   - Compatible with Rolldown bundler
- *   - Environment-aware (client environment only — server is external)
+ * How it works:
+ *   1. transform hook: this.parse() detects "use server" + taint analysis
+ *   2. Server functions replaced with RPC fetch() stubs in client code
+ *   3. Dev: proxies /_rpc to a local zeroship runtime child process
+ *   4. Build: Rolldown build() bundles server code after Vite finishes client
  */
 
 import type { Plugin, ResolvedConfig, ViteDevServer } from "vite";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { resolve, relative, extname } from "node:path";
-import { analyzeModule, isServerModuleQuick } from "./analyze.js";
-import { transformToClient } from "./stub.js";
-import { buildServerBundle } from "./server-bundle.js";
-import { startDevServer, stopDevServer, restartDevServer } from "./dev-server.js";
+import { ChildProcess, spawn } from "node:child_process";
+import http from "node:http";
 
 export interface ZeroshipOptions {
   /** RPC endpoint path (default: "/_rpc") */
@@ -35,13 +29,6 @@ export interface ZeroshipOptions {
   devServerPort?: number;
 }
 
-/**
- * Vite plugin for zeroship full-stack apps.
- *
- * Handles "use server" convention: server functions are automatically
- * replaced with RPC stubs in the client build, and bundled separately
- * for the zeroship runtime.
- */
 export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
   const rpcEndpoint = options.rpcEndpoint ?? "/_rpc";
   const devPort = options.devServerPort ?? 3001;
@@ -49,22 +36,21 @@ export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
   let config: ResolvedConfig;
   let isDev = false;
   let root = "";
+  let serverProcess: ChildProcess | null = null;
 
-  // Cache: module path → is "use server" module
+  // Caches
   const serverModuleCache = new Map<string, boolean>();
-  // Cache: resolved package specifier → is server package
-  const serverPackageCache = new Map<string, boolean>();
-  // Track server functions per file for build report
   const serverFunctionMap = new Map<string, string[]>();
-  // Known server module specifiers (resolved once at startup)
   const knownServerSources = new Set<string>();
 
-  /** Check if a file has "use server" at top (cached) */
-  function checkServerModule(filePath: string): boolean {
+  // --- Helpers ---
+
+  /** Check if a file's first non-comment line is "use server" */
+  function isServerFile(filePath: string): boolean {
     if (serverModuleCache.has(filePath)) return serverModuleCache.get(filePath)!;
     try {
       const code = readFileSync(filePath, "utf-8");
-      const result = isServerModuleQuick(code);
+      const result = checkDirective(code, "use server");
       serverModuleCache.set(filePath, result);
       return result;
     } catch {
@@ -73,65 +59,110 @@ export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
     }
   }
 
-  /** Check if an npm package is a server module (cached) */
-  function checkServerPackage(specifier: string): boolean {
-    if (serverPackageCache.has(specifier)) return serverPackageCache.get(specifier)!;
+  /** Check if code starts with a directive string */
+  function checkDirective(code: string, directive: string): boolean {
+    for (const line of code.split("\n")) {
+      const t = line.trim();
+      if (t === "" || t.startsWith("//") || t.startsWith("/*")) continue;
+      return t === `"${directive}"` || t === `"${directive}";`
+          || t === `'${directive}'` || t === `'${directive}';`;
+    }
+    return false;
+  }
+
+  /** Resolve a package specifier to its entry file and check for "use server" */
+  function isServerPackage(specifier: string): boolean {
+    if (serverModuleCache.has(specifier)) return serverModuleCache.get(specifier)!;
 
     const pkgDir = resolve(root, "node_modules", specifier);
-    if (!existsSync(pkgDir)) {
-      serverPackageCache.set(specifier, false);
-      return false;
-    }
+    if (!existsSync(pkgDir)) { serverModuleCache.set(specifier, false); return false; }
 
-    const pkgJsonPath = resolve(pkgDir, "package.json");
-    if (!existsSync(pkgJsonPath)) {
-      serverPackageCache.set(specifier, false);
-      return false;
-    }
+    const pkgPath = resolve(pkgDir, "package.json");
+    if (!existsSync(pkgPath)) { serverModuleCache.set(specifier, false); return false; }
 
     try {
-      const pkg = JSON.parse(readFileSync(pkgJsonPath, "utf-8"));
-      const entry =
-        pkg.exports?.["."]?.import ??
-        pkg.exports?.["."]?.default ??
-        (typeof pkg.exports?.["."] === "string" ? pkg.exports["."] : null) ??
-        pkg.module ??
-        pkg.main;
+      const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
+      const entry = pkg.exports?.["."]?.import
+        ?? pkg.exports?.["."]?.default
+        ?? (typeof pkg.exports?.["."] === "string" ? pkg.exports["."] : null)
+        ?? pkg.module ?? pkg.main;
+      if (!entry) { serverModuleCache.set(specifier, false); return false; }
 
-      if (!entry) {
-        serverPackageCache.set(specifier, false);
-        return false;
-      }
-
-      const entryPath = resolve(pkgDir, entry);
-      const result = checkServerModule(entryPath);
-      serverPackageCache.set(specifier, result);
+      const result = isServerFile(resolve(pkgDir, entry));
+      serverModuleCache.set(specifier, result);
       return result;
     } catch {
-      serverPackageCache.set(specifier, false);
+      serverModuleCache.set(specifier, false);
       return false;
     }
   }
 
-  /** Scan node_modules/@zeroship/* to find server packages */
+  /** Scan @zeroship/* packages for "use server" */
   function discoverServerPackages(): void {
     const scopeDir = resolve(root, "node_modules", "@zeroship");
     if (!existsSync(scopeDir)) return;
-
     try {
       for (const pkg of readdirSync(scopeDir)) {
-        const specifier = `@zeroship/${pkg}`;
-        if (checkServerPackage(specifier)) {
-          knownServerSources.add(specifier);
-        }
+        const spec = `@zeroship/${pkg}`;
+        if (isServerPackage(spec)) knownServerSources.add(spec);
       }
-    } catch {
-      // ignore
-    }
+    } catch { /* ignore */ }
   }
 
+  /** Generate an RPC stub for a function name */
+  function makeStub(name: string): string {
+    return `export async function ${name}(...args) {
+  const res = await fetch(${JSON.stringify(rpcEndpoint)}, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", method: ${JSON.stringify(name)}, params: args, id: Date.now() })
+  });
+  const json = await res.json();
+  if (json.error) throw new Error(json.error.message || "RPC error");
+  return json.result;
+}`;
+  }
+
+  /** Remove a named function (export async function name(...) { ... }) from code */
+  function removeFunction(code: string, name: string): string {
+    const pattern = new RegExp(
+      `export\\s+(async\\s+)?function\\s+${name}\\s*\\([^)]*\\)[^{]*\\{`,
+      "m"
+    );
+    const match = pattern.exec(code);
+    if (!match) return code;
+
+    const start = match.index;
+    let depth = 0;
+    let inStr: string | null = null;
+    let escaped = false;
+    const braceStart = code.indexOf("{", start + match[0].length - 1);
+
+    for (let i = braceStart; i < code.length; i++) {
+      const ch = code[i];
+      if (escaped) { escaped = false; continue; }
+      if (ch === "\\") { escaped = true; continue; }
+      if (inStr) { if (ch === inStr) inStr = null; continue; }
+      if (ch === '"' || ch === "'" || ch === "`") { inStr = ch; continue; }
+      if (ch === "{") depth++;
+      if (ch === "}") { depth--; if (depth === 0) return code.slice(0, start) + code.slice(i + 1); }
+    }
+    return code;
+  }
+
+  /** Find server entry point in project */
+  function findServerEntry(): string | null {
+    if (options.serverEntry) return options.serverEntry;
+    const candidates = ["src/index.ts", "src/index.tsx", "src/server.ts", "src/index.js", "src/server.js"];
+    for (const c of candidates) {
+      if (existsSync(resolve(root, c))) return c;
+    }
+    return null;
+  }
+
+  // --- Plugins ---
+
   return [
-    // Plugin 1: Transform — detect "use server" and generate RPC stubs
     {
       name: "zeroship:transform",
       enforce: "pre" as const,
@@ -140,138 +171,250 @@ export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
         config = resolvedConfig;
         isDev = config.command === "serve";
         root = config.root;
-
-        // Discover server packages on startup
         discoverServerPackages();
       },
 
-      // Vite 8 hook filter: only process source files, skip node_modules
       transform: {
         filter: {
-          id: {
-            include: /\.(ts|tsx|js|jsx)$/,
-            exclude: /node_modules/,
-          },
+          id: { include: /\.(ts|tsx|js|jsx)$/, exclude: /node_modules/ },
         },
-        handler(code: string, id: string) {
-          // Analyze module for "use server"
-          const analysis = analyzeModule(code, id, knownServerSources);
+        handler(this: any, code: string, id: string) {
+          // 1. Parse AST with Rolldown's built-in parser
+          const isTsx = id.endsWith(".tsx") || id.endsWith(".jsx");
+          const ast = this.parse(code, { lang: isTsx ? "tsx" : "ts" });
 
-          if (analysis.serverFunctions.length === 0) {
-            return null; // No server code — pass through
+          // 2. Check file-level "use server"
+          let isFileServer = false;
+          if (ast.body.length > 0) {
+            const first = ast.body[0];
+            if (
+              first.type === "ExpressionStatement" &&
+              first.expression?.type === "Literal" &&
+              first.expression.value === "use server"
+            ) {
+              isFileServer = true;
+            }
           }
 
-          // Track for build report
-          const relPath = relative(root, id);
-          serverFunctionMap.set(relPath, analysis.serverFunctions);
+          // 3. Collect imports and build taint set
+          const tainted = new Set<string>();
 
-          // Replace server functions with RPC stubs
-          const clientCode = transformToClient(
-            code,
-            analysis.serverFunctions,
-            rpcEndpoint
-          );
+          for (const node of ast.body) {
+            if (node.type === "ImportDeclaration") {
+              const src = node.source?.value;
+              if (!src) continue;
 
-          return { code: clientCode, map: null };
+              const isServer = knownServerSources.has(src)
+                || (src.startsWith("./") || src.startsWith("../"))
+                  && isServerFile(resolve(id, "..", src.replace(/\.(ts|tsx|js|jsx)$/, "") + extname(id)));
+
+              if (isServer) {
+                for (const spec of node.specifiers || []) {
+                  const name = spec.local?.name;
+                  if (name) tainted.add(name);
+                }
+              }
+            }
+          }
+
+          // 4. Propagate taint: const x = taintedFn(...) → x tainted
+          for (const node of ast.body) {
+            if (node.type === "VariableDeclaration") {
+              for (const decl of node.declarations || []) {
+                if (decl.id?.name && decl.init) {
+                  const callee =
+                    decl.init.type === "CallExpression" && decl.init.callee?.name
+                      ? decl.init.callee.name
+                      : decl.init.type === "Identifier"
+                        ? decl.init.name
+                        : null;
+                  if (callee && tainted.has(callee)) {
+                    tainted.add(decl.id.name);
+                  }
+                }
+              }
+            }
+          }
+
+          // 5. Find server functions
+          const serverFns: string[] = [];
+
+          for (const node of ast.body) {
+            if (node.type === "ExportNamedDeclaration" && node.declaration?.type === "FunctionDeclaration") {
+              const name = node.declaration.id?.name;
+              if (!name) continue;
+
+              if (isFileServer) {
+                serverFns.push(name);
+              } else if (hasFnDirective(node.declaration, "use server")) {
+                serverFns.push(name);
+              } else if (fnReferencesAny(node.declaration, tainted)) {
+                serverFns.push(name);
+              }
+            }
+          }
+
+          if (serverFns.length === 0) return null;
+
+          // 6. Track for build report
+          serverFunctionMap.set(relative(root, id), serverFns);
+
+          // 7. Transform: remove server fns, strip server imports, append stubs
+          let result = code;
+
+          // Remove "use server" directive
+          result = result.replace(/^\s*["']use server["'];?\s*\n/, "");
+
+          // Remove each server function
+          for (const fn of serverFns) {
+            result = removeFunction(result, fn);
+          }
+
+          // Remove @zeroship/* imports (server-only)
+          for (const src of knownServerSources) {
+            result = result.replace(
+              new RegExp(`^\\s*import\\s+.*from\\s+['"]${src.replace("/", "\\/")}['"]\\s*;?\\s*$`, "gm"),
+              ""
+            );
+          }
+
+          // Remove tainted variable declarations
+          for (const name of tainted) {
+            result = result.replace(
+              new RegExp(`^\\s*(const|let|var)\\s+${name}\\s*=.*$`, "gm"),
+              ""
+            );
+          }
+
+          // Append RPC stubs
+          result = result.trim() + "\n\n" + serverFns.map(makeStub).join("\n\n") + "\n";
+
+          return { code: result, map: null };
         },
       },
     },
 
-    // Plugin 2: Dev server — zeroship runtime + RPC proxy
+    // Dev server: zeroship runtime + proxy
     {
       name: "zeroship:dev-server",
 
       configureServer(server: ViteDevServer) {
         if (!isDev) return;
 
-        // Start zeroship runtime for server functions
-        startDevServer({
-          root,
-          port: devPort,
-          serverEntry: options.serverEntry,
-        });
-
-        // Proxy /_rpc → zeroship runtime /rpc
-        server.middlewares.use((req, res, next) => {
-          if (!req.url?.startsWith(rpcEndpoint)) {
-            return next();
+        // Start zeroship runtime
+        const entry = findServerEntry();
+        if (entry) {
+          const bin = resolve(root, "node_modules/.bin/zeroship");
+          const cmd = existsSync(bin) ? bin : "zeroship";
+          try {
+            serverProcess = spawn(cmd, ["serve", entry, `--port=${devPort}`, "--workers=1"], {
+              cwd: root,
+              stdio: ["ignore", "pipe", "pipe"],
+            });
+            serverProcess.stdout?.on("data", (d: Buffer) => {
+              const msg = d.toString().trim();
+              if (msg) console.log(`[zeroship:api] ${msg}`);
+            });
+            serverProcess.stderr?.on("data", (d: Buffer) => {
+              const msg = d.toString().trim();
+              if (msg) console.log(`[zeroship:api] ${msg}`);
+            });
+            console.log(`[zeroship] API server starting on :${devPort}`);
+          } catch {
+            console.warn("[zeroship] Failed to start API server — zeroship CLI not found");
           }
+        }
 
-          const http = require("node:http");
+        // Proxy /_rpc → zeroship runtime
+        server.middlewares.use((req, res, next) => {
+          if (!req.url?.startsWith(rpcEndpoint)) return next();
+
           const proxyReq = http.request(
             `http://localhost:${devPort}/rpc`,
             { method: req.method, headers: req.headers },
-            (proxyRes: any) => {
-              res.writeHead(proxyRes.statusCode, proxyRes.headers);
+            (proxyRes) => {
+              res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
               proxyRes.pipe(res);
             }
           );
           req.pipe(proxyReq);
           proxyReq.on("error", () => {
             res.writeHead(503, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "zeroship server not ready" }));
+            res.end('{"error":"zeroship API not ready"}');
           });
         });
-
       },
 
-      /** Use Vite's HMR hook for server code hot-restart */
-      handleHotUpdate({ file, server: _server }: { file: string; server: ViteDevServer }) {
+      handleHotUpdate({ file }: { file: string }) {
         const ext = extname(file);
         if (![".ts", ".tsx", ".js", ".jsx"].includes(ext)) return;
 
         const rel = relative(root, file);
-        const isServerFile =
-          serverFunctionMap.has(rel) ||
-          rel.startsWith("src/index") ||
-          rel.startsWith("src/server");
+        if (serverFunctionMap.has(rel) || rel.startsWith("src/index") || rel.startsWith("src/server")) {
+          console.log(`[zeroship] API changed: ${rel} — restarting`);
+          if (serverProcess) { serverProcess.kill("SIGTERM"); serverProcess = null; }
 
-        if (isServerFile) {
-          console.log(`[zeroship] Server code changed: ${rel} — restarting runtime`);
-          restartDevServer({
-            root,
-            port: devPort,
-            serverEntry: options.serverEntry,
-          });
-          // Invalidate server module cache so next transform re-analyzes
+          const entry = findServerEntry();
+          if (entry) {
+            setTimeout(() => {
+              const bin = resolve(root, "node_modules/.bin/zeroship");
+              const cmd = existsSync(bin) ? bin : "zeroship";
+              try {
+                serverProcess = spawn(cmd, ["serve", entry, `--port=${devPort}`, "--workers=1"], {
+                  cwd: root,
+                  stdio: ["ignore", "pipe", "pipe"],
+                });
+              } catch { /* ignore */ }
+            }, 300);
+          }
+
           serverModuleCache.clear();
         }
       },
 
       buildEnd() {
-        if (isDev) stopDevServer();
+        if (serverProcess) { serverProcess.kill("SIGTERM"); serverProcess = null; }
       },
     },
 
-    // Plugin 3: Build — bundle server code after Vite finishes client
+    // Production build: bundle server with Rolldown
     {
       name: "zeroship:build",
 
-      closeBundle() {
+      async closeBundle() {
         if (isDev) return;
+
+        const entry = findServerEntry();
+        if (!entry) { console.log("[zeroship] No server entry — client-only build"); return; }
 
         const outDir = config.build?.outDir
           ? resolve(root, config.build.outDir)
           : resolve(root, "dist");
 
-        console.log("\n[zeroship] Building server bundle...");
+        const serverOut = resolve(outDir, "server");
 
-        const result = buildServerBundle({
-          root,
-          outDir,
-          serverEntry: options.serverEntry,
-          minify: config.build?.minify !== false,
-        });
+        console.log("\n[zeroship] Building server bundle with Rolldown...");
 
-        if (result) {
-          console.log(`[zeroship] Server: ${result.bundlePath}`);
-          if (result.serverFunctions.length > 0) {
-            console.log(
-              `[zeroship] RPC endpoints: ${result.serverFunctions.join(", ")}`
-            );
-          }
-        } else {
-          console.log("[zeroship] No server code — client-only");
+        try {
+          // Rolldown is available via Vite's dependency tree
+          const { build } = await import("rolldown" as string) as { build: Function };
+          await build({
+            input: resolve(root, entry),
+            output: {
+              dir: serverOut,
+              format: "esm",
+              entryFileNames: "server.js",
+            },
+            platform: "neutral",
+            resolve: {
+              conditionNames: ["workerd", "worker", "import", "default"],
+            },
+            treeshake: true,
+          });
+
+          console.log(`[zeroship] Server: ${serverOut}/server.js`);
+        } catch (e) {
+          console.error("[zeroship] Server build failed:", e);
         }
 
         // Build report
@@ -286,9 +429,27 @@ export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
   ];
 }
 
-// Re-export for convenience
-export { analyzeModule, isServerModuleQuick } from "./analyze.js";
-export { transformToClient, generateStubs } from "./stub.js";
-export { buildServerBundle } from "./server-bundle.js";
+// --- AST helpers (work with Rolldown's Oxc/ESTree AST) ---
+
+/** Check if a function body starts with a directive */
+function hasFnDirective(fn: any, directive: string): boolean {
+  const stmts = fn.body?.body;
+  if (!stmts || stmts.length === 0) return false;
+  const first = stmts[0];
+  return first.type === "ExpressionStatement"
+    && first.expression?.type === "Literal"
+    && first.expression.value === directive;
+}
+
+/** Check if a function body contains any reference to tainted identifiers */
+function fnReferencesAny(fn: any, tainted: Set<string>): boolean {
+  if (tainted.size === 0) return false;
+  const json = JSON.stringify(fn.body);
+  for (const name of tainted) {
+    // Match identifier nodes: "name":"<tainted>"
+    if (json.includes(`"name":"${name}"`)) return true;
+  }
+  return false;
+}
 
 export default zeroship;
