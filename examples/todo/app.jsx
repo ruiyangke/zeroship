@@ -1,5 +1,4 @@
 import { model } from '@zeroship/db'
-import { serve } from 'zeroship'
 
 const todos = model('todos', {
   text: { type: String, required: true },
@@ -264,5 +263,3 @@ const styles = {
     margin: 0,
   },
 }
-
-serve(App)

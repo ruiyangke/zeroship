@@ -151,10 +151,13 @@ fn analyze(module: &Module, project_root: Option<&Path>) -> Analysis {
     a.server_functions = detector.server_fns;
     a.exported_server_fns = detector.exported_server_fns;
 
-    // Find serve() call
-    let mut serve_finder = ServeFinder { entry: None };
-    module.visit_with(&mut serve_finder);
-    a.entry_component = serve_finder.entry;
+    // Find entry component — a function that returns JSX and isn't a server function
+    let mut jsx_finder = JsxComponentFinder {
+        server_fns: &a.server_functions,
+        entry: None,
+    };
+    module.visit_with(&mut jsx_finder);
+    a.entry_component = jsx_finder.entry;
 
     a
 }
@@ -170,10 +173,6 @@ fn resolve_server_modules(module: &Module, project_root: Option<&Path>) -> HashS
         if let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item {
             let src = import.src.value.as_str().unwrap_or_default().to_string();
 
-            // Skip 'serve' source — it's the client-side render function
-            if src == "zeroship" {
-                continue;
-            }
 
             // Try to resolve the module and check for "use server"
             if let Some(root) = project_root {
@@ -304,17 +303,6 @@ impl Visit for TaintCollector<'_> {
             return;
         }
 
-        // Legacy: import { db, serve } from 'zeroship' — taint everything except 'serve'
-        if src == "zeroship" {
-            for spec in &import.specifiers {
-                if let ImportSpecifier::Named(named) = spec {
-                    let name = named.local.sym.to_string();
-                    if name != "serve" {
-                        self.tainted.insert(name);
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -449,25 +437,43 @@ impl Visit for TaintedRefChecker<'_> {
     }
 }
 
-// --- serve() finder ---
+// --- JSX component finder ---
+// Detects the entry component: a function containing JSX that isn't a server function.
+// Checks both `function App()` and `export default function App()`.
 
-struct ServeFinder {
+struct JsxComponentFinder<'a> {
+    server_fns: &'a HashSet<String>,
     entry: Option<String>,
 }
 
-impl Visit for ServeFinder {
-    fn visit_call_expr(&mut self, call: &CallExpr) {
-        if let Callee::Expr(expr) = &call.callee {
-            if let Expr::Ident(id) = &**expr {
-                if id.sym == "serve" {
-                    if let Some(ExprOrSpread { expr, .. }) = call.args.first() {
-                        if let Expr::Ident(arg) = &**expr {
-                            self.entry = Some(arg.sym.to_string());
-                        }
-                    }
-                }
+impl Visit for JsxComponentFinder<'_> {
+    fn visit_fn_decl(&mut self, fn_decl: &FnDecl) {
+        let name = fn_decl.ident.sym.to_string();
+        if self.entry.is_none() && !self.server_fns.contains(&name) {
+            if contains_jsx(&fn_decl.function) {
+                self.entry = Some(name);
             }
         }
+    }
+}
+
+/// Check if a function body contains any JSX elements.
+fn contains_jsx(func: &Function) -> bool {
+    let mut finder = JsxPresenceChecker { found: false };
+    func.visit_with(&mut finder);
+    finder.found
+}
+
+struct JsxPresenceChecker {
+    found: bool,
+}
+
+impl Visit for JsxPresenceChecker {
+    fn visit_jsx_element(&mut self, _: &JSXElement) {
+        self.found = true;
+    }
+    fn visit_jsx_fragment(&mut self, _: &JSXFragment) {
+        self.found = true;
     }
 }
 
@@ -525,21 +531,11 @@ impl VisitMut for ServerTransformer<'_> {
                 // Imports
                 ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => {
                     let src = import.src.value.as_str().unwrap_or_default().to_string();
-                    let is_server_module = src == "zeroship" || self.analysis.server_modules.contains(&src);
+                    let is_server_module = self.analysis.server_modules.contains(&src);
                     if is_server_module {
                         if self.target == Target::Node {
-                            // Keep server imports but remove 'serve'
-                            let mut import = import.clone();
-                            import.specifiers.retain(|s| {
-                                if let ImportSpecifier::Named(n) = s {
-                                    n.local.sym != "serve"
-                                } else {
-                                    true
-                                }
-                            });
-                            if !import.specifiers.is_empty() {
-                                keep.push(ModuleItem::ModuleDecl(ModuleDecl::Import(import)));
-                            }
+                            // Keep server SDK imports for Node target
+                            keep.push(item);
                         }
                         // Rust target: drop all server imports (primitives are on globalThis)
                     } else {
@@ -590,7 +586,7 @@ impl VisitMut for ServerTransformer<'_> {
                     }
                 }
 
-                // Drop everything else (components, styles, serve() calls, TS types)
+                // Drop everything else (components, styles, TS types)
                 _ => {}
             }
         }
@@ -664,7 +660,7 @@ impl VisitMut for ClientTransformer<'_> {
                 // Remove server module imports from client
                 ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => {
                     let src = import.src.value.as_str().unwrap_or_default().to_string();
-                    let is_server = src == "zeroship" || self.analysis.server_modules.contains(&src);
+                    let is_server = self.analysis.server_modules.contains(&src);
                     if !is_server {
                         keep.push(item);
                     }
@@ -720,19 +716,9 @@ impl VisitMut for ClientTransformer<'_> {
                     }
                 }
 
-                // Remove serve() calls
-                ModuleItem::Stmt(Stmt::Expr(ExprStmt { expr, .. })) => {
-                    let is_serve = if let Expr::Call(call) = &**expr {
-                        if let Callee::Expr(callee) = &call.callee {
-                            if let Expr::Ident(id) = &**callee {
-                                id.sym == "serve"
-                            } else { false }
-                        } else { false }
-                    } else { false };
-
-                    if !is_serve {
-                        keep.push(item);
-                    }
+                // Keep other expression statements
+                ModuleItem::Stmt(Stmt::Expr(_)) => {
+                    keep.push(item);
                 }
 
                 // Keep everything else
@@ -784,42 +770,40 @@ mod tests {
 
     #[test]
     fn basic_split() {
+        let dir = setup_mock_project();
         let source = r#"
-import { db, serve } from 'zeroship'
-const todos = db.collection('todos')
-export async function addTodo(text) { return todos.insert({ text, done: false }) }
-export async function getTodos() { return todos.find() }
+import { model } from "@zeroship/db"
+const todos = model("todos", { text: String })
+export async function addTodo(text) { return todos.create({ text }) }
+export async function getTodos() { return todos.find({}) }
 function App() { return <div>hello</div> }
 const styles = { wrapper: { color: 'red' } }
-serve(App)
 "#;
-        let result = compile(source, Target::Node);
+        let result = compile_with_options(source, Target::Node, false, Some(&dir));
         assert!(result.server.contains("addTodo"));
         assert!(result.server.contains("getTodos"));
-        assert!(result.server.contains("db.collection"));
+        assert!(result.server.contains("model"));
         assert!(!result.server.contains("App"));
         assert!(!result.server.contains("styles"));
 
         assert!(result.client.contains("App"));
         assert!(result.client.contains("styles"));
         assert!(result.client.contains("fetch"));
-        assert!(!result.client.contains("db.collection"));
-        assert!(!result.client.contains("serve(App)"));
+        assert!(!result.client.contains("model("));
 
         assert_eq!(result.entry_component, Some("App".to_string()));
         assert_eq!(result.server_functions, vec!["addTodo", "getTodos"]);
+        cleanup(&dir);
     }
 
     #[test]
     fn use_server_directive() {
         let source = r#"
-import { serve } from 'zeroship'
 export async function getTime() {
   "use server"
   return Date.now()
 }
 function App() { return <div>hi</div> }
-serve(App)
 "#;
         let result = compile(source, Target::Node);
         assert!(result.server.contains("getTime"));
@@ -830,63 +814,64 @@ serve(App)
 
     #[test]
     fn rust_target() {
+        let dir = setup_mock_project();
         let source = r#"
-import { db, serve } from 'zeroship'
-const todos = db.collection('todos')
-export async function addTodo(text) { return todos.insert({ text }) }
-export async function getTodos() { return todos.find() }
+import { model } from "@zeroship/db"
+const todos = model("todos", { text: String })
+export async function addTodo(text) { return todos.create({ text }) }
+export async function getTodos() { return todos.find({}) }
 function App() { return <div>hi</div> }
-serve(App)
 "#;
-        let result = compile(source, Target::Rust);
+        let result = compile_with_options(source, Target::Rust, false, Some(&dir));
         assert!(!result.server.contains("import"));
         assert!(!result.server.contains("export"));
         assert!(result.server.contains("globalThis.__rpc"));
         assert!(result.server.contains("addTodo"));
+        cleanup(&dir);
     }
 
     #[test]
     fn no_transitive_taint() {
+        let dir = setup_mock_project();
         let source = r#"
-import { db, serve } from 'zeroship'
-const todos = db.collection('todos')
-export async function getTodos() { return todos.find() }
+import { model } from "@zeroship/db"
+const todos = model("todos", { text: String })
+export async function getTodos() { return todos.find({}) }
 export async function getActive() {
   const all = await getTodos()
   return all.filter(t => !t.done)
 }
 function App() { return <div>hi</div> }
-serve(App)
 "#;
-        let result = compile(source, Target::Node);
+        let result = compile_with_options(source, Target::Node, false, Some(&dir));
         assert!(result.server.contains("getTodos"));
         assert!(!result.server.contains("getActive"));
         assert!(result.client.contains("getActive"));
+        cleanup(&dir);
     }
 
     #[test]
     fn typescript_support() {
+        let dir = setup_mock_project();
         let source = r#"
-import { db, serve } from 'zeroship'
+import { model } from "@zeroship/db"
 interface Todo { id: string; text: string; done: boolean }
-const todos = db.collection('todos')
+const todos = model("todos", { text: String })
 export async function addTodo(text: string): Promise<Todo> {
-  return todos.insert({ text, done: false })
+  return todos.create({ text })
 }
 function App(): JSX.Element { return <div>hello</div> }
-serve(App)
 "#;
-        let result = compile(source, Target::Node);
+        let result = compile_with_options(source, Target::Node, false, Some(&dir));
         assert!(result.server.contains("addTodo"));
         assert!(result.client.contains("App"));
+        cleanup(&dir);
     }
 
     #[test]
     fn no_server_functions() {
         let source = r#"
-import { serve } from 'zeroship'
 function App() { return <div>hello</div> }
-serve(App)
 "#;
         let result = compile(source, Target::Node);
         assert!(result.server.is_empty());
@@ -944,7 +929,6 @@ serve(App)
         let dir = setup_mock_project();
         let source = r#"
 import { model } from "@zeroship/db"
-import { serve } from 'zeroship'
 
 const todos = model("todos", { text: String, done: Boolean })
 
@@ -952,7 +936,7 @@ export async function addTodo(text) { return todos.create({ text }) }
 export async function getTodos() { return todos.find({}) }
 
 function App() { return <div>hello</div> }
-serve(App)
+
 "#;
         let result = compile_with_options(source, Target::Node, false, Some(&dir));
 
@@ -974,7 +958,6 @@ serve(App)
         let dir = setup_mock_project();
         let source = r#"
 import { model } from "@zeroship/db"
-import { serve } from 'zeroship'
 
 const todos = model("todos", { text: String })
 
@@ -982,7 +965,7 @@ export async function addTodo(text) { return todos.create({ text }) }
 export async function getTodos() { return todos.find({}) }
 
 function App() { return <div>hi</div> }
-serve(App)
+
 "#;
         let result = compile_with_options(source, Target::Rust, false, Some(&dir));
 
@@ -998,7 +981,6 @@ serve(App)
         let dir = setup_mock_project();
         let source = r#"
 import { model } from "@zeroship/db"
-import { serve } from 'zeroship'
 
 const users = model("users", { name: String })
 
@@ -1008,7 +990,7 @@ export async function getCount() { return users.countDocuments({}) }
 export function formatName(name) { return name.trim().toLowerCase() }
 
 function App() { return <div>hi</div> }
-serve(App)
+
 "#;
         let result = compile_with_options(source, Target::Node, false, Some(&dir));
 
@@ -1026,7 +1008,6 @@ serve(App)
         let source = r#"
 import { model } from "@zeroship/db"
 import { hash } from "@zeroship/auth"
-import { serve } from 'zeroship'
 
 const users = model("users", { name: String, password: String })
 
@@ -1036,7 +1017,7 @@ export async function register(name, password) {
 }
 
 function App() { return <div>hi</div> }
-serve(App)
+
 "#;
         let result = compile_with_options(source, Target::Node, false, Some(&dir));
 
@@ -1052,7 +1033,6 @@ serve(App)
         let dir = setup_mock_project();
         let source = r#"
 import { model } from "@zeroship/db"
-import { serve } from 'zeroship'
 
 const users = model("users", { name: String })
 
@@ -1064,7 +1044,7 @@ export async function getTime() {
 }
 
 function App() { return <div>hi</div> }
-serve(App)
+
 "#;
         let result = compile_with_options(source, Target::Node, false, Some(&dir));
 
@@ -1093,14 +1073,13 @@ serve(App)
 
         let source = r#"
 import { debounce } from "lodash"
-import { serve } from 'zeroship'
 
 const handler = debounce(() => {}, 100)
 
 export function handleClick() { handler() }
 
 function App() { return <div>hi</div> }
-serve(App)
+
 "#;
         let result = compile_with_options(source, Target::Node, false, Some(&dir));
 

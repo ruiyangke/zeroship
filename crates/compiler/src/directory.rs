@@ -126,8 +126,9 @@ mod tests {
             ("layout.jsx", "export default function Layout({ children }) { return <div>{children}</div> }"),
             ("page.jsx", "export default function Home() { return <h1>Home</h1> }"),
             ("todos/page.jsx", "export default function Todos() { return <div>Todos</div> }"),
-            ("todos/server.js", r#"import { db } from 'zeroship'
-const todos = db.collection('todos')
+            ("todos/server.js", r#"
+"use server"
+const todos = { find() {}, insert(x) { return x } }
 export async function getTodos() { return todos.find() }
 export async function addTodo(text) { return todos.insert({ text, done: false }) }
 "#),
@@ -147,7 +148,6 @@ export async function addTodo(text) { return todos.insert({ text, done: false })
         // Check server bundle
         assert!(result.server_bundle.contains("getTodos"));
         assert!(result.server_bundle.contains("addTodo"));
-        assert!(result.server_bundle.contains("db.collection"));
 
         // Check page client code
         let root = result.routes.iter().find(|r| r.path == "/").unwrap();
