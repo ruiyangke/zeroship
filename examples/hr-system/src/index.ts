@@ -12,308 +12,307 @@
  *   zeroship deploy . --app=<uuid> --control=http://localhost:9090 --key=<key>
  */
 
-import { createDb } from "@zeroship/db";
+import { createDb, schema } from "@zeroship/db";
 
 const db = createDb({
   // ---------------------------------------------------------------------------
   // Core
   // ---------------------------------------------------------------------------
   departments: {
-    name:                 { type: String, required: true },
-    code:                 { type: String, required: true },
-    manager_id:           { type: Number },
-    budget:               { type: Number, default: 0 },
-    headcount:            { type: Number, default: 0 },
-    parent_department_id: { type: Number },
+    name:               { type: String, required: true },
+    code:               { type: String, required: true },
+    managerId:          { type: Number },
+    budget:             { type: Number, default: 0 },
+    headcount:          { type: Number, default: 0 },
+    parentDepartmentId: { type: Number },
   },
 
   positions: {
-    title:         { type: String, required: true },
-    department_id: { type: Number, required: true },
-    level:         { type: String, enum: ["junior", "mid", "senior", "lead", "director", "vp", "c-level"] },
-    salary_min:    { type: Number },
-    salary_max:    { type: Number },
-    is_open:       { type: Boolean, default: true },
-    description:   { type: String },
+    title:        { type: String, required: true },
+    departmentId: { type: Number, required: true },
+    level:        { type: String, enum: ["junior", "mid", "senior", "lead", "director", "vp", "c-level"] },
+    salaryMin:    { type: Number },
+    salaryMax:    { type: Number },
+    isOpen:       { type: Boolean, default: true },
+    description:  { type: String },
   },
 
-  employees: {
-    first_name:               { type: String, required: true },
-    last_name:                { type: String, required: true },
-    email:                    { type: String, required: true },
-    phone:                    { type: String },
-    department_id:            { type: Number },
-    position_id:              { type: Number },
-    manager_id:               { type: Number },
-    hire_date:                { type: Number },
-    salary:                   { type: Number },
-    status:                   { type: String, enum: ["active", "on_leave", "terminated"], default: "active" },
-    skills:                   { type: [String] },
-    avatar_url:               { type: String },
-    emergency_contact_name:   { type: String },
-    emergency_contact_phone:  { type: String },
-    address:                  { type: String },
-    date_of_birth:            { type: Number },
-  },
+  employees: schema({
+    firstName:             { type: String, required: true },
+    lastName:              { type: String, required: true },
+    email:                 { type: String, required: true },
+    phone:                 { type: String },
+    departmentId:          { type: Number },
+    positionId:            { type: Number },
+    managerId:             { type: Number },
+    hireDate:              { type: Number },
+    salary:                { type: Number },
+    status:                { type: String, enum: ["active", "on_leave", "terminated"], default: "active" },
+    skills:                { type: [String] },
+    avatarUrl:             { type: String },
+    emergencyContactName:  { type: String },
+    emergencyContactPhone: { type: String },
+    address:               { type: String },
+    dateOfBirth:           { type: Number },
+  }).softDelete(),
 
   // ---------------------------------------------------------------------------
   // Recruitment
   // ---------------------------------------------------------------------------
-  job_postings: {
-    position_id:   { type: Number, required: true },
-    title:         { type: String, required: true },
-    description:   { type: String },
-    requirements:  { type: String },
-    status:        { type: String, enum: ["draft", "open", "closed"], default: "draft" },
-    posted_date:   { type: Number },
-    closing_date:  { type: Number },
+  jobPostings: {
+    positionId:  { type: Number, required: true },
+    title:       { type: String, required: true },
+    description: { type: String },
+    requirements:{ type: String },
+    status:      { type: String, enum: ["draft", "open", "closed"], default: "draft" },
+    postedDate:  { type: Number },
+    closingDate: { type: Number },
   },
 
   applicants: {
-    job_posting_id: { type: Number, required: true },
-    name:           { type: String, required: true },
-    email:          { type: String, required: true },
-    phone:          { type: String },
-    resume_url:     { type: String },
-    stage:          { type: String, enum: ["applied", "screening", "interview", "offer", "hired", "rejected"], default: "applied" },
-    rating:         { type: Number },
-    notes:          { type: String },
-    applied_date:   { type: Number },
+    jobPostingId: { type: Number, required: true },
+    name:         { type: String, required: true },
+    email:        { type: String, required: true },
+    phone:        { type: String },
+    resumeUrl:    { type: String },
+    stage:        { type: String, enum: ["applied", "screening", "interview", "offer", "hired", "rejected"], default: "applied" },
+    rating:       { type: Number },
+    notes:        { type: String },
+    appliedDate:  { type: Number },
   },
 
   interviews: {
-    applicant_id:      { type: Number, required: true },
-    interviewer_id:    { type: Number, required: true },
-    scheduled_at:      { type: Number, required: true },
-    duration_minutes:  { type: Number, default: 60 },
-    type:              { type: String, enum: ["phone", "video", "onsite"], default: "video" },
-    status:            { type: String, enum: ["scheduled", "completed", "cancelled"], default: "scheduled" },
-    feedback:          { type: String },
-    rating:            { type: Number },
+    applicantId:     { type: Number, required: true },
+    interviewerId:   { type: Number, required: true },
+    scheduledAt:     { type: Number, required: true },
+    durationMinutes: { type: Number, default: 60 },
+    type:            { type: String, enum: ["phone", "video", "onsite"], default: "video" },
+    status:          { type: String, enum: ["scheduled", "completed", "cancelled"], default: "scheduled" },
+    feedback:        { type: String },
+    rating:          { type: Number },
   },
 
   // ---------------------------------------------------------------------------
   // Time & Attendance
   // ---------------------------------------------------------------------------
   timesheets: {
-    employee_id:    { type: Number, required: true },
-    date:           { type: Number, required: true },
-    clock_in:       { type: Number },
-    clock_out:      { type: Number },
-    hours_worked:   { type: Number, default: 0 },
-    overtime_hours: { type: Number, default: 0 },
-    status:         { type: String, enum: ["draft", "submitted", "approved"], default: "draft" },
-    notes:          { type: String },
+    employeeId:    { type: Number, required: true },
+    date:          { type: Number, required: true },
+    clockIn:       { type: Number },
+    clockOut:      { type: Number },
+    hoursWorked:   { type: Number, default: 0 },
+    overtimeHours: { type: Number, default: 0 },
+    status:        { type: String, enum: ["draft", "submitted", "approved"], default: "draft" },
+    notes:         { type: String },
   },
 
-  work_schedules: {
-    employee_id:  { type: Number, required: true },
-    day_of_week:  { type: Number, required: true }, // 0=Sun, 6=Sat
-    start_time:   { type: String, required: true },
-    end_time:     { type: String, required: true },
-    is_remote:    { type: Boolean, default: false },
+  workSchedules: {
+    employeeId: { type: Number, required: true },
+    dayOfWeek:  { type: Number, required: true }, // 0=Sun, 6=Sat
+    startTime:  { type: String, required: true },
+    endTime:    { type: String, required: true },
+    isRemote:   { type: Boolean, default: false },
   },
 
   // ---------------------------------------------------------------------------
   // Leave
   // ---------------------------------------------------------------------------
-  leave_requests: {
-    employee_id: { type: Number, required: true },
-    type:        { type: String, required: true, enum: ["vacation", "sick", "personal", "parental", "bereavement"] },
-    start_date:  { type: Number, required: true },
-    end_date:    { type: Number, required: true },
-    days:        { type: Number, required: true },
-    reason:      { type: String },
-    status:      { type: String, enum: ["pending", "approved", "denied", "cancelled"], default: "pending" },
-    approved_by: { type: Number },
-    approved_at: { type: Number },
+  leaveRequests: {
+    employeeId: { type: Number, required: true },
+    type:       { type: String, required: true, enum: ["vacation", "sick", "personal", "parental", "bereavement"] },
+    startDate:  { type: Number, required: true },
+    endDate:    { type: Number, required: true },
+    days:       { type: Number, required: true },
+    reason:     { type: String },
+    status:     { type: String, enum: ["pending", "approved", "denied", "cancelled"], default: "pending" },
+    approvedBy: { type: Number },
+    approvedAt: { type: Number },
   },
 
-  leave_balances: {
-    employee_id:    { type: Number, required: true },
-    year:           { type: Number, required: true },
-    vacation_total: { type: Number, default: 20 },
-    vacation_used:  { type: Number, default: 0 },
-    sick_total:     { type: Number, default: 10 },
-    sick_used:      { type: Number, default: 0 },
-    personal_total: { type: Number, default: 5 },
-    personal_used:  { type: Number, default: 0 },
+  leaveBalances: {
+    employeeId:    { type: Number, required: true },
+    year:          { type: Number, required: true },
+    vacationTotal: { type: Number, default: 20 },
+    vacationUsed:  { type: Number, default: 0 },
+    sickTotal:     { type: Number, default: 10 },
+    sickUsed:      { type: Number, default: 0 },
+    personalTotal: { type: Number, default: 5 },
+    personalUsed:  { type: Number, default: 0 },
   },
 
   holidays: {
-    name:         { type: String, required: true },
-    date:         { type: Number, required: true },
-    is_recurring: { type: Boolean, default: false },
+    name:        { type: String, required: true },
+    date:        { type: Number, required: true },
+    isRecurring: { type: Boolean, default: false },
   },
 
   // ---------------------------------------------------------------------------
   // Payroll
   // ---------------------------------------------------------------------------
-  payroll_runs: {
-    period:           { type: String, required: true },
-    run_date:         { type: Number },
-    status:           { type: String, enum: ["draft", "processing", "completed"], default: "draft" },
-    total_gross:      { type: Number, default: 0 },
-    total_net:        { type: Number, default: 0 },
-    total_deductions: { type: Number, default: 0 },
-    processed_by:     { type: Number },
+  payrollRuns: {
+    period:          { type: String, required: true },
+    runDate:         { type: Number },
+    status:          { type: String, enum: ["draft", "processing", "completed"], default: "draft" },
+    totalGross:      { type: Number, default: 0 },
+    totalNet:        { type: Number, default: 0 },
+    totalDeductions: { type: Number, default: 0 },
+    processedBy:     { type: Number },
   },
 
   payslips: {
-    payroll_run_id:      { type: Number, required: true },
-    employee_id:         { type: Number, required: true },
-    base_salary:         { type: Number, required: true },
-    overtime_pay:        { type: Number, default: 0 },
-    bonus:               { type: Number, default: 0 },
-    deductions_tax:      { type: Number, default: 0 },
-    deductions_benefits: { type: Number, default: 0 },
-    deductions_other:    { type: Number, default: 0 },
-    net_pay:             { type: Number, required: true },
-    status:              { type: String, enum: ["pending", "paid"], default: "pending" },
+    payrollRunId:       { type: Number, required: true },
+    employeeId:         { type: Number, required: true },
+    baseSalary:         { type: Number, required: true },
+    overtimePay:        { type: Number, default: 0 },
+    bonus:              { type: Number, default: 0 },
+    deductionsTax:      { type: Number, default: 0 },
+    deductionsBenefits: { type: Number, default: 0 },
+    deductionsOther:    { type: Number, default: 0 },
+    netPay:             { type: Number, required: true },
+    status:             { type: String, enum: ["pending", "paid"], default: "pending" },
   },
 
   // ---------------------------------------------------------------------------
   // Performance
   // ---------------------------------------------------------------------------
   reviews: {
-    employee_id:  { type: Number, required: true },
-    reviewer_id:  { type: Number, required: true },
-    period:       { type: String, required: true },
-    cycle:        { type: String, enum: ["quarterly", "annual"], default: "annual" },
-    rating:       { type: Number, min: 1, max: 5 },
-    strengths:    { type: String },
-    improvements: { type: String },
-    goals:        { type: String },
-    status:       { type: String, enum: ["draft", "submitted", "acknowledged"], default: "draft" },
+    employeeId:  { type: Number, required: true },
+    reviewerId:  { type: Number, required: true },
+    period:      { type: String, required: true },
+    cycle:       { type: String, enum: ["quarterly", "annual"], default: "annual" },
+    rating:      { type: Number, min: 1, max: 5 },
+    strengths:   { type: String },
+    improvements:{ type: String },
+    goals:       { type: String },
+    status:      { type: String, enum: ["draft", "submitted", "acknowledged"], default: "draft" },
   },
 
   goals: {
-    employee_id:  { type: Number, required: true },
-    title:        { type: String, required: true },
-    description:  { type: String },
-    target_date:  { type: Number },
-    status:       { type: String, enum: ["active", "completed", "cancelled"], default: "active" },
-    progress:     { type: Number, default: 0, min: 0, max: 100 },
-    category:     { type: String, enum: ["performance", "development", "project"], default: "performance" },
+    employeeId:  { type: Number, required: true },
+    title:       { type: String, required: true },
+    description: { type: String },
+    targetDate:  { type: Number },
+    status:      { type: String, enum: ["active", "completed", "cancelled"], default: "active" },
+    progress:    { type: Number, default: 0, min: 0, max: 100 },
+    category:    { type: String, enum: ["performance", "development", "project"], default: "performance" },
   },
 
   feedback: {
-    from_employee_id: { type: Number, required: true },
-    to_employee_id:   { type: Number, required: true },
-    type:             { type: String, enum: ["praise", "constructive"], required: true },
-    message:          { type: String, required: true },
-    is_anonymous:     { type: Boolean, default: false },
+    fromEmployeeId: { type: Number, required: true },
+    toEmployeeId:   { type: Number, required: true },
+    type:           { type: String, enum: ["praise", "constructive"], required: true },
+    message:        { type: String, required: true },
+    isAnonymous:    { type: Boolean, default: false },
   },
 
   // ---------------------------------------------------------------------------
   // Training
   // ---------------------------------------------------------------------------
   courses: {
-    title:            { type: String, required: true },
-    description:      { type: String },
-    category:         { type: String },
-    duration_hours:   { type: Number },
-    is_mandatory:     { type: Boolean, default: false },
-    max_participants: { type: Number },
+    title:           { type: String, required: true },
+    description:     { type: String },
+    category:        { type: String },
+    durationHours:   { type: Number },
+    isMandatory:     { type: Boolean, default: false },
+    maxParticipants: { type: Number },
   },
 
   enrollments: {
-    course_id:    { type: Number, required: true },
-    employee_id:  { type: Number, required: true },
-    status:       { type: String, enum: ["enrolled", "in_progress", "completed", "dropped"], default: "enrolled" },
-    enrolled_at:  { type: Number },
-    completed_at: { type: Number },
-    score:        { type: Number },
+    courseId:     { type: Number, required: true },
+    employeeId:  { type: Number, required: true },
+    status:      { type: String, enum: ["enrolled", "in_progress", "completed", "dropped"], default: "enrolled" },
+    enrolledAt:  { type: Number },
+    completedAt: { type: Number },
+    score:       { type: Number },
   },
 
   certifications: {
-    employee_id:    { type: Number, required: true },
-    name:           { type: String, required: true },
-    issuer:         { type: String },
-    issue_date:     { type: Number },
-    expiry_date:    { type: Number },
-    credential_url: { type: String },
+    employeeId:    { type: Number, required: true },
+    name:          { type: String, required: true },
+    issuer:        { type: String },
+    issueDate:     { type: Number },
+    expiryDate:    { type: Number },
+    credentialUrl: { type: String },
   },
 
   // ---------------------------------------------------------------------------
   // Compensation & Benefits
   // ---------------------------------------------------------------------------
-  compensation_history: {
-    employee_id:    { type: Number, required: true },
-    effective_date: { type: Number, required: true },
-    salary:         { type: Number, required: true },
-    change_type:    { type: String, enum: ["hire", "promotion", "adjustment", "annual"], required: true },
-    change_reason:  { type: String },
-    approved_by:    { type: Number },
+  compensationHistory: {
+    employeeId:    { type: Number, required: true },
+    effectiveDate: { type: Number, required: true },
+    salary:        { type: Number, required: true },
+    changeType:    { type: String, enum: ["hire", "promotion", "adjustment", "annual"], required: true },
+    changeReason:  { type: String },
+    approvedBy:    { type: Number },
   },
 
-  benefits_plans: {
-    name:                    { type: String, required: true },
-    type:                    { type: String, enum: ["health", "dental", "vision", "life", "retirement"], required: true },
-    provider:                { type: String },
-    monthly_cost_employee:   { type: Number, default: 0 },
-    monthly_cost_employer:   { type: Number, default: 0 },
+  benefitsPlans: {
+    name:                  { type: String, required: true },
+    type:                  { type: String, enum: ["health", "dental", "vision", "life", "retirement"], required: true },
+    provider:              { type: String },
+    monthlyCostEmployee:   { type: Number, default: 0 },
+    monthlyCostEmployer:   { type: Number, default: 0 },
   },
 
-  benefits_enrollments: {
-    employee_id: { type: Number, required: true },
-    plan_id:     { type: Number, required: true },
-    start_date:  { type: Number, required: true },
-    end_date:    { type: Number },
-    status:      { type: String, enum: ["active", "cancelled"], default: "active" },
+  benefitsEnrollments: {
+    employeeId: { type: Number, required: true },
+    planId:     { type: Number, required: true },
+    startDate:  { type: Number, required: true },
+    endDate:    { type: Number },
+    status:     { type: String, enum: ["active", "cancelled"], default: "active" },
   },
 
-  expense_claims: {
-    employee_id:  { type: Number, required: true },
-    description:  { type: String, required: true },
-    amount:       { type: Number, required: true },
-    category:     { type: String, enum: ["travel", "meals", "equipment", "other"], required: true },
-    receipt_url:  { type: String },
-    status:       { type: String, enum: ["submitted", "approved", "rejected", "reimbursed"], default: "submitted" },
-    submitted_at: { type: Number },
-    approved_by:  { type: Number },
+  expenseClaims: {
+    employeeId:  { type: Number, required: true },
+    description: { type: String, required: true },
+    amount:      { type: Number, required: true },
+    category:    { type: String, enum: ["travel", "meals", "equipment", "other"], required: true },
+    receiptUrl:  { type: String },
+    status:      { type: String, enum: ["submitted", "approved", "rejected", "reimbursed"], default: "submitted" },
+    submittedAt: { type: Number },
+    approvedBy:  { type: Number },
   },
 
   // ---------------------------------------------------------------------------
   // Documents & Compliance
   // ---------------------------------------------------------------------------
   documents: {
-    employee_id:  { type: Number, required: true },
-    type:         { type: String, enum: ["contract", "id", "certification", "policy", "other"], required: true },
-    name:         { type: String, required: true },
-    file_url:     { type: String, required: true },
-    uploaded_at:  { type: Number },
-    expires_at:   { type: Number },
+    employeeId: { type: Number, required: true },
+    type:       { type: String, enum: ["contract", "id", "certification", "policy", "other"], required: true },
+    name:       { type: String, required: true },
+    fileUrl:    { type: String, required: true },
+    uploadedAt: { type: Number },
+    expiresAt:  { type: Number },
   },
 
-  audit_log: {
-    actor_id:     { type: Number, required: true },
-    action:       { type: String, enum: ["create", "update", "delete"], required: true },
-    entity_type:  { type: String, required: true },
-    entity_id:    { type: Number, required: true },
-    changes_json: { type: String },
-    timestamp:    { type: Number },
+  auditLog: {
+    actorId:    { type: Number, required: true },
+    action:     { type: String, enum: ["create", "update", "delete"], required: true },
+    entityType: { type: String, required: true },
+    entityId:   { type: Number, required: true },
+    changesJson:{ type: String },
+    timestamp:  { type: Number },
   },
 
   policies: {
-    title:          { type: String, required: true },
-    content:        { type: String },
-    version:        { type: String },
-    effective_date: { type: Number },
-    category:       { type: String, enum: ["handbook", "conduct", "safety", "privacy"], required: true },
+    title:         { type: String, required: true },
+    content:       { type: String },
+    version:       { type: String },
+    effectiveDate: { type: Number },
+    category:      { type: String, enum: ["handbook", "conduct", "safety", "privacy"], required: true },
   },
 
   // ---------------------------------------------------------------------------
   // Notifications
   // ---------------------------------------------------------------------------
   notifications: {
-    employee_id: { type: Number, required: true },
-    type:        { type: String, enum: ["leave_approved", "review_due", "payroll_ready", "course_reminder", "general"], required: true },
-    title:       { type: String, required: true },
-    message:     { type: String },
-    is_read:     { type: Boolean, default: false },
-    created_at:  { type: Number },
-    link:        { type: String },
+    employeeId: { type: Number, required: true },
+    type:       { type: String, enum: ["leave_approved", "review_due", "payroll_ready", "course_reminder", "general"], required: true },
+    title:      { type: String, required: true },
+    message:    { type: String },
+    isRead:     { type: Boolean, default: false },
+    link:       { type: String },
   },
 });
 
@@ -326,38 +325,38 @@ const db = createDb({
 // ---------------------------------------------------------------------------
 
 export async function createEmployee(
-  first_name: string,
-  last_name: string,
+  firstName: string,
+  lastName: string,
   email: string,
-  department_id: number,
-  position_id: number,
+  departmentId: number,
+  positionId: number,
   salary: number,
   extras?: Record<string, unknown>
 ) {
   const { data, error } = await db.employees.create({
-    first_name, last_name, email,
-    department_id, position_id, salary,
-    hire_date: Date.now(),
+    firstName, lastName, email,
+    departmentId, positionId, salary,
+    hireDate: Date.now(),
     status: "active",
     ...(extras || {}),
   });
   if (error) return { data: null, error };
 
-  await db.departments.updateOne({ id: department_id }, { headcount: { $inc: 1 } });
+  await db.departments.updateOne({ id: departmentId }, { headcount: { $inc: 1 } });
 
   // Record initial compensation history
-  await db.compensation_history.create({
-    employee_id: (data as Record<string, unknown>)._id as number,
-    effective_date: Date.now(),
+  await db.compensationHistory.create({
+    employeeId: (data as Record<string, unknown>)._id as number,
+    effectiveDate: Date.now(),
     salary,
-    change_type: "hire",
+    changeType: "hire",
   });
 
   return { data, error: null };
 }
 
 export async function getEmployees(filters?: Record<string, unknown>) {
-  return db.employees.find(filters || {}).sort({ last_name: 1, first_name: 1 });
+  return db.employees.find(filters || {}).sort({ lastName: 1, firstName: 1 });
 }
 
 export async function getEmployee(id: number) {
@@ -374,9 +373,9 @@ export async function terminateEmployee(id: number) {
 
   await db.employees.updateOne({ id }, { status: "terminated" });
 
-  if ((emp as Record<string, unknown>).department_id) {
+  if ((emp as Record<string, unknown>).departmentId) {
     await db.departments.updateOne(
-      { id: (emp as Record<string, unknown>).department_id as number },
+      { id: (emp as Record<string, unknown>).departmentId as number },
       { headcount: { $inc: -1 } }
     );
   }
@@ -396,7 +395,7 @@ export async function getOrgChart() {
 
   const roots: Record<string, unknown>[] = [];
   for (const e of empList) {
-    const mgr = (e as Record<string, unknown>).manager_id as number | undefined;
+    const mgr = (e as Record<string, unknown>).managerId as number | undefined;
     if (mgr && byId[mgr]) {
       ((byId[mgr].reports as Record<string, unknown>[])).push(byId[(e._id as number)]);
     } else {
@@ -407,16 +406,16 @@ export async function getOrgChart() {
   return { data: roots, error: null };
 }
 
-export async function getDirectReports(manager_id: number) {
-  return db.employees.find({ manager_id, status: "active" }).sort({ last_name: 1 });
+export async function getDirectReports(managerId: number) {
+  return db.employees.find({ managerId, status: "active" }).sort({ lastName: 1 });
 }
 
 export async function searchEmployees(query: string) {
   return db.employees.find({
     $or: [
-      { first_name: { $ilike: `%${query}%` } },
-      { last_name:  { $ilike: `%${query}%` } },
-      { email:      { $ilike: `%${query}%` } },
+      { firstName: { $ilike: `%${query}%` } },
+      { lastName:  { $ilike: `%${query}%` } },
+      { email:     { $ilike: `%${query}%` } },
     ],
   }).limit(20);
 }
@@ -429,14 +428,14 @@ export async function removeSkill(id: number, skill: string) {
   return db.employees.updateOne({ id }, { skills: { $pull: skill } });
 }
 
-export async function getEmployeesByDepartment(department_id: number) {
-  return db.employees.find({ department_id, status: "active" }).sort({ last_name: 1 });
+export async function getEmployeesByDepartment(departmentId: number) {
+  return db.employees.find({ departmentId, status: "active" }).sort({ lastName: 1 });
 }
 
-export async function getEmployeeHistory(employee_id: number) {
+export async function getEmployeeHistory(employeeId: number) {
   const [compHistory, posHistory] = await Promise.all([
-    db.compensation_history.find({ employee_id }).sort({ effective_date: -1 }),
-    db.reviews.find({ employee_id }).sort({ createdAt: -1 }),
+    db.compensationHistory.find({ employeeId }).sort({ effectiveDate: -1 }),
+    db.reviews.find({ employeeId }).sort({ createdAt: -1 }),
   ]);
   return {
     data: {
@@ -455,13 +454,13 @@ export async function createDepartment(
   name: string,
   code: string,
   budget?: number,
-  parent_department_id?: number
+  parentDepartmentId?: number
 ) {
   return db.departments.create({
     name,
     code,
     ...(budget !== undefined && { budget }),
-    ...(parent_department_id !== undefined && { parent_department_id }),
+    ...(parentDepartmentId !== undefined && { parentDepartmentId }),
   });
 }
 
@@ -493,7 +492,7 @@ export async function getDepartmentTree() {
 
   const roots: Record<string, unknown>[] = [];
   for (const d of deptList) {
-    const parent = (d as Record<string, unknown>).parent_department_id as number | undefined;
+    const parent = (d as Record<string, unknown>).parentDepartmentId as number | undefined;
     if (parent && byId[parent]) {
       (byId[parent].children as Record<string, unknown>[]).push(byId[(d._id as number)]);
     } else {
@@ -510,13 +509,13 @@ export async function getDepartmentTree() {
 
 export async function createPosition(
   title: string,
-  department_id: number,
+  departmentId: number,
   level: string,
-  salary_min: number,
-  salary_max: number,
+  salaryMin: number,
+  salaryMax: number,
   description?: string
 ) {
-  return db.positions.create({ title, department_id, level, salary_min, salary_max, ...(description && { description }) });
+  return db.positions.create({ title, departmentId, level, salaryMin, salaryMax, ...(description && { description }) });
 }
 
 export async function getPositions(filters?: Record<string, unknown>) {
@@ -524,7 +523,7 @@ export async function getPositions(filters?: Record<string, unknown>) {
 }
 
 export async function getOpenPositions() {
-  return db.positions.find({ is_open: true }).sort({ title: 1 });
+  return db.positions.find({ isOpen: true }).sort({ title: 1 });
 }
 
 export async function updatePosition(id: number, changes: Record<string, unknown>) {
@@ -532,11 +531,11 @@ export async function updatePosition(id: number, changes: Record<string, unknown
 }
 
 export async function closePosition(id: number) {
-  return db.positions.updateOne({ id }, { is_open: false });
+  return db.positions.updateOne({ id }, { isOpen: false });
 }
 
-export async function getPositionsByDepartment(department_id: number) {
-  return db.positions.find({ department_id }).sort({ level: 1 });
+export async function getPositionsByDepartment(departmentId: number) {
+  return db.positions.find({ departmentId }).sort({ level: 1 });
 }
 
 // ---------------------------------------------------------------------------
@@ -544,56 +543,56 @@ export async function getPositionsByDepartment(department_id: number) {
 // ---------------------------------------------------------------------------
 
 export async function createJobPosting(
-  position_id: number,
+  positionId: number,
   title: string,
   description?: string,
   requirements?: string,
-  closing_date?: number
+  closingDate?: number
 ) {
-  return db.job_postings.create({
-    position_id, title,
+  return db.jobPostings.create({
+    positionId, title,
     ...(description && { description }),
     ...(requirements && { requirements }),
-    ...(closing_date && { closing_date }),
+    ...(closingDate && { closingDate }),
   });
 }
 
 export async function getJobPostings(filters?: Record<string, unknown>) {
-  return db.job_postings.find(filters || {}).sort({ createdAt: -1 });
+  return db.jobPostings.find(filters || {}).sort({ createdAt: -1 });
 }
 
 export async function getJobPosting(id: number) {
-  return db.job_postings.findOne({ id });
+  return db.jobPostings.findOne({ id });
 }
 
 export async function publishJobPosting(id: number) {
-  return db.job_postings.updateOne({ id }, { status: "open", posted_date: Date.now() });
+  return db.jobPostings.updateOne({ id }, { status: "open", postedDate: Date.now() });
 }
 
 export async function closeJobPosting(id: number) {
-  return db.job_postings.updateOne({ id }, { status: "closed" });
+  return db.jobPostings.updateOne({ id }, { status: "closed" });
 }
 
 export async function applyToJob(
-  job_posting_id: number,
+  jobPostingId: number,
   name: string,
   email: string,
   phone?: string,
-  resume_url?: string
+  resumeUrl?: string
 ) {
   return db.applicants.create({
-    job_posting_id, name, email,
+    jobPostingId, name, email,
     ...(phone && { phone }),
-    ...(resume_url && { resume_url }),
-    applied_date: Date.now(),
+    ...(resumeUrl && { resumeUrl }),
+    appliedDate: Date.now(),
   });
 }
 
-export async function getApplicants(job_posting_id: number, stage?: string) {
+export async function getApplicants(jobPostingId: number, stage?: string) {
   return db.applicants.find({
-    job_posting_id,
+    jobPostingId,
     ...(stage && { stage }),
-  }).sort({ applied_date: -1 });
+  }).sort({ appliedDate: -1 });
 }
 
 export async function updateApplicantStage(
@@ -610,15 +609,15 @@ export async function updateApplicantStage(
 }
 
 export async function scheduleInterview(
-  applicant_id: number,
-  interviewer_id: number,
-  scheduled_at: number,
+  applicantId: number,
+  interviewerId: number,
+  scheduledAt: number,
   type: string,
-  duration_minutes?: number
+  durationMinutes?: number
 ) {
   return db.interviews.create({
-    applicant_id, interviewer_id, scheduled_at, type,
-    ...(duration_minutes && { duration_minutes }),
+    applicantId, interviewerId, scheduledAt, type,
+    ...(durationMinutes && { durationMinutes }),
   });
 }
 
@@ -634,34 +633,34 @@ export async function submitInterviewFeedback(
 // Time & Attendance (8 endpoints)
 // ---------------------------------------------------------------------------
 
-export async function clockIn(employee_id: number, date: number, notes?: string) {
+export async function clockIn(employeeId: number, date: number, notes?: string) {
   // Check if a timesheet already exists for today
-  const { data: existing } = await db.timesheets.findOne({ employee_id, date });
+  const { data: existing } = await db.timesheets.findOne({ employeeId, date });
   if (existing) {
     return { data: null, error: { message: "Already clocked in for this date" } };
   }
   return db.timesheets.create({
-    employee_id,
+    employeeId,
     date,
-    clock_in: Date.now(),
+    clockIn: Date.now(),
     ...(notes && { notes }),
   });
 }
 
-export async function clockOut(employee_id: number, date: number) {
-  const { data: ts } = await db.timesheets.findOne({ employee_id, date });
+export async function clockOut(employeeId: number, date: number) {
+  const { data: ts } = await db.timesheets.findOne({ employeeId, date });
   if (!ts) return { data: null, error: { message: "No clock-in found for this date" } };
 
   const tsData = ts as Record<string, unknown>;
-  const clock_out = Date.now();
-  const clock_in = tsData.clock_in as number;
-  const ms = clock_out - clock_in;
-  const hours_worked = Math.round((ms / 3_600_000) * 100) / 100;
-  const overtime_hours = Math.max(0, Math.round((hours_worked - 8) * 100) / 100);
+  const clockOutTime = Date.now();
+  const clockInTime = tsData.clockIn as number;
+  const ms = clockOutTime - clockInTime;
+  const hoursWorked = Math.round((ms / 3_600_000) * 100) / 100;
+  const overtimeHours = Math.max(0, Math.round((hoursWorked - 8) * 100) / 100);
 
   return db.timesheets.updateOne(
     { id: tsData._id as number },
-    { clock_out, hours_worked, overtime_hours }
+    { clockOut: clockOutTime, hoursWorked, overtimeHours }
   );
 }
 
@@ -674,61 +673,61 @@ export async function approveTimesheet(id: number) {
 }
 
 export async function getTimesheets(
-  employee_id: number,
-  from_date?: number,
-  to_date?: number
+  employeeId: number,
+  fromDate?: number,
+  toDate?: number
 ) {
   return db.timesheets.find({
-    employee_id,
-    ...(from_date !== undefined && to_date !== undefined && {
-      date: { $gte: from_date, $lte: to_date },
+    employeeId,
+    ...(fromDate !== undefined && toDate !== undefined && {
+      date: { $gte: fromDate, $lte: toDate },
     }),
   }).sort({ date: -1 });
 }
 
-export async function getWorkSchedule(employee_id: number) {
-  return db.work_schedules.find({ employee_id }).sort({ day_of_week: 1 });
+export async function getWorkSchedule(employeeId: number) {
+  return db.workSchedules.find({ employeeId }).sort({ dayOfWeek: 1 });
 }
 
 export async function updateWorkSchedule(
-  employee_id: number,
-  day_of_week: number,
-  start_time: string,
-  end_time: string,
-  is_remote?: boolean
+  employeeId: number,
+  dayOfWeek: number,
+  startTime: string,
+  endTime: string,
+  isRemote?: boolean
 ) {
-  const { data: existing } = await db.work_schedules.findOne({ employee_id, day_of_week });
+  const { data: existing } = await db.workSchedules.findOne({ employeeId, dayOfWeek });
   if (existing) {
-    return db.work_schedules.updateOne(
+    return db.workSchedules.updateOne(
       { id: (existing as Record<string, unknown>)._id as number },
-      { start_time, end_time, ...(is_remote !== undefined && { is_remote }) }
+      { startTime, endTime, ...(isRemote !== undefined && { isRemote }) }
     );
   }
-  return db.work_schedules.create({
-    employee_id, day_of_week, start_time, end_time,
-    ...(is_remote !== undefined && { is_remote }),
+  return db.workSchedules.create({
+    employeeId, dayOfWeek, startTime, endTime,
+    ...(isRemote !== undefined && { isRemote }),
   });
 }
 
-export async function getOvertimeReport(from_date?: number, to_date?: number) {
+export async function getOvertimeReport(fromDate?: number, toDate?: number) {
   return db.timesheets.aggregate([
     {
       $match: {
         status: "approved",
-        ...(from_date !== undefined && to_date !== undefined && {
-          date: { $gte: from_date, $lte: to_date },
+        ...(fromDate !== undefined && toDate !== undefined && {
+          date: { $gte: fromDate, $lte: toDate },
         }),
       },
     },
     {
       $group: {
-        _id: "$employee_id",
-        total_hours: { $sum: "$hours_worked" },
-        total_overtime: { $sum: "$overtime_hours" },
-        days_count: { $sum: 1 },
+        _id: "$employeeId",
+        totalHours: { $sum: "$hoursWorked" },
+        totalOvertime: { $sum: "$overtimeHours" },
+        daysCount: { $sum: 1 },
       },
     },
-    { $sort: { total_overtime: -1 } },
+    { $sort: { totalOvertime: -1 } },
   ]);
 }
 
@@ -737,31 +736,31 @@ export async function getOvertimeReport(from_date?: number, to_date?: number) {
 // ---------------------------------------------------------------------------
 
 export async function requestLeave(
-  employee_id: number,
+  employeeId: number,
   type: string,
-  start_date: number,
-  end_date: number,
+  startDate: number,
+  endDate: number,
   days: number,
   reason?: string
 ) {
-  return db.leave_requests.create({
-    employee_id, type, start_date, end_date, days,
+  return db.leaveRequests.create({
+    employeeId, type, startDate, endDate, days,
     ...(reason && { reason }),
   });
 }
 
-export async function approveLeave(id: number, approved_by: number) {
-  const { data } = await db.leave_requests.updateOne(
+export async function approveLeave(id: number, approvedBy: number) {
+  const { data } = await db.leaveRequests.updateOne(
     { id, status: "pending" },
-    { status: "approved", approved_by, approved_at: Date.now() }
+    { status: "approved", approvedBy, approvedAt: Date.now() }
   );
 
   if (data && (data as Record<string, unknown>).modifiedCount as number > 0) {
-    const { data: leave } = await db.leave_requests.findOne({ id });
+    const { data: leave } = await db.leaveRequests.findOne({ id });
     if (leave) {
       const leaveData = leave as Record<string, unknown>;
       await db.employees.updateOne(
-        { id: leaveData.employee_id as number },
+        { id: leaveData.employeeId as number },
         { status: "on_leave" }
       );
     }
@@ -770,29 +769,29 @@ export async function approveLeave(id: number, approved_by: number) {
   return { data, error: null };
 }
 
-export async function denyLeave(id: number, approved_by: number) {
-  return db.leave_requests.updateOne(
+export async function denyLeave(id: number, approvedBy: number) {
+  return db.leaveRequests.updateOne(
     { id, status: "pending" },
-    { status: "denied", approved_by, approved_at: Date.now() }
+    { status: "denied", approvedBy, approvedAt: Date.now() }
   );
 }
 
-export async function cancelLeave(id: number, employee_id: number) {
-  return db.leave_requests.updateOne(
-    { id, employee_id, status: "pending" },
+export async function cancelLeave(id: number, employeeId: number) {
+  return db.leaveRequests.updateOne(
+    { id, employeeId, status: "pending" },
     { status: "cancelled" }
   );
 }
 
 export async function getLeaveRequests(filters?: Record<string, unknown>) {
-  return db.leave_requests.find(filters || {}).sort({ createdAt: -1 });
+  return db.leaveRequests.find(filters || {}).sort({ createdAt: -1 });
 }
 
-export async function getLeaveBalance(employee_id: number) {
+export async function getLeaveBalance(employeeId: number) {
   const currentYear = new Date().getFullYear();
 
   // Check if there's an explicit balance record
-  const { data: balanceRecord } = await db.leave_balances.findOne({ employee_id, year: currentYear });
+  const { data: balanceRecord } = await db.leaveBalances.findOne({ employeeId, year: currentYear });
 
   if (balanceRecord) {
     return { data: balanceRecord, error: null };
@@ -802,10 +801,10 @@ export async function getLeaveBalance(employee_id: number) {
   const yearStart = new Date(currentYear, 0, 1).getTime();
   const yearEnd   = new Date(currentYear, 11, 31, 23, 59, 59).getTime();
 
-  const { data: approved } = await db.leave_requests.find({
-    employee_id,
+  const { data: approved } = await db.leaveRequests.find({
+    employeeId,
     status: "approved",
-    start_date: { $gte: yearStart, $lte: yearEnd },
+    startDate: { $gte: yearStart, $lte: yearEnd },
   });
 
   const used = ((approved as Record<string, unknown>[]) || []).reduce(
@@ -827,19 +826,19 @@ export async function getLeaveBalance(employee_id: number) {
   };
 }
 
-export async function getLeaveCalendar(department_id?: number) {
+export async function getLeaveCalendar(departmentId?: number) {
   const empFilter: Record<string, unknown> = { status: { $ne: "terminated" } };
-  if (department_id !== undefined) empFilter.department_id = department_id;
+  if (departmentId !== undefined) empFilter.departmentId = departmentId;
 
   const { data: teamMembers } = await db.employees.find(empFilter);
   const ids = ((teamMembers as Record<string, unknown>[]) || []).map(e => (e as Record<string, unknown>)._id as number);
 
   if (ids.length === 0) return { data: [], error: null };
 
-  return db.leave_requests.find({
-    employee_id: { $in: ids },
+  return db.leaveRequests.find({
+    employeeId: { $in: ids },
     status: "approved",
-  }).sort({ start_date: 1 });
+  }).sort({ startDate: 1 });
 }
 
 export async function getHolidays(year?: number) {
@@ -849,22 +848,22 @@ export async function getHolidays(year?: number) {
   return db.holidays.find({ date: { $gte: start, $lte: end } }).sort({ date: 1 });
 }
 
-export async function createHoliday(name: string, date: number, is_recurring?: boolean) {
-  return db.holidays.create({ name, date, ...(is_recurring !== undefined && { is_recurring }) });
+export async function createHoliday(name: string, date: number, isRecurring?: boolean) {
+  return db.holidays.create({ name, date, ...(isRecurring !== undefined && { isRecurring }) });
 }
 
 export async function getLeaveReport() {
-  return db.leave_requests.aggregate([
+  return db.leaveRequests.aggregate([
     { $match: { status: "approved" } },
     {
       $group: {
         _id: "$type",
-        total_requests: { $sum: 1 },
-        total_days:     { $sum: "$days" },
-        avg_days:       { $avg: "$days" },
+        totalRequests: { $sum: 1 },
+        totalDays:     { $sum: "$days" },
+        avgDays:       { $avg: "$days" },
       },
     },
-    { $sort: { total_days: -1 } },
+    { $sort: { totalDays: -1 } },
   ]);
 }
 
@@ -872,16 +871,16 @@ export async function getLeaveReport() {
 // Payroll (8 endpoints)
 // ---------------------------------------------------------------------------
 
-export async function createPayrollRun(period: string, processed_by: number) {
-  return db.payroll_runs.create({
+export async function createPayrollRun(period: string, processedBy: number) {
+  return db.payrollRuns.create({
     period,
-    run_date: Date.now(),
-    processed_by,
+    runDate: Date.now(),
+    processedBy,
   });
 }
 
-export async function processPayroll(payroll_run_id: number) {
-  await db.payroll_runs.updateOne({ id: payroll_run_id }, { status: "processing" });
+export async function processPayroll(payrollRunId: number) {
+  await db.payrollRuns.updateOne({ id: payrollRunId }, { status: "processing" });
 
   const { data: activeEmployees } = await db.employees.find({ status: "active" });
   if (!activeEmployees || (activeEmployees as Record<string, unknown>[]).length === 0) {
@@ -894,92 +893,92 @@ export async function processPayroll(payroll_run_id: number) {
 
   for (const emp of activeEmployees as Record<string, unknown>[]) {
     const base = (emp.salary as number) || 0;
-    const deductions_tax      = Math.round(base * 0.22);
-    const deductions_benefits = Math.round(base * 0.05);
-    const deductions_other    = 0;
-    const net = base - deductions_tax - deductions_benefits - deductions_other;
+    const deductionsTax      = Math.round(base * 0.22);
+    const deductionsBenefits = Math.round(base * 0.05);
+    const deductionsOther    = 0;
+    const net = base - deductionsTax - deductionsBenefits - deductionsOther;
 
     await db.payslips.create({
-      payroll_run_id,
-      employee_id: emp._id as number,
-      base_salary: base,
-      deductions_tax,
-      deductions_benefits,
-      deductions_other,
-      net_pay: net,
+      payrollRunId,
+      employeeId: emp._id as number,
+      baseSalary: base,
+      deductionsTax,
+      deductionsBenefits,
+      deductionsOther,
+      netPay: net,
     });
 
     totalGross += base;
     totalNet   += net;
-    totalDeductions += deductions_tax + deductions_benefits;
+    totalDeductions += deductionsTax + deductionsBenefits;
   }
 
-  await db.payroll_runs.updateOne(
-    { id: payroll_run_id },
+  await db.payrollRuns.updateOne(
+    { id: payrollRunId },
     {
       status: "completed",
-      total_gross: totalGross,
-      total_net:   totalNet,
-      total_deductions: totalDeductions,
+      totalGross,
+      totalNet,
+      totalDeductions,
     }
   );
 
   return {
     data: {
       processed: (activeEmployees as Record<string, unknown>[]).length,
-      total_gross: totalGross,
-      total_net: totalNet,
+      totalGross,
+      totalNet,
     },
     error: null,
   };
 }
 
-export async function finalizePayroll(payroll_run_id: number) {
-  await db.payslips.updateMany({ payroll_run_id, status: "pending" }, { status: "paid" });
+export async function finalizePayroll(payrollRunId: number) {
+  await db.payslips.updateMany({ payrollRunId, status: "pending" }, { status: "paid" });
   return { data: { finalized: true }, error: null };
 }
 
 export async function getPayrollRuns(filters?: Record<string, unknown>) {
-  return db.payroll_runs.find(filters || {}).sort({ run_date: -1 });
+  return db.payrollRuns.find(filters || {}).sort({ runDate: -1 });
 }
 
 export async function getPayslip(id: number) {
   return db.payslips.findOne({ id });
 }
 
-export async function getPayslipsByEmployee(employee_id: number) {
-  return db.payslips.find({ employee_id }).sort({ createdAt: -1 });
+export async function getPayslipsByEmployee(employeeId: number) {
+  return db.payslips.find({ employeeId }).sort({ createdAt: -1 });
 }
 
 export async function getPayrollSummary(period: string) {
-  const { data: run } = await db.payroll_runs.findOne({ period });
+  const { data: run } = await db.payrollRuns.findOne({ period });
   if (!run) return { data: null, error: { message: "Payroll run not found" } };
 
   const { data: slips } = await db.payslips.find({
-    payroll_run_id: (run as Record<string, unknown>)._id as number,
+    payrollRunId: (run as Record<string, unknown>)._id as number,
   });
 
   return {
     data: {
       run,
-      employee_count: ((slips as Record<string, unknown>[]) || []).length,
+      employeeCount: ((slips as Record<string, unknown>[]) || []).length,
       slips,
     },
     error: null,
   };
 }
 
-export async function exportPayroll(payroll_run_id: number) {
-  const { data: slips } = await db.payslips.find({ payroll_run_id });
+export async function exportPayroll(payrollRunId: number) {
+  const { data: slips } = await db.payslips.find({ payrollRunId });
   if (!slips) return { data: "", error: null };
 
   const rows = slips as Record<string, unknown>[];
-  const header = "employee_id,base_salary,overtime_pay,bonus,deductions_tax,deductions_benefits,deductions_other,net_pay,status";
+  const header = "employeeId,baseSalary,overtimePay,bonus,deductionsTax,deductionsBenefits,deductionsOther,netPay,status";
   const lines = rows.map(r =>
     [
-      r.employee_id, r.base_salary, r.overtime_pay, r.bonus,
-      r.deductions_tax, r.deductions_benefits, r.deductions_other,
-      r.net_pay, r.status,
+      r.employeeId, r.baseSalary, r.overtimePay, r.bonus,
+      r.deductionsTax, r.deductionsBenefits, r.deductionsOther,
+      r.netPay, r.status,
     ].join(",")
   );
   return { data: [header, ...lines].join("\n"), error: null };
@@ -990,8 +989,8 @@ export async function exportPayroll(payroll_run_id: number) {
 // ---------------------------------------------------------------------------
 
 export async function createReview(
-  employee_id: number,
-  reviewer_id: number,
+  employeeId: number,
+  reviewerId: number,
   period: string,
   cycle: string,
   strengths?: string,
@@ -999,7 +998,7 @@ export async function createReview(
   goalsText?: string
 ) {
   return db.reviews.create({
-    employee_id, reviewer_id, period, cycle,
+    employeeId, reviewerId, period, cycle,
     ...(strengths    && { strengths }),
     ...(improvements && { improvements }),
     ...(goalsText    && { goals: goalsText }),
@@ -1014,28 +1013,28 @@ export async function acknowledgeReview(id: number) {
   return db.reviews.updateOne({ id }, { status: "acknowledged" });
 }
 
-export async function getReviewsForEmployee(employee_id: number) {
-  return db.reviews.find({ employee_id }).sort({ createdAt: -1 });
+export async function getReviewsForEmployee(employeeId: number) {
+  return db.reviews.find({ employeeId }).sort({ createdAt: -1 });
 }
 
-export async function getPendingReviews(reviewer_id?: number) {
+export async function getPendingReviews(reviewerId?: number) {
   return db.reviews.find({
     status: "draft",
-    ...(reviewer_id !== undefined && { reviewer_id }),
+    ...(reviewerId !== undefined && { reviewerId }),
   }).sort({ createdAt: 1 });
 }
 
 export async function createGoal(
-  employee_id: number,
+  employeeId: number,
   title: string,
   category: string,
-  target_date?: number,
+  targetDate?: number,
   description?: string
 ) {
   return db.goals.create({
-    employee_id, title, category,
-    ...(target_date  !== undefined && { target_date }),
-    ...(description  && { description }),
+    employeeId, title, category,
+    ...(targetDate  !== undefined && { targetDate }),
+    ...(description && { description }),
   });
 }
 
@@ -1046,25 +1045,25 @@ export async function updateGoalProgress(id: number, progress: number, status?: 
   });
 }
 
-export async function getGoals(employee_id: number, filters?: Record<string, unknown>) {
-  return db.goals.find({ employee_id, ...(filters || {}) }).sort({ target_date: 1 });
+export async function getGoals(employeeId: number, filters?: Record<string, unknown>) {
+  return db.goals.find({ employeeId, ...(filters || {}) }).sort({ targetDate: 1 });
 }
 
 export async function giveFeedback(
-  from_employee_id: number,
-  to_employee_id: number,
+  fromEmployeeId: number,
+  toEmployeeId: number,
   type: string,
   message: string,
-  is_anonymous?: boolean
+  isAnonymous?: boolean
 ) {
   return db.feedback.create({
-    from_employee_id, to_employee_id, type, message,
-    ...(is_anonymous !== undefined && { is_anonymous }),
+    fromEmployeeId, toEmployeeId, type, message,
+    ...(isAnonymous !== undefined && { isAnonymous }),
   });
 }
 
-export async function getFeedbackForEmployee(to_employee_id: number) {
-  return db.feedback.find({ to_employee_id }).sort({ createdAt: -1 });
+export async function getFeedbackForEmployee(toEmployeeId: number) {
+  return db.feedback.find({ toEmployeeId }).sort({ createdAt: -1 });
 }
 
 // ---------------------------------------------------------------------------
@@ -1074,16 +1073,16 @@ export async function getFeedbackForEmployee(to_employee_id: number) {
 export async function createCourse(
   title: string,
   category: string,
-  duration_hours: number,
+  durationHours: number,
   description?: string,
-  is_mandatory?: boolean,
-  max_participants?: number
+  isMandatory?: boolean,
+  maxParticipants?: number
 ) {
   return db.courses.create({
-    title, category, duration_hours,
-    ...(description     && { description }),
-    ...(is_mandatory    !== undefined && { is_mandatory }),
-    ...(max_participants !== undefined && { max_participants }),
+    title, category, durationHours,
+    ...(description    && { description }),
+    ...(isMandatory    !== undefined && { isMandatory }),
+    ...(maxParticipants !== undefined && { maxParticipants }),
   });
 }
 
@@ -1091,57 +1090,57 @@ export async function getCourses(filters?: Record<string, unknown>) {
   return db.courses.find(filters || {}).sort({ title: 1 });
 }
 
-export async function enrollInCourse(course_id: number, employee_id: number) {
+export async function enrollInCourse(courseId: number, employeeId: number) {
   return db.enrollments.create({
-    course_id, employee_id,
-    enrolled_at: Date.now(),
+    courseId, employeeId,
+    enrolledAt: Date.now(),
   });
 }
 
 export async function completeCourse(
-  course_id: number,
-  employee_id: number,
+  courseId: number,
+  employeeId: number,
   score?: number
 ) {
   return db.enrollments.updateOne(
-    { course_id, employee_id },
+    { courseId, employeeId },
     {
       status: "completed",
-      completed_at: Date.now(),
+      completedAt: Date.now(),
       ...(score !== undefined && { score }),
     }
   );
 }
 
 export async function getEnrollments(filters?: Record<string, unknown>) {
-  return db.enrollments.find(filters || {}).sort({ enrolled_at: -1 });
+  return db.enrollments.find(filters || {}).sort({ enrolledAt: -1 });
 }
 
 export async function addCertification(
-  employee_id: number,
+  employeeId: number,
   name: string,
   issuer: string,
-  issue_date: number,
-  expiry_date?: number,
-  credential_url?: string
+  issueDate: number,
+  expiryDate?: number,
+  credentialUrl?: string
 ) {
   return db.certifications.create({
-    employee_id, name, issuer, issue_date,
-    ...(expiry_date     !== undefined && { expiry_date }),
-    ...(credential_url  && { credential_url }),
+    employeeId, name, issuer, issueDate,
+    ...(expiryDate    !== undefined && { expiryDate }),
+    ...(credentialUrl && { credentialUrl }),
   });
 }
 
-export async function getCertifications(employee_id: number) {
-  return db.certifications.find({ employee_id }).sort({ issue_date: -1 });
+export async function getCertifications(employeeId: number) {
+  return db.certifications.find({ employeeId }).sort({ issueDate: -1 });
 }
 
-export async function getExpiringCertifications(days_ahead: number = 30) {
+export async function getExpiringCertifications(daysAhead: number = 30) {
   const now    = Date.now();
-  const cutoff = now + days_ahead * 86_400_000;
+  const cutoff = now + daysAhead * 86_400_000;
   return db.certifications.find({
-    expiry_date: { $gte: now, $lte: cutoff },
-  }).sort({ expiry_date: 1 });
+    expiryDate: { $gte: now, $lte: cutoff },
+  }).sort({ expiryDate: 1 });
 }
 
 // ---------------------------------------------------------------------------
@@ -1149,68 +1148,68 @@ export async function getExpiringCertifications(days_ahead: number = 30) {
 // ---------------------------------------------------------------------------
 
 export async function adjustSalary(
-  employee_id: number,
-  new_salary: number,
-  change_type: string,
-  effective_date: number,
-  change_reason?: string,
-  approved_by?: number
+  employeeId: number,
+  newSalary: number,
+  changeType: string,
+  effectiveDate: number,
+  changeReason?: string,
+  approvedBy?: number
 ) {
-  await db.employees.updateOne({ id: employee_id }, { salary: new_salary });
+  await db.employees.updateOne({ id: employeeId }, { salary: newSalary });
 
-  return db.compensation_history.create({
-    employee_id,
-    effective_date,
-    salary: new_salary,
-    change_type,
-    ...(change_reason && { change_reason }),
-    ...(approved_by !== undefined && { approved_by }),
+  return db.compensationHistory.create({
+    employeeId,
+    effectiveDate,
+    salary: newSalary,
+    changeType,
+    ...(changeReason && { changeReason }),
+    ...(approvedBy !== undefined && { approvedBy }),
   });
 }
 
-export async function getCompensationHistory(employee_id: number) {
-  return db.compensation_history.find({ employee_id }).sort({ effective_date: -1 });
+export async function getCompensationHistory(employeeId: number) {
+  return db.compensationHistory.find({ employeeId }).sort({ effectiveDate: -1 });
 }
 
 export async function getBenefitsPlans(type?: string) {
-  return db.benefits_plans.find(type ? { type } : {}).sort({ name: 1 });
+  return db.benefitsPlans.find(type ? { type } : {}).sort({ name: 1 });
 }
 
 export async function enrollInBenefit(
-  employee_id: number,
-  plan_id: number,
-  start_date: number
+  employeeId: number,
+  planId: number,
+  startDate: number
 ) {
-  return db.benefits_enrollments.create({ employee_id, plan_id, start_date });
+  return db.benefitsEnrollments.create({ employeeId, planId, startDate });
 }
 
-export async function getBenefitsEnrollments(employee_id: number) {
-  return db.benefits_enrollments.find({ employee_id, status: "active" }).sort({ start_date: -1 });
+export async function getBenefitsEnrollments(employeeId: number) {
+  return db.benefitsEnrollments.find({ employeeId, status: "active" }).sort({ startDate: -1 });
 }
 
 export async function submitExpense(
-  employee_id: number,
+  employeeId: number,
   description: string,
   amount: number,
   category: string,
-  receipt_url?: string
+  receiptUrl?: string
 ) {
-  return db.expense_claims.create({
-    employee_id, description, amount, category,
-    submitted_at: Date.now(),
-    ...(receipt_url && { receipt_url }),
+  return db.expenseClaims.create({
+    employeeId, description, amount, category,
+    submittedAt: Date.now(),
+    ...(receiptUrl && { receiptUrl }),
   });
 }
 
-export async function approveExpense(id: number, approved_by: number, approve: boolean) {
-  return db.expense_claims.updateOne(
+export async function approveExpense(id: number, approvedBy: number, approve: boolean) {
+  return db.expenseClaims.updateOne(
     { id },
-    { status: approve ? "approved" : "rejected", approved_by }
+    { status: approve ? "approved" : "rejected", approvedBy }
   );
 }
 
 export async function getExpenses(filters?: Record<string, unknown>) {
-  return db.expense_claims.find(filters || {}).sort({ submitted_at: -1 });
+  return db.expenseClaims.find(filters || {}).sort({ submittedAt: -1 });
 }
 
 // ---------------------------------------------------------------------------
@@ -1218,58 +1217,58 @@ export async function getExpenses(filters?: Record<string, unknown>) {
 // ---------------------------------------------------------------------------
 
 export async function uploadDocument(
-  employee_id: number,
+  employeeId: number,
   type: string,
   name: string,
-  file_url: string,
-  expires_at?: number
+  fileUrl: string,
+  expiresAt?: number
 ) {
   return db.documents.create({
-    employee_id, type, name, file_url,
-    uploaded_at: Date.now(),
-    ...(expires_at !== undefined && { expires_at }),
+    employeeId, type, name, fileUrl,
+    uploadedAt: Date.now(),
+    ...(expiresAt !== undefined && { expiresAt }),
   });
 }
 
-export async function getDocuments(employee_id: number, type?: string) {
+export async function getDocuments(employeeId: number, type?: string) {
   return db.documents.find({
-    employee_id,
+    employeeId,
     ...(type && { type }),
-  }).sort({ uploaded_at: -1 });
+  }).sort({ uploadedAt: -1 });
 }
 
-export async function getExpiringDocuments(days_ahead: number = 30) {
+export async function getExpiringDocuments(daysAhead: number = 30) {
   const now    = Date.now();
-  const cutoff = now + days_ahead * 86_400_000;
+  const cutoff = now + daysAhead * 86_400_000;
   return db.documents.find({
-    expires_at: { $gte: now, $lte: cutoff },
-  }).sort({ expires_at: 1 });
+    expiresAt: { $gte: now, $lte: cutoff },
+  }).sort({ expiresAt: 1 });
 }
 
 export async function getPolicies(category?: string) {
-  return db.policies.find(category ? { category } : {}).sort({ effective_date: -1 });
+  return db.policies.find(category ? { category } : {}).sort({ effectiveDate: -1 });
 }
 
 export async function getAuditLog(
-  entity_type?: string,
-  entity_id?: number,
-  actor_id?: number
+  entityType?: string,
+  entityId?: number,
+  actorId?: number
 ) {
-  return db.audit_log.find({
-    ...(entity_type !== undefined && { entity_type }),
-    ...(entity_id   !== undefined && { entity_id }),
-    ...(actor_id    !== undefined && { actor_id }),
+  return db.auditLog.find({
+    ...(entityType !== undefined && { entityType }),
+    ...(entityId   !== undefined && { entityId }),
+    ...(actorId    !== undefined && { actorId }),
   }).sort({ timestamp: -1 }).limit(500);
 }
 
-export async function acknowledgePolicy(employee_id: number, policy_id: number) {
+export async function acknowledgePolicy(employeeId: number, policyId: number) {
   // Record acknowledgement as a document
   return db.documents.create({
-    employee_id,
+    employeeId,
     type: "policy",
-    name: `Policy ${policy_id} Acknowledgement`,
-    file_url: "",
-    uploaded_at: Date.now(),
+    name: `Policy ${policyId} Acknowledgement`,
+    fileUrl: "",
+    uploadedAt: Date.now(),
   });
 }
 
@@ -1277,20 +1276,20 @@ export async function acknowledgePolicy(employee_id: number, policy_id: number) 
 // Notifications (4 endpoints)
 // ---------------------------------------------------------------------------
 
-export async function getNotifications(employee_id: number) {
-  return db.notifications.find({ employee_id }).sort({ created_at: -1 });
+export async function getNotifications(employeeId: number) {
+  return db.notifications.find({ employeeId }).sort({ createdAt: -1 });
 }
 
 export async function markAsRead(id: number) {
-  return db.notifications.updateOne({ id }, { is_read: true });
+  return db.notifications.updateOne({ id }, { isRead: true });
 }
 
-export async function markAllAsRead(employee_id: number) {
-  return db.notifications.updateMany({ employee_id, is_read: false }, { is_read: true });
+export async function markAllAsRead(employeeId: number) {
+  return db.notifications.updateMany({ employeeId, isRead: false }, { isRead: true });
 }
 
-export async function getUnreadCount(employee_id: number) {
-  return db.notifications.countDocuments({ employee_id, is_read: false });
+export async function getUnreadCount(employeeId: number) {
+  return db.notifications.countDocuments({ employeeId, isRead: false });
 }
 
 // ---------------------------------------------------------------------------
@@ -1307,9 +1306,9 @@ export async function getDashboard() {
   ] = await Promise.all([
     db.employees.countDocuments({ status: "active" }),
     db.departments.countDocuments({}),
-    db.positions.countDocuments({ is_open: true }),
-    db.leave_requests.countDocuments({ status: "pending" }),
-    db.job_postings.countDocuments({ status: "open" }),
+    db.positions.countDocuments({ isOpen: true }),
+    db.leaveRequests.countDocuments({ status: "pending" }),
+    db.jobPostings.countDocuments({ status: "open" }),
   ]);
 
   return {
@@ -1327,7 +1326,7 @@ export async function getDashboard() {
 export async function getHeadcountByDepartment() {
   return db.employees.aggregate([
     { $match: { status: "active" } },
-    { $group: { _id: "$department_id", headcount: { $sum: 1 }, avg_salary: { $avg: "$salary" } } },
+    { $group: { _id: "$departmentId", headcount: { $sum: 1 }, avgSalary: { $avg: "$salary" } } },
     { $sort: { headcount: -1 } },
   ]);
 }
@@ -1337,15 +1336,15 @@ export async function getSalaryDistribution() {
     { $match: { status: "active" } },
     {
       $group: {
-        _id: "$department_id",
-        min_salary:    { $min: "$salary" },
-        max_salary:    { $max: "$salary" },
-        avg_salary:    { $avg: "$salary" },
-        total_payroll: { $sum: "$salary" },
-        headcount:     { $sum: 1 },
+        _id: "$departmentId",
+        minSalary:    { $min: "$salary" },
+        maxSalary:    { $max: "$salary" },
+        avgSalary:    { $avg: "$salary" },
+        totalPayroll: { $sum: "$salary" },
+        headcount:    { $sum: 1 },
       },
     },
-    { $sort: { total_payroll: -1 } },
+    { $sort: { totalPayroll: -1 } },
   ]);
 }
 
@@ -1353,40 +1352,40 @@ export async function getAttritionReport() {
   const { data: terminated } = await db.employees.countDocuments({ status: "terminated" });
   const { data: total }      = await db.employees.countDocuments({});
   const rate = total ? (((terminated as number) || 0) / (total as number) * 100).toFixed(1) : "0.0";
-  return { data: { terminated, total, attrition_rate: `${rate}%` }, error: null };
+  return { data: { terminated, total, attritionRate: `${rate}%` }, error: null };
 }
 
 export async function getLeaveUtilization() {
-  return db.leave_requests.aggregate([
+  return db.leaveRequests.aggregate([
     { $match: { status: "approved" } },
     {
       $group: {
-        _id: "$employee_id",
-        total_days_used: { $sum: "$days" },
-        requests_count:  { $sum: 1 },
+        _id: "$employeeId",
+        totalDaysUsed: { $sum: "$days" },
+        requestsCount: { $sum: 1 },
       },
     },
-    { $sort: { total_days_used: -1 } },
+    { $sort: { totalDaysUsed: -1 } },
   ]);
 }
 
 export async function getReviewStats() {
   return db.reviews.aggregate([
-    { $group: { _id: "$period", count: { $sum: 1 }, avg_rating: { $avg: "$rating" } } },
+    { $group: { _id: "$period", count: { $sum: 1 }, avgRating: { $avg: "$rating" } } },
     { $sort: { _id: -1 } },
   ]);
 }
 
 export async function getTimeToHire() {
-  // Hired applicants carry the applied_date; the job posting has the posted_date.
-  // We aggregate by job_posting_id and compute avg days from application to hire.
+  // Hired applicants carry the appliedDate; the job posting has the postedDate.
+  // We aggregate by jobPostingId and compute avg days from application to hire.
   return db.applicants.aggregate([
     { $match: { stage: "hired" } },
     {
       $group: {
-        _id: "$job_posting_id",
+        _id: "$jobPostingId",
         count: { $sum: 1 },
-        avg_apply_date: { $avg: "$applied_date" },
+        avgApplyDate: { $avg: "$appliedDate" },
       },
     },
     { $sort: { count: -1 } },
@@ -1397,7 +1396,7 @@ export async function getDiversityMetrics() {
   // Department composition with skill breakdown
   return db.employees.aggregate([
     { $match: { status: "active" } },
-    { $group: { _id: "$department_id", headcount: { $sum: 1 } } },
+    { $group: { _id: "$departmentId", headcount: { $sum: 1 } } },
     { $sort: { headcount: -1 } },
   ]);
 }
@@ -1407,25 +1406,25 @@ export async function getCostPerEmployee() {
     { $match: { status: "active" } },
     {
       $group: {
-        _id: "$department_id",
-        total_salary: { $sum: "$salary" },
-        headcount:    { $sum: 1 },
-        avg_salary:   { $avg: "$salary" },
+        _id: "$departmentId",
+        totalSalary: { $sum: "$salary" },
+        headcount:   { $sum: 1 },
+        avgSalary:   { $avg: "$salary" },
       },
     },
-    { $sort: { total_salary: -1 } },
+    { $sort: { totalSalary: -1 } },
   ]);
 }
 
 export async function getMonthlyTrends() {
   const { data: hires } = await db.employees.aggregate([
-    { $group: { _id: { $dateToString: { format: "%Y-%m", date: { $toDate: "$hire_date" } } }, count: { $sum: 1 } } },
+    { $group: { _id: { $dateToString: { format: "%Y-%m", date: { $toDate: "$hireDate" } } }, count: { $sum: 1 } } },
     { $sort: { _id: 1 } },
   ]);
 
   const { data: terminations } = await db.employees.aggregate([
     { $match: { status: "terminated" } },
-    { $group: { _id: { $dateToString: { format: "%Y-%m", date: { $toDate: "$hire_date" } } }, count: { $sum: 1 } } },
+    { $group: { _id: { $dateToString: { format: "%Y-%m", date: { $toDate: "$hireDate" } } }, count: { $sum: 1 } } },
     { $sort: { _id: 1 } },
   ]);
 
