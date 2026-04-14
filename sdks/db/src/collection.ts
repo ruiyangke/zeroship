@@ -162,6 +162,16 @@ export class Collection<S = PlainObject> {
     }
   }
 
+  /** Wraps an operation in ensureReady + try/catch → Result. Eliminates boilerplate per method. */
+  private async _run<T>(fn: () => Promise<T>): Promise<Result<T>> {
+    try {
+      await this.ensureReady();
+      return ok(await fn());
+    } catch (e) {
+      return err(toResultError(e));
+    }
+  }
+
   /**
    * Merges the soft-delete condition into a user-supplied filter.
    * When soft delete is enabled, adds `{ deleted_at: null }` so that
@@ -179,16 +189,13 @@ export class Collection<S = PlainObject> {
    * Returns the persisted document with `id`, `createdAt`, and `updatedAt` mapped.
    */
   async create(doc: CreateInput<S>): Promise<Result<Document<S>>> {
-    try {
-      await this.ensureReady();
+    return this._run(async () => {
       const validated = validateDoc(doc as PlainObject, this._schema);
       const outbound = mapDocOutbound(validated, this._toColumn);
       const raw = await this._native.insert(this._name, outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>);
       const result = parseRaw<PlainObject>(raw);
-      return ok(mapResultDoc(result!, this._toField) as Document<S>);
-    } catch (e) {
-      return err(toResultError(e));
-    }
+      return mapResultDoc(result!, this._toField) as Document<S>;
+    });
   }
 
   /**
@@ -197,16 +204,13 @@ export class Collection<S = PlainObject> {
    */
   async insertMany(docs: CreateInput<S>[]): Promise<Result<Document<S>[]>> {
     if (docs.length === 0) return ok([] as Document<S>[]);
-    try {
-      await this.ensureReady();
+    return this._run(async () => {
       const validated = (docs as PlainObject[]).map((doc) => validateDoc(doc, this._schema));
       const outbound = validated.map(d => mapDocOutbound(d, this._toColumn));
       const raw = await this._native.insertMany(this._name, outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>[]);
       const results = parseRaw<PlainObject[]>(raw);
-      return ok((results ?? []).map(d => mapResultDoc(d, this._toField)) as Document<S>[]);
-    } catch (e) {
-      return err(toResultError(e));
-    }
+      return (results ?? []).map(d => mapResultDoc(d, this._toField)) as Document<S>[];
+    });
   }
 
   /**
@@ -214,17 +218,14 @@ export class Collection<S = PlainObject> {
    * Field names in `filter` are mapped outbound before the native call.
    */
   async findOne(filter: Filter<S>): Promise<Result<Document<S> | null>> {
-    try {
-      await this.ensureReady();
+    return this._run(async () => {
       const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
       const raw = await this._native.findOne(this._name, mapped);
-      if (raw === null) return ok(null);
+      if (raw === null) return null;
       const result = parseRaw<PlainObject>(raw);
-      if (result === null) return ok(null);
-      return ok(mapResultDoc(result, this._toField) as Document<S>);
-    } catch (e) {
-      return err(toResultError(e));
-    }
+      if (result === null) return null;
+      return mapResultDoc(result, this._toField) as Document<S>;
+    });
   }
 
   /** Shorthand for `findOne({ id })`. */
@@ -264,8 +265,7 @@ export class Collection<S = PlainObject> {
     doc: CreateInput<S>,
     options: { conflictFields: (string & keyof Document<S>)[] }
   ): Promise<Result<Document<S>>> {
-    try {
-      await this.ensureReady();
+    return this._run(async () => {
       const validated = validateDoc(doc as PlainObject, this._schema);
       const outbound = mapDocOutbound(validated, this._toColumn);
       const conflictCols = options.conflictFields.map((f) => this._toColumn(f));
@@ -275,10 +275,8 @@ export class Collection<S = PlainObject> {
         conflictCols
       );
       const result = parseRaw<PlainObject>(raw);
-      return ok(mapResultDoc(result!, this._toField) as Document<S>);
-    } catch (e) {
-      return err(toResultError(e));
-    }
+      return mapResultDoc(result!, this._toField) as Document<S>;
+    });
   }
 
   /**
@@ -291,25 +289,18 @@ export class Collection<S = PlainObject> {
     filter: Filter<S>,
     update: UpdateExpression<S>
   ): Promise<Result<{ matchedCount: number; modifiedCount: number }>> {
-    try {
-      await this.ensureReady();
+    return this._run(async () => {
       const updateObj = update as PlainObject;
       const fields = extractUpdateFields(updateObj);
       checkPartial(fields, this._schema);
       validateArrayPushOps(updateObj, this._schema);
       const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const mappedUpdate = mapUpdateOutbound(updateObj, this._toColumn);
-      const raw = await this._native.updateOne(
-        this._name,
-        mappedFilter,
-        mappedUpdate
-      );
+      const raw = await this._native.updateOne(this._name, mappedFilter, mappedUpdate);
       const result = parseRaw<PlainObject>(raw);
       const matched = result !== null ? 1 : 0;
-      return ok({ matchedCount: matched, modifiedCount: matched });
-    } catch (e) {
-      return err(toResultError(e));
-    }
+      return { matchedCount: matched, modifiedCount: matched };
+    });
   }
 
   /**
@@ -322,25 +313,18 @@ export class Collection<S = PlainObject> {
     filter: Filter<S>,
     update: UpdateExpression<S>
   ): Promise<Result<{ matchedCount: number; modifiedCount: number }>> {
-    try {
-      await this.ensureReady();
+    return this._run(async () => {
       const updateObj = update as PlainObject;
       const fields = extractUpdateFields(updateObj);
       checkPartial(fields, this._schema);
       validateArrayPushOps(updateObj, this._schema);
       const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const mappedUpdate = mapUpdateOutbound(updateObj, this._toColumn);
-      const raw = await this._native.updateMany(
-        this._name,
-        mappedFilter,
-        mappedUpdate
-      );
+      const raw = await this._native.updateMany(this._name, mappedFilter, mappedUpdate);
       const result = parseRaw<{ updated: number }>(raw);
       const n = result?.updated ?? 0;
-      return ok({ matchedCount: n, modifiedCount: n });
-    } catch (e) {
-      return err(toResultError(e));
-    }
+      return { matchedCount: n, modifiedCount: n };
+    });
   }
 
   /**
@@ -352,25 +336,18 @@ export class Collection<S = PlainObject> {
     filter: Filter<S>,
     update: UpdateExpression<S>
   ): Promise<Result<Document<S> | null>> {
-    try {
-      await this.ensureReady();
+    return this._run(async () => {
       const updateObj = update as PlainObject;
       const fields = extractUpdateFields(updateObj);
       checkPartial(fields, this._schema);
       validateArrayPushOps(updateObj, this._schema);
       const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const mappedUpdate = mapUpdateOutbound(updateObj, this._toColumn);
-      const raw = await this._native.updateOne(
-        this._name,
-        mappedFilter,
-        mappedUpdate
-      );
+      const raw = await this._native.updateOne(this._name, mappedFilter, mappedUpdate);
       const result = parseRaw<PlainObject>(raw);
-      if (result === null) return ok(null);
-      return ok(mapResultDoc(result, this._toField) as Document<S>);
-    } catch (e) {
-      return err(toResultError(e));
-    }
+      if (result === null) return null;
+      return mapResultDoc(result, this._toField) as Document<S>;
+    });
   }
 
   /**
@@ -379,24 +356,19 @@ export class Collection<S = PlainObject> {
    * Returns `null` if no document matches the filter.
    */
   async findOneAndDelete(filter: Filter<S>): Promise<Result<Document<S> | null>> {
-    try {
-      await this.ensureReady();
+    return this._run(async () => {
       if (this._softDelete) {
         const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
         const col = this._toColumn("deletedAt");
         const raw = await this._native.updateOne(this._name, mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
         const result = parseRaw<PlainObject>(raw);
-        if (result === null) return ok(null);
-        return ok(mapResultDoc(result, this._toField) as Document<S>);
+        return result === null ? null : mapResultDoc(result, this._toField) as Document<S>;
       }
       const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const raw = await this._native.deleteOne(this._name, mapped);
       const result = parseRaw<PlainObject>(raw);
-      if (result === null) return ok(null);
-      return ok(mapResultDoc(result, this._toField) as Document<S>);
-    } catch (e) {
-      return err(toResultError(e));
-    }
+      return result === null ? null : mapResultDoc(result, this._toField) as Document<S>;
+    });
   }
 
   /**
@@ -405,21 +377,18 @@ export class Collection<S = PlainObject> {
    * Returns `{ deletedCount: 1 }` if a document was found, `{ deletedCount: 0 }` otherwise.
    */
   async deleteOne(filter: Filter<S>): Promise<Result<{ deletedCount: number }>> {
-    try {
-      await this.ensureReady();
+    return this._run(async () => {
       if (this._softDelete) {
         const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
         const col = this._toColumn("deletedAt");
         const raw = await this._native.updateOne(this._name, mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
         const result = parseRaw<PlainObject>(raw);
-        return ok({ deletedCount: result !== null ? 1 : 0 });
+        return { deletedCount: result !== null ? 1 : 0 };
       }
       const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const raw = await this._native.deleteOne(this._name, mapped);
-      return ok({ deletedCount: raw !== null && raw !== undefined && raw !== "" ? 1 : 0 });
-    } catch (e) {
-      return err(toResultError(e));
-    }
+      return { deletedCount: raw !== null && raw !== undefined && raw !== "" ? 1 : 0 };
+    });
   }
 
   /**
@@ -428,22 +397,19 @@ export class Collection<S = PlainObject> {
    * Returns `{ deletedCount: N }` where N is the number of documents removed.
    */
   async deleteMany(filter: Filter<S>): Promise<Result<{ deletedCount: number }>> {
-    try {
-      await this.ensureReady();
+    return this._run(async () => {
       if (this._softDelete) {
         const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
         const col = this._toColumn("deletedAt");
         const raw = await this._native.updateMany(this._name, mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
         const result = parseRaw<{ updated: number }>(raw);
-        return ok({ deletedCount: result?.updated ?? 0 });
+        return { deletedCount: result?.updated ?? 0 };
       }
       const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const raw = await this._native.deleteMany(this._name, mapped);
       const result = parseRaw<{ deleted: number }>(raw);
-      return ok({ deletedCount: result?.deleted ?? 0 });
-    } catch (e) {
-      return err(toResultError(e));
-    }
+      return { deletedCount: result?.deleted ?? 0 };
+    });
   }
 
   /**
@@ -451,15 +417,12 @@ export class Collection<S = PlainObject> {
    * no filter is provided.
    */
   async countDocuments(filter: Filter<S> = {} as Filter<S>): Promise<Result<number>> {
-    try {
-      await this.ensureReady();
+    return this._run(async () => {
       const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
       const raw = await this._native.count(this._name, mapped);
       const result = parseRaw<{ count: number }>(raw);
-      return ok(result?.count ?? 0);
-    } catch (e) {
-      return err(toResultError(e));
-    }
+      return result?.count ?? 0;
+    });
   }
 
   /**
@@ -467,9 +430,7 @@ export class Collection<S = PlainObject> {
    * Defaults to all documents when no filter is provided.
    */
   async distinct(field: string & keyof Document<S>, filter: Filter<S> = {} as Filter<S>): Promise<Result<(string | number | boolean | null)[]>> {
-    try {
-      await this.ensureReady();
-      // Validate field name at runtime — column names can't be parameterized in SQL
+    return this._run(async () => {
       if (!this._knownFields.has(field)) {
         throw new ValidationError({ [field]: { path: field, message: `unknown field: ${field}` } });
       }
@@ -477,10 +438,8 @@ export class Collection<S = PlainObject> {
       const column = this._toColumn(field);
       const raw = await this._native.distinct(this._name, column, mapped);
       const result = parseRaw<(string | number | boolean | null)[]>(raw);
-      return ok(result ?? []);
-    } catch (e) {
-      return err(toResultError(e));
-    }
+      return result ?? [];
+    });
   }
 
   /**
@@ -488,18 +447,14 @@ export class Collection<S = PlainObject> {
    * `$group`, `$match`, and accumulator expressions are translated to the native format.
    */
   async aggregate(pipeline: PlainObject[]): Promise<Result<PlainObject[]>> {
-    try {
-      await this.ensureReady();
-      // When soft delete is enabled, prepend a $match stage to exclude deleted docs
+    return this._run(async () => {
       let effectivePipeline = pipeline;
       if (this._softDelete) {
         const softFilter = { [this._toColumn("deletedAt")]: null };
         const hasLeadingMatch = pipeline.length > 0 && "$match" in pipeline[0];
         if (hasLeadingMatch) {
-          // Merge into existing leading $match
           const existing = pipeline[0].$match as ZeroshipDbFilter;
-          const merged = { $and: [existing, softFilter] } as ZeroshipDbFilter;
-          effectivePipeline = [{ $match: merged }, ...pipeline.slice(1)];
+          effectivePipeline = [{ $match: { $and: [existing, softFilter] } as ZeroshipDbFilter }, ...pipeline.slice(1)];
         } else {
           effectivePipeline = [{ $match: softFilter }, ...pipeline];
         }
@@ -507,10 +462,8 @@ export class Collection<S = PlainObject> {
       const translated = translateAggregatePipeline(effectivePipeline, this._toColumn) as ZeroshipDbAggregateStage[];
       const raw = await this._native.aggregate(this._name, translated);
       const results = parseRaw<PlainObject[]>(raw);
-      return ok((results ?? []).map(d => mapResultDoc(d, this._toField)));
-    } catch (e) {
-      return err(toResultError(e));
-    }
+      return (results ?? []).map(d => mapResultDoc(d, this._toField));
+    });
   }
 
   /**
@@ -518,14 +471,11 @@ export class Collection<S = PlainObject> {
    * Always performs a real DELETE regardless of the soft-delete setting.
    */
   async forceDelete(filter: Filter<S>): Promise<Result<{ deletedCount: number }>> {
-    try {
-      await this.ensureReady();
+    return this._run(async () => {
       const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const raw = await this._native.deleteOne(this._name, mapped);
-      return ok({ deletedCount: raw !== null && raw !== undefined && raw !== "" ? 1 : 0 });
-    } catch (e) {
-      return err(toResultError(e));
-    }
+      return { deletedCount: raw !== null && raw !== undefined && raw !== "" ? 1 : 0 };
+    });
   }
 
   /**
@@ -533,14 +483,11 @@ export class Collection<S = PlainObject> {
    * Always performs a real DELETE regardless of the soft-delete setting.
    */
   async forceDeleteMany(filter: Filter<S>): Promise<Result<{ deletedCount: number }>> {
-    try {
-      await this.ensureReady();
+    return this._run(async () => {
       const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const raw = await this._native.deleteMany(this._name, mapped);
       const result = parseRaw<{ deleted: number }>(raw);
-      return ok({ deletedCount: result?.deleted ?? 0 });
-    } catch (e) {
-      return err(toResultError(e));
-    }
+      return { deletedCount: result?.deleted ?? 0 };
+    });
   }
 }
