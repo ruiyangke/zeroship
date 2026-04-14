@@ -148,7 +148,11 @@ export class Query<S = PlainObject, P = Document<S>> {
 
     try {
       const raw = await this._native(this._collection, filter, opts);
-      const parsed: PlainObject[] = typeof raw === "string" ? JSON.parse(raw) : raw;
+      const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+      // Detect native error envelope (fallback — OpResult::Failed handles this in production)
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && typeof parsed.error === "string") {
+        throw new Error(parsed.error);
+      }
       const rows: PlainObject[] = Array.isArray(parsed) ? parsed : [];
       return ok(rows.map(d => mapResultDoc(d, this._toField)) as P[]);
     } catch (e: unknown) {

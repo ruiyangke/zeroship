@@ -57,7 +57,7 @@ export type InferSchema<S> = {
 };
 
 /**
- * The persisted document type: user fields + auto-generated `_id`, `createdAt`, `updatedAt`.
+ * The persisted document type: user fields + auto-generated `id`, `createdAt`, `updatedAt`.
  * Extends InferSchema so required fields remain required.
  */
 export type Document<S> = InferSchema<S> & {
@@ -287,7 +287,7 @@ export class TypeBuilder<T = unknown, R extends boolean = false> {
  * The type-builder namespace. Use these factory functions to define schema fields:
  *
  * ```ts
- * const schema = {
+ * const fields = {
  *   name: t.string().required(),
  *   age:  t.number().min(0),
  *   tags: t.array(t.string()),
@@ -339,17 +339,20 @@ export interface SchemaOptions {
  * Use `schema({ ... }).softDelete()` to enable soft delete for a specific collection.
  */
 export class SchemaBuilder<S> {
-  fields: S;
-  options: SchemaOptions;
+  readonly fields: S;
+  private _options: SchemaOptions;
 
   constructor(fields: S) {
     this.fields = fields;
-    this.options = { softDelete: false };
+    this._options = { softDelete: false };
   }
+
+  /** Returns the collection options. */
+  get options(): Readonly<SchemaOptions> { return this._options; }
 
   /** Enable soft delete — deleteOne/deleteMany set `deletedAt` instead of removing rows. */
   softDelete(): this {
-    this.options.softDelete = true;
+    this._options.softDelete = true;
     return this;
   }
 }

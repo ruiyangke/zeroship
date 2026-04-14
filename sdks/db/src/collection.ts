@@ -19,7 +19,6 @@ import { PlainObject, Result, Document, CreateInput, UpdateExpression, Filter, t
 /** The native driver interface from @zeroship/types. */
 export type NativeDb = ZeroshipDb;
 
-
 /**
  * Converts a caught value to an Error for inclusion in a Result.
  * ValidationError instances are returned as-is (they are already well-typed).
@@ -177,7 +176,7 @@ export class Collection<S = PlainObject> {
 
   /**
    * Inserts a single document after validating it against the schema.
-   * Returns the persisted document with `_id`, `createdAt`, and `updatedAt` mapped.
+   * Returns the persisted document with `id`, `createdAt`, and `updatedAt` mapped.
    */
   async create(doc: CreateInput<S>): Promise<Result<Document<S>>> {
     try {
