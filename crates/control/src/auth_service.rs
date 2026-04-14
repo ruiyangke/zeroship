@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
+use zeroship_core::typed_id;
 use zeroship_pg::Conn;
 
 // ---------------------------------------------------------------------------
@@ -208,13 +209,14 @@ impl AuthService {
             return Err("invalid email or password".into());
         }
 
+        let raw_uuid: String = row.get("id"); // raw UUID for internal queries
         let user = row_to_user(row);
 
         // Update last_login
         let _ = conn
             .execute(
                 "UPDATE auth_users SET last_login = NOW() WHERE id = $1::uuid",
-                &[&user.id.as_str()],
+                &[&raw_uuid.as_str()],
             )
             .await;
 
@@ -223,7 +225,7 @@ impl AuthService {
             .execute(
                 "INSERT INTO auth_app_consents (user_id, app_id) VALUES ($1::uuid, $2::uuid) \
                  ON CONFLICT (user_id, app_id) DO NOTHING",
-                &[&user.id.as_str(), &app_id],
+                &[&raw_uuid.as_str(), &app_id],
             )
             .await;
 
@@ -235,7 +237,7 @@ impl AuthService {
             .execute(
                 "INSERT INTO auth_sessions (user_id, app_id, token_hash, expires_at) \
                  VALUES ($1::uuid, $2::uuid, $3, NOW() + INTERVAL '24 hours')",
-                &[&user.id.as_str(), &app_id, &token_hash.as_str()],
+                &[&raw_uuid.as_str(), &app_id, &token_hash.as_str()],
             )
             .await;
 
@@ -261,14 +263,15 @@ impl AuthService {
 
     // -- User lookup ----------------------------------------------------------
 
-    /// Get a user by ID.
+    /// Get a user by typed ID (`usr_...`).
     pub async fn get_user(&self, user_id: &str) -> Result<AuthUser, String> {
+        let uuid = user_id_to_uuid(user_id)?;
         let mut conn = self.conn().await?;
 
         let rows = conn
             .query(
                 "SELECT id, email, name, avatar_url FROM auth_users WHERE id = $1::uuid",
-                &[&user_id],
+                &[&uuid.as_str()],
             )
             .await
             .map_err(|e| format!("database: {e}"))?;
@@ -282,13 +285,14 @@ impl AuthService {
 
     /// Check whether a user has granted consent to an app.
     pub async fn has_consent(&self, user_id: &str, app_id: &str) -> Result<bool, String> {
+        let uuid = user_id_to_uuid(user_id)?;
         let mut conn = self.conn().await?;
 
         let rows = conn
             .query(
                 "SELECT id FROM auth_app_consents \
                  WHERE user_id = $1::uuid AND app_id = $2::uuid AND revoked_at IS NULL",
-                &[&user_id, &app_id],
+                &[&uuid.as_str(), &app_id],
             )
             .await
             .map_err(|e| format!("database: {e}"))?;
@@ -298,12 +302,13 @@ impl AuthService {
 
     /// Grant consent for a user to an app. Idempotent (re-grants if revoked).
     pub async fn grant_consent(&self, user_id: &str, app_id: &str) -> Result<(), String> {
+        let uuid = user_id_to_uuid(user_id)?;
         let mut conn = self.conn().await?;
 
         conn.execute(
             "INSERT INTO auth_app_consents (user_id, app_id) VALUES ($1::uuid, $2::uuid) \
              ON CONFLICT (user_id, app_id) DO UPDATE SET revoked_at = NULL, granted_at = NOW()",
-            &[&user_id, &app_id],
+            &[&uuid.as_str(), &app_id],
         )
         .await
         .map_err(|e| format!("database: {e}"))?;
@@ -346,13 +351,22 @@ impl AuthService {
 // ---------------------------------------------------------------------------
 
 /// Convert a query row into an `AuthUser`.
+/// PG stores raw UUID; we encode it as a typed ID (`usr_` + base62).
 fn row_to_user(row: &zeroship_pg::Row) -> AuthUser {
+    let raw_uuid: String = row.get("id");
+    let id = typed_id::from_uuid_string(typed_id::USER_PREFIX, &raw_uuid)
+        .unwrap_or(raw_uuid); // fallback to raw if encoding fails
     AuthUser {
-        id: row.get("id"), // UUID comes back as String from text-format params
+        id,
         email: row.get("email"),
         name: row.get("name"),
         avatar_url: row.get("avatar_url"),
     }
+}
+
+/// Convert a typed user ID (`usr_...`) to raw UUID string for PG queries.
+fn user_id_to_uuid(typed: &str) -> Result<String, String> {
+    typed_id::to_uuid_string(typed)
 }
 
 /// SHA-256 hex digest of input.

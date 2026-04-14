@@ -42,7 +42,7 @@ postgres-types = { version = "0.2", features = ["with-uuid-1"] }
 fallible-iterator = "0.2"
 
 # IDs
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
 
 # Compression
 zstd = "0.13"

@@ -3,5 +3,6 @@
 pub mod types;
 pub mod vfs;
 pub mod auth;
+pub mod typed_id;
 
 pub use types::*;
