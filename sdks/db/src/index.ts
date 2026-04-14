@@ -8,3 +8,5 @@ export { ValidationError } from "./errors.js";
 export { Query } from "./query.js";
 export { Collection } from "./collection.js";
 export { transaction } from "./transaction.js";
+export { createDb } from "./db.js";
+export type { Db, TxCollection } from "./db.js";
