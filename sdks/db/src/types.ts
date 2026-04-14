@@ -93,7 +93,7 @@ export interface FieldDef {
   default?: unknown;
   min?: number;
   max?: number;
-  enum?: unknown[];
+  enum?: string[];
   pattern?: RegExp;
 }
 
@@ -151,7 +151,7 @@ export class TypeBuilder {
   }
 
   /** Restricts the field to a fixed set of allowed values. */
-  enum(...values: unknown[]): this {
+  enum(...values: string[]): this {
     this._def.enum = values;
     return this;
   }

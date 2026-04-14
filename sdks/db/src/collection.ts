@@ -15,24 +15,8 @@ import {
 import { Query } from "./query.js";
 import { PlainObject, Result, Document, CreateInput, UpdateInput, ok, err } from "./types.js";
 
-/** Interface that the native zeroship.db.* layer must satisfy. */
-export interface NativeDb {
-  insert(collection: string, doc: unknown): Promise<string>;
-  insertMany(collection: string, docs: unknown): Promise<string>;
-  findOne(collection: string, filter: unknown): Promise<string | null>;
-  find(collection: string, filter: unknown, opts: unknown): Promise<string>;
-  updateOne(collection: string, filter: unknown, update: unknown): Promise<string>;
-  updateMany(collection: string, filter: unknown, update: unknown): Promise<string>;
-  deleteOne(collection: string, filter: unknown): Promise<string>;
-  deleteMany(collection: string, filter: unknown): Promise<string>;
-  count(collection: string, filter: unknown): Promise<string>;
-  distinct(collection: string, field: string, filter: unknown): Promise<string>;
-  aggregate(collection: string, pipeline: unknown): Promise<string>;
-  registerModel?(collection: string, schema: unknown): Promise<unknown>;
-  beginTransaction?(): Promise<void>;
-  commitTransaction?(): Promise<void>;
-  rollbackTransaction?(): Promise<void>;
-}
+/** The native driver interface from @zeroship/types. */
+export type NativeDb = ZeroshipDb;
 
 /**
  * Converts a caught value to an Error for inclusion in a Result.
@@ -351,7 +335,7 @@ export class Collection<S = PlainObject> {
   async aggregate(pipeline: PlainObject[]): Promise<Result<PlainObject[]>> {
     await this.ensureReady();
       try {
-      const translated = translateAggregatePipeline(pipeline);
+      const translated = translateAggregatePipeline(pipeline) as ZeroshipDbAggregateStage[];
       const raw = await this._native.aggregate(this._name, translated);
       const results = parseRaw<PlainObject[]>(raw);
       return ok((results ?? []).map(mapResultDoc));

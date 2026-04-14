@@ -150,13 +150,10 @@ function createTxQuery<S>(query: Query<S>): TxQuery<S> {
 // createDb
 // ---------------------------------------------------------------------------
 
-/** Global scope augmented by the zeroship runtime */
-declare const globalThis: { zeroship?: { db?: NativeDb } } ;
-
 /** Get the native zeroship.db driver */
 function getNativeDb(): NativeDb {
-  if (globalThis.zeroship?.db) {
-    return globalThis.zeroship.db;
+  if (typeof zeroship !== "undefined" && zeroship?.db) {
+    return zeroship.db;
   }
   throw new Error("@zeroship/db: native zeroship.db.* not available — are you running inside zeroship?");
 }

@@ -25,6 +25,9 @@
     "prepublishOnly": "npm run build && npm test",
     "test": "node --import tsx --test tests/*.test.ts"
   },
+  "dependencies": {
+    "@zeroship/types": "file:../types"
+  },
   "devDependencies": {
     "tsx": "^4.0.0",
     "typescript": "^5.0.0"

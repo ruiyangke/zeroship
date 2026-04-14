@@ -123,7 +123,7 @@ export function normalizeSchema(input: SchemaInput): NormalizedSchema {
       if (mdef.default !== undefined) fieldDef.default = mdef.default;
       if (mdef.min !== undefined) fieldDef.min = mdef.min;
       if (mdef.max !== undefined) fieldDef.max = mdef.max;
-      if (mdef.enum !== undefined) fieldDef.enum = mdef.enum;
+      if (mdef.enum !== undefined) fieldDef.enum = mdef.enum as string[];
       if (mdef.match !== undefined) fieldDef.pattern = mdef.match;
 
       result[key] = fieldDef;

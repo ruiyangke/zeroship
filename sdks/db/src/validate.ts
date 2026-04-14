@@ -111,7 +111,7 @@ function checkField(
   if (
     enumVals !== undefined &&
     (type === "string" || type === "number" || type === "boolean") &&
-    !enumVals.includes(value)
+    !enumVals.includes(value as string)
   ) {
     errors[key] = {
       path: key,
