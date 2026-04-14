@@ -30,11 +30,11 @@ function getNativeDb(): NativeDb {
  * await Users.create({ name: "Alice", email: "alice@example.com" });
  * ```
  */
-export function model(
+export function model<S extends Record<string, unknown> = Record<string, unknown>>(
   name: string,
-  schema: Record<string, unknown>,
+  schema: S,
   nativeOverride?: NativeDb
-): Collection {
+): Collection<S> {
   if (typeof name !== "string" || name.trim().length === 0) {
     throw new Error("model name must be a non-empty string");
   }
@@ -56,5 +56,5 @@ export function model(
     }
   }
 
-  return new Collection(name, normalized, native, registrationPromise);
+  return new Collection<S>(name, normalized, native, registrationPromise);
 }

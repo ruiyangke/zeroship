@@ -4,7 +4,7 @@
  * executes the native find call only when awaited or .then() is called.
  */
 import { mapResultDoc } from "./utils.js";
-import { PlainObject, Result, ok, err } from "./types.js";
+import { PlainObject, Result, Document, ok, err } from "./types.js";
 
 type NativeFn = (
   collection: string,
@@ -14,9 +14,10 @@ type NativeFn = (
 
 /**
  * Chainable query object returned by `Collection.find()`.
+ * The generic parameter `S` is the raw schema shape; results resolve to `Document<S>[]`.
  * Collects query options lazily and executes via the native layer when awaited.
  */
-export class Query {
+export class Query<S = PlainObject> {
   private _collection: string;
   private _filter: PlainObject;
   private _native: NativeFn;
@@ -96,14 +97,14 @@ export class Query {
    * Executes the query and passes results to `resolve`; calls `reject` on error.
    */
   then(
-    resolve?: (value: Result<PlainObject[]>) => unknown,
+    resolve?: (value: Result<Document<S>[]>) => unknown,
     reject?: (reason: unknown) => unknown
   ): Promise<unknown> {
-    return this._exec().then(resolve, reject);
+    return this._exec().then(resolve as any, reject);
   }
 
   /** Executes the query and returns the mapped result documents. */
-  async _exec(): Promise<Result<PlainObject[]>> {
+  async _exec(): Promise<Result<Document<S>[]>> {
     const opts: PlainObject = {};
     if (this._sort !== undefined) opts["sort"] = this._sort;
     if (this._limit !== undefined) opts["limit"] = this._limit;
@@ -114,7 +115,7 @@ export class Query {
       const raw = await this._native(this._collection, this._filter, opts);
       const parsed: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
       const rows: PlainObject[] = Array.isArray(parsed) ? parsed : [];
-      return ok(rows.map(mapResultDoc));
+      return ok(rows.map(mapResultDoc) as Document<S>[]);
     } catch (e: any) {
       return err(new Error(`find query failed: ${e.message ?? e}`, { cause: e }));
     }

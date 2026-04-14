@@ -13,7 +13,7 @@ import {
   translateAggregatePipeline,
 } from "./utils.js";
 import { Query } from "./query.js";
-import { PlainObject, Result, ok, err } from "./types.js";
+import { PlainObject, Result, Document, CreateInput, UpdateInput, ok, err } from "./types.js";
 
 /** Interface that the native zeroship.db.* layer must satisfy. */
 export interface NativeDb {
@@ -123,9 +123,10 @@ function validateArrayPushOps(
 
 /**
  * Represents a named collection and exposes the full CRUD + aggregate API.
- * Instances are created via `model()` — do not construct directly in application code.
+ * The generic parameter `S` is the raw schema shape from which document and input
+ * types are derived. Use `model()` or `createDb()` — do not construct directly.
  */
-export class Collection {
+export class Collection<S = PlainObject> {
   private _name: string;
   private _schema: NormalizedSchema;
   private _native: NativeDb;
@@ -150,13 +151,13 @@ export class Collection {
    * Inserts a single document after validating it against the schema.
    * Returns the persisted document with `_id`, `createdAt`, and `updatedAt` mapped.
    */
-  async create(doc: PlainObject): Promise<Result<PlainObject>> {
+  async create(doc: CreateInput<S>): Promise<Result<Document<S>>> {
     try {
       await this.ensureReady();
-      const validated = validateDoc(doc, this._schema);
+      const validated = validateDoc(doc as PlainObject, this._schema);
       const raw = await this._native.insert(this._name, validated);
       const result = parseRaw<PlainObject>(raw);
-      return ok(mapResultDoc(result!));
+      return ok(mapResultDoc(result!) as Document<S>);
     } catch (e) {
       return err(toResultError(e));
     }
@@ -166,13 +167,13 @@ export class Collection {
    * Inserts multiple documents after validating each one against the schema.
    * Returns the persisted documents with field names mapped to the user-facing shape.
    */
-  async insertMany(docs: PlainObject[]): Promise<Result<PlainObject[]>> {
+  async insertMany(docs: CreateInput<S>[]): Promise<Result<Document<S>[]>> {
     await this.ensureReady();
       try {
-      const validated = docs.map((doc) => validateDoc(doc, this._schema));
+      const validated = (docs as PlainObject[]).map((doc) => validateDoc(doc, this._schema));
       const raw = await this._native.insertMany(this._name, validated);
       const results = parseRaw<PlainObject[]>(raw);
-      return ok((results ?? []).map(mapResultDoc));
+      return ok((results ?? []).map(mapResultDoc) as Document<S>[]);
     } catch (e) {
       return err(toResultError(e));
     }
@@ -182,27 +183,27 @@ export class Collection {
    * Finds and returns the first document matching `filter`, or `null` if none exists.
    * Field names in `filter` are mapped outbound before the native call.
    */
-  async findOne(filter: PlainObject): Promise<Result<PlainObject | null>> {
+  async findOne(filter: Partial<Document<S>>): Promise<Result<Document<S> | null>> {
     await this.ensureReady();
       try {
-      const mapped = mapFilterOutbound(filter);
+      const mapped = mapFilterOutbound(filter as PlainObject);
       const raw = await this._native.findOne(this._name, mapped);
       if (raw === null) return ok(null);
       const result = parseRaw<PlainObject>(raw);
       if (result === null) return ok(null);
-      return ok(mapResultDoc(result));
+      return ok(mapResultDoc(result) as Document<S>);
     } catch (e) {
       return err(toResultError(e));
     }
   }
 
   /** Shorthand for `findOne({ _id: id })`. */
-  async findById(id: unknown): Promise<Result<PlainObject | null>> {
-    return this.findOne({ _id: id });
+  async findById(id: unknown): Promise<Result<Document<S> | null>> {
+    return this.findOne({ _id: id } as Partial<Document<S>>);
   }
 
   /** Returns true if at least one document matches `filter`. */
-  async exists(filter: PlainObject): Promise<Result<boolean>> {
+  async exists(filter: Partial<Document<S>>): Promise<Result<boolean>> {
     const { data, error } = await this.countDocuments(filter);
     if (error) return err(error);
     return ok((data ?? 0) > 0);
@@ -212,10 +213,10 @@ export class Collection {
    * Returns a lazy Query that can be chained with `.sort()`, `.limit()`, `.skip()`,
    * and `.select()` before being awaited.
    */
-  find(filter: PlainObject = {}): Query {
-    const mapped = mapFilterOutbound(filter);
+  find(filter: Partial<Document<S>> = {} as Partial<Document<S>>): Query<S> {
+    const mapped = mapFilterOutbound(filter as PlainObject);
     const ready = this._ready;
-    return new Query(
+    return new Query<S>(
       this._name,
       mapped,
       async (col, f, opts) => {
@@ -232,16 +233,17 @@ export class Collection {
    * Returns `{ matchedCount, modifiedCount }` indicating whether a document was found.
    */
   async updateOne(
-    filter: PlainObject,
-    update: PlainObject
+    filter: Partial<Document<S>>,
+    update: UpdateInput<S> | PlainObject
   ): Promise<Result<{ matchedCount: number; modifiedCount: number }>> {
     await this.ensureReady();
       try {
-      const fields = extractUpdateFields(update);
+      const updateObj = update as PlainObject;
+      const fields = extractUpdateFields(updateObj);
       validatePartial(fields, this._schema);
-      validateArrayPushOps(update, this._schema);
-      const mappedFilter = mapFilterOutbound(filter);
-      const mappedUpdate = mapUpdateOutbound(update);
+      validateArrayPushOps(updateObj, this._schema);
+      const mappedFilter = mapFilterOutbound(filter as PlainObject);
+      const mappedUpdate = mapUpdateOutbound(updateObj);
       const raw = await this._native.updateOne(
         this._name,
         mappedFilter,
@@ -262,16 +264,17 @@ export class Collection {
    * Returns `{ matchedCount, modifiedCount }` with the count from the native layer.
    */
   async updateMany(
-    filter: PlainObject,
-    update: PlainObject
+    filter: Partial<Document<S>>,
+    update: UpdateInput<S> | PlainObject
   ): Promise<Result<{ matchedCount: number; modifiedCount: number }>> {
     await this.ensureReady();
       try {
-      const fields = extractUpdateFields(update);
+      const updateObj = update as PlainObject;
+      const fields = extractUpdateFields(updateObj);
       validatePartial(fields, this._schema);
-      validateArrayPushOps(update, this._schema);
-      const mappedFilter = mapFilterOutbound(filter);
-      const mappedUpdate = mapUpdateOutbound(update);
+      validateArrayPushOps(updateObj, this._schema);
+      const mappedFilter = mapFilterOutbound(filter as PlainObject);
+      const mappedUpdate = mapUpdateOutbound(updateObj);
       const raw = await this._native.updateMany(
         this._name,
         mappedFilter,
@@ -289,10 +292,10 @@ export class Collection {
    * Deletes the first document matching `filter`.
    * Returns `{ deletedCount: 1 }` if a document was found, `{ deletedCount: 0 }` otherwise.
    */
-  async deleteOne(filter: PlainObject): Promise<Result<{ deletedCount: number }>> {
+  async deleteOne(filter: Partial<Document<S>>): Promise<Result<{ deletedCount: number }>> {
     await this.ensureReady();
       try {
-      const mapped = mapFilterOutbound(filter);
+      const mapped = mapFilterOutbound(filter as PlainObject);
       const raw = await this._native.deleteOne(this._name, mapped);
       const result = parseRaw(raw);
       return ok({ deletedCount: result !== null ? 1 : 0 });
@@ -305,10 +308,10 @@ export class Collection {
    * Deletes all documents matching `filter`.
    * Returns `{ deletedCount: N }` where N is the number of documents removed.
    */
-  async deleteMany(filter: PlainObject): Promise<Result<{ deletedCount: number }>> {
+  async deleteMany(filter: Partial<Document<S>>): Promise<Result<{ deletedCount: number }>> {
     await this.ensureReady();
       try {
-      const mapped = mapFilterOutbound(filter);
+      const mapped = mapFilterOutbound(filter as PlainObject);
       const raw = await this._native.deleteMany(this._name, mapped);
       const result = parseRaw<{ deleted: number }>(raw);
       return ok({ deletedCount: result?.deleted ?? 0 });
@@ -321,10 +324,10 @@ export class Collection {
    * Counts documents matching `filter`. Defaults to counting all documents when
    * no filter is provided.
    */
-  async countDocuments(filter: PlainObject = {}): Promise<Result<number>> {
+  async countDocuments(filter: Partial<Document<S>> = {} as Partial<Document<S>>): Promise<Result<number>> {
     await this.ensureReady();
       try {
-      const mapped = mapFilterOutbound(filter);
+      const mapped = mapFilterOutbound(filter as PlainObject);
       const raw = await this._native.count(this._name, mapped);
       const result = parseRaw<{ count: number }>(raw);
       return ok(result?.count ?? 0);
@@ -337,10 +340,10 @@ export class Collection {
    * Returns the unique values of `field` across documents matching `filter`.
    * Defaults to all documents when no filter is provided.
    */
-  async distinct(field: string, filter: PlainObject = {}): Promise<Result<unknown[]>> {
+  async distinct(field: string, filter: Partial<Document<S>> = {} as Partial<Document<S>>): Promise<Result<unknown[]>> {
     await this.ensureReady();
       try {
-      const mapped = mapFilterOutbound(filter);
+      const mapped = mapFilterOutbound(filter as PlainObject);
       const raw = await this._native.distinct(this._name, field, mapped);
       const result = parseRaw<unknown[]>(raw);
       return ok(result ?? []);

@@ -10,6 +10,62 @@ export type PlainObject = Record<string, unknown>;
 /** Return type for all Collection methods. Never throws — errors are values. */
 export type Result<T> = { data: T; error: null } | { data: null; error: Error };
 
+// ---------------------------------------------------------------------------
+// Schema-to-TypeScript inference utilities
+// ---------------------------------------------------------------------------
+
+/** Maps a JS constructor to its corresponding TypeScript primitive type. */
+export type InferType<T> =
+  T extends StringConstructor ? string :
+  T extends NumberConstructor ? number :
+  T extends BooleanConstructor ? boolean :
+  T extends DateConstructor ? number :        // timestamps stored as Unix ms
+  T extends ObjectConstructor ? Record<string, unknown> :
+  T extends (infer U)[] ? InferType<U>[] :
+  unknown;
+
+/** Infers the value type from a field definition (Mongoose-style, bare constructor, or builder). */
+export type InferFieldDef<T> =
+  T extends { type: infer U } ? InferType<U> :
+  T extends StringConstructor | NumberConstructor | BooleanConstructor | DateConstructor | ObjectConstructor ? InferType<T> :
+  T extends (infer U)[] ? InferType<U>[] :
+  T extends TypeBuilder ? unknown :           // TypeBuilder inference is best-effort unknown
+  unknown;
+
+/** Keys that are explicitly marked required: true in the field definition. */
+export type RequiredKeys<S> = {
+  [K in keyof S]: S[K] extends { required: true } ? K : never
+}[keyof S];
+
+/** Keys that are not explicitly required. */
+export type OptionalKeys<S> = Exclude<keyof S, RequiredKeys<S>>;
+
+/**
+ * Infers the user-facing shape from a schema definition, honouring required/optional.
+ * Required fields are non-optional; all others become `?`.
+ */
+export type InferSchema<S> = {
+  [K in RequiredKeys<S>]: InferFieldDef<S[K]>
+} & {
+  [K in OptionalKeys<S>]?: InferFieldDef<S[K]>
+};
+
+/**
+ * The persisted document type: user fields + auto-generated `_id`, `createdAt`, `updatedAt`.
+ * Extends InferSchema so required fields remain required.
+ */
+export type Document<S> = InferSchema<S> & {
+  _id: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+/** Input type accepted by `create()` — required fields are required, optional are optional. */
+export type CreateInput<S> = InferSchema<S>;
+
+/** Input type accepted by `update*()` — all schema fields become optional. */
+export type UpdateInput<S> = Partial<InferSchema<S>>;
+
 /** Wraps a successful value in Result. */
 export function ok<T>(data: T): Result<T> {
   return { data, error: null };

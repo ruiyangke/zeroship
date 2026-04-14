@@ -26,7 +26,7 @@
 import { model } from "./model.js";
 import { Collection, type NativeDb } from "./collection.js";
 import { type NormalizedSchema } from "./schema.js";
-import { type PlainObject, type Result, ok, err } from "./types.js";
+import { type PlainObject, type Result, type Document, type CreateInput, type UpdateInput, ok, err } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,86 +35,89 @@ import { type PlainObject, type Result, ok, err } from "./types.js";
 /** Schema definition — Mongoose style, builder style, or bare constructors */
 type SchemaInput = Record<string, unknown>;
 
-/** A collection inside a transaction — same API but throws on error */
-export type TxCollection = {
-  create(doc: PlainObject): Promise<PlainObject>;
-  insertMany(docs: PlainObject[]): Promise<PlainObject[]>;
-  findOne(filter: PlainObject): Promise<PlainObject | null>;
-  findById(id: unknown): Promise<PlainObject | null>;
-  exists(filter: PlainObject): Promise<boolean>;
-  find(filter?: PlainObject): TxQuery;
-  updateOne(filter: PlainObject, update: PlainObject): Promise<{ matchedCount: number; modifiedCount: number }>;
-  updateMany(filter: PlainObject, update: PlainObject): Promise<{ matchedCount: number; modifiedCount: number }>;
-  deleteOne(filter: PlainObject): Promise<{ deletedCount: number }>;
-  deleteMany(filter: PlainObject): Promise<{ deletedCount: number }>;
-  countDocuments(filter?: PlainObject): Promise<number>;
-  distinct(field: string, filter?: PlainObject): Promise<unknown[]>;
+/**
+ * A typed collection inside a transaction — same API as Collection but throws
+ * on error instead of returning Result. Generic over schema shape S.
+ */
+export type TxCollection<S = PlainObject> = {
+  create(doc: CreateInput<S>): Promise<Document<S>>;
+  insertMany(docs: CreateInput<S>[]): Promise<Document<S>[]>;
+  findOne(filter: Partial<Document<S>>): Promise<Document<S> | null>;
+  findById(id: unknown): Promise<Document<S> | null>;
+  exists(filter: Partial<Document<S>>): Promise<boolean>;
+  find(filter?: Partial<Document<S>>): TxQuery<S>;
+  updateOne(filter: Partial<Document<S>>, update: UpdateInput<S> | PlainObject): Promise<{ matchedCount: number; modifiedCount: number }>;
+  updateMany(filter: Partial<Document<S>>, update: UpdateInput<S> | PlainObject): Promise<{ matchedCount: number; modifiedCount: number }>;
+  deleteOne(filter: Partial<Document<S>>): Promise<{ deletedCount: number }>;
+  deleteMany(filter: Partial<Document<S>>): Promise<{ deletedCount: number }>;
+  countDocuments(filter?: Partial<Document<S>>): Promise<number>;
+  distinct(field: string, filter?: Partial<Document<S>>): Promise<unknown[]>;
   aggregate(pipeline: PlainObject[]): Promise<PlainObject[]>;
 };
 
 /** Query inside a transaction — same chainable API but resolves to data directly */
-type TxQuery = {
-  sort(s: Record<string, number> | string): TxQuery;
-  limit(n: number): TxQuery;
-  skip(n: number): TxQuery;
-  select(s: string | string[] | Record<string, unknown>): TxQuery;
-  then(resolve?: (value: PlainObject[]) => unknown, reject?: (reason: unknown) => unknown): Promise<unknown>;
+type TxQuery<S = PlainObject> = {
+  sort(s: Record<string, number> | string): TxQuery<S>;
+  limit(n: number): TxQuery<S>;
+  skip(n: number): TxQuery<S>;
+  select(s: string | string[] | Record<string, unknown>): TxQuery<S>;
+  then(resolve?: (value: Document<S>[]) => unknown, reject?: (reason: unknown) => unknown): Promise<unknown>;
 };
 
-/** The db object returned by createDb */
+/** The db object returned by createDb — collections are fully typed per schema */
 export type Db<T extends Record<string, SchemaInput>> = {
-  [K in keyof T]: Collection;
+  [K in keyof T]: Collection<T[K]>
 } & {
-  transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection }) => Promise<R>) => Promise<Result<R>>;
+  transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection<T[K]> }) => Promise<R>) => Promise<Result<R>>;
 };
 
 // ---------------------------------------------------------------------------
 // TxCollection — wraps a Collection, throws on error
 // ---------------------------------------------------------------------------
 
-function createTxCollection(collection: Collection): TxCollection {
+function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
   async function unwrap<T>(result: Result<T>): Promise<T> {
     if (result.error) throw result.error;
     return result.data as T;
   }
 
   return {
-    async create(doc: PlainObject) {
+    async create(doc: CreateInput<S>) {
       return unwrap(await collection.create(doc));
     },
-    async insertMany(docs: PlainObject[]) {
+    async insertMany(docs: CreateInput<S>[]) {
       return unwrap(await collection.insertMany(docs));
     },
-    async findOne(filter: PlainObject) {
+    async findOne(filter: Partial<Document<S>>) {
       return unwrap(await collection.findOne(filter));
     },
     async findById(id: unknown) {
       return unwrap(await collection.findById(id));
     },
-    async exists(filter: PlainObject) {
+    async exists(filter: Partial<Document<S>>) {
       return unwrap(await collection.exists(filter));
     },
-    find(filter: PlainObject = {}): TxQuery {
+    find(filter: Partial<Document<S>> = {} as Partial<Document<S>>): TxQuery<S> {
       const query = collection.find(filter);
       // Wrap the query to throw on error
-      return createTxQuery(query);
+      return createTxQuery<S>(query);
     },
-    async updateOne(filter: PlainObject, update: PlainObject) {
+    async updateOne(filter: Partial<Document<S>>, update: UpdateInput<S> | PlainObject) {
       return unwrap(await collection.updateOne(filter, update));
     },
-    async updateMany(filter: PlainObject, update: PlainObject) {
+    async updateMany(filter: Partial<Document<S>>, update: UpdateInput<S> | PlainObject) {
       return unwrap(await collection.updateMany(filter, update));
     },
-    async deleteOne(filter: PlainObject) {
+    async deleteOne(filter: Partial<Document<S>>) {
       return unwrap(await collection.deleteOne(filter));
     },
-    async deleteMany(filter: PlainObject) {
+    async deleteMany(filter: Partial<Document<S>>) {
       return unwrap(await collection.deleteMany(filter));
     },
-    async countDocuments(filter: PlainObject = {}) {
+    async countDocuments(filter: Partial<Document<S>> = {} as Partial<Document<S>>) {
       return unwrap(await collection.countDocuments(filter));
     },
-    async distinct(field: string, filter: PlainObject = {}) {
+    async distinct(field: string, filter: Partial<Document<S>> = {} as Partial<Document<S>>) {
       return unwrap(await collection.distinct(field, filter));
     },
     async aggregate(pipeline: PlainObject[]) {
@@ -124,17 +127,17 @@ function createTxCollection(collection: Collection): TxCollection {
 }
 
 /** Wrap a Query to throw on error */
-function createTxQuery(query: any): TxQuery {
+function createTxQuery<S>(query: any): TxQuery<S> {
   return {
     sort(s: Record<string, number>) { query.sort(s); return this; },
     limit(n: number) { query.limit(n); return this; },
     skip(n: number) { query.skip(n); return this; },
     select(s: string | string[]) { query.select(s); return this; },
-    then(resolve?: (value: PlainObject[]) => unknown, reject?: (reason: unknown) => unknown) {
+    then(resolve?: (value: Document<S>[]) => unknown, reject?: (reason: unknown) => unknown) {
       return query.then(
-        (result: Result<PlainObject[]>) => {
+        (result: Result<Document<S>[]>) => {
           if (result.error) throw result.error;
-          return resolve ? resolve(result.data as PlainObject[]) : result.data;
+          return resolve ? resolve(result.data as Document<S>[]) : result.data;
         },
         reject
       );
@@ -165,25 +168,27 @@ export function createDb<T extends Record<string, SchemaInput>>(
   schemas: T,
   nativeOverride?: NativeDb,
 ): Db<T> {
-  const collections: Record<string, Collection> = {};
+  const collections = {} as { [K in keyof T]: Collection<T[K]> };
 
   for (const [name, schema] of Object.entries(schemas)) {
-    collections[name] = model(name, schema as Record<string, unknown>, nativeOverride);
+    (collections as Record<string, Collection<SchemaInput>>)[name] =
+      model(name, schema as SchemaInput, nativeOverride);
   }
 
   const db = {
     ...collections,
 
-    async transaction<R>(fn: (tx: Record<string, TxCollection>) => Promise<R>): Promise<Result<R>> {
+    async transaction<R>(fn: (tx: { [K in keyof T]: TxCollection<T[K]> }) => Promise<R>): Promise<Result<R>> {
       const native = nativeOverride ?? getNativeDb();
 
       // BEGIN
       await (native as any).beginTransaction();
 
       // Build tx — same collections but throwing on error
-      const tx: Record<string, TxCollection> = {};
+      const tx = {} as { [K in keyof T]: TxCollection<T[K]> };
       for (const [name, col] of Object.entries(collections)) {
-        tx[name] = createTxCollection(col);
+        (tx as Record<string, TxCollection<SchemaInput>>)[name] =
+          createTxCollection(col as Collection<SchemaInput>);
       }
 
       try {
