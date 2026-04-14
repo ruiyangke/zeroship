@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { model } from "@zeroship/db";
+import { createDb } from "@zeroship/db";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -12,46 +12,46 @@ import { Button } from "@/components/ui/button";
 // Server: models + data access (extracted by zeroship plugin)
 // ---------------------------------------------------------------------------
 
-const employees = model("employees", {
-  first_name: { type: String, required: true },
-  last_name: { type: String, required: true },
-  email: { type: String, required: true },
-  department_id: { type: Number },
-  salary: { type: Number },
-  status: { type: String, default: "active" },
-  skills: { type: [String] },
-});
-
-const departments = model("departments", {
-  name: { type: String, required: true },
-  code: { type: String, required: true },
-  headcount: { type: Number, default: 0 },
-});
-
-const leave_requests = model("leave_requests", {
-  employee_id: { type: Number, required: true },
-  type: { type: String, required: true },
-  days: { type: Number, required: true },
-  status: { type: String, default: "pending" },
+const db = createDb({
+  employees: {
+    first_name: { type: String, required: true },
+    last_name: { type: String, required: true },
+    email: { type: String, required: true },
+    department_id: { type: Number },
+    salary: { type: Number },
+    status: { type: String, default: "active" },
+    skills: { type: [String] },
+  },
+  departments: {
+    name: { type: String, required: true },
+    code: { type: String, required: true },
+    headcount: { type: Number, default: 0 },
+  },
+  leave_requests: {
+    employee_id: { type: Number, required: true },
+    type: { type: String, required: true },
+    days: { type: Number, required: true },
+    status: { type: String, default: "pending" },
+  },
 });
 
 export async function getEmployees() {
-  return employees.find({ status: "active" }).sort({ last_name: 1 });
+  return db.employees.find({ status: "active" }).sort({ last_name: 1 });
 }
 
 export async function getDepartments() {
-  return departments.find({}).sort({ name: 1 });
+  return db.departments.find({}).sort({ name: 1 });
 }
 
 export async function searchEmployees(query: string) {
-  return employees.find({ first_name: { $ilike: `%${query}%` } }).limit(20);
+  return db.employees.find({ first_name: { $ilike: `%${query}%` } }).limit(20);
 }
 
 export async function getDashboardStats() {
-  const { data: totalEmps } = await employees.countDocuments({ status: "active" });
-  const { data: totalDepts } = await departments.countDocuments({});
-  const { data: pendingLeaves } = await leave_requests.countDocuments({ status: "pending" });
-  const { data: openPositions } = await employees.countDocuments({ status: "terminated" });
+  const { data: totalEmps } = await db.employees.countDocuments({ status: "active" });
+  const { data: totalDepts } = await db.departments.countDocuments({});
+  const { data: pendingLeaves } = await db.leave_requests.countDocuments({ status: "pending" });
+  const { data: openPositions } = await db.employees.countDocuments({ status: "terminated" });
   return {
     data: { totalEmps, totalDepts, pendingLeaves, openPositions },
     error: null,
@@ -59,7 +59,7 @@ export async function getDashboardStats() {
 }
 
 export async function getHeadcountByDept() {
-  return employees.aggregate([
+  return db.employees.aggregate([
     { $match: { status: "active" } },
     { $group: { _id: "$department_id", count: { $sum: 1 } } },
     { $sort: { count: -1 } },
