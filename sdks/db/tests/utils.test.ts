@@ -165,4 +165,89 @@ describe("translateAggregatePipeline", () => {
     assert.deepEqual(result[0], { $sort: { created_at: -1 } });
     assert.deepEqual(result[1], { $limit: 10 });
   });
+
+  test("$having maps field names", () => {
+    const pipeline = [{ $having: { createdAt: { $gt: 100 } } }];
+    const result = translateAggregatePipeline(pipeline, toColumn);
+    const having = result[0].$having as Record<string, unknown>;
+    assert.equal(having.created_at, undefined ? undefined : (having as any).created_at);
+    assert.ok("created_at" in having);
+    assert.equal(having.createdAt, undefined);
+  });
+
+  test("$match maps camelCase to snake_case", () => {
+    const pipeline = [{ $match: { firstName: "Alice", updatedAt: { $gt: 100 } } }];
+    const result = translateAggregatePipeline(pipeline, toColumn);
+    const match = result[0].$match as Record<string, unknown>;
+    assert.equal(match.first_name, "Alice");
+    assert.ok("updated_at" in match);
+    assert.equal(match.firstName, undefined);
+    assert.equal(match.updatedAt, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mapResultDoc — general strategy
+// ---------------------------------------------------------------------------
+
+describe("mapResultDoc with custom strategy", () => {
+  test("asIs toField passes keys unchanged", () => {
+    const doc = { first_name: "Alice", id: 1 };
+    const result = mapResultDoc(doc, naming.asIs.toField);
+    assert.equal(result.first_name, "Alice");
+    assert.equal(result.firstName, undefined);
+  });
+
+  test("snakeCase toField converts all snake_case keys", () => {
+    const doc = { first_name: "Alice", last_name: "Smith", id: 1, email: "a@b.com" };
+    const result = mapResultDoc(doc, toField);
+    assert.equal(result.firstName, "Alice");
+    assert.equal(result.lastName, "Smith");
+    assert.equal(result.id, 1);
+    assert.equal(result.email, "a@b.com");
+    assert.equal(result.first_name, undefined);
+    assert.equal(result.last_name, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mapFilterOutbound — general strategy
+// ---------------------------------------------------------------------------
+
+describe("mapFilterOutbound with naming strategy", () => {
+  test("snakeCase converts camelCase field names", () => {
+    const result = mapFilterOutbound({ firstName: "Alice", age: 30 }, toColumn);
+    assert.equal(result.first_name, "Alice");
+    assert.equal(result.age, 30);
+    assert.equal(result.firstName, undefined);
+  });
+
+  test("fast path returns original for all-lowercase filter", () => {
+    const filter = { id: 1, name: "Alice" };
+    const result = mapFilterOutbound(filter, toColumn);
+    assert.equal(result, filter); // same reference — no copy
+  });
+
+  test("$and recursion maps nested camelCase keys", () => {
+    const result = mapFilterOutbound({
+      $and: [{ firstName: "Alice" }, { lastName: "Smith" }],
+    }, toColumn) as Record<string, unknown>;
+    const and = result.$and as Record<string, unknown>[];
+    assert.equal(and[0].first_name, "Alice");
+    assert.equal(and[1].last_name, "Smith");
+  });
+
+  test("depth limit throws on deeply nested filters", () => {
+    let filter: Record<string, unknown> = { id: 1 };
+    for (let i = 0; i < 25; i++) {
+      filter = { $not: filter };
+    }
+    assert.throws(() => mapFilterOutbound(filter, toColumn), /too deep/);
+  });
+
+  test("asIs toColumn passes all keys unchanged", () => {
+    const filter = { firstName: "Alice", createdAt: 100 };
+    const result = mapFilterOutbound(filter, naming.asIs.toColumn);
+    assert.equal(result, filter); // same reference
+  });
 });

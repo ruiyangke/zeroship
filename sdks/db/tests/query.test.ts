@@ -129,3 +129,106 @@ describe("Query thenable execution", () => {
     assert.equal(data[0].id, "x");
   });
 });
+
+// ---------------------------------------------------------------------------
+// opts key names (must match Rust: orderBy, offset, limit, select)
+// ---------------------------------------------------------------------------
+
+describe("Query opts key names", () => {
+  test("sort() produces orderBy key (not sort)", async () => {
+    const { fn, calls } = makeMockNative([]);
+    const q = new Query("users", {}, fn).sort({ name: 1 });
+    await q;
+    assert.ok("orderBy" in calls[0].opts);
+    assert.equal(calls[0].opts.sort, undefined);
+    assert.deepEqual(calls[0].opts.orderBy, { name: 1 });
+  });
+
+  test("skip() produces offset key (not skip)", async () => {
+    const { fn, calls } = makeMockNative([]);
+    const q = new Query("users", {}, fn).skip(20);
+    await q;
+    assert.ok("offset" in calls[0].opts);
+    assert.equal(calls[0].opts.skip, undefined);
+    assert.equal(calls[0].opts.offset, 20);
+  });
+
+  test("limit() produces limit key", async () => {
+    const { fn, calls } = makeMockNative([]);
+    const q = new Query("users", {}, fn).limit(10);
+    await q;
+    assert.equal(calls[0].opts.limit, 10);
+  });
+
+  test("select() produces select key", async () => {
+    const { fn, calls } = makeMockNative([]);
+    const q = new Query("users", {}, fn).select("name email");
+    await q;
+    assert.deepEqual(calls[0].opts.select, ["name", "email"]);
+  });
+
+  test("bare find() sends empty opts", async () => {
+    const { fn, calls } = makeMockNative([]);
+    const q = new Query("users", {}, fn);
+    await q;
+    assert.deepEqual(calls[0].opts, {});
+  });
+
+  test("string sort parses correctly", async () => {
+    const { fn, calls } = makeMockNative([]);
+    const q = new Query("users", {}, fn).sort("-createdAt name");
+    await q;
+    assert.deepEqual(calls[0].opts.orderBy, { createdAt: -1, name: 1 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Query with naming strategy toField
+// ---------------------------------------------------------------------------
+
+describe("Query with toField", () => {
+  test("maps snake_case result to camelCase when toField provided", async () => {
+    const { fn } = makeMockNative([
+      { id: 1, first_name: "Alice", created_at: 1000 },
+    ]);
+    const q = new Query("users", {}, fn, naming.snakeCase.toField);
+    const { data } = await q;
+    assert.equal(data![0].firstName, "Alice");
+    assert.equal(data![0].createdAt, 1000);
+    assert.equal((data![0] as any).first_name, undefined);
+  });
+
+  test("without toField, keys pass through unchanged", async () => {
+    const { fn } = makeMockNative([{ id: 1, first_name: "Alice" }]);
+    const q = new Query("users", {}, fn);
+    const { data } = await q;
+    assert.equal((data![0] as any).first_name, "Alice");
+    assert.equal(data![0].firstName, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// select() exclusion rejection
+// ---------------------------------------------------------------------------
+
+describe("Query select exclusion", () => {
+  test("inclusion projection works", () => {
+    const { fn } = makeMockNative([]);
+    assert.doesNotThrow(() => new Query("u", {}, fn).select({ name: 1, email: 1 }));
+  });
+
+  test("exclusion projection throws", () => {
+    const { fn } = makeMockNative([]);
+    assert.throws(
+      () => new Query("u", {}, fn).select({ password: 0, secret: 0 }),
+      /exclusion projections/
+    );
+  });
+
+  test("mixed projection keeps truthy keys", async () => {
+    const { fn, calls } = makeMockNative([]);
+    const q = new Query("u", {}, fn).select({ name: 1, password: 0 });
+    await q;
+    assert.deepEqual(calls[0].opts.select, ["name"]);
+  });
+});

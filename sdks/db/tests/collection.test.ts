@@ -574,3 +574,269 @@ describe("Collection.aggregate()", () => {
     assert.equal(matchFilter.id, "abc");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Naming strategy — snakeCase
+// ---------------------------------------------------------------------------
+
+describe("Collection — naming strategy (snakeCase)", () => {
+  test("create sends snake_case keys to native insert", async () => {
+    const s = normalizeSchema({ firstName: t.string().required(), lastName: t.string() });
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", s, native, { naming: naming.snakeCase });
+    await col.create({ firstName: "Alice" } as any);
+    const doc = calls[0].args[1] as PlainObject;
+    assert.equal(doc.first_name, "Alice");
+    assert.equal(doc.firstName, undefined);
+  });
+
+  test("create maps snake_case result back to camelCase", async () => {
+    const s = normalizeSchema({ firstName: t.string().required() });
+    const { native } = makeMockNative({
+      insert: (_col: string, _doc: unknown) =>
+        Promise.resolve(JSON.stringify({ id: 1, first_name: "Alice", created_at: 1000, updated_at: 1000 })),
+    });
+    const col = new Collection("users", s, native, { naming: naming.snakeCase });
+    const { data } = await col.create({ firstName: "Alice" } as any);
+    assert.equal(data!.firstName, "Alice");
+    assert.equal(data!.createdAt, 1000);
+    assert.equal((data as any).first_name, undefined);
+    assert.equal((data as any).created_at, undefined);
+  });
+
+  test("findOne sends snake_case filter keys", async () => {
+    const s = normalizeSchema({ firstName: t.string() });
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", s, native, { naming: naming.snakeCase });
+    await col.findOne({ firstName: "Alice" } as any);
+    const filter = calls[0].args[1] as PlainObject;
+    assert.equal(filter.first_name, "Alice");
+    assert.equal(filter.firstName, undefined);
+  });
+
+  test("findOne maps snake_case result back to camelCase", async () => {
+    const s = normalizeSchema({ firstName: t.string() });
+    const { native } = makeMockNative({
+      findOne: () => Promise.resolve(JSON.stringify({ id: 1, first_name: "Bob" })),
+    });
+    const col = new Collection("users", s, native, { naming: naming.snakeCase });
+    const { data } = await col.findOne({} as any);
+    assert.equal(data!.firstName, "Bob");
+    assert.equal((data as any).first_name, undefined);
+  });
+
+  test("updateOne sends snake_case filter and update keys", async () => {
+    const s = normalizeSchema({ firstName: t.string(), viewCount: t.number() });
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", s, native, { naming: naming.snakeCase });
+    await col.updateOne({ firstName: "Alice" } as any, { viewCount: 5 } as any);
+    const filter = calls[0].args[1] as PlainObject;
+    const update = calls[0].args[2] as PlainObject;
+    assert.equal(filter.first_name, "Alice");
+    assert.equal(update.view_count, 5);
+  });
+
+  test("$inc operator keys are mapped to snake_case", async () => {
+    const s = normalizeSchema({ viewCount: t.number() });
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", s, native, { naming: naming.snakeCase });
+    await col.updateOne({ id: 1 } as any, { $inc: { viewCount: 1 } } as any);
+    const update = calls[0].args[2] as PlainObject;
+    assert.deepEqual(update.view_count, { $inc: 1 });
+    assert.equal(update.viewCount, undefined);
+  });
+
+  test("distinct converts field name to snake_case", async () => {
+    const s = normalizeSchema({ firstName: t.string() });
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", s, native, { naming: naming.snakeCase });
+    await col.distinct("firstName" as any);
+    assert.equal(calls[0].args[1], "first_name");
+  });
+
+  test("insertMany sends snake_case keys and maps results back", async () => {
+    const s = normalizeSchema({ firstName: t.string().required() });
+    const { native } = makeMockNative({
+      insertMany: (_col: string, _docs: unknown) =>
+        Promise.resolve(JSON.stringify([
+          { id: 1, first_name: "Alice", created_at: 1000, updated_at: 1000 },
+          { id: 2, first_name: "Bob", created_at: 2000, updated_at: 2000 },
+        ])),
+    });
+    const col = new Collection("users", s, native, { naming: naming.snakeCase });
+    const { data } = await col.insertMany([{ firstName: "Alice" }, { firstName: "Bob" }] as any);
+    assert.equal(data![0].firstName, "Alice");
+    assert.equal(data![1].firstName, "Bob");
+    assert.equal(data![0].createdAt, 1000);
+  });
+
+  test("aggregate $match maps camelCase to snake_case", async () => {
+    const s = normalizeSchema({ firstName: t.string() });
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", s, native, { naming: naming.snakeCase });
+    await col.aggregate([{ $match: { firstName: "Alice" } }]);
+    const pipeline = calls[0].args[1] as PlainObject[];
+    const match = pipeline[0].$match as PlainObject;
+    assert.equal(match.first_name, "Alice");
+    assert.equal(match.firstName, undefined);
+  });
+
+  test("aggregate $sort maps camelCase keys to snake_case", async () => {
+    const s = normalizeSchema({ createdAt: t.number() });
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", s, native, { naming: naming.snakeCase });
+    await col.aggregate([{ $sort: { createdAt: -1 } }]);
+    const pipeline = calls[0].args[1] as PlainObject[];
+    assert.deepEqual(pipeline[0], { $sort: { created_at: -1 } });
+  });
+
+  test("asIs strategy passes field names unchanged", async () => {
+    const s = normalizeSchema({ firstName: t.string().required() });
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", s, native, { naming: naming.asIs });
+    await col.create({ firstName: "Alice" } as any);
+    const doc = calls[0].args[1] as PlainObject;
+    assert.equal(doc.firstName, "Alice");
+    assert.equal(doc.first_name, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Native error envelope detection
+// ---------------------------------------------------------------------------
+
+describe("Collection — native error envelope", () => {
+  test("create detects {error:...} from native and returns Result.error", async () => {
+    const { native } = makeMockNative({
+      insert: () => Promise.resolve(JSON.stringify({ error: "unique constraint violation" })),
+    });
+    const col = new Collection("users", schema, native);
+    const { data, error } = await col.create({ name: "Alice" } as any);
+    assert.equal(data, null);
+    assert.ok(error !== null);
+    assert.ok(error.message.includes("unique constraint violation"));
+  });
+
+  test("findOne detects {error:...} from native", async () => {
+    const { native } = makeMockNative({
+      findOne: () => Promise.resolve(JSON.stringify({ error: "permission denied" })),
+    });
+    const col = new Collection("users", schema, native);
+    const { data, error } = await col.findOne({} as any);
+    assert.equal(data, null);
+    assert.ok(error !== null);
+    assert.ok(error.message.includes("permission denied"));
+  });
+
+  test("updateOne detects {error:...} from native", async () => {
+    const { native } = makeMockNative({
+      updateOne: () => Promise.resolve(JSON.stringify({ error: "deadlock detected" })),
+    });
+    const col = new Collection("users", schema, native);
+    const { data, error } = await col.updateOne({} as any, {} as any);
+    assert.equal(data, null);
+    assert.ok(error !== null);
+    assert.ok(error.message.includes("deadlock"));
+  });
+
+  test("count detects {error:...} from native", async () => {
+    const { native } = makeMockNative({
+      count: () => Promise.resolve(JSON.stringify({ error: "table not found" })),
+    });
+    const col = new Collection("users", schema, native);
+    const { data, error } = await col.countDocuments({} as any);
+    assert.equal(data, null);
+    assert.ok(error !== null);
+    assert.ok(error.message.includes("table not found"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-field operators not rejected by validation
+// ---------------------------------------------------------------------------
+
+describe("Collection — per-field operator validation", () => {
+  test("updateOne with { views: { $inc: 1 } } per-field style succeeds", async () => {
+    const s = normalizeSchema({ views: t.number() });
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", s, native);
+    const { error } = await col.updateOne({} as any, { views: { $inc: 1 } } as any);
+    assert.equal(error, null);
+    assert.equal(calls[0].method, "updateOne");
+  });
+
+  test("updateOne with { tags: { $push: 'new' } } per-field style succeeds", async () => {
+    const s = normalizeSchema({ tags: t.array(t.string()) });
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", s, native);
+    const { error } = await col.updateOne({} as any, { tags: { $push: "new" } } as any);
+    assert.equal(error, null);
+    assert.equal(calls[0].method, "updateOne");
+  });
+
+  test("updateOne with { views: { $dec: 1 } } per-field style succeeds", async () => {
+    const s = normalizeSchema({ views: t.number() });
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", s, native);
+    const { error } = await col.updateOne({} as any, { views: { $dec: 1 } } as any);
+    assert.equal(error, null);
+  });
+
+  test("updateOne still validates bare field values", async () => {
+    const s = normalizeSchema({ age: t.number() });
+    const { native } = makeMockNative();
+    const col = new Collection("users", s, native);
+    const { error } = await col.updateOne({} as any, { age: "not-a-number" } as any);
+    assert.ok(error instanceof ValidationError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// insertMany empty array guard
+// ---------------------------------------------------------------------------
+
+describe("Collection — insertMany edge cases", () => {
+  test("insertMany([]) returns ok([]) without calling native", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    const { data, error } = await col.insertMany([]);
+    assert.equal(error, null);
+    assert.deepEqual(data, []);
+    assert.equal(calls.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// distinct field validation
+// ---------------------------------------------------------------------------
+
+describe("Collection — distinct field validation", () => {
+  test("distinct with valid schema field succeeds", async () => {
+    const { native } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    const { error } = await col.distinct("name" as any);
+    assert.equal(error, null);
+  });
+
+  test("distinct with auto-field 'id' succeeds", async () => {
+    const { native } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    const { error } = await col.distinct("id" as any);
+    assert.equal(error, null);
+  });
+
+  test("distinct with auto-field 'createdAt' succeeds", async () => {
+    const { native } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    const { error } = await col.distinct("createdAt" as any);
+    assert.equal(error, null);
+  });
+
+  test("distinct with unknown field throws ValidationError", async () => {
+    const { native } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    const { error } = await col.distinct("nonexistent" as any);
+    assert.ok(error instanceof ValidationError);
+    assert.ok(error.message.includes("nonexistent"));
+  });
+});
