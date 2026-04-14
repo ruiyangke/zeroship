@@ -8,8 +8,8 @@ import { PlainObject, Result, Document, ok, err } from "./types.js";
 
 type NativeFn = (
   collection: string,
-  filter: PlainObject,
-  opts: PlainObject
+  filter: ZeroshipDbFilter,
+  opts: ZeroshipDbFindOpts
 ) => Promise<string>;
 
 /**
@@ -19,10 +19,10 @@ type NativeFn = (
  */
 export class Query<S = PlainObject> {
   private _collection: string;
-  private _filter: PlainObject;
+  private _filter: ZeroshipDbFilter;
   private _native: NativeFn;
 
-  private _sort: PlainObject | undefined;
+  private _sort: Record<string, number> | undefined;
   private _limit: number | undefined;
   private _skip: number | undefined;
   private _select: string[] | undefined;
@@ -30,7 +30,7 @@ export class Query<S = PlainObject> {
   /** @internal */
   constructor(
     collection: string,
-    filter: PlainObject,
+    filter: ZeroshipDbFilter,
     native: NativeFn
   ) {
     this._collection = collection;
@@ -43,9 +43,9 @@ export class Query<S = PlainObject> {
    * Object: `{ field: 1 }` for ASC, `{ field: -1 }` for DESC.
    * String: `"field"` for ASC, `"-field"` for DESC. Multiple: `"-createdAt name"`.
    */
-  sort(s: PlainObject | string): this {
+  sort(s: Record<string, number> | string): this {
     if (typeof s === "string") {
-      const obj: PlainObject = {};
+      const obj: Record<string, number> = {};
       for (const part of s.split(/\s+/).filter(Boolean)) {
         if (part.startsWith("-")) {
           obj[part.slice(1)] = -1;
@@ -78,14 +78,20 @@ export class Query<S = PlainObject> {
    * Array: `["name", "email"]`.
    * Object: `{ name: 1, email: 1 }` (Mongoose style — keys with truthy values).
    */
-  select(s: string | string[] | Record<string, unknown>): this {
+  select(s: string | string[] | Record<string, number | boolean>): this {
     if (Array.isArray(s)) {
       this._select = s;
     } else if (typeof s === "string") {
       this._select = s.split(" ").filter((f) => f.length > 0);
     } else {
       // Object style: { name: 1, email: 1 } → ["name", "email"]
-      this._select = Object.entries(s)
+      // Exclusion style { password: 0 } is not supported — reject it
+      const entries = Object.entries(s);
+      const allFalsy = entries.length > 0 && entries.every(([, v]) => !v);
+      if (allFalsy) {
+        throw new Error("exclusion projections (e.g. { field: 0 }) are not supported; use inclusion style: { field: 1 }");
+      }
+      this._select = entries
         .filter(([, v]) => v)
         .map(([k]) => k);
     }
@@ -96,24 +102,24 @@ export class Query<S = PlainObject> {
    * Makes Query thenable so it can be used with `await`.
    * Executes the query and passes results to `resolve`; calls `reject` on error.
    */
-  then(
-    resolve?: (value: Result<Document<S>[]>) => unknown,
-    reject?: (reason: unknown) => unknown
-  ): Promise<unknown> {
-    return this._exec().then(resolve as any, reject);
+  then<TResult1 = Result<Document<S>[]>, TResult2 = never>(
+    resolve?: ((value: Result<Document<S>[]>) => TResult1 | PromiseLike<TResult1>) | null,
+    reject?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
+  ): Promise<TResult1 | TResult2> {
+    return this._exec().then(resolve, reject);
   }
 
   /** Executes the query and returns the mapped result documents. */
   async _exec(): Promise<Result<Document<S>[]>> {
-    const opts: PlainObject = {};
-    if (this._sort !== undefined) opts["sort"] = this._sort;
-    if (this._limit !== undefined) opts["limit"] = this._limit;
-    if (this._skip !== undefined) opts["skip"] = this._skip;
-    if (this._select !== undefined) opts["select"] = this._select;
+    const opts: ZeroshipDbFindOpts = {};
+    if (this._sort !== undefined) opts.sort = this._sort as Record<string, 1 | -1>;
+    if (this._limit !== undefined) opts.limit = this._limit;
+    if (this._skip !== undefined) opts.skip = this._skip;
+    if (this._select !== undefined) opts.select = this._select;
 
     try {
       const raw = await this._native(this._collection, this._filter, opts);
-      const parsed: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
+      const parsed: PlainObject[] = typeof raw === "string" ? JSON.parse(raw) : raw;
       const rows: PlainObject[] = Array.isArray(parsed) ? parsed : [];
       return ok(rows.map(mapResultDoc) as Document<S>[]);
     } catch (e: unknown) {

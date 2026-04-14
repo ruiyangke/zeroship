@@ -14,74 +14,119 @@
  */
 
 // ---------------------------------------------------------------------------
+// Primitive value types at the native boundary (JSON-serializable)
+// ---------------------------------------------------------------------------
+
+/** Scalar value that can appear in a filter or document at the native boundary. */
+type ZeroshipScalar = string | number | boolean | null;
+
+// ---------------------------------------------------------------------------
 // Database primitives (zeroship.db.*)
 // ---------------------------------------------------------------------------
 
-/** Filter object — MongoDB-style query operators */
+/** Filter object — MongoDB-style query operators, translated by SDK before native call. */
 interface ZeroshipDbFilter {
-  [field: string]:
-    | unknown
-    | { $eq?: unknown }
-    | { $ne?: unknown }
-    | { $gt?: unknown }
-    | { $gte?: unknown }
-    | { $lt?: unknown }
-    | { $lte?: unknown }
-    | { $in?: unknown[] }
-    | { $nin?: unknown[] }
-    | { $like?: string }
-    | { $ilike?: string }
-    | { $search?: string }
-    | { $exists?: boolean };
+  [field: string]: ZeroshipDbFilterValue;
+  $and?: ZeroshipDbFilter[];
+  $or?: ZeroshipDbFilter[];
+  $not?: ZeroshipDbFilter;
 }
 
-/** Update object — per-field operators */
+/** A single filter field value — direct scalar, null, or operator object. */
+type ZeroshipDbFilterValue =
+  | ZeroshipScalar
+  | { $eq?: ZeroshipScalar }
+  | { $ne?: ZeroshipScalar }
+  | { $gt?: string | number }
+  | { $gte?: string | number }
+  | { $lt?: string | number }
+  | { $lte?: string | number }
+  | { $in?: ZeroshipScalar[] }
+  | { $nin?: ZeroshipScalar[] }
+  | { $like?: string }
+  | { $ilike?: string }
+  | { $search?: string }
+  | { $exists?: boolean };
+
+/** Update object — per-field operators (SDK translates top-level $set/$inc to this form). */
 interface ZeroshipDbUpdate {
-  [field: string]:
-    | unknown
-    | { $set?: unknown }
-    | { $inc?: number }
-    | { $dec?: number }
-    | { $mul?: number }
-    | { $push?: unknown }
-    | { $pull?: unknown }
-    | { $addToSet?: unknown };
+  [field: string]: ZeroshipDbUpdateValue;
 }
 
-/** Find query options */
+/** A single update field value — direct scalar or operator object. */
+type ZeroshipDbUpdateValue =
+  | ZeroshipScalar
+  | { $set?: ZeroshipScalar }
+  | { $inc?: number }
+  | { $dec?: number }
+  | { $mul?: number }
+  | { $push?: ZeroshipScalar }
+  | { $pull?: ZeroshipScalar }
+  | { $addToSet?: ZeroshipScalar };
+
+/** Find query options. */
 interface ZeroshipDbFindOpts {
   limit?: number;
-  offset?: number;
-  orderBy?: Record<string, 1 | -1>;
+  skip?: number;
+  sort?: Record<string, 1 | -1>;
   select?: string[];
 }
 
-/** Aggregate pipeline stage */
+/** Aggregate pipeline stage. */
 type ZeroshipDbAggregateStage =
   | { $match: ZeroshipDbFilter }
-  | { $group: { by?: string | string[]; [agg: string]: unknown } }
+  | { $group: ZeroshipDbGroupStage }
   | { $having: ZeroshipDbFilter }
   | { $sort: Record<string, 1 | -1> }
   | { $limit: number };
 
-/** Normalized schema field definition */
+/** Group stage — `by` is the group key, other fields are accumulators. */
+interface ZeroshipDbGroupStage {
+  by?: string | string[];
+  [agg: string]: ZeroshipDbAccumulator | string | string[] | undefined;
+}
+
+/** Accumulator expression inside a $group stage. */
+type ZeroshipDbAccumulator =
+  | { $count: true }
+  | { $sum: string }
+  | { $avg: string }
+  | { $min: string }
+  | { $max: string }
+  | { $first: string };
+
+// ---------------------------------------------------------------------------
+// Schema types (zeroship.db.registerModel)
+// ---------------------------------------------------------------------------
+
+/** Supported primitive field type names. */
+type ZeroshipDbTypeName = "string" | "number" | "boolean" | "date" | "json" | "array";
+
+/** Supported primitive item type names (for array fields). */
+type ZeroshipDbPrimitiveTypeName = "string" | "number" | "boolean" | "date" | "json";
+
+/** Normalized schema field definition passed to registerModel. */
 interface ZeroshipDbFieldDef {
-  type: string;
+  type: ZeroshipDbTypeName;
+  items?: ZeroshipDbPrimitiveTypeName;
   required?: boolean;
   unique?: boolean;
   index?: boolean;
-  default?: unknown;
+  default?: ZeroshipScalar | Record<string, unknown>;
   min?: number;
   max?: number;
-  enum?: string[];
+  enum?: (string | number)[];
   pattern?: RegExp;
-  items?: string;
 }
 
-/** Normalized schema — field name → definition */
+/** Normalized schema — field name → definition. */
 type ZeroshipDbSchema = Record<string, ZeroshipDbFieldDef>;
 
-/** The zeroship.db namespace */
+// ---------------------------------------------------------------------------
+// Native driver interface (zeroship.db)
+// ---------------------------------------------------------------------------
+
+/** The zeroship.db namespace — all methods return JSON strings from the native layer. */
 interface ZeroshipDb {
   // --- CRUD ---
 
@@ -92,10 +137,10 @@ interface ZeroshipDb {
   findOne(collection: string, filter: ZeroshipDbFilter): Promise<string | null>;
 
   /** Insert one document. Returns JSON string of the inserted row. */
-  insert(collection: string, doc: Record<string, unknown>): Promise<string>;
+  insert(collection: string, doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>): Promise<string>;
 
   /** Insert multiple documents. Returns JSON array string. */
-  insertMany(collection: string, docs: Record<string, unknown>[]): Promise<string>;
+  insertMany(collection: string, docs: Record<string, ZeroshipScalar | ZeroshipScalar[]>[]): Promise<string>;
 
   /** Update one document. Returns JSON string of the updated row or null. */
   updateOne(collection: string, filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<string>;
@@ -145,7 +190,3 @@ interface ZeroshipGlobal {
 }
 
 declare var zeroship: ZeroshipGlobal;
-
-declare namespace globalThis {
-  var zeroship: ZeroshipGlobal;
-}

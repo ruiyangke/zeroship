@@ -30,7 +30,7 @@ function getNativeDb(): NativeDb {
  * await Users.create({ name: "Alice", email: "alice@example.com" });
  * ```
  */
-export function model<S extends Record<string, unknown> = Record<string, unknown>>(
+export function model<S extends Record<string, unknown>>(
   name: string,
   schema: S,
   nativeOverride?: NativeDb
@@ -41,16 +41,16 @@ export function model<S extends Record<string, unknown> = Record<string, unknown
   if (schema === null || schema === undefined || typeof schema !== "object") {
     throw new Error("model schema must be an object");
   }
-  const normalized = normalizeSchema(schema);
+  const normalized = normalizeSchema(schema as Parameters<typeof normalizeSchema>[0]);
   const native = nativeOverride ?? getNativeDb();
 
   // Register model with the runtime — creates table + columns if not exists.
   // registerModel returns a Promise. We store it so the Collection can await
   // it before the first CRUD operation, ensuring DDL completes first.
-  let registrationPromise: Promise<unknown> | null = null;
+  let registrationPromise: Promise<void> | null = null;
   if (native.registerModel) {
     try {
-      registrationPromise = native.registerModel(name, normalized as ZeroshipDbSchema);
+      registrationPromise = native.registerModel(name, normalized as ZeroshipDbSchema) as Promise<void>;
     } catch {
       // Ignore in non-runtime environments (tests, SSR)
     }

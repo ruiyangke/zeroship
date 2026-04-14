@@ -4,7 +4,7 @@
  * format, calls the native driver, and maps results back to the user-facing shape.
  */
 import { NormalizedSchema } from "./schema.js";
-import { validateDoc, validatePartial } from "./validate.js";
+import { validateDoc, checkPartial } from "./validate.js";
 import { mapNativeError, ValidationError } from "./errors.js";
 import {
   mapResultDoc,
@@ -13,10 +13,14 @@ import {
   translateAggregatePipeline,
 } from "./utils.js";
 import { Query } from "./query.js";
-import { PlainObject, Result, Document, CreateInput, UpdateInput, ok, err } from "./types.js";
+import { PlainObject, Result, Document, CreateInput, UpdateExpression, Filter, ok, err } from "./types.js";
 
 /** The native driver interface from @zeroship/types. */
 export type NativeDb = ZeroshipDb;
+
+/** Auto-generated fields allowed in distinct() — validated at runtime to prevent injection. */
+const ALLOWED_AUTO_FIELDS = new Set(["id", "createdAt", "updatedAt", "created_at", "updated_at"]);
+
 
 /**
  * Converts a caught value to an Error for inclusion in a Result.
@@ -31,7 +35,7 @@ function toResultError(e: unknown): Error {
 }
 
 /** Parses a raw JSON string (or already-parsed value) from the native layer. */
-function parseRaw<T = unknown>(raw: string | null | undefined): T | null {
+function parseRaw<T>(raw: string | null | undefined): T | null {
   if (raw === null || raw === undefined) return null;
   if (typeof raw === "string") {
     if (raw === "") return null;
@@ -53,8 +57,14 @@ function extractUpdateFields(update: PlainObject): PlainObject {
   const fields: PlainObject = {};
   for (const [key, val] of Object.entries(update)) {
     if (key === "$set" && typeof val === "object" && val !== null) {
-      Object.assign(fields, val as PlainObject);
+      for (const k of Object.keys(val as PlainObject)) {
+        if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
+        fields[k] = (val as PlainObject)[k];
+      }
     } else if (!key.startsWith("$")) {
+      // Skip per-field operator objects like { $inc: 1 } — they are not plain values
+      if (typeof val === "object" && val !== null && !Array.isArray(val) &&
+          Object.keys(val as PlainObject).every(k => k.startsWith("$"))) continue;
       fields[key] = val;
     }
   }
@@ -106,9 +116,9 @@ export class Collection<S = PlainObject> {
   private _name: string;
   private _schema: NormalizedSchema;
   private _native: NativeDb;
-  private _ready: Promise<unknown> | null;
+  private _ready: Promise<void> | null;
 
-  constructor(name: string, schema: NormalizedSchema, native: NativeDb, registrationPromise?: Promise<unknown> | null) {
+  constructor(name: string, schema: NormalizedSchema, native: NativeDb, registrationPromise?: Promise<void> | null) {
     this._name = name;
     this._schema = schema;
     this._native = native;
@@ -131,7 +141,7 @@ export class Collection<S = PlainObject> {
     try {
       await this.ensureReady();
       const validated = validateDoc(doc as PlainObject, this._schema);
-      const raw = await this._native.insert(this._name, validated);
+      const raw = await this._native.insert(this._name, validated as Record<string, ZeroshipScalar | ZeroshipScalar[]>);
       const result = parseRaw<PlainObject>(raw);
       return ok(mapResultDoc(result!) as Document<S>);
     } catch (e) {
@@ -144,10 +154,11 @@ export class Collection<S = PlainObject> {
    * Returns the persisted documents with field names mapped to the user-facing shape.
    */
   async insertMany(docs: CreateInput<S>[]): Promise<Result<Document<S>[]>> {
-    await this.ensureReady();
-      try {
+    if (docs.length === 0) return ok([] as Document<S>[]);
+    try {
+      await this.ensureReady();
       const validated = (docs as PlainObject[]).map((doc) => validateDoc(doc, this._schema));
-      const raw = await this._native.insertMany(this._name, validated);
+      const raw = await this._native.insertMany(this._name, validated as Record<string, ZeroshipScalar | ZeroshipScalar[]>[]);
       const results = parseRaw<PlainObject[]>(raw);
       return ok((results ?? []).map(mapResultDoc) as Document<S>[]);
     } catch (e) {
@@ -159,10 +170,10 @@ export class Collection<S = PlainObject> {
    * Finds and returns the first document matching `filter`, or `null` if none exists.
    * Field names in `filter` are mapped outbound before the native call.
    */
-  async findOne(filter: Partial<Document<S>>): Promise<Result<Document<S> | null>> {
-    await this.ensureReady();
-      try {
-      const mapped = mapFilterOutbound(filter as PlainObject);
+  async findOne(filter: Filter<S>): Promise<Result<Document<S> | null>> {
+    try {
+      await this.ensureReady();
+      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter);
       const raw = await this._native.findOne(this._name, mapped);
       if (raw === null) return ok(null);
       const result = parseRaw<PlainObject>(raw);
@@ -174,12 +185,12 @@ export class Collection<S = PlainObject> {
   }
 
   /** Shorthand for `findOne({ id })`. */
-  async findById(id: unknown): Promise<Result<Document<S> | null>> {
-    return this.findOne({ id } as Partial<Document<S>>);
+  async findById(id: number): Promise<Result<Document<S> | null>> {
+    return this.findOne({ id } as Filter<S>);
   }
 
   /** Returns true if at least one document matches `filter`. */
-  async exists(filter: Partial<Document<S>>): Promise<Result<boolean>> {
+  async exists(filter: Filter<S>): Promise<Result<boolean>> {
     const { data, error } = await this.countDocuments(filter);
     if (error) return err(error);
     return ok((data ?? 0) > 0);
@@ -189,14 +200,13 @@ export class Collection<S = PlainObject> {
    * Returns a lazy Query that can be chained with `.sort()`, `.limit()`, `.skip()`,
    * and `.select()` before being awaited.
    */
-  find(filter: Partial<Document<S>> = {} as Partial<Document<S>>): Query<S> {
-    const mapped = mapFilterOutbound(filter as PlainObject);
-    const ready = this._ready;
+  find(filter: Filter<S> = {} as Filter<S>): Query<S> {
+    const mapped = mapFilterOutbound(filter as ZeroshipDbFilter);
     return new Query<S>(
       this._name,
       mapped,
       async (col, f, opts) => {
-        if (ready) await ready;
+        await this.ensureReady();
         return this._native.find(col, f, opts);
       }
     );
@@ -209,24 +219,24 @@ export class Collection<S = PlainObject> {
    * Returns `{ matchedCount, modifiedCount }` indicating whether a document was found.
    */
   async updateOne(
-    filter: Partial<Document<S>>,
-    update: UpdateInput<S> | PlainObject
+    filter: Filter<S>,
+    update: UpdateExpression<S>
   ): Promise<Result<{ matchedCount: number; modifiedCount: number }>> {
-    await this.ensureReady();
-      try {
+    try {
+      await this.ensureReady();
       const updateObj = update as PlainObject;
       const fields = extractUpdateFields(updateObj);
-      validatePartial(fields, this._schema);
+      checkPartial(fields, this._schema);
       validateArrayPushOps(updateObj, this._schema);
-      const mappedFilter = mapFilterOutbound(filter as PlainObject);
+      const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter);
       const mappedUpdate = mapUpdateOutbound(updateObj);
       const raw = await this._native.updateOne(
         this._name,
         mappedFilter,
         mappedUpdate
       );
-      const result = parseRaw(raw);
-      const matched = result !== null && typeof result === "object" ? 1 : 0;
+      const result = parseRaw<PlainObject>(raw);
+      const matched = result !== null ? 1 : 0;
       return ok({ matchedCount: matched, modifiedCount: matched });
     } catch (e) {
       return err(toResultError(e));
@@ -240,16 +250,16 @@ export class Collection<S = PlainObject> {
    * Returns `{ matchedCount, modifiedCount }` with the count from the native layer.
    */
   async updateMany(
-    filter: Partial<Document<S>>,
-    update: UpdateInput<S> | PlainObject
+    filter: Filter<S>,
+    update: UpdateExpression<S>
   ): Promise<Result<{ matchedCount: number; modifiedCount: number }>> {
-    await this.ensureReady();
-      try {
+    try {
+      await this.ensureReady();
       const updateObj = update as PlainObject;
       const fields = extractUpdateFields(updateObj);
-      validatePartial(fields, this._schema);
+      checkPartial(fields, this._schema);
       validateArrayPushOps(updateObj, this._schema);
-      const mappedFilter = mapFilterOutbound(filter as PlainObject);
+      const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter);
       const mappedUpdate = mapUpdateOutbound(updateObj);
       const raw = await this._native.updateMany(
         this._name,
@@ -268,13 +278,12 @@ export class Collection<S = PlainObject> {
    * Deletes the first document matching `filter`.
    * Returns `{ deletedCount: 1 }` if a document was found, `{ deletedCount: 0 }` otherwise.
    */
-  async deleteOne(filter: Partial<Document<S>>): Promise<Result<{ deletedCount: number }>> {
-    await this.ensureReady();
-      try {
-      const mapped = mapFilterOutbound(filter as PlainObject);
+  async deleteOne(filter: Filter<S>): Promise<Result<{ deletedCount: number }>> {
+    try {
+      await this.ensureReady();
+      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter);
       const raw = await this._native.deleteOne(this._name, mapped);
-      const result = parseRaw(raw);
-      return ok({ deletedCount: result !== null ? 1 : 0 });
+      return ok({ deletedCount: raw !== null && raw !== undefined && raw !== "" ? 1 : 0 });
     } catch (e) {
       return err(toResultError(e));
     }
@@ -284,10 +293,10 @@ export class Collection<S = PlainObject> {
    * Deletes all documents matching `filter`.
    * Returns `{ deletedCount: N }` where N is the number of documents removed.
    */
-  async deleteMany(filter: Partial<Document<S>>): Promise<Result<{ deletedCount: number }>> {
-    await this.ensureReady();
-      try {
-      const mapped = mapFilterOutbound(filter as PlainObject);
+  async deleteMany(filter: Filter<S>): Promise<Result<{ deletedCount: number }>> {
+    try {
+      await this.ensureReady();
+      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter);
       const raw = await this._native.deleteMany(this._name, mapped);
       const result = parseRaw<{ deleted: number }>(raw);
       return ok({ deletedCount: result?.deleted ?? 0 });
@@ -300,10 +309,10 @@ export class Collection<S = PlainObject> {
    * Counts documents matching `filter`. Defaults to counting all documents when
    * no filter is provided.
    */
-  async countDocuments(filter: Partial<Document<S>> = {} as Partial<Document<S>>): Promise<Result<number>> {
-    await this.ensureReady();
-      try {
-      const mapped = mapFilterOutbound(filter as PlainObject);
+  async countDocuments(filter: Filter<S> = {} as Filter<S>): Promise<Result<number>> {
+    try {
+      await this.ensureReady();
+      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter);
       const raw = await this._native.count(this._name, mapped);
       const result = parseRaw<{ count: number }>(raw);
       return ok(result?.count ?? 0);
@@ -316,12 +325,16 @@ export class Collection<S = PlainObject> {
    * Returns the unique values of `field` across documents matching `filter`.
    * Defaults to all documents when no filter is provided.
    */
-  async distinct(field: string, filter: Partial<Document<S>> = {} as Partial<Document<S>>): Promise<Result<unknown[]>> {
-    await this.ensureReady();
-      try {
-      const mapped = mapFilterOutbound(filter as PlainObject);
+  async distinct(field: string & keyof Document<S>, filter: Filter<S> = {} as Filter<S>): Promise<Result<(string | number | boolean | null)[]>> {
+    try {
+      await this.ensureReady();
+      // Validate field name at runtime — column names can't be parameterized in SQL
+      if (!(field in this._schema) && !ALLOWED_AUTO_FIELDS.has(field)) {
+        throw new ValidationError({ [field]: { path: field, message: `unknown field: ${field}` } });
+      }
+      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter);
       const raw = await this._native.distinct(this._name, field, mapped);
-      const result = parseRaw<unknown[]>(raw);
+      const result = parseRaw<(string | number | boolean | null)[]>(raw);
       return ok(result ?? []);
     } catch (e) {
       return err(toResultError(e));
@@ -333,8 +346,8 @@ export class Collection<S = PlainObject> {
    * `$group`, `$match`, and accumulator expressions are translated to the native format.
    */
   async aggregate(pipeline: PlainObject[]): Promise<Result<PlainObject[]>> {
-    await this.ensureReady();
-      try {
+    try {
+      await this.ensureReady();
       const translated = translateAggregatePipeline(pipeline) as ZeroshipDbAggregateStage[];
       const raw = await this._native.aggregate(this._name, translated);
       const results = parseRaw<PlainObject[]>(raw);

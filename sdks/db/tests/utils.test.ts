@@ -157,10 +157,10 @@ describe("translateAggregatePipeline", () => {
     assert.equal(match.id, "123");
   });
 
-  test("non-group stages pass through", () => {
+  test("non-group stages map field names", () => {
     const pipeline = [{ $sort: { createdAt: -1 } }, { $limit: 10 }];
     const result = translateAggregatePipeline(pipeline);
-    assert.deepEqual(result[0], { $sort: { createdAt: -1 } });
+    assert.deepEqual(result[0], { $sort: { created_at: -1 } });
     assert.deepEqual(result[1], { $limit: 10 });
   });
 });

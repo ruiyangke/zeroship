@@ -21,20 +21,23 @@ export type InferType<T> =
   T extends BooleanConstructor ? boolean :
   T extends DateConstructor ? number :        // timestamps stored as Unix ms
   T extends ObjectConstructor ? Record<string, unknown> :
-  T extends (infer U)[] ? InferType<U>[] :
+  T extends readonly (infer U)[] ? InferType<U>[] :
   unknown;
 
 /** Infers the value type from a field definition (Mongoose-style, bare constructor, or builder). */
 export type InferFieldDef<T> =
   T extends { type: infer U } ? InferType<U> :
   T extends StringConstructor | NumberConstructor | BooleanConstructor | DateConstructor | ObjectConstructor ? InferType<T> :
-  T extends (infer U)[] ? InferType<U>[] :
-  T extends TypeBuilder ? unknown :           // TypeBuilder inference is best-effort unknown
+  T extends readonly (infer U)[] ? InferType<U>[] :
+  T extends TypeBuilder<infer U, any> ? U :
   unknown;
 
-/** Keys that are explicitly marked required: true in the field definition. */
+/** Keys that are explicitly marked required: true in the field definition or via TypeBuilder.required(). */
 export type RequiredKeys<S> = {
-  [K in keyof S]: S[K] extends { required: true } ? K : never
+  [K in keyof S]:
+    S[K] extends { required: true } ? K :
+    S[K] extends TypeBuilder<any, true> ? K :
+    never
 }[keyof S];
 
 /** Keys that are not explicitly required. */
@@ -60,11 +63,91 @@ export type Document<S> = InferSchema<S> & {
   updatedAt: number;
 };
 
-/** Input type accepted by `create()` — required fields are required, optional are optional. */
-export type CreateInput<S> = InferSchema<S>;
+/** Input type accepted by `create()` — required fields are required, auto-generated fields excluded. */
+export type CreateInput<S> = InferSchema<S> & {
+  id?: never;
+  createdAt?: never;
+  updatedAt?: never;
+};
 
-/** Input type accepted by `update*()` — all schema fields become optional. */
-export type UpdateInput<S> = Partial<InferSchema<S>>;
+// ---------------------------------------------------------------------------
+// Filter types — typed query operators per field type
+// ---------------------------------------------------------------------------
+
+/** Comparison operators available on any field type. */
+type ComparisonOps<T> = {
+  $eq?: T;
+  $ne?: T | null;
+  $gt?: T;
+  $gte?: T;
+  $lt?: T;
+  $lte?: T;
+  $in?: T[];
+  $nin?: T[];
+  $exists?: boolean;
+};
+
+/** String-specific operators. */
+type StringOps = {
+  $like?: string;
+  $ilike?: string;
+  $search?: string;
+};
+
+/** Filter value for a field — either a direct value, null, or operator object. */
+type FilterValue<T> =
+  T | null |
+  (NonNullable<T> extends string ? ComparisonOps<NonNullable<T>> & StringOps :
+   NonNullable<T> extends number ? ComparisonOps<NonNullable<T>> :
+   NonNullable<T> extends boolean ? ComparisonOps<NonNullable<T>> :
+   ComparisonOps<NonNullable<T>>);
+
+/** Typed filter for a document — each field accepts its value type or operators. */
+export type Filter<S> = {
+  [K in keyof Document<S>]?: FilterValue<Document<S>[K]>
+} & {
+  $and?: Filter<S>[];
+  $or?: Filter<S>[];
+  $not?: Filter<S>;
+};
+
+// ---------------------------------------------------------------------------
+// Update expression types — typed operators per field type
+// ---------------------------------------------------------------------------
+
+/** Numeric update operators. */
+type NumericUpdateOps = {
+  $inc?: number;
+  $dec?: number;
+  $mul?: number;
+};
+
+/** Array update operators. */
+type ArrayUpdateOps<T> = {
+  $push?: T;
+  $pull?: T;
+  $addToSet?: T;
+};
+
+/** Update value for a single field — direct value or typed operator. */
+type UpdateFieldValue<T> =
+  T |
+  (NonNullable<T> extends number ? NumericUpdateOps : never) |
+  (NonNullable<T> extends readonly unknown[] ? ArrayUpdateOps<NonNullable<T>[number]> : never);
+
+/** Typed update expression — per-field operators. */
+export type UpdateExpression<S> = {
+  [K in keyof InferSchema<S>]?: UpdateFieldValue<InferSchema<S>[K]>
+} & {
+  // Mongoose top-level operators (SDK translates to per-field)
+  $set?: Partial<InferSchema<S>>;
+  $inc?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends number ? number : never };
+  $dec?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends number ? number : never };
+  $mul?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends number ? number : never };
+  $push?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
+  $pull?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
+  $addToSet?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
+};
 
 /** Wraps a successful value in Result. */
 export function ok<T>(data: T): Result<T> {
@@ -83,6 +166,9 @@ export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
 /** All supported type names, including "array". */
 export type TypeName = PrimitiveTypeName | "array";
 
+/** Union of all values that can serve as a field default. */
+export type FieldDefaultValue = string | number | boolean | Date | null | PlainObject | string[] | number[] | boolean[];
+
 /** Internal representation of a fully-specified field definition used by validate and collection. */
 export interface FieldDef {
   type: TypeName;
@@ -90,19 +176,24 @@ export interface FieldDef {
   required?: boolean;
   unique?: boolean;
   index?: boolean;
-  default?: unknown;
+  default?: FieldDefaultValue | (() => FieldDefaultValue);
   min?: number;
   max?: number;
-  enum?: string[];
+  enum?: (string | number)[];
   pattern?: RegExp;
 }
 
 /**
  * Fluent builder for a single field definition.
- * Each method mutates and returns `this`, enabling chaining:
- * `t.string().required().min(3).max(50)`.
+ * Generic params: T = the inferred TS value type, R = whether required.
+ * `t.string().required().min(3).max(50)` → TypeBuilder<string, true>
  */
-export class TypeBuilder {
+export class TypeBuilder<T = unknown, R extends boolean = false> {
+  /** @internal Type-level brand — do not access at runtime. */
+  declare readonly _type: T;
+  /** @internal Type-level brand for required/optional distinction. */
+  declare readonly _required: R;
+
   private _def: FieldDef;
 
   constructor(def: FieldDef) {
@@ -115,9 +206,9 @@ export class TypeBuilder {
   }
 
   /** Marks the field as required; validation will fail if the field is absent. */
-  required(): this {
+  required(): TypeBuilder<T, true> {
     this._def.required = true;
-    return this;
+    return this as unknown as TypeBuilder<T, true>;
   }
 
   /** Adds a unique index constraint to the field. */
@@ -133,7 +224,7 @@ export class TypeBuilder {
   }
 
   /** Sets the default value (or factory function) used when the field is absent on insert. */
-  default(val: unknown): this {
+  default(val: FieldDefaultValue | (() => FieldDefaultValue)): this {
     this._def.default = val;
     return this;
   }
@@ -151,7 +242,7 @@ export class TypeBuilder {
   }
 
   /** Restricts the field to a fixed set of allowed values. */
-  enum(...values: string[]): this {
+  enum(...values: (string | number)[]): this {
     this._def.enum = values;
     return this;
   }
@@ -176,31 +267,31 @@ export class TypeBuilder {
  */
 export const t = {
   /** Creates a string field definition. */
-  string(): TypeBuilder {
-    return new TypeBuilder({ type: "string" });
+  string(): TypeBuilder<string> {
+    return new TypeBuilder<string>({ type: "string" });
   },
   /** Creates a number field definition. */
-  number(): TypeBuilder {
-    return new TypeBuilder({ type: "number" });
+  number(): TypeBuilder<number> {
+    return new TypeBuilder<number>({ type: "number" });
   },
   /** Creates a boolean field definition. */
-  boolean(): TypeBuilder {
-    return new TypeBuilder({ type: "boolean" });
+  boolean(): TypeBuilder<boolean> {
+    return new TypeBuilder<boolean>({ type: "boolean" });
   },
   /** Creates a date field definition (accepts `Date` objects or ISO date strings). */
-  date(): TypeBuilder {
-    return new TypeBuilder({ type: "date" });
+  date(): TypeBuilder<number> {
+    return new TypeBuilder<number>({ type: "date" });
   },
   /** Creates a JSON/object field definition for arbitrary nested data. */
-  json(): TypeBuilder {
-    return new TypeBuilder({ type: "json" });
+  json(): TypeBuilder<Record<string, unknown>> {
+    return new TypeBuilder<Record<string, unknown>>({ type: "json" });
   },
   /**
    * Creates an array field definition. Pass the item type builder as the argument:
    * `t.array(t.string())` produces `{ type: "array", items: "string" }`.
    */
-  array(items: TypeBuilder): TypeBuilder {
+  array<U>(items: TypeBuilder<U, any>): TypeBuilder<U[]> {
     const itemType = items.toFieldDef().type as PrimitiveTypeName;
-    return new TypeBuilder({ type: "array", items: itemType });
+    return new TypeBuilder<U[]>({ type: "array", items: itemType });
   },
 };

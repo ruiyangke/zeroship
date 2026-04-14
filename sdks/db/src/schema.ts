@@ -2,7 +2,7 @@
  * Schema normalization: converts Mongoose-style schema definitions and TypeBuilder
  * instances into a unified NormalizedSchema used by the rest of the SDK.
  */
-import { TypeBuilder, FieldDef, PrimitiveTypeName } from "./types.js";
+import { TypeBuilder, FieldDef, FieldDefaultValue, PrimitiveTypeName } from "./types.js";
 
 /** A normalized schema mapping field names to their FieldDef. */
 export type NormalizedSchema = Record<string, FieldDef>;
@@ -19,14 +19,16 @@ interface MongooseFieldDef {
   required?: boolean;
   unique?: boolean;
   index?: boolean;
-  default?: unknown;
+  default?: FieldDefaultValue | (() => FieldDefaultValue);
   min?: number;
   max?: number;
-  enum?: unknown[];
+  minlength?: number;
+  maxlength?: number;
+  enum?: (string | number)[];
   match?: RegExp;
 }
 
-type SchemaInput = Record<string, MongooseFieldDef | TypeBuilder | unknown>;
+type SchemaInput = Record<string, MongooseFieldDef | TypeBuilder<any, any> | MongooseConstructor | [MongooseConstructor]>;
 
 /** Maps a Mongoose constructor (String, Number, …) to our internal PrimitiveTypeName. */
 function mapConstructorType(ctor: MongooseConstructor): PrimitiveTypeName {
@@ -99,7 +101,7 @@ export function normalizeSchema(input: SchemaInput): NormalizedSchema {
   const result: NormalizedSchema = {};
 
   for (const [key, rawVal] of Object.entries(input)) {
-    const val = rawVal as unknown;
+    const val = rawVal;
 
     if (val instanceof TypeBuilder) {
       // Form 1: TypeBuilder instance
@@ -123,7 +125,9 @@ export function normalizeSchema(input: SchemaInput): NormalizedSchema {
       if (mdef.default !== undefined) fieldDef.default = mdef.default;
       if (mdef.min !== undefined) fieldDef.min = mdef.min;
       if (mdef.max !== undefined) fieldDef.max = mdef.max;
-      if (mdef.enum !== undefined) fieldDef.enum = mdef.enum as string[];
+      if (mdef.minlength !== undefined) fieldDef.min = mdef.minlength;
+      if (mdef.maxlength !== undefined) fieldDef.max = mdef.maxlength;
+      if (mdef.enum !== undefined) fieldDef.enum = mdef.enum;
       if (mdef.match !== undefined) fieldDef.pattern = mdef.match;
 
       result[key] = fieldDef;
@@ -133,6 +137,8 @@ export function normalizeSchema(input: SchemaInput): NormalizedSchema {
     } else if (isBareConstructor(val)) {
       // Form 3a: bare constructor shorthand — String, Number, Boolean, Date, Object
       result[key] = { type: mapConstructorType(val) };
+    } else {
+      throw new Error(`unrecognized schema field "${key}": expected a type constructor (String, Number, ...), { type: Constructor }, or t.string()/t.number()/...`);
     }
   }
 

@@ -86,6 +86,14 @@ function checkField(
       errors[key] = { path: key, message: `${key} must be an array` };
       return;
     }
+    if (min !== undefined && value.length < min) {
+      errors[key] = { path: key, message: `${key} must have at least ${min} items` };
+      return;
+    }
+    if (max !== undefined && value.length > max) {
+      errors[key] = { path: key, message: `${key} must have at most ${max} items` };
+      return;
+    }
     // Validate each array element against the declared item type.
     if (def.items !== undefined) {
       const itemType = def.items;
@@ -111,7 +119,7 @@ function checkField(
   if (
     enumVals !== undefined &&
     (type === "string" || type === "number" || type === "boolean") &&
-    !enumVals.includes(value as string)
+    !enumVals.includes(value as string | number)
   ) {
     errors[key] = {
       path: key,
@@ -130,9 +138,11 @@ function checkField(
  */
 export function validateDoc(doc: Doc, schema: NormalizedSchema): Doc {
   const errors: Record<string, FieldError> = {};
-  const result: Doc = { ...doc };
+  const result: Doc = {};
 
+  // Only copy schema-defined fields — unknown fields are stripped for safety
   for (const [key, def] of Object.entries(schema)) {
+    if (key in doc) result[key] = doc[key];
     const value = result[key];
     // An empty string is treated as absent for required checks — a string field
     // that requires a value should not accept "".
@@ -167,13 +177,33 @@ export function validateDoc(doc: Doc, schema: NormalizedSchema): Doc {
  * Does not require required fields or apply defaults — only validates the fields
  * that are present. Throws ValidationError if any present field is invalid.
  */
-export function validatePartial(doc: Doc, schema: NormalizedSchema): Doc {
+/**
+ * @internal
+ * Validates fields without building a result copy. Used by updateOne/updateMany
+ * where the stripped result is not needed (the update goes through mapUpdateOutbound).
+ */
+export function checkPartial(doc: Doc, schema: NormalizedSchema): void {
   const errors: Record<string, FieldError> = {};
-  const result: Doc = { ...doc };
-
-  for (const [key, value] of Object.entries(result)) {
+  for (const [key, value] of Object.entries(doc)) {
     const def = schema[key];
     if (!def) continue;
+    if (value === undefined || value === null) continue;
+    checkField(key, value, def, errors);
+  }
+  if (Object.keys(errors).length > 0) {
+    throw new ValidationError(errors);
+  }
+}
+
+export function validatePartial(doc: Doc, schema: NormalizedSchema): Doc {
+  const errors: Record<string, FieldError> = {};
+  const result: Doc = {};
+
+  // Only copy schema-defined fields — unknown fields are stripped for safety
+  for (const [key, value] of Object.entries(doc)) {
+    const def = schema[key];
+    if (!def) continue;
+    result[key] = value;
     if (value === undefined || value === null) continue;
     checkField(key, value, def, errors);
   }

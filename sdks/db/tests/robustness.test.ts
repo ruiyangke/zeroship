@@ -457,13 +457,14 @@ describe("query edge cases", () => {
 // ---------------------------------------------------------------------------
 
 describe("validation edge cases", () => {
-  test("doc with extra fields not in schema → passes through (extensible by design)", () => {
+  test("doc with extra fields not in schema → stripped for safety", () => {
     const result = validateDoc(
       { name: "Alice", unknownField: "extra", anotherExtra: 42 },
       schema
     );
     assert.equal(result.name, "Alice");
-    assert.equal(result.unknownField, "extra");
+    assert.equal(result.unknownField, undefined);
+    assert.equal(result.anotherExtra, undefined);
   });
 
   test("partial update on field with min constraint → min is still checked", () => {
