@@ -36,6 +36,10 @@ thread_local! {
     /// on subsequent cold starts within the same deploy.
     static REGISTERED_MODELS: RefCell<std::collections::HashSet<String>> =
         RefCell::new(std::collections::HashSet::new());
+
+    /// Active transaction connection. Only one transaction at a time per isolate
+    /// (V8 is single-threaded). If Some, all CRUD ops use this connection.
+    pub(crate) static TX_CONN: RefCell<Option<zeroship_pg::Conn>> = const { RefCell::new(None) };
 }
 
 /// Check if a model is already registered for this app on this thread.
@@ -145,6 +149,9 @@ impl NativePlugin for DbPlugin {
         r.add("distinct", callbacks::distinct);
         r.add("aggregate", callbacks::aggregate);
         r.add("registerModel", callbacks::register_model);
+        r.add("beginTransaction", callbacks::begin_transaction);
+        r.add("commitTransaction", callbacks::commit_transaction);
+        r.add("rollbackTransaction", callbacks::rollback_transaction);
     }
 
     fn shutdown(&self) {

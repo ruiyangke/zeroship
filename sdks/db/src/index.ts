@@ -7,3 +7,4 @@ export type { NormalizedSchema } from "./schema.js";
 export { ValidationError } from "./errors.js";
 export { Query } from "./query.js";
 export { Collection } from "./collection.js";
+export { transaction } from "./transaction.js";

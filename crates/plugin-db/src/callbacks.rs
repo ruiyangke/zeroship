@@ -148,51 +148,42 @@ fn setup_promise<'s>(
     (op_id, request_id, promise)
 }
 
-/// Execute a built query via the pool and return JSON string result.
-/// Lazily creates the pool on first use if not yet initialized.
-async fn exec_query(bq: BuiltQuery) -> Result<String, String> {
-    // Lazy pool init: if no pool yet, create one now
+/// Execute SQL with text params — uses TX connection if active, otherwise pool.
+async fn run_sql(sql: &str, params: &[&str]) -> Result<Vec<zeroship_pg::Row>, String> {
+    // Check if there's an active transaction
+    let has_tx = crate::TX_CONN.with(|tx| tx.borrow().is_some());
+    if has_tx {
+        // Use transaction connection
+        let mut conn = crate::TX_CONN.with(|tx| tx.borrow_mut().take())
+            .ok_or_else(|| "db: transaction connection lost".to_string())?;
+        let result = conn.query_text_params(sql, params).await;
+        // Put it back
+        crate::TX_CONN.with(|tx| { tx.borrow_mut().replace(conn); });
+        return result.map_err(|e| format!("db: {e}"));
+    }
+
+    // No transaction — use pool
     let has_pool = DB_POOL.with(|p| p.borrow().is_some());
     if !has_pool {
         crate::init_pool_async().await.map_err(|e| format!("db: lazy init failed: {e}"))?;
     }
-
-    let pool = DB_POOL.with(|p| {
-        let borrow = p.borrow();
-        borrow.as_ref().map(Rc::clone)
-    });
-
+    let pool = DB_POOL.with(|p| p.borrow().as_ref().map(Rc::clone));
     let pool = pool.ok_or_else(|| "db: pool not initialized".to_string())?;
+    pool.query_text_params(sql, params).await.map_err(|e| format!("db: {e}"))
+}
 
+/// Execute a built query via pool (or TX conn) and return JSON string result.
+async fn exec_query(bq: BuiltQuery) -> Result<String, String> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-
-    let rows = pool
-        .query_text_params(&bq.sql, &param_refs)
-        .await
+    let rows = run_sql(&bq.sql, &param_refs).await
         .map_err(|e| format!("db query error: {e}"))?;
-
     Ok(rows_to_json(&rows))
 }
 
 /// Execute a built query expecting a count result.
 async fn exec_count(bq: BuiltQuery) -> Result<String, String> {
-    let has_pool = DB_POOL.with(|p| p.borrow().is_some());
-    if !has_pool {
-        crate::init_pool_async().await.map_err(|e| format!("db: lazy init failed: {e}"))?;
-    }
-
-    let pool = DB_POOL.with(|p| {
-        let borrow = p.borrow();
-        borrow.as_ref().map(std::rc::Rc::clone)
-    });
-
-    let pool = pool.ok_or_else(|| "db: pool not initialized".to_string())?;
-
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-
-    let rows = pool
-        .query_text_params(&bq.sql, &param_refs)
-        .await
+    let rows = run_sql(&bq.sql, &param_refs).await
         .map_err(|e| format!("db query error: {e}"))?;
 
     let count: i64 = rows
@@ -205,23 +196,8 @@ async fn exec_count(bq: BuiltQuery) -> Result<String, String> {
 
 /// Execute an insert/update/delete query, returning the affected rows.
 async fn exec_mutation(bq: BuiltQuery) -> Result<String, String> {
-    let has_pool = DB_POOL.with(|p| p.borrow().is_some());
-    if !has_pool {
-        crate::init_pool_async().await.map_err(|e| format!("db: lazy init failed: {e}"))?;
-    }
-
-    let pool = DB_POOL.with(|p| {
-        let borrow = p.borrow();
-        borrow.as_ref().map(Rc::clone)
-    });
-
-    let pool = pool.ok_or_else(|| "db: pool not initialized".to_string())?;
-
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-
-    let rows = pool
-        .query_text_params(&bq.sql, &param_refs)
-        .await
+    let rows = run_sql(&bq.sql, &param_refs).await
         .map_err(|e| format!("db mutation error: {e}"))?;
 
     Ok(rows_to_json(&rows))
@@ -1061,5 +1037,125 @@ async fn exec_register_model(
         }
     }
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Transaction callbacks: begin / commit / rollback
+// ---------------------------------------------------------------------------
+//
+// V8 is single-threaded per isolate, so only one transaction can be active
+// at a time. We store the transaction connection in TX_CONN thread-local.
+// All CRUD callbacks (exec_query, exec_mutation, etc.) automatically use
+// TX_CONN when it's set, via the run_sql() helper.
+
+/// `zeroship.db.beginTransaction()` → Promise<void>
+/// Opens a dedicated connection, runs BEGIN, stores in TX_CONN.
+/// All subsequent CRUD ops use this connection until commit/rollback.
+pub fn begin_transaction(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let _ = &args;
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let value = match exec_begin().await {
+            Ok(()) => "null".to_string(),
+            Err(e) => error_json(&e),
+        };
+        OpResult::Completed { op_id, value, request_id }
+    }));
+
+    rv.set(promise.into());
+}
+
+async fn exec_begin() -> Result<(), String> {
+    // Check: no nested transactions
+    let has_tx = crate::TX_CONN.with(|tx| tx.borrow().is_some());
+    if has_tx {
+        return Err("db: transaction already active (nested transactions not supported)".to_string());
+    }
+
+    // Open a dedicated connection (not from pool — we need to hold it)
+    let url = crate::DB_URL.with(|u| u.borrow().clone())
+        .ok_or_else(|| "db: not configured".to_string())?;
+    let mut conn = zeroship_pg::Conn::connect(&url)
+        .await
+        .map_err(|e| format!("db: tx connect failed: {e}"))?;
+
+    conn.execute("BEGIN", &[])
+        .await
+        .map_err(|e| format!("db: BEGIN failed: {e}"))?;
+
+    crate::TX_CONN.with(|tx| { tx.borrow_mut().replace(conn); });
+    Ok(())
+}
+
+/// `zeroship.db.commitTransaction()` → Promise<void>
+pub fn commit_transaction(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let _ = &args;
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let value = match exec_end("COMMIT").await {
+            Ok(()) => "null".to_string(),
+            Err(e) => error_json(&e),
+        };
+        OpResult::Completed { op_id, value, request_id }
+    }));
+
+    rv.set(promise.into());
+}
+
+/// `zeroship.db.rollbackTransaction()` → Promise<void>
+pub fn rollback_transaction(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let _ = &args;
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let value = match exec_end("ROLLBACK").await {
+            Ok(()) => "null".to_string(),
+            Err(e) => error_json(&e),
+        };
+        OpResult::Completed { op_id, value, request_id }
+    }));
+
+    rv.set(promise.into());
+}
+
+async fn exec_end(cmd: &str) -> Result<(), String> {
+    let conn = crate::TX_CONN.with(|tx| tx.borrow_mut().take());
+    let mut conn = conn.ok_or_else(|| "db: no active transaction".to_string())?;
+
+    conn.execute(cmd, &[])
+        .await
+        .map_err(|e| format!("db: {cmd} failed: {e}"))?;
+
+    // Connection is dropped — not from pool, just closes
     Ok(())
 }
