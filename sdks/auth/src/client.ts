@@ -14,7 +14,7 @@
 
 /** Authenticated user profile from the platform. */
 export interface User {
-  id: number;
+  id: string;
   email: string;
   name: string;
   avatar: string | null;

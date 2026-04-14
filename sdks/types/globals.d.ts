@@ -189,7 +189,7 @@ interface ZeroshipDb {
 
 /** The authenticated user — decoded from the platform session by the gateway. */
 interface ZeroshipAuthUser {
-  id: number;
+  id: string;
   email: string;
   name: string;
   avatar: string | null;

@@ -12,7 +12,7 @@ use zeroship_pg::Conn;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthUser {
-    pub id: i32,
+    pub id: String, // UUID
     pub email: String,
     pub name: String,
     pub avatar_url: Option<String>,
@@ -20,8 +20,8 @@ pub struct AuthUser {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenClaims {
-    pub sub: i32,
-    pub app: String,
+    pub sub: String, // user UUID
+    pub app: String, // app UUID
     pub email: String,
     pub name: String,
     pub avatar: Option<String>,
@@ -63,8 +63,15 @@ impl AuthService {
         let mut conn = Conn::connect(db_url).await.map_err(|e| e.to_string())?;
 
         conn.execute(
+            "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("auth migration: {e}"))?;
+
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS auth_users (
-                id SERIAL PRIMARY KEY,
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 email TEXT UNIQUE NOT NULL,
                 name TEXT NOT NULL,
                 avatar_url TEXT,
@@ -82,7 +89,7 @@ impl AuthService {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS auth_app_consents (
                 id SERIAL PRIMARY KEY,
-                user_id INTEGER NOT NULL REFERENCES auth_users(id),
+                user_id UUID NOT NULL REFERENCES auth_users(id),
                 app_id UUID NOT NULL,
                 granted_at TIMESTAMPTZ DEFAULT NOW(),
                 revoked_at TIMESTAMPTZ,
@@ -96,7 +103,7 @@ impl AuthService {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS auth_sessions (
                 id SERIAL PRIMARY KEY,
-                user_id INTEGER NOT NULL REFERENCES auth_users(id),
+                user_id UUID NOT NULL REFERENCES auth_users(id),
                 app_id UUID NOT NULL,
                 token_hash TEXT NOT NULL,
                 expires_at TIMESTAMPTZ NOT NULL,
@@ -206,17 +213,17 @@ impl AuthService {
         // Update last_login
         let _ = conn
             .execute(
-                "UPDATE auth_users SET last_login = NOW() WHERE id = $1",
-                &[&user.id],
+                "UPDATE auth_users SET last_login = NOW() WHERE id = $1::uuid",
+                &[&user.id.as_str()],
             )
             .await;
 
         // Auto-grant consent on login
         let _ = conn
             .execute(
-                "INSERT INTO auth_app_consents (user_id, app_id) VALUES ($1, $2::uuid) \
+                "INSERT INTO auth_app_consents (user_id, app_id) VALUES ($1::uuid, $2::uuid) \
                  ON CONFLICT (user_id, app_id) DO NOTHING",
-                &[&user.id, &app_id],
+                &[&user.id.as_str(), &app_id],
             )
             .await;
 
@@ -227,8 +234,8 @@ impl AuthService {
         let _ = conn
             .execute(
                 "INSERT INTO auth_sessions (user_id, app_id, token_hash, expires_at) \
-                 VALUES ($1, $2::uuid, $3, NOW() + INTERVAL '24 hours')",
-                &[&user.id, &app_id, &token_hash.as_str()],
+                 VALUES ($1::uuid, $2::uuid, $3, NOW() + INTERVAL '24 hours')",
+                &[&user.id.as_str(), &app_id, &token_hash.as_str()],
             )
             .await;
 
@@ -255,12 +262,12 @@ impl AuthService {
     // -- User lookup ----------------------------------------------------------
 
     /// Get a user by ID.
-    pub async fn get_user(&self, user_id: i32) -> Result<AuthUser, String> {
+    pub async fn get_user(&self, user_id: &str) -> Result<AuthUser, String> {
         let mut conn = self.conn().await?;
 
         let rows = conn
             .query(
-                "SELECT id, email, name, avatar_url FROM auth_users WHERE id = $1",
+                "SELECT id, email, name, avatar_url FROM auth_users WHERE id = $1::uuid",
                 &[&user_id],
             )
             .await
@@ -274,13 +281,13 @@ impl AuthService {
     // -- Consent management ---------------------------------------------------
 
     /// Check whether a user has granted consent to an app.
-    pub async fn has_consent(&self, user_id: i32, app_id: &str) -> Result<bool, String> {
+    pub async fn has_consent(&self, user_id: &str, app_id: &str) -> Result<bool, String> {
         let mut conn = self.conn().await?;
 
         let rows = conn
             .query(
                 "SELECT id FROM auth_app_consents \
-                 WHERE user_id = $1 AND app_id = $2::uuid AND revoked_at IS NULL",
+                 WHERE user_id = $1::uuid AND app_id = $2::uuid AND revoked_at IS NULL",
                 &[&user_id, &app_id],
             )
             .await
@@ -290,11 +297,11 @@ impl AuthService {
     }
 
     /// Grant consent for a user to an app. Idempotent (re-grants if revoked).
-    pub async fn grant_consent(&self, user_id: i32, app_id: &str) -> Result<(), String> {
+    pub async fn grant_consent(&self, user_id: &str, app_id: &str) -> Result<(), String> {
         let mut conn = self.conn().await?;
 
         conn.execute(
-            "INSERT INTO auth_app_consents (user_id, app_id) VALUES ($1, $2::uuid) \
+            "INSERT INTO auth_app_consents (user_id, app_id) VALUES ($1::uuid, $2::uuid) \
              ON CONFLICT (user_id, app_id) DO UPDATE SET revoked_at = NULL, granted_at = NOW()",
             &[&user_id, &app_id],
         )
@@ -316,7 +323,7 @@ impl AuthService {
         let exp = iat + 86400; // 24 hours
 
         let claims = TokenClaims {
-            sub: user.id,
+            sub: user.id.clone(),
             app: app_id.to_string(),
             email: user.email.clone(),
             name: user.name.clone(),
@@ -341,7 +348,7 @@ impl AuthService {
 /// Convert a query row into an `AuthUser`.
 fn row_to_user(row: &zeroship_pg::Row) -> AuthUser {
     AuthUser {
-        id: row.get("id"),
+        id: row.get("id"), // UUID comes back as String from text-format params
         email: row.get("email"),
         name: row.get("name"),
         avatar_url: row.get("avatar_url"),

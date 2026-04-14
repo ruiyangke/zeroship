@@ -152,7 +152,7 @@ pub async fn userinfo(
         }
     };
 
-    match state.auth.get_user(claims.sub).await {
+    match state.auth.get_user(&claims.sub).await {
         Ok(user) => web::HttpResponse::Ok().json(&serde_json::json!({
             "user": user,
             "app": claims.app,
@@ -178,7 +178,7 @@ pub async fn consent(
         }
     };
 
-    match state.auth.grant_consent(claims.sub, &body.app_id).await {
+    match state.auth.grant_consent(&claims.sub, &body.app_id).await {
         Ok(()) => web::HttpResponse::Ok()
             .json(&serde_json::json!({ "granted": true, "app_id": body.app_id })),
         Err(msg) => {
@@ -211,7 +211,7 @@ pub async fn authorize(
 
     // If the user already has a valid session with consent, redirect back.
     if let Some(claims) = validate_session(&req, &state) {
-        if let Ok(true) = state.auth.has_consent(claims.sub, app_id).await {
+        if let Ok(true) = state.auth.has_consent(&claims.sub, app_id).await {
             return web::HttpResponse::Found()
                 .header(header::LOCATION, return_url)
                 .finish();

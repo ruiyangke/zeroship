@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthUser {
-    pub sub: i32,
+    pub sub: String,
     pub app: String,
     pub email: String,
     pub name: String,
@@ -72,7 +72,7 @@ pub fn extract_user(cookie_header: Option<&str>, jwt_secret: &str, app_id: &str)
 /// `sub` becomes `id`; `app`, `exp`, `iat` are stripped.
 #[derive(Serialize)]
 struct UserPayload<'a> {
-    id: i32,
+    id: &'a str,
     email: &'a str,
     name: &'a str,
     avatar: Option<&'a str>,
@@ -85,7 +85,7 @@ struct UserPayload<'a> {
 /// internals (`sub`, `app`, `exp`, `iat`) are not forwarded to the worker.
 pub fn encode_user_header(user: &AuthUser) -> String {
     let payload = UserPayload {
-        id: user.sub,
+        id: &user.sub,
         email: &user.email,
         name: &user.name,
         avatar: user.avatar.as_deref(),
