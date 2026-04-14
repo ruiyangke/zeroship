@@ -154,6 +154,9 @@ interface ZeroshipDb {
   /** Delete multiple documents. Returns JSON string with { deleted: N }. */
   deleteMany(collection: string, filter: ZeroshipDbFilter): Promise<string>;
 
+  /** Upsert a document (insert or update on conflict). Returns JSON string of the row. */
+  upsert(collection: string, doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>, conflictFields: string[]): Promise<string>;
+
   /** Count documents matching filter. Returns JSON string with { count: N }. */
   count(collection: string, filter: ZeroshipDbFilter): Promise<string>;
 
@@ -171,7 +174,7 @@ interface ZeroshipDb {
   // --- Transactions ---
 
   /** Begin a transaction. All subsequent CRUD ops use the same connection. */
-  beginTransaction(): Promise<void>;
+  beginTransaction(isolationLevel?: string): Promise<void>;
 
   /** Commit the active transaction. */
   commitTransaction(): Promise<void>;

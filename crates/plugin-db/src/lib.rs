@@ -145,6 +145,7 @@ impl NativePlugin for DbPlugin {
         r.add("updateMany", callbacks::update_many);
         r.add("deleteOne", callbacks::delete_one);
         r.add("deleteMany", callbacks::delete_many);
+        r.add("upsert", callbacks::upsert);
         r.add("count", callbacks::count);
         r.add("distinct", callbacks::distinct);
         r.add("aggregate", callbacks::aggregate);

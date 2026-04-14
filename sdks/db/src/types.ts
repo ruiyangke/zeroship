@@ -7,6 +7,9 @@
 /** Generic plain object type used throughout the SDK. */
 export type PlainObject = Record<string, unknown>;
 
+/** PostgreSQL transaction isolation levels. */
+export type IsolationLevel = "read uncommitted" | "read committed" | "repeatable read" | "serializable";
+
 /** Return type for all Collection methods. Never throws — errors are values. */
 export type Result<T> = { data: T; error: null } | { data: null; error: Error };
 

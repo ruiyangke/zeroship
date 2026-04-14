@@ -714,6 +714,8 @@ pub fn build_aggregate(
     let mut having_clause = String::new();
     let mut order_clause = String::new();
     let mut limit_clause = String::new();
+    // Track the most recent $sort for $first sort-order threading
+    let mut last_sort: Vec<(String, &str)> = Vec::new();
 
     for stage in stages {
         let obj = stage.as_object().ok_or_else(|| {
@@ -814,7 +816,19 @@ pub fn build_aggregate(
                                 "$first requires a field name string".to_string(),
                             )
                         })?;
-                        format!("(array_agg({}))[1]", quote_ident(field))
+                        if last_sort.is_empty() {
+                            format!("(array_agg({}))[1]", quote_ident(field))
+                        } else {
+                            let order_parts: Vec<String> = last_sort
+                                .iter()
+                                .map(|(col, dir)| format!("{} {dir}", quote_ident(col)))
+                                .collect();
+                            format!(
+                                "(array_agg({} ORDER BY {}))[1]",
+                                quote_ident(field),
+                                order_parts.join(", ")
+                            )
+                        }
                     }
                     other => {
                         return Err(QueryError::InvalidFilter(format!(
@@ -829,6 +843,17 @@ pub fn build_aggregate(
         } else if let Some(having_val) = obj.get("$having") {
             having_clause = build_having(having_val, &mut params, &agg_exprs)?;
         } else if let Some(sort_val) = obj.get("$sort") {
+            // Track sort columns/directions for $first threading
+            last_sort.clear();
+            if let Some(sort_obj) = sort_val.as_object() {
+                for (key, val) in sort_obj {
+                    let dir = match val.as_i64() {
+                        Some(n) if n < 0 => "DESC",
+                        _ => "ASC",
+                    };
+                    last_sort.push((key.clone(), dir));
+                }
+            }
             order_clause = build_order_by(sort_val)?;
         } else if let Some(limit_val) = obj.get("$limit") {
             let n = limit_val.as_i64().ok_or_else(|| {
@@ -1286,6 +1311,101 @@ fn value_to_param(value: &Value) -> String {
         // For arrays/objects, serialize as JSON text (stored as JSONB in PG)
         other => other.to_string(),
     }
+}
+
+/// Build an UPSERT (INSERT ... ON CONFLICT DO UPDATE) query:
+/// ```sql
+/// INSERT INTO "app_id"."collection" ("col1", "col2") VALUES ($1, $2)
+/// ON CONFLICT ("conflict_col") DO UPDATE SET "col2" = EXCLUDED."col2"
+/// RETURNING *
+/// ```
+///
+/// `doc` is the full document to insert (as a JSON object).
+/// `conflict_fields` is an array of column names that form the conflict target.
+/// Non-conflict columns are set to `EXCLUDED."col"` in the DO UPDATE SET clause.
+pub fn build_upsert(
+    app_id: &str,
+    collection: &str,
+    doc: &Value,
+    conflict_fields: &Value,
+) -> Result<BuiltQuery, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+
+    let obj = doc
+        .as_object()
+        .ok_or_else(|| QueryError::InvalidFilter("upsert document must be an object".to_string()))?;
+
+    if obj.is_empty() {
+        return Err(QueryError::InvalidFilter(
+            "upsert document cannot be empty".to_string(),
+        ));
+    }
+
+    let conflict_arr = conflict_fields
+        .as_array()
+        .ok_or_else(|| QueryError::InvalidFilter("conflict_fields must be an array".to_string()))?;
+
+    if conflict_arr.is_empty() {
+        return Err(QueryError::InvalidFilter(
+            "conflict_fields cannot be empty".to_string(),
+        ));
+    }
+
+    let conflict_set: std::collections::HashSet<&str> = conflict_arr
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+
+    if conflict_set.is_empty() {
+        return Err(QueryError::InvalidFilter(
+            "conflict_fields must contain string values".to_string(),
+        ));
+    }
+
+    let schema = quote_ident(app_id);
+    let table = quote_ident(collection);
+
+    let mut columns = Vec::new();
+    let mut placeholders = Vec::new();
+    let mut params: Vec<String> = Vec::new();
+    let mut update_clauses = Vec::new();
+
+    for (key, value) in obj {
+        columns.push(quote_ident(key));
+        params.push(value_to_param(value));
+        placeholders.push(format!("${}", params.len()));
+
+        // Non-conflict columns get updated to the EXCLUDED value
+        if !conflict_set.contains(key.as_str()) {
+            update_clauses.push(format!("{} = EXCLUDED.{}", quote_ident(key), quote_ident(key)));
+        }
+    }
+
+    let conflict_cols: Vec<String> = conflict_arr
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(quote_ident)
+        .collect();
+
+    // If all columns are conflict columns, use DO UPDATE SET for the first non-id conflict col
+    // to make it a true upsert (otherwise Postgres treats it as DO NOTHING).
+    if update_clauses.is_empty() {
+        // All columns are conflict columns — set the first one to itself
+        if let Some(first) = conflict_arr.first().and_then(|v| v.as_str()) {
+            update_clauses.push(format!("{} = EXCLUDED.{}", quote_ident(first), quote_ident(first)));
+        }
+    }
+
+    let sql = format!(
+        "INSERT INTO {schema}.{table} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {} RETURNING *",
+        columns.join(", "),
+        placeholders.join(", "),
+        conflict_cols.join(", "),
+        update_clauses.join(", ")
+    );
+
+    Ok(BuiltQuery { sql, params })
 }
 
 // ---------------------------------------------------------------------------
@@ -2007,5 +2127,156 @@ mod tests {
         assert!(result.is_err(), "$exists with non-bool should fail");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("boolean"), "msg: {msg}");
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. $first sort-order threading
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_aggregate_first_without_sort() {
+        let pipeline = json!([
+            {"$group": {"by": "department", "top_name": {"$first": "name"}}}
+        ]);
+        let q = build_aggregate("app1", "employees", &pipeline).unwrap();
+        // Without a preceding $sort, $first uses plain array_agg
+        assert!(
+            q.sql.contains(r#"(array_agg("name"))[1]"#),
+            "sql: {}",
+            q.sql
+        );
+    }
+
+    #[test]
+    fn test_aggregate_first_with_sort() {
+        let pipeline = json!([
+            {"$sort": {"salary": -1}},
+            {"$group": {"by": "department", "top_name": {"$first": "name"}}}
+        ]);
+        let q = build_aggregate("app1", "employees", &pipeline).unwrap();
+        // With a preceding $sort, $first threads the ORDER BY into array_agg
+        assert!(
+            q.sql.contains(r#"(array_agg("name" ORDER BY "salary" DESC))[1]"#),
+            "sql: {}",
+            q.sql
+        );
+    }
+
+    #[test]
+    fn test_aggregate_first_with_multi_sort() {
+        let pipeline = json!([
+            {"$sort": {"salary": -1, "name": 1}},
+            {"$group": {"by": "department", "top_name": {"$first": "name"}}}
+        ]);
+        let q = build_aggregate("app1", "employees", &pipeline).unwrap();
+        // Multi-column sort should appear in the ORDER BY clause
+        assert!(
+            q.sql.contains(r#"array_agg("name" ORDER BY"#),
+            "sql: {}",
+            q.sql
+        );
+        assert!(
+            q.sql.contains(r#""salary" DESC"#),
+            "sql: {}",
+            q.sql
+        );
+        assert!(
+            q.sql.contains(r#""name" ASC"#),
+            "sql: {}",
+            q.sql
+        );
+    }
+
+    #[test]
+    fn test_aggregate_first_sort_does_not_affect_other_aggs() {
+        let pipeline = json!([
+            {"$sort": {"salary": -1}},
+            {"$group": {
+                "by": "department",
+                "top_name": {"$first": "name"},
+                "total": {"$sum": "salary"},
+                "cnt": {"$count": true}
+            }}
+        ]);
+        let q = build_aggregate("app1", "employees", &pipeline).unwrap();
+        // $first should have ORDER BY
+        assert!(
+            q.sql.contains(r#"array_agg("name" ORDER BY "salary" DESC)"#),
+            "sql: {}",
+            q.sql
+        );
+        // $sum and $count should NOT have ORDER BY
+        assert!(
+            q.sql.contains(r#"SUM("salary")"#),
+            "sql: {}",
+            q.sql
+        );
+        assert!(
+            q.sql.contains("COUNT(*)"),
+            "sql: {}",
+            q.sql
+        );
+    }
+
+    #[test]
+    fn test_upsert_basic() {
+        let doc = json!({"name": "alice", "age": 30});
+        let conflict = json!(["name"]);
+        let q = build_upsert("app1", "users", &doc, &conflict).unwrap();
+        assert!(q.sql.contains("INSERT INTO"), "sql: {}", q.sql);
+        assert!(q.sql.contains("ON CONFLICT"), "sql: {}", q.sql);
+        assert!(q.sql.contains("DO UPDATE SET"), "sql: {}", q.sql);
+        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#""name""#), "sql: {}", q.sql);
+        // age is not a conflict field, so it should appear in DO UPDATE SET
+        assert!(q.sql.contains(r#""age" = EXCLUDED."age""#), "sql: {}", q.sql);
+        assert_eq!(q.params.len(), 2);
+    }
+
+    #[test]
+    fn test_upsert_multiple_conflict_fields() {
+        let doc = json!({"email": "a@b.com", "name": "alice", "age": 30});
+        let conflict = json!(["email", "name"]);
+        let q = build_upsert("app1", "users", &doc, &conflict).unwrap();
+        assert!(q.sql.contains(r#"ON CONFLICT ("email", "name")"#), "sql: {}", q.sql);
+        // Only age should be in DO UPDATE SET
+        assert!(q.sql.contains(r#""age" = EXCLUDED."age""#), "sql: {}", q.sql);
+        // email and name should NOT be in DO UPDATE SET (they are conflict fields)
+        assert!(!q.sql.contains(r#""email" = EXCLUDED."email""#), "sql: {}", q.sql);
+        assert!(!q.sql.contains(r#""name" = EXCLUDED."name""#), "sql: {}", q.sql);
+    }
+
+    #[test]
+    fn test_upsert_all_conflict_cols() {
+        // When all columns are conflict columns, we still produce a valid DO UPDATE SET
+        let doc = json!({"email": "a@b.com"});
+        let conflict = json!(["email"]);
+        let q = build_upsert("app1", "users", &doc, &conflict).unwrap();
+        assert!(q.sql.contains("DO UPDATE SET"), "sql: {}", q.sql);
+        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+    }
+
+    #[test]
+    fn test_upsert_empty_doc_error() {
+        let doc = json!({});
+        let conflict = json!(["name"]);
+        let result = build_upsert("app1", "users", &doc, &conflict);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_upsert_empty_conflict_fields_error() {
+        let doc = json!({"name": "alice"});
+        let conflict = json!([]);
+        let result = build_upsert("app1", "users", &doc, &conflict);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_upsert_invalid_collection_error() {
+        let doc = json!({"name": "alice"});
+        let conflict = json!(["name"]);
+        let result = build_upsert("app1", "users; DROP TABLE", &doc, &conflict);
+        assert!(result.is_err());
     }
 }

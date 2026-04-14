@@ -14,10 +14,11 @@ type NativeFn = (
 
 /**
  * Chainable query object returned by `Collection.find()`.
- * The generic parameter `S` is the raw schema shape; results resolve to `Document<S>[]`.
+ * The generic parameter `S` is the raw schema shape; `P` is the projected document shape.
+ * When `.select()` is called with typed field names, `P` narrows to `Pick<Document<S>, K>`.
  * Collects query options lazily and executes via the native layer when awaited.
  */
-export class Query<S = PlainObject> {
+export class Query<S = PlainObject, P = Document<S>> {
   private _collection: string;
   private _filter: ZeroshipDbFilter;
   private _toField: (s: string) => string;
@@ -27,6 +28,7 @@ export class Query<S = PlainObject> {
   private _limit: number | undefined;
   private _skip: number | undefined;
   private _select: string[] | undefined;
+  private _afterId: number | undefined;
 
   /** @internal */
   constructor(
@@ -76,12 +78,26 @@ export class Query<S = PlainObject> {
   }
 
   /**
+   * Cursor-based pagination: returns documents with `id > afterId`.
+   * Merges an `{ id: { $gt: afterId } }` condition into the filter at execution time.
+   */
+  after(id: number): this {
+    this._afterId = id;
+    return this;
+  }
+
+  /**
    * Restricts the returned fields.
    * String: `"name email"` (space-separated).
    * Array: `["name", "email"]`.
    * Object: `{ name: 1, email: 1 }` (Mongoose style — keys with truthy values).
+   *
+   * When called with a typed array of literal field names, the return type narrows
+   * to `Query<S, Pick<Document<S>, K>>` so that awaited results only contain those fields.
    */
-  select(s: string | string[] | Record<string, number | boolean>): this {
+  select<K extends keyof Document<S> & string>(fields: K[]): Query<S, Pick<Document<S>, K>>;
+  select(s: string | string[] | Record<string, number | boolean>): Query<S, P>;
+  select(s: string | string[] | Record<string, number | boolean>): Query<S, any> {
     if (Array.isArray(s)) {
       this._select = s;
     } else if (typeof s === "string") {
@@ -98,33 +114,43 @@ export class Query<S = PlainObject> {
         .filter(([, v]) => v)
         .map(([k]) => k);
     }
-    return this;
+    return this as unknown as Query<S, any>;
   }
 
   /**
    * Makes Query thenable so it can be used with `await`.
    * Executes the query and passes results to `resolve`; calls `reject` on error.
    */
-  then<TResult1 = Result<Document<S>[]>, TResult2 = never>(
-    resolve?: ((value: Result<Document<S>[]>) => TResult1 | PromiseLike<TResult1>) | null,
+  then<TResult1 = Result<P[]>, TResult2 = never>(
+    resolve?: ((value: Result<P[]>) => TResult1 | PromiseLike<TResult1>) | null,
     reject?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
   ): Promise<TResult1 | TResult2> {
     return this._exec().then(resolve, reject);
   }
 
   /** Executes the query and returns the mapped result documents. */
-  async _exec(): Promise<Result<Document<S>[]>> {
+  async _exec(): Promise<Result<P[]>> {
     const opts: ZeroshipDbFindOpts = {};
     if (this._sort !== undefined) opts.orderBy = this._sort as Record<string, 1 | -1>;
     if (this._limit !== undefined) opts.limit = this._limit;
     if (this._skip !== undefined) opts.offset = this._skip;
     if (this._select !== undefined) opts.select = this._select;
 
+    // Merge cursor condition into filter
+    let filter: ZeroshipDbFilter = this._filter;
+    if (this._afterId !== undefined) {
+      const cursorCondition: ZeroshipDbFilter = { id: { $gt: this._afterId } };
+      const hasKeys = Object.keys(filter).length > 0;
+      filter = hasKeys
+        ? { $and: [filter, cursorCondition] } as ZeroshipDbFilter
+        : cursorCondition;
+    }
+
     try {
-      const raw = await this._native(this._collection, this._filter, opts);
+      const raw = await this._native(this._collection, filter, opts);
       const parsed: PlainObject[] = typeof raw === "string" ? JSON.parse(raw) : raw;
       const rows: PlainObject[] = Array.isArray(parsed) ? parsed : [];
-      return ok(rows.map(d => mapResultDoc(d, this._toField)) as Document<S>[]);
+      return ok(rows.map(d => mapResultDoc(d, this._toField)) as P[]);
     } catch (e: unknown) {
       return err(new Error(`find query failed: ${e instanceof Error ? e.message : String(e)}`, { cause: e }));
     }

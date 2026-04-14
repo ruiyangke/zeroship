@@ -174,4 +174,73 @@ db.users.distinct("email");
 // @ts-expect-error — nonexistent field
 db.users.distinct("nonexistent");
 
+// --- select() narrowing ---
+
+async function testSelectNarrowing() {
+  // Typed array literal narrows the result
+  const { data } = await db.users.find({}).select(["name", "email"]);
+  if (data) {
+    const name: string = data[0].name;     // narrowed to Pick<Document, "name" | "email">
+    const email: string = data[0].email;   // narrowed
+
+    // @ts-expect-error — age is not in the selected fields
+    const age = data[0].age;
+  }
+}
+
+async function testSelectSingleField() {
+  const { data } = await db.users.find({}).select(["id"]);
+  if (data) {
+    const id: number = data[0].id;   // narrowed to Pick<Document, "id">
+
+    // @ts-expect-error — name is not in the selected fields
+    const name = data[0].name;
+  }
+}
+
+async function testSelectStringDoesNotNarrow() {
+  // String overload should NOT narrow — returns full Document
+  const { data } = await db.users.find({}).select("name email");
+  if (data) {
+    const name: string = data[0].name;   // still full Document
+    const age: number | undefined = data[0].age;  // all fields accessible
+  }
+}
+
+async function testSelectObjectDoesNotNarrow() {
+  // Object overload should NOT narrow — returns full Document
+  const { data } = await db.users.find({}).select({ name: 1, email: 1 });
+  if (data) {
+    const name: string = data[0].name;   // still full Document
+    const age: number | undefined = data[0].age;  // all fields accessible
+  }
+}
+
+// --- select() narrowing in transactions ---
+
+async function testTxSelectNarrowing() {
+  await db.transaction(async (tx) => {
+    const users = await tx.users.find({}).select(["name", "email"]);
+    const name: string = users[0].name;   // narrowed
+    const email: string = users[0].email; // narrowed
+
+    // @ts-expect-error — age is not in the selected fields
+    const age = users[0].age;
+    return users;
+  });
+}
+
+// --- soft delete: forceDelete is available ---
+
+async function testForceDelete() {
+  const { data: d1 } = await db.users.forceDelete({ name: "Alice" });
+  if (d1) {
+    const count: number = d1.deletedCount; // typed
+  }
+  const { data: d2 } = await db.users.forceDeleteMany({ role: "admin" });
+  if (d2) {
+    const count: number = d2.deletedCount; // typed
+  }
+}
+
 console.log("All type checks passed!");

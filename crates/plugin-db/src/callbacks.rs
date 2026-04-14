@@ -8,7 +8,7 @@
 //! 5. Returns the Promise to JS
 //!
 //! The runtime pump drains `spawned_ops`, polls the futures, and resolves
-//! promises via `OpResult::Completed`.
+//! promises via `OpResult::Completed` or rejects them via `OpResult::Failed`.
 
 use std::rc::Rc;
 
@@ -315,11 +315,6 @@ fn column_to_json(row: &zeroship_pg::Row, name: &str, oid: u32) -> Value {
     }
 }
 
-/// Build an error JSON string.
-fn error_json(msg: &str) -> String {
-    serde_json::json!({ "error": msg }).to_string()
-}
-
 // ---------------------------------------------------------------------------
 // Callback: findOne(collection, filterJson, optsJson)
 // ---------------------------------------------------------------------------
@@ -349,13 +344,8 @@ pub fn find_one(
     let bq = match query::build_find(&app_id, &collection, &filter, Some(1), None, None, None) {
         Ok(q) => q,
         Err(e) => {
-            // Resolve immediately with error
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Completed {
-                    op_id,
-                    value: error_json(&e.to_string()),
-                    request_id,
-                }
+                OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
             rv.set(promise.into());
             return;
@@ -363,15 +353,15 @@ pub fn find_one(
     };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let value = match exec_query(bq).await {
+        match exec_query(bq).await {
             Ok(json) => {
                 // findOne returns the first element or null
                 let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
-                arr.into_iter().next().unwrap_or(Value::Null).to_string()
+                let value = arr.into_iter().next().unwrap_or(Value::Null).to_string();
+                OpResult::Completed { op_id, value, request_id }
             }
-            Err(e) => error_json(&e),
-        };
-        OpResult::Completed { op_id, value, request_id }
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
     }));
 
     rv.set(promise.into());
@@ -414,11 +404,7 @@ pub fn find(
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Completed {
-                    op_id,
-                    value: error_json(&e.to_string()),
-                    request_id,
-                }
+                OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
             rv.set(promise.into());
             return;
@@ -426,11 +412,10 @@ pub fn find(
     };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let value = match exec_query(bq).await {
-            Ok(json) => json,
-            Err(e) => error_json(&e),
-        };
-        OpResult::Completed { op_id, value, request_id }
+        match exec_query(bq).await {
+            Ok(value) => OpResult::Completed { op_id, value, request_id },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
     }));
 
     rv.set(promise.into());
@@ -466,11 +451,7 @@ pub fn insert(
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Completed {
-                    op_id,
-                    value: error_json(&e.to_string()),
-                    request_id,
-                }
+                OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
             rv.set(promise.into());
             return;
@@ -478,15 +459,15 @@ pub fn insert(
     };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let value = match exec_mutation(bq).await {
+        match exec_mutation(bq).await {
             Ok(json) => {
                 // Return the first (inserted) row
                 let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
-                arr.into_iter().next().unwrap_or(Value::Null).to_string()
+                let value = arr.into_iter().next().unwrap_or(Value::Null).to_string();
+                OpResult::Completed { op_id, value, request_id }
             }
-            Err(e) => error_json(&e),
-        };
-        OpResult::Completed { op_id, value, request_id }
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
     }));
 
     rv.set(promise.into());
@@ -525,11 +506,7 @@ pub fn update_one(
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Completed {
-                    op_id,
-                    value: error_json(&e.to_string()),
-                    request_id,
-                }
+                OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
             rv.set(promise.into());
             return;
@@ -537,14 +514,14 @@ pub fn update_one(
     };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let value = match exec_mutation(bq).await {
+        match exec_mutation(bq).await {
             Ok(json) => {
                 let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
-                arr.into_iter().next().unwrap_or(Value::Null).to_string()
+                let value = arr.into_iter().next().unwrap_or(Value::Null).to_string();
+                OpResult::Completed { op_id, value, request_id }
             }
-            Err(e) => error_json(&e),
-        };
-        OpResult::Completed { op_id, value, request_id }
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
     }));
 
     rv.set(promise.into());
@@ -580,11 +557,7 @@ pub fn delete_one(
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Completed {
-                    op_id,
-                    value: error_json(&e.to_string()),
-                    request_id,
-                }
+                OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
             rv.set(promise.into());
             return;
@@ -592,14 +565,14 @@ pub fn delete_one(
     };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let value = match exec_mutation(bq).await {
+        match exec_mutation(bq).await {
             Ok(json) => {
                 let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
-                arr.into_iter().next().unwrap_or(Value::Null).to_string()
+                let value = arr.into_iter().next().unwrap_or(Value::Null).to_string();
+                OpResult::Completed { op_id, value, request_id }
             }
-            Err(e) => error_json(&e),
-        };
-        OpResult::Completed { op_id, value, request_id }
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
     }));
 
     rv.set(promise.into());
@@ -634,11 +607,7 @@ pub fn insert_many(
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Completed {
-                    op_id,
-                    value: error_json(&e.to_string()),
-                    request_id,
-                }
+                OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
             rv.set(promise.into());
             return;
@@ -646,11 +615,10 @@ pub fn insert_many(
     };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let value = match exec_mutation(bq).await {
-            Ok(json) => json, // Return the full array of inserted rows
-            Err(e) => error_json(&e),
-        };
-        OpResult::Completed { op_id, value, request_id }
+        match exec_mutation(bq).await {
+            Ok(value) => OpResult::Completed { op_id, value, request_id },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
     }));
 
     rv.set(promise.into());
@@ -685,11 +653,7 @@ pub fn aggregate(
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Completed {
-                    op_id,
-                    value: error_json(&e.to_string()),
-                    request_id,
-                }
+                OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
             rv.set(promise.into());
             return;
@@ -697,11 +661,10 @@ pub fn aggregate(
     };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let value = match exec_query(bq).await {
-            Ok(json) => json,
-            Err(e) => error_json(&e),
-        };
-        OpResult::Completed { op_id, value, request_id }
+        match exec_query(bq).await {
+            Ok(value) => OpResult::Completed { op_id, value, request_id },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
     }));
 
     rv.set(promise.into());
@@ -739,11 +702,7 @@ pub fn distinct(
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Completed {
-                    op_id,
-                    value: error_json(&e.to_string()),
-                    request_id,
-                }
+                OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
             rv.set(promise.into());
             return;
@@ -751,7 +710,7 @@ pub fn distinct(
     };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let value = match exec_query(bq).await {
+        match exec_query(bq).await {
             Ok(json) => {
                 // Extract single-column values into a flat array
                 let rows: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
@@ -765,11 +724,11 @@ pub fn distinct(
                         }
                     })
                     .collect();
-                Value::Array(flat).to_string()
+                let value = Value::Array(flat).to_string();
+                OpResult::Completed { op_id, value, request_id }
             }
-            Err(e) => error_json(&e),
-        };
-        OpResult::Completed { op_id, value, request_id }
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
     }));
 
     rv.set(promise.into());
@@ -807,11 +766,7 @@ pub fn update_many(
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Completed {
-                    op_id,
-                    value: error_json(&e.to_string()),
-                    request_id,
-                }
+                OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
             rv.set(promise.into());
             return;
@@ -819,15 +774,15 @@ pub fn update_many(
     };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let value = match exec_mutation(bq).await {
+        match exec_mutation(bq).await {
             Ok(json) => {
                 let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
                 let n = arr.len();
-                serde_json::json!({ "updated": n }).to_string()
+                let value = serde_json::json!({ "updated": n }).to_string();
+                OpResult::Completed { op_id, value, request_id }
             }
-            Err(e) => error_json(&e),
-        };
-        OpResult::Completed { op_id, value, request_id }
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
     }));
 
     rv.set(promise.into());
@@ -862,11 +817,7 @@ pub fn delete_many(
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Completed {
-                    op_id,
-                    value: error_json(&e.to_string()),
-                    request_id,
-                }
+                OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
             rv.set(promise.into());
             return;
@@ -874,15 +825,15 @@ pub fn delete_many(
     };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let value = match exec_mutation(bq).await {
+        match exec_mutation(bq).await {
             Ok(json) => {
                 let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
                 let n = arr.len();
-                serde_json::json!({ "deleted": n }).to_string()
+                let value = serde_json::json!({ "deleted": n }).to_string();
+                OpResult::Completed { op_id, value, request_id }
             }
-            Err(e) => error_json(&e),
-        };
-        OpResult::Completed { op_id, value, request_id }
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
     }));
 
     rv.set(promise.into());
@@ -918,11 +869,7 @@ pub fn count(
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Completed {
-                    op_id,
-                    value: error_json(&e.to_string()),
-                    request_id,
-                }
+                OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
             rv.set(promise.into());
             return;
@@ -930,11 +877,10 @@ pub fn count(
     };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let value = match exec_count(bq).await {
-            Ok(json) => json,
-            Err(e) => error_json(&e),
-        };
-        OpResult::Completed { op_id, value, request_id }
+        match exec_count(bq).await {
+            Ok(value) => OpResult::Completed { op_id, value, request_id },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
     }));
 
     rv.set(promise.into());
@@ -981,14 +927,13 @@ pub fn register_model(
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let value = match exec_register_model(&app_id, &collection, &schema).await {
+        match exec_register_model(&app_id, &collection, &schema).await {
             Ok(()) => {
                 crate::mark_model_registered(&app_id, &collection);
-                "null".to_string()
+                OpResult::Completed { op_id, value: "null".to_string(), request_id }
             }
-            Err(e) => error_json(&e),
-        };
-        OpResult::Completed { op_id, value, request_id }
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
     }));
 
     rv.set(promise.into());
@@ -1049,7 +994,7 @@ async fn exec_register_model(
 // All CRUD callbacks (exec_query, exec_mutation, etc.) automatically use
 // TX_CONN when it's set, via the run_sql() helper.
 
-/// `zeroship.db.beginTransaction()` → Promise<void>
+/// `zeroship.db.beginTransaction(isolationLevel?)` → Promise<void>
 /// Opens a dedicated connection, runs BEGIN, stores in TX_CONN.
 /// All subsequent CRUD ops use this connection until commit/rollback.
 pub fn begin_transaction(
@@ -1062,26 +1007,47 @@ pub fn begin_transaction(
         .expect("RuntimeState not in isolate slot")
         .clone();
 
-    let _ = &args;
+    let isolation_level = get_string_arg(scope, &args, 0);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let value = match exec_begin().await {
-            Ok(()) => "null".to_string(),
-            Err(e) => error_json(&e),
-        };
-        OpResult::Completed { op_id, value, request_id }
+        match exec_begin(isolation_level.as_deref()).await {
+            Ok(()) => OpResult::Completed { op_id, value: "null".to_string(), request_id },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
     }));
 
     rv.set(promise.into());
 }
 
-async fn exec_begin() -> Result<(), String> {
+/// Allowed isolation levels (uppercased for validation).
+const VALID_ISOLATION_LEVELS: &[&str] = &[
+    "READ UNCOMMITTED",
+    "READ COMMITTED",
+    "REPEATABLE READ",
+    "SERIALIZABLE",
+];
+
+async fn exec_begin(isolation_level: Option<&str>) -> Result<(), String> {
     // Check: no nested transactions
     let has_tx = crate::TX_CONN.with(|tx| tx.borrow().is_some());
     if has_tx {
         return Err("db: transaction already active (nested transactions not supported)".to_string());
     }
+
+    // Build BEGIN statement with optional isolation level
+    let begin_sql = match isolation_level {
+        Some(level) => {
+            let upper = level.to_uppercase();
+            if !VALID_ISOLATION_LEVELS.contains(&upper.as_str()) {
+                return Err(format!(
+                    "db: invalid isolation level: {level}. Must be one of: read uncommitted, read committed, repeatable read, serializable"
+                ));
+            }
+            format!("BEGIN ISOLATION LEVEL {upper}")
+        }
+        None => "BEGIN".to_string(),
+    };
 
     // Open a dedicated connection (not from pool — we need to hold it)
     let url = crate::DB_URL.with(|u| u.borrow().clone())
@@ -1090,7 +1056,7 @@ async fn exec_begin() -> Result<(), String> {
         .await
         .map_err(|e| format!("db: tx connect failed: {e}"))?;
 
-    conn.execute("BEGIN", &[])
+    conn.execute(&begin_sql, &[])
         .await
         .map_err(|e| format!("db: BEGIN failed: {e}"))?;
 
@@ -1113,11 +1079,10 @@ pub fn commit_transaction(
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let value = match exec_end("COMMIT").await {
-            Ok(()) => "null".to_string(),
-            Err(e) => error_json(&e),
-        };
-        OpResult::Completed { op_id, value, request_id }
+        match exec_end("COMMIT").await {
+            Ok(()) => OpResult::Completed { op_id, value: "null".to_string(), request_id },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
     }));
 
     rv.set(promise.into());
@@ -1138,11 +1103,63 @@ pub fn rollback_transaction(
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let value = match exec_end("ROLLBACK").await {
-            Ok(()) => "null".to_string(),
-            Err(e) => error_json(&e),
-        };
-        OpResult::Completed { op_id, value, request_id }
+        match exec_end("ROLLBACK").await {
+            Ok(()) => OpResult::Completed { op_id, value: "null".to_string(), request_id },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
+    }));
+
+    rv.set(promise.into());
+}
+
+// ---------------------------------------------------------------------------
+// Callback: upsert(collection, docJson, conflictFieldsJson)
+// ---------------------------------------------------------------------------
+
+/// `zeroship.db.upsert(collection, docJson, conflictFieldsJson)` → Promise<object>
+pub fn upsert(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+    let Some(doc) = parse_json_arg(scope, &args, 1) else {
+        return;
+    };
+    let Some(conflict_fields) = parse_json_arg(scope, &args, 2) else {
+        return;
+    };
+
+    let app_id = get_app_id(&state);
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    let bq = match query::build_upsert(&app_id, &collection, &doc, &conflict_fields) {
+        Ok(q) => q,
+        Err(e) => {
+            state.borrow_mut().spawned_ops.push(Box::pin(async move {
+                OpResult::Failed { op_id, error: e.to_string(), request_id }
+            }));
+            rv.set(promise.into());
+            return;
+        }
+    };
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        match exec_mutation(bq).await {
+            Ok(json) => {
+                let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
+                let value = arr.into_iter().next().unwrap_or(Value::Null).to_string();
+                OpResult::Completed { op_id, value, request_id }
+            }
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
     }));
 
     rv.set(promise.into());

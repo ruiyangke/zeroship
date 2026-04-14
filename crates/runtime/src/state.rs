@@ -336,6 +336,12 @@ pub enum OpResult {
         /// The request that owns this op (used to route logs / cancellation).
         request_id: Option<u64>,
     },
+    /// An async op failed — reject its promise with the error message.
+    Failed {
+        op_id: u32,
+        error: String,
+        request_id: Option<u64>,
+    },
     /// A streaming body chunk arrived.
     StreamChunk {
         stream_id: u32,

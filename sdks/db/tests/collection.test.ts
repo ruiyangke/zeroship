@@ -67,6 +67,8 @@ function makeMockNative(overrides: Partial<Record<keyof NativeDb, unknown>> = {}
         [col, pipeline],
         JSON.stringify([{ id: "g1", total: 100 }])
       ) as Promise<string>,
+    upsert: (col, doc, conflictFields) =>
+      record("upsert", [col, doc, conflictFields], JSON.stringify({ id: "u1", ...(doc as PlainObject) })) as Promise<string>,
     ...overrides,
   };
 
@@ -838,5 +840,474 @@ describe("Collection — distinct field validation", () => {
     const { error } = await col.distinct("nonexistent" as any);
     assert.ok(error instanceof ValidationError);
     assert.ok(error.message.includes("nonexistent"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findOneAndUpdate()
+// ---------------------------------------------------------------------------
+
+describe("Collection.findOneAndUpdate()", () => {
+  test("returns the updated document on match", async () => {
+    const { native } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    const { data, error } = await col.findOneAndUpdate({ name: "Alice" }, { $set: { age: 31 } });
+    assert.equal(error, null);
+    assert.ok(data !== null);
+    assert.equal(data.id, "1");
+    assert.equal(data.name, "Bob");
+  });
+
+  test("returns null when no document matches", async () => {
+    const { native } = makeMockNative({
+      updateOne: () => Promise.resolve(null as unknown as string),
+    });
+    const col = new Collection("users", schema, native);
+    const { data, error } = await col.findOneAndUpdate({ name: "Ghost" }, { $set: { age: 5 } });
+    assert.equal(error, null);
+    assert.equal(data, null);
+  });
+
+  test("returns null when native returns 'null' string", async () => {
+    const { native } = makeMockNative({
+      updateOne: () => Promise.resolve("null"),
+    });
+    const col = new Collection("users", schema, native);
+    const { data, error } = await col.findOneAndUpdate({ name: "Ghost" }, { $set: { age: 5 } });
+    assert.equal(error, null);
+    assert.equal(data, null);
+  });
+
+  test("calls native.updateOne with mapped filter and update", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    await col.findOneAndUpdate({ id: "1" }, { $set: { name: "NewName" } });
+    assert.equal(calls[0].method, "updateOne");
+    const filter = calls[0].args[1] as PlainObject;
+    assert.equal(filter.id, "1");
+  });
+
+  test("returns ValidationError for invalid $set fields", async () => {
+    const { native } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    const { data, error } = await col.findOneAndUpdate(
+      { name: "Alice" },
+      { $set: { age: "not-a-number" as unknown as number } }
+    );
+    assert.equal(data, null);
+    assert.ok(error instanceof ValidationError);
+  });
+
+  test("validates $push values against array item type", async () => {
+    const { native } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    const { data, error } = await col.findOneAndUpdate(
+      { name: "Alice" },
+      { $push: { tags: 42 as unknown as string } }
+    );
+    assert.equal(data, null);
+    assert.ok(error instanceof ValidationError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findOneAndDelete()
+// ---------------------------------------------------------------------------
+
+describe("Collection.findOneAndDelete()", () => {
+  test("returns the deleted document on match", async () => {
+    const { native } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    const { data, error } = await col.findOneAndDelete({ name: "Alice" });
+    assert.equal(error, null);
+    assert.ok(data !== null);
+    assert.equal(data.id, "1");
+  });
+
+  test("returns null when no document matches", async () => {
+    const { native } = makeMockNative({
+      deleteOne: () => Promise.resolve(null as unknown as string),
+    });
+    const col = new Collection("users", schema, native);
+    const { data, error } = await col.findOneAndDelete({ name: "Ghost" });
+    assert.equal(error, null);
+    assert.equal(data, null);
+  });
+
+  test("returns null when native returns empty string", async () => {
+    const { native } = makeMockNative({
+      deleteOne: () => Promise.resolve(""),
+    });
+    const col = new Collection("users", schema, native);
+    const { data, error } = await col.findOneAndDelete({ name: "Ghost" });
+    assert.equal(error, null);
+    assert.equal(data, null);
+  });
+
+  test("maps filter fields before calling native", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    await col.findOneAndDelete({ id: "abc" });
+    assert.equal(calls[0].method, "deleteOne");
+    const filter = calls[0].args[1] as PlainObject;
+    assert.equal(filter.id, "abc");
+  });
+
+  test("maps native error to Result error", async () => {
+    const { native } = makeMockNative({
+      deleteOne: () => Promise.reject(new Error("connection lost")),
+    });
+    const col = new Collection("users", schema, native);
+    const { data, error } = await col.findOneAndDelete({ name: "Alice" });
+    assert.equal(data, null);
+    assert.ok(error !== null);
+    assert.ok(error.message.includes("connection lost"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// upsert()
+// ---------------------------------------------------------------------------
+
+describe("Collection.upsert()", () => {
+  test("calls native.upsert with validated doc and conflict fields", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    await col.upsert({ name: "Alice", age: 25 }, { conflictFields: ["name"] });
+    assert.equal(calls[0].method, "upsert");
+    assert.equal(calls[0].args[0], "users");
+    const doc = calls[0].args[1] as PlainObject;
+    assert.equal(doc.name, "Alice");
+    assert.equal(doc.age, 25);
+    const conflictFields = calls[0].args[2] as string[];
+    assert.deepEqual(conflictFields, ["name"]);
+  });
+
+  test("returns the upserted document with id mapped", async () => {
+    const { native } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    const { data, error } = await col.upsert({ name: "Alice", age: 25 }, { conflictFields: ["name"] });
+    assert.equal(error, null);
+    assert.ok(data !== null);
+    assert.equal(data.id, "u1");
+    assert.equal(data.name, "Alice");
+  });
+
+  test("applies defaults before upserting", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    await col.upsert({ name: "Bob" }, { conflictFields: ["name"] });
+    const doc = calls[0].args[1] as PlainObject;
+    assert.equal(doc.role, "user");
+  });
+
+  test("returns ValidationError for missing required field", async () => {
+    const { native } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    const { data, error } = await col.upsert({ age: 20 }, { conflictFields: ["name"] });
+    assert.equal(data, null);
+    assert.ok(error instanceof ValidationError);
+  });
+
+  test("returns ValidationError for wrong type", async () => {
+    const { native } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    const { data, error } = await col.upsert(
+      { name: 42 as unknown as string },
+      { conflictFields: ["name"] }
+    );
+    assert.equal(data, null);
+    assert.ok(error instanceof ValidationError);
+  });
+
+  test("maps conflict fields through naming strategy", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native, { naming: naming.snakeCase });
+    await col.upsert({ name: "Alice" }, { conflictFields: ["createdAt" as any] });
+    const conflictFields = calls[0].args[2] as string[];
+    assert.deepEqual(conflictFields, ["created_at"]);
+  });
+
+  test("maps native error to Error with code 11000 on duplicate", async () => {
+    const { native } = makeMockNative({
+      upsert: () => Promise.reject(new Error("unique constraint violation")),
+    });
+    const col = new Collection("users", schema, native);
+    const { data, error } = await col.upsert({ name: "Alice" }, { conflictFields: ["name"] });
+    assert.equal(data, null);
+    assert.ok(error !== null && (error as { code?: number }).code === 11000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Soft delete
+// ---------------------------------------------------------------------------
+
+describe("Collection — soft delete", () => {
+  const sdSchema = normalizeSchema({ name: t.string().required(), role: t.string() });
+  sdSchema.deletedAt = { type: "date", required: false };
+
+  test("deleteOne with soft delete calls updateOne instead of deleteOne", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", sdSchema, native, { softDelete: true });
+    await col.deleteOne({ name: "Alice" } as any);
+    assert.equal(calls[0].method, "updateOne");
+  });
+
+  test("deleteMany with soft delete calls updateMany", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", sdSchema, native, { softDelete: true });
+    await col.deleteMany({ role: "admin" } as any);
+    assert.equal(calls[0].method, "updateMany");
+  });
+
+  test("findOne with soft delete adds deleted_at filter", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", sdSchema, native, { softDelete: true });
+    await col.findOne({ name: "Alice" } as any);
+    const filter = calls[0].args[1] as PlainObject;
+    assert.ok("$and" in filter || "deletedAt" in filter || "deleted_at" in filter);
+  });
+
+  test("countDocuments with soft delete adds filter to empty query", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", sdSchema, native, { softDelete: true });
+    await col.countDocuments({} as any);
+    const filter = calls[0].args[1] as PlainObject;
+    assert.ok(Object.keys(filter).length > 0);
+  });
+
+  test("without soft delete, deleteOne uses native deleteOne", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", sdSchema, native);
+    await col.deleteOne({ name: "Alice" } as any);
+    assert.equal(calls[0].method, "deleteOne");
+  });
+
+  test("without soft delete, findOne does not add extra filter", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", sdSchema, native);
+    await col.findOne({ name: "Alice" } as any);
+    const filter = calls[0].args[1] as PlainObject;
+    assert.equal(filter.name, "Alice");
+    assert.equal("$and" in filter, false);
+  });
+
+  test("forceDelete calls real native deleteOne", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", sdSchema, native, { softDelete: true });
+    await col.forceDelete({ name: "Alice" } as any);
+    assert.equal(calls[0].method, "deleteOne");
+  });
+
+  test("forceDeleteMany calls real native deleteMany", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", sdSchema, native, { softDelete: true });
+    await col.forceDeleteMany({ role: "admin" } as any);
+    assert.equal(calls[0].method, "deleteMany");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Soft Delete
+// ---------------------------------------------------------------------------
+
+describe("Collection — soft delete", () => {
+  test("deleteOne with softDelete calls native.updateOne instead of deleteOne", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native, { softDelete: true });
+    const { data, error } = await col.deleteOne({ name: "Alice" });
+    assert.equal(error, null);
+    assert.equal(calls[0].method, "updateOne");
+    const update = calls[0].args[2] as PlainObject;
+    assert.ok("deletedAt" in update, "update should contain deletedAt key");
+    assert.equal(typeof update.deletedAt, "number");
+    assert.deepEqual(data, { deletedCount: 1 });
+  });
+
+  test("deleteMany with softDelete calls native.updateMany instead of deleteMany", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native, { softDelete: true });
+    const { data, error } = await col.deleteMany({ role: "user" });
+    assert.equal(error, null);
+    assert.equal(calls[0].method, "updateMany");
+    const update = calls[0].args[2] as PlainObject;
+    assert.ok("deletedAt" in update, "update should contain deletedAt key");
+    assert.deepEqual(data, { deletedCount: 3 });
+  });
+
+  test("findOne with softDelete auto-filters deleted documents", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native, { softDelete: true });
+    await col.findOne({ name: "Alice" });
+    const filter = calls[0].args[1] as PlainObject;
+    // Should merge soft-delete condition via $and
+    assert.ok("$and" in filter, "filter should contain $and for soft-delete");
+    const andArray = filter.$and as PlainObject[];
+    assert.equal(andArray.length, 2);
+    assert.equal(andArray[0].name, "Alice");
+    assert.equal(andArray[1].deletedAt, null);
+  });
+
+  test("findOne with softDelete and empty filter uses just the soft-delete filter", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native, { softDelete: true });
+    await col.findOne({});
+    const filter = calls[0].args[1] as PlainObject;
+    // Empty user filter → only soft-delete filter, no $and needed
+    assert.equal(filter.deletedAt, null);
+    assert.equal(filter.$and, undefined);
+  });
+
+  test("find with softDelete auto-filters deleted documents", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native, { softDelete: true });
+    await col.find({ role: "admin" });
+    const filter = calls[0].args[1] as PlainObject;
+    assert.ok("$and" in filter);
+    const andArray = filter.$and as PlainObject[];
+    assert.equal(andArray[1].deletedAt, null);
+  });
+
+  test("countDocuments with softDelete auto-filters deleted documents", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native, { softDelete: true });
+    await col.countDocuments({ role: "admin" });
+    const filter = calls[0].args[1] as PlainObject;
+    assert.ok("$and" in filter);
+    const andArray = filter.$and as PlainObject[];
+    assert.equal(andArray[1].deletedAt, null);
+  });
+
+  test("exists with softDelete auto-filters deleted documents", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native, { softDelete: true });
+    await col.exists({ name: "Alice" });
+    // exists delegates to countDocuments
+    const filter = calls[0].args[1] as PlainObject;
+    assert.ok("$and" in filter);
+  });
+
+  test("distinct with softDelete auto-filters deleted documents", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native, { softDelete: true });
+    await col.distinct("role", { name: "Alice" });
+    const filter = calls[0].args[2] as PlainObject;
+    assert.ok("$and" in filter);
+    const andArray = filter.$and as PlainObject[];
+    assert.equal(andArray[1].deletedAt, null);
+  });
+
+  test("forceDelete bypasses soft delete and calls native.deleteOne", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native, { softDelete: true });
+    const { data, error } = await col.forceDelete({ name: "Alice" });
+    assert.equal(error, null);
+    assert.equal(calls[0].method, "deleteOne");
+    assert.deepEqual(data, { deletedCount: 1 });
+  });
+
+  test("forceDeleteMany bypasses soft delete and calls native.deleteMany", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native, { softDelete: true });
+    const { data, error } = await col.forceDeleteMany({ role: "user" });
+    assert.equal(error, null);
+    assert.equal(calls[0].method, "deleteMany");
+    assert.deepEqual(data, { deletedCount: 5 });
+  });
+
+  test("without softDelete, deleteOne still calls native.deleteOne", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    await col.deleteOne({ name: "Alice" });
+    assert.equal(calls[0].method, "deleteOne");
+  });
+
+  test("without softDelete, findOne does not inject soft-delete filter", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    await col.findOne({ name: "Alice" });
+    const filter = calls[0].args[1] as PlainObject;
+    assert.equal(filter.$and, undefined);
+    assert.equal(filter.name, "Alice");
+  });
+
+  test("findOneAndDelete with softDelete calls updateOne instead of deleteOne", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native, { softDelete: true });
+    const { data, error } = await col.findOneAndDelete({ name: "Alice" });
+    assert.equal(error, null);
+    assert.equal(calls[0].method, "updateOne");
+    assert.ok(data !== null);
+    assert.equal(data.id, "1");
+  });
+
+  test("softDelete with snakeCase naming maps deletedAt to deleted_at", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native, { naming: naming.snakeCase, softDelete: true });
+    await col.deleteOne({ name: "Alice" });
+    assert.equal(calls[0].method, "updateOne");
+    const update = calls[0].args[2] as PlainObject;
+    assert.ok("deleted_at" in update, "update should use snake_case deleted_at");
+    assert.equal(typeof update.deleted_at, "number");
+  });
+
+  test("softDelete with snakeCase naming filters with deleted_at in reads", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native, { naming: naming.snakeCase, softDelete: true });
+    await col.findOne({ name: "Alice" });
+    const filter = calls[0].args[1] as PlainObject;
+    assert.ok("$and" in filter);
+    const andArray = filter.$and as PlainObject[];
+    assert.equal(andArray[1].deleted_at, null);
+  });
+
+  test("deleteOne with softDelete returns deletedCount 0 when no match", async () => {
+    const { native } = makeMockNative({
+      updateOne: () => Promise.resolve(null as unknown as string),
+    });
+    const col = new Collection("users", schema, native, { softDelete: true });
+    const { data, error } = await col.deleteOne({ name: "Ghost" });
+    assert.equal(error, null);
+    assert.deepEqual(data, { deletedCount: 0 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// select() narrowing — runtime behavior
+// ---------------------------------------------------------------------------
+
+describe("Query.select() runtime", () => {
+  test("select with array of fields stores them correctly", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    await col.find({}).select(["name", "age"]);
+    const opts = calls[0].args[2] as PlainObject;
+    assert.deepEqual(opts.select, ["name", "age"]);
+  });
+
+  test("select with string stores parsed fields", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    await col.find({}).select("name age");
+    const opts = calls[0].args[2] as PlainObject;
+    assert.deepEqual(opts.select, ["name", "age"]);
+  });
+
+  test("select with object stores inclusion keys", async () => {
+    const { native, calls } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    await col.find({}).select({ name: 1, age: 1 });
+    const opts = calls[0].args[2] as PlainObject;
+    assert.deepEqual(opts.select, ["name", "age"]);
+  });
+
+  test("select returns results correctly", async () => {
+    const { native } = makeMockNative();
+    const col = new Collection("users", schema, native);
+    const { data, error } = await col.find({}).select(["name"]);
+    assert.equal(error, null);
+    assert.ok(data !== null);
+    assert.ok(Array.isArray(data));
   });
 });

@@ -35,7 +35,8 @@ export function model<S extends Record<string, unknown>>(
   name: string,
   schema: S,
   nativeOverride?: NativeDb,
-  namingStrategy: NamingStrategy = naming.snakeCase
+  namingStrategy: NamingStrategy = naming.snakeCase,
+  softDelete: boolean = false
 ): Collection<S> {
   if (typeof name !== "string" || name.trim().length === 0) {
     throw new Error("model name must be a non-empty string");
@@ -45,6 +46,11 @@ export function model<S extends Record<string, unknown>>(
   }
   const normalized = normalizeSchema(schema as Parameters<typeof normalizeSchema>[0]);
   const native = nativeOverride ?? getNativeDb();
+
+  // When soft delete is enabled, inject the deletedAt field into the schema
+  if (softDelete && !normalized.deletedAt) {
+    normalized.deletedAt = { type: "date", required: false };
+  }
 
   // Register model with the runtime — creates table + columns if not exists.
   // registerModel returns a Promise. We store it so the Collection can await
@@ -64,5 +70,5 @@ export function model<S extends Record<string, unknown>>(
     }
   }
 
-  return new Collection<S>(name, normalized, native, { naming: namingStrategy, ready: registrationPromise });
+  return new Collection<S>(name, normalized, native, { naming: namingStrategy, ready: registrationPromise, softDelete });
 }

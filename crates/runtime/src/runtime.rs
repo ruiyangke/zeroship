@@ -894,6 +894,58 @@ impl Runtime {
                 // Drain new tasks spawned by the V8 callback
                 self.drain_new_tasks_into(work);
             }
+            OpResult::Failed { op_id, error, request_id } => {
+                if let Some(rid) = request_id {
+                    let mut s = self.state.borrow_mut();
+                    s.executing_request_id = Some(rid);
+                    s.executing_request_cancel = None;
+                }
+
+                let start = Instant::now();
+
+                self.arm_cpu_timer();
+                let settled_results = enter_v8!(self, |scope| {
+                    crate::dispatch::reject_op(scope, &self.state, op_id, &error);
+                    collect_settled_promises(scope, &mut self.pending_requests)
+                });
+                self.disarm_cpu_timer();
+
+                if self.check_v8_terminated() {
+                    if let Some(rid) = request_id {
+                        if let Some(req) = self.pending_requests.remove(&rid) {
+                            if let Some(tx) = req.reply_direct {
+                                tx.send(Err("CPU time limit exceeded".into()));
+                            } else if let Some(tx) = req.reply_http {
+                                tx.send(Err("CPU time limit exceeded".into()));
+                            }
+                        }
+                    }
+                    self.clear_executing_request();
+                    self.drain_new_tasks_into(work);
+                    return;
+                }
+
+                let cpu_elapsed = start.elapsed();
+
+                if let Some(rid) = request_id {
+                    if let Some(req) = self.pending_requests.get_mut(&rid) {
+                        req.cpu_accumulated += cpu_elapsed;
+                    }
+                }
+
+                for (id, req, settled) in settled_results {
+                    self.send_settled_reply_any(id, req, settled, cpu_elapsed);
+                }
+
+                if let Some(rid) = request_id {
+                    self.check_cpu_limit(rid);
+                }
+
+                self.cleanup_cancelled_requests();
+                self.clear_executing_request();
+
+                self.drain_new_tasks_into(work);
+            }
             OpResult::StreamChunk { stream_id, data, done } => {
                 // Fast path: if there's a stream forwarder, send directly (no V8 entry)
                 if let Some(forwarder) = self.stream_forwarders.get_mut(&stream_id) {

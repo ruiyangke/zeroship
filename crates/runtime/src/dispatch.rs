@@ -106,6 +106,28 @@ pub fn resolve_op(
     }
 }
 
+/// Reject a pending promise resolver by op-id.
+///
+/// Removes the resolver from `state.pending_resolvers`, creates a V8 `Error`
+/// from `error`, and rejects the promise. Runs a microtask checkpoint after
+/// rejection.
+pub fn reject_op(
+    scope: &mut v8::PinScope,
+    state: &SharedState,
+    op_id: u32,
+    error: &str,
+) {
+    let resolver = state.borrow_mut().pending_resolvers.remove(&op_id);
+    if let Some(resolver) = resolver {
+        let r = v8::Local::new(scope, &resolver);
+        let msg = v8::String::new(scope, error)
+            .unwrap_or_else(|| v8::String::new(scope, "unknown error").unwrap());
+        let exception = v8::Exception::error(scope, msg);
+        r.reject(scope, exception);
+        scope.perform_microtask_checkpoint();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // fire_timer_callback
 // ---------------------------------------------------------------------------
