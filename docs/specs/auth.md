@@ -130,7 +130,7 @@ Owned by the control plane. Apps cannot access these tables.
 ```sql
 -- Platform users (one account per person, across all apps)
 CREATE TABLE auth.users (
-    id          SERIAL PRIMARY KEY,
+    id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     email       TEXT UNIQUE NOT NULL,
     name        TEXT NOT NULL,
     avatar_url  TEXT,
@@ -144,7 +144,7 @@ CREATE TABLE auth.users (
 -- OAuth provider links (one user can have multiple providers)
 CREATE TABLE auth.oauth_links (
     id              SERIAL PRIMARY KEY,
-    user_id         INTEGER NOT NULL REFERENCES auth.users(id),
+    user_id         UUID NOT NULL REFERENCES auth.users(id),
     provider        TEXT NOT NULL,        -- "google", "github", etc.
     provider_user_id TEXT NOT NULL,
     access_token    TEXT,                 -- encrypted, for API calls on behalf
@@ -177,13 +177,13 @@ CREATE TABLE auth.sessions (
 
 ```json
 {
-  "sub": 42,                              // platform user ID
-  "app": "a1b2c3d4-...",                  // app UUID
+  "sub": "d0f3a7c2-8b1e-4f5a-9c6d-2e3f4a5b6c7d",  // user UUID (global across apps)
+  "app": "a1b2c3d4-...",                             // app UUID
   "email": "alice@example.com",
   "name": "Alice Smith",
   "avatar": "https://...",
   "iat": 1714000000,
-  "exp": 1714086400                       // 24h default
+  "exp": 1714086400                                   // 24h default
 }
 ```
 
@@ -264,7 +264,7 @@ If not authenticated, `window.__zs_user` is `null`.
 ```ts
 // @zeroship/auth
 export interface User {
-    id: number;
+    id: string;  // UUID
     email: string;
     name: string;
     avatar: string | null;
