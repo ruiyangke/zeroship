@@ -187,7 +187,7 @@ CREATE TABLE auth.sessions (
 }
 ```
 
-- Signed with platform secret (HS256 or RS256)
+- Signed with HS256 (platform-internal, shared secret between auth service and gateway)
 - App never sees the JWT — only the gateway decodes it
 - Short-lived (24h), with refresh via platform session
 
