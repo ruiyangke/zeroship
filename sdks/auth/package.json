@@ -1,0 +1,28 @@
+{
+  "name": "@zeroship/auth",
+  "version": "0.1.0",
+  "description": "Auth SDK for zeroship — platform-managed authentication",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "devDependencies": {
+    "@zeroship/types": "file:../types",
+    "typescript": "^6.0.2"
+  }
+}
