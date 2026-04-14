@@ -201,12 +201,28 @@ export function createDb<const T extends Record<string, SchemaInput>>(
     ...collections,
 
     async transaction<R>(fn: (tx: { [K in keyof T]: TxCollection<T[K]> }) => Promise<R>): Promise<Result<R>> {
+      // Detect native error envelope: Rust resolves (not rejects) with {"error":"..."}
+      function checkTxResult(raw: unknown): void {
+        if (raw && typeof raw === "string") {
+          try {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === "object" && typeof parsed.error === "string") {
+              throw new Error(parsed.error);
+            }
+          } catch (e) {
+            if (e instanceof Error && !e.message.startsWith("Unexpected")) throw e;
+          }
+        }
+      }
+
       // BEGIN
-      await native.beginTransaction?.();
+      const beginResult = await native.beginTransaction?.();
+      checkTxResult(beginResult);
 
       try {
         const result = await fn(txCollections);
-        await native.commitTransaction?.();
+        const commitResult = await native.commitTransaction?.();
+        checkTxResult(commitResult);
         return ok(result);
       } catch (e) {
         try {

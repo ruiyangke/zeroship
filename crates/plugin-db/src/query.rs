@@ -229,12 +229,21 @@ fn def_to_constraints(field: &str, def: &serde_json::Value) -> String {
         parts.push(format!("CHECK ({col} <= {max})"));
     }
 
-    // Enum constraint
+    // Enum constraint — supports both string and numeric values
     if let Some(enums) = def.get("enum").and_then(|v| v.as_array()) {
         let values: Vec<String> = enums
             .iter()
-            .filter_map(|v| v.as_str())
-            .map(|s| format!("'{}'", s.replace('\'', "''")))
+            .filter_map(|v| {
+                if let Some(s) = v.as_str() {
+                    Some(format!("'{}'", s.replace('\'', "''")))
+                } else if let Some(n) = v.as_i64() {
+                    Some(n.to_string())
+                } else if let Some(n) = v.as_f64() {
+                    Some(n.to_string())
+                } else {
+                    None
+                }
+            })
             .collect();
         if !values.is_empty() {
             parts.push(format!("CHECK ({col} IN ({}))", values.join(", ")));
@@ -396,15 +405,19 @@ pub fn build_set_clauses(
         .as_object()
         .ok_or_else(|| QueryError::InvalidFilter("update must be an object".to_string()))?;
 
-    // Support { $set: { field: value } } top-level syntax
-    let fields: Vec<(&String, &Value)> = if let Some(set_val) = update_obj.get("$set") {
-        let obj = set_val
-            .as_object()
-            .ok_or_else(|| QueryError::InvalidFilter("$set must be an object".to_string()))?;
-        obj.iter().collect()
-    } else {
-        update_obj.iter().collect()
-    };
+    // Collect all fields: flatten $set inline, keep other keys as-is
+    let mut fields: Vec<(&String, &Value)> = Vec::new();
+    for (key, value) in update_obj.iter() {
+        if key == "$set" {
+            // Flatten $set fields into the top level
+            let obj = value
+                .as_object()
+                .ok_or_else(|| QueryError::InvalidFilter("$set must be an object".to_string()))?;
+            fields.extend(obj.iter());
+        } else {
+            fields.push((key, value));
+        }
+    }
 
     if fields.is_empty() {
         return Err(QueryError::InvalidFilter(
@@ -441,18 +454,23 @@ pub fn build_set_clauses(
                         format!("{col} = {col} * ${}::numeric", params.len())
                     }
                     "$push" => {
-                        params.push(value_to_param(op_val));
-                        format!("{col} = {col} || to_jsonb(${}::text)", params.len())
+                        // Serialize as JSON so numbers stay numbers, strings stay strings
+                        params.push(op_val.to_string());
+                        format!("{col} = {col} || ${}::jsonb", params.len())
                     }
                     "$pull" => {
-                        params.push(value_to_param(op_val));
-                        format!("{col} = {col} - ${}", params.len())
-                    }
-                    "$addToSet" => {
-                        params.push(value_to_param(op_val));
+                        // Remove array element by value: filter out matching elements
+                        params.push(op_val.to_string());
                         let n = params.len();
                         format!(
-                            "{col} = CASE WHEN {col} @> to_jsonb(${n}::text) THEN {col} ELSE {col} || to_jsonb(${n}::text) END"
+                            "{col} = (SELECT COALESCE(jsonb_agg(elem), '[]'::jsonb) FROM jsonb_array_elements({col}) elem WHERE elem != ${n}::jsonb)"
+                        )
+                    }
+                    "$addToSet" => {
+                        params.push(op_val.to_string());
+                        let n = params.len();
+                        format!(
+                            "{col} = CASE WHEN {col} @> ${n}::jsonb THEN {col} ELSE {col} || ${n}::jsonb END"
                         )
                     }
                     other => {
@@ -469,6 +487,11 @@ pub fn build_set_clauses(
         // Plain field: value — treat as $set
         params.push(value_to_param(value));
         set_clauses.push(format!("{col} = ${}", params.len()));
+    }
+
+    // Auto-update updated_at unless the caller explicitly set it
+    if !set_clauses.iter().any(|c| c.contains("\"updated_at\"")) {
+        set_clauses.push("\"updated_at\" = NOW()".to_string());
     }
 
     Ok(set_clauses)
@@ -531,18 +554,24 @@ pub fn build_insert_many(
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
 
-    // Use the first document to define the column set
-    let first = arr[0].as_object().ok_or_else(|| {
-        QueryError::InvalidFilter("insertMany: each document must be an object".to_string())
-    })?;
+    // Union all columns across all documents (not just the first)
+    let mut column_set = std::collections::BTreeSet::<&String>::new();
+    for doc in arr {
+        let obj = doc.as_object().ok_or_else(|| {
+            QueryError::InvalidFilter("insertMany: each document must be an object".to_string())
+        })?;
+        for key in obj.keys() {
+            column_set.insert(key);
+        }
+    }
 
-    if first.is_empty() {
+    if column_set.is_empty() {
         return Err(QueryError::InvalidFilter(
             "insertMany: documents cannot be empty".to_string(),
         ));
     }
 
-    let column_names: Vec<&String> = first.keys().collect();
+    let column_names: Vec<&String> = column_set.into_iter().collect();
     let columns: Vec<String> = column_names.iter().map(|k| quote_ident(k)).collect();
 
     let mut params: Vec<String> = Vec::new();
@@ -778,6 +807,14 @@ pub fn build_aggregate(
                             )
                         })?;
                         format!("MAX({})", quote_ident(field))
+                    }
+                    "$first" => {
+                        let field = op_val.as_str().ok_or_else(|| {
+                            QueryError::InvalidFilter(
+                                "$first requires a field name string".to_string(),
+                            )
+                        })?;
+                        format!("(array_agg({}))[1]", quote_ident(field))
                     }
                     other => {
                         return Err(QueryError::InvalidFilter(format!(

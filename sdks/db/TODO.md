@@ -8,17 +8,17 @@
 
 ## Critical — Rust fixes needed
 
-- [ ] `updatedAt` never updated on UPDATE — inject `updated_at = NOW()` in `build_set_clauses` or create BEFORE UPDATE trigger (`query.rs:477-599`)
-- [ ] `$first` aggregator missing — add `"$first" => (array_agg(col))[1]` in `build_aggregate` (`query.rs:748-786`)
-- [ ] Transaction errors resolve as `{"error":"..."}` instead of rejecting — change `beginTransaction`/`commitTransaction`/`rollbackTransaction` to reject on error, or at minimum have SDK detect the envelope (`callbacks.rs:1069`)
+- [x] `updatedAt` never updated on UPDATE — inject `updated_at = NOW()` in `build_set_clauses` (`query.rs:474`)
+- [x] `$first` aggregator — `(array_agg(col))[1]` in `build_aggregate` (`query.rs:786`). TODO: thread `$sort` order into `array_agg ORDER BY` for guaranteed first-in-sort-order
+- [x] Transaction errors — SDK now detects error envelope from begin/commit. Proper fix: add `OpResult::Failed` variant to Rust runtime so promises reject instead of resolving with error JSON (`runtime/src/state.rs:331`, `callbacks.rs:1069`)
 
 ## Important — Rust fixes needed
 
-- [ ] `$push`/`$addToSet` casts all values as text JSONB — `$push: 42` stores `"42"` not `42`. Use proper type-aware casting (`query.rs:444-457`)
-- [ ] `$pull` uses `jsonb - text` (key removal) not element-by-value removal — need subquery: `(SELECT jsonb_agg(elem) FROM jsonb_array_elements(col) elem WHERE elem != to_jsonb($N))` (`query.rs:448-449`)
-- [ ] `$set` top-level in native update drops all other keys — don't early-return, process all keys (`query.rs:400-407`)
-- [ ] `insertMany` derives columns from first doc only — union all columns across all docs (`query.rs:534-570`)
-- [ ] Numeric enum values skipped in DDL CHECK constraint — handle `as_i64()`/`as_f64()` (`query.rs:232-244`)
+- [x] `$push`/`$addToSet` — use `$N::jsonb` instead of `to_jsonb($N::text)`, preserves number/boolean types (`query.rs:443-457`)
+- [x] `$pull` — use `jsonb_array_elements` subquery to remove by value instead of `jsonb - text` key removal (`query.rs:447-452`)
+- [x] `$set` top-level — flatten inline, process all keys together (`query.rs:399-410`)
+- [x] `insertMany` — union all columns across all docs via BTreeSet (`query.rs:548-567`)
+- [x] Numeric enum values in DDL CHECK — handle `as_i64()`/`as_f64()` (`query.rs:232-252`)
 
 ## Minor
 
