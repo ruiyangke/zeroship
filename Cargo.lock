@@ -4882,8 +4882,10 @@ dependencies = [
 name = "zeroship-gateway"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "compio",
  "httparse",
+ "jsonwebtoken",
  "mimalloc",
  "ntex",
  "serde",
@@ -4960,6 +4962,7 @@ dependencies = [
 name = "zeroship-worker"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "compio",
  "futures",
  "hex",

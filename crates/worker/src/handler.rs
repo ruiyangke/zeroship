@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use ntex::web::{self, HttpResponse};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
+use ntex::web::{self, HttpRequest, HttpResponse};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -9,6 +11,7 @@ use zeroship_runtime::runtime::DispatchOutcome;
 use crate::{cache, WorkerConfig};
 
 pub async fn dispatch(
+    req: HttpRequest,
     config: web::types::State<Arc<WorkerConfig>>,
     path: web::types::Path<String>,
     body: String,
@@ -34,6 +37,17 @@ pub async fn dispatch(
         }
     };
 
+    // Decode authenticated user from X-ZS-User header (base64 JSON from gateway)
+    let user_json = req
+        .headers()
+        .get("x-zs-user")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|b64| B64.decode(b64).ok())
+        .and_then(|bytes| String::from_utf8(bytes).ok());
+
+    // Set auth user in thread-local before dispatch, clear after
+    zeroship_runtime::auth::set_auth_user(user_json);
+
     // Phase 1: Enter isolate, start dispatch (may return sync or async)
     let outcome = {
         let mut rt = runtime.borrow_mut();
@@ -44,7 +58,7 @@ pub async fn dispatch(
     };
 
     // Phase 2: Handle the outcome
-    match outcome {
+    let response = match outcome {
         DispatchOutcome::Complete(Ok(result)) => {
             make_response(&result.json, result.cpu_time.as_secs_f64() * 1000.0)
         }
@@ -99,7 +113,12 @@ pub async fn dispatch(
         }
 
         _ => make_error("unsupported dispatch outcome"),
-    }
+    };
+
+    // Clear auth user after dispatch (prevent leaking to next request)
+    zeroship_runtime::auth::clear_auth_user();
+
+    response
 }
 
 fn make_response(json: &str, cpu_ms: f64) -> HttpResponse {

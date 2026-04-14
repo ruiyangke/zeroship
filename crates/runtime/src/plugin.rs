@@ -106,18 +106,15 @@ impl NativeRegistrar {
 
 /// Register all plugins on the `zeroship` global namespace.
 ///
-/// Creates `globalThis.zeroship = { db: { ... }, auth: { ... }, ... }`
-/// and freezes the entire object tree to prevent modification by user code.
+/// Creates `globalThis.zeroship = { db: { ... }, ... }` with plugin namespaces.
+/// Does NOT freeze — call `freeze_zeroship()` after adding any built-in
+/// namespaces (e.g. `auth`).
 pub(crate) fn register_plugins(scope: &mut v8::PinScope, plugins: &[Box<dyn NativePlugin>]) {
-    if plugins.is_empty() {
-        return;
-    }
-
     let global = scope.get_current_context().global(scope);
-    let zeroship = v8::Object::new(scope);
 
-    // Collect namespace names for the freeze step
-    let mut namespaces: Vec<String> = Vec::new();
+    // Always create the zeroship namespace (built-ins like auth need it even
+    // when no plugins are registered).
+    let zeroship = v8::Object::new(scope);
 
     for plugin in plugins {
         let ns_name = plugin.namespace();
@@ -140,19 +137,29 @@ pub(crate) fn register_plugins(scope: &mut v8::PinScope, plugins: &[Box<dyn Nati
 
         let ns_key = v8::String::new(scope, ns_name).unwrap();
         zeroship.set(scope, ns_key.into(), ns_obj.into());
-        namespaces.push(ns_name.to_string());
     }
 
     // Set zeroship on global
     let zeroship_key = v8::String::new(scope, "zeroship").unwrap();
     global.set(scope, zeroship_key.into(), zeroship.into());
+}
 
-    // Freeze everything in one script (no borrow conflicts)
-    let mut freeze_js = String::from("Object.freeze(globalThis.zeroship);");
-    for ns in &namespaces {
-        freeze_js.push_str(&format!("Object.freeze(globalThis.zeroship.{ns});"));
-    }
-    let code = v8::String::new(scope, &freeze_js).unwrap();
+/// Freeze the `zeroship` global and all its namespace sub-objects.
+///
+/// Must be called after `register_plugins()` and any built-in namespace
+/// additions (e.g. `auth`). Freezing prevents user code from modifying or
+/// monkey-patching platform primitives.
+pub(crate) fn freeze_zeroship(scope: &mut v8::PinScope) {
+    // Use JS to enumerate and freeze all sub-namespaces, then the root.
+    let freeze_js = r#"(function() {
+        var zs = globalThis.zeroship;
+        if (!zs) return;
+        Object.keys(zs).forEach(function(k) {
+            if (typeof zs[k] === 'object' && zs[k] !== null) Object.freeze(zs[k]);
+        });
+        Object.freeze(zs);
+    })()"#;
+    let code = v8::String::new(scope, freeze_js).unwrap();
     if let Some(script) = v8::Script::compile(scope, code, None) {
         script.run(scope);
     }

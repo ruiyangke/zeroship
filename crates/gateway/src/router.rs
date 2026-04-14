@@ -7,7 +7,7 @@ use ntex::util::Bytes;
 use ntex::web::{self, HttpRequest, HttpResponse};
 use uuid::Uuid;
 
-use crate::{auth, enforce, proxy, GateState};
+use crate::{auth, enforce, proxy, user_auth, GateState};
 
 // ---------------------------------------------------------------------------
 // Content-Type mapping
@@ -271,6 +271,19 @@ async fn handle_rpc(
         Err(resp) => return resp,
     };
 
+    // Extract user from __zs_session cookie (None if missing/invalid/wrong app)
+    let user_header_value = if !state.config.auth_secret.is_empty() {
+        let cookie = req
+            .headers()
+            .get("cookie")
+            .and_then(|v| v.to_str().ok());
+        let app_id_str = app_id.to_string();
+        user_auth::extract_user(cookie, &state.config.auth_secret, &app_id_str)
+            .map(|u| user_auth::encode_user_header(&u))
+    } else {
+        None
+    };
+
     // Proxy to worker via CHWBL hash ring
     let request_id = Uuid::new_v4();
     let mut response = match proxy::forward(
@@ -279,6 +292,7 @@ async fn handle_rpc(
         &route.plan_id,
         &request_id,
         &body,
+        user_header_value.as_deref(),
     )
     .await
     {
@@ -288,6 +302,26 @@ async fn handle_rpc(
                 .json(&serde_json::json!({"error": format!("worker error: {e}")}));
         }
     };
+
+    // Handle 401 response: redirect browser requests to the auth page
+    if response.status() == ntex::http::StatusCode::UNAUTHORIZED {
+        let accepts_html = req
+            .headers()
+            .get("accept")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("text/html"));
+
+        if accepts_html {
+            let original_path = req.uri().path();
+            let auth_url = format!(
+                "{}/auth/authorize?app_id={}&return={}",
+                state.config.control_url, app_id, original_path
+            );
+            return HttpResponse::Found()
+                .header("location", auth_url)
+                .finish();
+        }
+    }
 
     // Add response headers
     let wall_ms = wall_start.elapsed().as_secs_f64() * 1000.0;

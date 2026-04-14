@@ -136,8 +136,34 @@ pub fn load_polyfills_and_modules(
 ) -> v8::Global<v8::Function> {
     setup_globals(scope);
 
-    // Register plugins on zeroship.* namespace
+    // Register plugins on zeroship.* namespace (does NOT freeze yet)
     crate::plugin::register_plugins(scope, plugins);
+
+    // Register zeroship.auth (built-in, always available)
+    {
+        let global = scope.get_current_context().global(scope);
+        let zs_key = v8::String::new(scope, "zeroship").unwrap();
+        let zeroship = global
+            .get(scope, zs_key.into())
+            .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())
+            .expect("zeroship namespace must exist after register_plugins");
+
+        let auth = v8::Object::new(scope);
+
+        let get_user_fn = v8::Function::new(scope, crate::auth::get_user_callback).unwrap();
+        let get_user_key = v8::String::new(scope, "getUser").unwrap();
+        auth.set(scope, get_user_key.into(), get_user_fn.into());
+
+        let require_user_fn = v8::Function::new(scope, crate::auth::require_user_callback).unwrap();
+        let require_user_key = v8::String::new(scope, "requireUser").unwrap();
+        auth.set(scope, require_user_key.into(), require_user_fn.into());
+
+        let auth_key = v8::String::new(scope, "auth").unwrap();
+        zeroship.set(scope, auth_key.into(), auth.into());
+    }
+
+    // Freeze the entire zeroship namespace (plugins + built-ins)
+    crate::plugin::freeze_zeroship(scope);
 
     // Load polyfills
     for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS, EVENTS_JS, BLOB_JS, FORMDATA_JS, WEBSOCKET_JS] {
@@ -591,6 +617,7 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
         let env_key = v8::String::new(scope, "env").unwrap();
         global.set(scope, env_key.into(), env.into());
     }
+
 }
 
 // ===========================================================================

@@ -3,6 +3,7 @@ mod enforce;
 mod proxy;
 mod router;
 mod sync;
+mod user_auth;
 
 use std::sync::Arc;
 
@@ -17,6 +18,7 @@ pub struct GateConfig {
     pub control_key: String,
     pub worker_urls: Vec<String>,
     pub poll_interval_secs: u64,
+    pub auth_secret: String,
 }
 
 #[allow(missing_debug_implementations)]
@@ -36,6 +38,7 @@ async fn main() -> std::io::Result<()> {
     let control_key = arg_or_env(&args, "--control-key", "CONTROL_KEY", "");
     let workers_str = arg_or_env(&args, "--workers", "WORKER_URLS", "http://localhost:8080");
     let poll_interval = arg_or_env(&args, "--poll-interval", "POLL_INTERVAL", "5");
+    let auth_secret = arg_or_env(&args, "--auth-secret", "AUTH_SECRET", "");
 
     let worker_urls: Vec<String> = workers_str
         .split(',')
@@ -61,6 +64,7 @@ async fn main() -> std::io::Result<()> {
             control_key,
             worker_urls,
             poll_interval_secs: poll_interval.parse().unwrap_or(5),
+            auth_secret,
         },
         routes: sync::RouteCache::new(),
         hash_ring,

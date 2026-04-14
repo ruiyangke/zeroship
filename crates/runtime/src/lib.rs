@@ -1,5 +1,6 @@
 #![allow(unsafe_code)]
 
+pub mod auth;
 pub mod state;
 pub mod dispatch;
 pub mod init;

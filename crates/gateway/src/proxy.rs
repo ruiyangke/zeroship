@@ -170,13 +170,14 @@ pub async fn forward(
     plan_id: &str,
     request_id: &Uuid,
     body: &[u8],
+    user_header: Option<&str>,
 ) -> Result<HttpResponse, String> {
     if ring.num_workers() == 0 {
         return Err("no workers configured".into());
     }
     let (idx, worker_url) = ring.select(app_id);
     ring.acquire(idx);
-    let result = forward_to_worker(worker_url, app_id, plan_id, request_id, body).await;
+    let result = forward_to_worker(worker_url, app_id, plan_id, request_id, body, user_header).await;
     ring.release(idx);
     result
 }
@@ -190,6 +191,7 @@ async fn forward_to_worker(
     plan_id: &str,
     request_id: &Uuid,
     body: &[u8],
+    user_header: Option<&str>,
 ) -> Result<HttpResponse, String> {
     let key = pool_key(worker_url);
     let path = format!("/dispatch/{app_id}");
@@ -210,7 +212,7 @@ async fn forward_to_worker(
     };
 
     // Build request (no clone — rebuild on retry if needed)
-    let request = build_request(&path, &host, app_id, plan_id, request_id, body);
+    let request = build_request(&path, &host, app_id, plan_id, request_id, body, user_header);
 
     if stream.write_all(request).await.is_err() {
         // Stale connection — reconnect with timeout
@@ -219,7 +221,7 @@ async fn forward_to_worker(
             .map_err(|_| "reconnect timeout".to_string())?
             .map_err(|e| format!("reconnect: {e}"))?;
         stream = new_stream;
-        let retry_request = build_request(&path, &host, app_id, plan_id, request_id, body);
+        let retry_request = build_request(&path, &host, app_id, plan_id, request_id, body, user_header);
         stream.write_all(retry_request).await.map_err(|e| format!("write: {e}"))?;
     }
 
@@ -252,7 +254,11 @@ async fn forward_to_worker(
     Ok(builder.body(response_body))
 }
 
-fn build_request(path: &str, host: &str, app_id: &Uuid, plan_id: &str, request_id: &Uuid, body: &[u8]) -> Vec<u8> {
+fn build_request(path: &str, host: &str, app_id: &Uuid, plan_id: &str, request_id: &Uuid, body: &[u8], user_header: Option<&str>) -> Vec<u8> {
+    let user_line = match user_header {
+        Some(val) => format!("X-ZS-User: {val}\r\n"),
+        None => String::new(),
+    };
     let header = format!(
         "POST {path} HTTP/1.1\r\n\
          Host: {host}\r\n\
@@ -261,6 +267,7 @@ fn build_request(path: &str, host: &str, app_id: &Uuid, plan_id: &str, request_i
          X-App-Id: {app_id}\r\n\
          X-Plan-Id: {plan_id}\r\n\
          X-Request-Id: {request_id}\r\n\
+         {user_line}\
          Connection: keep-alive\r\n\
          \r\n",
         body.len()
