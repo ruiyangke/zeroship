@@ -64,11 +64,11 @@ type ZeroshipDbUpdateValue =
   | { $pull?: ZeroshipScalar }
   | { $addToSet?: ZeroshipScalar };
 
-/** Find query options. */
+/** Find query options — key names must match what the Rust callback reads. */
 interface ZeroshipDbFindOpts {
   limit?: number;
-  skip?: number;
-  sort?: Record<string, 1 | -1>;
+  offset?: number;
+  orderBy?: Record<string, 1 | -1>;
   select?: string[];
 }
 

@@ -2,7 +2,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { Collection, NativeDb } from "../src/collection.js";
 import { normalizeSchema } from "../src/schema.js";
-import { t } from "../src/types.js";
+import { t, naming } from "../src/types.js";
 import { ValidationError } from "../src/errors.js";
 
 // ---------------------------------------------------------------------------
@@ -301,7 +301,7 @@ describe("Collection.updateOne()", () => {
 
   test("maps createdAt → created_at inside $set update (flattened)", async () => {
     const { native, calls } = makeMockNative();
-    const col = new Collection("users", schema, native);
+    const col = new Collection("users", schema, native, { naming: naming.snakeCase });
     await col.updateOne({ name: "Alice" }, { $set: { createdAt: "2024-01-01" } });
     const update = calls[0].args[2] as PlainObject;
     assert.equal(update.created_at, "2024-01-01");
@@ -310,7 +310,7 @@ describe("Collection.updateOne()", () => {
 
   test("maps updatedAt → updated_at inside $set update (flattened)", async () => {
     const { native, calls } = makeMockNative();
-    const col = new Collection("users", schema, native);
+    const col = new Collection("users", schema, native, { naming: naming.snakeCase });
     await col.updateOne({ name: "Alice" }, { $set: { updatedAt: "2024-06-01" } });
     const update = calls[0].args[2] as PlainObject;
     assert.equal(update.updated_at, "2024-06-01");
@@ -521,7 +521,7 @@ describe("Collection.distinct()", () => {
 describe("Collection — createdAt/updatedAt filter mapping", () => {
   test("findOne maps createdAt → created_at in filter", async () => {
     const { native, calls } = makeMockNative();
-    const col = new Collection("users", schema, native);
+    const col = new Collection("users", schema, native, { naming: naming.snakeCase });
     await col.findOne({ createdAt: "2024-01-01" });
     const filter = calls[0].args[1] as PlainObject;
     assert.equal(filter.created_at, "2024-01-01");
@@ -530,7 +530,7 @@ describe("Collection — createdAt/updatedAt filter mapping", () => {
 
   test("countDocuments maps updatedAt → updated_at in filter", async () => {
     const { native, calls } = makeMockNative();
-    const col = new Collection("users", schema, native);
+    const col = new Collection("users", schema, native, { naming: naming.snakeCase });
     await col.countDocuments({ updatedAt: "2024-06-01" });
     const filter = calls[0].args[1] as PlainObject;
     assert.equal(filter.updated_at, "2024-06-01");

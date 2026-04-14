@@ -149,6 +149,32 @@ export type UpdateExpression<S> = {
   $addToSet?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
 };
 
+// ---------------------------------------------------------------------------
+// Naming strategy — maps JS field names ↔ PG column names
+// ---------------------------------------------------------------------------
+
+/** Bidirectional mapping between JS field names and database column names. */
+export interface NamingStrategy {
+  /** Convert a JS field name to a database column name: `firstName` → `first_name` */
+  toColumn(field: string): string;
+  /** Convert a database column name to a JS field name: `first_name` → `firstName` */
+  toField(column: string): string;
+}
+
+/** Built-in naming strategies. */
+export const naming = {
+  /** camelCase → snake_case (industry standard, default) */
+  snakeCase: {
+    toColumn: (s: string) => s.replace(/[A-Z]/g, c => '_' + c.toLowerCase()),
+    toField: (s: string) => s.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase()),
+  } satisfies NamingStrategy,
+  /** Pass-through — field names used as-is (requires quoted identifiers in PG) */
+  asIs: {
+    toColumn: (s: string) => s,
+    toField: (s: string) => s,
+  } satisfies NamingStrategy,
+};
+
 /** Wraps a successful value in Result. */
 export function ok<T>(data: T): Result<T> {
   return { data, error: null };

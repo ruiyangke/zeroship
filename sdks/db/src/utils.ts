@@ -1,39 +1,47 @@
 /**
  * Utilities for @zeroship/db.
  *
- * Field name mapping: createdAt↔created_at, updatedAt↔updated_at.
+ * All field↔column mapping is driven by the NamingStrategy passed from Collection.
  * Contains aggregate pipeline translation (MongoDB → native format).
  */
 import { PlainObject } from "./types.js";
 
 // ---------------------------------------------------------------------------
-// Document result mapping (native → user)
+// Document mapping (native → user)
 // ---------------------------------------------------------------------------
 
-/** @internal Map result: created_at→createdAt, updated_at→updatedAt. Mutates in-place (safe on freshly parsed JSON). */
-export function mapResultDoc(doc: PlainObject): PlainObject {
-  if ("created_at" in doc) {
-    doc["createdAt"] = doc["created_at"];
-    delete doc["created_at"];
-  }
-  if ("updated_at" in doc) {
-    doc["updatedAt"] = doc["updated_at"];
-    delete doc["updated_at"];
+/** @internal Convert column names to JS field names. Mutates in-place (safe on freshly parsed JSON). */
+export function mapResultDoc(doc: PlainObject, toField: (s: string) => string): PlainObject {
+  for (const key of Object.keys(doc)) {
+    const field = toField(key);
+    if (field !== key) {
+      doc[field] = doc[key];
+      delete doc[key];
+    }
   }
   return doc;
+}
+
+/** @internal Convert JS field names to column names for native insert. */
+export function mapDocOutbound(doc: PlainObject, toColumn: (s: string) => string): PlainObject {
+  const result: PlainObject = {};
+  for (const [key, val] of Object.entries(doc)) {
+    result[toColumn(key)] = val;
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
 // Filter mapping (user → native)
 // ---------------------------------------------------------------------------
 
-/** @internal Map filter: createdAt→created_at, updatedAt→updated_at. Recurses into $and/$or/$not. */
-export function mapFilterOutbound(filter: ZeroshipDbFilter, depth = 0): ZeroshipDbFilter {
+/** @internal Convert JS field names in filter to column names. Recurses into $and/$or/$not. */
+export function mapFilterOutbound(filter: ZeroshipDbFilter, toColumn: (s: string) => string, depth = 0): ZeroshipDbFilter {
   if (depth > 20) throw new Error("filter nesting too deep (max 20 levels)");
   // Fast path: if no key needs remapping, return the original reference
   let needsMap = false;
   for (const key in filter) {
-    if (key === "createdAt" || key === "updatedAt" || key === "$and" || key === "$or" || key === "$not") {
+    if (toColumn(key) !== key || key === "$and" || key === "$or" || key === "$not") {
       needsMap = true;
       break;
     }
@@ -41,11 +49,9 @@ export function mapFilterOutbound(filter: ZeroshipDbFilter, depth = 0): Zeroship
   if (!needsMap) return filter;
   const result: ZeroshipDbFilter = {};
   for (const [key, val] of Object.entries(filter)) {
-    if (key === "createdAt") result["created_at"] = val;
-    else if (key === "updatedAt") result["updated_at"] = val;
-    else if (key === "$and" || key === "$or") result[key] = (val as ZeroshipDbFilter[]).map(f => mapFilterOutbound(f, depth + 1));
-    else if (key === "$not") result[key] = mapFilterOutbound(val as ZeroshipDbFilter, depth + 1);
-    else result[key] = val;
+    if (key === "$and" || key === "$or") result[key] = (val as ZeroshipDbFilter[]).map(f => mapFilterOutbound(f, toColumn, depth + 1));
+    else if (key === "$not") result[key] = mapFilterOutbound(val as ZeroshipDbFilter, toColumn, depth + 1);
+    else result[toColumn(key)] = val;
   }
   return result;
 }
@@ -54,27 +60,20 @@ export function mapFilterOutbound(filter: ZeroshipDbFilter, depth = 0): Zeroship
 // Update mapping (user → native)
 // ---------------------------------------------------------------------------
 
-/** @internal Map a field name from user-facing to DB column name. */
-function mapFieldName(field: string): string {
-  if (field === "createdAt") return "created_at";
-  if (field === "updatedAt") return "updated_at";
-  return field;
-}
-
 /** @internal Translate Mongoose top-level operators to per-field native format. */
-export function mapUpdateOutbound(update: PlainObject): ZeroshipDbUpdate {
+export function mapUpdateOutbound(update: PlainObject, toColumn: (s: string) => string): ZeroshipDbUpdate {
   const result: ZeroshipDbUpdate = {};
   for (const [key, val] of Object.entries(update)) {
     if (key === "$set" && typeof val === "object" && val !== null) {
       for (const [field, fieldVal] of Object.entries(val as PlainObject)) {
-        result[mapFieldName(field)] = fieldVal as ZeroshipDbUpdateValue;
+        result[toColumn(field)] = fieldVal as ZeroshipDbUpdateValue;
       }
     } else if (key.startsWith("$") && typeof val === "object" && val !== null) {
       for (const [field, fieldVal] of Object.entries(val as PlainObject)) {
-        result[mapFieldName(field)] = { [key]: fieldVal } as ZeroshipDbUpdateValue;
+        result[toColumn(field)] = { [key]: fieldVal } as ZeroshipDbUpdateValue;
       }
     } else {
-      result[mapFieldName(key)] = val as ZeroshipDbUpdateValue;
+      result[toColumn(key)] = val as ZeroshipDbUpdateValue;
     }
   }
   return result;
@@ -121,9 +120,9 @@ function translateGroupId(id: AggregateExpr): { by: string | string[] } {
 }
 
 /** @internal Translate a single pipeline stage */
-function translateStage(stage: PlainObject): PlainObject {
+function translateStage(stage: PlainObject, toColumn: (s: string) => string): PlainObject {
   if ("$match" in stage) {
-    return { $match: mapFilterOutbound(stage.$match as ZeroshipDbFilter) };
+    return { $match: mapFilterOutbound(stage.$match as ZeroshipDbFilter, toColumn) };
   }
   if ("$group" in stage) {
     const group = stage.$group as PlainObject;
@@ -137,13 +136,13 @@ function translateStage(stage: PlainObject): PlainObject {
     return { $group: translated };
   }
   if ("$having" in stage) {
-    return { $having: mapFilterOutbound(stage.$having as ZeroshipDbFilter) };
+    return { $having: mapFilterOutbound(stage.$having as ZeroshipDbFilter, toColumn) };
   }
   if ("$sort" in stage) {
     const sort = stage.$sort as PlainObject;
     const mapped: PlainObject = {};
     for (const [key, val] of Object.entries(sort)) {
-      mapped[mapFieldName(key)] = val;
+      mapped[toColumn(key)] = val;
     }
     return { $sort: mapped };
   }
@@ -154,6 +153,6 @@ function translateStage(stage: PlainObject): PlainObject {
  * @internal
  * Translate a MongoDB-style aggregate pipeline to native format.
  */
-export function translateAggregatePipeline(pipeline: PlainObject[]): PlainObject[] {
-  return pipeline.map(translateStage);
+export function translateAggregatePipeline(pipeline: PlainObject[], toColumn: (s: string) => string): PlainObject[] {
+  return pipeline.map(stage => translateStage(stage, toColumn));
 }

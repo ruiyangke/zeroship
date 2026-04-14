@@ -20,6 +20,7 @@ type NativeFn = (
 export class Query<S = PlainObject> {
   private _collection: string;
   private _filter: ZeroshipDbFilter;
+  private _toField: (s: string) => string;
   private _native: NativeFn;
 
   private _sort: Record<string, number> | undefined;
@@ -31,11 +32,13 @@ export class Query<S = PlainObject> {
   constructor(
     collection: string,
     filter: ZeroshipDbFilter,
-    native: NativeFn
+    native: NativeFn,
+    toField?: (s: string) => string
   ) {
     this._collection = collection;
     this._filter = filter;
     this._native = native;
+    this._toField = toField ?? (s => s);
   }
 
   /**
@@ -112,16 +115,16 @@ export class Query<S = PlainObject> {
   /** Executes the query and returns the mapped result documents. */
   async _exec(): Promise<Result<Document<S>[]>> {
     const opts: ZeroshipDbFindOpts = {};
-    if (this._sort !== undefined) opts.sort = this._sort as Record<string, 1 | -1>;
+    if (this._sort !== undefined) opts.orderBy = this._sort as Record<string, 1 | -1>;
     if (this._limit !== undefined) opts.limit = this._limit;
-    if (this._skip !== undefined) opts.skip = this._skip;
+    if (this._skip !== undefined) opts.offset = this._skip;
     if (this._select !== undefined) opts.select = this._select;
 
     try {
       const raw = await this._native(this._collection, this._filter, opts);
       const parsed: PlainObject[] = typeof raw === "string" ? JSON.parse(raw) : raw;
       const rows: PlainObject[] = Array.isArray(parsed) ? parsed : [];
-      return ok(rows.map(mapResultDoc) as Document<S>[]);
+      return ok(rows.map(d => mapResultDoc(d, this._toField)) as Document<S>[]);
     } catch (e: unknown) {
       return err(new Error(`find query failed: ${e instanceof Error ? e.message : String(e)}`, { cause: e }));
     }

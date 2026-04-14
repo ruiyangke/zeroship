@@ -8,18 +8,16 @@ import { validateDoc, checkPartial } from "./validate.js";
 import { mapNativeError, ValidationError } from "./errors.js";
 import {
   mapResultDoc,
+  mapDocOutbound,
   mapFilterOutbound,
   mapUpdateOutbound,
   translateAggregatePipeline,
 } from "./utils.js";
 import { Query } from "./query.js";
-import { PlainObject, Result, Document, CreateInput, UpdateExpression, Filter, ok, err } from "./types.js";
+import { PlainObject, Result, Document, CreateInput, UpdateExpression, Filter, type NamingStrategy, naming, ok, err } from "./types.js";
 
 /** The native driver interface from @zeroship/types. */
 export type NativeDb = ZeroshipDb;
-
-/** Auto-generated fields allowed in distinct() — validated at runtime to prevent injection. */
-const ALLOWED_AUTO_FIELDS = new Set(["id", "createdAt", "updatedAt", "created_at", "updated_at"]);
 
 
 /**
@@ -37,15 +35,22 @@ function toResultError(e: unknown): Error {
 /** Parses a raw JSON string (or already-parsed value) from the native layer. */
 function parseRaw<T>(raw: string | null | undefined): T | null {
   if (raw === null || raw === undefined) return null;
+  let parsed: unknown;
   if (typeof raw === "string") {
     if (raw === "") return null;
     try {
-      return JSON.parse(raw) as T;
+      parsed = JSON.parse(raw);
     } catch (e: unknown) {
       throw new Error(`failed to parse native response: ${e instanceof Error ? e.message : String(e)}`, { cause: e });
     }
+  } else {
+    parsed = raw;
   }
-  return raw as unknown as T;
+  // Detect native error envelope: Rust resolves with { "error": "..." } instead of rejecting
+  if (parsed && typeof parsed === "object" && "error" in parsed && typeof (parsed as PlainObject).error === "string") {
+    throw new Error((parsed as PlainObject).error as string);
+  }
+  return parsed as T;
 }
 
 /**
@@ -116,13 +121,34 @@ export class Collection<S = PlainObject> {
   private _name: string;
   private _schema: NormalizedSchema;
   private _native: NativeDb;
+  private _knownFields: Set<string>;
+  private _toColumn: (field: string) => string;
+  private _toField: (column: string) => string;
   private _ready: Promise<void> | null;
 
-  constructor(name: string, schema: NormalizedSchema, native: NativeDb, registrationPromise?: Promise<void> | null) {
+  constructor(name: string, schema: NormalizedSchema, native: NativeDb, options?: { naming?: NamingStrategy; ready?: Promise<void> | null }) {
     this._name = name;
     this._schema = schema;
     this._native = native;
-    this._ready = registrationPromise ?? null;
+    this._ready = options?.ready ?? null;
+
+    // Build field↔column lookup maps once at init — O(1) at query time
+    const strategy = options?.naming ?? naming.asIs;
+    const fieldToCol: Record<string, string> = {};
+    const colToField: Record<string, string> = {};
+    for (const field of Object.keys(schema)) {
+      const col = strategy.toColumn(field);
+      fieldToCol[field] = col;
+      colToField[col] = field;
+    }
+    for (const field of ["id", "createdAt", "updatedAt"]) {
+      const col = strategy.toColumn(field);
+      fieldToCol[field] = col;
+      colToField[col] = field;
+    }
+    this._knownFields = new Set(Object.keys(fieldToCol));
+    this._toColumn = (field) => fieldToCol[field] ?? field;
+    this._toField = (column) => colToField[column] ?? column;
   }
 
   /** Await table registration (DDL) before first operation. */
@@ -141,9 +167,10 @@ export class Collection<S = PlainObject> {
     try {
       await this.ensureReady();
       const validated = validateDoc(doc as PlainObject, this._schema);
-      const raw = await this._native.insert(this._name, validated as Record<string, ZeroshipScalar | ZeroshipScalar[]>);
+      const outbound = mapDocOutbound(validated, this._toColumn);
+      const raw = await this._native.insert(this._name, outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>);
       const result = parseRaw<PlainObject>(raw);
-      return ok(mapResultDoc(result!) as Document<S>);
+      return ok(mapResultDoc(result!, this._toField) as Document<S>);
     } catch (e) {
       return err(toResultError(e));
     }
@@ -158,9 +185,10 @@ export class Collection<S = PlainObject> {
     try {
       await this.ensureReady();
       const validated = (docs as PlainObject[]).map((doc) => validateDoc(doc, this._schema));
-      const raw = await this._native.insertMany(this._name, validated as Record<string, ZeroshipScalar | ZeroshipScalar[]>[]);
+      const outbound = validated.map(d => mapDocOutbound(d, this._toColumn));
+      const raw = await this._native.insertMany(this._name, outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>[]);
       const results = parseRaw<PlainObject[]>(raw);
-      return ok((results ?? []).map(mapResultDoc) as Document<S>[]);
+      return ok((results ?? []).map(d => mapResultDoc(d, this._toField)) as Document<S>[]);
     } catch (e) {
       return err(toResultError(e));
     }
@@ -173,12 +201,12 @@ export class Collection<S = PlainObject> {
   async findOne(filter: Filter<S>): Promise<Result<Document<S> | null>> {
     try {
       await this.ensureReady();
-      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter);
+      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const raw = await this._native.findOne(this._name, mapped);
       if (raw === null) return ok(null);
       const result = parseRaw<PlainObject>(raw);
       if (result === null) return ok(null);
-      return ok(mapResultDoc(result) as Document<S>);
+      return ok(mapResultDoc(result, this._toField) as Document<S>);
     } catch (e) {
       return err(toResultError(e));
     }
@@ -201,14 +229,15 @@ export class Collection<S = PlainObject> {
    * and `.select()` before being awaited.
    */
   find(filter: Filter<S> = {} as Filter<S>): Query<S> {
-    const mapped = mapFilterOutbound(filter as ZeroshipDbFilter);
+    const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
     return new Query<S>(
       this._name,
       mapped,
       async (col, f, opts) => {
         await this.ensureReady();
         return this._native.find(col, f, opts);
-      }
+      },
+      this._toField
     );
   }
 
@@ -228,8 +257,8 @@ export class Collection<S = PlainObject> {
       const fields = extractUpdateFields(updateObj);
       checkPartial(fields, this._schema);
       validateArrayPushOps(updateObj, this._schema);
-      const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter);
-      const mappedUpdate = mapUpdateOutbound(updateObj);
+      const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
+      const mappedUpdate = mapUpdateOutbound(updateObj, this._toColumn);
       const raw = await this._native.updateOne(
         this._name,
         mappedFilter,
@@ -259,8 +288,8 @@ export class Collection<S = PlainObject> {
       const fields = extractUpdateFields(updateObj);
       checkPartial(fields, this._schema);
       validateArrayPushOps(updateObj, this._schema);
-      const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter);
-      const mappedUpdate = mapUpdateOutbound(updateObj);
+      const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
+      const mappedUpdate = mapUpdateOutbound(updateObj, this._toColumn);
       const raw = await this._native.updateMany(
         this._name,
         mappedFilter,
@@ -281,7 +310,7 @@ export class Collection<S = PlainObject> {
   async deleteOne(filter: Filter<S>): Promise<Result<{ deletedCount: number }>> {
     try {
       await this.ensureReady();
-      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter);
+      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const raw = await this._native.deleteOne(this._name, mapped);
       return ok({ deletedCount: raw !== null && raw !== undefined && raw !== "" ? 1 : 0 });
     } catch (e) {
@@ -296,7 +325,7 @@ export class Collection<S = PlainObject> {
   async deleteMany(filter: Filter<S>): Promise<Result<{ deletedCount: number }>> {
     try {
       await this.ensureReady();
-      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter);
+      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const raw = await this._native.deleteMany(this._name, mapped);
       const result = parseRaw<{ deleted: number }>(raw);
       return ok({ deletedCount: result?.deleted ?? 0 });
@@ -312,7 +341,7 @@ export class Collection<S = PlainObject> {
   async countDocuments(filter: Filter<S> = {} as Filter<S>): Promise<Result<number>> {
     try {
       await this.ensureReady();
-      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter);
+      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const raw = await this._native.count(this._name, mapped);
       const result = parseRaw<{ count: number }>(raw);
       return ok(result?.count ?? 0);
@@ -329,11 +358,12 @@ export class Collection<S = PlainObject> {
     try {
       await this.ensureReady();
       // Validate field name at runtime — column names can't be parameterized in SQL
-      if (!(field in this._schema) && !ALLOWED_AUTO_FIELDS.has(field)) {
+      if (!this._knownFields.has(field)) {
         throw new ValidationError({ [field]: { path: field, message: `unknown field: ${field}` } });
       }
-      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter);
-      const raw = await this._native.distinct(this._name, field, mapped);
+      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
+      const column = this._toColumn(field);
+      const raw = await this._native.distinct(this._name, column, mapped);
       const result = parseRaw<(string | number | boolean | null)[]>(raw);
       return ok(result ?? []);
     } catch (e) {
@@ -348,10 +378,10 @@ export class Collection<S = PlainObject> {
   async aggregate(pipeline: PlainObject[]): Promise<Result<PlainObject[]>> {
     try {
       await this.ensureReady();
-      const translated = translateAggregatePipeline(pipeline) as ZeroshipDbAggregateStage[];
+      const translated = translateAggregatePipeline(pipeline, this._toColumn) as ZeroshipDbAggregateStage[];
       const raw = await this._native.aggregate(this._name, translated);
       const results = parseRaw<PlainObject[]>(raw);
-      return ok((results ?? []).map(mapResultDoc));
+      return ok((results ?? []).map(d => mapResultDoc(d, this._toField)));
     } catch (e) {
       return err(toResultError(e));
     }

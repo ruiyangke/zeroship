@@ -1,6 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { Query } from "../src/query.js";
+import { naming } from "../src/types.js";
 
 type PlainObject = Record<string, unknown>;
 
@@ -81,9 +82,9 @@ describe("Query thenable execution", () => {
     await q;
     assert.equal(calls[0].collection, "users");
     assert.deepEqual(calls[0].filter, { active: true });
-    assert.deepEqual(calls[0].opts.sort, { name: 1 });
+    assert.deepEqual(calls[0].opts.orderBy, { name: 1 });
     assert.equal(calls[0].opts.limit, 5);
-    assert.equal(calls[0].opts.skip, 10);
+    assert.equal(calls[0].opts.offset, 10);
   });
 
   test("await Query maps result docs (id → _id)", async () => {
@@ -104,7 +105,7 @@ describe("Query thenable execution", () => {
     const { fn } = makeMockNative([
       { id: "1", created_at: "2024-01-01", updated_at: "2024-06-01" },
     ]);
-    const q = new Query("docs", {}, fn);
+    const q = new Query("docs", {}, fn, naming.snakeCase.toField);
     const { data, error } = await q;
     assert.equal(error, null);
     assert.ok(data !== null);

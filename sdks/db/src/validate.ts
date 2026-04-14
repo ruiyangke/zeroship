@@ -195,22 +195,3 @@ export function checkPartial(doc: Doc, schema: NormalizedSchema): void {
   }
 }
 
-export function validatePartial(doc: Doc, schema: NormalizedSchema): Doc {
-  const errors: Record<string, FieldError> = {};
-  const result: Doc = {};
-
-  // Only copy schema-defined fields — unknown fields are stripped for safety
-  for (const [key, value] of Object.entries(doc)) {
-    const def = schema[key];
-    if (!def) continue;
-    result[key] = value;
-    if (value === undefined || value === null) continue;
-    checkField(key, value, def, errors);
-  }
-
-  if (Object.keys(errors).length > 0) {
-    throw new ValidationError(errors);
-  }
-
-  return result;
-}

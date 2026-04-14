@@ -6,9 +6,9 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { Collection, NativeDb } from "../src/collection.js";
-import { validateDoc, validatePartial } from "../src/validate.js";
+import { validateDoc, checkPartial } from "../src/validate.js";
 import { normalizeSchema } from "../src/schema.js";
-import { t } from "../src/types.js";
+import { t, naming } from "../src/types.js";
 import { ValidationError } from "../src/errors.js";
 import { Query } from "../src/query.js";
 import { translateAggregatePipeline } from "../src/utils.js";
@@ -470,7 +470,7 @@ describe("validation edge cases", () => {
   test("partial update on field with min constraint → min is still checked", () => {
     const s = normalizeSchema({ age: t.number().min(0) });
     assert.throws(
-      () => validatePartial({ age: -1 }, s),
+      () => checkPartial({ age: -1 }, s),
       (err: unknown) => err instanceof ValidationError
     );
   });
@@ -546,8 +546,8 @@ describe("aggregate edge cases", () => {
   test("$group with no _id field → translateAggregatePipeline handles gracefully", () => {
     const pipeline = [{ $group: { count: { $sum: 1 } } }];
     // Should not throw; _id is undefined → translateGroupId handles gracefully
-    assert.doesNotThrow(() => translateAggregatePipeline(pipeline));
-    const result = translateAggregatePipeline(pipeline);
+    assert.doesNotThrow(() => translateAggregatePipeline(pipeline, naming.snakeCase.toColumn));
+    const result = translateAggregatePipeline(pipeline, naming.snakeCase.toColumn);
     const group = result[0].$group as PlainObject;
     assert.ok("by" in group);
   });
@@ -563,8 +563,8 @@ describe("aggregate edge cases", () => {
     ];
     // translateAccumulator only handles $sum: 1 and $sum: "$string"; everything
     // else passes through. Should not throw.
-    assert.doesNotThrow(() => translateAggregatePipeline(pipeline));
-    const result = translateAggregatePipeline(pipeline);
+    assert.doesNotThrow(() => translateAggregatePipeline(pipeline, naming.snakeCase.toColumn));
+    const result = translateAggregatePipeline(pipeline, naming.snakeCase.toColumn);
     const group = result[0].$group as PlainObject;
     // total should pass through unchanged (not transformed to $count or $sum "field")
     const total = group.total as PlainObject;
@@ -573,15 +573,15 @@ describe("aggregate edge cases", () => {
 
   test("$group with null _id → translated to by: 'null'", () => {
     const pipeline = [{ $group: { id: null, count: { $sum: 1 } } }];
-    assert.doesNotThrow(() => translateAggregatePipeline(pipeline));
-    const result = translateAggregatePipeline(pipeline);
+    assert.doesNotThrow(() => translateAggregatePipeline(pipeline, naming.snakeCase.toColumn));
+    const result = translateAggregatePipeline(pipeline, naming.snakeCase.toColumn);
     const group = result[0].$group as PlainObject;
     assert.equal(group.by, "null");
   });
 
   test("pipeline with $sort stage → passes through unchanged", () => {
     const pipeline = [{ $sort: { name: 1 } }];
-    const result = translateAggregatePipeline(pipeline);
+    const result = translateAggregatePipeline(pipeline, naming.snakeCase.toColumn);
     assert.deepEqual(result[0], { $sort: { name: 1 } });
   });
 });

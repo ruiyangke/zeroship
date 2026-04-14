@@ -27,7 +27,7 @@ import { model } from "./model.js";
 import { Collection, type NativeDb } from "./collection.js";
 import { Query } from "./query.js";
 import { type NormalizedSchema } from "./schema.js";
-import { type PlainObject, type Result, type Document, type CreateInput, type UpdateExpression, type Filter, ok, err } from "./types.js";
+import { type PlainObject, type Result, type Document, type CreateInput, type UpdateExpression, type Filter, type NamingStrategy, naming, ok, err } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -162,23 +162,32 @@ function getNativeDb(): NativeDb {
   throw new Error("@zeroship/db: native zeroship.db.* not available — are you running inside zeroship?");
 }
 
+/** Options for createDb. */
+export interface CreateDbOptions {
+  /** Custom native driver (for tests). */
+  native?: NativeDb;
+  /** Column naming strategy. Default: `naming.snakeCase`. */
+  naming?: NamingStrategy;
+}
+
 /**
  * Create a typed database client with all models defined upfront.
  *
  * @param schemas Record of collection names → schema definitions
- * @param nativeOverride Optional: inject a custom native driver (for tests)
+ * @param options Optional: native driver override and naming strategy
  * @returns A db object with typed collections and transaction support
  */
 export function createDb<const T extends Record<string, SchemaInput>>(
   schemas: T,
-  nativeOverride?: NativeDb,
+  options?: CreateDbOptions,
 ): Db<T> {
-  const native = nativeOverride ?? getNativeDb();
+  const native = options?.native ?? getNativeDb();
+  const namingStrategy = options?.naming ?? naming.snakeCase;
   const collections = {} as { [K in keyof T]: Collection<T[K]> };
 
   for (const [name, schema] of Object.entries(schemas)) {
     (collections as Record<string, Collection<SchemaInput>>)[name] =
-      model(name, schema as SchemaInput, native);
+      model(name, schema as SchemaInput, native, namingStrategy);
   }
 
   // Pre-cache TxCollection wrappers — stateless, reusable across transactions
