@@ -38,9 +38,10 @@ type SchemaInput = Record<string, unknown>;
 /** A collection inside a transaction — same API but throws on error */
 export type TxCollection = {
   create(doc: PlainObject): Promise<PlainObject>;
-  insert(doc: PlainObject): Promise<PlainObject>;
   insertMany(docs: PlainObject[]): Promise<PlainObject[]>;
   findOne(filter: PlainObject): Promise<PlainObject | null>;
+  findById(id: unknown): Promise<PlainObject | null>;
+  exists(filter: PlainObject): Promise<boolean>;
   find(filter?: PlainObject): TxQuery;
   updateOne(filter: PlainObject, update: PlainObject): Promise<{ matchedCount: number; modifiedCount: number }>;
   updateMany(filter: PlainObject, update: PlainObject): Promise<{ matchedCount: number; modifiedCount: number }>;
@@ -53,10 +54,10 @@ export type TxCollection = {
 
 /** Query inside a transaction — same chainable API but resolves to data directly */
 type TxQuery = {
-  sort(s: Record<string, number>): TxQuery;
+  sort(s: Record<string, number> | string): TxQuery;
   limit(n: number): TxQuery;
   skip(n: number): TxQuery;
-  select(s: string | string[]): TxQuery;
+  select(s: string | string[] | Record<string, unknown>): TxQuery;
   then(resolve?: (value: PlainObject[]) => unknown, reject?: (reason: unknown) => unknown): Promise<unknown>;
 };
 
@@ -81,14 +82,17 @@ function createTxCollection(collection: Collection): TxCollection {
     async create(doc: PlainObject) {
       return unwrap(await collection.create(doc));
     },
-    async insert(doc: PlainObject) {
-      return unwrap(await collection.insert(doc));
-    },
     async insertMany(docs: PlainObject[]) {
       return unwrap(await collection.insertMany(docs));
     },
     async findOne(filter: PlainObject) {
       return unwrap(await collection.findOne(filter));
+    },
+    async findById(id: unknown) {
+      return unwrap(await collection.findById(id));
+    },
+    async exists(filter: PlainObject) {
+      return unwrap(await collection.exists(filter));
     },
     find(filter: PlainObject = {}): TxQuery {
       const query = collection.find(filter);

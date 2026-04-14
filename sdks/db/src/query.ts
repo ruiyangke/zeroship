@@ -37,9 +37,25 @@ export class Query {
     this._native = native;
   }
 
-  /** Sets the sort order. Pass `{ field: 1 }` for ascending, `{ field: -1 }` for descending. */
-  sort(obj: PlainObject): this {
-    this._sort = obj;
+  /**
+   * Sets the sort order.
+   * Object: `{ field: 1 }` for ASC, `{ field: -1 }` for DESC.
+   * String: `"field"` for ASC, `"-field"` for DESC. Multiple: `"-createdAt name"`.
+   */
+  sort(s: PlainObject | string): this {
+    if (typeof s === "string") {
+      const obj: PlainObject = {};
+      for (const part of s.split(/\s+/).filter(Boolean)) {
+        if (part.startsWith("-")) {
+          obj[part.slice(1)] = -1;
+        } else {
+          obj[part] = 1;
+        }
+      }
+      this._sort = obj;
+    } else {
+      this._sort = s;
+    }
     return this;
   }
 
@@ -57,13 +73,20 @@ export class Query {
 
   /**
    * Restricts the returned fields.
-   * Accepts either a space-separated string (`"name age"`) or an array of field names.
+   * String: `"name email"` (space-separated).
+   * Array: `["name", "email"]`.
+   * Object: `{ name: 1, email: 1 }` (Mongoose style — keys with truthy values).
    */
-  select(s: string | string[]): this {
+  select(s: string | string[] | Record<string, unknown>): this {
     if (Array.isArray(s)) {
       this._select = s;
-    } else {
+    } else if (typeof s === "string") {
       this._select = s.split(" ").filter((f) => f.length > 0);
+    } else {
+      // Object style: { name: 1, email: 1 } → ["name", "email"]
+      this._select = Object.entries(s)
+        .filter(([, v]) => v)
+        .map(([k]) => k);
     }
     return this;
   }

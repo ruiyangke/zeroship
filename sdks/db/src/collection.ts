@@ -163,14 +163,6 @@ export class Collection {
   }
 
   /**
-   * Alias for `create()`. Inserts a single document after validating it against the schema.
-   * Provided for spec compatibility — both `insert()` and `create()` are supported.
-   */
-  async insert(doc: PlainObject): Promise<Result<PlainObject>> {
-    return this.create(doc);
-  }
-
-  /**
    * Inserts multiple documents after validating each one against the schema.
    * Returns the persisted documents with field names mapped to the user-facing shape.
    */
@@ -202,6 +194,18 @@ export class Collection {
     } catch (e) {
       return err(toResultError(e));
     }
+  }
+
+  /** Shorthand for `findOne({ _id: id })`. */
+  async findById(id: unknown): Promise<Result<PlainObject | null>> {
+    return this.findOne({ _id: id });
+  }
+
+  /** Returns true if at least one document matches `filter`. */
+  async exists(filter: PlainObject): Promise<Result<boolean>> {
+    const { data, error } = await this.countDocuments(filter);
+    if (error) return err(error);
+    return ok((data ?? 0) > 0);
   }
 
   /**
