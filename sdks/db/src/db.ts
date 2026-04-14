@@ -25,6 +25,7 @@
 
 import { model } from "./model.js";
 import { Collection, type NativeDb } from "./collection.js";
+import { Query } from "./query.js";
 import { type NormalizedSchema } from "./schema.js";
 import { type PlainObject, type Result, type Document, type CreateInput, type UpdateInput, ok, err } from "./types.js";
 
@@ -92,7 +93,7 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
       return unwrap(await collection.findOne(filter));
     },
     async findById(id: unknown) {
-      return unwrap(await (collection as any).findById(id));
+      return unwrap(await collection.findById(id));
     },
     async exists(filter: Partial<Document<S>>) {
       return unwrap(await collection.exists(filter));
@@ -127,7 +128,7 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
 }
 
 /** Wrap a Query to throw on error */
-function createTxQuery<S>(query: any): TxQuery<S> {
+function createTxQuery<S>(query: Query<S>): TxQuery<S> {
   return {
     sort(s: Record<string, number>) { query.sort(s); return this; },
     limit(n: number) { query.limit(n); return this; },
@@ -149,10 +150,13 @@ function createTxQuery<S>(query: any): TxQuery<S> {
 // createDb
 // ---------------------------------------------------------------------------
 
+/** Global scope augmented by the zeroship runtime */
+declare const globalThis: { zeroship?: { db?: NativeDb } } ;
+
 /** Get the native zeroship.db driver */
 function getNativeDb(): NativeDb {
-  if (typeof globalThis !== "undefined" && (globalThis as any).zeroship?.db) {
-    return (globalThis as any).zeroship.db as NativeDb;
+  if (globalThis.zeroship?.db) {
+    return globalThis.zeroship.db;
   }
   throw new Error("@zeroship/db: native zeroship.db.* not available — are you running inside zeroship?");
 }
@@ -182,7 +186,7 @@ export function createDb<T extends Record<string, SchemaInput>>(
       const native = nativeOverride ?? getNativeDb();
 
       // BEGIN
-      await (native as any).beginTransaction();
+      await native.beginTransaction?.();
 
       // Build tx — same collections but throwing on error
       const tx = {} as { [K in keyof T]: TxCollection<T[K]> };
@@ -193,11 +197,11 @@ export function createDb<T extends Record<string, SchemaInput>>(
 
       try {
         const result = await fn(tx);
-        await (native as any).commitTransaction();
+        await native.commitTransaction?.();
         return ok(result);
       } catch (e) {
         try {
-          await (native as any).rollbackTransaction();
+          await native.rollbackTransaction?.();
         } catch {
           // Ignore rollback errors — connection cleanup handles it
         }

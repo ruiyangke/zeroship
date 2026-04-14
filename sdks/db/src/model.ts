@@ -5,10 +5,13 @@
 import { normalizeSchema } from "./schema.js";
 import { Collection, NativeDb } from "./collection.js";
 
+/** Global scope augmented by the zeroship runtime */
+declare const globalThis: { zeroship?: { db?: NativeDb } } ;
+
 /** Returns the native zeroship.db driver from the global scope, or throws if unavailable. */
 function getNativeDb(): NativeDb {
-  if (typeof globalThis !== "undefined" && (globalThis as any).zeroship?.db) {
-    return (globalThis as any).zeroship.db as NativeDb;
+  if (globalThis.zeroship?.db) {
+    return globalThis.zeroship.db;
   }
   throw new Error("@zeroship/db: native zeroship.db.* not available — are you running inside zeroship?");
 }
@@ -48,9 +51,9 @@ export function model<S extends Record<string, unknown> = Record<string, unknown
   // registerModel returns a Promise. We store it so the Collection can await
   // it before the first CRUD operation, ensuring DDL completes first.
   let registrationPromise: Promise<unknown> | null = null;
-  if ((native as any).registerModel) {
+  if (native.registerModel) {
     try {
-      registrationPromise = (native as any).registerModel(name, normalized);
+      registrationPromise = native.registerModel(name, normalized);
     } catch {
       // Ignore in non-runtime environments (tests, SSR)
     }

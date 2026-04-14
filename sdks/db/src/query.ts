@@ -116,8 +116,8 @@ export class Query<S = PlainObject> {
       const parsed: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
       const rows: PlainObject[] = Array.isArray(parsed) ? parsed : [];
       return ok(rows.map(mapResultDoc) as Document<S>[]);
-    } catch (e: any) {
-      return err(new Error(`find query failed: ${e.message ?? e}`, { cause: e }));
+    } catch (e: unknown) {
+      return err(new Error(`find query failed: ${e instanceof Error ? e.message : String(e)}`, { cause: e }));
     }
   }
 }

@@ -21,25 +21,17 @@ export interface NativeDb {
   insertMany(collection: string, docs: unknown): Promise<string>;
   findOne(collection: string, filter: unknown): Promise<string | null>;
   find(collection: string, filter: unknown, opts: unknown): Promise<string>;
-  updateOne(
-    collection: string,
-    filter: unknown,
-    update: unknown
-  ): Promise<string>;
-  updateMany(
-    collection: string,
-    filter: unknown,
-    update: unknown
-  ): Promise<string>;
+  updateOne(collection: string, filter: unknown, update: unknown): Promise<string>;
+  updateMany(collection: string, filter: unknown, update: unknown): Promise<string>;
   deleteOne(collection: string, filter: unknown): Promise<string>;
   deleteMany(collection: string, filter: unknown): Promise<string>;
   count(collection: string, filter: unknown): Promise<string>;
-  distinct(
-    collection: string,
-    field: string,
-    filter: unknown
-  ): Promise<string>;
+  distinct(collection: string, field: string, filter: unknown): Promise<string>;
   aggregate(collection: string, pipeline: unknown): Promise<string>;
+  registerModel?(collection: string, schema: unknown): Promise<unknown>;
+  beginTransaction?(): Promise<void>;
+  commitTransaction?(): Promise<void>;
+  rollbackTransaction?(): Promise<void>;
 }
 
 /**
@@ -61,8 +53,8 @@ function parseRaw<T = unknown>(raw: string | null | undefined): T | null {
     if (raw === "") return null;
     try {
       return JSON.parse(raw) as T;
-    } catch (e: any) {
-      throw new Error(`failed to parse native response: ${e.message ?? e}`, { cause: e });
+    } catch (e: unknown) {
+      throw new Error(`failed to parse native response: ${e instanceof Error ? e.message : String(e)}`, { cause: e });
     }
   }
   return raw as unknown as T;
