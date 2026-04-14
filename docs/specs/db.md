@@ -12,26 +12,28 @@ Based on Mongoose conventions (for LLM compatibility) with key improvements:
 - Real JOINs backed by Postgres — not N+1 populate
 
 ```javascript
-import { model } from "@zeroship/db";
+import { createDb } from "@zeroship/db";
 
-const users = model("users", {
-  name:  { type: String, required: true },
-  email: { type: String, required: true, unique: true },
-  role:  { type: String, enum: ["user", "admin"], default: "user" },
+const db = createDb({
+  users: {
+    name:  { type: String, required: true },
+    email: { type: String, required: true, unique: true },
+    role:  { type: String, enum: ["user", "admin"], default: "user" },
+  },
 });
 
-const { data: user, error } = await users.create({ name: "Alice", email: "alice@example.com" });
-const { data: admins } = await users.find({ role: "admin" }).sort({ name: 1 }).limit(10);
+const { data: user, error } = await db.users.create({ name: "Alice", email: "alice@example.com" });
+const { data: admins } = await db.users.find({ role: "admin" }).sort({ name: 1 }).limit(10);
 ```
 
 ## Architecture
 
 ```
 Creator code
-  │  import { model } from "@zeroship/db"
+  │  import { createDb } from "@zeroship/db"
   ▼
 @zeroship/db (JS/TS, npm package)         ← SDK layer: validation, chaining, { data, error }
-  model(), t, Collection, Query
+  createDb(), t, naming, Collection, Query
   │
   │  calls zeroship.db.* with per-field operator format
   ▼
@@ -86,40 +88,46 @@ Two styles, both produce the same internal representation.
 ### Mongoose style (recommended for LLM compatibility)
 
 ```javascript
-import { model } from "@zeroship/db";
+import { createDb } from "@zeroship/db";
 
-const users = model("users", {
-  name:     { type: String, required: true, minlength: 1, maxlength: 100 },
-  email:    { type: String, required: true, unique: true, match: /^[^@]+@[^@]+$/ },
-  age:      { type: Number, min: 0, max: 150 },
-  role:     { type: String, enum: ["user", "admin", "moderator"], default: "user" },
-  bio:      { type: String },
-  settings: { type: Object },
-  tags:     { type: [String] },
+const db = createDb({
+  users: {
+    name:     { type: String, required: true, minlength: 1, maxlength: 100 },
+    email:    { type: String, required: true, unique: true, match: /^[^@]+@[^@]+$/ },
+    age:      { type: Number, min: 0, max: 150 },
+    role:     { type: String, enum: ["user", "admin", "moderator"], default: "user" },
+    bio:      { type: String },
+    settings: { type: Object },
+    tags:     { type: [String] },
+  },
 });
 
 // Shorthand also works (bare constructors)
-const simple = model("simple", {
-  name: String,
-  count: Number,
-  active: Boolean,
-  tags: [String],
+const db2 = createDb({
+  simple: {
+    name: String,
+    count: Number,
+    active: Boolean,
+    tags: [String],
+  },
 });
 ```
 
 ### Builder style (alternative)
 
 ```javascript
-import { model, t } from "@zeroship/db";
+import { createDb, t } from "@zeroship/db";
 
-const users = model("users", {
-  name:     t.string().required().min(1).max(100),
-  email:    t.string().required().unique().pattern(/^[^@]+@[^@]+$/),
-  age:      t.number().min(0).max(150),
-  role:     t.string().enum("user", "admin", "moderator").default("user"),
-  bio:      t.string(),
-  settings: t.json(),
-  tags:     t.array(t.string()),
+const db = createDb({
+  users: {
+    name:     t.string().required().min(1).max(100),
+    email:    t.string().required().unique().pattern(/^[^@]+@[^@]+$/),
+    age:      t.number().min(0).max(150),
+    role:     t.string().enum("user", "admin", "moderator").default("user"),
+    bio:      t.string(),
+    settings: t.json(),
+    tags:     t.array(t.string()),
+  },
 });
 ```
 
@@ -460,15 +468,28 @@ Native (crates/plugin-db/):
 - Field mapping (id↔_id equivalent, camelCase↔snake_case for auto fields)
 - E2E tested through full platform pipeline
 
+## What's Implemented
+
+- `{ data, error }` return pattern on all Collection methods
+- `createDb()` with typed collections and `const T` inference
+- `findById(id)`, `exists(filter)`, `countDocuments(filter)`
+- Transactions: `db.transaction(async (tx) => { ... })` with TxCollection (throws on error)
+- Auto-migration: `registerModel` creates schemas/tables/columns on cold start
+- TypeBuilder API: `t.string().required().min(3)` with full generic inference
+- Naming strategy: `naming.snakeCase` (default), `naming.asIs`, or custom
+- Typed filters (`Filter<S>`), typed updates (`UpdateExpression<S>`), typed documents (`Document<S>`)
+- Aggregate pipeline translation: `$group`, `$match`, `$having`, `$sort`, `$limit`
+- Accumulators: `$count`, `$sum`, `$avg`, `$min`, `$max`, `$first`
+
 ## What's Deferred
 
-- `{ data, error }` return pattern (current: returns data directly or throws)
-- `findById(id)` — trivial alias
-- `exists(filter)` — trivial wrapper
 - `findOneAndUpdate` / `findOneAndDelete` — atomic read-modify-return
-- Auto-migration (registerModel + schema diffing)
-- Transactions
 - Populate / lookup (JOINs)
-- Soft delete
-- Cursor pagination
+- Soft delete (`deletedAt` field + automatic filtering)
+- Cursor pagination (`{ after: lastId }` → `WHERE id > $1 LIMIT $2`)
+- Upsert (`INSERT ... ON CONFLICT DO UPDATE`)
+- Type-safe `select()` return type narrowing
+- Transaction isolation levels (`SERIALIZABLE`, `REPEATABLE READ`)
 - Realtime subscriptions
+- `OpResult::Failed` in Rust runtime (proper promise rejection instead of error envelope)
+- `$first` sort-order threading into `array_agg ORDER BY`

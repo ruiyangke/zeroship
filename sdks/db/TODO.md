@@ -1,26 +1,31 @@
 # @zeroship/db — TODO
 
-## Critical — SDK fixes (done)
+All critical and important issues have been resolved. Remaining items are future enhancements.
 
-- [x] `sort`/`skip` key mismatch — SDK sends `sort`/`skip`, Rust reads `orderBy`/`offset` → rename in query.ts + globals.d.ts
-- [x] Native error envelope not detected — Rust resolves with `{"error":"..."}`, SDK treats as valid doc → add detection in `parseRaw`
-- [x] Dead code: `validatePartial` replaced by `checkPartial` → delete
+## Completed
 
-## Critical — Rust fixes needed
+- [x] `sort`/`skip` key mismatch → `orderBy`/`offset` (matches Rust)
+- [x] Native error envelope detection in `parseRaw` and transaction begin/commit
+- [x] Dead `validatePartial` removed (replaced by `checkPartial`)
+- [x] `updatedAt` auto-update: `"updated_at" = NOW()` injected in every UPDATE
+- [x] `$first` aggregator: `(array_agg(col))[1]`
+- [x] Transaction error detection via envelope parsing
+- [x] `$push`/`$addToSet`: `$N::jsonb` preserves number/boolean types
+- [x] `$pull`: `jsonb_array_elements` subquery removes by value
+- [x] `$set` top-level: flatten inline, process all keys
+- [x] `insertMany`: union all columns across all docs via BTreeSet
+- [x] Numeric enum values in DDL CHECK constraint
+- [x] Spec updated: `model()` → `createDb()`, deferred list refreshed
 
-- [x] `updatedAt` never updated on UPDATE — inject `updated_at = NOW()` in `build_set_clauses` (`query.rs:474`)
-- [x] `$first` aggregator — `(array_agg(col))[1]` in `build_aggregate` (`query.rs:786`). TODO: thread `$sort` order into `array_agg ORDER BY` for guaranteed first-in-sort-order
-- [x] Transaction errors — SDK now detects error envelope from begin/commit. Proper fix: add `OpResult::Failed` variant to Rust runtime so promises reject instead of resolving with error JSON (`runtime/src/state.rs:331`, `callbacks.rs:1069`)
+## Future Enhancements
 
-## Important — Rust fixes needed
-
-- [x] `$push`/`$addToSet` — use `$N::jsonb` instead of `to_jsonb($N::text)`, preserves number/boolean types (`query.rs:443-457`)
-- [x] `$pull` — use `jsonb_array_elements` subquery to remove by value instead of `jsonb - text` key removal (`query.rs:447-452`)
-- [x] `$set` top-level — flatten inline, process all keys together (`query.rs:399-410`)
-- [x] `insertMany` — union all columns across all docs via BTreeSet (`query.rs:548-567`)
-- [x] Numeric enum values in DDL CHECK — handle `as_i64()`/`as_f64()` (`query.rs:232-252`)
-
-## Minor
-
-- [ ] `naming.asIs` + Rust hardcoded `created_at`/`updated_at` = mismatch — document that `asIs` requires Rust-side quoted identifiers
-- [ ] Spec "deferred" list is stale — update `docs/specs/db.md` to reflect implemented features
+- [ ] `$first` sort-order threading — inject preceding `$sort` into `array_agg ORDER BY` for guaranteed order
+- [ ] `OpResult::Failed` in Rust runtime — proper promise rejection instead of error envelope (`runtime/src/state.rs:331`)
+- [ ] `naming.asIs` requires Rust-side quoted identifiers for `created_at`/`updated_at` auto-columns
+- [ ] `findOneAndUpdate` / `findOneAndDelete` — `UPDATE ... RETURNING *`
+- [ ] Cursor pagination — `{ after: lastId }` → `WHERE id > $1 LIMIT $2`
+- [ ] Upsert — `INSERT ... ON CONFLICT DO UPDATE`
+- [ ] Type-safe `select()` return type narrowing (Prisma-style)
+- [ ] Transaction isolation levels (`SERIALIZABLE`, `REPEATABLE READ`)
+- [ ] Populate / lookup (JOINs)
+- [ ] Soft delete (`deletedAt` + automatic filtering)
