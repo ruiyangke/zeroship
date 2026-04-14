@@ -55,7 +55,7 @@ export type InferSchema<S> = {
  * Extends InferSchema so required fields remain required.
  */
 export type Document<S> = InferSchema<S> & {
-  _id: number;
+  id: number;
   createdAt: number;
   updatedAt: number;
 };

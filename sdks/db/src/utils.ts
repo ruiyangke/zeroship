@@ -105,8 +105,10 @@ function translateGroupId(id: unknown): { by: string | string[] } {
 function translateStage(stage: PlainObject): PlainObject {
   if ("$group" in stage) {
     const group = stage.$group as PlainObject;
-    const { id, ...rest } = group;
-    const { by } = translateGroupId(id);
+    // Accept both _id (MongoDB convention) and id (our convention) as group key
+    const groupKey = group._id ?? group.id;
+    const { _id: _discardId, id: _discardId2, ...rest } = group;
+    const { by } = translateGroupId(groupKey);
     const translated: PlainObject = { by };
     for (const [key, val] of Object.entries(rest)) {
       translated[key] = translateAccumulator(val);

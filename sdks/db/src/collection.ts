@@ -197,9 +197,9 @@ export class Collection<S = PlainObject> {
     }
   }
 
-  /** Shorthand for `findOne({ _id: id })`. */
+  /** Shorthand for `findOne({ id })`. */
   async findById(id: unknown): Promise<Result<Document<S> | null>> {
-    return this.findOne({ _id: id } as Partial<Document<S>>);
+    return this.findOne({ id } as Partial<Document<S>>);
   }
 
   /** Returns true if at least one document matches `filter`. */

@@ -92,7 +92,7 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
       return unwrap(await collection.findOne(filter));
     },
     async findById(id: unknown) {
-      return unwrap(await collection.findById(id));
+      return unwrap(await (collection as any).findById(id));
     },
     async exists(filter: Partial<Document<S>>) {
       return unwrap(await collection.exists(filter));
