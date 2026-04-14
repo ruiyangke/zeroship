@@ -86,6 +86,168 @@ fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+// ---------------------------------------------------------------------------
+// DDL builders for registerModel
+// ---------------------------------------------------------------------------
+
+/// Build CREATE SCHEMA IF NOT EXISTS for an app.
+pub fn build_create_schema(app_id: &str) -> String {
+    format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(app_id))
+}
+
+/// Build CREATE TABLE IF NOT EXISTS from a normalized schema JSON.
+///
+/// Schema format: `{ "name": { "type": "string", "required": true, ... }, ... }`
+///
+/// Auto-generates: id SERIAL PRIMARY KEY, created_at, updated_at.
+pub fn build_create_table(
+    app_id: &str,
+    collection: &str,
+    schema: &serde_json::Value,
+) -> Result<String, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+
+    let table = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
+
+    let mut columns = vec![
+        "id SERIAL PRIMARY KEY".to_string(),
+    ];
+
+    if let Some(obj) = schema.as_object() {
+        for (field, def) in obj {
+            let col_def = field_to_column(field, def);
+            columns.push(col_def);
+        }
+    }
+
+    columns.push("created_at TIMESTAMPTZ DEFAULT NOW()".to_string());
+    columns.push("updated_at TIMESTAMPTZ DEFAULT NOW()".to_string());
+
+    Ok(format!(
+        "CREATE TABLE IF NOT EXISTS {} (\n  {}\n)",
+        table,
+        columns.join(",\n  ")
+    ))
+}
+
+/// Build ALTER TABLE ADD COLUMN IF NOT EXISTS for a single field.
+pub fn build_add_column(
+    app_id: &str,
+    collection: &str,
+    field: &str,
+    def: &serde_json::Value,
+) -> Result<String, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+
+    let table = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
+    let pg_type = def_to_pg_type(def);
+    let constraints = def_to_constraints(field, def);
+
+    Ok(format!(
+        "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} {} {}",
+        table,
+        quote_ident(field),
+        pg_type,
+        constraints
+    ).trim().to_string())
+}
+
+/// Convert a field definition to a full column definition for CREATE TABLE.
+fn field_to_column(field: &str, def: &serde_json::Value) -> String {
+    let pg_type = def_to_pg_type(def);
+    let constraints = def_to_constraints(field, def);
+    format!("{} {} {}", quote_ident(field), pg_type, constraints).trim().to_string()
+}
+
+/// Map schema type to PostgreSQL type.
+fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
+    match def.get("type").and_then(|t| t.as_str()) {
+        Some("string") => "TEXT",
+        Some("number") => "NUMERIC",
+        Some("boolean") => "BOOLEAN",
+        Some("date") => "TIMESTAMPTZ",
+        Some("json") => "JSONB",
+        Some("array") => "JSONB",
+        _ => "TEXT",
+    }
+}
+
+/// Generate column constraints from field definition.
+fn def_to_constraints(field: &str, def: &serde_json::Value) -> String {
+    let mut parts = Vec::new();
+
+    if def.get("required").and_then(|v| v.as_bool()) == Some(true) {
+        parts.push("NOT NULL".to_string());
+    }
+
+    if def.get("unique").and_then(|v| v.as_bool()) == Some(true) {
+        parts.push("UNIQUE".to_string());
+    }
+
+    // Default value
+    if let Some(default) = def.get("default") {
+        match def.get("type").and_then(|t| t.as_str()) {
+            Some("string") => {
+                if let Some(s) = default.as_str() {
+                    parts.push(format!("DEFAULT '{}'", s.replace('\'', "''")));
+                }
+            }
+            Some("number") => {
+                if let Some(n) = default.as_f64() {
+                    parts.push(format!("DEFAULT {n}"));
+                }
+            }
+            Some("boolean") => {
+                if let Some(b) = default.as_bool() {
+                    parts.push(format!("DEFAULT {b}"));
+                }
+            }
+            Some("json") => parts.push("DEFAULT '{}'::jsonb".to_string()),
+            Some("array") => parts.push("DEFAULT '[]'::jsonb".to_string()),
+            _ => {}
+        }
+    } else {
+        // Default defaults for json/array
+        match def.get("type").and_then(|t| t.as_str()) {
+            Some("json") => parts.push("DEFAULT '{}'::jsonb".to_string()),
+            Some("array") => parts.push("DEFAULT '[]'::jsonb".to_string()),
+            _ => {}
+        }
+    }
+
+    // Check constraints for min/max
+    let col = quote_ident(field);
+    if let (Some("number"), Some(min)) = (def.get("type").and_then(|t| t.as_str()), def.get("min").and_then(|v| v.as_f64())) {
+        if let Some(max) = def.get("max").and_then(|v| v.as_f64()) {
+            parts.push(format!("CHECK ({col} >= {min} AND {col} <= {max})"));
+        } else {
+            parts.push(format!("CHECK ({col} >= {min})"));
+        }
+    } else if let (Some("number"), Some(max)) = (def.get("type").and_then(|t| t.as_str()), def.get("max").and_then(|v| v.as_f64())) {
+        parts.push(format!("CHECK ({col} <= {max})"));
+    }
+
+    // Enum constraint
+    if let Some(enums) = def.get("enum").and_then(|v| v.as_array()) {
+        let values: Vec<String> = enums
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| format!("'{}'", s.replace('\'', "''")))
+            .collect();
+        if !values.is_empty() {
+            parts.push(format!("CHECK ({col} IN ({}))", values.join(", ")));
+        }
+    }
+
+    parts.join(" ")
+}
+
+// ---------------------------------------------------------------------------
+// Query builders
+// ---------------------------------------------------------------------------
+
 /// Build a SELECT query: `SELECT [cols|*] FROM "app_id"."collection" WHERE ... LIMIT ... OFFSET ...`
 pub fn build_find(
     app_id: &str,

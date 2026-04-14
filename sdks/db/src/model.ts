@@ -43,5 +43,18 @@ export function model(
   }
   const normalized = normalizeSchema(schema);
   const native = nativeOverride ?? getNativeDb();
-  return new Collection(name, normalized, native);
+
+  // Register model with the runtime — creates table + columns if not exists.
+  // registerModel returns a Promise. We store it so the Collection can await
+  // it before the first CRUD operation, ensuring DDL completes first.
+  let registrationPromise: Promise<unknown> | null = null;
+  if ((native as any).registerModel) {
+    try {
+      registrationPromise = (native as any).registerModel(name, normalized);
+    } catch {
+      // Ignore in non-runtime environments (tests, SSR)
+    }
+  }
+
+  return new Collection(name, normalized, native, registrationPromise);
 }

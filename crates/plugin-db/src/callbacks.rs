@@ -963,3 +963,103 @@ pub fn count(
 
     rv.set(promise.into());
 }
+
+// ---------------------------------------------------------------------------
+// Callback: registerModel(collection, schemaJson)
+// ---------------------------------------------------------------------------
+
+/// `zeroship.db.registerModel(collection, schemaJson)` → Promise<void>
+///
+/// Creates the table and any missing columns. Idempotent — safe to call
+/// on every cold start. Skips DDL if the model was already registered
+/// for this app on this thread.
+pub fn register_model(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+    let Some(schema) = parse_json_arg(scope, &args, 1) else {
+        return;
+    };
+
+    let app_id = get_app_id(&state);
+
+    // Fast path: already registered on this thread — skip DDL
+    if crate::is_model_registered(&app_id, &collection) {
+        let resolver = v8::PromiseResolver::new(scope).unwrap();
+        let promise = resolver.get_promise(scope);
+        let undefined = v8::undefined(scope);
+        resolver.resolve(scope, undefined.into());
+        rv.set(promise.into());
+        return;
+    }
+
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let value = match exec_register_model(&app_id, &collection, &schema).await {
+            Ok(()) => {
+                crate::mark_model_registered(&app_id, &collection);
+                "null".to_string()
+            }
+            Err(e) => error_json(&e),
+        };
+        OpResult::Completed { op_id, value, request_id }
+    }));
+
+    rv.set(promise.into());
+}
+
+/// Execute DDL for registerModel: CREATE SCHEMA, CREATE TABLE, ADD COLUMNs.
+async fn exec_register_model(
+    app_id: &str,
+    collection: &str,
+    schema: &Value,
+) -> Result<(), String> {
+    // Lazy pool init
+    let has_pool = DB_POOL.with(|p| p.borrow().is_some());
+    if !has_pool {
+        crate::init_pool_async().await.map_err(|e| format!("db: lazy init failed: {e}"))?;
+    }
+
+    let pool = DB_POOL.with(|p| {
+        let borrow = p.borrow();
+        borrow.as_ref().map(Rc::clone)
+    });
+    let pool = pool.ok_or_else(|| "db: pool not initialized".to_string())?;
+
+    // 1. CREATE SCHEMA IF NOT EXISTS
+    let create_schema = query::build_create_schema(app_id);
+    let empty: Vec<&str> = Vec::new();
+    pool.query_text_params(&create_schema, &empty)
+        .await
+        .map_err(|e| format!("db: create schema failed: {e}"))?;
+
+    // 2. CREATE TABLE IF NOT EXISTS
+    let create_table = query::build_create_table(app_id, collection, schema)
+        .map_err(|e| format!("db: {e}"))?;
+    pool.query_text_params(&create_table, &empty)
+        .await
+        .map_err(|e| format!("db: create table failed: {e}"))?;
+
+    // 3. ALTER TABLE ADD COLUMN IF NOT EXISTS for each field
+    if let Some(obj) = schema.as_object() {
+        for (field, def) in obj {
+            let alter = query::build_add_column(app_id, collection, field, def)
+                .map_err(|e| format!("db: {e}"))?;
+            pool.query_text_params(&alter, &empty)
+                .await
+                .map_err(|e| format!("db: add column '{field}' failed: {e}"))?;
+        }
+    }
+
+    Ok(())
+}

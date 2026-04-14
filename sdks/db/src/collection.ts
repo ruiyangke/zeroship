@@ -129,11 +129,21 @@ export class Collection {
   private _name: string;
   private _schema: NormalizedSchema;
   private _native: NativeDb;
+  private _ready: Promise<unknown> | null;
 
-  constructor(name: string, schema: NormalizedSchema, native: NativeDb) {
+  constructor(name: string, schema: NormalizedSchema, native: NativeDb, registrationPromise?: Promise<unknown> | null) {
     this._name = name;
     this._schema = schema;
     this._native = native;
+    this._ready = registrationPromise ?? null;
+  }
+
+  /** Await table registration (DDL) before first operation. */
+  private async ensureReady(): Promise<void> {
+    if (this._ready) {
+      await this._ready;
+      this._ready = null; // Only await once
+    }
   }
 
   /**
@@ -142,6 +152,7 @@ export class Collection {
    */
   async create(doc: PlainObject): Promise<Result<PlainObject>> {
     try {
+      await this.ensureReady();
       const validated = validateDoc(doc, this._schema);
       const raw = await this._native.insert(this._name, validated);
       const result = parseRaw<PlainObject>(raw);
@@ -164,7 +175,8 @@ export class Collection {
    * Returns the persisted documents with field names mapped to the user-facing shape.
    */
   async insertMany(docs: PlainObject[]): Promise<Result<PlainObject[]>> {
-    try {
+    await this.ensureReady();
+      try {
       const validated = docs.map((doc) => validateDoc(doc, this._schema));
       const raw = await this._native.insertMany(this._name, validated);
       const results = parseRaw<PlainObject[]>(raw);
@@ -179,7 +191,8 @@ export class Collection {
    * Field names in `filter` are mapped outbound before the native call.
    */
   async findOne(filter: PlainObject): Promise<Result<PlainObject | null>> {
-    try {
+    await this.ensureReady();
+      try {
       const mapped = mapFilterOutbound(filter);
       const raw = await this._native.findOne(this._name, mapped);
       if (raw === null) return ok(null);
@@ -197,10 +210,14 @@ export class Collection {
    */
   find(filter: PlainObject = {}): Query {
     const mapped = mapFilterOutbound(filter);
+    const ready = this._ready;
     return new Query(
       this._name,
       mapped,
-      (col, f, opts) => this._native.find(col, f, opts)
+      async (col, f, opts) => {
+        if (ready) await ready;
+        return this._native.find(col, f, opts);
+      }
     );
   }
 
@@ -214,7 +231,8 @@ export class Collection {
     filter: PlainObject,
     update: PlainObject
   ): Promise<Result<{ matchedCount: number; modifiedCount: number }>> {
-    try {
+    await this.ensureReady();
+      try {
       const fields = extractUpdateFields(update);
       validatePartial(fields, this._schema);
       validateArrayPushOps(update, this._schema);
@@ -243,7 +261,8 @@ export class Collection {
     filter: PlainObject,
     update: PlainObject
   ): Promise<Result<{ matchedCount: number; modifiedCount: number }>> {
-    try {
+    await this.ensureReady();
+      try {
       const fields = extractUpdateFields(update);
       validatePartial(fields, this._schema);
       validateArrayPushOps(update, this._schema);
@@ -267,7 +286,8 @@ export class Collection {
    * Returns `{ deletedCount: 1 }` if a document was found, `{ deletedCount: 0 }` otherwise.
    */
   async deleteOne(filter: PlainObject): Promise<Result<{ deletedCount: number }>> {
-    try {
+    await this.ensureReady();
+      try {
       const mapped = mapFilterOutbound(filter);
       const raw = await this._native.deleteOne(this._name, mapped);
       const result = parseRaw(raw);
@@ -282,7 +302,8 @@ export class Collection {
    * Returns `{ deletedCount: N }` where N is the number of documents removed.
    */
   async deleteMany(filter: PlainObject): Promise<Result<{ deletedCount: number }>> {
-    try {
+    await this.ensureReady();
+      try {
       const mapped = mapFilterOutbound(filter);
       const raw = await this._native.deleteMany(this._name, mapped);
       const result = parseRaw<{ deleted: number }>(raw);
@@ -297,7 +318,8 @@ export class Collection {
    * no filter is provided.
    */
   async countDocuments(filter: PlainObject = {}): Promise<Result<number>> {
-    try {
+    await this.ensureReady();
+      try {
       const mapped = mapFilterOutbound(filter);
       const raw = await this._native.count(this._name, mapped);
       const result = parseRaw<{ count: number }>(raw);
@@ -312,7 +334,8 @@ export class Collection {
    * Defaults to all documents when no filter is provided.
    */
   async distinct(field: string, filter: PlainObject = {}): Promise<Result<unknown[]>> {
-    try {
+    await this.ensureReady();
+      try {
       const mapped = mapFilterOutbound(filter);
       const raw = await this._native.distinct(this._name, field, mapped);
       const result = parseRaw<unknown[]>(raw);
@@ -327,7 +350,8 @@ export class Collection {
    * `$group`, `$match`, and accumulator expressions are translated to the native format.
    */
   async aggregate(pipeline: PlainObject[]): Promise<Result<PlainObject[]>> {
-    try {
+    await this.ensureReady();
+      try {
       const translated = translateAggregatePipeline(pipeline);
       const raw = await this._native.aggregate(this._name, translated);
       const results = parseRaw<PlainObject[]>(raw);

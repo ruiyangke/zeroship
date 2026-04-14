@@ -31,6 +31,23 @@ thread_local! {
 
     /// Database URL — set during `init()`, consumed on first pool creation.
     pub(crate) static DB_URL: RefCell<Option<String>> = const { RefCell::new(None) };
+
+    /// Registered models — keyed by "app_id:collection". Prevents redundant DDL
+    /// on subsequent cold starts within the same deploy.
+    static REGISTERED_MODELS: RefCell<std::collections::HashSet<String>> =
+        RefCell::new(std::collections::HashSet::new());
+}
+
+/// Check if a model is already registered for this app on this thread.
+pub(crate) fn is_model_registered(app_id: &str, collection: &str) -> bool {
+    let key = format!("{app_id}:{collection}");
+    REGISTERED_MODELS.with(|r| r.borrow().contains(&key))
+}
+
+/// Mark a model as registered.
+pub(crate) fn mark_model_registered(app_id: &str, collection: &str) {
+    let key = format!("{app_id}:{collection}");
+    REGISTERED_MODELS.with(|r| { r.borrow_mut().insert(key); });
 }
 
 /// Ensure the pool is initialized. If not, try to create it from `DB_URL`.
@@ -127,6 +144,7 @@ impl NativePlugin for DbPlugin {
         r.add("count", callbacks::count);
         r.add("distinct", callbacks::distinct);
         r.add("aggregate", callbacks::aggregate);
+        r.add("registerModel", callbacks::register_model);
     }
 
     fn shutdown(&self) {
