@@ -1,226 +1,128 @@
 /**
- * Field-name mapping utilities for @zeroship/db.
- * Converts between the JS-facing camelCase API names (_id, createdAt, updatedAt)
- * and the native snake_case / plain names used by the underlying data layer.
+ * Utilities for @zeroship/db.
+ *
+ * No field mapping — Postgres native names used everywhere (id, created_at, updated_at).
+ * Contains aggregate pipeline translation (MongoDB → native format).
  */
 import { PlainObject } from "./types.js";
 
 // ---------------------------------------------------------------------------
-// Inbound mapping: native result → user-facing doc
-// id → _id, created_at → createdAt, updated_at → updatedAt
+// Pass-through (no mapping — Postgres native names)
 // ---------------------------------------------------------------------------
 
-/**
- * @internal
- * Maps a native result document to the user-facing shape.
- * Renames `id`→`_id`, `created_at`→`createdAt`, `updated_at`→`updatedAt`.
- * All other fields are passed through unchanged.
- */
+/** @internal Map result: created_at→createdAt, updated_at→updatedAt. No _id mapping. */
 export function mapResultDoc(doc: PlainObject): PlainObject {
   const result: PlainObject = {};
   for (const [key, val] of Object.entries(doc)) {
-    if (key === "id") {
-      result["_id"] = val;
-    } else if (key === "created_at") {
-      result["createdAt"] = val;
-    } else if (key === "updated_at") {
-      result["updatedAt"] = val;
-    } else {
-      result[key] = val;
-    }
+    if (key === "created_at") result["createdAt"] = val;
+    else if (key === "updated_at") result["updatedAt"] = val;
+    else result[key] = val;
   }
   return result;
 }
 
-// ---------------------------------------------------------------------------
-// Outbound mapping: user filter → native filter
-// _id → id, createdAt → created_at, updatedAt → updated_at (deep, handles $and/$or/$not)
-// ---------------------------------------------------------------------------
-
-/**
- * @internal
- * Maps a user-supplied filter to the native format.
- * Renames `_id`→`id`, `createdAt`→`created_at`, `updatedAt`→`updated_at`.
- * Recurses into `$and`, `$or`, and `$not` operators so field names are
- * translated at every nesting level.
- */
+/** @internal Map filter: createdAt→created_at, updatedAt→updated_at. Recurses into $and/$or/$not. */
 export function mapFilterOutbound(filter: PlainObject): PlainObject {
   const result: PlainObject = {};
   for (const [key, val] of Object.entries(filter)) {
-    if (key === "_id") {
-      result["id"] = val;
-    } else if (key === "createdAt") {
-      result["created_at"] = val;
-    } else if (key === "updatedAt") {
-      result["updated_at"] = val;
-    } else if (key === "$and" || key === "$or") {
-      result[key] = (val as PlainObject[]).map(mapFilterOutbound);
-    } else if (key === "$not") {
-      result[key] = mapFilterOutbound(val as PlainObject);
-    } else {
-      result[key] = val;
-    }
+    if (key === "createdAt") result["created_at"] = val;
+    else if (key === "updatedAt") result["updated_at"] = val;
+    else if (key === "$and" || key === "$or") result[key] = (val as PlainObject[]).map(mapFilterOutbound);
+    else if (key === "$not") result[key] = mapFilterOutbound(val as PlainObject);
+    else result[key] = val;
   }
   return result;
 }
 
-/**
- * @internal
- * Maps an update object's field names from user-facing to native format.
- * Handles both `$set`/`$unset` operator objects and bare top-level field maps.
- * Does NOT touch `$push`/`$addToSet`/`$inc`/`$dec`/`$mul` — those are handled
- * separately by the collection layer.
- */
+/** @internal Map a field name from user-facing to DB column name. */
+function mapFieldName(field: string): string {
+  if (field === "createdAt") return "created_at";
+  if (field === "updatedAt") return "updated_at";
+  return field;
+}
+
+/** @internal Pass-through: no update mapping needed. */
 export function mapUpdateOutbound(update: PlainObject): PlainObject {
-  // The native layer expects per-field operators: { views: { $inc: 1 } }
-  // Mongoose uses top-level operators: { $inc: { views: 1 } }
-  // Transform Mongoose → native format, applying field name mapping.
+  // Still need to transform Mongoose top-level operators to per-field:
+  // { $inc: { views: 1 } } → { views: { $inc: 1 } }
   const result: PlainObject = {};
   for (const [key, val] of Object.entries(update)) {
     if (key === "$set" && typeof val === "object" && val !== null) {
-      // $set fields become plain field:value
+      // $set fields become plain field:value, with createdAt/updatedAt mapped
       for (const [field, fieldVal] of Object.entries(val as PlainObject)) {
         result[mapFieldName(field)] = fieldVal;
       }
     } else if (key.startsWith("$") && typeof val === "object" && val !== null) {
       // $inc, $dec, $mul, $push, $pull, $addToSet — per-field operators
-      // { $inc: { views: 1, likes: 2 } } → { views: { $inc: 1 }, likes: { $inc: 2 } }
       for (const [field, fieldVal] of Object.entries(val as PlainObject)) {
         result[mapFieldName(field)] = { [key]: fieldVal };
       }
     } else {
-      // Bare field — apply name mapping
       result[mapFieldName(key)] = val;
     }
   }
   return result;
 }
 
-/** Maps a single user-facing field name to its native counterpart. */
-function mapFieldName(key: string): string {
-  if (key === "_id") return "id";
-  if (key === "createdAt") return "created_at";
-  if (key === "updatedAt") return "updated_at";
-  return key;
-}
-
-/** Applies mapFieldName to every key in a plain object. */
-function mapUpdateFields(fields: PlainObject): PlainObject {
-  const result: PlainObject = {};
-  for (const [k, v] of Object.entries(fields)) {
-    result[mapFieldName(k)] = v;
-  }
-  return result;
-}
-
 // ---------------------------------------------------------------------------
-// Aggregate pipeline translation: MongoDB → native format
+// Aggregate pipeline translation (MongoDB syntax → native format)
 // ---------------------------------------------------------------------------
 
+/** @internal Strip $ prefix from field references */
 function stripDollar(val: string): string {
   return val.startsWith("$") ? val.slice(1) : val;
 }
 
-/** Translates a single MongoDB accumulator expression to the native equivalent. */
-function translateAccumulator(
-  acc: unknown
-): unknown {
+/** @internal Translate an accumulator expression */
+function translateAccumulator(acc: unknown): unknown {
   if (typeof acc !== "object" || acc === null) return acc;
   const obj = acc as PlainObject;
 
-  // { $sum: 1 } → { $count: true }
-  if ("$sum" in obj && obj["$sum"] === 1) {
-    return { $count: true };
-  }
-
-  // { $sum: "$field" } → { $sum: "field" }
-  if ("$sum" in obj && typeof obj["$sum"] === "string") {
-    return { $sum: stripDollar(obj["$sum"] as string) };
-  }
-
-  // { $avg: "$field" } → { $avg: "field" }
-  if ("$avg" in obj && typeof obj["$avg"] === "string") {
-    return { $avg: stripDollar(obj["$avg"] as string) };
-  }
-
-  // { $min: "$field" } → { $min: "field" }
-  if ("$min" in obj && typeof obj["$min"] === "string") {
-    return { $min: stripDollar(obj["$min"] as string) };
-  }
-
-  // { $max: "$field" } → { $max: "field" }
-  if ("$max" in obj && typeof obj["$max"] === "string") {
-    return { $max: stripDollar(obj["$max"] as string) };
-  }
-
-  // { $first: "$field" } → { $first: "field" }
-  if ("$first" in obj && typeof obj["$first"] === "string") {
-    return { $first: stripDollar(obj["$first"] as string) };
-  }
+  if ("$sum" in obj && obj.$sum === 1) return { $count: true };
+  if ("$sum" in obj && typeof obj.$sum === "string") return { $sum: stripDollar(obj.$sum as string) };
+  if ("$avg" in obj && typeof obj.$avg === "string") return { $avg: stripDollar(obj.$avg as string) };
+  if ("$min" in obj && typeof obj.$min === "string") return { $min: stripDollar(obj.$min as string) };
+  if ("$max" in obj && typeof obj.$max === "string") return { $max: stripDollar(obj.$max as string) };
+  if ("$first" in obj && typeof obj.$first === "string") return { $first: stripDollar(obj.$first as string) };
 
   return acc;
 }
 
-/** Translates a MongoDB $group `_id` value to the native `by` format. */
-function translateGroupId(
-  id: unknown
-): { by: string | string[] } {
-  // Single field: "$fieldName" → by: "fieldName"
-  if (typeof id === "string") {
-    return { by: stripDollar(id) };
-  }
-
-  // Multi-field: { a: "$x", b: "$y" } → by: ["x", "y"]
+/** @internal Translate _id group key to by */
+function translateGroupId(id: unknown): { by: string | string[] } {
+  if (typeof id === "string") return { by: stripDollar(id) };
   if (typeof id === "object" && id !== null) {
-    const obj = id as PlainObject;
     const fields: string[] = [];
-    for (const val of Object.values(obj)) {
-      if (typeof val === "string") {
-        fields.push(stripDollar(val));
-      }
+    for (const val of Object.values(id as PlainObject)) {
+      if (typeof val === "string") fields.push(stripDollar(val));
     }
     return { by: fields };
   }
-
   return { by: String(id) };
 }
 
-/** Translates a single MongoDB aggregate stage to the native format. */
+/** @internal Translate a single pipeline stage */
 function translateStage(stage: PlainObject): PlainObject {
   if ("$group" in stage) {
-    const group = stage["$group"] as PlainObject;
-    const { _id, ...rest } = group;
-    const { by } = translateGroupId(_id);
-
+    const group = stage.$group as PlainObject;
+    const { id, ...rest } = group;
+    const { by } = translateGroupId(id);
     const translated: PlainObject = { by };
-    for (const [accKey, accVal] of Object.entries(rest)) {
-      translated[accKey] = translateAccumulator(accVal);
+    for (const [key, val] of Object.entries(rest)) {
+      translated[key] = translateAccumulator(val);
     }
     return { $group: translated };
   }
-
-  if ("$match" in stage) {
-    return { $match: mapFilterOutbound(stage["$match"] as PlainObject) };
-  }
-
-  if ("$sort" in stage) {
-    return stage;
-  }
-
-  if ("$limit" in stage || "$skip" in stage || "$project" in stage || "$unwind" in stage) {
-    return stage;
-  }
-
   return stage;
 }
 
 /**
  * @internal
- * Translates a full MongoDB-style aggregate pipeline to the native format.
- * Each stage is translated individually; unrecognized stages pass through as-is.
+ * Translate a MongoDB-style aggregate pipeline to native format.
+ * - `$group._id` → `$group.by`
+ * - `"$field"` → `"field"` (strip $ prefix)
+ * - `{ $sum: 1 }` → `{ $count: true }`
  */
-export function translateAggregatePipeline(
-  pipeline: PlainObject[]
-): PlainObject[] {
+export function translateAggregatePipeline(pipeline: PlainObject[]): PlainObject[] {
   return pipeline.map(translateStage);
 }

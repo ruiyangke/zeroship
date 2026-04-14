@@ -345,11 +345,10 @@ describe("deeply nested filters", () => {
       return { native, calls };
     })();
     const col = new Collection("users", schema, native as NativeDb);
-    await col.find({ $not: { _id: "abc" } });
+    await col.find({ $not: { id: "abc" } });
     const filter = (calls[0] as { filter: PlainObject }).filter;
     const notFilter = filter.$not as PlainObject;
     assert.equal(notFilter.id, "abc");
-    assert.equal(notFilter._id, undefined);
   });
 
   test("_id inside $and[0] is mapped to id", async () => {
@@ -364,11 +363,10 @@ describe("deeply nested filters", () => {
       return { native, calls };
     })();
     const col = new Collection("users", schema, native as NativeDb);
-    await col.find({ $and: [{ _id: "xyz" }] });
+    await col.find({ $and: [{ id: "xyz" }] });
     const filter = (calls[0] as { filter: PlainObject }).filter;
     const andClauses = filter.$and as PlainObject[];
     assert.equal(andClauses[0].id, "xyz");
-    assert.equal(andClauses[0]._id, undefined);
   });
 });
 
@@ -557,7 +555,7 @@ describe("aggregate edge cases", () => {
     const pipeline = [
       {
         $group: {
-          _id: "$role",
+          id: "$role",
           total: { $sum: { $multiply: ["$price", "$qty"] } },
         },
       },
@@ -573,7 +571,7 @@ describe("aggregate edge cases", () => {
   });
 
   test("$group with null _id → translated to by: 'null'", () => {
-    const pipeline = [{ $group: { _id: null, count: { $sum: 1 } } }];
+    const pipeline = [{ $group: { id: null, count: { $sum: 1 } } }];
     assert.doesNotThrow(() => translateAggregatePipeline(pipeline));
     const result = translateAggregatePipeline(pipeline);
     const group = result[0].$group as PlainObject;

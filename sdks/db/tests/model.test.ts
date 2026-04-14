@@ -51,7 +51,7 @@ describe("model() — builder schema", () => {
     const Users = model("users", { name: t.string().required() }, native);
     const { data, error } = await Users.create({ name: "Alice" });
     assert.equal(error, null);
-    assert.ok(data !== null && "_id" in data);
+    assert.ok(data !== null && "id" in data);
     assert.equal(data.name, "Alice");
   });
 
@@ -61,7 +61,7 @@ describe("model() — builder schema", () => {
     const { data, error } = await Users.findOne({ name: "Alice" });
     assert.equal(error, null);
     assert.ok(data !== null);
-    assert.equal(data._id, "xyz");
+    assert.equal(data.id, "xyz");
   });
 });
 
@@ -88,7 +88,7 @@ describe("model() — Mongoose schema", () => {
     const Users = model("users", schema, native);
     const { data, error } = await Users.create({ name: "Bob" });
     assert.equal(error, null);
-    assert.ok(data !== null && "_id" in data);
+    assert.ok(data !== null && "id" in data);
   });
 });
 
@@ -117,7 +117,7 @@ describe("model() — nativeOverride", () => {
     const { data, error } = await Users.create({ title: "Hello" });
     assert.equal(error, null);
     assert.ok(data !== null);
-    assert.equal(data._id, "mock-id");
+    assert.equal(data.id, "mock-id");
   });
 });
 

@@ -95,9 +95,9 @@ describe("Query thenable execution", () => {
     const { data, error } = await q;
     assert.equal(error, null);
     assert.ok(data !== null);
-    assert.equal(data[0]._id, "1");
+    assert.equal(data[0].id, "1");
     assert.equal(data[0].name, "Alice");
-    assert.equal(data[1]._id, "2");
+    assert.equal(data[1].id, "2");
   });
 
   test("await Query maps created_at → createdAt", async () => {
@@ -125,6 +125,6 @@ describe("Query thenable execution", () => {
     const { data, error } = await Promise.resolve(q);
     assert.equal(error, null);
     assert.ok(data !== null);
-    assert.equal(data[0]._id, "x");
+    assert.equal(data[0].id, "x");
   });
 });

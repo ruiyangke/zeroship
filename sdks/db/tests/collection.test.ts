@@ -99,8 +99,8 @@ describe("Collection.create()", () => {
     const col = new Collection("users", schema, native);
     const { data, error } = await col.create({ name: "Carol", age: 20 });
     assert.equal(error, null);
-    assert.ok(data !== null && "_id" in data);
-    assert.equal(data._id, "abc123");
+    assert.ok(data !== null && "id" in data);
+    assert.equal(data.id, "abc123");
   });
 
   test("returns ValidationError for missing required field", async () => {
@@ -161,7 +161,7 @@ describe("Collection.insertMany()", () => {
     assert.equal(error, null);
     assert.ok(data !== null);
     assert.equal(data.length, 2);
-    assert.ok("_id" in data[0]);
+    assert.ok("id" in data[0]);
   });
 
   test("returns ValidationError if any doc is invalid", async () => {
@@ -181,11 +181,10 @@ describe("Collection.findOne()", () => {
   test("maps _id filter to id before calling native", async () => {
     const { native, calls } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await col.findOne({ _id: "abc" });
+    await col.findOne({ id: "abc" });
     const filter = calls[0].args[1] as PlainObject;
     assert.ok("id" in filter);
     assert.equal(filter.id, "abc");
-    assert.ok(!("_id" in filter));
   });
 
   test("returns null data when native returns null", async () => {
@@ -204,7 +203,7 @@ describe("Collection.findOne()", () => {
     const { data, error } = await col.findOne({ name: "Alice" });
     assert.equal(error, null);
     assert.ok(data !== null);
-    assert.equal(data._id, "xyz");
+    assert.equal(data.id, "xyz");
     assert.equal(data.name, "Alice");
   });
 });
@@ -225,11 +224,10 @@ describe("Collection.find()", () => {
   test("find() passes mapped filter to Query", async () => {
     const { native, calls } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await col.find({ _id: "123" });
+    await col.find({ id: "123" });
     assert.equal(calls[0].method, "find");
     const filter = calls[0].args[1] as PlainObject;
     assert.equal(filter.id, "123");
-    assert.ok(!("_id" in filter));
   });
 
   test("find() result docs have _id", async () => {
@@ -237,8 +235,8 @@ describe("Collection.find()", () => {
     const col = new Collection("users", schema, native);
     const { data, error } = await col.find({});
     assert.equal(error, null);
-    assert.ok(data !== null && "_id" in data[0]);
-    assert.equal(data[0]._id, "1");
+    assert.ok(data !== null && "id" in data[0]);
+    assert.equal(data[0].id, "1");
   });
 });
 
@@ -250,7 +248,7 @@ describe("Collection.updateOne()", () => {
   test("calls native.updateOne with mapped filter", async () => {
     const { native, calls } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await col.updateOne({ _id: "1" }, { $set: { name: "NewName" } });
+    await col.updateOne({ id: "1" }, { $set: { name: "NewName" } });
     assert.equal(calls[0].method, "updateOne");
     const filter = calls[0].args[1] as PlainObject;
     assert.equal(filter.id, "1");
@@ -294,11 +292,10 @@ describe("Collection.updateOne()", () => {
   test("maps _id → id inside $set update (flattened)", async () => {
     const { native, calls } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await col.updateOne({ name: "Alice" }, { $set: { _id: "new-id" } });
+    await col.updateOne({ name: "Alice" }, { $set: { id: "new-id" } });
     const update = calls[0].args[2] as PlainObject;
-    // $set is flattened: { $set: { _id: "x" } } → { id: "x" }
+    // $set is flattened: { $set: { id: "x" } } → { id: "x" }
     assert.equal(update.id, "new-id");
-    assert.equal(update._id, undefined);
     assert.equal(update.$set, undefined);
   });
 
@@ -373,7 +370,7 @@ describe("Collection.updateMany()", () => {
   test("maps filter _id → id", async () => {
     const { native, calls } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await col.updateMany({ _id: "x" }, { $set: { name: "Y" } });
+    await col.updateMany({ id: "x" }, { $set: { name: "Y" } });
     const filter = calls[0].args[1] as PlainObject;
     assert.equal(filter.id, "x");
   });
@@ -382,10 +379,9 @@ describe("Collection.updateMany()", () => {
   test("maps _id → id inside $set in updateMany", async () => {
     const { native, calls } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await col.updateMany({ role: "user" }, { $set: { _id: "x" } });
+    await col.updateMany({ role: "user" }, { $set: { id: "x" } });
     const update = calls[0].args[2] as PlainObject;
     assert.equal(update.id, "x");
-    assert.equal(update._id, undefined);
     assert.equal(update.$set, undefined);
   });
 
@@ -425,7 +421,7 @@ describe("Collection.deleteOne()", () => {
   test("maps _id → id in filter", async () => {
     const { native, calls } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await col.deleteOne({ _id: "abc" });
+    await col.deleteOne({ id: "abc" });
     const filter = calls[0].args[1] as PlainObject;
     assert.equal(filter.id, "abc");
   });
@@ -447,7 +443,7 @@ describe("Collection.deleteMany()", () => {
   test("maps _id → id in filter", async () => {
     const { native, calls } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await col.deleteMany({ _id: "z" });
+    await col.deleteMany({ id: "z" });
     const filter = calls[0].args[1] as PlainObject;
     assert.equal(filter.id, "z");
   });
@@ -469,7 +465,7 @@ describe("Collection.countDocuments()", () => {
   test("maps _id → id in filter", async () => {
     const { native, calls } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await col.countDocuments({ _id: "x" });
+    await col.countDocuments({ id: "x" });
     const filter = calls[0].args[1] as PlainObject;
     assert.equal(filter.id, "x");
   });
@@ -505,7 +501,7 @@ describe("Collection.distinct()", () => {
   test("maps _id → id in filter", async () => {
     const { native, calls } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await col.distinct("name", { _id: "abc" });
+    await col.distinct("name", { id: "abc" });
     const filter = calls[0].args[2] as PlainObject;
     assert.equal(filter.id, "abc");
   });
@@ -551,7 +547,7 @@ describe("Collection.aggregate()", () => {
     const { native, calls } = makeMockNative();
     const col = new Collection("users", schema, native);
     await col.aggregate([
-      { $group: { _id: "$role", count: { $sum: 1 } } },
+      { $group: { id: "$role", count: { $sum: 1 } } },
     ]);
     assert.equal(calls[0].method, "aggregate");
     const pipeline = calls[0].args[1] as PlainObject[];
@@ -565,17 +561,16 @@ describe("Collection.aggregate()", () => {
     const col = new Collection("users", schema, native);
     const { data, error } = await col.aggregate([{ $match: { role: "admin" } }]);
     assert.equal(error, null);
-    assert.ok(data !== null && "_id" in data[0]);
-    assert.equal(data[0]._id, "g1");
+    assert.ok(data !== null && "id" in data[0]);
+    assert.equal(data[0].id, "g1");
   });
 
   test("passes $match with mapped filter", async () => {
     const { native, calls } = makeMockNative();
     const col = new Collection("users", schema, native);
-    await col.aggregate([{ $match: { _id: "abc" } }]);
+    await col.aggregate([{ $match: { id: "abc" } }]);
     const pipeline = calls[0].args[1] as PlainObject[];
     const matchFilter = pipeline[0].$match as PlainObject;
     assert.equal(matchFilter.id, "abc");
-    assert.ok(!("_id" in matchFilter));
   });
 });
