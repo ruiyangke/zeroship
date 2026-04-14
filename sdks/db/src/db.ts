@@ -27,14 +27,14 @@ import { model } from "./model.js";
 import { Collection, type NativeDb } from "./collection.js";
 import { Query } from "./query.js";
 import { type NormalizedSchema } from "./schema.js";
-import { type PlainObject, type Result, type Document, type CreateInput, type UpdateExpression, type Filter, type IsolationLevel, type NamingStrategy, naming, ok, err } from "./types.js";
+import { type PlainObject, type Result, type Document, type CreateInput, type UpdateExpression, type Filter, type IsolationLevel, type NamingStrategy, SchemaBuilder, naming, ok, err } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-/** Schema definition — Mongoose style, builder style, or bare constructors */
-type SchemaInput = Record<string, unknown>;
+/** Schema definition — plain fields or schema() builder with options */
+type SchemaInput = Record<string, unknown> | SchemaBuilder<Record<string, unknown>>;
 
 /**
  * A typed collection inside a transaction — same API as Collection but throws
@@ -81,11 +81,14 @@ export interface TransactionOptions {
   isolationLevel?: IsolationLevel;
 }
 
+/** Unwrap SchemaBuilder at the type level — extracts fields from schema() wrapper */
+type UnwrapSchema<T> = T extends SchemaBuilder<infer S> ? S : T;
+
 /** The db object returned by createDb — collections are fully typed per schema */
 export type Db<T extends Record<string, SchemaInput>> = {
-  [K in keyof T]: Collection<T[K]>
+  [K in keyof T]: Collection<UnwrapSchema<T[K]>>
 } & {
-  transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection<T[K]> }) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
+  transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>> }) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
 };
 
 // ---------------------------------------------------------------------------
@@ -197,8 +200,6 @@ export interface CreateDbOptions {
   native?: NativeDb;
   /** Column naming strategy. Default: `naming.snakeCase`. */
   naming?: NamingStrategy;
-  /** Enable soft delete for all collections. When true, deleteOne/deleteMany set `deleted_at` instead of removing rows, and all reads auto-filter deleted documents. */
-  softDelete?: boolean;
 }
 
 /**
@@ -214,12 +215,15 @@ export function createDb<const T extends Record<string, SchemaInput>>(
 ): Db<T> {
   const native = options?.native ?? getNativeDb();
   const namingStrategy = options?.naming ?? naming.snakeCase;
-  const softDelete = options?.softDelete ?? false;
   const collections = {} as { [K in keyof T]: Collection<T[K]> };
 
-  for (const [name, schema] of Object.entries(schemas)) {
+  for (const [name, rawSchema] of Object.entries(schemas)) {
+    // Unwrap SchemaBuilder to extract per-collection options
+    const isBuilder = rawSchema instanceof SchemaBuilder;
+    const fields = isBuilder ? rawSchema.fields : rawSchema;
+    const softDelete = isBuilder ? rawSchema.options.softDelete : false;
     (collections as Record<string, Collection<SchemaInput>>)[name] =
-      model(name, schema as SchemaInput, native, namingStrategy, softDelete);
+      model(name, fields as Record<string, unknown>, native, namingStrategy, softDelete);
   }
 
   // Pre-cache TxCollection wrappers — stateless, reusable across transactions

@@ -324,3 +324,37 @@ export const t = {
     return new TypeBuilder<U[]>({ type: "array", items: itemType });
   },
 };
+
+// ---------------------------------------------------------------------------
+// Schema builder — per-collection options via fluent API
+// ---------------------------------------------------------------------------
+
+/** Options that can be set per-collection via the schema() builder. */
+export interface SchemaOptions {
+  softDelete: boolean;
+}
+
+/**
+ * Wraps field definitions with per-collection options.
+ * Use `schema({ ... }).softDelete()` to enable soft delete for a specific collection.
+ */
+export class SchemaBuilder<S> {
+  fields: S;
+  options: SchemaOptions;
+
+  constructor(fields: S) {
+    this.fields = fields;
+    this.options = { softDelete: false };
+  }
+
+  /** Enable soft delete — deleteOne/deleteMany set `deletedAt` instead of removing rows. */
+  softDelete(): this {
+    this.options.softDelete = true;
+    return this;
+  }
+}
+
+/** Create a schema with per-collection options. */
+export function schema<S>(fields: S): SchemaBuilder<S> {
+  return new SchemaBuilder(fields);
+}

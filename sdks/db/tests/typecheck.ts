@@ -4,7 +4,7 @@
  * Run: npx tsc --project tsconfig.test.json
  */
 
-import { createDb, t } from "../src/index.js";
+import { createDb, t, schema } from "../src/index.js";
 
 // === Mongoose-style schema ===
 
@@ -230,14 +230,24 @@ async function testTxSelectNarrowing() {
   });
 }
 
-// --- soft delete: forceDelete is available ---
+// --- per-collection soft delete via schema().softDelete() ---
+
+const db3 = createDb({
+  articles: schema({
+    title: t.string().required(),
+    body: t.string(),
+  }).softDelete(),
+  logs: {
+    message: t.string().required(),
+  },
+});
 
 async function testForceDelete() {
-  const { data: d1 } = await db.users.forceDelete({ name: "Alice" });
+  const { data: d1 } = await db3.articles.forceDelete({ title: "old" });
   if (d1) {
     const count: number = d1.deletedCount; // typed
   }
-  const { data: d2 } = await db.users.forceDeleteMany({ role: "admin" });
+  const { data: d2 } = await db3.articles.forceDeleteMany({});
   if (d2) {
     const count: number = d2.deletedCount; // typed
   }

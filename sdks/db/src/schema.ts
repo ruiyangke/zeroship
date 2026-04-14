@@ -2,7 +2,7 @@
  * Schema normalization: converts Mongoose-style schema definitions and TypeBuilder
  * instances into a unified NormalizedSchema used by the rest of the SDK.
  */
-import { TypeBuilder, FieldDef, FieldDefaultValue, PrimitiveTypeName } from "./types.js";
+import { TypeBuilder, SchemaBuilder, FieldDef, FieldDefaultValue, PrimitiveTypeName } from "./types.js";
 
 /** A normalized schema mapping field names to their FieldDef. */
 export type NormalizedSchema = Record<string, FieldDef>;
