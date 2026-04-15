@@ -338,6 +338,87 @@ impl Runtime {
         }
     }
 
+    /// Start the internal event loop pump.  Spawns a compio task that
+    /// processes async V8 operations (timers, fetch, streams) until the
+    /// runtime is dropped.
+    ///
+    /// Must be called **after** the runtime is wrapped in `Rc<RefCell<>>`
+    /// and the isolate is initialised (i.e. after `new_direct` /
+    /// `new_with_plugins`).
+    pub fn start_pump(self_ref: Rc<RefCell<Self>>) {
+        let (notify_tx, notify_rx) = futures::channel::mpsc::channel::<()>(1);
+        {
+            let mut rt = self_ref.borrow_mut();
+            rt.set_pump_notify(notify_tx);
+        }
+
+        let rt = self_ref.clone();
+        compio::runtime::spawn(async move {
+            Self::pump_loop(rt, notify_rx).await;
+        })
+        .detach();
+    }
+
+    /// The pump loop — drives `AsyncWork` (fetch, timers, streams) on the
+    /// current compio thread.  Enters/exits the V8 isolate around every V8
+    /// interaction so multi-isolate-per-thread setups (the worker) work
+    /// correctly.  For single-isolate use (benchmark server) the extra
+    /// enter/exit is a harmless nested push/pop.
+    async fn pump_loop(
+        runtime: Rc<RefCell<Self>>,
+        mut notify_rx: futures::channel::mpsc::Receiver<()>,
+    ) {
+        use futures::StreamExt;
+        let mut work = AsyncWork::new();
+
+        loop {
+            {
+                let mut rt = runtime.borrow_mut();
+                rt.enter_isolate();
+                rt.drain_new_tasks_into(&mut work);
+                rt.exit_isolate();
+            }
+
+            let event = {
+                let has_ops = !work.pending_ops.is_empty();
+                let has_timers = !work.pending_timers.is_empty();
+
+                match (has_ops, has_timers) {
+                    (true, true) => {
+                        futures::select! {
+                            r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
+                            r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
+                            _ = notify_rx.next() => None,
+                        }
+                    }
+                    (true, false) => {
+                        futures::select! {
+                            r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
+                            _ = notify_rx.next() => None,
+                        }
+                    }
+                    (false, true) => {
+                        futures::select! {
+                            r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
+                            _ = notify_rx.next() => None,
+                        }
+                    }
+                    (false, false) => {
+                        let _ = notify_rx.next().await;
+                        None
+                    }
+                }
+            };
+
+            if let Some(event) = event {
+                let mut rt = runtime.borrow_mut();
+                rt.enter_isolate();
+                rt.handle_async_event(event, &mut work);
+                rt.exit_isolate();
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Initialization
     // -----------------------------------------------------------------------

@@ -5,7 +5,7 @@ use std::rc::Rc;
 use uuid::Uuid;
 
 use zeroship_runtime::plugin::NativePlugin;
-use zeroship_runtime::runtime::{AsyncEvent, AsyncWork, Runtime};
+use zeroship_runtime::runtime::Runtime;
 
 struct IsolateEntry {
     runtime: Rc<RefCell<Runtime>>,
@@ -121,17 +121,8 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8]) -> bool {
         // The handler will enter/exit around each dispatch_rpc call.
         rt.borrow_mut().exit_isolate();
 
-        // Start pump task for async V8 ops
-        let mut async_work = AsyncWork::new();
-        let (notify_tx, notify_rx) = futures::channel::mpsc::channel::<()>(1);
-        rt.borrow_mut().set_pump_notify(notify_tx);
-        rt.borrow_mut().drain_new_tasks_into(&mut async_work);
-
-        let rt_pump = rt.clone();
-        compio::runtime::spawn(async move {
-            pump_task(rt_pump, async_work, notify_rx).await;
-        })
-        .detach();
+        // Start pump task for async V8 ops (timers, fetch, streams).
+        Runtime::start_pump(rt.clone());
 
         cache.isolates.insert(
             app_id,
@@ -210,58 +201,3 @@ fn evict_lru(cache: &mut AppCache) {
     }
 }
 
-/// Pump task — drives async V8 operations (timers, fetch).
-/// Copied from `zeroship_runtime::serve` — must stay in sync.
-async fn pump_task(
-    runtime: Rc<RefCell<Runtime>>,
-    mut work: AsyncWork,
-    mut notify_rx: futures::channel::mpsc::Receiver<()>,
-) {
-    use futures::StreamExt;
-    loop {
-        {
-            let mut rt = runtime.borrow_mut();
-            rt.enter_isolate();
-            rt.drain_new_tasks_into(&mut work);
-            rt.exit_isolate();
-        }
-
-        let event = {
-            let has_ops = !work.pending_ops.is_empty();
-            let has_timers = !work.pending_timers.is_empty();
-
-            match (has_ops, has_timers) {
-                (true, true) => {
-                    futures::select! {
-                        r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
-                        r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
-                        _ = notify_rx.next() => None,
-                    }
-                }
-                (true, false) => {
-                    futures::select! {
-                        r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
-                        _ = notify_rx.next() => None,
-                    }
-                }
-                (false, true) => {
-                    futures::select! {
-                        r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
-                        _ = notify_rx.next() => None,
-                    }
-                }
-                (false, false) => {
-                    let _ = notify_rx.next().await;
-                    None
-                }
-            }
-        };
-
-        if let Some(event) = event {
-            let mut rt = runtime.borrow_mut();
-            rt.enter_isolate();
-            rt.handle_async_event(event, &mut work);
-            rt.exit_isolate();
-        }
-    }
-}

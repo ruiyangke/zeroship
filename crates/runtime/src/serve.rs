@@ -24,12 +24,11 @@ use std::collections::HashMap;
 
 use crate::init::init_v8;
 use crate::modules::ModuleEntry;
-use crate::runtime::{AsyncEvent, AsyncWork, DispatchOutcome, HttpDispatchResult, Runtime};
+use crate::runtime::{DispatchOutcome, HttpDispatchResult, Runtime};
 
 use compio::buf::BufResult;
 use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
-use futures::StreamExt;
 
 
 // ===========================================================================
@@ -921,59 +920,6 @@ fn deliver_ws_close(
 }
 
 // ===========================================================================
-// Pump task
-// ===========================================================================
-
-async fn pump_task(
-    runtime: Rc<RefCell<Runtime>>,
-    mut work: AsyncWork,
-    mut notify_rx: futures::channel::mpsc::Receiver<()>,
-) {
-    loop {
-        {
-            let mut rt = runtime.borrow_mut();
-            rt.drain_new_tasks_into(&mut work);
-        }
-
-        let event = {
-            let has_ops = !work.pending_ops.is_empty();
-            let has_timers = !work.pending_timers.is_empty();
-
-            match (has_ops, has_timers) {
-                (true, true) => {
-                    futures::select! {
-                        r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
-                        r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
-                        _ = notify_rx.next() => None,
-                    }
-                }
-                (true, false) => {
-                    futures::select! {
-                        r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
-                        _ = notify_rx.next() => None,
-                    }
-                }
-                (false, true) => {
-                    futures::select! {
-                        r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
-                        _ = notify_rx.next() => None,
-                    }
-                }
-                (false, false) => {
-                    let _ = notify_rx.next().await;
-                    None
-                }
-            }
-        };
-
-        if let Some(event) = event {
-            let mut rt = runtime.borrow_mut();
-            rt.handle_async_event(event, &mut work);
-        }
-    }
-}
-
-// ===========================================================================
 // SO_REUSEPORT listener
 // ===========================================================================
 
@@ -1042,16 +988,8 @@ fn run_single_worker(
                 }
             }
 
-            // Pump task setup
-            let mut async_work = AsyncWork::new();
-            let (notify_tx, notify_rx) = futures::channel::mpsc::channel::<()>(1);
-            runtime.borrow_mut().set_pump_notify(notify_tx);
-            runtime.borrow_mut().drain_new_tasks_into(&mut async_work);
-
-            let rt_pump = runtime.clone();
-            compio::runtime::spawn(async move {
-                pump_task(rt_pump, async_work, notify_rx).await;
-            }).detach();
+            // Start the async event loop pump (timers, fetch, streams).
+            Runtime::start_pump(runtime.clone());
 
             // Accept loop
             loop {

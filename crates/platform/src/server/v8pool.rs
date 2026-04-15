@@ -11,7 +11,7 @@ use crate::core::types::{IsolateStats, PoolStats, RpcResult};
 use zeroship_runtime::modules::ModuleEntry;
 use zeroship_runtime::init_v8;
 use zeroship_runtime::runtime::Runtime;
-use zeroship_runtime::{AsyncWork, AsyncEvent, DispatchOutcome};
+use zeroship_runtime::DispatchOutcome;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -347,14 +347,8 @@ fn run_compio_worker(
                 Runtime::new_direct(modules, HashMap::new(), cpu_limit, wall_timeout),
             ));
 
-            // Spawn the pump task for async V8 work (fetch, timers, etc.)
-            let mut async_work = AsyncWork::new();
-            let (notify_tx, notify_rx) = futures::channel::mpsc::channel::<()>(1);
-            runtime.borrow_mut().set_pump_notify(notify_tx);
-            runtime.borrow_mut().drain_new_tasks_into(&mut async_work);
-
-            let rt_pump = runtime.clone();
-            compio::runtime::spawn(pump_task(rt_pump, async_work, notify_rx)).detach();
+            // Start pump task for async V8 ops (timers, fetch, streams).
+            Runtime::start_pump(runtime.clone());
 
             // Request loop: receive work from flume, dispatch into V8
             while let Ok(req) = request_rx.recv_async().await {
@@ -424,60 +418,3 @@ fn run_compio_worker(
         });
 }
 
-// ===========================================================================
-// Pump task — drives async V8 work (ops, timers) to completion
-// ===========================================================================
-
-/// Background task that owns `AsyncWork` and drives pending ops/timers.
-/// Same architecture as runtime-compio's standalone server.
-async fn pump_task(
-    runtime: Rc<RefCell<Runtime>>,
-    mut work: AsyncWork,
-    mut notify_rx: futures::channel::mpsc::Receiver<()>,
-) {
-    use futures::StreamExt;
-
-    loop {
-        // Drain any newly spawned tasks (from dispatch_start calls)
-        {
-            let mut rt = runtime.borrow_mut();
-            rt.drain_new_tasks_into(&mut work);
-        }
-
-        let event = {
-            let has_ops = !work.pending_ops.is_empty();
-            let has_timers = !work.pending_timers.is_empty();
-
-            match (has_ops, has_timers) {
-                (true, true) => {
-                    futures::select! {
-                        r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
-                        r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
-                        _ = notify_rx.next() => None,
-                    }
-                }
-                (true, false) => {
-                    futures::select! {
-                        r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
-                        _ = notify_rx.next() => None,
-                    }
-                }
-                (false, true) => {
-                    futures::select! {
-                        r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
-                        _ = notify_rx.next() => None,
-                    }
-                }
-                (false, false) => {
-                    let _ = notify_rx.next().await;
-                    None
-                }
-            }
-        };
-
-        if let Some(event) = event {
-            let mut rt = runtime.borrow_mut();
-            rt.handle_async_event(event, &mut work);
-        }
-    }
-}
