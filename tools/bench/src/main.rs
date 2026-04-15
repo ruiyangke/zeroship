@@ -1,15 +1,46 @@
 mod config;
 mod http;
 mod numa;
+mod report;
 mod stats;
+mod thread;
 
 use config::Config;
+use stats::{Summary, ThreadStats};
 
 fn main() {
     let config = Config::from_args();
-    println!("zerobench v0.1.0");
-    println!("  URL:         {}", config.url);
-    println!("  Threads:     {}", config.threads);
-    println!("  Connections: {}", config.connections);
-    println!("  Duration:    {:?}", config.duration);
+    let cpus = numa::resolve_cpus(&config.cpu_affinity, &config.numa_node, config.threads);
+
+    eprintln!(
+        "Running {:?} test @ {}",
+        config.duration, config.url
+    );
+    eprintln!(
+        "  {} threads and {} connections",
+        config.threads, config.connections
+    );
+
+    let start = std::time::Instant::now();
+
+    // Spawn N OS threads, each running a compio event loop.
+    // Config is re-parsed per thread so each thread gets its own owned copy
+    // (avoids Send requirements on the config reference).
+    let handles: Vec<_> = (0..config.threads)
+        .map(|i| {
+            let cfg = Config::from_args();
+            let cpu = cpus[i];
+            std::thread::spawn(move || thread::run_worker(&cfg, i, cpu))
+        })
+        .collect();
+
+    let thread_stats: Vec<ThreadStats> = handles
+        .into_iter()
+        .map(|h| h.join().expect("worker thread panicked"))
+        .collect();
+
+    let duration = start.elapsed();
+    let summary = Summary::merge(thread_stats, duration);
+
+    report::print_wrk_format(&summary, &config);
 }
