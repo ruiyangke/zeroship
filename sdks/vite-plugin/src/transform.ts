@@ -1,0 +1,295 @@
+import type { Plugin } from "vite";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { resolve, relative, extname } from "node:path";
+import { DEFAULT_RPC_ENDPOINT } from "./constants.js";
+
+export interface TransformState {
+  serverModuleCache: Map<string, boolean>;
+  serverFunctionMap: Map<string, string[]>;
+  knownServerSources: Set<string>;
+}
+
+// --- AST helpers (work with Rolldown's Oxc/ESTree AST) ---
+
+/** Check if a function body starts with a directive */
+function hasFnDirective(fn: any, directive: string): boolean {
+  const stmts = fn.body?.body;
+  if (!stmts || stmts.length === 0) return false;
+  const first = stmts[0];
+  return first.type === "ExpressionStatement"
+    && first.expression?.type === "Literal"
+    && first.expression.value === directive;
+}
+
+/** Check if a function body contains any reference to tainted identifiers */
+function fnReferencesAny(fn: any, tainted: Set<string>): boolean {
+  if (tainted.size === 0) return false;
+  const json = JSON.stringify(fn.body);
+  for (const name of tainted) {
+    // Match identifier nodes: "name":"<tainted>"
+    if (json.includes(`"name":"${name}"`)) return true;
+  }
+  return false;
+}
+
+/** Check if a file's first non-comment line is "use server" */
+function isServerFile(filePath: string, serverModuleCache: Map<string, boolean>): boolean {
+  if (serverModuleCache.has(filePath)) return serverModuleCache.get(filePath)!;
+  try {
+    const code = readFileSync(filePath, "utf-8");
+    const result = checkDirective(code, "use server");
+    serverModuleCache.set(filePath, result);
+    return result;
+  } catch {
+    serverModuleCache.set(filePath, false);
+    return false;
+  }
+}
+
+/** Check if code starts with a directive string */
+function checkDirective(code: string, directive: string): boolean {
+  for (const line of code.split("\n")) {
+    const t = line.trim();
+    if (t === "" || t.startsWith("//") || t.startsWith("/*")) continue;
+    return t === `"${directive}"` || t === `"${directive}";`
+        || t === `'${directive}'` || t === `'${directive}';`;
+  }
+  return false;
+}
+
+/** Resolve a package specifier to its entry file and check for "use server" */
+function isServerPackage(specifier: string, root: string, serverModuleCache: Map<string, boolean>): boolean {
+  if (serverModuleCache.has(specifier)) return serverModuleCache.get(specifier)!;
+
+  const pkgDir = resolve(root, "node_modules", specifier);
+  if (!existsSync(pkgDir)) { serverModuleCache.set(specifier, false); return false; }
+
+  const pkgPath = resolve(pkgDir, "package.json");
+  if (!existsSync(pkgPath)) { serverModuleCache.set(specifier, false); return false; }
+
+  try {
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
+    const entry = pkg.exports?.["."]?.import
+      ?? pkg.exports?.["."]?.default
+      ?? (typeof pkg.exports?.["."] === "string" ? pkg.exports["."] : null)
+      ?? pkg.module ?? pkg.main;
+    if (!entry) { serverModuleCache.set(specifier, false); return false; }
+
+    const result = isServerFile(resolve(pkgDir, entry), serverModuleCache);
+    serverModuleCache.set(specifier, result);
+    return result;
+  } catch {
+    serverModuleCache.set(specifier, false);
+    return false;
+  }
+}
+
+/** Scan @zeroship/* packages for "use server" */
+function discoverServerPackages(root: string, serverModuleCache: Map<string, boolean>, knownServerSources: Set<string>): void {
+  const scopeDir = resolve(root, "node_modules", "@zeroship");
+  if (!existsSync(scopeDir)) return;
+  try {
+    for (const pkg of readdirSync(scopeDir)) {
+      const spec = `@zeroship/${pkg}`;
+      if (isServerPackage(spec, root, serverModuleCache)) knownServerSources.add(spec);
+    }
+  } catch { /* ignore */ }
+}
+
+/** Generate an RPC stub for a function name */
+function makeStub(name: string, rpcEndpoint: string): string {
+  return `export async function ${name}(...args) {
+  const res = await fetch(${JSON.stringify(rpcEndpoint)}, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", method: ${JSON.stringify(name)}, params: args, id: Date.now() })
+  });
+  const json = await res.json();
+  if (json.error) throw new Error(json.error.message || "RPC error");
+  return json.result;
+}`;
+}
+
+/** Remove a named function (export async function name(...) { ... }) from code */
+function removeFunction(code: string, name: string): string {
+  const pattern = new RegExp(
+    `export\\s+(async\\s+)?function\\s+${name}\\s*\\([^)]*\\)[^{]*\\{`,
+    "m"
+  );
+  const match = pattern.exec(code);
+  if (!match) return code;
+
+  const start = match.index;
+  let depth = 0;
+  let inStr: string | null = null;
+  let escaped = false;
+  const braceStart = code.indexOf("{", start + match[0].length - 1);
+
+  for (let i = braceStart; i < code.length; i++) {
+    const ch = code[i];
+    if (escaped) { escaped = false; continue; }
+    if (ch === "\\") { escaped = true; continue; }
+    if (inStr) { if (ch === inStr) inStr = null; continue; }
+    if (ch === '"' || ch === "'" || ch === "`") { inStr = ch; continue; }
+    if (ch === "{") depth++;
+    if (ch === "}") { depth--; if (depth === 0) return code.slice(0, start) + code.slice(i + 1); }
+  }
+  return code;
+}
+
+export function transformPlugin(rpcEndpoint: string = DEFAULT_RPC_ENDPOINT, state: TransformState): Plugin {
+  const { serverModuleCache, serverFunctionMap, knownServerSources } = state;
+  let root = "";
+
+  return {
+    name: "zeroship:transform",
+    enforce: "pre" as const,
+
+    configResolved(resolvedConfig: any) {
+      root = resolvedConfig.root;
+      discoverServerPackages(root, serverModuleCache, knownServerSources);
+    },
+
+    transform: {
+      filter: {
+        id: { include: /\.(ts|tsx|js|jsx)$/, exclude: /node_modules/ },
+      },
+      handler(this: any, code: string, id: string) {
+        // 1. Parse AST with Rolldown's built-in parser
+        const isTsx = id.endsWith(".tsx") || id.endsWith(".jsx");
+        const ast = this.parse(code, { lang: isTsx ? "tsx" : "ts" });
+
+        // 2. Check file-level "use server"
+        let isFileServer = false;
+        if (ast.body.length > 0) {
+          const first = ast.body[0];
+          if (
+            first.type === "ExpressionStatement" &&
+            first.expression?.type === "Literal" &&
+            first.expression.value === "use server"
+          ) {
+            isFileServer = true;
+          }
+        }
+
+        // 3. Collect imports and build taint set
+        const tainted = new Set<string>();
+
+        for (const node of ast.body) {
+          if (node.type === "ImportDeclaration") {
+            const src = node.source?.value;
+            if (!src) continue;
+
+            const isServer = knownServerSources.has(src)
+              || (src.startsWith("./") || src.startsWith("../"))
+                && isServerFile(resolve(id, "..", src.replace(/\.(ts|tsx|js|jsx)$/, "") + extname(id)), serverModuleCache);
+
+            if (isServer) {
+              for (const spec of node.specifiers || []) {
+                const name = spec.local?.name;
+                if (name) tainted.add(name);
+              }
+            }
+          }
+        }
+
+        // 4. Propagate taint: const x = taintedFn(...) → x tainted
+        for (const node of ast.body) {
+          if (node.type === "VariableDeclaration") {
+            for (const decl of node.declarations || []) {
+              if (decl.id?.name && decl.init) {
+                const callee =
+                  decl.init.type === "CallExpression" && decl.init.callee?.name
+                    ? decl.init.callee.name
+                    : decl.init.type === "Identifier"
+                      ? decl.init.name
+                      : null;
+                if (callee && tainted.has(callee)) {
+                  tainted.add(decl.id.name);
+                }
+              }
+            }
+          }
+        }
+
+        // 5. Find server functions
+        const serverFns: string[] = [];
+
+        for (const node of ast.body) {
+          if (node.type === "ExportNamedDeclaration" && node.declaration?.type === "FunctionDeclaration") {
+            const name = node.declaration.id?.name;
+            if (!name) continue;
+
+            if (isFileServer) {
+              serverFns.push(name);
+            } else if (hasFnDirective(node.declaration, "use server")) {
+              serverFns.push(name);
+            } else if (fnReferencesAny(node.declaration, tainted)) {
+              serverFns.push(name);
+            }
+          }
+        }
+
+        if (serverFns.length === 0) return null;
+
+        // 6. Track for build report
+        serverFunctionMap.set(relative(root, id), serverFns);
+
+        // 7. Transform to client code
+        // For file-level "use server" modules: replace ENTIRE file with stubs
+        if (isFileServer) {
+          const stubs = serverFns.map((name) => makeStub(name, rpcEndpoint)).join("\n\n");
+          return { code: stubs + "\n", map: null };
+        }
+
+        // For mixed files: remove server fns, keep client code, append stubs
+        let result = code;
+
+        // Remove "use server" directive
+        result = result.replace(/^\s*["']use server["'];?\s*\n/, "");
+
+        // Remove each server function
+        for (const fn of serverFns) {
+          result = removeFunction(result, fn);
+        }
+
+        // Remove @zeroship/* imports (server-only)
+        for (const src of knownServerSources) {
+          result = result.replace(
+            new RegExp(`^\\s*import\\s+.*from\\s+['"]${src.replace("/", "\\/")}['"]\\s*;?\\s*$`, "gm"),
+            ""
+          );
+        }
+
+        // Remove tainted variable declarations (handles multi-line model() calls)
+        for (const name of tainted) {
+          const declPattern = new RegExp(`(const|let|var)\\s+${name}\\s*=`);
+          const match = declPattern.exec(result);
+          if (match) {
+            // Find the start of the line
+            let lineStart = result.lastIndexOf("\n", match.index) + 1;
+            // Find the end: scan for balanced parens/braces, then semicolon or newline
+            let pos = match.index + match[0].length;
+            let depth = 0;
+            let inStr: string | null = null;
+            while (pos < result.length) {
+              const ch = result[pos];
+              if (inStr) { if (ch === inStr && result[pos - 1] !== "\\") inStr = null; }
+              else if (ch === '"' || ch === "'" || ch === "`") { inStr = ch; }
+              else if (ch === "(" || ch === "{" || ch === "[") { depth++; }
+              else if (ch === ")" || ch === "}" || ch === "]") { depth--; }
+              else if (depth === 0 && (ch === ";" || ch === "\n")) { pos++; break; }
+              pos++;
+            }
+            result = result.slice(0, lineStart) + result.slice(pos);
+          }
+        }
+
+        // Append RPC stubs
+        result = result.trim() + "\n\n" + serverFns.map((name) => makeStub(name, rpcEndpoint)).join("\n\n") + "\n";
+
+        return { code: result, map: null };
+      },
+    },
+  };
+}
