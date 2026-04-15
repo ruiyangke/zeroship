@@ -3,8 +3,10 @@
 //! Each provider implements [`OAuthProvider`], which knows how to build an
 //! authorization URL and exchange an authorization code for a user profile.
 
+pub mod apple;
 pub mod github;
 pub mod google;
+pub mod meta;
 
 use std::collections::HashMap;
 use std::future::Future;

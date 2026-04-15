@@ -77,6 +77,26 @@ async fn main() -> std::io::Result<()> {
         eprintln!("  oauth: github enabled");
     }
 
+    if let (Ok(client_id), Ok(client_secret)) = (
+        std::env::var("APPLE_CLIENT_ID"),
+        std::env::var("APPLE_CLIENT_SECRET"),
+    ) {
+        let redirect_uri = format!("{service_url}/auth/callback/apple");
+        let config = oauth::OAuthConfig { client_id, client_secret, redirect_uri };
+        oauth_registry.register(oauth::apple::AppleProvider::new(config));
+        eprintln!("  oauth: apple enabled");
+    }
+
+    if let (Ok(client_id), Ok(client_secret)) = (
+        std::env::var("META_CLIENT_ID"),
+        std::env::var("META_CLIENT_SECRET"),
+    ) {
+        let redirect_uri = format!("{service_url}/auth/callback/meta");
+        let config = oauth::OAuthConfig { client_id, client_secret, redirect_uri };
+        oauth_registry.register(oauth::meta::MetaProvider::new(config));
+        eprintln!("  oauth: meta enabled");
+    }
+
     let state = Arc::new(AppState { auth, oauth: oauth_registry });
 
     let bind_addr = format!("0.0.0.0:{port}");
