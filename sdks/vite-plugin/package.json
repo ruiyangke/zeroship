@@ -1,7 +1,7 @@
 {
   "name": "@zeroship/vite-plugin",
-  "version": "0.2.0",
-  "description": "Vite 8 plugin for zeroship — full-stack apps with \"use server\"",
+  "version": "0.3.0",
+  "description": "Vite plugin for zeroship — full-stack apps with Environment API + ModuleRunner in V8",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -21,7 +21,7 @@
     "dev": "tsc --watch"
   },
   "peerDependencies": {
-    "vite": ">=5.0.0"
+    "vite": ">=6.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
