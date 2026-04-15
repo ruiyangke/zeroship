@@ -5,7 +5,7 @@
 
 import type { Plugin, ViteDevServer } from "vite";
 import { resolve, dirname } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ChildProcess, spawn } from "node:child_process";
 import http from "node:http";
@@ -244,8 +244,28 @@ export function devServerPlugin(
                 ? server.config.server.port
                 : 5173;
 
+          // Load .env file if present (like dotenv)
+          const dotenvVars: Record<string, string> = {};
+          const envPath = resolve(root, ".env");
+          if (existsSync(envPath)) {
+            for (const line of readFileSync(envPath, "utf-8").split("\n")) {
+              const trimmed = line.trim();
+              if (!trimmed || trimmed.startsWith("#")) continue;
+              const eq = trimmed.indexOf("=");
+              if (eq === -1) continue;
+              const key = trimmed.slice(0, eq).trim();
+              let val = trimmed.slice(eq + 1).trim();
+              // Strip surrounding quotes
+              if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+                val = val.slice(1, -1);
+              }
+              dotenvVars[key] = val;
+            }
+          }
+
           const childEnv: NodeJS.ProcessEnv = {
             ...process.env,
+            ...dotenvVars,
             [ENV_DEV]: "1",
             [ENV_VITE_WS]: `ws://localhost:${vitePort}${WS_PATH}`,
             ...(serverEntry ? { [ENV_ENTRY]: serverEntry } : {}),

@@ -15,10 +15,16 @@ export const zeroshipEvaluator = {
     const wrapped = `"use strict";async (${keys})=>{${code}\n}`;
     const fn = (0, eval)(wrapped);
     await fn(...Object.values(context));
-    Object.seal(context[ssrModuleExportsKey]);
   },
 
   async runExternalModule(filepath: string): Promise<any> {
-    return import(filepath);
+    // V8 runtime does not support dynamic import(). All modules should be
+    // inlined by Vite (resolved via node-compat polyfills or bundled).
+    // If we get here, the module was externalized — which is a config error.
+    throw new Error(
+      `[zeroship] Cannot import external module "${filepath}". ` +
+      `The V8 runtime does not support dynamic import(). ` +
+      `Add this module to the node-compat polyfills or configure Vite to bundle it.`
+    );
   },
 };

@@ -7,13 +7,18 @@
     "build": "vite build"
   },
   "dependencies": {
-    "@langchain/core": "^0.3",
-    "@langchain/openai": "^0.4",
     "@langchain/anthropic": "^0.3",
-    "langchain": "^0.3"
+    "@langchain/core": "^0.3",
+    "@langchain/langgraph": "^1.2.8",
+    "@langchain/openai": "^0.4",
+    "@vitejs/plugin-react": "^6.0.1",
+    "@zeroship/vite-plugin": "file:../../sdks/vite-plugin",
+    "langchain": "^0.3",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
   },
   "devDependencies": {
-    "vite": "^8",
-    "typescript": "^5.9"
+    "typescript": "^5.9",
+    "vite": "^8"
   }
 }

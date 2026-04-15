@@ -78,7 +78,16 @@ async function handleRpc(req: any): Promise<any> {
     const rpc = JSON.parse(body);
     id = rpc.id;
 
-    const mod = await getUserModule();
+    let mod;
+    try {
+      mod = await getUserModule();
+    } catch (importErr: any) {
+      return jsonResponse({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: `Module import failed: ${importErr.message}`, stack: importErr.stack },
+        id,
+      });
+    }
     const fn = mod[rpc.method];
 
     if (typeof fn !== "function") {
@@ -90,6 +99,13 @@ async function handleRpc(req: any): Promise<any> {
     }
 
     const result = await fn(...(rpc.params ?? []));
+
+    // If the function returns a Response (e.g., SSE stream), pass it through
+    // directly instead of wrapping in JSON-RPC envelope.
+    if (result && typeof result === "object" && typeof result.headers?.get === "function") {
+      return result;
+    }
+
     return jsonResponse({ jsonrpc: "2.0", result, id });
   } catch (e: any) {
     return jsonResponse({

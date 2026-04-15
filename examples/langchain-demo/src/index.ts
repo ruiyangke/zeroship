@@ -1,218 +1,171 @@
 "use server";
 
 /**
- * LangChain Demo — verifies LangChain runs on the zeroship runtime.
+ * LangGraph ReAct agent with tools — runs in zeroship V8 runtime.
  *
- * Tests:
- * 1. Basic LLM call (ChatOpenAI / ChatAnthropic)
- * 2. Prompt template + chain
- * 3. Structured output (JSON)
- * 4. Streaming (token-by-token)
- * 5. Tool calling
- * 6. Multi-step chain (RAG-lite)
+ * Tools:
+ *   - calculator: evaluate math expressions
+ *   - weather: get current weather for a city
+ *   - datetime: get current date/time info
  */
 
 import { ChatOpenAI } from "@langchain/openai";
-import { ChatAnthropic } from "@langchain/anthropic";
-import { ChatPromptTemplate } from "@langchain/core/prompts";
-import { StringOutputParser, JsonOutputParser } from "@langchain/core/output_parsers";
-import { RunnableSequence } from "@langchain/core/runnables";
+import { createReactAgent } from "@langchain/langgraph/prebuilt";
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 
-// ---------------------------------------------------------------------------
-// LLM setup — uses environment variables for API keys
-// ---------------------------------------------------------------------------
+// ── Tools ──────────────────────────────────────────────────────────────
 
-function getModel(provider: "openai" | "anthropic" = "openai") {
-  if (provider === "anthropic") {
-    return new ChatAnthropic({
-      model: "claude-sonnet-4-20250514",
-      temperature: 0,
-      // API key from process.env.ANTHROPIC_API_KEY (needs polyfill on zeroship)
-    });
-  }
-  return new ChatOpenAI({
-    model: "gpt-4o-mini",
-    temperature: 0,
-    // API key from process.env.OPENAI_API_KEY
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Test 1: Basic LLM call
-// ---------------------------------------------------------------------------
-
-export async function basicCall() {
-  const model = getModel();
-  const response = await model.invoke("What is 2 + 2? Reply with just the number.");
-  return { result: response.content };
-}
-
-// ---------------------------------------------------------------------------
-// Test 2: Prompt template + chain
-// ---------------------------------------------------------------------------
-
-export async function promptChain() {
-  const model = getModel();
-  const prompt = ChatPromptTemplate.fromMessages([
-    ["system", "You are a helpful assistant that translates {input_language} to {output_language}."],
-    ["human", "{text}"],
-  ]);
-
-  const chain = prompt.pipe(model).pipe(new StringOutputParser());
-
-  const result = await chain.invoke({
-    input_language: "English",
-    output_language: "French",
-    text: "Hello, how are you?",
-  });
-
-  return { translation: result };
-}
-
-// ---------------------------------------------------------------------------
-// Test 3: Structured output (JSON)
-// ---------------------------------------------------------------------------
-
-export async function structuredOutput() {
-  const model = getModel();
-  const prompt = ChatPromptTemplate.fromMessages([
-    ["system", "Extract the name and age from the text. Respond with JSON: {{\"name\": \"...\", \"age\": number}}"],
-    ["human", "{text}"],
-  ]);
-
-  const chain = prompt.pipe(model).pipe(new JsonOutputParser());
-
-  const result = await chain.invoke({
-    text: "My name is Alice and I am 30 years old.",
-  });
-
-  return { parsed: result };
-}
-
-// ---------------------------------------------------------------------------
-// Test 4: Streaming (token-by-token)
-// ---------------------------------------------------------------------------
-
-export async function streamingCall() {
-  const model = getModel();
-  const prompt = ChatPromptTemplate.fromMessages([
-    ["human", "Write a haiku about programming."],
-  ]);
-
-  const chain = prompt.pipe(model).pipe(new StringOutputParser());
-
-  // .stream() returns an async iterable of chunks
-  const stream = await chain.stream({});
-
-  const chunks: string[] = [];
-  for await (const chunk of stream) {
-    chunks.push(chunk);
-  }
-
-  return {
-    fullText: chunks.join(""),
-    chunkCount: chunks.length,
-    streamingWorks: chunks.length > 1, // should be many small chunks
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Test 5: Tool calling
-// ---------------------------------------------------------------------------
-
-const weatherTool = tool(
-  async ({ city }: { city: string }) => {
-    // Mock weather API — in a real app, this would call a weather service
-    const temps: Record<string, number> = {
-      "New York": 72,
-      "London": 59,
-      "Tokyo": 68,
-    };
-    const temp = temps[city] ?? 65;
-    return `The temperature in ${city} is ${temp}°F.`;
+const calculator = tool(
+  async ({ expression }: { expression: string }) => {
+    try {
+      // Safe eval for math: only allows numbers, operators, parens, Math.*
+      const sanitized = expression.replace(/[^0-9+\-*/().,%\s]|(?:Math\.(?:sqrt|pow|abs|floor|ceil|round|min|max|PI|E|log|sin|cos|tan))/g, "");
+      if (sanitized !== expression) {
+        return `Error: expression contains invalid characters. Only numbers, +, -, *, /, (), and Math functions are allowed.`;
+      }
+      const result = new Function(`"use strict"; return (${expression})`)();
+      return `${expression} = ${result}`;
+    } catch (e: any) {
+      return `Error evaluating "${expression}": ${e.message}`;
+    }
   },
   {
-    name: "get_weather",
-    description: "Get the current weather in a city",
+    name: "calculator",
+    description: "Evaluate a mathematical expression. Supports +, -, *, /, (), and Math functions (Math.sqrt, Math.pow, Math.PI, etc.)",
     schema: z.object({
-      city: z.string().describe("The city name"),
+      expression: z.string().describe("The math expression to evaluate, e.g. '(2 + 3) * 4' or 'Math.sqrt(144)'"),
     }),
   }
 );
 
-export async function toolCalling() {
-  const model = getModel().bindTools([weatherTool]);
-
-  const response = await model.invoke("What's the weather in Tokyo?");
-
-  // Check if the model requested a tool call
-  if (response.tool_calls && response.tool_calls.length > 0) {
-    const toolCall = response.tool_calls[0];
-    const toolResult = await weatherTool.invoke(toolCall.args as { city: string });
-    return {
-      toolUsed: toolCall.name,
-      toolArgs: toolCall.args,
-      toolResult,
+const weather = tool(
+  async ({ city }: { city: string }) => {
+    // Mock weather data — in production, call a real weather API
+    const conditions: Record<string, { temp: number; condition: string; humidity: number }> = {
+      "new york": { temp: 72, condition: "Partly cloudy", humidity: 55 },
+      "london": { temp: 59, condition: "Overcast", humidity: 78 },
+      "tokyo": { temp: 68, condition: "Clear", humidity: 45 },
+      "paris": { temp: 64, condition: "Light rain", humidity: 82 },
+      "sydney": { temp: 75, condition: "Sunny", humidity: 40 },
+      "san francisco": { temp: 61, condition: "Foggy", humidity: 88 },
     };
+    const data = conditions[city.toLowerCase()] ?? { temp: 65, condition: "Unknown", humidity: 50 };
+    return `Weather in ${city}: ${data.temp}°F, ${data.condition}, humidity ${data.humidity}%`;
+  },
+  {
+    name: "weather",
+    description: "Get current weather for a city. Returns temperature, condition, and humidity.",
+    schema: z.object({
+      city: z.string().describe("The city name, e.g. 'New York', 'Tokyo'"),
+    }),
   }
+);
 
-  return { result: response.content, toolUsed: null };
+const datetime = tool(
+  async () => {
+    const now = new Date();
+    return `Current date/time: ${now.toISOString()}. Day: ${now.toLocaleDateString("en-US", { weekday: "long" })}. Unix timestamp: ${Math.floor(now.getTime() / 1000)}`;
+  },
+  {
+    name: "datetime",
+    description: "Get the current date, time, day of week, and unix timestamp.",
+    schema: z.object({}),
+  }
+);
+
+// ── Agent ──────────────────────────────────────────────────────────────
+
+let agent: any = null;
+
+function getAgent() {
+  if (agent) return agent;
+
+  const model = new ChatOpenAI({
+    model: "gpt-4.1-mini",
+    temperature: 0,
+    streaming: true,
+  });
+
+  agent = createReactAgent({
+    llm: model,
+    tools: [calculator, weather, datetime],
+  });
+
+  return agent;
 }
 
-// ---------------------------------------------------------------------------
-// Test 6: Multi-step chain
-// ---------------------------------------------------------------------------
+// ── Exports ────────────────────────────────────────────────────────────
 
-export async function multiStepChain() {
-  const model = getModel();
-
-  // Step 1: Generate a topic
-  const topicChain = ChatPromptTemplate.fromMessages([
-    ["human", "Pick a random programming concept. Reply with just the concept name."],
-  ]).pipe(model).pipe(new StringOutputParser());
-
-  // Step 2: Explain it
-  const explainChain = ChatPromptTemplate.fromMessages([
-    ["human", "Explain {topic} in one sentence, for a beginner."],
-  ]).pipe(model).pipe(new StringOutputParser());
-
-  // Step 3: Generate a quiz question
-  const quizChain = ChatPromptTemplate.fromMessages([
-    ["human", "Create a multiple choice question about {topic}. Format:\nQ: ...\nA) ...\nB) ...\nC) ...\nD) ...\nAnswer: ..."],
-  ]).pipe(model).pipe(new StringOutputParser());
-
-  // Run the pipeline
-  const topic = await topicChain.invoke({});
-  const explanation = await explainChain.invoke({ topic });
-  const quiz = await quizChain.invoke({ topic });
-
-  return { topic, explanation, quiz };
+export interface ChatMessage {
+  role: "user" | "assistant" | "tool";
+  content: string;
+  toolName?: string;
 }
 
-// ---------------------------------------------------------------------------
-// Run all tests
-// ---------------------------------------------------------------------------
+/**
+ * Send a message to the agent (non-streaming).
+ */
+export async function chat(message: string, history: ChatMessage[] = []): Promise<ChatMessage> {
+  const a = getAgent();
 
-export async function runAllTests() {
-  const results: Record<string, { success: boolean; data?: unknown; error?: string }> = {};
+  const messages = [
+    ...history.map((m) => ({
+      role: m.role as string,
+      content: m.content,
+    })),
+    { role: "user", content: message },
+  ];
 
-  for (const [name, fn] of Object.entries({
-    basicCall,
-    promptChain,
-    structuredOutput,
-    streamingCall,
-    toolCalling,
-    multiStepChain,
-  })) {
-    try {
-      const data = await fn();
-      results[name] = { success: true, data };
-    } catch (e) {
-      results[name] = { success: false, error: e instanceof Error ? e.message : String(e) };
-    }
-  }
+  const result = await a.invoke({ messages });
+  const lastMessage = result.messages[result.messages.length - 1];
 
-  return results;
+  return {
+    role: "assistant",
+    content: typeof lastMessage.content === "string" ? lastMessage.content : JSON.stringify(lastMessage.content),
+  };
+}
+
+/**
+ * Stream a response from the agent, token by token.
+ * Returns an SSE-compatible Response with streaming body.
+ */
+export async function chatStream(message: string, history: ChatMessage[] = []): Promise<any> {
+  const a = getAgent();
+
+  const messages = [
+    ...history.map((m) => ({
+      role: m.role as string,
+      content: m.content,
+    })),
+    { role: "user", content: message },
+  ];
+
+  const stream = await a.stream({ messages }, { streamMode: "messages" });
+
+  const encoder = new TextEncoder();
+  const readable = new ReadableStream({
+    async start(controller) {
+      try {
+        for await (const [message, _metadata] of stream) {
+          if (message.content && typeof message.content === "string") {
+            const data = JSON.stringify({ token: message.content, type: message._getType() });
+            controller.enqueue(encoder.encode(`data: ${data}\n\n`));
+          }
+        }
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      } catch (e: any) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: e.message })}\n\n`));
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(readable, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+    },
+  });
 }

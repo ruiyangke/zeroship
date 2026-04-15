@@ -17,6 +17,7 @@ import { DEFAULT_RPC_ENDPOINT } from "./constants.js";
 import { transformPlugin, type TransformState } from "./transform.js";
 import { devServerPlugin } from "./dev-server.js";
 import { buildPlugin } from "./build.js";
+import { nodeCompatPlugin } from "./node-compat.js";
 
 export interface ZeroshipOptions {
   /** RPC endpoint path (default: "/_rpc") */
@@ -38,6 +39,7 @@ export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
   };
 
   return [
+    nodeCompatPlugin(),
     transformPlugin(rpcEndpoint, state),
     ...devServerPlugin(options, state),
     buildPlugin(state),
