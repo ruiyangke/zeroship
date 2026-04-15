@@ -6,15 +6,14 @@
 import * as vite from "vite";
 import type { WebSocket } from "ws";
 
-// Reference WS_PATH — imported for completeness (used in the dev server plugin).
-import { WS_PATH as _WS_PATH } from "./constants.js";
-
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /** Buffers outbound messages until the WebSocket connection is established. */
 export interface WsContainer {
   ws?: WebSocket;
   buffer: string[];
+  /** Stored onMessage handler so setWebSocket() can wire it directly. */
+  onMessage?: (data: Buffer | string) => void;
 }
 
 // ── HotChannel ─────────────────────────────────────────────────────────────
@@ -34,7 +33,8 @@ export function createHotChannel(container: WsContainer): vite.HotChannel {
   const listeners = new Map<string, Set<Function>>();
 
   /** The handler attached to ws.on("message", ...) — kept as a reference so
-   *  we can detach it in close(). */
+   *  we can detach it in close().  Also stored on the container so that
+   *  setWebSocket() can attach it directly without re-calling listen(). */
   let messageHandler: ((data: Buffer | string) => void) | null = null;
 
   function onMessage(data: Buffer | string): void {
@@ -95,22 +95,23 @@ export function createHotChannel(container: WsContainer): vite.HotChannel {
     },
 
     listen(): void {
+      // Always store the ref so setWebSocket() can attach it directly.
+      messageHandler = onMessage;
+      container.onMessage = onMessage;
+
       if (!container.ws) return;
 
       // Remove any previously registered handler before re-attaching.
-      if (messageHandler) {
-        container.ws.off("message", messageHandler);
-      }
-
-      messageHandler = onMessage;
+      container.ws.off("message", messageHandler);
       container.ws.on("message", messageHandler);
     },
 
     close(): void {
       if (container.ws && messageHandler) {
         container.ws.off("message", messageHandler);
-        messageHandler = null;
       }
+      messageHandler = null;
+      container.onMessage = undefined;
     },
   };
 }
@@ -158,8 +159,14 @@ export class ZeroshipDevEnvironment extends vite.DevEnvironment {
     }
     this._wsContainer.buffer = [];
 
-    // Wire the inbound handler now that a WS is available.
-    this.hot.listen();
+    // Attach the stored handler directly — avoids a double-call to listen()
+    // and works correctly even if listen() was called before the WS arrived.
+    if (this._wsContainer.onMessage) {
+      ws.on("message", this._wsContainer.onMessage);
+    } else {
+      // listen() hasn't been called yet; fall back to calling it now.
+      this.hot.listen();
+    }
   }
 }
 
@@ -173,16 +180,17 @@ export class ZeroshipDevEnvironment extends vite.DevEnvironment {
  */
 export function createZeroshipEnvironmentOptions(): vite.EnvironmentOptions {
   return {
+    consumer: "server",
     resolve: {
       conditions: ["zeroship", "worker", "module"],
       noExternal: true,
     },
     dev: {
-      createEnvironment(name: string, config: vite.ResolvedConfig): ZeroshipDevEnvironment {
+      createEnvironment(name: string, config: vite.ResolvedConfig, _context?: any): ZeroshipDevEnvironment {
         return new ZeroshipDevEnvironment(name, config);
       },
     },
-    build: { target: "es2024", ssr: true },
+    build: { target: "es2024" },
     keepProcessEnv: true,
   };
 }

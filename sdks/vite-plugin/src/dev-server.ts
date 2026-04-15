@@ -173,7 +173,7 @@ export function devServerPlugin(
             next: () => void
           ) => {
             const url = req.url ?? "";
-            if (!url.startsWith("/_rpc") && !url.startsWith("/rpc")) {
+            if (!url.startsWith("/_rpc") && !url.startsWith("/api/")) {
               return next();
             }
 

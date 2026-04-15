@@ -3,7 +3,7 @@
  * Same pattern as Cloudflare's __VITE_UNSAFE_EVAL__.
  */
 
-const SSR_MODULE_EXPORTS_KEY = "__vite_ssr_exports__";
+import { ssrModuleExportsKey } from "vite/module-runner";
 
 export const zeroshipEvaluator = {
   async runInlinedModule(
@@ -15,7 +15,7 @@ export const zeroshipEvaluator = {
     const wrapped = `"use strict";async (${keys})=>{${code}\n}`;
     const fn = (0, eval)(wrapped);
     await fn(...Object.values(context));
-    Object.seal(context[SSR_MODULE_EXPORTS_KEY]);
+    Object.seal(context[ssrModuleExportsKey]);
   },
 
   async runExternalModule(filepath: string): Promise<any> {

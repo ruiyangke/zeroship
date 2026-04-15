@@ -21,13 +21,14 @@ export async function createRunner(): Promise<ModuleRunner> {
   });
 
   const transport = {
-    connect({ onMessage }: { onMessage: (data: any) => void }) {
+    connect({ onMessage, onDisconnection }: { onMessage: (data: any) => void; onDisconnection: () => void }) {
       ws.addEventListener("message", (event: any) => {
         const parsed = typeof event.data === "string"
           ? JSON.parse(event.data)
           : JSON.parse(event.data.toString());
         onMessage(parsed);
       });
+      ws.addEventListener("close", () => onDisconnection());
     },
     send(data: any) {
       ws.send(JSON.stringify(data));
