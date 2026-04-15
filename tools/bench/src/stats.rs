@@ -1,4 +1,42 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use hdrhistogram::Histogram;
+
+/// Shared atomic counters that worker threads update and the TUI reads.
+/// All fields use `Relaxed` ordering — approximate real-time display is fine.
+pub struct LiveStats {
+    pub requests: AtomicU64,
+    pub bytes: AtomicU64,
+    pub errors: AtomicU64,
+}
+
+impl LiveStats {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            requests: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+        })
+    }
+
+    pub fn add_request(&self, bytes: u64) {
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        self.bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    pub fn add_error(&self) {
+        self.errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> (u64, u64, u64) {
+        (
+            self.requests.load(Ordering::Relaxed),
+            self.bytes.load(Ordering::Relaxed),
+            self.errors.load(Ordering::Relaxed),
+        )
+    }
+}
 
 /// Per-thread SSE statistics. Lock-free — each thread owns its own instance.
 pub struct SseThreadStats {
