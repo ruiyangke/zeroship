@@ -1,5 +1,4 @@
 import { useState, useRef, useEffect } from "react";
-import { chat } from "./index";
 
 interface ChatMsg { role: string; content: string }
 
@@ -20,16 +19,105 @@ export function App() {
     if (!text || loading) return;
 
     const userMsg: ChatMsg = { role: "user", content: text };
-    const history = [...messages, userMsg];
-    setMessages(history);
+    setMessages((prev) => [...prev, userMsg]);
     setInput("");
     setLoading(true);
 
+    // Add empty assistant message that we'll fill with streamed tokens
+    setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+
     try {
-      const result = await chat(text, messages);
-      setMessages((prev) => [...prev, result]);
+      const res = await fetch("/_rpc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "chat",
+          params: [text, messages],
+          id: Date.now(),
+        }),
+      });
+
+      const contentType = res.headers.get("content-type") ?? "";
+
+      if (contentType.includes("text/event-stream")) {
+        // Stream SSE tokens
+        const reader = res.body!.getReader();
+        const decoder = new TextDecoder();
+        let content = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value, { stream: true });
+          for (const line of chunk.split("\n")) {
+            if (!line.startsWith("data: ")) continue;
+            const data = line.slice(6).trim();
+            if (data === "[DONE]") break;
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.token) {
+                content += parsed.token;
+                setMessages((prev) => {
+                  const updated = [...prev];
+                  updated[updated.length - 1] = { role: "assistant", content };
+                  return updated;
+                });
+              } else if (parsed.tool && parsed.args) {
+                // Tool call — show in message
+                content += `\n🔧 Using ${parsed.tool}...\n`;
+                setMessages((prev) => {
+                  const updated = [...prev];
+                  updated[updated.length - 1] = { role: "assistant", content };
+                  return updated;
+                });
+              } else if (parsed.tool && parsed.result) {
+                content += `✅ ${parsed.result}\n\n`;
+                setMessages((prev) => {
+                  const updated = [...prev];
+                  updated[updated.length - 1] = { role: "assistant", content };
+                  return updated;
+                });
+              } else if (parsed.error) {
+                content += `\nError: ${parsed.error}`;
+                setMessages((prev) => {
+                  const updated = [...prev];
+                  updated[updated.length - 1] = { role: "assistant", content };
+                  return updated;
+                });
+              }
+            } catch {}
+          }
+        }
+
+        // If no content was streamed, remove the empty message
+        if (!content) {
+          setMessages((prev) => prev.slice(0, -1));
+        }
+      } else {
+        // JSON-RPC fallback
+        const json = await res.json();
+        if (json.result) {
+          setMessages((prev) => {
+            const updated = [...prev];
+            updated[updated.length - 1] = json.result;
+            return updated;
+          });
+        } else if (json.error) {
+          setMessages((prev) => {
+            const updated = [...prev];
+            updated[updated.length - 1] = { role: "assistant", content: `Error: ${json.error.message}` };
+            return updated;
+          });
+        }
+      }
     } catch (e: any) {
-      setMessages((prev) => [...prev, { role: "assistant", content: `Error: ${e.message}` }]);
+      setMessages((prev) => {
+        const updated = [...prev];
+        updated[updated.length - 1] = { role: "assistant", content: `Error: ${e.message}` };
+        return updated;
+      });
     }
 
     setLoading(false);
@@ -43,11 +131,9 @@ export function App() {
           <h1 style={styles.title}>AI Chatbot</h1>
           <span style={styles.badge}>LangChain + zeroship V8</span>
         </div>
-
         <div style={styles.tools}>
           Tools: <code>calculator</code> <code>weather</code> <code>datetime</code>
         </div>
-
         <div style={styles.messages}>
           {messages.length === 0 && (
             <div style={styles.empty}>
@@ -64,15 +150,8 @@ export function App() {
               </div>
             </div>
           ))}
-          {loading && (
-            <div style={{ ...styles.message, ...styles.assistantMsg }}>
-              <div style={styles.msgRole}>AI</div>
-              <div style={{ ...styles.msgContent, opacity: 0.5 }}>Thinking...</div>
-            </div>
-          )}
           <div ref={bottomRef} />
         </div>
-
         <form onSubmit={send} style={styles.form}>
           <input
             ref={inputRef}
@@ -87,9 +166,8 @@ export function App() {
             {loading ? "..." : "Send"}
           </button>
         </form>
-
         <div style={styles.powered}>
-          Powered by <strong>zeroship</strong> V8 runtime + LangChain + OpenAI gpt-4.1-mini
+          Powered by <strong>zeroship</strong> V8 runtime + LangChain + SSE streaming
         </div>
       </div>
     </div>
@@ -97,27 +175,8 @@ export function App() {
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  container: {
-    minHeight: "100vh",
-    background: "linear-gradient(135deg, #0f0c29, #302b63, #24243e)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-    padding: 20,
-  },
-  card: {
-    background: "#1a1a2e",
-    borderRadius: 16,
-    padding: "24px",
-    width: "100%",
-    maxWidth: 600,
-    height: "85vh",
-    display: "flex",
-    flexDirection: "column",
-    boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
-    border: "1px solid rgba(255,255,255,0.06)",
-  },
+  container: { minHeight: "100vh", background: "linear-gradient(135deg, #0f0c29, #302b63, #24243e)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', padding: 20 },
+  card: { background: "#1a1a2e", borderRadius: 16, padding: "24px", width: "100%", maxWidth: 600, height: "85vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 60px rgba(0,0,0,0.5)", border: "1px solid rgba(255,255,255,0.06)" },
   header: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 },
   title: { margin: 0, fontSize: 24, fontWeight: 300, color: "#e0e0e0", letterSpacing: 2 },
   badge: { fontSize: 10, padding: "3px 8px", borderRadius: 20, background: "rgba(16,185,129,0.15)", color: "#34d399", border: "1px solid rgba(16,185,129,0.3)" },

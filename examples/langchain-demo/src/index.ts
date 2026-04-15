@@ -1,10 +1,5 @@
 "use server";
 
-/**
- * LangChain AI chatbot — runs in zeroship V8 runtime.
- * Uses ChatOpenAI with tool calling (manual ReAct loop).
- */
-
 import { ChatOpenAI } from "@langchain/openai";
 import { HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
 import { tool } from "@langchain/core/tools";
@@ -59,63 +54,114 @@ const tools = [
 // ── Model ──────────────────────────────────────────────────────────────
 
 let model: any = null;
-
 function getModel() {
   if (model) return model;
-  model = new ChatOpenAI({ model: "gpt-4.1-mini", temperature: 0 }).bindTools(tools);
+  model = new ChatOpenAI({ model: "gpt-5.4-mini", temperature: 0 }).bindTools(tools);
   return model;
 }
-
 const toolMap = Object.fromEntries(tools.map(t => [t.name, t]));
 
-// ── ReAct loop (manual — avoids LangGraph chunking issues) ─────────────
+// ── Streaming ReAct loop ───────────────────────────────────────────────
 
-async function reactLoop(messages: any[]): Promise<string> {
+async function reactLoopStream(
+  messages: any[],
+  onToken: (token: string) => void,
+  onToolCall: (name: string, args: any) => void,
+  onToolResult: (name: string, result: string) => void,
+): Promise<void> {
   const m = getModel();
-  // Max 5 iterations to prevent infinite loops
   for (let i = 0; i < 5; i++) {
-    const response = await m.invoke(messages);
-    messages.push(response);
+    const stream = await m.stream(messages);
+    let fullResponse: any = null;
 
-    // If no tool calls, return the content
-    if (!response.tool_calls || response.tool_calls.length === 0) {
-      return typeof response.content === "string" ? response.content : JSON.stringify(response.content);
+    for await (const chunk of stream) {
+      if (!fullResponse) fullResponse = chunk;
+      else fullResponse = fullResponse.concat(chunk);
+      if (chunk.content && typeof chunk.content === "string") {
+        onToken(chunk.content);
+      }
     }
 
-    // Execute tool calls
-    for (const tc of response.tool_calls) {
+    if (!fullResponse) return;
+    messages.push(fullResponse);
+
+    if (!fullResponse.tool_calls || fullResponse.tool_calls.length === 0) return;
+
+    for (const tc of fullResponse.tool_calls) {
+      onToolCall(tc.name, tc.args);
       const fn = toolMap[tc.name];
       if (!fn) {
         messages.push(new ToolMessage({ tool_call_id: tc.id, content: `Tool not found: ${tc.name}` }));
+        onToolResult(tc.name, `Tool not found: ${tc.name}`);
         continue;
       }
       try {
         const result = await fn.invoke(tc.args);
         messages.push(new ToolMessage({ tool_call_id: tc.id, content: result }));
+        onToolResult(tc.name, result);
       } catch (e: any) {
         messages.push(new ToolMessage({ tool_call_id: tc.id, content: `Error: ${e.message}` }));
+        onToolResult(tc.name, `Error: ${e.message}`);
       }
     }
   }
-  return "Max iterations reached.";
 }
 
 // ── RPC exports ────────────────────────────────────────────────────────
 
 interface ChatMsg { role: string; content: string }
 
-export async function chat(message: string, history: ChatMsg[] = {}): Promise<ChatMsg> {
-  try {
-    const messages: any[] = history.map((m: ChatMsg) =>
-      m.role === "user" ? new HumanMessage(m.content) : new AIMessage(m.content)
-    );
-    messages.push(new HumanMessage(message));
+export async function chat(message: string, history: ChatMsg[] = []): Promise<any> {
+  const msgs: any[] = (Array.isArray(history) ? history : []).map((m: ChatMsg) =>
+    m.role === "user" ? new HumanMessage(m.content) : new AIMessage(m.content)
+  );
+  msgs.push(new HumanMessage(message));
 
-    const content = await reactLoop(messages);
-    return { role: "assistant", content };
+  // Collect SSE events FIRST (all async work completes), then stream them.
+  // This avoids the issue where nested fetch() calls inside ReadableStream.start()
+  // can't progress because the stream reader loop occupies the event loop.
+  const events: string[] = [];
+  const encoder = new TextEncoder();
+
+  try {
+    const m = getModel();
+    // ReAct loop: up to 5 iterations
+    for (let i = 0; i < 5; i++) {
+      const response = await m.invoke(msgs);
+      msgs.push(response);
+
+      if (response.content && typeof response.content === "string") {
+        events.push(JSON.stringify({ token: response.content }));
+      }
+
+      if (!response.tool_calls || response.tool_calls.length === 0) break;
+
+      for (const tc of response.tool_calls) {
+        events.push(JSON.stringify({ tool: tc.name, args: tc.args }));
+        const fn = toolMap[tc.name];
+        const result = fn ? await fn.invoke(tc.args) : `Tool not found: ${tc.name}`;
+        events.push(JSON.stringify({ tool: tc.name, result }));
+        msgs.push(new ToolMessage({ tool_call_id: tc.id, content: result }));
+      }
+    }
   } catch (e: any) {
-    return { role: "assistant", content: `Error: ${e.message}` };
+    events.push(JSON.stringify({ error: e.message }));
   }
+
+  // Now stream the collected events as SSE
+  const stream = new ReadableStream({
+    start(controller: any) {
+      for (const evt of events) {
+        controller.enqueue(encoder.encode(`data: ${evt}\n\n`));
+      }
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
+  });
 }
 
 export function ping() { return "pong"; }
