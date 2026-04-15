@@ -16,7 +16,8 @@
     "src"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node --import tsx scripts/build-bootstrap.ts",
+    "build:bootstrap": "node --import tsx scripts/build-bootstrap.ts",
     "dev": "tsc --watch"
   },
   "peerDependencies": {
@@ -25,6 +26,8 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",
+    "esbuild": "^0.28.0",
+    "tsx": "^4.21.0",
     "typescript": "^5.0.0",
     "vite": "^8.0.0"
   },
