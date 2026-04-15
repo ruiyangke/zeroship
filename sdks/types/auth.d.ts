@@ -8,6 +8,7 @@ interface ZeroshipAuthUser {
   email: string;
   name: string;
   avatar: string | null;
+  emailVerified: boolean;
 }
 
 /** The zeroship.auth namespace — synchronous user context from the gateway. */

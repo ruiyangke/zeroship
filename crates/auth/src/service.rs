@@ -13,19 +13,21 @@ use zeroship_pg::Conn;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthUser {
-    pub id: String, // UUID
+    pub id: String, // UUID → typed ID (usr_...)
     pub email: String,
     pub name: String,
     pub avatar_url: Option<String>,
+    pub email_verified: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenClaims {
-    pub sub: String, // user UUID
+    pub sub: String, // user UUID → typed ID (usr_...)
     pub app: String, // app UUID
     pub email: String,
     pub name: String,
     pub avatar: Option<String>,
+    pub email_verified: bool,
     pub exp: usize,
     pub iat: usize,
 }
@@ -310,6 +312,7 @@ impl AuthService {
             email: user.email.clone(),
             name: user.name.clone(),
             avatar: user.avatar_url.clone(),
+            email_verified: user.email_verified,
             exp,
             iat,
         };
@@ -338,6 +341,7 @@ fn row_to_user(row: &zeroship_pg::Row) -> AuthUser {
         email: row.get("email"),
         name: row.get("name"),
         avatar_url: row.get("avatar_url"),
+        email_verified: row.get("email_verified"),
     }
 }
 

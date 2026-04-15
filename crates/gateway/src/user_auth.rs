@@ -22,6 +22,7 @@ pub struct AuthUser {
     pub email: String,
     pub name: String,
     pub avatar: Option<String>,
+    pub email_verified: bool,
     pub exp: usize,
     pub iat: usize,
 }
@@ -76,6 +77,7 @@ struct UserPayload<'a> {
     email: &'a str,
     name: &'a str,
     avatar: Option<&'a str>,
+    email_verified: bool,
 }
 
 /// Serialize the authenticated user as base64-encoded JSON for the `ZeroShip-User`
@@ -89,6 +91,7 @@ pub fn encode_user_header(user: &AuthUser) -> String {
         email: &user.email,
         name: &user.name,
         avatar: user.avatar.as_deref(),
+        email_verified: user.email_verified,
     };
     let json = serde_json::to_string(&payload).unwrap_or_default();
     B64.encode(json.as_bytes())
