@@ -78,7 +78,7 @@ impl AuthService {
                 email TEXT UNIQUE NOT NULL,
                 name TEXT NOT NULL,
                 avatar_url TEXT,
-                password_hash TEXT NOT NULL,
+                password_hash TEXT,
                 email_verified BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -157,7 +157,52 @@ impl AuthService {
 
         let rows = conn
             .query(
-                "SELECT id, email, name, avatar_url FROM auth_users WHERE email = $1",
+                "SELECT id, email, name, avatar_url, email_verified FROM auth_users WHERE email = $1",
+                &[&email],
+            )
+            .await
+            .map_err(|e| format!("database: {e}"))?;
+
+        rows.first()
+            .map(row_to_user)
+            .ok_or_else(|| "insert ok but read-back failed".to_string())
+    }
+
+    /// Find or create a user from an OAuth provider profile. No password.
+    /// Used by the OAuth callback flow — Google/GitHub provide email + name + avatar.
+    pub async fn find_or_create_oauth_user(
+        &self,
+        email: &str,
+        name: &str,
+        avatar_url: Option<&str>,
+    ) -> Result<AuthUser, String> {
+        let mut conn = self.conn().await?;
+
+        // Try to find existing user by email
+        let rows = conn
+            .query(
+                "SELECT id, email, name, avatar_url, email_verified FROM auth_users WHERE email = $1",
+                &[&email],
+            )
+            .await
+            .map_err(|e| format!("database: {e}"))?;
+
+        if let Some(row) = rows.first() {
+            return Ok(row_to_user(row));
+        }
+
+        // Create new user — no password, email verified (provider confirmed it)
+        let avatar = avatar_url.unwrap_or("");
+        conn.execute(
+            "INSERT INTO auth_users (email, name, avatar_url, email_verified) VALUES ($1, $2, NULLIF($3, ''), TRUE)",
+            &[&email, &name, &avatar],
+        )
+        .await
+        .map_err(|e| format!("database: {e}"))?;
+
+        let rows = conn
+            .query(
+                "SELECT id, email, name, avatar_url, email_verified FROM auth_users WHERE email = $1",
                 &[&email],
             )
             .await
@@ -183,19 +228,24 @@ impl AuthService {
 
         let rows = conn
             .query(
-                "SELECT id, email, name, avatar_url, password_hash FROM auth_users WHERE email = $1",
+                "SELECT id, email, name, avatar_url, email_verified, password_hash FROM auth_users WHERE email = $1",
                 &[&email],
             )
             .await
             .map_err(|e| format!("database: {e}"))?;
 
         let row = rows.first().ok_or("invalid email or password")?;
-        let stored_hash: String = row.get("password_hash");
+        let stored_hash: Option<String> = row.try_get("password_hash").ok();
 
-        let valid =
-            bcrypt::verify(password, &stored_hash).map_err(|e| format!("bcrypt verify: {e}"))?;
-        if !valid {
-            return Err("invalid email or password".into());
+        match stored_hash {
+            None => return Err("this account uses social login — no password set".into()),
+            Some(hash) => {
+                let valid = bcrypt::verify(password, &hash)
+                    .map_err(|e| format!("bcrypt verify: {e}"))?;
+                if !valid {
+                    return Err("invalid email or password".into());
+                }
+            }
         }
 
         let raw_uuid: String = row.get("id"); // raw UUID for internal queries
@@ -249,7 +299,7 @@ impl AuthService {
 
         let rows = conn
             .query(
-                "SELECT id, email, name, avatar_url FROM auth_users WHERE id = $1::uuid",
+                "SELECT id, email, name, avatar_url, email_verified FROM auth_users WHERE id = $1::uuid",
                 &[&uuid.as_str()],
             )
             .await
