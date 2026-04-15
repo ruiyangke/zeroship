@@ -23,6 +23,9 @@ pub fn init_v8() {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
+        // Install the TLS crypto provider (rustls needs this for HTTPS fetch).
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
         let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform);
         v8::V8::initialize();
