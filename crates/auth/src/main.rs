@@ -1,6 +1,7 @@
 //! zeroship-auth — auth service binary.
 
 mod handlers;
+mod queries;
 mod service;
 
 use std::sync::Arc;
