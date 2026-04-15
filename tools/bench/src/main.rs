@@ -5,9 +5,10 @@ mod report;
 mod sse;
 mod stats;
 mod thread;
+mod ws;
 
 use config::Config;
-use stats::{Summary, SseSummary, ThreadStats, SseThreadStats};
+use stats::{Summary, SseSummary, WsSummary, ThreadStats, SseThreadStats, WsThreadStats};
 
 fn main() {
     let config = Config::from_args();
@@ -16,6 +17,11 @@ fn main() {
     if config.sse {
         eprintln!(
             "Running {:?} SSE test @ {}",
+            config.duration, config.url
+        );
+    } else if config.ws {
+        eprintln!(
+            "Running {:?} WebSocket test @ {}",
             config.duration, config.url
         );
     } else {
@@ -31,7 +37,27 @@ fn main() {
 
     let start = std::time::Instant::now();
 
-    if config.sse {
+    if config.ws {
+        // WebSocket mode: each thread manages N persistent upgraded connections,
+        // sending a message and recording RTT per round-trip.
+        let handles: Vec<_> = (0..config.threads)
+            .map(|i| {
+                let cfg = Config::from_args();
+                let cpu = cpus[i];
+                std::thread::spawn(move || ws::run_ws_worker(&cfg, i, cpu))
+            })
+            .collect();
+
+        let thread_stats: Vec<WsThreadStats> = handles
+            .into_iter()
+            .map(|h| h.join().expect("WS worker thread panicked"))
+            .collect();
+
+        let duration = start.elapsed();
+        let summary = WsSummary::merge(thread_stats, duration);
+
+        report::print_ws_format(&summary, &config);
+    } else if config.sse {
         // SSE mode: each thread runs long-lived streaming connections.
         let handles: Vec<_> = (0..config.threads)
             .map(|i| {

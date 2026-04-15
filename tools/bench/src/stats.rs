@@ -84,6 +84,94 @@ impl SseSummary {
     }
 }
 
+/// Per-thread WebSocket statistics. Lock-free — each thread owns its own instance.
+pub struct WsThreadStats {
+    /// Round-trip time per message (microseconds): send text frame → receive response frame.
+    pub rtt: hdrhistogram::Histogram<u64>,
+    pub total_messages: u64,
+    pub total_bytes: u64,
+    pub errors_connect: u64,
+    pub errors_upgrade: u64,
+    pub errors_read: u64,
+    pub errors_write: u64,
+}
+
+impl WsThreadStats {
+    pub fn new() -> Self {
+        Self {
+            rtt: hdrhistogram::Histogram::new_with_bounds(1, 60_000_000, 3).unwrap(),
+            total_messages: 0,
+            total_bytes: 0,
+            errors_connect: 0,
+            errors_upgrade: 0,
+            errors_read: 0,
+            errors_write: 0,
+        }
+    }
+
+    pub fn record_rtt(&mut self, micros: u64) {
+        let _ = self.rtt.record(micros.max(1));
+    }
+
+    pub fn record_message(&mut self, bytes: u64) {
+        self.total_messages += 1;
+        self.total_bytes += bytes;
+    }
+}
+
+/// Aggregated WebSocket stats from all threads.
+pub struct WsSummary {
+    pub rtt: hdrhistogram::Histogram<u64>,
+    pub total_messages: u64,
+    pub total_bytes: u64,
+    pub errors_connect: u64,
+    pub errors_upgrade: u64,
+    pub errors_read: u64,
+    pub errors_write: u64,
+    pub duration: std::time::Duration,
+}
+
+impl WsSummary {
+    pub fn merge(thread_stats: Vec<WsThreadStats>, duration: std::time::Duration) -> Self {
+        let mut rtt = hdrhistogram::Histogram::new_with_bounds(1, 60_000_000, 3).unwrap();
+        let mut total_messages = 0u64;
+        let mut total_bytes = 0u64;
+        let mut errors_connect = 0u64;
+        let mut errors_upgrade = 0u64;
+        let mut errors_read = 0u64;
+        let mut errors_write = 0u64;
+
+        for ts in &thread_stats {
+            rtt.add(&ts.rtt).ok();
+            total_messages += ts.total_messages;
+            total_bytes += ts.total_bytes;
+            errors_connect += ts.errors_connect;
+            errors_upgrade += ts.errors_upgrade;
+            errors_read += ts.errors_read;
+            errors_write += ts.errors_write;
+        }
+
+        WsSummary {
+            rtt,
+            total_messages,
+            total_bytes,
+            errors_connect,
+            errors_upgrade,
+            errors_read,
+            errors_write,
+            duration,
+        }
+    }
+
+    pub fn messages_per_sec(&self) -> f64 {
+        self.total_messages as f64 / self.duration.as_secs_f64()
+    }
+
+    pub fn total_errors(&self) -> u64 {
+        self.errors_connect + self.errors_upgrade + self.errors_read + self.errors_write
+    }
+}
+
 /// Per-thread statistics. Lock-free — each thread owns its own instance.
 pub struct ThreadStats {
     pub latency: Histogram<u64>,

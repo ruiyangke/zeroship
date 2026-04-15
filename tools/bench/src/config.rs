@@ -16,6 +16,8 @@ pub struct Config {
     pub numa_node: Option<usize>,
     pub cpu_affinity: Option<Vec<usize>>,
     pub sse: bool,
+    /// Run in WebSocket benchmark mode (--ws).
+    pub ws: bool,
 }
 
 impl Config {
@@ -38,6 +40,7 @@ impl Config {
             numa_node: None,
             cpu_affinity: None,
             sse: false,
+            ws: false,
         };
 
         let mut i = 1;
@@ -53,6 +56,7 @@ impl Config {
                 "--latency" => { config.print_latency = true; }
                 "--json" => { config.json_output = true; }
                 "--sse" => { config.sse = true; }
+                "--ws" => { config.ws = true; }
                 "--numa" => { i += 1; config.numa_node = args[i].parse().ok(); }
                 "--cpu" => { i += 1; config.cpu_affinity = Some(parse_cpu_range(&args[i])); }
                 arg if !arg.starts_with('-') => {

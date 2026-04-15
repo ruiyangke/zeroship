@@ -5487,12 +5487,14 @@ dependencies = [
 name = "zerobench"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "compio",
  "hdrhistogram",
  "httparse",
  "libc",
  "serde",
  "serde_json",
+ "sha1",
 ]
 
 [[package]]

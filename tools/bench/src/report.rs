@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::stats::{Summary, SseSummary};
+use crate::stats::{Summary, SseSummary, WsSummary};
 
 /// Print wrk-compatible benchmark output. If `config.json_output` is set,
 /// also print a JSON block after the text report.
@@ -161,6 +161,76 @@ pub fn print_sse_format(summary: &SseSummary, config: &Config) {
             "chunk_lat_max_us": clat_max,
             "errors_connect": summary.errors_connect,
             "errors_read": summary.errors_read,
+        });
+        println!("\n{}", serde_json::to_string_pretty(&json).unwrap());
+    }
+}
+
+/// Print WebSocket benchmark results.
+///
+/// ```text
+/// Running 10s WebSocket test @ ws://localhost:8080/echo
+///   100 connections
+///   Msg Stats    Avg      p50      p99      Max
+///     RTT       0.15ms   0.12ms   0.45ms   2.1ms
+///     Msg/Sec   85,200
+///   852,000 messages in 10.00s
+/// ```
+pub fn print_ws_format(summary: &WsSummary, config: &Config) {
+    let dur_secs = summary.duration.as_secs_f64();
+    let mps = summary.messages_per_sec();
+
+    let rtt_avg = summary.rtt.mean();
+    let rtt_p50 = summary.rtt.value_at_percentile(50.0) as f64;
+    let rtt_p99 = summary.rtt.value_at_percentile(99.0) as f64;
+    let rtt_max = summary.rtt.max() as f64;
+
+    println!("  {:<14}{:<9}{:<9}{:<9}{}", "Msg Stats", "Avg", "p50", "p99", "Max");
+    println!(
+        "    {:<12}{:<9}{:<9}{:<9}{}",
+        "RTT",
+        format_time(rtt_avg),
+        format_time(rtt_p50),
+        format_time(rtt_p99),
+        format_time(rtt_max),
+    );
+    println!("    Msg/Sec   {:.0}", mps);
+    println!(
+        "  {} messages in {:.2}s, {} read",
+        format_count(summary.total_messages),
+        dur_secs,
+        format_bytes(summary.total_bytes),
+    );
+
+    let total_errors = summary.total_errors();
+    if total_errors > 0 {
+        println!(
+            "  Errors: connect {}, upgrade {}, read {}, write {}",
+            summary.errors_connect,
+            summary.errors_upgrade,
+            summary.errors_read,
+            summary.errors_write,
+        );
+    }
+
+    println!("Messages/sec: {:.2}", mps);
+    println!("Transfer/sec: {}", format_bytes_rate(summary.total_bytes as f64 / dur_secs));
+
+    if config.json_output {
+        let json = serde_json::json!({
+            "total_messages": summary.total_messages,
+            "total_bytes": summary.total_bytes,
+            "duration_ms": summary.duration.as_millis(),
+            "messages_per_sec": mps,
+            "rtt_avg_us": rtt_avg,
+            "rtt_p50_us": rtt_p50,
+            "rtt_p99_us": rtt_p99,
+            "rtt_max_us": rtt_max,
+            "errors_connect": summary.errors_connect,
+            "errors_upgrade": summary.errors_upgrade,
+            "errors_read": summary.errors_read,
+            "errors_write": summary.errors_write,
+            "errors_total": total_errors,
         });
         println!("\n{}", serde_json::to_string_pretty(&json).unwrap());
     }
