@@ -405,6 +405,12 @@ fn set_interval_callback(
 pub fn setup_globals(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
 
+    // global = globalThis (Node.js compat — many npm packages reference `global`)
+    {
+        let key = v8::String::new(scope, "global").unwrap();
+        global.set(scope, key.into(), global.into());
+    }
+
     // console.log/warn/error/info
     {
         let console = v8::Object::new(scope);

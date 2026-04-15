@@ -196,8 +196,13 @@ export class ZeroshipDevEnvironment extends vite.DevEnvironment {
         if (code) {
           return { id, url: id, code, file: id } as vite.FetchResult;
         }
-        // unenv polyfill → rewrite and fetch through normal pipeline
-        return super.fetchModule(compatId, importer, _options);
+        // unenv polyfill → resolve and transform through Vite's pipeline.
+        // We use transformRequest() which runs resolveId → load → transform,
+        // converting the unenv module to SSR-compatible code.
+        const transformed = await this.transformRequest(compatId);
+        if (transformed) {
+          return { id, url: compatId, code: transformed.code, file: compatId } as vite.FetchResult;
+        }
       }
     }
 

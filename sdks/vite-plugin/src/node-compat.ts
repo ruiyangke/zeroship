@@ -13,9 +13,13 @@ import type { Plugin } from "vite";
 
 // ── unenv alias map ───────────────────────────────────────────────────────
 
-// Import the nodeless preset from unenv at build time.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const { nodeless } = require("unenv") as { nodeless: { alias: Record<string, string> } };
+// Import the nodeless preset from unenv.
+import { createRequire } from "node:module";
+const _require = createRequire(import.meta.url);
+const { nodeless } = _require("unenv") as { nodeless: { alias: Record<string, string> } };
+
+// Use unenv specifiers as-is — Vite resolves them via optimizeDeps.
+// unenv must be installed in the user's project (added as peerDep).
 const unenvAliases: Record<string, string> = nodeless.alias;
 
 // ── Custom overrides (modules where unenv is insufficient) ────────────────
@@ -25,8 +29,9 @@ const CUSTOM_PREFIX = "\0zeroship-node:";
 /** Custom polyfill code for modules unenv doesn't implement. */
 const customPolyfills: Record<string, string> = {
   // node:crypto — uses native Rust __cryptoHashSync/__cryptoHmacSync
+  // NOTE: Uses __vite_ssr_exports__ instead of export (code runs in eval context)
   "node:crypto": `
-export function createHash(algorithm) {
+function createHash(algorithm) {
   const chunks = [];
   return {
     update(data) { chunks.push(typeof data === "string" ? data : new TextDecoder().decode(data)); return this; },
@@ -41,7 +46,7 @@ export function createHash(algorithm) {
   };
 }
 
-export function createHmac(algorithm, key) {
+function createHmac(algorithm, key) {
   const keyStr = typeof key === "string" ? key : new TextDecoder().decode(key);
   const chunks = [];
   return {
@@ -56,24 +61,26 @@ export function createHmac(algorithm, key) {
   };
 }
 
-export function randomUUID() { return crypto.randomUUID(); }
-export function randomBytes(size) { const b = new Uint8Array(size); crypto.getRandomValues(b); return b; }
-export function randomFillSync(buf) { crypto.getRandomValues(buf); return buf; }
-export function randomFill(buf, ...args) { const cb = args[args.length-1]; crypto.getRandomValues(buf); cb(null, buf); }
-export function randomInt(min, max) { if (max===undefined){max=min;min=0;} const a=new Uint32Array(1); crypto.getRandomValues(a); return min+(a[0]%(max-min)); }
-export function getRandomValues(buf) { return crypto.getRandomValues(buf); }
-export const webcrypto = crypto;
-export const subtle = crypto.subtle;
-export const fips = false;
-export const constants = {};
-export default { createHash, createHmac, randomUUID, randomBytes, randomFillSync, randomFill, randomInt, getRandomValues, webcrypto, subtle, fips, constants };
+function randomUUID() { return crypto.randomUUID(); }
+function randomBytes(size) { const b = new Uint8Array(size); crypto.getRandomValues(b); return b; }
+function randomFillSync(buf) { crypto.getRandomValues(buf); return buf; }
+function randomFill(buf, ...args) { const cb = args[args.length-1]; crypto.getRandomValues(buf); cb(null, buf); }
+function randomInt(min, max) { if (max===undefined){max=min;min=0;} const a=new Uint32Array(1); crypto.getRandomValues(a); return min+(a[0]%(max-min)); }
+function getRandomValues(buf) { return crypto.getRandomValues(buf); }
+const webcrypto = crypto;
+const subtle = crypto.subtle;
+const fips = false;
+const constants = {};
+const _default = { createHash, createHmac, randomUUID, randomBytes, randomFillSync, randomFill, randomInt, getRandomValues, webcrypto, subtle, fips, constants };
+
+Object.assign(__vite_ssr_exports__, { createHash, createHmac, randomUUID, randomBytes, randomFillSync, randomFill, randomInt, getRandomValues, webcrypto, subtle, fips, constants, default: _default });
 `,
 
   // node:timers/promises — unenv stubs this as a proxy (doesn't work)
   "node:timers/promises": `
-export function setTimeout(ms, value) { return new Promise(r => globalThis.setTimeout(() => r(value), ms || 0)); }
-export function setImmediate(value) { return Promise.resolve(value); }
-export default { setTimeout, setImmediate };
+function _setTimeout(ms, value) { return new Promise(r => globalThis.setTimeout(() => r(value), ms || 0)); }
+function _setImmediate(value) { return Promise.resolve(value); }
+Object.assign(__vite_ssr_exports__, { setTimeout: _setTimeout, setImmediate: _setImmediate, default: { setTimeout: _setTimeout, setImmediate: _setImmediate } });
 `,
 };
 

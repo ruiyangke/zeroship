@@ -88,6 +88,13 @@ async function handleRpc(req: any): Promise<any> {
         id,
       });
     }
+
+    // Debug: log available exports on first call
+    if (!(globalThis as any).__debuggedExports) {
+      (globalThis as any).__debuggedExports = true;
+      console.log("[zeroship:dev] Module exports:", Object.keys(mod));
+    }
+
     const fn = mod[rpc.method];
 
     if (typeof fn !== "function") {

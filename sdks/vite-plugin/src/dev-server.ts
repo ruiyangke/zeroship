@@ -147,14 +147,11 @@ export function devServerPlugin(
               // args = [id, importer, options?]
               result = await zeroshipEnv.fetchModule(args[0], args[1], args[2]);
             } else if (methodName === "getBuiltins") {
-              // Return serialized resolve.builtins from the environment config.
-              // Vite 8's ModuleRunner calls this to know which imports to externalize.
-              const builtins = (zeroshipEnv as any).config?.resolve?.builtins ?? [];
-              result = builtins.map((b: any) =>
-                typeof b === "string"
-                  ? { type: "string", value: b }
-                  : { type: "RegExp", source: b.source, flags: b.flags }
-              );
+              // Return EMPTY builtins — our V8 runtime can't import node: modules
+              // natively. By returning [], the ModuleRunner will always call
+              // fetchModule() for every import, which lets our fetchModule override
+              // intercept node:* and return polyfill code.
+              result = [];
             } else {
               // Dispatch other methods to the environment if they exist
               const fn = (zeroshipEnv as any)[methodName];
