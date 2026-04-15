@@ -555,6 +555,17 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
         global.set(scope, crypto_key.into(), crypto.into());
     }
 
+    // Native sync hash/HMAC for node:crypto polyfill
+    {
+        let f = v8::Function::new(scope, crate::crypto::crypto_hash_sync_callback).unwrap();
+        let key = v8::String::new(scope, "__cryptoHashSync").unwrap();
+        global.set(scope, key.into(), f.into());
+
+        let f = v8::Function::new(scope, crate::crypto::crypto_hmac_sync_callback).unwrap();
+        let key = v8::String::new(scope, "__cryptoHmacSync").unwrap();
+        global.set(scope, key.into(), f.into());
+    }
+
     // __streams namespace (native backing for ReadableStream)
     {
         let streams = v8::Object::new(scope);
