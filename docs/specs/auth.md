@@ -37,7 +37,7 @@ GET /dashboard              Reads __zs_session cookie
                             │
                             └─ Invalid / missing:
                                If server returns 401 ──→ Redirect to platform login
-                                                         auth.zeroship.dev/authorize
+                                                         auth.zeroship.ai/authorize
                                                            ?app_id=xxx
                                                            &return=/dashboard
 ```
@@ -47,7 +47,7 @@ GET /dashboard              Reads __zs_session cookie
 | Component | Where | Responsibility |
 |---|---|---|
 | **Auth service** | Control plane | User CRUD, password hashing (bcrypt), OAuth flows, JWT issuance, consent management |
-| **Auth pages** | `auth.zeroship.dev` | Platform-hosted login, signup, consent UI. Not customizable by creators. |
+| **Auth pages** | `auth.zeroship.ai` | Platform-hosted login, signup, consent UI. Not customizable by creators. |
 | **Gateway middleware** | Gateway | Decode JWT from cookie, validate, inject user into V8 request context, handle 401→redirect |
 | **Server SDK** | `@zeroship/auth` | `auth.getUser()`, `auth.requireUser()` — reads from V8 context |
 | **Client SDK** | `@zeroship/auth/client` | `auth.getUser()` — reads `window.__zs_user` injected by gateway |
@@ -57,11 +57,11 @@ GET /dashboard              Reads __zs_session cookie
 ### First visit (not logged in)
 
 ```
-1. User visits app.zeroship.dev/dashboard
+1. User visits app.zeroship.ai/dashboard
 2. Gateway: no __zs_session cookie
 3. Worker runs: auth.requireUser() → throws 401
 4. Gateway intercepts 401 → redirect to:
-     auth.zeroship.dev/authorize?app_id=<uuid>&return=/dashboard
+     auth.zeroship.ai/authorize?app_id=<uuid>&return=/dashboard
 5. Platform auth page shows login form:
      ┌─────────────────────────────────┐
      │   Sign in to continue           │
@@ -96,15 +96,15 @@ GET /dashboard              Reads __zs_session cookie
 8. User clicks Allow
 9. Platform records consent: (user_id, app_id, granted_at)
 10. Platform issues JWT: { sub: user_id, app: app_id, email, name, avatar, exp }
-11. Platform sets cookie: __zs_session=<JWT>; HttpOnly; Secure; SameSite=Lax; Domain=.zeroship.dev
-12. Redirect back to: app.zeroship.dev/dashboard
+11. Platform sets cookie: __zs_session=<JWT>; HttpOnly; Secure; SameSite=Lax; Domain=.zeroship.ai
+12. Redirect back to: app.zeroship.ai/dashboard
 13. Gateway reads cookie → valid → injects user → worker runs → auth.getUser() works
 ```
 
 ### Returning visit (logged in, already consented)
 
 ```
-1. User visits app.zeroship.dev/dashboard
+1. User visits app.zeroship.ai/dashboard
 2. Gateway: reads __zs_session cookie → JWT valid, consent exists
 3. Injects user into V8 context
 4. Worker: auth.getUser() → { id, email, name, avatar }
@@ -114,13 +114,13 @@ GET /dashboard              Reads __zs_session cookie
 ### First visit to a different app (logged in, no consent for this app)
 
 ```
-1. User visits other-app.zeroship.dev/settings
+1. User visits other-app.zeroship.ai/settings
 2. Gateway: reads __zs_session cookie → JWT valid, but no consent for this app
-3. Redirect to: auth.zeroship.dev/authorize?app_id=<other-app>&return=/settings
+3. Redirect to: auth.zeroship.ai/authorize?app_id=<other-app>&return=/settings
 4. Platform shows consent screen (skip login — already authenticated)
 5. User clicks Allow
 6. Platform issues new JWT scoped to this app
-7. Redirect back to other-app.zeroship.dev/settings
+7. Redirect back to other-app.zeroship.ai/settings
 ```
 
 ## Platform Database Schema
@@ -248,7 +248,7 @@ if (auth.isLoggedIn()) { ... }
 
 // Sign out — redirects to platform sign-out page, clears cookie
 auth.signOut();
-// → redirect to auth.zeroship.dev/logout?app_id=xxx&return=/
+// → redirect to auth.zeroship.ai/logout?app_id=xxx&return=/
 ```
 
 The gateway injects into every HTML response:
@@ -302,7 +302,7 @@ export const auth: {
 ```
 1. Worker returned HTTP 401
 2. Gateway intercepts (does not forward to browser)
-3. Redirect to: auth.zeroship.dev/authorize?app_id=<id>&return=<original_path>
+3. Redirect to: auth.zeroship.ai/authorize?app_id=<id>&return=<original_path>
 ```
 
 ### On HTML response (for client-side user injection):
@@ -321,11 +321,11 @@ export const auth: {
 2. Platform redirects to:
      accounts.google.com/o/oauth2/v2/auth
        ?client_id=<platform_google_client_id>
-       &redirect_uri=auth.zeroship.dev/callback/google
+       &redirect_uri=auth.zeroship.ai/callback/google
        &scope=email+profile
        &state=<encrypted: app_id, return_url>
 3. User authenticates with Google, grants permission
-4. Google redirects to: auth.zeroship.dev/callback/google?code=xxx&state=yyy
+4. Google redirects to: auth.zeroship.ai/callback/google?code=xxx&state=yyy
 5. Platform exchanges code for tokens
 6. Platform reads Google profile (email, name, picture)
 7. Platform finds or creates user in auth.users
@@ -368,7 +368,7 @@ Creators don't configure JWT secrets, session duration, or cookie settings. The 
 ### Phase 1: Core (MVP)
 
 1. **Auth service** in control plane — users table, bcrypt password hashing, JWT issuance
-2. **Login/signup page** at `auth.zeroship.dev` — email/password only
+2. **Login/signup page** at `auth.zeroship.ai` — email/password only
 3. **Consent screen** — simple "Allow / Deny"
 4. **Gateway middleware** — JWT validation, cookie handling, 401 redirect, `__zs_user` injection
 5. **Server SDK** — `auth.getUser()`, `auth.requireUser()` (reads V8 context)

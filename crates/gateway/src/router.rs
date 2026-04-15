@@ -109,7 +109,7 @@ pub fn extract_app_name(req: &HttpRequest, path_name: Option<&str>) -> Option<St
         return None;
     }
 
-    // Extract first subdomain: "myapp.zeroship.dev" → "myapp"
+    // Extract first subdomain: "myapp.zeroship.ai" → "myapp"
     // Must have at least one dot (i.e., subdomain.domain)
     let dot_pos = host.find('.')?;
     let subdomain = &host[..dot_pos];

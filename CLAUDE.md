@@ -48,7 +48,7 @@ End Users → Gateway          JWT validation, rate limiting, CHWBL routing, sta
 ```
 PostgreSQL          One database, separate schemas (control, auth, per-app)
 Object Storage      Bundles, assets, user uploads
-DNS/Domains         console.zeroship.dev, auth.zeroship.dev, {app}.zeroship.dev
+DNS/Domains         console.zeroship.ai, auth.zeroship.ai, {app}.zeroship.ai
 ```
 
 ### How they connect
@@ -171,7 +171,7 @@ Needs Rust (new primitive):        Pure JS (npm package):
 - **@zeroship/kv** — key-value store, sessions, cache, feature flags
 - **Stripe Connect** — creators connect Stripe, end users subscribe, revenue splits
 - **Creator dashboard** — web UI for apps, pricing, revenue, analytics
-- **Custom domains** — {app-name}.zeroship.dev + creator's own domain
+- **Custom domains** — {app-name}.zeroship.ai + creator's own domain
 
 ### Phase 3: AI app builder (the differentiator)
 
