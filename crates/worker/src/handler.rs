@@ -3,10 +3,12 @@ use std::sync::Arc;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use ntex::web::{self, HttpRequest, HttpResponse};
+use ntex::util::Bytes;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use zeroship_runtime::runtime::DispatchOutcome;
+use zeroship_runtime::StreamReader;
 
 use crate::{cache, WorkerConfig};
 
@@ -91,7 +93,7 @@ pub async fn dispatch(
             make_http_response(status, &headers, &body)
         }
         DispatchOutcome::HttpStream { status, headers, body: reader, logs: _ } => {
-            drain_stream_to_response(status, &headers, &reader).await
+            stream_response(status, &headers, reader)
         }
         DispatchOutcome::HttpPending(rx) => {
             let wall_limit = runtime.borrow().wall_timeout()
@@ -105,7 +107,7 @@ pub async fn dispatch(
                             make_http_response(status, &headers, &body)
                         }
                         Ok(zeroship_runtime::HttpDispatchResult::Stream { status, headers, body: reader, .. }) => {
-                            drain_stream_to_response(status, &headers, &reader).await
+                            stream_response(status, &headers, reader)
                         }
                         Ok(zeroship_runtime::HttpDispatchResult::WebSocket { .. }) => {
                             make_error("WebSocket upgrade not supported via gateway dispatch")
@@ -151,35 +153,59 @@ fn make_http_response(status: u16, headers: &[(String, String)], body: &str) -> 
     builder.body(body.to_string())
 }
 
-/// Drain a ReadableStream body into a single buffer, then return as a complete
-/// HTTP response. This is the simplified streaming approach: the stream is fully
-/// consumed before sending, so the JS code using ReadableStream compiles and runs
-/// correctly, but the client does not receive chunks in real time.
+/// Build a streaming HTTP response that yields chunks from a V8 ReadableStream
+/// in real time. Uses ntex's `streaming()` with an mpsc channel so chunks flow
+/// to the client as they arrive (chunked transfer-encoding), instead of
+/// buffering the entire body first.
 ///
-/// Full chunked-encoding pass-through is a future enhancement.
-async fn drain_stream_to_response(
+/// The V8 pump task continues running independently, pushing chunks into the
+/// StreamReader. A spawned compio task drains those chunks and forwards them
+/// through the ntex mpsc channel.
+fn stream_response(
     status: u16,
     headers: &[(String, String)],
-    reader: &zeroship_runtime::StreamReader,
+    reader: StreamReader,
 ) -> HttpResponse {
-    // Drain all available chunks, yielding until the stream is closed.
-    let mut body_buf = Vec::new();
-    loop {
-        for chunk in reader.drain() {
-            body_buf.extend_from_slice(&chunk);
-        }
-        if reader.is_done() {
-            // Drain any final chunks that arrived with the done signal
-            for chunk in reader.drain() {
-                body_buf.extend_from_slice(&chunk);
-            }
-            break;
-        }
-        yield_now().await;
+    let status_code = ntex::http::StatusCode::from_u16(status)
+        .unwrap_or(ntex::http::StatusCode::OK);
+    let mut builder = HttpResponse::build(status_code);
+    for (name, value) in headers {
+        builder.header(name.as_str(), value.as_str());
     }
 
-    let body_str = String::from_utf8_lossy(&body_buf).to_string();
-    make_http_response(status, headers, &body_str)
+    // Create an ntex mpsc channel — Receiver implements futures_core::Stream,
+    // which is exactly what ResponseBuilder::streaming() needs.
+    let (tx, rx) = ntex::channel::mpsc::channel();
+
+    // Spawn a task that drains the StreamReader and forwards chunks to the
+    // channel. When the reader signals done, the sender is dropped, which
+    // closes the stream and ends the HTTP response.
+    compio::runtime::spawn(async move {
+        loop {
+            let chunks = reader.drain();
+            for chunk in chunks {
+                if !chunk.is_empty() {
+                    let item: Result<Bytes, std::io::Error> = Ok(Bytes::from(chunk));
+                    if tx.send(item).is_err() {
+                        return; // client disconnected
+                    }
+                }
+            }
+            if reader.is_done() {
+                // Drain any final chunks that arrived with the done signal
+                for chunk in reader.drain() {
+                    if !chunk.is_empty() {
+                        let item: Result<Bytes, std::io::Error> = Ok(Bytes::from(chunk));
+                        let _ = tx.send(item);
+                    }
+                }
+                return; // tx drops here, closing the stream
+            }
+            yield_now().await;
+        }
+    }).detach();
+
+    builder.streaming(rx)
 }
 
 fn make_error(msg: &str) -> HttpResponse {

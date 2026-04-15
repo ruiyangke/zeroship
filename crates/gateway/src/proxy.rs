@@ -225,33 +225,83 @@ async fn forward_to_worker(
         stream.write_all(retry_request).await.map_err(|e| format!("write: {e}"))?;
     }
 
-    // Read response with timeout and httparse
-    let (status, headers, response_body) = compio::time::timeout(
+    // Parse response headers (shared between buffered and streaming paths)
+    let parsed = compio::time::timeout(
         WORKER_TIMEOUT,
-        read_http_response(&mut stream),
+        read_http_headers(&mut stream),
     )
     .await
     .map_err(|_| "read timeout".to_string())?
     .map_err(|e| format!("read: {e}"))?;
 
-    // Return connection to pool if healthy
-    CONN_POOL.with(|p| p.borrow_mut().put(key, stream));
-
-    // Build gateway response — forward all non-hop-by-hop headers
-    let mut builder = HttpResponse::build(
-        ntex::http::StatusCode::from_u16(status).unwrap_or(ntex::http::StatusCode::BAD_GATEWAY),
-    );
-
     let hop_by_hop = ["connection", "keep-alive", "transfer-encoding",
                       "te", "trailer", "upgrade", "proxy-authorization", "proxy-authenticate"];
-    for (name, value) in &headers {
+
+    let mut builder = HttpResponse::build(
+        ntex::http::StatusCode::from_u16(parsed.status).unwrap_or(ntex::http::StatusCode::BAD_GATEWAY),
+    );
+    for (name, value) in &parsed.headers {
         let lname = name.to_ascii_lowercase();
         if !hop_by_hop.contains(&lname.as_str()) {
             builder.set_header(name.as_str(), value.as_str());
         }
     }
 
-    Ok(builder.body(response_body))
+    if parsed.is_chunked {
+        // Streaming path: forward chunks in real time via ntex mpsc channel.
+        // The connection is consumed by the streaming task (not returned to pool).
+        let (tx, rx) = ntex::channel::mpsc::channel();
+
+        compio::runtime::spawn(async move {
+            // Forward any body bytes already read past the header boundary
+            let mut leftover = parsed.trailing;
+
+            loop {
+                // Process available data: decode chunked frames
+                loop {
+                    match decode_next_chunk(&leftover) {
+                        ChunkDecode::Complete(data, consumed) => {
+                            if data.is_empty() {
+                                // Final zero-length chunk — stream is done
+                                return;
+                            }
+                            let item: Result<ntex::util::Bytes, std::io::Error> =
+                                Ok(ntex::util::Bytes::from(data));
+                            if tx.send(item).is_err() {
+                                return; // client disconnected
+                            }
+                            leftover = leftover[consumed..].to_vec();
+                        }
+                        ChunkDecode::Incomplete => break,
+                    }
+                }
+
+                // Read more data from the worker
+                let read_buf = vec![0u8; 4096];
+                let BufResult(r, returned) = stream.read(read_buf).await;
+                match r {
+                    Ok(0) => return, // connection closed
+                    Ok(n) => leftover.extend_from_slice(&returned[..n]),
+                    Err(_) => return,
+                }
+            }
+        }).detach();
+
+        Ok(builder.streaming(rx))
+    } else {
+        // Buffered path: read the complete body (Content-Length or close-delimited),
+        // then return connection to pool.
+        let response_body = compio::time::timeout(
+            WORKER_TIMEOUT,
+            read_body_buffered(&mut stream, parsed.content_length, parsed.trailing),
+        )
+        .await
+        .map_err(|_| "read timeout".to_string())?
+        .map_err(|e| format!("read: {e}"))?;
+
+        CONN_POOL.with(|p| p.borrow_mut().put(key, stream));
+        Ok(builder.body(response_body))
+    }
 }
 
 fn build_request(path: &str, host: &str, app_id: &Uuid, plan_id: &str, request_id: &Uuid, body: &[u8], user_header: Option<&str>) -> Vec<u8> {
@@ -287,60 +337,158 @@ fn extract_host(worker_url: &str) -> String {
     }
 }
 
-/// Read a full HTTP response using httparse, supporting both Content-Length and close-delimited.
-async fn read_http_response(stream: &mut Stream) -> Result<(u16, Vec<(String, String)>, Vec<u8>), String> {
+// ---------------------------------------------------------------------------
+// HTTP response parsing — split into header + body phases for streaming support
+// ---------------------------------------------------------------------------
+
+/// Parsed HTTP response headers with metadata needed for body reading.
+struct ParsedHeaders {
+    status: u16,
+    headers: Vec<(String, String)>,
+    content_length: Option<usize>,
+    is_chunked: bool,
+    /// Bytes read past the header boundary (start of body data).
+    trailing: Vec<u8>,
+}
+
+/// Read HTTP response headers from the stream. Returns parsed header info
+/// and any trailing bytes that were read past the header boundary.
+async fn read_http_headers(stream: &mut Stream) -> Result<ParsedHeaders, String> {
     let mut buf = Vec::with_capacity(4096);
-    let mut header_len = 0;
-    let mut status = 200u16;
-    let mut content_length: Option<usize> = None;
-    let mut headers_parsed = Vec::new();
-    let mut headers_done = false;
 
     loop {
         let read_buf = vec![0u8; 4096];
         let BufResult(r, returned) = stream.read(read_buf).await;
         let n = r.map_err(|e| e.to_string())?;
-        if n == 0 { break; }
+        if n == 0 {
+            return Err("connection closed before headers complete".to_string());
+        }
         buf.extend_from_slice(&returned[..n]);
 
-        if !headers_done {
-            let mut parsed_headers = [httparse::EMPTY_HEADER; 32];
-            let mut resp = httparse::Response::new(&mut parsed_headers);
-            match resp.parse(&buf) {
-                Ok(httparse::Status::Complete(len)) => {
-                    header_len = len;
-                    status = resp.code.unwrap_or(502);
-                    headers_done = true;
+        let mut parsed_headers = [httparse::EMPTY_HEADER; 32];
+        let mut resp = httparse::Response::new(&mut parsed_headers);
+        match resp.parse(&buf) {
+            Ok(httparse::Status::Complete(header_len)) => {
+                let status = resp.code.unwrap_or(502);
+                let mut headers = Vec::new();
+                let mut content_length = None;
+                let mut is_chunked = false;
 
-                    for h in resp.headers.iter() {
-                        let name = h.name.to_string();
-                        let value = String::from_utf8_lossy(h.value).to_string();
-                        if name.eq_ignore_ascii_case("content-length") {
-                            content_length = value.trim().parse().ok();
-                        }
-                        headers_parsed.push((name, value));
+                for h in resp.headers.iter() {
+                    let name = h.name.to_string();
+                    let value = String::from_utf8_lossy(h.value).to_string();
+                    if name.eq_ignore_ascii_case("content-length") {
+                        content_length = value.trim().parse().ok();
                     }
+                    if name.eq_ignore_ascii_case("transfer-encoding")
+                        && value.to_ascii_lowercase().contains("chunked")
+                    {
+                        is_chunked = true;
+                    }
+                    headers.push((name, value));
                 }
-                Ok(httparse::Status::Partial) => continue,
-                Err(e) => return Err(format!("parse: {e}")),
-            }
-        }
 
-        // Check if we have the full body
-        if headers_done {
-            if let Some(cl) = content_length {
-                if buf.len() >= header_len + cl { break; }
+                let trailing = buf[header_len..].to_vec();
+
+                return Ok(ParsedHeaders {
+                    status,
+                    headers,
+                    content_length,
+                    is_chunked,
+                    trailing,
+                });
             }
-            // No Content-Length: read until connection close (handled by n == 0 above)
+            Ok(httparse::Status::Partial) => continue,
+            Err(e) => return Err(format!("parse: {e}")),
+        }
+    }
+}
+
+/// Read a complete body using Content-Length or close-delimited mode.
+/// Used for non-chunked (buffered) responses.
+async fn read_body_buffered(
+    stream: &mut Stream,
+    content_length: Option<usize>,
+    trailing: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    let mut body = trailing;
+
+    if let Some(cl) = content_length {
+        // Content-Length mode: read exactly `cl` bytes
+        while body.len() < cl {
+            let read_buf = vec![0u8; 4096];
+            let BufResult(r, returned) = stream.read(read_buf).await;
+            let n = r.map_err(|e| e.to_string())?;
+            if n == 0 { break; }
+            body.extend_from_slice(&returned[..n]);
+        }
+        body.truncate(cl);
+    } else {
+        // Close-delimited: read until connection close
+        loop {
+            let read_buf = vec![0u8; 4096];
+            let BufResult(r, returned) = stream.read(read_buf).await;
+            let n = r.map_err(|e| e.to_string())?;
+            if n == 0 { break; }
+            body.extend_from_slice(&returned[..n]);
         }
     }
 
-    if !headers_done {
-        return Err("incomplete response".to_string());
+    Ok(body)
+}
+
+// ---------------------------------------------------------------------------
+// Chunked transfer-encoding decoder
+// ---------------------------------------------------------------------------
+
+/// Result of attempting to decode the next chunk from a buffer.
+enum ChunkDecode {
+    /// A complete chunk was decoded: (data, bytes_consumed_from_buffer).
+    /// data is empty for the final zero-length terminator chunk.
+    Complete(Vec<u8>, usize),
+    /// Not enough data in the buffer to decode a complete chunk.
+    Incomplete,
+}
+
+/// Attempt to decode the next HTTP chunked-encoding frame from `buf`.
+///
+/// Chunked format: `<hex-size>\r\n<data>\r\n`, terminated by `0\r\n\r\n`.
+fn decode_next_chunk(buf: &[u8]) -> ChunkDecode {
+    // Find the chunk size line ending (\r\n)
+    let Some(crlf_pos) = find_crlf(buf) else {
+        return ChunkDecode::Incomplete;
+    };
+
+    // Parse hex size
+    let size_str = match std::str::from_utf8(&buf[..crlf_pos]) {
+        Ok(s) => s.trim(),
+        Err(_) => return ChunkDecode::Incomplete,
+    };
+    // Strip chunk extensions (anything after ';')
+    let size_hex = size_str.split(';').next().unwrap_or("").trim();
+    let chunk_size = match usize::from_str_radix(size_hex, 16) {
+        Ok(s) => s,
+        Err(_) => return ChunkDecode::Incomplete,
+    };
+
+    // Total bytes for this chunk: size_line + \r\n + data + \r\n
+    let data_start = crlf_pos + 2; // past the first \r\n
+    let chunk_end = data_start + chunk_size + 2; // data + trailing \r\n
+
+    if buf.len() < chunk_end {
+        return ChunkDecode::Incomplete;
     }
 
-    let body_end = content_length.map(|cl| header_len + cl).unwrap_or(buf.len());
-    let body = buf[header_len..body_end].to_vec();
+    if chunk_size == 0 {
+        // Terminal chunk
+        return ChunkDecode::Complete(Vec::new(), chunk_end);
+    }
 
-    Ok((status, headers_parsed, body))
+    let data = buf[data_start..data_start + chunk_size].to_vec();
+    ChunkDecode::Complete(data, chunk_end)
+}
+
+/// Find the position of the first \r\n in `buf`.
+fn find_crlf(buf: &[u8]) -> Option<usize> {
+    buf.windows(2).position(|w| w == b"\r\n")
 }
