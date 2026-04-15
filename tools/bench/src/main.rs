@@ -1,4 +1,5 @@
 mod config;
+mod stats;
 
 use config::Config;
 
