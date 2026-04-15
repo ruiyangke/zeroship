@@ -39,8 +39,9 @@ done
 # ---------------------------------------------------------------------------
 
 NUMA_NODES=$(lscpu 2>/dev/null | grep "NUMA node(s)" | awk '{print $NF}' || echo "1")
-if [ "$NUMA_NODES" -ge 2 ]; then
-    # 2+ NUMA nodes: pin servers to node 0, wrk to node 1
+HAS_NUMACTL=$(command -v numactl >/dev/null 2>&1 && echo "1" || echo "0")
+if [ "$NUMA_NODES" -ge 2 ] && [ "$HAS_NUMACTL" = "1" ]; then
+    # 2+ NUMA nodes + numactl available: pin servers to node 0, wrk to node 1
     NUMA_SERVER="numactl --cpunodebind=0 --membind=0"
     NUMA_CLIENT="numactl --cpunodebind=1 --membind=1"
     NUMA_NODE0_CPUS=$(lscpu | grep "NUMA node0" | awk '{print $NF}')
@@ -49,7 +50,11 @@ if [ "$NUMA_NODES" -ge 2 ]; then
 else
     NUMA_SERVER=""
     NUMA_CLIENT=""
-    NUMA_INFO="Single NUMA node"
+    if [ "$NUMA_NODES" -ge 2 ]; then
+        NUMA_INFO="Multi-NUMA detected but numactl not installed (apt install numactl)"
+    else
+        NUMA_INFO="Single NUMA node"
+    fi
 fi
 
 # Count physical cores per NUMA node for server workers
@@ -157,7 +162,7 @@ run_sse() {
         if [[ "$line" == "data: [DONE]" ]]; then
             break
         fi
-    done < <($NUMA_CLIENT curl -sN "$url" 2>/dev/null)
+    done < <($NUMA_CLIENT curl -sN --max-time 30 "$url" 2>/dev/null)
 
     local end=$(date +%s%N)
     local total_ms=$(( (end - start) / 1000000 ))
@@ -222,17 +227,11 @@ run_sse "Node.js 1000×0ms" $PORT_NODE 1000 0
 
 echo ""
 
-run_sse "compio (1 worker) 100×1ms" $PORT_COMPIO_1 100 1
-run_sse "Node.js 100×1ms" $PORT_NODE 100 1
+# NOTE: Delayed SSE tests (1ms, 10ms per chunk) require the full platform
+# worker with an independent pump task. The raw benchmark server's drain loop
+# blocks timer processing. Use tests/bench_platform.sh for delayed SSE.
 
-echo ""
-
-run_sse "compio (1 worker) 50×10ms" $PORT_COMPIO_1 50 10
-run_sse "Node.js 50×10ms" $PORT_NODE 50 10
-
-echo ""
-
-# SSE: concurrent streams
+# SSE: concurrent streams (0ms delay only)
 echo "  Concurrent SSE (10 streams × 100 chunks × 0ms):"
 start_conc=$(date +%s%N)
 CONC_PIDS=()
