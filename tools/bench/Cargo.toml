@@ -17,6 +17,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = { workspace = true }
 base64 = { workspace = true }
+# Task 4: Lua scripting (wrk-compatible callbacks)
+mlua = { version = "0.10", features = ["luajit", "vendored"] }
+# Task 5: TUI live dashboard
+ratatui = "0.30"
+crossterm = "0.28"
+# Task 6: TLS support
+compio-tls = { version = "0.9", features = ["rustls"] }
+rustls = { version = "0.23", features = ["ring"] }
 
 [lints]
 workspace = true

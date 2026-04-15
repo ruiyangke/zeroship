@@ -18,6 +18,14 @@ pub struct Config {
     pub sse: bool,
     /// Run in WebSocket benchmark mode (--ws).
     pub ws: bool,
+    /// Optional Lua script path (-s / --script).
+    pub script: Option<String>,
+    /// Show live TUI dashboard (--tui).
+    pub tui: bool,
+    /// Use TLS for the connection (auto-detected from https:// / wss://, or forced with --tls).
+    pub tls: bool,
+    /// Skip TLS certificate verification (--insecure).
+    pub insecure: bool,
 }
 
 impl Config {
@@ -41,6 +49,10 @@ impl Config {
             cpu_affinity: None,
             sse: false,
             ws: false,
+            script: None,
+            tui: false,
+            tls: false,
+            insecure: false,
         };
 
         let mut i = 1;
@@ -57,6 +69,10 @@ impl Config {
                 "--json" => { config.json_output = true; }
                 "--sse" => { config.sse = true; }
                 "--ws" => { config.ws = true; }
+                "-s" | "--script" => { i += 1; config.script = Some(args[i].clone()); }
+                "--tui" => { config.tui = true; }
+                "--tls" => { config.tls = true; }
+                "--insecure" => { config.insecure = true; }
                 "--numa" => { i += 1; config.numa_node = args[i].parse().ok(); }
                 "--cpu" => { i += 1; config.cpu_affinity = Some(parse_cpu_range(&args[i])); }
                 arg if !arg.starts_with('-') => {
@@ -84,17 +100,25 @@ impl Config {
 }
 
 fn parse_url(url: &str, config: &mut Config) {
-    let without_scheme = url.strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
+    // Detect TLS from scheme.
+    let is_tls = url.starts_with("https://") || url.starts_with("wss://");
+    if is_tls {
+        config.tls = true;
+    }
+
+    let without_scheme = url.strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .or_else(|| url.strip_prefix("wss://"))
+        .or_else(|| url.strip_prefix("ws://"))
         .unwrap_or(url);
     let (host_port, path) = without_scheme.split_once('/').unwrap_or((without_scheme, ""));
     config.path = format!("/{path}");
     if let Some((h, p)) = host_port.split_once(':') {
         config.host = h.to_string();
-        config.port = p.parse().unwrap_or(80);
+        config.port = p.parse().unwrap_or(if is_tls { 443 } else { 80 });
     } else {
         config.host = host_port.to_string();
-        config.port = if url.starts_with("https") { 443 } else { 80 };
+        config.port = if is_tls { 443 } else { 80 };
     }
 }
 
