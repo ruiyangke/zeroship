@@ -455,6 +455,10 @@ async fn dispatch_http(
             r.is_ok()
         }
         DispatchOutcome::HttpStream { status, headers, body, logs: _ } => {
+            // Notify the pump that there may be new async tasks (e.g. timers
+            // from an async ReadableStream start() callback).
+            runtime.borrow_mut().notify_pump();
+
             let header_bytes = build_stream_response_headers(status, &headers);
             let BufResult(r, _) = stream.write_all(header_bytes).await;
             if r.is_err() { return false; }
@@ -470,7 +474,10 @@ async fn dispatch_http(
                     if r.is_err() { return false; }
                 }
                 if body.is_done() { break; }
-                yield_now().await;
+                // Sleep briefly to allow the compio event loop to fire timers
+                // and drive async I/O (e.g. fetch responses, setTimeout).
+                // yield_now() only yields to ready tasks — doesn't poll I/O.
+                compio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
             let BufResult(r, _) = stream.write_all(b"0\r\n\r\n".to_vec()).await;
             r.is_ok()
@@ -485,7 +492,8 @@ async fn dispatch_http(
                 if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                     break None;
                 }
-                yield_now().await;
+                // Sleep briefly to let compio poll I/O events that the pump needs.
+                compio::time::sleep(std::time::Duration::from_millis(1)).await;
             };
 
             match result {
@@ -510,7 +518,7 @@ async fn dispatch_http(
                             if r.is_err() { return false; }
                         }
                         if body.is_done() { break; }
-                        yield_now().await;
+                        compio::time::sleep(std::time::Duration::from_millis(1)).await;
                     }
                     let BufResult(r, _) = stream.write_all(b"0\r\n\r\n".to_vec()).await;
                     r.is_ok()

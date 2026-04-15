@@ -333,7 +333,7 @@ impl Runtime {
     }
 
     /// Wake the pump task so it can drain newly added work.
-    fn notify_pump(&self) {
+    pub fn notify_pump(&self) {
         if let Some(tx) = &self.pump_notify_tx {
             let _ = tx.clone().try_send(());
         }
@@ -904,6 +904,46 @@ impl Runtime {
 
         // Fire zero-delay timers inline
         self.fire_ready_timers_pump(work);
+
+        // Forward buffered outbound stream chunks to their StreamForwarders.
+        // This handles the case where JS calls controller.enqueue() (via
+        // __streams.enqueue) which buffers data in RuntimeState — we need
+        // to move it to the StreamWriter so the HTTP stream reader can drain it.
+        self.flush_outbound_streams();
+    }
+
+    /// Move buffered chunks from RuntimeState.streams → StreamForwarder → StreamWriter.
+    fn flush_outbound_streams(&mut self) {
+        let outbound_ids: Vec<u32> = {
+            self.state.borrow().outbound_streams.iter().copied().collect()
+        };
+        for stream_id in outbound_ids {
+            let chunks: Vec<Vec<u8>> = {
+                let mut s = self.state.borrow_mut();
+                if let Some(stream) = s.streams.get_mut(&stream_id) {
+                    stream.buffer.drain(..).collect()
+                } else {
+                    continue;
+                }
+            };
+            if let Some(forwarder) = self.stream_forwarders.get_mut(&stream_id) {
+                for chunk in chunks {
+                    forwarder.try_forward(chunk);
+                }
+            }
+
+            // Check if stream was closed
+            let is_closed = {
+                let s = self.state.borrow();
+                s.streams.get(&stream_id).map(|st| st.closed).unwrap_or(true)
+            };
+            if is_closed {
+                if let Some(forwarder) = self.stream_forwarders.remove(&stream_id) {
+                    forwarder.writer.close();
+                }
+                self.state.borrow_mut().outbound_streams.remove(&stream_id);
+            }
+        }
     }
 
     /// Handle an async event from the pump (op completed or timer fired).
