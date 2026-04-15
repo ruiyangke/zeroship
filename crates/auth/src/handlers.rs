@@ -7,6 +7,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use ntex::http::header;
 use ntex::web;
 use ntex::web::types::{Json, Query, State};
+use openidconnect::{Nonce, PkceCodeVerifier};
 use serde::Deserialize;
 
 use crate::service::TokenClaims;
@@ -17,18 +18,25 @@ use crate::AppState;
 // ---------------------------------------------------------------------------
 
 const COOKIE_NAME: &str = "__zs_session";
+const PKCE_COOKIE: &str = "__zs_pkce";
+const NONCE_COOKIE: &str = "__zs_nonce";
 
-/// Extract the `__zs_session` value from the raw Cookie header.
-fn extract_session_cookie(req: &web::HttpRequest) -> Option<String> {
+/// Extract a named cookie value from the raw Cookie header.
+fn extract_cookie(req: &web::HttpRequest, name: &str) -> Option<String> {
     let header_val = req.headers().get(header::COOKIE)?.to_str().ok()?;
     for part in header_val.split(';') {
         let part = part.trim();
-        if let Some(value) = part.strip_prefix(COOKIE_NAME) {
+        if let Some(value) = part.strip_prefix(name) {
             let value = value.strip_prefix('=')?;
             return Some(value.to_string());
         }
     }
     None
+}
+
+/// Extract the `__zs_session` value from the raw Cookie header.
+fn extract_session_cookie(req: &web::HttpRequest) -> Option<String> {
+    extract_cookie(req, COOKIE_NAME)
 }
 
 /// Build a Set-Cookie header value for setting the session cookie.
@@ -41,6 +49,30 @@ fn set_cookie_header(token: &str) -> String {
 /// Build a Set-Cookie header value that clears the session cookie.
 fn clear_cookie_header() -> String {
     format!("{COOKIE_NAME}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0")
+}
+
+/// Build a short-lived cookie for storing the PKCE verifier during OAuth flow.
+fn pkce_cookie_header(verifier: &str) -> String {
+    format!(
+        "{PKCE_COOKIE}={verifier}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=300"
+    )
+}
+
+/// Build a short-lived cookie for storing the OIDC nonce during OAuth flow.
+fn nonce_cookie_header(nonce: &str) -> String {
+    format!(
+        "{NONCE_COOKIE}={nonce}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=300"
+    )
+}
+
+/// Build a Set-Cookie header that clears the PKCE cookie.
+fn clear_pkce_cookie() -> String {
+    format!("{PKCE_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0")
+}
+
+/// Build a Set-Cookie header that clears the nonce cookie.
+fn clear_nonce_cookie() -> String {
+    format!("{NONCE_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0")
 }
 
 /// Validate the session cookie and return claims, or None.
@@ -267,6 +299,9 @@ fn decode_state(state: &str) -> Result<(String, String), String> {
 ///
 /// Query params: `app_id` (which app the user is logging into),
 /// `return` (URL to redirect back to after auth completes).
+///
+/// Sets short-lived HttpOnly cookies for the PKCE verifier and OIDC nonce
+/// so they can be recovered during the callback.
 pub async fn oauth_start(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,
@@ -286,15 +321,23 @@ pub async fn oauth_start(
     let return_url = query.return_url.as_deref().unwrap_or("/");
     let oauth_state = encode_state(app_id, return_url);
 
-    let url = provider.authorize_url(&oauth_state);
+    let (url, _csrf_token, nonce, pkce_verifier) = provider.authorize_url(&oauth_state);
+
+    // Store PKCE verifier and nonce in short-lived HttpOnly cookies (5 min TTL).
+    let pkce_cookie = pkce_cookie_header(pkce_verifier.secret());
+    let nonce_cookie = nonce_cookie_header(nonce.secret());
+
     web::HttpResponse::Found()
         .header(header::LOCATION, url)
+        .header(header::SET_COOKIE, pkce_cookie)
+        .header(header::SET_COOKIE, nonce_cookie)
         .finish()
 }
 
 /// GET /auth/callback/{provider} -- handle the OAuth provider's callback.
 ///
 /// Query params: `code` (authorization code), `state` (encoded app_id + return_url).
+/// Reads the PKCE verifier and nonce from cookies set during `oauth_start`.
 pub async fn oauth_callback(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,
@@ -334,8 +377,28 @@ pub async fn oauth_callback(
         }
     };
 
+    // Recover the PKCE verifier from the cookie set during oauth_start.
+    let pkce_secret = match extract_cookie(&req, PKCE_COOKIE) {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({ "error": "missing PKCE verifier cookie" }));
+        }
+    };
+    let pkce_verifier = PkceCodeVerifier::new(pkce_secret);
+
+    // Recover the nonce from the cookie set during oauth_start.
+    let nonce_secret = match extract_cookie(&req, NONCE_COOKIE) {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({ "error": "missing nonce cookie" }));
+        }
+    };
+    let nonce = Nonce::new(nonce_secret);
+
     // Exchange the authorization code for a user profile.
-    let profile = match provider.exchange(code).await {
+    let profile = match provider.exchange(code, pkce_verifier, &nonce).await {
         Ok(p) => p,
         Err(msg) => {
             return web::HttpResponse::BadGateway()
@@ -365,8 +428,10 @@ pub async fn oauth_callback(
         }
     };
 
-    // Set session cookie and redirect back to the app.
-    let cookie = set_cookie_header(&token);
+    // Set session cookie and clear the PKCE/nonce cookies.
+    let session_cookie = set_cookie_header(&token);
+    let clear_pkce = clear_pkce_cookie();
+    let clear_nonce = clear_nonce_cookie();
 
     // Append token as a query parameter to the return URL so the app can
     // read it on the client side (useful for SPAs that don't read cookies).
@@ -377,7 +442,9 @@ pub async fn oauth_callback(
     };
 
     web::HttpResponse::Found()
-        .header(header::SET_COOKIE, cookie)
+        .header(header::SET_COOKIE, session_cookie)
+        .header(header::SET_COOKIE, clear_pkce)
+        .header(header::SET_COOKIE, clear_nonce)
         .header(header::LOCATION, redirect)
         .finish()
 }

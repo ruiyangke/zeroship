@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use ntex::web;
 
-use oauth::OAuthRegistry;
+use oauth::ProviderRegistry;
 use service::AuthService;
 
 #[global_allocator]
@@ -19,7 +19,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[allow(missing_debug_implementations)]
 pub struct AppState {
     pub auth: AuthService,
-    pub oauth: OAuthRegistry,
+    pub oauth: ProviderRegistry,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -54,8 +54,9 @@ async fn main() -> std::io::Result<()> {
     let auth = AuthService::new(&db_url, &jwt_secret);
 
     // --- OAuth providers (enabled by env vars) ---
+    // OIDC providers (Google, Apple) perform async discovery at startup.
     let service_url = arg_or_env(&args, "--url", "SERVICE_URL", &format!("http://localhost:{port}"));
-    let mut oauth_registry = OAuthRegistry::new();
+    let mut oauth_registry = ProviderRegistry::new();
 
     if let (Ok(client_id), Ok(client_secret)) = (
         std::env::var("GOOGLE_CLIENT_ID"),
@@ -63,8 +64,15 @@ async fn main() -> std::io::Result<()> {
     ) {
         let redirect_uri = format!("{service_url}/auth/callback/google");
         let config = oauth::OAuthConfig { client_id, client_secret, redirect_uri };
-        oauth_registry.register(oauth::google::GoogleProvider::new(config));
-        eprintln!("  oauth: google enabled");
+        match oauth::google::build(config).await {
+            Ok(provider) => {
+                oauth_registry.register(provider);
+                eprintln!("  oauth: google enabled (OIDC discovery OK)");
+            }
+            Err(e) => {
+                eprintln!("  oauth: google FAILED — {e}");
+            }
+        }
     }
 
     if let (Ok(client_id), Ok(client_secret)) = (
@@ -73,8 +81,15 @@ async fn main() -> std::io::Result<()> {
     ) {
         let redirect_uri = format!("{service_url}/auth/callback/github");
         let config = oauth::OAuthConfig { client_id, client_secret, redirect_uri };
-        oauth_registry.register(oauth::github::GitHubProvider::new(config));
-        eprintln!("  oauth: github enabled");
+        match oauth::github::build(config).await {
+            Ok(provider) => {
+                oauth_registry.register(provider);
+                eprintln!("  oauth: github enabled");
+            }
+            Err(e) => {
+                eprintln!("  oauth: github FAILED — {e}");
+            }
+        }
     }
 
     if let (Ok(client_id), Ok(client_secret)) = (
@@ -83,8 +98,15 @@ async fn main() -> std::io::Result<()> {
     ) {
         let redirect_uri = format!("{service_url}/auth/callback/apple");
         let config = oauth::OAuthConfig { client_id, client_secret, redirect_uri };
-        oauth_registry.register(oauth::apple::AppleProvider::new(config));
-        eprintln!("  oauth: apple enabled");
+        match oauth::apple::build(config).await {
+            Ok(provider) => {
+                oauth_registry.register(provider);
+                eprintln!("  oauth: apple enabled (OIDC discovery OK)");
+            }
+            Err(e) => {
+                eprintln!("  oauth: apple FAILED — {e}");
+            }
+        }
     }
 
     if let (Ok(client_id), Ok(client_secret)) = (
@@ -93,8 +115,15 @@ async fn main() -> std::io::Result<()> {
     ) {
         let redirect_uri = format!("{service_url}/auth/callback/meta");
         let config = oauth::OAuthConfig { client_id, client_secret, redirect_uri };
-        oauth_registry.register(oauth::meta::MetaProvider::new(config));
-        eprintln!("  oauth: meta enabled");
+        match oauth::meta::build(config).await {
+            Ok(provider) => {
+                oauth_registry.register(provider);
+                eprintln!("  oauth: meta enabled");
+            }
+            Err(e) => {
+                eprintln!("  oauth: meta FAILED — {e}");
+            }
+        }
     }
 
     let state = Arc::new(AppState { auth, oauth: oauth_registry });

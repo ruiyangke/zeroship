@@ -1,25 +1,33 @@
-//! GitHub OAuth2 provider.
+//! GitHub OAuth2 provider — plain OAuth2 (not OIDC).
 //!
 //! Flow:
 //! 1. Redirect user to `github.com/login/oauth/authorize`
 //! 2. Exchange authorization code at `github.com/login/oauth/access_token`
 //! 3. Fetch user profile from `api.github.com/user`
 //! 4. If email is null, fetch primary verified email from `api.github.com/user/emails`
+//!
+//! GitHub does not support OIDC, so endpoints are configured manually via
+//! a synthetic `CoreProviderMetadata` and the user profile is fetched via
+//! GitHub's REST API using the access token.
 
-use std::collections::HashMap;
-
+use openidconnect::{ClientId, ClientSecret, RedirectUrl};
 use serde::Deserialize;
 
-use super::{ExchangeFuture, OAuthConfig, OAuthProfile, OAuthProvider, http_client};
+use super::{
+    OAuthConfig, OAuthCoreClient, OAuthProfile, Provider, ProviderKind, cyper_client,
+    manual_provider_metadata,
+};
+
+/// GitHub's authorization endpoint.
+const AUTH_URL: &str = "https://github.com/login/oauth/authorize";
+/// GitHub's token endpoint.
+const TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
+/// GitHub's user API endpoint.
+const USERINFO_URL: &str = "https://api.github.com/user";
 
 // ---------------------------------------------------------------------------
-// Token + userinfo response shapes
+// GitHub API response shapes
 // ---------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-struct TokenResponse {
-    access_token: String,
-}
 
 #[derive(Deserialize)]
 struct UserResponse {
@@ -37,86 +45,61 @@ struct EmailEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Provider
+// Builder
 // ---------------------------------------------------------------------------
 
-/// GitHub OAuth2 provider.
-#[derive(Debug, Clone)]
-pub struct GitHubProvider {
-    config: OAuthConfig,
+/// Create a GitHub OAuth2 provider with manually configured endpoints.
+///
+/// This is async for signature consistency with OIDC providers, but does not
+/// perform any network calls.
+pub async fn build(config: OAuthConfig) -> Result<Provider, String> {
+    let metadata = manual_provider_metadata("https://github.com", AUTH_URL, TOKEN_URL)?;
+
+    let client = OAuthCoreClient::from_provider_metadata(
+        metadata,
+        ClientId::new(config.client_id),
+        Some(ClientSecret::new(config.client_secret)),
+    )
+    .set_redirect_uri(
+        RedirectUrl::new(config.redirect_uri)
+            .map_err(|e| format!("github: invalid redirect URI: {e}"))?,
+    )
+    .disable_openid_scope();
+
+    Ok(Provider {
+        name: "github".to_string(),
+        client,
+        kind: ProviderKind::OAuth2,
+        scopes: vec!["user:email".to_string()],
+        profile_fetcher: Some(fetch_profile),
+    })
 }
 
-impl GitHubProvider {
-    /// Create a new GitHub OAuth provider with the given configuration.
-    pub fn new(config: OAuthConfig) -> Self {
-        Self { config }
-    }
+// ---------------------------------------------------------------------------
+// Profile fetcher
+// ---------------------------------------------------------------------------
+
+/// Fetch user profile from GitHub's REST API using an access token.
+fn fetch_profile(
+    access_token: &str,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<OAuthProfile, String>> + Send + '_>>
+{
+    Box::pin(fetch_profile_impl(access_token))
 }
 
-impl OAuthProvider for GitHubProvider {
-    fn name(&self) -> &str {
-        "github"
-    }
+async fn fetch_profile_impl(access_token: &str) -> Result<OAuthProfile, String> {
+    let client = cyper_client();
 
-    fn authorize_url(&self, state: &str) -> String {
-        format!(
-            "https://github.com/login/oauth/authorize\
-             ?client_id={client_id}\
-             &redirect_uri={redirect_uri}\
-             &scope=user:email\
-             &state={state}",
-            client_id = urlencod(&self.config.client_id),
-            redirect_uri = urlencod(&self.config.redirect_uri),
-            state = urlencod(state),
-        )
-    }
-
-    fn exchange(&self, code: &str) -> ExchangeFuture<'_> {
-        let code = code.to_string();
-        Box::pin(async move { exchange_impl(&self.config, &code).await })
-    }
-}
-
-/// The actual async exchange logic, extracted so the trait method can return
-/// a boxed future.
-async fn exchange_impl(config: &OAuthConfig, code: &str) -> Result<OAuthProfile, String> {
-    let client = http_client();
-
-    // --- Step 1: Exchange code for access token ---
-    let mut form = HashMap::new();
-    form.insert("code", code);
-    form.insert("client_id", config.client_id.as_str());
-    form.insert("client_secret", config.client_secret.as_str());
-
+    // --- Fetch user profile ---
     let resp = client
-        .post("https://github.com/login/oauth/access_token")
-        .map_err(|e| format!("github: build token request: {e}"))?
-        .header("Accept", "application/json")
-        .map_err(|e| format!("github: set accept header: {e}"))?
-        .form(&form)
-        .map_err(|e| format!("github: encode form: {e}"))?
-        .send()
-        .await
-        .map_err(|e| format!("github: token exchange: {e}"))?;
-
-    if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("github: token exchange failed: {body}"));
-    }
-
-    let token: TokenResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("github: parse token response: {e}"))?;
-
-    // --- Step 2: Fetch user profile ---
-    let resp = client
-        .get("https://api.github.com/user")
+        .get(USERINFO_URL)
         .map_err(|e| format!("github: build user request: {e}"))?
-        .bearer_auth(&token.access_token)
+        .bearer_auth(access_token)
         .map_err(|e| format!("github: set bearer auth: {e}"))?
         .header("User-Agent", "zeroship")
         .map_err(|e| format!("github: set user-agent: {e}"))?
+        .header("Accept", "application/json")
+        .map_err(|e| format!("github: set accept: {e}"))?
         .send()
         .await
         .map_err(|e| format!("github: user request: {e}"))?;
@@ -131,12 +114,12 @@ async fn exchange_impl(config: &OAuthConfig, code: &str) -> Result<OAuthProfile,
         .await
         .map_err(|e| format!("github: parse user response: {e}"))?;
 
-    // --- Step 3: Resolve email ---
+    // --- Resolve email ---
     // GitHub may not include email in /user if the user's email is private.
     // Fall back to /user/emails to find the primary verified email.
     let email = match user.email {
         Some(ref e) if !e.is_empty() => e.clone(),
-        _ => fetch_primary_email(&token.access_token).await?,
+        _ => fetch_primary_email(access_token).await?,
     };
 
     Ok(OAuthProfile {
@@ -146,13 +129,9 @@ async fn exchange_impl(config: &OAuthConfig, code: &str) -> Result<OAuthProfile,
     })
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 /// Fetch the primary verified email from `GET /user/emails`.
 async fn fetch_primary_email(access_token: &str) -> Result<String, String> {
-    let client = http_client();
+    let client = cyper_client();
 
     let resp = client
         .get("https://api.github.com/user/emails")
@@ -161,6 +140,8 @@ async fn fetch_primary_email(access_token: &str) -> Result<String, String> {
         .map_err(|e| format!("github: set bearer auth (emails): {e}"))?
         .header("User-Agent", "zeroship")
         .map_err(|e| format!("github: set user-agent (emails): {e}"))?
+        .header("Accept", "application/json")
+        .map_err(|e| format!("github: set accept (emails): {e}"))?
         .send()
         .await
         .map_err(|e| format!("github: emails request: {e}"))?;
@@ -183,23 +164,3 @@ async fn fetch_primary_email(access_token: &str) -> Result<String, String> {
         .map(|e| e.email.clone())
         .ok_or_else(|| "github: no verified email found".to_string())
 }
-
-/// Minimal percent-encoding for URL query parameter values.
-fn urlencod(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => {
-                out.push('%');
-                out.push(char::from(HEX[(b >> 4) as usize]));
-                out.push(char::from(HEX[(b & 0x0f) as usize]));
-            }
-        }
-    }
-    out
-}
-
-const HEX: &[u8; 16] = b"0123456789ABCDEF";
