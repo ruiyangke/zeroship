@@ -4,12 +4,9 @@
 // Migrations
 // ---------------------------------------------------------------------------
 
-pub const CREATE_UUID_EXTENSION: &str =
-    "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"";
-
 pub const CREATE_USERS_TABLE: &str =
     "CREATE TABLE IF NOT EXISTS auth_users (
-        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        id UUID PRIMARY KEY,
         email TEXT UNIQUE NOT NULL,
         name TEXT NOT NULL,
         avatar_url TEXT,
@@ -39,10 +36,10 @@ pub const CREATE_CONSENTS_TABLE: &str =
 // ---------------------------------------------------------------------------
 
 pub const INSERT_USER: &str =
-    "INSERT INTO auth_users (email, name, password_hash) VALUES ($1, $2, $3)";
+    "INSERT INTO auth_users (id, email, name, password_hash) VALUES ($1::uuid, $2, $3, $4)";
 
 pub const INSERT_OAUTH_USER: &str =
-    "INSERT INTO auth_users (email, name, avatar_url, email_verified) VALUES ($1, $2, NULLIF($3, ''), TRUE)";
+    "INSERT INTO auth_users (id, email, name, avatar_url, email_verified) VALUES ($1::uuid, $2, $3, NULLIF($4, ''), TRUE)";
 
 pub const SELECT_USER_BY_EMAIL: &str =
     "SELECT id, email, name, avatar_url, email_verified FROM auth_users WHERE email = $1";

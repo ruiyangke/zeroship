@@ -64,7 +64,6 @@ impl AuthService {
     pub async fn new(db_url: &str, jwt_secret: &str) -> Result<Self, String> {
         let mut conn = Conn::connect(db_url).await.map_err(|e| e.to_string())?;
 
-        conn.execute(sql::CREATE_UUID_EXTENSION, &[]).await.map_err(|e| format!("auth migration: {e}"))?;
         conn.execute(sql::CREATE_USERS_TABLE, &[]).await.map_err(|e| format!("auth migration: {e}"))?;
         conn.execute(sql::CREATE_CONSENTS_TABLE, &[]).await.map_err(|e| format!("auth migration: {e}"))?;
 
@@ -92,9 +91,10 @@ impl AuthService {
         }
 
         let hash = bcrypt::hash(password, 12).map_err(|e| format!("bcrypt: {e}"))?;
+        let id = typed_id::new_v7().to_string();
         let mut conn = self.conn().await?;
 
-        conn.execute(sql::INSERT_USER, &[&email, &name, &hash.as_str()])
+        conn.execute(sql::INSERT_USER, &[&id.as_str(), &email, &name, &hash.as_str()])
             .await
             .map_err(|e| {
                 let msg = e.to_string();
@@ -118,8 +118,9 @@ impl AuthService {
             return Ok(row_to_user(row));
         }
 
+        let id = typed_id::new_v7().to_string();
         let avatar = avatar_url.unwrap_or("");
-        conn.execute(sql::INSERT_OAUTH_USER, &[&email, &name, &avatar]).await.map_err(|e| format!("database: {e}"))?;
+        conn.execute(sql::INSERT_OAUTH_USER, &[&id.as_str(), &email, &name, &avatar]).await.map_err(|e| format!("database: {e}"))?;
 
         let rows = conn.query(sql::SELECT_USER_BY_EMAIL, &[&email]).await.map_err(|e| format!("database: {e}"))?;
         rows.first().map(row_to_user).ok_or_else(|| "insert ok but read-back failed".to_string())
