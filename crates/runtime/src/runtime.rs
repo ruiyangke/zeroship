@@ -377,6 +377,7 @@ impl Runtime {
                 let mut rt = runtime.borrow_mut();
                 rt.enter_isolate();
                 rt.drain_new_tasks_into(&mut work);
+                rt.flush_outbound_streams();
                 rt.exit_isolate();
             }
 
@@ -415,6 +416,8 @@ impl Runtime {
                 let mut rt = runtime.borrow_mut();
                 rt.enter_isolate();
                 rt.handle_async_event(event, &mut work);
+                // Flush any stream chunks enqueued during V8 execution.
+                rt.flush_outbound_streams();
                 rt.exit_isolate();
             }
         }
@@ -842,18 +845,30 @@ impl Runtime {
                 let (writer, reader) = channel::stream_buffer();
                 let mut forwarder = StreamForwarder::new(writer);
 
-                // Flush any chunks already buffered in the stream state
-                {
+                // Flush any chunks already buffered in the stream state.
+                // If start() was async and already completed, chunks + close
+                // may already be in the buffer.
+                let already_closed = {
                     let mut s = self.state.borrow_mut();
-                    if let Some(stream) = s.streams.get_mut(&stream_id) {
+                    let closed = if let Some(stream) = s.streams.get_mut(&stream_id) {
                         for chunk in stream.buffer.drain(..) {
                             forwarder.try_forward(chunk);
                         }
-                    }
+                        stream.closed
+                    } else {
+                        false
+                    };
                     s.outbound_streams.insert(stream_id);
-                }
+                    closed
+                };
 
-                self.stream_forwarders.insert(stream_id, forwarder);
+                if already_closed {
+                    // Stream completed before we started reading — close writer
+                    // so the reader sees is_done() immediately.
+                    forwarder.writer.close();
+                } else {
+                    self.stream_forwarders.insert(stream_id, forwarder);
+                }
                 DispatchOutcome::HttpStream { status, headers, body: reader, logs }
             }
             ResponseInfo::WebSocket { ws_id, headers } => {
@@ -904,16 +919,11 @@ impl Runtime {
 
         // Fire zero-delay timers inline
         self.fire_ready_timers_pump(work);
-
-        // Forward buffered outbound stream chunks to their StreamForwarders.
-        // This handles the case where JS calls controller.enqueue() (via
-        // __streams.enqueue) which buffers data in RuntimeState — we need
-        // to move it to the StreamWriter so the HTTP stream reader can drain it.
-        self.flush_outbound_streams();
     }
 
     /// Move buffered chunks from RuntimeState.streams → StreamForwarder → StreamWriter.
-    fn flush_outbound_streams(&mut self) {
+    /// Must be called after any V8 execution that may have called __streams.enqueue().
+    pub fn flush_outbound_streams(&mut self) {
         let outbound_ids: Vec<u32> = {
             self.state.borrow().outbound_streams.iter().copied().collect()
         };

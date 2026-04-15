@@ -477,7 +477,7 @@ async fn dispatch_http(
                 // Sleep briefly to allow the compio event loop to fire timers
                 // and drive async I/O (e.g. fetch responses, setTimeout).
                 // yield_now() only yields to ready tasks — doesn't poll I/O.
-                compio::time::sleep(std::time::Duration::from_millis(1)).await;
+                body.wait_for_data().await;
             }
             let BufResult(r, _) = stream.write_all(b"0\r\n\r\n".to_vec()).await;
             r.is_ok()
@@ -492,7 +492,7 @@ async fn dispatch_http(
                 if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                     break None;
                 }
-                // Sleep briefly to let compio poll I/O events that the pump needs.
+                // Yield to let the pump drive async ops that resolve the promise.
                 compio::time::sleep(std::time::Duration::from_millis(1)).await;
             };
 
@@ -518,7 +518,7 @@ async fn dispatch_http(
                             if r.is_err() { return false; }
                         }
                         if body.is_done() { break; }
-                        compio::time::sleep(std::time::Duration::from_millis(1)).await;
+                        body.wait_for_data().await;
                     }
                     let BufResult(r, _) = stream.write_all(b"0\r\n\r\n".to_vec()).await;
                     r.is_ok()
