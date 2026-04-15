@@ -117,15 +117,14 @@ export async function chat(message: string, history: ChatMsg[] = []): Promise<an
   );
   msgs.push(new HumanMessage(message));
 
-  // Collect SSE events FIRST (all async work completes), then stream them.
-  // This avoids the issue where nested fetch() calls inside ReadableStream.start()
-  // can't progress because the stream reader loop occupies the event loop.
+  // Collect all ReAct events first, then stream them as SSE.
+  // True token-by-token streaming from OpenAI requires fixing nested
+  // async ReadableStream support in the single-threaded event loop.
   const events: string[] = [];
   const encoder = new TextEncoder();
 
   try {
     const m = getModel();
-    // ReAct loop: up to 5 iterations
     for (let i = 0; i < 5; i++) {
       const response = await m.invoke(msgs);
       msgs.push(response);
@@ -148,7 +147,6 @@ export async function chat(message: string, history: ChatMsg[] = []): Promise<an
     events.push(JSON.stringify({ error: e.message }));
   }
 
-  // Now stream the collected events as SSE
   const stream = new ReadableStream({
     start(controller: any) {
       for (const evt of events) {
