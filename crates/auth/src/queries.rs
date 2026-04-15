@@ -1,35 +1,5 @@
 //! All SQL queries for the auth service — one file, easy to audit.
-
-// ---------------------------------------------------------------------------
-// Migrations
-// ---------------------------------------------------------------------------
-
-pub const CREATE_USERS_TABLE: &str =
-    "CREATE TABLE IF NOT EXISTS auth_users (
-        id UUID PRIMARY KEY,
-        email TEXT UNIQUE NOT NULL,
-        name TEXT NOT NULL,
-        avatar_url TEXT,
-        password_hash TEXT,
-        email_verified BOOLEAN DEFAULT FALSE,
-        created_at TIMESTAMPTZ DEFAULT NOW(),
-        updated_at TIMESTAMPTZ DEFAULT NOW(),
-        last_login TIMESTAMPTZ
-    )";
-
-pub const CREATE_CONSENTS_TABLE: &str =
-    "CREATE TABLE IF NOT EXISTS auth_app_consents (
-        id SERIAL PRIMARY KEY,
-        user_id UUID NOT NULL REFERENCES auth_users(id),
-        app_id UUID NOT NULL,
-        granted_at TIMESTAMPTZ DEFAULT NOW(),
-        revoked_at TIMESTAMPTZ,
-        UNIQUE (user_id, app_id)
-    )";
-
-// ---------------------------------------------------------------------------
-// User columns — single source of truth for SELECT projections
-// ---------------------------------------------------------------------------
+//! Migrations live in crates/auth/migrations/*.sql — applied before deployment.
 
 // ---------------------------------------------------------------------------
 // User queries

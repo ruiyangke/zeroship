@@ -60,15 +60,9 @@ impl std::fmt::Debug for AuthService {
 }
 
 impl AuthService {
-    /// Connect to the database, run migrations, return an `AuthService`.
-    pub async fn new(db_url: &str, jwt_secret: &str) -> Result<Self, String> {
-        let mut conn = Conn::connect(db_url).await.map_err(|e| e.to_string())?;
-
-        conn.execute(sql::CREATE_USERS_TABLE, &[]).await.map_err(|e| format!("auth migration: {e}"))?;
-        conn.execute(sql::CREATE_CONSENTS_TABLE, &[]).await.map_err(|e| format!("auth migration: {e}"))?;
-
-        let _ = conn.close().await;
-        Ok(Self { db_url: db_url.to_string(), jwt_secret: jwt_secret.to_string() })
+    /// Create an `AuthService`. Schema must already exist (applied via migrations).
+    pub fn new(db_url: &str, jwt_secret: &str) -> Self {
+        Self { db_url: db_url.to_string(), jwt_secret: jwt_secret.to_string() }
     }
 
     /// Open a fresh connection.

@@ -48,9 +48,7 @@ async fn main() -> std::io::Result<()> {
         &uuid::Uuid::new_v4().to_string(),
     );
 
-    let auth = AuthService::new(&db_url, &jwt_secret)
-        .await
-        .expect("failed to initialise auth service");
+    let auth = AuthService::new(&db_url, &jwt_secret);
 
     let state = Arc::new(AppState { auth });
 
