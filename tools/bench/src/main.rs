@@ -1,5 +1,6 @@
 mod config;
 mod http;
+mod numa;
 mod stats;
 
 use config::Config;
