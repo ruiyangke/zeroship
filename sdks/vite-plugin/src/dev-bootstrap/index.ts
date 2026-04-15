@@ -1,20 +1,43 @@
 /**
  * Dev bootstrap — entry module for zeroship V8 runtime in dev mode.
  * Bundled into dist/dev-bootstrap.js by esbuild.
+ *
+ * Uses lazy initialization instead of top-level await because the V8 runtime
+ * may start serving HTTP requests before TLA promises resolve.
  */
 import { createRunner } from "./transport";
+import type { ModuleRunner } from "vite/module-runner";
 
-const runner = await createRunner();
 const ENTRY = (globalThis as any).process?.env?.ZEROSHIP_ENTRY;
 
-if (!ENTRY) {
-  throw new Error("[zeroship] ZEROSHIP_ENTRY not set");
+let runner: ModuleRunner | null = null;
+let runnerPromise: Promise<ModuleRunner> | null = null;
+
+async function getRunner(): Promise<ModuleRunner> {
+  if (runner) return runner;
+  if (!runnerPromise) {
+    runnerPromise = createRunner().then((r) => {
+      runner = r;
+      console.log(`[zeroship:dev] ModuleRunner ready, entry: ${ENTRY}`);
+      return r;
+    });
+  }
+  return runnerPromise;
 }
 
-console.log(`[zeroship:dev] ModuleRunner ready, entry: ${ENTRY}`);
+// Kick off connection immediately (don't await — just start it)
+getRunner().catch((e) => console.error("[zeroship:dev] Runner init failed:", e));
 
 export async function onRequest(req: any): Promise<any> {
-  const mod = await runner.import(ENTRY);
+  if (!ENTRY) {
+    return new Response(
+      JSON.stringify({ error: "ZEROSHIP_ENTRY not set" }),
+      { status: 500, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  const r = await getRunner();
+  const mod = await r.import(ENTRY);
 
   if (typeof mod.onRequest === "function") {
     return mod.onRequest(req);

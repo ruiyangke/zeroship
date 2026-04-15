@@ -1,0 +1,15 @@
+{
+  "name": "todo-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite"
+  },
+  "dependencies": {
+    "@zeroship/vite-plugin": "file:../../sdks/vite-plugin"
+  },
+  "devDependencies": {
+    "vite": "^8.0.0",
+    "typescript": "^5.0.0"
+  }
+}

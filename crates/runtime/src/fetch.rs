@@ -21,6 +21,8 @@ pub fn error_json(msg: &str) -> String {
 /// Validate the URL to prevent SSRF attacks.
 ///
 /// Blocks private/internal IPs, loopback, link-local, and non-HTTP(S) schemes.
+/// In dev mode (`ZEROSHIP_DEV=1`), localhost/loopback is allowed so the
+/// Vite plugin's ModuleRunner can fetch modules from the Vite dev server.
 pub fn validate_url(url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
 
@@ -28,6 +30,11 @@ pub fn validate_url(url: &str) -> Result<(), String> {
     match parsed.scheme() {
         "http" | "https" => {}
         scheme => return Err(format!("Blocked URL scheme: {scheme}")),
+    }
+
+    // In dev mode, skip host/IP validation (allows localhost fetch to Vite)
+    if std::env::var("ZEROSHIP_DEV").is_ok() {
+        return Ok(());
     }
 
     let host = parsed

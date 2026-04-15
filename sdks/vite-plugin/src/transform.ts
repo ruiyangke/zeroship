@@ -155,6 +155,10 @@ export function transformPlugin(rpcEndpoint: string = DEFAULT_RPC_ENDPOINT, stat
         id: { include: /\.(ts|tsx|js|jsx)$/, exclude: /node_modules/ },
       },
       handler(this: any, code: string, id: string) {
+        // Skip transform for the zeroship environment — server code should
+        // run as-is in V8. Only transform for client (replace with RPC stubs).
+        if (this.environment?.name === "zeroship") return null;
+
         // 1. Parse AST with Rolldown's built-in parser
         const isTsx = id.endsWith(".tsx") || id.endsWith(".jsx");
         const ast = this.parse(code, { lang: isTsx ? "tsx" : "ts" });

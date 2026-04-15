@@ -183,7 +183,6 @@ export function createZeroshipEnvironmentOptions(): vite.EnvironmentOptions {
     consumer: "server",
     resolve: {
       conditions: ["zeroship", "worker", "module"],
-      noExternal: true,
     },
     dev: {
       createEnvironment(name: string, config: vite.ResolvedConfig, _context?: any): ZeroshipDevEnvironment {

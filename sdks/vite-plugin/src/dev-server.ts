@@ -103,7 +103,119 @@ export function devServerPlugin(
         }
       );
 
-      // 2. Spawn zeroship runtime ────────────────────────────────────────────
+      // 2. Module fetch endpoint ─────────────────────────────────────────
+      //
+      // The runtime's ModuleRunner calls this to fetch transformed modules
+      // from Vite's environment. This replaces WebSocket-based invoke since
+      // the V8 runtime doesn't support outbound WebSocket connections.
+
+      server.middlewares.use(
+        async (
+          req: http.IncomingMessage,
+          res: http.ServerResponse,
+          next: () => void
+        ) => {
+          if (req.url !== "/__zeroship_fetch" || req.method !== "POST") {
+            return next();
+          }
+
+          const zeroshipEnv = server.environments[
+            "zeroship"
+          ] as ZeroshipDevEnvironment | undefined;
+
+          if (!zeroshipEnv) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: { message: "zeroship environment not found" } }));
+            return;
+          }
+
+          // Read POST body
+          const chunks: Buffer[] = [];
+          for await (const chunk of req) chunks.push(chunk as Buffer);
+          const body = Buffer.concat(chunks).toString();
+
+          try {
+            const data = JSON.parse(body);
+            // The ModuleRunner sends vite:invoke calls via the transport.
+            // Format: { type: "custom", event: "vite:invoke",
+            //           data: { id: correlationId, name: methodName, data: args[] } }
+            const invoke = data.data ?? data;
+            const { name: methodName, data: args } = invoke;
+
+            let result: any;
+            if (methodName === "fetchModule") {
+              // args = [id, importer, options?]
+              result = await zeroshipEnv.fetchModule(args[0], args[1], args[2]);
+            } else if (methodName === "getBuiltins") {
+              // Return serialized resolve.builtins from the environment config.
+              // Vite 8's ModuleRunner calls this to know which imports to externalize.
+              const builtins = (zeroshipEnv as any).config?.resolve?.builtins ?? [];
+              result = builtins.map((b: any) =>
+                typeof b === "string"
+                  ? { type: "string", value: b }
+                  : { type: "RegExp", source: b.source, flags: b.flags }
+              );
+            } else {
+              // Dispatch other methods to the environment if they exist
+              const fn = (zeroshipEnv as any)[methodName];
+              if (typeof fn === "function") {
+                result = await fn.apply(zeroshipEnv, args ?? []);
+              } else {
+                // Unknown methods return empty result rather than error —
+                // the runner may probe for optional capabilities.
+                result = null;
+              }
+            }
+
+            // Return in the format the runner expects: { result } or { error }
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ result }));
+          } catch (e: any) {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: { message: e.message ?? String(e) } }));
+          }
+        }
+      );
+
+      // 3. Proxy middleware (pre-middleware) ───────────────────────────────
+      //
+      // Registered directly inside configureServer (not returned) so it runs
+      // BEFORE Vite's built-in middleware. This ensures /api/* and /_rpc are
+      // proxied to the runtime instead of being caught by Vite's SPA fallback.
+
+      server.middlewares.use(
+        (
+          req: http.IncomingMessage,
+          res: http.ServerResponse,
+          next: () => void
+        ) => {
+          const url = req.url ?? "";
+          if (!url.startsWith("/_rpc") && !url.startsWith("/api/")) {
+            return next();
+          }
+
+          const proxyReq = http.request(
+            `http://localhost:${devPort}${url}`,
+            { method: req.method, headers: req.headers },
+            (proxyRes) => {
+              res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
+              proxyRes.pipe(res);
+            }
+          );
+
+          req.pipe(proxyReq);
+
+          proxyReq.on("error", () => {
+            res.writeHead(503, { "Content-Type": "application/json" });
+            res.end('{"error":"zeroship API not ready"}');
+          });
+        }
+      );
+
+      // 3. Spawn zeroship runtime ────────────────────────────────────────────
+      //
+      // Deferred until Vite's HTTP server is actually listening. The bootstrap
+      // opens a WebSocket back to Vite, which fails if the server isn't ready.
 
       const __filename = fileURLToPath(import.meta.url);
       const __dirname = dirname(__filename);
@@ -119,82 +231,58 @@ export function devServerPlugin(
           "[zeroship] dev-bootstrap.js not found — skipping runtime spawn (run the bootstrap bundler first)"
         );
       } else {
-        const vitePort =
-          typeof server.config.server?.port === "number"
-            ? server.config.server.port
-            : 5173;
+        const spawnRuntime = () => {
+          // Resolve the actual listening port from the HTTP server.
+          const addr = server.httpServer?.address();
+          const vitePort =
+            addr && typeof addr === "object" ? addr.port
+              : typeof server.config.server?.port === "number"
+                ? server.config.server.port
+                : 5173;
 
-        const childEnv: NodeJS.ProcessEnv = {
-          ...process.env,
-          [ENV_DEV]: "1",
-          [ENV_VITE_WS]: `ws://localhost:${vitePort}${WS_PATH}`,
-          ...(serverEntry ? { [ENV_ENTRY]: serverEntry } : {}),
-        };
+          const childEnv: NodeJS.ProcessEnv = {
+            ...process.env,
+            [ENV_DEV]: "1",
+            [ENV_VITE_WS]: `ws://localhost:${vitePort}${WS_PATH}`,
+            ...(serverEntry ? { [ENV_ENTRY]: serverEntry } : {}),
+          };
 
-        try {
-          serverProcess = spawn(
-            cmd,
-            ["serve", bootstrapPath, `--port=${devPort}`, "--workers=1"],
-            {
-              cwd: root,
-              stdio: ["ignore", "pipe", "pipe"],
-              env: childEnv,
-            }
-          );
-
-          serverProcess.stdout?.on("data", (d: Buffer) => {
-            const msg = d.toString().trim();
-            if (msg) console.log(`[zeroship:api] ${msg}`);
-          });
-
-          serverProcess.stderr?.on("data", (d: Buffer) => {
-            const msg = d.toString().trim();
-            if (msg) console.log(`[zeroship:api] ${msg}`);
-          });
-
-          console.log(`[zeroship] API server starting on :${devPort}`);
-        } catch {
-          console.warn(
-            "[zeroship] Failed to start API server — zeroship CLI not found"
-          );
-        }
-      }
-
-      // 3. Proxy middleware (post-middleware) ───────────────────────────────
-      //
-      // Returning a function from configureServer registers it as a
-      // post-middleware (after Vite's own middleware).
-
-      return () => {
-        server.middlewares.use(
-          (
-            req: http.IncomingMessage,
-            res: http.ServerResponse,
-            next: () => void
-          ) => {
-            const url = req.url ?? "";
-            if (!url.startsWith("/_rpc") && !url.startsWith("/api/")) {
-              return next();
-            }
-
-            const proxyReq = http.request(
-              `http://localhost:${devPort}${url}`,
-              { method: req.method, headers: req.headers },
-              (proxyRes) => {
-                res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
-                proxyRes.pipe(res);
+          try {
+            serverProcess = spawn(
+              cmd,
+              ["serve", bootstrapPath, `--port=${devPort}`, "--workers=1"],
+              {
+                cwd: root,
+                stdio: ["ignore", "pipe", "pipe"],
+                env: childEnv,
               }
             );
 
-            req.pipe(proxyReq);
-
-            proxyReq.on("error", () => {
-              res.writeHead(503, { "Content-Type": "application/json" });
-              res.end('{"error":"zeroship API not ready"}');
+            serverProcess.stdout?.on("data", (d: Buffer) => {
+              const msg = d.toString().trim();
+              if (msg) console.log(`[zeroship:api] ${msg}`);
             });
+
+            serverProcess.stderr?.on("data", (d: Buffer) => {
+              const msg = d.toString().trim();
+              if (msg) console.log(`[zeroship:api] ${msg}`);
+            });
+
+            console.log(`[zeroship] API server starting on :${devPort}`);
+          } catch {
+            console.warn(
+              "[zeroship] Failed to start API server — zeroship CLI not found"
+            );
           }
-        );
-      };
+        };
+
+        // Defer spawn until server is listening.
+        if (server.httpServer?.listening) {
+          spawnRuntime();
+        } else {
+          server.httpServer?.once("listening", spawnRuntime);
+        }
+      }
     },
 
     handleHotUpdate({ file }: { file: string }) {
