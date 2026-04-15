@@ -2,7 +2,7 @@
 //!
 //! The gateway reads the `__zs_session` cookie from every request, validates the
 //! JWT signature + expiry, checks it is scoped to the current app, and (if valid)
-//! encodes the user as a base64-JSON header (`X-ZS-User`) for the worker.
+//! encodes the user as a base64-JSON header (`ZeroShip-User`) for the worker.
 //!
 //! The worker never sees the JWT — it only receives the decoded user object.
 
@@ -78,7 +78,7 @@ struct UserPayload<'a> {
     avatar: Option<&'a str>,
 }
 
-/// Serialize the authenticated user as base64-encoded JSON for the `X-ZS-User`
+/// Serialize the authenticated user as base64-encoded JSON for the `ZeroShip-User`
 /// header.  The worker decodes this to populate `zeroship.auth.getUser()`.
 ///
 /// The payload uses the public shape `{ id, email, name, avatar }` — JWT

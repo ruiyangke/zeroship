@@ -1,7 +1,7 @@
 //! Auth primitives — `zeroship.auth.getUser()` and `zeroship.auth.requireUser()`.
 //!
 //! The gateway extracts the authenticated user from the `__zs_session` cookie
-//! and forwards it as the `X-ZS-User` header (base64-encoded JSON). The worker
+//! and forwards it as the `ZeroShip-User` header (base64-encoded JSON). The worker
 //! decodes this header before dispatching to V8 and stores the user JSON in a
 //! thread-local. The V8 callbacks read from the thread-local.
 //!
@@ -20,7 +20,7 @@ thread_local! {
 }
 
 /// Set the authenticated user for the current request.
-/// Called by the worker dispatch handler after decoding `X-ZS-User`.
+/// Called by the worker dispatch handler after decoding `ZeroShip-User`.
 pub fn set_auth_user(user_json: Option<String>) {
     AUTH_USER_JSON.with(|u| *u.borrow_mut() = user_json);
 }

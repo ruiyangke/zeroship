@@ -37,10 +37,10 @@ pub async fn dispatch(
         }
     };
 
-    // Decode authenticated user from X-ZS-User header (base64 JSON from gateway)
+    // Decode authenticated user from ZeroShip-User header (base64 JSON from gateway)
     let user_json = req
         .headers()
-        .get("x-zs-user")
+        .get("zeroship-user")
         .and_then(|v| v.to_str().ok())
         .and_then(|b64| B64.decode(b64).ok())
         .and_then(|bytes| String::from_utf8(bytes).ok());

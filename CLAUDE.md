@@ -62,7 +62,7 @@ Control Plane ───deploy bundle──────────→ Object Sto
 
 Auth Service ←──401 redirect────────────← Gateway (end-user not logged in)
              ───JWT cookie──────────────→ Gateway (validates on every request)
-             ───user profile────────────→ Workers (via X-ZS-User header)
+             ───user profile────────────→ Workers (via ZeroShip-User header)
 ```
 
 ### Key technical decisions

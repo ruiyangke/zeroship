@@ -256,7 +256,7 @@ async fn forward_to_worker(
 
 fn build_request(path: &str, host: &str, app_id: &Uuid, plan_id: &str, request_id: &Uuid, body: &[u8], user_header: Option<&str>) -> Vec<u8> {
     let user_line = match user_header {
-        Some(val) => format!("X-ZS-User: {val}\r\n"),
+        Some(val) => format!("ZeroShip-User: {val}\r\n"),
         None => String::new(),
     };
     let header = format!(
