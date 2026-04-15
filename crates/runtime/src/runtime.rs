@@ -250,7 +250,8 @@ impl Runtime {
     ) -> Self {
         init_v8();
 
-        let params = v8::CreateParams::default().heap_limits(0, 128 * 1024 * 1024);
+        // 512MB heap for dev (LangChain + deps need ~200MB). Production can be tuned lower.
+        let params = v8::CreateParams::default().heap_limits(0, 512 * 1024 * 1024);
         let mut isolate = v8::Isolate::new(params);
 
         // Register near-heap-limit callback to prevent OOM crashes

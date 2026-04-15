@@ -232,11 +232,12 @@ export function createZeroshipEnvironmentOptions(): vite.EnvironmentOptions {
     },
     build: { target: "es2024" },
     keepProcessEnv: true,
-    // Enable dep pre-bundling for the zeroship environment.
-    // This converts CJS modules (module.exports, require) to ESM so they
-    // work in the V8 runtime which only supports ESM.
+    // Enable dep optimization (CJS → ESM conversion).
     optimizeDeps: {
       noDiscovery: false,
+      // Prevent mid-request reloads when new deps are discovered.
+      // The ModuleRunner can't handle pre-bundle version changes.
+      ignoreOutdatedRequests: true,
     },
   };
 }
