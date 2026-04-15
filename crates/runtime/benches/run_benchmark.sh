@@ -110,4 +110,91 @@ scenario "10. AES-GCM encrypt (cached)" aesEncrypt "[]"
 scenario "11. ECDSA P-256 sign (cached)" ecdsaSign "[]"
 
 echo ""
+echo "--- SSE Streaming ---"
+echo ""
+
+# SSE benchmarks use curl (wrk doesn't support streaming responses).
+# We measure: time-to-first-byte (TTFB), total stream time, and throughput.
+run_sse() {
+    local label=$1 port=$2 chunks=$3 delay=$4 size=${5:-50}
+    local url="http://localhost:$port/sse?chunks=$chunks&delay=$delay&size=$size"
+
+    local start=$(date +%s%N)
+    local first_byte=""
+    local count=0
+
+    while IFS= read -r line; do
+        if [ -z "$first_byte" ]; then
+            first_byte=$(date +%s%N)
+        fi
+        if [[ "$line" == data:* ]]; then
+            count=$((count + 1))
+        fi
+        if [[ "$line" == "data: [DONE]" ]]; then
+            break
+        fi
+    done < <(curl -sN "$url" 2>/dev/null)
+
+    local end=$(date +%s%N)
+    local total_ms=$(( (end - start) / 1000000 ))
+    local ttfb_ms=0
+    if [ -n "$first_byte" ]; then
+        ttfb_ms=$(( (first_byte - start) / 1000000 ))
+    fi
+    local tps=0
+    if [ "$total_ms" -gt 0 ] && [ "$count" -gt 0 ]; then
+        tps=$(( count * 1000 / total_ms ))
+    fi
+
+    printf "  %-40s  TTFB %4dms  %5d chunks in %5dms  %6d chunks/s\n" \
+        "$label" "$ttfb_ms" "$count" "$total_ms" "$tps"
+}
+
+# SSE: 100 chunks, no delay (max throughput)
+run_sse "compio (1 worker) 100×0ms" $PORT_COMPIO_1 100 0
+run_sse "compio ($(nproc) workers) 100×0ms" $PORT_COMPIO_16 100 0
+run_sse "Node.js 100×0ms" $PORT_NODE 100 0
+
+echo ""
+
+# SSE: 1000 chunks, no delay (sustained throughput)
+run_sse "compio (1 worker) 1000×0ms" $PORT_COMPIO_1 1000 0
+run_sse "compio ($(nproc) workers) 1000×0ms" $PORT_COMPIO_16 1000 0
+run_sse "Node.js 1000×0ms" $PORT_NODE 1000 0
+
+echo ""
+
+# SSE: 100 chunks, 1ms delay (simulates fast LLM ~1000 tok/s)
+run_sse "compio (1 worker) 100×1ms" $PORT_COMPIO_1 100 1
+run_sse "Node.js 100×1ms" $PORT_NODE 100 1
+
+echo ""
+
+# SSE: 50 chunks, 10ms delay (simulates slower LLM ~100 tok/s)
+run_sse "compio (1 worker) 50×10ms" $PORT_COMPIO_1 50 10
+run_sse "Node.js 50×10ms" $PORT_NODE 50 10
+
+echo ""
+
+# SSE: concurrent streams
+echo "  Concurrent SSE (10 streams × 100 chunks × 0ms):"
+start_conc=$(date +%s%N)
+for i in $(seq 1 10); do
+    curl -sN "http://localhost:$PORT_COMPIO_16/sse?chunks=100&delay=0" > /dev/null 2>&1 &
+done
+wait
+end_conc=$(date +%s%N)
+conc_ms=$(( (end_conc - start_conc) / 1000000 ))
+printf "  %-40s  %5dms (10 parallel)\n" "compio ($(nproc) workers)" "$conc_ms"
+
+start_conc=$(date +%s%N)
+for i in $(seq 1 10); do
+    curl -sN "http://localhost:$PORT_NODE/sse?chunks=100&delay=0" > /dev/null 2>&1 &
+done
+wait
+end_conc=$(date +%s%N)
+conc_ms=$(( (end_conc - start_conc) / 1000000 ))
+printf "  %-40s  %5dms (10 parallel)\n" "Node.js" "$conc_ms"
+
+echo ""
 echo "========================================================="

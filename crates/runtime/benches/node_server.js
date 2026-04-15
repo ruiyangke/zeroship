@@ -36,6 +36,39 @@ const server = http.createServer((req, res) => {
         return;
     }
 
+    // SSE streaming endpoint: /sse?chunks=N&delay=M&size=S
+    if (req.method === 'GET' && req.url.startsWith('/sse')) {
+        const url = new URL(req.url, `http://localhost:${PORT}`);
+        const chunks = parseInt(url.searchParams.get('chunks') || '100');
+        const delayMs = parseInt(url.searchParams.get('delay') || '0');
+        const chunkSize = parseInt(url.searchParams.get('size') || '50');
+        const payload = 'x'.repeat(chunkSize);
+
+        res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+        });
+
+        let i = 0;
+        const send = () => {
+            if (i < chunks) {
+                res.write(`data: ${JSON.stringify({ i, t: Date.now(), d: payload })}\n\n`);
+                i++;
+                if (delayMs > 0) {
+                    setTimeout(send, delayMs);
+                } else {
+                    setImmediate(send);
+                }
+            } else {
+                res.write('data: [DONE]\n\n');
+                res.end();
+            }
+        };
+        send();
+        return;
+    }
+
     res.writeHead(404);
     res.end('Not Found');
 });

@@ -99,6 +99,8 @@ var _ecKp = null;
 // =========================================================================
 
 export function onRequest(req) {
+    var url = new URL(req.url);
+
     // WebSocket upgrade
     if (req.headers.get("upgrade") === "websocket") {
         var pair = new WebSocketPair();
@@ -111,6 +113,37 @@ export function onRequest(req) {
         });
 
         return new Response(null, { status: 101, webSocket: client });
+    }
+
+    // SSE streaming endpoint: /sse?chunks=N&delay=M
+    if (url.pathname === "/sse") {
+        var chunks = parseInt(url.searchParams.get("chunks") || "100");
+        var delayMs = parseInt(url.searchParams.get("delay") || "0");
+        var chunkSize = parseInt(url.searchParams.get("size") || "50");
+
+        var payload = "x".repeat(chunkSize);
+        var stream = new ReadableStream({
+            async start(controller) {
+                for (var i = 0; i < chunks; i++) {
+                    controller.enqueue(
+                        new TextEncoder().encode("data: " + JSON.stringify({ i: i, t: Date.now(), d: payload }) + "\n\n")
+                    );
+                    if (delayMs > 0) {
+                        await new Promise(function(r) { setTimeout(r, delayMs); });
+                    }
+                }
+                controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+                controller.close();
+            }
+        });
+
+        return new Response(stream, {
+            status: 200,
+            headers: {
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+            },
+        });
     }
 
     return new Response(JSON.stringify({ method: req.method, url: req.url }), {
