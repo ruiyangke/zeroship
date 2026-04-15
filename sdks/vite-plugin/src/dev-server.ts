@@ -194,8 +194,12 @@ export function devServerPlugin(
             return next();
           }
 
+          // Forward path as-is — the bootstrap's onRequest handles /_rpc dispatch.
+          // (The runtime's native /rpc path uses __rpc which doesn't have ModuleRunner modules.)
+          const targetPath = url;
+
           const proxyReq = http.request(
-            `http://localhost:${devPort}${url}`,
+            `http://localhost:${devPort}${targetPath}`,
             { method: req.method, headers: req.headers },
             (proxyRes) => {
               res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);

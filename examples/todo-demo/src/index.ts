@@ -1,6 +1,7 @@
 "use server";
 
-// Simple in-memory todo list — tests the Vite Environment API dev flow.
+// Pure server functions — no routing boilerplate needed.
+// The bootstrap handles JSON-RPC dispatch automatically.
 
 interface Todo {
   id: number;
@@ -33,34 +34,4 @@ export function deleteTodo(id: number): boolean {
   if (idx === -1) return false;
   todos.splice(idx, 1);
   return true;
-}
-
-// HTTP handler for direct requests
-export function onRequest(req: any): Response {
-  const url = new URL(req.url);
-
-  if (url.pathname === "/api/todos" && req.method === "GET") {
-    return new Response(JSON.stringify(listTodos()), {
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-
-  if (url.pathname === "/api/todos" && req.method === "POST") {
-    const todo = addTodo("New todo " + Date.now());
-    return new Response(JSON.stringify(todo), {
-      status: 201,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-
-  if (url.pathname === "/api/health") {
-    return new Response(JSON.stringify({ status: "ok", env: "zeroship-v8" }), {
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-
-  return new Response(JSON.stringify({ error: "not found" }), {
-    status: 404,
-    headers: { "Content-Type": "application/json" },
-  });
 }
