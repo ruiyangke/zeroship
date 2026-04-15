@@ -87,8 +87,11 @@ pub async fn dispatch(
         }
 
         // HTTP handler responses (for onRequest exports)
-        DispatchOutcome::HttpComplete { status: _, headers: _, body, logs: _ } => {
-            make_response(&body, 0.0)
+        DispatchOutcome::HttpComplete { status, headers, body, logs: _ } => {
+            make_http_response(status, &headers, &body)
+        }
+        DispatchOutcome::HttpStream { status, headers, body: reader, logs: _ } => {
+            drain_stream_to_response(status, &headers, &reader).await
         }
         DispatchOutcome::HttpPending(rx) => {
             let wall_limit = runtime.borrow().wall_timeout()
@@ -98,10 +101,15 @@ pub async fn dispatch(
             loop {
                 if let Some(result) = rx.try_recv() {
                     break match result {
-                        Ok(zeroship_runtime::HttpDispatchResult::Complete { body, .. }) => {
-                            make_response(&body, 0.0)
+                        Ok(zeroship_runtime::HttpDispatchResult::Complete { status, headers, body, .. }) => {
+                            make_http_response(status, &headers, &body)
                         }
-                        Ok(_) => make_error("unsupported HTTP result type"),
+                        Ok(zeroship_runtime::HttpDispatchResult::Stream { status, headers, body: reader, .. }) => {
+                            drain_stream_to_response(status, &headers, &reader).await
+                        }
+                        Ok(zeroship_runtime::HttpDispatchResult::WebSocket { .. }) => {
+                            make_error("WebSocket upgrade not supported via gateway dispatch")
+                        }
                         Err(e) => make_error(&e),
                     };
                 }
@@ -112,7 +120,9 @@ pub async fn dispatch(
             }
         }
 
-        _ => make_error("unsupported dispatch outcome"),
+        DispatchOutcome::WebSocketUpgrade { .. } => {
+            make_error("WebSocket upgrade not supported via gateway dispatch")
+        }
     };
 
     // Clear auth user after dispatch (prevent leaking to next request)
@@ -128,6 +138,48 @@ fn make_response(json: &str, cpu_ms: f64) -> HttpResponse {
         builder.header("x-cpu-time-ms", format!("{cpu_ms:.2}"));
     }
     builder.body(json.to_string())
+}
+
+/// Build an HTTP response forwarding the JS handler's status, headers, and body.
+fn make_http_response(status: u16, headers: &[(String, String)], body: &str) -> HttpResponse {
+    let status_code = ntex::http::StatusCode::from_u16(status)
+        .unwrap_or(ntex::http::StatusCode::OK);
+    let mut builder = HttpResponse::build(status_code);
+    for (name, value) in headers {
+        builder.header(name.as_str(), value.as_str());
+    }
+    builder.body(body.to_string())
+}
+
+/// Drain a ReadableStream body into a single buffer, then return as a complete
+/// HTTP response. This is the simplified streaming approach: the stream is fully
+/// consumed before sending, so the JS code using ReadableStream compiles and runs
+/// correctly, but the client does not receive chunks in real time.
+///
+/// Full chunked-encoding pass-through is a future enhancement.
+async fn drain_stream_to_response(
+    status: u16,
+    headers: &[(String, String)],
+    reader: &zeroship_runtime::StreamReader,
+) -> HttpResponse {
+    // Drain all available chunks, yielding until the stream is closed.
+    let mut body_buf = Vec::new();
+    loop {
+        for chunk in reader.drain() {
+            body_buf.extend_from_slice(&chunk);
+        }
+        if reader.is_done() {
+            // Drain any final chunks that arrived with the done signal
+            for chunk in reader.drain() {
+                body_buf.extend_from_slice(&chunk);
+            }
+            break;
+        }
+        yield_now().await;
+    }
+
+    let body_str = String::from_utf8_lossy(&body_buf).to_string();
+    make_http_response(status, headers, &body_str)
 }
 
 fn make_error(msg: &str) -> HttpResponse {

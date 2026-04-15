@@ -618,6 +618,30 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
         global.set(scope, env_key.into(), env.into());
     }
 
+    // process.env polyfill — many npm packages (e.g. LangChain) read
+    // `process.env.OPENAI_API_KEY`. Populate from host environment so
+    // runtime detection and env-based config work out of the box.
+    {
+        let process = v8::Object::new(scope);
+        let env_obj = v8::Object::new(scope);
+
+        for (key, value) in std::env::vars() {
+            let k = v8::String::new(scope, &key).unwrap();
+            let v = v8::String::new(scope, &value).unwrap();
+            env_obj.set(scope, k.into(), v.into());
+        }
+
+        let env_key = v8::String::new(scope, "env").unwrap();
+        process.set(scope, env_key.into(), env_obj.into());
+
+        let version = v8::String::new(scope, "v20.0.0").unwrap();
+        let version_key = v8::String::new(scope, "version").unwrap();
+        process.set(scope, version_key.into(), version.into());
+
+        let process_key = v8::String::new(scope, "process").unwrap();
+        global.set(scope, process_key.into(), process.into());
+    }
+
 }
 
 // ===========================================================================
