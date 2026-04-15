@@ -2,20 +2,28 @@ mod config;
 mod http;
 mod numa;
 mod report;
+mod sse;
 mod stats;
 mod thread;
 
 use config::Config;
-use stats::{Summary, ThreadStats};
+use stats::{Summary, SseSummary, ThreadStats, SseThreadStats};
 
 fn main() {
     let config = Config::from_args();
     let cpus = numa::resolve_cpus(&config.cpu_affinity, &config.numa_node, config.threads);
 
-    eprintln!(
-        "Running {:?} test @ {}",
-        config.duration, config.url
-    );
+    if config.sse {
+        eprintln!(
+            "Running {:?} SSE test @ {}",
+            config.duration, config.url
+        );
+    } else {
+        eprintln!(
+            "Running {:?} test @ {}",
+            config.duration, config.url
+        );
+    }
     eprintln!(
         "  {} threads and {} connections",
         config.threads, config.connections
@@ -23,24 +31,45 @@ fn main() {
 
     let start = std::time::Instant::now();
 
-    // Spawn N OS threads, each running a compio event loop.
-    // Config is re-parsed per thread so each thread gets its own owned copy
-    // (avoids Send requirements on the config reference).
-    let handles: Vec<_> = (0..config.threads)
-        .map(|i| {
-            let cfg = Config::from_args();
-            let cpu = cpus[i];
-            std::thread::spawn(move || thread::run_worker(&cfg, i, cpu))
-        })
-        .collect();
+    if config.sse {
+        // SSE mode: each thread runs long-lived streaming connections.
+        let handles: Vec<_> = (0..config.threads)
+            .map(|i| {
+                let cfg = Config::from_args();
+                let cpu = cpus[i];
+                std::thread::spawn(move || sse::run_sse_worker(&cfg, i, cpu))
+            })
+            .collect();
 
-    let thread_stats: Vec<ThreadStats> = handles
-        .into_iter()
-        .map(|h| h.join().expect("worker thread panicked"))
-        .collect();
+        let thread_stats: Vec<SseThreadStats> = handles
+            .into_iter()
+            .map(|h| h.join().expect("SSE worker thread panicked"))
+            .collect();
 
-    let duration = start.elapsed();
-    let summary = Summary::merge(thread_stats, duration);
+        let duration = start.elapsed();
+        let summary = SseSummary::merge(thread_stats, duration);
 
-    report::print_wrk_format(&summary, &config);
+        report::print_sse_format(&summary, &config);
+    } else {
+        // HTTP mode: spawn N OS threads, each running a compio event loop.
+        // Config is re-parsed per thread so each thread gets its own owned copy
+        // (avoids Send requirements on the config reference).
+        let handles: Vec<_> = (0..config.threads)
+            .map(|i| {
+                let cfg = Config::from_args();
+                let cpu = cpus[i];
+                std::thread::spawn(move || thread::run_worker(&cfg, i, cpu))
+            })
+            .collect();
+
+        let thread_stats: Vec<ThreadStats> = handles
+            .into_iter()
+            .map(|h| h.join().expect("worker thread panicked"))
+            .collect();
+
+        let duration = start.elapsed();
+        let summary = Summary::merge(thread_stats, duration);
+
+        report::print_wrk_format(&summary, &config);
+    }
 }

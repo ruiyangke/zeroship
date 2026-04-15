@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::stats::Summary;
+use crate::stats::{Summary, SseSummary};
 
 /// Print wrk-compatible benchmark output. If `config.json_output` is set,
 /// also print a JSON block after the text report.
@@ -77,6 +77,90 @@ pub fn print_wrk_format(summary: &Summary, config: &Config) {
             "errors_timeout": summary.errors_timeout,
             "errors_status": summary.errors_status,
             "errors_total": total_errors,
+        });
+        println!("\n{}", serde_json::to_string_pretty(&json).unwrap());
+    }
+}
+
+/// Print SSE benchmark results.
+pub fn print_sse_format(summary: &SseSummary, config: &Config) {
+    let dur_secs = summary.duration.as_secs_f64();
+    let chunks_per_sec = summary.chunks_per_sec();
+    let chunks_per_conn = if config.connections > 0 {
+        chunks_per_sec / config.connections as f64
+    } else {
+        0.0
+    };
+
+    let ttfb_avg = summary.ttfb.mean();
+    let ttfb_p50 = summary.ttfb.value_at_percentile(50.0) as f64;
+    let ttfb_p99 = summary.ttfb.value_at_percentile(99.0) as f64;
+    let ttfb_max = summary.ttfb.max() as f64;
+
+    let clat_avg = summary.chunk_latency.mean();
+    let clat_p50 = summary.chunk_latency.value_at_percentile(50.0) as f64;
+    let clat_p99 = summary.chunk_latency.value_at_percentile(99.0) as f64;
+    let clat_max = summary.chunk_latency.max() as f64;
+
+    println!("  {:<12}{:<9}{:<9}{:<9}{}", "TTFB", "Avg", "p50", "p99", "Max");
+    println!(
+        "  {:<12}{:<9}{:<9}{:<9}{}",
+        "",
+        format_time(ttfb_avg),
+        format_time(ttfb_p50),
+        format_time(ttfb_p99),
+        format_time(ttfb_max),
+    );
+    println!(
+        "  Chunks/s    {:.0} (total)   {:.0} (per conn)",
+        chunks_per_sec,
+        chunks_per_conn,
+    );
+    println!("  {:<12}{:<9}{:<9}{:<9}{}", "Chunk Lat", "Avg", "p50", "p99", "Max");
+    println!(
+        "  {:<12}{:<9}{:<9}{:<9}{}",
+        "",
+        format_time(clat_avg),
+        format_time(clat_p50),
+        format_time(clat_p99),
+        format_time(clat_max),
+    );
+    println!(
+        "  {} chunks in {:.2}s, {} read",
+        format_count(summary.total_chunks),
+        dur_secs,
+        format_bytes(summary.total_bytes),
+    );
+
+    let total_errors = summary.errors_connect + summary.errors_read;
+    if total_errors > 0 {
+        println!(
+            "  Socket errors: connect {}, read {}",
+            summary.errors_connect,
+            summary.errors_read,
+        );
+    }
+
+    println!("Chunks/sec:   {:.2}", chunks_per_sec);
+    println!("Transfer/sec: {}", format_bytes_rate(summary.total_bytes as f64 / dur_secs));
+
+    if config.json_output {
+        let json = serde_json::json!({
+            "total_chunks": summary.total_chunks,
+            "total_bytes": summary.total_bytes,
+            "completed_streams": summary.completed_streams,
+            "duration_ms": summary.duration.as_millis(),
+            "chunks_per_sec": chunks_per_sec,
+            "ttfb_avg_us": ttfb_avg,
+            "ttfb_p50_us": ttfb_p50,
+            "ttfb_p99_us": ttfb_p99,
+            "ttfb_max_us": ttfb_max,
+            "chunk_lat_avg_us": clat_avg,
+            "chunk_lat_p50_us": clat_p50,
+            "chunk_lat_p99_us": clat_p99,
+            "chunk_lat_max_us": clat_max,
+            "errors_connect": summary.errors_connect,
+            "errors_read": summary.errors_read,
         });
         println!("\n{}", serde_json::to_string_pretty(&json).unwrap());
     }

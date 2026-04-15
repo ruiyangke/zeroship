@@ -15,6 +15,7 @@ pub struct Config {
     pub json_output: bool,
     pub numa_node: Option<usize>,
     pub cpu_affinity: Option<Vec<usize>>,
+    pub sse: bool,
 }
 
 impl Config {
@@ -36,6 +37,7 @@ impl Config {
             json_output: false,
             numa_node: None,
             cpu_affinity: None,
+            sse: false,
         };
 
         let mut i = 1;
@@ -50,6 +52,7 @@ impl Config {
                 "--timeout" => { i += 1; config.timeout = parse_duration(&args[i]); }
                 "--latency" => { config.print_latency = true; }
                 "--json" => { config.json_output = true; }
+                "--sse" => { config.sse = true; }
                 "--numa" => { i += 1; config.numa_node = args[i].parse().ok(); }
                 "--cpu" => { i += 1; config.cpu_affinity = Some(parse_cpu_range(&args[i])); }
                 arg if !arg.starts_with('-') => {
