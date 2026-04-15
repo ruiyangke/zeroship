@@ -5,6 +5,8 @@
 
 import * as vite from "vite";
 import type { WebSocket } from "ws";
+import type { FetchFunctionOptions } from "vite/module-runner";
+import { getNodeCompatId, getCustomPolyfillCode } from "./node-compat.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -167,6 +169,39 @@ export class ZeroshipDevEnvironment extends vite.DevEnvironment {
       // listen() hasn't been called yet; fall back to calling it now.
       this.hot.listen();
     }
+  }
+
+  /**
+   * Override fetchModule to intercept node:* builtins.
+   *
+   * Vite treats node:* as builtins and returns `{ externalize }` BEFORE
+   * any plugin resolveId hook runs. Since our V8 runtime can't import
+   * node: modules natively, we intercept them here and route to either:
+   *   - Custom polyfill (crypto) → return code directly
+   *   - unenv polyfill (buffer, path, etc.) → rewrite to unenv path, fetch normally
+   */
+  override async fetchModule(
+    id: string,
+    importer?: string,
+    _options?: FetchFunctionOptions,
+  ): Promise<vite.FetchResult> {
+    // Check if this is a node:* or bare builtin we can polyfill
+    const isNodeish = id.startsWith("node:") || /^(crypto|buffer|path|util|events|stream|os|url|http|https|fs|assert|process|async_hooks|timers|string_decoder|querystring|punycode|net|tls|dns|zlib|worker_threads|diagnostics_channel|perf_hooks|module)(\/.+)?$/.test(id);
+
+    if (isNodeish) {
+      const compatId = getNodeCompatId(id);
+      if (compatId) {
+        // Custom polyfill (e.g. crypto) → return code directly
+        const code = getCustomPolyfillCode(compatId);
+        if (code) {
+          return { id, url: id, code, file: id } as vite.FetchResult;
+        }
+        // unenv polyfill → rewrite and fetch through normal pipeline
+        return super.fetchModule(compatId, importer, _options);
+      }
+    }
+
+    return super.fetchModule(id, importer, _options);
   }
 }
 

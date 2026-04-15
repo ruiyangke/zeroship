@@ -33,6 +33,7 @@
   },
   "license": "MIT",
   "dependencies": {
+    "unenv": "^1.10.0",
     "ws": "^8.20.0"
   }
 }
