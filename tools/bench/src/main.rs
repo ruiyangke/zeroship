@@ -1,4 +1,5 @@
 mod config;
+mod http;
 mod stats;
 
 use config::Config;
