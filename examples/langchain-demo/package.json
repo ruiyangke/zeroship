@@ -1,0 +1,19 @@
+{
+  "name": "langchain-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@langchain/core": "^0.3",
+    "@langchain/openai": "^0.4",
+    "@langchain/anthropic": "^0.3",
+    "langchain": "^0.3"
+  },
+  "devDependencies": {
+    "vite": "^8",
+    "typescript": "^5.9"
+  }
+}
