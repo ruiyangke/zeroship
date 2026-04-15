@@ -1,11 +1,11 @@
 [package]
-name = "zeroship-control"
+name = "zeroship-auth"
 version = "0.1.0"
 edition = "2021"
-description = "zeroship control plane — admin API, internal API, Postgres, VFS"
+description = "zeroship auth service — user management, OAuth2, consent"
 
 [[bin]]
-name = "zeroship-control"
+name = "zeroship-auth"
 path = "src/main.rs"
 
 [dependencies]
@@ -17,6 +17,8 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+bcrypt = { workspace = true }
+jsonwebtoken = { workspace = true }
 mimalloc = { workspace = true }
 
 [lints]
