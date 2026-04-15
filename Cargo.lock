@@ -4836,7 +4836,9 @@ dependencies = [
 name = "zeroship-auth"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bcrypt",
+ "cyper",
  "jsonwebtoken",
  "mimalloc",
  "ntex",

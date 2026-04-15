@@ -1,7 +1,9 @@
-//! Auth API handlers — register, login, userinfo, consent, logout, authorize.
+//! Auth API handlers — register, login, userinfo, consent, logout, authorize, OAuth.
 
 use std::sync::Arc;
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use ntex::http::header;
 use ntex::web;
 use ntex::web::types::{Json, Query, State};
@@ -226,4 +228,156 @@ pub async fn authorize(
         "return": return_url,
         "message": "Login required. POST /auth/login to authenticate.",
     }))
+}
+
+// ---------------------------------------------------------------------------
+// OAuth handlers
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct OAuthStartQuery {
+    pub app_id: Option<String>,
+    #[serde(rename = "return")]
+    pub return_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct OAuthCallbackQuery {
+    pub code: Option<String>,
+    pub state: Option<String>,
+}
+
+/// Encode `app_id|return_url` as URL-safe base64 for the OAuth state parameter.
+fn encode_state(app_id: &str, return_url: &str) -> String {
+    let payload = format!("{app_id}|{return_url}");
+    B64URL.encode(payload.as_bytes())
+}
+
+/// Decode the OAuth state parameter back to `(app_id, return_url)`.
+fn decode_state(state: &str) -> Result<(String, String), String> {
+    let bytes = B64URL.decode(state).map_err(|e| format!("invalid state: {e}"))?;
+    let payload = String::from_utf8(bytes).map_err(|e| format!("invalid state utf8: {e}"))?;
+    let (app_id, return_url) = payload
+        .split_once('|')
+        .ok_or_else(|| "invalid state format".to_string())?;
+    Ok((app_id.to_string(), return_url.to_string()))
+}
+
+/// GET /auth/{provider} -- redirect user to provider's authorization page.
+///
+/// Query params: `app_id` (which app the user is logging into),
+/// `return` (URL to redirect back to after auth completes).
+pub async fn oauth_start(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    query: Query<OAuthStartQuery>,
+) -> web::HttpResponse {
+    let provider_name = req.match_info().get("provider").unwrap_or("");
+
+    let provider = match state.oauth.get(provider_name) {
+        Some(p) => p,
+        None => {
+            return web::HttpResponse::NotFound()
+                .json(&serde_json::json!({ "error": format!("unknown provider: {provider_name}") }));
+        }
+    };
+
+    let app_id = query.app_id.as_deref().unwrap_or("");
+    let return_url = query.return_url.as_deref().unwrap_or("/");
+    let oauth_state = encode_state(app_id, return_url);
+
+    let url = provider.authorize_url(&oauth_state);
+    web::HttpResponse::Found()
+        .header(header::LOCATION, url)
+        .finish()
+}
+
+/// GET /auth/callback/{provider} -- handle the OAuth provider's callback.
+///
+/// Query params: `code` (authorization code), `state` (encoded app_id + return_url).
+pub async fn oauth_callback(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    query: Query<OAuthCallbackQuery>,
+) -> web::HttpResponse {
+    let provider_name = req.match_info().get("provider").unwrap_or("");
+
+    let provider = match state.oauth.get(provider_name) {
+        Some(p) => p,
+        None => {
+            return web::HttpResponse::NotFound()
+                .json(&serde_json::json!({ "error": format!("unknown provider: {provider_name}") }));
+        }
+    };
+
+    let code = match query.code.as_deref() {
+        Some(c) if !c.is_empty() => c,
+        _ => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({ "error": "missing code parameter" }));
+        }
+    };
+
+    let oauth_state = match query.state.as_deref() {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({ "error": "missing state parameter" }));
+        }
+    };
+
+    let (app_id, return_url) = match decode_state(oauth_state) {
+        Ok(pair) => pair,
+        Err(msg) => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({ "error": msg }));
+        }
+    };
+
+    // Exchange the authorization code for a user profile.
+    let profile = match provider.exchange(code).await {
+        Ok(p) => p,
+        Err(msg) => {
+            return web::HttpResponse::BadGateway()
+                .json(&serde_json::json!({ "error": msg }));
+        }
+    };
+
+    // Find or create the user in our database.
+    let user = match state
+        .auth
+        .find_or_create_oauth_user(&profile.email, &profile.name, profile.avatar_url.as_deref())
+        .await
+    {
+        Ok(u) => u,
+        Err(msg) => {
+            return web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({ "error": msg }));
+        }
+    };
+
+    // Issue a JWT scoped to the app.
+    let token = match state.auth.issue_token(&user, &app_id) {
+        Ok(t) => t,
+        Err(msg) => {
+            return web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({ "error": msg }));
+        }
+    };
+
+    // Set session cookie and redirect back to the app.
+    let cookie = set_cookie_header(&token);
+
+    // Append token as a query parameter to the return URL so the app can
+    // read it on the client side (useful for SPAs that don't read cookies).
+    let redirect = if return_url.contains('?') {
+        format!("{return_url}&token={token}")
+    } else {
+        format!("{return_url}?token={token}")
+    };
+
+    web::HttpResponse::Found()
+        .header(header::SET_COOKIE, cookie)
+        .header(header::LOCATION, redirect)
+        .finish()
 }

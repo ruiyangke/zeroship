@@ -1,6 +1,7 @@
 //! zeroship-auth — auth service binary.
 
 mod handlers;
+pub mod oauth;
 mod queries;
 mod service;
 
@@ -8,6 +9,7 @@ use std::sync::Arc;
 
 use ntex::web;
 
+use oauth::OAuthRegistry;
 use service::AuthService;
 
 #[global_allocator]
@@ -17,6 +19,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[allow(missing_debug_implementations)]
 pub struct AppState {
     pub auth: AuthService,
+    pub oauth: OAuthRegistry,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -50,7 +53,31 @@ async fn main() -> std::io::Result<()> {
 
     let auth = AuthService::new(&db_url, &jwt_secret);
 
-    let state = Arc::new(AppState { auth });
+    // --- OAuth providers (enabled by env vars) ---
+    let service_url = arg_or_env(&args, "--url", "SERVICE_URL", &format!("http://localhost:{port}"));
+    let mut oauth_registry = OAuthRegistry::new();
+
+    if let (Ok(client_id), Ok(client_secret)) = (
+        std::env::var("GOOGLE_CLIENT_ID"),
+        std::env::var("GOOGLE_CLIENT_SECRET"),
+    ) {
+        let redirect_uri = format!("{service_url}/auth/callback/google");
+        let config = oauth::OAuthConfig { client_id, client_secret, redirect_uri };
+        oauth_registry.register(oauth::google::GoogleProvider::new(config));
+        eprintln!("  oauth: google enabled");
+    }
+
+    if let (Ok(client_id), Ok(client_secret)) = (
+        std::env::var("GITHUB_CLIENT_ID"),
+        std::env::var("GITHUB_CLIENT_SECRET"),
+    ) {
+        let redirect_uri = format!("{service_url}/auth/callback/github");
+        let config = oauth::OAuthConfig { client_id, client_secret, redirect_uri };
+        oauth_registry.register(oauth::github::GitHubProvider::new(config));
+        eprintln!("  oauth: github enabled");
+    }
+
+    let state = Arc::new(AppState { auth, oauth: oauth_registry });
 
     let bind_addr = format!("0.0.0.0:{port}");
     eprintln!("zeroship-auth listening on {bind_addr}");
@@ -82,6 +109,15 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/auth/authorize")
                     .route(web::get().to(handlers::authorize)),
+            )
+            // --- OAuth ---
+            .service(
+                web::resource("/auth/{provider}")
+                    .route(web::get().to(handlers::oauth_start)),
+            )
+            .service(
+                web::resource("/auth/callback/{provider}")
+                    .route(web::get().to(handlers::oauth_callback)),
             )
             // --- Health ---
             .service(
