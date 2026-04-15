@@ -101,20 +101,6 @@ impl AuthService {
         .await
         .map_err(|e| format!("auth migration: {e}"))?;
 
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS auth_sessions (
-                id SERIAL PRIMARY KEY,
-                user_id UUID NOT NULL REFERENCES auth_users(id),
-                app_id UUID NOT NULL,
-                token_hash TEXT NOT NULL,
-                expires_at TIMESTAMPTZ NOT NULL,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            )",
-            &[],
-        )
-        .await
-        .map_err(|e| format!("auth migration: {e}"))?;
-
         let _ = conn.close().await;
 
         Ok(Self {
@@ -183,7 +169,8 @@ impl AuthService {
     // -- Login ----------------------------------------------------------------
 
     /// Authenticate with email + password and issue a JWT scoped to the given
-    /// app. Also records a session and grants consent if not already present.
+    /// app. Grants consent if not already present. JWT is the session — no
+    /// server-side session storage.
     pub async fn login(
         &self,
         email: &str,
@@ -230,16 +217,6 @@ impl AuthService {
             .await;
 
         let token = self.issue_token(&user, app_id)?;
-
-        // Record session
-        let token_hash = sha2_hex(&token);
-        let _ = conn
-            .execute(
-                "INSERT INTO auth_sessions (user_id, app_id, token_hash, expires_at) \
-                 VALUES ($1::uuid, $2::uuid, $3, NOW() + INTERVAL '24 hours')",
-                &[&raw_uuid.as_str(), &app_id, &token_hash.as_str()],
-            )
-            .await;
 
         Ok(LoginResult { user, token })
     }
@@ -367,12 +344,4 @@ fn row_to_user(row: &zeroship_pg::Row) -> AuthUser {
 /// Convert a typed user ID (`usr_...`) to raw UUID string for PG queries.
 fn user_id_to_uuid(typed: &str) -> Result<String, String> {
     typed_id::to_uuid_string(typed)
-}
-
-/// SHA-256 hex digest of input.
-fn sha2_hex(input: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    hex::encode(hasher.finalize())
 }

@@ -4837,13 +4837,11 @@ name = "zeroship-auth"
 version = "0.1.0"
 dependencies = [
  "bcrypt",
- "hex",
  "jsonwebtoken",
  "mimalloc",
  "ntex",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "uuid",
  "zeroship-core",
  "zeroship-pg",

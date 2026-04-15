@@ -2,7 +2,7 @@
 
 ## Overview
 
-Authentication is a **platform service**, not an app feature. The platform manages users, passwords, OAuth, sessions, and consent. Apps never see tokens, never store passwords, never implement login. They call `auth.getUser()` and get back a user object — or `null`.
+Authentication is a **platform service**, not an app feature. The platform manages users, passwords, OAuth, and consent. Apps never see tokens, never store passwords, never implement login. They call `auth.getUser()` and get back a user object — or `null`. JWT cookies are the session — no server-side session storage.
 
 The model: Google OAuth for third parties. Users have one platform account. Each app they use gets a consent grant. The app receives a user profile, nothing more.
 
@@ -162,15 +162,8 @@ CREATE TABLE auth.app_consents (
     UNIQUE (user_id, app_id)
 );
 
--- Active sessions
-CREATE TABLE auth.sessions (
-    id          SERIAL PRIMARY KEY,
-    user_id     INTEGER NOT NULL REFERENCES auth.users(id),
-    app_id      UUID NOT NULL,
-    token_hash  TEXT NOT NULL,            -- SHA-256 of JWT, for revocation
-    expires_at  TIMESTAMPTZ NOT NULL,
-    created_at  TIMESTAMPTZ DEFAULT NOW()
-);
+-- No sessions table — JWT is the session. Validated by gateway locally (HMAC, ~2μs).
+-- Token lifetime: 24h. No server-side session storage needed.
 ```
 
 ## JWT Structure
@@ -189,7 +182,7 @@ CREATE TABLE auth.sessions (
 
 - Signed with HS256 (platform-internal, shared secret between auth service and gateway)
 - App never sees the JWT — only the gateway decodes it
-- Short-lived (24h), with refresh via platform session
+- Short-lived (24h), no server-side session — JWT is the session
 
 ## Native Primitives
 
@@ -386,5 +379,5 @@ Creators don't configure JWT secrets, session duration, or cookie settings. The 
 11. **Email verification** — verify email after signup
 12. **User profile editing** — change name, avatar
 13. **Consent management** — user can view and revoke app consents
-14. **Session management** — user can view and revoke sessions
+14. **Token invalidation** — optional `token_invalidated_at` timestamp for emergency revocation
 15. **Scopes** — granular permissions when the platform has features worth scoping
