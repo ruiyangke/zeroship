@@ -66,6 +66,7 @@ async fn main() -> std::io::Result<()> {
         web::App::new()
             .state(config)
             .service(web::resource("/dispatch/{app_id}").route(web::post().to(handler::dispatch)))
+            .service(web::resource("/http-dispatch/{app_id}").route(web::post().to(handler::http_dispatch)))
             .service(web::resource("/health").route(web::get().to(|| async {
                 web::HttpResponse::Ok().body(r#"{"status":"ok"}"#)
             })))

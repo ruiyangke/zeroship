@@ -268,6 +268,7 @@ impl Registry {
                     plan_id: row.get("plan_id"),
                     api_key_hash: row.get("api_key_hash"),
                     deploy_hash: row.get("deploy_hash"),
+                    has_http_handler: false,
                 },
             );
         }

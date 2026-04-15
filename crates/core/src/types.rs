@@ -23,6 +23,12 @@ pub struct RouteEntry {
     pub plan_id: String,
     pub api_key_hash: String,
     pub deploy_hash: Option<String>,
+    /// Whether the app exports an `onRequest` HTTP handler.
+    /// When true, the gateway proxies non-RPC HTTP requests to the worker
+    /// via `/http-dispatch/` so the JS handler receives a proper `Request`
+    /// object and can return streaming responses (SSE).
+    #[serde(default)]
+    pub has_http_handler: bool,
 }
 
 /// Map of app id → current deploy hash (None means no deployment yet).

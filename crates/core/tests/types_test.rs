@@ -72,6 +72,7 @@ fn route_entry_roundtrip() {
         plan_id: "pro".to_string(),
         api_key_hash: "deadbeef".repeat(8),
         deploy_hash: Some("abc123".to_string()),
+        has_http_handler: false,
     };
 
     let json = serde_json::to_string(&entry).unwrap();

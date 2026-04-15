@@ -182,6 +182,45 @@ pub async fn forward(
     result
 }
 
+/// Forward an HTTP request to a worker via the `/http-dispatch/` endpoint.
+///
+/// Instead of sending a raw RPC body, this sends a JSON envelope containing
+/// the original HTTP request details (method, URL, headers, body) so the
+/// worker can invoke the app's `onRequest` handler with a proper `Request`
+/// object. This enables streaming responses (SSE) from V8 ReadableStreams.
+pub async fn forward_http(
+    ring: &HashRing,
+    app_id: &Uuid,
+    plan_id: &str,
+    request_id: &Uuid,
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: &str,
+    user_header: Option<&str>,
+) -> Result<HttpResponse, String> {
+    if ring.num_workers() == 0 {
+        return Err("no workers configured".into());
+    }
+    let (idx, worker_url) = ring.select(app_id);
+    ring.acquire(idx);
+
+    // Build the HTTP envelope JSON
+    let envelope = serde_json::json!({
+        "method": method,
+        "url": url,
+        "headers": headers,
+        "body": body,
+    });
+    let envelope_bytes = serde_json::to_vec(&envelope).unwrap_or_default();
+
+    let result = forward_to_worker_http(
+        worker_url, app_id, plan_id, request_id, &envelope_bytes, user_header,
+    ).await;
+    ring.release(idx);
+    result
+}
+
 /// Timeout for connecting and reading from workers.
 const WORKER_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -291,6 +330,115 @@ async fn forward_to_worker(
     } else {
         // Buffered path: read the complete body (Content-Length or close-delimited),
         // then return connection to pool.
+        let response_body = compio::time::timeout(
+            WORKER_TIMEOUT,
+            read_body_buffered(&mut stream, parsed.content_length, parsed.trailing),
+        )
+        .await
+        .map_err(|_| "read timeout".to_string())?
+        .map_err(|e| format!("read: {e}"))?;
+
+        CONN_POOL.with(|p| p.borrow_mut().put(key, stream));
+        Ok(builder.body(response_body))
+    }
+}
+
+/// Forward an HTTP dispatch request to a worker. Uses `/http-dispatch/{app_id}`
+/// so the worker invokes the app's `onRequest` handler instead of RPC dispatch.
+/// Otherwise identical to `forward_to_worker`.
+async fn forward_to_worker_http(
+    worker_url: &str,
+    app_id: &Uuid,
+    plan_id: &str,
+    request_id: &Uuid,
+    body: &[u8],
+    user_header: Option<&str>,
+) -> Result<HttpResponse, String> {
+    let key = pool_key(worker_url);
+    let path = format!("/http-dispatch/{app_id}");
+
+    let host = extract_host(worker_url);
+
+    let mut stream = match CONN_POOL.with(|p| p.borrow_mut().take(&key)) {
+        Some(s) => s,
+        None => {
+            let (s, _, _) = compio::time::timeout(WORKER_TIMEOUT, connect(worker_url))
+                .await
+                .map_err(|_| "connect timeout".to_string())?
+                .map_err(|e| format!("connect: {e}"))?;
+            s
+        }
+    };
+
+    let request = build_request(&path, &host, app_id, plan_id, request_id, body, user_header);
+
+    if stream.write_all(request).await.is_err() {
+        let (new_stream, _, _) = compio::time::timeout(WORKER_TIMEOUT, connect(worker_url))
+            .await
+            .map_err(|_| "reconnect timeout".to_string())?
+            .map_err(|e| format!("reconnect: {e}"))?;
+        stream = new_stream;
+        let retry_request = build_request(&path, &host, app_id, plan_id, request_id, body, user_header);
+        stream.write_all(retry_request).await.map_err(|e| format!("write: {e}"))?;
+    }
+
+    let parsed = compio::time::timeout(
+        WORKER_TIMEOUT,
+        read_http_headers(&mut stream),
+    )
+    .await
+    .map_err(|_| "read timeout".to_string())?
+    .map_err(|e| format!("read: {e}"))?;
+
+    let hop_by_hop = ["connection", "keep-alive", "transfer-encoding",
+                      "te", "trailer", "upgrade", "proxy-authorization", "proxy-authenticate"];
+
+    let mut builder = HttpResponse::build(
+        ntex::http::StatusCode::from_u16(parsed.status).unwrap_or(ntex::http::StatusCode::BAD_GATEWAY),
+    );
+    for (name, value) in &parsed.headers {
+        let lname = name.to_ascii_lowercase();
+        if !hop_by_hop.contains(&lname.as_str()) {
+            builder.set_header(name.as_str(), value.as_str());
+        }
+    }
+
+    if parsed.is_chunked {
+        let (tx, rx) = ntex::channel::mpsc::channel();
+
+        compio::runtime::spawn(async move {
+            let mut leftover = parsed.trailing;
+
+            loop {
+                loop {
+                    match decode_next_chunk(&leftover) {
+                        ChunkDecode::Complete(data, consumed) => {
+                            if data.is_empty() {
+                                return;
+                            }
+                            let item: Result<ntex::util::Bytes, std::io::Error> =
+                                Ok(ntex::util::Bytes::from(data));
+                            if tx.send(item).is_err() {
+                                return;
+                            }
+                            leftover = leftover[consumed..].to_vec();
+                        }
+                        ChunkDecode::Incomplete => break,
+                    }
+                }
+
+                let read_buf = vec![0u8; 4096];
+                let BufResult(r, returned) = stream.read(read_buf).await;
+                match r {
+                    Ok(0) => return,
+                    Ok(n) => leftover.extend_from_slice(&returned[..n]),
+                    Err(_) => return,
+                }
+            }
+        }).detach();
+
+        Ok(builder.streaming(rx))
+    } else {
         let response_body = compio::time::timeout(
             WORKER_TIMEOUT,
             read_body_buffered(&mut stream, parsed.content_length, parsed.trailing),

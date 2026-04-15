@@ -233,10 +233,17 @@ async fn handle_request(
     // Normalize tail: strip leading slash
     let tail = tail.strip_prefix('/').unwrap_or(tail);
 
-    // 2. Decide: RPC or static asset
+    // 2. Decide: RPC, HTTP dispatch, or static asset
     if tail == "rpc" {
         // RPC request — requires auth, rate limit, proxy to worker
         return handle_rpc(req, &state, &app_id, &route, body, wall_start).await;
+    }
+
+    // If the app exports an onRequest handler, proxy non-static HTTP requests
+    // to the worker via HTTP dispatch. This enables streaming responses (SSE)
+    // and dynamic server-side routing.
+    if route.has_http_handler && !is_static_ext(tail) {
+        return handle_http_dispatch(req, &state, &app_id, &route, tail, body, wall_start).await;
     }
 
     // Static file serving — no auth required
@@ -322,6 +329,105 @@ async fn handle_rpc(
                 .finish();
         }
     }
+
+    // Add response headers
+    let wall_ms = wall_start.elapsed().as_secs_f64() * 1000.0;
+    response.headers_mut().insert(
+        ntex::http::header::HeaderName::from_static("x-wall-time-ms"),
+        ntex::http::header::HeaderValue::from_str(&format!("{wall_ms:.2}")).unwrap(),
+    );
+    response.headers_mut().insert(
+        ntex::http::header::HeaderName::from_static("x-request-id"),
+        ntex::http::header::HeaderValue::from_str(&request_id.to_string()).unwrap(),
+    );
+
+    response
+}
+
+// ---------------------------------------------------------------------------
+// HTTP dispatch handler (for apps with onRequest — enables SSE streaming)
+// ---------------------------------------------------------------------------
+
+/// Forward an HTTP request to the worker via the `/http-dispatch/` endpoint.
+///
+/// This path is used for apps that export an `onRequest` handler. The full
+/// HTTP request (method, URL, headers, body) is forwarded so the JS handler
+/// receives a proper `Request` object and can return streaming responses
+/// (e.g., SSE for LLM token streaming).
+async fn handle_http_dispatch(
+    req: HttpRequest,
+    state: &GateState,
+    app_id: &Uuid,
+    route: &zeroship_core::types::RouteEntry,
+    tail: &str,
+    body: Bytes,
+    wall_start: std::time::Instant,
+) -> HttpResponse {
+    // Rate limit
+    if let Err(resp) = enforce::check_rate_limit(&state.rate_limiters, app_id) {
+        return resp;
+    }
+
+    // Concurrency guard (RAII — released on drop)
+    let _guard = match enforce::acquire_concurrency(&state.concurrency, app_id) {
+        Ok(guard) => guard,
+        Err(resp) => return resp,
+    };
+
+    // Extract user from __zs_session cookie
+    let user_header_value = if !state.config.auth_secret.is_empty() {
+        let cookie = req
+            .headers()
+            .get("cookie")
+            .and_then(|v| v.to_str().ok());
+        let app_id_str = app_id.to_string();
+        user_auth::extract_user(cookie, &state.config.auth_secret, &app_id_str)
+            .map(|u| user_auth::encode_user_header(&u))
+    } else {
+        None
+    };
+
+    // Reconstruct the URL the JS handler will see
+    let scheme = if req.connection_info().scheme() == "https" { "https" } else { "http" };
+    let host = req
+        .headers()
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost");
+    let url = format!("{scheme}://{host}/{tail}");
+
+    // Collect request headers as [key, value] pairs
+    let mut headers: Vec<(String, String)> = Vec::new();
+    for (name, value) in req.headers() {
+        if let Ok(v) = value.to_str() {
+            headers.push((name.as_str().to_string(), v.to_string()));
+        }
+    }
+
+    let method = req.method().as_str();
+    let body_str = String::from_utf8_lossy(&body);
+
+    // Proxy to worker via CHWBL hash ring using HTTP dispatch
+    let request_id = Uuid::new_v4();
+    let mut response = match proxy::forward_http(
+        &state.hash_ring,
+        app_id,
+        &route.plan_id,
+        &request_id,
+        method,
+        &url,
+        &headers,
+        &body_str,
+        user_header_value.as_deref(),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return HttpResponse::BadGateway()
+                .json(&serde_json::json!({"error": format!("worker error: {e}")}));
+        }
+    };
 
     // Add response headers
     let wall_ms = wall_start.elapsed().as_secs_f64() * 1000.0;
