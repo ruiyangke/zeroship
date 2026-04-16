@@ -143,6 +143,45 @@ pub enum AsyncEvent {
     Timer(TimerResult),
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RuntimeLimits {
+    pub cpu_limit: Option<Duration>,
+    pub wall_timeout: Option<Duration>,
+}
+
+#[derive(Clone)]
+pub struct RuntimeHandle {
+    runtime: Rc<RefCell<Runtime>>,
+    limits: RuntimeLimits,
+    modules: Rc<Vec<ModuleEntry>>,
+}
+
+impl RuntimeHandle {
+    pub fn new(runtime: Rc<RefCell<Runtime>>, limits: RuntimeLimits, modules: Vec<ModuleEntry>) -> Self {
+        Self {
+            runtime,
+            limits,
+            modules: Rc::new(modules),
+        }
+    }
+
+    pub fn runtime(&self) -> Rc<RefCell<Runtime>> {
+        self.runtime.clone()
+    }
+
+    pub fn limits(&self) -> RuntimeLimits {
+        self.limits
+    }
+
+    pub fn wall_timeout(&self) -> Option<Duration> {
+        self.limits.wall_timeout
+    }
+
+    pub fn modules(&self) -> &[ModuleEntry] {
+        self.modules.as_ref().as_slice()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PendingRequest — tracking for in-flight async requests
 // ---------------------------------------------------------------------------
@@ -196,7 +235,6 @@ pub struct Runtime {
     /// Cached JS helper that constructs a Request from Rust-supplied params.
     http_create_request_fn: Option<v8::Global<v8::Function>>,
     pub(crate) initialized: bool,
-    pub(crate) modules: Vec<ModuleEntry>,
     pub(crate) state: SharedState,
     /// Plugins registered on zeroship.* namespace.
     plugins: Vec<Box<dyn crate::plugin::NativePlugin>>,
@@ -231,18 +269,18 @@ unsafe impl Send for Runtime {}
 impl Runtime {
     /// Create a new `Runtime` in direct-dispatch mode (no channel).
     pub fn new_direct(
-        modules: Vec<ModuleEntry>,
+        _modules: Vec<ModuleEntry>,
         env_vars: HashMap<String, String>,
         cpu_limit: Option<Duration>,
         wall_timeout: Option<Duration>,
     ) -> Self {
-        Self::new_with_plugins(modules, env_vars, cpu_limit, wall_timeout, Vec::new())
+        Self::new_with_plugins(_modules, env_vars, cpu_limit, wall_timeout, Vec::new())
     }
 
     /// Create a new runtime with plugins.
     /// Plugins register native functions on `zeroship.{namespace}.*`.
     pub fn new_with_plugins(
-        modules: Vec<ModuleEntry>,
+        _modules: Vec<ModuleEntry>,
         env_vars: HashMap<String, String>,
         cpu_limit: Option<Duration>,
         wall_timeout: Option<Duration>,
@@ -285,7 +323,6 @@ impl Runtime {
             http_handler_fn: None,
             http_create_request_fn: None,
             initialized: false,
-            modules,
             state,
             plugins,
             stream_forwarders: HashMap::new(),
@@ -433,18 +470,16 @@ impl Runtime {
     }
 
     /// Load polyfills, ES modules, and compile the dispatch function (once).
-    pub(crate) fn ensure_initialized(&mut self) {
+    pub(crate) fn ensure_initialized(&mut self, modules: &[ModuleEntry]) {
         if self.initialized {
             return;
         }
-
-        let modules = self.modules.clone();
 
         {
             v8::scope!(let handle_scope, &mut self.isolate);
             let context = v8::Local::new(handle_scope, &self.context);
             let scope = &mut v8::ContextScope::new(handle_scope, context);
-            self.dispatch_fn = Some(load_polyfills_and_modules(scope, &modules, &self.plugins));
+            self.dispatch_fn = Some(load_polyfills_and_modules(scope, modules, &self.plugins));
 
             // Check if __rpc.onRequest is a function. If so, cache a Global ref
             // for the native HTTP dispatch path.
@@ -541,8 +576,8 @@ impl Runtime {
     /// For async handlers that produce a pending promise, fires ready timers
     /// and checks settlement. Returns an error if the promise remains pending
     /// (truly async ops like fetch are not yet supported in channel-free mode).
-    pub fn dispatch_rpc(&mut self, body: &str) -> Result<RequestResult, String> {
-        self.ensure_initialized();
+    pub fn dispatch_rpc(&mut self, modules: &[ModuleEntry], body: &str) -> Result<RequestResult, String> {
+        self.ensure_initialized(modules);
 
         if self.dispatch_fn.is_none() {
             return Err("Isolate not initialized".to_string());
@@ -635,8 +670,8 @@ impl Runtime {
     /// - **Error**: returns `DispatchOutcome::Complete(Err(msg))`
     ///
     /// The caller must NOT hold the RefCell borrow across any `.await`.
-    pub fn dispatch_start(&mut self, body: &str) -> DispatchOutcome {
-        self.ensure_initialized();
+    pub fn dispatch_start(&mut self, modules: &[ModuleEntry], body: &str) -> DispatchOutcome {
+        self.ensure_initialized(modules);
 
         if self.dispatch_fn.is_none() {
             return DispatchOutcome::Complete(Err("Isolate not initialized".to_string()));
@@ -754,12 +789,13 @@ impl Runtime {
     /// Returns immediately with a DispatchOutcome variant.
     pub fn dispatch_http(
         &mut self,
+        modules: &[ModuleEntry],
         method: &str,
         url: &str,
         headers_json: &str,
         body: &str,
     ) -> DispatchOutcome {
-        self.ensure_initialized();
+        self.ensure_initialized(modules);
 
         if self.http_handler_fn.is_none() {
             return DispatchOutcome::Complete(Err("No onRequest handler exported".to_string()));
@@ -1180,7 +1216,7 @@ impl Runtime {
         loop {
             let timer_id = {
                 let mut s = self.state.borrow_mut();
-                if s.ready_timers.is_empty() { None } else { Some(s.ready_timers.remove(0)) }
+                s.ready_timers.pop_front()
             };
             let Some(timer_id) = timer_id else { break };
 
@@ -1203,7 +1239,7 @@ impl Runtime {
         loop {
             let timer_id = {
                 let mut s = self.state.borrow_mut();
-                if s.ready_timers.is_empty() { None } else { Some(s.ready_timers.remove(0)) }
+                s.ready_timers.pop_front()
             };
             let Some(timer_id) = timer_id else { break };
 

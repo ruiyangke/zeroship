@@ -1,7 +1,7 @@
 mod common;
 use common::*;
 
-use zeroship_runtime::{init_v8, ModuleEntry};
+use zeroship_runtime::init_v8;
 use zeroship_runtime::runtime::Runtime;
 
 #[test]
@@ -32,14 +32,15 @@ fn persistent_context() {
 #[test]
 fn per_request_cpu() {
     init_v8();
-    let mut runtime = Runtime::new_direct(m(r#"
+    let modules = m(r#"
         export function fib(n) {
             function f(n) { return n <= 1 ? n : f(n-1) + f(n-2); }
             return f(n);
         }
-    "#), no_env(), None, None);
-    let r1 = runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"fib","params":[20],"id":1}"#).unwrap();
-    let r2 = runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"fib","params":[35],"id":2}"#).unwrap();
+    "#);
+    let mut runtime = Runtime::new_direct(modules.clone(), no_env(), None, None);
+    let r1 = runtime.dispatch_rpc(&modules, r#"{"jsonrpc":"2.0","method":"fib","params":[20],"id":1}"#).unwrap();
+    let r2 = runtime.dispatch_rpc(&modules, r#"{"jsonrpc":"2.0","method":"fib","params":[35],"id":2}"#).unwrap();
     assert!(r2.cpu_time > r1.cpu_time * 5);
 }
 

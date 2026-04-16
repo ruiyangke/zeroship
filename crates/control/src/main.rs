@@ -106,6 +106,10 @@ async fn main() -> std::io::Result<()> {
                     .route(web::get().to(internal::get_bundle)),
             )
             .service(
+                web::resource("/internal/apps/{app_id}")
+                    .route(web::get().to(internal::get_app_version)),
+            )
+            .service(
                 web::resource("/internal/routes")
                     .route(web::get().to(internal::get_routes)),
             )

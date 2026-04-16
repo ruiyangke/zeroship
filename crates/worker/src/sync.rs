@@ -1,8 +1,9 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+use zeroship_core::types::{AppVersionInfo, VersionMap};
+use zeroship_runtime::RuntimeLimits;
 
 use crate::{cache, WorkerConfig};
 
@@ -30,21 +31,26 @@ async fn sync_once(config: &WorkerConfig) -> Result<(), String> {
     let response =
         http_get(&url, &config.control_key).await.map_err(|e| format!("fetch versions: {e}"))?;
 
-    let versions: HashMap<Uuid, Option<String>> =
+    let versions: VersionMap =
         serde_json::from_str(&response).map_err(|e| format!("parse versions: {e}"))?;
 
     // Only update apps that are ALREADY cached (not new ones — those load on-demand).
     let local_app_ids = cache::all_app_ids();
     for local_id in &local_app_ids {
         match versions.get(local_id) {
-            // App still exists — check if hash changed (deploy)
-            Some(Some(remote_hash)) => {
+            // App still exists — check if deploy hash OR limits changed.
+            Some(info) => {
+                let remote_hash = &info.deploy_hash;
                 let local_hash = cache::get_hash(local_id);
-                let needs_update = match &local_hash {
-                    Some(lh) if lh != remote_hash => true, // hash changed = new deploy
-                    None => true,                           // no hash tracked (shouldn't happen)
-                    _ => false,                             // same hash, skip
+                let local_limits = cache::get_limits(local_id);
+                let target_limits = RuntimeLimits {
+                    cpu_limit: info.runtime.cpu_limit_ms.map(std::time::Duration::from_millis),
+                    wall_timeout: info.runtime.wall_timeout_ms.map(std::time::Duration::from_millis),
                 };
+                let needs_update = match &local_hash {
+                    Some(lh) => remote_hash.as_ref().is_some_and(|rh| lh != rh),
+                    None => remote_hash.is_some(),
+                } || local_limits != Some(target_limits);
 
                 if needs_update {
                     let bundle_url =
@@ -52,17 +58,21 @@ async fn sync_once(config: &WorkerConfig) -> Result<(), String> {
                     match http_get_bytes(&bundle_url, &config.control_key).await {
                         Ok(bytes) => {
                             let computed = hex::encode(Sha256::digest(&bytes));
-                            if computed != *remote_hash {
+                            if remote_hash.as_ref().is_some_and(|remote_hash| computed != *remote_hash) {
                                 eprintln!(
-                                    "[worker-sync] hash mismatch for {local_id}: expected {remote_hash}, got {computed}"
+                                    "[worker-sync] hash mismatch for {local_id}: expected {}, got {computed}",
+                                    remote_hash.as_deref().unwrap_or("")
                                 );
                                 continue;
                             }
-                            if cache::load_app(*local_id, &bytes) {
-                                cache::set_hash(*local_id, remote_hash.clone());
+                            if cache::load_app(*local_id, &bytes, info.runtime.clone()) {
+                                if let Some(remote_hash) = remote_hash {
+                                    cache::set_hash(*local_id, remote_hash.clone());
+                                }
                                 eprintln!(
-                                    "[worker-sync] updated {local_id} (hash: {}...)",
-                                    &remote_hash[..remote_hash.len().min(8)]
+                                    "[worker-sync] updated {local_id} (plan: {}, hash: {}...)",
+                                    info.plan_id,
+                                    &computed[..computed.len().min(8)]
                                 );
                             }
                         }
@@ -76,12 +86,16 @@ async fn sync_once(config: &WorkerConfig) -> Result<(), String> {
                 cache::evict_app(local_id);
                 cache::remove_hash(local_id);
             }
-            // App exists but no deploy yet (deploy_hash is null) — skip
-            Some(None) => {}
         }
     }
 
     Ok(())
+}
+
+pub async fn fetch_app_version(url_base: &str, auth_key: &str, app_id: &Uuid) -> Result<AppVersionInfo, String> {
+    let url = format!("{url_base}/internal/apps/{app_id}");
+    let body = http_get(&url, auth_key).await?;
+    serde_json::from_str(&body).map_err(|e| e.to_string())
 }
 
 /// Simple HTTP GET returning response body as string.

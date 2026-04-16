@@ -13,6 +13,7 @@
 //! setTimeout callback while `reader.read()` is awaited.
 
 use crate::state::{SharedState, StreamState};
+use std::collections::VecDeque;
 
 /// Resolve a PromiseResolver with `{value: Uint8Array(data), done: false}`.
 fn resolve_with_chunk(
@@ -67,7 +68,7 @@ pub fn stream_create_callback(
     s.next_stream_id += 1;
     s.streams.insert(id, StreamState {
         pending_read: None,
-        buffer: Vec::new(),
+        buffer: VecDeque::new(),
         closed: false,
         direct_writer: None,
     });
@@ -99,15 +100,14 @@ pub fn stream_read_callback(
     let stream = s.streams.entry(stream_id).or_insert_with(|| {
         crate::state::StreamState {
             pending_read: None,
-            buffer: Vec::new(),
+            buffer: VecDeque::new(),
             closed: false,
             direct_writer: None,
         }
     });
 
-    if !stream.buffer.is_empty() {
+    if let Some(data) = stream.buffer.pop_front() {
         // Buffered chunk available — resolve immediately.
-        let data = stream.buffer.remove(0);
         drop(s);
         resolve_with_chunk(scope, resolver, &data);
     } else if stream.closed {
@@ -161,7 +161,7 @@ pub fn stream_enqueue_callback(
             } else if let Some(writer) = stream.direct_writer.as_ref() {
                 StreamDispatch::Direct(writer.clone())
             } else {
-                stream.buffer.push(data);
+                stream.buffer.push_back(data);
                 return;
             }
         } else {
@@ -287,7 +287,7 @@ pub fn push_stream_chunk(
             let stream = s.streams.entry(stream_id).or_insert_with(|| {
                 crate::state::StreamState {
                     pending_read: None,
-                    buffer: Vec::new(),
+                    buffer: VecDeque::new(),
                     closed: false,
                     direct_writer: None,
                 }
@@ -301,7 +301,7 @@ pub fn push_stream_chunk(
         } else {
             let mut s = state.borrow_mut();
             if let Some(stream) = s.streams.get_mut(&stream_id) {
-                stream.buffer.push(data.to_vec());
+                stream.buffer.push_back(data.to_vec());
             }
         }
     }

@@ -1,4 +1,5 @@
 #![allow(unsafe_code)]
+#![allow(missing_debug_implementations)]
 
 pub mod auth;
 pub mod state;
@@ -26,7 +27,7 @@ pub use init::{init_v8, RequestResult, HttpResult};
 pub use modules::ModuleEntry;
 pub use state::{SharedState, RuntimeState, OpResult, FetchRequest, StreamState, SpawnedTimer, WebSocketState, WsMessage};
 pub use storage::AppStorage;
-pub use runtime::{Runtime, DispatchOutcome, HttpDispatchResult, AsyncWork, AsyncEvent};
+pub use runtime::{Runtime, RuntimeHandle, RuntimeLimits, DispatchOutcome, HttpDispatchResult, AsyncWork, AsyncEvent};
 pub use channel::{ResultSender, ResultReceiver, StreamWriter, StreamReader};
 pub use bundle::{AppBundle, ModuleType, ModuleInfo};
 pub use serve::{start_server, ServerOptions};

@@ -23,6 +23,7 @@
             openssl
             sqlite
             wrk
+            numactl
             hey
             esbuild
             # Profiling

@@ -58,6 +58,7 @@ pub(crate) fn mark_model_registered(app_id: &str, collection: &str) {
 ///
 /// Returns `Some(())` on success, `None` if the pool could not be created
 /// (throws a V8 exception in that case).
+#[allow(dead_code)]
 pub(crate) fn ensure_pool(scope: &mut v8::PinScope<'_, '_>) -> Option<()> {
     let has_pool = DB_POOL.with(|p| p.borrow().is_some());
     if has_pool {

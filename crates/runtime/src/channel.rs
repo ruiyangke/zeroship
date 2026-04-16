@@ -1,8 +1,8 @@
 //! Single-threaded channel primitives for compio runtime.
 //!
 //! These replace `tokio::sync::oneshot` and `tokio::sync::mpsc` with simple
-//! `Rc<Cell>` / `Rc<RefCell>` based types. This works because compio is
-//! single-threaded — no Send/Sync needed.
+//! `Rc<RefCell<_>>` based types. This works because compio is single-threaded
+//! — no Send/Sync needed.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -15,28 +15,66 @@ use std::task::Waker;
 
 /// Single-value slot for passing a result from pump to connection handler.
 /// Works because compio is single-threaded — no Send/Sync needed.
-pub struct ResultSender<T>(Rc<Cell<Option<T>>>);
+pub struct ResultSender<T>(Rc<RefCell<ResultInner<T>>>);
 
 impl<T> ResultSender<T> {
-    /// Store a value. The receiver will see it on next `try_recv()`.
+    /// Store a value and wake any task waiting in `recv()`.
     pub fn send(self, value: T) {
-        self.0.set(Some(value));
+        let mut inner = self.0.borrow_mut();
+        inner.value = Some(value);
+        if let Some(waker) = inner.waker.take() {
+            waker.wake();
+        }
     }
 }
 
-pub struct ResultReceiver<T>(Rc<Cell<Option<T>>>);
+pub struct ResultReceiver<T>(Rc<RefCell<ResultInner<T>>>);
 
 impl<T> ResultReceiver<T> {
     /// Take the value if the sender has stored one.
     pub fn try_recv(&self) -> Option<T> {
-        self.0.take()
+        self.0.borrow_mut().value.take()
+    }
+
+    /// Wait until the sender stores a value.
+    pub fn recv(&self) -> WaitForResult<'_, T> {
+        WaitForResult { receiver: self }
     }
 }
 
 /// Create a new oneshot-like slot pair.
 pub fn result_slot<T>() -> (ResultSender<T>, ResultReceiver<T>) {
-    let slot = Rc::new(Cell::new(None));
+    let slot = Rc::new(RefCell::new(ResultInner {
+        value: None,
+        waker: None,
+    }));
     (ResultSender(slot.clone()), ResultReceiver(slot))
+}
+
+struct ResultInner<T> {
+    value: Option<T>,
+    waker: Option<Waker>,
+}
+
+pub struct WaitForResult<'a, T> {
+    receiver: &'a ResultReceiver<T>,
+}
+
+impl<T> std::future::Future for WaitForResult<'_, T> {
+    type Output = T;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let mut inner = self.receiver.0.borrow_mut();
+        if let Some(value) = inner.value.take() {
+            std::task::Poll::Ready(value)
+        } else {
+            inner.waker = Some(cx.waker().clone());
+            std::task::Poll::Pending
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -83,7 +121,16 @@ pub struct StreamReader {
 impl StreamReader {
     /// Drain all available chunks from the buffer.
     pub fn drain(&self) -> Vec<Vec<u8>> {
-        self.inner.borrow_mut().chunks.drain(..).collect()
+        let mut chunks = Vec::new();
+        while let Some(chunk) = self.pop() {
+            chunks.push(chunk);
+        }
+        chunks
+    }
+
+    /// Pop a single available chunk from the buffer.
+    pub fn pop(&self) -> Option<Vec<u8>> {
+        self.inner.borrow_mut().chunks.pop_front()
     }
 
     /// Returns true if the writer has signalled completion.

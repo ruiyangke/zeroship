@@ -326,7 +326,7 @@ fn set_timeout_callback(
     }
     if delay < Duration::from_millis(1) {
         // Fast path: fire inline without tokio::time::sleep overhead.
-        s.ready_timers.push(id);
+        s.ready_timers.push_back(id);
     } else {
         s.spawned_timers.push(crate::state::SpawnedTimer { id, delay, interval: None });
     }

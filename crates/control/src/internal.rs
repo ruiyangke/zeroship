@@ -78,6 +78,32 @@ pub async fn get_bundle(
     }
 }
 
+pub async fn get_app_version(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    app_id: Path<String>,
+) -> web::HttpResponse {
+    if let Some(resp) = check_auth(&req, &state) {
+        return resp;
+    }
+    let uid = match app_id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error":"invalid uuid"}))
+        }
+    };
+    match state.registry.get_versions().await {
+        Ok(versions) => match versions.get(&uid) {
+            Some(info) => web::HttpResponse::Ok().json(info),
+            None => web::HttpResponse::NotFound()
+                .json(&serde_json::json!({"error":"app not found"})),
+        },
+        Err(e) => web::HttpResponse::InternalServerError()
+            .json(&serde_json::json!({"error": e.to_string()})),
+    }
+}
+
 pub async fn get_routes(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,

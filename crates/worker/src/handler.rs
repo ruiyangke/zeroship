@@ -2,15 +2,35 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
+use futures::{pin_mut, FutureExt};
 use ntex::web::{self, HttpRequest, HttpResponse};
 use ntex::util::Bytes;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use zeroship_runtime::runtime::DispatchOutcome;
-use zeroship_runtime::StreamReader;
+use zeroship_runtime::{ResultReceiver, RuntimeHandle, StreamReader};
 
 use crate::{cache, WorkerConfig};
+
+async fn recv_with_timeout<T>(
+    rx: &ResultReceiver<T>,
+    timeout: std::time::Duration,
+) -> Option<T> {
+    let recv = rx.recv().fuse();
+    let sleep = compio::time::sleep(timeout).fuse();
+    pin_mut!(recv, sleep);
+    futures::select! {
+        result = recv => Some(result),
+        _ = sleep => None,
+    }
+}
+
+fn wall_limit(handle: &RuntimeHandle) -> std::time::Duration {
+    handle
+        .wall_timeout()
+        .unwrap_or(std::time::Duration::from_secs(30))
+}
 
 // ---------------------------------------------------------------------------
 // HTTP dispatch — called by the gateway for apps with onRequest handlers
@@ -40,13 +60,14 @@ pub async fn http_dispatch(
         }
     }
 
-    let runtime = match cache::get_runtime(&app_id) {
-        Some(rt) => rt,
+    let handle = match cache::get_runtime(&app_id) {
+        Some(handle) => handle,
         None => {
             return HttpResponse::NotFound()
                 .body(format!(r#"{{"error":"app {app_id} not loaded"}}"#));
         }
     };
+    let runtime = handle.runtime();
 
     // Decode authenticated user from ZeroShip-User header (base64 JSON from gateway)
     let user_json = req
@@ -76,7 +97,7 @@ pub async fn http_dispatch(
     let outcome = {
         let mut rt = runtime.borrow_mut();
         rt.enter_isolate();
-        let o = rt.dispatch_http(&envelope.method, &envelope.url, &headers_json, &envelope.body);
+        let o = rt.dispatch_http(handle.modules(), &envelope.method, &envelope.url, &headers_json, &envelope.body);
         rt.exit_isolate();
         o
     };
@@ -90,29 +111,18 @@ pub async fn http_dispatch(
             stream_response(status, &headers, reader)
         }
         DispatchOutcome::HttpPending(rx) => {
-            let wall_limit = runtime.borrow().wall_timeout()
-                .unwrap_or(std::time::Duration::from_secs(30));
-            let deadline = std::time::Instant::now() + wall_limit;
-
-            loop {
-                if let Some(result) = rx.try_recv() {
-                    break match result {
-                        Ok(zeroship_runtime::HttpDispatchResult::Complete { status, headers, body, .. }) => {
-                            make_http_response(status, &headers, &body)
-                        }
-                        Ok(zeroship_runtime::HttpDispatchResult::Stream { status, headers, body: reader, .. }) => {
-                            stream_response(status, &headers, reader)
-                        }
-                        Ok(zeroship_runtime::HttpDispatchResult::WebSocket { .. }) => {
-                            make_error("WebSocket upgrade not supported via gateway dispatch")
-                        }
-                        Err(e) => make_error(&e),
-                    };
+            match recv_with_timeout(&rx, wall_limit(&handle)).await {
+                Some(Ok(zeroship_runtime::HttpDispatchResult::Complete { status, headers, body, .. })) => {
+                    make_http_response(status, &headers, &body)
                 }
-                if std::time::Instant::now() >= deadline {
-                    break make_error("request timed out");
+                Some(Ok(zeroship_runtime::HttpDispatchResult::Stream { status, headers, body: reader, .. })) => {
+                    stream_response(status, &headers, reader)
                 }
-                yield_now().await;
+                Some(Ok(zeroship_runtime::HttpDispatchResult::WebSocket { .. })) => {
+                    make_error("WebSocket upgrade not supported via gateway dispatch")
+                }
+                Some(Err(e)) => make_error(&e),
+                None => make_error("request timed out"),
             }
         }
         // dispatch_http never returns these, but handle exhaustively
@@ -166,13 +176,14 @@ pub async fn dispatch(
         }
     }
 
-    let runtime = match cache::get_runtime(&app_id) {
-        Some(rt) => rt,
+    let handle = match cache::get_runtime(&app_id) {
+        Some(handle) => handle,
         None => {
             return HttpResponse::NotFound()
                 .body(format!(r#"{{"error":"app {app_id} not loaded"}}"#));
         }
     };
+    let runtime = handle.runtime();
 
     // Decode authenticated user from ZeroShip-User header (base64 JSON from gateway)
     let user_json = req
@@ -189,7 +200,7 @@ pub async fn dispatch(
     let outcome = {
         let mut rt = runtime.borrow_mut();
         rt.enter_isolate();
-        let o = rt.dispatch_start(&body);
+        let o = rt.dispatch_start(handle.modules(), &body);
         rt.exit_isolate();
         o
     };
@@ -204,22 +215,10 @@ pub async fn dispatch(
         DispatchOutcome::Pending(rx) => {
             // Async — the pump task will resolve the promise.
             // We yield to compio until the result arrives.
-            let wall_limit = runtime.borrow().wall_timeout()
-                .unwrap_or(std::time::Duration::from_secs(30));
-            let deadline = std::time::Instant::now() + wall_limit;
-
-            loop {
-                if let Some(result) = rx.try_recv() {
-                    break match result {
-                        Ok(r) => make_response(&r.json, r.cpu_time.as_secs_f64() * 1000.0),
-                        Err(e) => make_error(&e),
-                    };
-                }
-                if std::time::Instant::now() >= deadline {
-                    break make_error("request timed out");
-                }
-                // Yield to compio — let the pump task run
-                yield_now().await;
+            match recv_with_timeout(&rx, wall_limit(&handle)).await {
+                Some(Ok(r)) => make_response(&r.json, r.cpu_time.as_secs_f64() * 1000.0),
+                Some(Err(e)) => make_error(&e),
+                None => make_error("request timed out"),
             }
         }
 
@@ -231,29 +230,18 @@ pub async fn dispatch(
             stream_response(status, &headers, reader)
         }
         DispatchOutcome::HttpPending(rx) => {
-            let wall_limit = runtime.borrow().wall_timeout()
-                .unwrap_or(std::time::Duration::from_secs(30));
-            let deadline = std::time::Instant::now() + wall_limit;
-
-            loop {
-                if let Some(result) = rx.try_recv() {
-                    break match result {
-                        Ok(zeroship_runtime::HttpDispatchResult::Complete { status, headers, body, .. }) => {
-                            make_http_response(status, &headers, &body)
-                        }
-                        Ok(zeroship_runtime::HttpDispatchResult::Stream { status, headers, body: reader, .. }) => {
-                            stream_response(status, &headers, reader)
-                        }
-                        Ok(zeroship_runtime::HttpDispatchResult::WebSocket { .. }) => {
-                            make_error("WebSocket upgrade not supported via gateway dispatch")
-                        }
-                        Err(e) => make_error(&e),
-                    };
+            match recv_with_timeout(&rx, wall_limit(&handle)).await {
+                Some(Ok(zeroship_runtime::HttpDispatchResult::Complete { status, headers, body, .. })) => {
+                    make_http_response(status, &headers, &body)
                 }
-                if std::time::Instant::now() >= deadline {
-                    break make_error("request timed out");
+                Some(Ok(zeroship_runtime::HttpDispatchResult::Stream { status, headers, body: reader, .. })) => {
+                    stream_response(status, &headers, reader)
                 }
-                yield_now().await;
+                Some(Ok(zeroship_runtime::HttpDispatchResult::WebSocket { .. })) => {
+                    make_error("WebSocket upgrade not supported via gateway dispatch")
+                }
+                Some(Err(e)) => make_error(&e),
+                None => make_error("request timed out"),
             }
         }
 
@@ -314,7 +302,7 @@ fn stream_response(
     compio::runtime::spawn(async move {
         loop {
             // Drain all available chunks
-            for chunk in reader.drain() {
+            while let Some(chunk) = reader.pop() {
                 if !chunk.is_empty() {
                     if tx.send(Ok::<Bytes, std::io::Error>(Bytes::from(chunk))).is_err() {
                         return; // client disconnected
@@ -324,7 +312,7 @@ fn stream_response(
 
             // Check if stream is complete
             if reader.is_done() {
-                for chunk in reader.drain() {
+                while let Some(chunk) = reader.pop() {
                     if !chunk.is_empty() {
                         let _ = tx.send(Ok(Bytes::from(chunk)));
                     }
@@ -359,22 +347,9 @@ fn make_error(msg: &str) -> HttpResponse {
         .body(serde_json::to_string(&error).unwrap())
 }
 
-/// Yield control to the compio event loop.
-fn yield_now() -> impl std::future::Future<Output = ()> {
-    let mut yielded = false;
-    std::future::poll_fn(move |cx| {
-        if yielded {
-            std::task::Poll::Ready(())
-        } else {
-            yielded = true;
-            cx.waker().wake_by_ref();
-            std::task::Poll::Pending
-        }
-    })
-}
-
 /// Pull bundle from control plane and load into cache (cold start path).
 async fn load_on_demand(config: &WorkerConfig, app_id: &Uuid) -> Result<(), String> {
+    let app_version = crate::sync::fetch_app_version(&config.control_url, &config.control_key, app_id).await?;
     let bundle_url = format!("{}/internal/bundles/{}", config.control_url, app_id);
     let bytes = crate::sync::http_get_bytes(&bundle_url, &config.control_key).await?;
 
@@ -384,7 +359,7 @@ async fn load_on_demand(config: &WorkerConfig, app_id: &Uuid) -> Result<(), Stri
 
     let hash = hex::encode(Sha256::digest(&bytes));
 
-    if cache::load_app(*app_id, &bytes) {
+    if cache::load_app(*app_id, &bytes, app_version.runtime) {
         cache::set_hash(*app_id, hash);
         eprintln!("[worker] on-demand loaded {app_id}");
         Ok(())

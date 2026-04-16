@@ -201,7 +201,7 @@ pub struct RuntimeState {
     pub spawned_timers: Vec<SpawnedTimer>,
     /// Timer IDs ready to fire immediately (delay == 0).
     /// Drained by the Runtime after each enter_v8, avoiding sleep overhead.
-    pub ready_timers: Vec<u32>,
+    pub ready_timers: VecDeque<u32>,
 
     /// Fetch requests queued by V8 callbacks, drained by the runtime executor.
     pub spawned_fetches: Vec<FetchRequest>,
@@ -254,7 +254,7 @@ impl RuntimeState {
 
             spawned_ops: Vec::new(),
             spawned_timers: Vec::new(),
-            ready_timers: Vec::new(),
+            ready_timers: VecDeque::new(),
             spawned_fetches: Vec::new(),
 
             executing_request_id: None,
@@ -303,7 +303,7 @@ pub struct StreamState {
     /// Resolver waiting on the next `read()` call, if any.
     pub pending_read: Option<v8::Global<v8::PromiseResolver>>,
     /// Buffered chunks not yet consumed by JS.
-    pub buffer: Vec<Vec<u8>>,
+    pub buffer: VecDeque<Vec<u8>>,
     /// Whether the stream has been closed/errored.
     pub closed: bool,
     /// Direct writer for HTTP response body streams.

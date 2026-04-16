@@ -17,6 +17,7 @@ pub struct ModuleEntry {
 }
 
 /// In-memory representation of an `.appbundle` file.
+#[derive(Debug)]
 pub struct AppBundle {
     /// Module index — O(1) lookup by specifier.
     modules: HashMap<String, BundleModule>,
@@ -29,6 +30,7 @@ pub struct AppBundle {
 }
 
 /// Index entry for one module.
+#[derive(Debug)]
 struct BundleModule {
     module_type: ModuleType,
     /// Offset into `data` for the compressed source.

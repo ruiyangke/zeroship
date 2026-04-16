@@ -4,6 +4,8 @@
 //! authentication. Provides buffered compio I/O, connection pool, and a simple
 //! query API for the zeroship platform.
 
+#![allow(missing_debug_implementations)]
+
 mod conn;
 mod pool;
 mod stream;

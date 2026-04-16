@@ -16,6 +16,21 @@ pub struct AppRecord {
     pub updated_at: String,
 }
 
+/// Worker-facing runtime limits for a specific app.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AppRuntimeLimits {
+    pub cpu_limit_ms: Option<u64>,
+    pub wall_timeout_ms: Option<u64>,
+}
+
+/// Worker-facing metadata for an app version/config snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppVersionInfo {
+    pub deploy_hash: Option<String>,
+    pub plan_id: String,
+    pub runtime: AppRuntimeLimits,
+}
+
 /// A routing entry resolved from an incoming request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteEntry {
@@ -31,8 +46,8 @@ pub struct RouteEntry {
     pub has_http_handler: bool,
 }
 
-/// Map of app id → current deploy hash (None means no deployment yet).
-pub type VersionMap = HashMap<Uuid, Option<String>>;
+/// Map of app id → current deploy/config snapshot.
+pub type VersionMap = HashMap<Uuid, AppVersionInfo>;
 
 /// Map of app id → route entry for fast lookup.
 pub type RouteMap = HashMap<Uuid, RouteEntry>;

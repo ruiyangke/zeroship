@@ -25,6 +25,7 @@ struct ConnectConfig {
     user: String,
     password: Option<String>,
     database: String,
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
     sslmode: SslMode,
 }
 
@@ -238,7 +239,7 @@ impl Conn {
         let mut pid = 0i32;
         let mut secret = 0i32;
         let mut params = HashMap::new();
-        let mut status = b'I';
+        let status;
 
         loop {
             let msg = read_message(&mut stream).await?;

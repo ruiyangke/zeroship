@@ -4,11 +4,12 @@ use std::rc::Rc;
 
 use uuid::Uuid;
 
+use zeroship_core::types::AppRuntimeLimits;
 use zeroship_runtime::plugin::NativePlugin;
-use zeroship_runtime::runtime::Runtime;
+use zeroship_runtime::runtime::{Runtime, RuntimeHandle, RuntimeLimits};
 
 struct IsolateEntry {
-    runtime: Rc<RefCell<Runtime>>,
+    handle: RuntimeHandle,
     last_used: std::time::Instant,
 }
 
@@ -34,15 +35,6 @@ pub fn init_cache(max_size: usize, db_url: Option<String>) {
     }
 }
 
-/// Initialize async resources (DB pool). Must be called on compio runtime.
-pub async fn init_async() {
-    if DB_URL.with(|u| u.borrow().is_some()) {
-        if let Err(e) = zeroship_plugin_db::init_pool_async().await {
-            eprintln!("[worker] db pool init failed: {e}");
-        }
-    }
-}
-
 /// Create plugins for a new Runtime.
 fn create_plugins() -> Vec<Box<dyn NativePlugin>> {
     let mut plugins: Vec<Box<dyn NativePlugin>> = Vec::new();
@@ -59,21 +51,25 @@ fn create_plugins() -> Vec<Box<dyn NativePlugin>> {
 }
 
 /// Get or create a V8 runtime for an app. Returns None if the app isn't loaded.
-pub fn get_runtime(app_id: &Uuid) -> Option<Rc<RefCell<Runtime>>> {
+pub fn get_runtime(app_id: &Uuid) -> Option<RuntimeHandle> {
     CACHE.with(|c| {
         let mut cache = c.borrow_mut();
         let cache = cache.as_mut()?;
         if let Some(entry) = cache.isolates.get_mut(app_id) {
             entry.last_used = std::time::Instant::now();
-            Some(entry.runtime.clone())
+            Some(entry.handle.clone())
         } else {
             None
         }
     })
 }
 
+pub fn get_limits(app_id: &Uuid) -> Option<RuntimeLimits> {
+    get_runtime(app_id).map(|handle| handle.limits())
+}
+
 /// Load an app from bundle bytes. Creates V8 runtime + starts pump task.
-pub fn load_app(app_id: Uuid, bundle_bytes: &[u8]) -> bool {
+pub fn load_app(app_id: Uuid, bundle_bytes: &[u8], app_limits: AppRuntimeLimits) -> bool {
     let mut bundle = match zeroship_bundle::AppBundle::from_bytes(bundle_bytes) {
         Ok(b) => b,
         Err(e) => {
@@ -99,19 +95,21 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8]) -> bool {
         let mut env_vars = HashMap::new();
         env_vars.insert("APP_ID".to_string(), app_id.to_string());
 
+        let limits = runtime_limits_from_app(&app_limits);
         let rt = Rc::new(RefCell::new(Runtime::new_with_plugins(
-            modules,
+            modules.clone(),
             env_vars,
-            None,
-            None,
+            limits.cpu_limit,
+            limits.wall_timeout,
             plugins,
         )));
+        let handle = RuntimeHandle::new(rt.clone(), limits, modules);
 
         // Warmup (isolate is entered after new_direct)
         {
             let result = rt
                 .borrow_mut()
-                .dispatch_rpc(r#"{"jsonrpc":"2.0","method":"__ping","params":[],"id":0}"#);
+                .dispatch_rpc(handle.modules(), r#"{"jsonrpc":"2.0","method":"__ping","params":[],"id":0}"#);
             if let Err(e) = &result {
                 eprintln!("[worker] warmup warning for {app_id}: {e}");
             }
@@ -123,17 +121,23 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8]) -> bool {
 
         // Start pump task for async V8 ops (timers, fetch, streams).
         Runtime::start_pump(rt.clone());
-
         cache.isolates.insert(
             app_id,
             IsolateEntry {
-                runtime: rt,
+                handle,
                 last_used: std::time::Instant::now(),
             },
         );
 
         true
     })
+}
+
+fn runtime_limits_from_app(limits: &AppRuntimeLimits) -> RuntimeLimits {
+    RuntimeLimits {
+        cpu_limit: limits.cpu_limit_ms.map(std::time::Duration::from_millis),
+        wall_timeout: limits.wall_timeout_ms.map(std::time::Duration::from_millis),
+    }
 }
 
 /// Remove an app from the cache.
@@ -200,4 +204,3 @@ fn evict_lru(cache: &mut AppCache) {
         });
     }
 }
-

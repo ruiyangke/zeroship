@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use zeroship_core::auth::hash_api_key;
-use zeroship_core::types::{AppRecord, RouteEntry, RouteMap, VersionMap};
+use zeroship_core::types::{AppRecord, AppRuntimeLimits, AppVersionInfo, RouteEntry, RouteMap, VersionMap};
 use zeroship_pg::Conn;
 use uuid::Uuid;
 
@@ -238,13 +238,18 @@ impl Registry {
     pub async fn get_versions(&self) -> Result<VersionMap, RegistryError> {
         let mut conn = self.conn().await?;
         let rows = conn
-            .query("SELECT id, deploy_hash FROM apps", &[])
+            .query("SELECT id, deploy_hash, plan_id FROM apps", &[])
             .await?;
         let mut map = HashMap::new();
         for row in &rows {
             let id: Uuid = row.get("id");
             let hash: Option<String> = row.get("deploy_hash");
-            map.insert(id, hash);
+            let plan_id: String = row.get("plan_id");
+            map.insert(id, AppVersionInfo {
+                deploy_hash: hash,
+                runtime: runtime_limits_for_plan(&plan_id),
+                plan_id,
+            });
         }
         Ok(map)
     }
@@ -311,6 +316,27 @@ impl Registry {
             map.insert(row.get::<String>("resource"), row.get::<i64>("value"));
         }
         Ok(map)
+    }
+}
+
+fn runtime_limits_for_plan(plan_id: &str) -> AppRuntimeLimits {
+    match plan_id {
+        "free" => AppRuntimeLimits {
+            cpu_limit_ms: Some(50),
+            wall_timeout_ms: Some(5_000),
+        },
+        "pro" => AppRuntimeLimits {
+            cpu_limit_ms: Some(30_000),
+            wall_timeout_ms: Some(30_000),
+        },
+        "unlimited" | "enterprise" => AppRuntimeLimits {
+            cpu_limit_ms: None,
+            wall_timeout_ms: None,
+        },
+        _ => AppRuntimeLimits {
+            cpu_limit_ms: Some(50),
+            wall_timeout_ms: Some(5_000),
+        },
     }
 }
 

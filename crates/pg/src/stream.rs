@@ -70,12 +70,14 @@ impl BufStream {
     }
 
     /// Read exactly one byte from the stream (used for SSL negotiation response).
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
     pub async fn read_byte(&mut self) -> Result<u8> {
         self.fill(1).await?;
         Ok(self.read_buf.split_to(1)[0])
     }
 
     /// Append data to the write buffer (no I/O until flush).
+    #[allow(dead_code)]
     pub fn write(&mut self, data: &[u8]) {
         self.write_buf.extend_from_slice(data);
     }

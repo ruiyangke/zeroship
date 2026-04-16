@@ -17,18 +17,19 @@
 #![allow(unsafe_code)]
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::task::Waker;
 use std::time::Duration;
-use std::collections::HashMap;
 
 use crate::init::init_v8;
 use crate::modules::ModuleEntry;
-use crate::runtime::{DispatchOutcome, HttpDispatchResult, Runtime};
+use crate::runtime::{DispatchOutcome, HttpDispatchResult, Runtime, RuntimeHandle, RuntimeLimits};
 
 use compio::buf::BufResult;
 use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
+use futures::{pin_mut, FutureExt};
 
 
 // ===========================================================================
@@ -114,22 +115,21 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
     std::process::exit(1);
 }
 
-// ===========================================================================
-// Yield helper
-// ===========================================================================
-
-/// Yield control back to the compio event loop so other tasks can run.
-fn yield_now() -> impl std::future::Future<Output = ()> {
-    let mut yielded = false;
-    std::future::poll_fn(move |cx| {
-        if yielded {
-            std::task::Poll::Ready(())
-        } else {
-            yielded = true;
-            cx.waker().wake_by_ref();
-            std::task::Poll::Pending
+async fn recv_with_timeout<T>(
+    rx: &crate::channel::ResultReceiver<T>,
+    timeout: Option<Duration>,
+) -> Option<T> {
+    if let Some(limit) = timeout {
+        let recv = rx.recv().fuse();
+        let sleep = compio::time::sleep(limit).fuse();
+        pin_mut!(recv, sleep);
+        futures::select! {
+            result = recv => Some(result),
+            _ = sleep => None,
         }
-    })
+    } else {
+        Some(rx.recv().await)
+    }
 }
 
 // ===========================================================================
@@ -146,8 +146,9 @@ const SERVICE_UNAVAILABLE: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nContent
 
 async fn handle_connection(
     mut stream: TcpStream,
-    runtime: Rc<RefCell<Runtime>>,
+    handle: RuntimeHandle,
 ) {
+    let runtime = handle.runtime();
     let mut data = Vec::with_capacity(8192);
     let mut read_buf = Vec::with_capacity(4096);
 
@@ -200,7 +201,7 @@ async fn handle_connection(
                     if write_result.is_err() { return; }
                 }
                 ("POST", "/rpc") => {
-                    let response_bytes = dispatch_rpc(body_bytes, &runtime).await;
+                    let response_bytes = dispatch_rpc(body_bytes, &handle).await;
                     let BufResult(write_result, _) = stream.write_all(response_bytes).await;
                     if write_result.is_err() { return; }
                 }
@@ -229,7 +230,7 @@ async fn handle_connection(
                     );
 
                     let wrote_ok = dispatch_http(
-                        &mut stream, method, &full_url, &headers_json, body_str, &runtime,
+                        &mut stream, method, &full_url, &headers_json, body_str, &handle,
                         &raw_headers,
                     ).await;
                     if !wrote_ok { return; }
@@ -389,14 +390,15 @@ fn collect_headers_json(headers: &[httparse::Header<'_>]) -> String {
 
 async fn dispatch_rpc(
     body_bytes: &[u8],
-    runtime: &Rc<RefCell<Runtime>>,
+    handle: &RuntimeHandle,
 ) -> Vec<u8> {
     let body_str = match std::str::from_utf8(body_bytes) {
         Ok(s) => s,
         Err(_) => return SERVICE_UNAVAILABLE.to_vec(),
     };
 
-    let outcome = runtime.borrow_mut().dispatch_start(body_str);
+    let runtime = handle.runtime();
+    let outcome = runtime.borrow_mut().dispatch_start(handle.modules(), body_str);
 
     match outcome {
         DispatchOutcome::Complete(Ok(result)) => {
@@ -406,22 +408,13 @@ async fn dispatch_rpc(
             build_json_response(&format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\"")))
         }
         DispatchOutcome::Pending(rx) => {
-            let wall_limit = runtime.borrow().wall_timeout();
-            let deadline = wall_limit.map(|d| std::time::Instant::now() + d);
-            loop {
-                if let Some(result) = rx.try_recv() {
-                    break match result {
-                        Ok(r) => build_json_response(&r.json),
-                        Err(e) => {
-                            let escaped = e.replace('"', "\\\"");
-                            build_json_response(&format!(r#"{{"error":"{escaped}"}}"#))
-                        }
-                    };
+            match recv_with_timeout(&rx, handle.wall_timeout()).await {
+                Some(Ok(r)) => build_json_response(&r.json),
+                Some(Err(e)) => {
+                    let escaped = e.replace('"', "\\\"");
+                    build_json_response(&format!(r#"{{"error":"{escaped}"}}"#))
                 }
-                if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                    break build_json_response(r#"{"error":"Request timed out"}"#);
-                }
-                yield_now().await;
+                None => build_json_response(r#"{"error":"Request timed out"}"#),
             }
         }
         DispatchOutcome::HttpComplete { .. }
@@ -443,10 +436,11 @@ async fn dispatch_http(
     url: &str,
     headers_json: &str,
     body: &str,
-    runtime: &Rc<RefCell<Runtime>>,
+    handle: &RuntimeHandle,
     request_headers: &[(String, String)],
 ) -> bool {
-    let outcome = runtime.borrow_mut().dispatch_http(method, url, headers_json, body);
+    let runtime = handle.runtime();
+    let outcome = runtime.borrow_mut().dispatch_http(handle.modules(), method, url, headers_json, body);
 
     match outcome {
         DispatchOutcome::HttpComplete { status, headers, body, logs: _ } => {
@@ -464,7 +458,7 @@ async fn dispatch_http(
             if r.is_err() { return false; }
 
             loop {
-                for chunk in body.drain() {
+                while let Some(chunk) = body.pop() {
                     let size_hex = format!("{:x}\r\n", chunk.len());
                     let mut chunk_data = Vec::with_capacity(size_hex.len() + chunk.len() + 2);
                     chunk_data.extend_from_slice(size_hex.as_bytes());
@@ -483,18 +477,7 @@ async fn dispatch_http(
             r.is_ok()
         }
         DispatchOutcome::HttpPending(rx) => {
-            let wall_limit = runtime.borrow().wall_timeout();
-            let deadline = wall_limit.map(|d| std::time::Instant::now() + d);
-            let result = loop {
-                if let Some(result) = rx.try_recv() {
-                    break Some(result);
-                }
-                if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                    break None;
-                }
-                // Yield to let the pump drive async ops that resolve the promise.
-                compio::time::sleep(std::time::Duration::from_millis(1)).await;
-            };
+            let result = recv_with_timeout(&rx, handle.wall_timeout()).await;
 
             match result {
                 Some(Ok(HttpDispatchResult::Complete { status, headers, body, logs: _ })) => {
@@ -508,7 +491,7 @@ async fn dispatch_http(
                     if r.is_err() { return false; }
 
                     loop {
-                        for chunk in body.drain() {
+                        while let Some(chunk) = body.pop() {
                             let size_hex = format!("{:x}\r\n", chunk.len());
                             let mut chunk_data = Vec::with_capacity(size_hex.len() + chunk.len() + 2);
                             chunk_data.extend_from_slice(size_hex.as_bytes());
@@ -524,7 +507,7 @@ async fn dispatch_http(
                     r.is_ok()
                 }
                 Some(Ok(HttpDispatchResult::WebSocket { ws_id, headers, logs: _ })) => {
-                    handle_websocket_upgrade(stream, ws_id, &headers, request_headers, runtime).await
+                    handle_websocket_upgrade(stream, ws_id, &headers, request_headers, &runtime).await
                 }
                 Some(Err(e)) => {
                     let body = format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\""));
@@ -551,8 +534,7 @@ async fn dispatch_http(
             r.is_ok()
         }
         DispatchOutcome::WebSocketUpgrade { ws_id, headers } => {
-
-            handle_websocket_upgrade(stream, ws_id, &headers, request_headers, runtime).await
+            handle_websocket_upgrade(stream, ws_id, &headers, request_headers, &runtime).await
         }
         DispatchOutcome::Pending(_) => {
             let response = build_http_response(500, &[], r#"{"error":"Unexpected pending state"}"#);
@@ -983,12 +965,17 @@ fn run_single_worker(
             }
 
             let runtime = Rc::new(RefCell::new(
-                Runtime::new_direct(modules, HashMap::new(), cpu_limit, wall_timeout),
+                Runtime::new_direct(modules.clone(), HashMap::new(), cpu_limit, wall_timeout),
             ));
+            let handle = RuntimeHandle::new(runtime.clone(), RuntimeLimits {
+                cpu_limit,
+                wall_timeout,
+            }, modules);
 
             // Warmup
             {
                 let result = runtime.borrow_mut().dispatch_rpc(
+                    handle.modules(),
                     r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":0}"#,
                 );
                 if let Err(e) = result {
@@ -1002,7 +989,7 @@ fn run_single_worker(
             // Accept loop
             loop {
                 let (stream, _addr) = listener.accept().await.unwrap();
-                let rt = runtime.clone();
+                let rt = handle.clone();
                 compio::runtime::spawn(handle_connection(stream, rt)).detach();
             }
         });
