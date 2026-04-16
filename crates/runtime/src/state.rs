@@ -306,6 +306,10 @@ pub struct StreamState {
     pub buffer: Vec<Vec<u8>>,
     /// Whether the stream has been closed/errored.
     pub closed: bool,
+    /// Direct writer for HTTP response body streams.
+    /// When set, `enqueue()` bypasses the buffer and writes directly to this
+    /// writer — chunks reach the TCP socket without a pump cycle.
+    pub direct_writer: Option<crate::channel::StreamWriter>,
 }
 
 // ---------------------------------------------------------------------------

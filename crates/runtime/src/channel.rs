@@ -50,6 +50,7 @@ struct StreamInner {
 }
 
 /// Writer half of a shared stream buffer.
+#[derive(Clone)]
 pub struct StreamWriter {
     inner: Rc<RefCell<StreamInner>>,
 }

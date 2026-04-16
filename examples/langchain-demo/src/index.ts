@@ -117,40 +117,18 @@ export async function chat(message: string, history: ChatMsg[] = []): Promise<an
   );
   msgs.push(new HumanMessage(message));
 
-  // Collect all ReAct events first, then stream them as SSE.
-  // True token-by-token streaming from OpenAI requires fixing nested
-  // async ReadableStream support in the single-threaded event loop.
-  const events: string[] = [];
   const encoder = new TextEncoder();
-
-  try {
-    const m = getModel();
-    for (let i = 0; i < 5; i++) {
-      const response = await m.invoke(msgs);
-      msgs.push(response);
-
-      if (response.content && typeof response.content === "string") {
-        events.push(JSON.stringify({ token: response.content }));
-      }
-
-      if (!response.tool_calls || response.tool_calls.length === 0) break;
-
-      for (const tc of response.tool_calls) {
-        events.push(JSON.stringify({ tool: tc.name, args: tc.args }));
-        const fn = toolMap[tc.name];
-        const result = fn ? await fn.invoke(tc.args) : `Tool not found: ${tc.name}`;
-        events.push(JSON.stringify({ tool: tc.name, result }));
-        msgs.push(new ToolMessage({ tool_call_id: tc.id, content: result }));
-      }
-    }
-  } catch (e: any) {
-    events.push(JSON.stringify({ error: e.message }));
-  }
-
   const stream = new ReadableStream({
-    start(controller: any) {
-      for (const evt of events) {
-        controller.enqueue(encoder.encode(`data: ${evt}\n\n`));
+    async start(controller: any) {
+      try {
+        await reactLoopStream(
+          msgs,
+          (token) => controller.enqueue(encoder.encode(`data: ${JSON.stringify({ token })}\n\n`)),
+          (name, args) => controller.enqueue(encoder.encode(`data: ${JSON.stringify({ tool: name, args })}\n\n`)),
+          (name, result) => controller.enqueue(encoder.encode(`data: ${JSON.stringify({ tool: name, result })}\n\n`)),
+        );
+      } catch (e: any) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: e.message })}\n\n`));
       }
       controller.enqueue(encoder.encode("data: [DONE]\n\n"));
       controller.close();

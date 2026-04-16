@@ -843,31 +843,26 @@ impl Runtime {
             }
             ResponseInfo::Stream { status, headers, stream_id } => {
                 let (writer, reader) = channel::stream_buffer();
-                let mut forwarder = StreamForwarder::new(writer);
 
-                // Flush any chunks already buffered in the stream state.
-                // If start() was async and already completed, chunks + close
-                // may already be in the buffer.
-                let already_closed = {
+                // Attach the writer directly to the stream state so future
+                // enqueue() calls from JS write straight to the TCP-bound
+                // channel — no buffer, no pump cycle.
+                {
                     let mut s = self.state.borrow_mut();
-                    let closed = if let Some(stream) = s.streams.get_mut(&stream_id) {
+                    if let Some(stream) = s.streams.get_mut(&stream_id) {
+                        // Flush any chunks enqueued before we attached
                         for chunk in stream.buffer.drain(..) {
-                            forwarder.try_forward(chunk);
+                            writer.push(chunk);
                         }
-                        stream.closed
+                        // If start() already completed, close the writer now
+                        if stream.closed {
+                            writer.close();
+                        } else {
+                            stream.direct_writer = Some(writer);
+                        }
                     } else {
-                        false
-                    };
-                    s.outbound_streams.insert(stream_id);
-                    closed
-                };
-
-                if already_closed {
-                    // Stream completed before we started reading — close writer
-                    // so the reader sees is_done() immediately.
-                    forwarder.writer.close();
-                } else {
-                    self.stream_forwarders.insert(stream_id, forwarder);
+                        writer.close();
+                    }
                 }
                 DispatchOutcome::HttpStream { status, headers, body: reader, logs }
             }
