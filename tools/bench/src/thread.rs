@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -9,8 +11,9 @@ use crate::lua::LuaScript;
 use crate::stats::{LiveStats, ThreadStats};
 use crate::tls::MaybeStream;
 
-/// Run one worker thread: pin to CPU, spin up a compio runtime, open N connections,
-/// send requests in a tight loop until the duration expires.
+/// Run one worker thread: pin to CPU, spin up a compio runtime, open N
+/// connections, and drive each one concurrently in its own task until the
+/// deadline expires.
 pub fn run_worker(
     config: &Config,
     _thread_id: usize,
@@ -37,80 +40,113 @@ async fn worker_loop(
     script: Option<LuaScript>,
     live: Option<Arc<LiveStats>>,
 ) -> ThreadStats {
-    let mut stats = ThreadStats::new();
     let conns_per_thread = config.connections_per_thread();
-    let default_request_bytes: Vec<u8> = http::build_request(config);
+
+    // Build the default request once per thread. If a Lua script is loaded,
+    // honor its mutations to the `wrk` global (method/body/headers/path).
+    let default_request_bytes: Rc<Vec<u8>> = Rc::new(match script.as_ref() {
+        Some(s) => s.build_request_from_wrk(config),
+        None => http::build_request(config),
+    });
+
     let deadline = Instant::now() + config.duration;
 
-    // Open initial connections (best-effort; failures are recorded)
-    let mut connections: Vec<Option<MaybeStream>> = Vec::with_capacity(conns_per_thread);
+    // Shared per-thread state — tasks run cooperatively on the same compio
+    // runtime, so Rc<RefCell<...>> is the right tool.
+    let stats = Rc::new(RefCell::new(ThreadStats::new()));
+    let script = script.map(Rc::new);
+
+    // Spawn one task per connection so they make progress concurrently.
+    // The previous implementation served connections one-at-a-time in
+    // round-robin, which turned a 150µs p50 into a 3.7ms (conns-per-thread
+    // × p50) round-trip and capped throughput at ~6K req/s/thread.
+    let mut tasks = Vec::with_capacity(conns_per_thread);
     for _ in 0..conns_per_thread {
-        match crate::tls::connect(&config.host, config.port, config.tls).await {
-            Ok(stream) => connections.push(Some(stream)),
-            Err(_) => {
-                stats.errors_connect += 1;
-                connections.push(None);
-            }
-        }
+        let host = config.host.clone();
+        let port = config.port;
+        let tls = config.tls;
+        let req_bytes = default_request_bytes.clone();
+        let stats = stats.clone();
+        let script = script.clone();
+        let live = live.clone();
+
+        tasks.push(compio::runtime::spawn(async move {
+            connection_task(host, port, tls, req_bytes, deadline, stats, script, live).await;
+        }));
     }
 
-    let mut conn_idx = 0;
+    for t in tasks {
+        let _ = t.await;
+    }
+
+    Rc::try_unwrap(stats)
+        .unwrap_or_else(|_| unreachable!("all spawned tasks have completed"))
+        .into_inner()
+}
+
+/// Drive one keep-alive connection: connect, then issue request/response
+/// cycles in a tight loop until the deadline expires.
+async fn connection_task(
+    host: String,
+    port: u16,
+    tls: bool,
+    req_bytes: Rc<Vec<u8>>,
+    deadline: Instant,
+    stats: Rc<RefCell<ThreadStats>>,
+    script: Option<Rc<LuaScript>>,
+    live: Option<Arc<LiveStats>>,
+) {
+    let mut stream: MaybeStream = match crate::tls::connect(&host, port, tls).await {
+        Ok(s) => s,
+        Err(_) => {
+            stats.borrow_mut().errors_connect += 1;
+            return;
+        }
+    };
+
+    // Reuse a single read buffer across requests to avoid a 64KB alloc per
+    // response. Responses on the benchmark path are small and the buffer
+    // grows on demand.
+    let mut read_buf: Vec<u8> = Vec::with_capacity(8192);
 
     while Instant::now() < deadline {
-        // Reconnect if this slot is dead
-        if connections[conn_idx].is_none() {
-            match crate::tls::connect(&config.host, config.port, config.tls).await {
-                Ok(stream) => connections[conn_idx] = Some(stream),
-                Err(_) => {
-                    stats.errors_connect += 1;
-                    conn_idx = (conn_idx + 1) % conns_per_thread;
-                    continue;
-                }
-            }
-        }
-
         // Determine request bytes: Lua `request()` override or default.
-        let request_bytes = script
-            .as_ref()
+        let request_bytes: Vec<u8> = script
+            .as_deref()
             .and_then(|s| if s.has_request() { s.call_request() } else { None })
-            .unwrap_or_else(|| default_request_bytes.clone());
+            .unwrap_or_else(|| (*req_bytes).clone());
 
-        let stream = connections[conn_idx].as_mut().unwrap();
         let start = Instant::now();
 
         // --- Send request ---
         let BufResult(write_res, _buf) = stream.write_all(request_bytes).await;
         if write_res.is_err() {
-            stats.errors_write += 1;
-            connections[conn_idx] = None;
-            conn_idx = (conn_idx + 1) % conns_per_thread;
-            continue;
+            stats.borrow_mut().errors_write += 1;
+            return;
         }
 
         // --- Read response ---
-        let mut buf: Vec<u8> = Vec::with_capacity(65536);
+        read_buf.clear();
         let mut parsed: Option<http::ParsedResponse> = None;
-        let mut read_error = false;
 
         loop {
-            let BufResult(read_res, returned_buf) = stream.read(buf).await;
-            buf = returned_buf;
+            let BufResult(read_res, returned_buf) = stream.read(read_buf).await;
+            read_buf = returned_buf;
 
             match read_res {
                 Ok(0) => {
-                    connections[conn_idx] = None;
-                    break;
+                    // Server closed the connection — end this task.
+                    return;
                 }
                 Ok(_) => {
                     if parsed.is_none() {
-                        parsed = http::parse_response(&buf);
+                        parsed = http::parse_response(&read_buf);
                     }
 
                     if let Some(ref p) = parsed {
-                        let body_available = buf.len().saturating_sub(p.header_len);
-
+                        let body_available = read_buf.len().saturating_sub(p.header_len);
                         let complete = if p.chunked {
-                            let body_slice = &buf[p.header_len..];
+                            let body_slice = &read_buf[p.header_len..];
                             http::find_chunked_end(body_slice).is_some()
                         } else {
                             body_available >= p.content_length
@@ -120,65 +156,54 @@ async fn worker_loop(
                             break;
                         }
 
-                        if buf.len() == buf.capacity() {
-                            buf.reserve(65536);
+                        if read_buf.len() == read_buf.capacity() {
+                            read_buf.reserve(65536);
                         }
-                    } else {
-                        if buf.len() == buf.capacity() {
-                            buf.reserve(4096);
-                        }
+                    } else if read_buf.len() == read_buf.capacity() {
+                        read_buf.reserve(4096);
                     }
                 }
                 Err(_) => {
-                    stats.errors_read += 1;
-                    connections[conn_idx] = None;
-                    read_error = true;
-                    break;
+                    stats.borrow_mut().errors_read += 1;
+                    return;
                 }
             }
-        }
-
-        if read_error {
-            conn_idx = (conn_idx + 1) % conns_per_thread;
-            continue;
         }
 
         let elapsed = start.elapsed();
 
         if let Some(ref p) = parsed {
-            stats.record_latency(elapsed.as_micros() as u64);
-            stats.record_request(buf.len() as u64);
+            {
+                let mut s = stats.borrow_mut();
+                s.record_latency(elapsed.as_micros() as u64);
+                s.record_request(read_buf.len() as u64);
+                if p.status >= 400 {
+                    s.errors_status += 1;
+                }
+            }
 
-            // Update live stats for TUI.
             if let Some(ref l) = live {
-                l.add_request(buf.len() as u64);
+                l.add_request(read_buf.len() as u64);
+                if p.status >= 400 {
+                    l.add_error();
+                }
             }
 
             // Lua response() callback.
             if let Some(ref s) = script {
                 if s.has_response() {
-                    let header_slice = &buf[..p.header_len.min(buf.len())];
-                    let body_slice = &buf[p.header_len.min(buf.len())..];
+                    let header_slice = &read_buf[..p.header_len.min(read_buf.len())];
+                    let body_slice = &read_buf[p.header_len.min(read_buf.len())..];
                     let headers_str = std::str::from_utf8(header_slice).unwrap_or("");
                     let body_str = std::str::from_utf8(body_slice).unwrap_or("");
                     s.call_response(p.status, headers_str, body_str);
                 }
             }
 
-            if p.status >= 400 {
-                stats.errors_status += 1;
-                if let Some(ref l) = live {
-                    l.add_error();
-                }
-            }
-
             if !p.keep_alive {
-                connections[conn_idx] = None;
+                // Server signaled Connection: close — this slot is done.
+                return;
             }
         }
-
-        conn_idx = (conn_idx + 1) % conns_per_thread;
     }
-
-    stats
 }

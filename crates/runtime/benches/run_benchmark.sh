@@ -142,7 +142,7 @@ parse_rps_lat() {
 run_rpc() {
     local name=$1 port=$2 lua=$3
     local out
-    out=$($ZB -t$THREADS -c$CONNS -d"$DURATION" $CLIENT_NUMA -s "$lua" "http://localhost:$port/rpc" 2>&1)
+    out=$($ZB -t "$THREADS" -c "$CONNS" -d "$DURATION" $CLIENT_NUMA -s "$lua" "http://localhost:$port/rpc" 2>&1)
     local parsed=$(parse_rps_lat "$out")
     local rps="${parsed%%|*}"
     local lat="${parsed##*|}"
@@ -167,7 +167,7 @@ run_sse() {
     local url="http://localhost:$port/sse?chunks=$chunks&delay=$delay&size=$size"
 
     local out
-    out=$($ZB --sse -t$THREADS -c$conns -d"$duration" $CLIENT_NUMA "$url" 2>&1)
+    out=$($ZB --sse -t "$THREADS" -c "$conns" -d "$duration" $CLIENT_NUMA "$url" 2>&1)
 
     local chunks_per_sec=$(echo "$out" | grep -E 'Chunks/sec' | head -1 | awk '{print $2}')
     local transfer=$(echo "$out" | grep -E 'Transfer/sec' | head -1 | awk '{print $2}')
