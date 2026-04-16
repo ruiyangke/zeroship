@@ -50,6 +50,7 @@ struct StreamInner {
 }
 
 /// Writer half of a shared stream buffer.
+#[derive(Clone)]
 pub struct StreamWriter {
     inner: Rc<RefCell<StreamInner>>,
 }
@@ -98,6 +99,32 @@ impl StreamReader {
     /// Returns true if there are chunks available to read.
     pub fn has_data(&self) -> bool {
         !self.inner.borrow().chunks.is_empty()
+    }
+
+    /// Wait until data is available or the stream is done.
+    /// Uses waker-based notification — no polling.
+    pub fn wait_for_data(&self) -> WaitForData<'_> {
+        WaitForData { reader: self }
+    }
+}
+
+/// Future that resolves when the StreamReader has data or is done.
+pub struct WaitForData<'a> {
+    reader: &'a StreamReader,
+}
+
+impl<'a> std::future::Future for WaitForData<'a> {
+    type Output = ();
+
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        let inner = self.reader.inner.borrow();
+        if !inner.chunks.is_empty() || inner.done {
+            std::task::Poll::Ready(())
+        } else {
+            drop(inner);
+            self.reader.register_waker(cx.waker());
+            std::task::Poll::Pending
+        }
     }
 }
 

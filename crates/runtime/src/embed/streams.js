@@ -114,7 +114,13 @@
 
     if (underlyingSource && typeof underlyingSource.start === "function") {
       try {
-        underlyingSource.start(this._controller);
+        var startResult = underlyingSource.start(this._controller);
+        // If start() is async, track the promise so the pump drives it
+        // and errors propagate to the stream.
+        if (startResult && typeof startResult.then === "function") {
+          var ctrl = this._controller;
+          startResult.then(undefined, function(e) { ctrl.error(e); });
+        }
       } catch (e) {
         this._controller.error(e);
       }

@@ -69,6 +69,7 @@ pub fn stream_create_callback(
         pending_read: None,
         buffer: Vec::new(),
         closed: false,
+        direct_writer: None,
     });
     rv.set(v8::Integer::new_from_unsigned(scope, id).into());
 }
@@ -100,6 +101,7 @@ pub fn stream_read_callback(
             pending_read: None,
             buffer: Vec::new(),
             closed: false,
+            direct_writer: None,
         }
     });
 
@@ -147,23 +149,40 @@ pub fn stream_enqueue_callback(
         .expect("RuntimeState not in isolate slot")
         .clone();
 
-    // Synchronous fast-path: if there's a pending read, resolve it immediately.
-    let pending = {
-        let mut s = state.borrow_mut();
-        s.streams.get_mut(&stream_id).and_then(|stream| stream.pending_read.take())
-    };
-
-    if let Some(resolver_global) = pending {
-        let resolver = v8::Local::new(scope, &resolver_global);
-        resolve_with_chunk(scope, resolver, &data);
-    } else {
-        // Buffer the chunk — the runtime layer will forward outbound stream
-        // chunks via StreamForwarder when draining new tasks.
+    // Dispatch to one of three destinations, in priority order:
+    //   1. Pending read → resolve JS promise synchronously
+    //   2. Direct writer (HTTP response body) → push straight to TCP writer channel
+    //   3. Buffer → stage until a reader or writer attaches
+    let dispatch = {
         let mut s = state.borrow_mut();
         if let Some(stream) = s.streams.get_mut(&stream_id) {
-            stream.buffer.push(data);
+            if let Some(resolver) = stream.pending_read.take() {
+                StreamDispatch::Resolve(resolver)
+            } else if let Some(writer) = stream.direct_writer.as_ref() {
+                StreamDispatch::Direct(writer.clone())
+            } else {
+                stream.buffer.push(data);
+                return;
+            }
+        } else {
+            return;
+        }
+    };
+
+    match dispatch {
+        StreamDispatch::Resolve(resolver_global) => {
+            let resolver = v8::Local::new(scope, &resolver_global);
+            resolve_with_chunk(scope, resolver, &data);
+        }
+        StreamDispatch::Direct(writer) => {
+            writer.push(data);
         }
     }
+}
+
+enum StreamDispatch {
+    Resolve(v8::Global<v8::PromiseResolver>),
+    Direct(crate::channel::StreamWriter),
 }
 
 // ---------------------------------------------------------------------------
@@ -182,16 +201,22 @@ pub fn stream_close_callback(
         .expect("RuntimeState not in isolate slot")
         .clone();
 
-    let pending = {
+    let (pending, direct_writer) = {
         let mut s = state.borrow_mut();
         s.outbound_streams.remove(&stream_id);
         if let Some(stream) = s.streams.get_mut(&stream_id) {
             stream.closed = true;
-            stream.pending_read.take()
+            (stream.pending_read.take(), stream.direct_writer.take())
         } else {
-            None
+            (None, None)
         }
     };
+
+    // Close the direct HTTP writer so the TCP handler sees EOF and writes
+    // the chunked-encoding terminator.
+    if let Some(writer) = direct_writer {
+        writer.close();
+    }
 
     // If there's a pending read, resolve it with {done: true}.
     if let Some(resolver_global) = pending {
@@ -264,6 +289,7 @@ pub fn push_stream_chunk(
                     pending_read: None,
                     buffer: Vec::new(),
                     closed: false,
+                    direct_writer: None,
                 }
             });
             stream.pending_read.take()

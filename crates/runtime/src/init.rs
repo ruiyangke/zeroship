@@ -23,6 +23,9 @@ pub fn init_v8() {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
+        // Install the TLS crypto provider (rustls needs this for HTTPS fetch).
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
         let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform);
         v8::V8::initialize();
@@ -405,6 +408,12 @@ fn set_interval_callback(
 pub fn setup_globals(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
 
+    // global = globalThis (Node.js compat — many npm packages reference `global`)
+    {
+        let key = v8::String::new(scope, "global").unwrap();
+        global.set(scope, key.into(), global.into());
+    }
+
     // console.log/warn/error/info
     {
         let console = v8::Object::new(scope);
@@ -553,6 +562,17 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
 
         let crypto_key = v8::String::new(scope, "crypto").unwrap();
         global.set(scope, crypto_key.into(), crypto.into());
+    }
+
+    // Native sync hash/HMAC for node:crypto polyfill
+    {
+        let f = v8::Function::new(scope, crate::crypto::crypto_hash_sync_callback).unwrap();
+        let key = v8::String::new(scope, "__cryptoHashSync").unwrap();
+        global.set(scope, key.into(), f.into());
+
+        let f = v8::Function::new(scope, crate::crypto::crypto_hmac_sync_callback).unwrap();
+        let key = v8::String::new(scope, "__cryptoHmacSync").unwrap();
+        global.set(scope, key.into(), f.into());
     }
 
     // __streams namespace (native backing for ReadableStream)

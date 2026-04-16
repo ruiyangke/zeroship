@@ -1,0 +1,16 @@
+{
+  "name": "@zeroship/node-compat",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node.js API polyfills for the zeroship V8 runtime",
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "unenv": "^1.10.0"
+  }
+}

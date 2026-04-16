@@ -113,6 +113,47 @@ impl LuaScript {
 
     pub fn has_request(&self) -> bool { self.has_request }
     pub fn has_response(&self) -> bool { self.has_response }
+
+    /// Build the default HTTP request from the `wrk` global table.
+    ///
+    /// After the script runs, `wrk.method`/`wrk.body`/`wrk.headers` may have
+    /// been mutated (e.g. `wrk.method = "POST"` in the common wrk idiom).
+    /// Read them back and produce the final request bytes — otherwise these
+    /// assignments are silently ignored and the benchmark sends the config's
+    /// original method/path, which is almost never what the user intended.
+    pub fn build_request_from_wrk(&self, config: &Config) -> Vec<u8> {
+        let globals = self.lua.globals();
+        let Ok(wrk): LuaResult<LuaTable> = globals.get("wrk") else {
+            return crate::http::build_request(config);
+        };
+        let method: String = wrk.get("method").unwrap_or_else(|_| config.method.clone());
+        let path: String = wrk.get("path").unwrap_or_else(|_| config.path.clone());
+        let host: String = wrk.get("host").unwrap_or_else(|_| config.host.clone());
+        let port: u16 = wrk.get("port").unwrap_or(config.port);
+        let body: String = wrk.get("body").unwrap_or_default();
+
+        let mut req = format!("{method} {path} HTTP/1.1\r\n");
+        req.push_str(&format!("Host: {host}:{port}\r\n"));
+        req.push_str("Connection: keep-alive\r\n");
+
+        if let Ok(headers) = wrk.get::<LuaTable>("headers") {
+            for pair in headers.pairs::<String, String>() {
+                if let Ok((k, v)) = pair {
+                    req.push_str(&format!("{k}: {v}\r\n"));
+                }
+            }
+        }
+
+        if !body.is_empty() {
+            req.push_str(&format!("Content-Length: {}\r\n", body.len()));
+            req.push_str("\r\n");
+            req.push_str(&body);
+        } else {
+            req.push_str("\r\n");
+        }
+
+        req.into_bytes()
+    }
 }
 
 /// Set up the `wrk` global table in the Lua state, matching wrk's API surface.

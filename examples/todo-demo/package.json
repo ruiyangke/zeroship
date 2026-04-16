@@ -1,0 +1,18 @@
+{
+  "name": "todo-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^6.0.1",
+    "@zeroship/vite-plugin": "file:../../sdks/vite-plugin",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "vite": "^8.0.0"
+  }
+}

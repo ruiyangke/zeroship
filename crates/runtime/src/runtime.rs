@@ -250,7 +250,8 @@ impl Runtime {
     ) -> Self {
         init_v8();
 
-        let params = v8::CreateParams::default().heap_limits(0, 128 * 1024 * 1024);
+        // 512MB heap for dev (LangChain + deps need ~200MB). Production can be tuned lower.
+        let params = v8::CreateParams::default().heap_limits(0, 512 * 1024 * 1024);
         let mut isolate = v8::Isolate::new(params);
 
         // Register near-heap-limit callback to prevent OOM crashes
@@ -332,7 +333,7 @@ impl Runtime {
     }
 
     /// Wake the pump task so it can drain newly added work.
-    fn notify_pump(&self) {
+    pub fn notify_pump(&self) {
         if let Some(tx) = &self.pump_notify_tx {
             let _ = tx.clone().try_send(());
         }
@@ -376,6 +377,7 @@ impl Runtime {
                 let mut rt = runtime.borrow_mut();
                 rt.enter_isolate();
                 rt.drain_new_tasks_into(&mut work);
+                rt.flush_outbound_streams();
                 rt.exit_isolate();
             }
 
@@ -414,6 +416,8 @@ impl Runtime {
                 let mut rt = runtime.borrow_mut();
                 rt.enter_isolate();
                 rt.handle_async_event(event, &mut work);
+                // Flush any stream chunks enqueued during V8 execution.
+                rt.flush_outbound_streams();
                 rt.exit_isolate();
             }
         }
@@ -839,20 +843,27 @@ impl Runtime {
             }
             ResponseInfo::Stream { status, headers, stream_id } => {
                 let (writer, reader) = channel::stream_buffer();
-                let mut forwarder = StreamForwarder::new(writer);
 
-                // Flush any chunks already buffered in the stream state
+                // Attach the writer directly to the stream state so future
+                // enqueue() calls from JS write straight to the TCP-bound
+                // channel — no buffer, no pump cycle.
                 {
                     let mut s = self.state.borrow_mut();
                     if let Some(stream) = s.streams.get_mut(&stream_id) {
+                        // Flush any chunks enqueued before we attached
                         for chunk in stream.buffer.drain(..) {
-                            forwarder.try_forward(chunk);
+                            writer.push(chunk);
                         }
+                        // If start() already completed, close the writer now
+                        if stream.closed {
+                            writer.close();
+                        } else {
+                            stream.direct_writer = Some(writer);
+                        }
+                    } else {
+                        writer.close();
                     }
-                    s.outbound_streams.insert(stream_id);
                 }
-
-                self.stream_forwarders.insert(stream_id, forwarder);
                 DispatchOutcome::HttpStream { status, headers, body: reader, logs }
             }
             ResponseInfo::WebSocket { ws_id, headers } => {
@@ -903,6 +914,41 @@ impl Runtime {
 
         // Fire zero-delay timers inline
         self.fire_ready_timers_pump(work);
+    }
+
+    /// Move buffered chunks from RuntimeState.streams → StreamForwarder → StreamWriter.
+    /// Must be called after any V8 execution that may have called __streams.enqueue().
+    pub fn flush_outbound_streams(&mut self) {
+        let outbound_ids: Vec<u32> = {
+            self.state.borrow().outbound_streams.iter().copied().collect()
+        };
+        for stream_id in outbound_ids {
+            let chunks: Vec<Vec<u8>> = {
+                let mut s = self.state.borrow_mut();
+                if let Some(stream) = s.streams.get_mut(&stream_id) {
+                    stream.buffer.drain(..).collect()
+                } else {
+                    continue;
+                }
+            };
+            if let Some(forwarder) = self.stream_forwarders.get_mut(&stream_id) {
+                for chunk in chunks {
+                    forwarder.try_forward(chunk);
+                }
+            }
+
+            // Check if stream was closed
+            let is_closed = {
+                let s = self.state.borrow();
+                s.streams.get(&stream_id).map(|st| st.closed).unwrap_or(true)
+            };
+            if is_closed {
+                if let Some(forwarder) = self.stream_forwarders.remove(&stream_id) {
+                    forwarder.writer.close();
+                }
+                self.state.borrow_mut().outbound_streams.remove(&stream_id);
+            }
+        }
     }
 
     /// Handle an async event from the pump (op completed or timer fired).
