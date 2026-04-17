@@ -20,8 +20,8 @@ export interface WsContainer {
   onMessage?: (data: Buffer | string) => void;
 }
 
-/** Typed listener for HotChannel events. */
-type HotListener = (data: unknown, client?: { send(data: unknown): void }) => void;
+/** Listener type matching Vite's HotChannel overloaded signatures. */
+type HotListener = (...args: any[]) => void;
 
 // ── HotChannel ─────────────────────────────────────────────────────────────
 
