@@ -36,6 +36,7 @@
     "node": ">=20.19.0"
   },
   "dependencies": {
+    "magic-string": "^0.30.21",
     "unenv": "^1.10.0",
     "ws": "^8.20.0"
   }

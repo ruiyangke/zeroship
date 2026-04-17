@@ -2,6 +2,7 @@ import type { Plugin } from "vite";
 import { createRequire } from "module";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { resolve, relative, extname, dirname } from "node:path";
+import MagicString from "magic-string";
 import { DEFAULT_RPC_ENDPOINT } from "./constants.js";
 
 export interface TransformState {
@@ -287,8 +288,16 @@ export function transformPlugin(rpcEndpoint: string = DEFAULT_RPC_ENDPOINT, stat
         // 7. Transform to client code
         // For file-level "use server" modules: replace ENTIRE file with stubs
         if (isFileServer) {
-          const stubs = serverFns.map((name) => makeStub(name, rpcEndpoint)).join("\n\n");
-          return { code: stubs + "\n", map: null };
+          const result = serverFns.map((name) => makeStub(name, rpcEndpoint)).join("\n\n") + "\n";
+          if (result !== code) {
+            const s = new MagicString(code);
+            s.overwrite(0, code.length, result);
+            return {
+              code: result,
+              map: s.generateMap({ source: id, includeContent: true, hires: false }),
+            };
+          }
+          return { code: result, map: null };
         }
 
         // For mixed files: remove server fns, keep client code, append stubs
@@ -337,6 +346,15 @@ export function transformPlugin(rpcEndpoint: string = DEFAULT_RPC_ENDPOINT, stat
         // Append RPC stubs
         result = result.trim() + "\n\n" + serverFns.map((name) => makeStub(name, rpcEndpoint)).join("\n\n") + "\n";
 
+        // If we modified the code, generate a source map
+        if (result !== code) {
+          const s = new MagicString(code);
+          s.overwrite(0, code.length, result);
+          return {
+            code: result,
+            map: s.generateMap({ source: id, includeContent: true, hires: false }),
+          };
+        }
         return { code: result, map: null };
       },
     },
