@@ -47,7 +47,7 @@ function createHash(algorithm) {
 }
 
 function createHmac(algorithm, key) {
-  const keyStr = typeof key === "string" ? key : new TextDecoder().decode(key);
+  const keyStr = typeof key === "string" ? key : Array.from(new Uint8Array(key.buffer || key)).map(b => b.toString(16).padStart(2, "0")).join("");
   const chunks = [];
   return {
     update(data) { chunks.push(typeof data === "string" ? data : new TextDecoder().decode(data)); return this; },
@@ -65,7 +65,19 @@ function randomUUID() { return crypto.randomUUID(); }
 function randomBytes(size) { const b = new Uint8Array(size); crypto.getRandomValues(b); return b; }
 function randomFillSync(buf) { crypto.getRandomValues(buf); return buf; }
 function randomFill(buf, ...args) { const cb = args[args.length-1]; crypto.getRandomValues(buf); cb(null, buf); }
-function randomInt(min, max) { if (max===undefined){max=min;min=0;} const a=new Uint32Array(1); crypto.getRandomValues(a); return min+(a[0]%(max-min)); }
+function randomInt(min, max) {
+  if (max === undefined) { max = min; min = 0; }
+  const range = max - min;
+  if (range <= 0) throw new RangeError("max must be greater than min");
+  const limit = Math.floor(0x100000000 / range) * range;
+  let val;
+  do {
+    const a = new Uint32Array(1);
+    crypto.getRandomValues(a);
+    val = a[0];
+  } while (val >= limit);
+  return min + (val % range);
+}
 function getRandomValues(buf) { return crypto.getRandomValues(buf); }
 const webcrypto = crypto;
 const subtle = crypto.subtle;
@@ -80,7 +92,13 @@ Object.assign(__vite_ssr_exports__, { createHash, createHmac, randomUUID, random
   "node:timers/promises": `
 function _setTimeout(ms, value) { return new Promise(r => globalThis.setTimeout(() => r(value), ms || 0)); }
 function _setImmediate(value) { return Promise.resolve(value); }
-Object.assign(__vite_ssr_exports__, { setTimeout: _setTimeout, setImmediate: _setImmediate, default: { setTimeout: _setTimeout, setImmediate: _setImmediate } });
+async function* _setInterval(ms, value) {
+  while (true) {
+    await new Promise(r => globalThis.setTimeout(r, ms || 0));
+    yield value;
+  }
+}
+Object.assign(__vite_ssr_exports__, { setTimeout: _setTimeout, setImmediate: _setImmediate, setInterval: _setInterval, default: { setTimeout: _setTimeout, setImmediate: _setImmediate, setInterval: _setInterval } });
 `,
 };
 
