@@ -312,12 +312,27 @@ export function devServerPlugin(
           }
         };
 
-        process.on("exit", killChild);
-        process.on("SIGINT", () => { killChild(); process.exit(0); });
-        process.on("SIGTERM", () => { killChild(); process.exit(0); });
-        server.httpServer?.on("close", killChild);
+        // Signal handlers — stored so they can be removed on server close
+        // to prevent listener leaks when Vite is restarted programmatically.
+        const onExit   = () => killChild();
+        const onSigint = () => { killChild(); process.exit(0); };
+        const onSigterm = () => { killChild(); process.exit(0); };
+        process.on("exit", onExit);
+        process.on("SIGINT", onSigint);
+        process.on("SIGTERM", onSigterm);
 
-        // Restart on unexpected exit (crash recovery)
+        const cleanupListeners = () => {
+          process.removeListener("exit", onExit);
+          process.removeListener("SIGINT", onSigint);
+          process.removeListener("SIGTERM", onSigterm);
+        };
+        server.httpServer?.on("close", () => { killChild(); cleanupListeners(); });
+
+        // Restart on unexpected exit (crash recovery).
+        // A single timer reference prevents concurrent spawn attempts
+        // when the child crash-loops faster than the restart delay.
+        let restartTimer: ReturnType<typeof setTimeout> | null = null;
+
         const setupRestartHandler = () => {
           if (!serverProcess) return;
           serverProcess.on("exit", (code, signal) => {
@@ -325,7 +340,9 @@ export function devServerPlugin(
             console.warn(
               `[zeroship] runtime exited unexpectedly (code=${code}, signal=${signal}) — restarting in 1s`
             );
-            setTimeout(() => {
+            if (restartTimer) clearTimeout(restartTimer);
+            restartTimer = setTimeout(() => {
+              restartTimer = null;
               spawnRuntime();
               setupRestartHandler();
             }, 1000);
@@ -368,11 +385,15 @@ export function devServerPlugin(
               }
             );
 
+            req.on("error", () => proxyReq.destroy());
             req.pipe(proxyReq);
 
             proxyReq.on("error", () => {
-              res.writeHead(503, { "Content-Type": "application/json" });
-              res.end('{"error":"zeroship API not ready"}');
+              req.destroy();
+              if (!res.headersSent) {
+                res.writeHead(503, { "Content-Type": "application/json" });
+                res.end('{"error":"zeroship API not ready"}');
+              }
             });
           }
         );
@@ -386,11 +407,9 @@ export function devServerPlugin(
       ) {
         // Clear transform-level caches so the next transform re-evaluates
         // "use server" detection for this file.
-        for (const [key] of state.serverModuleCache) {
-          if (key === file || file.endsWith(key) || key.endsWith(file)) {
-            state.serverModuleCache.delete(key);
-          }
-        }
+        // Exact path match only — substring matching (file.endsWith(key))
+        // would false-positive on unrelated files sharing a suffix.
+        state.serverModuleCache.delete(file);
 
         // Queue for HMR delivery to the V8 runtime. The runtime polls
         // /__zeroship_hmr_check and invalidates its ModuleRunner cache
