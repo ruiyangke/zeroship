@@ -332,10 +332,17 @@ impl Conn {
     ) -> Result<Vec<Row>> {
         match compio::time::timeout(QUERY_TIMEOUT, self.query_inner(sql, params)).await {
             Ok(result) => result,
-            Err(_) => Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!("query timed out after {}s", QUERY_TIMEOUT.as_secs()),
-            ))),
+            Err(_) => {
+                // The inner future was dropped mid-flight. The read buffer
+                // may contain partial response bytes from the aborted query.
+                // Mark the connection as error state so the pool drops it
+                // instead of returning a poisoned connection to the next caller.
+                self.status = b'E';
+                Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("query timed out after {}s", QUERY_TIMEOUT.as_secs()),
+                )))
+            }
         }
     }
 
@@ -512,10 +519,13 @@ impl Conn {
     ) -> Result<Vec<Row>> {
         match compio::time::timeout(QUERY_TIMEOUT, self.query_text_params_inner(sql, params)).await {
             Ok(result) => result,
-            Err(_) => Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!("query timed out after {}s", QUERY_TIMEOUT.as_secs()),
-            ))),
+            Err(_) => {
+                self.status = b'E'; // poison — partial response in read buffer
+                Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("query timed out after {}s", QUERY_TIMEOUT.as_secs()),
+                )))
+            }
         }
     }
 
@@ -683,10 +693,13 @@ impl Conn {
     ) -> Result<u64> {
         match compio::time::timeout(QUERY_TIMEOUT, self.execute_inner(sql, params)).await {
             Ok(result) => result,
-            Err(_) => Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!("query timed out after {}s", QUERY_TIMEOUT.as_secs()),
-            ))),
+            Err(_) => {
+                self.status = b'E'; // poison — partial response in read buffer
+                Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("query timed out after {}s", QUERY_TIMEOUT.as_secs()),
+                )))
+            }
         }
     }
 
