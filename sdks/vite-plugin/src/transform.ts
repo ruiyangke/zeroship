@@ -21,13 +21,21 @@ function hasFnDirective(fn: any, directive: string): boolean {
     && first.expression.value === directive;
 }
 
-/** Check if a function body contains any reference to tainted identifiers */
-function fnReferencesAny(fn: any, tainted: Set<string>): boolean {
-  if (tainted.size === 0) return false;
-  const json = JSON.stringify(fn.body);
-  for (const name of tainted) {
-    // Match identifier nodes: "name":"<tainted>"
-    if (json.includes(`"name":"${name}"`)) return true;
+/** Check if an AST node references any of the given identifiers (AST walk). */
+function fnReferencesAny(node: any, identifiers: Set<string>): boolean {
+  if (!node || typeof node !== "object") return false;
+  if (node.type === "Identifier" && identifiers.has(node.name)) return true;
+  if (node.type === "MemberExpression" && fnReferencesAny(node.object, identifiers)) return true;
+  for (const key of Object.keys(node)) {
+    if (key === "type" || key === "start" || key === "end") continue;
+    const child = node[key];
+    if (Array.isArray(child)) {
+      for (const item of child) {
+        if (fnReferencesAny(item, identifiers)) return true;
+      }
+    } else if (child && typeof child === "object" && child.type) {
+      if (fnReferencesAny(child, identifiers)) return true;
+    }
   }
   return false;
 }
@@ -37,7 +45,7 @@ function isServerFile(filePath: string, serverModuleCache: Map<string, boolean>)
   if (serverModuleCache.has(filePath)) return serverModuleCache.get(filePath)!;
   try {
     const code = readFileSync(filePath, "utf-8");
-    const result = checkDirective(code, "use server");
+    const result = checkDirective(code);
     serverModuleCache.set(filePath, result);
     return result;
   } catch {
@@ -47,12 +55,18 @@ function isServerFile(filePath: string, serverModuleCache: Map<string, boolean>)
 }
 
 /** Check if code starts with a directive string */
-function checkDirective(code: string, directive: string): boolean {
-  for (const line of code.split("\n")) {
-    const t = line.trim();
-    if (t === "" || t.startsWith("//") || t.startsWith("/*")) continue;
-    return t === `"${directive}"` || t === `"${directive}";`
-        || t === `'${directive}'` || t === `'${directive}';`;
+function checkDirective(code: string): boolean {
+  let i = 0;
+  const lines = code.split("\n");
+  while (i < lines.length) {
+    const t = lines[i].trim();
+    if (t === "" || t.startsWith("//")) { i++; continue; }
+    if (t.startsWith("/*")) {
+      while (i < lines.length && !lines[i].includes("*/")) i++;
+      i++;
+      continue;
+    }
+    return t === '"use server"' || t === "'use server'" || t === '"use server";' || t === "'use server';";
   }
   return false;
 }
@@ -110,21 +124,51 @@ function makeStub(name: string, rpcEndpoint: string): string {
 }`;
 }
 
-/** Remove a named function (export async function name(...) { ... }) from code */
+/** Remove a named export function or arrow export from code */
 function removeFunction(code: string, name: string): string {
-  const pattern = new RegExp(
-    `export\\s+(async\\s+)?function\\s+${name}\\s*\\([^)]*\\)[^{]*\\{`,
-    "m"
+  // Pattern 1: export (async) function name(...) { ... }
+  const fnPattern = new RegExp(
+    `export\\s+(async\\s+)?function\\s+${name}\\s*\\([^)]*\\)[^{]*\\{`, "m"
   );
-  const match = pattern.exec(code);
-  if (!match) return code;
+  const fnMatch = fnPattern.exec(code);
+  if (fnMatch) {
+    return removeBraceBlock(code, fnMatch.index, fnMatch[0].length);
+  }
 
-  const start = match.index;
+  // Pattern 2: export const/let/var name = ...;
+  const arrowPattern = new RegExp(
+    `export\\s+(const|let|var)\\s+${name}\\s*=`, "m"
+  );
+  const arrowMatch = arrowPattern.exec(code);
+  if (arrowMatch) {
+    const start = arrowMatch.index;
+    let depth = 0;
+    let inStr: string | null = null;
+    let escaped = false;
+    for (let i = start + arrowMatch[0].length; i < code.length; i++) {
+      const ch = code[i];
+      if (escaped) { escaped = false; continue; }
+      if (ch === "\\") { escaped = true; continue; }
+      if (inStr) { if (ch === inStr) inStr = null; continue; }
+      if (ch === '"' || ch === "'" || ch === "`") { inStr = ch; continue; }
+      if (ch === "{" || ch === "(" || ch === "[") depth++;
+      if (ch === "}" || ch === ")" || ch === "]") depth--;
+      if (depth === 0 && ch === ";") {
+        return code.slice(0, start) + code.slice(i + 1);
+      }
+      if (depth < 0) {
+        return code.slice(0, start) + code.slice(i);
+      }
+    }
+  }
+  return code;
+}
+
+function removeBraceBlock(code: string, matchStart: number, matchLen: number): string {
+  const braceStart = code.indexOf("{", matchStart + matchLen - 1);
   let depth = 0;
   let inStr: string | null = null;
   let escaped = false;
-  const braceStart = code.indexOf("{", start + match[0].length - 1);
-
   for (let i = braceStart; i < code.length; i++) {
     const ch = code[i];
     if (escaped) { escaped = false; continue; }
@@ -132,7 +176,7 @@ function removeFunction(code: string, name: string): string {
     if (inStr) { if (ch === inStr) inStr = null; continue; }
     if (ch === '"' || ch === "'" || ch === "`") { inStr = ch; continue; }
     if (ch === "{") depth++;
-    if (ch === "}") { depth--; if (depth === 0) return code.slice(0, start) + code.slice(i + 1); }
+    if (ch === "}") { depth--; if (depth === 0) return code.slice(0, matchStart) + code.slice(i + 1); }
   }
   return code;
 }
