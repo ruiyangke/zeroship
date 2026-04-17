@@ -54,11 +54,35 @@ pub struct Conn {
     pub needs_rollback: bool,
 }
 
+/// Default timeout for the entire connect + auth handshake. Prevents a
+/// slow or unresponsive server from hanging the caller indefinitely.
+/// Individual I/O operations inside the handshake don't have their own
+/// timeout — this single deadline covers the whole sequence.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Default timeout for a single query (Parse → Execute → ReadyForQuery).
+/// Queries that take longer than this return `Error::Io` with a timeout.
+const QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 impl Conn {
     /// Open a connection to PostgreSQL using the given URL.
     ///
     /// Supports: `postgres://user:password@host:port/database?sslmode=prefer|require|disable`
+    ///
+    /// The entire handshake (TCP connect + TLS + auth + startup) is wrapped
+    /// in a 10-second timeout. A server that doesn't respond within that
+    /// window produces `Error::Io` instead of hanging forever.
     pub async fn connect(url: &str) -> Result<Self> {
+        match compio::time::timeout(CONNECT_TIMEOUT, Self::connect_inner(url)).await {
+            Ok(result) => result,
+            Err(_) => Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("connection timed out after {}s", CONNECT_TIMEOUT.as_secs()),
+            ))),
+        }
+    }
+
+    async fn connect_inner(url: &str) -> Result<Self> {
         let cfg = parse_url(url)?;
 
         // TCP connect
@@ -299,7 +323,23 @@ impl Conn {
     /// Execute a query using the Extended Query Protocol, returning rows.
     ///
     /// Pipelines Parse → Bind → Describe(Portal) → Execute → Sync in one flush.
+    /// Wrapped in a 30-second timeout to prevent a slow server from hanging
+    /// the caller. Returns `Error::Io` with `TimedOut` on deadline exceeded.
     pub async fn query(
+        &mut self,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<Vec<Row>> {
+        match compio::time::timeout(QUERY_TIMEOUT, self.query_inner(sql, params)).await {
+            Ok(result) => result,
+            Err(_) => Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("query timed out after {}s", QUERY_TIMEOUT.as_secs()),
+            ))),
+        }
+    }
+
+    async fn query_inner(
         &mut self,
         sql: &str,
         params: &[&(dyn ToSql + Sync)],
@@ -470,6 +510,20 @@ impl Conn {
         sql: &str,
         params: &[&str],
     ) -> Result<Vec<Row>> {
+        match compio::time::timeout(QUERY_TIMEOUT, self.query_text_params_inner(sql, params)).await {
+            Ok(result) => result,
+            Err(_) => Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("query timed out after {}s", QUERY_TIMEOUT.as_secs()),
+            ))),
+        }
+    }
+
+    async fn query_text_params_inner(
+        &mut self,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<Vec<Row>> {
         let mut buf = BytesMut::new();
 
         // Parse (unnamed statement, no type hints)
@@ -623,6 +677,20 @@ impl Conn {
     ///
     /// Like `query()` but skips Describe and does not collect rows.
     pub async fn execute(
+        &mut self,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<u64> {
+        match compio::time::timeout(QUERY_TIMEOUT, self.execute_inner(sql, params)).await {
+            Ok(result) => result,
+            Err(_) => Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("query timed out after {}s", QUERY_TIMEOUT.as_secs()),
+            ))),
+        }
+    }
+
+    async fn execute_inner(
         &mut self,
         sql: &str,
         params: &[&(dyn ToSql + Sync)],

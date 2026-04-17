@@ -35,10 +35,26 @@ impl Pool {
         // Try to pop an idle connection
         let conn = self.conns.borrow_mut().pop();
         if let Some(mut conn) = conn {
-            // If the connection needs a rollback from a dropped transaction, send it
+            // If the connection needs a rollback from a dropped transaction,
+            // send it. If the ROLLBACK itself fails (broken connection, timeout),
+            // discard the connection and create a fresh one instead of returning
+            // a potentially corrupted connection to the caller.
             if conn.needs_rollback {
-                let _ = conn.execute("ROLLBACK", &[]).await;
-                conn.needs_rollback = false;
+                match conn.execute("ROLLBACK", &[]).await {
+                    Ok(_) => {
+                        conn.needs_rollback = false;
+                    }
+                    Err(_) => {
+                        // Connection is broken — drop it, open fresh
+                        self.total.set(self.total.get().saturating_sub(1));
+                        let fresh = Conn::connect(&self.url).await?;
+                        self.total.set(self.total.get() + 1);
+                        return Ok(PooledConn {
+                            conn: Some(fresh),
+                            pool: self,
+                        });
+                    }
+                }
             }
             return Ok(PooledConn {
                 conn: Some(conn),
@@ -81,12 +97,15 @@ impl Pool {
     }
 
     /// Return a connection to the pool (called by PooledConn::drop).
+    ///
+    /// Only accepts connections in idle state (status `I`). Connections
+    /// in transaction (`T`) or error (`E`) state are dropped — they can't
+    /// be safely reused without a RESET, and the next `get()` will open
+    /// a fresh one.
     fn return_conn(&self, conn: Conn) {
-        // Only return healthy connections (idle state)
         if conn.status() == b'I' {
             self.conns.borrow_mut().push(conn);
         } else {
-            // Unhealthy or in-transaction — drop it, decrement total
             self.total.set(self.total.get().saturating_sub(1));
         }
     }

@@ -13,6 +13,14 @@ use crate::{Error, Result};
 
 const READ_BUF_CAPACITY: usize = 8192;
 
+/// Maximum single-message size the driver will accept. PostgreSQL's own
+/// limit is 1 GB (`PG_LARGE_SEND_MAX`), but for a platform where apps
+/// execute structured CRUD queries (not bulk COPY), 64 MB is generous.
+/// A malformed or malicious server sending a message header with a
+/// multi-GB length field will be rejected here instead of OOM-ing the
+/// worker.
+const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+
 pub(crate) enum StreamInner {
     Tcp(TcpStream),
     #[cfg(feature = "tls")]
@@ -48,7 +56,16 @@ impl BufStream {
 
     /// Ensure the read buffer has at least `min_bytes` available.
     /// Reads from the socket if needed. Returns error on EOF or I/O failure.
+    ///
+    /// Rejects requests larger than `MAX_MESSAGE_SIZE` to prevent a
+    /// malformed/malicious server from OOM-ing the process with a
+    /// crafted 4-byte length field (e.g., 0xFFFFFFFF = 4 GB).
     pub async fn fill(&mut self, min_bytes: usize) -> Result<()> {
+        if min_bytes > MAX_MESSAGE_SIZE {
+            return Err(Error::Protocol(format!(
+                "message too large: {min_bytes} bytes (max {MAX_MESSAGE_SIZE})"
+            )));
+        }
         while self.read_buf.len() < min_bytes {
             let capacity = READ_BUF_CAPACITY.max(min_bytes - self.read_buf.len());
             let buf = vec![0u8; capacity];
