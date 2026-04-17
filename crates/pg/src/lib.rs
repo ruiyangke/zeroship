@@ -13,7 +13,7 @@ mod stream;
 use std::sync::Arc;
 
 pub use conn::{Conn, Transaction};
-pub use pool::{Pool, PooledConn};
+pub use pool::{Pool, PoolConfig, PoolMetrics, PooledConn};
 pub use postgres_types::{FromSql, ToSql, Type};
 
 // ---------------------------------------------------------------------------
