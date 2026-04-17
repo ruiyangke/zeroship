@@ -58,7 +58,7 @@ export function buildPlugin(state: TransformState, options: { serverEntry?: stri
         logLevel: "warn",
       });
 
-      const totalFns = [...serverFunctionMap.values()].reduce((sum, fns) => sum + fns.length, 0);
+      const totalFns = [...serverFunctionMap.values()].reduce((sum, fns) => sum + fns.size, 0);
       console.log(
         `[zeroship] server bundle complete — ${serverFunctionMap.size} modules, ${totalFns} server functions`
       );

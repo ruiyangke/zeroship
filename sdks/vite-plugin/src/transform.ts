@@ -7,7 +7,7 @@ import { DEFAULT_RPC_ENDPOINT } from "./constants.js";
 
 export interface TransformState {
   serverModuleCache: Map<string, boolean>;
-  serverFunctionMap: Map<string, string[]>;
+  serverFunctionMap: Map<string, Set<string>>;
   knownServerSources: Set<string>;
 }
 
@@ -126,62 +126,9 @@ function makeStub(name: string, rpcEndpoint: string): string {
 }`;
 }
 
-/** Remove a named export function or arrow export from code */
-function removeFunction(code: string, name: string): string {
-  // Pattern 1: export (async) function name(...) { ... }
-  const fnPattern = new RegExp(
-    `export\\s+(async\\s+)?function\\s+${name}\\s*\\([^)]*\\)[^{]*\\{`, "m"
-  );
-  const fnMatch = fnPattern.exec(code);
-  if (fnMatch) {
-    return removeBraceBlock(code, fnMatch.index, fnMatch[0].length);
-  }
-
-  // Pattern 2: export const/let/var name = ...;
-  const arrowPattern = new RegExp(
-    `export\\s+(const|let|var)\\s+${name}\\s*=`, "m"
-  );
-  const arrowMatch = arrowPattern.exec(code);
-  if (arrowMatch) {
-    const start = arrowMatch.index;
-    let depth = 0;
-    let inStr: string | null = null;
-    let escaped = false;
-    for (let i = start + arrowMatch[0].length; i < code.length; i++) {
-      const ch = code[i];
-      if (escaped) { escaped = false; continue; }
-      if (ch === "\\") { escaped = true; continue; }
-      if (inStr) { if (ch === inStr) inStr = null; continue; }
-      if (ch === '"' || ch === "'" || ch === "`") { inStr = ch; continue; }
-      if (ch === "{" || ch === "(" || ch === "[") depth++;
-      if (ch === "}" || ch === ")" || ch === "]") depth--;
-      if (depth === 0 && ch === ";") {
-        return code.slice(0, start) + code.slice(i + 1);
-      }
-      if (depth < 0) {
-        return code.slice(0, start) + code.slice(i);
-      }
-    }
-  }
-  return code;
-}
-
-function removeBraceBlock(code: string, matchStart: number, matchLen: number): string {
-  const braceStart = code.indexOf("{", matchStart + matchLen - 1);
-  let depth = 0;
-  let inStr: string | null = null;
-  let escaped = false;
-  for (let i = braceStart; i < code.length; i++) {
-    const ch = code[i];
-    if (escaped) { escaped = false; continue; }
-    if (ch === "\\") { escaped = true; continue; }
-    if (inStr) { if (ch === inStr) inStr = null; continue; }
-    if (ch === '"' || ch === "'" || ch === "`") { inStr = ch; continue; }
-    if (ch === "{") depth++;
-    if (ch === "}") { depth--; if (depth === 0) return code.slice(0, matchStart) + code.slice(i + 1); }
-  }
-  return code;
-}
+// No removeFunction / removeBraceBlock — we use AST node positions directly.
+// The transform handler collects AST nodes with start/end and removes them
+// via MagicString, which gives correct source maps for free.
 
 export function transformPlugin(rpcEndpoint: string = DEFAULT_RPC_ENDPOINT, state: TransformState): Plugin {
   const { serverModuleCache, serverFunctionMap, knownServerSources } = state;
@@ -262,100 +209,103 @@ export function transformPlugin(rpcEndpoint: string = DEFAULT_RPC_ENDPOINT, stat
           }
         }
 
-        // 5. Find server functions
-        const serverFns: string[] = [];
+        // 5. Find server functions — collect AST nodes with positions
+        //
+        // Unlike the previous regex-based approach, we use the AST node's
+        // start/end positions directly. This handles destructured params,
+        // default values with parens, arrow function exports, and every
+        // other syntax the regex couldn't parse. MagicString removes the
+        // exact ranges, giving correct source maps for free.
+        interface ServerFn { name: string; node: any; }
+        const serverFns: ServerFn[] = [];
 
         for (const node of ast.body) {
-          if (node.type === "ExportNamedDeclaration" && node.declaration?.type === "FunctionDeclaration") {
-            const name = node.declaration.id?.name;
-            if (!name) continue;
+          if (node.type !== "ExportNamedDeclaration") continue;
+          const decl = node.declaration;
+          if (!decl) continue;
 
-            if (isFileServer) {
-              serverFns.push(name);
-            } else if (hasFnDirective(node.declaration, "use server")) {
-              serverFns.push(name);
-            } else if (fnReferencesAny(node.declaration, tainted)) {
-              serverFns.push(name);
+          // export function name() { ... }
+          // export async function name() { ... }
+          if (decl.type === "FunctionDeclaration" && decl.id?.name) {
+            const name = decl.id.name;
+            if (isFileServer || hasFnDirective(decl, "use server") || fnReferencesAny(decl, tainted)) {
+              serverFns.push({ name, node });
+            }
+          }
+
+          // export const name = () => { ... }
+          // export const name = async function() { ... }
+          // export const name = createServerFn(...)
+          if (decl.type === "VariableDeclaration") {
+            for (const d of decl.declarations || []) {
+              const name = d.id?.name;
+              if (!name || !d.init) continue;
+              if (isFileServer || fnReferencesAny(d.init, tainted)) {
+                serverFns.push({ name, node });
+                break; // one removal per VariableDeclaration node
+              }
             }
           }
         }
 
         if (serverFns.length === 0) return null;
 
-        // 6. Track for build report
-        serverFunctionMap.set(relative(root, id), serverFns);
+        const names = serverFns.map((f) => f.name);
 
-        // 7. Transform to client code
-        // For file-level "use server" modules: replace ENTIRE file with stubs
+        // 6. Track for build report + export signature tracking
+        serverFunctionMap.set(relative(root, id), new Set(names));
+
+        // 7. Transform to client code using MagicString (AST positions)
+        const s = new MagicString(code);
+
         if (isFileServer) {
-          const result = serverFns.map((name) => makeStub(name, rpcEndpoint)).join("\n\n") + "\n";
-          if (result !== code) {
-            const s = new MagicString(code);
-            s.overwrite(0, code.length, result);
-            return {
-              code: result,
-              map: s.generateMap({ source: id, includeContent: true, hires: false }),
-            };
+          // Replace ENTIRE file with stubs
+          s.overwrite(0, code.length, names.map((n) => makeStub(n, rpcEndpoint)).join("\n\n") + "\n");
+          return {
+            code: s.toString(),
+            map: s.generateMap({ source: id, includeContent: true, hires: true }),
+          };
+        }
+
+        // Mixed file: remove server pieces, keep client code, append stubs
+
+        // Remove "use server" directive (first statement if it's a string literal)
+        if (ast.body[0]?.type === "ExpressionStatement" && ast.body[0].expression?.value === "use server") {
+          s.remove(ast.body[0].start, ast.body[0].end);
+        }
+
+        // Remove each server function's export node (uses AST positions — no regex)
+        for (const { node } of serverFns) {
+          s.remove(node.start, node.end);
+        }
+
+        // Remove server-only imports (by AST position, not regex)
+        for (const node of ast.body) {
+          if (node.type !== "ImportDeclaration") continue;
+          const src = node.source?.value;
+          if (src && knownServerSources.has(src)) {
+            s.remove(node.start, node.end);
           }
-          return { code: result, map: null };
         }
 
-        // For mixed files: remove server fns, keep client code, append stubs
-        let result = code;
-
-        // Remove "use server" directive
-        result = result.replace(/^\s*["']use server["'];?\s*\n/, "");
-
-        // Remove each server function
-        for (const fn of serverFns) {
-          result = removeFunction(result, fn);
-        }
-
-        // Remove @zeroship/* imports (server-only)
-        for (const src of knownServerSources) {
-          result = result.replace(
-            new RegExp(`^\\s*import\\s+.*from\\s+['"]${src.replace("/", "\\/")}['"]\\s*;?\\s*$`, "gm"),
-            ""
-          );
-        }
-
-        // Remove tainted variable declarations (handles multi-line model() calls)
-        for (const name of tainted) {
-          const declPattern = new RegExp(`(const|let|var)\\s+${name}\\s*=`);
-          const match = declPattern.exec(result);
-          if (match) {
-            // Find the start of the line
-            let lineStart = result.lastIndexOf("\n", match.index) + 1;
-            // Find the end: scan for balanced parens/braces, then semicolon or newline
-            let pos = match.index + match[0].length;
-            let depth = 0;
-            let inStr: string | null = null;
-            while (pos < result.length) {
-              const ch = result[pos];
-              if (inStr) { if (ch === inStr && result[pos - 1] !== "\\") inStr = null; }
-              else if (ch === '"' || ch === "'" || ch === "`") { inStr = ch; }
-              else if (ch === "(" || ch === "{" || ch === "[") { depth++; }
-              else if (ch === ")" || ch === "}" || ch === "]") { depth--; }
-              else if (depth === 0 && (ch === ";" || ch === "\n")) { pos++; break; }
-              pos++;
+        // Remove tainted variable declarations (by AST position)
+        for (const node of ast.body) {
+          if (node.type !== "VariableDeclaration") continue;
+          for (const d of node.declarations || []) {
+            if (d.id?.name && tainted.has(d.id.name)) {
+              s.remove(node.start, node.end);
+              break;
             }
-            result = result.slice(0, lineStart) + result.slice(pos);
           }
         }
 
         // Append RPC stubs
-        result = result.trim() + "\n\n" + serverFns.map((name) => makeStub(name, rpcEndpoint)).join("\n\n") + "\n";
+        s.append("\n\n" + names.map((n) => makeStub(n, rpcEndpoint)).join("\n\n") + "\n");
 
-        // If we modified the code, generate a source map
-        if (result !== code) {
-          const s = new MagicString(code);
-          s.overwrite(0, code.length, result);
-          return {
-            code: result,
-            map: s.generateMap({ source: id, includeContent: true, hires: false }),
-          };
-        }
-        return { code: result, map: null };
+        return {
+          code: s.toString(),
+          map: s.generateMap({ source: id, includeContent: true, hires: true }),
+        };
       },
     },
   };
