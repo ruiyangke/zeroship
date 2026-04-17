@@ -5,11 +5,7 @@
  * The runtime doesn't support outbound WebSocket connections (WebSocket is
  * server-side only, via WebSocketPair). So we use HTTP-based transport:
  * - invoke() uses fetch() to call Vite's fetchModule endpoint
- * - HMR is disabled (no bidirectional channel)
- *
- * This means file changes require a request to see the new code (the runner
- * re-fetches on next import after cache miss). Full HMR support requires
- * adding client-side WebSocket to the runtime.
+ * - HMR is enabled: module graph invalidation is handled by the runner
  */
 import { ModuleRunner } from "vite/module-runner";
 import { zeroshipEvaluator } from "./evaluator";
@@ -26,7 +22,7 @@ export async function createRunner(): Promise<ModuleRunner> {
     .replace(/^wss:/, "https:")
     .replace(/\/__zeroship_hmr$/, "");
 
-  // HTTP-based transport: uses fetch for module requests, no HMR.
+  // HTTP-based transport: uses fetch for module requests.
   const transport = {
     async invoke(data: any): Promise<{ result: any } | { error: any }> {
       try {
@@ -46,7 +42,7 @@ export async function createRunner(): Promise<ModuleRunner> {
   return new ModuleRunner(
     {
       transport,
-      hmr: false,
+      hmr: true,
     },
     zeroshipEvaluator,
   );

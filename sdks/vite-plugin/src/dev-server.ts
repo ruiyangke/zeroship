@@ -344,11 +344,17 @@ export function devServerPlugin(
       };
     },
 
-    handleHotUpdate({ file }: { file: string }) {
-      // Clear cached server-module status for the changed file so the next
-      // transform re-evaluates whether it is a server file.
-      state.serverModuleCache.delete(file);
-      // ModuleRunner handles module graph invalidation via HMR messages.
+    hotUpdate({ file }: { file: string }) {
+      if (
+        file.endsWith(".ts") || file.endsWith(".tsx") ||
+        file.endsWith(".js") || file.endsWith(".jsx")
+      ) {
+        for (const [key] of state.serverModuleCache) {
+          if (file.endsWith(key) || key.endsWith(file)) {
+            state.serverModuleCache.delete(key);
+          }
+        }
+      }
     },
 
     buildEnd() {
