@@ -44,6 +44,13 @@ export function devServerPlugin(
   let isDev = false;
   let serverProcess: ChildProcess | null = null;
 
+  // Accumulates file paths changed since the last HMR poll. The V8 runtime
+  // polls GET /__zeroship_hmr_check every 500ms via setInterval + fetch().
+  // We can't push via WebSocket (V8 has no outbound WS client) or hold a
+  // streaming response open (wall timeout would kill it). Polling is the
+  // simplest mechanism that works within the runtime's constraints.
+  const pendingHmrChanges = new Set<string>();
+
   // ── Plugin 1: zeroship:environment ──────────────────────────────────────
 
   const environmentPlugin: Plugin = {
@@ -174,7 +181,35 @@ export function devServerPlugin(
         }
       );
 
-      // 3. Spawn zeroship runtime ────────────────────────────────────────────
+      // 3. HMR poll endpoint ──────────────────────────────────────────────
+      //
+      // The V8 runtime polls this every 500ms to discover changed files.
+      // Returns the pending set and clears it atomically. Empty array = no
+      // changes. The runtime uses the paths to invalidate its ModuleRunner
+      // evaluated-modules cache so the next import() re-fetches from Vite.
+
+      server.middlewares.use(
+        (
+          req: http.IncomingMessage,
+          res: http.ServerResponse,
+          next: () => void
+        ) => {
+          if (req.url !== "/__zeroship_hmr_check" || req.method !== "GET") {
+            return next();
+          }
+
+          const changed = [...pendingHmrChanges];
+          pendingHmrChanges.clear();
+
+          res.writeHead(200, {
+            "Content-Type": "application/json",
+            "Cache-Control": "no-store",
+          });
+          res.end(JSON.stringify({ changed }));
+        }
+      );
+
+      // 4. Spawn zeroship runtime ────────────────────────────────────────────
       //
       // Deferred until Vite's HTTP server is actually listening. The bootstrap
       // opens a WebSocket back to Vite, which fails if the server isn't ready.
@@ -349,11 +384,18 @@ export function devServerPlugin(
         file.endsWith(".ts") || file.endsWith(".tsx") ||
         file.endsWith(".js") || file.endsWith(".jsx")
       ) {
+        // Clear transform-level caches so the next transform re-evaluates
+        // "use server" detection for this file.
         for (const [key] of state.serverModuleCache) {
-          if (file.endsWith(key) || key.endsWith(file)) {
+          if (key === file || file.endsWith(key) || key.endsWith(file)) {
             state.serverModuleCache.delete(key);
           }
         }
+
+        // Queue for HMR delivery to the V8 runtime. The runtime polls
+        // /__zeroship_hmr_check and invalidates its ModuleRunner cache
+        // for each path returned. The next import() re-fetches from Vite.
+        pendingHmrChanges.add(file);
       }
     },
 

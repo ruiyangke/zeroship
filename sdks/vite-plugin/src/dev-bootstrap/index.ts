@@ -37,7 +37,60 @@ async function getUserModule(): Promise<any> {
 }
 
 // Kick off connection immediately
-getRunner().catch((e) => console.error("[zeroship:dev] Runner init failed:", e));
+getRunner()
+  .then((r) => startHmrPoll(r))
+  .catch((e) => console.error("[zeroship:dev] Runner init failed:", e));
+
+/**
+ * Poll Vite for changed files every 500ms and invalidate the ModuleRunner's
+ * evaluated-module cache for each changed path. This causes the next
+ * import() to re-fetch the module from Vite (which re-transforms it).
+ *
+ * Why polling, not WebSocket/SSE:
+ * - V8 runtime has no outbound WebSocket client (WS is server-side only)
+ * - A streaming fetch would hit the per-request wall timeout
+ * - setInterval runs on the pump between requests — no timeout constraints
+ * - 500ms latency is acceptable for dev HMR (saves are human-speed)
+ */
+function startHmrPoll(runner: ModuleRunner) {
+  const viteWsUrl = (globalThis as any).process?.env?.ZEROSHIP_VITE_WS;
+  if (!viteWsUrl) return;
+
+  const viteOrigin = viteWsUrl
+    .replace(/^ws:/, "http:")
+    .replace(/^wss:/, "https:")
+    .replace(/\/__zeroship_hmr$/, "");
+
+  const pollUrl = `${viteOrigin}/__zeroship_hmr_check`;
+
+  setInterval(async () => {
+    try {
+      const resp = await fetch(pollUrl);
+      const { changed } = await resp.json() as { changed: string[] };
+
+      if (changed.length === 0) return;
+
+      // Invalidate each changed module so the next import() re-fetches
+      for (const file of changed) {
+        // The runner tracks modules by their Vite-resolved ID (usually
+        // the absolute file path). invalidateModule marks it stale so
+        // the next import() calls fetchModule again.
+        const mods = runner.evaluatedModules;
+        // Try the file path directly and common URL-encoded variants
+        for (const id of [file, `/${file}`, file.replace(/\\/g, "/")]) {
+          const mod = mods.getModuleById(id);
+          if (mod) {
+            mods.invalidateModule(mod);
+          }
+        }
+      }
+
+      console.log(`[zeroship:hmr] ${changed.length} module(s) updated`);
+    } catch {
+      // Vite not ready or restarting — silently ignore
+    }
+  }, 500);
+}
 
 /**
  * HTTP request handler — called by the Rust runtime for every request.
