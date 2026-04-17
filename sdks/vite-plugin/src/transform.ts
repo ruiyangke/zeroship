@@ -1,6 +1,7 @@
 import type { Plugin } from "vite";
+import { createRequire } from "module";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
-import { resolve, relative, extname } from "node:path";
+import { resolve, relative, extname, dirname } from "node:path";
 import { DEFAULT_RPC_ENDPOINT } from "./constants.js";
 
 export interface TransformState {
@@ -72,28 +73,28 @@ function checkDirective(code: string): boolean {
 }
 
 /** Resolve a package specifier to its entry file and check for "use server" */
-function isServerPackage(specifier: string, root: string, serverModuleCache: Map<string, boolean>): boolean {
-  if (serverModuleCache.has(specifier)) return serverModuleCache.get(specifier)!;
-
-  const pkgDir = resolve(root, "node_modules", specifier);
-  if (!existsSync(pkgDir)) { serverModuleCache.set(specifier, false); return false; }
-
-  const pkgPath = resolve(pkgDir, "package.json");
-  if (!existsSync(pkgPath)) { serverModuleCache.set(specifier, false); return false; }
+function isServerPackage(specifier: string, root: string, cache: Map<string, boolean>): boolean {
+  const cached = cache.get(specifier);
+  if (cached !== undefined) return cached;
 
   try {
-    const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
-    const entry = pkg.exports?.["."]?.import
-      ?? pkg.exports?.["."]?.default
-      ?? (typeof pkg.exports?.["."] === "string" ? pkg.exports["."] : null)
-      ?? pkg.module ?? pkg.main;
-    if (!entry) { serverModuleCache.set(specifier, false); return false; }
+    const require = createRequire(resolve(root, "package.json"));
+    const pkgJsonPath = require.resolve(`${specifier}/package.json`);
+    const pkg = JSON.parse(readFileSync(pkgJsonPath, "utf-8"));
 
-    const result = isServerFile(resolve(pkgDir, entry), serverModuleCache);
-    serverModuleCache.set(specifier, result);
-    return result;
+    const entry =
+      pkg.exports?.["."]?.import ??
+      pkg.exports?.["."]?.default ??
+      pkg.module ??
+      pkg.main ??
+      "index.js";
+
+    const entryPath = resolve(dirname(pkgJsonPath), entry);
+    const isServer = existsSync(entryPath) && checkDirective(readFileSync(entryPath, "utf-8"));
+    cache.set(specifier, isServer);
+    return isServer;
   } catch {
-    serverModuleCache.set(specifier, false);
+    cache.set(specifier, false);
     return false;
   }
 }
