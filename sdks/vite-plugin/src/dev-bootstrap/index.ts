@@ -19,13 +19,15 @@ let runnerPromise: Promise<ModuleRunner> | null = null;
 
 async function getRunner(): Promise<ModuleRunner> {
   if (runner) return runner;
-  if (!runnerPromise) {
-    runnerPromise = createRunner().then((r) => {
-      runner = r;
-      console.log(`[zeroship:dev] ModuleRunner ready, entry: ${ENTRY}`);
-      return r;
-    });
-  }
+  if (runnerPromise) return runnerPromise;
+  runnerPromise = createRunner().then((r) => {
+    runner = r;
+    console.log(`[zeroship:dev] ModuleRunner ready, entry: ${ENTRY}`);
+    return r;
+  }).catch((err) => {
+    runnerPromise = null;
+    throw err;
+  });
   return runnerPromise;
 }
 
@@ -89,12 +91,6 @@ async function handleRpc(req: any): Promise<any> {
       });
     }
 
-    // Debug: log available exports on first call
-    if (!(globalThis as any).__debuggedExports) {
-      (globalThis as any).__debuggedExports = true;
-      console.log("[zeroship:dev] Module exports:", Object.keys(mod));
-    }
-
     const fn = mod[rpc.method];
 
     if (typeof fn !== "function") {
@@ -109,15 +105,16 @@ async function handleRpc(req: any): Promise<any> {
 
     // If the function returns a Response (e.g., SSE stream), pass it through
     // directly instead of wrapping in JSON-RPC envelope.
-    if (result && typeof result === "object" && typeof result.headers?.get === "function") {
+    if (result instanceof Response) {
       return result;
     }
 
     return jsonResponse({ jsonrpc: "2.0", result, id });
   } catch (e: any) {
+    const code = id === null ? -32700 : -32000;
     return jsonResponse({
       jsonrpc: "2.0",
-      error: { code: -32000, message: e.message ?? String(e) },
+      error: { code, message: e.message ?? String(e) },
       id,
     });
   }
