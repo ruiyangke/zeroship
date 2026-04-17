@@ -264,6 +264,40 @@ export function devServerPlugin(
         } else {
           server.httpServer?.once("listening", spawnRuntime);
         }
+
+        // Clean up child process on Vite exit (SIGINT, SIGTERM, process.exit)
+        const killChild = () => {
+          if (serverProcess && !serverProcess.killed) {
+            serverProcess.kill("SIGTERM");
+            setTimeout(() => {
+              if (serverProcess && !serverProcess.killed) {
+                serverProcess.kill("SIGKILL");
+              }
+            }, 3000).unref();
+          }
+        };
+
+        process.on("exit", killChild);
+        process.on("SIGINT", () => { killChild(); process.exit(0); });
+        process.on("SIGTERM", () => { killChild(); process.exit(0); });
+        server.httpServer?.on("close", killChild);
+
+        // Restart on unexpected exit (crash recovery)
+        const setupRestartHandler = () => {
+          if (!serverProcess) return;
+          serverProcess.on("exit", (code, signal) => {
+            if (signal === "SIGTERM" || signal === "SIGKILL") return;
+            console.warn(
+              `[zeroship] runtime exited unexpectedly (code=${code}, signal=${signal}) — restarting in 1s`
+            );
+            setTimeout(() => {
+              spawnRuntime();
+              setupRestartHandler();
+            }, 1000);
+          });
+        };
+
+        setupRestartHandler();
       }
 
       // 4. Proxy middleware (returned as pre-middleware) ─────────────────────
