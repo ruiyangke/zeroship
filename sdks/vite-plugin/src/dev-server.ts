@@ -174,45 +174,6 @@ export function devServerPlugin(
         }
       );
 
-      // 3. Proxy middleware (pre-middleware) ───────────────────────────────
-      //
-      // Registered directly inside configureServer (not returned) so it runs
-      // BEFORE Vite's built-in middleware. This ensures /api/* and /_rpc are
-      // proxied to the runtime instead of being caught by Vite's SPA fallback.
-
-      server.middlewares.use(
-        (
-          req: http.IncomingMessage,
-          res: http.ServerResponse,
-          next: () => void
-        ) => {
-          const url = req.url ?? "";
-          if (!url.startsWith("/_rpc") && !url.startsWith("/api/")) {
-            return next();
-          }
-
-          // Forward path as-is — the bootstrap's onRequest handles /_rpc dispatch.
-          // (The runtime's native /rpc path uses __rpc which doesn't have ModuleRunner modules.)
-          const targetPath = url;
-
-          const proxyReq = http.request(
-            `http://localhost:${devPort}${targetPath}`,
-            { method: req.method, headers: req.headers },
-            (proxyRes) => {
-              res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
-              proxyRes.pipe(res);
-            }
-          );
-
-          req.pipe(proxyReq);
-
-          proxyReq.on("error", () => {
-            res.writeHead(503, { "Content-Type": "application/json" });
-            res.end('{"error":"zeroship API not ready"}');
-          });
-        }
-      );
-
       // 3. Spawn zeroship runtime ────────────────────────────────────────────
       //
       // Deferred until Vite's HTTP server is actually listening. The bootstrap
@@ -304,6 +265,49 @@ export function devServerPlugin(
           server.httpServer?.once("listening", spawnRuntime);
         }
       }
+
+      // 4. Proxy middleware (returned as pre-middleware) ─────────────────────
+      //
+      // Returning a function from configureServer registers it as pre-middleware,
+      // so it runs BEFORE Vite's built-in middleware (including the SPA fallback).
+      // This ensures /rpc, /_rpc, and /api/* are proxied to the runtime instead
+      // of being caught by Vite's index.html fallback.
+      return () => {
+        server.middlewares.use(
+          (
+            req: http.IncomingMessage,
+            res: http.ServerResponse,
+            next: () => void
+          ) => {
+            const url = req.url ?? "";
+            if (
+              !url.startsWith("/_rpc") &&
+              !url.startsWith("/rpc") &&
+              !url.startsWith("/api/")
+            ) {
+              return next();
+            }
+
+            // Forward path as-is — the bootstrap's onRequest handles both
+            // /rpc and /_rpc dispatch.
+            const proxyReq = http.request(
+              `http://localhost:${devPort}${url}`,
+              { method: req.method, headers: req.headers },
+              (proxyRes) => {
+                res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
+                proxyRes.pipe(res);
+              }
+            );
+
+            req.pipe(proxyReq);
+
+            proxyReq.on("error", () => {
+              res.writeHead(503, { "Content-Type": "application/json" });
+              res.end('{"error":"zeroship API not ready"}');
+            });
+          }
+        );
+      };
     },
 
     handleHotUpdate({ file }: { file: string }) {
