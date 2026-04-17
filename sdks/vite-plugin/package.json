@@ -32,6 +32,9 @@
     "vite": "^8.0.0"
   },
   "license": "MIT",
+  "engines": {
+    "node": ">=20.19.0"
+  },
   "dependencies": {
     "unenv": "^1.10.0",
     "ws": "^8.20.0"

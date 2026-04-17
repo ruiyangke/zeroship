@@ -1,23 +1,22 @@
-import * as esbuild from "esbuild";
-import { resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
+import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const root = resolve(__dirname, "..");
+const src = resolve(__dirname, "../src/dev-bootstrap/index.ts");
+const out = resolve(__dirname, "../dist/dev-bootstrap.js");
 
-await esbuild.build({
-  entryPoints: [resolve(root, "src/dev-bootstrap/index.ts")],
+await build({
+  entryPoints: [src],
   bundle: true,
   format: "esm",
   platform: "neutral",
   target: "es2024",
-  outfile: resolve(root, "dist/dev-bootstrap.js"),
-  external: [],
-  sourcemap: true,
-  minify: false,
+  outfile: out,
+  external: ["vite/module-runner"],
   banner: {
-    js: "// @zeroship/vite-plugin dev bootstrap — runs inside V8 runtime",
+    js: "// Auto-generated dev bootstrap for zeroship V8 runtime\n",
   },
 });
 
-console.log("[zeroship] dev-bootstrap.js built successfully");
+console.log(`[build-bootstrap] ${out}`);
