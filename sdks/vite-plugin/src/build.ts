@@ -1,72 +1,67 @@
-import type { Plugin } from "vite";
+import { type Plugin, build as viteBuild } from "vite";
+import { resolve, relative } from "node:path";
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
 import type { TransformState } from "./transform.js";
 
 /** Find server entry point in project */
 export function findServerEntry(root: string, explicit?: string): string | null {
-  if (explicit) return explicit;
-  const candidates = ["src/index.ts", "src/index.tsx", "src/server.ts", "src/index.js", "src/server.js"];
-  for (const c of candidates) {
-    if (existsSync(resolve(root, c))) return c;
+  if (explicit && existsSync(resolve(root, explicit))) return resolve(root, explicit);
+  for (const candidate of [
+    "src/server.ts",
+    "src/server.js",
+    "server.ts",
+    "server.js",
+    "src/index.server.ts",
+  ]) {
+    const p = resolve(root, candidate);
+    if (existsSync(p)) return p;
   }
   return null;
 }
 
-export function buildPlugin(state: TransformState): Plugin {
+export function buildPlugin(state: TransformState, options: { serverEntry?: string } = {}): Plugin {
   const { serverFunctionMap } = state;
-  let isDev = false;
   let root = "";
-  let config: any;
+  let isDev = false;
 
   return {
     name: "zeroship:build",
 
-    configResolved(resolvedConfig: any) {
-      config = resolvedConfig;
-      isDev = resolvedConfig.command === "serve";
-      root = resolvedConfig.root;
+    configResolved(config: any) {
+      root = config.root;
+      isDev = config.command === "serve";
     },
 
-    async closeBundle() {
+    async writeBundle() {
       if (isDev) return;
 
-      const entry = findServerEntry(root, config?._zeroshipServerEntry);
-      if (!entry) { console.log("[zeroship] No server entry — client-only build"); return; }
-
-      const outDir = config.build?.outDir
-        ? resolve(root, config.build.outDir)
-        : resolve(root, "dist");
-
-      const serverOut = resolve(outDir, "server");
-
-      console.log("\n[zeroship] Building server bundle with Rolldown...");
-
-      try {
-        // Use esbuild for server bundle — simple, fast, no Vite recursion
-        const { execSync } = await import("node:child_process" as string);
-        const { mkdirSync } = await import("node:fs" as string);
-        mkdirSync(serverOut, { recursive: true });
-        const outFile = resolve(serverOut, "server.js");
-        const entryFile = resolve(root, entry);
-        const minFlag = config.build?.minify !== false ? "--minify" : "";
-        execSync(
-          `npx esbuild ${entryFile} --bundle --format=esm --platform=neutral --main-fields=module,main --outfile=${outFile} ${minFlag}`.trim(),
-          { cwd: root, stdio: "pipe" }
-        );
-
-        console.log(`[zeroship] Server: ${outFile}`);
-      } catch (e) {
-        console.error("[zeroship] Server build failed:", e);
+      const entry = findServerEntry(root, options.serverEntry);
+      if (!entry) {
+        console.warn("[zeroship] no server entry found — skipping server bundle");
+        return;
       }
 
-      // Build report
-      if (serverFunctionMap.size > 0) {
-        console.log("\n[zeroship] Server/client split:");
-        for (const [file, fns] of serverFunctionMap) {
-          console.log(`  ${file}: ${fns.join(", ")}`);
-        }
-      }
+      console.log(`[zeroship] building server bundle from ${relative(root, entry)}`);
+
+      await viteBuild({
+        root,
+        configFile: false,
+        build: {
+          ssr: entry,
+          outDir: "dist/server",
+          emptyOutDir: false,
+          rolldownOptions: {
+            output: { format: "esm", entryFileNames: "index.js" },
+          },
+          minify: true,
+        },
+        logLevel: "warn",
+      });
+
+      const totalFns = [...serverFunctionMap.values()].reduce((sum, fns) => sum + fns.length, 0);
+      console.log(
+        `[zeroship] server bundle complete — ${serverFunctionMap.size} modules, ${totalFns} server functions`
+      );
     },
   };
 }

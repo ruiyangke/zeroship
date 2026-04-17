@@ -42,7 +42,7 @@ export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
     nodeCompatPlugin(),
     transformPlugin(rpcEndpoint, state),
     ...devServerPlugin(options, state),
-    buildPlugin(state),
+    buildPlugin(state, { serverEntry: options.serverEntry }),
   ];
 }
 
