@@ -8,6 +8,8 @@ import type { WebSocket } from "ws";
 import type { FetchFunctionOptions } from "vite/module-runner";
 import { getNodeCompatId, getCustomPolyfillCode } from "./node-compat.js";
 
+const MAX_WS_BUFFER = 1000;
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /** Buffers outbound messages until the WebSocket connection is established. */
@@ -17,6 +19,9 @@ export interface WsContainer {
   /** Stored onMessage handler so setWebSocket() can wire it directly. */
   onMessage?: (data: Buffer | string) => void;
 }
+
+/** Typed listener for HotChannel events. */
+type HotListener = (data: unknown, client?: { send(data: unknown): void }) => void;
 
 // ── HotChannel ─────────────────────────────────────────────────────────────
 
@@ -32,7 +37,7 @@ export interface WsContainer {
  */
 export function createHotChannel(container: WsContainer): vite.HotChannel {
   // event → Set<listener>
-  const listeners = new Map<string, Set<Function>>();
+  const listeners = new Map<string, Set<HotListener>>();
 
   /** The handler attached to ws.on("message", ...) — kept as a reference so
    *  we can detach it in close().  Also stored on the container so that
@@ -59,7 +64,7 @@ export function createHotChannel(container: WsContainer): vite.HotChannel {
         const raw = JSON.stringify(payload);
         if (container.ws && container.ws.readyState === 1 /* OPEN */) {
           container.ws.send(raw);
-        } else {
+        } else if (container.buffer.length < MAX_WS_BUFFER) {
           container.buffer.push(raw);
         }
       },
@@ -78,12 +83,12 @@ export function createHotChannel(container: WsContainer): vite.HotChannel {
       const raw = JSON.stringify(payload);
       if (container.ws && container.ws.readyState === 1 /* OPEN */) {
         container.ws.send(raw);
-      } else {
+      } else if (container.buffer.length < MAX_WS_BUFFER) {
         container.buffer.push(raw);
       }
     },
 
-    on(event: string, listener: Function): void {
+    on(event: string, listener: HotListener): void {
       let set = listeners.get(event);
       if (!set) {
         set = new Set();
@@ -92,7 +97,7 @@ export function createHotChannel(container: WsContainer): vite.HotChannel {
       set.add(listener);
     },
 
-    off(event: string, listener: Function): void {
+    off(event: string, listener: HotListener): void {
       listeners.get(event)?.delete(listener);
     },
 
@@ -151,6 +156,9 @@ export class ZeroshipDevEnvironment extends vite.DevEnvironment {
    * message handler.
    */
   setWebSocket(ws: WebSocket): void {
+    if (this._wsContainer.ws) {
+      (this._wsContainer.ws as any).removeAllListeners?.("message");
+    }
     this._wsContainer.ws = ws;
 
     // Flush buffered outbound messages.
@@ -222,7 +230,7 @@ export function createZeroshipEnvironmentOptions(): vite.EnvironmentOptions {
   return {
     consumer: "server",
     resolve: {
-      conditions: ["zeroship", "worker", "module"],
+      conditions: ["zeroship", "worker", "module", "import", "default"],
       noExternal: true,
     },
     dev: {
