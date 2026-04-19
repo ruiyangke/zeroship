@@ -482,6 +482,12 @@ struct PendingRequest {
     cpu_accumulated: Duration,
     wall_start: Instant,
     cancel: CancelFlag,
+    /// Raw JSON-RPC id slice from the incoming request body — preserved
+    /// verbatim so the envelope built when the promise settles has the
+    /// same id type as the request (number stays number, string stays
+    /// string, null/absent both serialize as `null`). Only set for RPC
+    /// requests (is_http = false).
+    id_json: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -875,7 +881,18 @@ impl RuntimeInner {
                 // zero-duration sleep serves the same purpose: it posts a
                 // completion that fires on the next io_uring cycle, giving
                 // ready handlers a scheduling slot.
-                compio::time::sleep(Duration::ZERO).await;
+                //
+                // Skip the yield when there's no outstanding work: with empty
+                // pending_ops + pending_timers, the next loop iteration will
+                // immediately await `notify_rx.next()`, which naturally yields
+                // to the scheduler. Posting an extra io_uring completion just
+                // to repeat that wait is pure overhead — measurable in the
+                // ping/pong hot path where every request re-enters this loop.
+                let should_yield = !work.pending_ops.is_empty()
+                    || !work.pending_timers.is_empty();
+                if should_yield {
+                    compio::time::sleep(Duration::ZERO).await;
+                }
             }
         }
     }
@@ -988,7 +1005,17 @@ impl RuntimeInner {
     ///
     /// Does NOT drain pending requests — the caller decides which request
     /// to error (only the one that was executing when the timer fired).
+    ///
+    /// Fast path: when `cpu_limit` is None, no CPU timer exists, so V8 can
+    /// never be terminated by us. Skipping the isolate state read saves a
+    /// vdso syscall on every dispatch in the common (no-limit) case — this
+    /// is the benchmark configuration and also the default for many deploys.
     fn check_v8_terminated(&mut self) -> bool {
+        // If no timer is configured, V8 cannot have been terminated by us.
+        // (Other code paths never call terminate_execution.)
+        if self.cpu_timer.is_none() {
+            return false;
+        }
         if !self.isolate.is_execution_terminating() {
             return false;
         }
@@ -1013,6 +1040,22 @@ impl RuntimeInner {
             return Err("Isolate not initialized".to_string());
         }
 
+        // Parse the JSON-RPC envelope on the Rust side — the old JS wrapper
+        // did this via JSON.parse inside V8, which was ~8% of ping CPU.
+        let parsed = match crate::dispatch::parse_request(body) {
+            Ok(p) => p,
+            Err(envelope) => {
+                return Ok(RequestResult {
+                    json: envelope,
+                    cpu_time: Duration::ZERO,
+                    wall_time: Duration::ZERO,
+                    logs: Vec::new(),
+                });
+            }
+        };
+        let id_json = parsed.id.map(|r| r.get()).unwrap_or("null");
+        let params_json = parsed.params.map(|r| r.get());
+
         let request_id = self.next_direct_request_id;
         self.next_direct_request_id += 1;
         let wall_start = Instant::now();
@@ -1023,7 +1066,14 @@ impl RuntimeInner {
         let dispatch_result = {
             let dispatch_fn = self.dispatch_fn.as_ref().unwrap();
             enter_v8!(self, |scope| {
-                crate::dispatch::dispatch_request(scope, &self.state, dispatch_fn, body)
+                crate::dispatch::dispatch_request(
+                    scope,
+                    &self.state,
+                    dispatch_fn,
+                    parsed.method,
+                    params_json,
+                    id_json,
+                )
             })
         };
         self.disarm_cpu_timer();
@@ -1053,7 +1103,7 @@ impl RuntimeInner {
                 // Check if the promise settled after microtask checkpoint + ready timers
                 self.arm_cpu_timer();
                 let result = enter_v8!(self, |scope| {
-                    crate::dispatch::extract_promise_result(scope, &promise)
+                    crate::dispatch::extract_promise_result(scope, &promise, id_json)
                 });
                 self.disarm_cpu_timer();
 
@@ -1112,6 +1162,24 @@ impl RuntimeInner {
             return DispatchOutcome::Complete(Err("Isolate not initialized".to_string()));
         }
 
+        // Parse the JSON-RPC envelope on the Rust side. On a malformed body
+        // we still return a valid envelope (id=null, code=-32700) so the
+        // client receives a well-formed JSON-RPC error instead of an
+        // opaque transport failure.
+        let parsed = match crate::dispatch::parse_request(body) {
+            Ok(p) => p,
+            Err(envelope) => {
+                return DispatchOutcome::Complete(Ok(RequestResult {
+                    json: envelope,
+                    cpu_time: Duration::ZERO,
+                    wall_time: Duration::ZERO,
+                    logs: Vec::new(),
+                }));
+            }
+        };
+        let id_json_owned: String = parsed.id.map(|r| r.get().to_string()).unwrap_or_else(|| "null".to_string());
+        let params_json = parsed.params.map(|r| r.get());
+
         let request_id = self.next_direct_request_id;
         self.next_direct_request_id += 1;
 
@@ -1134,8 +1202,17 @@ impl RuntimeInner {
         self.arm_cpu_timer();
         let dispatch_result = {
             let dispatch_fn = self.dispatch_fn.as_ref().unwrap();
+            let method = parsed.method;
+            let id_ref: &str = &id_json_owned;
             enter_v8!(self, |scope| {
-                crate::dispatch::dispatch_request(scope, &self.state, dispatch_fn, body)
+                crate::dispatch::dispatch_request(
+                    scope,
+                    &self.state,
+                    dispatch_fn,
+                    method,
+                    params_json,
+                    id_ref,
+                )
             })
         };
         self.disarm_cpu_timer();
@@ -1172,8 +1249,9 @@ impl RuntimeInner {
 
                 // Check if promise settled after microtask checkpoint + ready timers
                 self.arm_cpu_timer();
+                let id_ref: &str = &id_json_owned;
                 let result = enter_v8!(self, |scope| {
-                    crate::dispatch::extract_promise_result(scope, &promise)
+                    crate::dispatch::extract_promise_result(scope, &promise, id_ref)
                 });
                 self.disarm_cpu_timer();
 
@@ -1218,6 +1296,7 @@ impl RuntimeInner {
                             cpu_accumulated: cpu_total,
                             wall_start,
                             cancel: cancel.clone(),
+                            id_json: id_json_owned,
                         });
                         // Notify the pump that new work was added
                         self.notify_pump();
@@ -1330,6 +1409,9 @@ impl RuntimeInner {
                     cpu_accumulated: cpu_elapsed,
                     wall_start,
                     cancel: cancel.clone(),
+                    // id_json is unused for HTTP requests — no envelope is
+                    // built from the JSON-RPC id. Placeholder value.
+                    id_json: String::new(),
                 });
                 self.notify_pump();
                 DispatchOutcome::HttpPending { rx, cancel }
@@ -1811,10 +1893,14 @@ impl RuntimeInner {
         let wall_time = req.wall_start.elapsed();
 
         match settled {
-            SettledResult::Rpc(Ok(json)) => {
+            SettledResult::Rpc(Ok(result_json)) => {
+                // Wrap the raw handler result in the JSON-RPC envelope using
+                // the id we stashed when the request arrived. Doing this
+                // here (rather than in JS) moves the stringify work to Rust.
+                let envelope = crate::dispatch::build_success_envelope(&result_json, &req.id_json);
                 let logs = self.drain_request_logs(id);
                 let result = RequestResult {
-                    json,
+                    json: envelope,
                     cpu_time,
                     wall_time,
                     logs,

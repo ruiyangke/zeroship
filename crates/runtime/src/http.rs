@@ -196,6 +196,12 @@ pub fn extract_response_headers(scope: &mut v8::PinScope, response_obj: v8::Loca
 }
 
 /// Extract the result of a settled promise, branching on RPC vs HTTP.
+///
+/// The RPC path returns the *raw* handler result as JSON (via
+/// `JSON.stringify`), NOT the full JSON-RPC envelope — the envelope is
+/// built later in `send_settled_reply_any` using the request's stored
+/// `id_json`. This keeps the id local to `PendingRequest` and avoids
+/// re-parsing the request body downstream.
 pub fn extract_settled_result(
     scope: &mut v8::PinScope,
     promise: &v8::Global<v8::Promise>,
@@ -208,19 +214,37 @@ pub fn extract_settled_result(
             if is_http {
                 SettledResult::Http(inspect_response(scope, val))
             } else {
-                let json = val
-                    .to_string(scope)
-                    .map(|s| s.to_rust_string_lossy(scope))
-                    .unwrap_or_else(|| "[object]".to_string());
+                // Handler returned a JS value (or a promise that resolved to one).
+                // Serialize via JSON.stringify — matches the old JS wrapper's
+                // `{result: v}` field shape exactly (numbers stay numbers,
+                // undefined becomes null).
+                let json = if val.is_undefined() {
+                    "null".to_string()
+                } else {
+                    v8::json::stringify(scope, val)
+                        .map(|s| s.to_rust_string_lossy(scope))
+                        .unwrap_or_else(|| "null".to_string())
+                };
                 SettledResult::Rpc(Ok(json))
             }
         }
         v8::PromiseState::Rejected => {
-            let msg = local
-                .result(scope)
-                .to_string(scope)
-                .map(|s| s.to_rust_string_lossy(scope))
-                .unwrap_or_else(|| "Promise rejected".to_string());
+            // Read `.message` if it's an Error object; else stringify.
+            let exc = local.result(scope);
+            let msg = if let Some(obj) = exc.to_object(scope) {
+                let msg_key = v8::String::new(scope, "message").unwrap();
+                obj.get(scope, msg_key.into())
+                    .filter(|v| !v.is_undefined() && !v.is_null())
+                    .and_then(|v| v.to_string(scope))
+                    .map(|s| s.to_rust_string_lossy(scope))
+                    .unwrap_or_else(|| exc.to_string(scope)
+                        .map(|s| s.to_rust_string_lossy(scope))
+                        .unwrap_or_else(|| "Promise rejected".to_string()))
+            } else {
+                exc.to_string(scope)
+                    .map(|s| s.to_rust_string_lossy(scope))
+                    .unwrap_or_else(|| "Promise rejected".to_string())
+            };
             if is_http {
                 SettledResult::Http(Err(msg))
             } else {

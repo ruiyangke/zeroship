@@ -104,24 +104,36 @@ pub const FORMDATA_JS: &str = include_str!("embed/formdata.js");
 pub const WEBSOCKET_JS: &str = include_str!("embed/websocket.js");
 
 /// The JSON-RPC dispatch function compiled once and reused for every request.
-/// Handles both sync and async (Promise-returning) handlers.
-pub const DISPATCH_JS: &str = r#"(function(__req_json) {
-    var req = JSON.parse(__req_json);
-    var fn = __rpc[req.method];
-    if (!fn) return JSON.stringify({jsonrpc:"2.0",error:{code:-32601,message:"not found"},id:req.id});
-    try {
-        var result = fn.apply(null, req.params || []);
-        if (result && typeof result.then === 'function') {
-            return result.then(function(v) {
-                return JSON.stringify({jsonrpc:"2.0",result:v,id:req.id});
-            }, function(e) {
-                return JSON.stringify({jsonrpc:"2.0",error:{code:-32000,message:e && e.message ? e.message : String(e)},id:req.id});
-            });
-        }
-        return JSON.stringify({jsonrpc:"2.0",result:result,id:req.id});
-    } catch(e) {
-        return JSON.stringify({jsonrpc:"2.0",error:{code:-32000,message:e.message},id:req.id});
+///
+/// Takes the method name + raw params-JSON slice, returns the *raw* handler
+/// return value (Promise or plain JS value). The JSON-RPC envelope (jsonrpc,
+/// result/error, id) is built in Rust — doing it here cost ~15% CPU from
+/// JSON.parse(req)/stringify(envelope) on the ping hot path.
+///
+/// Contract:
+/// - Return: whatever the handler returned. Rust calls `v8::json::stringify`
+///   on it (or on the fulfilled promise value) to serialize.
+/// - Throw: all error paths throw an Error. Rust uses `TryCatch` to extract
+///   the message, and reads an optional `.code` property for the JSON-RPC
+///   error code (default -32000, -32601 for "method not found").
+pub const DISPATCH_JS: &str = r#"(function(__method, __paramsJson) {
+    var fn = __rpc[__method];
+    if (typeof fn !== 'function') {
+        var err = new Error('Method not found: ' + __method);
+        err.code = -32601;
+        throw err;
     }
+    // Preserve the old `req.params || []` semantics: a missing, null, or
+    // empty-string params argument means "no arguments". JSON.parse("null")
+    // is null, which `fn.apply(null, null)` would throw on in strict mode.
+    var params;
+    if (!__paramsJson) {
+        params = [];
+    } else {
+        var parsed = JSON.parse(__paramsJson);
+        params = parsed == null ? [] : parsed;
+    }
+    return fn.apply(null, params);
 })"#;
 
 // ===========================================================================
