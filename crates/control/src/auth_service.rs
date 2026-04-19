@@ -2,10 +2,10 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use compio_postgres::{Client, NoTls};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use zeroship_core::typed_id;
-use zeroship_pg::Conn;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,7 +61,7 @@ impl AuthService {
     /// Connect to the database, run auth schema migrations, and return an
     /// `AuthService`.
     pub async fn new(db_url: &str, jwt_secret: &str) -> Result<Self, String> {
-        let mut conn = Conn::connect(db_url).await.map_err(|e| e.to_string())?;
+        let conn = open_conn(db_url).await.map_err(|e| e.to_string())?;
 
         conn.execute(
             "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"",
@@ -115,7 +115,8 @@ impl AuthService {
         .await
         .map_err(|e| format!("auth migration: {e}"))?;
 
-        let _ = conn.close().await;
+        // Drop the migration client — the driver task drains and exits.
+        drop(conn);
 
         Ok(Self {
             db_url: db_url.to_string(),
@@ -124,10 +125,8 @@ impl AuthService {
     }
 
     /// Open a fresh connection.
-    async fn conn(&self) -> Result<Conn, String> {
-        Conn::connect(&self.db_url)
-            .await
-            .map_err(|e| e.to_string())
+    async fn conn(&self) -> Result<Client, String> {
+        open_conn(&self.db_url).await.map_err(|e| e.to_string())
     }
 
     // -- Registration ---------------------------------------------------------
@@ -151,7 +150,7 @@ impl AuthService {
 
         let hash = bcrypt::hash(password, 12).map_err(|e| format!("bcrypt: {e}"))?;
 
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
 
         conn.execute(
             "INSERT INTO auth_users (email, name, password_hash) VALUES ($1, $2, $3)",
@@ -190,7 +189,7 @@ impl AuthService {
         password: &str,
         app_id: &str,
     ) -> Result<LoginResult, String> {
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
 
         let rows = conn
             .query(
@@ -266,7 +265,7 @@ impl AuthService {
     /// Get a user by typed ID (`usr_...`).
     pub async fn get_user(&self, user_id: &str) -> Result<AuthUser, String> {
         let uuid = user_id_to_uuid(user_id)?;
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
 
         let rows = conn
             .query(
@@ -286,7 +285,7 @@ impl AuthService {
     /// Check whether a user has granted consent to an app.
     pub async fn has_consent(&self, user_id: &str, app_id: &str) -> Result<bool, String> {
         let uuid = user_id_to_uuid(user_id)?;
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
 
         let rows = conn
             .query(
@@ -303,7 +302,7 @@ impl AuthService {
     /// Grant consent for a user to an app. Idempotent (re-grants if revoked).
     pub async fn grant_consent(&self, user_id: &str, app_id: &str) -> Result<(), String> {
         let uuid = user_id_to_uuid(user_id)?;
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
 
         conn.execute(
             "INSERT INTO auth_app_consents (user_id, app_id) VALUES ($1::uuid, $2::uuid) \
@@ -350,9 +349,21 @@ impl AuthService {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Open a new compio-postgres connection and detach its driver task.
+async fn open_conn(url: &str) -> Result<Client, compio_postgres::Error> {
+    let (client, connection) = compio_postgres::connect(url, NoTls).await?;
+    compio::runtime::spawn(async move {
+        if let Err(e) = connection.run().await {
+            eprintln!("control/auth: pg connection error: {e}");
+        }
+    })
+    .detach();
+    Ok(client)
+}
+
 /// Convert a query row into an `AuthUser`.
 /// PG stores raw UUID; we encode it as a typed ID (`usr_` + base62).
-fn row_to_user(row: &zeroship_pg::Row) -> AuthUser {
+fn row_to_user(row: &compio_postgres::Row) -> AuthUser {
     let raw_uuid: String = row.get("id");
     let id = typed_id::from_uuid_string(typed_id::USER_PREFIX, &raw_uuid)
         .unwrap_or(raw_uuid); // fallback to raw if encoding fails

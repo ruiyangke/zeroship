@@ -2,10 +2,10 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use compio_postgres::{Client, NoTls};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use zeroship_core::typed_id;
-use zeroship_pg::Conn;
 
 use crate::queries as sql;
 
@@ -66,8 +66,8 @@ impl AuthService {
     }
 
     /// Open a fresh connection.
-    async fn conn(&self) -> Result<Conn, String> {
-        Conn::connect(&self.db_url).await.map_err(|e| e.to_string())
+    async fn conn(&self) -> Result<Client, String> {
+        open_conn(&self.db_url).await.map_err(|e| e.to_string())
     }
 
     // -- Registration ---------------------------------------------------------
@@ -86,7 +86,7 @@ impl AuthService {
 
         let hash = bcrypt::hash(password, 12).map_err(|e| format!("bcrypt: {e}"))?;
         let id = typed_id::new_v7().to_string();
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
 
         conn.execute(sql::INSERT_USER, &[&id.as_str(), &email, &name, &hash.as_str()])
             .await
@@ -105,7 +105,7 @@ impl AuthService {
 
     /// Find or create a user from an OAuth provider profile. No password.
     pub async fn find_or_create_oauth_user(&self, email: &str, name: &str, avatar_url: Option<&str>) -> Result<AuthUser, String> {
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
 
         let rows = conn.query(sql::SELECT_USER_BY_EMAIL, &[&email]).await.map_err(|e| format!("database: {e}"))?;
         if let Some(row) = rows.first() {
@@ -124,7 +124,7 @@ impl AuthService {
 
     /// Authenticate with email + password and issue a JWT scoped to an app.
     pub async fn login(&self, email: &str, password: &str, app_id: &str) -> Result<LoginResult, String> {
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
 
         let rows = conn.query(sql::SELECT_USER_BY_EMAIL_WITH_PASSWORD, &[&email]).await.map_err(|e| format!("database: {e}"))?;
         let row = rows.first().ok_or("invalid email or password")?;
@@ -166,7 +166,7 @@ impl AuthService {
     /// Get a user by typed ID (`usr_...`).
     pub async fn get_user(&self, user_id: &str) -> Result<AuthUser, String> {
         let uuid = user_id_to_uuid(user_id)?;
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
 
         let rows = conn.query(sql::SELECT_USER_BY_ID, &[&uuid.as_str()]).await.map_err(|e| format!("database: {e}"))?;
         rows.first().map(row_to_user).ok_or_else(|| "user not found".to_string())
@@ -177,7 +177,7 @@ impl AuthService {
     /// Check whether a user has granted consent to an app.
     pub async fn has_consent(&self, user_id: &str, app_id: &str) -> Result<bool, String> {
         let uuid = user_id_to_uuid(user_id)?;
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
 
         let rows = conn.query(sql::SELECT_CONSENT, &[&uuid.as_str(), &app_id]).await.map_err(|e| format!("database: {e}"))?;
         Ok(!rows.is_empty())
@@ -186,7 +186,7 @@ impl AuthService {
     /// Grant consent for a user to an app. Idempotent.
     pub async fn grant_consent(&self, user_id: &str, app_id: &str) -> Result<(), String> {
         let uuid = user_id_to_uuid(user_id)?;
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
 
         conn.execute(sql::UPSERT_CONSENT, &[&uuid.as_str(), &app_id]).await.map_err(|e| format!("database: {e}"))?;
         Ok(())
@@ -219,8 +219,20 @@ impl AuthService {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Open a new compio-postgres connection and detach its driver task.
+async fn open_conn(url: &str) -> Result<Client, compio_postgres::Error> {
+    let (client, connection) = compio_postgres::connect(url, NoTls).await?;
+    compio::runtime::spawn(async move {
+        if let Err(e) = connection.run().await {
+            eprintln!("auth: pg connection error: {e}");
+        }
+    })
+    .detach();
+    Ok(client)
+}
+
 /// Convert a query row into an `AuthUser` (PG UUID → typed ID).
-fn row_to_user(row: &zeroship_pg::Row) -> AuthUser {
+fn row_to_user(row: &compio_postgres::Row) -> AuthUser {
     let raw_uuid: String = row.get("id");
     let id = typed_id::from_uuid_string(typed_id::USER_PREFIX, &raw_uuid).unwrap_or(raw_uuid);
     AuthUser {

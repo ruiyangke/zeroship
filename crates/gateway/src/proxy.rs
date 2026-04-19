@@ -171,13 +171,14 @@ pub async fn forward(
     request_id: &Uuid,
     body: &[u8],
     user_header: Option<&str>,
+    worker_key: &str,
 ) -> Result<HttpResponse, String> {
     if ring.num_workers() == 0 {
         return Err("no workers configured".into());
     }
     let (idx, worker_url) = ring.select(app_id);
     ring.acquire(idx);
-    let result = forward_to_worker(worker_url, app_id, plan_id, request_id, body, user_header).await;
+    let result = forward_to_worker(worker_url, app_id, plan_id, request_id, body, user_header, worker_key).await;
     ring.release(idx);
     result
 }
@@ -198,6 +199,7 @@ pub async fn forward_http(
     headers: &[(String, String)],
     body: &str,
     user_header: Option<&str>,
+    worker_key: &str,
 ) -> Result<HttpResponse, String> {
     if ring.num_workers() == 0 {
         return Err("no workers configured".into());
@@ -215,7 +217,7 @@ pub async fn forward_http(
     let envelope_bytes = serde_json::to_vec(&envelope).unwrap_or_default();
 
     let result = forward_to_worker_http(
-        worker_url, app_id, plan_id, request_id, &envelope_bytes, user_header,
+        worker_url, app_id, plan_id, request_id, &envelope_bytes, user_header, worker_key,
     ).await;
     ring.release(idx);
     result
@@ -231,6 +233,7 @@ async fn forward_to_worker(
     request_id: &Uuid,
     body: &[u8],
     user_header: Option<&str>,
+    worker_key: &str,
 ) -> Result<HttpResponse, String> {
     let key = pool_key(worker_url);
     let path = format!("/dispatch/{app_id}");
@@ -238,20 +241,25 @@ async fn forward_to_worker(
     // Cache host extraction (no .leak())
     let host = extract_host(worker_url);
 
-    // Get pooled connection or create new (with timeout)
-    let mut stream = match CONN_POOL.with(|p| p.borrow_mut().take(&key)) {
-        Some(s) => s,
+    // Attempt up to 2 times: once with a pooled connection (if any), once
+    // with a fresh one. A pooled TCP connection can be half-open — the
+    // peer closed it after a keep-alive timeout but we haven't noticed
+    // yet. The write may succeed into the kernel buffer; the failure only
+    // surfaces on read as "connection closed before headers complete".
+    // Retrying on a fresh connection handles that race.
+    let (mut stream, mut from_pool) = match CONN_POOL.with(|p| p.borrow_mut().take(&key)) {
+        Some(s) => (s, true),
         None => {
             let (s, _, _) = compio::time::timeout(WORKER_TIMEOUT, connect(worker_url))
                 .await
                 .map_err(|_| "connect timeout".to_string())?
                 .map_err(|e| format!("connect: {e}"))?;
-            s
+            (s, false)
         }
     };
 
     // Build request (no clone — rebuild on retry if needed)
-    let request = build_request(&path, &host, app_id, plan_id, request_id, body, user_header);
+    let request = build_request(&path, &host, app_id, plan_id, request_id, body, user_header, worker_key);
 
     if stream.write_all(request).await.is_err() {
         // Stale connection — reconnect with timeout
@@ -260,18 +268,34 @@ async fn forward_to_worker(
             .map_err(|_| "reconnect timeout".to_string())?
             .map_err(|e| format!("reconnect: {e}"))?;
         stream = new_stream;
-        let retry_request = build_request(&path, &host, app_id, plan_id, request_id, body, user_header);
+        from_pool = false;
+        let retry_request = build_request(&path, &host, app_id, plan_id, request_id, body, user_header, worker_key);
         stream.write_all(retry_request).await.map_err(|e| format!("write: {e}"))?;
     }
 
-    // Parse response headers (shared between buffered and streaming paths)
-    let parsed = compio::time::timeout(
-        WORKER_TIMEOUT,
-        read_http_headers(&mut stream),
-    )
-    .await
-    .map_err(|_| "read timeout".to_string())?
-    .map_err(|e| format!("read: {e}"))?;
+    // Parse response headers (shared between buffered and streaming paths).
+    // On pooled connections, retry once on read failure with a fresh socket.
+    let parsed = match compio::time::timeout(WORKER_TIMEOUT, read_http_headers(&mut stream)).await {
+        Ok(Ok(p)) => p,
+        Ok(Err(e)) if from_pool => {
+            // Pooled connection was half-open. Reconnect and retry once.
+            let (new_stream, _, _) = compio::time::timeout(WORKER_TIMEOUT, connect(worker_url))
+                .await
+                .map_err(|_| format!("reconnect timeout (after: {e})"))?
+                .map_err(|e| format!("reconnect: {e}"))?;
+            stream = new_stream;
+            from_pool = false;
+            let retry_request = build_request(&path, &host, app_id, plan_id, request_id, body, user_header, worker_key);
+            stream.write_all(retry_request).await.map_err(|e| format!("write: {e}"))?;
+            compio::time::timeout(WORKER_TIMEOUT, read_http_headers(&mut stream))
+                .await
+                .map_err(|_| "read timeout".to_string())?
+                .map_err(|e| format!("read: {e}"))?
+        }
+        Ok(Err(e)) => return Err(format!("read: {e}")),
+        Err(_) => return Err("read timeout".to_string()),
+    };
+    let _ = from_pool; // silence unused after last branch
 
     let hop_by_hop = ["connection", "keep-alive", "transfer-encoding",
                       "te", "trailer", "upgrade", "proxy-authorization", "proxy-authenticate"];
@@ -353,24 +377,27 @@ async fn forward_to_worker_http(
     request_id: &Uuid,
     body: &[u8],
     user_header: Option<&str>,
+    worker_key: &str,
 ) -> Result<HttpResponse, String> {
     let key = pool_key(worker_url);
     let path = format!("/http-dispatch/{app_id}");
 
     let host = extract_host(worker_url);
 
-    let mut stream = match CONN_POOL.with(|p| p.borrow_mut().take(&key)) {
-        Some(s) => s,
+    // See comment on forward_to_worker — we retry once on read failure when
+    // the connection came from the pool (half-open detection).
+    let (mut stream, mut from_pool) = match CONN_POOL.with(|p| p.borrow_mut().take(&key)) {
+        Some(s) => (s, true),
         None => {
             let (s, _, _) = compio::time::timeout(WORKER_TIMEOUT, connect(worker_url))
                 .await
                 .map_err(|_| "connect timeout".to_string())?
                 .map_err(|e| format!("connect: {e}"))?;
-            s
+            (s, false)
         }
     };
 
-    let request = build_request(&path, &host, app_id, plan_id, request_id, body, user_header);
+    let request = build_request(&path, &host, app_id, plan_id, request_id, body, user_header, worker_key);
 
     if stream.write_all(request).await.is_err() {
         let (new_stream, _, _) = compio::time::timeout(WORKER_TIMEOUT, connect(worker_url))
@@ -378,17 +405,31 @@ async fn forward_to_worker_http(
             .map_err(|_| "reconnect timeout".to_string())?
             .map_err(|e| format!("reconnect: {e}"))?;
         stream = new_stream;
-        let retry_request = build_request(&path, &host, app_id, plan_id, request_id, body, user_header);
+        from_pool = false;
+        let retry_request = build_request(&path, &host, app_id, plan_id, request_id, body, user_header, worker_key);
         stream.write_all(retry_request).await.map_err(|e| format!("write: {e}"))?;
     }
 
-    let parsed = compio::time::timeout(
-        WORKER_TIMEOUT,
-        read_http_headers(&mut stream),
-    )
-    .await
-    .map_err(|_| "read timeout".to_string())?
-    .map_err(|e| format!("read: {e}"))?;
+    let parsed = match compio::time::timeout(WORKER_TIMEOUT, read_http_headers(&mut stream)).await {
+        Ok(Ok(p)) => p,
+        Ok(Err(e)) if from_pool => {
+            let (new_stream, _, _) = compio::time::timeout(WORKER_TIMEOUT, connect(worker_url))
+                .await
+                .map_err(|_| format!("reconnect timeout (after: {e})"))?
+                .map_err(|e| format!("reconnect: {e}"))?;
+            stream = new_stream;
+            from_pool = false;
+            let retry_request = build_request(&path, &host, app_id, plan_id, request_id, body, user_header, worker_key);
+            stream.write_all(retry_request).await.map_err(|e| format!("write: {e}"))?;
+            compio::time::timeout(WORKER_TIMEOUT, read_http_headers(&mut stream))
+                .await
+                .map_err(|_| "read timeout".to_string())?
+                .map_err(|e| format!("read: {e}"))?
+        }
+        Ok(Err(e)) => return Err(format!("read: {e}")),
+        Err(_) => return Err("read timeout".to_string()),
+    };
+    let _ = from_pool;
 
     let hop_by_hop = ["connection", "keep-alive", "transfer-encoding",
                       "te", "trailer", "upgrade", "proxy-authorization", "proxy-authenticate"];
@@ -452,10 +493,24 @@ async fn forward_to_worker_http(
     }
 }
 
-fn build_request(path: &str, host: &str, app_id: &Uuid, plan_id: &str, request_id: &Uuid, body: &[u8], user_header: Option<&str>) -> Vec<u8> {
+fn build_request(
+    path: &str,
+    host: &str,
+    app_id: &Uuid,
+    plan_id: &str,
+    request_id: &Uuid,
+    body: &[u8],
+    user_header: Option<&str>,
+    worker_key: &str,
+) -> Vec<u8> {
     let user_line = match user_header {
         Some(val) => format!("ZeroShip-User: {val}\r\n"),
         None => String::new(),
+    };
+    let auth_line = if worker_key.is_empty() {
+        String::new()
+    } else {
+        format!("Authorization: Bearer {worker_key}\r\n")
     };
     let header = format!(
         "POST {path} HTTP/1.1\r\n\
@@ -465,6 +520,7 @@ fn build_request(path: &str, host: &str, app_id: &Uuid, plan_id: &str, request_i
          X-App-Id: {app_id}\r\n\
          X-Plan-Id: {plan_id}\r\n\
          X-Request-Id: {request_id}\r\n\
+         {auth_line}\
          {user_line}\
          Connection: keep-alive\r\n\
          \r\n",

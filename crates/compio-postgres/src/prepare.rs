@@ -1,0 +1,352 @@
+// Ported from tokio-postgres (MIT/Apache-2.0). Copyright (c) 2016 Steven Fackler.
+//
+// Phase 4 port: this file is a near-verbatim translation of tokio-postgres's
+// `prepare.rs`. The logic — Parse + Describe + Sync, parameter/column
+// resolution, recursive type info via pg_catalog — is protocol + SQL, so
+// only the I/O glue has to change. The recursive helpers (`prepare_rec`,
+// `get_type_rec`) remain boxed futures because the recursion between
+// `prepare` ↔ `get_type` ↔ `prepare_rec` cannot be expressed as a plain
+// async fn (Rust has no syntactic support for recursive `async fn`).
+
+use crate::client::InnerClient;
+use crate::codec::FrontendMessage;
+use crate::connection::RequestMessages;
+use crate::error::SqlState;
+use crate::types::{Field, Kind, Oid, Type};
+use crate::{Column, Error, Statement};
+use crate::{query, slice_iter};
+use bytes::Bytes;
+use fallible_iterator::FallibleIterator;
+use futures_util::TryStreamExt;
+use log::debug;
+use postgres_protocol::message::backend::Message;
+use postgres_protocol::message::frontend;
+use std::collections::HashSet;
+use std::future::Future;
+use std::io;
+use std::pin::{Pin, pin};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+const TYPEINFO_QUERY: &str = "\
+SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, n.nspname, t.typrelid
+FROM pg_catalog.pg_type t
+LEFT OUTER JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid
+INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid
+WHERE t.oid = $1
+";
+
+// Range types weren't added until Postgres 9.2, so pg_range may not exist
+const TYPEINFO_FALLBACK_QUERY: &str = "\
+SELECT t.typname, t.typtype, t.typelem, NULL::OID, t.typbasetype, n.nspname, t.typrelid
+FROM pg_catalog.pg_type t
+INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid
+WHERE t.oid = $1
+";
+
+const TYPEINFO_ENUM_QUERY: &str = "\
+SELECT enumlabel
+FROM pg_catalog.pg_enum
+WHERE enumtypid = $1
+ORDER BY enumsortorder
+";
+
+// Postgres 9.0 didn't have enumsortorder
+const TYPEINFO_ENUM_FALLBACK_QUERY: &str = "\
+SELECT enumlabel
+FROM pg_catalog.pg_enum
+WHERE enumtypid = $1
+ORDER BY oid
+";
+
+const TYPEINFO_COMPOSITE_QUERY: &str = "\
+SELECT attname, atttypid
+FROM pg_catalog.pg_attribute
+WHERE attrelid = $1
+AND NOT attisdropped
+AND attnum > 0
+ORDER BY attnum
+";
+
+static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+pub async fn prepare(
+    client: &Arc<InnerClient>,
+    query: &str,
+    types: &[Type],
+) -> Result<Statement, Error> {
+    let name = format!("s{}", NEXT_ID.fetch_add(1, Ordering::SeqCst));
+    let buf = encode(client, &name, query, types)?;
+    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+
+    match responses.next().await? {
+        Message::ParseComplete => {}
+        _ => return Err(Error::unexpected_message()),
+    }
+
+    let parameter_description = match responses.next().await? {
+        Message::ParameterDescription(body) => body,
+        _ => return Err(Error::unexpected_message()),
+    };
+
+    let row_description = match responses.next().await? {
+        Message::RowDescription(body) => Some(body),
+        Message::NoData => None,
+        _ => return Err(Error::unexpected_message()),
+    };
+
+    let mut parameters = vec![];
+    let mut it = parameter_description.parameters();
+    while let Some(oid) = it.next().map_err(Error::parse)? {
+        let type_ = get_type(client, oid).await?;
+        parameters.push(type_);
+    }
+
+    let mut columns = vec![];
+    if let Some(row_description) = row_description {
+        let mut it = row_description.fields();
+        while let Some(field) = it.next().map_err(Error::parse)? {
+            let type_ = get_type(client, field.type_oid()).await?;
+            let column = Column {
+                name: field.name().to_string(),
+                table_oid: Some(field.table_oid()).filter(|n| *n != 0),
+                column_id: Some(field.column_id()).filter(|n| *n != 0),
+                type_modifier: field.type_modifier(),
+                r#type: type_,
+            };
+            columns.push(column);
+        }
+    }
+
+    Ok(Statement::new(client, name, parameters, columns))
+}
+
+/// Build an error describing a cycle in pg_catalog type resolution.
+///
+/// The Error type has no dedicated `cycle_detected`/`unknown_type`
+/// constructor and this file is not allowed to modify the error module,
+/// so we reuse `Error::parse` (which wraps an `io::Error`) to surface the
+/// cycle with a descriptive message. Semantically the failure is "we
+/// cannot resolve this type from pg_catalog" — close enough to a parse
+/// error over the type-info response.
+fn cycle_detected(oid: Oid) -> Error {
+    Error::parse(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("cycle detected resolving postgres type with OID {oid}"),
+    ))
+}
+
+fn prepare_rec<'a>(
+    client: &'a Arc<InnerClient>,
+    query: &'a str,
+    types: &'a [Type],
+) -> Pin<Box<dyn Future<Output = Result<Statement, Error>> + 'a + Send>> {
+    Box::pin(prepare(client, query, types))
+}
+
+fn encode(client: &InnerClient, name: &str, query: &str, types: &[Type]) -> Result<Bytes, Error> {
+    if types.is_empty() {
+        debug!("preparing query {name}: {query}");
+    } else {
+        debug!("preparing query {name} with types {types:?}: {query}");
+    }
+
+    client.with_buf(|buf| {
+        frontend::parse(name, query, types.iter().map(Type::oid), buf).map_err(Error::encode)?;
+        frontend::describe(b'S', name, buf).map_err(Error::encode)?;
+        frontend::sync(buf);
+        Ok(buf.split().freeze())
+    })
+}
+
+pub(crate) async fn get_type(client: &Arc<InnerClient>, oid: Oid) -> Result<Type, Error> {
+    let mut in_flight = HashSet::new();
+    get_type_inner(client, oid, &mut in_flight).await
+}
+
+/// Resolve a type OID, threading an `in_flight` set through the recursion
+/// to detect cycles. A cycle can occur when a domain type is defined over
+/// itself, or a composite type transitively references its own row type.
+/// Without this guard, resolution recurses forever because `client.type_`
+/// only returns `Some` after `set_type` fires — so any OID currently
+/// being resolved is invisible to nested callers.
+async fn get_type_inner(
+    client: &Arc<InnerClient>,
+    oid: Oid,
+    in_flight: &mut HashSet<Oid>,
+) -> Result<Type, Error> {
+    if let Some(type_) = Type::from_oid(oid) {
+        return Ok(type_);
+    }
+
+    if let Some(type_) = client.type_(oid) {
+        return Ok(type_);
+    }
+
+    if !in_flight.insert(oid) {
+        return Err(cycle_detected(oid));
+    }
+
+    // `oid` must be removed from `in_flight` on every exit path so a
+    // later retry (e.g. after the cycle-bearing type is dropped) can
+    // succeed. Run the resolution in a nested async block, then always
+    // remove before returning.
+    let result = get_type_body(client, oid, in_flight).await;
+    in_flight.remove(&oid);
+    result
+}
+
+/// Body of `get_type_inner` — separated so the parent can guarantee
+/// `in_flight.remove(&oid)` runs on every return path. The caller is
+/// responsible for inserting `oid` into `in_flight` before calling.
+async fn get_type_body(
+    client: &Arc<InnerClient>,
+    oid: Oid,
+    in_flight: &mut HashSet<Oid>,
+) -> Result<Type, Error> {
+    let stmt = typeinfo_statement(client).await?;
+
+    let mut rows = pin!(query::query(client, stmt, slice_iter(&[&oid])).await?);
+
+    let row = match rows.try_next().await? {
+        Some(row) => row,
+        None => return Err(Error::unexpected_message()),
+    };
+
+    let name: String = row.try_get(0)?;
+    let type_: i8 = row.try_get(1)?;
+    let elem_oid: Oid = row.try_get(2)?;
+    let rngsubtype: Option<Oid> = row.try_get(3)?;
+    let basetype: Oid = row.try_get(4)?;
+    let schema: String = row.try_get(5)?;
+    let relid: Oid = row.try_get(6)?;
+
+    let kind = if type_ == b'e' as i8 {
+        let variants = get_enum_variants(client, oid).await?;
+        Kind::Enum(variants)
+    } else if type_ == b'p' as i8 {
+        Kind::Pseudo
+    } else if basetype != 0 {
+        let type_ = get_type_rec(client, basetype, in_flight).await?;
+        Kind::Domain(type_)
+    } else if elem_oid != 0 {
+        let type_ = get_type_rec(client, elem_oid, in_flight).await?;
+        Kind::Array(type_)
+    } else if relid != 0 {
+        let fields = get_composite_fields(client, relid, in_flight).await?;
+        Kind::Composite(fields)
+    } else if let Some(rngsubtype) = rngsubtype {
+        let type_ = get_type_rec(client, rngsubtype, in_flight).await?;
+        Kind::Range(type_)
+    } else {
+        Kind::Simple
+    };
+
+    let type_ = Type::new(name, oid, kind, schema);
+    client.set_type(oid, &type_);
+
+    Ok(type_)
+}
+
+fn get_type_rec<'a>(
+    client: &'a Arc<InnerClient>,
+    oid: Oid,
+    in_flight: &'a mut HashSet<Oid>,
+) -> Pin<Box<dyn Future<Output = Result<Type, Error>> + Send + 'a>> {
+    Box::pin(get_type_inner(client, oid, in_flight))
+}
+
+async fn typeinfo_statement(client: &Arc<InnerClient>) -> Result<Statement, Error> {
+    if let Some(stmt) = client.typeinfo() {
+        return Ok(stmt);
+    }
+
+    let stmt = match prepare_rec(client, TYPEINFO_QUERY, &[]).await {
+        Ok(stmt) => stmt,
+        Err(ref e) if e.code() == Some(&SqlState::UNDEFINED_TABLE) => {
+            prepare_rec(client, TYPEINFO_FALLBACK_QUERY, &[]).await?
+        }
+        Err(e) => return Err(e),
+    };
+
+    // Recheck-before-set: two concurrent `query_raw` calls can both miss
+    // the cache, both PREPARE on the server, and only one can win the
+    // cache slot. If another task beat us, return its Statement and drop
+    // ours — `StatementInner::drop` in statement.rs sends `Close S`, so
+    // the extra server-side statement is DEALLOCATEd instead of leaking
+    // until connection close.
+    if let Some(other) = client.typeinfo() {
+        return Ok(other);
+    }
+    client.set_typeinfo(&stmt);
+    Ok(stmt)
+}
+
+async fn get_enum_variants(client: &Arc<InnerClient>, oid: Oid) -> Result<Vec<String>, Error> {
+    let stmt = typeinfo_enum_statement(client).await?;
+
+    query::query(client, stmt, slice_iter(&[&oid]))
+        .await?
+        .and_then(|row| async move { row.try_get(0) })
+        .try_collect()
+        .await
+}
+
+async fn typeinfo_enum_statement(client: &Arc<InnerClient>) -> Result<Statement, Error> {
+    if let Some(stmt) = client.typeinfo_enum() {
+        return Ok(stmt);
+    }
+
+    let stmt = match prepare_rec(client, TYPEINFO_ENUM_QUERY, &[]).await {
+        Ok(stmt) => stmt,
+        Err(ref e) if e.code() == Some(&SqlState::UNDEFINED_COLUMN) => {
+            prepare_rec(client, TYPEINFO_ENUM_FALLBACK_QUERY, &[]).await?
+        }
+        Err(e) => return Err(e),
+    };
+
+    // Recheck-before-set: see `typeinfo_statement` for the rationale.
+    if let Some(other) = client.typeinfo_enum() {
+        return Ok(other);
+    }
+    client.set_typeinfo_enum(&stmt);
+    Ok(stmt)
+}
+
+async fn get_composite_fields(
+    client: &Arc<InnerClient>,
+    oid: Oid,
+    in_flight: &mut HashSet<Oid>,
+) -> Result<Vec<Field>, Error> {
+    let stmt = typeinfo_composite_statement(client).await?;
+
+    let rows = query::query(client, stmt, slice_iter(&[&oid]))
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+
+    let mut fields = vec![];
+    for row in rows {
+        let name = row.try_get(0)?;
+        let oid = row.try_get(1)?;
+        let type_ = get_type_rec(client, oid, in_flight).await?;
+        fields.push(Field::new(name, type_));
+    }
+
+    Ok(fields)
+}
+
+async fn typeinfo_composite_statement(client: &Arc<InnerClient>) -> Result<Statement, Error> {
+    if let Some(stmt) = client.typeinfo_composite() {
+        return Ok(stmt);
+    }
+
+    let stmt = prepare_rec(client, TYPEINFO_COMPOSITE_QUERY, &[]).await?;
+
+    // Recheck-before-set: see `typeinfo_statement` for the rationale.
+    if let Some(other) = client.typeinfo_composite() {
+        return Ok(other);
+    }
+    client.set_typeinfo_composite(&stmt);
+    Ok(stmt)
+}

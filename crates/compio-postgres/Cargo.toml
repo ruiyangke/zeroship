@@ -1,0 +1,58 @@
+[package]
+name = "compio-postgres"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Native, asynchronous PostgreSQL client for compio/io_uring — port of tokio-postgres"
+repository = "https://github.com/zeroship/zeroship"
+keywords = ["database", "postgres", "postgresql", "sql", "compio"]
+categories = ["database"]
+rust-version = "1.85"
+
+[lib]
+test = false
+
+[features]
+default = []
+array-impls = ["postgres-types/array-impls"]
+with-chrono-0_4 = ["postgres-types/with-chrono-0_4"]
+with-serde_json-1 = ["postgres-types/with-serde_json-1"]
+with-uuid-1 = ["postgres-types/with-uuid-1"]
+with-time-0_3 = ["postgres-types/with-time-0_3"]
+with-bit-vec-0_8 = ["postgres-types/with-bit-vec-0_8"]
+with-bit-vec-0_9 = ["postgres-types/with-bit-vec-0_9"]
+with-eui48-1 = ["postgres-types/with-eui48-1"]
+with-geo-types-0_7 = ["postgres-types/with-geo-types-0_7"]
+with-jiff-0_2 = ["postgres-types/with-jiff-0_2"]
+with-smol_str-01 = ["postgres-types/with-smol_str-01"]
+with-cidr-0_3 = ["postgres-types/with-cidr-0_3"]
+tls = ["dep:compio-tls"]
+
+[dependencies]
+async-trait = "0.1"
+bytes = { workspace = true }
+byteorder = "1.0"
+fallible-iterator = { workspace = true }
+futures-channel = { version = "0.3", features = ["sink"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+log = "0.4"
+parking_lot = "0.12"
+percent-encoding = { workspace = true }
+pin-project-lite = "0.2.11"
+phf = "0.13"
+postgres-protocol = { workspace = true }
+postgres-types = { workspace = true }
+rand = "0.10"
+whoami = "2.0"
+compio = { workspace = true }
+socket2 = { workspace = true }
+
+[dependencies.compio-tls]
+workspace = true
+optional = true
+
+[dev-dependencies]
+compio = { workspace = true }
+
+[lints]
+workspace = true

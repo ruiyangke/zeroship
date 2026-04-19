@@ -13,10 +13,15 @@
 #
 # Prerequisites:
 #   - cargo build --release -p zeroship-control -p zeroship-gateway -p zeroship-worker -p zeroship
-#   - docker start pg-test (Postgres on port 5434)
+#   - docker compose up -d postgres (Postgres on port 5440 per docker-compose.yml)
 #
 # Usage:
 #   ./tests/e2e_platform.sh
+#
+# Env overrides:
+#   DATABASE_URL     — postgres connection URL (default: compose instance on 5440)
+#   PG_CONTAINER     — docker container name for cleanup (default: appbase-postgres-1)
+#   PG_USER / PG_DB  — user/database for cleanup
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -25,7 +30,10 @@ BIN="$ROOT/target/release"
 CONTROL_PORT=9090
 WORKER_PORTS=(8080 8081 8082)
 GATE_PORT=8000
-DB_URL="postgres://postgres:test@localhost:5434/postgres"
+DB_URL="${DATABASE_URL:-postgres://postgres:zeroship@localhost:5440/zeroship}"
+PG_CONTAINER="${PG_CONTAINER:-appbase-postgres-1}"
+PG_USER="${PG_USER:-postgres}"
+PG_DB="${PG_DB:-zeroship}"
 CONTROL_KEY="test-ck"
 MASTER_KEY="test-mk"
 
@@ -54,7 +62,7 @@ for port in $CONTROL_PORT ${WORKER_PORTS[@]} $GATE_PORT; do
     lsof -ti :"$port" 2>/dev/null | xargs kill -9 2>/dev/null || true
 done
 rm -rf /tmp/zeroship-e2e-bundles
-docker exec pg-test psql -U postgres -c "DROP TABLE IF EXISTS usage_history, usage, apps CASCADE" > /dev/null 2>&1
+docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -c "DROP TABLE IF EXISTS usage_history, usage, apps CASCADE" > /dev/null 2>&1
 
 # Start control
 "$BIN/zeroship-control" --port $CONTROL_PORT --db "$DB_URL" --bundles /tmp/zeroship-e2e-bundles \

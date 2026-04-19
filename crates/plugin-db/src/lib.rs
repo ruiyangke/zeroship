@@ -15,7 +15,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use zeroship_pg::Pool;
+use compio_postgres::{Client, Pool};
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar, PluginConfig};
 
 pub mod callbacks;
@@ -39,7 +39,12 @@ thread_local! {
 
     /// Active transaction connection. Only one transaction at a time per isolate
     /// (V8 is single-threaded). If Some, all CRUD ops use this connection.
-    pub(crate) static TX_CONN: RefCell<Option<zeroship_pg::Conn>> = const { RefCell::new(None) };
+    ///
+    /// We store a raw [`Client`] (not a [`compio_postgres::Transaction<'a>`])
+    /// because the lifetime of `Transaction<'a>` is tied to its parent
+    /// [`Client`] — which cannot live inside a thread-local. Instead we issue
+    /// `BEGIN`/`COMMIT`/`ROLLBACK` via `client.execute(...)` directly.
+    pub(crate) static TX_CONN: RefCell<Option<Client>> = const { RefCell::new(None) };
 }
 
 /// Check if a model is already registered for this app on this thread.

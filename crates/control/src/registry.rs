@@ -1,10 +1,10 @@
-//! Registry — application CRUD backed by PostgreSQL (zeroship-pg).
+//! Registry — application CRUD backed by PostgreSQL (compio-postgres).
 
 use std::collections::HashMap;
 
 use zeroship_core::auth::hash_api_key;
 use zeroship_core::types::{AppRecord, AppRuntimeLimits, AppVersionInfo, RouteEntry, RouteMap, VersionMap};
-use zeroship_pg::Conn;
+use compio_postgres::{Client, NoTls};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -30,15 +30,36 @@ impl std::fmt::Display for RegistryError {
     }
 }
 
-impl From<zeroship_pg::Error> for RegistryError {
-    fn from(e: zeroship_pg::Error) -> Self {
+impl From<compio_postgres::Error> for RegistryError {
+    fn from(e: compio_postgres::Error) -> Self {
         let msg = e.to_string();
-        if msg.contains("duplicate key") || msg.contains("unique") || msg.contains("23505") {
-            Self::AlreadyExists(msg)
+        // compio-postgres's Error is opaque — peek at the full chain (the
+        // underlying DbError's SQLSTATE or message) via the Display/source
+        // fallback. UNIQUE violations flow through the chain as "23505 /
+        // duplicate key value violates unique constraint".
+        let full = format!("{msg}: {}", source_chain(&e));
+        if full.contains("duplicate key") || full.contains("unique") || full.contains("23505") {
+            Self::AlreadyExists(full)
         } else {
-            Self::Database(msg)
+            Self::Database(full)
         }
     }
+}
+
+/// Walk an error's `source()` chain and concatenate the messages. Useful for
+/// reaching through the opaque `compio_postgres::Error` wrapper to the
+/// `DbError` inside.
+fn source_chain(err: &dyn std::error::Error) -> String {
+    let mut out = String::new();
+    let mut cur: Option<&dyn std::error::Error> = err.source();
+    while let Some(e) = cur {
+        if !out.is_empty() {
+            out.push_str(" | ");
+        }
+        out.push_str(&e.to_string());
+        cur = e.source();
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -52,10 +73,23 @@ pub struct Registry {
     db_url: String,
 }
 
+/// Open a new compio-postgres connection and detach its driver task onto the
+/// compio runtime. Returns the [`Client`] handle.
+async fn open_conn(url: &str) -> Result<Client, compio_postgres::Error> {
+    let (client, connection) = compio_postgres::connect(url, NoTls).await?;
+    compio::runtime::spawn(async move {
+        if let Err(e) = connection.run().await {
+            eprintln!("control: pg connection error: {e}");
+        }
+    })
+    .detach();
+    Ok(client)
+}
+
 impl Registry {
     /// Connect to the database, run schema migrations, and return a `Registry`.
     pub async fn new(db_url: &str) -> Result<Self, String> {
-        let mut conn = Conn::connect(db_url).await.map_err(|e| e.to_string())?;
+        let conn = open_conn(db_url).await.map_err(|e| e.to_string())?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS apps (
@@ -104,7 +138,8 @@ impl Registry {
         .await
         .map_err(|e| format!("migration: {e}"))?;
 
-        let _ = conn.close().await;
+        // Dropping `conn` causes the driver task to send Terminate and exit.
+        drop(conn);
 
         Ok(Self {
             db_url: db_url.to_string(),
@@ -112,8 +147,8 @@ impl Registry {
     }
 
     /// Open a fresh connection.
-    async fn conn(&self) -> Result<Conn, RegistryError> {
-        Conn::connect(&self.db_url).await.map_err(RegistryError::from)
+    async fn conn(&self) -> Result<Client, RegistryError> {
+        open_conn(&self.db_url).await.map_err(RegistryError::from)
     }
 
     // -- App CRUD -----------------------------------------------------------
@@ -137,7 +172,7 @@ impl Registry {
 
         let api_key = Uuid::new_v4().to_string();
         let key_hash = hash_api_key(&api_key);
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
 
         conn.execute(
             "INSERT INTO apps (name, plan_id, api_key, api_key_hash) VALUES ($1, $2, $3, $4)",
@@ -160,7 +195,7 @@ impl Registry {
 
     /// Get an app by primary key.
     pub async fn get_app(&self, id: &Uuid) -> Result<Option<AppRecord>, RegistryError> {
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
         let rows = conn
             .query(
                 "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
@@ -173,7 +208,7 @@ impl Registry {
 
     /// Get an app by unique name.
     pub async fn get_app_by_name(&self, name: &str) -> Result<Option<AppRecord>, RegistryError> {
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
         let rows = conn
             .query(
                 "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
@@ -186,7 +221,7 @@ impl Registry {
 
     /// List all apps ordered by name.
     pub async fn list_apps(&self) -> Result<Vec<AppRecord>, RegistryError> {
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
         let rows = conn
             .query(
                 "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
@@ -199,7 +234,7 @@ impl Registry {
 
     /// Delete an app by id. Returns true if a row was deleted.
     pub async fn delete_app(&self, id: &Uuid) -> Result<bool, RegistryError> {
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
         let n = conn
             .execute("DELETE FROM apps WHERE id = $1", &[id])
             .await?;
@@ -208,7 +243,7 @@ impl Registry {
 
     /// Set the deploy hash (content-addressable bundle hash) for an app.
     pub async fn set_deploy_hash(&self, id: &Uuid, hash: &str) -> Result<bool, RegistryError> {
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
         let n = conn
             .execute(
                 "UPDATE apps SET deploy_hash = $1, \
@@ -221,7 +256,7 @@ impl Registry {
 
     /// Change the plan for an app.
     pub async fn set_plan(&self, id: &Uuid, plan_id: &str) -> Result<bool, RegistryError> {
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
         let n = conn
             .execute(
                 "UPDATE apps SET plan_id = $1, \
@@ -236,7 +271,7 @@ impl Registry {
 
     /// Return every app's current deploy hash (used by workers to sync).
     pub async fn get_versions(&self) -> Result<VersionMap, RegistryError> {
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
         let rows = conn
             .query("SELECT id, deploy_hash, plan_id FROM apps", &[])
             .await?;
@@ -256,7 +291,7 @@ impl Registry {
 
     /// Build the full route table for the gateway.
     pub async fn get_routes(&self) -> Result<RouteMap, RegistryError> {
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
         let rows = conn
             .query(
                 "SELECT id, name, plan_id, api_key_hash, deploy_hash FROM apps",
@@ -289,7 +324,7 @@ impl Registry {
         resource: &str,
         delta: i64,
     ) -> Result<(), RegistryError> {
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
         conn.execute(
             "INSERT INTO usage (app_id, resource, value) VALUES ($1, $2, $3) \
              ON CONFLICT (app_id, resource) DO UPDATE SET value = usage.value + $3",
@@ -304,7 +339,7 @@ impl Registry {
         &self,
         app_id: &Uuid,
     ) -> Result<HashMap<String, i64>, RegistryError> {
-        let mut conn = self.conn().await?;
+        let conn = self.conn().await?;
         let rows = conn
             .query(
                 "SELECT resource, value FROM usage WHERE app_id = $1",
@@ -313,7 +348,7 @@ impl Registry {
             .await?;
         let mut map = HashMap::new();
         for row in &rows {
-            map.insert(row.get::<String>("resource"), row.get::<i64>("value"));
+            map.insert(row.get::<_, String>("resource"), row.get::<_, i64>("value"));
         }
         Ok(map)
     }
@@ -324,18 +359,22 @@ fn runtime_limits_for_plan(plan_id: &str) -> AppRuntimeLimits {
         "free" => AppRuntimeLimits {
             cpu_limit_ms: Some(50),
             wall_timeout_ms: Some(5_000),
+            heap_limit_mb: Some(64),
         },
         "pro" => AppRuntimeLimits {
             cpu_limit_ms: Some(30_000),
             wall_timeout_ms: Some(30_000),
+            heap_limit_mb: Some(256),
         },
         "unlimited" | "enterprise" => AppRuntimeLimits {
             cpu_limit_ms: None,
             wall_timeout_ms: None,
+            heap_limit_mb: None, // platform default (128 MB)
         },
         _ => AppRuntimeLimits {
             cpu_limit_ms: Some(50),
             wall_timeout_ms: Some(5_000),
+            heap_limit_mb: Some(64),
         },
     }
 }
@@ -348,7 +387,7 @@ fn runtime_limits_for_plan(plan_id: &str) -> AppRuntimeLimits {
 ///
 /// Columns: id (UUID), name (TEXT), plan_id (UUID), deploy_hash (TEXT | NULL),
 ///          api_key (TEXT), created_at (BIGINT), updated_at (BIGINT).
-fn row_to_record(row: &zeroship_pg::Row) -> AppRecord {
+fn row_to_record(row: &compio_postgres::Row) -> AppRecord {
     AppRecord {
         id: row.get("id"),
         name: row.get("name"),

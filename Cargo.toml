@@ -4,6 +4,7 @@ resolver = "3"
 exclude = [
     "crates/platform",
     "crates/runtime/benches/ntex-bench",
+    "refs",
 ]
 
 # ---------------------------------------------------------------------------
@@ -20,7 +21,7 @@ futures = "0.3"
 ntex = { version = "3", features = ["compio"] }
 httparse = "1"
 http = "1"
-cyper = { version = "0.8", default-features = false, features = ["rustls", "json"] }
+cyper = { version = "0.8", default-features = false, features = ["rustls", "json", "stream"] }
 url = "2"
 
 # Serialization
@@ -41,6 +42,7 @@ openidconnect = { version = "4.0", default-features = false }
 postgres-protocol = "0.6"
 postgres-types = { version = "0.2", features = ["with-uuid-1"] }
 fallible-iterator = "0.2"
+percent-encoding = "2"
 
 # IDs
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
@@ -71,7 +73,7 @@ syn = { version = "2", features = ["full"] }
 # Internal crates
 zeroship-bundle = { path = "crates/bundle" }
 zeroship-core = { path = "crates/core" }
-zeroship-pg = { path = "crates/pg" }
+compio-postgres = { path = "crates/compio-postgres" }
 zeroship-plugin-db = { path = "crates/plugin-db" }
 zeroship-runtime = { path = "crates/runtime" }
 zeroship-runtime-macros = { path = "crates/runtime-macros" }

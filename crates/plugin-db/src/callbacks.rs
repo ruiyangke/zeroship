@@ -149,16 +149,16 @@ fn setup_promise<'s>(
 }
 
 /// Execute SQL with text params — uses TX connection if active, otherwise pool.
-async fn run_sql(sql: &str, params: &[&str]) -> Result<Vec<zeroship_pg::Row>, String> {
+async fn run_sql(sql: &str, params: &[&str]) -> Result<Vec<compio_postgres::Row>, String> {
     // Check if there's an active transaction
     let has_tx = crate::TX_CONN.with(|tx| tx.borrow().is_some());
     if has_tx {
         // Use transaction connection
-        let mut conn = crate::TX_CONN.with(|tx| tx.borrow_mut().take())
+        let client = crate::TX_CONN.with(|tx| tx.borrow_mut().take())
             .ok_or_else(|| "db: transaction connection lost".to_string())?;
-        let result = conn.query_text_params(sql, params).await;
+        let result = client.query_text_params(sql, params).await;
         // Put it back
-        crate::TX_CONN.with(|tx| { tx.borrow_mut().replace(conn); });
+        crate::TX_CONN.with(|tx| { tx.borrow_mut().replace(client); });
         return result.map_err(|e| format!("db: {e}"));
     }
 
@@ -188,7 +188,7 @@ async fn exec_count(bq: BuiltQuery) -> Result<String, String> {
 
     let count: i64 = rows
         .first()
-        .map(|r| r.get::<i64>("count"))
+        .map(|r| r.get::<_, i64>("count"))
         .unwrap_or(0);
 
     Ok(serde_json::json!({ "count": count }).to_string())
@@ -204,7 +204,7 @@ async fn exec_mutation(bq: BuiltQuery) -> Result<String, String> {
 }
 
 /// Convert rows to a JSON array string.
-fn rows_to_json(rows: &[zeroship_pg::Row]) -> String {
+fn rows_to_json(rows: &[compio_postgres::Row]) -> String {
     let arr: Vec<Value> = rows.iter().map(row_to_json).collect();
     Value::Array(arr).to_string()
 }
@@ -219,55 +219,55 @@ fn rows_to_json(rows: &[zeroship_pg::Row]) -> String {
 /// - UUID → string
 /// - JSONB/JSON → parsed JSON value
 /// - Everything else → string (via text representation)
-fn row_to_json(row: &zeroship_pg::Row) -> Value {
+fn row_to_json(row: &compio_postgres::Row) -> Value {
     let mut obj = serde_json::Map::new();
     for col in row.columns() {
-        let key = col.name.clone();
-        let value = column_to_json(row, &col.name, col.oid);
+        let key = col.name().to_string();
+        let value = column_to_json(row, col.name(), col.type_().oid());
         obj.insert(key, value);
     }
     Value::Object(obj)
 }
 
 /// Convert a single column value to JSON based on its OID.
-fn column_to_json(row: &zeroship_pg::Row, name: &str, oid: u32) -> Value {
+fn column_to_json(row: &compio_postgres::Row, name: &str, oid: u32) -> Value {
     // Try to get the value — if it's NULL, return null
     // OIDs from postgres_types::Type constants
     match oid {
         // BOOL = 16
-        16 => match row.try_get::<bool>(name) {
+        16 => match row.try_get::<_, bool>(name) {
             Ok(v) => Value::Bool(v),
             Err(_) => Value::Null,
         },
         // INT2 = 21
-        21 => match row.try_get::<i16>(name) {
+        21 => match row.try_get::<_, i16>(name) {
             Ok(v) => Value::Number(serde_json::Number::from(v)),
             Err(_) => Value::Null,
         },
         // INT4 = 23
-        23 => match row.try_get::<i32>(name) {
+        23 => match row.try_get::<_, i32>(name) {
             Ok(v) => Value::Number(serde_json::Number::from(v)),
             Err(_) => Value::Null,
         },
         // INT8 = 20
-        20 => match row.try_get::<i64>(name) {
+        20 => match row.try_get::<_, i64>(name) {
             Ok(v) => Value::Number(serde_json::Number::from(v)),
             Err(_) => Value::Null,
         },
         // FLOAT4 = 700
-        700 => match row.try_get::<f32>(name) {
+        700 => match row.try_get::<_, f32>(name) {
             Ok(v) => serde_json::Number::from_f64(f64::from(v))
                 .map_or(Value::Null, Value::Number),
             Err(_) => Value::Null,
         },
         // FLOAT8 = 701
-        701 => match row.try_get::<f64>(name) {
+        701 => match row.try_get::<_, f64>(name) {
             Ok(v) => serde_json::Number::from_f64(v)
                 .map_or(Value::Null, Value::Number),
             Err(_) => Value::Null,
         },
         // UUID = 2950
-        2950 => match row.try_get::<uuid::Uuid>(name) {
+        2950 => match row.try_get::<_, uuid::Uuid>(name) {
             Ok(v) => Value::String(v.to_string()),
             Err(_) => Value::Null,
         },
@@ -288,7 +288,7 @@ fn column_to_json(row: &zeroship_pg::Row, name: &str, oid: u32) -> Value {
         1082 => match row.raw_value(name) {
             Some(bytes) if bytes.len() == 4 => {
                 let pg_days = i32::from_be_bytes(bytes.try_into().unwrap());
-                let unix_ms = (pg_days as i64 + 10957) * 86_400_000;
+                let unix_ms = (i64::from(pg_days) + 10957) * 86_400_000;
                 Value::Number(serde_json::Number::from(unix_ms))
             }
             _ => Value::Null,
@@ -302,13 +302,16 @@ fn column_to_json(row: &zeroship_pg::Row, name: &str, oid: u32) -> Value {
             _ => Value::Null,
         },
         // JSON = 114 — text format, no prefix
-        114 => match row.try_get::<String>(name) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or(Value::String(s)),
+        114 => match row.try_get::<_, String>(name) {
+            Ok(s) => {
+                let parsed = serde_json::from_str(&s).ok();
+                parsed.unwrap_or(Value::String(s))
+            }
             Err(_) => Value::Null,
         },
         // TEXT = 25, VARCHAR = 1043, CHAR = 18, BPCHAR = 1042, NAME = 19
         // and everything else: treat as text
-        _ => match row.try_get::<String>(name) {
+        _ => match row.try_get::<_, String>(name) {
             Ok(v) => Value::String(v),
             Err(_) => Value::Null,
         },
@@ -1049,18 +1052,28 @@ async fn exec_begin(isolation_level: Option<&str>) -> Result<(), String> {
         None => "BEGIN".to_string(),
     };
 
-    // Open a dedicated connection (not from pool — we need to hold it)
+    // Open a dedicated connection (not from pool — we need to hold it).
+    // compio-postgres splits a connection into (Client, Connection); we spawn
+    // the Connection on a detached task so its run loop drives I/O, and store
+    // the Client in TX_CONN. When the Client is eventually dropped, the task
+    // terminates gracefully.
     let url = crate::DB_URL.with(|u| u.borrow().clone())
         .ok_or_else(|| "db: not configured".to_string())?;
-    let mut conn = zeroship_pg::Conn::connect(&url)
+    let (client, connection) = compio_postgres::connect(&url, compio_postgres::NoTls)
         .await
         .map_err(|e| format!("db: tx connect failed: {e}"))?;
+    compio::runtime::spawn(async move {
+        if let Err(e) = connection.run().await {
+            eprintln!("db: tx connection task error: {e}");
+        }
+    })
+    .detach();
 
-    conn.execute(&begin_sql, &[])
+    client.execute(&begin_sql, &[])
         .await
         .map_err(|e| format!("db: BEGIN failed: {e}"))?;
 
-    crate::TX_CONN.with(|tx| { tx.borrow_mut().replace(conn); });
+    crate::TX_CONN.with(|tx| { tx.borrow_mut().replace(client); });
     Ok(())
 }
 
@@ -1166,13 +1179,14 @@ pub fn upsert(
 }
 
 async fn exec_end(cmd: &str) -> Result<(), String> {
-    let conn = crate::TX_CONN.with(|tx| tx.borrow_mut().take());
-    let mut conn = conn.ok_or_else(|| "db: no active transaction".to_string())?;
+    let client = crate::TX_CONN.with(|tx| tx.borrow_mut().take())
+        .ok_or_else(|| "db: no active transaction".to_string())?;
 
-    conn.execute(cmd, &[])
+    client.execute(cmd, &[])
         .await
         .map_err(|e| format!("db: {cmd} failed: {e}"))?;
 
-    // Connection is dropped — not from pool, just closes
+    // Client is dropped here — the spawned Connection task observes the
+    // closed sender, sends Terminate, flushes, and exits.
     Ok(())
 }

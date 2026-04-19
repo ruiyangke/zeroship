@@ -3,7 +3,7 @@
 //! Requires: `docker start pg-test` (Postgres on port 5434)
 //! Run: `cargo test -p zeroship-plugin-db --test integration -- --test-threads=1`
 
-use zeroship_pg::{Conn, Pool};
+use compio_postgres::{NoTls, Pool};
 use serde_json::{json, Value};
 
 fn test_url() -> String {
@@ -13,9 +13,14 @@ fn test_url() -> String {
 
 async fn require_pg() -> String {
     let url = test_url();
-    match Conn::connect(&url).await {
-        Ok(conn) => {
-            let _ = conn.close().await;
+    match compio_postgres::connect(&url, NoTls).await {
+        Ok((client, connection)) => {
+            // Drive the connection just long enough to drop both halves.
+            compio::runtime::spawn(async move {
+                let _ = connection.run().await;
+            })
+            .detach();
+            drop(client);
             url
         }
         Err(e) => {
@@ -44,7 +49,8 @@ async fn setup(pool: &Pool) {
                 category TEXT,
                 views INTEGER DEFAULT 0,
                 tags JSONB DEFAULT '[]'::jsonb,
-                created_at TIMESTAMPTZ DEFAULT NOW()
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
             )"#
         ),
         &[],
@@ -68,27 +74,28 @@ async fn exec_mutation(pool: &Pool, bq: zeroship_plugin_db::query::BuiltQuery) -
 }
 
 /// Simplified row → JSON (just text columns for testing).
-fn row_to_json(row: &zeroship_pg::Row) -> Value {
+fn row_to_json(row: &compio_postgres::Row) -> Value {
     let mut obj = serde_json::Map::new();
     for col in row.columns() {
-        let val = match col.oid {
+        let name = col.name();
+        let val = match col.type_().oid() {
             // INT4 = 23
-            23 => match row.try_get::<i32>(&col.name) {
+            23 => match row.try_get::<_, i32>(name) {
                 Ok(v) => Value::Number(v.into()),
                 Err(_) => Value::Null,
             },
             // INT8 = 20
-            20 => match row.try_get::<i64>(&col.name) {
+            20 => match row.try_get::<_, i64>(name) {
                 Ok(v) => Value::Number(v.into()),
                 Err(_) => Value::Null,
             },
             // BOOL = 16
-            16 => match row.try_get::<bool>(&col.name) {
+            16 => match row.try_get::<_, bool>(name) {
                 Ok(v) => Value::Bool(v),
                 Err(_) => Value::Null,
             },
             // JSONB = 3802 — binary format has 1-byte version prefix, strip it
-            3802 => match row.raw_value(&col.name) {
+            3802 => match row.raw_value(name) {
                 Some(bytes) if bytes.len() > 1 => {
                     let json_str = std::str::from_utf8(&bytes[1..]).unwrap_or("null");
                     serde_json::from_str(json_str).unwrap_or(Value::Null)
@@ -96,12 +103,15 @@ fn row_to_json(row: &zeroship_pg::Row) -> Value {
                 _ => Value::Null,
             },
             // JSON = 114 — text format, no prefix
-            114 => match row.try_get::<String>(&col.name) {
-                Ok(s) => serde_json::from_str(&s).unwrap_or(Value::String(s)),
+            114 => match row.try_get::<_, String>(name) {
+                Ok(s) => {
+                    let parsed = serde_json::from_str(&s).ok();
+                    parsed.unwrap_or(Value::String(s))
+                }
                 Err(_) => Value::Null,
             },
             // TIMESTAMPTZ = 1184 — read raw, return as number
-            1184 => match row.raw_value(&col.name) {
+            1184 => match row.raw_value(name) {
                 Some(bytes) if bytes.len() == 8 => {
                     let pg_usec = i64::from_be_bytes(bytes.try_into().unwrap());
                     let unix_ms = pg_usec / 1_000 + 946_684_800_000;
@@ -110,12 +120,12 @@ fn row_to_json(row: &zeroship_pg::Row) -> Value {
                 _ => Value::Null,
             },
             // Everything else → String
-            _ => match row.try_get::<String>(&col.name) {
+            _ => match row.try_get::<_, String>(name) {
                 Ok(v) => Value::String(v),
                 Err(_) => Value::Null,
             },
         };
-        obj.insert(col.name.clone(), val);
+        obj.insert(name.to_string(), val);
     }
     Value::Object(obj)
 }
@@ -338,7 +348,7 @@ async fn delete_operations() {
     let bq = build_count(SCHEMA, "notes", &json!({})).unwrap();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
-    assert_eq!(rows[0].get::<i64>("count"), 4);
+    assert_eq!(rows[0].get::<_, i64>("count"), 4);
 
     // Delete many remaining food
     let bq = build_delete_many(SCHEMA, "notes", &json!({"category": "food"})).unwrap();
@@ -349,7 +359,7 @@ async fn delete_operations() {
     let bq = build_count(SCHEMA, "notes", &json!({})).unwrap();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
-    assert_eq!(rows[0].get::<i64>("count"), 2);
+    assert_eq!(rows[0].get::<_, i64>("count"), 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -571,13 +581,13 @@ async fn count_with_filter() {
     let bq = build_count(SCHEMA, "notes", &json!({})).unwrap();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
-    assert_eq!(rows[0].get::<i64>("count"), 3);
+    assert_eq!(rows[0].get::<_, i64>("count"), 3);
 
     // Count with filter
     let bq = build_count(SCHEMA, "notes", &json!({"category": "tech"})).unwrap();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
-    assert_eq!(rows[0].get::<i64>("count"), 2);
+    assert_eq!(rows[0].get::<_, i64>("count"), 2);
 }
 
 // ---------------------------------------------------------------------------
