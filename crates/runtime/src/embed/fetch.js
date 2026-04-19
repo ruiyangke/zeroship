@@ -459,6 +459,14 @@
 
   applyBodyMixin(Response.prototype);
 
+  // Tag the prototype so Rust can classify a value as "shaped like a Response"
+  // via one property read instead of probing `status` + `headers` (two reads,
+  // two string interns) on every async RPC settlement. Any object that derives
+  // from Response.prototype (polyfill, `new Response`, async-generator wrap)
+  // inherits `__zsResponse === 1`; plain handler returns (objects, primitives)
+  // don't. See `http::looks_like_response`.
+  Response.prototype.__zsResponse = 1;
+
   Response.error = function() {
     var resp = Object.create(Response.prototype);
     resp.status = 0;

@@ -114,3 +114,33 @@ fn method_not_found_errors() {
     ).unwrap_err();
     assert!(err.contains("Method not found"), "got: {}", err);
 }
+
+#[test]
+fn plain_object_with_status_is_not_response() {
+    // Regression guard for the `__zsResponse` prototype tag: a handler
+    // return shaped like `{ status, url }` (e.g. `fetchExternal`) must be
+    // JSON-encoded verbatim, NOT fed into the Response inspection path.
+    // The old two-probe heuristic (`status` + `headers`) paid two V8
+    // property reads on every async RPC settlement because this shape
+    // passed the first probe; the tag-based check rejects it in one read.
+    let r = dispatch(m(r#"
+        export async function fetchLike() {
+            return { status: 200, url: "http://example.com" };
+        }
+    "#), "fetchLike", "[]").unwrap();
+    assert_eq!(r.json, r#"{"status":200,"url":"http://example.com"}"#);
+}
+
+#[test]
+fn user_returned_response_passes_through() {
+    // A user-constructed `new Response(...)` still goes through the
+    // HTTP inspection path (the tag is on `Response.prototype`). The
+    // dispatch_rpc path collapses Complete responses to their body
+    // so we see the body string verbatim.
+    let r = dispatch(m(r#"
+        export function respond() {
+            return new Response("hello", { status: 200 });
+        }
+    "#), "respond", "[]").unwrap();
+    assert_eq!(r.json, "hello");
+}

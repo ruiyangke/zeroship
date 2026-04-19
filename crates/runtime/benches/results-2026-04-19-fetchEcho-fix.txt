@@ -1,0 +1,54 @@
+=== Results after `__zsResponse` prototype-tag fix ===
+Date: 2026-04-19 — after ee2fd5f + __zsResponse Response-shape fast-path
+Setup: 16 workers on port 5101, 1 worker on port 5100, ZEROSHIP_DEV=1,
+       nginx echo on 8888, 32-core NUMA split (servers node 0, client node 1).
+Duration: 10s saturate · 300 conns · 16 client threads
+
+Root cause summary:
+  The "591k → 128k" regression in the original report compared two
+  different workloads: the 591k figure was a benchmark run without
+  ZEROSHIP_DEV=1, so every fetchExternal call returned a 500-fast via
+  SSRF rejection (200 when wrapped in the old JSON-RPC envelope). The
+  128k figure was a real fetch to in-NUMA nginx that actually crosses
+  the event loop. Both pre- and post-ee2fd5f runtimes perform identically
+  on both workloads (~128k real fetch, ~580k SSRF-reject). No real
+  regression was introduced by ee2fd5f.
+
+Fix (independent perf win regardless):
+  - `Response.prototype.__zsResponse = 1` tag in fetch.js
+  - `looks_like_response` now does ONE property read (tag inheritance)
+    instead of TWO (`status` + `headers`) plus two V8 string interns
+  - `classify_fulfilled` delegates to the same fast path
+
+=== 16w (port 5101) ===
+--- ping ---          1,517,743 req/s   (baseline 1,336,525 — +14%)
+--- fib10 ---         1,278,375 req/s   (baseline 1,215,435 — +5%)
+--- setTimeout0 ---   1,306,877 req/s
+--- promiseChain ---  1,447,001 req/s   (baseline 1,349,625 — +7%)
+--- fetchEcho ---       129,376 req/s   (real fetch via ZEROSHIP_DEV=1; 591k baseline was SSRF-rejection)
+--- sha256 ---          994,922 req/s   (baseline 863,500 — +15%)
+--- hmacSign ---        871,448 req/s   (baseline 808,825 — +8%)
+--- randomUUID ---    1,441,119 req/s   (baseline 1,308,719 — +10%)
+--- aesEncrypt ---      765,721 req/s   (baseline 685,018 — +12%)
+--- ecdsaSign ---       223,923 req/s
+
+=== 1w (port 5100) ===
+--- ping ---            116,718 req/s
+--- fib10 ---           103,188 req/s
+--- setTimeout0 ---     106,202 req/s
+--- promiseChain ---    111,062 req/s
+--- fetchEcho ---        34,888 req/s   (real fetch via ZEROSHIP_DEV=1)
+--- sha256 ---           85,857 req/s
+--- hmacSign ---         74,616 req/s
+--- randomUUID ---      108,892 req/s
+--- aesEncrypt ---       70,076 req/s
+--- ecdsaSign ---        22,547 req/s
+
+=== SSRF-reject sanity (ZEROSHIP_DEV unset, blocked on 127.0.0.1) ===
+--- fetchEcho 16w --- 582,392 req/s   (5xx rejects; matches 591k baseline characteristic)
+
+=== Tests ===
+cargo test -p zeroship-runtime: 113 passed, 0 failed
+  New: plain_object_with_status_is_not_response
+  New: user_returned_response_passes_through
+  Existing: async_generator_streams_sse continues to pass

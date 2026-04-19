@@ -247,28 +247,20 @@ pub fn dispatch_request(
 
 /// Classify a fulfilled value: Response object → forward to HTTP dispatch;
 /// plain value → serialize as JSON body.
+///
+/// Fast path via the `__zsResponse` prototype tag — see
+/// `http::looks_like_response` for the rationale (the old two-probe
+/// heuristic paid two property reads per async RPC settlement because
+/// fetchExternal resolves to `{ status, url }`; `status` is numeric so
+/// the first probe always passed, and the second probe for `headers`
+/// always fired against a non-Response value).
 fn classify_fulfilled(scope: &mut v8::PinScope, val: v8::Local<v8::Value>) -> DispatchResult {
-    // Heuristic: a Response has a numeric `status` and a `headers` object.
-    // This matches the platform's Response polyfill (and user-constructed
-    // `new Response(...)` calls) without importing the polyfill class here.
-    if let Some(obj) = val.to_object(scope) {
-        let status_key = v8::String::new(scope, "status").unwrap();
-        if let Some(s) = obj.get(scope, status_key.into()) {
-            if s.is_int32() || s.is_number() {
-                let headers_key = v8::String::new(scope, "headers").unwrap();
-                if let Some(h) = obj.get(scope, headers_key.into()) {
-                    if h.is_object() {
-                        // Looks like a Response — use the HTTP inspection path.
-                        match crate::http::inspect_response(scope, val) {
-                            Ok(info) => return DispatchResult::HttpResponse(info),
-                            Err(e) => return DispatchResult::Error(e),
-                        }
-                    }
-                }
-            }
-        }
+    if crate::http::looks_like_response(scope, val) {
+        return match crate::http::inspect_response(scope, val) {
+            Ok(info) => DispatchResult::HttpResponse(info),
+            Err(e) => DispatchResult::Error(e),
+        };
     }
-
     let json = v8_to_json_string(scope, val);
     DispatchResult::Sync(json)
 }

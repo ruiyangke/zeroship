@@ -195,17 +195,28 @@ pub fn extract_response_headers(scope: &mut v8::PinScope, response_obj: v8::Loca
     result
 }
 
-/// Heuristic test for a V8 value that behaves like a `Response`.
-/// Matches the polyfill's shape (numeric `status` + `headers` object)
-/// without holding a reference to the polyfill's constructor.
+/// Fast test for a V8 value produced by the Response polyfill.
+///
+/// The polyfill tags `Response.prototype` with `__zsResponse = 1` (see
+/// `embed/fetch.js`). Any instance — user-constructed, async-generator
+/// wrap, `Response.json/error/redirect` — inherits the tag. Plain handler
+/// returns (`{ status, url }`, primitives, arrays) don't.
+///
+/// One property read per async RPC settlement. The previous probe did two
+/// reads (`status` + `headers`) plus two V8 string interns on every call,
+/// which showed up in `perf` under fetch-heavy load because fetchExternal
+/// resolves to `{ status, url }` — `status` is numeric, so the first read
+/// passed and the second always fired. V8's inline cache turns the single
+/// lookup into a hidden-class check after warmup.
 pub fn looks_like_response(scope: &mut v8::PinScope, val: v8::Local<v8::Value>) -> bool {
+    // Fast reject: primitives and null can't inherit a prototype tag.
+    if !val.is_object() { return false; }
     let Some(obj) = val.to_object(scope) else { return false; };
-    let status_key = v8::String::new(scope, "status").unwrap();
-    let Some(s) = obj.get(scope, status_key.into()) else { return false; };
-    if !(s.is_int32() || s.is_number()) { return false; }
-    let headers_key = v8::String::new(scope, "headers").unwrap();
-    let Some(h) = obj.get(scope, headers_key.into()) else { return false; };
-    h.is_object()
+    let key = v8::String::new(scope, "__zsResponse").unwrap();
+    match obj.get(scope, key.into()) {
+        Some(v) => v.is_true() || v.uint32_value(scope) == Some(1),
+        None => false,
+    }
 }
 
 /// Extract the result of a settled promise, branching on RPC vs HTTP.
