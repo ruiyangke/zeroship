@@ -1,15 +1,15 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use uuid::Uuid;
 
 use zeroship_core::types::AppRuntimeLimits;
 use zeroship_runtime::plugin::NativePlugin;
-use zeroship_runtime::runtime::{Runtime, RuntimeHandle, RuntimeLimits};
+use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
 
 struct IsolateEntry {
-    handle: RuntimeHandle,
+    runtime: Runtime,
     last_used: std::time::Instant,
 }
 
@@ -36,28 +36,22 @@ pub fn init_cache(max_size: usize, db_url: Option<String>) {
 }
 
 /// Create plugins for a new Runtime.
-fn create_plugins() -> Vec<Box<dyn NativePlugin>> {
-    let mut plugins: Vec<Box<dyn NativePlugin>> = Vec::new();
-    if DB_URL.with(|u| u.borrow().is_some()) {
-        let plugin = zeroship_plugin_db::DbPlugin::new();
-        let config = std::sync::Arc::new(zeroship_runtime::plugin::PluginConfig {
-            db_url: DB_URL.with(|u| u.borrow().clone()),
-            ..Default::default()
-        });
-        plugin.init(&config);
-        plugins.push(Box::new(plugin));
+fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
+    if let Some(url) = DB_URL.with(|u| u.borrow().clone()) {
+        vec![Arc::new(zeroship_plugin_db::DbPlugin::new(url))]
+    } else {
+        vec![]
     }
-    plugins
 }
 
 /// Get or create a V8 runtime for an app. Returns None if the app isn't loaded.
-pub fn get_runtime(app_id: &Uuid) -> Option<RuntimeHandle> {
+pub fn get_runtime(app_id: &Uuid) -> Option<Runtime> {
     CACHE.with(|c| {
         let mut cache = c.borrow_mut();
         let cache = cache.as_mut()?;
         if let Some(entry) = cache.isolates.get_mut(app_id) {
             entry.last_used = std::time::Instant::now();
-            Some(entry.handle.clone())
+            Some(entry.runtime.clone())
         } else {
             None
         }
@@ -65,7 +59,7 @@ pub fn get_runtime(app_id: &Uuid) -> Option<RuntimeHandle> {
 }
 
 pub fn get_limits(app_id: &Uuid) -> Option<RuntimeLimits> {
-    get_runtime(app_id).map(|handle| handle.limits())
+    get_runtime(app_id).map(|runtime| runtime.limits())
 }
 
 /// Load an app from bundle bytes. Creates V8 runtime + starts pump task.
@@ -96,21 +90,18 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8], app_limits: AppRuntimeLimits)
         env_vars.insert("APP_ID".to_string(), app_id.to_string());
 
         let limits = runtime_limits_from_app(&app_limits);
-        let rt = Rc::new(RefCell::new(Runtime::new_with_plugins(
-            modules.clone(),
-            env_vars,
-            limits.cpu_limit,
-            limits.wall_timeout,
-            limits.heap_limit_bytes,
-            plugins,
-        )));
-        let handle = RuntimeHandle::new(rt.clone(), limits, modules);
+        let runtime = Runtime::builder()
+            .modules(modules)
+            .env_vars(env_vars)
+            .limits(limits)
+            .plugins(plugins)
+            .build();
 
-        // Warmup (isolate is entered after new_direct)
+        // Warmup (isolate is entered after build())
         {
-            let result = rt
-                .borrow_mut()
-                .dispatch_rpc(handle.modules(), r#"{"jsonrpc":"2.0","method":"__ping","params":[],"id":0}"#);
+            let result = runtime.dispatch_rpc(
+                r#"{"jsonrpc":"2.0","method":"__ping","params":[],"id":0}"#,
+            );
             if let Err(e) = &result {
                 eprintln!("[worker] warmup warning for {app_id}: {e}");
             }
@@ -118,14 +109,14 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8], app_limits: AppRuntimeLimits)
 
         // Exit isolate so other isolates can be created/entered on this thread.
         // The handler will enter/exit around each dispatch_rpc call.
-        rt.borrow_mut().exit_isolate();
+        runtime.exit_isolate();
 
         // Start pump task for async V8 ops (timers, fetch, streams).
-        Runtime::start_pump(rt.clone());
+        runtime.start_pump();
         cache.isolates.insert(
             app_id,
             IsolateEntry {
-                handle,
+                runtime,
                 last_used: std::time::Instant::now(),
             },
         );

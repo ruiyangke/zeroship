@@ -1,11 +1,8 @@
 //! End-to-end test: real npm app → .appbundle → V8 execution
 
-mod common;
-
 use zeroship_runtime::bundle::{AppBundle, ModuleType};
 use zeroship_runtime::init_v8;
 use zeroship_runtime::runtime::Runtime;
-use std::collections::HashMap;
 
 /// Load the esbuild-bundled JS at compile time
 const BUNDLED_JS: &str = include_str!("/tmp/test-app/dist/bundled.js");
@@ -57,15 +54,15 @@ fn execute_real_app_from_bundle() {
     
     // Load into V8 and execute
     init_v8();
-    let mut runtime = Runtime::new_direct(entries.clone(), HashMap::new(), None, None);
+    let runtime = Runtime::builder().modules(entries).build();
     
     // Test ping
-    let r = runtime.dispatch_rpc(&entries, r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":1}"#).unwrap();
+    let r = runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":1}"#).unwrap();
     assert!(r.json.contains("pong"), "ping failed: {}", r.json);
     eprintln!("  ping: OK");
     
     // Test createUser with zod validation
-    let r = runtime.dispatch_rpc(&entries,
+    let r = runtime.dispatch_rpc(
         r#"{"jsonrpc":"2.0","method":"createUser","params":["Alice","alice@example.com",30],"id":2}"#
     ).unwrap();
     eprintln!("  createUser: {}", &r.json[..80.min(r.json.len())]);
@@ -73,14 +70,14 @@ fn execute_real_app_from_bundle() {
     assert!(r.json.contains("id"), "createUser should return id: {}", r.json);
     
     // Test validateUser (zod validation — invalid email)
-    let r = runtime.dispatch_rpc(&entries,
+    let r = runtime.dispatch_rpc(
         r#"{"jsonrpc":"2.0","method":"validateUser","params":[{"name":"Bob","email":"not-email","age":25}],"id":3}"#
     ).unwrap();
     eprintln!("  validateUser (invalid): {}", &r.json[..80.min(r.json.len())]);
     assert!(r.json.contains("false") || r.json.contains("error"), "validation should fail: {}", r.json);
     
     // Test listUsers (lodash sortBy)
-    let r = runtime.dispatch_rpc(&entries,
+    let r = runtime.dispatch_rpc(
         r#"{"jsonrpc":"2.0","method":"listUsers","params":[],"id":4}"#
     ).unwrap();
     eprintln!("  listUsers: {}", &r.json[..80.min(r.json.len())]);
@@ -222,15 +219,15 @@ fn execute_multi_module_from_bundle() {
     
     // Execute in V8
     init_v8();
-    let mut runtime = Runtime::new_direct(entries.clone(), HashMap::new(), None, None);
+    let runtime = Runtime::builder().modules(entries).build();
     
-    let r = runtime.dispatch_rpc(&entries, r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":1}"#).unwrap();
+    let r = runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":1}"#).unwrap();
     assert!(r.json.contains("pong"));
     
-    let r = runtime.dispatch_rpc(&entries, r#"{"jsonrpc":"2.0","method":"compute","params":[21],"id":2}"#).unwrap();
+    let r = runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"compute","params":[21],"id":2}"#).unwrap();
     assert!(r.json.contains("42"), "compute(21) should be 42: {}", r.json);
     
-    let r = runtime.dispatch_rpc(&entries, r#"{"jsonrpc":"2.0","method":"hello","params":["World"],"id":3}"#).unwrap();
+    let r = runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"hello","params":["World"],"id":3}"#).unwrap();
     assert!(r.json.contains("Hello, World!"), "hello should greet: {}", r.json);
     
     eprintln!("  multi-module from bundle: all functions working");

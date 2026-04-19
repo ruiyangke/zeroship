@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use zeroship_core::auth::{extract_bearer, validate_control_key, verify_hmac_sha256_hex};
 use zeroship_runtime::runtime::DispatchOutcome;
-use zeroship_runtime::{ResultReceiver, RuntimeHandle, StreamReader};
+use zeroship_runtime::{Runtime, ResultReceiver, StreamReader};
 
 use crate::{cache, metrics, WorkerConfig};
 
@@ -66,7 +66,7 @@ async fn recv_with_timeout<T>(
     rx: &ResultReceiver<T>,
     timeout: std::time::Duration,
     cancel: &zeroship_runtime::CancelFlag,
-    handle: &RuntimeHandle,
+    runtime: &Runtime,
 ) -> Option<T> {
     let recv = rx.recv().fuse();
     let sleep = compio::time::sleep(timeout).fuse();
@@ -75,14 +75,14 @@ async fn recv_with_timeout<T>(
         result = recv => Some(result),
         _ = sleep => {
             cancel.cancel();
-            handle.notify_pump();
+            runtime.notify_pump();
             None
         }
     }
 }
 
-fn wall_limit(handle: &RuntimeHandle) -> std::time::Duration {
-    handle
+fn wall_limit(runtime: &Runtime) -> std::time::Duration {
+    runtime
         .wall_timeout()
         .unwrap_or(std::time::Duration::from_secs(30))
 }
@@ -125,14 +125,13 @@ pub async fn http_dispatch(
         }
     }
 
-    let handle = match cache::get_runtime(&app_id) {
-        Some(handle) => handle,
+    let runtime = match cache::get_runtime(&app_id) {
+        Some(r) => r,
         None => {
             return HttpResponse::NotFound()
                 .body(format!(r#"{{"error":"app {app_id} not loaded"}}"#));
         }
     };
-    let runtime = handle.runtime();
 
     metrics::inc(&metrics::DISPATCH_HTTP_TOTAL);
 
@@ -165,17 +164,15 @@ pub async fn http_dispatch(
 
     // Phase 1: Enter isolate, start HTTP dispatch
     let outcome = {
-        let mut rt = runtime.borrow_mut();
-        rt.enter_isolate();
-        let o = rt.dispatch_http(
-            handle.modules(),
+        runtime.enter_isolate();
+        let o = runtime.dispatch_http(
             &envelope.method,
             &envelope.url,
             &headers_json,
             &envelope.body,
             user_json,
         );
-        rt.exit_isolate();
+        runtime.exit_isolate();
         o
     };
 
@@ -188,7 +185,7 @@ pub async fn http_dispatch(
             stream_response(status, &headers, reader)
         }
         DispatchOutcome::HttpPending { rx, cancel } => {
-            match recv_with_timeout(&rx, wall_limit(&handle), &cancel, &handle).await {
+            match recv_with_timeout(&rx, wall_limit(&runtime), &cancel, &runtime).await {
                 Some(Ok(zeroship_runtime::HttpDispatchResult::Complete { status, headers, body, .. })) => {
                     make_http_response(status, headers, body)
                 }
@@ -260,14 +257,13 @@ pub async fn dispatch(
         }
     }
 
-    let handle = match cache::get_runtime(&app_id) {
-        Some(handle) => handle,
+    let runtime = match cache::get_runtime(&app_id) {
+        Some(r) => r,
         None => {
             return HttpResponse::NotFound()
                 .body(format!(r#"{{"error":"app {app_id} not loaded"}}"#));
         }
     };
-    let runtime = handle.runtime();
 
     metrics::inc(&metrics::DISPATCH_RPC_TOTAL);
 
@@ -283,10 +279,9 @@ pub async fn dispatch(
 
     // Phase 1: Enter isolate, start dispatch (may return sync or async)
     let outcome = {
-        let mut rt = runtime.borrow_mut();
-        rt.enter_isolate();
-        let o = rt.dispatch_start(handle.modules(), &body, user_json);
-        rt.exit_isolate();
+        runtime.enter_isolate();
+        let o = runtime.dispatch_start(&body, user_json);
+        runtime.exit_isolate();
         o
     };
 
@@ -300,7 +295,7 @@ pub async fn dispatch(
         DispatchOutcome::Pending { rx, cancel } => {
             // Async — the pump task will resolve the promise.
             // We yield to compio until the result arrives.
-            match recv_with_timeout(&rx, wall_limit(&handle), &cancel, &handle).await {
+            match recv_with_timeout(&rx, wall_limit(&runtime), &cancel, &runtime).await {
                 Some(Ok(r)) => make_response(r.json, r.cpu_time.as_secs_f64() * 1000.0),
                 Some(Err(e)) => make_error(&e),
                 None => make_error("request timed out"),
@@ -315,7 +310,7 @@ pub async fn dispatch(
             stream_response(status, &headers, reader)
         }
         DispatchOutcome::HttpPending { rx, cancel } => {
-            match recv_with_timeout(&rx, wall_limit(&handle), &cancel, &handle).await {
+            match recv_with_timeout(&rx, wall_limit(&runtime), &cancel, &runtime).await {
                 Some(Ok(zeroship_runtime::HttpDispatchResult::Complete { status, headers, body, .. })) => {
                     make_http_response(status, headers, body)
                 }

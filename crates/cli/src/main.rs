@@ -6,8 +6,11 @@
 //!   zeroship serve   <file-or-dir> [--port=3000] [--workers=0]
 //!   zeroship deploy  <dir-or-file> --app=<id> [--control=URL] [--key=KEY]
 
-use zeroship_bundle::{AppBundle, ModuleType, ModuleEntry};
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use zeroship_bundle::{AppBundle, ModuleType, ModuleEntry};
+use zeroship_runtime::NativePlugin;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -315,6 +318,17 @@ fn cmd_serve(args: &[String]) {
 
     eprintln!("[zeroship] Starting server on port {port}");
 
+    // Opt-in db plugin: when DATABASE_URL is set, register the db plugin
+    // so JS `zeroship.db.*` works in the dev path (e.g. `vite-plugin` spawns
+    // `zeroship serve` with DATABASE_URL forwarded from `.env`).
+    let mut plugins: Vec<Arc<dyn NativePlugin>> = Vec::new();
+    if let Ok(url) = std::env::var("DATABASE_URL") {
+        if !url.is_empty() {
+            plugins.push(Arc::new(zeroship_plugin_db::DbPlugin::new(url)));
+            eprintln!("[zeroship] db plugin registered (DATABASE_URL set)");
+        }
+    }
+
     zeroship_runtime::serve::start_server(
         modules,
         zeroship_runtime::serve::ServerOptions {
@@ -322,6 +336,7 @@ fn cmd_serve(args: &[String]) {
             workers,
             cpu_limit,
             wall_timeout,
+            plugins,
         },
     );
 }

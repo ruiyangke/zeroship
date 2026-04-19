@@ -64,5 +64,6 @@ fn main() {
         workers: num_workers,
         cpu_limit,
         wall_timeout,
+        ..Default::default()
     });
 }

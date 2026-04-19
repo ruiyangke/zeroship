@@ -6579,6 +6579,7 @@ dependencies = [
  "serde_json",
  "zeroship-bundle",
  "zeroship-compiler",
+ "zeroship-plugin-db",
  "zeroship-runtime",
 ]
 

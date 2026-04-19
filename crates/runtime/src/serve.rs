@@ -19,12 +19,14 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::task::Waker;
 use std::time::Duration;
 
 use crate::init::init_v8;
 use crate::modules::ModuleEntry;
-use crate::runtime::{DispatchOutcome, HttpDispatchResult, Runtime, RuntimeHandle, RuntimeLimits};
+use crate::plugin::NativePlugin;
+use crate::runtime::{DispatchOutcome, HttpDispatchResult, Runtime, RuntimeLimits};
 
 use compio::buf::BufResult;
 use compio::io::{AsyncRead, AsyncWriteExt};
@@ -37,7 +39,7 @@ use futures::{pin_mut, FutureExt};
 // ===========================================================================
 
 /// Configuration for the compio HTTP server.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ServerOptions {
     pub port: u16,
     /// Number of worker threads. 0 = auto-detect from available parallelism.
@@ -46,6 +48,22 @@ pub struct ServerOptions {
     pub cpu_limit: Option<Duration>,
     /// Per-request wall-clock timeout.
     pub wall_timeout: Option<Duration>,
+    /// Native plugins to register on each worker's `zeroship.*` namespace.
+    /// Each worker thread gets its own `Runtime`, so each plugin instance
+    /// is cloned (via `Arc`) into every worker.
+    pub plugins: Vec<Arc<dyn NativePlugin>>,
+}
+
+impl std::fmt::Debug for ServerOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerOptions")
+            .field("port", &self.port)
+            .field("workers", &self.workers)
+            .field("cpu_limit", &self.cpu_limit)
+            .field("wall_timeout", &self.wall_timeout)
+            .field("plugins", &self.plugins.len())
+            .finish()
+    }
 }
 
 impl Default for ServerOptions {
@@ -55,6 +73,7 @@ impl Default for ServerOptions {
             workers: 0,
             cpu_limit: None,
             wall_timeout: None,
+            plugins: Vec::new(),
         }
     }
 }
@@ -89,6 +108,7 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
             options.cpu_limit,
             options.wall_timeout,
             modules,
+            options.plugins,
         );
     } else {
         eprintln!("[zeroship] {num_workers} workers on port {}", options.port);
@@ -98,10 +118,19 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
             let cpu_limit = options.cpu_limit;
             let wall_timeout = options.wall_timeout;
             let port = options.port;
+            let worker_plugins = options.plugins.clone();
             let handle = std::thread::Builder::new()
                 .name(format!("worker-{i}"))
                 .spawn(move || {
-                    run_single_worker(port, true, Some(i), cpu_limit, wall_timeout, worker_modules);
+                    run_single_worker(
+                        port,
+                        true,
+                        Some(i),
+                        cpu_limit,
+                        wall_timeout,
+                        worker_modules,
+                        worker_plugins,
+                    );
                 })
                 .unwrap();
             handles.push(handle);
@@ -119,7 +148,7 @@ async fn recv_with_timeout<T>(
     rx: &crate::channel::ResultReceiver<T>,
     timeout: Option<Duration>,
     cancel: &crate::channel::CancelFlag,
-    handle: &RuntimeHandle,
+    handle: &Runtime,
 ) -> Option<T> {
     if let Some(limit) = timeout {
         let recv = rx.recv().fuse();
@@ -190,9 +219,8 @@ const MAX_CONNECTION_BUFFER_BYTES: usize = MAX_HEADER_BYTES + MAX_BODY_BYTES + 4
 
 async fn handle_connection(
     mut stream: TcpStream,
-    handle: RuntimeHandle,
+    runtime: Runtime,
 ) {
-    let runtime = handle.runtime();
     let mut data = Vec::with_capacity(8192);
     let mut read_buf = Vec::with_capacity(4096);
 
@@ -311,14 +339,14 @@ async fn handle_connection(
 
             let total_len = total_input_consumed;
 
-            let has_http = runtime.borrow().has_http_handler();
+            let has_http = runtime.has_http_handler();
             match (method, path) {
                 ("GET", "/health") => {
                     let BufResult(write_result, _) = stream.write_all(HEALTH_RESPONSE.to_vec()).await;
                     if write_result.is_err() { return; }
                 }
                 ("POST", "/rpc") => {
-                    let response_bytes = dispatch_rpc(body_bytes, &handle).await;
+                    let response_bytes = dispatch_rpc(body_bytes, &runtime).await;
                     let BufResult(write_result, _) = stream.write_all(response_bytes).await;
                     if write_result.is_err() { return; }
                 }
@@ -347,7 +375,7 @@ async fn handle_connection(
                     );
 
                     let wrote_ok = dispatch_http(
-                        &mut stream, method, &full_url, &headers_json, body_str, &handle,
+                        &mut stream, method, &full_url, &headers_json, body_str, &runtime,
                         &raw_headers,
                     ).await;
                     if !wrote_ok { return; }
@@ -651,18 +679,17 @@ fn collect_headers_json(headers: &[httparse::Header<'_>]) -> String {
 
 async fn dispatch_rpc(
     body_bytes: &[u8],
-    handle: &RuntimeHandle,
+    runtime: &Runtime,
 ) -> Vec<u8> {
     let body_str = match std::str::from_utf8(body_bytes) {
         Ok(s) => s,
         Err(_) => return SERVICE_UNAVAILABLE.to_vec(),
     };
 
-    let runtime = handle.runtime();
     // Standalone server has no gateway in front of it, so no authenticated
     // user is forwarded. Passing `None` makes `zeroship.auth.getUser()`
     // return null — consistent with anonymous access.
-    let outcome = runtime.borrow_mut().dispatch_start(handle.modules(), body_str, None);
+    let outcome = runtime.dispatch_start(body_str, None);
 
     match outcome {
         DispatchOutcome::Complete(Ok(result)) => {
@@ -672,7 +699,7 @@ async fn dispatch_rpc(
             build_json_response(&format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\"")))
         }
         DispatchOutcome::Pending { rx, cancel } => {
-            match recv_with_timeout(&rx, handle.wall_timeout(), &cancel, handle).await {
+            match recv_with_timeout(&rx, runtime.wall_timeout(), &cancel, runtime).await {
                 Some(Ok(r)) => build_json_response(&r.json),
                 Some(Err(e)) => {
                     let escaped = e.replace('"', "\\\"");
@@ -700,13 +727,10 @@ async fn dispatch_http(
     url: &str,
     headers_json: &str,
     body: &str,
-    handle: &RuntimeHandle,
+    runtime: &Runtime,
     request_headers: &[(String, String)],
 ) -> bool {
-    let runtime = handle.runtime();
-    let outcome = runtime.borrow_mut().dispatch_http(
-        handle.modules(), method, url, headers_json, body, None,
-    );
+    let outcome = runtime.dispatch_http(method, url, headers_json, body, None);
 
     match outcome {
         DispatchOutcome::HttpComplete { status, headers, body, logs: _ } => {
@@ -717,7 +741,7 @@ async fn dispatch_http(
         DispatchOutcome::HttpStream { status, headers, body, logs: _ } => {
             // Notify the pump that there may be new async tasks (e.g. timers
             // from an async ReadableStream start() callback).
-            runtime.borrow_mut().notify_pump();
+            runtime.notify_pump();
 
             let header_bytes = build_stream_response_headers(status, &headers);
             let BufResult(r, _) = stream.write_all(header_bytes).await;
@@ -726,7 +750,7 @@ async fn dispatch_http(
             stream_chunked_body(stream, body).await
         }
         DispatchOutcome::HttpPending { rx, cancel } => {
-            let result = recv_with_timeout(&rx, handle.wall_timeout(), &cancel, handle).await;
+            let result = recv_with_timeout(&rx, runtime.wall_timeout(), &cancel, runtime).await;
 
             match result {
                 Some(Ok(HttpDispatchResult::Complete { status, headers, body, logs: _ })) => {
@@ -741,7 +765,7 @@ async fn dispatch_http(
                     stream_chunked_body(stream, body).await
                 }
                 Some(Ok(HttpDispatchResult::WebSocket { ws_id, headers, logs: _ })) => {
-                    handle_websocket_upgrade(stream, ws_id, &headers, request_headers, &runtime).await
+                    handle_websocket_upgrade(stream, ws_id, &headers, request_headers, runtime).await
                 }
                 Some(Err(e)) => {
                     let body = format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\""));
@@ -768,7 +792,7 @@ async fn dispatch_http(
             r.is_ok()
         }
         DispatchOutcome::WebSocketUpgrade { ws_id, headers } => {
-            handle_websocket_upgrade(stream, ws_id, &headers, request_headers, &runtime).await
+            handle_websocket_upgrade(stream, ws_id, &headers, request_headers, runtime).await
         }
         DispatchOutcome::Pending { .. } => {
             let response = build_http_response(500, &[], r#"{"error":"Unexpected pending state"}"#);
@@ -938,7 +962,7 @@ async fn handle_websocket_upgrade(
     ws_id: u32,
     response_headers: &[(String, String)],
     request_headers: &[(String, String)],
-    runtime: &Rc<RefCell<Runtime>>,
+    runtime: &Runtime,
 ) -> bool {
     // Find the Sec-WebSocket-Key from request headers
     let ws_key = request_headers
@@ -962,7 +986,7 @@ async fn handle_websocket_upgrade(
 
     // Find the server-side WebSocket ID (the peer of ws_id, which is the client side)
     let server_ws_id = {
-        let state = runtime.borrow().state().clone();
+        let state = runtime.state();
         let s = state.borrow();
         s.websockets.get(&ws_id).and_then(|ws| ws.peer_id).unwrap_or(0)
     };
@@ -973,7 +997,7 @@ async fn handle_websocket_upgrade(
 
     // Grab the notification handles for this WebSocket's outgoing queue.
     let (outgoing_ready, pump_waker) = {
-        let state = runtime.borrow().state().clone();
+        let state = runtime.state();
         let s = state.borrow();
         if let Some(ws) = s.websockets.get(&server_ws_id) {
             (ws.outgoing_ready.clone(), ws.pump_waker.clone())
@@ -999,7 +1023,7 @@ async fn handle_websocket_upgrade(
         let mut got_close = false;
         loop {
             let msg = {
-                let state = runtime.borrow().state().clone();
+                let state = runtime.state();
                 let mut s = state.borrow_mut();
                 match s.websockets.get_mut(&server_ws_id) {
                     Some(ws) => ws.outgoing.pop_front(),
@@ -1128,24 +1152,13 @@ impl<F: std::future::Future<Output = Option<(u8, Vec<u8>)>>> std::future::Future
 }
 
 /// Enter V8 to call `ws._onMessage(data)` on the server WebSocket.
-fn deliver_ws_message(
-    runtime: &Rc<RefCell<Runtime>>,
-    ws_id: u32,
-    data: &str,
-) {
-    let mut rt = runtime.borrow_mut();
-    rt.enter_v8_for_ws_message(ws_id, data);
+fn deliver_ws_message(runtime: &Runtime, ws_id: u32, data: &str) {
+    runtime.enter_v8_for_ws_message(ws_id, data);
 }
 
 /// Enter V8 to call `ws._onClose(code, reason)` on the server WebSocket.
-fn deliver_ws_close(
-    runtime: &Rc<RefCell<Runtime>>,
-    ws_id: u32,
-    code: u16,
-    reason: &str,
-) {
-    let mut rt = runtime.borrow_mut();
-    rt.enter_v8_for_ws_close(ws_id, code, reason);
+fn deliver_ws_close(runtime: &Runtime, ws_id: u32, code: u16, reason: &str) {
+    runtime.enter_v8_for_ws_close(ws_id, code, reason);
 }
 
 // ===========================================================================
@@ -1182,6 +1195,7 @@ fn run_single_worker(
     cpu_limit: Option<Duration>,
     wall_timeout: Option<Duration>,
     modules: Vec<ModuleEntry>,
+    plugins: Vec<Arc<dyn NativePlugin>>,
 ) {
     compio::runtime::RuntimeBuilder::new()
         .build()
@@ -1203,19 +1217,20 @@ fn run_single_worker(
                 eprintln!("[zeroship] http://0.0.0.0:{port}");
             }
 
-            let runtime = Rc::new(RefCell::new(
-                Runtime::new_direct(modules.clone(), HashMap::new(), cpu_limit, wall_timeout),
-            ));
-            let handle = RuntimeHandle::new(runtime.clone(), RuntimeLimits {
-                cpu_limit,
-                wall_timeout,
-                heap_limit_bytes: None,
-            }, modules);
+            let runtime = Runtime::builder()
+                .modules(modules)
+                .env_vars(HashMap::new())
+                .limits(RuntimeLimits {
+                    cpu_limit,
+                    wall_timeout,
+                    heap_limit_bytes: None,
+                })
+                .plugins(plugins)
+                .build();
 
             // Warmup
             {
-                let result = runtime.borrow_mut().dispatch_rpc(
-                    handle.modules(),
+                let result = runtime.dispatch_rpc(
                     r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":0}"#,
                 );
                 if let Err(e) = result {
@@ -1224,12 +1239,12 @@ fn run_single_worker(
             }
 
             // Start the async event loop pump (timers, fetch, streams).
-            Runtime::start_pump(runtime.clone());
+            runtime.start_pump();
 
             // Accept loop
             loop {
                 let (stream, _addr) = listener.accept().await.unwrap();
-                let rt = handle.clone();
+                let rt = runtime.clone();
                 compio::runtime::spawn(handle_connection(stream, rt)).detach();
             }
         });

@@ -13,10 +13,9 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use compio_postgres::{Client, Pool};
-use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar, PluginConfig};
+use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 
 pub mod callbacks;
 pub mod query;
@@ -29,7 +28,7 @@ thread_local! {
     /// Connection pool — created lazily on first DB operation.
     pub(crate) static DB_POOL: RefCell<Option<Rc<Pool>>> = const { RefCell::new(None) };
 
-    /// Database URL — set during `init()`, consumed on first pool creation.
+    /// Database URL — poisoned during `register()`, consumed on first pool creation.
     pub(crate) static DB_URL: RefCell<Option<String>> = const { RefCell::new(None) };
 
     /// Registered models — keyed by "app_id:collection". Prevents redundant DDL
@@ -74,12 +73,12 @@ pub(crate) fn ensure_pool(scope: &mut v8::PinScope<'_, '_>) -> Option<()> {
     // But Pool::connect is async. We can't block here in a V8 callback.
     // The pool must be created before V8 callbacks run.
     //
-    // If we reach here, init() was not called or the URL was not set.
+    // If we reach here, the URL was not set at plugin register-time.
     let has_url = DB_URL.with(|u| u.borrow().is_some());
     if !has_url {
         let msg = v8::String::new(
             scope,
-            "db: not configured — set db_url in PluginConfig",
+            "db: not configured — pass a URL to DbPlugin::new()",
         )
         .unwrap();
         let exc = v8::Exception::error(scope, msg);
@@ -105,7 +104,9 @@ pub(crate) fn ensure_pool(scope: &mut v8::PinScope<'_, '_>) -> Option<()> {
 // ---------------------------------------------------------------------------
 
 /// The database plugin — registers `zeroship.db.*` methods.
-pub struct DbPlugin;
+pub struct DbPlugin {
+    url: String,
+}
 
 impl std::fmt::Debug for DbPlugin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -116,14 +117,8 @@ impl std::fmt::Debug for DbPlugin {
 impl DbPlugin {
     /// Create a new `DbPlugin` instance.
     #[must_use]
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for DbPlugin {
-    fn default() -> Self {
-        Self::new()
+    pub fn new(url: impl Into<String>) -> Self {
+        Self { url: url.into() }
     }
 }
 
@@ -136,13 +131,12 @@ impl NativePlugin for DbPlugin {
         "database"
     }
 
-    fn init(&self, config: &Arc<PluginConfig>) {
-        if let Some(url) = &config.db_url {
-            DB_URL.with(|u| *u.borrow_mut() = Some(url.clone()));
-        }
-    }
-
     fn register(&self, r: &mut NativeRegistrar) {
+        // Poison the URL thread-local so `ensure_pool_initialized`
+        // (invoked lazily on first callback) can find it. `register()`
+        // may fire multiple times per thread in multi-tenant workers —
+        // idempotent overwrite is intentional.
+        DB_URL.with(|u| *u.borrow_mut() = Some(self.url.clone()));
         r.add("findOne", callbacks::find_one);
         r.add("find", callbacks::find);
         r.add("insert", callbacks::insert);
@@ -160,23 +154,20 @@ impl NativePlugin for DbPlugin {
         r.add("commitTransaction", callbacks::commit_transaction);
         r.add("rollbackTransaction", callbacks::rollback_transaction);
     }
-
-    fn shutdown(&self) {
-        DB_POOL.with(|p| p.borrow_mut().take());
-        DB_URL.with(|u| u.borrow_mut().take());
-    }
 }
 
 /// Initialize the connection pool asynchronously.
 ///
 /// Must be called on the compio runtime thread BEFORE any JS execution.
-/// Typically called after `plugin.init(config)` but before the isolate
-/// starts processing requests.
+/// Typically called after the plugin has been registered on a Runtime but
+/// before the isolate starts processing requests.
 ///
 /// ```ignore
-/// let plugin = DbPlugin::new();
-/// plugin.init(&config);
-/// zeroship_plugin_db::init_pool_async().await;
+/// // Inside a compio runtime:
+/// let runtime = Runtime::builder()
+///     .plugin(DbPlugin::new(url))
+///     .build();
+/// zeroship_plugin_db::init_pool_async().await?;
 /// // Now safe to run JS that calls zeroship.db.*
 /// ```
 pub async fn init_pool_async() -> Result<(), String> {

@@ -1,6 +1,3 @@
-mod common;
-use common::*;
-
 use zeroship_runtime::{init_v8, ModuleEntry};
 use zeroship_runtime::runtime::{Runtime, DispatchOutcome};
 
@@ -18,9 +15,9 @@ fn on_request_basic() {
             }
         "#.into(),
     }];
-    let mut runtime = Runtime::new_direct(modules.clone(), no_env(), None, None);
+    let runtime = Runtime::builder().modules(modules.clone()).build();
 
-    let (status, _headers, body) = match runtime.dispatch_http(&modules, "GET", "http://localhost/hello", "[]", "", None) {
+    let (status, _headers, body) = match runtime.dispatch_http("GET", "http://localhost/hello", "[]", "", None) {
         DispatchOutcome::HttpComplete { status, headers, body, .. } => (status, headers, body),
         _ => panic!("expected HttpComplete"),
     };
@@ -40,14 +37,14 @@ fn on_request_with_rpc() {
             }
         "#.into(),
     }];
-    let mut runtime = Runtime::new_direct(modules.clone(), no_env(), None, None);
+    let runtime = Runtime::builder().modules(modules.clone()).build();
 
     // RPC still works
-    let rpc = runtime.dispatch_rpc(&modules, r#"{"jsonrpc":"2.0","method":"add","params":[3,4],"id":1}"#).unwrap();
+    let rpc = runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"add","params":[3,4],"id":1}"#).unwrap();
     assert!(rpc.json.contains("7"));
 
     // HTTP also works
-    match runtime.dispatch_http(&modules, "GET", "http://localhost/", "[]", "", None) {
+    match runtime.dispatch_http("GET", "http://localhost/", "[]", "", None) {
         DispatchOutcome::HttpComplete { status, body, .. } => {
             assert_eq!(status, 200);
             assert!(body.contains("HTTP handler"));
@@ -63,8 +60,8 @@ fn no_on_request_returns_error() {
         specifier: "index.js".into(),
         source: "export function ping() { return 'pong'; }".into(),
     }];
-    let mut runtime = Runtime::new_direct(modules.clone(), no_env(), None, None);
-    match runtime.dispatch_http(&modules, "GET", "http://localhost/", "[]", "", None) {
+    let runtime = Runtime::builder().modules(modules.clone()).build();
+    match runtime.dispatch_http("GET", "http://localhost/", "[]", "", None) {
         DispatchOutcome::Complete(Err(e)) => assert!(e.contains("No onRequest")),
         _ => panic!("expected error"),
     }
@@ -81,8 +78,8 @@ fn on_request_async() {
             }
         "#.into(),
     }];
-    let mut runtime = Runtime::new_direct(modules.clone(), no_env(), None, None);
-    match runtime.dispatch_http(&modules, "GET", "http://localhost/", "[]", "", None) {
+    let runtime = Runtime::builder().modules(modules.clone()).build();
+    match runtime.dispatch_http("GET", "http://localhost/", "[]", "", None) {
         DispatchOutcome::HttpComplete { status, body, .. } => {
             assert_eq!(status, 201);
             assert!(body.contains("async response"));
@@ -106,8 +103,8 @@ fn url_in_http_handler() {
             }
         "#.into(),
     }];
-    let mut runtime = Runtime::new_direct(modules.clone(), no_env(), None, None);
-    match runtime.dispatch_http(&modules, "GET", "http://localhost/hello?name=world", "[]", "", None) {
+    let runtime = Runtime::builder().modules(modules.clone()).build();
+    match runtime.dispatch_http("GET", "http://localhost/hello?name=world", "[]", "", None) {
         DispatchOutcome::HttpComplete { status, body, .. } => {
             assert_eq!(status, 200);
             assert!(body.contains("\"path\":\"/hello\""), "got: {}", body);
@@ -138,8 +135,8 @@ fn streaming_http_response_sync() {
             }
         "#.into(),
     }];
-    let mut runtime = Runtime::new_direct(modules.clone(), no_env(), None, None);
-    match runtime.dispatch_http(&modules, "GET", "http://localhost/events", "[]", "", None) {
+    let runtime = Runtime::builder().modules(modules.clone()).build();
+    match runtime.dispatch_http("GET", "http://localhost/events", "[]", "", None) {
         DispatchOutcome::HttpComplete { status, body, .. } => {
             assert_eq!(status, 200);
             assert!(body.contains("data: event 0"), "got: {}", body);

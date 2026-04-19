@@ -8,43 +8,25 @@
 
 use std::sync::Arc;
 
-/// Configuration passed to plugins during init.
-/// Contains worker-level config (DB URL, storage path, etc.)
-#[derive(Debug, Clone)]
-pub struct PluginConfig {
-    /// Postgres connection URL (for database plugins).
-    pub db_url: Option<String>,
-    /// JWT secret (for auth plugins).
-    pub jwt_secret: Option<String>,
-    /// Storage path or S3 URL (for storage plugins).
-    pub storage_url: Option<String>,
-    /// Arbitrary key-value config for custom plugins.
-    pub extra: std::collections::HashMap<String, String>,
-}
-
-impl Default for PluginConfig {
-    fn default() -> Self {
-        Self {
-            db_url: None,
-            jwt_secret: None,
-            storage_url: None,
-            extra: std::collections::HashMap::new(),
-        }
-    }
-}
-
 /// A native extension that registers functions on `zeroship.{namespace}.*`.
 ///
 /// Plugins are the extension mechanism for the runtime. Each plugin:
 /// 1. Declares a namespace ("db", "auth", "storage", "kv")
-/// 2. Initializes per-thread resources in `init()` (connection pools, caches)
-/// 3. Registers V8 callbacks in `register()` (called per-isolate)
+/// 2. Registers V8 callbacks in `register()` and poisons any thread-local
+///    state it owns (e.g. connection URLs) from `&self` there.
 ///
 /// Callbacks access:
 /// - `app_id` → from `scope.get_slot::<SharedState>()` → `state.app_id`
 /// - `meter`  → from `scope.get_slot::<SharedState>()` → `state.meter`
-/// - resources → from `thread_local!` (pools, caches — set in `init()`)
-pub trait NativePlugin: Send + Sync {
+/// - resources → from `thread_local!` (pools, caches — initialized lazily
+///   on first callback via async bootstrap; see `plugin-db` for the pattern)
+///
+/// `Send + Sync + 'static` are needed so plugins can live inside an
+/// `Arc<dyn NativePlugin>` that crosses worker-thread boundaries in the
+/// multi-worker `start_server` path. Plugin authors virtually always
+/// satisfy these naturally (URLs, simple structs) — the bound is explicit
+/// here so the compiler catches the rare plugin that can't.
+pub trait NativePlugin: Send + Sync + 'static {
     /// Namespace under `zeroship.*`. Must be a valid JS identifier.
     /// Examples: "db", "auth", "storage", "kv"
     fn namespace(&self) -> &str;
@@ -54,15 +36,12 @@ pub trait NativePlugin: Send + Sync {
         self.namespace()
     }
 
-    /// Called once per worker thread. Set up thread-local resources
-    /// (connection pools, caches). Can do async I/O.
-    fn init(&self, config: &Arc<PluginConfig>);
-
-    /// Called once per V8 isolate. Register functions on `zeroship.{namespace}`.
-    fn register(&self, registrar: &mut NativeRegistrar);
-
-    /// Called on worker shutdown. Close connections, flush buffers.
-    fn shutdown(&self) {}
+    /// Called once per Runtime, on the thread that will own it.
+    /// Plugins register V8 callbacks here. Plugins that keep thread-local
+    /// resources may initialize them here — the same thread may see
+    /// `register()` fire repeatedly as multiple Runtimes are constructed
+    /// on it (one per app in multi-tenant workers). Init must be idempotent.
+    fn register(&self, r: &mut NativeRegistrar);
 }
 
 /// Collects function registrations from a plugin.
@@ -109,7 +88,7 @@ impl NativeRegistrar {
 /// Creates `globalThis.zeroship = { db: { ... }, ... }` with plugin namespaces.
 /// Does NOT freeze — call `freeze_zeroship()` after adding any built-in
 /// namespaces (e.g. `auth`).
-pub(crate) fn register_plugins(scope: &mut v8::PinScope, plugins: &[Box<dyn NativePlugin>]) {
+pub(crate) fn register_plugins(scope: &mut v8::PinScope, plugins: &[Arc<dyn NativePlugin>]) {
     let global = scope.get_current_context().global(scope);
 
     // Always create the zeroship namespace (built-ins like auth need it even

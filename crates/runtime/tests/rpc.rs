@@ -38,9 +38,9 @@ fn per_request_cpu() {
             return f(n);
         }
     "#);
-    let mut runtime = Runtime::new_direct(modules.clone(), no_env(), None, None);
-    let r1 = runtime.dispatch_rpc(&modules, r#"{"jsonrpc":"2.0","method":"fib","params":[20],"id":1}"#).unwrap();
-    let r2 = runtime.dispatch_rpc(&modules, r#"{"jsonrpc":"2.0","method":"fib","params":[35],"id":2}"#).unwrap();
+    let runtime = Runtime::builder().modules(modules).build();
+    let r1 = runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"fib","params":[20],"id":1}"#).unwrap();
+    let r2 = runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"fib","params":[35],"id":2}"#).unwrap();
     assert!(r2.cpu_time > r1.cpu_time * 5);
 }
 

@@ -24,8 +24,8 @@
 //! ## 2. Deploys drop in-flight requests on the old isolate
 //!
 //! `cache.rs::load_app` removes the old `IsolateEntry` before inserting
-//! the new one. In-flight requests holding a `RuntimeHandle` still see
-//! their `Rc<RefCell<Runtime>>` alive (so they complete on the OLD
+//! the new one. In-flight requests holding a `Runtime` handle still see
+//! their `Rc<RefCell<RuntimeInner>>` alive (so they complete on the OLD
 //! isolate), but there's no versioned cache that says "route new traffic
 //! to v2 while v1 drains". Zero-downtime deploys require a versioned
 //! isolate map + per-version router, which isn't wired in yet.
@@ -61,9 +61,10 @@
 //!
 //! ## Async dispatch architecture
 //!
-//! V8 is single-threaded. Multiple compio connection tasks share one Runtime
-//! via `Rc<RefCell<Runtime>>`. The key constraint: the RefCell borrow must
-//! NEVER be held across an `.await` point.
+//! V8 is single-threaded. Multiple compio connection tasks share one
+//! `Runtime` handle (which wraps `Rc<RefCell<RuntimeInner>>`). The key
+//! constraint: the RefCell borrow must NEVER be held across an `.await`
+//! point.
 //!
 //! **Sync handlers** (ping, fib, uuid): `dispatch_start` returns
 //! `DispatchOutcome::Complete` — the connection handler gets the result
@@ -82,6 +83,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::stream::FuturesUnordered;
@@ -89,6 +91,7 @@ use futures::stream::FuturesUnordered;
 use crate::init::{init_v8, load_polyfills_and_modules, RequestResult};
 use crate::http::{self, ResponseInfo, SettledResult, HTTP_CREATE_REQUEST_JS};
 use crate::modules::ModuleEntry;
+use crate::plugin::NativePlugin;
 use crate::state::{
     DispatchResult, OpResult, RuntimeState, SharedState, SpawnedTimer, TimerResult,
 };
@@ -239,43 +242,227 @@ pub struct RuntimeLimits {
     pub heap_limit_bytes: Option<usize>,
 }
 
+// ---------------------------------------------------------------------------
+// Runtime — the public handle
+// ---------------------------------------------------------------------------
+
+/// Public handle to a V8 isolate + its async pump.
+///
+/// Cheap to clone; every clone points at the same underlying isolate. All
+/// dispatch methods take `&self` and borrow the inner `RefCell` internally
+/// — callers never see the `Rc<RefCell<_>>` layout, and hot-path accessors
+/// (`limits`, `modules`) read the outer struct directly without borrowing.
+///
+/// Construct via `Runtime::builder()`.
 #[derive(Clone)]
-pub struct RuntimeHandle {
-    runtime: Rc<RefCell<Runtime>>,
+pub struct Runtime {
+    inner: Rc<RefCell<RuntimeInner>>,
     limits: RuntimeLimits,
     modules: Rc<Vec<ModuleEntry>>,
 }
 
-impl RuntimeHandle {
-    pub fn new(runtime: Rc<RefCell<Runtime>>, limits: RuntimeLimits, modules: Vec<ModuleEntry>) -> Self {
-        Self {
-            runtime,
-            limits,
-            modules: Rc::new(modules),
-        }
+impl Runtime {
+    /// Start building a new `Runtime`. See [`RuntimeBuilder`].
+    pub fn builder() -> RuntimeBuilder {
+        RuntimeBuilder::default()
     }
 
-    pub fn runtime(&self) -> Rc<RefCell<Runtime>> {
-        self.runtime.clone()
-    }
+    // ---- Borrow-free hot-path accessors ---------------------------------
 
+    /// Effective runtime limits (cpu/wall/heap). Immutable snapshot.
     pub fn limits(&self) -> RuntimeLimits {
         self.limits
     }
 
+    /// Per-request wall-clock timeout, if configured.
     pub fn wall_timeout(&self) -> Option<Duration> {
         self.limits.wall_timeout
+    }
+
+    /// Per-request CPU time limit, if configured.
+    pub fn cpu_limit(&self) -> Option<Duration> {
+        self.limits.cpu_limit
+    }
+
+    /// Module list this runtime was built with.
+    pub fn modules(&self) -> &[ModuleEntry] {
+        self.modules.as_ref().as_slice()
     }
 
     /// Wake the pump task immediately. Callers use this after flipping a
     /// request's cancel flag so the pump runs `cleanup_cancelled_requests`
     /// on the next cycle instead of waiting for an unrelated event.
     pub fn notify_pump(&self) {
-        self.runtime.borrow().notify_pump();
+        self.inner.borrow().notify_pump();
     }
 
-    pub fn modules(&self) -> &[ModuleEntry] {
-        self.modules.as_ref().as_slice()
+    // ---- Methods that enter V8 — borrow internally -----------------------
+
+    /// Dispatch a JSON-RPC request synchronously. See
+    /// [`RuntimeInner::dispatch_rpc`] for details.
+    pub fn dispatch_rpc(&self, body: &str) -> Result<RequestResult, String> {
+        let modules = self.modules.clone();
+        self.inner.borrow_mut().dispatch_rpc(modules.as_slice(), body)
+    }
+
+    /// Phase 1 dispatch — returns immediately with an outcome describing
+    /// whether the handler completed synchronously, is pending on the pump,
+    /// or errored.
+    pub fn dispatch_start(
+        &self,
+        body: &str,
+        user_json: Option<String>,
+    ) -> DispatchOutcome {
+        let modules = self.modules.clone();
+        self.inner
+            .borrow_mut()
+            .dispatch_start(modules.as_slice(), body, user_json)
+    }
+
+    /// HTTP dispatch — calls the JS `onRequest` handler.
+    pub fn dispatch_http(
+        &self,
+        method: &str,
+        url: &str,
+        headers_json: &str,
+        body: &str,
+        user_json: Option<String>,
+    ) -> DispatchOutcome {
+        let modules = self.modules.clone();
+        self.inner.borrow_mut().dispatch_http(
+            modules.as_slice(),
+            method,
+            url,
+            headers_json,
+            body,
+            user_json,
+        )
+    }
+
+    /// Returns true if the app exports an `onRequest` HTTP handler.
+    pub fn has_http_handler(&self) -> bool {
+        self.inner.borrow().has_http_handler()
+    }
+
+    /// Enter the V8 isolate on this thread. Multi-tenant workers that keep
+    /// several isolates per thread MUST call `enter_isolate` before each
+    /// `dispatch_*` and `exit_isolate` after. Single-isolate callers can
+    /// ignore — `dispatch_*` tolerates nested enter/exit.
+    pub fn enter_isolate(&self) {
+        self.inner.borrow_mut().enter_isolate();
+    }
+
+    /// Exit the V8 isolate. See [`Runtime::enter_isolate`].
+    pub fn exit_isolate(&self) {
+        self.inner.borrow_mut().exit_isolate();
+    }
+
+    /// Deliver a WebSocket text/binary message into V8.
+    pub fn enter_v8_for_ws_message(&self, ws_id: u32, data: &str) {
+        self.inner.borrow_mut().enter_v8_for_ws_message(ws_id, data);
+    }
+
+    /// Deliver a WebSocket close into V8.
+    pub fn enter_v8_for_ws_close(&self, ws_id: u32, code: u16, reason: &str) {
+        self.inner.borrow_mut().enter_v8_for_ws_close(ws_id, code, reason);
+    }
+
+    /// Access the shared runtime state. The borrow is brief; callers must
+    /// not hold it across `.await`.
+    pub fn state(&self) -> SharedState {
+        self.inner.borrow().state().clone()
+    }
+
+    /// Start the internal event-loop pump. Must be called once after
+    /// `build()` — on a compio runtime thread — before dispatch is driven.
+    ///
+    /// Clones `self` internally; callers don't need to juggle `Rc<RefCell>`.
+    pub fn start_pump(&self) {
+        RuntimeInner::start_pump(self.inner.clone());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RuntimeBuilder
+// ---------------------------------------------------------------------------
+
+/// Builder for [`Runtime`]. All fields are optional.
+#[derive(Default)]
+pub struct RuntimeBuilder {
+    modules: Vec<ModuleEntry>,
+    env_vars: HashMap<String, String>,
+    limits: RuntimeLimits,
+    plugins: Vec<Arc<dyn NativePlugin>>,
+}
+
+impl RuntimeBuilder {
+    /// Set the module list. See [`Runtime::modules`].
+    pub fn modules(mut self, m: Vec<ModuleEntry>) -> Self {
+        self.modules = m;
+        self
+    }
+
+    /// Set the per-app environment variables (exposed as `process.env.*`).
+    pub fn env_vars(mut self, e: HashMap<String, String>) -> Self {
+        self.env_vars = e;
+        self
+    }
+
+    /// Set the full limits struct.
+    pub fn limits(mut self, l: RuntimeLimits) -> Self {
+        self.limits = l;
+        self
+    }
+
+    /// Shorthand: set only the CPU limit.
+    pub fn cpu_limit(mut self, d: Duration) -> Self {
+        self.limits.cpu_limit = Some(d);
+        self
+    }
+
+    /// Shorthand: set only the wall timeout.
+    pub fn wall_timeout(mut self, d: Duration) -> Self {
+        self.limits.wall_timeout = Some(d);
+        self
+    }
+
+    /// Shorthand: set only the heap limit (bytes).
+    pub fn heap_limit_bytes(mut self, n: usize) -> Self {
+        self.limits.heap_limit_bytes = Some(n);
+        self
+    }
+
+    /// Register one plugin. Order matters only for namespace collisions
+    /// (last-wins), which plugins should avoid in practice.
+    pub fn plugin<P: NativePlugin>(mut self, p: P) -> Self {
+        self.plugins.push(Arc::new(p));
+        self
+    }
+
+    /// Replace the plugin list wholesale.
+    pub fn plugins(mut self, ps: Vec<Arc<dyn NativePlugin>>) -> Self {
+        self.plugins = ps;
+        self
+    }
+
+    /// Build the runtime. Panics on V8 init failure (same as the underlying
+    /// `v8::Isolate::new` call — not newly fallible here).
+    pub fn build(self) -> Runtime {
+        let limits = self.limits;
+        let modules_rc = Rc::new(self.modules);
+        let inner = RuntimeInner::new_with_plugins(
+            modules_rc.as_ref().clone(),
+            self.env_vars,
+            limits.cpu_limit,
+            limits.wall_timeout,
+            limits.heap_limit_bytes,
+            self.plugins,
+        );
+        Runtime {
+            inner: Rc::new(RefCell::new(inner)),
+            limits,
+            modules: modules_rc,
+        }
     }
 }
 
@@ -322,8 +509,9 @@ macro_rules! enter_v8 {
 /// A V8 isolate driven by a compio event loop.
 ///
 /// Owns the isolate and all associated state. Must be run on a single thread
-/// because V8 types are `!Send`.
-pub struct Runtime {
+/// because V8 types are `!Send`. This is the inner type — the public handle
+/// is [`Runtime`], which wraps `Rc<RefCell<RuntimeInner>>`.
+pub(crate) struct RuntimeInner {
     pub(crate) isolate: v8::OwnedIsolate,
     pub(crate) context: v8::Global<v8::Context>,
     pub(crate) dispatch_fn: Option<v8::Global<v8::Function>>,
@@ -334,7 +522,7 @@ pub struct Runtime {
     pub(crate) initialized: bool,
     pub(crate) state: SharedState,
     /// Plugins registered on zeroship.* namespace.
-    plugins: Vec<Box<dyn crate::plugin::NativePlugin>>,
+    plugins: Vec<Arc<dyn NativePlugin>>,
 
     /// Stream forwarders: stream_id -> StreamForwarder for outbound HTTP streams.
     stream_forwarders: HashMap<u32, StreamForwarder>,
@@ -349,7 +537,10 @@ pub struct Runtime {
 
     /// Optional per-request CPU time limit.
     cpu_limit: Option<Duration>,
-    /// Optional per-request wall time limit.
+    /// Optional per-request wall time limit. The outer `Runtime.limits`
+    /// exposes this to external callers; the inner copy stays for
+    /// symmetry with `cpu_limit` and for future dispatch-internal uses.
+    #[allow(dead_code)]
     wall_timeout: Option<Duration>,
 
     /// POSIX CPU timer — kills V8 on CPU limit exceeded (Linux only).
@@ -370,13 +561,13 @@ pub struct Runtime {
     pump_wall_start: Instant,
 }
 
-// `Runtime` is intentionally *not* `Send`.
+// `RuntimeInner` is intentionally *not* `Send`.
 //
 // It owns a `v8::OwnedIsolate` (thread-bound) plus `Rc`/`RefCell` state that
 // `SharedState` shares with V8 callbacks. Nothing in the current codebase
-// attempts to move a `Runtime` across threads — workers create one per ntex
-// thread, the pump runs on the same thread, and `RuntimeHandle` only ever
-// wraps `Rc<RefCell<Runtime>>` (itself `!Send`).
+// attempts to move a `RuntimeInner` across threads — workers create one per
+// ntex thread, the pump runs on the same thread, and the public `Runtime`
+// handle only ever wraps `Rc<RefCell<RuntimeInner>>` (itself `!Send`).
 //
 // A previous revision carried `unsafe impl Send for Runtime {}` "for API
 // compat". That impl was unused and only weakened the type system's ability
@@ -384,26 +575,16 @@ pub struct Runtime {
 // If a new executor ever needs `Send`, switch to channel-based ownership
 // transfer instead of re-adding this impl.
 
-impl Runtime {
-    /// Create a new `Runtime` in direct-dispatch mode (no channel).
-    pub fn new_direct(
-        _modules: Vec<ModuleEntry>,
-        env_vars: HashMap<String, String>,
-        cpu_limit: Option<Duration>,
-        wall_timeout: Option<Duration>,
-    ) -> Self {
-        Self::new_with_plugins(_modules, env_vars, cpu_limit, wall_timeout, None, Vec::new())
-    }
-
+impl RuntimeInner {
     /// Create a new runtime with plugins.
     /// Plugins register native functions on `zeroship.{namespace}.*`.
-    pub fn new_with_plugins(
+    fn new_with_plugins(
         _modules: Vec<ModuleEntry>,
         env_vars: HashMap<String, String>,
         cpu_limit: Option<Duration>,
         wall_timeout: Option<Duration>,
         heap_limit_bytes: Option<usize>,
-        plugins: Vec<Box<dyn crate::plugin::NativePlugin>>,
+        plugins: Vec<Arc<dyn NativePlugin>>,
     ) -> Self {
         init_v8();
 
@@ -495,7 +676,8 @@ impl Runtime {
     }
 
     /// Exit the V8 isolate so another isolate can be entered on this thread.
-    /// Must be called after `new_direct` when storing multiple runtimes.
+    /// Must be called after `Runtime::builder().build()` when storing
+    /// multiple runtimes on one thread.
     /// # Safety
     /// The isolate must not be used between `exit_isolate` and `enter_isolate`.
     pub fn exit_isolate(&mut self) {
@@ -519,16 +701,6 @@ impl Runtime {
         self.pump_notify_tx = Some(tx);
     }
 
-    /// Optional per-request CPU time limit.
-    pub fn cpu_limit(&self) -> Option<Duration> {
-        self.cpu_limit
-    }
-
-    /// Optional per-request wall time limit.
-    pub fn wall_timeout(&self) -> Option<Duration> {
-        self.wall_timeout
-    }
-
     /// Wake the pump task so it can drain newly added work.
     pub fn notify_pump(&self) {
         if let Some(tx) = &self.pump_notify_tx {
@@ -540,10 +712,10 @@ impl Runtime {
     /// processes async V8 operations (timers, fetch, streams) until the
     /// runtime is dropped.
     ///
-    /// Must be called **after** the runtime is wrapped in `Rc<RefCell<>>`
-    /// and the isolate is initialised (i.e. after `new_direct` /
-    /// `new_with_plugins`).
-    pub fn start_pump(self_ref: Rc<RefCell<Self>>) {
+    /// Must be called **after** the isolate is wrapped in `Rc<RefCell<>>`
+    /// (handled by `Runtime::build`). Prefer calling `Runtime::start_pump`
+    /// on the public handle — it hides the `Rc<RefCell<_>>` plumbing.
+    pub(crate) fn start_pump(self_ref: Rc<RefCell<Self>>) {
         let (notify_tx, notify_rx) = futures::channel::mpsc::channel::<()>(1);
         {
             let mut rt = self_ref.borrow_mut();
@@ -1715,6 +1887,7 @@ impl Runtime {
     }
 
     /// Returns true if there are pending async requests.
+    #[allow(dead_code)]
     pub fn has_pending_requests(&self) -> bool {
         !self.pending_requests.is_empty()
     }
