@@ -6,6 +6,7 @@
 //! The V8 scope IS the context — callbacks read app_id and meter from
 //! RuntimeState (via scope slot), and per-thread resources from thread_local.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// A native extension that registers functions on `zeroship.{namespace}.*`.
@@ -95,6 +96,11 @@ pub(crate) fn register_plugins(scope: &mut v8::PinScope, plugins: &[Arc<dyn Nati
     // when no plugins are registered).
     let zeroship = v8::Object::new(scope);
 
+    // Track registered namespaces so a second plugin claiming the same slot
+    // can't silently overwrite the first (callbacks would vanish at runtime
+    // with no error). Platform misconfiguration should fail loud.
+    let mut seen: HashSet<String> = HashSet::new();
+
     for plugin in plugins {
         let ns_name = plugin.namespace();
         debug_assert!(
@@ -103,6 +109,14 @@ pub(crate) fn register_plugins(scope: &mut v8::PinScope, plugins: &[Arc<dyn Nati
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
             "plugin namespace must be lowercase alphanumeric: {ns_name}"
         );
+
+        if !seen.insert(ns_name.to_string()) {
+            panic!(
+                "plugin namespace collision: '{}' registered by two plugins (second was '{}')",
+                ns_name,
+                plugin.name()
+            );
+        }
 
         // Collect registrations from the plugin (no V8 scope needed)
         let mut registrar = NativeRegistrar::new();

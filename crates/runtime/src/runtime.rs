@@ -301,8 +301,9 @@ impl Runtime {
     /// Dispatch a JSON-RPC request synchronously. See
     /// [`RuntimeInner::dispatch_rpc`] for details.
     pub fn dispatch_rpc(&self, body: &str) -> Result<RequestResult, String> {
-        let modules = self.modules.clone();
-        self.inner.borrow_mut().dispatch_rpc(modules.as_slice(), body)
+        self.inner
+            .borrow_mut()
+            .dispatch_rpc(self.modules.as_slice(), body)
     }
 
     /// Phase 1 dispatch — returns immediately with an outcome describing
@@ -313,10 +314,9 @@ impl Runtime {
         body: &str,
         user_json: Option<String>,
     ) -> DispatchOutcome {
-        let modules = self.modules.clone();
         self.inner
             .borrow_mut()
-            .dispatch_start(modules.as_slice(), body, user_json)
+            .dispatch_start(self.modules.as_slice(), body, user_json)
     }
 
     /// HTTP dispatch — calls the JS `onRequest` handler.
@@ -328,9 +328,8 @@ impl Runtime {
         body: &str,
         user_json: Option<String>,
     ) -> DispatchOutcome {
-        let modules = self.modules.clone();
         self.inner.borrow_mut().dispatch_http(
-            modules.as_slice(),
+            self.modules.as_slice(),
             method,
             url,
             headers_json,
@@ -432,8 +431,8 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Register one plugin. Order matters only for namespace collisions
-    /// (last-wins), which plugins should avoid in practice.
+    /// Register one plugin. Two plugins sharing a namespace will panic at
+    /// Runtime construction — see [`register_plugins`](crate::plugin).
     pub fn plugin<P: NativePlugin>(mut self, p: P) -> Self {
         self.plugins.push(Arc::new(p));
         self
@@ -451,7 +450,6 @@ impl RuntimeBuilder {
         let limits = self.limits;
         let modules_rc = Rc::new(self.modules);
         let inner = RuntimeInner::new_with_plugins(
-            modules_rc.as_ref().clone(),
             self.env_vars,
             limits.cpu_limit,
             limits.wall_timeout,
@@ -579,7 +577,6 @@ impl RuntimeInner {
     /// Create a new runtime with plugins.
     /// Plugins register native functions on `zeroship.{namespace}.*`.
     fn new_with_plugins(
-        _modules: Vec<ModuleEntry>,
         env_vars: HashMap<String, String>,
         cpu_limit: Option<Duration>,
         wall_timeout: Option<Duration>,

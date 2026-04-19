@@ -136,7 +136,22 @@ impl NativePlugin for DbPlugin {
         // (invoked lazily on first callback) can find it. `register()`
         // may fire multiple times per thread in multi-tenant workers —
         // idempotent overwrite is intentional.
-        DB_URL.with(|u| *u.borrow_mut() = Some(self.url.clone()));
+        //
+        // Invariant: in today's production each worker thread hosts a single
+        // DB URL, so the `different` branch is a no-op. It exists for the
+        // multi-URL-per-thread case: when two DbPlugin instances with
+        // distinct URLs register on the same thread, we must drop any
+        // previously-created pool so `init_pool_async` / `ensure_pool`
+        // build a fresh one for the new URL instead of silently aliasing
+        // the first pool to the second URL.
+        DB_URL.with(|u| {
+            let mut cell = u.borrow_mut();
+            let different = cell.as_deref() != Some(self.url.as_str());
+            if different {
+                *cell = Some(self.url.clone());
+                DB_POOL.with(|p| *p.borrow_mut() = None);
+            }
+        });
         r.add("findOne", callbacks::find_one);
         r.add("find", callbacks::find);
         r.add("insert", callbacks::insert);
