@@ -1,0 +1,125 @@
+=== Building ===
+    Finished `release` profile [optimized] target(s) in 0.29s
+=== Starting servers (NUMA node 0) ===
+[echo-server] http://0.0.0.0:8888
+[v8-server-compio] appbundle: 5801 -> 1891 bytes (33% ratio)
+[v8-server-compio] appbundle: 5801 -> 1891 bytes (33% ratio)
+[zeroship] 16 workers on port 5101
+[zeroship] http://0.0.0.0:5100
+[zeroship] worker 5 ready on port 5101
+[zeroship] worker 2 ready on port 5101
+[zeroship] worker 0 ready on port 5101
+[zeroship] worker 1 ready on port 5101
+[zeroship] worker 3 ready on port 5101
+[zeroship] worker 4 ready on port 5101
+[zeroship] worker 10 ready on port 5101
+[zeroship] worker 6 ready on port 5101
+[zeroship] worker 7 ready on port 5101
+[zeroship] worker 9 ready on port 5101
+[zeroship] worker 11 ready on port 5101
+[zeroship] worker 8 ready on port 5101
+[zeroship] worker 13 ready on port 5101
+[zeroship] worker 12 ready on port 5101
+[zeroship] worker 14 ready on port 5101
+[zeroship] worker 15 ready on port 5101
+[node-cluster] 16 workers on port 4003 (Node.js v22.22.2)
+[node] http://0.0.0.0:4002 (Node.js v22.22.2)
+[node] http://0.0.0.0:4003 (Node.js v22.22.2)
+[node] http://0.0.0.0:4003 (Node.js v22.22.2)
+[node] http://0.0.0.0:4003 (Node.js v22.22.2)
+[node] http://0.0.0.0:4003 (Node.js v22.22.2)
+[node] http://0.0.0.0:4003 (Node.js v22.22.2)
+[node] http://0.0.0.0:4003 (Node.js v22.22.2)
+[node] http://0.0.0.0:4003 (Node.js v22.22.2)
+[node] http://0.0.0.0:4003 (Node.js v22.22.2)
+[node] http://0.0.0.0:4003 (Node.js v22.22.2)
+[node] http://0.0.0.0:4003 (Node.js v22.22.2)
+[node] http://0.0.0.0:4003 (Node.js v22.22.2)
+[node] http://0.0.0.0:4003 (Node.js v22.22.2)
+[node] http://0.0.0.0:4003 (Node.js v22.22.2)
+[node] http://0.0.0.0:4003 (Node.js v22.22.2)
+[node] http://0.0.0.0:4003 (Node.js v22.22.2)
+[node] http://0.0.0.0:4003 (Node.js v22.22.2)
+All servers ready.
+
+=================================================================
+  zeroship Runtime Benchmark
+  2026-04-16 | 32 logical cores | x86_64
+  NUMA split: servers on node 0 (0-7,16-23), wrk on node 1 (8-15,24-31)
+  wrk: 8 threads, 300 connections, 10s per test
+  servers: 16 workers
+=================================================================
+
+--- 1. ping/pong (minimal) ---
+  compio (1 worker)                              119139.68 req/s  2.47ms (750.35us)
+  compio (16 workers)                            991576.27 req/s  201.65us (185.43us)
+  Node.js v22.22.2                                27416.74 req/s  37.31ms (145.22ms)
+  Node.js cluster (16)                           280986.49 req/s  1.18ms (1.29ms)
+
+--- 2. fib(10) (light CPU) ---
+  compio (1 worker)                              108480.05 req/s  2.72ms (538.85us)
+  compio (16 workers)                            987718.73 req/s  241.64us (282.38us)
+  Node.js v22.22.2                                26419.77 req/s  26.77ms (104.33ms)
+  Node.js cluster (16)                           247183.26 req/s  1.39ms (1.61ms)
+
+--- 3. setTimeout(0) ---
+  compio (1 worker)                              104760.12 req/s  2.82ms (623.50us)
+  compio (16 workers)                            991301.34 req/s  266.07us (452.62us)
+  Node.js v22.22.2                                31770.16 req/s  16.64ms (60.23ms)
+  Node.js cluster (16)                           154674.10 req/s  1.91ms (588.35us)
+
+--- 4. Promise chain (sync .then) ---
+  compio (1 worker)                              114934.72 req/s  2.56ms (612.72us)
+  compio (16 workers)                           1032414.98 req/s  194.64us (108.57us)
+  Node.js v22.22.2                                26772.69 req/s  30.23ms (118.57ms)
+  Node.js cluster (16)                           270150.76 req/s  1.09ms (328.17us)
+
+--- 5. Promise chain + 100ms timer ---
+  compio (1 worker)                                2902.72 req/s  101.12ms (440.00us)
+  compio (16 workers)                              2921.92 req/s  100.21ms (54.87us)
+  Node.js v22.22.2                                 2905.72 req/s  100.67ms (617.18us)
+  Node.js cluster (16)                             2905.50 req/s  100.31ms (446.72us)
+
+--- 6. fetch() → local echo ---
+  compio (1 worker)                               55297.23 req/s  5.31ms (0.85ms)
+  compio (16 workers)                            575007.06 req/s  510.64us (191.55us)
+  Node.js v22.22.2                                 5020.10 req/s  73.95ms (144.70ms)
+  Node.js cluster (16)                            33258.82 req/s  10.09ms (10.19ms)
+
+--- Crypto ---
+
+--- 7. randomUUID() ---
+  compio (1 worker)                              111474.44 req/s  2.68ms (1.63ms)
+  compio (16 workers)                            998554.95 req/s  250.11us (1.14ms)
+  Node.js v22.22.2                                26286.91 req/s  33.36ms (130.06ms)
+  Node.js cluster (16)                           220206.15 req/s  1.51ms (2.11ms)
+
+--- 8. SHA-256 digest ---
+  compio (1 worker)                               91214.38 req/s  3.22ms (704.35us)
+  compio (16 workers)                            952802.11 req/s  287.72us (262.16us)
+  Node.js v22.22.2                                21825.88 req/s  26.73ms (90.27ms)
+  Node.js cluster (16)                           144998.22 req/s  2.07ms (0.88ms)
+
+--- 9. HMAC-SHA256 sign (cached) ---
+  compio (1 worker)                               81152.14 req/s  3.66ms (834.61us)
+  compio (16 workers)                            857348.27 req/s  324.59us (187.56us)
+  Node.js v22.22.2                                21891.41 req/s  20.28ms (55.85ms)
+  Node.js cluster (16)                           140427.23 req/s  2.11ms (604.71us)
+
+--- 10. AES-GCM encrypt (cached) ---
+  compio (1 worker)                               75389.90 req/s  3.89ms (0.95ms)
+  compio (16 workers)                            757826.96 req/s  386.68us (177.38us)
+  Node.js v22.22.2                                19743.13 req/s  24.35ms (70.42ms)
+  Node.js cluster (16)                           127278.56 req/s  2.32ms (597.44us)
+
+--- 11. ECDSA P-256 sign (cached) ---
+  compio (1 worker)                               22519.17 req/s  13.18ms (5.03ms)
+  compio (16 workers)                            222690.08 req/s  1.32ms (319.44us)
+  Node.js v22.22.2                                17736.69 req/s  28.06ms (81.52ms)
+  Node.js cluster (16)                            92541.25 req/s  3.21ms (1.46ms)
+
+--- SSE Streaming ---
+
+  compio (1 worker) 100×0ms                  TTFB   10ms    101 chunks in    19ms    5315 chunks/s
+  compio (16 workers) 100×0ms                TTFB   10ms    101 chunks in    19ms    5315 chunks/s
+  Node.js 100×0ms                            TTFB    9ms    101 chunks in    18ms    5611 chunks/s
