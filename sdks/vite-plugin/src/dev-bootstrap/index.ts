@@ -31,9 +31,32 @@ async function getRunner(): Promise<ModuleRunner> {
   return runnerPromise;
 }
 
+/**
+ * Import the user module, retrying once if Vite's dep optimizer regenerated
+ * pre-bundled files while our ModuleRunner had a stale version cached.
+ *
+ * Symptom: `The file does not exist at "…/.vite/deps_zeroship/foo-HASH.js"`.
+ * Cause: Vite discovers a new dependency mid-request, re-runs optimizeDeps,
+ *        replaces the on-disk bundle with a new content-hash. The Runner's
+ *        module graph still references the old hashed URL → 404.
+ * Fix:   tear down the Runner and create a fresh one, then retry the import
+ *        exactly once. Any further failure is a real error.
+ */
 async function getUserModule(): Promise<any> {
   const r = await getRunner();
-  return r.import(ENTRY);
+  try {
+    return await r.import(ENTRY);
+  } catch (err: any) {
+    const msg = String(err?.message ?? err ?? "");
+    if (msg.includes("is in the optimize deps directory")) {
+      console.log("[zeroship:dev] deps re-optimized, resetting runner");
+      runner = null;
+      runnerPromise = null;
+      const fresh = await getRunner();
+      return fresh.import(ENTRY);
+    }
+    throw err;
+  }
 }
 
 // Kick off connection immediately

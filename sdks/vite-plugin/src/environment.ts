@@ -225,8 +225,18 @@ export class ZeroshipDevEnvironment extends vite.DevEnvironment {
  * server environment.  Place this under
  * `environments: { zeroship: createZeroshipEnvironmentOptions() }` in your
  * `vite.config.ts`.
+ *
+ * @param serverEntry  Absolute path to the user's server entry file. Passed
+ *                     to Vite as `optimizeDeps.entries` so dep discovery runs
+ *                     at Vite startup (before the ModuleRunner issues any
+ *                     fetchModule calls). Without this, Vite discovers deps
+ *                     lazily as modules are imported; re-optimization then
+ *                     invalidates previously-hashed files and the
+ *                     ModuleRunner hits "file does not exist" on stale URLs.
  */
-export function createZeroshipEnvironmentOptions(): vite.EnvironmentOptions {
+export function createZeroshipEnvironmentOptions(
+  serverEntry?: string,
+): vite.EnvironmentOptions {
   return {
     consumer: "server",
     resolve: {
@@ -246,6 +256,12 @@ export function createZeroshipEnvironmentOptions(): vite.EnvironmentOptions {
       // Prevent mid-request reloads when new deps are discovered.
       // The ModuleRunner can't handle pre-bundle version changes.
       ignoreOutdatedRequests: true,
+      // Pre-crawl the server entry so all deps are discovered at Vite
+      // startup, not lazily on first request. If the entry isn't known
+      // (no detectable server file), fall back to scanning common paths.
+      entries: serverEntry
+        ? [serverEntry]
+        : ["src/index.{ts,tsx,js,jsx}", "src/server.{ts,js}", "server.{ts,js}"],
     },
   };
 }

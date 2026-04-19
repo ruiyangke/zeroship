@@ -56,10 +56,17 @@ export function devServerPlugin(
   const environmentPlugin: Plugin = {
     name: "zeroship:environment",
 
-    config() {
+    config(userConfig) {
+      // Detect server entry at config time so optimizeDeps.entries can
+      // pre-crawl it. Otherwise Vite's dep optimizer discovers deps lazily
+      // as modules import, which causes re-optimization mid-request and
+      // "file does not exist" errors from the ModuleRunner on stale URLs.
+      const detectedRoot = resolve(userConfig.root ?? process.cwd());
+      const entry =
+        options.serverEntry ?? findServerEntry(detectedRoot) ?? undefined;
       return {
         environments: {
-          zeroship: createZeroshipEnvironmentOptions(),
+          zeroship: createZeroshipEnvironmentOptions(entry),
         },
       };
     },
