@@ -12,21 +12,15 @@ interface ChatMsg {
 /**
  * Streaming chat endpoint.
  *
- * Uses the official `openai` SDK (^6) to request a streaming completion from
- * gpt-5.4-mini, then adapts the SDK's async iterator into an
- * `SSE Response(ReadableStream)` that the zeroship runtime serves to the
- * browser as `text/event-stream` with chunked transfer encoding.
+ * Writing `async function*` yields a plain JS object per token — the
+ * zeroship runtime auto-wraps the generator as a Response(text/event-stream)
+ * with `event: yield` frames per yielded value and `event: return` /
+ * `event: error` to close the stream.
  *
- * The wire protocol is minimal:
- *   data: {"token": "Hi"}\n\n
- *   data: {"token": " there"}\n\n
- *   …
- *   data: [DONE]\n\n
- *
- * The browser side reads the stream via `response.body.getReader()` and
- * appends each token to the assistant message as it arrives.
+ * On the client side, the vite-plugin transform produces a stub that
+ * exposes this as an `AsyncIterable<{token: string}>` — see App.tsx.
  */
-export async function chat(message: string, history: ChatMsg[] = []) {
+export async function* chat(message: string, history: ChatMsg[] = []) {
   const safeHistory = Array.isArray(history) ? history : [];
   const messages: ChatMsg[] = [
     ...safeHistory.filter((m): m is ChatMsg => !!m && typeof m.content === "string"),
@@ -39,40 +33,10 @@ export async function chat(message: string, history: ChatMsg[] = []) {
     messages,
   });
 
-  const encoder = new TextEncoder();
-  const body = new ReadableStream({
-    async start(controller) {
-      try {
-        for await (const part of stream) {
-          const delta = part.choices?.[0]?.delta?.content;
-          if (delta) {
-            controller.enqueue(
-              encoder.encode(`data: ${JSON.stringify({ token: delta })}\n\n`)
-            );
-          }
-        }
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-      } catch (e: any) {
-        // Surface the upstream error as an SSE frame so the client can show
-        // it instead of silently hanging.
-        controller.enqueue(
-          encoder.encode(
-            `data: ${JSON.stringify({ error: e?.message ?? String(e) })}\n\n`
-          )
-        );
-      } finally {
-        controller.close();
-      }
-    },
-  });
-
-  return new Response(body, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache, no-transform",
-      "X-Accel-Buffering": "no",
-    },
-  });
+  for await (const part of stream) {
+    const delta = part.choices?.[0]?.delta?.content;
+    if (delta) yield { token: delta };
+  }
 }
 
 export function ping() {

@@ -98,10 +98,11 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8], app_limits: AppRuntimeLimits)
             .build();
 
         // Warmup (isolate is entered after build())
+        // New wire: (method, args_json). `__ping` will fail "method not
+        // found" for apps without a `__ping` export — that's fine, the
+        // point is exercising the dispatch code path.
         {
-            let result = runtime.dispatch_rpc(
-                r#"{"jsonrpc":"2.0","method":"__ping","params":[],"id":0}"#,
-            );
+            let result = runtime.dispatch_rpc("__ping", "[]");
             if let Err(e) = &result {
                 eprintln!("[worker] warmup warning for {app_id}: {e}");
             }

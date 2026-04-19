@@ -2,12 +2,13 @@
  * Dev bootstrap — entry module for zeroship V8 runtime in dev mode.
  * Bundled into dist/dev-bootstrap.js by esbuild.
  *
- * Supports both dispatch modes:
- *   1. JSON-RPC on /_rpc — calls exported "use server" functions by name
- *   2. HTTP on all other paths — delegates to onRequest/default export
+ * Dispatch wire (v2):
+ *   POST /_rpc/<modulePath>/<exportName>   → path-based RPC with JSON args array
+ *   *                                       → user's onRequest or default export
  *
- * Uses lazy initialization because the V8 runtime may start serving
- * HTTP requests before the ModuleRunner connects to Vite.
+ * The registry is populated on the server side by `__register(name, fn)`
+ * side-effects that the vite-plugin transform appends to each "use server"
+ * module. Importing the user entry runs those side-effects.
  */
 import { createRunner } from "./transport";
 import type { ModuleRunner } from "vite/module-runner";
@@ -16,6 +17,17 @@ const ENTRY = (globalThis as any).process?.env?.ZEROSHIP_ENTRY;
 
 let runner: ModuleRunner | null = null;
 let runnerPromise: Promise<ModuleRunner> | null = null;
+
+// Registry of server functions. Populated by `__register(name, fn)` calls
+// that the transform appends to server modules. Exposed as a global so
+// every transformed module can push into it (ModuleRunner shares the
+// runner's own global scope with the V8 isolate).
+const registry: Map<string, Function> = new Map();
+(globalThis as any).__register = (name: string, fn: Function) => {
+  // Last-write-wins so HMR replacements land cleanly.
+  registry.set(name, fn);
+};
+(globalThis as any).__lookup = (name: string): Function | undefined => registry.get(name);
 
 async function getRunner(): Promise<ModuleRunner> {
   if (runner) return runner;
@@ -68,12 +80,6 @@ getRunner()
  * Poll Vite for changed files every 500ms and invalidate the ModuleRunner's
  * evaluated-module cache for each changed path. This causes the next
  * import() to re-fetch the module from Vite (which re-transforms it).
- *
- * Why polling, not WebSocket/SSE:
- * - V8 runtime has no outbound WebSocket client (WS is server-side only)
- * - A streaming fetch would hit the per-request wall timeout
- * - setInterval runs on the pump between requests — no timeout constraints
- * - 500ms latency is acceptable for dev HMR (saves are human-speed)
  */
 function startHmrPoll(runner: ModuleRunner) {
   const viteWsUrl = (globalThis as any).process?.env?.ZEROSHIP_VITE_WS;
@@ -93,13 +99,8 @@ function startHmrPoll(runner: ModuleRunner) {
 
       if (changed.length === 0) return;
 
-      // Invalidate each changed module so the next import() re-fetches
       for (const file of changed) {
-        // The runner tracks modules by their Vite-resolved ID (usually
-        // the absolute file path). invalidateModule marks it stale so
-        // the next import() calls fetchModule again.
         const mods = runner.evaluatedModules;
-        // Try the file path directly and common URL-encoded variants
         for (const id of [file, `/${file}`, file.replace(/\\/g, "/")]) {
           const mod = mods.getModuleById(id);
           if (mod) {
@@ -118,20 +119,27 @@ function startHmrPoll(runner: ModuleRunner) {
 /**
  * HTTP request handler — called by the Rust runtime for every request.
  *
- * Routes:
- *   POST /_rpc  → JSON-RPC dispatch to user's exported functions
- *   *           → user's onRequest or default export
+ * POST /_rpc/<methodName>   → registry lookup + invoke
+ * *                          → user's onRequest or default export
  */
 export async function onRequest(req: any): Promise<any> {
   if (!ENTRY) {
-    return jsonResponse({ error: "ZEROSHIP_ENTRY not set" }, 500);
+    return errorResponse("ZEROSHIP_ENTRY not set", 500);
   }
 
   const url = new URL(req.url);
 
-  // ── JSON-RPC dispatch ──────────────────────────────────────────────
+  // ── URL-path RPC ────────────────────────────────────────────────────
+  if (url.pathname.startsWith("/_rpc/") && req.method === "POST") {
+    return handleRpcPath(url.pathname.slice("/_rpc/".length), req);
+  }
+
+  // Legacy /_rpc and /rpc (JSON-RPC envelope) — surface migration error.
   if ((url.pathname === "/_rpc" || url.pathname === "/rpc") && req.method === "POST") {
-    return handleRpc(req);
+    return errorResponse(
+      "The JSON-RPC envelope is gone. Use POST /_rpc/<methodName> with a JSON array body.",
+      410,
+    );
   }
 
   // ── HTTP dispatch ──────────────────────────────────────────────────
@@ -144,60 +152,146 @@ export async function onRequest(req: any): Promise<any> {
     return mod.default(req);
   }
 
-  return jsonResponse({ error: `No handler in ${ENTRY}` }, 404);
+  return errorResponse(`No handler in ${ENTRY}`, 404);
 }
 
-// ── JSON-RPC handler ───────────────────────────────────────────────────
+/**
+ * Dispatch a URL-path RPC call. Loads the user module (which populates
+ * the registry as a side effect), looks up the method, parses args, invokes.
+ *
+ * Return shapes:
+ *   - unary: Response(JSON.stringify(value), 200, application/json)
+ *   - stream (async generator): Response(ReadableStream) with SSE frames
+ *   - throw: Response(JSON error body, status from err.status or 500)
+ *   - user-returned Response: passthrough
+ */
+async function handleRpcPath(methodName: string, req: any): Promise<any> {
+  // Touch the user module so its __register side-effects populate the
+  // registry. We do this every request — getUserModule() hits the
+  // ModuleRunner's evaluated cache, so after warmup it's effectively
+  // free; on HMR invalidation the registry is repopulated with the
+  // fresh function references.
+  try {
+    await getUserModule();
+  } catch (importErr: any) {
+    return errorResponse(`Module import failed: ${importErr.message}`, 500, importErr);
+  }
 
-async function handleRpc(req: any): Promise<any> {
-  let id = null;
+  const fn = registry.get(methodName);
+  if (typeof fn !== "function") {
+    return errorResponse(`Method not found: ${methodName}`, 404);
+  }
+
+  let args: any[] = [];
   try {
     const body = typeof req.text === "function" ? await req.text() : String(req.body ?? "");
-    const rpc = JSON.parse(body);
-    id = rpc.id;
-
-    let mod;
-    try {
-      mod = await getUserModule();
-    } catch (importErr: any) {
-      return jsonResponse({
-        jsonrpc: "2.0",
-        error: { code: -32000, message: `Module import failed: ${importErr.message}`, stack: importErr.stack },
-        id,
-      });
+    if (body) {
+      const parsed = JSON.parse(body);
+      if (parsed != null) {
+        if (!Array.isArray(parsed)) {
+          return errorResponse("RPC args body must be a JSON array", 400);
+        }
+        args = parsed;
+      }
     }
-
-    const fn = mod[rpc.method];
-
-    if (typeof fn !== "function") {
-      return jsonResponse({
-        jsonrpc: "2.0",
-        error: { code: -32601, message: `Method not found: ${rpc.method}` },
-        id,
-      });
-    }
-
-    const result = await fn(...(rpc.params ?? []));
-
-    // If the function returns a Response (e.g., SSE stream), pass it through
-    // directly instead of wrapping in JSON-RPC envelope.
-    if (result instanceof Response) {
-      return result;
-    }
-
-    return jsonResponse({ jsonrpc: "2.0", result, id });
   } catch (e: any) {
-    const code = id === null ? -32700 : -32000;
-    return jsonResponse({
-      jsonrpc: "2.0",
-      error: { code, message: e.message ?? String(e) },
-      id,
-    });
+    return errorResponse(`Invalid args JSON: ${e.message ?? String(e)}`, 400);
   }
+
+  let result: any;
+  try {
+    result = fn.apply(null, args);
+  } catch (e: any) {
+    return errorResponse(e?.message ?? String(e), statusFromError(e), e);
+  }
+
+  // Async generator → SSE stream
+  if (
+    result != null && typeof result === "object" &&
+    typeof result[Symbol.asyncIterator] === "function" &&
+    typeof result.next === "function" &&
+    typeof result.return === "function"
+  ) {
+    return wrapAsyncGenerator(result);
+  }
+
+  // Promise path
+  if (result && typeof result.then === "function") {
+    try {
+      result = await result;
+    } catch (e: any) {
+      return errorResponse(e?.message ?? String(e), statusFromError(e), e);
+    }
+
+    // Resolved to an async generator (rare — unwrap)
+    if (
+      result != null && typeof result === "object" &&
+      typeof result[Symbol.asyncIterator] === "function" &&
+      typeof result.next === "function" &&
+      typeof result.return === "function"
+    ) {
+      return wrapAsyncGenerator(result);
+    }
+  }
+
+  // User-returned Response (e.g. form B streaming): passthrough
+  if (result instanceof Response) {
+    return result;
+  }
+
+  // Plain value → JSON body
+  return new Response(JSON.stringify(result === undefined ? null : result), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
-function jsonResponse(data: any, status = 200): any {
-  return new Response(JSON.stringify(data), {
+function wrapAsyncGenerator(gen: any): any {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream({
+    async start(controller) {
+      try {
+        while (true) {
+          const step = await gen.next();
+          if (step.done) {
+            const retJson = JSON.stringify(step.value === undefined ? null : step.value);
+            controller.enqueue(encoder.encode(`event: return\ndata: ${retJson}\n\n`));
+            break;
+          }
+          const valJson = JSON.stringify(step.value === undefined ? null : step.value);
+          controller.enqueue(encoder.encode(`event: yield\ndata: ${valJson}\n\n`));
+        }
+      } catch (e: any) {
+        const payload = JSON.stringify({
+          message: e?.message ?? String(e),
+          name: e?.name ?? "Error",
+        });
+        controller.enqueue(encoder.encode(`event: error\ndata: ${payload}\n\n`));
+      } finally {
+        controller.close();
+      }
+    },
+  });
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      "X-Accel-Buffering": "no",
+    },
+  });
+}
+
+function statusFromError(e: any): number {
+  const s = e?.status;
+  if (typeof s === "number" && s >= 400 && s < 600) return s;
+  return 500;
+}
+
+function errorResponse(message: string, status: number, err?: any): any {
+  const body: Record<string, unknown> = { message, name: err?.name ?? "Error" };
+  if (err?.stack) body.stack = err.stack;
+  return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });

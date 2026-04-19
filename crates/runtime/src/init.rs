@@ -103,38 +103,112 @@ pub const FORMDATA_JS: &str = include_str!("embed/formdata.js");
 /// Embedded WebSocket/WebSocketPair polyfill (depends on events.js for EventTarget).
 pub const WEBSOCKET_JS: &str = include_str!("embed/websocket.js");
 
-/// The JSON-RPC dispatch function compiled once and reused for every request.
+/// The RPC dispatch function compiled once and reused for every request.
 ///
-/// Takes the method name + raw params-JSON slice, returns the *raw* handler
-/// return value (Promise or plain JS value). The JSON-RPC envelope (jsonrpc,
-/// result/error, id) is built in Rust — doing it here cost ~15% CPU from
-/// JSON.parse(req)/stringify(envelope) on the ping hot path.
+/// Takes the method name + raw args-JSON slice, returns the *raw* handler
+/// return value (Promise, async generator, plain JS value, or Response).
+/// The HTTP response is built in Rust — no JSON-RPC envelope.
 ///
 /// Contract:
-/// - Return: whatever the handler returned. Rust calls `v8::json::stringify`
-///   on it (or on the fulfilled promise value) to serialize.
-/// - Throw: all error paths throw an Error. Rust uses `TryCatch` to extract
-///   the message, and reads an optional `.code` property for the JSON-RPC
-///   error code (default -32000, -32601 for "method not found").
-pub const DISPATCH_JS: &str = r#"(function(__method, __paramsJson) {
+/// - Args: `(method, argsJson)` — `argsJson` is a JSON array (may be null/empty).
+/// - Return: whatever the handler returned. Rust inspects:
+///     * Async generator (has Symbol.asyncIterator + `.next` yields) →
+///       wrap in a Response(ReadableStream) that emits SSE `event:yield`
+///       frames per yield and `event:return`/`event:error` on termination.
+///     * `Response` instance → pass through unchanged.
+///     * plain value → JSON.stringify and return as `application/json` body.
+/// - Throw: any thrown value bubbles via V8 TryCatch. Rust builds an error
+///   body `{"message","name","stack"}` with HTTP 500 (or `err.status` if
+///   numeric 400-599 — users can throw `HttpError` to set the status).
+///
+/// `__rpc` is the RPC registry — a plain object populated from module
+/// exports AND from `__register(name, fn)` calls that the vite-plugin
+/// transform emits into server modules so path-based keys
+/// (`src/api/users/getUser`) resolve to the right function.
+pub const DISPATCH_JS: &str = r#"(function(__method, __argsJson) {
     var fn = __rpc[__method];
     if (typeof fn !== 'function') {
         var err = new Error('Method not found: ' + __method);
-        err.code = -32601;
+        err.status = 404;
         throw err;
     }
-    // Preserve the old `req.params || []` semantics: a missing, null, or
-    // empty-string params argument means "no arguments". JSON.parse("null")
-    // is null, which `fn.apply(null, null)` would throw on in strict mode.
-    var params;
-    if (!__paramsJson) {
-        params = [];
+    var args;
+    if (!__argsJson) {
+        args = [];
     } else {
-        var parsed = JSON.parse(__paramsJson);
-        params = parsed == null ? [] : parsed;
+        var parsed = JSON.parse(__argsJson);
+        args = parsed == null ? [] : parsed;
     }
-    return fn.apply(null, params);
+    var result = fn.apply(null, args);
+
+    // Wrap async generators in a Response(ReadableStream) that emits SSE
+    // frames. Detection: the returned object has a Symbol.asyncIterator
+    // method AND a generator-style `next/return/throw` triple. This matches
+    // `async function*` output but NOT a plain async function returning
+    // a value or a Response (both of which go through the passthrough path).
+    if (result != null && typeof result === 'object'
+        && typeof result[Symbol.asyncIterator] === 'function'
+        && typeof result.next === 'function'
+        && typeof result.return === 'function') {
+        return __wrapAsyncGenerator(result);
+    }
+    return result;
 })"#;
+
+/// Wraps an async generator in a Response(ReadableStream) that emits SSE
+/// frames. Installed as a global helper alongside DISPATCH_JS.
+///
+/// Frames:
+/// - `event: yield\ndata: <json>\n\n` for each `yield` value
+/// - `event: return\ndata: <json>\n\n` on clean completion (value is the
+///   generator's return value, or `null` if the body used a bare `return`)
+/// - `event: error\ndata: {"message":"...","name":"..."}\n\n` on throw
+///
+/// One SSE `data:` line per frame — yielded values that are multi-line
+/// JSON strings round-trip correctly because the JSON is on a single line
+/// (JSON.stringify never emits embedded newlines unless the caller passed
+/// an indentation argument, which we don't).
+pub const WRAP_ASYNC_GENERATOR_JS: &str = r#"globalThis.__wrapAsyncGenerator = function(gen) {
+    var encoder = new TextEncoder();
+    var body = new ReadableStream({
+        async start(controller) {
+            try {
+                while (true) {
+                    var step = await gen.next();
+                    if (step.done) {
+                        var retJson = JSON.stringify(step.value === undefined ? null : step.value);
+                        controller.enqueue(encoder.encode("event: return\ndata: " + retJson + "\n\n"));
+                        break;
+                    }
+                    var valJson = JSON.stringify(step.value === undefined ? null : step.value);
+                    controller.enqueue(encoder.encode("event: yield\ndata: " + valJson + "\n\n"));
+                }
+            } catch (e) {
+                var payload = JSON.stringify({
+                    message: (e && e.message) || String(e),
+                    name: (e && e.name) || "Error",
+                });
+                controller.enqueue(encoder.encode("event: error\ndata: " + payload + "\n\n"));
+            } finally {
+                controller.close();
+            }
+        },
+    });
+    return new Response(body, {
+        status: 200,
+        headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    });
+};
+globalThis.__register = function(name, fn) {
+    if (typeof globalThis.__rpc !== 'object' || globalThis.__rpc === null) {
+        globalThis.__rpc = Object.create(null);
+    }
+    globalThis.__rpc[name] = fn;
+};"#;
 
 // ===========================================================================
 // Shared initialization: polyfills + module loading + dispatch compilation
@@ -187,10 +261,34 @@ pub fn load_polyfills_and_modules(
         script.run(scope).unwrap();
     }
 
-    // Load ES modules and copy exports to a plain object on globalThis.__rpc.
-    // Module Namespace objects are V8 exotic objects with slower property access
-    // (live binding resolution per lookup). Copying to a plain object restores
+    // Install the async-generator wrapper helper + __register before the
+    // entry module evaluates, because module top-level code (e.g. a transformed
+    // "use server" file's `__register("src/index/ping", ping)` footer) runs
+    // during load_modules and needs both globals already present.
+    {
+        let code = v8::String::new(scope, WRAP_ASYNC_GENERATOR_JS).unwrap();
+        let script = v8::Script::compile(scope, code, None).unwrap();
+        script.run(scope).unwrap();
+    }
+
+    // Seed the RPC registry as a plain object so `__register` side effects
+    // from user modules land somewhere before module exports are merged in.
+    {
+        let global = scope.get_current_context().global(scope);
+        let rpc_key = v8::String::new(scope, "__rpc").unwrap();
+        let initial = v8::Object::new(scope);
+        global.set(scope, rpc_key.into(), initial.into());
+    }
+
+    // Load ES modules and merge exports into `__rpc`. Module Namespace
+    // objects are V8 exotic objects with slower property access (live
+    // binding resolution per lookup). Copying to a plain object restores
     // fast inline-cached property access on the dispatch hot path.
+    //
+    // `__register` side effects already populated `__rpc` with path-based
+    // keys (e.g. `src/index/ping`); module-export merging additionally
+    // registers bare names (`ping`) so legacy tests and benchmarks that
+    // don't run through the vite-plugin transform still work.
     let context = scope.get_current_context();
     match crate::modules::load_modules(scope, modules) {
         Ok(namespace) => {
@@ -198,7 +296,14 @@ pub fn load_polyfills_and_modules(
             let ns_local = v8::Local::new(scope, &namespace);
             let ns_obj = ns_local.to_object(scope).unwrap();
 
-            let plain = v8::Object::new(scope);
+            // Read the current __rpc (may already have __register entries
+            // from module top-level `__register(...)` calls).
+            let rpc_key = v8::String::new(scope, "__rpc").unwrap();
+            let plain = global
+                .get(scope, rpc_key.into())
+                .and_then(|v| v8::Local::<v8::Object>::try_from(v).ok())
+                .unwrap_or_else(|| v8::Object::new(scope));
+
             if let Some(names) = ns_obj.get_own_property_names(scope, Default::default()) {
                 for i in 0..names.length() {
                     let key = names.get_index(scope, i).unwrap();
@@ -208,7 +313,6 @@ pub fn load_polyfills_and_modules(
                 }
             }
 
-            let rpc_key = v8::String::new(scope, "__rpc").unwrap();
             global.set(scope, rpc_key.into(), plain.into());
         }
         Err(e) => {
@@ -216,7 +320,7 @@ pub fn load_polyfills_and_modules(
         }
     }
 
-    // Compile JSON-RPC dispatch function
+    // Compile the RPC dispatch function.
     let code = v8::String::new(scope, DISPATCH_JS).unwrap();
     let script = v8::Script::compile(scope, code, None).unwrap();
     let result = script.run(scope).unwrap();

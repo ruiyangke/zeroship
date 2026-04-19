@@ -6,85 +6,51 @@
 //! By making them free functions with disjoint `(scope, state)` params, Rust
 //! can verify the borrows don't overlap.
 //!
-//! ## JSON-RPC envelope — moved out of V8
+//! ## Wire format
 //!
-//! An earlier revision wrapped every dispatch in a JS IIFE that did
-//! `JSON.parse(requestBody)` then `JSON.stringify(envelope)`. For the
-//! ping hot path (tiny payload, no work), those two JSON calls cost ~15%
-//! of total CPU per request. They now happen on the Rust side:
+//! The wire is URL-path-based (not JSON-RPC):
+//!   `POST /_rpc/<methodName>` with body = JSON array of positional args.
 //!
-//! - Parse the incoming JSON-RPC body with `parse_request` (serde_json
-//!   uses `RawValue` to avoid re-allocating `params` and `id`).
-//! - DISPATCH_JS takes `(method, paramsJson)` and returns the raw handler
-//!   value (or throws).
-//! - This module calls `v8::json::stringify` on the returned value to
-//!   serialize the result, then builds the envelope via `format!`.
+//! Response:
+//!   - Success (plain value): HTTP 200 + `Content-Type: application/json`
+//!     + body = the raw return value JSON.
+//!   - Success (async generator): HTTP 200 `text/event-stream` with
+//!     `event: yield` / `event: return` / `event: error` frames. DISPATCH_JS
+//!     wraps the generator in a `Response(ReadableStream)`, so the streaming
+//!     HTTP dispatch path handles delivery exactly like user-constructed
+//!     `Response(ReadableStream)` (form B).
+//!   - Error: HTTP 500 (or `err.status` if numeric 400-599) + body
+//!     `{"message":"...","name":"...","stack":"..."}`.
 //!
-//! The id is preserved verbatim (`RawValue`) so it round-trips unchanged
-//! — a number stays a number, a string stays a string, and `null` / absent
-//! are both serialized as `null` per JSON-RPC 2.0 §5.
+//! Callers of [`dispatch_request`] classify the result as sync / async /
+//! error. For the sync case they receive a `DispatchResult::Sync(ReturnInfo)`
+//! whose inner form distinguishes "plain JSON body" from "Response object"
+//! (the async-generator wrap path and user-returned `Response`s). The
+//! runtime then forwards complete buffered responses or streams them via
+//! the existing HTTP infrastructure — no separate SSE framing in Rust.
 
 use crate::state::{DispatchResult, SharedState};
 
 // ---------------------------------------------------------------------------
-// JSON-RPC request parsing
+// Error envelope
 // ---------------------------------------------------------------------------
 
-/// Parsed view of an incoming JSON-RPC request. Holds borrowed slices from
-/// the original body — no allocations for `params` or `id`, which are kept
-/// as `RawValue` so they round-trip without re-serialization.
-#[derive(serde::Deserialize)]
-pub struct JsonRpcRequestBorrow<'a> {
-    pub method: &'a str,
-    #[serde(default, borrow)]
-    pub params: Option<&'a serde_json::value::RawValue>,
-    #[serde(default, borrow)]
-    pub id: Option<&'a serde_json::value::RawValue>,
-}
-
-/// Parse an incoming JSON-RPC request body.
-///
-/// Returns `Err(envelope)` when the body is malformed — the envelope is
-/// already the full wire error, so callers can just pass it through.
-pub fn parse_request(body: &str) -> Result<JsonRpcRequestBorrow<'_>, String> {
-    serde_json::from_str::<JsonRpcRequestBorrow>(body)
-        .map_err(|_| build_error_envelope(-32700, "Parse error", "null"))
-}
-
-// ---------------------------------------------------------------------------
-// Envelope builders
-// ---------------------------------------------------------------------------
-
-/// Build a JSON-RPC 2.0 success envelope.
-///
-/// `result_json` is an already-serialized JSON value (e.g. `"pong"`, `7`,
-/// `{...}`). `id_json` is the raw id slice from the request body — it's
-/// inserted verbatim so types are preserved (number → number, etc.).
+/// Build an error body in the new wire format: `{"message","name","stack"}`.
+/// Quotes inside the strings are escaped per JSON rules; no `itoa` / status
+/// is embedded — the status is carried separately so streaming HTTP paths
+/// can emit the correct status line.
 #[inline]
-pub fn build_success_envelope(result_json: &str, id_json: &str) -> String {
-    // Pre-size: prefix(~25) + result + mid(~7) + id + suffix(~1).
-    let mut out = String::with_capacity(40 + result_json.len() + id_json.len());
-    out.push_str(r#"{"jsonrpc":"2.0","result":"#);
-    out.push_str(result_json);
-    out.push_str(r#","id":"#);
-    out.push_str(id_json);
-    out.push('}');
-    out
-}
-
-/// Build a JSON-RPC 2.0 error envelope.
-#[inline]
-pub fn build_error_envelope(code: i32, message: &str, id_json: &str) -> String {
-    let mut out = String::with_capacity(80 + message.len() + id_json.len());
-    out.push_str(r#"{"jsonrpc":"2.0","error":{"code":"#);
-    let mut buf = itoa::Buffer::new();
-    out.push_str(buf.format(code));
-    out.push_str(r#","message":""#);
-    // Escape the message per JSON string rules.
+pub fn build_error_body(message: &str, name: &str, stack: Option<&str>) -> String {
+    let mut out = String::with_capacity(40 + message.len() + name.len() + stack.map(str::len).unwrap_or(0));
+    out.push_str(r#"{"message":""#);
     escape_json_string(message, &mut out);
-    out.push_str(r#""},"id":"#);
-    out.push_str(id_json);
-    out.push('}');
+    out.push_str(r#"","name":""#);
+    escape_json_string(name, &mut out);
+    if let Some(s) = stack {
+        out.push_str(r#"","stack":""#);
+        escape_json_string(s, &mut out);
+    }
+    out.push_str("\"}");
     out
 }
 
@@ -114,16 +80,10 @@ fn escape_json_string(s: &str, out: &mut String) {
 // ---------------------------------------------------------------------------
 
 /// Serialize a V8 value to JSON via `JSON.stringify`. Returns a fallback
-/// `"null"` if stringification fails (e.g. the value contains a cycle or
-/// a non-serializable like a function — those round-trip as `undefined`
-/// in JS, which JSON.stringify represents by omitting the key; for a
-/// top-level value we produce `null` to keep the envelope well-formed).
+/// `"null"` if stringification fails (cycle, non-serializable). Matches
+/// the web platform's convention: `undefined` round-trips as `null`.
 fn v8_to_json_string(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> String {
     if value.is_undefined() {
-        // JSON.stringify(undefined) returns `undefined` (not a string),
-        // which violates our envelope contract. Treat as null — the old
-        // JS wrapper's `{result: v}` with v=undefined dropped the field
-        // entirely, so serving null here is at least as informative.
         return "null".to_string();
     }
     v8::json::stringify(scope, value)
@@ -134,7 +94,7 @@ fn v8_to_json_string(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> S
 /// Extract a human-readable error message from a V8 exception value.
 /// Reads `.message` when present (Error instances); falls back to
 /// `String(exception)` for other throwables (plain strings, numbers).
-fn v8_exception_to_message(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> String {
+pub fn v8_exception_to_message(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> String {
     if let Some(obj) = exception.to_object(scope) {
         let msg_key = v8::String::new(scope, "message").unwrap();
         if let Some(msg_val) = obj.get(scope, msg_key.into()) {
@@ -149,52 +109,76 @@ fn v8_exception_to_message(scope: &mut v8::PinScope, exception: v8::Local<v8::Va
         .unwrap_or_else(|| "unknown error".to_string())
 }
 
-/// Read an optional `code` property from a V8 exception object.
-/// Defaults to -32000 (application error) per our JSON-RPC convention.
-fn v8_exception_to_code(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> i32 {
+/// Read `.name` (Error subclass name) from a V8 exception object. Defaults
+/// to `"Error"` for plain throwables.
+pub fn v8_exception_to_name(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> String {
     if let Some(obj) = exception.to_object(scope) {
-        let code_key = v8::String::new(scope, "code").unwrap();
-        if let Some(code_val) = obj.get(scope, code_key.into()) {
-            if let Some(n) = code_val.int32_value(scope) {
-                return n;
+        let name_key = v8::String::new(scope, "name").unwrap();
+        if let Some(name_val) = obj.get(scope, name_key.into()) {
+            if !name_val.is_undefined() && !name_val.is_null() {
+                return name_val.to_rust_string_lossy(scope);
             }
         }
     }
-    -32000
+    "Error".to_string()
+}
+
+/// Read `.stack` if present. Returns `None` when absent (plain throwables,
+/// string errors) so callers can omit the field from the body.
+pub fn v8_exception_to_stack(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> Option<String> {
+    let obj = exception.to_object(scope)?;
+    let key = v8::String::new(scope, "stack").unwrap();
+    let val = obj.get(scope, key.into())?;
+    if val.is_undefined() || val.is_null() {
+        return None;
+    }
+    Some(val.to_rust_string_lossy(scope))
+}
+
+/// Read `.status` as a numeric HTTP status code (400-599). Returns
+/// `None` for non-numeric or out-of-range values so callers fall back
+/// to HTTP 500.
+pub fn v8_exception_to_status(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> Option<u16> {
+    let obj = exception.to_object(scope)?;
+    let key = v8::String::new(scope, "status").unwrap();
+    let val = obj.get(scope, key.into())?;
+    let n = val.int32_value(scope)?;
+    if (400..=599).contains(&n) { Some(n as u16) } else { None }
 }
 
 // ---------------------------------------------------------------------------
 // dispatch_request
 // ---------------------------------------------------------------------------
 
-/// Call the JS dispatch function with a parsed request and classify the result.
+/// Call the JS dispatch function with `(methodName, argsJson)` and
+/// classify the result.
 ///
 /// Returns:
-/// - `DispatchResult::Sync(envelope)` — synchronous result or already-settled
-///   promise; the envelope is already the full wire JSON.
-/// - `DispatchResult::Async(promise)` — promise is still pending; the caller
-///   must remember `id_json` to build the envelope when it settles.
-/// - `DispatchResult::Error(msg)` — hard error (body too large, etc.) —
-///   callers wrap this in their own error envelope.
+/// - `DispatchResult::Sync(json)` — synchronous plain-value result, ready
+///   to serve as `application/json` body.
+/// - `DispatchResult::Async(promise)` — promise is still pending; the
+///   caller registers it with the pump. When it settles, the runtime
+///   inspects the fulfilled value: if it's a `Response` (user-returned
+///   or from the async-generator wrapper) it streams; otherwise plain
+///   JSON body.
+/// - `DispatchResult::Error(msg)` — hard dispatch error (method lookup
+///   failed before entering user code, or an argument too large for V8).
 pub fn dispatch_request(
     scope: &mut v8::PinScope,
     _state: &SharedState,
     dispatch_fn: &v8::Global<v8::Function>,
     method: &str,
-    params_json: Option<&str>,
-    id_json: &str,
+    args_json: Option<&str>,
 ) -> DispatchResult {
-    // Build JS args. Passing None for params avoids a JSON.parse call in JS
-    // on the ping hot path (no params → empty array handled in JS).
     let method_arg = match v8::String::new(scope, method) {
         Some(s) => s,
         None => return DispatchResult::Error("Method name too large for V8 string".to_string()),
     };
 
-    let params_arg: v8::Local<v8::Value> = match params_json {
+    let args_arg: v8::Local<v8::Value> = match args_json {
         Some(p) => match v8::String::new(scope, p) {
             Some(s) => s.into(),
-            None => return DispatchResult::Error("Params too large for V8 string".to_string()),
+            None => return DispatchResult::Error("Args too large for V8 string".to_string()),
         },
         None => v8::null(scope).into(),
     };
@@ -202,15 +186,11 @@ pub fn dispatch_request(
     let func = v8::Local::new(scope, dispatch_fn);
     let undefined = v8::undefined(scope).into();
 
-    // Call inside a TryCatch so we can distinguish throws from normal returns.
-    // The old JS IIFE caught exceptions internally and returned an envelope
-    // string. Now the wrapper rethrows — Rust catches and builds the envelope.
     let (result_val, caught_exception) = {
         v8::tc_scope!(let tc, scope);
-        let r = func.call(tc, undefined, &[method_arg.into(), params_arg]);
+        let r = func.call(tc, undefined, &[method_arg.into(), args_arg]);
         if tc.has_caught() {
             let exc = tc.exception();
-            // Global-ize so we can use it outside the try-catch scope.
             let exc_global = exc.map(|e| v8::Global::new(tc, e));
             (None, exc_global)
         } else {
@@ -222,18 +202,16 @@ pub fn dispatch_request(
 
     if let Some(exc_global) = caught_exception {
         let exc_local = v8::Local::new(scope, &exc_global);
-        let code = v8_exception_to_code(scope, exc_local);
-        let msg = v8_exception_to_message(scope, exc_local);
-        return DispatchResult::Sync(build_error_envelope(code, &msg, id_json));
+        return DispatchResult::ErrorValue {
+            message: v8_exception_to_message(scope, exc_local),
+            name: v8_exception_to_name(scope, exc_local),
+            stack: v8_exception_to_stack(scope, exc_local),
+            status: v8_exception_to_status(scope, exc_local).unwrap_or(500),
+        };
     }
 
     let Some(result_global) = result_val else {
-        // call() returned None but TryCatch caught nothing — defensive.
-        return DispatchResult::Sync(build_error_envelope(
-            -32000,
-            "JS dispatch returned no value",
-            id_json,
-        ));
+        return DispatchResult::Error("JS dispatch returned no value".to_string());
     };
 
     let val = v8::Local::new(scope, &result_global);
@@ -243,14 +221,19 @@ pub fn dispatch_request(
         match promise.state() {
             v8::PromiseState::Fulfilled => {
                 let result_val = promise.result(scope);
-                let result_json = v8_to_json_string(scope, result_val);
-                DispatchResult::Sync(build_success_envelope(&result_json, id_json))
+                // May be a Response (user-returned or async-generator-wrapped)
+                // or a plain value. We let the runtime inspect via
+                // `extract_promise_result` which classifies both shapes.
+                classify_fulfilled(scope, result_val)
             }
             v8::PromiseState::Rejected => {
                 let exc = promise.result(scope);
-                let code = v8_exception_to_code(scope, exc);
-                let msg = v8_exception_to_message(scope, exc);
-                DispatchResult::Sync(build_error_envelope(code, &msg, id_json))
+                DispatchResult::ErrorValue {
+                    message: v8_exception_to_message(scope, exc),
+                    name: v8_exception_to_name(scope, exc),
+                    stack: v8_exception_to_stack(scope, exc),
+                    status: v8_exception_to_status(scope, exc).unwrap_or(500),
+                }
             }
             v8::PromiseState::Pending => {
                 let global_promise = v8::Global::new(scope, promise);
@@ -258,9 +241,36 @@ pub fn dispatch_request(
             }
         }
     } else {
-        let result_json = v8_to_json_string(scope, val);
-        DispatchResult::Sync(build_success_envelope(&result_json, id_json))
+        classify_fulfilled(scope, val)
     }
+}
+
+/// Classify a fulfilled value: Response object → forward to HTTP dispatch;
+/// plain value → serialize as JSON body.
+fn classify_fulfilled(scope: &mut v8::PinScope, val: v8::Local<v8::Value>) -> DispatchResult {
+    // Heuristic: a Response has a numeric `status` and a `headers` object.
+    // This matches the platform's Response polyfill (and user-constructed
+    // `new Response(...)` calls) without importing the polyfill class here.
+    if let Some(obj) = val.to_object(scope) {
+        let status_key = v8::String::new(scope, "status").unwrap();
+        if let Some(s) = obj.get(scope, status_key.into()) {
+            if s.is_int32() || s.is_number() {
+                let headers_key = v8::String::new(scope, "headers").unwrap();
+                if let Some(h) = obj.get(scope, headers_key.into()) {
+                    if h.is_object() {
+                        // Looks like a Response — use the HTTP inspection path.
+                        match crate::http::inspect_response(scope, val) {
+                            Ok(info) => return DispatchResult::HttpResponse(info),
+                            Err(e) => return DispatchResult::Error(e),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let json = v8_to_json_string(scope, val);
+    DispatchResult::Sync(json)
 }
 
 // ---------------------------------------------------------------------------
@@ -352,21 +362,21 @@ pub fn fire_timer_callback(
 // extract_promise_result
 // ---------------------------------------------------------------------------
 
-/// Extract the result of a settled promise as a JSON-RPC envelope.
+/// Extract the result of a settled promise as a classified DispatchResult.
 ///
-/// Returns `Ok(envelope)` if fulfilled, `Err(msg)` if rejected or still
-/// pending. The envelope is the full wire JSON — ready to send.
+/// Returns:
+/// - `Ok(DispatchResult::Sync(json))` for plain values
+/// - `Ok(DispatchResult::HttpResponse(info))` for Response instances
+/// - `Err(...)` for rejection or still-pending
 pub fn extract_promise_result(
     scope: &mut v8::PinScope,
     promise: &v8::Global<v8::Promise>,
-    id_json: &str,
-) -> Result<String, String> {
+) -> Result<DispatchResult, String> {
     let local = v8::Local::new(scope, promise);
     match local.state() {
         v8::PromiseState::Fulfilled => {
             let result_val = local.result(scope);
-            let result_json = v8_to_json_string(scope, result_val);
-            Ok(build_success_envelope(&result_json, id_json))
+            Ok(classify_fulfilled(scope, result_val))
         }
         v8::PromiseState::Rejected => {
             let exc = local.result(scope);

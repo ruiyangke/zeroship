@@ -63,92 +63,55 @@ const toolMap = Object.fromEntries(tools.map(t => [t.name, t]));
 
 // ── Streaming ReAct loop ───────────────────────────────────────────────
 //
-// Each iteration either:
-//   (a) streams tokens from the model until it finishes, or
-//   (b) collects tool_calls, executes them, appends ToolMessage results,
-//       and loops. Tool events surface as `{tool, args}` / `{tool, result}`
-//       SSE frames so the UI can render them inline.
-//
-// LangChain's `.stream()` returns an AsyncIterable<AIMessageChunk>. Chunks
-// carry either a content delta (text token) or a tool_call fragment. We
-// concatenate the fragments so that after the iterator completes we have
-// the same AIMessage we would have gotten from `.invoke()`, plus the
-// token events already emitted.
-async function reactLoop(
-  messages: any[],
-  emit: (ev: any) => void,
-): Promise<void> {
-  const m = getModel();
-  for (let step = 0; step < 5; step++) {
-    const stream: any = await m.stream(messages);
-
-    let accumulated: any = null;
-    for await (const chunk of stream) {
-      accumulated = accumulated == null ? chunk : accumulated.concat(chunk);
-      const delta = typeof chunk.content === "string" ? chunk.content : "";
-      if (delta) emit({ token: delta });
-    }
-    if (accumulated == null) return;
-    messages.push(accumulated);
-
-    const toolCalls = accumulated.tool_calls ?? [];
-    if (toolCalls.length === 0) return;
-
-    for (const tc of toolCalls) {
-      emit({ tool: tc.name, args: tc.args });
-      const fn = toolMap[tc.name];
-      if (!fn) {
-        const msg = `Tool not found: ${tc.name}`;
-        messages.push(new ToolMessage({ tool_call_id: tc.id, content: msg }));
-        emit({ tool: tc.name, result: msg });
-        continue;
-      }
-      try {
-        const result = await fn.invoke(tc.args);
-        messages.push(new ToolMessage({ tool_call_id: tc.id, content: result }));
-        emit({ tool: tc.name, result });
-      } catch (e: any) {
-        const msg = `Error: ${e.message}`;
-        messages.push(new ToolMessage({ tool_call_id: tc.id, content: msg }));
-        emit({ tool: tc.name, result: msg });
-      }
-    }
-  }
-}
-
-// ── RPC exports ────────────────────────────────────────────────────────
+// Async generator — each `yield` produces an event the client receives
+// directly. The zeroship runtime wraps the generator into an SSE
+// Response automatically; the vite-plugin client stub exposes this
+// as an AsyncIterable<{token?: string; tool?: string; ...}>.
 
 interface ChatMsg { role: string; content: string }
 
-export async function chat(message: string, history: ChatMsg[] = []): Promise<Response> {
+export async function* chat(message: string, history: ChatMsg[] = []) {
   const msgs: any[] = (Array.isArray(history) ? history : []).map((m: ChatMsg) =>
     m.role === "user" ? new HumanMessage(m.content) : new AIMessage(m.content)
   );
   msgs.push(new HumanMessage(message));
 
-  const encoder = new TextEncoder();
-  const body = new ReadableStream({
-    async start(controller) {
-      const emit = (ev: unknown) =>
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(ev)}\n\n`));
-      try {
-        await reactLoop(msgs, emit);
-      } catch (e: any) {
-        emit({ error: e?.message ?? String(e) });
-      } finally {
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-        controller.close();
-      }
-    },
-  });
+  const m = getModel();
+  for (let step = 0; step < 5; step++) {
+    const stream: any = await m.stream(msgs);
 
-  return new Response(body, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache, no-transform",
-      "X-Accel-Buffering": "no",
-    },
-  });
+    let accumulated: any = null;
+    for await (const chunk of stream) {
+      accumulated = accumulated == null ? chunk : accumulated.concat(chunk);
+      const delta = typeof chunk.content === "string" ? chunk.content : "";
+      if (delta) yield { token: delta };
+    }
+    if (accumulated == null) return;
+    msgs.push(accumulated);
+
+    const toolCalls = accumulated.tool_calls ?? [];
+    if (toolCalls.length === 0) return;
+
+    for (const tc of toolCalls) {
+      yield { tool: tc.name, args: tc.args };
+      const fn = toolMap[tc.name];
+      if (!fn) {
+        const msg = `Tool not found: ${tc.name}`;
+        msgs.push(new ToolMessage({ tool_call_id: tc.id, content: msg }));
+        yield { tool: tc.name, result: msg };
+        continue;
+      }
+      try {
+        const result = await fn.invoke(tc.args);
+        msgs.push(new ToolMessage({ tool_call_id: tc.id, content: result }));
+        yield { tool: tc.name, result };
+      } catch (e: any) {
+        const msg = `Error: ${e.message}`;
+        msgs.push(new ToolMessage({ tool_call_id: tc.id, content: msg }));
+        yield { tool: tc.name, result: msg };
+      }
+    }
+  }
 }
 
 export function ping() { return "pong"; }

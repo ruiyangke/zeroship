@@ -8,7 +8,7 @@ fn text_encoder_decoder() {
         var buf = enc.encode("Hello");
         var dec = new TextDecoder();
         return { encoded: Array.from(buf), decoded: dec.decode(buf) };
-    }"#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    }"#), "test", "[]").unwrap();
     assert!(r.json.contains("Hello"), "got: {}", r.json);
     assert!(r.json.contains("[72,101,108,108,111]"), "got: {}", r.json);
 }
@@ -29,7 +29,7 @@ fn text_decoder_respects_subarray_bounds() {
         var head = dec.decode(full.subarray(0, 5));     // "ABCDE"
         var mid  = dec.decode(full.subarray(6, 9));     // "XYZ"
         return { head: head, mid: mid };
-    }"#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    }"#), "test", "[]").unwrap();
     assert!(r.json.contains("\"head\":\"ABCDE\""), "got: {}", r.json);
     assert!(r.json.contains("\"mid\":\"XYZ\""), "got: {}", r.json);
 }
@@ -58,7 +58,7 @@ fn readable_stream_preserves_non_byte_values() {
             out.push({ kind: r.value.kind, n: r.value.n });
         }
         return { out: out };
-    }"#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    }"#), "test", "[]").unwrap();
     assert!(r.json.contains("\"kind\":\"first\",\"n\":1"), "got: {}", r.json);
     assert!(r.json.contains("\"kind\":\"second\",\"n\":2"), "got: {}", r.json);
 }
@@ -92,7 +92,7 @@ fn readable_stream_invokes_pull_on_read() {
             out.push(r.value.n);
         }
         return { out: out, pullCalls: pullCalls };
-    }"#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    }"#), "test", "[]").unwrap();
     assert!(r.json.contains("\"out\":[1,2,3]"), "got: {}", r.json);
     assert!(r.json.contains("\"pullCalls\":"), "got: {}", r.json);
 }
@@ -117,7 +117,7 @@ fn readable_stream_is_async_iterable() {
             out.push(chunk.n);
         }
         return { out: out };
-    }"#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    }"#), "test", "[]").unwrap();
     assert!(r.json.contains("\"out\":[1,2]"), "got: {}", r.json);
 }
 
@@ -129,7 +129,7 @@ fn structured_clone() {
         clone.a = 99;
         clone.b.push(4);
         return { original: obj.a, cloned: clone.a, origLen: obj.b.length, cloneLen: clone.b.length };
-    }"#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    }"#), "test", "[]").unwrap();
     assert!(r.json.contains("\"original\":1"), "got: {}", r.json);
     assert!(r.json.contains("\"cloned\":99"), "got: {}", r.json);
     assert!(r.json.contains("\"origLen\":2"), "got: {}", r.json);
@@ -142,7 +142,7 @@ fn btoa_atob() {
         var encoded = btoa("Hello, World!");
         var decoded = atob(encoded);
         return { encoded, decoded };
-    }"#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    }"#), "test", "[]").unwrap();
     assert!(r.json.contains("SGVsbG8sIFdvcmxkIQ=="), "got: {}", r.json);
     assert!(r.json.contains("Hello, World!"), "got: {}", r.json);
 }
@@ -160,7 +160,7 @@ fn headers_class_works() {
                 missing: h.has("nonexistent"),
             };
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("text/plain"), "got: {}", r.json);
     assert!(r.json.contains("hello, world"), "got: {}", r.json);
 }
@@ -180,7 +180,7 @@ fn request_class_works() {
                 header: req.headers.get("x-test"),
             };
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("example.com"), "got: {}", r.json);
     assert!(r.json.contains("POST"), "got: {}", r.json);
 }
@@ -193,7 +193,7 @@ fn response_static_json() {
             var data = await resp.json();
             return { status: resp.status, hello: data.hello, ct: resp.headers.get("content-type") };
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("world"), "got: {}", r.json);
     assert!(r.json.contains("application/json"), "got: {}", r.json);
 }

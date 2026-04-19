@@ -195,13 +195,25 @@ pub fn extract_response_headers(scope: &mut v8::PinScope, response_obj: v8::Loca
     result
 }
 
+/// Heuristic test for a V8 value that behaves like a `Response`.
+/// Matches the polyfill's shape (numeric `status` + `headers` object)
+/// without holding a reference to the polyfill's constructor.
+pub fn looks_like_response(scope: &mut v8::PinScope, val: v8::Local<v8::Value>) -> bool {
+    let Some(obj) = val.to_object(scope) else { return false; };
+    let status_key = v8::String::new(scope, "status").unwrap();
+    let Some(s) = obj.get(scope, status_key.into()) else { return false; };
+    if !(s.is_int32() || s.is_number()) { return false; }
+    let headers_key = v8::String::new(scope, "headers").unwrap();
+    let Some(h) = obj.get(scope, headers_key.into()) else { return false; };
+    h.is_object()
+}
+
 /// Extract the result of a settled promise, branching on RPC vs HTTP.
 ///
-/// The RPC path returns the *raw* handler result as JSON (via
-/// `JSON.stringify`), NOT the full JSON-RPC envelope — the envelope is
-/// built later in `send_settled_reply_any` using the request's stored
-/// `id_json`. This keeps the id local to `PendingRequest` and avoids
-/// re-parsing the request body downstream.
+/// RPC path: return the raw handler value as JSON (already the response
+/// body for the new wire). If the resolved value looks like a `Response`
+/// (e.g. the async-generator wrapper produced one), promote to the Http
+/// variant so the streaming machinery takes over.
 pub fn extract_settled_result(
     scope: &mut v8::PinScope,
     promise: &v8::Global<v8::Promise>,
@@ -212,21 +224,22 @@ pub fn extract_settled_result(
         v8::PromiseState::Fulfilled => {
             let val = local.result(scope);
             if is_http {
-                SettledResult::Http(inspect_response(scope, val))
-            } else {
-                // Handler returned a JS value (or a promise that resolved to one).
-                // Serialize via JSON.stringify — matches the old JS wrapper's
-                // `{result: v}` field shape exactly (numbers stay numbers,
-                // undefined becomes null).
-                let json = if val.is_undefined() {
-                    "null".to_string()
-                } else {
-                    v8::json::stringify(scope, val)
-                        .map(|s| s.to_rust_string_lossy(scope))
-                        .unwrap_or_else(|| "null".to_string())
-                };
-                SettledResult::Rpc(Ok(json))
+                return SettledResult::Http(inspect_response(scope, val));
             }
+            // RPC path: promote Response-shaped values to HTTP so the
+            // async-generator wrap can stream out exactly as it would from
+            // `onRequest`.
+            if looks_like_response(scope, val) {
+                return SettledResult::Http(inspect_response(scope, val));
+            }
+            let json = if val.is_undefined() {
+                "null".to_string()
+            } else {
+                v8::json::stringify(scope, val)
+                    .map(|s| s.to_rust_string_lossy(scope))
+                    .unwrap_or_else(|| "null".to_string())
+            };
+            SettledResult::Rpc(Ok(json))
         }
         v8::PromiseState::Rejected => {
             // Read `.message` if it's an Error object; else stringify.

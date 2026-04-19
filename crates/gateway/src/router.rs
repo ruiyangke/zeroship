@@ -234,9 +234,19 @@ async fn handle_request(
     let tail = tail.strip_prefix('/').unwrap_or(tail);
 
     // 2. Decide: RPC, HTTP dispatch, or static asset
+    //
+    // RPC wire: `POST /<app>/_rpc/<methodName>` — the suffix after `_rpc/`
+    // is the URL-path-style method name; the request body is the JSON
+    // args array. Legacy `POST /<app>/rpc` with a JSON-RPC envelope is
+    // kept routable only as a 410 to surface the migration.
+    if let Some(method_name) = tail.strip_prefix("_rpc/") {
+        return handle_rpc(req, &state, &app_id, &route, method_name, body, wall_start).await;
+    }
     if tail == "rpc" {
-        // RPC request — requires auth, rate limit, proxy to worker
-        return handle_rpc(req, &state, &app_id, &route, body, wall_start).await;
+        return HttpResponse::Gone().json(&serde_json::json!({
+            "message": "The /rpc JSON-RPC endpoint is gone. Use POST /_rpc/<methodName> with a JSON array body.",
+            "name": "Error",
+        }));
     }
 
     // If the app exports an onRequest handler, proxy non-static HTTP requests
@@ -259,6 +269,7 @@ async fn handle_rpc(
     state: &GateState,
     app_id: &Uuid,
     route: &zeroship_core::types::RouteEntry,
+    method_name: &str,
     body: Bytes,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
@@ -291,6 +302,21 @@ async fn handle_rpc(
         None
     };
 
+    // Build the worker-side envelope: {method, args}. The client's request
+    // body is already a JSON array of args, forwarded verbatim. Empty
+    // body is treated as "[]" by the worker/runtime pair.
+    let args_str = match std::str::from_utf8(&body) {
+        Ok(s) => s,
+        Err(_) => {
+            return HttpResponse::BadRequest()
+                .json(&serde_json::json!({"message": "RPC body must be UTF-8 JSON", "name": "Error"}));
+        }
+    };
+    let envelope_bytes = serde_json::to_vec(&serde_json::json!({
+        "method": method_name,
+        "args": args_str,
+    })).unwrap();
+
     // Proxy to worker via CHWBL hash ring
     let request_id = Uuid::new_v4();
     let mut response = match proxy::forward(
@@ -298,7 +324,7 @@ async fn handle_rpc(
         app_id,
         &route.plan_id,
         &request_id,
-        &body,
+        &Bytes::from(envelope_bytes),
         user_header_value.as_deref(),
         &state.config.worker_key,
     )

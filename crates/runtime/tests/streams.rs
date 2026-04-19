@@ -21,7 +21,7 @@ fn readable_stream_sync_enqueue() {
             }
             return text;
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("hello world"), "got: {}", r.json);
 }
 
@@ -40,6 +40,6 @@ fn readable_stream_response_text_method() {
             var text = await resp.text();
             return text;
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("abcdef"), "got: {}", r.json);
 }

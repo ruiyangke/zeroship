@@ -43,7 +43,7 @@ fn duplicate_namespace_panics() {
         .modules(noop_modules())
         .plugins(plugins)
         .build();
-    let _ = runtime.dispatch_rpc(r#"{"id":1,"method":"hello","params":[]}"#);
+    let _ = runtime.dispatch_rpc("hello", "[]");
 }
 
 #[test]
@@ -59,5 +59,5 @@ fn unique_namespaces_ok() {
         .build();
     // Force isolate initialization — this runs register_plugins, which must
     // not panic with unique namespaces.
-    let _ = runtime.dispatch_rpc(r#"{"id":1,"method":"hello","params":[]}"#);
+    let _ = runtime.dispatch_rpc("hello", "[]");
 }

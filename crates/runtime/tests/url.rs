@@ -17,7 +17,7 @@ fn url_parse_basic() {
                 host: url.host,
             };
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("\"protocol\":\"https:\""), "got: {}", r.json);
     assert!(r.json.contains("\"hostname\":\"example.com\""), "got: {}", r.json);
     assert!(r.json.contains("\"port\":\"8080\""), "got: {}", r.json);
@@ -32,7 +32,7 @@ fn url_with_base() {
             const url = new URL("/api/users", "https://example.com");
             return url.href;
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("https://example.com/api/users"), "got: {}", r.json);
 }
 
@@ -43,7 +43,7 @@ fn url_invalid_throws() {
             try { new URL("not a url"); return "should have thrown"; }
             catch (e) { return "caught: " + e.message; }
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("caught:"), "got: {}", r.json);
 }
 
@@ -57,7 +57,7 @@ fn url_can_parse() {
                 relative: URL.canParse("/path", "https://example.com"),
             };
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("\"valid\":true"), "got: {}", r.json);
     assert!(r.json.contains("\"invalid\":false"), "got: {}", r.json);
     assert!(r.json.contains("\"relative\":true"), "got: {}", r.json);
@@ -76,7 +76,7 @@ fn url_search_params() {
                 has_q: p.has("q"),
             };
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("\"q\":\"hello\""), "got: {}", r.json);
     assert!(r.json.contains("\"lang\":\"en\""), "got: {}", r.json);
     assert!(r.json.contains("\"missing\":null"), "got: {}", r.json);

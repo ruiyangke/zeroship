@@ -3,7 +3,6 @@ import { createRequire } from "module";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { resolve, relative, extname, dirname } from "node:path";
 import MagicString from "magic-string";
-import { DEFAULT_RPC_ENDPOINT } from "./constants.js";
 
 export interface TransformState {
   serverModuleCache: Map<string, boolean>;
@@ -112,25 +111,85 @@ function discoverServerPackages(root: string, serverModuleCache: Map<string, boo
   } catch { /* ignore */ }
 }
 
-/** Generate an RPC stub for a function name */
-function makeStub(name: string, rpcEndpoint: string): string {
-  return `export async function ${name}(...args) {
-  const res = await fetch(${JSON.stringify(rpcEndpoint)}, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", method: ${JSON.stringify(name)}, params: args, id: Date.now() })
-  });
-  const json = await res.json();
-  if (json.error) throw new Error(json.error.message || "RPC error");
-  return json.result;
-}`;
+/**
+ * Compute the URL-path method name for an export.
+ *
+ * Method names are rooted at the project root with the extension stripped:
+ *   /abs/project/src/api/users.ts  →  "src/api/users"
+ *
+ * Per-export method is `<relPathNoExt>/<exportName>`. Paths keep forward
+ * slashes so the wire (`POST /_rpc/src/api/users/getUser`) matches the
+ * registry key `src/api/users/getUser` on both ends. No collisions
+ * because file path is part of the key.
+ */
+function moduleBaseName(root: string, id: string): string {
+  const rel = relative(root, id).replace(/\\/g, "/");
+  const ext = extname(rel);
+  return ext ? rel.slice(0, -ext.length) : rel;
 }
 
-// No removeFunction / removeBraceBlock — we use AST node positions directly.
-// The transform handler collects AST nodes with start/end and removes them
-// via MagicString, which gives correct source maps for free.
+/** Shared runtime: emitted once per client bundle. Minimal, no deps. */
+const CLIENT_HELPERS = `
+async function __rpcUnary(name, args) {
+  const r = await fetch("/_rpc/" + name, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(args),
+  });
+  if (!r.ok) {
+    let msg = r.statusText;
+    try { msg = (await r.json()).message || msg; } catch {}
+    throw new Error(msg);
+  }
+  return r.json();
+}
+async function* __rpcStream(name, args) {
+  const r = await fetch("/_rpc/" + name, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(args),
+  });
+  if (!r.ok) {
+    let msg = r.statusText;
+    try { msg = (await r.json()).message || msg; } catch {}
+    throw new Error(msg);
+  }
+  const reader = r.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf("\\n\\n")) !== -1) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      const evMatch = frame.match(/^event: (.*)$/m);
+      const dataMatch = frame.match(/^data: (.*)$/s);
+      if (!evMatch || !dataMatch) continue;
+      const ev = evMatch[1];
+      const data = dataMatch[1];
+      const parsed = JSON.parse(data);
+      if (ev === "yield") yield parsed;
+      else if (ev === "error") throw new Error(parsed.message || "stream error");
+      else if (ev === "return") return parsed;
+    }
+  }
+}
+`.trim();
 
-export function transformPlugin(rpcEndpoint: string = DEFAULT_RPC_ENDPOINT, state: TransformState): Plugin {
+/** Client stub for a non-streaming export */
+function clientUnaryStub(name: string, methodName: string): string {
+  return `export const ${name} = (...args) => __rpcUnary(${JSON.stringify(methodName)}, args);`;
+}
+
+/** Client stub for a streaming (async generator) export */
+function clientStreamStub(name: string, methodName: string): string {
+  return `export const ${name} = (...args) => __rpcStream(${JSON.stringify(methodName)}, args);`;
+}
+
+export function transformPlugin(_rpcEndpoint: string, state: TransformState): Plugin {
   const { serverModuleCache, serverFunctionMap, knownServerSources } = state;
   let root = "";
 
@@ -148,9 +207,14 @@ export function transformPlugin(rpcEndpoint: string = DEFAULT_RPC_ENDPOINT, stat
         id: { include: /\.(ts|tsx|js|jsx)$/, exclude: /node_modules/ },
       },
       handler(this: any, code: string, id: string) {
-        // Skip transform for the zeroship environment — server code should
-        // run as-is in V8. Only transform for client (replace with RPC stubs).
-        if (this.environment?.name === "zeroship") return null;
+        // Server environment detection:
+        //  - dev: `this.environment.name === "zeroship"` (dev-server creates it)
+        //  - prod build: Vite's `ssr: entry` build runs in environment `ssr`
+        //    (rolldown sets `this.environment.name === "ssr"`). We treat both
+        //    as the server side.
+        //  - prod client build: environment name is `"client"`.
+        const envName = this.environment?.name;
+        const isServerEnv = envName === "zeroship" || envName === "ssr";
 
         // 1. Parse AST with Rolldown's built-in parser
         const isTsx = id.endsWith(".tsx") || id.endsWith(".jsx");
@@ -209,14 +273,13 @@ export function transformPlugin(rpcEndpoint: string = DEFAULT_RPC_ENDPOINT, stat
           }
         }
 
-        // 5. Find server functions — collect AST nodes with positions
-        //
-        // Unlike the previous regex-based approach, we use the AST node's
-        // start/end positions directly. This handles destructured params,
-        // default values with parens, arrow function exports, and every
-        // other syntax the regex couldn't parse. MagicString removes the
-        // exact ranges, giving correct source maps for free.
-        interface ServerFn { name: string; node: any; }
+        // 5. Find server functions — collect AST nodes with positions +
+        //    flag async generators separately (their client stubs differ).
+        interface ServerFn {
+          name: string;
+          node: any;
+          isStream: boolean;
+        }
         const serverFns: ServerFn[] = [];
 
         for (const node of ast.body) {
@@ -226,22 +289,30 @@ export function transformPlugin(rpcEndpoint: string = DEFAULT_RPC_ENDPOINT, stat
 
           // export function name() { ... }
           // export async function name() { ... }
+          // export async function* name() { ... }
           if (decl.type === "FunctionDeclaration" && decl.id?.name) {
             const name = decl.id.name;
             if (isFileServer || hasFnDirective(decl, "use server") || fnReferencesAny(decl, tainted)) {
-              serverFns.push({ name, node });
+              serverFns.push({ name, node, isStream: !!decl.generator });
             }
           }
 
           // export const name = () => { ... }
           // export const name = async function() { ... }
+          // export const name = async function*() { ... }
           // export const name = createServerFn(...)
           if (decl.type === "VariableDeclaration") {
             for (const d of decl.declarations || []) {
               const name = d.id?.name;
               if (!name || !d.init) continue;
               if (isFileServer || fnReferencesAny(d.init, tainted)) {
-                serverFns.push({ name, node });
+                // Only arrow/function-expression initializers can be generators;
+                // other initializers (calls like `createServerFn(...)`) can't
+                // reliably be inspected for generator-ness. Default to unary.
+                const isStream =
+                  (d.init.type === "FunctionExpression" && !!d.init.generator) ||
+                  (d.init.type === "ArrowFunctionExpression" && !!d.init.generator);
+                serverFns.push({ name, node, isStream });
                 break; // one removal per VariableDeclaration node
               }
             }
@@ -251,16 +322,53 @@ export function transformPlugin(rpcEndpoint: string = DEFAULT_RPC_ENDPOINT, stat
         if (serverFns.length === 0) return null;
 
         const names = serverFns.map((f) => f.name);
+        const modPath = moduleBaseName(root, id);
 
         // 6. Track for build report + export signature tracking
         serverFunctionMap.set(relative(root, id), new Set(names));
 
-        // 7. Transform to client code using MagicString (AST positions)
+        // --- SERVER ENVIRONMENT ---------------------------------------------
+        //
+        // Append `__register(methodName, fn)` side effects so the V8 runtime
+        // registry can resolve the URL-path-style method name to the export.
+        // Keep all original exports (including `onRequest`, tainted helpers,
+        // imports) untouched — only add registrations at the bottom of the
+        // module. The transform is a superset of the source, never a
+        // rewrite of the bodies.
+        if (isServerEnv) {
+          const s = new MagicString(code);
+          const registrations = serverFns
+            .map((fn) => {
+              const methodName = `${modPath}/${fn.name}`;
+              return `__register(${JSON.stringify(methodName)}, ${fn.name});`;
+            })
+            .join("\n");
+          s.append(`\n\n// zeroship: register server functions for URL-path RPC\n${registrations}\n`);
+          return {
+            code: s.toString(),
+            map: s.generateMap({ source: id, includeContent: true, hires: true }),
+          };
+        }
+
+        // --- CLIENT ENVIRONMENT ---------------------------------------------
+        //
+        // Emit stubs that call the URL-path-based RPC wire. Unary exports
+        // (plain async functions, regular functions) become `__rpcUnary`;
+        // async generators become `__rpcStream`. The stubs live in the
+        // client bundle; the actual implementation lives on the server
+        // and is invoked over HTTP.
         const s = new MagicString(code);
 
+        const stubs = serverFns.map((fn) => {
+          const methodName = `${modPath}/${fn.name}`;
+          return fn.isStream
+            ? clientStreamStub(fn.name, methodName)
+            : clientUnaryStub(fn.name, methodName);
+        });
+
         if (isFileServer) {
-          // Replace ENTIRE file with stubs
-          s.overwrite(0, code.length, names.map((n) => makeStub(n, rpcEndpoint)).join("\n\n") + "\n");
+          // Replace ENTIRE file with stubs + helpers
+          s.overwrite(0, code.length, CLIENT_HELPERS + "\n\n" + stubs.join("\n") + "\n");
           return {
             code: s.toString(),
             map: s.generateMap({ source: id, includeContent: true, hires: true }),
@@ -299,8 +407,8 @@ export function transformPlugin(rpcEndpoint: string = DEFAULT_RPC_ENDPOINT, stat
           }
         }
 
-        // Append RPC stubs
-        s.append("\n\n" + names.map((n) => makeStub(n, rpcEndpoint)).join("\n\n") + "\n");
+        // Append helpers + RPC stubs
+        s.append("\n\n" + CLIENT_HELPERS + "\n\n" + stubs.join("\n") + "\n");
 
         return {
           code: s.toString(),

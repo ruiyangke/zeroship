@@ -298,25 +298,31 @@ impl Runtime {
 
     // ---- Methods that enter V8 — borrow internally -----------------------
 
-    /// Dispatch a JSON-RPC request synchronously. See
-    /// [`RuntimeInner::dispatch_rpc`] for details.
-    pub fn dispatch_rpc(&self, body: &str) -> Result<RequestResult, String> {
+    /// Dispatch an RPC request synchronously.
+    ///
+    /// New wire: `method` is the URL path after `/_rpc/` (e.g. `"ping"` or
+    /// `"src/index/ping"`), `args_json` is a JSON-serialized positional
+    /// args array (e.g. `"[]"` or `"[3,4]"`). Empty string is equivalent
+    /// to `"[]"`. Returns the raw value JSON (no envelope); for streaming
+    /// / Response returns, the `json` field holds the rendered body.
+    pub fn dispatch_rpc(&self, method: &str, args_json: &str) -> Result<RequestResult, String> {
         self.inner
             .borrow_mut()
-            .dispatch_rpc(self.modules.as_slice(), body)
+            .dispatch_rpc(self.modules.as_slice(), method, args_json)
     }
 
     /// Phase 1 dispatch — returns immediately with an outcome describing
     /// whether the handler completed synchronously, is pending on the pump,
-    /// or errored.
+    /// or errored. Same args as [`dispatch_rpc`].
     pub fn dispatch_start(
         &self,
-        body: &str,
+        method: &str,
+        args_json: &str,
         user_json: Option<String>,
     ) -> DispatchOutcome {
         self.inner
             .borrow_mut()
-            .dispatch_start(self.modules.as_slice(), body, user_json)
+            .dispatch_start(self.modules.as_slice(), method, args_json, user_json)
     }
 
     /// HTTP dispatch — calls the JS `onRequest` handler.
@@ -341,6 +347,16 @@ impl Runtime {
     /// Returns true if the app exports an `onRequest` HTTP handler.
     pub fn has_http_handler(&self) -> bool {
         self.inner.borrow().has_http_handler()
+    }
+
+    /// Cheap check: is `method_name` present in the `__rpc` registry?
+    ///
+    /// Used by the URL-path RPC route to decide between native dispatch
+    /// (when the method is registered in-isolate) and falling through
+    /// to `onRequest` (dev-bootstrap's async registry). One V8 object
+    /// property read — no JS function call, no microtask checkpoint.
+    pub fn rpc_method_exists(&self, method_name: &str) -> bool {
+        self.inner.borrow_mut().rpc_method_exists(method_name)
     }
 
     /// Enter the V8 isolate on this thread. Multi-tenant workers that keep
@@ -482,12 +498,6 @@ struct PendingRequest {
     cpu_accumulated: Duration,
     wall_start: Instant,
     cancel: CancelFlag,
-    /// Raw JSON-RPC id slice from the incoming request body — preserved
-    /// verbatim so the envelope built when the promise settles has the
-    /// same id type as the request (number stays number, string stays
-    /// string, null/absent both serialize as `null`). Only set for RPC
-    /// requests (is_http = false).
-    id_json: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -527,6 +537,15 @@ pub(crate) struct RuntimeInner {
     pub(crate) state: SharedState,
     /// Plugins registered on zeroship.* namespace.
     plugins: Vec<Arc<dyn NativePlugin>>,
+
+    /// Cache for `rpc_method_exists` probes. The URL-path router does a
+    /// registry lookup on every `/_rpc/*` request; without this the probe
+    /// enters V8 twice per request (once to probe, once to dispatch).
+    /// Sticky semantics: `Some(true)` never transitions back to `false`
+    /// (HMR may re-register, never unregister through the runtime), and
+    /// `Some(false)` is considered stale enough to re-probe next time
+    /// so HMR-added methods pick up without a worker restart.
+    rpc_method_cache: HashMap<String, bool>,
 
     /// Stream forwarders: stream_id -> StreamForwarder for outbound HTTP streams.
     stream_forwarders: HashMap<u32, StreamForwarder>,
@@ -662,6 +681,7 @@ impl RuntimeInner {
             initialized: false,
             state,
             plugins,
+            rpc_method_cache: HashMap::new(),
             stream_forwarders: HashMap::new(),
             pending_requests: HashMap::new(),
             next_direct_request_id: 1,
@@ -906,6 +926,43 @@ impl RuntimeInner {
         self.http_handler_fn.is_some()
     }
 
+    /// Cheap registry-lookup used by the URL-path RPC router.
+    ///
+    /// Hits an in-process cache; only the first call per method enters
+    /// V8. Positive cache is sticky; negative cache is cleared here so
+    /// HMR-added methods get picked up on the next request (~20 µs one
+    /// V8 probe, then the dispatch). The dispatch-fast-path caller
+    /// should pre-check the cache before paying for the V8 enter.
+    pub fn rpc_method_exists(&mut self, method_name: &str) -> bool {
+        if !self.initialized {
+            return false;
+        }
+        if let Some(&true) = self.rpc_method_cache.get(method_name) {
+            return true;
+        }
+        let exists = enter_v8!(self, |scope| {
+            let global = scope.get_current_context().global(scope);
+            let rpc_key = v8::String::new(scope, "__rpc").unwrap();
+            let Some(rpc_obj) = global
+                .get(scope, rpc_key.into())
+                .and_then(|v| v.to_object(scope))
+            else {
+                return false;
+            };
+            let Some(name_str) = v8::String::new(scope, method_name) else {
+                return false;
+            };
+            let Some(val) = rpc_obj.get(scope, name_str.into()) else {
+                return false;
+            };
+            val.is_function()
+        });
+        if exists {
+            self.rpc_method_cache.insert(method_name.to_string(), true);
+        }
+        exists
+    }
+
     /// Load polyfills, ES modules, and compile the dispatch function (once).
     pub(crate) fn ensure_initialized(&mut self, modules: &[ModuleEntry]) {
         if self.initialized {
@@ -1028,33 +1085,20 @@ impl RuntimeInner {
     // Direct dispatch (channel-free mode)
     // -----------------------------------------------------------------------
 
-    /// Dispatch a JSON-RPC request synchronously into V8. Returns the result
+    /// Dispatch an RPC request synchronously into V8. Returns the result
     /// immediately for sync handlers (ping, fib, promiseChain, uuid, crypto).
     /// For async handlers that produce a pending promise, fires ready timers
     /// and checks settlement. Returns an error if the promise remains pending
     /// (truly async ops like fetch are not yet supported in channel-free mode).
-    pub fn dispatch_rpc(&mut self, modules: &[ModuleEntry], body: &str) -> Result<RequestResult, String> {
+    ///
+    /// `method` is the URL-path-style method name (e.g. `"ping"` or
+    /// `"src/index/ping"`). `args_json` is a JSON array of positional args.
+    pub fn dispatch_rpc(&mut self, modules: &[ModuleEntry], method: &str, args_json: &str) -> Result<RequestResult, String> {
         self.ensure_initialized(modules);
 
         if self.dispatch_fn.is_none() {
             return Err("Isolate not initialized".to_string());
         }
-
-        // Parse the JSON-RPC envelope on the Rust side — the old JS wrapper
-        // did this via JSON.parse inside V8, which was ~8% of ping CPU.
-        let parsed = match crate::dispatch::parse_request(body) {
-            Ok(p) => p,
-            Err(envelope) => {
-                return Ok(RequestResult {
-                    json: envelope,
-                    cpu_time: Duration::ZERO,
-                    wall_time: Duration::ZERO,
-                    logs: Vec::new(),
-                });
-            }
-        };
-        let id_json = parsed.id.map(|r| r.get()).unwrap_or("null");
-        let params_json = parsed.params.map(|r| r.get());
 
         let request_id = self.next_direct_request_id;
         self.next_direct_request_id += 1;
@@ -1070,9 +1114,8 @@ impl RuntimeInner {
                     scope,
                     &self.state,
                     dispatch_fn,
-                    parsed.method,
-                    params_json,
-                    id_json,
+                    method,
+                    if args_json.is_empty() { None } else { Some(args_json) },
                 )
             })
         };
@@ -1096,6 +1139,19 @@ impl RuntimeInner {
                     logs,
                 })
             }
+            DispatchResult::HttpResponse(info) => {
+                // Handler returned a Response synchronously. For channel-free
+                // mode we only support Complete responses; a stream would need
+                // the pump to drive its readers. Flatten Complete to its body.
+                self.state.borrow_mut().executing_request_id = None;
+                let logs = self.drain_request_logs(request_id);
+                match info {
+                    crate::http::ResponseInfo::Complete { body, .. } => {
+                        Ok(RequestResult { json: body, cpu_time: cpu_dispatch, wall_time: cpu_dispatch, logs })
+                    }
+                    _ => Err("Streaming / WebSocket responses not supported via dispatch_rpc — use dispatch_http".to_string())
+                }
+            }
             DispatchResult::Async(promise) => {
                 // Try to settle inline: fire ready timers
                 self.fire_ready_timers_inline();
@@ -1103,7 +1159,7 @@ impl RuntimeInner {
                 // Check if the promise settled after microtask checkpoint + ready timers
                 self.arm_cpu_timer();
                 let result = enter_v8!(self, |scope| {
-                    crate::dispatch::extract_promise_result(scope, &promise, id_json)
+                    crate::dispatch::extract_promise_result(scope, &promise)
                 });
                 self.disarm_cpu_timer();
 
@@ -1115,20 +1171,29 @@ impl RuntimeInner {
 
                 self.state.borrow_mut().executing_request_id = None;
                 match result {
-                    Ok(json) => {
+                    Ok(DispatchResult::Sync(json)) => {
                         let logs = self.drain_request_logs(request_id);
-                        Ok(RequestResult {
-                            json,
-                            cpu_time: cpu_total,
-                            wall_time: cpu_total,
-                            logs,
-                        })
+                        Ok(RequestResult { json, cpu_time: cpu_total, wall_time: cpu_total, logs })
                     }
-                    Err(_) => {
+                    Ok(DispatchResult::HttpResponse(info)) => {
+                        let logs = self.drain_request_logs(request_id);
+                        match info {
+                            crate::http::ResponseInfo::Complete { body, .. } => {
+                                Ok(RequestResult { json: body, cpu_time: cpu_total, wall_time: cpu_total, logs })
+                            }
+                            _ => Err("Streaming / WebSocket responses not supported via dispatch_rpc — use dispatch_http".to_string())
+                        }
+                    }
+                    Ok(DispatchResult::ErrorValue { message, .. }) => Err(message),
+                    Ok(_) | Err(_) => {
                         // Promise still pending — async ops not supported in direct dispatch
                         Err("Promise did not settle synchronously (async ops not supported in channel-free mode)".to_string())
                     }
                 }
+            }
+            DispatchResult::ErrorValue { message, .. } => {
+                self.state.borrow_mut().executing_request_id = None;
+                Err(message)
             }
             DispatchResult::Error(msg) => {
                 self.state.borrow_mut().executing_request_id = None;
@@ -1153,7 +1218,8 @@ impl RuntimeInner {
     pub fn dispatch_start(
         &mut self,
         modules: &[ModuleEntry],
-        body: &str,
+        method: &str,
+        args_json: &str,
         user_json: Option<String>,
     ) -> DispatchOutcome {
         self.ensure_initialized(modules);
@@ -1161,24 +1227,6 @@ impl RuntimeInner {
         if self.dispatch_fn.is_none() {
             return DispatchOutcome::Complete(Err("Isolate not initialized".to_string()));
         }
-
-        // Parse the JSON-RPC envelope on the Rust side. On a malformed body
-        // we still return a valid envelope (id=null, code=-32700) so the
-        // client receives a well-formed JSON-RPC error instead of an
-        // opaque transport failure.
-        let parsed = match crate::dispatch::parse_request(body) {
-            Ok(p) => p,
-            Err(envelope) => {
-                return DispatchOutcome::Complete(Ok(RequestResult {
-                    json: envelope,
-                    cpu_time: Duration::ZERO,
-                    wall_time: Duration::ZERO,
-                    logs: Vec::new(),
-                }));
-            }
-        };
-        let id_json_owned: String = parsed.id.map(|r| r.get().to_string()).unwrap_or_else(|| "null".to_string());
-        let params_json = parsed.params.map(|r| r.get());
 
         let request_id = self.next_direct_request_id;
         self.next_direct_request_id += 1;
@@ -1202,16 +1250,14 @@ impl RuntimeInner {
         self.arm_cpu_timer();
         let dispatch_result = {
             let dispatch_fn = self.dispatch_fn.as_ref().unwrap();
-            let method = parsed.method;
-            let id_ref: &str = &id_json_owned;
+            let args_opt = if args_json.is_empty() { None } else { Some(args_json) };
             enter_v8!(self, |scope| {
                 crate::dispatch::dispatch_request(
                     scope,
                     &self.state,
                     dispatch_fn,
                     method,
-                    params_json,
-                    id_ref,
+                    args_opt,
                 )
             })
         };
@@ -1236,6 +1282,13 @@ impl RuntimeInner {
                     logs,
                 }))
             }
+            DispatchResult::HttpResponse(info) => {
+                // Handler returned a Response synchronously. Route through
+                // the HTTP path so streaming (async generator wrap, user-
+                // returned Response(ReadableStream)) works.
+                self.clear_executing_request();
+                self.build_http_outcome(request_id, info, cpu_dispatch)
+            }
             DispatchResult::Async(promise) => {
                 // Fire zero-delay timers inline — this settles setTimeout(0) immediately
                 // without a round-trip through the pump task.
@@ -1249,9 +1302,8 @@ impl RuntimeInner {
 
                 // Check if promise settled after microtask checkpoint + ready timers
                 self.arm_cpu_timer();
-                let id_ref: &str = &id_json_owned;
                 let result = enter_v8!(self, |scope| {
-                    crate::dispatch::extract_promise_result(scope, &promise, id_ref)
+                    crate::dispatch::extract_promise_result(scope, &promise)
                 });
                 self.disarm_cpu_timer();
 
@@ -1264,8 +1316,7 @@ impl RuntimeInner {
                 let cpu_total = wall_start.elapsed();
 
                 match result {
-                    Ok(json) => {
-                        // CPU limit check for inline-settled async requests
+                    Ok(DispatchResult::Sync(json)) => {
                         if let Some(limit) = self.cpu_limit {
                             if cpu_total > limit {
                                 self.clear_executing_request();
@@ -1273,17 +1324,22 @@ impl RuntimeInner {
                                 return DispatchOutcome::Complete(Err("CPU time limit exceeded".into()));
                             }
                         }
-                        // Promise settled synchronously (e.g. Promise.resolve chains, setTimeout(0))
                         self.clear_executing_request();
                         let logs = self.drain_request_logs(request_id);
                         DispatchOutcome::Complete(Ok(RequestResult {
-                            json,
-                            cpu_time: cpu_total,
-                            wall_time: cpu_total,
-                            logs,
+                            json, cpu_time: cpu_total, wall_time: cpu_total, logs,
                         }))
                     }
-                    Err(_) => {
+                    Ok(DispatchResult::HttpResponse(info)) => {
+                        self.clear_executing_request();
+                        self.build_http_outcome(request_id, info, cpu_total)
+                    }
+                    Ok(DispatchResult::ErrorValue { message, .. }) => {
+                        self.clear_executing_request();
+                        self.discard_request_state(request_id);
+                        DispatchOutcome::Complete(Err(message))
+                    }
+                    Ok(_) | Err(_) => {
                         // Promise is truly pending — needs the pump to drive it
                         self.clear_executing_request();
                         let (tx, rx) = channel::result_slot();
@@ -1296,7 +1352,6 @@ impl RuntimeInner {
                             cpu_accumulated: cpu_total,
                             wall_start,
                             cancel: cancel.clone(),
-                            id_json: id_json_owned,
                         });
                         // Notify the pump that new work was added
                         self.notify_pump();
@@ -1304,8 +1359,14 @@ impl RuntimeInner {
                     }
                 }
             }
+            DispatchResult::ErrorValue { message, .. } => {
+                self.clear_executing_request();
+                self.discard_request_state(request_id);
+                DispatchOutcome::Complete(Err(message))
+            }
             DispatchResult::Error(msg) => {
                 self.clear_executing_request();
+                self.discard_request_state(request_id);
                 DispatchOutcome::Complete(Err(msg))
             }
         }
@@ -1409,9 +1470,6 @@ impl RuntimeInner {
                     cpu_accumulated: cpu_elapsed,
                     wall_start,
                     cancel: cancel.clone(),
-                    // id_json is unused for HTTP requests — no envelope is
-                    // built from the JSON-RPC id. Placeholder value.
-                    id_json: String::new(),
                 });
                 self.notify_pump();
                 DispatchOutcome::HttpPending { rx, cancel }
@@ -1894,13 +1952,11 @@ impl RuntimeInner {
 
         match settled {
             SettledResult::Rpc(Ok(result_json)) => {
-                // Wrap the raw handler result in the JSON-RPC envelope using
-                // the id we stashed when the request arrived. Doing this
-                // here (rather than in JS) moves the stringify work to Rust.
-                let envelope = crate::dispatch::build_success_envelope(&result_json, &req.id_json);
+                // New wire: the handler's return value is the response body,
+                // no envelope. Serve as `application/json`.
                 let logs = self.drain_request_logs(id);
                 let result = RequestResult {
-                    json: envelope,
+                    json: result_json,
                     cpu_time,
                     wall_time,
                     logs,

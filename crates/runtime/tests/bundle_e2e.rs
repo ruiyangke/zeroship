@@ -57,29 +57,29 @@ fn execute_real_app_from_bundle() {
     let runtime = Runtime::builder().modules(entries).build();
     
     // Test ping
-    let r = runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":1}"#).unwrap();
+    let r = runtime.dispatch_rpc("ping", "[]").unwrap();
     assert!(r.json.contains("pong"), "ping failed: {}", r.json);
     eprintln!("  ping: OK");
-    
+
     // Test createUser with zod validation
     let r = runtime.dispatch_rpc(
-        r#"{"jsonrpc":"2.0","method":"createUser","params":["Alice","alice@example.com",30],"id":2}"#
+        "createUser",
+        r#"["Alice","alice@example.com",30]"#,
     ).unwrap();
     eprintln!("  createUser: {}", &r.json[..80.min(r.json.len())]);
     assert!(r.json.contains("Alice"), "createUser failed: {}", r.json);
     assert!(r.json.contains("id"), "createUser should return id: {}", r.json);
-    
+
     // Test validateUser (zod validation — invalid email)
     let r = runtime.dispatch_rpc(
-        r#"{"jsonrpc":"2.0","method":"validateUser","params":[{"name":"Bob","email":"not-email","age":25}],"id":3}"#
+        "validateUser",
+        r#"[{"name":"Bob","email":"not-email","age":25}]"#,
     ).unwrap();
     eprintln!("  validateUser (invalid): {}", &r.json[..80.min(r.json.len())]);
     assert!(r.json.contains("false") || r.json.contains("error"), "validation should fail: {}", r.json);
-    
+
     // Test listUsers (lodash sortBy)
-    let r = runtime.dispatch_rpc(
-        r#"{"jsonrpc":"2.0","method":"listUsers","params":[],"id":4}"#
-    ).unwrap();
+    let r = runtime.dispatch_rpc("listUsers", "[]").unwrap();
     eprintln!("  listUsers: {}", &r.json[..80.min(r.json.len())]);
     assert!(r.json.contains("Alice"), "listUsers should contain Alice: {}", r.json);
     
@@ -221,13 +221,13 @@ fn execute_multi_module_from_bundle() {
     init_v8();
     let runtime = Runtime::builder().modules(entries).build();
     
-    let r = runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":1}"#).unwrap();
+    let r = runtime.dispatch_rpc("ping", "[]").unwrap();
     assert!(r.json.contains("pong"));
-    
-    let r = runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"compute","params":[21],"id":2}"#).unwrap();
+
+    let r = runtime.dispatch_rpc("compute", "[21]").unwrap();
     assert!(r.json.contains("42"), "compute(21) should be 42: {}", r.json);
-    
-    let r = runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"hello","params":["World"],"id":3}"#).unwrap();
+
+    let r = runtime.dispatch_rpc("hello", "[\"World\"]").unwrap();
     assert!(r.json.contains("Hello, World!"), "hello should greet: {}", r.json);
     
     eprintln!("  multi-module from bundle: all functions working");

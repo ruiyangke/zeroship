@@ -40,8 +40,8 @@ fn on_request_with_rpc() {
     let runtime = Runtime::builder().modules(modules.clone()).build();
 
     // RPC still works
-    let rpc = runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"add","params":[3,4],"id":1}"#).unwrap();
-    assert!(rpc.json.contains("7"));
+    let rpc = runtime.dispatch_rpc("add", "[3,4]").unwrap();
+    assert_eq!(rpc.json, "7");
 
     // HTTP also works
     match runtime.dispatch_http("GET", "http://localhost/", "[]", "", None) {

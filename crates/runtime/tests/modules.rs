@@ -12,11 +12,11 @@ fn esm_basic_rpc() {
         "#.into(),
     }];
     let runtime = Runtime::builder().modules(modules).build();
-    let r = runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":1}"#).unwrap();
-    assert!(r.json.contains("pong"), "got: {}", r.json);
+    let r = runtime.dispatch_rpc("ping", "[]").unwrap();
+    assert_eq!(r.json, "\"pong\"");
 
-    let r2 = runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"add","params":[3,4],"id":2}"#).unwrap();
-    assert!(r2.json.contains("\"result\":7"), "got: {}", r2.json);
+    let r2 = runtime.dispatch_rpc("add", "[3,4]").unwrap();
+    assert_eq!(r2.json, "7");
 }
 
 #[test]
@@ -36,6 +36,6 @@ fn esm_multi_module_rpc() {
         },
     ];
     let runtime = Runtime::builder().modules(modules).build();
-    let r = runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"compute","params":[3,4],"id":1}"#).unwrap();
-    assert!(r.json.contains("7"), "got: {}", r.json);
+    let r = runtime.dispatch_rpc("compute", "[3,4]").unwrap();
+    assert_eq!(r.json, "7");
 }

@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { chat } from "./index";
 
 interface ChatMsg {
   role: "user" | "assistant";
@@ -35,64 +36,21 @@ export function App() {
     let content = "";
 
     try {
-      const res = await fetch("/_rpc", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          method: "chat",
-          params: [text, messages],
-          id: Date.now(),
-        }),
-      });
-
-      const contentType = res.headers.get("content-type") ?? "";
-      if (!contentType.includes("text/event-stream")) {
-        // Error path — upstream returned JSON-RPC envelope with an error.
-        const json = await res.json();
-        throw new Error(json?.error?.message ?? `HTTP ${res.status}`);
-      }
-
-      const reader = res.body!.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        let newlineIdx: number;
-        while ((newlineIdx = buffer.indexOf("\n\n")) !== -1) {
-          const frame = buffer.slice(0, newlineIdx);
-          buffer = buffer.slice(newlineIdx + 2);
-          if (!frame.startsWith("data: ")) continue;
-          const payload = frame.slice(6).trim();
-          if (payload === "[DONE]") continue;
-
-          let parsed: { token?: string; error?: string };
-          try {
-            parsed = JSON.parse(payload);
-          } catch {
-            continue;
-          }
-          if (parsed.error) {
-            throw new Error(parsed.error);
-          }
-          if (typeof parsed.token !== "string") continue;
-
-          if (firstToken) {
-            setFirstTokenMs(Math.round(performance.now() - started));
-            firstToken = false;
-          }
-
-          content += parsed.token;
-          setMessages((prev) => {
-            const updated = [...prev];
-            updated[updated.length - 1] = { role: "assistant", content };
-            return updated;
-          });
+      // `chat` is the client stub produced by @zeroship/vite-plugin:
+      // an async iterable that streams `{ token: string }` events.
+      for await (const ev of chat(text, messages)) {
+        if (firstToken) {
+          setFirstTokenMs(Math.round(performance.now() - started));
+          firstToken = false;
         }
+        if (typeof ev.token !== "string") continue;
+
+        content += ev.token;
+        setMessages((prev) => {
+          const updated = [...prev];
+          updated[updated.length - 1] = { role: "assistant", content };
+          return updated;
+        });
       }
     } catch (e: any) {
       setMessages((prev) => {
@@ -117,7 +75,7 @@ export function App() {
           <span style={styles.badge}>zeroship V8 + openai^6</span>
         </div>
         <div style={styles.subhead}>
-          <code>gpt-5.4-mini</code> · SSE · <code>Response(ReadableStream)</code>
+          <code>gpt-5.4-mini</code> · async generator · URL-path RPC
           {firstTokenMs != null && (
             <span style={styles.metric}> · first token {firstTokenMs} ms</span>
           )}

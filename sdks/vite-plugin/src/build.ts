@@ -1,7 +1,8 @@
 import { type Plugin, build as viteBuild } from "vite";
 import { resolve, relative } from "node:path";
 import { existsSync } from "node:fs";
-import type { TransformState } from "./transform.js";
+import { transformPlugin, type TransformState } from "./transform.js";
+import { DEFAULT_RPC_ENDPOINT } from "./constants.js";
 
 /** Find server entry point in project */
 export function findServerEntry(root: string, explicit?: string): string | null {
@@ -47,9 +48,16 @@ export function buildPlugin(state: TransformState, options: { serverEntry?: stri
 
       console.log(`[zeroship] building server bundle from ${relative(root, entry)}`);
 
+      // Reuse the shared transform state so the server bundle emits
+      // `__register(...)` side effects for every "use server" export
+      // the client build already registered. Without this, the server
+      // bundle has the plain function bodies but no registry
+      // population, so the V8 runtime sees "Method not found" for
+      // every URL-path RPC call.
       await viteBuild({
         root,
         configFile: false,
+        plugins: [transformPlugin(DEFAULT_RPC_ENDPOINT, state)],
         build: {
           ssr: entry,
           outDir: "dist/server",

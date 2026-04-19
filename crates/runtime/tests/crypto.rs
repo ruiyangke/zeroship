@@ -7,7 +7,7 @@ fn crypto_random_uuid() {
         var id1 = crypto.randomUUID();
         var id2 = crypto.randomUUID();
         return { id1, id2, different: id1 !== id2, format: /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id1) };
-    }"#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    }"#), "test", "[]").unwrap();
     assert!(r.json.contains("\"different\":true"), "got: {}", r.json);
     assert!(r.json.contains("\"format\":true"), "got: {}", r.json);
 }
@@ -22,7 +22,7 @@ fn crypto_get_random_values() {
             for (var i = 0; i < buf.length; i++) { if (buf[i] !== 0) nonzero++; }
             return nonzero > 0 ? "ok" : "all_zeros";
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("ok"), "got: {}", r.json);
 }
 
@@ -37,7 +37,7 @@ fn crypto_subtle_digest_sha256() {
             for (var i = 0; i < bytes.length; i++) hex += ("0" + bytes[i].toString(16)).slice(-2);
             return hex;
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"), "got: {}", r.json);
 }
 
@@ -49,7 +49,7 @@ fn crypto_subtle_digest_sha512() {
             var hash = await crypto.subtle.digest("SHA-512", data);
             return new Uint8Array(hash).length;
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("64"), "SHA-512 should produce 64 bytes, got: {}", r.json);
 }
 
@@ -67,7 +67,7 @@ fn crypto_import_export_hmac_raw() {
             for (var i = 0; i < 16; i++) { if (arr[i] !== i+1) return "mismatch at " + i; }
             return "ok";
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("ok"), "got: {}", r.json);
 }
 
@@ -81,7 +81,7 @@ fn crypto_generate_hmac_key() {
             if (new Uint8Array(exported).length !== 32) return "wrong length";
             return "ok";
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("ok"), "got: {}", r.json);
 }
 
@@ -95,7 +95,7 @@ fn crypto_generate_ecdsa_keypair() {
             if (kp.privateKey.type !== "private") return "wrong priv type";
             return "ok";
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("ok"), "got: {}", r.json);
 }
 
@@ -109,7 +109,7 @@ fn crypto_generate_aes_key() {
             if (new Uint8Array(raw).length !== 32) return "wrong length";
             return "ok";
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("ok"), "got: {}", r.json);
 }
 
@@ -127,7 +127,7 @@ fn crypto_hmac_sign_verify() {
             if (bad) return "tampered verify should fail";
             return "ok";
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("ok"), "got: {}", r.json);
 }
 
@@ -142,7 +142,7 @@ fn crypto_ecdsa_sign_verify() {
             if (!valid) return "verify failed";
             return "ok";
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("ok"), "got: {}", r.json);
 }
 
@@ -157,7 +157,7 @@ fn crypto_ed25519_sign_verify() {
             if (!valid) return "verify failed";
             return "ok";
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("ok"), "got: {}", r.json);
 }
 
@@ -174,7 +174,7 @@ fn crypto_aes_gcm_encrypt_decrypt() {
             var text = new TextDecoder().decode(new Uint8Array(decrypted));
             return text === "secret message" ? "ok" : "mismatch: " + text;
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("ok"), "got: {}", r.json);
 }
 
@@ -191,7 +191,7 @@ fn crypto_aes_cbc_encrypt_decrypt() {
             var text = new TextDecoder().decode(new Uint8Array(decrypted));
             return text === "hello cbc" ? "ok" : "mismatch: " + text;
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("ok"), "got: {}", r.json);
 }
 
@@ -210,7 +210,7 @@ fn crypto_hkdf_derive_bits() {
             if (new Uint8Array(bits).length !== 32) return "wrong length";
             return "ok";
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("ok"), "got: {}", r.json);
 }
 
@@ -228,7 +228,7 @@ fn crypto_pbkdf2_derive_bits() {
             if (new Uint8Array(bits).length !== 32) return "wrong length";
             return "ok";
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("ok"), "got: {}", r.json);
 }
 
@@ -249,6 +249,6 @@ fn crypto_derive_key_hkdf_to_aes() {
             if (new Uint8Array(raw).length !== 32) return "wrong length";
             return "ok";
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    "#), "test", "[]").unwrap();
     assert!(r.json.contains("ok"), "got: {}", r.json);
 }

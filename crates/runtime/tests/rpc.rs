@@ -6,9 +6,13 @@ use zeroship_runtime::runtime::Runtime;
 
 #[test]
 fn basic_rpc() {
-    let r = dispatch(m(r#"export function ping() { return "pong"; }"#),
-        r#"{"jsonrpc":"2.0","method":"ping","params":[],"id":1}"#).unwrap();
-    assert!(r.json.contains("pong"));
+    let r = dispatch(
+        m(r#"export function ping() { return "pong"; }"#),
+        "ping",
+        "[]",
+    ).unwrap();
+    // New wire: body is the raw JSON value, no envelope.
+    assert_eq!(r.json, "\"pong\"");
 }
 
 #[test]
@@ -18,15 +22,11 @@ fn persistent_context() {
             let n = 0;
             export function count() { return ++n; }
         "#),
-        &[
-            r#"{"jsonrpc":"2.0","method":"count","params":[],"id":1}"#,
-            r#"{"jsonrpc":"2.0","method":"count","params":[],"id":2}"#,
-            r#"{"jsonrpc":"2.0","method":"count","params":[],"id":3}"#,
-        ],
+        &[("count", "[]"), ("count", "[]"), ("count", "[]")],
     );
-    assert!(results[0].as_ref().unwrap().json.contains("\"result\":1"));
-    assert!(results[1].as_ref().unwrap().json.contains("\"result\":2"));
-    assert!(results[2].as_ref().unwrap().json.contains("\"result\":3"));
+    assert_eq!(results[0].as_ref().unwrap().json, "1");
+    assert_eq!(results[1].as_ref().unwrap().json, "2");
+    assert_eq!(results[2].as_ref().unwrap().json, "3");
 }
 
 #[test]
@@ -39,16 +39,19 @@ fn per_request_cpu() {
         }
     "#);
     let runtime = Runtime::builder().modules(modules).build();
-    let r1 = runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"fib","params":[20],"id":1}"#).unwrap();
-    let r2 = runtime.dispatch_rpc(r#"{"jsonrpc":"2.0","method":"fib","params":[35],"id":2}"#).unwrap();
+    let r1 = runtime.dispatch_rpc("fib", "[20]").unwrap();
+    let r2 = runtime.dispatch_rpc("fib", "[35]").unwrap();
     assert!(r2.cpu_time > r1.cpu_time * 5);
 }
 
 #[test]
 fn sync_still_works_with_event_loop() {
-    let r = dispatch(m(r#"export function add(a, b) { return a + b; }"#),
-        r#"{"jsonrpc":"2.0","method":"add","params":[3,4],"id":1}"#).unwrap();
-    assert!(r.json.contains("\"result\":7"));
+    let r = dispatch(
+        m(r#"export function add(a, b) { return a + b; }"#),
+        "add",
+        "[3,4]",
+    ).unwrap();
+    assert_eq!(r.json, "7");
 }
 
 #[test]
@@ -59,8 +62,8 @@ fn set_timeout_zero_delay() {
                 setTimeout(function() { resolve("immediate"); }, 0);
             });
         }
-    "#), r#"{"jsonrpc":"2.0","method":"immediate","params":[],"id":1}"#).unwrap();
-    assert!(r.json.contains("immediate"));
+    "#), "immediate", "[]").unwrap();
+    assert_eq!(r.json, "\"immediate\"");
 }
 
 #[test]
@@ -69,8 +72,8 @@ fn promise_resolve_sync() {
         export async function test() {
             return "sync-async";
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
-    assert!(r.json.contains("sync-async"));
+    "#), "test", "[]").unwrap();
+    assert_eq!(r.json, "\"sync-async\"");
 }
 
 #[test]
@@ -79,6 +82,35 @@ fn promise_then_chain_sync() {
         export function test() {
             return Promise.resolve(1).then(v => v + 10).then(v => v * 2);
         }
-    "#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
-    assert!(r.json.contains("\"result\":22"));
+    "#), "test", "[]").unwrap();
+    assert_eq!(r.json, "22");
+}
+
+#[test]
+fn async_generator_streams_sse() {
+    // An async generator should be auto-wrapped in a Response(text/event-stream).
+    // The dispatch_rpc path collapses Complete responses to their body, so
+    // we see the full SSE frame sequence as a single string.
+    let r = dispatch(m(r#"
+        export async function* chat() {
+            yield { token: "Hi" };
+            yield { token: "!" };
+        }
+    "#), "chat", "[]").unwrap();
+    assert!(r.json.contains("event: yield"), "got: {}", r.json);
+    assert!(r.json.contains(r#"{"token":"Hi"}"#), "got: {}", r.json);
+    assert!(r.json.contains(r#"{"token":"!"}"#), "got: {}", r.json);
+    assert!(r.json.contains("event: return"), "got: {}", r.json);
+}
+
+#[test]
+fn method_not_found_errors() {
+    // Method lookup fails before touching user code. The error bubbles
+    // out of dispatch_rpc as an Err("Method not found: ..." ).
+    let err = dispatch(
+        m(r#"export function ping() { return "pong"; }"#),
+        "nope",
+        "[]",
+    ).unwrap_err();
+    assert!(err.contains("Method not found"), "got: {}", err);
 }

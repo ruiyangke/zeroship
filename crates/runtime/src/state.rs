@@ -438,10 +438,27 @@ pub struct TimerResult {
 
 /// Return value from JS op dispatch — tells the event loop what to do next.
 pub enum DispatchResult {
-    /// Op completed synchronously; value is the JSON result string.
+    /// Handler completed synchronously with a plain value. The string is
+    /// already-serialized JSON ready to ship as `application/json`.
     Sync(String),
-    /// Op started asynchronously; the promise will be resolved later.
+    /// Handler returned a Response object (either user-constructed or
+    /// produced by the async-generator wrapper). The runtime forwards it
+    /// via the HTTP streaming/inspection path.
+    HttpResponse(crate::http::ResponseInfo),
+    /// Handler returned a pending promise. The pump will settle it; when
+    /// it does, the runtime classifies the resolved value as Sync / HttpResponse
+    /// / ErrorValue just like here.
     Async(v8::Global<v8::Promise>),
-    /// Dispatch failed; value is the error message.
+    /// Handler threw. All fields come from the JS exception. `status` is
+    /// 500 by default, overridable by setting `err.status` to an integer
+    /// in 400-599 (the HttpError class, or any ad-hoc throw).
+    ErrorValue {
+        message: String,
+        name: String,
+        stack: Option<String>,
+        status: u16,
+    },
+    /// Hard dispatch-layer error (method lookup failed, argument too large
+    /// for V8 string, etc). Not a user-thrown value — no stack/name.
     Error(String),
 }

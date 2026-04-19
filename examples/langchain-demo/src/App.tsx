@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { chat } from "./index";
 
 interface ChatMsg { role: string; content: string }
 
@@ -26,91 +27,29 @@ export function App() {
     // Add empty assistant message that we'll fill with streamed tokens
     setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
 
+    let content = "";
+
     try {
-      const res = await fetch("/_rpc", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          method: "chat",
-          params: [text, messages],
-          id: Date.now(),
-        }),
-      });
-
-      const contentType = res.headers.get("content-type") ?? "";
-
-      if (contentType.includes("text/event-stream")) {
-        // Stream SSE tokens
-        const reader = res.body!.getReader();
-        const decoder = new TextDecoder();
-        let content = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          const chunk = decoder.decode(value, { stream: true });
-          for (const line of chunk.split("\n")) {
-            if (!line.startsWith("data: ")) continue;
-            const data = line.slice(6).trim();
-            if (data === "[DONE]") break;
-            try {
-              const parsed = JSON.parse(data);
-              if (parsed.token) {
-                content += parsed.token;
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  updated[updated.length - 1] = { role: "assistant", content };
-                  return updated;
-                });
-              } else if (parsed.tool && parsed.args) {
-                // Tool call — show in message
-                content += `\n🔧 Using ${parsed.tool}...\n`;
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  updated[updated.length - 1] = { role: "assistant", content };
-                  return updated;
-                });
-              } else if (parsed.tool && parsed.result) {
-                content += `✅ ${parsed.result}\n\n`;
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  updated[updated.length - 1] = { role: "assistant", content };
-                  return updated;
-                });
-              } else if (parsed.error) {
-                content += `\nError: ${parsed.error}`;
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  updated[updated.length - 1] = { role: "assistant", content };
-                  return updated;
-                });
-              }
-            } catch {}
-          }
+      // `chat` is the client stub (async iterable of event objects).
+      for await (const ev of chat(text, messages)) {
+        if (typeof ev.token === "string") {
+          content += ev.token;
+        } else if (ev.tool && ev.args) {
+          content += `\n🔧 Using ${ev.tool}...\n`;
+        } else if (ev.tool && ev.result) {
+          content += `✅ ${ev.result}\n\n`;
+        } else if (ev.error) {
+          content += `\nError: ${ev.error}`;
         }
+        setMessages((prev) => {
+          const updated = [...prev];
+          updated[updated.length - 1] = { role: "assistant", content };
+          return updated;
+        });
+      }
 
-        // If no content was streamed, remove the empty message
-        if (!content) {
-          setMessages((prev) => prev.slice(0, -1));
-        }
-      } else {
-        // JSON-RPC fallback
-        const json = await res.json();
-        if (json.result) {
-          setMessages((prev) => {
-            const updated = [...prev];
-            updated[updated.length - 1] = json.result;
-            return updated;
-          });
-        } else if (json.error) {
-          setMessages((prev) => {
-            const updated = [...prev];
-            updated[updated.length - 1] = { role: "assistant", content: `Error: ${json.error.message}` };
-            return updated;
-          });
-        }
+      if (!content) {
+        setMessages((prev) => prev.slice(0, -1));
       }
     } catch (e: any) {
       setMessages((prev) => {
@@ -167,7 +106,7 @@ export function App() {
           </button>
         </form>
         <div style={styles.powered}>
-          Powered by <strong>zeroship</strong> V8 runtime + LangChain + SSE streaming
+          Powered by <strong>zeroship</strong> V8 runtime + LangChain + async generators
         </div>
       </div>
     </div>

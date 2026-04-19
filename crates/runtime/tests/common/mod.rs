@@ -18,25 +18,36 @@ pub fn no_env() -> HashMap<String, String> {
     HashMap::new()
 }
 
-/// Create a Runtime and dispatch a single RPC request.
-pub fn dispatch(modules: Vec<ModuleEntry>, json: &str) -> Result<RequestResult, String> {
+/// Create a Runtime and dispatch a single RPC request (URL-path wire).
+pub fn dispatch(modules: Vec<ModuleEntry>, method: &str, args_json: &str) -> Result<RequestResult, String> {
     init_v8();
     let runtime = Runtime::builder().modules(modules).build();
-    runtime.dispatch_rpc(json)
+    runtime.dispatch_rpc(method, args_json)
 }
 
-/// Create a Runtime, dispatch multiple requests sequentially.
-pub fn dispatch_multi(modules: Vec<ModuleEntry>, requests: &[&str]) -> Vec<Result<RequestResult, String>> {
+/// Create a Runtime, dispatch multiple requests sequentially (URL-path wire).
+pub fn dispatch_multi(
+    modules: Vec<ModuleEntry>,
+    requests: &[(&str, &str)],
+) -> Vec<Result<RequestResult, String>> {
     init_v8();
     let runtime = Runtime::builder().modules(modules).build();
-    requests.iter().map(|json| runtime.dispatch_rpc(json)).collect()
+    requests
+        .iter()
+        .map(|(method, args)| runtime.dispatch_rpc(method, args))
+        .collect()
 }
 
 /// Create a Runtime with env vars and dispatch a single RPC request.
-pub fn dispatch_with_env(modules: Vec<ModuleEntry>, env: HashMap<String, String>, json: &str) -> Result<RequestResult, String> {
+pub fn dispatch_with_env(
+    modules: Vec<ModuleEntry>,
+    env: HashMap<String, String>,
+    method: &str,
+    args_json: &str,
+) -> Result<RequestResult, String> {
     init_v8();
     let runtime = Runtime::builder().modules(modules).env_vars(env).build();
-    runtime.dispatch_rpc(json)
+    runtime.dispatch_rpc(method, args_json)
 }
 
 /// Helper: dispatch an HTTP request and extract the body from a sync HttpComplete outcome.

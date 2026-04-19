@@ -225,8 +225,18 @@ struct HttpEnvelope {
 }
 
 // ---------------------------------------------------------------------------
-// RPC dispatch — existing path for JSON-RPC requests
+// RPC dispatch — URL-path-based wire
 // ---------------------------------------------------------------------------
+
+/// Envelope the gateway sends for RPC calls: method name + args JSON array.
+/// The gateway forwards the URL path segment after `/_rpc/` as `method`,
+/// and the raw request body as `args` (a JSON array of positional args).
+#[derive(serde::Deserialize)]
+struct RpcEnvelope {
+    method: String,
+    #[serde(default)]
+    args: String,
+}
 
 pub async fn dispatch(
     req: HttpRequest,
@@ -277,10 +287,21 @@ pub async fn dispatch(
         .and_then(|v| v.to_str().ok());
     let user_json = decode_user_header(raw_user, &config.worker_key);
 
+    // Parse the method + args envelope from the gateway.
+    let envelope: RpcEnvelope = match serde_json::from_str(&body) {
+        Ok(e) => e,
+        Err(e) => {
+            metrics::inc(&metrics::DISPATCH_REJECTED_BAD_ENVELOPE);
+            return HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error": format!("invalid RPC envelope: {e}")}));
+        }
+    };
+
     // Phase 1: Enter isolate, start dispatch (may return sync or async)
+    let args = if envelope.args.is_empty() { "[]" } else { envelope.args.as_str() };
     let outcome = {
         runtime.enter_isolate();
-        let o = runtime.dispatch_start(&body, user_json);
+        let o = runtime.dispatch_start(&envelope.method, args, user_json);
         runtime.exit_isolate();
         o
     };
@@ -421,14 +442,11 @@ fn stream_response(
 }
 
 fn make_error(msg: &str) -> HttpResponse {
-    let error = serde_json::json!({
-        "jsonrpc": "2.0",
-        "error": { "code": -32000, "message": msg },
-        "id": null
-    });
-    HttpResponse::Ok()
+    // New wire: `{"message","name"}` body with HTTP 500 (no envelope).
+    let body = serde_json::json!({ "message": msg, "name": "Error" });
+    HttpResponse::InternalServerError()
         .content_type("application/json")
-        .body(serde_json::to_string(&error).unwrap())
+        .body(serde_json::to_string(&body).unwrap())
 }
 
 /// Pull bundle from control plane and load into cache (cold start path).

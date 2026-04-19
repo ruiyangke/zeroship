@@ -8,6 +8,6 @@ fn console_log_works() {
             console.log("Hello from JS!");
             return "logged";
         }
-    "#), r#"{"jsonrpc":"2.0","method":"greet","params":[],"id":1}"#).unwrap();
+    "#), "greet", "[]").unwrap();
     assert!(r.json.contains("logged"));
 }
