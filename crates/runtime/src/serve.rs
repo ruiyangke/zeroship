@@ -118,6 +118,8 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
 async fn recv_with_timeout<T>(
     rx: &crate::channel::ResultReceiver<T>,
     timeout: Option<Duration>,
+    cancel: &crate::channel::CancelFlag,
+    handle: &RuntimeHandle,
 ) -> Option<T> {
     if let Some(limit) = timeout {
         let recv = rx.recv().fuse();
@@ -125,7 +127,11 @@ async fn recv_with_timeout<T>(
         pin_mut!(recv, sleep);
         futures::select! {
             result = recv => Some(result),
-            _ = sleep => None,
+            _ = sleep => {
+                cancel.cancel();
+                handle.notify_pump();
+                None
+            }
         }
     } else {
         Some(rx.recv().await)
@@ -139,6 +145,44 @@ async fn recv_with_timeout<T>(
 const HEALTH_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}";
 const NOT_FOUND_RESPONSE: &[u8] = b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found";
 const SERVICE_UNAVAILABLE: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
+const HEADERS_TOO_LARGE_RESPONSE: &[u8] =
+    b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+const PAYLOAD_TOO_LARGE_RESPONSE: &[u8] =
+    b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+const BAD_REQUEST_RESPONSE: &[u8] =
+    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+// ---------------------------------------------------------------------------
+// Per-connection limits
+//
+// The standalone server accepts arbitrary HTTP traffic, so every input path
+// needs an explicit cap. Without these, a slow/malicious client can pin
+// memory and a compio task indefinitely:
+// - no header cap → unlimited buffer growth before httparse decides it's
+//   "complete" or gives up
+// - no body cap → a `Content-Length: 999999999999` lie forces us to wait
+//   for bytes that will never arrive, holding the scratch buffer open
+// - no connection cap → slowloris-style drip attacks keep `data` growing
+//   even across partial reads
+//
+// Limits are deliberately static (not configurable) — the standalone server
+// is a dev/benchmark entrypoint; operators who need different numbers deploy
+// the worker+gateway where the gateway enforces its own rules.
+// ---------------------------------------------------------------------------
+
+/// Max bytes in the HTTP request line + headers. Matches nginx's default
+/// `large_client_header_buffers`. Triggers 431 Request Header Fields Too Large.
+const MAX_HEADER_BYTES: usize = 16 * 1024;
+
+/// Max bytes in a single request body. Covers JSON-RPC dispatch and the
+/// HTTP envelope from the gateway. Triggers 413 Content Too Large.
+const MAX_BODY_BYTES: usize = 1024 * 1024;
+
+/// Max bytes buffered in `data` before we give up waiting for the request
+/// to complete. Mostly defense against slowloris: a client that writes one
+/// byte per second but never finishes the headers would otherwise force us
+/// to keep the connection open forever.
+const MAX_CONNECTION_BUFFER_BYTES: usize = MAX_HEADER_BYTES + MAX_BODY_BYTES + 4096;
 
 // ===========================================================================
 // HTTP connection handler
@@ -163,6 +207,14 @@ async fn handle_connection(
             Err(_) => return,
         };
 
+        // Enforce the per-connection buffer cap before appending. A client
+        // that keeps sending bytes without completing a request would
+        // otherwise grow `data` without bound.
+        if data.len().saturating_add(n) > MAX_CONNECTION_BUFFER_BYTES {
+            let _ = stream.write_all(PAYLOAD_TOO_LARGE_RESPONSE.to_vec()).await;
+            return;
+        }
+
         data.extend_from_slice(&read_buf[..n]);
 
         let mut consumed = 0;
@@ -173,13 +225,41 @@ async fn handle_connection(
 
             let header_len = match req.parse(&data[consumed..]) {
                 Ok(httparse::Status::Complete(len)) => len,
-                Ok(httparse::Status::Partial) => break,
-                Err(_) => return,
+                Ok(httparse::Status::Partial) => {
+                    // Reject before we commit more memory — if the unparsed
+                    // slice is already over the header cap we're never going
+                    // to accept this request.
+                    if data.len() - consumed > MAX_HEADER_BYTES {
+                        let _ = stream.write_all(HEADERS_TOO_LARGE_RESPONSE.to_vec()).await;
+                        return;
+                    }
+                    break;
+                }
+                Err(_) => {
+                    let _ = stream.write_all(BAD_REQUEST_RESPONSE.to_vec()).await;
+                    return;
+                }
             };
+
+            if header_len > MAX_HEADER_BYTES {
+                let _ = stream.write_all(HEADERS_TOO_LARGE_RESPONSE.to_vec()).await;
+                return;
+            }
 
             let method = req.method.unwrap_or("GET");
             let path = req.path.unwrap_or("/");
 
+            // Determine body framing: Content-Length, Transfer-Encoding:
+            // chunked, or no body. An earlier revision only supported
+            // Content-Length and silently mis-parsed chunked requests
+            // (treating Content-Length=0 as "body-less" and then parsing
+            // the body bytes as the next pipelined request).
+            let is_chunked = headers.iter().any(|h| {
+                h.name.eq_ignore_ascii_case("transfer-encoding")
+                    && std::str::from_utf8(h.value)
+                        .map(|v| v.to_ascii_lowercase().contains("chunked"))
+                        .unwrap_or(false)
+            });
             let content_length: usize = headers
                 .iter()
                 .find(|h| h.name.eq_ignore_ascii_case("content-length"))
@@ -187,12 +267,49 @@ async fn handle_connection(
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
 
-            let total_len = header_len + content_length;
-            if data.len() - consumed < total_len {
-                break;
+            if content_length > MAX_BODY_BYTES {
+                // Trust the declared length enough to reject early —
+                // waiting for the full body to arrive just so we can reject
+                // it afterwards would defeat the purpose of the cap.
+                let _ = stream.write_all(PAYLOAD_TOO_LARGE_RESPONSE.to_vec()).await;
+                return;
             }
 
-            let body_bytes = &data[consumed + header_len..consumed + total_len];
+            // For chunked requests, decode chunks out of `data` starting at
+            // `consumed + header_len` into an owned `Vec<u8>`. For
+            // Content-Length requests, we borrow from `data` directly.
+            //
+            // We pre-allocate an owned buffer only on the chunked path so
+            // the hot Content-Length path — which handles essentially all
+            // traffic — stays alloc-free. Both paths end up with a byte
+            // slice the dispatch code can read; the owned Vec is kept in
+            // scope below to back the slice.
+            let chunked_body_buf: Vec<u8>;
+            let (body_bytes, total_input_consumed): (&[u8], usize) = if is_chunked {
+                match decode_chunked_body(&data[consumed + header_len..], MAX_BODY_BYTES) {
+                    ChunkedDecode::Complete { body_bytes, consumed_input } => {
+                        chunked_body_buf = body_bytes;
+                        (chunked_body_buf.as_slice(), header_len + consumed_input)
+                    }
+                    ChunkedDecode::Incomplete => break,
+                    ChunkedDecode::TooLarge => {
+                        let _ = stream.write_all(PAYLOAD_TOO_LARGE_RESPONSE.to_vec()).await;
+                        return;
+                    }
+                    ChunkedDecode::Invalid => {
+                        let _ = stream.write_all(BAD_REQUEST_RESPONSE.to_vec()).await;
+                        return;
+                    }
+                }
+            } else {
+                let total_len = header_len + content_length;
+                if data.len() - consumed < total_len {
+                    break;
+                }
+                (&data[consumed + header_len..consumed + total_len], total_len)
+            };
+
+            let total_len = total_input_consumed;
 
             let has_http = runtime.borrow().has_http_handler();
             match (method, path) {
@@ -326,6 +443,150 @@ fn build_http_response(status: u16, headers: &[(String, String)], body: &str) ->
     buf
 }
 
+/// Stream an HTTP/1.1 chunked response body from `reader` to `stream`.
+///
+/// Called after the response headers (including `Transfer-Encoding: chunked`)
+/// have already been written. Loops until the reader reports `is_done`, then
+/// writes the `0\r\n\r\n` terminator.
+///
+/// Allocation: one `Vec<u8>` for the whole response. Previously every chunk
+/// allocated `String` (from `format!`) + `Vec` (for framing) — one alloc pair
+/// per token on SSE/LLM-streaming endpoints. The scratch buffer is returned
+/// by `write_all` via compio's ownership-transfer model, cleared (keeping
+/// capacity) and reused for the next chunk, so after the first chunk
+/// steady-state allocation is zero.
+/// Outcome of attempting to decode a chunked request body in place.
+enum ChunkedDecode {
+    /// Body decoded successfully. `body_bytes` holds the concatenated
+    /// chunk payloads, `consumed_input` tells the caller how many input
+    /// bytes were consumed (including framing, so it can slice past them).
+    Complete { body_bytes: Vec<u8>, consumed_input: usize },
+    /// Not enough input to finish a chunk or the terminator. Caller should
+    /// read more bytes and retry — no state mutated.
+    Incomplete,
+    /// Decoded body would exceed `max_bytes`. Send 413 and close.
+    TooLarge,
+    /// Framing malformed (bad chunk size line, non-hex digits, etc).
+    /// Send 400 and close.
+    Invalid,
+}
+
+/// Decode an HTTP/1.1 chunked-transfer body into a plain byte sequence.
+///
+/// Grammar (RFC 9112 §7.1):
+///   chunked-body = *chunk last-chunk trailer-section CRLF
+///   chunk        = chunk-size [ chunk-ext ] CRLF chunk-data CRLF
+///   chunk-size   = 1*HEXDIG
+///   last-chunk   = 1*("0") [ chunk-ext ] CRLF
+///
+/// We ignore chunk extensions (everything on the size line after `;`) and
+/// trailers (we accept an empty trailer section only). That matches what
+/// every real client sends — no browser or SDK uses chunk extensions.
+fn decode_chunked_body(input: &[u8], max_bytes: usize) -> ChunkedDecode {
+    let mut out: Vec<u8> = Vec::new();
+    let mut pos = 0;
+
+    loop {
+        // Find end of chunk-size line (\r\n).
+        let Some(line_end) = find_crlf(&input[pos..]) else {
+            return ChunkedDecode::Incomplete;
+        };
+        let size_line = &input[pos..pos + line_end];
+        // Strip chunk extensions if present.
+        let size_field = match size_line.iter().position(|&b| b == b';') {
+            Some(p) => &size_line[..p],
+            None => size_line,
+        };
+        let size_str = match std::str::from_utf8(size_field) {
+            Ok(s) => s.trim(),
+            Err(_) => return ChunkedDecode::Invalid,
+        };
+        let chunk_size = match usize::from_str_radix(size_str, 16) {
+            Ok(n) => n,
+            Err(_) => return ChunkedDecode::Invalid,
+        };
+        pos += line_end + 2; // past the CRLF
+
+        if chunk_size == 0 {
+            // last-chunk. Accept one more CRLF to close the trailer section.
+            if input.len() < pos + 2 {
+                return ChunkedDecode::Incomplete;
+            }
+            if &input[pos..pos + 2] != b"\r\n" {
+                // Non-empty trailers aren't supported; walk the trailer
+                // lines until we hit the empty one. Every real trailer
+                // ends with CRLFCRLF.
+                while pos < input.len() {
+                    let Some(tlen) = find_crlf(&input[pos..]) else {
+                        return ChunkedDecode::Incomplete;
+                    };
+                    pos += tlen + 2;
+                    if tlen == 0 {
+                        break;
+                    }
+                }
+            } else {
+                pos += 2;
+            }
+            return ChunkedDecode::Complete {
+                body_bytes: out,
+                consumed_input: pos,
+            };
+        }
+
+        if out.len().saturating_add(chunk_size) > max_bytes {
+            return ChunkedDecode::TooLarge;
+        }
+        // Need chunk data + trailing CRLF fully in buffer.
+        if input.len() < pos + chunk_size + 2 {
+            return ChunkedDecode::Incomplete;
+        }
+        out.extend_from_slice(&input[pos..pos + chunk_size]);
+        pos += chunk_size;
+        if &input[pos..pos + 2] != b"\r\n" {
+            return ChunkedDecode::Invalid;
+        }
+        pos += 2;
+    }
+}
+
+fn find_crlf(buf: &[u8]) -> Option<usize> {
+    buf.windows(2).position(|w| w == b"\r\n")
+}
+
+async fn stream_chunked_body(
+    stream: &mut TcpStream,
+    reader: crate::channel::StreamReader,
+) -> bool {
+    use std::io::Write as _;
+
+    let mut scratch: Vec<u8> = Vec::with_capacity(4096);
+    loop {
+        while let Some(chunk) = reader.pop() {
+            scratch.clear();
+            // Writing into a `Vec<u8>` via `std::io::Write` doesn't heap-
+            // allocate — the formatter goes straight through `extend_from_slice`
+            // on the existing capacity.
+            let _ = write!(scratch, "{:x}\r\n", chunk.len());
+            scratch.extend_from_slice(&chunk);
+            scratch.extend_from_slice(b"\r\n");
+            let BufResult(r, returned) = stream.write_all(scratch).await;
+            scratch = returned;
+            if r.is_err() {
+                return false;
+            }
+        }
+        if reader.is_done() {
+            break;
+        }
+        reader.wait_for_data().await;
+    }
+    // `&'static [u8]` implements `IoBuf`, so the trailer ships without a
+    // `.to_vec()` allocation.
+    let BufResult(r, _) = stream.write_all(b"0\r\n\r\n" as &'static [u8]).await;
+    r.is_ok()
+}
+
 fn build_stream_response_headers(status: u16, headers: &[(String, String)]) -> Vec<u8> {
     let status_text = match status {
         200 => "OK", 404 => "Not Found", 500 => "Internal Server Error", _ => "OK",
@@ -398,7 +659,10 @@ async fn dispatch_rpc(
     };
 
     let runtime = handle.runtime();
-    let outcome = runtime.borrow_mut().dispatch_start(handle.modules(), body_str);
+    // Standalone server has no gateway in front of it, so no authenticated
+    // user is forwarded. Passing `None` makes `zeroship.auth.getUser()`
+    // return null — consistent with anonymous access.
+    let outcome = runtime.borrow_mut().dispatch_start(handle.modules(), body_str, None);
 
     match outcome {
         DispatchOutcome::Complete(Ok(result)) => {
@@ -407,8 +671,8 @@ async fn dispatch_rpc(
         DispatchOutcome::Complete(Err(e)) => {
             build_json_response(&format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\"")))
         }
-        DispatchOutcome::Pending(rx) => {
-            match recv_with_timeout(&rx, handle.wall_timeout()).await {
+        DispatchOutcome::Pending { rx, cancel } => {
+            match recv_with_timeout(&rx, handle.wall_timeout(), &cancel, handle).await {
                 Some(Ok(r)) => build_json_response(&r.json),
                 Some(Err(e)) => {
                     let escaped = e.replace('"', "\\\"");
@@ -419,7 +683,7 @@ async fn dispatch_rpc(
         }
         DispatchOutcome::HttpComplete { .. }
         | DispatchOutcome::HttpStream { .. }
-        | DispatchOutcome::HttpPending(_)
+        | DispatchOutcome::HttpPending { .. }
         | DispatchOutcome::WebSocketUpgrade { .. } => {
             SERVICE_UNAVAILABLE.to_vec()
         }
@@ -440,7 +704,9 @@ async fn dispatch_http(
     request_headers: &[(String, String)],
 ) -> bool {
     let runtime = handle.runtime();
-    let outcome = runtime.borrow_mut().dispatch_http(handle.modules(), method, url, headers_json, body);
+    let outcome = runtime.borrow_mut().dispatch_http(
+        handle.modules(), method, url, headers_json, body, None,
+    );
 
     match outcome {
         DispatchOutcome::HttpComplete { status, headers, body, logs: _ } => {
@@ -457,27 +723,10 @@ async fn dispatch_http(
             let BufResult(r, _) = stream.write_all(header_bytes).await;
             if r.is_err() { return false; }
 
-            loop {
-                while let Some(chunk) = body.pop() {
-                    let size_hex = format!("{:x}\r\n", chunk.len());
-                    let mut chunk_data = Vec::with_capacity(size_hex.len() + chunk.len() + 2);
-                    chunk_data.extend_from_slice(size_hex.as_bytes());
-                    chunk_data.extend_from_slice(&chunk);
-                    chunk_data.extend_from_slice(b"\r\n");
-                    let BufResult(r, _) = stream.write_all(chunk_data).await;
-                    if r.is_err() { return false; }
-                }
-                if body.is_done() { break; }
-                // Sleep briefly to allow the compio event loop to fire timers
-                // and drive async I/O (e.g. fetch responses, setTimeout).
-                // yield_now() only yields to ready tasks — doesn't poll I/O.
-                body.wait_for_data().await;
-            }
-            let BufResult(r, _) = stream.write_all(b"0\r\n\r\n".to_vec()).await;
-            r.is_ok()
+            stream_chunked_body(stream, body).await
         }
-        DispatchOutcome::HttpPending(rx) => {
-            let result = recv_with_timeout(&rx, handle.wall_timeout()).await;
+        DispatchOutcome::HttpPending { rx, cancel } => {
+            let result = recv_with_timeout(&rx, handle.wall_timeout(), &cancel, handle).await;
 
             match result {
                 Some(Ok(HttpDispatchResult::Complete { status, headers, body, logs: _ })) => {
@@ -489,22 +738,7 @@ async fn dispatch_http(
                     let header_bytes = build_stream_response_headers(status, &headers);
                     let BufResult(r, _) = stream.write_all(header_bytes).await;
                     if r.is_err() { return false; }
-
-                    loop {
-                        while let Some(chunk) = body.pop() {
-                            let size_hex = format!("{:x}\r\n", chunk.len());
-                            let mut chunk_data = Vec::with_capacity(size_hex.len() + chunk.len() + 2);
-                            chunk_data.extend_from_slice(size_hex.as_bytes());
-                            chunk_data.extend_from_slice(&chunk);
-                            chunk_data.extend_from_slice(b"\r\n");
-                            let BufResult(r, _) = stream.write_all(chunk_data).await;
-                            if r.is_err() { return false; }
-                        }
-                        if body.is_done() { break; }
-                        body.wait_for_data().await;
-                    }
-                    let BufResult(r, _) = stream.write_all(b"0\r\n\r\n".to_vec()).await;
-                    r.is_ok()
+                    stream_chunked_body(stream, body).await
                 }
                 Some(Ok(HttpDispatchResult::WebSocket { ws_id, headers, logs: _ })) => {
                     handle_websocket_upgrade(stream, ws_id, &headers, request_headers, &runtime).await
@@ -536,7 +770,7 @@ async fn dispatch_http(
         DispatchOutcome::WebSocketUpgrade { ws_id, headers } => {
             handle_websocket_upgrade(stream, ws_id, &headers, request_headers, &runtime).await
         }
-        DispatchOutcome::Pending(_) => {
+        DispatchOutcome::Pending { .. } => {
             let response = build_http_response(500, &[], r#"{"error":"Unexpected pending state"}"#);
             let BufResult(r, _) = stream.write_all(response).await;
             r.is_ok()
@@ -752,39 +986,44 @@ async fn handle_websocket_upgrade(
     // Event-driven: select between TCP read and outgoing notification.
 
     loop {
-        // Drain any pending outgoing messages first (non-blocking).
+        // Drain any pending outgoing messages, one at a time. The previous
+        // version used `ws.outgoing.drain(..).collect::<Vec<_>>()` so it
+        // could release the borrow before awaiting TCP writes, but that
+        // allocated a fresh `Vec<WsMessage>` on every pump iteration —
+        // wasteful on chatty channels (LLM streaming, presence updates).
+        //
+        // Pattern now: re-acquire the borrow in each iteration of the
+        // drain loop, `pop_front` exactly one message, drop the borrow
+        // before the await. Allocations: zero.
+        outgoing_ready.set(false);
         let mut got_close = false;
-        {
-            let outgoing: Vec<crate::state::WsMessage> = {
-                outgoing_ready.set(false);
+        loop {
+            let msg = {
                 let state = runtime.borrow().state().clone();
                 let mut s = state.borrow_mut();
-                if let Some(ws) = s.websockets.get_mut(&server_ws_id) {
-                    ws.outgoing.drain(..).collect()
-                } else {
-                    return true;
+                match s.websockets.get_mut(&server_ws_id) {
+                    Some(ws) => ws.outgoing.pop_front(),
+                    None => return true,
                 }
             };
-
-            for msg in outgoing {
-                match msg {
-                    crate::state::WsMessage::Text(text) => {
-                        if !write_ws_frame(stream, 0x1, text.as_bytes()).await {
-                            return false;
-                        }
+            let Some(msg) = msg else { break };
+            match msg {
+                crate::state::WsMessage::Text(text) => {
+                    if !write_ws_frame(stream, 0x1, text.as_bytes()).await {
+                        return false;
                     }
-                    crate::state::WsMessage::Binary(data) => {
-                        if !write_ws_frame(stream, 0x2, &data).await {
-                            return false;
-                        }
+                }
+                crate::state::WsMessage::Binary(data) => {
+                    if !write_ws_frame(stream, 0x2, &data).await {
+                        return false;
                     }
-                    crate::state::WsMessage::Close(code, reason) => {
-                        let mut close_payload = Vec::with_capacity(2 + reason.len());
-                        close_payload.extend_from_slice(&code.to_be_bytes());
-                        close_payload.extend_from_slice(reason.as_bytes());
-                        let _ = write_ws_frame(stream, 0x8, &close_payload).await;
-                        got_close = true;
-                    }
+                }
+                crate::state::WsMessage::Close(code, reason) => {
+                    let mut close_payload = Vec::with_capacity(2 + reason.len());
+                    close_payload.extend_from_slice(&code.to_be_bytes());
+                    close_payload.extend_from_slice(reason.as_bytes());
+                    let _ = write_ws_frame(stream, 0x8, &close_payload).await;
+                    got_close = true;
                 }
             }
         }
@@ -970,6 +1209,7 @@ fn run_single_worker(
             let handle = RuntimeHandle::new(runtime.clone(), RuntimeLimits {
                 cpu_limit,
                 wall_timeout,
+                heap_limit_bytes: None,
             }, modules);
 
             // Warmup
@@ -993,4 +1233,75 @@ fn run_single_worker(
                 compio::runtime::spawn(handle_connection(stream, rt)).detach();
             }
         });
+}
+
+#[cfg(test)]
+mod chunked_decode_tests {
+    use super::*;
+
+    fn assert_complete(result: ChunkedDecode, expected_body: &[u8]) {
+        match result {
+            ChunkedDecode::Complete { body_bytes, consumed_input: _ } => {
+                assert_eq!(&body_bytes[..], expected_body);
+            }
+            other => panic!("expected Complete, got {:?}", discriminant(other)),
+        }
+    }
+
+    fn discriminant(r: ChunkedDecode) -> &'static str {
+        match r {
+            ChunkedDecode::Complete { .. } => "Complete",
+            ChunkedDecode::Incomplete => "Incomplete",
+            ChunkedDecode::TooLarge => "TooLarge",
+            ChunkedDecode::Invalid => "Invalid",
+        }
+    }
+
+    #[test]
+    fn decodes_minimal_chunked_body() {
+        // 5\r\nhello\r\n0\r\n\r\n  →  "hello"
+        let input = b"5\r\nhello\r\n0\r\n\r\n";
+        assert_complete(decode_chunked_body(input, 1024), b"hello");
+    }
+
+    #[test]
+    fn decodes_multi_chunk_body() {
+        let input = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        assert_complete(decode_chunked_body(input, 1024), b"hello world");
+    }
+
+    #[test]
+    fn ignores_chunk_extensions() {
+        // Extensions after ';' on the size line must be ignored.
+        let input = b"5;meta=x\r\nhello\r\n0\r\n\r\n";
+        assert_complete(decode_chunked_body(input, 1024), b"hello");
+    }
+
+    #[test]
+    fn incomplete_on_partial_chunk() {
+        // Size line is there but the data isn't fully buffered yet.
+        let input = b"5\r\nhel";
+        matches!(decode_chunked_body(input, 1024), ChunkedDecode::Incomplete);
+    }
+
+    #[test]
+    fn too_large_rejects() {
+        // Claimed chunk size blows past the cap before we even try to read
+        // the data bytes. Catch early to avoid letting a hostile client
+        // force us to allocate a huge buffer.
+        let input = b"1000000\r\n";
+        matches!(decode_chunked_body(input, 1024), ChunkedDecode::TooLarge);
+    }
+
+    #[test]
+    fn invalid_hex_rejects() {
+        let input = b"zzz\r\n";
+        matches!(decode_chunked_body(input, 1024), ChunkedDecode::Invalid);
+    }
+
+    #[test]
+    fn empty_body_accepted() {
+        let input = b"0\r\n\r\n";
+        assert_complete(decode_chunked_body(input, 1024), b"");
+    }
 }

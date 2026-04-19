@@ -20,7 +20,7 @@ fn on_request_basic() {
     }];
     let mut runtime = Runtime::new_direct(modules.clone(), no_env(), None, None);
 
-    let (status, _headers, body) = match runtime.dispatch_http(&modules, "GET", "http://localhost/hello", "[]", "") {
+    let (status, _headers, body) = match runtime.dispatch_http(&modules, "GET", "http://localhost/hello", "[]", "", None) {
         DispatchOutcome::HttpComplete { status, headers, body, .. } => (status, headers, body),
         _ => panic!("expected HttpComplete"),
     };
@@ -47,7 +47,7 @@ fn on_request_with_rpc() {
     assert!(rpc.json.contains("7"));
 
     // HTTP also works
-    match runtime.dispatch_http(&modules, "GET", "http://localhost/", "[]", "") {
+    match runtime.dispatch_http(&modules, "GET", "http://localhost/", "[]", "", None) {
         DispatchOutcome::HttpComplete { status, body, .. } => {
             assert_eq!(status, 200);
             assert!(body.contains("HTTP handler"));
@@ -64,7 +64,7 @@ fn no_on_request_returns_error() {
         source: "export function ping() { return 'pong'; }".into(),
     }];
     let mut runtime = Runtime::new_direct(modules.clone(), no_env(), None, None);
-    match runtime.dispatch_http(&modules, "GET", "http://localhost/", "[]", "") {
+    match runtime.dispatch_http(&modules, "GET", "http://localhost/", "[]", "", None) {
         DispatchOutcome::Complete(Err(e)) => assert!(e.contains("No onRequest")),
         _ => panic!("expected error"),
     }
@@ -82,7 +82,7 @@ fn on_request_async() {
         "#.into(),
     }];
     let mut runtime = Runtime::new_direct(modules.clone(), no_env(), None, None);
-    match runtime.dispatch_http(&modules, "GET", "http://localhost/", "[]", "") {
+    match runtime.dispatch_http(&modules, "GET", "http://localhost/", "[]", "", None) {
         DispatchOutcome::HttpComplete { status, body, .. } => {
             assert_eq!(status, 201);
             assert!(body.contains("async response"));
@@ -107,7 +107,7 @@ fn url_in_http_handler() {
         "#.into(),
     }];
     let mut runtime = Runtime::new_direct(modules.clone(), no_env(), None, None);
-    match runtime.dispatch_http(&modules, "GET", "http://localhost/hello?name=world", "[]", "") {
+    match runtime.dispatch_http(&modules, "GET", "http://localhost/hello?name=world", "[]", "", None) {
         DispatchOutcome::HttpComplete { status, body, .. } => {
             assert_eq!(status, 200);
             assert!(body.contains("\"path\":\"/hello\""), "got: {}", body);
@@ -139,7 +139,7 @@ fn streaming_http_response_sync() {
         "#.into(),
     }];
     let mut runtime = Runtime::new_direct(modules.clone(), no_env(), None, None);
-    match runtime.dispatch_http(&modules, "GET", "http://localhost/events", "[]", "") {
+    match runtime.dispatch_http(&modules, "GET", "http://localhost/events", "[]", "", None) {
         DispatchOutcome::HttpComplete { status, body, .. } => {
             assert_eq!(status, 200);
             assert!(body.contains("data: event 0"), "got: {}", body);

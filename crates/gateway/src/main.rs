@@ -19,6 +19,11 @@ pub struct GateConfig {
     pub worker_urls: Vec<String>,
     pub poll_interval_secs: u64,
     pub auth_secret: String,
+    /// Shared secret between gateway and workers. Used to bearer-auth the
+    /// `/dispatch` endpoints and HMAC-sign the `ZeroShip-User` header so
+    /// workers can verify forwarded identity was not forged by an attacker
+    /// with direct network access. Empty disables both checks (dev only).
+    pub worker_key: String,
 }
 
 #[allow(missing_debug_implementations)]
@@ -39,6 +44,13 @@ async fn main() -> std::io::Result<()> {
     let workers_str = arg_or_env(&args, "--workers", "WORKER_URLS", "http://localhost:8080");
     let poll_interval = arg_or_env(&args, "--poll-interval", "POLL_INTERVAL", "5");
     let auth_secret = arg_or_env(&args, "--auth-secret", "AUTH_SECRET", "");
+    let worker_key = arg_or_env(&args, "--worker-key", "WORKER_KEY", "");
+
+    if worker_key.is_empty() {
+        eprintln!(
+            "[zeroship-gate] WARNING: WORKER_KEY not set — worker endpoints are unauthenticated"
+        );
+    }
 
     let worker_urls: Vec<String> = workers_str
         .split(',')
@@ -65,6 +77,7 @@ async fn main() -> std::io::Result<()> {
             worker_urls,
             poll_interval_secs: poll_interval.parse().unwrap_or(5),
             auth_secret,
+            worker_key,
         },
         routes: sync::RouteCache::new(),
         hash_ring,

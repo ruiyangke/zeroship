@@ -101,6 +101,7 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8], app_limits: AppRuntimeLimits)
             env_vars,
             limits.cpu_limit,
             limits.wall_timeout,
+            limits.heap_limit_bytes,
             plugins,
         )));
         let handle = RuntimeHandle::new(rt.clone(), limits, modules);
@@ -137,6 +138,7 @@ fn runtime_limits_from_app(limits: &AppRuntimeLimits) -> RuntimeLimits {
     RuntimeLimits {
         cpu_limit: limits.cpu_limit_ms.map(std::time::Duration::from_millis),
         wall_timeout: limits.wall_timeout_ms.map(std::time::Duration::from_millis),
+        heap_limit_bytes: limits.heap_limit_mb.map(|mb| (mb as usize) * 1024 * 1024),
     }
 }
 

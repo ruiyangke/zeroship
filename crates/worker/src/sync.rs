@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -7,33 +7,70 @@ use zeroship_runtime::RuntimeLimits;
 
 use crate::{cache, WorkerConfig};
 
-/// Start the background sync loop on the current thread.
-pub fn start_sync(config: Arc<WorkerConfig>) {
+/// Process-wide snapshot of `/internal/versions`, refreshed by a single
+/// background poller regardless of how many ntex worker threads are running.
+///
+/// This replaces the previous "one HTTP poll per thread" behaviour that
+/// multiplied control-plane traffic by `workers_count`.
+pub type SharedVersions = Arc<RwLock<Option<VersionMap>>>;
+
+/// Start the single process-wide version-polling task. All ntex worker
+/// threads observe its output through `shared`.
+pub fn start_version_poller(config: Arc<WorkerConfig>, shared: SharedVersions) {
     compio::runtime::spawn(async move {
-        sync_loop(config).await;
+        version_poll_loop(config, shared).await;
     })
     .detach();
 }
 
-async fn sync_loop(config: Arc<WorkerConfig>) {
+/// Start the per-thread reconcile loop. Reads the shared version map
+/// populated by `start_version_poller` and updates this thread's local cache.
+/// No HTTP traffic — the version map is already in memory.
+pub fn start_sync(config: Arc<WorkerConfig>, shared: SharedVersions) {
+    compio::runtime::spawn(async move {
+        reconcile_loop(config, shared).await;
+    })
+    .detach();
+}
+
+async fn version_poll_loop(config: Arc<WorkerConfig>, shared: SharedVersions) {
+    let interval = std::time::Duration::from_secs(config.poll_interval_secs);
+    loop {
+        match poll_versions(&config).await {
+            Ok(versions) => {
+                // RwLock write is brief — just swap the map in.
+                if let Ok(mut guard) = shared.write() {
+                    *guard = Some(versions);
+                }
+            }
+            Err(e) => eprintln!("[worker-sync] poll error: {e}"),
+        }
+        compio::time::sleep(interval).await;
+    }
+}
+
+async fn poll_versions(config: &WorkerConfig) -> Result<VersionMap, String> {
+    let url = format!("{}/internal/versions", config.control_url);
+    let response =
+        http_get(&url, &config.control_key).await.map_err(|e| format!("fetch versions: {e}"))?;
+    serde_json::from_str(&response).map_err(|e| format!("parse versions: {e}"))
+}
+
+async fn reconcile_loop(config: Arc<WorkerConfig>, shared: SharedVersions) {
     let interval = std::time::Duration::from_secs(config.poll_interval_secs);
     loop {
         compio::time::sleep(interval).await;
-        if let Err(e) = sync_once(&config).await {
-            eprintln!("[worker-sync] error: {e}");
+        // Snapshot the shared map under a brief read lock, then drop the lock
+        // before doing any async work (no .await while holding a std RwLock).
+        let snapshot: Option<VersionMap> = shared.read().ok().and_then(|g| g.clone());
+        let Some(versions) = snapshot else { continue };
+        if let Err(e) = reconcile_once(&config, &versions).await {
+            eprintln!("[worker-sync] reconcile error: {e}");
         }
     }
 }
 
-async fn sync_once(config: &WorkerConfig) -> Result<(), String> {
-    let url = format!("{}/internal/versions", config.control_url);
-
-    let response =
-        http_get(&url, &config.control_key).await.map_err(|e| format!("fetch versions: {e}"))?;
-
-    let versions: VersionMap =
-        serde_json::from_str(&response).map_err(|e| format!("parse versions: {e}"))?;
-
+async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap) -> Result<(), String> {
     // Only update apps that are ALREADY cached (not new ones — those load on-demand).
     let local_app_ids = cache::all_app_ids();
     for local_id in &local_app_ids {
@@ -46,6 +83,7 @@ async fn sync_once(config: &WorkerConfig) -> Result<(), String> {
                 let target_limits = RuntimeLimits {
                     cpu_limit: info.runtime.cpu_limit_ms.map(std::time::Duration::from_millis),
                     wall_timeout: info.runtime.wall_timeout_ms.map(std::time::Duration::from_millis),
+                    heap_limit_bytes: info.runtime.heap_limit_mb.map(|mb| (mb as usize) * 1024 * 1024),
                 };
                 let needs_update = match &local_hash {
                     Some(lh) => remote_hash.as_ref().is_some_and(|rh| lh != rh),
@@ -92,6 +130,8 @@ async fn sync_once(config: &WorkerConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// Fetch just one app's version info. Used by `load_on_demand` in `handler.rs`
+/// when a request arrives for an app that's not yet in the thread-local cache.
 pub async fn fetch_app_version(url_base: &str, auth_key: &str, app_id: &Uuid) -> Result<AppVersionInfo, String> {
     let url = format!("{url_base}/internal/apps/{app_id}");
     let body = http_get(&url, auth_key).await?;
@@ -104,49 +144,51 @@ async fn http_get(url: &str, auth_key: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|e| e.to_string())
 }
 
-/// Simple HTTP GET returning response body as bytes.
+/// Shared cyper client for control-plane calls. Unlike the fetch client, this
+/// one talks only to the operator-configured `CONTROL_URL`, so we use cyper's
+/// default resolver (no SSRF guard — the operator trusts this endpoint by
+/// construction).
+fn control_client() -> &'static cyper::Client {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<cyper::Client> = OnceLock::new();
+    CLIENT.get_or_init(cyper::Client::new)
+}
+
+/// HTTP GET returning the response body as bytes. Uses a proper HTTP client
+/// (cyper) so the caller gets correct query-string handling, TLS support,
+/// chunked/compressed decoding, keep-alive, and status-code parsing —
+/// instead of a hand-rolled TCP GET that assumed port 80, dropped the query,
+/// and split the body on `\r\n\r\n`.
+///
 /// Public so handler.rs can use it for on-demand bundle loading.
 pub async fn http_get_bytes(url: &str, auth_key: &str) -> Result<Vec<u8>, String> {
-    use compio::buf::BufResult;
-    use compio::io::{AsyncRead, AsyncWriteExt};
-    use compio::net::TcpStream;
-
-    let parsed = url::Url::parse(url).map_err(|e| e.to_string())?;
-    let host = parsed.host_str().ok_or("no host")?;
-    let port = parsed.port().unwrap_or(80);
-    let path = parsed.path();
-
-    let addr = format!("{host}:{port}");
-    let mut stream = TcpStream::connect(&addr).await.map_err(|e| e.to_string())?;
-
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {auth_key}\r\nConnection: close\r\n\r\n"
-    );
-
-    let BufResult(r, _) = stream.write_all(request.into_bytes()).await;
-    r.map_err(|e| e.to_string())?;
-
-    let mut response = Vec::new();
-    loop {
-        let buf = vec![0u8; 8192];
-        let BufResult(r, returned) = stream.read(buf).await;
-        let n = r.map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
-        }
-        response.extend_from_slice(&returned[..n]);
+    let client = control_client();
+    let mut builder = client
+        .get(url)
+        .map_err(|e| format!("invalid control URL: {e}"))?;
+    if !auth_key.is_empty() {
+        builder = builder
+            .header("authorization", &format!("Bearer {auth_key}"))
+            .map_err(|e| format!("invalid auth header: {e}"))?;
     }
 
-    let header_end = response
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or("no HTTP header end")?;
+    let response = builder
+        .send()
+        .await
+        .map_err(|e| format!("control request failed: {e}"))?;
 
-    let header = std::str::from_utf8(&response[..header_end]).map_err(|e| e.to_string())?;
-    if !header.starts_with("HTTP/1.1 200") && !header.starts_with("HTTP/1.0 200") {
-        let status_line = header.lines().next().unwrap_or("unknown");
-        return Err(format!("HTTP error: {status_line}"));
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!(
+            "HTTP error: {} {}",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("")
+        ));
     }
 
-    Ok(response[header_end + 4..].to_vec())
+    response
+        .bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|e| format!("read body: {e}"))
 }

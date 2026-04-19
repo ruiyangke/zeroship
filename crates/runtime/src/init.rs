@@ -216,6 +216,28 @@ pub fn load_polyfills_and_modules(
 // Console polyfill (variadic — stays manual)
 // ===========================================================================
 
+/// Max bytes retained for a single `console.log` line. Protects the
+/// per-request log vector (shipped back to the gateway) and the operator's
+/// stderr from an app doing `console.log(hugeString)` in a loop.
+const CONSOLE_LINE_MAX: usize = 4096;
+
+/// Truncate a console line to `CONSOLE_LINE_MAX` bytes, preserving a valid
+/// UTF-8 boundary and appending a truncation marker so operators can tell.
+fn truncate_console_line(mut line: String) -> String {
+    if line.len() <= CONSOLE_LINE_MAX {
+        return line;
+    }
+    // `floor_char_boundary` isn't stable, so walk back from the cap to the
+    // nearest char boundary manually.
+    let mut cut = CONSOLE_LINE_MAX;
+    while cut > 0 && !line.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    line.truncate(cut);
+    line.push_str("…[truncated]");
+    line
+}
+
 fn console_log_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -227,20 +249,59 @@ fn console_log_callback(
         let s = arg.to_rust_string_lossy(scope);
         parts.push(s);
     }
-    let line = parts.join(" ");
-    println!("{}", line);
+    let line = truncate_console_line(parts.join(" "));
 
     let state: SharedState = scope
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")
         .clone();
     let mut s = state.borrow_mut();
-    let req_id = s.executing_request_id.unwrap_or(0);
-    let logs = s.per_request_logs.entry(req_id).or_default();
+    let req_id = s.executing_request_id;
+
+    // Operator-visible mirror on stderr (not stdout — stdout should stay
+    // clean for CLI tools that want to capture structured output). Prefix
+    // with request metadata so multi-request logs are disentanglable, and
+    // only enable in dev / when ZEROSHIP_LOG is set.
+    if std::env::var("ZEROSHIP_LOG").is_ok() || cfg!(debug_assertions) {
+        match req_id {
+            Some(rid) => eprintln!("[app req={rid}] {line}"),
+            None => eprintln!("[app] {line}"),
+        }
+    }
+
+    let logs = s.per_request_logs.entry(req_id.unwrap_or(0)).or_default();
     logs.push(line);
     if logs.len() > 1000 {
         let drain = logs.len() - 1000;
         logs.drain(..drain);
+    }
+}
+
+#[cfg(test)]
+mod console_tests {
+    use super::*;
+
+    #[test]
+    fn short_lines_untouched() {
+        assert_eq!(truncate_console_line("hello".to_string()), "hello");
+    }
+
+    #[test]
+    fn long_lines_truncated() {
+        let long = "x".repeat(CONSOLE_LINE_MAX + 100);
+        let out = truncate_console_line(long);
+        assert!(out.len() <= CONSOLE_LINE_MAX + "…[truncated]".len());
+        assert!(out.ends_with("…[truncated]"));
+    }
+
+    #[test]
+    fn truncation_respects_utf8_boundaries() {
+        // Multi-byte char right at the boundary — truncation must not split it.
+        let mut long = "x".repeat(CONSOLE_LINE_MAX - 1);
+        long.push('ñ'); // 2-byte UTF-8 char straddles the boundary
+        long.push_str(&"y".repeat(200));
+        let out = truncate_console_line(long);
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
     }
 }
 
@@ -271,15 +332,26 @@ fn queue_microtask_callback(
 // ===========================================================================
 
 /// Start time for performance.now() — set once per isolate.
-static PERF_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-
+/// `performance.now()` — per-isolate high-resolution clock.
+///
+/// Each app gets its own epoch (stored as `perf_epoch` in `RuntimeState`)
+/// so one app cannot observe when another app's requests started, how
+/// long they took, or when the V8 thread was busy serving someone else.
+///
+/// An earlier revision used a `static OnceLock<Instant>` shared across
+/// the entire process — all apps saw the same time origin and could
+/// derive each other's scheduling patterns via differential timing.
 fn performance_now_callback(
     scope: &mut v8::PinScope,
     _args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let start = PERF_START.get_or_init(std::time::Instant::now);
-    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let state: crate::state::SharedState = scope
+        .get_slot::<crate::state::SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    let epoch = state.borrow().perf_epoch;
+    let elapsed_ms = epoch.elapsed().as_secs_f64() * 1000.0;
     rv.set(v8::Number::new(scope, elapsed_ms).into());
 }
 
@@ -314,6 +386,21 @@ fn set_timeout_callback(
         0
     };
 
+    // Admission control: reject before allocating V8 handles / state.
+    {
+        let s = state.borrow();
+        if s.timer_callbacks.len() >= crate::state::MAX_PENDING_TIMERS {
+            drop(s);
+            let msg = v8::String::new(
+                scope,
+                &format!("Too many pending timers (limit: {})", crate::state::MAX_PENDING_TIMERS),
+            ).unwrap();
+            let exc = v8::Exception::range_error(scope, msg);
+            scope.throw_exception(exc);
+            return;
+        }
+    }
+
     let global_cb = v8::Global::new(scope, callback);
     let delay = Duration::from_millis(u64::from(ms));
 
@@ -325,7 +412,6 @@ fn set_timeout_callback(
         s.timer_owner.insert(id, req_id);
     }
     if delay < Duration::from_millis(1) {
-        // Fast path: fire inline without tokio::time::sleep overhead.
         s.ready_timers.push_back(id);
     } else {
         s.spawned_timers.push(crate::state::SpawnedTimer { id, delay, interval: None });
@@ -384,6 +470,21 @@ fn set_interval_callback(
         0
     };
     let delay = Duration::from_millis(u64::from(ms));
+
+    // Same admission control as setTimeout.
+    {
+        let s = state.borrow();
+        if s.timer_callbacks.len() >= crate::state::MAX_PENDING_TIMERS {
+            drop(s);
+            let msg = v8::String::new(
+                scope,
+                &format!("Too many pending timers (limit: {})", crate::state::MAX_PENDING_TIMERS),
+            ).unwrap();
+            let exc = v8::Exception::range_error(scope, msg);
+            scope.throw_exception(exc);
+            return;
+        }
+    }
 
     let global_cb = v8::Global::new(scope, callback);
     let mut s = state.borrow_mut();
@@ -639,15 +740,27 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
     }
 
     // process.env polyfill — many npm packages (e.g. LangChain) read
-    // `process.env.OPENAI_API_KEY`. Populate from host environment so
-    // runtime detection and env-based config work out of the box.
+    // `process.env.OPENAI_API_KEY`. Populate from the per-app env_vars
+    // stored in RuntimeState (set by the worker cache during load_app).
+    //
+    // SECURITY: an earlier revision used `std::env::vars()` which leaked
+    // every host-level secret (DATABASE_URL, WORKER_KEY, AWS credentials)
+    // to every app. Multi-tenant apps must only see their own env vars.
+    // The control plane can inject per-app secrets into the app bundle or
+    // the deploy metadata; those arrive in `env_vars` via the worker.
     {
         let process = v8::Object::new(scope);
         let env_obj = v8::Object::new(scope);
 
-        for (key, value) in std::env::vars() {
-            let k = v8::String::new(scope, &key).unwrap();
-            let v = v8::String::new(scope, &value).unwrap();
+        // Read per-app env_vars from the RuntimeState slot.
+        let state: crate::state::SharedState = scope
+            .get_slot::<crate::state::SharedState>()
+            .expect("RuntimeState not in isolate slot")
+            .clone();
+        let app_env = state.borrow().env_vars.clone();
+        for (key, value) in &app_env {
+            let k = v8::String::new(scope, key).unwrap();
+            let v = v8::String::new(scope, value).unwrap();
             env_obj.set(scope, k.into(), v.into());
         }
 

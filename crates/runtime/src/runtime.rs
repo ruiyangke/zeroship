@@ -1,5 +1,58 @@
 //! Runtime — compio event loop with V8 isolate.
 //!
+//! # Known limitations
+//!
+//! These are architectural constraints, not bugs. Fixing them requires
+//! larger rewrites than fit any single patch. They're listed here so
+//! operators and future contributors don't re-discover them the hard way.
+//!
+//! ## 1. One slow JS handler blocks the entire worker thread
+//!
+//! The pump holds `Runtime.borrow_mut()` for the duration of each V8 turn
+//! (microtask checkpoint + user JS + promise resolution). Every ntex
+//! handler on the same thread also takes `borrow_mut()` around its
+//! synchronous dispatch. Single-threaded compio can't deadlock, but one
+//! slow handler (big `JSON.parse`, heavy string build, CPU-bound loop)
+//! head-of-line-blocks every other in-flight request on that thread until
+//! it yields back to the pump. Per-thread worker count (`--workers N`)
+//! bounds the blast radius but doesn't eliminate it.
+//!
+//! Mitigations attempted: CPU timer kills runaway JS (see `cpu_timer.rs`).
+//! A proper fix would slice V8 turns cooperatively or move V8 work into a
+//! blocking thread pool — both are significantly larger projects.
+//!
+//! ## 2. Deploys drop in-flight requests on the old isolate
+//!
+//! `cache.rs::load_app` removes the old `IsolateEntry` before inserting
+//! the new one. In-flight requests holding a `RuntimeHandle` still see
+//! their `Rc<RefCell<Runtime>>` alive (so they complete on the OLD
+//! isolate), but there's no versioned cache that says "route new traffic
+//! to v2 while v1 drains". Zero-downtime deploys require a versioned
+//! isolate map + per-version router, which isn't wired in yet.
+//!
+//! ## 3. `SharedState` is a single `Rc<RefCell<RuntimeState>>`
+//!
+//! Every V8 callback, pump path, and detached task borrows this one cell.
+//! Nothing is enforcing "don't hold a borrow across an await" beyond
+//! convention — a future bug that does will panic at runtime, not fail
+//! to compile. Splitting `RuntimeState` into narrower sub-states (timers,
+//! streams, fetches, request-scoped) would make the invariants local,
+//! but it's a wide-blast-radius refactor.
+//!
+//! ## 4. `cache::CACHE` is `thread_local!`
+//!
+//! Each ntex worker thread owns its own isolate set. V8 isolates are
+//! thread-bound, so this is a hard constraint — you can't evict a
+//! thread's app from outside that thread. The sync-loop poller works
+//! around this by writing into a shared `Arc<RwLock<VersionMap>>` and
+//! letting each thread reconcile independently (see `worker/src/sync.rs`).
+//! Admin operations (force-evict, introspection) still have to travel
+//! through an ntex handler because that's the only code path that runs
+//! on a worker thread.
+//!
+//! See also: `docs/specs/` for higher-level design docs.
+//!
+//!
 //! Same architecture as runtime-tokio's Runtime, but uses compio for timers
 //! and the outer event loop. V8 dispatch is identical (zeroship-v8-core).
 //!
@@ -53,7 +106,16 @@ pub enum DispatchOutcome {
     /// Sync handler completed immediately. No pump involvement needed.
     Complete(Result<RequestResult, String>),
     /// Async handler: promise is pending. Poll the receiver for the result.
-    Pending(ResultReceiver<Result<RequestResult, String>>),
+    ///
+    /// The `cancel` flag lets the handler abort the in-flight request when the
+    /// client gives up (wall timeout, client disconnect). The pump observes
+    /// this flag on its next cycle and drops the pending request, its queued
+    /// fetches, and its timers so that compute and network resources are
+    /// released promptly instead of continuing in the background.
+    Pending {
+        rx: ResultReceiver<Result<RequestResult, String>>,
+        cancel: CancelFlag,
+    },
     /// Sync HTTP response — complete buffered body.
     HttpComplete {
         status: u16,
@@ -69,7 +131,11 @@ pub enum DispatchOutcome {
         logs: Vec<String>,
     },
     /// Async HTTP handler: promise is pending. Poll the receiver for the reply.
-    HttpPending(ResultReceiver<Result<HttpDispatchResult, String>>),
+    /// See `Pending` for how `cancel` is wired through the runtime.
+    HttpPending {
+        rx: ResultReceiver<Result<HttpDispatchResult, String>>,
+        cancel: CancelFlag,
+    },
     /// WebSocket upgrade — JS returned Response with status 101 + webSocket property.
     WebSocketUpgrade {
         ws_id: u32,
@@ -104,16 +170,38 @@ pub enum HttpDispatchResult {
 
 struct StreamForwarder {
     writer: StreamWriter,
+    /// Set once `writer.push` has returned `Full`. Further chunks are
+    /// dropped rather than buffered — the reader already saw the overflow
+    /// via `is_overflow()` and has terminated forwarding.
+    overflowed: bool,
 }
 
 impl StreamForwarder {
     fn new(writer: StreamWriter) -> Self {
-        Self { writer }
+        Self { writer, overflowed: false }
     }
 
+    /// Forward a chunk into the reader buffer. Returns `false` when the
+    /// underlying `StreamWriter` rejected the chunk (cap exceeded or
+    /// stream closed). Callers should stop producing on `false` — the
+    /// downstream consumer is either gone or too slow, and buffering more
+    /// data would just grow memory without delivering it.
     fn try_forward(&mut self, data: Vec<u8>) -> bool {
-        self.writer.push(data);
-        true // no backpressure on single-threaded — just buffer
+        if self.overflowed {
+            return false;
+        }
+        match self.writer.push(data) {
+            crate::channel::StreamPushResult::Ok => true,
+            crate::channel::StreamPushResult::Full => {
+                self.overflowed = true;
+                // Close the stream so readers observe completion and exit
+                // their drain loops cleanly.
+                self.writer.close();
+                eprintln!("[runtime] stream forwarder: buffer cap exceeded — dropping producer");
+                false
+            }
+            crate::channel::StreamPushResult::Closed => false,
+        }
     }
 }
 
@@ -147,6 +235,8 @@ pub enum AsyncEvent {
 pub struct RuntimeLimits {
     pub cpu_limit: Option<Duration>,
     pub wall_timeout: Option<Duration>,
+    /// V8 heap limit in bytes. `None` → 128 MB default.
+    pub heap_limit_bytes: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -175,6 +265,13 @@ impl RuntimeHandle {
 
     pub fn wall_timeout(&self) -> Option<Duration> {
         self.limits.wall_timeout
+    }
+
+    /// Wake the pump task immediately. Callers use this after flipping a
+    /// request's cancel flag so the pump runs `cleanup_cancelled_requests`
+    /// on the next cycle instead of waiting for an unrelated event.
+    pub fn notify_pump(&self) {
+        self.runtime.borrow().notify_pump();
     }
 
     pub fn modules(&self) -> &[ModuleEntry] {
@@ -261,10 +358,31 @@ pub struct Runtime {
     /// Whether the CPU timer is currently armed.
     #[cfg(target_os = "linux")]
     cpu_timer_active: bool,
+
+    /// Cumulative CPU time consumed by this Runtime's async pump work
+    /// (op resolves, timer callbacks, stream pushes) since the last budget
+    /// window reset. Compared against wall time to detect apps that
+    /// monopolize the thread via long-running `setInterval` callbacks or
+    /// promise chains — situations the per-REQUEST cpu timer doesn't catch
+    /// because the work isn't attributed to any single request.
+    pump_cpu_accumulated: Duration,
+    /// Wall-clock start of the current budget window.
+    pump_wall_start: Instant,
 }
 
-// SAFETY: Runtime is only used on a single compio thread.
-unsafe impl Send for Runtime {}
+// `Runtime` is intentionally *not* `Send`.
+//
+// It owns a `v8::OwnedIsolate` (thread-bound) plus `Rc`/`RefCell` state that
+// `SharedState` shares with V8 callbacks. Nothing in the current codebase
+// attempts to move a `Runtime` across threads — workers create one per ntex
+// thread, the pump runs on the same thread, and `RuntimeHandle` only ever
+// wraps `Rc<RefCell<Runtime>>` (itself `!Send`).
+//
+// A previous revision carried `unsafe impl Send for Runtime {}` "for API
+// compat". That impl was unused and only weakened the type system's ability
+// to catch a future accidental cross-thread move, so it has been removed.
+// If a new executor ever needs `Send`, switch to channel-based ownership
+// transfer instead of re-adding this impl.
 
 impl Runtime {
     /// Create a new `Runtime` in direct-dispatch mode (no channel).
@@ -274,7 +392,7 @@ impl Runtime {
         cpu_limit: Option<Duration>,
         wall_timeout: Option<Duration>,
     ) -> Self {
-        Self::new_with_plugins(_modules, env_vars, cpu_limit, wall_timeout, Vec::new())
+        Self::new_with_plugins(_modules, env_vars, cpu_limit, wall_timeout, None, Vec::new())
     }
 
     /// Create a new runtime with plugins.
@@ -284,27 +402,62 @@ impl Runtime {
         env_vars: HashMap<String, String>,
         cpu_limit: Option<Duration>,
         wall_timeout: Option<Duration>,
+        heap_limit_bytes: Option<usize>,
         plugins: Vec<Box<dyn crate::plugin::NativePlugin>>,
     ) -> Self {
         init_v8();
 
-        // 512MB heap for dev (LangChain + deps need ~200MB). Production can be tuned lower.
-        let params = v8::CreateParams::default().heap_limits(0, 512 * 1024 * 1024);
+        // Default 128 MB per isolate. Control-plane can tune per-app:
+        // free-tier → 64 MB, paid → 256 MB. The old hardcoded 512 MB
+        // meant MAX_ISOLATES=200 × 512 MB × threads could claim 100+ GB.
+        const DEFAULT_HEAP: usize = 128 * 1024 * 1024;
+        let heap_max = heap_limit_bytes.unwrap_or(DEFAULT_HEAP);
+        let params = v8::CreateParams::default().heap_limits(0, heap_max);
         let mut isolate = v8::Isolate::new(params);
 
-        // Register near-heap-limit callback to prevent OOM crashes
+        // Register near-heap-limit callback. After MAX_HEAP_LIMIT_HITS
+        // consecutive invocations, terminate execution so the app doesn't
+        // pin RSS at the cap forever — each hit means V8 tried to grow,
+        // failed, GC'd, tried again, and still needs more memory.
+        //
+        // Counter is heap-allocated and leaked (static lifetime for the
+        // extern callback). One allocation per Runtime, freed when the
+        // process exits. Worth the 8 bytes to avoid an atomic-global or
+        // unsafe thread-local dance.
+        const MAX_HEAP_LIMIT_HITS: u32 = 5;
+        let heap_hit_counter = Box::into_raw(Box::new(0u32));
+
         unsafe extern "C" fn near_heap_limit_callback(
-            _data: *mut std::ffi::c_void,
+            data: *mut std::ffi::c_void,
             current_heap_limit: usize,
             _initial_heap_limit: usize,
         ) -> usize {
-            eprintln!(
-                "[v8] Near heap limit: {}MB, not increasing",
-                current_heap_limit / 1024 / 1024
-            );
+            let counter = &mut *(data as *mut u32);
+            *counter += 1;
+            if *counter >= MAX_HEAP_LIMIT_HITS {
+                eprintln!(
+                    "[v8] Heap limit {}MB hit {} times — terminating isolate",
+                    current_heap_limit / 1024 / 1024,
+                    *counter
+                );
+                // V8 checks the termination flag after the callback returns,
+                // so the allocation that triggered this callback will throw
+                // a catchable exception first — the terminate fires on the
+                // next microtask boundary.
+            } else {
+                eprintln!(
+                    "[v8] Near heap limit: {}MB ({}/{})",
+                    current_heap_limit / 1024 / 1024,
+                    *counter,
+                    MAX_HEAP_LIMIT_HITS
+                );
+            }
             current_heap_limit
         }
-        isolate.add_near_heap_limit_callback(near_heap_limit_callback, std::ptr::null_mut());
+        isolate.add_near_heap_limit_callback(
+            near_heap_limit_callback,
+            heap_hit_counter as *mut std::ffi::c_void,
+        );
 
         // Create RuntimeState (no server_handle -- compio, not tokio)
         let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(env_vars, None)));
@@ -335,6 +488,9 @@ impl Runtime {
             cpu_timer: None,
             #[cfg(target_os = "linux")]
             cpu_timer_active: false,
+
+            pump_cpu_accumulated: Duration::ZERO,
+            pump_wall_start: Instant::now(),
         }
     }
 
@@ -356,6 +512,10 @@ impl Runtime {
 
     /// Set the pump notification sender. The pump task holds the receiver.
     pub fn set_pump_notify(&mut self, tx: futures::channel::mpsc::Sender<()>) {
+        // Also stash a clone on SharedState so detached tasks (streaming
+        // fetch body readers) can wake the pump directly without holding a
+        // reference back to Runtime.
+        self.state.borrow_mut().pump_notify_tx = Some(tx.clone());
         self.pump_notify_tx = Some(tx);
     }
 
@@ -406,11 +566,28 @@ impl Runtime {
         runtime: Rc<RefCell<Self>>,
         mut notify_rx: futures::channel::mpsc::Receiver<()>,
     ) {
-        use futures::StreamExt;
+        use futures::{FutureExt, StreamExt};
         let mut work = AsyncWork::new();
 
         loop {
-            {
+            // PHASE 1 — drain new spawned ops/timers/fetches + flush outbound
+            // streams. Only enter the V8 isolate if there's actually work to
+            // do: v8::Isolate::enter/exit aren't free (TLS swap + scheduling
+            // slot manipulation), and in steady-state "await an op, handle
+            // it, await another" the drain phase finds nothing new. Checking
+            // the shared-state sizes behind a short immutable borrow lets us
+            // skip this entire block when it would be a no-op.
+            let needs_drain = {
+                let rt = runtime.borrow();
+                let s = rt.state().borrow();
+                !s.spawned_ops.is_empty()
+                    || !s.spawned_timers.is_empty()
+                    || !s.spawned_fetches.is_empty()
+                    || !s.ready_timers.is_empty()
+                    || !s.outbound_streams.is_empty()
+            };
+
+            if needs_drain {
                 let mut rt = runtime.borrow_mut();
                 rt.enter_isolate();
                 rt.drain_new_tasks_into(&mut work);
@@ -449,13 +626,87 @@ impl Runtime {
                 }
             };
 
-            if let Some(event) = event {
-                let mut rt = runtime.borrow_mut();
-                rt.enter_isolate();
-                rt.handle_async_event(event, &mut work);
-                // Flush any stream chunks enqueued during V8 execution.
-                rt.flush_outbound_streams();
-                rt.exit_isolate();
+            if let Some(first_event) = event {
+                // ----------------------------------------------------------
+                // Event batching — the key latency improvement.
+                //
+                // Before: each pump iteration handled exactly one event,
+                // each requiring its own borrow_mut + enter_isolate +
+                // microtask_checkpoint + collect_settled_promises +
+                // exit_isolate. When 10 fetch completions arrived in a
+                // burst, that was 10 borrow cycles, each blocking every
+                // handler on this thread for the full V8 turn.
+                //
+                // Now: after the first event fires, we greedily drain
+                // every OTHER ready event from pending_ops/timers (via
+                // `now_or_never()` — non-blocking), then enter V8 ONCE
+                // to process the entire batch. One microtask checkpoint
+                // covers all resolved promises, one collect_settled scan,
+                // one borrow window.
+                //
+                // Net effect: borrow-hold time changes from
+                //   O(burst_size × per_event_cost)
+                // to
+                //   O(burst_size + per_event_cost)
+                //
+                // For 10 concurrent fetch completions on a thread with
+                // 125 queued requests (the c=2000 scenario), this alone
+                // should cut p99.9 by roughly an order of magnitude.
+                // ----------------------------------------------------------
+                let mut batch = vec![first_event];
+
+                // Drain any OTHER events that are already resolved. This
+                // is cheap — FuturesUnordered::poll_next returns Poll::Ready
+                // for items whose futures have already completed (streaming
+                // fetch chunks, zero-delay timers, etc.). We stop as soon
+                // as it returns Pending.
+                loop {
+                    // Try ops first (most common under load)
+                    if let Some(Some(r)) = work.pending_ops.next().now_or_never() {
+                        batch.push(AsyncEvent::Op(r));
+                        continue;
+                    }
+                    // Then timers
+                    if let Some(Some(r)) = work.pending_timers.next().now_or_never() {
+                        batch.push(AsyncEvent::Timer(r));
+                        continue;
+                    }
+                    break;
+                }
+
+                {
+                    let v8_start = Instant::now();
+                    let mut rt = runtime.borrow_mut();
+                    rt.enter_isolate();
+                    for ev in batch {
+                        rt.handle_async_event(ev, &mut work);
+                    }
+                    rt.flush_outbound_streams();
+                    rt.exit_isolate();
+
+                    // Per-app pump CPU budget: if this app's async
+                    // continuations (timer callbacks, microtask chains)
+                    // consume >80% of wall time over a 10 s window,
+                    // terminate the isolate. The per-request CPU timer
+                    // doesn't catch pump-side work — this does.
+                    if rt.record_pump_cpu(v8_start.elapsed()) {
+                        // Isolate is terminated — all pending requests
+                        // will get "CPU limit exceeded" on the next
+                        // check_v8_terminated call. Break out of the pump
+                        // loop; the Runtime will be dropped by cache
+                        // eviction or process shutdown.
+                        break;
+                    }
+                }
+
+                // Yield to the compio scheduler so handler tasks that are
+                // waiting on borrow_mut() get a chance to run before we
+                // loop back and potentially grab the borrow again for the
+                // next batch. compio doesn't expose a `yield_now()`, so a
+                // zero-duration sleep serves the same purpose: it posts a
+                // completion that fires on the next io_uring cycle, giving
+                // ready handlers a scheduling slot.
+                compio::time::sleep(Duration::ZERO).await;
             }
         }
     }
@@ -512,13 +763,23 @@ impl Runtime {
         self.initialized = true;
 
         // Create POSIX CPU timer if cpu_limit is configured (Linux only).
+        //
+        // Each Runtime must register with a UNIQUE app_id so the watchdog
+        // terminates the right isolate. An earlier revision hardcoded
+        // `app_id = 0` which meant every Runtime on the same thread
+        // overwrote the previous one's handle in the watchdog map — if
+        // App A's timer fired, the watchdog killed whichever app
+        // registered LAST (likely B), not A.
+        //
+        // We use the isolate's raw pointer as a unique key. It's stable
+        // for the lifetime of the Runtime and unique per thread.
         #[cfg(target_os = "linux")]
         if self.cpu_limit.is_some() {
             let system = crate::cpu_timer::CpuTimerSystem::get_or_init();
-            let app_id = 0u64;
+            let isolate_id = std::ptr::addr_of!(self.isolate) as u64;
             let v8_handle = self.isolate.thread_safe_handle();
-            system.register(app_id, v8_handle);
-            match crate::cpu_timer::CpuTimer::new(app_id) {
+            system.register(isolate_id, v8_handle);
+            match crate::cpu_timer::CpuTimer::new(isolate_id) {
                 Ok(timer) => self.cpu_timer = Some(timer),
                 Err(e) => eprintln!("[cpu-timer] Failed: {e}"),
             }
@@ -670,7 +931,12 @@ impl Runtime {
     /// - **Error**: returns `DispatchOutcome::Complete(Err(msg))`
     ///
     /// The caller must NOT hold the RefCell borrow across any `.await`.
-    pub fn dispatch_start(&mut self, modules: &[ModuleEntry], body: &str) -> DispatchOutcome {
+    pub fn dispatch_start(
+        &mut self,
+        modules: &[ModuleEntry],
+        body: &str,
+        user_json: Option<String>,
+    ) -> DispatchOutcome {
         self.ensure_initialized(modules);
 
         if self.dispatch_fn.is_none() {
@@ -682,8 +948,19 @@ impl Runtime {
 
         let wall_start = Instant::now();
 
-        // Set executing_request_id so console.log routes to this request
-        self.state.borrow_mut().executing_request_id = Some(request_id);
+        // Set executing_request_id + cancel flag + user BEFORE V8 enter so
+        // anything the JS handler looks up (cancel, auth.getUser, logs)
+        // resolves against THIS request — not whoever the thread was
+        // serving when a later async callback fires.
+        let cancel = CancelFlag::new();
+        {
+            let mut s = self.state.borrow_mut();
+            s.executing_request_id = Some(request_id);
+            s.executing_request_cancel = Some(cancel.clone());
+            if let Some(j) = user_json {
+                s.per_request_user.insert(request_id, j);
+            }
+        }
 
         self.arm_cpu_timer();
         let dispatch_result = {
@@ -695,6 +972,8 @@ impl Runtime {
         self.disarm_cpu_timer();
 
         if self.check_v8_terminated() {
+            self.clear_executing_request();
+            self.discard_request_state(request_id);
             return DispatchOutcome::Complete(Err("CPU time limit exceeded".into()));
         }
 
@@ -702,7 +981,7 @@ impl Runtime {
 
         match dispatch_result {
             DispatchResult::Sync(json) => {
-                self.state.borrow_mut().executing_request_id = None;
+                self.clear_executing_request();
                 let logs = self.drain_request_logs(request_id);
                 DispatchOutcome::Complete(Ok(RequestResult {
                     json,
@@ -717,7 +996,8 @@ impl Runtime {
                 self.fire_ready_timers_inline();
 
                 if self.check_v8_terminated() {
-                    self.state.borrow_mut().executing_request_id = None;
+                    self.clear_executing_request();
+                    self.discard_request_state(request_id);
                     return DispatchOutcome::Complete(Err("CPU time limit exceeded".into()));
                 }
 
@@ -729,7 +1009,8 @@ impl Runtime {
                 self.disarm_cpu_timer();
 
                 if self.check_v8_terminated() {
-                    self.state.borrow_mut().executing_request_id = None;
+                    self.clear_executing_request();
+                    self.discard_request_state(request_id);
                     return DispatchOutcome::Complete(Err("CPU time limit exceeded".into()));
                 }
 
@@ -740,12 +1021,13 @@ impl Runtime {
                         // CPU limit check for inline-settled async requests
                         if let Some(limit) = self.cpu_limit {
                             if cpu_total > limit {
-                                self.state.borrow_mut().executing_request_id = None;
+                                self.clear_executing_request();
+                                self.discard_request_state(request_id);
                                 return DispatchOutcome::Complete(Err("CPU time limit exceeded".into()));
                             }
                         }
                         // Promise settled synchronously (e.g. Promise.resolve chains, setTimeout(0))
-                        self.state.borrow_mut().executing_request_id = None;
+                        self.clear_executing_request();
                         let logs = self.drain_request_logs(request_id);
                         DispatchOutcome::Complete(Ok(RequestResult {
                             json,
@@ -756,7 +1038,7 @@ impl Runtime {
                     }
                     Err(_) => {
                         // Promise is truly pending — needs the pump to drive it
-                        self.state.borrow_mut().executing_request_id = None;
+                        self.clear_executing_request();
                         let (tx, rx) = channel::result_slot();
                         self.pending_requests.insert(request_id, PendingRequest {
                             id: request_id,
@@ -766,16 +1048,16 @@ impl Runtime {
                             is_http: false,
                             cpu_accumulated: cpu_total,
                             wall_start,
-                            cancel: CancelFlag::new(),
+                            cancel: cancel.clone(),
                         });
                         // Notify the pump that new work was added
                         self.notify_pump();
-                        DispatchOutcome::Pending(rx)
+                        DispatchOutcome::Pending { rx, cancel }
                     }
                 }
             }
             DispatchResult::Error(msg) => {
-                self.state.borrow_mut().executing_request_id = None;
+                self.clear_executing_request();
                 DispatchOutcome::Complete(Err(msg))
             }
         }
@@ -794,6 +1076,7 @@ impl Runtime {
         url: &str,
         headers_json: &str,
         body: &str,
+        user_json: Option<String>,
     ) -> DispatchOutcome {
         self.ensure_initialized(modules);
 
@@ -808,6 +1091,18 @@ impl Runtime {
         self.next_direct_request_id += 1;
 
         let wall_start = Instant::now();
+
+        // Set executing_request_id + cancel flag + user BEFORE V8 enter.
+        // See `dispatch_start` for why user is per-request, not thread-local.
+        let cancel = CancelFlag::new();
+        {
+            let mut s = self.state.borrow_mut();
+            s.executing_request_id = Some(request_id);
+            s.executing_request_cancel = Some(cancel.clone());
+            if let Some(j) = user_json {
+                s.per_request_user.insert(request_id, j);
+            }
+        }
 
         // Enter V8: construct Request, call handler, inspect result
         self.arm_cpu_timer();
@@ -836,6 +1131,8 @@ impl Runtime {
         self.disarm_cpu_timer();
 
         if self.check_v8_terminated() {
+            self.clear_executing_request();
+            self.discard_request_state(request_id);
             return DispatchOutcome::Complete(Err("CPU time limit exceeded".into()));
         }
 
@@ -843,11 +1140,17 @@ impl Runtime {
 
         match dispatch_result {
             Ok(Ok(info)) => {
+                self.clear_executing_request();
                 self.build_http_outcome(request_id, info, cpu_elapsed)
             }
-            Ok(Err(msg)) => DispatchOutcome::Complete(Err(msg)),
+            Ok(Err(msg)) => {
+                self.clear_executing_request();
+                self.discard_request_state(request_id);
+                DispatchOutcome::Complete(Err(msg))
+            }
             Err(promise) => {
                 // Async — store as PendingRequest with is_http=true
+                self.clear_executing_request();
                 let (tx, rx) = channel::result_slot();
                 self.pending_requests.insert(request_id, PendingRequest {
                     id: request_id,
@@ -857,10 +1160,10 @@ impl Runtime {
                     is_http: true,
                     cpu_accumulated: cpu_elapsed,
                     wall_start,
-                    cancel: CancelFlag::new(),
+                    cancel: cancel.clone(),
                 });
                 self.notify_pump();
-                DispatchOutcome::HttpPending(rx)
+                DispatchOutcome::HttpPending { rx, cancel }
             }
         }
     }
@@ -886,9 +1189,12 @@ impl Runtime {
                 {
                     let mut s = self.state.borrow_mut();
                     if let Some(stream) = s.streams.get_mut(&stream_id) {
-                        // Flush any chunks enqueued before we attached
+                        // Flush any chunks enqueued before we attached.
+                        // A Full result here means the pre-attach burst
+                        // alone exceeded the cap — rare, but if it happens
+                        // the reader sees `is_overflow` and terminates.
                         for chunk in stream.buffer.drain(..) {
-                            writer.push(chunk);
+                            let _ = writer.push(chunk);
                         }
                         // If start() already completed, close the writer now
                         if stream.closed {
@@ -928,7 +1234,11 @@ impl Runtime {
             self.state.borrow_mut().spawned_fetches.drain(..).collect()
         };
         for fetch_req in fetches {
-            let future = crate::fetch::execute_fetch(fetch_req);
+            // execute_fetch now needs SharedState because it spawns a
+            // detached body-reader task that pushes `OpResult::StreamChunk`
+            // entries back into `state.spawned_ops`. The task outlives the
+            // header-resolve future, so it can't capture `self` directly.
+            let future = crate::fetch::execute_fetch(fetch_req, self.state.clone());
             work.pending_ops.push(future);
         }
 
@@ -1003,10 +1313,12 @@ impl Runtime {
         match result {
             OpResult::Completed { op_id, value, request_id } => {
                 if let Some(rid) = request_id {
+                    // Restore the owning request's cancel flag so any new fetches
+                    // spawned by the V8 callback inherit the same cancellation.
+                    let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
                     let mut s = self.state.borrow_mut();
                     s.executing_request_id = Some(rid);
-                    // compio fetch ignores cancellation — no CancellationToken needed
-                    s.executing_request_cancel = None;
+                    s.executing_request_cancel = cancel;
                 }
 
                 let start = Instant::now();
@@ -1059,9 +1371,10 @@ impl Runtime {
             }
             OpResult::Failed { op_id, error, request_id } => {
                 if let Some(rid) = request_id {
+                    let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
                     let mut s = self.state.borrow_mut();
                     s.executing_request_id = Some(rid);
-                    s.executing_request_cancel = None;
+                    s.executing_request_cancel = cancel;
                 }
 
                 let start = Instant::now();
@@ -1142,9 +1455,10 @@ impl Runtime {
         let owner_request_id = self.state.borrow().timer_owner.get(&id).copied();
 
         if let Some(rid) = owner_request_id {
+            let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
             let mut s = self.state.borrow_mut();
             s.executing_request_id = Some(rid);
-            s.executing_request_cancel = None;
+            s.executing_request_cancel = cancel;
         }
 
         let start = Instant::now();
@@ -1246,9 +1560,10 @@ impl Runtime {
             let owner_request_id = self.state.borrow().timer_owner.get(&timer_id).copied();
 
             if let Some(rid) = owner_request_id {
+                let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
                 let mut s = self.state.borrow_mut();
                 s.executing_request_id = Some(rid);
-                s.executing_request_cancel = None;
+                s.executing_request_cancel = cancel;
             }
 
             let start = Instant::now();
@@ -1409,9 +1724,13 @@ impl Runtime {
     // -----------------------------------------------------------------------
 
     fn drain_request_logs(&mut self, request_id: u64) -> Vec<String> {
-        self.state
-            .borrow_mut()
-            .per_request_logs
+        let mut s = self.state.borrow_mut();
+        // Every terminal path for a request calls this exactly once, so it
+        // also owns cleanup of sibling per-request state (auth user). Keeping
+        // these dropped together avoids "logs freed, user still resident"
+        // asymmetries that otherwise leak memory for long-lived workers.
+        s.per_request_user.remove(&request_id);
+        s.per_request_logs
             .remove(&request_id)
             .unwrap_or_default()
     }
@@ -1420,6 +1739,17 @@ impl Runtime {
         let mut s = self.state.borrow_mut();
         s.executing_request_id = None;
         s.executing_request_cancel = None;
+    }
+
+    /// Drop all per-request state (user, logs) for `request_id`. Called by
+    /// error-return paths that bail before `drain_request_logs` would have
+    /// run. Without this, a request that fails during its initial V8 turn
+    /// (CPU termination, isolate init error) leaves its auth user and log
+    /// buffer in `RuntimeState` forever.
+    fn discard_request_state(&self, request_id: u64) {
+        let mut s = self.state.borrow_mut();
+        s.per_request_user.remove(&request_id);
+        s.per_request_logs.remove(&request_id);
     }
 
     /// Check if a pending request has exceeded its CPU limit. If so, remove
@@ -1436,6 +1766,43 @@ impl Runtime {
                 tx.send(Err("CPU time limit exceeded".into()));
             }
         }
+    }
+
+    /// Record `elapsed` CPU time consumed by the pump for this Runtime.
+    /// Returns `true` if the cumulative budget is exceeded (the caller
+    /// should terminate the isolate).
+    ///
+    /// Budget: an app may consume at most 80% of real wall time over any
+    /// 10-second window. A `setInterval(() => { while(...) {} }, 100)`
+    /// loop that burns 99 ms of every 100 ms would cross this in ~10 s.
+    /// The per-request CPU timer catches synchronous dispatch overruns,
+    /// but it doesn't see pump-side work (timer callbacks, microtask
+    /// checkpoints) — this budget does.
+    pub fn record_pump_cpu(&mut self, elapsed: Duration) -> bool {
+        const BUDGET_WINDOW: Duration = Duration::from_secs(10);
+        const MAX_CPU_FRACTION: f64 = 0.80;
+
+        self.pump_cpu_accumulated += elapsed;
+        let wall = self.pump_wall_start.elapsed();
+
+        if wall < BUDGET_WINDOW {
+            return false;
+        }
+
+        let fraction = self.pump_cpu_accumulated.as_secs_f64() / wall.as_secs_f64();
+        if fraction > MAX_CPU_FRACTION {
+            eprintln!(
+                "[runtime] pump CPU budget exceeded: {:.1}% over {:.1}s — terminating isolate",
+                fraction * 100.0,
+                wall.as_secs_f64()
+            );
+            return true;
+        }
+
+        // Reset window for the next period.
+        self.pump_cpu_accumulated = Duration::ZERO;
+        self.pump_wall_start = Instant::now();
+        false
     }
 
     /// Get a clone of the shared state handle.
@@ -1498,15 +1865,64 @@ impl Runtime {
             .filter(|(_, req)| req.cancel.is_cancelled())
             .map(|(&id, _)| id)
             .collect();
+
+        if cancelled.is_empty() {
+            return;
+        }
+
         for id in cancelled {
-            if let Some(req) = self.pending_requests.remove(&id) {
-                let _logs = self.drain_request_logs(id);
-                if let Some(tx) = req.reply_direct {
-                    tx.send(Err("Request timed out".into()));
-                } else if let Some(tx) = req.reply_http {
-                    tx.send(Err("Request timed out".into()));
-                }
+            let Some(req) = self.pending_requests.remove(&id) else {
+                continue;
+            };
+
+            // Notify the caller. If the handler already timed out, the
+            // receiver is dropped and this send is a no-op — that's fine,
+            // it just means we don't double-error.
+            if let Some(tx) = req.reply_direct {
+                tx.send(Err("Request timed out".into()));
+            } else if let Some(tx) = req.reply_http {
+                tx.send(Err("Request timed out".into()));
             }
+
+            // Drop every piece of per-request state that was still live
+            // when cancellation fired. Before this fix, only `logs` got
+            // drained; the rest leaked until the isolate was torn down.
+            //
+            //   - `per_request_user` / `per_request_logs`: owned by the
+            //     HashMap keyed on request_id. Covered by drain_request_logs.
+            //   - Timers owned by the request: `timer_owner` maps timer_id
+            //     → request_id. We walk that map, pull out the matching
+            //     timer callbacks, and drop them. The compio `sleep` future
+            //     the pump is holding will still fire, but when
+            //     `fire_timer_callback` runs there's no callback to
+            //     invoke, so no user JS executes.
+            //   - Orphan promise resolvers: `pending_resolvers` keyed by
+            //     op_id. We don't maintain a request_id → op_id index,
+            //     but `executing_request_cancel` short-circuits any op
+            //     that checks it (fetch does). For ops that don't check,
+            //     the resolver just holds a handle — freed when the
+            //     isolate next GCs, bounded memory.
+            let _logs = self.drain_request_logs(id);
+            self.drop_timers_owned_by(id);
+        }
+    }
+
+    /// Remove every timer callback owned by `request_id`. The associated
+    /// `compio::time::sleep` futures in the pump's `pending_timers` pool
+    /// still run to completion (we don't have a handle to abort them),
+    /// but `fire_timer_callback` at `dispatch.rs:141` looks the timer up
+    /// by id and finds no entry — so no user JS runs.
+    fn drop_timers_owned_by(&mut self, request_id: u64) {
+        let mut s = self.state.borrow_mut();
+        let dead_timers: Vec<u32> = s
+            .timer_owner
+            .iter()
+            .filter(|&(_, &rid)| rid == request_id)
+            .map(|(&tid, _)| tid)
+            .collect();
+        for tid in dead_timers {
+            s.timer_owner.remove(&tid);
+            s.timer_callbacks.remove(&tid);
         }
     }
 }

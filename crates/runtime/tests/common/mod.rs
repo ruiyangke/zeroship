@@ -49,7 +49,7 @@ pub fn dispatch_http_sync(
 ) -> Option<(u16, Vec<(String, String)>, String)> {
     init_v8();
     let mut runtime = Runtime::new_direct(modules.clone(), no_env(), None, None);
-    match runtime.dispatch_http(&modules, method, url, headers_json, body) {
+    match runtime.dispatch_http(&modules, method, url, headers_json, body, None) {
         DispatchOutcome::HttpComplete { status, headers, body, .. } => {
             Some((status, headers, body))
         }

@@ -28,7 +28,7 @@ pub use modules::ModuleEntry;
 pub use state::{SharedState, RuntimeState, OpResult, FetchRequest, StreamState, SpawnedTimer, WebSocketState, WsMessage};
 pub use storage::AppStorage;
 pub use runtime::{Runtime, RuntimeHandle, RuntimeLimits, DispatchOutcome, HttpDispatchResult, AsyncWork, AsyncEvent};
-pub use channel::{ResultSender, ResultReceiver, StreamWriter, StreamReader};
+pub use channel::{CancelFlag, ResultSender, ResultReceiver, StreamWriter, StreamReader};
 pub use bundle::{AppBundle, ModuleType, ModuleInfo};
 pub use serve::{start_server, ServerOptions};
 pub use plugin::{NativePlugin, NativeRegistrar, PluginConfig};

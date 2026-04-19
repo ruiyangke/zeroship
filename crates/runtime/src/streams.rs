@@ -175,7 +175,9 @@ pub fn stream_enqueue_callback(
             resolve_with_chunk(scope, resolver, &data);
         }
         StreamDispatch::Direct(writer) => {
-            writer.push(data);
+            // Ignore the push result here — the reader observes overflow via
+            // `is_overflow()` and terminates, so we don't need to tell JS.
+            let _ = writer.push(data);
         }
     }
 }

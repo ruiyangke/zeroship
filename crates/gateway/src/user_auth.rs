@@ -80,12 +80,16 @@ struct UserPayload<'a> {
     email_verified: bool,
 }
 
-/// Serialize the authenticated user as base64-encoded JSON for the `ZeroShip-User`
-/// header.  The worker decodes this to populate `zeroship.auth.getUser()`.
+/// Serialize the authenticated user as `base64(JSON).<hex-hmac>` for the
+/// `ZeroShip-User` header. The worker decodes the base64 portion and verifies
+/// the HMAC against the same `worker_key` before trusting the user identity.
 ///
 /// The payload uses the public shape `{ id, email, name, avatar }` — JWT
 /// internals (`sub`, `app`, `exp`, `iat`) are not forwarded to the worker.
-pub fn encode_user_header(user: &AuthUser) -> String {
+///
+/// Signing prevents a caller with network access to the worker from forging a
+/// user identity, even if the worker's endpoint bearer-auth were ever bypassed.
+pub fn encode_user_header(user: &AuthUser, worker_key: &str) -> String {
     let payload = UserPayload {
         id: &user.sub,
         email: &user.email,
@@ -94,5 +98,7 @@ pub fn encode_user_header(user: &AuthUser) -> String {
         email_verified: user.email_verified,
     };
     let json = serde_json::to_string(&payload).unwrap_or_default();
-    B64.encode(json.as_bytes())
+    let b64 = B64.encode(json.as_bytes());
+    let mac = zeroship_core::auth::hmac_sha256_hex(worker_key.as_bytes(), b64.as_bytes());
+    format!("{b64}.{mac}")
 }

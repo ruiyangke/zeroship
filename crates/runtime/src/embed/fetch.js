@@ -232,13 +232,18 @@
   }
 
   // Read a ReadableStream to completion, returning a Promise<string>.
-  function __readStreamToString(stream) {
+  // Drain a ReadableStream into a single Uint8Array. Used by every
+  // non-streaming Body mixin consumer (text, json, arrayBuffer, blob) when
+  // the response arrived via streaming fetch (`stream_id` set). Each chunk
+  // is either already a Uint8Array (Rust push path) or a string (pure-JS
+  // ReadableStreams from user code), and we normalize to bytes before
+  // concatenation so TextDecoder can run on the combined buffer.
+  function __readStreamToBytes(stream) {
     var reader = stream.getReader();
     var chunks = [];
     function pump() {
       return reader.read().then(function(result) {
         if (result.done) {
-          // Concatenate all chunks into a single string.
           var total = 0;
           for (var i = 0; i < chunks.length; i++) total += chunks[i].length;
           var buf = new Uint8Array(total);
@@ -247,7 +252,7 @@
             buf.set(chunks[i], off);
             off += chunks[i].length;
           }
-          return new TextDecoder().decode(buf);
+          return buf;
         }
         if (result.value) {
           chunks.push(result.value instanceof Uint8Array ? result.value : new TextEncoder().encode(String(result.value)));
@@ -256,6 +261,12 @@
       });
     }
     return pump();
+  }
+
+  function __readStreamToString(stream) {
+    return __readStreamToBytes(stream).then(function(bytes) {
+      return new TextDecoder().decode(bytes);
+    });
   }
 
   function applyBodyMixin(proto) {
@@ -284,6 +295,15 @@
     proto.arrayBuffer = function() {
       if (this._bodyUsed) return Promise.reject(new TypeError("Body has already been consumed."));
       this._bodyUsed = true;
+      // Streaming fetch response — drain the ReadableStream into a Uint8Array
+      // and hand the backing ArrayBuffer to the caller. Without this path,
+      // `fetch(url).then(r => r.arrayBuffer())` silently returned an empty
+      // buffer for anything delivered via stream_id.
+      if (this._isStreamBody && this.body) {
+        return __readStreamToBytes(this.body).then(function(u8) {
+          return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+        });
+      }
       if (this._bodyBytes) {
         return Promise.resolve(this._bodyBytes);
       }

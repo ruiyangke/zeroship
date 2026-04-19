@@ -57,6 +57,7 @@ services:
           --port 8000 \
           --control http://control:9090 \
           --control-key platform-key \
+          --worker-key worker-key \
           --workers "$$WORKERS" \
           --poll-interval 3
     ports:
@@ -69,10 +70,18 @@ services:
 
   worker:
     build: .
+    # Worker defaults to binding 127.0.0.1 for safety. In the Docker
+    # network the gateway reaches the worker via the `worker` DNS name,
+    # so we explicitly opt in to 0.0.0.0 AND set a WORKER_KEY — without
+    # the key the worker refuses to bind a non-loopback address (to
+    # avoid exposing unauthenticated code execution). The key must match
+    # the gateway's `--worker-key`.
     command: >
       zeroship-worker
         --port 8080
         --workers 4
+        --bind 0.0.0.0
+        --worker-key worker-key
         --control http://control:9090
         --control-key platform-key
         --max-isolates 200

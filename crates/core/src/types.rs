@@ -21,6 +21,9 @@ pub struct AppRecord {
 pub struct AppRuntimeLimits {
     pub cpu_limit_ms: Option<u64>,
     pub wall_timeout_ms: Option<u64>,
+    /// Maximum V8 heap in megabytes. `None` → 128 MB default in the worker.
+    /// Free-tier apps should be capped low (64 MB); paid tiers can go higher.
+    pub heap_limit_mb: Option<u32>,
 }
 
 /// Worker-facing metadata for an app version/config snapshot.

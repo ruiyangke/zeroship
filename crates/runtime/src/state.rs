@@ -86,6 +86,29 @@ pub const REQUEST_CHANNEL_CAPACITY: usize = 256;
 /// Maximum number of concurrent in-flight async ops (fetch, kv, ...).
 pub const MAX_PENDING_OPS: usize = 1024;
 
+/// Maximum number of live timers (setTimeout + setInterval) per runtime.
+/// Each timer holds a `v8::Global<v8::Function>` (~200 bytes) + a compio
+/// sleep future. Without a cap, `for(;;) setTimeout(f, 1e9)` grows memory
+/// indefinitely. 10,000 matches the V8 guideline for reasonable timer
+/// density (Chrome DevTools warns at 10K pending timers).
+pub const MAX_PENDING_TIMERS: usize = 10_000;
+
+/// Separate, tighter cap on concurrent outbound fetches per runtime/app.
+///
+/// The shared cyper client is cross-app: if one app fires 1024 fetches at
+/// a slow upstream, it can monopolize the connection pool and the DNS
+/// resolver for every other app on the same worker thread. `MAX_PENDING_OPS`
+/// alone doesn't distinguish fetches from cheap in-memory ops, so a
+/// dedicated fetch cap is required for multi-tenant safety.
+///
+/// 64 is a heuristic: the Node.js default `http.globalAgent.maxSockets`
+/// is infinity but Undici's dispatcher defaults to 128 per origin. We err
+/// lower — platform apps are expected to reach only a handful of upstreams
+/// at once, and a runaway loop (e.g. accidentally-recursive fetch) hits
+/// this cap quickly enough to give the operator a clean error instead of
+/// an OOM or a control-plane outage.
+pub const MAX_PENDING_FETCHES: usize = 64;
+
 // ---------------------------------------------------------------------------
 // WebSocket state
 // ---------------------------------------------------------------------------
@@ -206,13 +229,32 @@ pub struct RuntimeState {
     /// Fetch requests queued by V8 callbacks, drained by the runtime executor.
     pub spawned_fetches: Vec<FetchRequest>,
 
+    /// Number of fetches currently queued OR executing for this runtime.
+    /// Incremented in the V8 `__rawFetch` callback and decremented when
+    /// the fetch's detached body-reader task finishes (EOF, error, or
+    /// cancellation). Guards against one app exhausting the shared cyper
+    /// client's connection pool — `MAX_PENDING_OPS` would let this climb
+    /// to 1024 which is well within OOM-by-sockets territory when the
+    /// upstream is slow.
+    pub in_flight_fetches: usize,
+
     /// The request currently being executed (None between requests).
     pub executing_request_id: Option<u64>,
-    /// Cancellation flag for the current request (unused in compio path, kept for API compat).
-    pub executing_request_cancel: Option<()>,
+    /// Cancellation flag for the request currently being executed. Captured
+    /// by V8 callbacks (e.g. `__rawFetch`) so that async ops they spawn
+    /// inherit the same flag and abort early if the handler gives up.
+    pub executing_request_cancel: Option<crate::channel::CancelFlag>,
 
     /// Per-request log lines accumulated during execution.
     pub per_request_logs: HashMap<u64, Vec<String>>,
+
+    /// Per-request authenticated user JSON. Keyed by `request_id` so that
+    /// async continuations (promise .then handlers, timer callbacks) read
+    /// the identity of *the request that scheduled them* — not whatever
+    /// user the thread happened to be handling at the moment the callback
+    /// fires. An earlier revision used a thread-local here; that leaks
+    /// across every `.await` boundary in a single-threaded async runtime.
+    pub per_request_user: HashMap<u64, String>,
 
     /// In-memory KV store.
     pub kv_store: HashMap<String, String>,
@@ -233,6 +275,17 @@ pub struct RuntimeState {
     pub websockets: HashMap<u32, WebSocketState>,
     /// Monotonically increasing WebSocket ID counter (incremented by 2 for pairs).
     pub next_ws_id: u32,
+
+    /// Per-isolate time origin for `performance.now()`. Set once at Runtime
+    /// creation. Prevents cross-app timing side-channels.
+    pub perf_epoch: std::time::Instant,
+
+    /// Clone of the pump's notification channel. Stored here so detached
+    /// compio tasks (streaming fetch bodies, in particular) can wake the
+    /// pump after pushing new entries into `spawned_ops` without needing a
+    /// reference to `Runtime`, which is single-owner and guarded by a
+    /// `RefCell` that can't be held across `.await`.
+    pub pump_notify_tx: Option<futures::channel::mpsc::Sender<()>>,
 }
 
 /// Convenience alias — the shared handle passed into V8 callbacks.
@@ -256,11 +309,13 @@ impl RuntimeState {
             spawned_timers: Vec::new(),
             ready_timers: VecDeque::new(),
             spawned_fetches: Vec::new(),
+            in_flight_fetches: 0,
 
             executing_request_id: None,
             executing_request_cancel: None,
 
             per_request_logs: HashMap::new(),
+            per_request_user: HashMap::new(),
 
             kv_store: HashMap::new(),
             env_vars,
@@ -272,6 +327,9 @@ impl RuntimeState {
 
             websockets: HashMap::new(),
             next_ws_id: 1,
+
+            perf_epoch: std::time::Instant::now(),
+            pump_notify_tx: None,
         }
     }
 }
@@ -290,7 +348,11 @@ pub struct FetchRequest {
     pub url: String,
     pub headers_json: String,
     pub body: Option<String>,
-    pub cancel: Option<()>,
+    /// Cancellation flag for the owning request. When set, the fetch executor
+    /// short-circuits before sending the HTTP request and before reading the
+    /// response body, so a timed-out request does not continue to consume
+    /// network and memory after the client gave up.
+    pub cancel: Option<crate::channel::CancelFlag>,
 }
 
 // ---------------------------------------------------------------------------

@@ -286,7 +286,7 @@ async fn handle_rpc(
             .and_then(|v| v.to_str().ok());
         let app_id_str = app_id.to_string();
         user_auth::extract_user(cookie, &state.config.auth_secret, &app_id_str)
-            .map(|u| user_auth::encode_user_header(&u))
+            .map(|u| user_auth::encode_user_header(&u, &state.config.worker_key))
     } else {
         None
     };
@@ -300,6 +300,7 @@ async fn handle_rpc(
         &request_id,
         &body,
         user_header_value.as_deref(),
+        &state.config.worker_key,
     )
     .await
     {
@@ -382,7 +383,7 @@ async fn handle_http_dispatch(
             .and_then(|v| v.to_str().ok());
         let app_id_str = app_id.to_string();
         user_auth::extract_user(cookie, &state.config.auth_secret, &app_id_str)
-            .map(|u| user_auth::encode_user_header(&u))
+            .map(|u| user_auth::encode_user_header(&u, &state.config.worker_key))
     } else {
         None
     };
@@ -419,6 +420,7 @@ async fn handle_http_dispatch(
         &headers,
         &body_str,
         user_header_value.as_deref(),
+        &state.config.worker_key,
     )
     .await
     {

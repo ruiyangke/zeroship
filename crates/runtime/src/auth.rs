@@ -1,33 +1,61 @@
 //! Auth primitives — `zeroship.auth.getUser()` and `zeroship.auth.requireUser()`.
 //!
 //! The gateway extracts the authenticated user from the `__zs_session` cookie
-//! and forwards it as the `ZeroShip-User` header (base64-encoded JSON). The worker
-//! decodes this header before dispatching to V8 and stores the user JSON in a
-//! thread-local. The V8 callbacks read from the thread-local.
+//! and forwards it as the `ZeroShip-User` header (base64-encoded JSON, HMAC-
+//! signed with the shared worker key). The worker decodes + verifies the
+//! header before dispatching to V8 and stores the user JSON in the runtime's
+//! per-request state, keyed by `request_id`.
 //!
-//! This is entirely synchronous — no async, no network, no native calls.
+//! ## Why per-request, not thread-local
+//!
+//! An earlier revision used a `thread_local!` here. That is structurally
+//! wrong for an async runtime: `set_auth_user(userA)` → `.await` lets the
+//! compio scheduler run handler B → handler B calls `set_auth_user(userB)`
+//! → pump fires A's pending promise → A's `.then` callback reads the
+//! thread-local → sees **userB**. Any `onRequest` handler that called
+//! `getUser()` after an `await` saw whichever user last touched the thread.
+//!
+//! The callbacks below look up the user via the currently-executing
+//! request id stored in `RuntimeState`. The pump sets that id every time
+//! it enters V8 to drive a specific request (see `runtime.rs`
+//! `handle_op_result_pump` / `handle_timer_pump`), so async continuations
+//! resolve to the correct identity.
 
-use std::cell::RefCell;
+use crate::state::SharedState;
 
-// ---------------------------------------------------------------------------
-// Thread-local storage for the current request's authenticated user
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    /// The authenticated user for the current request, as a JSON string.
-    /// Set before V8 dispatch, cleared after. `None` means no user (anonymous).
-    static AUTH_USER_JSON: RefCell<Option<String>> = const { RefCell::new(None) };
+/// Store the user JSON for a specific request. Called by the worker
+/// dispatch handler after HMAC-verifying the `ZeroShip-User` header,
+/// right before V8 enters for the initial dispatch.
+pub fn set_request_user(state: &SharedState, request_id: u64, user_json: Option<String>) {
+    let mut s = state.borrow_mut();
+    match user_json {
+        Some(j) => {
+            s.per_request_user.insert(request_id, j);
+        }
+        None => {
+            s.per_request_user.remove(&request_id);
+        }
+    }
 }
 
-/// Set the authenticated user for the current request.
-/// Called by the worker dispatch handler after decoding `ZeroShip-User`.
-pub fn set_auth_user(user_json: Option<String>) {
-    AUTH_USER_JSON.with(|u| *u.borrow_mut() = user_json);
+/// Drop the user entry for a finished request. Mirrors `drain_request_logs`
+/// — every terminal path (success, error, cancellation) must call this so
+/// long-running workers don't accumulate per-request state forever.
+pub fn clear_request_user(state: &SharedState, request_id: u64) {
+    state.borrow_mut().per_request_user.remove(&request_id);
 }
 
-/// Clear the authenticated user after request dispatch completes.
-pub fn clear_auth_user() {
-    AUTH_USER_JSON.with(|u| *u.borrow_mut() = None);
+/// Look up the currently-executing request's user JSON.
+///
+/// `executing_request_id` is set by the runtime immediately before every
+/// V8 turn that belongs to a specific request (dispatch, op resolve, op
+/// reject, timer fire). If no request is currently attributed — e.g. a
+/// module-init callback, or a stream pump with no owning request —
+/// returns `None`.
+fn current_user(state: &SharedState) -> Option<String> {
+    let s = state.borrow();
+    let rid = s.executing_request_id?;
+    s.per_request_user.get(&rid).cloned()
 }
 
 // ---------------------------------------------------------------------------
@@ -35,27 +63,23 @@ pub fn clear_auth_user() {
 // ---------------------------------------------------------------------------
 
 /// `zeroship.auth.getUser()` — returns the authenticated user object or null.
-///
-/// Reads the thread-local user JSON set by the worker before dispatch.
-/// Returns the parsed object to JS, or `null` if no user is present.
 pub fn get_user_callback(
     scope: &mut v8::PinScope,
     _args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let json_opt = AUTH_USER_JSON.with(|u| u.borrow().clone());
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
 
-    match json_opt {
+    match current_user(&state) {
         Some(json) => {
-            let json_str = match v8::String::new(scope, &json) {
-                Some(s) => s,
-                None => {
-                    rv.set(v8::null(scope).into());
-                    return;
-                }
+            let Some(json_str) = v8::String::new(scope, &json) else {
+                rv.set(v8::null(scope).into());
+                return;
             };
-            let parsed = v8::json::parse(scope, json_str);
-            match parsed {
+            match v8::json::parse(scope, json_str) {
                 Some(val) => rv.set(val),
                 None => rv.set(v8::null(scope).into()),
             }
@@ -66,42 +90,34 @@ pub fn get_user_callback(
     }
 }
 
-/// `zeroship.auth.requireUser()` — returns the authenticated user or throws 401.
-///
-/// Same as `getUser()` but throws an Error if no user is present.
-/// The error message includes a status hint so the gateway can redirect.
+/// `zeroship.auth.requireUser()` — returns the authenticated user or throws.
 pub fn require_user_callback(
     scope: &mut v8::PinScope,
     _args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let json_opt = AUTH_USER_JSON.with(|u| u.borrow().clone());
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
 
-    match json_opt {
+    let throw_auth_required = |scope: &mut v8::PinScope| {
+        let msg = v8::String::new(scope, "Authentication required").unwrap();
+        let exc = v8::Exception::error(scope, msg);
+        scope.throw_exception(exc);
+    };
+
+    match current_user(&state) {
         Some(json) => {
-            let json_str = match v8::String::new(scope, &json) {
-                Some(s) => s,
-                None => {
-                    let msg = v8::String::new(scope, "Authentication required").unwrap();
-                    let exc = v8::Exception::error(scope, msg);
-                    scope.throw_exception(exc);
-                    return;
-                }
+            let Some(json_str) = v8::String::new(scope, &json) else {
+                throw_auth_required(scope);
+                return;
             };
-            let parsed = v8::json::parse(scope, json_str);
-            match parsed {
+            match v8::json::parse(scope, json_str) {
                 Some(val) => rv.set(val),
-                None => {
-                    let msg = v8::String::new(scope, "Authentication required").unwrap();
-                    let exc = v8::Exception::error(scope, msg);
-                    scope.throw_exception(exc);
-                }
+                None => throw_auth_required(scope),
             }
         }
-        None => {
-            let msg = v8::String::new(scope, "Authentication required").unwrap();
-            let exc = v8::Exception::error(scope, msg);
-            scope.throw_exception(exc);
-        }
+        None => throw_auth_required(scope),
     }
 }

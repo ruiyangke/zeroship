@@ -1,6 +1,10 @@
-//! Auth utilities: control key validation, API key hashing, bearer extraction.
+//! Auth utilities: control key validation, API key hashing, bearer extraction,
+//! HMAC signing for cross-service identity propagation.
 
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Constant-time comparison using XOR fold to prevent timing attacks.
 /// Returns true if `provided` and `expected` are equal.
@@ -46,6 +50,25 @@ pub fn extract_bearer(header: &str) -> Option<&str> {
     header.strip_prefix("Bearer ")
 }
 
+// ---------------------------------------------------------------------------
+// HMAC-SHA256 signing — used to sign forwarded identity across trust boundaries
+// ---------------------------------------------------------------------------
+
+/// Compute an HMAC-SHA256 over `payload` with `key`, returned as lowercase hex.
+#[must_use]
+pub fn hmac_sha256_hex(key: &[u8], payload: &[u8]) -> String {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(payload);
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Constant-time verify of `expected_hex` against `payload` HMAC-signed with `key`.
+#[must_use]
+pub fn verify_hmac_sha256_hex(key: &[u8], payload: &[u8], expected_hex: &str) -> bool {
+    let computed = hmac_sha256_hex(key, payload);
+    validate_control_key(&computed, expected_hex)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +110,26 @@ mod tests {
         assert_eq!(extract_bearer("Basic abc123"), None);
         assert_eq!(extract_bearer("Bearer "), Some(""));
         assert_eq!(extract_bearer(""), None);
+    }
+
+    #[test]
+    fn hmac_roundtrip() {
+        let key = b"shared-secret";
+        let payload = b"user-payload";
+        let mac = hmac_sha256_hex(key, payload);
+        assert!(verify_hmac_sha256_hex(key, payload, &mac));
+    }
+
+    #[test]
+    fn hmac_rejects_tampered_payload() {
+        let key = b"shared-secret";
+        let mac = hmac_sha256_hex(key, b"original");
+        assert!(!verify_hmac_sha256_hex(key, b"tampered", &mac));
+    }
+
+    #[test]
+    fn hmac_rejects_wrong_key() {
+        let mac = hmac_sha256_hex(b"key-a", b"payload");
+        assert!(!verify_hmac_sha256_hex(b"key-b", b"payload", &mac));
     }
 }
