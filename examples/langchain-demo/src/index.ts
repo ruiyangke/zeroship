@@ -56,52 +56,50 @@ const tools = [
 let model: any = null;
 function getModel() {
   if (model) return model;
-  model = new ChatOpenAI({ model: "gpt-5.4-mini", temperature: 0 }).bindTools(tools);
+  model = new ChatOpenAI({ model: "gpt-4o-mini", temperature: 0 }).bindTools(tools);
   return model;
 }
 const toolMap = Object.fromEntries(tools.map(t => [t.name, t]));
 
-// ── Streaming ReAct loop ───────────────────────────────────────────────
+// ── Non-streaming ReAct loop ───────────────────────────────────────────
+//
+// NOTE: .stream() on LangChain's model currently returns a stream whose
+// async iterator yields zero items in the zeroship V8 runtime (to debug).
+// Using .invoke() for now — tokens arrive all at once instead of
+// incrementally, but the chat works end-to-end.
 
-async function reactLoopStream(
+async function reactLoop(
   messages: any[],
-  onToken: (token: string) => void,
-  onToolCall: (name: string, args: any) => void,
-  onToolResult: (name: string, result: string) => void,
+  emit: (ev: any) => void,
 ): Promise<void> {
   const m = getModel();
   for (let i = 0; i < 5; i++) {
-    const stream = await m.stream(messages);
-    let fullResponse: any = null;
+    const response: any = await m.invoke(messages);
+    messages.push(response);
 
-    for await (const chunk of stream) {
-      if (!fullResponse) fullResponse = chunk;
-      else fullResponse = fullResponse.concat(chunk);
-      if (chunk.content && typeof chunk.content === "string") {
-        onToken(chunk.content);
-      }
+    if (response.content && typeof response.content === "string") {
+      emit({ token: response.content });
     }
 
-    if (!fullResponse) return;
-    messages.push(fullResponse);
+    if (!response.tool_calls || response.tool_calls.length === 0) return;
 
-    if (!fullResponse.tool_calls || fullResponse.tool_calls.length === 0) return;
-
-    for (const tc of fullResponse.tool_calls) {
-      onToolCall(tc.name, tc.args);
+    for (const tc of response.tool_calls) {
+      emit({ tool: tc.name, args: tc.args });
       const fn = toolMap[tc.name];
       if (!fn) {
-        messages.push(new ToolMessage({ tool_call_id: tc.id, content: `Tool not found: ${tc.name}` }));
-        onToolResult(tc.name, `Tool not found: ${tc.name}`);
+        const msg = `Tool not found: ${tc.name}`;
+        messages.push(new ToolMessage({ tool_call_id: tc.id, content: msg }));
+        emit({ tool: tc.name, result: msg });
         continue;
       }
       try {
         const result = await fn.invoke(tc.args);
         messages.push(new ToolMessage({ tool_call_id: tc.id, content: result }));
-        onToolResult(tc.name, result);
+        emit({ tool: tc.name, result });
       } catch (e: any) {
-        messages.push(new ToolMessage({ tool_call_id: tc.id, content: `Error: ${e.message}` }));
-        onToolResult(tc.name, `Error: ${e.message}`);
+        const msg = `Error: ${e.message}`;
+        messages.push(new ToolMessage({ tool_call_id: tc.id, content: msg }));
+        emit({ tool: tc.name, result: msg });
       }
     }
   }
@@ -117,27 +115,23 @@ export async function chat(message: string, history: ChatMsg[] = []): Promise<an
   );
   msgs.push(new HumanMessage(message));
 
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream({
-    async start(controller: any) {
-      try {
-        await reactLoopStream(
-          msgs,
-          (token) => controller.enqueue(encoder.encode(`data: ${JSON.stringify({ token })}\n\n`)),
-          (name, args) => controller.enqueue(encoder.encode(`data: ${JSON.stringify({ tool: name, args })}\n\n`)),
-          (name, result) => controller.enqueue(encoder.encode(`data: ${JSON.stringify({ tool: name, result })}\n\n`)),
-        );
-      } catch (e: any) {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: e.message })}\n\n`));
-      }
-      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-      controller.close();
-    },
-  });
+  // NOTE: the user-facing SSE stream is disabled for now — returning a
+  // Response(ReadableStream) through the V8→HTTP path appears to buffer
+  // or drop the body (separate runtime bug). Collect events and return
+  // as JSON so the demo's chat() actually produces output.
+  const events: any[] = [];
+  try {
+    await reactLoop(msgs, (ev) => events.push(ev));
+  } catch (e: any) {
+    events.push({ error: e.message });
+  }
 
-  return new Response(stream, {
-    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
-  });
+  // Pull the final assistant content out of collected token events.
+  const reply = events
+    .filter((e) => typeof e.token === "string")
+    .map((e) => e.token)
+    .join("");
+  return { reply, events };
 }
 
 export function ping() { return "pong"; }
