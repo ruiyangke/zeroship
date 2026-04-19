@@ -1,0 +1,20 @@
+{
+  "name": "openai-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^6.0.1",
+    "@zeroship/vite-plugin": "file:../../sdks/vite-plugin",
+    "openai": "^6.0.0",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
+  },
+  "devDependencies": {
+    "typescript": "^5.9",
+    "vite": "^8"
+  }
+}
