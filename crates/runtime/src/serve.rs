@@ -48,6 +48,12 @@ pub struct ServerOptions {
     pub cpu_limit: Option<Duration>,
     /// Per-request wall-clock timeout.
     pub wall_timeout: Option<Duration>,
+    /// V8 heap limit in bytes (per worker). `None` → runtime default (128 MB).
+    /// Dev callers typically raise this to 256-512 MB for app bundles that
+    /// pull in heavy dependencies (LangChain, SDKs, etc).
+    pub heap_limit_bytes: Option<usize>,
+    /// Env vars exposed to JS as `process.env.*`. Cloned into each worker.
+    pub env_vars: HashMap<String, String>,
     /// Native plugins to register on each worker's `zeroship.*` namespace.
     /// Each worker thread gets its own `Runtime`, so each plugin instance
     /// is cloned (via `Arc`) into every worker.
@@ -73,6 +79,8 @@ impl Default for ServerOptions {
             workers: 0,
             cpu_limit: None,
             wall_timeout: None,
+            heap_limit_bytes: None,
+            env_vars: HashMap::new(),
             plugins: Vec::new(),
         }
     }
@@ -107,7 +115,9 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
             None,
             options.cpu_limit,
             options.wall_timeout,
+            options.heap_limit_bytes,
             modules,
+            options.env_vars,
             options.plugins,
         );
     } else {
@@ -117,7 +127,9 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
             let worker_modules = modules.clone();
             let cpu_limit = options.cpu_limit;
             let wall_timeout = options.wall_timeout;
+            let heap_limit_bytes = options.heap_limit_bytes;
             let port = options.port;
+            let worker_env = options.env_vars.clone();
             let worker_plugins = options.plugins.clone();
             let handle = std::thread::Builder::new()
                 .name(format!("worker-{i}"))
@@ -128,7 +140,9 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
                         Some(i),
                         cpu_limit,
                         wall_timeout,
+                        heap_limit_bytes,
                         worker_modules,
+                        worker_env,
                         worker_plugins,
                     );
                 })
@@ -1194,7 +1208,9 @@ fn run_single_worker(
     worker_id: Option<usize>,
     cpu_limit: Option<Duration>,
     wall_timeout: Option<Duration>,
+    heap_limit_bytes: Option<usize>,
     modules: Vec<ModuleEntry>,
+    env_vars: HashMap<String, String>,
     plugins: Vec<Arc<dyn NativePlugin>>,
 ) {
     compio::runtime::RuntimeBuilder::new()
@@ -1219,11 +1235,11 @@ fn run_single_worker(
 
             let runtime = Runtime::builder()
                 .modules(modules)
-                .env_vars(HashMap::new())
+                .env_vars(env_vars)
                 .limits(RuntimeLimits {
                     cpu_limit,
                     wall_timeout,
-                    heap_limit_bytes: None,
+                    heap_limit_bytes,
                 })
                 .plugins(plugins)
                 .build();

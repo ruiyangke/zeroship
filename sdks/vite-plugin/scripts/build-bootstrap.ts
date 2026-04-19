@@ -13,7 +13,8 @@ await build({
   platform: "neutral",
   target: "es2024",
   outfile: out,
-  external: ["vite/module-runner"],
+  // vite/module-runner MUST be bundled: the V8 runtime has no module resolver
+  // for external npm packages. ModuleRunner is small and self-contained.
   banner: {
     js: "// Auto-generated dev bootstrap for zeroship V8 runtime\n",
   },

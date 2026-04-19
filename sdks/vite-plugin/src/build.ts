@@ -12,6 +12,10 @@ export function findServerEntry(root: string, explicit?: string): string | null 
     "server.ts",
     "server.js",
     "src/index.server.ts",
+    "src/index.ts",
+    "src/index.js",
+    "index.ts",
+    "index.js",
   ]) {
     const p = resolve(root, candidate);
     if (existsSync(p)) return p;

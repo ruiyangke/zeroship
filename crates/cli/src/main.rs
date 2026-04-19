@@ -303,6 +303,15 @@ fn cmd_serve(args: &[String]) {
     let wall_timeout = flag_str(args, "--wall-timeout=")
         .and_then(|s| s.parse::<u64>().ok())
         .map(std::time::Duration::from_millis);
+    // Dev default: 512 MB. Single-tenant dev apps routinely load big libraries
+    // (LangChain + provider SDKs = ~100 MB by themselves). The production
+    // worker's 128 MB default is sized for multi-tenant isolation, not for
+    // single-process dev. CLI flag or ZEROSHIP_HEAP_LIMIT_MB overrides.
+    let heap_limit_bytes = flag_str(args, "--heap-limit-mb=")
+        .or_else(|| std::env::var("ZEROSHIP_HEAP_LIMIT_MB").ok())
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|mb| mb * 1024 * 1024)
+        .or(Some(512 * 1024 * 1024));
 
     let input_path = PathBuf::from(input);
 
@@ -329,6 +338,12 @@ fn cmd_serve(args: &[String]) {
         }
     }
 
+    // Forward process env to the V8 runtime so `process.env.FOO` works in JS.
+    // Important for dev: the vite-plugin sets ZEROSHIP_ENTRY / ZEROSHIP_VITE_WS
+    // in the spawned child env, and user apps expect access to OPENAI_API_KEY
+    // etc. Without this, `process.env` in V8 is empty.
+    let env_vars: std::collections::HashMap<String, String> = std::env::vars().collect();
+
     zeroship_runtime::serve::start_server(
         modules,
         zeroship_runtime::serve::ServerOptions {
@@ -336,6 +351,8 @@ fn cmd_serve(args: &[String]) {
             workers,
             cpu_limit,
             wall_timeout,
+            heap_limit_bytes,
+            env_vars,
             plugins,
         },
     );

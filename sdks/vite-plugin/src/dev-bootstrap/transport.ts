@@ -39,10 +39,13 @@ export async function createRunner(): Promise<ModuleRunner> {
     },
   };
 
+  // hmr=false: ModuleRunner's built-in HMR requires a bidirectional transport.
+  // Our HTTP transport can't support it. Instead, HMR is implemented via the
+  // poll-based invalidation loop in index.ts (startHmrPoll → invalidateModule).
   return new ModuleRunner(
     {
       transport,
-      hmr: true,
+      hmr: false,
     },
     zeroshipEvaluator,
   );
