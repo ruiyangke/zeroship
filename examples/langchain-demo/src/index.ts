@@ -56,34 +56,45 @@ const tools = [
 let model: any = null;
 function getModel() {
   if (model) return model;
-  model = new ChatOpenAI({ model: "gpt-4o-mini", temperature: 0 }).bindTools(tools);
+  model = new ChatOpenAI({ model: "gpt-5.4-mini", temperature: 0 }).bindTools(tools);
   return model;
 }
 const toolMap = Object.fromEntries(tools.map(t => [t.name, t]));
 
-// ── Non-streaming ReAct loop ───────────────────────────────────────────
+// ── Streaming ReAct loop ───────────────────────────────────────────────
 //
-// NOTE: .stream() on LangChain's model currently returns a stream whose
-// async iterator yields zero items in the zeroship V8 runtime (to debug).
-// Using .invoke() for now — tokens arrive all at once instead of
-// incrementally, but the chat works end-to-end.
-
+// Each iteration either:
+//   (a) streams tokens from the model until it finishes, or
+//   (b) collects tool_calls, executes them, appends ToolMessage results,
+//       and loops. Tool events surface as `{tool, args}` / `{tool, result}`
+//       SSE frames so the UI can render them inline.
+//
+// LangChain's `.stream()` returns an AsyncIterable<AIMessageChunk>. Chunks
+// carry either a content delta (text token) or a tool_call fragment. We
+// concatenate the fragments so that after the iterator completes we have
+// the same AIMessage we would have gotten from `.invoke()`, plus the
+// token events already emitted.
 async function reactLoop(
   messages: any[],
   emit: (ev: any) => void,
 ): Promise<void> {
   const m = getModel();
-  for (let i = 0; i < 5; i++) {
-    const response: any = await m.invoke(messages);
-    messages.push(response);
+  for (let step = 0; step < 5; step++) {
+    const stream: any = await m.stream(messages);
 
-    if (response.content && typeof response.content === "string") {
-      emit({ token: response.content });
+    let accumulated: any = null;
+    for await (const chunk of stream) {
+      accumulated = accumulated == null ? chunk : accumulated.concat(chunk);
+      const delta = typeof chunk.content === "string" ? chunk.content : "";
+      if (delta) emit({ token: delta });
     }
+    if (accumulated == null) return;
+    messages.push(accumulated);
 
-    if (!response.tool_calls || response.tool_calls.length === 0) return;
+    const toolCalls = accumulated.tool_calls ?? [];
+    if (toolCalls.length === 0) return;
 
-    for (const tc of response.tool_calls) {
+    for (const tc of toolCalls) {
       emit({ tool: tc.name, args: tc.args });
       const fn = toolMap[tc.name];
       if (!fn) {
@@ -109,29 +120,35 @@ async function reactLoop(
 
 interface ChatMsg { role: string; content: string }
 
-export async function chat(message: string, history: ChatMsg[] = []): Promise<any> {
+export async function chat(message: string, history: ChatMsg[] = []): Promise<Response> {
   const msgs: any[] = (Array.isArray(history) ? history : []).map((m: ChatMsg) =>
     m.role === "user" ? new HumanMessage(m.content) : new AIMessage(m.content)
   );
   msgs.push(new HumanMessage(message));
 
-  // NOTE: the user-facing SSE stream is disabled for now — returning a
-  // Response(ReadableStream) through the V8→HTTP path appears to buffer
-  // or drop the body (separate runtime bug). Collect events and return
-  // as JSON so the demo's chat() actually produces output.
-  const events: any[] = [];
-  try {
-    await reactLoop(msgs, (ev) => events.push(ev));
-  } catch (e: any) {
-    events.push({ error: e.message });
-  }
+  const encoder = new TextEncoder();
+  const body = new ReadableStream({
+    async start(controller) {
+      const emit = (ev: unknown) =>
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(ev)}\n\n`));
+      try {
+        await reactLoop(msgs, emit);
+      } catch (e: any) {
+        emit({ error: e?.message ?? String(e) });
+      } finally {
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      }
+    },
+  });
 
-  // Pull the final assistant content out of collected token events.
-  const reply = events
-    .filter((e) => typeof e.token === "string")
-    .map((e) => e.token)
-    .join("");
-  return { reply, events };
+  return new Response(body, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      "X-Accel-Buffering": "no",
+    },
+  });
 }
 
 export function ping() { return "pong"; }
