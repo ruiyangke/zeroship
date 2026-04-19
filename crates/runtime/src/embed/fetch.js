@@ -738,9 +738,27 @@
 
   if (typeof TextDecoder === "undefined") {
     globalThis.TextDecoder = function TextDecoder() {};
+    // `decode(buf)` must respect the view's byteOffset + byteLength when buf is
+    // a typed-array view. Previously we did `new Uint8Array(buf.buffer || buf)`,
+    // which silently widened any subarray view back to the entire backing
+    // ArrayBuffer — e.g. `new TextDecoder().decode(u8.subarray(0, 4))` would
+    // decode all of `u8`, not just the first four bytes. That broke consumers
+    // that rely on slice-based line parsing (OpenAI's LineDecoder, any code
+    // that does `buf.subarray(0, patternIndex)` before decoding).
     TextDecoder.prototype.decode = function(buf) {
       if (!buf) return "";
-      var bytes = new Uint8Array(buf.buffer || buf);
+      var bytes;
+      if (buf instanceof Uint8Array) {
+        bytes = buf;
+      } else if (ArrayBuffer.isView && ArrayBuffer.isView(buf)) {
+        // Any other view: construct a Uint8Array that mirrors the same window.
+        bytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+      } else if (buf instanceof ArrayBuffer) {
+        bytes = new Uint8Array(buf);
+      } else {
+        // Fall back: accept array-likes (e.g. number[])
+        bytes = new Uint8Array(buf);
+      }
       var result = "";
       for (var i = 0; i < bytes.length;) {
         var b = bytes[i];

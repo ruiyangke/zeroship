@@ -203,9 +203,21 @@ pub fn stream_close_callback(
         .expect("RuntimeState not in isolate slot")
         .clone();
 
+    // We set `closed = true` and take the direct writer, but we deliberately
+    // leave `outbound_streams` membership alone. `flush_outbound_streams` is
+    // what eventually propagates EOF to the forwarder + TCP writer, and it
+    // keys off that set. An earlier revision removed the stream_id from
+    // `outbound_streams` here, which meant chunks enqueued immediately before
+    // `controller.close()` (a very common SSE pattern — the final `[DONE]`
+    // marker) were left sitting in `stream.buffer` forever because the next
+    // pump flush no longer iterated this stream. The forwarder also never
+    // saw EOF, so the HTTP client just hung waiting for the chunked-encoding
+    // terminator that would never arrive.
+    //
+    // `flush_outbound_streams` now owns the lifecycle: drain remaining
+    // buffered chunks → close forwarder → remove from outbound_streams.
     let (pending, direct_writer) = {
         let mut s = state.borrow_mut();
-        s.outbound_streams.remove(&stream_id);
         if let Some(stream) = s.streams.get_mut(&stream_id) {
             stream.closed = true;
             (stream.pending_read.take(), stream.direct_writer.take())
@@ -215,7 +227,9 @@ pub fn stream_close_callback(
     };
 
     // Close the direct HTTP writer so the TCP handler sees EOF and writes
-    // the chunked-encoding terminator.
+    // the chunked-encoding terminator. (Only set on the sync-dispatch path;
+    // async dispatch uses the forwarder, which `flush_outbound_streams`
+    // closes after draining the final buffered chunks.)
     if let Some(writer) = direct_writer {
         writer.close();
     }

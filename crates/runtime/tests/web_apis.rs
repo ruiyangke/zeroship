@@ -13,6 +13,27 @@ fn text_encoder_decoder() {
     assert!(r.json.contains("[72,101,108,108,111]"), "got: {}", r.json);
 }
 
+// Regression: a previous TextDecoder polyfill did
+// `new Uint8Array(buf.buffer || buf)` which silently widened every subarray
+// view back to the underlying ArrayBuffer — breaking OpenAI SDK's LineDecoder
+// (which splits the concatenation buffer via `subarray(0, patternIndex)` and
+// then decodes each slice). The SSE stream produced exactly one empty line
+// with the full buffer repeated, so `for await (const part of openai_stream)`
+// yielded zero iterations.
+#[test]
+fn text_decoder_respects_subarray_bounds() {
+    let r = dispatch(m(r#"export function test() {
+        var enc = new TextEncoder();
+        var full = enc.encode("ABCDE\nXYZ");
+        var dec = new TextDecoder();
+        var head = dec.decode(full.subarray(0, 5));     // "ABCDE"
+        var mid  = dec.decode(full.subarray(6, 9));     // "XYZ"
+        return { head: head, mid: mid };
+    }"#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    assert!(r.json.contains("\"head\":\"ABCDE\""), "got: {}", r.json);
+    assert!(r.json.contains("\"mid\":\"XYZ\""), "got: {}", r.json);
+}
+
 #[test]
 fn structured_clone() {
     let r = dispatch(m(r#"export function test() {

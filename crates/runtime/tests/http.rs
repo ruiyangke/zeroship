@@ -155,3 +155,98 @@ fn streaming_http_response_sync() {
         _ => panic!("expected HttpComplete or HttpStream"),
     }
 }
+
+// Regression: when an async ReadableStream.start() enqueued chunks across
+// timer-driven await points and then called controller.close(), the earlier
+// close implementation removed the stream from `outbound_streams` before the
+// pump's final flush ran. That flush keys off outbound_streams membership,
+// so (1) the last chunks before close stayed buffered forever, and (2) the
+// forwarder was never closed — HTTP clients saw the response hang waiting
+// for the chunked-encoding terminator that never arrived. The streaming
+// `[DONE]` marker in SSE was the canonical symptom.
+#[test]
+fn streaming_http_response_async_closes_cleanly() {
+    init_v8();
+
+    let modules = vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: r#"
+            export async function onRequest(request) {
+                // Force the handler promise to be pending past the initial
+                // microtask drain so the runtime takes the async dispatch
+                // path — that's where the bug lived (StreamForwarder +
+                // outbound_streams membership vs direct_writer).
+                await new Promise((r) => setTimeout(r, 0));
+                const encoder = new TextEncoder();
+                const body = new ReadableStream({
+                    async start(controller) {
+                        controller.enqueue(encoder.encode("data: tick 0\n\n"));
+                        await new Promise((r) => setTimeout(r, 0));
+                        controller.enqueue(encoder.encode("data: tick 1\n\n"));
+                        await new Promise((r) => setTimeout(r, 0));
+                        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+                        controller.close();
+                    },
+                });
+                return new Response(body, {
+                    headers: { "Content-Type": "text/event-stream" },
+                });
+            }
+        "#.into(),
+    }];
+
+    compio::runtime::Runtime::new().unwrap().block_on(async move {
+        let runtime = Runtime::builder().modules(modules).build();
+        runtime.start_pump();
+
+        // onRequest resolves to the Response synchronously (start() is async
+        // but the enclosing function returns without awaiting it), so we go
+        // straight to HttpStream with the pump driving the timer chain.
+        let reader = match runtime.dispatch_http("GET", "http://localhost/events", "[]", "", None) {
+            DispatchOutcome::HttpStream { status, body, .. } => {
+                assert_eq!(status, 200);
+                body
+            }
+            DispatchOutcome::HttpPending { rx, .. } => {
+                let result = compio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("dispatch_http timed out")
+                    .expect("dispatch_http returned error");
+                match result {
+                    zeroship_runtime::runtime::HttpDispatchResult::Stream { body, status, .. } => {
+                        assert_eq!(status, 200);
+                        body
+                    }
+                    other => panic!("expected Stream, got {:?}", std::mem::discriminant(&other)),
+                }
+            }
+            other => panic!(
+                "expected HttpStream or HttpPending, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        };
+
+        // Drain the body until is_done. The critical assertion is that the
+        // stream *does* close — a buggy close path leaves the reader waiting
+        // forever for a chunk that never arrives.
+        let collected = compio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut out = String::new();
+            loop {
+                while let Some(chunk) = reader.pop() {
+                    out.push_str(&String::from_utf8_lossy(&chunk));
+                }
+                if reader.is_done() {
+                    break;
+                }
+                reader.wait_for_data().await;
+            }
+            out
+        })
+        .await
+        .expect("reader never saw close after controller.close()");
+
+        assert!(collected.contains("data: tick 0"), "got: {collected}");
+        assert!(collected.contains("data: tick 1"), "got: {collected}");
+        assert!(collected.contains("data: [DONE]"), "final marker missing; got: {collected}");
+    });
+}
