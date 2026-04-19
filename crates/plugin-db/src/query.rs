@@ -391,12 +391,18 @@ pub fn build_insert(
 ///
 /// Supported operators:
 /// - `$set`      — `"col" = $N`
-/// - `$inc`      — `"col" = "col" + $N`
-/// - `$dec`      — `"col" = "col" - $N`
-/// - `$mul`      — `"col" = "col" * $N`
-/// - `$push`     — `"col" = "col" || to_jsonb($N::text)`
-/// - `$pull`     — `"col" = "col" - $N`
-/// - `$addToSet` — `"col" = CASE WHEN "col" @> to_jsonb($N::text) THEN "col" ELSE "col" || to_jsonb($N::text) END`
+/// - `$inc`      — `"col" = "col" + $N::numeric`
+/// - `$dec`      — `"col" = "col" - $N::numeric`
+/// - `$mul`      — `"col" = "col" * $N::numeric`
+/// - `$push`     — `"col" = "col" || $N::jsonb` (operand is JSON-encoded,
+///                 so `{"$push": 42}` appends the number 42, not the string
+///                 "42" — preserves number/boolean/object/array types)
+/// - `$pull`     — `"col" = (SELECT COALESCE(jsonb_agg(elem), '[]'::jsonb)
+///                 FROM jsonb_array_elements("col") elem WHERE elem != $N::jsonb)`
+///                 (removes array elements by value; `jsonb - text` would
+///                 instead delete object keys, which is not what we want)
+/// - `$addToSet` — `"col" = CASE WHEN "col" @> $N::jsonb THEN "col"
+///                                ELSE "col" || $N::jsonb END`
 pub fn build_set_clauses(
     update: &Value,
     params: &mut Vec<String>,
@@ -1564,12 +1570,17 @@ mod tests {
         let filter = json!({"id": 1});
         let update = json!({"tags": {"$push": "new"}});
         let q = build_update_one("app1", "posts", &filter, &update).unwrap();
+        // Appends the JSON-encoded value to the jsonb array. The `::jsonb`
+        // cast (not `to_jsonb(::text)`) keeps numbers, booleans, and objects
+        // as their real JSON types — the old shape stringified everything.
         assert!(
-            q.sql.contains(r#""tags" = "tags" || to_jsonb($1::text)"#),
+            q.sql.contains(r#""tags" = "tags" || $1::jsonb"#),
             "sql: {}",
             q.sql
         );
-        assert_eq!(q.params[0], "new");
+        // Param is JSON-encoded: a string `"new"` is stored as `"\"new\""`
+        // so Postgres parses it back as a JSON string on ::jsonb cast.
+        assert_eq!(q.params[0], "\"new\"");
     }
 
     #[test]
@@ -1577,8 +1588,15 @@ mod tests {
         let filter = json!({"id": 1});
         let update = json!({"tags": {"$pull": "old"}});
         let q = build_update_one("app1", "posts", &filter, &update).unwrap();
-        assert!(q.sql.contains(r#""tags" = "tags" - $1"#), "sql: {}", q.sql);
-        assert_eq!(q.params[0], "old");
+        // Removes array elements by value. An earlier implementation used
+        // `"tags" - $1`, but that's the jsonb "remove key" operator and
+        // would mutate objects, not filter array elements.
+        assert!(
+            q.sql.contains(r#""tags" = (SELECT COALESCE(jsonb_agg(elem), '[]'::jsonb) FROM jsonb_array_elements("tags") elem WHERE elem != $1::jsonb)"#),
+            "sql: {}",
+            q.sql
+        );
+        assert_eq!(q.params[0], "\"old\"");
     }
 
     #[test]
@@ -1586,9 +1604,15 @@ mod tests {
         let filter = json!({"id": 1});
         let update = json!({"tags": {"$addToSet": "unique"}});
         let q = build_update_one("app1", "posts", &filter, &update).unwrap();
-        assert!(q.sql.contains("CASE WHEN"), "sql: {}", q.sql);
-        assert!(q.sql.contains("@>"), "sql: {}", q.sql);
-        assert_eq!(q.params[0], "unique");
+        // Appends only if the array doesn't already contain the value
+        // (jsonb @> containment check). Both sides use ::jsonb so type is
+        // preserved — same rationale as $push.
+        assert!(
+            q.sql.contains(r#""tags" = CASE WHEN "tags" @> $1::jsonb THEN "tags" ELSE "tags" || $1::jsonb END"#),
+            "sql: {}",
+            q.sql
+        );
+        assert_eq!(q.params[0], "\"unique\"");
     }
 
     #[test]
@@ -2278,5 +2302,247 @@ mod tests {
         let conflict = json!(["name"]);
         let result = build_upsert("app1", "users; DROP TABLE", &doc, &conflict);
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Update-operator regression tests
+    //
+    // These lock in the fixes from 6a309b3 ("resolve 7 native-layer bugs"):
+    // type preservation on jsonb array ops, value-based $pull, $set flattening,
+    // and updated_at auto-injection.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_update_push_number_preserves_type() {
+        // Regression: old shape wrapped with `to_jsonb($N::text)` which
+        // stringified numbers. New shape uses `$N::jsonb` with the operand
+        // serialized as JSON, so `42` stays a JSON number.
+        let filter = json!({"id": 1});
+        let update = json!({"scores": {"$push": 42}});
+        let q = build_update_one("app1", "games", &filter, &update).unwrap();
+        assert!(
+            q.sql.contains(r#""scores" = "scores" || $1::jsonb"#),
+            "sql: {}",
+            q.sql
+        );
+        // Param is the JSON text "42", not "\"42\"" — Postgres parses it
+        // back as a JSON number on the ::jsonb cast.
+        assert_eq!(q.params[0], "42");
+    }
+
+    #[test]
+    fn test_update_push_bool_preserves_type() {
+        let filter = json!({"id": 1});
+        let update = json!({"flags": {"$push": true}});
+        let q = build_update_one("app1", "games", &filter, &update).unwrap();
+        assert!(q.sql.contains(r#""flags" = "flags" || $1::jsonb"#), "sql: {}", q.sql);
+        assert_eq!(q.params[0], "true");
+    }
+
+    #[test]
+    fn test_update_push_object_preserves_type() {
+        let filter = json!({"id": 1});
+        let update = json!({"entries": {"$push": {"k": "v", "n": 3}}});
+        let q = build_update_one("app1", "log", &filter, &update).unwrap();
+        assert!(q.sql.contains(r#""entries" = "entries" || $1::jsonb"#), "sql: {}", q.sql);
+        // Object → compact JSON text. Keys serialized in serde_json::Value
+        // order (preserves insertion via the default feature? -- we don't
+        // assert ordering, just that both keys are present).
+        assert!(q.params[0].contains(r#""k":"v""#), "params[0] = {}", q.params[0]);
+        assert!(q.params[0].contains(r#""n":3"#), "params[0] = {}", q.params[0]);
+    }
+
+    #[test]
+    fn test_update_pull_number() {
+        // Regression: old shape `"tags" - $1` is the jsonb "remove key"
+        // operator — it mutates objects, not arrays. The subquery form
+        // correctly removes array elements equal to the value.
+        let filter = json!({"id": 1});
+        let update = json!({"scores": {"$pull": 100}});
+        let q = build_update_one("app1", "games", &filter, &update).unwrap();
+        assert!(
+            q.sql.contains(r#"FROM jsonb_array_elements("scores") elem WHERE elem != $1::jsonb"#),
+            "sql: {}",
+            q.sql
+        );
+        assert_eq!(q.params[0], "100");
+    }
+
+    #[test]
+    fn test_update_add_to_set_number() {
+        let filter = json!({"id": 1});
+        let update = json!({"ids": {"$addToSet": 7}});
+        let q = build_update_one("app1", "games", &filter, &update).unwrap();
+        assert!(
+            q.sql.contains(r#""ids" = CASE WHEN "ids" @> $1::jsonb THEN "ids" ELSE "ids" || $1::jsonb END"#),
+            "sql: {}",
+            q.sql
+        );
+        // $addToSet reuses the same parameter index for the containment
+        // check and the append — only one param is pushed.
+        assert_eq!(q.params.len(), 2, "params: {:?}", q.params); // the op param + the filter param (id = 1)
+        assert_eq!(q.params[0], "7");
+    }
+
+    #[test]
+    fn test_update_updated_at_auto_injected() {
+        // Every UPDATE implicitly bumps updated_at unless the caller
+        // explicitly set it. This is part of the platform contract.
+        let filter = json!({"id": 1});
+        let update = json!({"name": "bob"});
+        let q = build_update_one("app1", "users", &filter, &update).unwrap();
+        assert!(q.sql.contains(r#""updated_at" = NOW()"#), "sql: {}", q.sql);
+    }
+
+    #[test]
+    fn test_update_updated_at_not_overridden_when_explicit() {
+        // If the caller explicitly provides updated_at, we must NOT add
+        // our own `NOW()` clause — would collide and the user's value wins.
+        let filter = json!({"id": 1});
+        let explicit_ts = "2026-01-01T00:00:00Z";
+        let update = json!({"name": "bob", "updated_at": explicit_ts});
+        let q = build_update_one("app1", "users", &filter, &update).unwrap();
+        assert!(
+            !q.sql.contains("NOW()"),
+            "sql should not contain NOW() when updated_at is explicit: {}",
+            q.sql
+        );
+        assert!(q.params.contains(&explicit_ts.to_string()), "params: {:?}", q.params);
+    }
+
+    #[test]
+    fn test_update_set_flattens_top_level() {
+        // Regression: early impl processed only the $set key and dropped
+        // sibling top-level fields. After 6a309b3 the builder flattens
+        // $set into the top level, so both `name` and `age` must appear.
+        let filter = json!({"id": 1});
+        let update = json!({"$set": {"name": "alice"}, "age": 30});
+        let q = build_update_one("app1", "users", &filter, &update).unwrap();
+        assert!(q.sql.contains(r#""name" = $"#), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#""age" = $"#), "sql: {}", q.sql);
+        assert!(q.params.contains(&"alice".to_string()));
+        assert!(q.params.contains(&"30".to_string()));
+    }
+
+    #[test]
+    fn test_update_set_coexists_with_inc() {
+        // Mixed $set (flattened) + $inc on a sibling field. Both must
+        // produce SET clauses and share the same params vector.
+        let filter = json!({"id": 1});
+        let update = json!({"$set": {"name": "alice"}, "views": {"$inc": 5}});
+        let q = build_update_one("app1", "posts", &filter, &update).unwrap();
+        assert!(q.sql.contains(r#""name" = $"#), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#""views" = "views" + $"#), "sql: {}", q.sql);
+        assert!(q.params.contains(&"alice".to_string()));
+        assert!(q.params.contains(&"5".to_string()));
+    }
+
+    #[test]
+    fn test_update_inc_param_formatting() {
+        // $inc operand is pushed via value_to_param — a float should render
+        // as "1.5" (not "1.5e0" or similar), so Postgres's ::numeric cast
+        // accepts it without a client-side conversion.
+        let filter = json!({"id": 1});
+        let update = json!({"balance": {"$inc": 1.5}});
+        let q = build_update_one("app1", "accounts", &filter, &update).unwrap();
+        assert_eq!(q.params[0], "1.5");
+    }
+
+    #[test]
+    fn test_update_negative_inc() {
+        // Negative $inc must still render with the `+` operator (caller
+        // uses $dec for subtraction semantically). Postgres handles the
+        // minus sign on the numeric literal fine.
+        let filter = json!({"id": 1});
+        let update = json!({"stock": {"$inc": -3}});
+        let q = build_update_one("app1", "items", &filter, &update).unwrap();
+        assert!(q.sql.contains(r#""stock" = "stock" + $1::numeric"#), "sql: {}", q.sql);
+        assert_eq!(q.params[0], "-3");
+    }
+
+    #[test]
+    fn test_update_param_indexing_with_filter() {
+        // SET params come first, WHERE params come after. The `$N`
+        // placeholders must be contiguous across both halves.
+        let filter = json!({"status": "active"});
+        let update = json!({"name": "alice", "views": {"$inc": 1}});
+        let q = build_update_one("app1", "posts", &filter, &update).unwrap();
+        // Two SET params: name ($1), inc ($2); one WHERE param: status ($3).
+        assert_eq!(q.params.len(), 3, "params: {:?}", q.params);
+        assert!(q.sql.contains("$3"), "sql: {}", q.sql);
+        assert!(!q.sql.contains("$4"), "sql: {}", q.sql);
+    }
+
+    #[test]
+    fn test_update_empty_object_rejected() {
+        // Empty update object should surface as an error rather than
+        // produce `SET (nothing)` or `SET "updated_at" = NOW()` alone,
+        // which would silently bump timestamps without user intent.
+        let filter = json!({"id": 1});
+        let update = json!({});
+        let err = build_update_one("app1", "users", &filter, &update).unwrap_err();
+        // Variant is QueryError::InvalidFilter — compare Display form so
+        // this doesn't need to import the enum.
+        assert!(
+            format!("{err}").to_lowercase().contains("empty"),
+            "error should mention empty fields, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_update_unknown_operator_rejected() {
+        let filter = json!({"id": 1});
+        let update = json!({"tags": {"$weirdOp": "val"}});
+        let err = build_update_one("app1", "posts", &filter, &update).unwrap_err();
+        assert!(
+            format!("{err}").contains("$weirdOp"),
+            "error should name the unsupported op, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_update_many_auto_updates_timestamp() {
+        // updateMany shares the same build_set_clauses path, so the
+        // auto-timestamp behaviour must hold there too.
+        let filter = json!({"status": "draft"});
+        let update = json!({"status": "published"});
+        let q = build_update_many("app1", "posts", &filter, &update).unwrap();
+        assert!(q.sql.contains(r#""updated_at" = NOW()"#), "sql: {}", q.sql);
+        // updateMany must NOT wrap the WHERE in a ctid LIMIT 1 subquery —
+        // that would only touch one row.
+        assert!(!q.sql.contains("LIMIT 1"), "sql: {}", q.sql);
+    }
+
+    #[test]
+    fn test_update_set_without_top_level_fields() {
+        // Pure $set with no siblings — flattening must still work.
+        let filter = json!({"id": 1});
+        let update = json!({"$set": {"name": "alice", "age": 30}});
+        let q = build_update_one("app1", "users", &filter, &update).unwrap();
+        assert!(q.sql.contains(r#""name" = $"#), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#""age" = $"#), "sql: {}", q.sql);
+    }
+
+    #[test]
+    fn test_update_set_non_object_rejected() {
+        // `$set` value that isn't an object should error, not be
+        // silently treated as a scalar $set on a column named "$set".
+        let filter = json!({"id": 1});
+        let update = json!({"$set": "not an object"});
+        let err = build_update_one("app1", "users", &filter, &update).unwrap_err();
+        assert!(
+            format!("{err}").contains("$set"),
+            "error should mention $set, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_update_string_column_name_is_quoted() {
+        // Column names get quoted via quote_ident, so a column with a
+        // reserved word as its name still works.
+        let filter = json!({"id": 1});
+        let update = json!({"user": "alice"}); // "user" is a reserved word
+        let q = build_update_one("app1", "accounts", &filter, &update).unwrap();
+        assert!(q.sql.contains(r#""user" = $"#), "sql: {}", q.sql);
     }
 }
