@@ -34,6 +34,93 @@ fn text_decoder_respects_subarray_bounds() {
     assert!(r.json.contains("\"mid\":\"XYZ\""), "got: {}", r.json);
 }
 
+// Regression: ReadableStream used to stringify non-byte enqueued chunks
+// via `String(chunk)` and push the UTF-8 bytes of `"[object Foo]"` to the
+// native slot. LangChain's `.stream()` and any other source that emits
+// framework types through `controller.enqueue(obj)` received unusable
+// `Uint8Array` chunks. The fixed polyfill keeps non-byte values in a
+// JS-side FIFO so the reader sees the original object.
+#[test]
+fn readable_stream_preserves_non_byte_values() {
+    let r = dispatch(m(r#"export async function test() {
+        var stream = new ReadableStream({
+            start(controller) {
+                controller.enqueue({ kind: "first",  n: 1 });
+                controller.enqueue({ kind: "second", n: 2 });
+                controller.close();
+            }
+        });
+        var reader = stream.getReader();
+        var out = [];
+        while (true) {
+            var r = await reader.read();
+            if (r.done) break;
+            out.push({ kind: r.value.kind, n: r.value.n });
+        }
+        return { out: out };
+    }"#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    assert!(r.json.contains("\"kind\":\"first\",\"n\":1"), "got: {}", r.json);
+    assert!(r.json.contains("\"kind\":\"second\",\"n\":2"), "got: {}", r.json);
+}
+
+// Regression: the polyfill stored `pull(controller)` on the stream but
+// never actually called it. Consumers that rely on lazy chunk production
+// (LangChain's IterableReadableStream.fromAsyncGenerator, OpenAI's
+// response body wrapper) hung on the first `read()` because no one was
+// feeding the native slot.
+#[test]
+fn readable_stream_invokes_pull_on_read() {
+    let r = dispatch(m(r#"export async function test() {
+        var chunks = [{ n: 1 }, { n: 2 }, { n: 3 }];
+        var i = 0;
+        var pullCalls = 0;
+        var stream = new ReadableStream({
+            async pull(controller) {
+                pullCalls++;
+                if (i >= chunks.length) {
+                    controller.close();
+                    return;
+                }
+                controller.enqueue(chunks[i++]);
+            }
+        });
+        var reader = stream.getReader();
+        var out = [];
+        while (true) {
+            var r = await reader.read();
+            if (r.done) break;
+            out.push(r.value.n);
+        }
+        return { out: out, pullCalls: pullCalls };
+    }"#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    assert!(r.json.contains("\"out\":[1,2,3]"), "got: {}", r.json);
+    assert!(r.json.contains("\"pullCalls\":"), "got: {}", r.json);
+}
+
+// Regression: the polyfill did not expose `[Symbol.asyncIterator]`, so
+// `for await (const value of stream)` fell back to library shims that
+// drove the stream through `getReader()`. Our own fast path matters for
+// consumers (e.g. LangChain's `IterableReadableStream`) that install
+// their own `[Symbol.asyncIterator]` but still delegate to `getReader`.
+#[test]
+fn readable_stream_is_async_iterable() {
+    let r = dispatch(m(r#"export async function test() {
+        var stream = new ReadableStream({
+            start(controller) {
+                controller.enqueue({ n: 1 });
+                controller.enqueue({ n: 2 });
+                controller.close();
+            }
+        });
+        var out = [];
+        for await (var chunk of stream) {
+            out.push(chunk.n);
+        }
+        return { out: out };
+    }"#), r#"{"jsonrpc":"2.0","method":"test","params":[],"id":1}"#).unwrap();
+    assert!(r.json.contains("\"out\":[1,2]"), "got: {}", r.json);
+}
+
 #[test]
 fn structured_clone() {
     let r = dispatch(m(r#"export function test() {
