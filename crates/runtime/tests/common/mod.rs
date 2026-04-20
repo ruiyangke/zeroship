@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 
-use zeroship_runtime::{init_v8, ModuleEntry, RequestResult};
+use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, RequestResult};
+use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::runtime::{Runtime, DispatchOutcome, RuntimeLimits};
 
 /// Create a module list from a single JS source string.
@@ -73,4 +74,43 @@ pub fn dispatch_http_sync(
 #[allow(dead_code)]
 pub fn default_limits() -> RuntimeLimits {
     RuntimeLimits::default()
+}
+
+/// HTTP request to feed `call_fetch_handler` — the new kernel primitive.
+pub struct TestRequest {
+    pub method: &'static str,
+    pub url: &'static str,
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+}
+
+impl TestRequest {
+    pub fn get(url: &'static str) -> Self {
+        Self { method: "GET", url, headers: vec![], body: String::new() }
+    }
+    pub fn post_json(url: &'static str, body: impl Into<String>) -> Self {
+        Self {
+            method: "POST",
+            url,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: body.into(),
+        }
+    }
+}
+
+/// Build a Runtime + call `call_fetch_handler` once synchronously.
+/// Returns the outcome as-is; tests destructure.
+pub fn dispatch_fetch(modules: Vec<ModuleEntry>, req: TestRequest) -> FetchOutcome {
+    init_v8();
+    let runtime = Runtime::builder().modules(modules).build();
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    runtime.call_fetch_handler(
+        req.method,
+        req.url,
+        &req.headers,
+        &req.body,
+        &env,
+        ctx,
+    )
 }

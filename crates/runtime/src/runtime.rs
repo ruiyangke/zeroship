@@ -372,6 +372,35 @@ impl Runtime {
         )
     }
 
+    /// Kernel's sole dispatch primitive (in progress — stub in Task B2,
+    /// real implementation in Task B3). Invokes the user's
+    /// `export default { fetch(request, env, ctx) }` handler and returns
+    /// a `FetchOutcome` describing the response.
+    ///
+    /// `method` / `url` / `headers` / `body`: the HTTP request shape — matches
+    ///   what the worker crate already packages from the incoming envelope.
+    /// `env`: module-singleton env snapshot (JSON-serialized once at boot).
+    /// `ctx`: per-request execution context (cancel flag + waitUntil bookkeeping).
+    pub fn call_fetch_handler(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: &str,
+        env: &crate::EnvSnapshot,
+        ctx: crate::RequestCtx,
+    ) -> crate::FetchOutcome {
+        self.inner.borrow_mut().call_fetch_handler(
+            self.modules.as_slice(),
+            method,
+            url,
+            headers,
+            body,
+            env,
+            ctx,
+        )
+    }
+
     /// Returns true if the app exports an `onRequest` HTTP handler.
     pub fn has_http_handler(&self) -> bool {
         self.inner.borrow().has_http_handler()
@@ -559,6 +588,9 @@ pub(crate) struct RuntimeInner {
     pub(crate) dispatch_fn: Option<v8::Global<v8::Function>>,
     /// Cached reference to `__rpc.onRequest` — present when the app exports an HTTP handler.
     pub(crate) http_handler_fn: Option<v8::Global<v8::Function>>,
+    /// Cached reference to `module.default.fetch`, resolved once at module
+    /// init. None if the module doesn't export a default.fetch handler.
+    pub(crate) fetch_handler_fn: Option<v8::Global<v8::Function>>,
     /// Cached JS helper that constructs a Request from Rust-supplied params.
     http_create_request_fn: Option<v8::Global<v8::Function>>,
     pub(crate) initialized: bool,
@@ -713,6 +745,7 @@ impl RuntimeInner {
             context,
             dispatch_fn: None,
             http_handler_fn: None,
+            fetch_handler_fn: None,
             http_create_request_fn: None,
             initialized: false,
             state,
@@ -1026,6 +1059,26 @@ impl RuntimeInner {
                     if handler.is_function() {
                         let func = v8::Local::<v8::Function>::try_from(handler).unwrap();
                         self.http_handler_fn = Some(v8::Global::new(scope, func));
+                    }
+                }
+
+                // Check if the entry module has `export default { fetch(...) }`.
+                // The default export is merged into `__rpc.default` by the same
+                // namespace-copy loop in `load_polyfills_and_modules` that
+                // registers named exports. Reach through to its `.fetch`
+                // method so the kernel dispatch path (`call_fetch_handler`)
+                // has a cached Global<Function>.
+                let default_key = v8::String::new(scope, "default").unwrap();
+                if let Some(default_obj) = rpc_obj
+                    .get(scope, default_key.into())
+                    .and_then(|v| v.to_object(scope))
+                {
+                    let fetch_key = v8::String::new(scope, "fetch").unwrap();
+                    if let Some(fetch_val) = default_obj.get(scope, fetch_key.into()) {
+                        if fetch_val.is_function() {
+                            let func = v8::Local::<v8::Function>::try_from(fetch_val).unwrap();
+                            self.fetch_handler_fn = Some(v8::Global::new(scope, func));
+                        }
                     }
                 }
             }
@@ -1413,6 +1466,190 @@ impl RuntimeInner {
     // -----------------------------------------------------------------------
     // HTTP dispatch (direct mode, used with pump task)
     // -----------------------------------------------------------------------
+
+    /// Kernel's sole dispatch primitive. Invokes the user's
+    /// `export default { fetch(request, env, ctx) }` handler and classifies
+    /// the result as a `FetchOutcome`.
+    ///
+    /// Task B3 covers the sync-return paths (Response / ReadableStream /
+    /// WebSocketUpgrade) and error paths. Task B4 will add the real
+    /// `Pending` handling for a handler that returns an unsettled Promise;
+    /// for now a pending promise yields a 501 stub.
+    pub fn call_fetch_handler(
+        &mut self,
+        modules: &[crate::ModuleEntry],
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: &str,
+        env: &crate::EnvSnapshot,
+        ctx: crate::RequestCtx,
+    ) -> crate::FetchOutcome {
+        self.ensure_initialized(modules);
+
+        if self.fetch_handler_fn.is_none() {
+            return crate::FetchOutcome::Response {
+                status: 404,
+                headers: vec![("content-type".into(), "application/json".into())],
+                body: r#"{"message":"No default.fetch handler exported","name":"Error"}"#.into(),
+                logs: vec![],
+            };
+        }
+        if self.http_create_request_fn.is_none() {
+            return crate::FetchOutcome::Response {
+                status: 500,
+                headers: vec![("content-type".into(), "application/json".into())],
+                body: r#"{"message":"HTTP request helper not compiled","name":"Error"}"#.into(),
+                logs: vec![],
+            };
+        }
+
+        let request_id = self.next_direct_request_id;
+        self.next_direct_request_id += 1;
+
+        let wall_start = Instant::now();
+
+        // Mark the request as executing, and wire the cancel flag through so
+        // native ops spawned inside the handler can observe cancellation.
+        {
+            let mut s = self.state.borrow_mut();
+            s.executing_request_id = Some(request_id);
+            s.executing_request_cancel = Some(ctx.cancel.clone());
+        }
+
+        // Serialize headers once for the HTTP_CREATE_REQUEST_JS helper
+        // (which JSON.parses into a header array).
+        let headers_json = serde_json::to_string(headers).unwrap_or_else(|_| "[]".into());
+        let env_json = env.as_json().to_string();
+
+        self.arm_cpu_timer();
+        let dispatch_result: Result<Result<ResponseInfo, String>, v8::Global<v8::Promise>> =
+            enter_v8!(self, |scope| {
+                let undefined = v8::undefined(scope).into();
+
+                // 1. Construct JS Request via the same helper dispatch_http uses.
+                let create_fn = v8::Local::new(scope, self.http_create_request_fn.as_ref().unwrap());
+                let method_val = v8::String::new(scope, method).unwrap().into();
+                let url_val = v8::String::new(scope, url).unwrap().into();
+                let headers_val = v8::String::new(scope, &headers_json).unwrap().into();
+                let body_val = v8::String::new(scope, body).unwrap().into();
+
+                let request_opt = create_fn.call(scope, undefined, &[method_val, url_val, headers_val, body_val]);
+                if request_opt.is_none() {
+                    Ok(Err("Failed to construct Request object".to_string()))
+                } else {
+                    let request = request_opt.unwrap();
+
+                    // 2. Build env — JSON.parse the snapshot. `{}` for empty.
+                    let env_src = v8::String::new(scope, &env_json).unwrap();
+                    let env_val: v8::Local<v8::Value> = v8::json::parse(scope, env_src)
+                        .unwrap_or_else(|| v8::Object::new(scope).into());
+
+                    // 3. Build ctx — minimal stub. `waitUntil` / `passThroughOnException`
+                    //    are no-ops for B3; Task C3 wires `waitUntil` into the pump.
+                    let ctx_obj = v8::Object::new(scope);
+                    let wu_key = v8::String::new(scope, "waitUntil").unwrap();
+                    let wu_fn = v8::Function::new(scope, ctx_noop_callback).unwrap();
+                    ctx_obj.set(scope, wu_key.into(), wu_fn.into());
+                    let pt_key = v8::String::new(scope, "passThroughOnException").unwrap();
+                    let pt_fn = v8::Function::new(scope, ctx_noop_callback).unwrap();
+                    ctx_obj.set(scope, pt_key.into(), pt_fn.into());
+                    let ctx_val: v8::Local<v8::Value> = ctx_obj.into();
+
+                    // 4. Call module.default.fetch(request, env, ctx)
+                    let handler = v8::Local::new(scope, self.fetch_handler_fn.as_ref().unwrap());
+                    call_fetch_inner(scope, handler, undefined, request, env_val, ctx_val)
+                }
+            });
+        self.disarm_cpu_timer();
+
+        if self.check_v8_terminated() {
+            self.clear_executing_request();
+            self.discard_request_state(request_id);
+            return crate::FetchOutcome::Response {
+                status: 503,
+                headers: vec![("content-type".into(), "application/json".into())],
+                body: r#"{"message":"CPU time limit exceeded","name":"Error"}"#.into(),
+                logs: vec![],
+            };
+        }
+
+        let cpu_elapsed = wall_start.elapsed();
+
+        match dispatch_result {
+            Ok(Ok(info)) => {
+                self.clear_executing_request();
+                self.build_fetch_outcome(request_id, info, cpu_elapsed)
+            }
+            Ok(Err(msg)) => {
+                self.clear_executing_request();
+                self.discard_request_state(request_id);
+                crate::FetchOutcome::Response {
+                    status: 500,
+                    headers: vec![("content-type".into(), "application/json".into())],
+                    body: serde_json::json!({"message": msg, "name": "Error"}).to_string(),
+                    logs: vec![],
+                }
+            }
+            Err(_promise) => {
+                // Pending promise — the real async path lands in Task B4.
+                // For now, surface the unimplemented state clearly.
+                self.clear_executing_request();
+                self.discard_request_state(request_id);
+                crate::FetchOutcome::Response {
+                    status: 501,
+                    headers: vec![("content-type".into(), "application/json".into())],
+                    body: r#"{"message":"async fetch not implemented yet (Task B4)","name":"Error"}"#.into(),
+                    logs: vec![],
+                }
+            }
+        }
+    }
+
+    /// Convert a `ResponseInfo` into a `FetchOutcome`. Mirrors
+    /// [`Self::build_http_outcome`] exactly — the writer-attachment logic
+    /// for streaming responses is preserved verbatim. When the old HTTP
+    /// path is deleted, this helper fully replaces it.
+    fn build_fetch_outcome(
+        &mut self,
+        request_id: u64,
+        info: ResponseInfo,
+        _cpu_time: Duration,
+    ) -> crate::FetchOutcome {
+        let logs = self.drain_request_logs(request_id);
+        match info {
+            ResponseInfo::Complete { status, headers, body } => {
+                crate::FetchOutcome::Response { status, headers, body, logs }
+            }
+            ResponseInfo::Stream { status, headers, stream_id } => {
+                let (writer, reader) = channel::stream_buffer();
+
+                // Attach the writer directly to the stream state so future
+                // enqueue() calls from JS write straight to the TCP-bound
+                // channel — no buffer, no pump cycle. (Mirrors
+                // `build_http_outcome`.)
+                {
+                    let mut s = self.state.borrow_mut();
+                    if let Some(stream) = s.streams.get_mut(&stream_id) {
+                        for chunk in stream.buffer.drain(..) {
+                            let _ = writer.push(chunk);
+                        }
+                        if stream.closed {
+                            writer.close();
+                        } else {
+                            stream.direct_writer = Some(writer);
+                        }
+                    } else {
+                        writer.close();
+                    }
+                }
+                crate::FetchOutcome::Stream { status, headers, body_reader: reader, logs }
+            }
+            ResponseInfo::WebSocket { ws_id, headers } => {
+                crate::FetchOutcome::WebSocketUpgrade { ws_id, headers }
+            }
+        }
+    }
 
     /// Dispatch an HTTP request by calling `onRequest(Request)` directly.
     /// Returns immediately with a DispatchOutcome variant.
@@ -2377,5 +2614,57 @@ fn dispatch_http_inner(
         } else {
             Ok(http::inspect_response(scope, result))
         }
+    }
+}
+
+/// No-op V8 callback used for `ctx.waitUntil` and `ctx.passThroughOnException`
+/// in the B3 kernel fetch path. Task C3 replaces `waitUntil` with a real
+/// promise-collecting callback that feeds into the pump; `passThroughOnException`
+/// stays a no-op until (and if) we decide to honor it.
+fn ctx_noop_callback(
+    _scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+}
+
+/// Call the module.default.fetch handler with (request, env, ctx) and
+/// inspect the result. Separated out for the same reason as
+/// [`dispatch_http_inner`] — avoids double-borrowing `self` while the
+/// `enter_v8!` macro already holds `&mut self.isolate`.
+fn call_fetch_inner(
+    scope: &mut v8::PinScope,
+    handler: v8::Local<v8::Function>,
+    undefined: v8::Local<v8::Value>,
+    request: v8::Local<v8::Value>,
+    env: v8::Local<v8::Value>,
+    ctx: v8::Local<v8::Value>,
+) -> Result<Result<ResponseInfo, String>, v8::Global<v8::Promise>> {
+    let result_opt = handler.call(scope, undefined, &[request, env, ctx]);
+    if result_opt.is_none() {
+        return Ok(Err("default.fetch threw an exception".to_string()));
+    }
+    let result = result_opt.unwrap();
+    scope.perform_microtask_checkpoint();
+    if result.is_promise() {
+        let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+        match promise.state() {
+            v8::PromiseState::Fulfilled => {
+                let resolved = promise.result(scope);
+                Ok(http::inspect_response(scope, resolved))
+            }
+            v8::PromiseState::Rejected => {
+                let msg = promise.result(scope)
+                    .to_string(scope)
+                    .map(|s| s.to_rust_string_lossy(scope))
+                    .unwrap_or_else(|| "Promise rejected".to_string());
+                Ok(Err(msg))
+            }
+            v8::PromiseState::Pending => {
+                Err(v8::Global::new(scope, promise))
+            }
+        }
+    } else {
+        Ok(http::inspect_response(scope, result))
     }
 }
