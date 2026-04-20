@@ -523,6 +523,78 @@ fn zs_env_callback(
 }
 
 // ===========================================================================
+// __zs_bind_request_ctx / __zs_get_request_ctx — per-request ctx stash
+// ===========================================================================
+
+/// `__zs_bind_request_ctx(ctxObj)` — stash the JS `ctx` object on the
+/// currently-executing request so nested modules can look it up without
+/// threading it through every call. Called by the bootstrap (PR 2)
+/// immediately on entry to `fetch(req, env, ctx)`. Passing `null` clears
+/// the stash; passing a non-object is a silent no-op.
+fn zs_bind_request_ctx_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    let rid_opt = state.borrow().executing_request_id;
+    let Some(rid) = rid_opt else {
+        // No active request — silently ignore. Bootstrap should never
+        // call this outside a request, but defensive no-op is safer
+        // than a throw.
+        return;
+    };
+
+    let arg = args.get(0);
+    if arg.is_null() || arg.is_undefined() {
+        // __zs_bind_request_ctx(null) clears the stashed ctx.
+        state.borrow_mut().request_ctx_by_id.remove(&rid);
+        return;
+    }
+    if !arg.is_object() {
+        // Non-null, non-object — ignore (type error from JS side
+        // would be appropriate but silent for now).
+        return;
+    }
+    let obj: v8::Local<v8::Object> = arg.try_into().unwrap();
+    let global_obj = v8::Global::new(scope, obj);
+    state.borrow_mut().request_ctx_by_id.insert(rid, global_obj);
+}
+
+/// `__zs_get_request_ctx()` — return the stashed `ctx` object for the
+/// currently-executing request, or `null` if none was bound (no active
+/// request, or bootstrap hasn't run). Returns the exact same object
+/// reference passed to `__zs_bind_request_ctx` — not a clone.
+fn zs_get_request_ctx_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    let rid_opt = state.borrow().executing_request_id;
+    let Some(rid) = rid_opt else {
+        rv.set(v8::null(scope).into());
+        return;
+    };
+    let ctx_opt = state.borrow().request_ctx_by_id.get(&rid).cloned();
+    match ctx_opt {
+        Some(ctx_global) => {
+            let ctx_local = v8::Local::new(scope, ctx_global);
+            rv.set(ctx_local.into());
+        }
+        None => {
+            rv.set(v8::null(scope).into());
+        }
+    }
+}
+
+// ===========================================================================
 // Timer callbacks (take v8::Function args — stays manual)
 // ===========================================================================
 
@@ -913,6 +985,22 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
         let f = v8::Function::new(scope, zs_env_callback).unwrap();
         let key = v8::String::new(scope, "__zs_env").unwrap();
         global.set(scope, key.into(), f.into());
+    }
+
+    // __zs_bind_request_ctx / __zs_get_request_ctx — per-request ctx stash
+    // for the PR 2 bootstrap. `__zs_bind_request_ctx(ctx)` stashes the
+    // object under the current request_id; `__zs_get_request_ctx()` returns
+    // the same reference from any nested module. Lightweight replacement
+    // for AsyncLocalStorage — single-threaded isolate, request_id tracked
+    // by the pump across await boundaries.
+    {
+        let bind_key = v8::String::new(scope, "__zs_bind_request_ctx").unwrap();
+        let bind_fn = v8::Function::new(scope, zs_bind_request_ctx_callback).unwrap();
+        global.set(scope, bind_key.into(), bind_fn.into());
+
+        let get_key = v8::String::new(scope, "__zs_get_request_ctx").unwrap();
+        let get_fn = v8::Function::new(scope, zs_get_request_ctx_callback).unwrap();
+        global.set(scope, get_key.into(), get_fn.into());
     }
 
     // process.env polyfill — many npm packages (e.g. LangChain) read

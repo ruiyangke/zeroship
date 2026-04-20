@@ -217,6 +217,59 @@ fn zs_env_returns_snapshot() {
 }
 
 #[test]
+fn zs_bind_and_get_request_ctx() {
+    let modules = m(r#"
+        export default {
+            fetch(request, env, ctx) {
+                // Simulate what the bootstrap (PR 2) will do:
+                // bind ctx on entry.
+                __zs_bind_request_ctx(ctx);
+
+                // Nested lookup — must return the SAME object reference.
+                const nested = __zs_get_request_ctx();
+
+                return Response.json({
+                    sameRef: nested === ctx,
+                    hasWaitUntil: typeof nested?.waitUntil === "function",
+                    hasPassThrough: typeof nested?.passThroughOnException === "function"
+                });
+            }
+        };
+    "#);
+    let outcome = dispatch_fetch(modules, TestRequest::get("http://localhost/"));
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("expected Response");
+    };
+    assert_eq!(status, 200, "body: {}", body);
+    assert!(body.contains(r#""sameRef":true"#), "body: {}", body);
+    assert!(body.contains(r#""hasWaitUntil":true"#), "body: {}", body);
+    assert!(body.contains(r#""hasPassThrough":true"#), "body: {}", body);
+}
+
+#[test]
+fn zs_get_request_ctx_without_bind_returns_null() {
+    let modules = m(r#"
+        export default {
+            fetch(request, env, ctx) {
+                // No __zs_bind_request_ctx call — get must return null.
+                const nested = __zs_get_request_ctx();
+                return Response.json({
+                    nested: nested,  // serializes to null
+                    isNull: nested === null
+                });
+            }
+        };
+    "#);
+    let outcome = dispatch_fetch(modules, TestRequest::get("http://localhost/"));
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("expected Response");
+    };
+    assert_eq!(status, 200, "body: {}", body);
+    assert!(body.contains(r#""isNull":true"#), "body: {}", body);
+    assert!(body.contains(r#""nested":null"#), "body: {}", body);
+}
+
+#[test]
 fn websocket_upgrade() {
     let modules = m(r#"
         export default {

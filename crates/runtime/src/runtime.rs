@@ -2444,10 +2444,12 @@ impl RuntimeInner {
     fn drain_request_logs(&mut self, request_id: u64) -> Vec<String> {
         let mut s = self.state.borrow_mut();
         // Every terminal path for a request calls this exactly once, so it
-        // also owns cleanup of sibling per-request state (auth user). Keeping
-        // these dropped together avoids "logs freed, user still resident"
-        // asymmetries that otherwise leak memory for long-lived workers.
+        // also owns cleanup of sibling per-request state (auth user, bound
+        // ctx). Keeping these dropped together avoids "logs freed, user
+        // still resident" asymmetries that otherwise leak memory for
+        // long-lived workers.
         s.per_request_user.remove(&request_id);
+        s.request_ctx_by_id.remove(&request_id);
         s.per_request_logs
             .remove(&request_id)
             .unwrap_or_default()
@@ -2459,14 +2461,15 @@ impl RuntimeInner {
         s.executing_request_cancel = None;
     }
 
-    /// Drop all per-request state (user, logs) for `request_id`. Called by
-    /// error-return paths that bail before `drain_request_logs` would have
-    /// run. Without this, a request that fails during its initial V8 turn
-    /// (CPU termination, isolate init error) leaves its auth user and log
-    /// buffer in `RuntimeState` forever.
+    /// Drop all per-request state (user, bound ctx, logs) for `request_id`.
+    /// Called by error-return paths that bail before `drain_request_logs`
+    /// would have run. Without this, a request that fails during its
+    /// initial V8 turn (CPU termination, isolate init error) leaves its
+    /// auth user, bound ctx, and log buffer in `RuntimeState` forever.
     fn discard_request_state(&self, request_id: u64) {
         let mut s = self.state.borrow_mut();
         s.per_request_user.remove(&request_id);
+        s.request_ctx_by_id.remove(&request_id);
         s.per_request_logs.remove(&request_id);
     }
 

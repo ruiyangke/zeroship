@@ -269,6 +269,19 @@ pub struct RuntimeState {
     /// isolate's lifetime.
     pub wait_until_by_request: HashMap<u64, Vec<v8::Global<v8::Promise>>>,
 
+    /// Per-request JS-exposed `ctx` object, keyed by request_id.
+    /// Populated via `__zs_bind_request_ctx(ctxObj)` from bootstrap JS;
+    /// read via `__zs_get_request_ctx()` from any nested module that
+    /// needs waitUntil/passThroughOnException without threading ctx
+    /// through every function call. Lightweight replacement for
+    /// AsyncLocalStorage — single-threaded isolate, request_id tracked
+    /// by the pump across await boundaries.
+    ///
+    /// TODO(PR 2): clear entries in drain_request_logs /
+    /// discard_request_state / cancellation sweep alongside
+    /// per_request_user and wait_until_by_request.
+    pub request_ctx_by_id: std::collections::HashMap<u64, v8::Global<v8::Object>>,
+
     /// In-memory KV store.
     pub kv_store: HashMap<String, String>,
     /// Process / runtime environment variables surfaced to JS.
@@ -336,6 +349,7 @@ impl RuntimeState {
             per_request_logs: HashMap::new(),
             per_request_user: HashMap::new(),
             wait_until_by_request: HashMap::new(),
+            request_ctx_by_id: HashMap::new(),
 
             kv_store: HashMap::new(),
             env_vars,
