@@ -860,6 +860,22 @@ impl RuntimeInner {
             let context = v8::Local::new(handle_scope, &self.context);
             let scope = &mut v8::ContextScope::new(handle_scope, context);
 
+            // Build the composite env object FIRST — plugin namespaces
+            // overlaid on the scalar env JSON snapshot. The `zeroship`
+            // module's top-level `const env = Object.freeze(__zs_env())`
+            // captures this during module load; if the cache wasn't
+            // populated by then, the import would see only the scalar JSON
+            // and plugin namespaces would be invisible on `import { env }`.
+            //
+            // Cache on SharedState (not RuntimeInner) so the `__zs_env`
+            // callback — a free function with only scope-slot access — can
+            // retrieve the same V8 Global.
+            if self.state.borrow().env_obj.is_none() {
+                let env_json = self.state.borrow().env_json.clone();
+                let global = crate::plugin::build_env_object(scope, &self.plugins, &env_json);
+                self.state.borrow_mut().env_obj = Some(global);
+            }
+
             // Load polyfills and the user's entry module. The returned global
             // is the entry module's Namespace Object; the kernel reads
             // `default.fetch` directly off it (no more `__rpc` reach-through).
@@ -1013,15 +1029,21 @@ impl RuntimeInner {
         env: &crate::EnvSnapshot,
         ctx: crate::RequestCtx,
     ) -> crate::FetchOutcome {
-        // Stash the env JSON on state so the `__zs_env` native op returns the
-        // same payload as the second arg of `fetch(req, env, ctx)`. Must run
-        // BEFORE `ensure_initialized` so the `zeroship` module's top-level
-        // `const env = Object.freeze(__zs_env())` — evaluated exactly once at
-        // module-load during the first `ensure_initialized` call — captures
-        // the real env rather than the default `{}`. Subsequent requests still
-        // update `env_json` here so synchronous op reads from the handler see
-        // the current request's env (not the previous one's) in case user
-        // code calls `__zs_env()` directly.
+        // Stash the env JSON on state so the very first `ensure_initialized`
+        // builds the composite env object (plugin namespaces + scalar JSON)
+        // with the real scalars instead of the default `{}`. Must run BEFORE
+        // `ensure_initialized` — that call is where `build_env_object` reads
+        // `env_json`, caches the result on `state.env_obj`, and where the
+        // `zeroship` module's `const env = Object.freeze(__zs_env())`
+        // top-level binding captures that same cached object.
+        //
+        // After the first call, `env_obj` is populated and further updates
+        // to `env_json` do not refresh the cached V8 object — the scalars
+        // are effectively per-app, not per-request, matching Cloudflare /
+        // Bun / Workers semantics. Subsequent requests still overwrite
+        // `env_json` for the degraded fallback path in `zs_env_callback`
+        // (only reached if `ensure_initialized` has not yet completed,
+        // which shouldn't happen under the normal dispatch flow).
         self.state.borrow_mut().set_env_snapshot(env);
 
         self.ensure_initialized(modules);
@@ -1087,10 +1109,25 @@ impl RuntimeInner {
                 } else {
                     let request = request_opt.unwrap();
 
-                    // 2. Build env — JSON.parse the snapshot. `{}` for empty.
-                    let env_src = v8::String::new(scope, &env_json).unwrap();
-                    let env_val: v8::Local<v8::Value> = v8::json::parse(scope, env_src)
-                        .unwrap_or_else(|| v8::Object::new(scope).into());
+                    // 2. Build env — return the cached composite object
+                    //    (plugin namespaces + scalar env JSON) built during
+                    //    `ensure_initialized`. Same V8 Object identity as
+                    //    `__zs_env()` / `import { env } from "zeroship"` so
+                    //    user code can compare references across those
+                    //    surfaces. Fallback to JSON-parse only if the cache
+                    //    wasn't populated (shouldn't happen — we just ran
+                    //    `ensure_initialized` above).
+                    let env_val: v8::Local<v8::Value> = {
+                        let maybe_global = self.state.borrow().env_obj.clone();
+                        match maybe_global {
+                            Some(g) => v8::Local::new(scope, g).into(),
+                            None => {
+                                let env_src = v8::String::new(scope, &env_json).unwrap();
+                                v8::json::parse(scope, env_src)
+                                    .unwrap_or_else(|| v8::Object::new(scope).into())
+                            }
+                        }
+                    };
 
                     // 3. Build ctx — minimal stub. `waitUntil` swallows any
                     //    rejection via `.catch(() => {})` so we don't leak

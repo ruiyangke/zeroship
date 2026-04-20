@@ -610,3 +610,70 @@ fn bootstrap_rpc_non_array_body_returns_400() {
     assert_eq!(status, 400, "body: {}", body);
     assert!(body.contains("JSON array"), "body: {}", body);
 }
+
+// Plugin callback for `env_exposes_plugin_namespace` — returns the string
+// "pong". Free function so it coerces to `v8::FunctionCallback` without the
+// closure gymnastics that `NativeRegistrar::add<F>`'s trait bound rejects.
+fn echo_ping_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let s = v8::String::new(scope, "pong").unwrap();
+    rv.set(s.into());
+}
+
+#[test]
+fn env_exposes_plugin_namespace() {
+    use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
+    use std::sync::Arc;
+
+    struct EchoPlugin;
+    impl NativePlugin for EchoPlugin {
+        fn namespace(&self) -> &str {
+            "echo"
+        }
+        fn register(&self, r: &mut NativeRegistrar) {
+            r.add("ping", echo_ping_callback);
+        }
+    }
+
+    let modules = m(r#"
+        import { env } from "zeroship";
+        export default {
+            fetch(request, envArg, ctx) {
+                return Response.json({
+                    hasEchoImport: typeof env.echo === "object",
+                    hasEchoArg: typeof envArg.echo === "object",
+                    fromImport: env.echo.ping(),
+                    fromArg: envArg.echo.ping(),
+                    sameRef: env.echo === envArg.echo,
+                });
+            }
+        };
+    "#);
+    init_v8();
+    let runtime = Runtime::builder()
+        .modules(modules)
+        .plugins(vec![Arc::new(EchoPlugin) as Arc<dyn NativePlugin>])
+        .build();
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler(
+        "GET",
+        "http://localhost/",
+        &[],
+        "",
+        &env,
+        ctx,
+    );
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("expected Response");
+    };
+    assert_eq!(status, 200, "body: {}", body);
+    assert!(body.contains(r#""hasEchoImport":true"#), "body: {}", body);
+    assert!(body.contains(r#""hasEchoArg":true"#), "body: {}", body);
+    assert!(body.contains(r#""fromImport":"pong""#), "body: {}", body);
+    assert!(body.contains(r#""fromArg":"pong""#), "body: {}", body);
+    assert!(body.contains(r#""sameRef":true"#), "body: {}", body);
+}

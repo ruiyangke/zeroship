@@ -552,13 +552,18 @@ fn performance_now_callback(
 // __zs_env — return the current frozen env snapshot
 // ===========================================================================
 
-/// `__zs_env()` — returns the JSON.parsed env snapshot.
+/// `__zs_env()` — returns the composite env object (plugin namespaces +
+/// scalar env JSON).
 ///
-/// Stashed on `RuntimeState.env_json` by `call_fetch_handler` before
-/// dispatch. JS wraps this via `const env = Object.freeze(__zs_env());`
-/// in the zeroship module so SDK code can read `env.*` without threading
-/// it through every call. Returns the same data as the 2nd argument of
-/// `fetch(request, env, ctx)`.
+/// Built once by `RuntimeInner::ensure_initialized` and cached on
+/// `RuntimeState.env_obj`. Every call returns the same V8 Global so SDK
+/// code importing `env` from the `zeroship` module sees the same object
+/// identity as the `env` arg of `fetch(req, env, ctx)`.
+///
+/// Fallback: if called before `ensure_initialized` completed (shouldn't
+/// happen under the normal dispatch path, but be defensive), JSON-parse
+/// the scalar snapshot instead of panicking — plugin namespaces will be
+/// missing but at least the scalar values are visible.
 fn zs_env_callback(
     scope: &mut v8::PinScope,
     _args: v8::FunctionCallbackArguments,
@@ -568,13 +573,22 @@ fn zs_env_callback(
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")
         .clone();
-    let json = state.borrow().env_json.clone();
-    match v8::String::new(scope, &json) {
-        Some(s) => match v8::json::parse(scope, s) {
-            Some(val) => rv.set(val),
-            None => rv.set(v8::Object::new(scope).into()),
-        },
-        None => rv.set(v8::Object::new(scope).into()),
+    let env_opt = state.borrow().env_obj.clone();
+    match env_opt {
+        Some(env_global) => {
+            let env_local = v8::Local::new(scope, env_global);
+            rv.set(env_local.into());
+        }
+        None => {
+            let json = state.borrow().env_json.clone();
+            match v8::String::new(scope, &json) {
+                Some(s) => match v8::json::parse(scope, s) {
+                    Some(val) => rv.set(val),
+                    None => rv.set(v8::Object::new(scope).into()),
+                },
+                None => rv.set(v8::Object::new(scope).into()),
+            }
+        }
     }
 }
 

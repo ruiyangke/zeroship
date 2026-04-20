@@ -1,15 +1,21 @@
-//! Plugin system — extensible native functions on the `zeroship.*` global.
+//! Plugin system — extensible native functions on the `env.*` handler arg.
 //!
-//! The runtime is a kernel. Plugins are drivers. Each plugin registers
-//! functions on `zeroship.{namespace}.*` via the `NativePlugin` trait.
+//! The runtime is a kernel. Plugins are drivers. Each plugin registers a set
+//! of native callbacks under its own namespace (e.g. "db", "kv"). The
+//! namespaces are overlaid onto the per-app scalar env JSON to form the
+//! single composite `env` object that user code sees as
+//!   - the `env` argument of `fetch(request, env, ctx)`
+//!   - the `env` named export of the `zeroship` module
+//!   - the return value of `__zs_env()`
 //!
-//! The V8 scope IS the context — callbacks read app_id and meter from
-//! RuntimeState (via scope slot), and per-thread resources from thread_local.
+//! The V8 scope IS the context — callbacks read `app_id` / `meter` from
+//! `RuntimeState` via the isolate scope slot, and per-thread resources from
+//! `thread_local!`.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// A native extension that registers functions on `zeroship.{namespace}.*`.
+/// A native extension that registers functions on `env.{namespace}.*`.
 ///
 /// Plugins are the extension mechanism for the runtime. Each plugin:
 /// 1. Declares a namespace ("db", "auth", "storage", "kv")
@@ -28,8 +34,8 @@ use std::sync::Arc;
 /// satisfy these naturally (URLs, simple structs) — the bound is explicit
 /// here so the compiler catches the rare plugin that can't.
 pub trait NativePlugin: Send + Sync + 'static {
-    /// Namespace under `zeroship.*`. Must be a valid JS identifier.
-    /// Examples: "db", "auth", "storage", "kv"
+    /// Namespace under `env.*`. Must be a valid JS identifier — lowercase
+    /// alphanumeric + underscore. Examples: "db", "auth", "storage", "kv"
     fn namespace(&self) -> &str;
 
     /// Human-readable name for logging/debugging.
@@ -65,7 +71,7 @@ impl NativeRegistrar {
         }
     }
 
-    /// Register a native function as `zeroship.{namespace}.{name}`.
+    /// Register a native function as `env.{namespace}.{name}`.
     ///
     /// The callback signature:
     /// `fn(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, rv: v8::ReturnValue)`
@@ -84,23 +90,45 @@ impl NativeRegistrar {
     }
 }
 
-/// Register all plugins on the `zeroship` global namespace.
+/// Build the `env` object that user code sees as:
+///   - the return value of `__zs_env()`
+///   - the `env` argument of `fetch(request, env, ctx)`
+///   - the `env` named export of the `zeroship` module
 ///
-/// Creates `globalThis.zeroship = { db: { ... }, ... }` with plugin namespaces.
-/// Does NOT freeze — call `freeze_zeroship()` after adding any built-in
-/// namespaces (e.g. `auth`).
-pub(crate) fn register_plugins(scope: &mut v8::PinScope, plugins: &[Arc<dyn NativePlugin>]) {
-    let global = scope.get_current_context().global(scope);
+/// Structure:
+///   env = { ...<plugin namespaces>, ...<scalar secrets from env_json> }
+///
+/// Plugin namespaces are lowercase (matching the existing `NativePlugin::namespace()`
+/// convention — "db", "kv", etc.). Scalar secrets come from the `env_json`
+/// snapshot on `RuntimeState`. If a scalar name collides with a plugin
+/// namespace, the plugin wins (platform primitives override user config) —
+/// the overlay order below enforces this.
+///
+/// The returned object is shallow-frozen (via `Object.freeze`), so user code
+/// can't monkey-patch `env.db = null` at runtime. Namespace sub-objects
+/// remain mutable by reference, but their registered methods are attached as
+/// own properties at build time — replacing them would require reassigning
+/// through the frozen parent.
+pub(crate) fn build_env_object(
+    scope: &mut v8::PinScope,
+    plugins: &[Arc<dyn NativePlugin>],
+    env_json: &str,
+) -> v8::Global<v8::Object> {
+    // Start with scalar env JSON parsed into an object. If parsing fails
+    // (malformed JSON, non-object top-level) fall back to an empty object —
+    // the callback still has to return something valid.
+    let env_obj = {
+        let s = v8::String::new(scope, env_json).unwrap();
+        v8::json::parse(scope, s)
+            .and_then(|v| v.to_object(scope))
+            .unwrap_or_else(|| v8::Object::new(scope))
+    };
 
-    // Always create the zeroship namespace (built-ins like auth need it even
-    // when no plugins are registered).
-    let zeroship = v8::Object::new(scope);
-
-    // Track registered namespaces so a second plugin claiming the same slot
-    // can't silently overwrite the first (callbacks would vanish at runtime
-    // with no error). Platform misconfiguration should fail loud.
+    // Overlay plugin namespaces. Each plugin contributes an object under
+    // its declared namespace with all its registered callbacks. A second
+    // plugin claiming the same namespace panics — platform misconfiguration
+    // should fail loud, not silently shadow.
     let mut seen: HashSet<String> = HashSet::new();
-
     for plugin in plugins {
         let ns_name = plugin.namespace();
         debug_assert!(
@@ -109,7 +137,6 @@ pub(crate) fn register_plugins(scope: &mut v8::PinScope, plugins: &[Arc<dyn Nati
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
             "plugin namespace must be lowercase alphanumeric: {ns_name}"
         );
-
         if !seen.insert(ns_name.to_string()) {
             panic!(
                 "plugin namespace collision: '{}' registered by two plugins (second was '{}')",
@@ -118,42 +145,32 @@ pub(crate) fn register_plugins(scope: &mut v8::PinScope, plugins: &[Arc<dyn Nati
             );
         }
 
-        // Collect registrations from the plugin (no V8 scope needed)
         let mut registrar = NativeRegistrar::new();
         plugin.register(&mut registrar);
 
-        // Create V8 namespace object and apply all registrations
         let ns_obj = v8::Object::new(scope);
         for (_name, apply_fn) in &registrar.entries {
             apply_fn(scope, ns_obj);
         }
 
         let ns_key = v8::String::new(scope, ns_name).unwrap();
-        zeroship.set(scope, ns_key.into(), ns_obj.into());
+        env_obj.set(scope, ns_key.into(), ns_obj.into());
     }
 
-    // Set zeroship on global
-    let zeroship_key = v8::String::new(scope, "zeroship").unwrap();
-    global.set(scope, zeroship_key.into(), zeroship.into());
-}
-
-/// Freeze the `zeroship` global and all its namespace sub-objects.
-///
-/// Must be called after `register_plugins()` and any built-in namespace
-/// additions (e.g. `auth`). Freezing prevents user code from modifying or
-/// monkey-patching platform primitives.
-pub(crate) fn freeze_zeroship(scope: &mut v8::PinScope) {
-    // Use JS to enumerate and freeze all sub-namespaces, then the root.
-    let freeze_js = r#"(function() {
-        var zs = globalThis.zeroship;
-        if (!zs) return;
-        Object.keys(zs).forEach(function(k) {
-            if (typeof zs[k] === 'object' && zs[k] !== null) Object.freeze(zs[k]);
-        });
-        Object.freeze(zs);
-    })()"#;
-    let code = v8::String::new(scope, freeze_js).unwrap();
-    if let Some(script) = v8::Script::compile(scope, code, None) {
-        script.run(scope);
+    // Shallow freeze via Object.freeze. Prevents user code from reassigning
+    // `env.db = null` or adding `env.foo`. Namespace sub-objects stay
+    // unfrozen — their methods are already attached, and freezing them
+    // would be a minor defensive-in-depth gain at the cost of breaking any
+    // future plugin that expects to extend its namespace after registration.
+    let freeze_source = "(obj) => Object.freeze(obj)";
+    let code = v8::String::new(scope, freeze_source).unwrap();
+    if let Some(script) = v8::Script::compile(scope, code, None)
+        && let Some(func_val) = script.run(scope)
+        && let Ok(freeze_fn) = v8::Local::<v8::Function>::try_from(func_val)
+    {
+        let undefined = v8::undefined(scope).into();
+        let _ = freeze_fn.call(scope, undefined, &[env_obj.into()]);
     }
+
+    v8::Global::new(scope, env_obj)
 }

@@ -293,6 +293,14 @@ pub struct RuntimeState {
     /// object (`"{}"`) by default.
     pub env_json: String,
 
+    /// Composite `env` object surfaced to user code — plugin namespaces
+    /// overlaid on the scalar `env_json`. Built once by
+    /// `RuntimeInner::ensure_initialized` and cached here so the
+    /// `__zs_env` native op (a free function with only `SharedState`
+    /// access) and `call_fetch_handler` both hand back the same frozen
+    /// V8 Object reference. `None` until `ensure_initialized` has run.
+    pub env_obj: Option<v8::Global<v8::Object>>,
+
     /// WebCrypto key store, keyed by key-id.
     pub key_store: HashMap<u32, crate::crypto::KeyData>,
     /// Monotonically increasing key-id counter.
@@ -355,6 +363,7 @@ impl RuntimeState {
             env_vars,
 
             env_json: "{}".into(),
+            env_obj: None,
 
             key_store: HashMap::new(),
             next_key_id: 1,
