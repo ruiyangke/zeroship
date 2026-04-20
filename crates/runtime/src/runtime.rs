@@ -548,8 +548,15 @@ struct PendingRequest {
     promise: v8::Global<v8::Promise>,
     /// Reply slot for direct-dispatch async mode (pump task) — RPC path.
     reply_direct: Option<ResultSender<Result<RequestResult, DispatchError>>>,
-    /// Reply slot for direct-dispatch async mode — HTTP path.
+    /// Reply slot for direct-dispatch async mode — HTTP path (legacy
+    /// `dispatch_http`). Short-lived: Task D2 deletes this slot when
+    /// `dispatch_http` is removed in favor of `call_fetch_handler`.
     reply_http: Option<ResultSender<Result<HttpDispatchResult, DispatchError>>>,
+    /// Reply slot for the new `call_fetch_handler` pending path. Carries a
+    /// `SettledFetch` mirroring `FetchOutcome`'s three non-Pending variants.
+    /// Mutually exclusive with `reply_http` in practice — exactly one is Some
+    /// for any given PendingRequest.
+    reply_fetch: Option<ResultSender<Result<crate::SettledFetch, DispatchError>>>,
     /// Whether this is an HTTP request (affects response inspection).
     is_http: bool,
     cpu_accumulated: Duration,
@@ -1449,6 +1456,7 @@ impl RuntimeInner {
                             promise,
                             reply_direct: Some(tx),
                             reply_http: None,
+                            reply_fetch: None,
                             is_http: false,
                             cpu_accumulated: cpu_total,
                             wall_start,
@@ -1640,18 +1648,51 @@ impl RuntimeInner {
                     logs: vec![],
                 }
             }
-            Err(_promise) => {
-                // Pending promise — the real async path lands in Task B4.
-                // For now, surface the unimplemented state clearly.
+            Err(promise) => {
+                // Pending promise — hand off to the pump. Clear
+                // `executing_request_*` so the next synchronous dispatch
+                // can enter V8 cleanly, but keep per-request state
+                // (logs, user, timers) alive: the pump still needs it
+                // when the promise settles. DO NOT call
+                // `discard_request_state` here — only after settle.
                 self.clear_executing_request();
-                self.discard_request_state(request_id);
-                crate::FetchOutcome::Response {
-                    status: 501,
-                    headers: vec![("content-type".into(), "application/json".into())],
-                    body: r#"{"message":"async fetch not implemented yet (Task B4)","name":"Error"}"#.into(),
-                    logs: vec![],
-                }
+                self.store_fetch_pending(request_id, promise, ctx, cpu_elapsed, wall_start)
             }
+        }
+    }
+
+    /// Track a pending fetch promise and return a `FetchOutcome::Pending`
+    /// whose receiver is settled by the pump via `send_settled_reply_any`
+    /// once the promise resolves or rejects.
+    fn store_fetch_pending(
+        &mut self,
+        request_id: u64,
+        promise: v8::Global<v8::Promise>,
+        ctx: crate::RequestCtx,
+        cpu_accumulated: Duration,
+        wall_start: Instant,
+    ) -> crate::FetchOutcome {
+        let (tx, rx) = channel::result_slot();
+
+        self.pending_requests.insert(request_id, PendingRequest {
+            id: request_id,
+            promise,
+            reply_direct: None,
+            reply_http: None,
+            reply_fetch: Some(tx),
+            // is_http drives the pump's Response-inspection path — the
+            // fetch handler always produces a `Response`, same as
+            // `dispatch_http`, so this is `true`.
+            is_http: true,
+            cpu_accumulated,
+            wall_start,
+            cancel: ctx.cancel.clone(),
+        });
+        self.notify_pump();
+
+        crate::FetchOutcome::Pending {
+            rx,
+            cancel: ctx.cancel,
         }
     }
 
@@ -1790,6 +1831,7 @@ impl RuntimeInner {
                     promise,
                     reply_direct: None,
                     reply_http: Some(tx),
+                    reply_fetch: None,
                     is_http: true,
                     cpu_accumulated: cpu_elapsed,
                     wall_start,
@@ -1971,6 +2013,8 @@ impl RuntimeInner {
                                 tx.send(Err("CPU time limit exceeded".into()));
                             } else if let Some(tx) = req.reply_http {
                                 tx.send(Err("CPU time limit exceeded".into()));
+                            } else if let Some(tx) = req.reply_fetch {
+                                tx.send(Err("CPU time limit exceeded".into()));
                             }
                         }
                     }
@@ -2025,6 +2069,8 @@ impl RuntimeInner {
                             if let Some(tx) = req.reply_direct {
                                 tx.send(Err("CPU time limit exceeded".into()));
                             } else if let Some(tx) = req.reply_http {
+                                tx.send(Err("CPU time limit exceeded".into()));
+                            } else if let Some(tx) = req.reply_fetch {
                                 tx.send(Err("CPU time limit exceeded".into()));
                             }
                         }
@@ -2110,6 +2156,8 @@ impl RuntimeInner {
                     if let Some(tx) = req.reply_direct {
                         tx.send(Err("CPU time limit exceeded".into()));
                     } else if let Some(tx) = req.reply_http {
+                        tx.send(Err("CPU time limit exceeded".into()));
+                    } else if let Some(tx) = req.reply_fetch {
                         tx.send(Err("CPU time limit exceeded".into()));
                     }
                 }
@@ -2216,6 +2264,8 @@ impl RuntimeInner {
                             tx.send(Err("CPU time limit exceeded".into()));
                         } else if let Some(tx) = req.reply_http {
                             tx.send(Err("CPU time limit exceeded".into()));
+                        } else if let Some(tx) = req.reply_fetch {
+                            tx.send(Err("CPU time limit exceeded".into()));
                         }
                     }
                 }
@@ -2295,10 +2345,36 @@ impl RuntimeInner {
                 }
             }
             SettledResult::Http(Ok(info)) => {
-                self.send_http_settled(id, info, req.reply_http, cpu_time);
+                // New `call_fetch_handler` path takes priority — translate
+                // the `FetchOutcome` that `build_fetch_outcome` produces
+                // into a `SettledFetch` 1:1 (the two enums were designed
+                // for this mapping). The legacy `reply_http` branch is a
+                // short-lived bridge for `dispatch_http`; Task D2 deletes
+                // it when `dispatch_http` is removed.
+                if let Some(tx) = req.reply_fetch {
+                    let outcome = self.build_fetch_outcome(id, info, cpu_time);
+                    let settled = match outcome {
+                        crate::FetchOutcome::Response { status, headers, body, logs } =>
+                            crate::SettledFetch::Response { status, headers, body, logs },
+                        crate::FetchOutcome::Stream { status, headers, body_reader, logs } =>
+                            crate::SettledFetch::Stream { status, headers, body_reader, logs },
+                        crate::FetchOutcome::WebSocketUpgrade { ws_id, headers } =>
+                            crate::SettledFetch::WebSocketUpgrade { ws_id, headers, logs: vec![] },
+                        crate::FetchOutcome::Pending { .. } =>
+                            unreachable!("build_fetch_outcome never returns Pending"),
+                    };
+                    tx.send(Ok(settled));
+                } else {
+                    self.send_http_settled(id, info, req.reply_http, cpu_time);
+                }
             }
             SettledResult::Http(Err(msg)) => {
-                if let Some(tx) = req.reply_http {
+                // `msg: String` is consumed by `.into()`, so we route to
+                // whichever reply slot is set. On a correctly-populated
+                // PendingRequest only one of the two is `Some`.
+                if let Some(tx) = req.reply_fetch {
+                    tx.send(Err(msg.into()));
+                } else if let Some(tx) = req.reply_http {
                     tx.send(Err(msg.into()));
                 }
             }
@@ -2399,6 +2475,8 @@ impl RuntimeInner {
             if let Some(tx) = req.reply_direct {
                 tx.send(Err("CPU time limit exceeded".into()));
             } else if let Some(tx) = req.reply_http {
+                tx.send(Err("CPU time limit exceeded".into()));
+            } else if let Some(tx) = req.reply_fetch {
                 tx.send(Err("CPU time limit exceeded".into()));
             }
         }
@@ -2517,6 +2595,8 @@ impl RuntimeInner {
             if let Some(tx) = req.reply_direct {
                 tx.send(Err("Request timed out".into()));
             } else if let Some(tx) = req.reply_http {
+                tx.send(Err("Request timed out".into()));
+            } else if let Some(tx) = req.reply_fetch {
                 tx.send(Err("Request timed out".into()));
             }
 
