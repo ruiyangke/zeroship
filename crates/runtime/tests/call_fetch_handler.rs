@@ -384,3 +384,229 @@ fn streaming_async_closes_cleanly() {
         assert!(collected.contains("data: [DONE]"), "final marker missing; got: {collected}");
     });
 }
+
+// ===========================================================================
+// PR 2 Task 3 — zeroship module surface tests
+// ===========================================================================
+//
+// These lock in the three exports of the user-facing `zeroship` module:
+// `env`, `waitUntil`, `getRequest`. The module is injected by the runtime
+// alongside the bootstrap (see crates/runtime/src/init.rs::ZEROSHIP_MODULE_JS).
+
+#[test]
+fn zeroship_module_env_import() {
+    // User code imports `env` from the `zeroship` module — the same
+    // object should surface as the `env` handler arg and `__zs_env()`.
+    let modules = m(r#"
+        import { env } from "zeroship";
+        export default {
+            fetch(request, envArg, ctx) {
+                return Response.json({
+                    fromImport: env,
+                    fromArg: envArg,
+                    fromOp: __zs_env(),
+                    allEqual: JSON.stringify(env) === JSON.stringify(envArg)
+                           && JSON.stringify(env) === JSON.stringify(__zs_env())
+                });
+            }
+        };
+    "#);
+    init_v8();
+    let runtime = Runtime::builder().modules(modules).build();
+    let env = EnvSnapshot::new(serde_json::json!({"FOO": "bar"}));
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler(
+        "GET", "http://localhost/", &[], "", &env, ctx,
+    );
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("expected Response");
+    };
+    assert_eq!(status, 200, "body: {}", body);
+    assert!(body.contains(r#""allEqual":true"#), "body: {}", body);
+    assert!(body.contains(r#""FOO":"bar""#), "body: {}", body);
+}
+
+#[test]
+fn zeroship_wait_until_accepts_promise() {
+    // waitUntil with a Promise arg should succeed silently (no throw).
+    // We can't easily observe the pump's wait_until_by_request state from
+    // userland, but the handler completing without error is proof the op
+    // accepted the Promise.
+    let modules = m(r#"
+        import { waitUntil } from "zeroship";
+        export default {
+            fetch(request, env, ctx) {
+                let called = false;
+                try {
+                    waitUntil(Promise.resolve("bg work"));
+                    called = true;
+                } catch (e) {
+                    return Response.json({ threw: String(e), called: false });
+                }
+                return Response.json({ called });
+            }
+        };
+    "#);
+    match dispatch_fetch(modules, TestRequest::get("http://localhost/")) {
+        FetchOutcome::Response { status, body, .. } => {
+            assert_eq!(status, 200, "body: {}", body);
+            assert!(body.contains(r#""called":true"#), "body: {}", body);
+        }
+        _ => panic!("expected Response"),
+    }
+}
+
+#[test]
+fn zeroship_wait_until_rejects_non_promise() {
+    // waitUntil should throw TypeError for non-Promise args.
+    let modules = m(r#"
+        import { waitUntil } from "zeroship";
+        export default {
+            fetch(request, env, ctx) {
+                try {
+                    waitUntil("not a promise");
+                    return Response.json({ threw: false });
+                } catch (e) {
+                    return Response.json({
+                        threw: true,
+                        name: e.name,
+                        message: e.message,
+                    });
+                }
+            }
+        };
+    "#);
+    match dispatch_fetch(modules, TestRequest::get("http://localhost/")) {
+        FetchOutcome::Response { status, body, .. } => {
+            assert_eq!(status, 200, "body: {}", body);
+            assert!(body.contains(r#""threw":true"#), "body: {}", body);
+            assert!(body.contains(r#""name":"TypeError""#), "body: {}", body);
+        }
+        _ => panic!("expected Response"),
+    }
+}
+
+#[test]
+fn zeroship_get_request_returns_request() {
+    // getRequest() returns the same Request the handler got as arg 1.
+    let modules = m(r#"
+        import { getRequest } from "zeroship";
+        export default {
+            fetch(request, env, ctx) {
+                const fromLookup = getRequest();
+                return Response.json({
+                    sameRef: fromLookup === request,
+                    url: fromLookup.url,
+                });
+            }
+        };
+    "#);
+    match dispatch_fetch(modules, TestRequest::get("http://localhost/foo")) {
+        FetchOutcome::Response { status, body, .. } => {
+            assert_eq!(status, 200, "body: {}", body);
+            assert!(body.contains(r#""sameRef":true"#), "body: {}", body);
+            assert!(body.contains("/foo"), "body: {}", body);
+        }
+        _ => panic!("expected Response"),
+    }
+}
+
+// ===========================================================================
+// PR 2 Task 3 — bootstrap RPC contract tests
+// ===========================================================================
+//
+// These four tests are effectively the B3/B4/B5 status-probe tests from the
+// PR 1 plan — they moved into PR 2 because the status-code assertions now
+// live in the bootstrap (JS-level), not the kernel (Rust-level).
+
+#[test]
+fn bootstrap_routes_rpc_to_named_export() {
+    let modules = m(r#"
+        export function greet(name) {
+            return { hello: name };
+        }
+    "#);
+    init_v8();
+    let runtime = Runtime::builder().modules(modules).build();
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler(
+        "POST",
+        "http://localhost/_rpc/greet",
+        &[("content-type".into(), "application/json".into())],
+        r#"["world"]"#,
+        &env,
+        ctx,
+    );
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("expected Response");
+    };
+    assert_eq!(status, 200, "body: {}", body);
+    assert!(body.contains(r#""hello":"world""#), "body: {}", body);
+}
+
+#[test]
+fn bootstrap_rpc_method_not_found_returns_404() {
+    let modules = m(r#"export function greet() { return "hi"; }"#);
+    init_v8();
+    let runtime = Runtime::builder().modules(modules).build();
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler(
+        "POST",
+        "http://localhost/_rpc/unknown",
+        &[("content-type".into(), "application/json".into())],
+        "[]",
+        &env,
+        ctx,
+    );
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("expected Response");
+    };
+    assert_eq!(status, 404, "body: {}", body);
+    assert!(body.contains("Method not found"), "body: {}", body);
+}
+
+#[test]
+fn bootstrap_rpc_malformed_json_returns_400() {
+    let modules = m(r#"export function greet(x) { return x; }"#);
+    init_v8();
+    let runtime = Runtime::builder().modules(modules).build();
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler(
+        "POST",
+        "http://localhost/_rpc/greet",
+        &[("content-type".into(), "application/json".into())],
+        "not-json",
+        &env,
+        ctx,
+    );
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("expected Response");
+    };
+    assert_eq!(status, 400, "body: {}", body);
+    assert!(body.contains("Invalid args JSON"), "body: {}", body);
+}
+
+#[test]
+fn bootstrap_rpc_non_array_body_returns_400() {
+    let modules = m(r#"export function greet(x) { return x; }"#);
+    init_v8();
+    let runtime = Runtime::builder().modules(modules).build();
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler(
+        "POST",
+        "http://localhost/_rpc/greet",
+        &[("content-type".into(), "application/json".into())],
+        r#"{"not":"array"}"#,
+        &env,
+        ctx,
+    );
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("expected Response");
+    };
+    assert_eq!(status, 400, "body: {}", body);
+    assert!(body.contains("JSON array"), "body: {}", body);
+}
