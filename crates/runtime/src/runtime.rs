@@ -1505,6 +1505,12 @@ impl RuntimeInner {
     ) -> crate::FetchOutcome {
         self.ensure_initialized(modules);
 
+        // Stash the env JSON on state so the `__zs_env` native op returns the
+        // same payload as the second arg of `fetch(req, env, ctx)`. Must run
+        // BEFORE dispatch so any synchronous op read from the handler sees
+        // this request's env (not the previous one's).
+        self.state.borrow_mut().set_env_snapshot(env);
+
         if self.fetch_handler_fn.is_none() {
             return crate::FetchOutcome::Response {
                 status: 404,

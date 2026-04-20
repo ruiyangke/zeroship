@@ -185,6 +185,38 @@ fn streaming_response() {
 }
 
 #[test]
+fn zs_env_returns_snapshot() {
+    let modules = m(r#"
+        export default {
+            fetch(request, env, ctx) {
+                return Response.json({
+                    viaArg: env,
+                    viaOp: __zs_env()
+                });
+            }
+        };
+    "#);
+    init_v8();
+    let runtime = Runtime::builder().modules(modules).build();
+    let env = EnvSnapshot::new(serde_json::json!({"FOO": "bar", "N": 42}));
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler(
+        "GET", "http://localhost/", &[], "",
+        &env, ctx,
+    );
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("expected Response");
+    };
+    assert_eq!(status, 200, "body: {}", body);
+    // Both arg and op must return the env contents.
+    assert!(body.contains(r#""FOO":"bar""#), "body: {}", body);
+    assert!(body.contains(r#""N":42"#), "body: {}", body);
+    // Should appear TWICE (once for viaArg, once for viaOp).
+    let foo_count = body.matches(r#""FOO":"bar""#).count();
+    assert_eq!(foo_count, 2, "env should appear in both fields, body: {}", body);
+}
+
+#[test]
 fn websocket_upgrade() {
     let modules = m(r#"
         export default {

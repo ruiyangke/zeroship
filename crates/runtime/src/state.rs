@@ -274,6 +274,12 @@ pub struct RuntimeState {
     /// Process / runtime environment variables surfaced to JS.
     pub env_vars: HashMap<String, String>,
 
+    /// Frozen env JSON snapshot — JSON.parse-able string. Passed to JS via
+    /// the `__zs_env` native op. Same value for every request; populated
+    /// at worker boot from zeroship.toml + control-plane secrets. Empty
+    /// object (`"{}"`) by default.
+    pub env_json: String,
+
     /// WebCrypto key store, keyed by key-id.
     pub key_store: HashMap<u32, crate::crypto::KeyData>,
     /// Monotonically increasing key-id counter.
@@ -334,6 +340,8 @@ impl RuntimeState {
             kv_store: HashMap::new(),
             env_vars,
 
+            env_json: "{}".into(),
+
             key_store: HashMap::new(),
             next_key_id: 1,
 
@@ -361,6 +369,15 @@ impl RuntimeState {
             .or_default()
             .push(promise);
         true
+    }
+
+    /// Stash the env snapshot JSON so the `__zs_env` native op can return
+    /// the same payload as the second arg of `fetch(req, env, ctx)`. Called
+    /// by `call_fetch_handler` immediately after `ensure_initialized` and
+    /// before dispatching into JS, so op reads during the current V8 turn
+    /// see the correct value.
+    pub fn set_env_snapshot(&mut self, env: &crate::EnvSnapshot) {
+        self.env_json = env.as_json().to_string();
     }
 
     /// Allocate a stream-id that is not currently held by an active stream or

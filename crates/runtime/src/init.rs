@@ -493,6 +493,36 @@ fn performance_now_callback(
 }
 
 // ===========================================================================
+// __zs_env — return the current frozen env snapshot
+// ===========================================================================
+
+/// `__zs_env()` — returns the JSON.parsed env snapshot.
+///
+/// Stashed on `RuntimeState.env_json` by `call_fetch_handler` before
+/// dispatch. JS wraps this via `const env = Object.freeze(__zs_env());`
+/// in the zeroship module so SDK code can read `env.*` without threading
+/// it through every call. Returns the same data as the 2nd argument of
+/// `fetch(request, env, ctx)`.
+fn zs_env_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    let json = state.borrow().env_json.clone();
+    match v8::String::new(scope, &json) {
+        Some(s) => match v8::json::parse(scope, s) {
+            Some(val) => rv.set(val),
+            None => rv.set(v8::Object::new(scope).into()),
+        },
+        None => rv.set(v8::Object::new(scope).into()),
+    }
+}
+
+// ===========================================================================
 // Timer callbacks (take v8::Function args — stays manual)
 // ===========================================================================
 
@@ -874,6 +904,15 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
 
         let env_key = v8::String::new(scope, "env").unwrap();
         global.set(scope, env_key.into(), env.into());
+    }
+
+    // __zs_env — returns the frozen env snapshot (same as fetch's 2nd arg).
+    // The zeroship JS module exposes this as `const env = Object.freeze(__zs_env());`
+    // so SDK packages can read env.* without threading it through fetch().
+    {
+        let f = v8::Function::new(scope, zs_env_callback).unwrap();
+        let key = v8::String::new(scope, "__zs_env").unwrap();
+        global.set(scope, key.into(), f.into());
     }
 
     // process.env polyfill — many npm packages (e.g. LangChain) read
