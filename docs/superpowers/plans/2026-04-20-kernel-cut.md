@@ -85,7 +85,7 @@ pub enum FetchOutcome {
     /// Handler returned a Promise that hasn't settled. Poll `rx` for the
     /// final `FetchOutcome::Response` or `FetchOutcome::Stream`.
     Pending {
-        rx: ResultReceiver<Result<PendingBody, DispatchError>>,
+        rx: ResultReceiver<Result<SettledFetch, DispatchError>>,
         cancel: CancelFlag,
     },
     /// Handler returned a Response with status 101 + `webSocket` property.
@@ -97,7 +97,7 @@ pub enum FetchOutcome {
 
 /// Body shape delivered via the pending-resolver channel. Mirrors
 /// `FetchOutcome` minus the `Pending` variant (can't be nested).
-pub enum PendingBody {
+pub enum SettledFetch {
     Complete {
         status: u16,
         headers: Vec<(String, String)>,
@@ -182,7 +182,7 @@ pub mod fetch_outcome;
 And add to the `pub use` block:
 
 ```rust
-pub use fetch_outcome::{FetchOutcome, PendingBody, RequestCtx, EnvSnapshot};
+pub use fetch_outcome::{FetchOutcome, SettledFetch, RequestCtx, EnvSnapshot};
 ```
 
 - [ ] **Step 3: Verify the new types compile**
@@ -774,7 +774,7 @@ for sync returns. Async paths stubbed; tests added for the happy path."
 Append to `crates/runtime/tests/call_fetch_handler.rs`:
 
 ```rust
-use zeroship_runtime::PendingBody;
+use zeroship_runtime::SettledFetch;
 use std::time::Duration;
 
 #[test]
@@ -807,7 +807,7 @@ fn async_response() {
                 .expect("pending delivered error")
         });
 
-    let PendingBody::Complete { status, body, .. } = body else {
+    let SettledFetch::Response { status, body, .. } = body else {
         panic!("expected Complete body");
     };
     assert_eq!(status, 202);
@@ -847,7 +847,7 @@ fn store_fetch_pending(
         };
     };
 
-    let (tx, rx) = crate::channel::result_channel::<Result<crate::PendingBody, crate::runtime::DispatchError>>();
+    let (tx, rx) = crate::channel::result_channel::<Result<crate::SettledFetch, crate::runtime::DispatchError>>();
 
     let pending = crate::runtime::PendingRequest {
         id: request_id,
@@ -870,7 +870,7 @@ fn store_fetch_pending(
 }
 ```
 
-Note: you need to add `reply_fetch: Option<ResultSender<Result<PendingBody, DispatchError>>>` to the `PendingRequest` struct, alongside `reply_direct` and `reply_http`. Grep for the struct definition:
+Note: you need to add `reply_fetch: Option<ResultSender<Result<SettledFetch, DispatchError>>>` to the `PendingRequest` struct, alongside `reply_direct` and `reply_http`. Grep for the struct definition:
 
 ```bash
 grep -n "struct PendingRequest" crates/runtime/src/runtime.rs
@@ -886,9 +886,9 @@ Find the pump's settle branch — search:
 grep -n "SettledResult::Rpc\|SettledResult::Http" crates/runtime/src/runtime.rs
 ```
 
-The pump matches on `SettledResult::{Rpc, Http}` and delivers via `reply_direct` / `reply_http`. Add a third arm (or reuse Http) that also sends to `reply_fetch`. Since PR 1 does not yet split settlement by handler type, do the simplest thing: after the existing `reply_http.send(...)`, also check `reply_fetch` and send a translated `PendingBody`:
+The pump matches on `SettledResult::{Rpc, Http}` and delivers via `reply_direct` / `reply_http`. Add a third arm (or reuse Http) that also sends to `reply_fetch`. Since PR 1 does not yet split settlement by handler type, do the simplest thing: after the existing `reply_http.send(...)`, also check `reply_fetch` and send a translated `SettledFetch`:
 
-The pump's settle branch already calls `build_http_outcome` for the `reply_http` slot. Since `ResponseInfo::Stream` carries a `stream_id` (not a reader) and the writer-attachment must happen exactly once, route the settled info through `build_fetch_outcome` first and then convert its result to `PendingBody`:
+The pump's settle branch already calls `build_http_outcome` for the `reply_http` slot. Since `ResponseInfo::Stream` carries a `stream_id` (not a reader) and the writer-attachment must happen exactly once, route the settled info through `build_fetch_outcome` first and then convert its result to `SettledFetch`:
 
 ```rust
 SettledResult::Http(Ok(info)) => {
@@ -900,11 +900,11 @@ SettledResult::Http(Ok(info)) => {
         let outcome = self.build_fetch_outcome(id, info, cpu_time);
         let pb = match outcome {
             crate::FetchOutcome::Response { status, headers, body, logs } =>
-                crate::PendingBody::Complete { status, headers, body, logs },
+                crate::SettledFetch::Response { status, headers, body, logs },
             crate::FetchOutcome::Stream { status, headers, body_reader, logs } =>
-                crate::PendingBody::Stream { status, headers, body_reader, logs },
+                crate::SettledFetch::Stream { status, headers, body_reader, logs },
             crate::FetchOutcome::WebSocketUpgrade { ws_id, headers } =>
-                crate::PendingBody::WebSocket { ws_id, headers, logs: vec![] },
+                crate::SettledFetch::WebSocketUpgrade { ws_id, headers, logs: vec![] },
             crate::FetchOutcome::Pending { .. } =>
                 unreachable!("settled info cannot produce Pending"),
         };
@@ -1344,7 +1344,7 @@ Rewrite `crates/worker/src/handler.rs`. The new shape: one `dispatch` handler th
 Key excerpt (the full rewrite is mechanical — adapt existing error handling to the new enum):
 
 ```rust
-use zeroship_runtime::{FetchOutcome, PendingBody, EnvSnapshot, RequestCtx};
+use zeroship_runtime::{FetchOutcome, SettledFetch, EnvSnapshot, RequestCtx};
 use zeroship_runtime::channel::CancelFlag;
 
 pub async fn dispatch(
@@ -1425,11 +1425,11 @@ pub async fn dispatch(
 
         FetchOutcome::Pending { rx, cancel: cf } => {
             match recv_with_timeout(&rx, wall_limit(&runtime), &cf, &runtime).await {
-                Some(Ok(PendingBody::Complete { status, headers, body, .. })) =>
+                Some(Ok(SettledFetch::Response { status, headers, body, .. })) =>
                     build_http_response(status, headers, body),
-                Some(Ok(PendingBody::Stream { status, headers, body_reader, .. })) =>
+                Some(Ok(SettledFetch::Stream { status, headers, body_reader, .. })) =>
                     stream_response(status, &headers, body_reader),
-                Some(Ok(PendingBody::WebSocket { .. })) =>
+                Some(Ok(SettledFetch::WebSocketUpgrade { .. })) =>
                     build_http_response(500, vec![],
                         r#"{"message":"WebSocket upgrade not supported via HTTP dispatch","name":"Error"}"#.into()),
                 Some(Err(e)) =>
@@ -1543,18 +1543,18 @@ match outcome {
         handle_websocket_upgrade(stream, ws_id, &headers, request_headers, runtime).await,
     FetchOutcome::Pending { rx, cancel } => {
         match recv_with_timeout(&rx, runtime.wall_timeout(), &cancel, runtime).await {
-            Some(Ok(PendingBody::Complete { status, headers, body, .. })) => {
+            Some(Ok(SettledFetch::Response { status, headers, body, .. })) => {
                 let resp = build_http_response(status, &headers, &body);
                 let BufResult(r, _) = stream.write_all(resp).await;
                 r.is_ok()
             }
-            Some(Ok(PendingBody::Stream { status, headers, body_reader, .. })) => {
+            Some(Ok(SettledFetch::Stream { status, headers, body_reader, .. })) => {
                 let hdr = build_stream_response_headers(status, &headers);
                 let BufResult(r, _) = stream.write_all(hdr).await;
                 if r.is_err() { return false; }
                 stream_chunked_body(stream, body_reader).await
             }
-            Some(Ok(PendingBody::WebSocket { ws_id, headers, .. })) =>
+            Some(Ok(SettledFetch::WebSocketUpgrade { ws_id, headers, .. })) =>
                 handle_websocket_upgrade(stream, ws_id, &headers, request_headers, runtime).await,
             Some(Err(e)) => {
                 let body = format!(
