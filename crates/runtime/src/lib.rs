@@ -18,6 +18,7 @@ pub mod storage;
 pub mod bundle;
 pub mod serve;
 pub mod plugin;
+pub(crate) mod panic_util;
 
 #[cfg(target_os = "linux")]
 pub mod cpu_timer;

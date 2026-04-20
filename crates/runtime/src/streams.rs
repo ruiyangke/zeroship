@@ -64,8 +64,7 @@ pub fn stream_create_callback(
         .expect("RuntimeState not in isolate slot")
         .clone();
     let mut s = state.borrow_mut();
-    let id = s.next_stream_id;
-    s.next_stream_id += 1;
+    let id = s.alloc_stream_id();
     s.streams.insert(id, StreamState {
         pending_read: None,
         buffer: VecDeque::new(),

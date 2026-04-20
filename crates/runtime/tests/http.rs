@@ -62,7 +62,7 @@ fn no_on_request_returns_error() {
     }];
     let runtime = Runtime::builder().modules(modules.clone()).build();
     match runtime.dispatch_http("GET", "http://localhost/", "[]", "", None) {
-        DispatchOutcome::Complete(Err(e)) => assert!(e.contains("No onRequest")),
+        DispatchOutcome::Complete(Err(e)) => assert!(e.message.contains("No onRequest")),
         _ => panic!("expected error"),
     }
 }

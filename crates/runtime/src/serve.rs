@@ -793,10 +793,7 @@ async fn dispatch_rpc_by_path(
             r.is_ok()
         }
         DispatchOutcome::Complete(Err(e)) => {
-            let resp = build_error_response(
-                if e.starts_with("Method not found") { 404 } else { 500 },
-                &e,
-            );
+            let resp = build_error_response(e.status, &e.message);
             let BufResult(r, _) = stream.write_all(resp).await;
             r.is_ok()
         }
@@ -808,7 +805,7 @@ async fn dispatch_rpc_by_path(
                     w.is_ok()
                 }
                 Some(Err(e)) => {
-                    let resp = build_error_response(500, &e);
+                    let resp = build_error_response(e.status, &e.message);
                     let BufResult(w, _) = stream.write_all(resp).await;
                     w.is_ok()
                 }
@@ -853,7 +850,7 @@ async fn dispatch_rpc_by_path(
                     r.is_ok()
                 }
                 Some(Err(e)) => {
-                    let resp = build_error_response(500, &e);
+                    let resp = build_error_response(e.status, &e.message);
                     let BufResult(r, _) = stream.write_all(resp).await;
                     r.is_ok()
                 }
@@ -923,8 +920,8 @@ async fn dispatch_http(
                     handle_websocket_upgrade(stream, ws_id, &headers, request_headers, runtime).await
                 }
                 Some(Err(e)) => {
-                    let body = format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\""));
-                    let response = build_http_response(500, &[], &body);
+                    let body = format!(r#"{{"error":"{}"}}"#, e.message.replace('"', "\\\""));
+                    let response = build_http_response(e.status, &[], &body);
                     let BufResult(r, _) = stream.write_all(response).await;
                     r.is_ok()
                 }
@@ -941,8 +938,8 @@ async fn dispatch_http(
             r.is_ok()
         }
         DispatchOutcome::Complete(Err(e)) => {
-            let body = format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\""));
-            let response = build_http_response(500, &[], &body);
+            let body = format!(r#"{{"error":"{}"}}"#, e.message.replace('"', "\\\""));
+            let response = build_http_response(e.status, &[], &body);
             let BufResult(r, _) = stream.write_all(response).await;
             r.is_ok()
         }
@@ -1400,7 +1397,9 @@ fn run_single_worker(
             loop {
                 let (stream, _addr) = listener.accept().await.unwrap();
                 let rt = runtime.clone();
-                compio::runtime::spawn(handle_connection(stream, rt)).detach();
+                compio::runtime::spawn(async move {
+                    crate::panic_util::guard("handle_connection", handle_connection(stream, rt)).await;
+                }).detach();
             }
         });
 }

@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use zeroship_core::auth::{extract_bearer, validate_control_key, verify_hmac_sha256_hex};
-use zeroship_runtime::runtime::DispatchOutcome;
+use zeroship_runtime::runtime::{DispatchError, DispatchOutcome};
 use zeroship_runtime::{Runtime, ResultReceiver, StreamReader};
 
 use crate::{cache, metrics, WorkerConfig};
@@ -193,10 +193,10 @@ pub async fn http_dispatch(
                     stream_response(status, &headers, reader)
                 }
                 Some(Ok(zeroship_runtime::HttpDispatchResult::WebSocket { .. })) => {
-                    make_error("WebSocket upgrade not supported via gateway dispatch")
+                    make_error_msg(500, "WebSocket upgrade not supported via gateway dispatch")
                 }
                 Some(Err(e)) => make_error(&e),
-                None => make_error("request timed out"),
+                None => make_error_msg(504, "request timed out"),
             }
         }
         // dispatch_http never returns these, but handle exhaustively
@@ -204,9 +204,9 @@ pub async fn http_dispatch(
             make_response(result.json, result.cpu_time.as_secs_f64() * 1000.0)
         }
         DispatchOutcome::Complete(Err(e)) => make_error(&e),
-        DispatchOutcome::Pending { .. } => make_error("unexpected Pending from dispatch_http"),
+        DispatchOutcome::Pending { .. } => make_error_msg(500, "unexpected Pending from dispatch_http"),
         DispatchOutcome::WebSocketUpgrade { .. } => {
-            make_error("WebSocket upgrade not supported via gateway dispatch")
+            make_error_msg(500, "WebSocket upgrade not supported via gateway dispatch")
         }
     };
 
@@ -319,7 +319,7 @@ pub async fn dispatch(
             match recv_with_timeout(&rx, wall_limit(&runtime), &cancel, &runtime).await {
                 Some(Ok(r)) => make_response(r.json, r.cpu_time.as_secs_f64() * 1000.0),
                 Some(Err(e)) => make_error(&e),
-                None => make_error("request timed out"),
+                None => make_error_msg(504, "request timed out"),
             }
         }
 
@@ -339,15 +339,15 @@ pub async fn dispatch(
                     stream_response(status, &headers, reader)
                 }
                 Some(Ok(zeroship_runtime::HttpDispatchResult::WebSocket { .. })) => {
-                    make_error("WebSocket upgrade not supported via gateway dispatch")
+                    make_error_msg(500, "WebSocket upgrade not supported via gateway dispatch")
                 }
                 Some(Err(e)) => make_error(&e),
-                None => make_error("request timed out"),
+                None => make_error_msg(504, "request timed out"),
             }
         }
 
         DispatchOutcome::WebSocketUpgrade { .. } => {
-            make_error("WebSocket upgrade not supported via gateway dispatch")
+            make_error_msg(500, "WebSocket upgrade not supported via gateway dispatch")
         }
     };
 
@@ -441,12 +441,20 @@ fn stream_response(
     builder.streaming(rx)
 }
 
-fn make_error(msg: &str) -> HttpResponse {
-    // New wire: `{"message","name"}` body with HTTP 500 (no envelope).
-    let body = serde_json::json!({ "message": msg, "name": "Error" });
-    HttpResponse::InternalServerError()
+fn make_error(err: &DispatchError) -> HttpResponse {
+    // New wire: `{"message","name"}` body. Status comes from DispatchError
+    // so JS-thrown errors with `err.status` (e.g. 400 for bad input) reach
+    // the client instead of being flattened to 500.
+    let body = serde_json::json!({ "message": err.message, "name": "Error" });
+    let status = ntex::http::StatusCode::from_u16(err.status)
+        .unwrap_or(ntex::http::StatusCode::INTERNAL_SERVER_ERROR);
+    HttpResponse::build(status)
         .content_type("application/json")
         .body(serde_json::to_string(&body).unwrap())
+}
+
+fn make_error_msg(status: u16, msg: &str) -> HttpResponse {
+    make_error(&DispatchError::new(msg, status))
 }
 
 /// Pull bundle from control plane and load into cache (cold start path).

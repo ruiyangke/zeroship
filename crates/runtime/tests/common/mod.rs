@@ -64,7 +64,7 @@ pub fn dispatch_http_sync(
         DispatchOutcome::HttpComplete { status, headers, body, .. } => {
             Some((status, headers, body))
         }
-        DispatchOutcome::Complete(Err(e)) if e.contains("No onRequest") => None,
+        DispatchOutcome::Complete(Err(e)) if e.message.contains("No onRequest") => None,
         _ => panic!("unexpected dispatch_http outcome"),
     }
 }

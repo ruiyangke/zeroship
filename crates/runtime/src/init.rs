@@ -136,8 +136,29 @@ pub const DISPATCH_JS: &str = r#"(function(__method, __argsJson) {
     if (!__argsJson) {
         args = [];
     } else {
-        var parsed = JSON.parse(__argsJson);
-        args = parsed == null ? [] : parsed;
+        var parsed;
+        try {
+            parsed = JSON.parse(__argsJson);
+        } catch (_e) {
+            // Client-side error: malformed JSON body. Classify as 400 Bad
+            // Request and use a generic message so we don't leak internal
+            // V8 parser diagnostics.
+            var err = new Error('Invalid args JSON');
+            err.status = 400;
+            throw err;
+        }
+        if (parsed == null) {
+            args = [];
+        } else if (Array.isArray(parsed)) {
+            args = parsed;
+        } else {
+            // Wire contract: args body must be a JSON array. A non-array
+            // would otherwise get silently coerced to zero args via
+            // Function.prototype.apply's CreateListFromArrayLike step.
+            var err = new Error('RPC args body must be a JSON array');
+            err.status = 400;
+            throw err;
+        }
     }
     var result = fn.apply(null, args);
 

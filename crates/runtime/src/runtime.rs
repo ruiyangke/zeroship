@@ -104,10 +104,38 @@ use crate::channel::{
 // DispatchOutcome — result of dispatch_start
 // ---------------------------------------------------------------------------
 
+/// Carries an error message and the HTTP status code it should map to.
+/// `From<String>` and `From<&str>` default the status to 500 so existing
+/// call sites that produced plain `Err("...".into())` continue to work
+/// (they just get the generic 500 default).
+#[derive(Debug, Clone)]
+pub struct DispatchError {
+    pub message: String,
+    pub status: u16,
+}
+
+impl DispatchError {
+    pub fn new(message: impl Into<String>, status: u16) -> Self {
+        Self { message: message.into(), status }
+    }
+}
+
+impl From<String> for DispatchError {
+    fn from(s: String) -> Self {
+        Self { message: s, status: 500 }
+    }
+}
+
+impl From<&str> for DispatchError {
+    fn from(s: &str) -> Self {
+        Self { message: s.into(), status: 500 }
+    }
+}
+
 /// Outcome of `dispatch_start` / `dispatch_http` — tells the connection handler what to do.
 pub enum DispatchOutcome {
     /// Sync handler completed immediately. No pump involvement needed.
-    Complete(Result<RequestResult, String>),
+    Complete(Result<RequestResult, DispatchError>),
     /// Async handler: promise is pending. Poll the receiver for the result.
     ///
     /// The `cancel` flag lets the handler abort the in-flight request when the
@@ -116,7 +144,7 @@ pub enum DispatchOutcome {
     /// fetches, and its timers so that compute and network resources are
     /// released promptly instead of continuing in the background.
     Pending {
-        rx: ResultReceiver<Result<RequestResult, String>>,
+        rx: ResultReceiver<Result<RequestResult, DispatchError>>,
         cancel: CancelFlag,
     },
     /// Sync HTTP response — complete buffered body.
@@ -136,7 +164,7 @@ pub enum DispatchOutcome {
     /// Async HTTP handler: promise is pending. Poll the receiver for the reply.
     /// See `Pending` for how `cancel` is wired through the runtime.
     HttpPending {
-        rx: ResultReceiver<Result<HttpDispatchResult, String>>,
+        rx: ResultReceiver<Result<HttpDispatchResult, DispatchError>>,
         cancel: CancelFlag,
     },
     /// WebSocket upgrade — JS returned Response with status 101 + webSocket property.
@@ -490,9 +518,9 @@ struct PendingRequest {
     id: u64,
     promise: v8::Global<v8::Promise>,
     /// Reply slot for direct-dispatch async mode (pump task) — RPC path.
-    reply_direct: Option<ResultSender<Result<RequestResult, String>>>,
+    reply_direct: Option<ResultSender<Result<RequestResult, DispatchError>>>,
     /// Reply slot for direct-dispatch async mode — HTTP path.
-    reply_http: Option<ResultSender<Result<HttpDispatchResult, String>>>,
+    reply_http: Option<ResultSender<Result<HttpDispatchResult, DispatchError>>>,
     /// Whether this is an HTTP request (affects response inspection).
     is_http: bool,
     cpu_accumulated: Duration,
@@ -635,7 +663,15 @@ impl RuntimeInner {
             current_heap_limit: usize,
             _initial_heap_limit: usize,
         ) -> usize {
-            let counter = &mut *(data as *mut u32);
+            if data.is_null() {
+                return current_heap_limit;
+            }
+            // SAFETY: `data` was set via `Box::into_raw(Box::new(0u32))` below
+            // and is never freed during the isolate's lifetime. V8 invokes
+            // this callback only from the isolate's owning thread per
+            // `Isolate::add_near_heap_limit_callback` contract, so we have
+            // exclusive access to the counter here.
+            let counter = unsafe { &mut *(data as *mut u32) };
             *counter += 1;
             if *counter >= MAX_HEAP_LIMIT_HITS {
                 eprintln!(
@@ -747,7 +783,9 @@ impl RuntimeInner {
 
         let rt = self_ref.clone();
         compio::runtime::spawn(async move {
-            Self::pump_loop(rt, notify_rx).await;
+            crate::panic_util::guard("pump_loop", async move {
+                Self::pump_loop(rt, notify_rx).await;
+            }).await;
         })
         .detach();
     }
@@ -1225,7 +1263,7 @@ impl RuntimeInner {
         self.ensure_initialized(modules);
 
         if self.dispatch_fn.is_none() {
-            return DispatchOutcome::Complete(Err("Isolate not initialized".to_string()));
+            return DispatchOutcome::Complete(Err(DispatchError::new("Isolate not initialized", 503)));
         }
 
         let request_id = self.next_direct_request_id;
@@ -1334,10 +1372,10 @@ impl RuntimeInner {
                         self.clear_executing_request();
                         self.build_http_outcome(request_id, info, cpu_total)
                     }
-                    Ok(DispatchResult::ErrorValue { message, .. }) => {
+                    Ok(DispatchResult::ErrorValue { message, status, .. }) => {
                         self.clear_executing_request();
                         self.discard_request_state(request_id);
-                        DispatchOutcome::Complete(Err(message))
+                        DispatchOutcome::Complete(Err(DispatchError::new(message, status)))
                     }
                     Ok(_) | Err(_) => {
                         // Promise is truly pending — needs the pump to drive it
@@ -1359,15 +1397,15 @@ impl RuntimeInner {
                     }
                 }
             }
-            DispatchResult::ErrorValue { message, .. } => {
+            DispatchResult::ErrorValue { message, status, .. } => {
                 self.clear_executing_request();
                 self.discard_request_state(request_id);
-                DispatchOutcome::Complete(Err(message))
+                DispatchOutcome::Complete(Err(DispatchError::new(message, status)))
             }
             DispatchResult::Error(msg) => {
                 self.clear_executing_request();
                 self.discard_request_state(request_id);
-                DispatchOutcome::Complete(Err(msg))
+                DispatchOutcome::Complete(Err(msg.into()))
             }
         }
     }
@@ -1390,10 +1428,10 @@ impl RuntimeInner {
         self.ensure_initialized(modules);
 
         if self.http_handler_fn.is_none() {
-            return DispatchOutcome::Complete(Err("No onRequest handler exported".to_string()));
+            return DispatchOutcome::Complete(Err(DispatchError::new("No onRequest handler exported", 404)));
         }
         if self.http_create_request_fn.is_none() {
-            return DispatchOutcome::Complete(Err("HTTP request helper not compiled".to_string()));
+            return DispatchOutcome::Complete(Err(DispatchError::new("HTTP request helper not compiled", 500)));
         }
 
         let request_id = self.next_direct_request_id;
@@ -1455,7 +1493,7 @@ impl RuntimeInner {
             Ok(Err(msg)) => {
                 self.clear_executing_request();
                 self.discard_request_state(request_id);
-                DispatchOutcome::Complete(Err(msg))
+                DispatchOutcome::Complete(Err(msg.into()))
             }
             Err(promise) => {
                 // Async — store as PendingRequest with is_http=true
@@ -1967,7 +2005,7 @@ impl RuntimeInner {
             }
             SettledResult::Rpc(Err(msg)) => {
                 if let Some(tx) = req.reply_direct {
-                    tx.send(Err(msg));
+                    tx.send(Err(msg.into()));
                 }
             }
             SettledResult::Http(Ok(info)) => {
@@ -1975,7 +2013,7 @@ impl RuntimeInner {
             }
             SettledResult::Http(Err(msg)) => {
                 if let Some(tx) = req.reply_http {
-                    tx.send(Err(msg));
+                    tx.send(Err(msg.into()));
                 }
             }
         }
@@ -1986,7 +2024,7 @@ impl RuntimeInner {
         &mut self,
         id: u64,
         info: ResponseInfo,
-        reply_http: Option<ResultSender<Result<HttpDispatchResult, String>>>,
+        reply_http: Option<ResultSender<Result<HttpDispatchResult, DispatchError>>>,
         _cpu_time: Duration,
     ) {
         let logs = self.drain_request_logs(id);

@@ -332,6 +332,25 @@ impl RuntimeState {
             pump_notify_tx: None,
         }
     }
+
+    /// Allocate a stream-id that is not currently held by an active stream or
+    /// pending resolver. Uses the monotonic `next_stream_id` counter with
+    /// collision-avoidance after wrap, so long-running runtimes (>12 hours at
+    /// 100k fetches/sec) don't silently cross-wire a new stream with an
+    /// in-flight one. Skips 0 so callers can treat it as a sentinel.
+    pub fn alloc_stream_id(&mut self) -> u32 {
+        loop {
+            let sid = self.next_stream_id;
+            self.next_stream_id = self.next_stream_id.wrapping_add(1);
+            if sid == 0 {
+                continue;
+            }
+            if self.streams.contains_key(&sid) || self.pending_resolvers.contains_key(&sid) {
+                continue;
+            }
+            return sid;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

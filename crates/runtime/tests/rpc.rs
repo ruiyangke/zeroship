@@ -3,6 +3,7 @@ use common::*;
 
 use zeroship_runtime::init_v8;
 use zeroship_runtime::runtime::Runtime;
+use zeroship_runtime::ModuleEntry;
 
 #[test]
 fn basic_rpc() {
@@ -113,6 +114,69 @@ fn method_not_found_errors() {
         "[]",
     ).unwrap_err();
     assert!(err.contains("Method not found"), "got: {}", err);
+}
+
+// --- Status propagation probes (B3/B4/B5) ---
+//
+// These adversarial inputs exercise the DISPATCH_JS pre-args validation:
+//   - unknown method           → err.status = 404
+//   - malformed JSON body      → err.status = 400
+//   - JSON-but-not-array body  → err.status = 400
+// The status must reach DispatchOutcome via DispatchError so the worker
+// translates it to the right HTTP code instead of flattening to 500.
+
+fn dispatch_start_error(modules: Vec<ModuleEntry>, method: &str, args_json: &str)
+    -> zeroship_runtime::runtime::DispatchError
+{
+    use zeroship_runtime::runtime::DispatchOutcome;
+    init_v8();
+    let runtime = Runtime::builder().modules(modules).build();
+    match runtime.dispatch_start(method, args_json, None) {
+        DispatchOutcome::Complete(Err(e)) => e,
+        other => panic!("expected Complete(Err), got different outcome ({})",
+            match other {
+                DispatchOutcome::Complete(Ok(_)) => "Complete(Ok)",
+                DispatchOutcome::Pending { .. } => "Pending",
+                DispatchOutcome::HttpComplete { .. } => "HttpComplete",
+                DispatchOutcome::HttpStream { .. } => "HttpStream",
+                DispatchOutcome::HttpPending { .. } => "HttpPending",
+                DispatchOutcome::WebSocketUpgrade { .. } => "WebSocketUpgrade",
+                DispatchOutcome::Complete(Err(_)) => unreachable!(),
+            }),
+    }
+}
+
+#[test]
+fn unknown_method_status_404() {
+    let e = dispatch_start_error(
+        m(r#"export function ping() { return "pong"; }"#),
+        "nope",
+        "[]",
+    );
+    assert_eq!(e.status, 404, "msg={}", e.message);
+    assert!(e.message.contains("Method not found"), "msg={}", e.message);
+}
+
+#[test]
+fn malformed_json_body_status_400() {
+    let e = dispatch_start_error(
+        m(r#"export function ping() { return "pong"; }"#),
+        "ping",
+        "not-json",
+    );
+    assert_eq!(e.status, 400, "msg={}", e.message);
+    assert!(e.message.contains("Invalid args JSON"), "msg={}", e.message);
+}
+
+#[test]
+fn non_array_body_status_400() {
+    let e = dispatch_start_error(
+        m(r#"export function ping() { return "pong"; }"#),
+        "ping",
+        r#"{"not":"an array"}"#,
+    );
+    assert_eq!(e.status, 400, "msg={}", e.message);
+    assert!(e.message.contains("JSON array"), "msg={}", e.message);
 }
 
 #[test]

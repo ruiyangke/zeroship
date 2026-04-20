@@ -274,8 +274,7 @@ pub fn raw_fetch_callback(
         s.next_op_id += 1;
         s.pending_resolvers.insert(id, global_resolver);
 
-        let sid = s.next_stream_id;
-        s.next_stream_id += 1;
+        let sid = s.alloc_stream_id();
 
         let req_id = s.executing_request_id;
         let cancel = s.executing_request_cancel.clone();
@@ -531,52 +530,54 @@ fn spawn_body_reader(
     use futures::StreamExt;
 
     compio::runtime::spawn(async move {
-        let mut body_stream = response.bytes_stream();
-        let mut total = 0usize;
+        crate::panic_util::guard("spawn_body_reader", async move {
+            let mut body_stream = response.bytes_stream();
+            let mut total = 0usize;
 
-        // Every termination path (normal EOF, upstream error, byte-cap
-        // overflow, cancellation) breaks out of the loop to a single
-        // release-site below. Earlier revisions had per-arm early returns
-        // and forgot the slot release on two of them — consolidating is
-        // cheaper than proving correctness on every arm.
-        loop {
-            if let Some(flag) = &cancel
-                && flag.is_cancelled()
-            {
-                push_stream_chunk_to_state(&state, stream_id, Vec::new(), true);
-                break;
-            }
-
-            let chunk = match body_stream.next().await {
-                Some(Ok(b)) => b,
-                Some(Err(e)) => {
-                    eprintln!("[fetch] body read error on stream {stream_id}: {e}");
+            // Every termination path (normal EOF, upstream error, byte-cap
+            // overflow, cancellation) breaks out of the loop to a single
+            // release-site below. Earlier revisions had per-arm early returns
+            // and forgot the slot release on two of them — consolidating is
+            // cheaper than proving correctness on every arm.
+            loop {
+                if let Some(flag) = &cancel
+                    && flag.is_cancelled()
+                {
                     push_stream_chunk_to_state(&state, stream_id, Vec::new(), true);
                     break;
                 }
-                None => {
-                    // Normal EOF
+
+                let chunk = match body_stream.next().await {
+                    Some(Ok(b)) => b,
+                    Some(Err(e)) => {
+                        eprintln!("[fetch] body read error on stream {stream_id}: {e}");
+                        push_stream_chunk_to_state(&state, stream_id, Vec::new(), true);
+                        break;
+                    }
+                    None => {
+                        // Normal EOF
+                        push_stream_chunk_to_state(&state, stream_id, Vec::new(), true);
+                        break;
+                    }
+                };
+
+                total = total.saturating_add(chunk.len());
+                if total > MAX_RESPONSE_SIZE {
+                    eprintln!(
+                        "[fetch] response on stream {stream_id} exceeded MAX_RESPONSE_SIZE ({MAX_RESPONSE_SIZE}); truncating"
+                    );
                     push_stream_chunk_to_state(&state, stream_id, Vec::new(), true);
                     break;
                 }
-            };
 
-            total = total.saturating_add(chunk.len());
-            if total > MAX_RESPONSE_SIZE {
-                eprintln!(
-                    "[fetch] response on stream {stream_id} exceeded MAX_RESPONSE_SIZE ({MAX_RESPONSE_SIZE}); truncating"
-                );
-                push_stream_chunk_to_state(&state, stream_id, Vec::new(), true);
-                break;
+                if chunk.is_empty() {
+                    continue;
+                }
+                push_stream_chunk_to_state(&state, stream_id, chunk.to_vec(), false);
             }
 
-            if chunk.is_empty() {
-                continue;
-            }
-            push_stream_chunk_to_state(&state, stream_id, chunk.to_vec(), false);
-        }
-
-        release_fetch_slot(&state);
+            release_fetch_slot(&state);
+        }).await;
     })
     .detach();
 }
