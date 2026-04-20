@@ -460,6 +460,14 @@ pub(crate) struct RuntimeInner {
     /// Cached reference to `module.default.fetch`, resolved once at module
     /// init. None if the module doesn't export a default.fetch handler.
     pub(crate) fetch_handler_fn: Option<v8::Global<v8::Function>>,
+    /// Cached reference to `module.default.dispatchRpc`, the bootstrap's
+    /// kernel fast-path for /_rpc/<method> calls. Takes `(methodName,
+    /// bodyText)` and returns a Promise<Response> — skips building a full
+    /// Request object, URL parsing, and stream reads. Null when the user's
+    /// module doesn't go through the zeroship bootstrap (e.g., raw Hono
+    /// export), in which case `call_fetch_handler` falls back to the slow
+    /// `default.fetch` path for `/_rpc/*` as well.
+    pub(crate) rpc_handler_fn: Option<v8::Global<v8::Function>>,
     /// Cached JS helper that constructs a Request from Rust-supplied params.
     http_create_request_fn: Option<v8::Global<v8::Function>>,
     pub(crate) initialized: bool,
@@ -604,6 +612,7 @@ impl RuntimeInner {
             isolate,
             context,
             fetch_handler_fn: None,
+            rpc_handler_fn: None,
             http_create_request_fn: None,
             initialized: false,
             state,
@@ -905,6 +914,24 @@ impl RuntimeInner {
                                             Some(v8::Global::new(scope, func));
                                     }
                                 }
+                                // Also look for the bootstrap's fast-path
+                                // `default.dispatchRpc(methodName, bodyText)`.
+                                // When present, /_rpc/<method> requests skip
+                                // the full Request construction and JS URL
+                                // parsing, and land at the user function
+                                // roughly 5x cheaper than the fetch() path.
+                                let rpc_key = v8::String::new(scope, "dispatchRpc").unwrap();
+                                if let Some(rpc_val) =
+                                    default_obj.get(scope, rpc_key.into())
+                                {
+                                    if rpc_val.is_function() {
+                                        let func =
+                                            v8::Local::<v8::Function>::try_from(rpc_val)
+                                                .unwrap();
+                                        self.rpc_handler_fn =
+                                            Some(v8::Global::new(scope, func));
+                                    }
+                                }
                             }
                         }
                     }
@@ -1083,68 +1110,73 @@ impl RuntimeInner {
         let headers_json = serde_json::to_string(headers).unwrap_or_else(|_| "[]".into());
         let env_json = env.as_json().to_string();
 
-        self.arm_cpu_timer();
-        // `Ok` carries a fully-classified DispatchResult (HttpResponse /
-        // ErrorValue / Error). The `Err` arm is a still-pending promise
-        // that the outer match turns into 501 until Task B4 wires async.
+        // Kernel RPC fast-path. When the URL is `/_rpc/<method>` AND the
+        // module's default export surfaced a `dispatchRpc(methodName,
+        // bodyText)` shortcut (the zeroship bootstrap always does), skip
+        // constructing a Request / env / ctx and invoke dispatchRpc
+        // directly. This drops the per-request JS work from
+        //   (Request construction + URL parser + request.text() stream
+        //    + __bindRequest × 2 + property lookup + JSON.parse)
+        // to just
+        //   (JSON.parse on bodyText + property lookup).
         //
-        // Using DispatchResult here (not Result<ResponseInfo, String>)
-        // preserves `err.status` / `err.name` / `err.stack` from user
-        // throws. See `call_fetch_inner` for the classification logic —
-        // it mirrors `dispatch_request` in `dispatch.rs` for consistency.
+        // Measured on this machine: master 844K req/s vs the slow fetch
+        // path 160-330K — the fast-path recovers the gap for an
+        // empty-body RPC call.
+        let rpc_method: Option<&str> = self
+            .rpc_handler_fn
+            .as_ref()
+            .and_then(|_| rpc_method_from_url(url));
+
+        self.arm_cpu_timer();
         let dispatch_result: Result<DispatchResult, v8::Global<v8::Promise>> =
             enter_v8!(self, |scope| {
                 let undefined = v8::undefined(scope).into();
 
-                // 1. Construct JS Request via the same helper dispatch_http uses.
-                let create_fn = v8::Local::new(scope, self.http_create_request_fn.as_ref().unwrap());
-                let method_val = v8::String::new(scope, method).unwrap().into();
-                let url_val = v8::String::new(scope, url).unwrap().into();
-                let headers_val = v8::String::new(scope, &headers_json).unwrap().into();
-                let body_val = v8::String::new(scope, body).unwrap().into();
-
-                let request_opt = create_fn.call(scope, undefined, &[method_val, url_val, headers_val, body_val]);
-                if request_opt.is_none() {
-                    Ok(DispatchResult::Error("Failed to construct Request object".to_string()))
+                if let Some(method_name) = rpc_method {
+                    // ---- Fast path: dispatchRpc(methodName, bodyText) ----
+                    let rpc_fn = v8::Local::new(scope, self.rpc_handler_fn.as_ref().unwrap());
+                    let method_arg = v8::String::new(scope, method_name).unwrap().into();
+                    let body_arg = v8::String::new(scope, body).unwrap().into();
+                    call_fetch_inner(scope, rpc_fn, undefined, method_arg, body_arg, undefined)
                 } else {
-                    let request = request_opt.unwrap();
+                    // ---- Slow path: full default.fetch(request, env, ctx) ----
+                    let create_fn = v8::Local::new(scope, self.http_create_request_fn.as_ref().unwrap());
+                    let method_val = v8::String::new(scope, method).unwrap().into();
+                    let url_val = v8::String::new(scope, url).unwrap().into();
+                    let headers_val = v8::String::new(scope, &headers_json).unwrap().into();
+                    let body_val = v8::String::new(scope, body).unwrap().into();
 
-                    // 2. Build env — return the cached composite object
-                    //    (plugin namespaces + scalar env JSON) built during
-                    //    `ensure_initialized`. Same V8 Object identity as
-                    //    `__zs_env()` / `import { env } from "zeroship"` so
-                    //    user code can compare references across those
-                    //    surfaces. Fallback to JSON-parse only if the cache
-                    //    wasn't populated (shouldn't happen — we just ran
-                    //    `ensure_initialized` above).
-                    let env_val: v8::Local<v8::Value> = {
-                        let maybe_global = self.state.borrow().env_obj.clone();
-                        match maybe_global {
-                            Some(g) => v8::Local::new(scope, g).into(),
-                            None => {
-                                let env_src = v8::String::new(scope, &env_json).unwrap();
-                                v8::json::parse(scope, env_src)
-                                    .unwrap_or_else(|| v8::Object::new(scope).into())
+                    let request_opt = create_fn.call(scope, undefined, &[method_val, url_val, headers_val, body_val]);
+                    if request_opt.is_none() {
+                        Ok(DispatchResult::Error("Failed to construct Request object".to_string()))
+                    } else {
+                        let request = request_opt.unwrap();
+
+                        let env_val: v8::Local<v8::Value> = {
+                            let maybe_global = self.state.borrow().env_obj.clone();
+                            match maybe_global {
+                                Some(g) => v8::Local::new(scope, g).into(),
+                                None => {
+                                    let env_src = v8::String::new(scope, &env_json).unwrap();
+                                    v8::json::parse(scope, env_src)
+                                        .unwrap_or_else(|| v8::Object::new(scope).into())
+                                }
                             }
-                        }
-                    };
+                        };
 
-                    // 3. Build ctx — minimal stub. `waitUntil` swallows any
-                    //    rejection via `.catch(() => {})` so we don't leak
-                    //    unhandled-rejection warnings while real wiring lands
-                    //    in Task C3; `passThroughOnException` is a true no-op.
-                    let ctx_obj = v8::Object::new(scope);
-                    let wu_key = v8::String::new(scope, "waitUntil").unwrap();
-                    let wu_fn = v8::Function::new(scope, wait_until_noop_callback).unwrap();
-                    ctx_obj.set(scope, wu_key.into(), wu_fn.into());
-                    let pt_key = v8::String::new(scope, "passThroughOnException").unwrap();
-                    let pt_fn = v8::Function::new(scope, pass_through_on_exception_noop_callback).unwrap();
-                    ctx_obj.set(scope, pt_key.into(), pt_fn.into());
-                    let ctx_val: v8::Local<v8::Value> = ctx_obj.into();
+                        let ctx_obj = v8::Object::new(scope);
+                        let wu_key = v8::String::new(scope, "waitUntil").unwrap();
+                        let wu_fn = v8::Function::new(scope, wait_until_noop_callback).unwrap();
+                        ctx_obj.set(scope, wu_key.into(), wu_fn.into());
+                        let pt_key = v8::String::new(scope, "passThroughOnException").unwrap();
+                        let pt_fn = v8::Function::new(scope, pass_through_on_exception_noop_callback).unwrap();
+                        ctx_obj.set(scope, pt_key.into(), pt_fn.into());
+                        let ctx_val: v8::Local<v8::Value> = ctx_obj.into();
 
-                    // 4. Call module.default.fetch(request, env, ctx)
-                    let handler = v8::Local::new(scope, self.fetch_handler_fn.as_ref().unwrap());
-                    call_fetch_inner(scope, handler, undefined, request, env_val, ctx_val)
+                        let handler = v8::Local::new(scope, self.fetch_handler_fn.as_ref().unwrap());
+                        call_fetch_inner(scope, handler, undefined, request, env_val, ctx_val)
+                    }
                 }
             });
         self.disarm_cpu_timer();
@@ -1983,6 +2015,39 @@ fn call_ws_method(
     let Ok(func) = v8::Local::<v8::Function>::try_from(method_val) else { return };
 
     func.call(scope, ws_val, args);
+}
+
+/// Extract the `<method>` segment from a URL whose path starts with `/_rpc/`.
+///
+/// Returns `None` if the URL isn't an RPC request (kernel will fall through
+/// to the full `default.fetch(request, env, ctx)` path). Handles `http://`
+/// and `https://` schemes; the method name is everything after `/_rpc/` up
+/// to `?`, `#`, or end-of-string. Percent-encoding is left to the JS side
+/// to decode — the fast-path passes the raw segment to `dispatchRpc` which
+/// does not need decoding for the common "ping"-style identifier case.
+#[inline]
+fn rpc_method_from_url(url: &str) -> Option<&str> {
+    // Find the path: skip "scheme://host". If the URL is a raw path
+    // (e.g. "/_rpc/ping"), start at 0.
+    let path_start = if let Some(rest) = url.strip_prefix("http://") {
+        url.len() - rest.len() + rest.find('/').unwrap_or(rest.len())
+    } else if let Some(rest) = url.strip_prefix("https://") {
+        url.len() - rest.len() + rest.find('/').unwrap_or(rest.len())
+    } else {
+        0
+    };
+    let path_and_query = url.get(path_start..)?;
+    let method_and_rest = path_and_query.strip_prefix("/_rpc/")?;
+    // Stop at `?` or `#` — we want just the method identifier.
+    let end = method_and_rest
+        .find(|c: char| c == '?' || c == '#')
+        .unwrap_or(method_and_rest.len());
+    let method = &method_and_rest[..end];
+    if method.is_empty() {
+        None
+    } else {
+        Some(method)
+    }
 }
 
 /// Call the onRequest handler and inspect the result. Separated out to avoid
