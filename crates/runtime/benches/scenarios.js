@@ -198,6 +198,12 @@ function handleSse(url) {
     });
 }
 
+// Cheapest possible "pong" response — same byte payload as the RPC path's
+// `"pong"` (JSON string, 6 bytes incl. quotes) but constructed via the
+// standard Response API. Used to measure the fetch() dispatch overhead on
+// its own, with no URL/body work by the handler.
+const PONG_RESPONSE_BYTES = new TextEncoder().encode('"pong"');
+
 export default {
     fetch(request) {
         const url = new URL(request.url);
@@ -207,6 +213,15 @@ export default {
         }
         if (url.pathname === "/sse") {
             return handleSse(url);
+        }
+        // /ping — fetch-path counterpart to the /_rpc/ping scenario.
+        // Returns the same `"pong"` body so wrk transfer numbers are
+        // apples-to-apples between the two dispatch paths.
+        if (url.pathname === "/ping") {
+            return new Response(PONG_RESPONSE_BYTES, {
+                status: 200,
+                headers: { "Content-Type": "application/json" },
+            });
         }
         return Response.json({ method: request.method, url: request.url });
     },

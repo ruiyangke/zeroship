@@ -146,19 +146,37 @@ echo "  wrk: -t$THREADS -c$CONNS -d$DURATION  |  workers=$WORKERS"
 echo "  NUMA: $([ -n "$NUMA_SERVER" ] && echo "server=node0 / client=node1" || echo 'disabled')"
 echo "=================================================================="
 
+run_wrk_get() {
+    local label=$1 port=$2 path=$3
+    local output rps p50 p99 total
+    output=$($NUMA_CLIENT wrk -t$THREADS -c$CONNS -d$DURATION --latency \
+        "http://127.0.0.1:$port$path" 2>&1)
+    rps=$(awk '/Requests\/sec/ {print $2}' <<< "$output")
+    p50=$(awk '$1=="50%" {print $2}' <<< "$output")
+    p99=$(awk '$1=="99%" {print $2}' <<< "$output")
+    total=$(awk '/[Rr]equests in / {print $1}' <<< "$output")
+    printf "  %-28s %14s req/s  p50=%-8s p99=%-8s (total %s)\n" \
+        "$label" "$rps" "$p50" "$p99" "${total:-?}"
+}
+
 echo ""
-echo "--- ping ---"
-run_wrk "v8-compio 1w" $PORT_1W "/_rpc/ping" /tmp/wrk-rpc-empty.lua
+echo "--- ping  (RPC fast-path:  POST /_rpc/ping) ---"
+run_wrk "v8-compio 1w"          $PORT_1W "/_rpc/ping" /tmp/wrk-rpc-empty.lua
 run_wrk "v8-compio ${WORKERS}w" $PORT_NW "/_rpc/ping" /tmp/wrk-rpc-empty.lua
 
 echo ""
-echo "--- promiseChain ---"
-run_wrk "v8-compio 1w" $PORT_1W "/_rpc/promiseChain" /tmp/wrk-rpc-empty.lua
+echo "--- ping  (fetch handler: GET  /ping) ---"
+run_wrk_get "v8-compio 1w"          $PORT_1W "/ping"
+run_wrk_get "v8-compio ${WORKERS}w" $PORT_NW "/ping"
+
+echo ""
+echo "--- promiseChain (RPC) ---"
+run_wrk "v8-compio 1w"          $PORT_1W "/_rpc/promiseChain" /tmp/wrk-rpc-empty.lua
 run_wrk "v8-compio ${WORKERS}w" $PORT_NW "/_rpc/promiseChain" /tmp/wrk-rpc-empty.lua
 
 echo ""
-echo "--- fetchLocal (→ echo @ $PORT_ECHO) ---"
-run_wrk "v8-compio 1w" $PORT_1W "/_rpc/fetchExternal" /tmp/wrk-rpc-fetchlocal.lua
+echo "--- fetchLocal (RPC → echo @ $PORT_ECHO) ---"
+run_wrk "v8-compio 1w"          $PORT_1W "/_rpc/fetchExternal" /tmp/wrk-rpc-fetchlocal.lua
 run_wrk "v8-compio ${WORKERS}w" $PORT_NW "/_rpc/fetchExternal" /tmp/wrk-rpc-fetchlocal.lua
 
 echo ""
