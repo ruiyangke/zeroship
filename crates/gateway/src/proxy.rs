@@ -164,32 +164,16 @@ fn pool_key(worker_url: &str) -> String {
 // HTTP proxy
 // ---------------------------------------------------------------------------
 
-pub async fn forward(
-    ring: &HashRing,
-    app_id: &Uuid,
-    plan_id: &str,
-    request_id: &Uuid,
-    body: &[u8],
-    user_header: Option<&str>,
-    worker_key: &str,
-) -> Result<HttpResponse, String> {
-    if ring.num_workers() == 0 {
-        return Err("no workers configured".into());
-    }
-    let (idx, worker_url) = ring.select(app_id);
-    ring.acquire(idx);
-    let result = forward_to_worker(worker_url, app_id, plan_id, request_id, body, user_header, worker_key).await;
-    ring.release(idx);
-    result
-}
-
-/// Forward an HTTP request to a worker via the `/http-dispatch/` endpoint.
+/// Forward an HTTP request to a worker via the unified `/dispatch/{app_id}`
+/// endpoint.
 ///
-/// Instead of sending a raw RPC body, this sends a JSON envelope containing
-/// the original HTTP request details (method, URL, headers, body) so the
-/// worker can invoke the app's `onRequest` handler with a proper `Request`
-/// object. This enables streaming responses (SSE) from V8 ReadableStreams.
-pub async fn forward_http(
+/// Wraps the original HTTP request (method, URL, headers, body) into the
+/// JSON envelope the worker's kernel passes to `Runtime::call_fetch_handler`
+/// (which in turn invokes the app's exported `default.fetch`). This is the
+/// one path the kernel exposes — both `_rpc/*` URLs and normal HTTP requests
+/// travel the same wire; any routing within the app happens in user-space JS
+/// via the bootstrap router.
+pub async fn forward_dispatch(
     ring: &HashRing,
     app_id: &Uuid,
     plan_id: &str,
@@ -207,7 +191,7 @@ pub async fn forward_http(
     let (idx, worker_url) = ring.select(app_id);
     ring.acquire(idx);
 
-    // Build the HTTP envelope JSON
+    // Build the HTTP envelope JSON.
     let envelope = serde_json::json!({
         "method": method,
         "url": url,
@@ -216,7 +200,7 @@ pub async fn forward_http(
     });
     let envelope_bytes = serde_json::to_vec(&envelope).unwrap_or_default();
 
-    let result = forward_to_worker_http(
+    let result = forward_to_worker_dispatch(
         worker_url, app_id, plan_id, request_id, &envelope_bytes, user_header, worker_key,
     ).await;
     ring.release(idx);
@@ -226,7 +210,8 @@ pub async fn forward_http(
 /// Timeout for connecting and reading from workers.
 const WORKER_TIMEOUT: Duration = Duration::from_secs(30);
 
-async fn forward_to_worker(
+/// Forward the HTTP envelope to a worker at `/dispatch/{app_id}`.
+async fn forward_to_worker_dispatch(
     worker_url: &str,
     app_id: &Uuid,
     plan_id: &str,
@@ -238,7 +223,6 @@ async fn forward_to_worker(
     let key = pool_key(worker_url);
     let path = format!("/dispatch/{app_id}");
 
-    // Cache host extraction (no .leak())
     let host = extract_host(worker_url);
 
     // Attempt up to 2 times: once with a pooled connection (if any), once
@@ -247,145 +231,6 @@ async fn forward_to_worker(
     // yet. The write may succeed into the kernel buffer; the failure only
     // surfaces on read as "connection closed before headers complete".
     // Retrying on a fresh connection handles that race.
-    let (mut stream, mut from_pool) = match CONN_POOL.with(|p| p.borrow_mut().take(&key)) {
-        Some(s) => (s, true),
-        None => {
-            let (s, _, _) = compio::time::timeout(WORKER_TIMEOUT, connect(worker_url))
-                .await
-                .map_err(|_| "connect timeout".to_string())?
-                .map_err(|e| format!("connect: {e}"))?;
-            (s, false)
-        }
-    };
-
-    // Build request (no clone — rebuild on retry if needed)
-    let request = build_request(&path, &host, app_id, plan_id, request_id, body, user_header, worker_key);
-
-    if stream.write_all(request).await.is_err() {
-        // Stale connection — reconnect with timeout
-        let (new_stream, _, _) = compio::time::timeout(WORKER_TIMEOUT, connect(worker_url))
-            .await
-            .map_err(|_| "reconnect timeout".to_string())?
-            .map_err(|e| format!("reconnect: {e}"))?;
-        stream = new_stream;
-        from_pool = false;
-        let retry_request = build_request(&path, &host, app_id, plan_id, request_id, body, user_header, worker_key);
-        stream.write_all(retry_request).await.map_err(|e| format!("write: {e}"))?;
-    }
-
-    // Parse response headers (shared between buffered and streaming paths).
-    // On pooled connections, retry once on read failure with a fresh socket.
-    let parsed = match compio::time::timeout(WORKER_TIMEOUT, read_http_headers(&mut stream)).await {
-        Ok(Ok(p)) => p,
-        Ok(Err(e)) if from_pool => {
-            // Pooled connection was half-open. Reconnect and retry once.
-            let (new_stream, _, _) = compio::time::timeout(WORKER_TIMEOUT, connect(worker_url))
-                .await
-                .map_err(|_| format!("reconnect timeout (after: {e})"))?
-                .map_err(|e| format!("reconnect: {e}"))?;
-            stream = new_stream;
-            from_pool = false;
-            let retry_request = build_request(&path, &host, app_id, plan_id, request_id, body, user_header, worker_key);
-            stream.write_all(retry_request).await.map_err(|e| format!("write: {e}"))?;
-            compio::time::timeout(WORKER_TIMEOUT, read_http_headers(&mut stream))
-                .await
-                .map_err(|_| "read timeout".to_string())?
-                .map_err(|e| format!("read: {e}"))?
-        }
-        Ok(Err(e)) => return Err(format!("read: {e}")),
-        Err(_) => return Err("read timeout".to_string()),
-    };
-    let _ = from_pool; // silence unused after last branch
-
-    let hop_by_hop = ["connection", "keep-alive", "transfer-encoding",
-                      "te", "trailer", "upgrade", "proxy-authorization", "proxy-authenticate"];
-
-    let mut builder = HttpResponse::build(
-        ntex::http::StatusCode::from_u16(parsed.status).unwrap_or(ntex::http::StatusCode::BAD_GATEWAY),
-    );
-    for (name, value) in &parsed.headers {
-        let lname = name.to_ascii_lowercase();
-        if !hop_by_hop.contains(&lname.as_str()) {
-            builder.set_header(name.as_str(), value.as_str());
-        }
-    }
-
-    if parsed.is_chunked {
-        // Streaming path: forward chunks in real time via ntex mpsc channel.
-        // The connection is consumed by the streaming task (not returned to pool).
-        let (tx, rx) = ntex::channel::mpsc::channel();
-
-        compio::runtime::spawn(async move {
-            // Forward any body bytes already read past the header boundary
-            let mut leftover = parsed.trailing;
-
-            loop {
-                // Process available data: decode chunked frames
-                loop {
-                    match decode_next_chunk(&leftover) {
-                        ChunkDecode::Complete(data, consumed) => {
-                            if data.is_empty() {
-                                // Final zero-length chunk — stream is done
-                                return;
-                            }
-                            let item: Result<ntex::util::Bytes, std::io::Error> =
-                                Ok(ntex::util::Bytes::from(data));
-                            if tx.send(item).is_err() {
-                                return; // client disconnected
-                            }
-                            leftover = leftover[consumed..].to_vec();
-                        }
-                        ChunkDecode::Incomplete => break,
-                    }
-                }
-
-                // Read more data from the worker
-                let read_buf = vec![0u8; 4096];
-                let BufResult(r, returned) = stream.read(read_buf).await;
-                match r {
-                    Ok(0) => return, // connection closed
-                    Ok(n) => leftover.extend_from_slice(&returned[..n]),
-                    Err(_) => return,
-                }
-            }
-        }).detach();
-
-        Ok(builder.streaming(rx))
-    } else {
-        // Buffered path: read the complete body (Content-Length or close-delimited),
-        // then return connection to pool.
-        let response_body = compio::time::timeout(
-            WORKER_TIMEOUT,
-            read_body_buffered(&mut stream, parsed.content_length, parsed.trailing),
-        )
-        .await
-        .map_err(|_| "read timeout".to_string())?
-        .map_err(|e| format!("read: {e}"))?;
-
-        CONN_POOL.with(|p| p.borrow_mut().put(key, stream));
-        Ok(builder.body(response_body))
-    }
-}
-
-/// Forward an HTTP dispatch request to a worker. Uses `/http-dispatch/{app_id}`
-/// so the worker invokes the app's `onRequest` handler instead of RPC dispatch.
-/// Otherwise identical to `forward_to_worker`.
-async fn forward_to_worker_http(
-    worker_url: &str,
-    app_id: &Uuid,
-    plan_id: &str,
-    request_id: &Uuid,
-    body: &[u8],
-    user_header: Option<&str>,
-    worker_key: &str,
-) -> Result<HttpResponse, String> {
-    let key = pool_key(worker_url);
-    let path = format!("/http-dispatch/{app_id}");
-
-    let host = extract_host(worker_url);
-
-    // See comment on forward_to_worker — we retry once on read failure when
-    // the connection came from the pool (half-open detection).
     let (mut stream, mut from_pool) = match CONN_POOL.with(|p| p.borrow_mut().take(&key)) {
         Some(s) => (s, true),
         None => {

@@ -221,7 +221,7 @@ async fn handle_request(
 ) -> HttpResponse {
     let wall_start = std::time::Instant::now();
 
-    // 1. Route resolution — we need the app_id for both RPC and static assets
+    // 1. Route resolution — we need the app_id for both dispatch and static assets.
     let (app_id, route) = match state.routes.lookup_by_name(app_name) {
         Some(r) => r,
         None => {
@@ -233,15 +233,7 @@ async fn handle_request(
     // Normalize tail: strip leading slash
     let tail = tail.strip_prefix('/').unwrap_or(tail);
 
-    // 2. Decide: RPC, HTTP dispatch, or static asset
-    //
-    // RPC wire: `POST /<app>/_rpc/<methodName>` — the suffix after `_rpc/`
-    // is the URL-path-style method name; the request body is the JSON
-    // args array. Legacy `POST /<app>/rpc` with a JSON-RPC envelope is
-    // kept routable only as a 410 to surface the migration.
-    if let Some(method_name) = tail.strip_prefix("_rpc/") {
-        return handle_rpc(req, &state, &app_id, &route, method_name, body, wall_start).await;
-    }
+    // 2. Legacy /rpc JSON-RPC endpoint removed — surface the migration.
     if tail == "rpc" {
         return HttpResponse::Gone().json(&serde_json::json!({
             "message": "The /rpc JSON-RPC endpoint is gone. Use POST /_rpc/<methodName> with a JSON array body.",
@@ -249,139 +241,47 @@ async fn handle_request(
         }));
     }
 
-    // If the app exports an onRequest handler, proxy non-static HTTP requests
-    // to the worker via HTTP dispatch. This enables streaming responses (SSE)
-    // and dynamic server-side routing.
-    if route.has_http_handler && !is_static_ext(tail) {
-        return handle_http_dispatch(req, &state, &app_id, &route, tail, body, wall_start).await;
+    // 3. `_rpc/<method>` URLs still require the app's X-Api-Key check. The
+    //    URL itself is preserved in the envelope we forward; the bootstrap
+    //    router in the runtime (PR 2) dispatches `_rpc/*` internally.
+    if tail.starts_with("_rpc/") {
+        if let Err(resp) = auth::check_api_key(&req, &route) {
+            return resp;
+        }
     }
 
-    // Static file serving — no auth required
+    // 4. If the app exports a fetch handler, proxy non-static HTTP requests
+    //    to the worker via the unified dispatch endpoint. This enables
+    //    streaming (SSE) and server-side routing; the JS handler receives
+    //    a proper `Request` object.
+    if route.has_http_handler && (tail.starts_with("_rpc/") || !is_static_ext(tail)) {
+        return handle_dispatch(req, &state, &app_id, &route, tail, body, wall_start).await;
+    }
+
+    // 5. `_rpc/*` URLs on apps without a fetch handler have nowhere to go —
+    //    the legacy RPC-only wire is gone.
+    if tail.starts_with("_rpc/") {
+        return HttpResponse::NotFound()
+            .json(&serde_json::json!({"error": "app has no fetch handler"}));
+    }
+
+    // 6. Static file serving — no auth required.
     handle_static(&state, &app_id, tail).await
 }
 
 // ---------------------------------------------------------------------------
-// RPC handler (auth + rate limit + proxy)
+// Dispatch handler — the single worker-facing path
 // ---------------------------------------------------------------------------
 
-async fn handle_rpc(
-    req: HttpRequest,
-    state: &GateState,
-    app_id: &Uuid,
-    route: &zeroship_core::types::RouteEntry,
-    method_name: &str,
-    body: Bytes,
-    wall_start: std::time::Instant,
-) -> HttpResponse {
-    // Auth — check X-Api-Key header
-    if let Err(resp) = auth::check_api_key(&req, route) {
-        return resp;
-    }
-
-    // Rate limit
-    if let Err(resp) = enforce::check_rate_limit(&state.rate_limiters, app_id) {
-        return resp;
-    }
-
-    // Concurrency guard (RAII — released on drop)
-    let _guard = match enforce::acquire_concurrency(&state.concurrency, app_id) {
-        Ok(guard) => guard,
-        Err(resp) => return resp,
-    };
-
-    // Extract user from __zs_session cookie (None if missing/invalid/wrong app)
-    let user_header_value = if !state.config.auth_secret.is_empty() {
-        let cookie = req
-            .headers()
-            .get("cookie")
-            .and_then(|v| v.to_str().ok());
-        let app_id_str = app_id.to_string();
-        user_auth::extract_user(cookie, &state.config.auth_secret, &app_id_str)
-            .map(|u| user_auth::encode_user_header(&u, &state.config.worker_key))
-    } else {
-        None
-    };
-
-    // Build the worker-side envelope: {method, args}. The client's request
-    // body is already a JSON array of args, forwarded verbatim. Empty
-    // body is treated as "[]" by the worker/runtime pair.
-    let args_str = match std::str::from_utf8(&body) {
-        Ok(s) => s,
-        Err(_) => {
-            return HttpResponse::BadRequest()
-                .json(&serde_json::json!({"message": "RPC body must be UTF-8 JSON", "name": "Error"}));
-        }
-    };
-    let envelope_bytes = serde_json::to_vec(&serde_json::json!({
-        "method": method_name,
-        "args": args_str,
-    })).unwrap();
-
-    // Proxy to worker via CHWBL hash ring
-    let request_id = Uuid::new_v4();
-    let mut response = match proxy::forward(
-        &state.hash_ring,
-        app_id,
-        &route.plan_id,
-        &request_id,
-        &Bytes::from(envelope_bytes),
-        user_header_value.as_deref(),
-        &state.config.worker_key,
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return HttpResponse::BadGateway()
-                .json(&serde_json::json!({"error": format!("worker error: {e}")}));
-        }
-    };
-
-    // Handle 401 response: redirect browser requests to the auth page
-    if response.status() == ntex::http::StatusCode::UNAUTHORIZED {
-        let accepts_html = req
-            .headers()
-            .get("accept")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.contains("text/html"));
-
-        if accepts_html {
-            let original_path = req.uri().path();
-            let auth_url = format!(
-                "{}/auth/authorize?app_id={}&return={}",
-                state.config.control_url, app_id, original_path
-            );
-            return HttpResponse::Found()
-                .header("location", auth_url)
-                .finish();
-        }
-    }
-
-    // Add response headers
-    let wall_ms = wall_start.elapsed().as_secs_f64() * 1000.0;
-    response.headers_mut().insert(
-        ntex::http::header::HeaderName::from_static("x-wall-time-ms"),
-        ntex::http::header::HeaderValue::from_str(&format!("{wall_ms:.2}")).unwrap(),
-    );
-    response.headers_mut().insert(
-        ntex::http::header::HeaderName::from_static("x-request-id"),
-        ntex::http::header::HeaderValue::from_str(&request_id.to_string()).unwrap(),
-    );
-
-    response
-}
-
-// ---------------------------------------------------------------------------
-// HTTP dispatch handler (for apps with onRequest — enables SSE streaming)
-// ---------------------------------------------------------------------------
-
-/// Forward an HTTP request to the worker via the `/http-dispatch/` endpoint.
+/// Forward an HTTP request to the worker via `/dispatch/{app_id}`.
 ///
-/// This path is used for apps that export an `onRequest` handler. The full
-/// HTTP request (method, URL, headers, body) is forwarded so the JS handler
-/// receives a proper `Request` object and can return streaming responses
-/// (e.g., SSE for LLM token streaming).
-async fn handle_http_dispatch(
+/// The full HTTP request (method, URL, headers, body) is packaged into the
+/// HttpEnvelope and handed to `Runtime::call_fetch_handler`, which invokes
+/// the app's exported `default.fetch(req, env, ctx)`. Covers both the
+/// `_rpc/*` URLs (routed inside the kernel via the bootstrap) and plain
+/// HTTP requests. Enables streaming responses (e.g., SSE for LLM token
+/// streaming).
+async fn handle_dispatch(
     req: HttpRequest,
     state: &GateState,
     app_id: &Uuid,
@@ -414,7 +314,7 @@ async fn handle_http_dispatch(
         None
     };
 
-    // Reconstruct the URL the JS handler will see
+    // Reconstruct the URL the JS handler will see.
     let scheme = if req.connection_info().scheme() == "https" { "https" } else { "http" };
     let host = req
         .headers()
@@ -423,7 +323,7 @@ async fn handle_http_dispatch(
         .unwrap_or("localhost");
     let url = format!("{scheme}://{host}/{tail}");
 
-    // Collect request headers as [key, value] pairs
+    // Collect request headers as [key, value] pairs.
     let mut headers: Vec<(String, String)> = Vec::new();
     for (name, value) in req.headers() {
         if let Ok(v) = value.to_str() {
@@ -434,9 +334,9 @@ async fn handle_http_dispatch(
     let method = req.method().as_str();
     let body_str = String::from_utf8_lossy(&body);
 
-    // Proxy to worker via CHWBL hash ring using HTTP dispatch
+    // Proxy to worker via CHWBL hash ring.
     let request_id = Uuid::new_v4();
-    let mut response = match proxy::forward_http(
+    let mut response = match proxy::forward_dispatch(
         &state.hash_ring,
         app_id,
         &route.plan_id,
@@ -457,7 +357,27 @@ async fn handle_http_dispatch(
         }
     };
 
-    // Add response headers
+    // Handle 401 response: redirect browser requests to the auth page.
+    if response.status() == ntex::http::StatusCode::UNAUTHORIZED {
+        let accepts_html = req
+            .headers()
+            .get("accept")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("text/html"));
+
+        if accepts_html {
+            let original_path = req.uri().path();
+            let auth_url = format!(
+                "{}/auth/authorize?app_id={}&return={}",
+                state.config.control_url, app_id, original_path
+            );
+            return HttpResponse::Found()
+                .header("location", auth_url)
+                .finish();
+        }
+    }
+
+    // Add response headers.
     let wall_ms = wall_start.elapsed().as_secs_f64() * 1000.0;
     response.headers_mut().insert(
         ntex::http::header::HeaderName::from_static("x-wall-time-ms"),

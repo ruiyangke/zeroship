@@ -25,8 +25,7 @@ macro_rules! counter {
     };
 }
 
-counter!(DISPATCH_RPC_TOTAL);
-counter!(DISPATCH_HTTP_TOTAL);
+counter!(DISPATCH_TOTAL);
 counter!(DISPATCH_REJECTED_AUTH);
 counter!(DISPATCH_REJECTED_BAD_APP_ID);
 counter!(DISPATCH_REJECTED_BAD_ENVELOPE);
@@ -48,12 +47,9 @@ pub fn inc(counter: &AtomicU64) {
 pub fn render() -> String {
     let mut out = String::with_capacity(2048);
 
-    emit_counter(&mut out, "zeroship_worker_dispatch_rpc_total",
-        "RPC requests dispatched to V8",
-        &DISPATCH_RPC_TOTAL);
-    emit_counter(&mut out, "zeroship_worker_dispatch_http_total",
-        "HTTP requests dispatched to V8 onRequest handler",
-        &DISPATCH_HTTP_TOTAL);
+    emit_counter(&mut out, "zeroship_worker_dispatch_total",
+        "HTTP requests dispatched to V8 via the unified fetch handler",
+        &DISPATCH_TOTAL);
     emit_counter(&mut out, "zeroship_worker_dispatch_rejected_auth",
         "Dispatch requests rejected because the Authorization bearer didn't match the worker key",
         &DISPATCH_REJECTED_AUTH);
