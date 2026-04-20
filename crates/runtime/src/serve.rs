@@ -23,10 +23,12 @@ use std::sync::Arc;
 use std::task::Waker;
 use std::time::Duration;
 
+use crate::channel::CancelFlag;
 use crate::init::init_v8;
 use crate::modules::ModuleEntry;
 use crate::plugin::NativePlugin;
-use crate::runtime::{DispatchOutcome, HttpDispatchResult, Runtime, RuntimeLimits};
+use crate::runtime::{Runtime, RuntimeLimits};
+use crate::{EnvSnapshot, FetchOutcome, RequestCtx, SettledFetch};
 
 use compio::buf::BufResult;
 use compio::io::{AsyncRead, AsyncWriteExt};
@@ -186,7 +188,6 @@ async fn recv_with_timeout<T>(
 // ===========================================================================
 
 const HEALTH_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}";
-const NOT_FOUND_RESPONSE: &[u8] = b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found";
 const HEADERS_TOO_LARGE_RESPONSE: &[u8] =
     b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 const PAYLOAD_TOO_LARGE_RESPONSE: &[u8] =
@@ -352,72 +353,49 @@ async fn handle_connection(
 
             let total_len = total_input_consumed;
 
-            let has_http = runtime.has_http_handler();
-            match (method, path) {
-                ("GET", "/health") => {
-                    let BufResult(write_result, _) = stream.write_all(HEALTH_RESPONSE.to_vec()).await;
-                    if write_result.is_err() { return; }
-                }
-                // New URL-path-based RPC wire: POST /_rpc/<methodName>.
-                // The body is the JSON args array. `dispatch_rpc_by_path`
-                // routes into DISPATCH_JS which looks up the method in
-                // the `__rpc` registry — populated by module exports
-                // (bench/test case) and by `__register(...)` side effects
-                // from the vite-plugin transform (dev-bootstrap case).
-                //
-                // When DISPATCH_JS reports "method not found" AND an
-                // `onRequest` handler exists, we fall back to onRequest
-                // so dev-bootstrap's async ModuleRunner-based dispatch
-                // still gets the request (its registry populates
-                // asynchronously as user modules load).
-                ("POST", p) if p.starts_with("/_rpc/") => {
-                    let method_name = &p["/_rpc/".len()..];
-                    let wrote_ok = dispatch_rpc_with_fallback(
-                        &mut stream, method, path, method_name, body_bytes,
-                        &headers, &runtime, has_http,
-                    ).await;
-                    if !wrote_ok { return; }
-                }
-                _ if has_http => {
-                    let headers_json = collect_headers_json(&headers);
-                    let body_str = std::str::from_utf8(body_bytes).unwrap_or("");
-                    let host = headers.iter()
-                        .find(|h| h.name.eq_ignore_ascii_case("host"))
-                        .and_then(|h| std::str::from_utf8(h.value).ok())
-                        .unwrap_or("localhost");
-                    let full_url = format!("http://{}{}", host, path);
+            // `/health` is the only kernel-level route — it's a liveness
+            // probe for process managers, served without touching V8. Every
+            // other request, including `/_rpc/<method>`, flows through a
+            // single `handle_request` → `call_fetch_handler` call. Any
+            // URL-based routing (RPC vs HTTP vs static assets) lives in
+            // user-space (the bootstrap router from PR 2); the kernel is
+            // URL-agnostic.
+            if method == "GET" && path == "/health" {
+                let BufResult(write_result, _) = stream.write_all(HEALTH_RESPONSE.to_vec()).await;
+                if write_result.is_err() { return; }
+            } else {
+                let body_str = std::str::from_utf8(body_bytes).unwrap_or("");
+                let host = headers.iter()
+                    .find(|h| h.name.eq_ignore_ascii_case("host"))
+                    .and_then(|h| std::str::from_utf8(h.value).ok())
+                    .unwrap_or("localhost");
+                let full_url = format!("http://{}{}", host, path);
 
-                    // Collect raw request headers for WebSocket upgrade detection
-                    let raw_headers: Vec<(String, String)> = headers.iter()
-                        .filter(|h| !h.name.is_empty())
-                        .map(|h| (
-                            h.name.to_string(),
-                            std::str::from_utf8(h.value).unwrap_or("").to_string(),
-                        ))
-                        .collect();
+                // Materialize request headers as `(name, value)` pairs once —
+                // reused both for the fetch handler (as its request headers)
+                // and for the WebSocket handshake if this turns into an upgrade.
+                let request_headers: Vec<(String, String)> = headers.iter()
+                    .filter(|h| !h.name.is_empty())
+                    .map(|h| (
+                        h.name.to_string(),
+                        std::str::from_utf8(h.value).unwrap_or("").to_string(),
+                    ))
+                    .collect();
 
-                    // Check if this is a WebSocket upgrade BEFORE dispatch
-                    let is_upgrade = headers.iter().any(|h|
-                        h.name.eq_ignore_ascii_case("upgrade") &&
-                        std::str::from_utf8(h.value).unwrap_or("").eq_ignore_ascii_case("websocket")
-                    );
+                // Check for WebSocket upgrade BEFORE dispatch — after a
+                // successful upgrade the stream is no longer HTTP, so we
+                // must not loop back to parse another request out of it.
+                let is_upgrade = request_headers.iter().any(|(name, value)|
+                    name.eq_ignore_ascii_case("upgrade") &&
+                    value.eq_ignore_ascii_case("websocket")
+                );
 
-                    let wrote_ok = dispatch_http(
-                        &mut stream, method, &full_url, &headers_json, body_str, &runtime,
-                        &raw_headers,
-                    ).await;
-                    if !wrote_ok { return; }
-
-                    // After WebSocket upgrade, the stream is no longer HTTP.
-                    // The dispatch_http call handled the full WebSocket lifecycle.
-                    // Exit the connection handler — don't try to parse more HTTP.
-                    if is_upgrade { return; }
-                }
-                _ => {
-                    let BufResult(write_result, _) = stream.write_all(NOT_FOUND_RESPONSE.to_vec()).await;
-                    if write_result.is_err() { return; }
-                }
-            };
+                let wrote_ok = handle_request(
+                    &mut stream, method, &full_url, &request_headers, body_str, &runtime,
+                ).await;
+                if !wrote_ok { return; }
+                if is_upgrade { return; }
+            }
 
             consumed += total_len;
 
@@ -437,23 +415,6 @@ async fn handle_connection(
 // ===========================================================================
 // Response builders
 // ===========================================================================
-
-/// Fast-path builder for plain `200 OK` + `application/json` responses.
-/// The path-based RPC unary case hits this on every request, so skipping
-/// the generic header-loop saves ~2% per request. Matches the old
-/// JSON-RPC hot path that `build_json_response` served.
-fn build_json_ok_response(body: &str) -> Vec<u8> {
-    const PREFIX: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nContent-Length: ";
-    const SEP: &[u8] = b"\r\n\r\n";
-    let mut len_buf = itoa::Buffer::new();
-    let len_str = len_buf.format(body.len());
-    let mut buf = Vec::with_capacity(PREFIX.len() + len_str.len() + SEP.len() + body.len());
-    buf.extend_from_slice(PREFIX);
-    buf.extend_from_slice(len_str.as_bytes());
-    buf.extend_from_slice(SEP);
-    buf.extend_from_slice(body.as_bytes());
-    buf
-}
 
 fn build_http_response(status: u16, headers: &[(String, String)], body: &str) -> Vec<u8> {
     let status_text = match status {
@@ -669,287 +630,93 @@ fn build_stream_response_headers(status: u16, headers: &[(String, String)]) -> V
 }
 
 // ===========================================================================
-// Header collection
+// Unified request dispatch
 // ===========================================================================
 
-fn collect_headers_json(headers: &[httparse::Header<'_>]) -> String {
-    let mut buf = String::from("[");
-    let mut first = true;
-    for h in headers {
-        if h.name.is_empty() { continue; }
-        if !first { buf.push(','); }
-        first = false;
-        let val = std::str::from_utf8(h.value).unwrap_or("");
-        buf.push('[');
-        buf.push('"');
-        buf.push_str(h.name);
-        buf.push('"');
-        buf.push(',');
-        buf.push('"');
-        for ch in val.chars() {
-            match ch {
-                '"' => buf.push_str("\\\""),
-                '\\' => buf.push_str("\\\\"),
-                '\n' => buf.push_str("\\n"),
-                '\r' => buf.push_str("\\r"),
-                _ => buf.push(ch),
-            }
-        }
-        buf.push('"');
-        buf.push(']');
-    }
-    buf.push(']');
-    buf
-}
-
-// ===========================================================================
-// RPC dispatch — URL-path-based wire
-// ===========================================================================
-
-/// Render an error body for a dispatch that failed before reaching JS
-/// (method-not-found, transport error). `e` is the runtime's `Err(String)`.
-fn build_error_response(status: u16, message: &str) -> Vec<u8> {
-    let body = crate::dispatch::build_error_body(message, "Error", None);
-    build_http_response(status, &[("content-type".into(), "application/json".into())], &body)
-}
-
-/// Route `/_rpc/*` to the native registry when possible, else fall
-/// through to `onRequest` (dev-bootstrap) so its async registry can
-/// finish populating.
+/// Single entry point from the TCP parser into the runtime. Builds the
+/// fetch-handler envelope (env + per-request ctx), invokes
+/// `Runtime::call_fetch_handler`, and writes the `FetchOutcome` back to
+/// the stream.
 ///
-/// Performance: when there's no onRequest handler (standalone tests /
-/// benches), skip the registry probe entirely and dispatch directly.
-/// The probe is only needed to arbitrate between the two dispatchers
-/// in mixed-mode apps (dev-bootstrap exports `onRequest` AND the user
-/// module's registered RPC methods).
-async fn dispatch_rpc_with_fallback(
+/// Mirrors `worker::handler::dispatch` — the worker receives the envelope
+/// over HTTP from the gateway, serve.rs constructs it from the raw TCP
+/// request — but past that point the shape is identical, so both paths
+/// share the same outcome vocabulary.
+///
+/// Returns `true` if the write to `stream` succeeded (connection can be
+/// reused for HTTP keep-alive). After a successful WebSocket upgrade the
+/// caller exits the connection handler since the stream is no longer HTTP.
+async fn handle_request(
     stream: &mut TcpStream,
     method: &str,
-    path: &str,
-    method_name: &str,
-    body_bytes: &[u8],
-    headers: &[httparse::Header<'_>],
-    runtime: &Runtime,
-    has_http: bool,
-) -> bool {
-    if !has_http {
-        // Fast path: no onRequest means there's nothing to fall back to,
-        // so dispatch directly. DISPATCH_JS returns `Method not found`
-        // at HTTP 404 if the method is genuinely missing.
-        return dispatch_rpc_by_path(stream, method_name, body_bytes, runtime).await;
-    }
-
-    if runtime.rpc_method_exists(method_name) {
-        return dispatch_rpc_by_path(stream, method_name, body_bytes, runtime).await;
-    }
-
-    // Fall through to onRequest (dev-bootstrap handles its own registry).
-    let headers_json = collect_headers_json(headers);
-    let body_str = std::str::from_utf8(body_bytes).unwrap_or("");
-    let host = headers.iter()
-        .find(|h| h.name.eq_ignore_ascii_case("host"))
-        .and_then(|h| std::str::from_utf8(h.value).ok())
-        .unwrap_or("localhost");
-    let full_url = format!("http://{}{}", host, path);
-    let raw_headers: Vec<(String, String)> = headers.iter()
-        .filter(|h| !h.name.is_empty())
-        .map(|h| (
-            h.name.to_string(),
-            std::str::from_utf8(h.value).unwrap_or("").to_string(),
-        ))
-        .collect();
-    dispatch_http(stream, method, &full_url, &headers_json, body_str, runtime, &raw_headers).await
-}
-
-/// Dispatch a URL-path-based RPC request and write the full response.
-///
-/// Writes either an `application/json` body (plain return) or a streamed
-/// `text/event-stream` response when the handler returned a Response —
-/// including the auto-wrapped async generator case, since the wrapper
-/// produces a `Response(ReadableStream)` inside V8 and from there the
-/// standard HTTP streaming path takes over.
-async fn dispatch_rpc_by_path(
-    stream: &mut TcpStream,
-    method_name: &str,
-    body_bytes: &[u8],
+    url: &str,
+    request_headers: &[(String, String)],
+    body: &str,
     runtime: &Runtime,
 ) -> bool {
-    let body_str = match std::str::from_utf8(body_bytes) {
-        Ok(s) => s,
-        Err(_) => {
-            let resp = build_error_response(400, "Invalid UTF-8 in request body");
-            let BufResult(r, _) = stream.write_all(resp).await;
-            return r.is_ok();
-        }
-    };
+    // Env is empty in the standalone server — there's no control plane in
+    // front of it providing per-app secrets / vars. `call_fetch_handler`
+    // still reads it (as `fetch(req, env, ctx)`'s second arg), just as
+    // `{}`.
+    let env = EnvSnapshot::empty();
+    let cancel = CancelFlag::new();
+    let ctx = RequestCtx::new(cancel.clone());
 
-    // Standalone server has no gateway in front of it; anonymous access.
-    let outcome = runtime.dispatch_start(method_name, body_str, None);
+    let outcome = runtime.call_fetch_handler(method, url, request_headers, body, &env, ctx);
 
     match outcome {
-        DispatchOutcome::Complete(Ok(result)) => {
-            let resp = build_json_ok_response(&result.json);
-            let BufResult(r, _) = stream.write_all(resp).await;
-            r.is_ok()
-        }
-        DispatchOutcome::Complete(Err(e)) => {
-            let resp = build_error_response(e.status, &e.message);
-            let BufResult(r, _) = stream.write_all(resp).await;
-            r.is_ok()
-        }
-        DispatchOutcome::Pending { rx, cancel } => {
-            match recv_with_timeout(&rx, runtime.wall_timeout(), &cancel, runtime).await {
-                Some(Ok(r)) => {
-                    let resp = build_json_ok_response(&r.json);
-                    let BufResult(w, _) = stream.write_all(resp).await;
-                    w.is_ok()
-                }
-                Some(Err(e)) => {
-                    let resp = build_error_response(e.status, &e.message);
-                    let BufResult(w, _) = stream.write_all(resp).await;
-                    w.is_ok()
-                }
-                None => {
-                    let resp = build_error_response(504, "Request timed out");
-                    let BufResult(w, _) = stream.write_all(resp).await;
-                    w.is_ok()
-                }
-            }
-        }
-        // Handler returned a Response (e.g. async generator wrapper → SSE).
-        // Reuse the HTTP streaming path.
-        DispatchOutcome::HttpComplete { status, headers, body, logs: _ } => {
+        FetchOutcome::Response { status, headers, body, logs: _ } => {
             let resp = build_http_response(status, &headers, &body);
             let BufResult(r, _) = stream.write_all(resp).await;
             r.is_ok()
         }
-        DispatchOutcome::HttpStream { status, headers, body, logs: _ } => {
+        FetchOutcome::Stream { status, headers, body_reader, logs: _ } => {
+            // Notify the pump — a streaming handler may have queued timers
+            // or fetches in its `start()` callback that won't run until
+            // the pump loop picks them up.
             runtime.notify_pump();
             let header_bytes = build_stream_response_headers(status, &headers);
             let BufResult(r, _) = stream.write_all(header_bytes).await;
             if r.is_err() { return false; }
-            stream_chunked_body(stream, body).await
+            stream_chunked_body(stream, body_reader).await
         }
-        DispatchOutcome::HttpPending { rx, cancel } => {
-            let result = recv_with_timeout(&rx, runtime.wall_timeout(), &cancel, runtime).await;
-            match result {
-                Some(Ok(HttpDispatchResult::Complete { status, headers, body, logs: _ })) => {
+        FetchOutcome::WebSocketUpgrade { ws_id, headers } => {
+            handle_websocket_upgrade(stream, ws_id, &headers, request_headers, runtime).await
+        }
+        FetchOutcome::Pending { rx, cancel: cf } => {
+            match recv_with_timeout(&rx, runtime.wall_timeout(), &cf, runtime).await {
+                Some(Ok(SettledFetch::Response { status, headers, body, .. })) => {
                     let resp = build_http_response(status, &headers, &body);
                     let BufResult(r, _) = stream.write_all(resp).await;
                     r.is_ok()
                 }
-                Some(Ok(HttpDispatchResult::Stream { status, headers, body, logs: _ })) => {
+                Some(Ok(SettledFetch::Stream { status, headers, body_reader, .. })) => {
                     let header_bytes = build_stream_response_headers(status, &headers);
                     let BufResult(r, _) = stream.write_all(header_bytes).await;
                     if r.is_err() { return false; }
-                    stream_chunked_body(stream, body).await
+                    stream_chunked_body(stream, body_reader).await
                 }
-                Some(Ok(HttpDispatchResult::WebSocket { .. })) => {
-                    let resp = build_error_response(400, "WebSocket upgrade not supported on RPC route");
-                    let BufResult(r, _) = stream.write_all(resp).await;
-                    r.is_ok()
-                }
-                Some(Err(e)) => {
-                    let resp = build_error_response(e.status, &e.message);
-                    let BufResult(r, _) = stream.write_all(resp).await;
-                    r.is_ok()
-                }
-                None => {
-                    let resp = build_error_response(504, "Request timed out");
-                    let BufResult(r, _) = stream.write_all(resp).await;
-                    r.is_ok()
-                }
-            }
-        }
-        DispatchOutcome::WebSocketUpgrade { .. } => {
-            let resp = build_error_response(400, "WebSocket upgrade not supported on RPC route");
-            let BufResult(r, _) = stream.write_all(resp).await;
-            r.is_ok()
-        }
-    }
-}
-
-// ===========================================================================
-// HTTP dispatch
-// ===========================================================================
-
-async fn dispatch_http(
-    stream: &mut TcpStream,
-    method: &str,
-    url: &str,
-    headers_json: &str,
-    body: &str,
-    runtime: &Runtime,
-    request_headers: &[(String, String)],
-) -> bool {
-    let outcome = runtime.dispatch_http(method, url, headers_json, body, None);
-
-    match outcome {
-        DispatchOutcome::HttpComplete { status, headers, body, logs: _ } => {
-            let response = build_http_response(status, &headers, &body);
-            let BufResult(r, _) = stream.write_all(response).await;
-            r.is_ok()
-        }
-        DispatchOutcome::HttpStream { status, headers, body, logs: _ } => {
-            // Notify the pump that there may be new async tasks (e.g. timers
-            // from an async ReadableStream start() callback).
-            runtime.notify_pump();
-
-            let header_bytes = build_stream_response_headers(status, &headers);
-            let BufResult(r, _) = stream.write_all(header_bytes).await;
-            if r.is_err() { return false; }
-
-            stream_chunked_body(stream, body).await
-        }
-        DispatchOutcome::HttpPending { rx, cancel } => {
-            let result = recv_with_timeout(&rx, runtime.wall_timeout(), &cancel, runtime).await;
-
-            match result {
-                Some(Ok(HttpDispatchResult::Complete { status, headers, body, logs: _ })) => {
-                    let response = build_http_response(status, &headers, &body);
-                    let BufResult(r, _) = stream.write_all(response).await;
-                    r.is_ok()
-                }
-                Some(Ok(HttpDispatchResult::Stream { status, headers, body, logs: _ })) => {
-                    let header_bytes = build_stream_response_headers(status, &headers);
-                    let BufResult(r, _) = stream.write_all(header_bytes).await;
-                    if r.is_err() { return false; }
-                    stream_chunked_body(stream, body).await
-                }
-                Some(Ok(HttpDispatchResult::WebSocket { ws_id, headers, logs: _ })) => {
+                Some(Ok(SettledFetch::WebSocketUpgrade { ws_id, headers, .. })) => {
                     handle_websocket_upgrade(stream, ws_id, &headers, request_headers, runtime).await
                 }
                 Some(Err(e)) => {
-                    let body = format!(r#"{{"error":"{}"}}"#, e.message.replace('"', "\\\""));
-                    let response = build_http_response(e.status, &[], &body);
-                    let BufResult(r, _) = stream.write_all(response).await;
+                    let body = format!(
+                        r#"{{"message":"{}","name":"Error"}}"#,
+                        e.message.replace('"', "\\\"")
+                    );
+                    let resp = build_http_response(e.status, &[], &body);
+                    let BufResult(r, _) = stream.write_all(resp).await;
                     r.is_ok()
                 }
                 None => {
-                    let response = build_http_response(504, &[], r#"{"error":"Request timed out"}"#);
-                    let BufResult(r, _) = stream.write_all(response).await;
+                    let resp = build_http_response(
+                        504, &[],
+                        r#"{"message":"request timed out","name":"Error"}"#,
+                    );
+                    let BufResult(r, _) = stream.write_all(resp).await;
                     r.is_ok()
                 }
             }
-        }
-        DispatchOutcome::Complete(Ok(result)) => {
-            let response = build_http_response(200, &[("content-type".into(), "application/json".into())], &result.json);
-            let BufResult(r, _) = stream.write_all(response).await;
-            r.is_ok()
-        }
-        DispatchOutcome::Complete(Err(e)) => {
-            let body = format!(r#"{{"error":"{}"}}"#, e.message.replace('"', "\\\""));
-            let response = build_http_response(e.status, &[], &body);
-            let BufResult(r, _) = stream.write_all(response).await;
-            r.is_ok()
-        }
-        DispatchOutcome::WebSocketUpgrade { ws_id, headers } => {
-            handle_websocket_upgrade(stream, ws_id, &headers, request_headers, runtime).await
-        }
-        DispatchOutcome::Pending { .. } => {
-            let response = build_http_response(500, &[], r#"{"error":"Unexpected pending state"}"#);
-            let BufResult(r, _) = stream.write_all(response).await;
-            r.is_ok()
         }
     }
 }
