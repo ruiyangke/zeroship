@@ -88,7 +88,7 @@ use std::time::{Duration, Instant};
 
 use futures::stream::FuturesUnordered;
 
-use crate::init::{init_v8, load_polyfills_and_modules, RequestResult};
+use crate::init::{init_v8, load_polyfills_and_modules};
 use crate::http::{self, ResponseInfo, SettledResult, HTTP_CREATE_REQUEST_JS};
 use crate::modules::ModuleEntry;
 use crate::plugin::NativePlugin;
@@ -97,7 +97,7 @@ use crate::state::{
 };
 
 use crate::channel::{
-    self, CancelFlag, ResultReceiver, ResultSender, StreamReader, StreamWriter,
+    self, CancelFlag, ResultSender, StreamWriter,
 };
 
 // ---------------------------------------------------------------------------
@@ -130,69 +130,6 @@ impl From<&str> for DispatchError {
     fn from(s: &str) -> Self {
         Self { message: s.into(), status: 500 }
     }
-}
-
-/// Outcome of `dispatch_start` / `dispatch_http` — tells the connection handler what to do.
-pub enum DispatchOutcome {
-    /// Sync handler completed immediately. No pump involvement needed.
-    Complete(Result<RequestResult, DispatchError>),
-    /// Async handler: promise is pending. Poll the receiver for the result.
-    ///
-    /// The `cancel` flag lets the handler abort the in-flight request when the
-    /// client gives up (wall timeout, client disconnect). The pump observes
-    /// this flag on its next cycle and drops the pending request, its queued
-    /// fetches, and its timers so that compute and network resources are
-    /// released promptly instead of continuing in the background.
-    Pending {
-        rx: ResultReceiver<Result<RequestResult, DispatchError>>,
-        cancel: CancelFlag,
-    },
-    /// Sync HTTP response — complete buffered body.
-    HttpComplete {
-        status: u16,
-        headers: Vec<(String, String)>,
-        body: String,
-        logs: Vec<String>,
-    },
-    /// Streaming HTTP response — headers ready, body arrives via shared buffer.
-    HttpStream {
-        status: u16,
-        headers: Vec<(String, String)>,
-        body: StreamReader,
-        logs: Vec<String>,
-    },
-    /// Async HTTP handler: promise is pending. Poll the receiver for the reply.
-    /// See `Pending` for how `cancel` is wired through the runtime.
-    HttpPending {
-        rx: ResultReceiver<Result<HttpDispatchResult, DispatchError>>,
-        cancel: CancelFlag,
-    },
-    /// WebSocket upgrade — JS returned Response with status 101 + webSocket property.
-    WebSocketUpgrade {
-        ws_id: u32,
-        headers: Vec<(String, String)>,
-    },
-}
-
-/// Result of an async HTTP dispatch (sent through the oneshot when promise settles).
-pub enum HttpDispatchResult {
-    Complete {
-        status: u16,
-        headers: Vec<(String, String)>,
-        body: String,
-        logs: Vec<String>,
-    },
-    Stream {
-        status: u16,
-        headers: Vec<(String, String)>,
-        body: StreamReader,
-        logs: Vec<String>,
-    },
-    WebSocket {
-        ws_id: u32,
-        headers: Vec<(String, String)>,
-        logs: Vec<String>,
-    },
 }
 
 // ---------------------------------------------------------------------------
@@ -326,54 +263,7 @@ impl Runtime {
 
     // ---- Methods that enter V8 — borrow internally -----------------------
 
-    /// Dispatch an RPC request synchronously.
-    ///
-    /// New wire: `method` is the URL path after `/_rpc/` (e.g. `"ping"` or
-    /// `"src/index/ping"`), `args_json` is a JSON-serialized positional
-    /// args array (e.g. `"[]"` or `"[3,4]"`). Empty string is equivalent
-    /// to `"[]"`. Returns the raw value JSON (no envelope); for streaming
-    /// / Response returns, the `json` field holds the rendered body.
-    pub fn dispatch_rpc(&self, method: &str, args_json: &str) -> Result<RequestResult, String> {
-        self.inner
-            .borrow_mut()
-            .dispatch_rpc(self.modules.as_slice(), method, args_json)
-    }
-
-    /// Phase 1 dispatch — returns immediately with an outcome describing
-    /// whether the handler completed synchronously, is pending on the pump,
-    /// or errored. Same args as [`dispatch_rpc`].
-    pub fn dispatch_start(
-        &self,
-        method: &str,
-        args_json: &str,
-        user_json: Option<String>,
-    ) -> DispatchOutcome {
-        self.inner
-            .borrow_mut()
-            .dispatch_start(self.modules.as_slice(), method, args_json, user_json)
-    }
-
-    /// HTTP dispatch — calls the JS `onRequest` handler.
-    pub fn dispatch_http(
-        &self,
-        method: &str,
-        url: &str,
-        headers_json: &str,
-        body: &str,
-        user_json: Option<String>,
-    ) -> DispatchOutcome {
-        self.inner.borrow_mut().dispatch_http(
-            self.modules.as_slice(),
-            method,
-            url,
-            headers_json,
-            body,
-            user_json,
-        )
-    }
-
-    /// Kernel's sole dispatch primitive (in progress — stub in Task B2,
-    /// real implementation in Task B3). Invokes the user's
+    /// Kernel's sole dispatch primitive. Invokes the user's
     /// `export default { fetch(request, env, ctx) }` handler and returns
     /// a `FetchOutcome` describing the response.
     ///
@@ -399,21 +289,6 @@ impl Runtime {
             env,
             ctx,
         )
-    }
-
-    /// Returns true if the app exports an `onRequest` HTTP handler.
-    pub fn has_http_handler(&self) -> bool {
-        self.inner.borrow().has_http_handler()
-    }
-
-    /// Cheap check: is `method_name` present in the `__rpc` registry?
-    ///
-    /// Used by the URL-path RPC route to decide between native dispatch
-    /// (when the method is registered in-isolate) and falling through
-    /// to `onRequest` (dev-bootstrap's async registry). One V8 object
-    /// property read — no JS function call, no microtask checkpoint.
-    pub fn rpc_method_exists(&self, method_name: &str) -> bool {
-        self.inner.borrow_mut().rpc_method_exists(method_name)
     }
 
     /// Enter the V8 isolate on this thread. Multi-tenant workers that keep
@@ -546,19 +421,9 @@ struct PendingRequest {
     #[allow(dead_code)]
     id: u64,
     promise: v8::Global<v8::Promise>,
-    /// Reply slot for direct-dispatch async mode (pump task) — RPC path.
-    reply_direct: Option<ResultSender<Result<RequestResult, DispatchError>>>,
-    /// Reply slot for direct-dispatch async mode — HTTP path (legacy
-    /// `dispatch_http`). Short-lived: Task D2 deletes this slot when
-    /// `dispatch_http` is removed in favor of `call_fetch_handler`.
-    reply_http: Option<ResultSender<Result<HttpDispatchResult, DispatchError>>>,
-    /// Reply slot for the new `call_fetch_handler` pending path. Carries a
+    /// Reply slot for the `call_fetch_handler` pending path. Carries a
     /// `SettledFetch` mirroring `FetchOutcome`'s three non-Pending variants.
-    /// Mutually exclusive with `reply_http` in practice — exactly one is Some
-    /// for any given PendingRequest.
-    reply_fetch: Option<ResultSender<Result<crate::SettledFetch, DispatchError>>>,
-    /// Whether this is an HTTP request (affects response inspection).
-    is_http: bool,
+    reply_fetch: ResultSender<Result<crate::SettledFetch, DispatchError>>,
     cpu_accumulated: Duration,
     wall_start: Instant,
     cancel: CancelFlag,
@@ -592,9 +457,6 @@ macro_rules! enter_v8 {
 pub(crate) struct RuntimeInner {
     pub(crate) isolate: v8::OwnedIsolate,
     pub(crate) context: v8::Global<v8::Context>,
-    pub(crate) dispatch_fn: Option<v8::Global<v8::Function>>,
-    /// Cached reference to `__rpc.onRequest` — present when the app exports an HTTP handler.
-    pub(crate) http_handler_fn: Option<v8::Global<v8::Function>>,
     /// Cached reference to `module.default.fetch`, resolved once at module
     /// init. None if the module doesn't export a default.fetch handler.
     pub(crate) fetch_handler_fn: Option<v8::Global<v8::Function>>,
@@ -602,17 +464,8 @@ pub(crate) struct RuntimeInner {
     http_create_request_fn: Option<v8::Global<v8::Function>>,
     pub(crate) initialized: bool,
     pub(crate) state: SharedState,
-    /// Plugins registered on zeroship.* namespace.
+    /// Plugins registered on the runtime at boot.
     plugins: Vec<Arc<dyn NativePlugin>>,
-
-    /// Cache for `rpc_method_exists` probes. The URL-path router does a
-    /// registry lookup on every `/_rpc/*` request; without this the probe
-    /// enters V8 twice per request (once to probe, once to dispatch).
-    /// Sticky semantics: `Some(true)` never transitions back to `false`
-    /// (HMR may re-register, never unregister through the runtime), and
-    /// `Some(false)` is considered stale enough to re-probe next time
-    /// so HMR-added methods pick up without a worker restart.
-    rpc_method_cache: HashMap<String, bool>,
 
     /// Stream forwarders: stream_id -> StreamForwarder for outbound HTTP streams.
     stream_forwarders: HashMap<u32, StreamForwarder>,
@@ -750,14 +603,11 @@ impl RuntimeInner {
         Self {
             isolate,
             context,
-            dispatch_fn: None,
-            http_handler_fn: None,
             fetch_handler_fn: None,
             http_create_request_fn: None,
             initialized: false,
             state,
             plugins,
-            rpc_method_cache: HashMap::new(),
             stream_forwarders: HashMap::new(),
             pending_requests: HashMap::new(),
             next_direct_request_id: 1,
@@ -999,48 +849,6 @@ impl RuntimeInner {
     // Initialization
     // -----------------------------------------------------------------------
 
-    /// Returns true if an HTTP handler (`onRequest`) is available.
-    pub fn has_http_handler(&self) -> bool {
-        self.http_handler_fn.is_some()
-    }
-
-    /// Cheap registry-lookup used by the URL-path RPC router.
-    ///
-    /// Hits an in-process cache; only the first call per method enters
-    /// V8. Positive cache is sticky; negative cache is cleared here so
-    /// HMR-added methods get picked up on the next request (~20 µs one
-    /// V8 probe, then the dispatch). The dispatch-fast-path caller
-    /// should pre-check the cache before paying for the V8 enter.
-    pub fn rpc_method_exists(&mut self, method_name: &str) -> bool {
-        if !self.initialized {
-            return false;
-        }
-        if let Some(&true) = self.rpc_method_cache.get(method_name) {
-            return true;
-        }
-        let exists = enter_v8!(self, |scope| {
-            let global = scope.get_current_context().global(scope);
-            let rpc_key = v8::String::new(scope, "__rpc").unwrap();
-            let Some(rpc_obj) = global
-                .get(scope, rpc_key.into())
-                .and_then(|v| v.to_object(scope))
-            else {
-                return false;
-            };
-            let Some(name_str) = v8::String::new(scope, method_name) else {
-                return false;
-            };
-            let Some(val) = rpc_obj.get(scope, name_str.into()) else {
-                return false;
-            };
-            val.is_function()
-        });
-        if exists {
-            self.rpc_method_cache.insert(method_name.to_string(), true);
-        }
-        exists
-    }
-
     /// Load polyfills and ES modules, then resolve `default.fetch` (once).
     pub(crate) fn ensure_initialized(&mut self, modules: &[ModuleEntry]) {
         if self.initialized {
@@ -1188,298 +996,13 @@ impl RuntimeInner {
     ///
     /// `method` is the URL-path-style method name (e.g. `"ping"` or
     /// `"src/index/ping"`). `args_json` is a JSON array of positional args.
-    pub fn dispatch_rpc(&mut self, modules: &[ModuleEntry], method: &str, args_json: &str) -> Result<RequestResult, String> {
-        self.ensure_initialized(modules);
-
-        if self.dispatch_fn.is_none() {
-            return Err("Isolate not initialized".to_string());
-        }
-
-        let request_id = self.next_direct_request_id;
-        self.next_direct_request_id += 1;
-        let wall_start = Instant::now();
-
-        self.state.borrow_mut().executing_request_id = Some(request_id);
-
-        self.arm_cpu_timer();
-        let dispatch_result = {
-            let dispatch_fn = self.dispatch_fn.as_ref().unwrap();
-            enter_v8!(self, |scope| {
-                crate::dispatch::dispatch_request(
-                    scope,
-                    &self.state,
-                    dispatch_fn,
-                    method,
-                    if args_json.is_empty() { None } else { Some(args_json) },
-                )
-            })
-        };
-        self.disarm_cpu_timer();
-
-        if self.check_v8_terminated() {
-            self.state.borrow_mut().executing_request_id = None;
-            return Err("CPU time limit exceeded".into());
-        }
-
-        let cpu_dispatch = wall_start.elapsed();
-
-        match dispatch_result {
-            DispatchResult::Sync(json) => {
-                self.state.borrow_mut().executing_request_id = None;
-                let logs = self.drain_request_logs(request_id);
-                Ok(RequestResult {
-                    json,
-                    cpu_time: cpu_dispatch,
-                    wall_time: cpu_dispatch,
-                    logs,
-                })
-            }
-            DispatchResult::HttpResponse(info) => {
-                // Handler returned a Response synchronously. For channel-free
-                // mode we only support Complete responses; a stream would need
-                // the pump to drive its readers. Flatten Complete to its body.
-                self.state.borrow_mut().executing_request_id = None;
-                let logs = self.drain_request_logs(request_id);
-                match info {
-                    crate::http::ResponseInfo::Complete { body, .. } => {
-                        Ok(RequestResult { json: body, cpu_time: cpu_dispatch, wall_time: cpu_dispatch, logs })
-                    }
-                    _ => Err("Streaming / WebSocket responses not supported via dispatch_rpc — use dispatch_http".to_string())
-                }
-            }
-            DispatchResult::Async(promise) => {
-                // Try to settle inline: fire ready timers
-                self.fire_ready_timers_inline();
-
-                // Check if the promise settled after microtask checkpoint + ready timers
-                self.arm_cpu_timer();
-                let result = enter_v8!(self, |scope| {
-                    crate::dispatch::extract_promise_result(scope, &promise)
-                });
-                self.disarm_cpu_timer();
-
-                if self.check_v8_terminated() {
-                    return Err("CPU time limit exceeded".into());
-                }
-
-                let cpu_total = wall_start.elapsed();
-
-                self.state.borrow_mut().executing_request_id = None;
-                match result {
-                    Ok(DispatchResult::Sync(json)) => {
-                        let logs = self.drain_request_logs(request_id);
-                        Ok(RequestResult { json, cpu_time: cpu_total, wall_time: cpu_total, logs })
-                    }
-                    Ok(DispatchResult::HttpResponse(info)) => {
-                        let logs = self.drain_request_logs(request_id);
-                        match info {
-                            crate::http::ResponseInfo::Complete { body, .. } => {
-                                Ok(RequestResult { json: body, cpu_time: cpu_total, wall_time: cpu_total, logs })
-                            }
-                            _ => Err("Streaming / WebSocket responses not supported via dispatch_rpc — use dispatch_http".to_string())
-                        }
-                    }
-                    Ok(DispatchResult::ErrorValue { message, .. }) => Err(message),
-                    Ok(_) | Err(_) => {
-                        // Promise still pending — async ops not supported in direct dispatch
-                        Err("Promise did not settle synchronously (async ops not supported in channel-free mode)".to_string())
-                    }
-                }
-            }
-            DispatchResult::ErrorValue { message, .. } => {
-                self.state.borrow_mut().executing_request_id = None;
-                Err(message)
-            }
-            DispatchResult::Error(msg) => {
-                self.state.borrow_mut().executing_request_id = None;
-                Err(msg)
-            }
-        }
-    }
-
     // -----------------------------------------------------------------------
-    // Two-phase async dispatch (used with pump task)
-    // -----------------------------------------------------------------------
-
-    /// Phase 1: Dispatch a request into V8. Returns immediately.
-    ///
-    /// - **Sync handler**: returns `DispatchOutcome::Complete(Ok(result))`
-    /// - **Async handler**: stores a `PendingRequest`, returns
-    ///   `DispatchOutcome::Pending(receiver)` — the pump task will send the
-    ///   result when the promise settles.
-    /// - **Error**: returns `DispatchOutcome::Complete(Err(msg))`
-    ///
-    /// The caller must NOT hold the RefCell borrow across any `.await`.
-    pub fn dispatch_start(
-        &mut self,
-        modules: &[ModuleEntry],
-        method: &str,
-        args_json: &str,
-        user_json: Option<String>,
-    ) -> DispatchOutcome {
-        self.ensure_initialized(modules);
-
-        if self.dispatch_fn.is_none() {
-            return DispatchOutcome::Complete(Err(DispatchError::new("Isolate not initialized", 503)));
-        }
-
-        let request_id = self.next_direct_request_id;
-        self.next_direct_request_id += 1;
-
-        let wall_start = Instant::now();
-
-        // Set executing_request_id + cancel flag + user BEFORE V8 enter so
-        // anything the JS handler looks up (cancel, auth.getUser, logs)
-        // resolves against THIS request — not whoever the thread was
-        // serving when a later async callback fires.
-        let cancel = CancelFlag::new();
-        {
-            let mut s = self.state.borrow_mut();
-            s.executing_request_id = Some(request_id);
-            s.executing_request_cancel = Some(cancel.clone());
-            if let Some(j) = user_json {
-                s.per_request_user.insert(request_id, j);
-            }
-        }
-
-        self.arm_cpu_timer();
-        let dispatch_result = {
-            let dispatch_fn = self.dispatch_fn.as_ref().unwrap();
-            let args_opt = if args_json.is_empty() { None } else { Some(args_json) };
-            enter_v8!(self, |scope| {
-                crate::dispatch::dispatch_request(
-                    scope,
-                    &self.state,
-                    dispatch_fn,
-                    method,
-                    args_opt,
-                )
-            })
-        };
-        self.disarm_cpu_timer();
-
-        if self.check_v8_terminated() {
-            self.clear_executing_request();
-            self.discard_request_state(request_id);
-            return DispatchOutcome::Complete(Err("CPU time limit exceeded".into()));
-        }
-
-        let cpu_dispatch = wall_start.elapsed();
-
-        match dispatch_result {
-            DispatchResult::Sync(json) => {
-                self.clear_executing_request();
-                let logs = self.drain_request_logs(request_id);
-                DispatchOutcome::Complete(Ok(RequestResult {
-                    json,
-                    cpu_time: cpu_dispatch,
-                    wall_time: cpu_dispatch,
-                    logs,
-                }))
-            }
-            DispatchResult::HttpResponse(info) => {
-                // Handler returned a Response synchronously. Route through
-                // the HTTP path so streaming (async generator wrap, user-
-                // returned Response(ReadableStream)) works.
-                self.clear_executing_request();
-                self.build_http_outcome(request_id, info, cpu_dispatch)
-            }
-            DispatchResult::Async(promise) => {
-                // Fire zero-delay timers inline — this settles setTimeout(0) immediately
-                // without a round-trip through the pump task.
-                self.fire_ready_timers_inline();
-
-                if self.check_v8_terminated() {
-                    self.clear_executing_request();
-                    self.discard_request_state(request_id);
-                    return DispatchOutcome::Complete(Err("CPU time limit exceeded".into()));
-                }
-
-                // Check if promise settled after microtask checkpoint + ready timers
-                self.arm_cpu_timer();
-                let result = enter_v8!(self, |scope| {
-                    crate::dispatch::extract_promise_result(scope, &promise)
-                });
-                self.disarm_cpu_timer();
-
-                if self.check_v8_terminated() {
-                    self.clear_executing_request();
-                    self.discard_request_state(request_id);
-                    return DispatchOutcome::Complete(Err("CPU time limit exceeded".into()));
-                }
-
-                let cpu_total = wall_start.elapsed();
-
-                match result {
-                    Ok(DispatchResult::Sync(json)) => {
-                        if let Some(limit) = self.cpu_limit {
-                            if cpu_total > limit {
-                                self.clear_executing_request();
-                                self.discard_request_state(request_id);
-                                return DispatchOutcome::Complete(Err("CPU time limit exceeded".into()));
-                            }
-                        }
-                        self.clear_executing_request();
-                        let logs = self.drain_request_logs(request_id);
-                        DispatchOutcome::Complete(Ok(RequestResult {
-                            json, cpu_time: cpu_total, wall_time: cpu_total, logs,
-                        }))
-                    }
-                    Ok(DispatchResult::HttpResponse(info)) => {
-                        self.clear_executing_request();
-                        self.build_http_outcome(request_id, info, cpu_total)
-                    }
-                    Ok(DispatchResult::ErrorValue { message, status, .. }) => {
-                        self.clear_executing_request();
-                        self.discard_request_state(request_id);
-                        DispatchOutcome::Complete(Err(DispatchError::new(message, status)))
-                    }
-                    Ok(_) | Err(_) => {
-                        // Promise is truly pending — needs the pump to drive it
-                        self.clear_executing_request();
-                        let (tx, rx) = channel::result_slot();
-                        self.pending_requests.insert(request_id, PendingRequest {
-                            id: request_id,
-                            promise,
-                            reply_direct: Some(tx),
-                            reply_http: None,
-                            reply_fetch: None,
-                            is_http: false,
-                            cpu_accumulated: cpu_total,
-                            wall_start,
-                            cancel: cancel.clone(),
-                        });
-                        // Notify the pump that new work was added
-                        self.notify_pump();
-                        DispatchOutcome::Pending { rx, cancel }
-                    }
-                }
-            }
-            DispatchResult::ErrorValue { message, status, .. } => {
-                self.clear_executing_request();
-                self.discard_request_state(request_id);
-                DispatchOutcome::Complete(Err(DispatchError::new(message, status)))
-            }
-            DispatchResult::Error(msg) => {
-                self.clear_executing_request();
-                self.discard_request_state(request_id);
-                DispatchOutcome::Complete(Err(msg.into()))
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // HTTP dispatch (direct mode, used with pump task)
+    // Kernel dispatch primitive — call_fetch_handler
     // -----------------------------------------------------------------------
 
     /// Kernel's sole dispatch primitive. Invokes the user's
     /// `export default { fetch(request, env, ctx) }` handler and classifies
     /// the result as a `FetchOutcome`.
-    ///
-    /// Task B3 covers the sync-return paths (Response / ReadableStream /
-    /// WebSocketUpgrade) and error paths. Task B4 will add the real
-    /// `Pending` handling for a handler that returns an unsettled Promise;
-    /// for now a pending promise yields a 501 stub.
     pub fn call_fetch_handler(
         &mut self,
         modules: &[crate::ModuleEntry],
@@ -1670,13 +1193,7 @@ impl RuntimeInner {
         self.pending_requests.insert(request_id, PendingRequest {
             id: request_id,
             promise,
-            reply_direct: None,
-            reply_http: None,
-            reply_fetch: Some(tx),
-            // is_http drives the pump's Response-inspection path — the
-            // fetch handler always produces a `Response`, same as
-            // `dispatch_http`, so this is `true`.
-            is_http: true,
+            reply_fetch: tx,
             cpu_accumulated,
             wall_start,
             cancel: ctx.cancel.clone(),
@@ -1730,154 +1247,6 @@ impl RuntimeInner {
             }
             ResponseInfo::WebSocket { ws_id, headers } => {
                 crate::FetchOutcome::WebSocketUpgrade { ws_id, headers }
-            }
-        }
-    }
-
-    /// Dispatch an HTTP request by calling `onRequest(Request)` directly.
-    /// Returns immediately with a DispatchOutcome variant.
-    pub fn dispatch_http(
-        &mut self,
-        modules: &[ModuleEntry],
-        method: &str,
-        url: &str,
-        headers_json: &str,
-        body: &str,
-        user_json: Option<String>,
-    ) -> DispatchOutcome {
-        self.ensure_initialized(modules);
-
-        if self.http_handler_fn.is_none() {
-            return DispatchOutcome::Complete(Err(DispatchError::new("No onRequest handler exported", 404)));
-        }
-        if self.http_create_request_fn.is_none() {
-            return DispatchOutcome::Complete(Err(DispatchError::new("HTTP request helper not compiled", 500)));
-        }
-
-        let request_id = self.next_direct_request_id;
-        self.next_direct_request_id += 1;
-
-        let wall_start = Instant::now();
-
-        // Set executing_request_id + cancel flag + user BEFORE V8 enter.
-        // See `dispatch_start` for why user is per-request, not thread-local.
-        let cancel = CancelFlag::new();
-        {
-            let mut s = self.state.borrow_mut();
-            s.executing_request_id = Some(request_id);
-            s.executing_request_cancel = Some(cancel.clone());
-            if let Some(j) = user_json {
-                s.per_request_user.insert(request_id, j);
-            }
-        }
-
-        // Enter V8: construct Request, call handler, inspect result
-        self.arm_cpu_timer();
-        let dispatch_result: Result<Result<ResponseInfo, String>, v8::Global<v8::Promise>> =
-            enter_v8!(self, |scope| {
-                let undefined = v8::undefined(scope).into();
-
-                // 1. Construct JS Request via helper
-                let create_fn = v8::Local::new(scope, self.http_create_request_fn.as_ref().unwrap());
-                let method_val = v8::String::new(scope, method).unwrap().into();
-                let url_val = v8::String::new(scope, url).unwrap().into();
-                let headers_val = v8::String::new(scope, headers_json).unwrap().into();
-                let body_val = v8::String::new(scope, body).unwrap().into();
-
-                let request_opt = create_fn.call(scope, undefined, &[method_val, url_val, headers_val, body_val]);
-                if request_opt.is_none() {
-                    Ok(Err("Failed to construct Request object".to_string()))
-                } else {
-                    let request = request_opt.unwrap();
-
-                    // 2. Call onRequest(request)
-                    let handler = v8::Local::new(scope, self.http_handler_fn.as_ref().unwrap());
-                    dispatch_http_inner(scope, handler, undefined, request)
-                }
-            });
-        self.disarm_cpu_timer();
-
-        if self.check_v8_terminated() {
-            self.clear_executing_request();
-            self.discard_request_state(request_id);
-            return DispatchOutcome::Complete(Err("CPU time limit exceeded".into()));
-        }
-
-        let cpu_elapsed = wall_start.elapsed();
-
-        match dispatch_result {
-            Ok(Ok(info)) => {
-                self.clear_executing_request();
-                self.build_http_outcome(request_id, info, cpu_elapsed)
-            }
-            Ok(Err(msg)) => {
-                self.clear_executing_request();
-                self.discard_request_state(request_id);
-                DispatchOutcome::Complete(Err(msg.into()))
-            }
-            Err(promise) => {
-                // Async — store as PendingRequest with is_http=true
-                self.clear_executing_request();
-                let (tx, rx) = channel::result_slot();
-                self.pending_requests.insert(request_id, PendingRequest {
-                    id: request_id,
-                    promise,
-                    reply_direct: None,
-                    reply_http: Some(tx),
-                    reply_fetch: None,
-                    is_http: true,
-                    cpu_accumulated: cpu_elapsed,
-                    wall_start,
-                    cancel: cancel.clone(),
-                });
-                self.notify_pump();
-                DispatchOutcome::HttpPending { rx, cancel }
-            }
-        }
-    }
-
-    /// Convert a ResponseInfo into the appropriate DispatchOutcome.
-    fn build_http_outcome(
-        &mut self,
-        request_id: u64,
-        info: ResponseInfo,
-        _cpu_time: Duration,
-    ) -> DispatchOutcome {
-        let logs = self.drain_request_logs(request_id);
-        match info {
-            ResponseInfo::Complete { status, headers, body } => {
-                DispatchOutcome::HttpComplete { status, headers, body, logs }
-            }
-            ResponseInfo::Stream { status, headers, stream_id } => {
-                let (writer, reader) = channel::stream_buffer();
-
-                // Attach the writer directly to the stream state so future
-                // enqueue() calls from JS write straight to the TCP-bound
-                // channel — no buffer, no pump cycle.
-                {
-                    let mut s = self.state.borrow_mut();
-                    if let Some(stream) = s.streams.get_mut(&stream_id) {
-                        // Flush any chunks enqueued before we attached.
-                        // A Full result here means the pre-attach burst
-                        // alone exceeded the cap — rare, but if it happens
-                        // the reader sees `is_overflow` and terminates.
-                        for chunk in stream.buffer.drain(..) {
-                            let _ = writer.push(chunk);
-                        }
-                        // If start() already completed, close the writer now
-                        if stream.closed {
-                            writer.close();
-                        } else {
-                            stream.direct_writer = Some(writer);
-                        }
-                    } else {
-                        writer.close();
-                    }
-                }
-                DispatchOutcome::HttpStream { status, headers, body: reader, logs }
-            }
-            ResponseInfo::WebSocket { ws_id, headers } => {
-                DispatchOutcome::WebSocketUpgrade { ws_id, headers }
             }
         }
     }
@@ -2002,13 +1371,7 @@ impl RuntimeInner {
                     // Only error the request whose JS was executing when the timer fired
                     if let Some(rid) = request_id {
                         if let Some(req) = self.pending_requests.remove(&rid) {
-                            if let Some(tx) = req.reply_direct {
-                                tx.send(Err("CPU time limit exceeded".into()));
-                            } else if let Some(tx) = req.reply_http {
-                                tx.send(Err("CPU time limit exceeded".into()));
-                            } else if let Some(tx) = req.reply_fetch {
-                                tx.send(Err("CPU time limit exceeded".into()));
-                            }
+                            req.reply_fetch.send(Err("CPU time limit exceeded".into()));
                         }
                     }
                     self.clear_executing_request();
@@ -2059,13 +1422,7 @@ impl RuntimeInner {
                 if self.check_v8_terminated() {
                     if let Some(rid) = request_id {
                         if let Some(req) = self.pending_requests.remove(&rid) {
-                            if let Some(tx) = req.reply_direct {
-                                tx.send(Err("CPU time limit exceeded".into()));
-                            } else if let Some(tx) = req.reply_http {
-                                tx.send(Err("CPU time limit exceeded".into()));
-                            } else if let Some(tx) = req.reply_fetch {
-                                tx.send(Err("CPU time limit exceeded".into()));
-                            }
+                            req.reply_fetch.send(Err("CPU time limit exceeded".into()));
                         }
                     }
                     self.clear_executing_request();
@@ -2146,13 +1503,7 @@ impl RuntimeInner {
             // Only error the request whose timer callback was executing
             if let Some(rid) = owner_request_id {
                 if let Some(req) = self.pending_requests.remove(&rid) {
-                    if let Some(tx) = req.reply_direct {
-                        tx.send(Err("CPU time limit exceeded".into()));
-                    } else if let Some(tx) = req.reply_http {
-                        tx.send(Err("CPU time limit exceeded".into()));
-                    } else if let Some(tx) = req.reply_fetch {
-                        tx.send(Err("CPU time limit exceeded".into()));
-                    }
+                    req.reply_fetch.send(Err("CPU time limit exceeded".into()));
                 }
             }
             self.clear_executing_request();
@@ -2200,28 +1551,6 @@ impl RuntimeInner {
 
     /// Fire zero-delay timers inline during dispatch_start (no AsyncWork needed).
     /// Spawned ops/timers from callbacks remain in RuntimeState for the pump to drain.
-    fn fire_ready_timers_inline(&mut self) {
-        loop {
-            let timer_id = {
-                let mut s = self.state.borrow_mut();
-                s.ready_timers.pop_front()
-            };
-            let Some(timer_id) = timer_id else { break };
-
-            self.arm_cpu_timer();
-            enter_v8!(self, |scope| {
-                crate::dispatch::fire_timer_callback(scope, &self.state, timer_id);
-            });
-            self.disarm_cpu_timer();
-
-            if self.check_v8_terminated() {
-                return;
-            }
-
-            self.state.borrow_mut().timer_owner.remove(&timer_id);
-        }
-    }
-
     /// Fire zero-delay timers, draining new tasks into external AsyncWork.
     fn fire_ready_timers_pump(&mut self, work: &mut AsyncWork) {
         loop {
@@ -2253,13 +1582,7 @@ impl RuntimeInner {
                 // Only error the request whose timer callback was executing
                 if let Some(rid) = owner_request_id {
                     if let Some(req) = self.pending_requests.remove(&rid) {
-                        if let Some(tx) = req.reply_direct {
-                            tx.send(Err("CPU time limit exceeded".into()));
-                        } else if let Some(tx) = req.reply_http {
-                            tx.send(Err("CPU time limit exceeded".into()));
-                        } else if let Some(tx) = req.reply_fetch {
-                            tx.send(Err("CPU time limit exceeded".into()));
-                        }
+                        req.reply_fetch.send(Err("CPU time limit exceeded".into()));
                     }
                 }
                 self.clear_executing_request();
@@ -2315,105 +1638,31 @@ impl RuntimeInner {
         cpu_elapsed: Duration,
     ) {
         let cpu_time = req.cpu_accumulated + cpu_elapsed;
-        let wall_time = req.wall_start.elapsed();
+        let _wall_time = req.wall_start.elapsed();
 
         match settled {
-            SettledResult::Rpc(Ok(result_json)) => {
-                // New wire: the handler's return value is the response body,
-                // no envelope. Serve as `application/json`.
-                let logs = self.drain_request_logs(id);
-                let result = RequestResult {
-                    json: result_json,
-                    cpu_time,
-                    wall_time,
-                    logs,
-                };
-                if let Some(tx) = req.reply_direct {
-                    tx.send(Ok(result));
-                }
-            }
-            SettledResult::Rpc(Err(msg)) => {
-                if let Some(tx) = req.reply_direct {
-                    tx.send(Err(msg.into()));
-                }
+            SettledResult::Rpc(_) => {
+                // RPC path is gone; the pump should never produce this.
+                unreachable!("SettledResult::Rpc no longer produced after dispatch_rpc removal");
             }
             SettledResult::Http(Ok(info)) => {
-                // New `call_fetch_handler` path takes priority — translate
-                // the `FetchOutcome` that `build_fetch_outcome` produces
-                // into a `SettledFetch` 1:1 (the two enums were designed
-                // for this mapping). The legacy `reply_http` branch is a
-                // short-lived bridge for `dispatch_http`; Task D2 deletes
-                // it when `dispatch_http` is removed.
-                if let Some(tx) = req.reply_fetch {
-                    let outcome = self.build_fetch_outcome(id, info, cpu_time);
-                    let settled = match outcome {
-                        crate::FetchOutcome::Response { status, headers, body, logs } =>
-                            crate::SettledFetch::Response { status, headers, body, logs },
-                        crate::FetchOutcome::Stream { status, headers, body_reader, logs } =>
-                            crate::SettledFetch::Stream { status, headers, body_reader, logs },
-                        crate::FetchOutcome::WebSocketUpgrade { ws_id, headers } =>
-                            crate::SettledFetch::WebSocketUpgrade { ws_id, headers, logs: vec![] },
-                        crate::FetchOutcome::Pending { .. } =>
-                            unreachable!("build_fetch_outcome never returns Pending"),
-                    };
-                    tx.send(Ok(settled));
-                } else {
-                    self.send_http_settled(id, info, req.reply_http, cpu_time);
-                }
+                // `build_fetch_outcome` attaches the stream writer + drains
+                // logs; we translate its variants 1:1 into SettledFetch.
+                let outcome = self.build_fetch_outcome(id, info, cpu_time);
+                let settled = match outcome {
+                    crate::FetchOutcome::Response { status, headers, body, logs } =>
+                        crate::SettledFetch::Response { status, headers, body, logs },
+                    crate::FetchOutcome::Stream { status, headers, body_reader, logs } =>
+                        crate::SettledFetch::Stream { status, headers, body_reader, logs },
+                    crate::FetchOutcome::WebSocketUpgrade { ws_id, headers } =>
+                        crate::SettledFetch::WebSocketUpgrade { ws_id, headers, logs: vec![] },
+                    crate::FetchOutcome::Pending { .. } =>
+                        unreachable!("build_fetch_outcome never returns Pending"),
+                };
+                req.reply_fetch.send(Ok(settled));
             }
             SettledResult::Http(Err(msg)) => {
-                // `msg: String` is consumed by `.into()`, so we route to
-                // whichever reply slot is set. On a correctly-populated
-                // PendingRequest only one of the two is `Some`.
-                if let Some(tx) = req.reply_fetch {
-                    tx.send(Err(msg.into()));
-                } else if let Some(tx) = req.reply_http {
-                    tx.send(Err(msg.into()));
-                }
-            }
-        }
-    }
-
-    /// Send an HTTP response for a settled async HTTP request.
-    fn send_http_settled(
-        &mut self,
-        id: u64,
-        info: ResponseInfo,
-        reply_http: Option<ResultSender<Result<HttpDispatchResult, DispatchError>>>,
-        _cpu_time: Duration,
-    ) {
-        let logs = self.drain_request_logs(id);
-        match info {
-            ResponseInfo::Complete { status, headers, body } => {
-                if let Some(tx) = reply_http {
-                    tx.send(Ok(HttpDispatchResult::Complete { status, headers, body, logs }));
-                }
-            }
-            ResponseInfo::Stream { status, headers, stream_id } => {
-                let (writer, reader) = channel::stream_buffer();
-                let mut forwarder = StreamForwarder::new(writer);
-
-                // Flush any chunks already buffered
-                {
-                    let mut s = self.state.borrow_mut();
-                    if let Some(stream) = s.streams.get_mut(&stream_id) {
-                        for chunk in stream.buffer.drain(..) {
-                            forwarder.try_forward(chunk);
-                        }
-                    }
-                    s.outbound_streams.insert(stream_id);
-                }
-
-                self.stream_forwarders.insert(stream_id, forwarder);
-
-                if let Some(tx) = reply_http {
-                    tx.send(Ok(HttpDispatchResult::Stream { status, headers, body: reader, logs }));
-                }
-            }
-            ResponseInfo::WebSocket { ws_id, headers } => {
-                if let Some(tx) = reply_http {
-                    tx.send(Ok(HttpDispatchResult::WebSocket { ws_id, headers, logs }));
-                }
+                req.reply_fetch.send(Err(msg.into()));
             }
         }
     }
@@ -2468,13 +1717,7 @@ impl RuntimeInner {
         if req.cpu_accumulated > cpu_limit {
             let req = self.pending_requests.remove(&request_id).unwrap();
             let _logs = self.drain_request_logs(request_id);
-            if let Some(tx) = req.reply_direct {
-                tx.send(Err("CPU time limit exceeded".into()));
-            } else if let Some(tx) = req.reply_http {
-                tx.send(Err("CPU time limit exceeded".into()));
-            } else if let Some(tx) = req.reply_fetch {
-                tx.send(Err("CPU time limit exceeded".into()));
-            }
+            req.reply_fetch.send(Err("CPU time limit exceeded".into()));
         }
     }
 
@@ -2588,13 +1831,7 @@ impl RuntimeInner {
             // Notify the caller. If the handler already timed out, the
             // receiver is dropped and this send is a no-op — that's fine,
             // it just means we don't double-error.
-            if let Some(tx) = req.reply_direct {
-                tx.send(Err("Request timed out".into()));
-            } else if let Some(tx) = req.reply_http {
-                tx.send(Err("Request timed out".into()));
-            } else if let Some(tx) = req.reply_fetch {
-                tx.send(Err("Request timed out".into()));
-            }
+            req.reply_fetch.send(Err("Request timed out".into()));
 
             // Drop every piece of per-request state that was still live
             // when cancellation fired. Before this fix, only `logs` got
@@ -2666,7 +1903,7 @@ fn collect_settled_promises(
         .into_iter()
         .filter_map(|id| {
             let req = pending_requests.remove(&id)?;
-            let result = http::extract_settled_result(scope, &req.promise, req.is_http);
+            let result = http::extract_settled_result(scope, &req.promise);
             Some((id, req, result))
         })
         .collect()
@@ -2705,43 +1942,6 @@ fn call_ws_method(
 }
 
 /// Call the onRequest handler and inspect the result. Separated out to avoid
-/// borrow conflicts (self.http_handler_fn borrowed while enter_v8! borrows self).
-fn dispatch_http_inner(
-    scope: &mut v8::PinScope,
-    handler: v8::Local<v8::Function>,
-    undefined: v8::Local<v8::Value>,
-    request: v8::Local<v8::Value>,
-) -> Result<Result<ResponseInfo, String>, v8::Global<v8::Promise>> {
-    let result_opt = handler.call(scope, undefined, &[request]);
-    if result_opt.is_none() {
-        Ok(Err("onRequest threw an exception".to_string()))
-    } else {
-        let result = result_opt.unwrap();
-        scope.perform_microtask_checkpoint();
-        if result.is_promise() {
-            let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
-            match promise.state() {
-                v8::PromiseState::Fulfilled => {
-                    let resolved = promise.result(scope);
-                    Ok(http::inspect_response(scope, resolved))
-                }
-                v8::PromiseState::Rejected => {
-                    let msg = promise.result(scope)
-                        .to_string(scope)
-                        .map(|s| s.to_rust_string_lossy(scope))
-                        .unwrap_or_else(|| "Promise rejected".to_string());
-                    Ok(Err(msg))
-                }
-                v8::PromiseState::Pending => {
-                    Err(v8::Global::new(scope, promise))
-                }
-            }
-        } else {
-            Ok(http::inspect_response(scope, result))
-        }
-    }
-}
-
 /// No-op V8 callback for `ctx.passThroughOnException`. Takes no arguments
 /// and has no side effects — it's here only so the JS side can call the
 /// method without a TypeError. Whether we ever honor the semantic

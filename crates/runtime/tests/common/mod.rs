@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, RequestResult, SettledFetch};
 use zeroship_runtime::channel::CancelFlag;
-use zeroship_runtime::runtime::{Runtime, DispatchOutcome, RuntimeLimits};
+use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
 
 /// Create a module list from a single JS source string.
 ///
@@ -431,7 +431,3 @@ pub fn dispatch_fetch(modules: Vec<ModuleEntry>, req: TestRequest) -> FetchOutco
     )
 }
 
-/// Silence the never-used warning for DispatchOutcome alias (tests import it
-/// by name; the D2 removal deletes this alias entirely).
-#[allow(dead_code)]
-fn _keep_dispatch_outcome_alias_alive() -> Option<DispatchOutcome> { None }

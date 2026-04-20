@@ -1,38 +1,28 @@
-//! ESM integration tests via the deleted `dispatch_rpc` path.
-//!
-//! The lib-side `modules::tests` suite already covers module loading /
-//! import-graph resolution using `load_modules` directly; these tests are
-//! end-to-end smoke tests through `dispatch_rpc`, which D2 removes. Kept
-//! here for history — D2 deletes them.
-//!
-//! TODO(PR 1 Task D2): delete this file once `dispatch_rpc` is removed.
+//! ESM integration tests — ride on `call_fetch_handler` via the common
+//! `dispatch` bootstrap helper. Proves import graphs resolve correctly
+//! in the actual kernel, complementing the lib-side `modules::tests`
+//! unit suite.
 
-use zeroship_runtime::{init_v8, ModuleEntry};
-use zeroship_runtime::runtime::Runtime;
+mod common;
+use common::*;
+
+use zeroship_runtime::ModuleEntry;
 
 #[test]
-#[ignore = "PR 1 Task D2: dispatch_rpc is removed — lib modules::tests covers module loading"]
 fn esm_basic_rpc() {
-    init_v8();
-    let modules = vec![ModuleEntry {
-        specifier: "index.js".into(),
-        source: r#"
-            export function ping() { return "pong"; }
-            export function add(a, b) { return a + b; }
-        "#.into(),
-    }];
-    let runtime = Runtime::builder().modules(modules).build();
-    let r = runtime.dispatch_rpc("ping", "[]").unwrap();
+    let modules = m(r#"
+        export function ping() { return "pong"; }
+        export function add(a, b) { return a + b; }
+    "#);
+    let r = dispatch(modules.clone(), "ping", "[]").unwrap();
     assert_eq!(r.json, "\"pong\"");
 
-    let r2 = runtime.dispatch_rpc("add", "[3,4]").unwrap();
+    let r2 = dispatch(modules, "add", "[3,4]").unwrap();
     assert_eq!(r2.json, "7");
 }
 
 #[test]
-#[ignore = "PR 1 Task D2: dispatch_rpc is removed — lib modules::tests covers module loading"]
 fn esm_multi_module_rpc() {
-    init_v8();
     let modules = vec![
         ModuleEntry {
             specifier: "index.js".into(),
@@ -46,7 +36,6 @@ fn esm_multi_module_rpc() {
             source: "export function add(a, b) { return a + b; }".into(),
         },
     ];
-    let runtime = Runtime::builder().modules(modules).build();
-    let r = runtime.dispatch_rpc("compute", "[3,4]").unwrap();
+    let r = dispatch(modules, "compute", "[3,4]").unwrap();
     assert_eq!(r.json, "7");
 }

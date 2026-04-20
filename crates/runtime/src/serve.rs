@@ -1149,15 +1149,10 @@ fn run_single_worker(
                 .plugins(plugins)
                 .build();
 
-            // Warmup (URL-path wire: method name is a bare string).
-            {
-                let result = runtime.dispatch_rpc("ping", "[]");
-                if let Err(e) = result {
-                    eprintln!("[zeroship] warmup failed: {e}");
-                }
-            }
-
             // Start the async event loop pump (timers, fetch, streams).
+            // (Warmup removed — `call_fetch_handler` initializes lazily via
+            // `ensure_initialized` on the first request; the kernel no
+            // longer exposes a bare-function dispatch primitive.)
             runtime.start_pump();
 
             // Accept loop

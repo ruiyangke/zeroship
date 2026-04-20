@@ -219,38 +219,18 @@ pub fn looks_like_response(scope: &mut v8::PinScope, val: v8::Local<v8::Value>) 
     }
 }
 
-/// Extract the result of a settled promise, branching on RPC vs HTTP.
-///
-/// RPC path: return the raw handler value as JSON (already the response
-/// body for the new wire). If the resolved value looks like a `Response`
-/// (e.g. the async-generator wrapper produced one), promote to the Http
-/// variant so the streaming machinery takes over.
+/// Extract the result of a settled promise. All dispatch goes through
+/// `call_fetch_handler` now, so the fulfilled value is always inspected
+/// as an HTTP `Response`.
 pub fn extract_settled_result(
     scope: &mut v8::PinScope,
     promise: &v8::Global<v8::Promise>,
-    is_http: bool,
 ) -> SettledResult {
     let local = v8::Local::new(scope, promise);
     match local.state() {
         v8::PromiseState::Fulfilled => {
             let val = local.result(scope);
-            if is_http {
-                return SettledResult::Http(inspect_response(scope, val));
-            }
-            // RPC path: promote Response-shaped values to HTTP so the
-            // async-generator wrap can stream out exactly as it would from
-            // `onRequest`.
-            if looks_like_response(scope, val) {
-                return SettledResult::Http(inspect_response(scope, val));
-            }
-            let json = if val.is_undefined() {
-                "null".to_string()
-            } else {
-                v8::json::stringify(scope, val)
-                    .map(|s| s.to_rust_string_lossy(scope))
-                    .unwrap_or_else(|| "null".to_string())
-            };
-            SettledResult::Rpc(Ok(json))
+            SettledResult::Http(inspect_response(scope, val))
         }
         v8::PromiseState::Rejected => {
             // Read `.message` if it's an Error object; else stringify.
@@ -269,19 +249,10 @@ pub fn extract_settled_result(
                     .map(|s| s.to_rust_string_lossy(scope))
                     .unwrap_or_else(|| "Promise rejected".to_string())
             };
-            if is_http {
-                SettledResult::Http(Err(msg))
-            } else {
-                SettledResult::Rpc(Err(msg))
-            }
+            SettledResult::Http(Err(msg))
         }
         v8::PromiseState::Pending => {
-            let err = "Promise still pending".to_string();
-            if is_http {
-                SettledResult::Http(Err(err))
-            } else {
-                SettledResult::Rpc(Err(err))
-            }
+            SettledResult::Http(Err("Promise still pending".to_string()))
         }
     }
 }

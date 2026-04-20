@@ -1,8 +1,9 @@
 //! End-to-end test: real npm app → .appbundle → V8 execution
 
+mod common;
+use common::{dispatch, dispatch_multi};
+
 use zeroship_runtime::bundle::{AppBundle, ModuleType};
-use zeroship_runtime::init_v8;
-use zeroship_runtime::runtime::Runtime;
 
 /// Load the esbuild-bundled JS at compile time
 const BUNDLED_JS: &str = include_str!("/tmp/test-app/dist/bundled.js");
@@ -41,49 +42,43 @@ fn bundle_round_trip_real_app() {
 }
 
 #[test]
-#[ignore = "PR 1 Task D2: dispatch_rpc is removed — bundle load coverage remains via other tests"]
 fn execute_real_app_from_bundle() {
     // Create .appbundle
     let bundle = AppBundle::new("index.js", vec![
         ("index.js".into(), ModuleType::EsModule, BUNDLED_JS.into()),
     ]);
     let bytes = bundle.to_bytes();
-    
+
     // Parse bundle
     let mut loaded = AppBundle::from_bytes(&bytes).unwrap();
     let entries = loaded.to_module_entries();
-    
-    // Load into V8 and execute
-    init_v8();
-    let runtime = Runtime::builder().modules(entries).build();
-    
-    // Test ping
-    let r = runtime.dispatch_rpc("ping", "[]").unwrap();
+
+    // All four calls share the same runtime so in-memory app state
+    // (user list) persists across them — the test depends on it.
+    let results = dispatch_multi(entries, &[
+        ("ping", "[]"),
+        ("createUser", r#"["Alice","alice@example.com",30]"#),
+        ("validateUser", r#"[{"name":"Bob","email":"not-email","age":25}]"#),
+        ("listUsers", "[]"),
+    ]);
+
+    let r = results[0].as_ref().unwrap();
     assert!(r.json.contains("pong"), "ping failed: {}", r.json);
     eprintln!("  ping: OK");
 
-    // Test createUser with zod validation
-    let r = runtime.dispatch_rpc(
-        "createUser",
-        r#"["Alice","alice@example.com",30]"#,
-    ).unwrap();
+    let r = results[1].as_ref().unwrap();
     eprintln!("  createUser: {}", &r.json[..80.min(r.json.len())]);
     assert!(r.json.contains("Alice"), "createUser failed: {}", r.json);
     assert!(r.json.contains("id"), "createUser should return id: {}", r.json);
 
-    // Test validateUser (zod validation — invalid email)
-    let r = runtime.dispatch_rpc(
-        "validateUser",
-        r#"[{"name":"Bob","email":"not-email","age":25}]"#,
-    ).unwrap();
+    let r = results[2].as_ref().unwrap();
     eprintln!("  validateUser (invalid): {}", &r.json[..80.min(r.json.len())]);
     assert!(r.json.contains("false") || r.json.contains("error"), "validation should fail: {}", r.json);
 
-    // Test listUsers (lodash sortBy)
-    let r = runtime.dispatch_rpc("listUsers", "[]").unwrap();
+    let r = results[3].as_ref().unwrap();
     eprintln!("  listUsers: {}", &r.json[..80.min(r.json.len())]);
     assert!(r.json.contains("Alice"), "listUsers should contain Alice: {}", r.json);
-    
+
     eprintln!("\n  All real-world npm functions working from .appbundle!");
 }
 
@@ -193,9 +188,7 @@ fn large_module_count() {
 }
 
 #[test]
-#[ignore = "PR 1 Task D2: dispatch_rpc is removed — bundle load coverage remains via other tests"]
 fn execute_multi_module_from_bundle() {
-    // Multi-module app: entry imports helpers
     let entry = r#"
         import { double } from './math.js';
         import { greet } from './strings.js';
@@ -206,7 +199,7 @@ fn execute_multi_module_from_bundle() {
     let math = "export function double(n) { return n * 2; }";
     let strings = "export function greet(name) { return 'Hello, ' + name + '!'; }";
     let unused = "export function unused() { THIS_WOULD_FAIL_IF_COMPILED; }";
-    
+
     let bundle = AppBundle::new("index.js", vec![
         ("index.js".into(), ModuleType::EsModule, entry.into()),
         ("math.js".into(), ModuleType::EsModule, math.into()),
@@ -214,24 +207,20 @@ fn execute_multi_module_from_bundle() {
         ("unused.js".into(), ModuleType::EsModule, unused.into()),
     ]);
     let bytes = bundle.to_bytes();
-    
-    // Load from bundle
+
     let mut loaded = AppBundle::from_bytes(&bytes).unwrap();
     let entries = loaded.to_module_entries();
-    
-    // Execute in V8
-    init_v8();
-    let runtime = Runtime::builder().modules(entries).build();
-    
-    let r = runtime.dispatch_rpc("ping", "[]").unwrap();
-    assert!(r.json.contains("pong"));
 
-    let r = runtime.dispatch_rpc("compute", "[21]").unwrap();
-    assert!(r.json.contains("42"), "compute(21) should be 42: {}", r.json);
+    let results = dispatch_multi(entries, &[
+        ("ping", "[]"),
+        ("compute", "[21]"),
+        ("hello", "[\"World\"]"),
+    ]);
 
-    let r = runtime.dispatch_rpc("hello", "[\"World\"]").unwrap();
-    assert!(r.json.contains("Hello, World!"), "hello should greet: {}", r.json);
-    
+    assert!(results[0].as_ref().unwrap().json.contains("pong"));
+    assert!(results[1].as_ref().unwrap().json.contains("42"), "compute(21) should be 42: {}", results[1].as_ref().unwrap().json);
+    assert!(results[2].as_ref().unwrap().json.contains("Hello, World!"), "hello should greet: {}", results[2].as_ref().unwrap().json);
+
     eprintln!("  multi-module from bundle: all functions working");
 }
 

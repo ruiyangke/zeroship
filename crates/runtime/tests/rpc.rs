@@ -1,9 +1,11 @@
 mod common;
 use common::*;
 
-use zeroship_runtime::init_v8;
-use zeroship_runtime::runtime::Runtime;
-use zeroship_runtime::ModuleEntry;
+// These tests exercise the pre-kernel-cut named-export + JSON-args contract,
+// riding on top of `call_fetch_handler` via the `DISPATCH_BOOTSTRAP_JS` helper
+// in `common/mod.rs`. They prove that a simple user module can still expose
+// individual functions as RPC methods — the exact pattern the PR 2 bootstrap
+// will re-implement in user-space.
 
 #[test]
 fn basic_rpc() {
@@ -28,22 +30,6 @@ fn persistent_context() {
     assert_eq!(results[0].as_ref().unwrap().json, "1");
     assert_eq!(results[1].as_ref().unwrap().json, "2");
     assert_eq!(results[2].as_ref().unwrap().json, "3");
-}
-
-#[test]
-#[ignore = "PR 1 Task D2: dispatch_rpc is removed — per-request CPU tracking moves to call_fetch_handler tests"]
-fn per_request_cpu() {
-    init_v8();
-    let modules = m(r#"
-        export function fib(n) {
-            function f(n) { return n <= 1 ? n : f(n-1) + f(n-2); }
-            return f(n);
-        }
-    "#);
-    let runtime = Runtime::builder().modules(modules).build();
-    let r1 = runtime.dispatch_rpc("fib", "[20]").unwrap();
-    let r2 = runtime.dispatch_rpc("fib", "[35]").unwrap();
-    assert!(r2.cpu_time > r1.cpu_time * 5);
 }
 
 #[test]
@@ -90,9 +76,9 @@ fn promise_then_chain_sync() {
 
 #[test]
 fn async_generator_streams_sse() {
-    // An async generator should be auto-wrapped in a Response(text/event-stream).
-    // The dispatch_rpc path collapses Complete responses to their body, so
-    // we see the full SSE frame sequence as a single string.
+    // An async generator should be auto-wrapped in a Response(text/event-stream)
+    // by the DISPATCH_BOOTSTRAP_JS helper. dispatch() buffers the full stream
+    // body into a single string for assertion purposes.
     let r = dispatch(m(r#"
         export async function* chat() {
             yield { token: "Hi" };
@@ -107,8 +93,8 @@ fn async_generator_streams_sse() {
 
 #[test]
 fn method_not_found_errors() {
-    // Method lookup fails before touching user code. The error bubbles
-    // out of dispatch_rpc as an Err("Method not found: ..." ).
+    // The bootstrap throws `Error('Method not found: <name>')` with
+    // err.status = 404 when the user module has no matching named export.
     let err = dispatch(
         m(r#"export function ping() { return "pong"; }"#),
         "nope",
@@ -117,80 +103,11 @@ fn method_not_found_errors() {
     assert!(err.contains("Method not found"), "got: {}", err);
 }
 
-// --- Status propagation probes (B3/B4/B5) ---
-//
-// These adversarial inputs exercise the DISPATCH_JS pre-args validation:
-//   - unknown method           → err.status = 404
-//   - malformed JSON body      → err.status = 400
-//   - JSON-but-not-array body  → err.status = 400
-// The status must reach DispatchOutcome via DispatchError so the worker
-// translates it to the right HTTP code instead of flattening to 500.
-
-fn dispatch_start_error(modules: Vec<ModuleEntry>, method: &str, args_json: &str)
-    -> zeroship_runtime::runtime::DispatchError
-{
-    use zeroship_runtime::runtime::DispatchOutcome;
-    init_v8();
-    let runtime = Runtime::builder().modules(modules).build();
-    match runtime.dispatch_start(method, args_json, None) {
-        DispatchOutcome::Complete(Err(e)) => e,
-        other => panic!("expected Complete(Err), got different outcome ({})",
-            match other {
-                DispatchOutcome::Complete(Ok(_)) => "Complete(Ok)",
-                DispatchOutcome::Pending { .. } => "Pending",
-                DispatchOutcome::HttpComplete { .. } => "HttpComplete",
-                DispatchOutcome::HttpStream { .. } => "HttpStream",
-                DispatchOutcome::HttpPending { .. } => "HttpPending",
-                DispatchOutcome::WebSocketUpgrade { .. } => "WebSocketUpgrade",
-                DispatchOutcome::Complete(Err(_)) => unreachable!(),
-            }),
-    }
-}
-
-#[test]
-#[ignore = "PR 1 Task D2: dispatch_start is removed — error status mapping moves to bootstrap (PR 2)"]
-fn unknown_method_status_404() {
-    let e = dispatch_start_error(
-        m(r#"export function ping() { return "pong"; }"#),
-        "nope",
-        "[]",
-    );
-    assert_eq!(e.status, 404, "msg={}", e.message);
-    assert!(e.message.contains("Method not found"), "msg={}", e.message);
-}
-
-#[test]
-#[ignore = "PR 1 Task D2: dispatch_start is removed — error status mapping moves to bootstrap (PR 2)"]
-fn malformed_json_body_status_400() {
-    let e = dispatch_start_error(
-        m(r#"export function ping() { return "pong"; }"#),
-        "ping",
-        "not-json",
-    );
-    assert_eq!(e.status, 400, "msg={}", e.message);
-    assert!(e.message.contains("Invalid args JSON"), "msg={}", e.message);
-}
-
-#[test]
-#[ignore = "PR 1 Task D2: dispatch_start is removed — error status mapping moves to bootstrap (PR 2)"]
-fn non_array_body_status_400() {
-    let e = dispatch_start_error(
-        m(r#"export function ping() { return "pong"; }"#),
-        "ping",
-        r#"{"not":"an array"}"#,
-    );
-    assert_eq!(e.status, 400, "msg={}", e.message);
-    assert!(e.message.contains("JSON array"), "msg={}", e.message);
-}
-
 #[test]
 fn plain_object_with_status_is_not_response() {
     // Regression guard for the `__zsResponse` prototype tag: a handler
-    // return shaped like `{ status, url }` (e.g. `fetchExternal`) must be
-    // JSON-encoded verbatim, NOT fed into the Response inspection path.
-    // The old two-probe heuristic (`status` + `headers`) paid two V8
-    // property reads on every async RPC settlement because this shape
-    // passed the first probe; the tag-based check rejects it in one read.
+    // return shaped like `{ status, url }` must be JSON-encoded verbatim,
+    // not fed into the Response inspection path.
     let r = dispatch(m(r#"
         export async function fetchLike() {
             return { status: 200, url: "http://example.com" };
@@ -201,10 +118,10 @@ fn plain_object_with_status_is_not_response() {
 
 #[test]
 fn user_returned_response_passes_through() {
-    // A user-constructed `new Response(...)` still goes through the
-    // HTTP inspection path (the tag is on `Response.prototype`). The
-    // dispatch_rpc path collapses Complete responses to their body
-    // so we see the body string verbatim.
+    // A user-constructed `new Response(...)` goes through the HTTP
+    // inspection path (the tag is on `Response.prototype`). The bootstrap
+    // passes the Response through unchanged; dispatch() collapses the
+    // buffered body into the json field for assertion.
     let r = dispatch(m(r#"
         export function respond() {
             return new Response("hello", { status: 200 });

@@ -29,7 +29,7 @@ pub use init::{init_v8, RequestResult, HttpResult};
 pub use modules::ModuleEntry;
 pub use state::{SharedState, RuntimeState, OpResult, FetchRequest, StreamState, SpawnedTimer, WebSocketState, WsMessage};
 pub use storage::AppStorage;
-pub use runtime::{Runtime, RuntimeBuilder, RuntimeLimits, DispatchOutcome, HttpDispatchResult, AsyncWork, AsyncEvent};
+pub use runtime::{Runtime, RuntimeBuilder, RuntimeLimits, AsyncWork, AsyncEvent};
 pub use fetch_outcome::{FetchOutcome, SettledFetch, RequestCtx, EnvSnapshot};
 pub use channel::{CancelFlag, ResultSender, ResultReceiver, StreamWriter, StreamReader};
 pub use bundle::{AppBundle, ModuleType, ModuleInfo};

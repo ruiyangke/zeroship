@@ -97,19 +97,10 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8], app_limits: AppRuntimeLimits)
             .plugins(plugins)
             .build();
 
-        // Warmup (isolate is entered after build())
-        // New wire: (method, args_json). `__ping` will fail "method not
-        // found" for apps without a `__ping` export — that's fine, the
-        // point is exercising the dispatch code path.
-        {
-            let result = runtime.dispatch_rpc("__ping", "[]");
-            if let Err(e) = &result {
-                eprintln!("[worker] warmup warning for {app_id}: {e}");
-            }
-        }
-
         // Exit isolate so other isolates can be created/entered on this thread.
-        // The handler will enter/exit around each dispatch_rpc call.
+        // The handler will enter/exit around each call_fetch_handler call.
+        // (Warmup removed — `call_fetch_handler` does lazy init via
+        // `ensure_initialized` on the first request.)
         runtime.exit_isolate();
 
         // Start pump task for async V8 ops (timers, fetch, streams).

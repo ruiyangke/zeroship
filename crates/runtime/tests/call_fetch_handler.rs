@@ -299,3 +299,111 @@ fn websocket_upgrade() {
         }
     }
 }
+
+// Regression guard ported from the deleted `tests/http.rs`. When an async
+// ReadableStream.start() enqueued chunks across timer-driven await points
+// and then called controller.close(), an earlier close implementation
+// removed the stream from outbound_streams before the pump's final flush
+// ran — buffered chunks stayed resident forever, the forwarder never
+// closed, and HTTP clients hung waiting for the chunked-encoding
+// terminator. The SSE [DONE] marker was the canonical symptom. This test
+// rides the same plumbing via call_fetch_handler.
+#[test]
+fn streaming_async_closes_cleanly() {
+    let modules = m(r#"
+        export default {
+            async fetch(request, env, ctx) {
+                // Force the handler promise pending past the initial
+                // microtask drain so async dispatch takes over.
+                await new Promise((r) => setTimeout(r, 0));
+                const encoder = new TextEncoder();
+                const body = new ReadableStream({
+                    async start(controller) {
+                        controller.enqueue(encoder.encode("data: tick 0\n\n"));
+                        await new Promise((r) => setTimeout(r, 0));
+                        controller.enqueue(encoder.encode("data: tick 1\n\n"));
+                        await new Promise((r) => setTimeout(r, 0));
+                        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+                        controller.close();
+                    },
+                });
+                return new Response(body, {
+                    headers: { "Content-Type": "text/event-stream" },
+                });
+            }
+        };
+    "#);
+
+    compio::runtime::Runtime::new().unwrap().block_on(async move {
+        init_v8();
+        let runtime = Runtime::builder().modules(modules).build();
+        runtime.start_pump();
+
+        let env = EnvSnapshot::empty();
+        let ctx = RequestCtx::new(CancelFlag::new());
+        let outcome = runtime.call_fetch_handler(
+            "GET", "http://localhost/events", &[], "",
+            &env, ctx,
+        );
+
+        // The outer handler is async; we get Pending and the pump settles
+        // to a Stream.
+        let reader = match outcome {
+            FetchOutcome::Stream { status, body_reader, .. } => {
+                assert_eq!(status, 200);
+                body_reader
+            }
+            FetchOutcome::Pending { rx, cancel: _ } => {
+                let settled = compio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("call_fetch_handler pending timed out")
+                    .expect("call_fetch_handler pending delivered DispatchError");
+                match settled {
+                    SettledFetch::Stream { status, body_reader, .. } => {
+                        assert_eq!(status, 200);
+                        body_reader
+                    }
+                    other => {
+                        let name = match other {
+                            SettledFetch::Response { .. } => "Response",
+                            SettledFetch::WebSocketUpgrade { .. } => "WebSocketUpgrade",
+                            SettledFetch::Stream { .. } => unreachable!(),
+                        };
+                        panic!("expected Stream, got {name}");
+                    }
+                }
+            }
+            other => {
+                let name = match other {
+                    FetchOutcome::Response { .. } => "Response",
+                    FetchOutcome::WebSocketUpgrade { .. } => "WebSocketUpgrade",
+                    FetchOutcome::Pending { .. } => unreachable!(),
+                    FetchOutcome::Stream { .. } => unreachable!(),
+                };
+                panic!("expected Stream or Pending, got {name}");
+            }
+        };
+
+        // Drain until is_done — the critical assertion is that close
+        // actually propagates.
+        let collected = compio::time::timeout(Duration::from_secs(5), async {
+            let mut out = String::new();
+            loop {
+                while let Some(chunk) = reader.pop() {
+                    out.push_str(&String::from_utf8_lossy(&chunk));
+                }
+                if reader.is_done() {
+                    break;
+                }
+                reader.wait_for_data().await;
+            }
+            out
+        })
+        .await
+        .expect("reader never saw close after controller.close()");
+
+        assert!(collected.contains("data: tick 0"), "got: {collected}");
+        assert!(collected.contains("data: tick 1"), "got: {collected}");
+        assert!(collected.contains("data: [DONE]"), "final marker missing; got: {collected}");
+    });
+}
