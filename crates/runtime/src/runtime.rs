@@ -1041,7 +1041,7 @@ impl RuntimeInner {
         exists
     }
 
-    /// Load polyfills, ES modules, and compile the dispatch function (once).
+    /// Load polyfills and ES modules, then resolve `default.fetch` (once).
     pub(crate) fn ensure_initialized(&mut self, modules: &[ModuleEntry]) {
         if self.initialized {
             return;
@@ -1051,50 +1051,37 @@ impl RuntimeInner {
             v8::scope!(let handle_scope, &mut self.isolate);
             let context = v8::Local::new(handle_scope, &self.context);
             let scope = &mut v8::ContextScope::new(handle_scope, context);
-            self.dispatch_fn = Some(load_polyfills_and_modules(scope, modules, &self.plugins));
 
-            // Check if __rpc.onRequest is a function. If so, cache a Global ref
-            // for the native HTTP dispatch path.
-            let global = context.global(scope);
-            let rpc_key = v8::String::new(scope, "__rpc").unwrap();
-            if let Some(rpc_obj) = global
-                .get(scope, rpc_key.into())
-                .and_then(|v| v.to_object(scope))
-            {
-                let on_request_key = v8::String::new(scope, "onRequest").unwrap();
-                if let Some(handler) = rpc_obj.get(scope, on_request_key.into()) {
-                    if handler.is_function() {
-                        let func = v8::Local::<v8::Function>::try_from(handler).unwrap();
-                        self.http_handler_fn = Some(v8::Global::new(scope, func));
-                    }
-                }
+            // Load polyfills and the user's entry module. The returned global
+            // is the entry module's Namespace Object; the kernel reads
+            // `default.fetch` directly off it (no more `__rpc` reach-through).
+            let namespace = load_polyfills_and_modules(scope, modules, &self.plugins);
 
-                // Check if the entry module has `export default { fetch(...) }`.
-                // The default export is merged into `__rpc.default` by the same
-                // namespace-copy loop in `load_polyfills_and_modules` that
-                // registers named exports. Reach through to its `.fetch`
-                // method so the kernel dispatch path (`call_fetch_handler`)
-                // has a cached Global<Function>.
-                //
-                // TODO(PR 1 Task D2): when __rpc scaffolding is deleted,
-                // replace this reach-through with either a
-                // `globalThis.__zs_user_default` binding emitted by the
-                // module loader, or a direct V8 module-namespace read on
-                // the user's entry module. Without this redirect in place
-                // the lookup below will silently return None and every
-                // fetch request will 404. See
-                // docs/superpowers/plans/2026-04-20-kernel-cut.md Task B3
-                // Step 6 for the plan's original approach.
-                let default_key = v8::String::new(scope, "default").unwrap();
-                if let Some(default_obj) = rpc_obj
-                    .get(scope, default_key.into())
-                    .and_then(|v| v.to_object(scope))
-                {
-                    let fetch_key = v8::String::new(scope, "fetch").unwrap();
-                    if let Some(fetch_val) = default_obj.get(scope, fetch_key.into()) {
-                        if fetch_val.is_function() {
-                            let func = v8::Local::<v8::Function>::try_from(fetch_val).unwrap();
-                            self.fetch_handler_fn = Some(v8::Global::new(scope, func));
+            // Resolve `export default { fetch(...) }` on the entry module's
+            // namespace. This is the sole dispatch target of the new kernel:
+            // `call_fetch_handler` invokes this cached function for every
+            // incoming request, passing `(Request, env, ctx)` just like the
+            // Cloudflare Workers / Bun / WinterCG module-worker contract.
+            if let Some(ns_global) = namespace {
+                let ns_local = v8::Local::new(scope, &ns_global);
+                if let Some(ns_obj) = ns_local.to_object(scope) {
+                    let default_key = v8::String::new(scope, "default").unwrap();
+                    if let Some(default_val) = ns_obj.get(scope, default_key.into()) {
+                        if !default_val.is_undefined() && !default_val.is_null() {
+                            if let Some(default_obj) = default_val.to_object(scope) {
+                                let fetch_key = v8::String::new(scope, "fetch").unwrap();
+                                if let Some(fetch_val) =
+                                    default_obj.get(scope, fetch_key.into())
+                                {
+                                    if fetch_val.is_function() {
+                                        let func =
+                                            v8::Local::<v8::Function>::try_from(fetch_val)
+                                                .unwrap();
+                                        self.fetch_handler_fn =
+                                            Some(v8::Global::new(scope, func));
+                                    }
+                                }
+                            }
                         }
                     }
                 }

@@ -1,7 +1,17 @@
+//! ESM integration tests via the deleted `dispatch_rpc` path.
+//!
+//! The lib-side `modules::tests` suite already covers module loading /
+//! import-graph resolution using `load_modules` directly; these tests are
+//! end-to-end smoke tests through `dispatch_rpc`, which D2 removes. Kept
+//! here for history — D2 deletes them.
+//!
+//! TODO(PR 1 Task D2): delete this file once `dispatch_rpc` is removed.
+
 use zeroship_runtime::{init_v8, ModuleEntry};
 use zeroship_runtime::runtime::Runtime;
 
 #[test]
+#[ignore = "PR 1 Task D2: dispatch_rpc is removed — lib modules::tests covers module loading"]
 fn esm_basic_rpc() {
     init_v8();
     let modules = vec![ModuleEntry {
@@ -20,6 +30,7 @@ fn esm_basic_rpc() {
 }
 
 #[test]
+#[ignore = "PR 1 Task D2: dispatch_rpc is removed — lib modules::tests covers module loading"]
 fn esm_multi_module_rpc() {
     init_v8();
     let modules = vec![

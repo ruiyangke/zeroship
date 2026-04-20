@@ -41,6 +41,7 @@ fn bundle_round_trip_real_app() {
 }
 
 #[test]
+#[ignore = "PR 1 Task D2: dispatch_rpc is removed — bundle load coverage remains via other tests"]
 fn execute_real_app_from_bundle() {
     // Create .appbundle
     let bundle = AppBundle::new("index.js", vec![
@@ -192,6 +193,7 @@ fn large_module_count() {
 }
 
 #[test]
+#[ignore = "PR 1 Task D2: dispatch_rpc is removed — bundle load coverage remains via other tests"]
 fn execute_multi_module_from_bundle() {
     // Multi-module app: entry imports helpers
     let entry = r#"

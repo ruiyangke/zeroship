@@ -1,7 +1,17 @@
+//! `onRequest(request)`-contract tests. The kernel-cut refactor (PR 1) removes
+//! `dispatch_http` and the `onRequest` named export in favor of
+//! `default.fetch` + `call_fetch_handler`. These tests exercise the old
+//! contract directly; D2 deletes `dispatch_http`, so they're ignored here and
+//! will be deleted alongside the method. The module-worker-style equivalents
+//! live in `call_fetch_handler.rs`.
+//!
+//! TODO(PR 1 Task D2): delete this file once `dispatch_http` is removed.
+
 use zeroship_runtime::{init_v8, ModuleEntry};
 use zeroship_runtime::runtime::{Runtime, DispatchOutcome};
 
 #[test]
+#[ignore = "PR 1 Task D2: dispatch_http + onRequest are removed — use call_fetch_handler"]
 fn on_request_basic() {
     init_v8();
     let modules = vec![ModuleEntry {
@@ -26,6 +36,7 @@ fn on_request_basic() {
 }
 
 #[test]
+#[ignore = "PR 1 Task D2: dispatch_http + onRequest are removed — use call_fetch_handler"]
 fn on_request_with_rpc() {
     init_v8();
     let modules = vec![ModuleEntry {
@@ -54,6 +65,7 @@ fn on_request_with_rpc() {
 }
 
 #[test]
+#[ignore = "PR 1 Task D2: dispatch_http is removed — use call_fetch_handler"]
 fn no_on_request_returns_error() {
     init_v8();
     let modules = vec![ModuleEntry {
@@ -68,6 +80,7 @@ fn no_on_request_returns_error() {
 }
 
 #[test]
+#[ignore = "PR 1 Task D2: dispatch_http + onRequest are removed — use call_fetch_handler"]
 fn on_request_async() {
     init_v8();
     let modules = vec![ModuleEntry {
@@ -89,6 +102,7 @@ fn on_request_async() {
 }
 
 #[test]
+#[ignore = "PR 1 Task D2: dispatch_http + onRequest are removed — use call_fetch_handler"]
 fn url_in_http_handler() {
     init_v8();
     let modules = vec![ModuleEntry {
@@ -115,6 +129,7 @@ fn url_in_http_handler() {
 }
 
 #[test]
+#[ignore = "PR 1 Task D2: dispatch_http + onRequest are removed — use call_fetch_handler"]
 fn streaming_http_response_sync() {
     init_v8();
     let modules = vec![ModuleEntry {
@@ -165,6 +180,7 @@ fn streaming_http_response_sync() {
 // for the chunked-encoding terminator that never arrived. The streaming
 // `[DONE]` marker in SSE was the canonical symptom.
 #[test]
+#[ignore = "PR 1 Task D2: dispatch_http + onRequest are removed — use call_fetch_handler"]
 fn streaming_http_response_async_closes_cleanly() {
     init_v8();
 

@@ -1,4 +1,10 @@
 //! Plugin system tests.
+//!
+//! TODO(PR 1 Task D2 / PR 3): these tests assert the `zeroship.*` global
+//! facade (plugin namespace collisions) that was deleted in PR 1 Task D1.
+//! The `NativePlugin` trait itself remains so PR 3 can re-expose plugins
+//! under `env.*`; until that wiring lands, these tests exercise a dead
+//! code path.
 
 use std::sync::Arc;
 
@@ -29,6 +35,7 @@ fn noop_modules() -> Vec<ModuleEntry> {
 
 #[test]
 #[should_panic(expected = "plugin namespace collision")]
+#[ignore = "PR 1 Task D1: zeroship.* facade removed — plugin collision check moves to PR 3"]
 fn duplicate_namespace_panics() {
     init_v8();
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![
@@ -47,6 +54,7 @@ fn duplicate_namespace_panics() {
 }
 
 #[test]
+#[ignore = "PR 1 Task D1: zeroship.* facade removed — plugin collision check moves to PR 3"]
 fn unique_namespaces_ok() {
     init_v8();
     let plugins: Vec<Arc<dyn NativePlugin>> = vec![

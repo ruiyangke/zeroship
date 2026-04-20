@@ -31,6 +31,7 @@ fn persistent_context() {
 }
 
 #[test]
+#[ignore = "PR 1 Task D2: dispatch_rpc is removed — per-request CPU tracking moves to call_fetch_handler tests"]
 fn per_request_cpu() {
     init_v8();
     let modules = m(r#"
@@ -147,6 +148,7 @@ fn dispatch_start_error(modules: Vec<ModuleEntry>, method: &str, args_json: &str
 }
 
 #[test]
+#[ignore = "PR 1 Task D2: dispatch_start is removed — error status mapping moves to bootstrap (PR 2)"]
 fn unknown_method_status_404() {
     let e = dispatch_start_error(
         m(r#"export function ping() { return "pong"; }"#),
@@ -158,6 +160,7 @@ fn unknown_method_status_404() {
 }
 
 #[test]
+#[ignore = "PR 1 Task D2: dispatch_start is removed — error status mapping moves to bootstrap (PR 2)"]
 fn malformed_json_body_status_400() {
     let e = dispatch_start_error(
         m(r#"export function ping() { return "pong"; }"#),
@@ -169,6 +172,7 @@ fn malformed_json_body_status_400() {
 }
 
 #[test]
+#[ignore = "PR 1 Task D2: dispatch_start is removed — error status mapping moves to bootstrap (PR 2)"]
 fn non_array_body_status_400() {
     let e = dispatch_start_error(
         m(r#"export function ping() { return "pong"; }"#),
