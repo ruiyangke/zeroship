@@ -183,3 +183,34 @@ fn streaming_response() {
         }
     });
 }
+
+#[test]
+fn websocket_upgrade() {
+    let modules = m(r#"
+        export default {
+            fetch(request, env, ctx) {
+                const pair = new WebSocketPair();
+                const [client, server] = Object.values(pair);
+                server.accept();
+                return new Response(null, {
+                    status: 101,
+                    webSocket: client
+                });
+            }
+        };
+    "#);
+    match dispatch_fetch(modules, TestRequest::get("http://localhost/")) {
+        FetchOutcome::WebSocketUpgrade { ws_id, headers: _ } => {
+            assert!(ws_id > 0, "expected non-zero ws_id, got {}", ws_id);
+        }
+        other => {
+            let name = match other {
+                FetchOutcome::Response { .. } => "Response",
+                FetchOutcome::Stream { .. } => "Stream",
+                FetchOutcome::Pending { .. } => "Pending",
+                FetchOutcome::WebSocketUpgrade { .. } => unreachable!(),
+            };
+            panic!("expected WebSocketUpgrade outcome, got {}", name);
+        }
+    }
+}
