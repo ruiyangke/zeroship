@@ -1068,6 +1068,16 @@ impl RuntimeInner {
                 // registers named exports. Reach through to its `.fetch`
                 // method so the kernel dispatch path (`call_fetch_handler`)
                 // has a cached Global<Function>.
+                //
+                // TODO(PR 1 Task D2): when __rpc scaffolding is deleted,
+                // replace this reach-through with either a
+                // `globalThis.__zs_user_default` binding emitted by the
+                // module loader, or a direct V8 module-namespace read on
+                // the user's entry module. Without this redirect in place
+                // the lookup below will silently return None and every
+                // fetch request will 404. See
+                // docs/superpowers/plans/2026-04-20-kernel-cut.md Task B3
+                // Step 6 for the plan's original approach.
                 let default_key = v8::String::new(scope, "default").unwrap();
                 if let Some(default_obj) = rpc_obj
                     .get(scope, default_key.into())
@@ -1523,7 +1533,15 @@ impl RuntimeInner {
         let env_json = env.as_json().to_string();
 
         self.arm_cpu_timer();
-        let dispatch_result: Result<Result<ResponseInfo, String>, v8::Global<v8::Promise>> =
+        // `Ok` carries a fully-classified DispatchResult (HttpResponse /
+        // ErrorValue / Error). The `Err` arm is a still-pending promise
+        // that the outer match turns into 501 until Task B4 wires async.
+        //
+        // Using DispatchResult here (not Result<ResponseInfo, String>)
+        // preserves `err.status` / `err.name` / `err.stack` from user
+        // throws. See `call_fetch_inner` for the classification logic —
+        // it mirrors `dispatch_request` in `dispatch.rs` for consistency.
+        let dispatch_result: Result<DispatchResult, v8::Global<v8::Promise>> =
             enter_v8!(self, |scope| {
                 let undefined = v8::undefined(scope).into();
 
@@ -1536,7 +1554,7 @@ impl RuntimeInner {
 
                 let request_opt = create_fn.call(scope, undefined, &[method_val, url_val, headers_val, body_val]);
                 if request_opt.is_none() {
-                    Ok(Err("Failed to construct Request object".to_string()))
+                    Ok(DispatchResult::Error("Failed to construct Request object".to_string()))
                 } else {
                     let request = request_opt.unwrap();
 
@@ -1545,14 +1563,16 @@ impl RuntimeInner {
                     let env_val: v8::Local<v8::Value> = v8::json::parse(scope, env_src)
                         .unwrap_or_else(|| v8::Object::new(scope).into());
 
-                    // 3. Build ctx — minimal stub. `waitUntil` / `passThroughOnException`
-                    //    are no-ops for B3; Task C3 wires `waitUntil` into the pump.
+                    // 3. Build ctx — minimal stub. `waitUntil` swallows any
+                    //    rejection via `.catch(() => {})` so we don't leak
+                    //    unhandled-rejection warnings while real wiring lands
+                    //    in Task C3; `passThroughOnException` is a true no-op.
                     let ctx_obj = v8::Object::new(scope);
                     let wu_key = v8::String::new(scope, "waitUntil").unwrap();
-                    let wu_fn = v8::Function::new(scope, ctx_noop_callback).unwrap();
+                    let wu_fn = v8::Function::new(scope, wait_until_noop_callback).unwrap();
                     ctx_obj.set(scope, wu_key.into(), wu_fn.into());
                     let pt_key = v8::String::new(scope, "passThroughOnException").unwrap();
-                    let pt_fn = v8::Function::new(scope, ctx_noop_callback).unwrap();
+                    let pt_fn = v8::Function::new(scope, pass_through_on_exception_noop_callback).unwrap();
                     ctx_obj.set(scope, pt_key.into(), pt_fn.into());
                     let ctx_val: v8::Local<v8::Value> = ctx_obj.into();
 
@@ -1577,17 +1597,46 @@ impl RuntimeInner {
         let cpu_elapsed = wall_start.elapsed();
 
         match dispatch_result {
-            Ok(Ok(info)) => {
+            Ok(DispatchResult::HttpResponse(info)) => {
                 self.clear_executing_request();
                 self.build_fetch_outcome(request_id, info, cpu_elapsed)
             }
-            Ok(Err(msg)) => {
+            Ok(DispatchResult::ErrorValue { message, name, stack, status }) => {
+                // Handler threw (or returned a rejected promise). Honor
+                // `err.status` so `throw new HttpError(404)` yields 404,
+                // not the previous hardcoded 500.
+                self.clear_executing_request();
+                self.discard_request_state(request_id);
+                crate::FetchOutcome::Response {
+                    status,
+                    headers: vec![("content-type".into(), "application/json".into())],
+                    body: crate::dispatch::build_error_body(&message, &name, stack.as_deref()),
+                    logs: vec![],
+                }
+            }
+            Ok(DispatchResult::Error(msg)) => {
+                // Hard dispatch-layer error (couldn't inspect Response,
+                // Request construction failed, etc). Not user-thrown, so
+                // no stack/name — generic 500.
                 self.clear_executing_request();
                 self.discard_request_state(request_id);
                 crate::FetchOutcome::Response {
                     status: 500,
                     headers: vec![("content-type".into(), "application/json".into())],
-                    body: serde_json::json!({"message": msg, "name": "Error"}).to_string(),
+                    body: crate::dispatch::build_error_body(&msg, "Error", None),
+                    logs: vec![],
+                }
+            }
+            Ok(DispatchResult::Sync(_)) | Ok(DispatchResult::Async(_)) => {
+                // `call_fetch_inner` never produces these variants (no
+                // JSON-plain-value path, no async-dispatch bubbling). If
+                // we ever get here it's a classification bug; fail loud.
+                self.clear_executing_request();
+                self.discard_request_state(request_id);
+                crate::FetchOutcome::Response {
+                    status: 500,
+                    headers: vec![("content-type".into(), "application/json".into())],
+                    body: r#"{"message":"internal: unexpected DispatchResult variant from fetch handler","name":"Error"}"#.into(),
                     logs: vec![],
                 }
             }
@@ -2617,21 +2666,68 @@ fn dispatch_http_inner(
     }
 }
 
-/// No-op V8 callback used for `ctx.waitUntil` and `ctx.passThroughOnException`
-/// in the B3 kernel fetch path. Task C3 replaces `waitUntil` with a real
-/// promise-collecting callback that feeds into the pump; `passThroughOnException`
-/// stays a no-op until (and if) we decide to honor it.
-fn ctx_noop_callback(
+/// No-op V8 callback for `ctx.passThroughOnException`. Takes no arguments
+/// and has no side effects — it's here only so the JS side can call the
+/// method without a TypeError. Whether we ever honor the semantic
+/// ("if the worker throws, bypass normal error handling and reach the
+/// origin") is a separate design question.
+fn pass_through_on_exception_noop_callback(
     _scope: &mut v8::PinScope,
     _args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
 ) {
 }
 
+/// V8 callback for `ctx.waitUntil(promise)`. Real wiring (register the
+/// promise into `RuntimeState.wait_until_by_request` so the kernel
+/// awaits before releasing the isolate) lands in Task C3. Until then,
+/// we still need to prevent unhandled-rejection spam: if user code
+/// passes a rejecting promise and we drop it silently, V8 emits an
+/// unhandled-rejection for every call.
+///
+/// The minimum-safe no-op attaches `.catch(() => {})` to the argument
+/// when it's a promise, so rejections are suppressed. This matches the
+/// observable behavior a real waitUntil implementation would exhibit
+/// to the caller (promise settles, nothing blocks response).
+fn wait_until_noop_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let arg = args.get(0);
+    if !arg.is_promise() {
+        return;
+    }
+    let promise = match v8::Local::<v8::Promise>::try_from(arg) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    // Empty rust closure marshalled as a V8 function — nothing to do,
+    // we just need to register *some* rejection handler so V8 doesn't
+    // flag the promise as unhandled.
+    let Some(noop) = v8::Function::new(scope, pass_through_on_exception_noop_callback) else {
+        return;
+    };
+    let _ = promise.catch(scope, noop);
+}
+
 /// Call the module.default.fetch handler with (request, env, ctx) and
-/// inspect the result. Separated out for the same reason as
-/// [`dispatch_http_inner`] — avoids double-borrowing `self` while the
-/// `enter_v8!` macro already holds `&mut self.isolate`.
+/// classify the result into a [`DispatchResult`]. Separated out for the
+/// same reason as [`dispatch_http_inner`] — avoids double-borrowing
+/// `self` while the `enter_v8!` macro already holds `&mut self.isolate`.
+///
+/// Returns:
+/// - `Ok(DispatchResult::HttpResponse)` — handler returned a Response
+///   (sync or fulfilled promise) that was inspected successfully.
+/// - `Ok(DispatchResult::ErrorValue { status, .. })` — handler threw
+///   synchronously or rejected a promise. `status` is lifted from
+///   `err.status` (400–599) per the same convention `dispatch_request`
+///   uses, so `throw new HttpError(404)` yields 404, not hardcoded 500.
+/// - `Ok(DispatchResult::Error)` — the Response object couldn't be
+///   inspected (malformed shape, non-Response return). Maps to 500.
+/// - `Err(v8::Global<v8::Promise>)` — handler returned a still-pending
+///   promise. The real async path lands in Task B4; caller serves 501
+///   in the meantime.
 fn call_fetch_inner(
     scope: &mut v8::PinScope,
     handler: v8::Local<v8::Function>,
@@ -2639,32 +2735,69 @@ fn call_fetch_inner(
     request: v8::Local<v8::Value>,
     env: v8::Local<v8::Value>,
     ctx: v8::Local<v8::Value>,
-) -> Result<Result<ResponseInfo, String>, v8::Global<v8::Promise>> {
-    let result_opt = handler.call(scope, undefined, &[request, env, ctx]);
-    if result_opt.is_none() {
-        return Ok(Err("default.fetch threw an exception".to_string()));
-    }
-    let result = result_opt.unwrap();
+) -> Result<DispatchResult, v8::Global<v8::Promise>> {
+    // Use a TryCatch so synchronous throws surface the exception value
+    // (needed for err.status / err.name / err.stack) rather than a bare
+    // `None` return that drops all of it.
+    let (result_val, caught_exception) = {
+        v8::tc_scope!(let tc, scope);
+        let r = handler.call(tc, undefined, &[request, env, ctx]);
+        if tc.has_caught() {
+            let exc = tc.exception();
+            let exc_global = exc.map(|e| v8::Global::new(tc, e));
+            (None, exc_global)
+        } else {
+            (r.map(|v| v8::Global::new(tc, v)), None)
+        }
+    };
+
     scope.perform_microtask_checkpoint();
+
+    if let Some(exc_global) = caught_exception {
+        let exc_local = v8::Local::new(scope, &exc_global);
+        return Ok(DispatchResult::ErrorValue {
+            message: crate::dispatch::v8_exception_to_message(scope, exc_local),
+            name: crate::dispatch::v8_exception_to_name(scope, exc_local),
+            stack: crate::dispatch::v8_exception_to_stack(scope, exc_local),
+            status: crate::dispatch::v8_exception_to_status(scope, exc_local).unwrap_or(500),
+        });
+    }
+
+    let Some(result_global) = result_val else {
+        // `call` returned None but TryCatch saw no exception — defensive
+        // fallback; should be unreachable.
+        return Ok(DispatchResult::Error(
+            "default.fetch returned no value".to_string(),
+        ));
+    };
+
+    let result = v8::Local::new(scope, &result_global);
+
     if result.is_promise() {
         let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
         match promise.state() {
             v8::PromiseState::Fulfilled => {
                 let resolved = promise.result(scope);
-                Ok(http::inspect_response(scope, resolved))
+                match http::inspect_response(scope, resolved) {
+                    Ok(info) => Ok(DispatchResult::HttpResponse(info)),
+                    Err(e) => Ok(DispatchResult::Error(e)),
+                }
             }
             v8::PromiseState::Rejected => {
-                let msg = promise.result(scope)
-                    .to_string(scope)
-                    .map(|s| s.to_rust_string_lossy(scope))
-                    .unwrap_or_else(|| "Promise rejected".to_string());
-                Ok(Err(msg))
+                let exc = promise.result(scope);
+                Ok(DispatchResult::ErrorValue {
+                    message: crate::dispatch::v8_exception_to_message(scope, exc),
+                    name: crate::dispatch::v8_exception_to_name(scope, exc),
+                    stack: crate::dispatch::v8_exception_to_stack(scope, exc),
+                    status: crate::dispatch::v8_exception_to_status(scope, exc).unwrap_or(500),
+                })
             }
-            v8::PromiseState::Pending => {
-                Err(v8::Global::new(scope, promise))
-            }
+            v8::PromiseState::Pending => Err(v8::Global::new(scope, promise)),
         }
     } else {
-        Ok(http::inspect_response(scope, result))
+        match http::inspect_response(scope, result) {
+            Ok(info) => Ok(DispatchResult::HttpResponse(info)),
+            Err(e) => Ok(DispatchResult::Error(e)),
+        }
     }
 }
