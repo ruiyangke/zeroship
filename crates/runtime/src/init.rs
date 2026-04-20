@@ -102,6 +102,184 @@ pub const FORMDATA_JS: &str = include_str!("embed/formdata.js");
 /// Embedded WebSocket/WebSocketPair polyfill (depends on events.js for EventTarget).
 pub const WEBSOCKET_JS: &str = include_str!("embed/websocket.js");
 
+/// The `zeroship` user-facing ESM module. Exposes the request-scoped helpers
+/// that SDK packages lean on:
+///
+/// - `env`: a frozen snapshot of per-app env vars (same as `fetch`'s 2nd arg).
+/// - `waitUntil(promise)`: extend the isolate's hold on a request past its
+///   response so fire-and-forget work (log flush, webhook retry) can finish.
+/// - `getRequest()`: look up the current `Request` from any nested module
+///   without threading it through every call. Throws if called outside a
+///   request (bootstrap hasn't bound a ctx yet).
+///
+/// `__zs_wait_until` is registered by `setup_globals`; it throws to JS when
+/// called outside a request. `__zs_env` / `__zs_get_request_ctx` are the
+/// other halves.
+pub(crate) const ZEROSHIP_MODULE_JS: &str = r#"
+const env = Object.freeze(__zs_env());
+
+function waitUntil(promise) {
+    if (!(promise instanceof Promise)) {
+        throw new TypeError("waitUntil expects a Promise");
+    }
+    __zs_wait_until(promise);
+}
+
+function getRequest() {
+    const ctx = __zs_get_request_ctx();
+    if (!ctx || !ctx.__zs_request) {
+        throw new Error("getRequest called outside a request");
+    }
+    return ctx.__zs_request;
+}
+
+export { env, waitUntil, getRequest };
+"#;
+
+/// Internal bootstrap-only module. NOT part of the stable user-facing API —
+/// only the runtime-synthesized `index.js` bootstrap imports from here. Kept
+/// in its own specifier so `import { __bindRequest } from "zeroship"` fails
+/// (users shouldn't poke at request-context plumbing).
+pub(crate) const ZEROSHIP_INTERNAL_MODULE_JS: &str = r#"
+// Bootstrap-only — NOT stable API. Users should not import this.
+export function __bindRequest(ctx, request) {
+    if (ctx == null) {
+        __zs_bind_request_ctx(null);
+        return;
+    }
+    // Attach the Request object to ctx so getRequest() can return it.
+    ctx.__zs_request = request;
+    __zs_bind_request_ctx(ctx);
+}
+"#;
+
+/// Runtime-injected bootstrap module. Becomes the new entry (`index.js`),
+/// wrapping the user's original entry (renamed internally to `__user__.js`).
+///
+/// Provides three things the user's handler doesn't have to hand-write:
+///
+/// 1. **RPC routing**: `POST /_rpc/<name>` → `user[<name>](...args)`, with
+///    args as a JSON array in the body. Matches the "use server" named-export
+///    idiom the AI compiler emits.
+/// 2. **Request-context binding**: before invoking user code, stashes the
+///    ctx + Request so nested modules can call `getRequest()` without
+///    threading the request through every function signature.
+/// 3. **Error/stream normalization**: JSON-formats thrown errors (honoring
+///    `err.status`), auto-wraps async generators as SSE.
+///
+/// Non-`/_rpc/*` paths still fall through to `user.default?.fetch`, so
+/// existing module-worker apps keep working unchanged.
+pub(crate) const BOOTSTRAP_JS: &str = r#"
+import * as user from "./__user__.js";
+import { __bindRequest } from "zeroship/internal";
+
+function sseFromAsyncGen(gen) {
+    const encoder = new TextEncoder();
+    const body = new ReadableStream({
+        async start(controller) {
+            try {
+                while (true) {
+                    const step = await gen.next();
+                    if (step.done) {
+                        const retJson = JSON.stringify(step.value === undefined ? null : step.value);
+                        controller.enqueue(encoder.encode("event: return\ndata: " + retJson + "\n\n"));
+                        break;
+                    }
+                    const valJson = JSON.stringify(step.value === undefined ? null : step.value);
+                    controller.enqueue(encoder.encode("event: yield\ndata: " + valJson + "\n\n"));
+                }
+            } catch (e) {
+                const payload = JSON.stringify({
+                    message: (e && e.message) || String(e),
+                    name: (e && e.name) || "Error",
+                });
+                controller.enqueue(encoder.encode("event: error\ndata: " + payload + "\n\n"));
+            } finally {
+                controller.close();
+            }
+        },
+    });
+    return new Response(body, {
+        status: 200,
+        headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    });
+}
+
+function errorResponse(err) {
+    const status = Number.isInteger(err && err.status) && err.status >= 400 && err.status < 600
+        ? err.status : 500;
+    const body = JSON.stringify({
+        message: (err && err.message) ? err.message : String(err),
+        name: (err && err.name) ? err.name : "Error",
+    });
+    return new Response(body, {
+        status,
+        headers: { "Content-Type": "application/json" },
+    });
+}
+
+async function handleRpc(request, methodName) {
+    const fn = user[methodName];
+    if (typeof fn !== "function") {
+        throw Object.assign(new Error("Method not found: " + methodName), { status: 404 });
+    }
+    let bodyText = "";
+    try { bodyText = await request.text(); } catch (_) {}
+    let args;
+    if (!bodyText) {
+        args = [];
+    } else {
+        let parsed;
+        try { parsed = JSON.parse(bodyText); }
+        catch (_e) {
+            throw Object.assign(new Error("Invalid args JSON"), { status: 400 });
+        }
+        if (parsed == null) args = [];
+        else if (Array.isArray(parsed)) args = parsed;
+        else throw Object.assign(new Error("RPC args body must be a JSON array"), { status: 400 });
+    }
+    let result = fn.apply(null, args);
+    if (result && typeof result.then === "function") result = await result;
+
+    if (result instanceof Response) return result;
+    if (result != null && typeof result === "object"
+        && typeof result[Symbol.asyncIterator] === "function"
+        && typeof result.next === "function"
+        && typeof result.return === "function") {
+        return sseFromAsyncGen(result);
+    }
+    return Response.json(result === undefined ? null : result);
+}
+
+export default {
+    async fetch(request, env, ctx) {
+        __bindRequest(ctx, request);
+        try {
+            const url = new URL(request.url);
+            if (url.pathname.startsWith("/_rpc/")) {
+                const method = decodeURIComponent(url.pathname.slice(6));
+                return await handleRpc(request, method);
+            }
+            if (user.default && typeof user.default.fetch === "function") {
+                return await user.default.fetch(request, env, ctx);
+            }
+            return new Response(
+                JSON.stringify({ message: "Not Found", name: "Error" }),
+                { status: 404, headers: { "Content-Type": "application/json" } }
+            );
+        } catch (err) {
+            return errorResponse(err);
+        } finally {
+            __bindRequest(null);
+        }
+    },
+};
+"#;
+
 // ===========================================================================
 // Shared initialization: polyfills + module loading
 // ===========================================================================
@@ -132,16 +310,99 @@ pub fn load_polyfills_and_modules(
         script.run(scope).unwrap();
     }
 
+    // Wrap the user's module graph in the bootstrap entry.
+    //
+    // Layout after wrapping:
+    //   entries[0] = "index.js"            — BOOTSTRAP_JS (the new entry)
+    //   entries[1] = "__user__.js"         — user's original entry (source preserved)
+    //   entries[2] = "zeroship"            — env / waitUntil / getRequest facade
+    //   entries[3] = "zeroship/internal"   — bootstrap-only __bindRequest
+    //   entries[4..] = user's other modules (unchanged specifiers)
+    //
+    // The load_modules walker compiles BOOTSTRAP_JS first, discovers its two
+    // imports (`./__user__.js` + `zeroship/internal`) and transitively the
+    // user's `zeroship` imports, then instantiates + evaluates the bootstrap.
+    // The returned namespace is the bootstrap's, so ensure_initialized reads
+    // `default.fetch` off the bootstrap (not the user module) — exactly the
+    // indirection we want.
+    let wrapped = wrap_with_bootstrap(modules);
+
     // Load ES modules and return the entry module's namespace object.
     // The kernel reads `default.fetch` directly off the namespace — no more
     // `__rpc` copy loop, no more `DISPATCH_JS`, no more URL-path router.
-    match crate::modules::load_modules(scope, modules) {
+    match crate::modules::load_modules(scope, &wrapped) {
         Ok(namespace) => Some(namespace),
         Err(e) => {
             eprintln!("[v8] Module loading failed: {e}");
             None
         }
     }
+}
+
+/// Rewrite the user's module list so the bootstrap is the new entry.
+///
+/// The user's declared first module is renamed to `__user__.js`; a synthetic
+/// `index.js` (BOOTSTRAP_JS) is prepended as the new entry, plus the two
+/// zeroship modules (`zeroship` and `zeroship/internal`).
+///
+/// **Collision**: the compiler always emits `index.js` as the user's entry,
+/// so a user entry actually named `__user__.js` is a bug if it happens. A
+/// `debug_assert!` catches this in dev builds; in release it's silently
+/// overwritten (the user module's source wins over our internal specifier
+/// by virtue of ordering in the sources map).
+fn wrap_with_bootstrap(
+    modules: &[crate::modules::ModuleEntry],
+) -> Vec<crate::modules::ModuleEntry> {
+    use crate::modules::ModuleEntry;
+
+    // Empty input preserved as-is — the module loader will return a clean
+    // "No modules to load" error. Don't synthesize a bootstrap pointing at
+    // a non-existent `__user__.js`.
+    if modules.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out: Vec<ModuleEntry> = Vec::with_capacity(modules.len() + 3);
+
+    // entry 0: bootstrap becomes the new entrypoint under "index.js".
+    out.push(ModuleEntry {
+        specifier: "index.js".into(),
+        source: BOOTSTRAP_JS.into(),
+    });
+
+    // entry 1: user's original entry, renamed to "__user__.js". Its own
+    // declared specifier (usually "index.js") is discarded — the bootstrap
+    // imports `./__user__.js` by exact name.
+    let user_entry = &modules[0];
+    debug_assert!(
+        user_entry.specifier != "__user__.js",
+        "User entry collides with bootstrap's internal specifier",
+    );
+    out.push(ModuleEntry {
+        specifier: "__user__.js".into(),
+        source: user_entry.source.clone(),
+    });
+
+    // entries 2-3: the zeroship facade + internal modules. Live in the
+    // module graph alongside the user's modules so `import ... from "zeroship"`
+    // resolves via the normal lookup path.
+    out.push(ModuleEntry {
+        specifier: "zeroship".into(),
+        source: ZEROSHIP_MODULE_JS.into(),
+    });
+    out.push(ModuleEntry {
+        specifier: "zeroship/internal".into(),
+        source: ZEROSHIP_INTERNAL_MODULE_JS.into(),
+    });
+
+    // Remaining user modules — pass through unchanged. Their declared
+    // specifiers (other than "index.js" which can't collide since we moved
+    // the user entry) stay valid for their own cross-module imports.
+    for entry in modules.iter().skip(1) {
+        out.push(entry.clone());
+    }
+
+    out
 }
 
 // ===========================================================================
@@ -357,6 +618,36 @@ fn zs_bind_request_ctx_callback(
     let obj: v8::Local<v8::Object> = arg.try_into().unwrap();
     let global_obj = v8::Global::new(scope, obj);
     state.borrow_mut().request_ctx_by_id.insert(rid, global_obj);
+}
+
+/// `__zs_wait_until(promise)` — push a Promise onto the current request's
+/// waitUntil bag. The kernel keeps the isolate alive past the response body
+/// write until every promise here settles (or the wall timeout fires).
+///
+/// Type-checking and TypeError on non-Promise args is done in the JS-side
+/// `zeroship.waitUntil` wrapper; this op defensively no-ops on bad input so
+/// a JS-side bug can't crash the isolate. Silent no-op when called outside
+/// an active request — the JS side already checks and doesn't call us in
+/// that case, but be conservative for robustness.
+fn zs_wait_until_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let state = scope
+        .get_slot::<crate::state::SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    let arg = args.get(0);
+    if !arg.is_promise() {
+        return;
+    }
+    let promise: v8::Local<v8::Promise> = arg.try_into().unwrap();
+    let global = v8::Global::new(scope, promise);
+    let _registered = state.borrow_mut().register_wait_until(global);
+    // If register_wait_until returned false there's no active request —
+    // drop the promise silently. The JS-side wrapper is the user-facing
+    // contract for that case.
 }
 
 /// `__zs_get_request_ctx()` — return the stashed `ctx` object for the
@@ -796,6 +1087,16 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
         let get_key = v8::String::new(scope, "__zs_get_request_ctx").unwrap();
         let get_fn = v8::Function::new(scope, zs_get_request_ctx_callback).unwrap();
         global.set(scope, get_key.into(), get_fn.into());
+    }
+
+    // __zs_wait_until — registers a Promise against the current request's
+    // wait-until bag. Consumed by `zeroship.waitUntil` in the user-facing
+    // ESM module; the kernel holds the isolate alive past the response
+    // until every promise settles or the wall timeout fires.
+    {
+        let key = v8::String::new(scope, "__zs_wait_until").unwrap();
+        let f = v8::Function::new(scope, zs_wait_until_callback).unwrap();
+        global.set(scope, key.into(), f.into());
     }
 
     // process.env polyfill — many npm packages (e.g. LangChain) read
