@@ -23,6 +23,7 @@
  *   });
  */
 
+import { env } from "zeroship";
 import { model } from "./model.js";
 import { Collection, type NativeDb } from "./collection.js";
 import { Query } from "./query.js";
@@ -186,12 +187,28 @@ function createTxQuery<S>(query: Query<S, Document<S>>): TxQuery<S, Document<S>>
 // createDb
 // ---------------------------------------------------------------------------
 
-/** Get the native zeroship.db driver */
+/**
+ * Resolve the native database driver off the runtime's composite `env`.
+ *
+ * Each V8 isolate in the zeroship runtime builds an `env` object at init
+ * time that overlays plugin namespaces on top of the app's scalar env
+ * vars (see `crates/runtime/src/plugin.rs::build_env_object`). The
+ * DbPlugin registers under namespace "db", so `env.db` is the live
+ * NativeDb interface with `find`, `findOne`, `insert`, ... attached.
+ *
+ * The same `env` object is also passed as the second argument to
+ * `fetch(request, env, ctx)`. SDK users who prefer to receive it
+ * explicitly can pass it via `createDb(..., { native: env.db })`.
+ */
 function getNativeDb(): NativeDb {
-  if (typeof zeroship !== "undefined" && zeroship?.db) {
-    return zeroship.db;
+  const db = (env as { db?: NativeDb } | undefined)?.db;
+  if (db) {
+    return db;
   }
-  throw new Error("@zeroship/db: native zeroship.db.* not available — are you running inside zeroship?");
+  throw new Error(
+    "@zeroship/db: env.db not available — " +
+    "is the DbPlugin registered on this runtime?"
+  );
 }
 
 /** Options for createDb. */

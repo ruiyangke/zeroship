@@ -1,0 +1,10 @@
+{
+  "name": "zeroship",
+  "version": "0.0.0-stub",
+  "description": "Node-side shim for the virtual \"zeroship\" module. Provides just enough shape for SDK unit tests to load. Inside the V8 runtime, this file is never used — the runtime synthesizes its own zeroship module from ZEROSHIP_MODULE_JS.",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "private": true,
+  "license": "MIT"
+}

@@ -126,29 +126,22 @@ describe("model() — nativeOverride", () => {
 // ---------------------------------------------------------------------------
 
 describe("model() — missing native", () => {
-  test("throws clear error when no nativeOverride and globalThis.zeroship.db is absent", () => {
-    // Save and clear any existing globalThis.zeroship
-    const saved = (globalThis as any).zeroship;
-    delete (globalThis as any).zeroship;
-
-    try {
-      assert.throws(
-        () => model("users", { name: t.string() }),
-        (err: unknown) => {
-          assert.ok(err instanceof Error);
-          assert.ok(
-            err.message.includes("native zeroship.db"),
-            `Expected error about native zeroship.db, got: ${err.message}`
-          );
-          return true;
-        }
-      );
-    } finally {
-      // Restore
-      if (saved !== undefined) {
-        (globalThis as any).zeroship = saved;
+  test("throws clear error when no nativeOverride and env.db is absent", () => {
+    // In the Node test environment, the `zeroship` module is the file-linked
+    // stub (sdks/zeroship-stub), which exports `env = {}` — i.e. no db
+    // namespace. Calling `model()` without `nativeOverride` should hit the
+    // getNativeDb() throw path. No global setup/teardown needed.
+    assert.throws(
+      () => model("users", { name: t.string() }),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.ok(
+          err.message.includes("env.db not available"),
+          `Expected error about env.db not available, got: ${err.message}`
+        );
+        return true;
       }
-    }
+    );
   });
 });
 

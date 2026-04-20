@@ -14,8 +14,14 @@
     }
   },
   "files": ["dist", "src"],
+  "scripts": {
+    "build": "tsc",
+    "test": "node --import tsx --test tests/*.test.ts"
+  },
   "devDependencies": {
     "@zeroship/types": "file:../types",
-    "typescript": "^6.0.2"
+    "tsx": "^4.0.0",
+    "typescript": "^6.0.2",
+    "zeroship": "file:../zeroship-stub"
   }
 }

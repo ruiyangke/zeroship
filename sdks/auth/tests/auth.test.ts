@@ -1,8 +1,11 @@
-import { test, describe } from "node:test";
+import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { env } from "zeroship";
 
-// We need to set up mocks before importing the SDK
-// because it checks typeof zeroship at call time
+// The SDK reads the auth namespace off `env.auth`. In the Node-side
+// stub (sdks/zeroship-stub) `env` is mutable, so tests inject a fake
+// plugin by assigning `env.auth = { getUser, requireUser }` before
+// calling into the SDK.
 
 const mockUser = {
   id: "usr_0Bk3Np4qR5sT7uV8wYz1A",
@@ -11,15 +14,25 @@ const mockUser = {
   avatar: null,
 };
 
-describe("auth — server context (zeroship global)", () => {
-  test("getUser returns user from native context", async () => {
-    (globalThis as any).zeroship = {
-      auth: {
-        getUser: () => mockUser,
-        requireUser: () => mockUser,
-      },
-    };
-    // Dynamic import to pick up the global
+function setEnvAuth(ns: Record<string, unknown> | null): void {
+  if (ns === null) {
+    delete (env as Record<string, unknown>).auth;
+  } else {
+    (env as Record<string, unknown>).auth = ns;
+  }
+}
+
+describe("auth — server context (env.auth plugin)", () => {
+  beforeEach(() => {
+    setEnvAuth(null);
+    delete (globalThis as any).window;
+  });
+
+  test("getUser returns user from env.auth", async () => {
+    setEnvAuth({
+      getUser: () => mockUser,
+      requireUser: () => mockUser,
+    });
     const { auth } = await import("../src/index.js");
 
     const user = auth.getUser();
@@ -29,13 +42,11 @@ describe("auth — server context (zeroship global)", () => {
     assert.equal(user?.avatar, null);
   });
 
-  test("requireUser returns user from native context", async () => {
-    (globalThis as any).zeroship = {
-      auth: {
-        getUser: () => mockUser,
-        requireUser: () => mockUser,
-      },
-    };
+  test("requireUser returns user from env.auth", async () => {
+    setEnvAuth({
+      getUser: () => mockUser,
+      requireUser: () => mockUser,
+    });
     const { auth } = await import("../src/index.js");
 
     const user = auth.requireUser();
@@ -43,37 +54,35 @@ describe("auth — server context (zeroship global)", () => {
   });
 
   test("isLoggedIn returns true when authenticated", async () => {
-    (globalThis as any).zeroship = {
-      auth: {
-        getUser: () => mockUser,
-        requireUser: () => mockUser,
-      },
-    };
+    setEnvAuth({
+      getUser: () => mockUser,
+      requireUser: () => mockUser,
+    });
     const { auth } = await import("../src/index.js");
 
     assert.equal(auth.isLoggedIn(), true);
   });
 
-  test("getUser returns null when native returns null", async () => {
-    (globalThis as any).zeroship = {
-      auth: {
-        getUser: () => null,
-        requireUser: () => { throw new Error("Authentication required"); },
+  test("getUser returns null when env.auth.getUser returns null", async () => {
+    setEnvAuth({
+      getUser: () => null,
+      requireUser: () => {
+        throw new Error("Authentication required");
       },
-    };
+    });
     const { auth } = await import("../src/index.js");
 
     assert.equal(auth.getUser(), null);
     assert.equal(auth.isLoggedIn(), false);
   });
 
-  test("requireUser throws when native throws", async () => {
-    (globalThis as any).zeroship = {
-      auth: {
-        getUser: () => null,
-        requireUser: () => { throw new Error("Authentication required"); },
+  test("requireUser throws when env.auth.requireUser throws", async () => {
+    setEnvAuth({
+      getUser: () => null,
+      requireUser: () => {
+        throw new Error("Authentication required");
       },
-    };
+    });
     const { auth } = await import("../src/index.js");
 
     assert.throws(() => auth.requireUser(), /Authentication required/);
@@ -81,8 +90,14 @@ describe("auth — server context (zeroship global)", () => {
 });
 
 describe("auth — client context (window global)", () => {
+  beforeEach(() => {
+    setEnvAuth(null);
+  });
+  afterEach(() => {
+    delete (globalThis as any).window;
+  });
+
   test("getUser reads window.__zs_user", async () => {
-    delete (globalThis as any).zeroship;
     (globalThis as any).window = { __zs_user: mockUser };
     const { auth } = await import("../src/index.js");
 
@@ -92,7 +107,6 @@ describe("auth — client context (window global)", () => {
   });
 
   test("getUser returns null when window.__zs_user is null", async () => {
-    delete (globalThis as any).zeroship;
     (globalThis as any).window = { __zs_user: null };
     const { auth } = await import("../src/index.js");
 
@@ -101,7 +115,6 @@ describe("auth — client context (window global)", () => {
   });
 
   test("requireUser throws in client when not authenticated", async () => {
-    delete (globalThis as any).zeroship;
     (globalThis as any).window = { __zs_user: null };
     const { auth } = await import("../src/index.js");
 
@@ -109,10 +122,13 @@ describe("auth — client context (window global)", () => {
   });
 });
 
-describe("auth — no context (SSR / build time)", () => {
-  test("getUser returns null when neither zeroship nor window exists", async () => {
-    delete (globalThis as any).zeroship;
+describe("auth — no context (SSR / build time / pre-AuthPlugin)", () => {
+  beforeEach(() => {
+    setEnvAuth(null);
     delete (globalThis as any).window;
+  });
+
+  test("getUser returns null when neither env.auth nor window exists", async () => {
     const { auth } = await import("../src/index.js");
 
     assert.equal(auth.getUser(), null);
@@ -120,8 +136,6 @@ describe("auth — no context (SSR / build time)", () => {
   });
 
   test("requireUser throws when neither context exists", async () => {
-    delete (globalThis as any).zeroship;
-    delete (globalThis as any).window;
     const { auth } = await import("../src/index.js");
 
     assert.throws(() => auth.requireUser(), /Authentication required/);
@@ -129,13 +143,25 @@ describe("auth — no context (SSR / build time)", () => {
 });
 
 describe("auth — User type shape", () => {
+  beforeEach(() => {
+    delete (globalThis as any).window;
+  });
+
   test("user has all expected fields", async () => {
-    (globalThis as any).zeroship = {
-      auth: {
-        getUser: () => ({ id: "usr_test", email: "a@b.com", name: "Test", avatar: "https://img.com/a.jpg" }),
-        requireUser: () => ({ id: "usr_test", email: "a@b.com", name: "Test", avatar: "https://img.com/a.jpg" }),
-      },
-    };
+    setEnvAuth({
+      getUser: () => ({
+        id: "usr_test",
+        email: "a@b.com",
+        name: "Test",
+        avatar: "https://img.com/a.jpg",
+      }),
+      requireUser: () => ({
+        id: "usr_test",
+        email: "a@b.com",
+        name: "Test",
+        avatar: "https://img.com/a.jpg",
+      }),
+    });
     const { auth } = await import("../src/index.js");
 
     const user = auth.getUser()!;
@@ -146,12 +172,20 @@ describe("auth — User type shape", () => {
   });
 
   test("avatar can be null", async () => {
-    (globalThis as any).zeroship = {
-      auth: {
-        getUser: () => ({ id: "usr_test", email: "a@b.com", name: "Test", avatar: null }),
-        requireUser: () => ({ id: "usr_test", email: "a@b.com", name: "Test", avatar: null }),
-      },
-    };
+    setEnvAuth({
+      getUser: () => ({
+        id: "usr_test",
+        email: "a@b.com",
+        name: "Test",
+        avatar: null,
+      }),
+      requireUser: () => ({
+        id: "usr_test",
+        email: "a@b.com",
+        name: "Test",
+        avatar: null,
+      }),
+    });
     const { auth } = await import("../src/index.js");
 
     assert.equal(auth.getUser()!.avatar, null);

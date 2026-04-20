@@ -2,16 +2,27 @@
  * Top-level `model()` factory for @zeroship/db.
  * Creates a Collection bound to the current app's native database driver.
  */
+import { env } from "zeroship";
 import { normalizeSchema } from "./schema.js";
 import { Collection, NativeDb } from "./collection.js";
 import { NamingStrategy, naming } from "./types.js";
 
-/** Returns the native zeroship.db driver from the global scope, or throws if unavailable. */
+/**
+ * Resolve the native database driver off the runtime's composite `env`.
+ *
+ * Mirrors `getNativeDb()` in db.ts — see the comment there for full
+ * context. Model-level callers of `model()` that pass `nativeOverride`
+ * (tests, mocks) short-circuit this lookup and never invoke it.
+ */
 function getNativeDb(): NativeDb {
-  if (typeof zeroship !== "undefined" && zeroship?.db) {
-    return zeroship.db;
+  const db = (env as { db?: NativeDb } | undefined)?.db;
+  if (db) {
+    return db;
   }
-  throw new Error("@zeroship/db: native zeroship.db.* not available — are you running inside zeroship?");
+  throw new Error(
+    "@zeroship/db: env.db not available — " +
+    "is the DbPlugin registered on this runtime?"
+  );
 }
 
 /**
