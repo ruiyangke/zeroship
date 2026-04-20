@@ -1013,13 +1013,18 @@ impl RuntimeInner {
         env: &crate::EnvSnapshot,
         ctx: crate::RequestCtx,
     ) -> crate::FetchOutcome {
-        self.ensure_initialized(modules);
-
         // Stash the env JSON on state so the `__zs_env` native op returns the
         // same payload as the second arg of `fetch(req, env, ctx)`. Must run
-        // BEFORE dispatch so any synchronous op read from the handler sees
-        // this request's env (not the previous one's).
+        // BEFORE `ensure_initialized` so the `zeroship` module's top-level
+        // `const env = Object.freeze(__zs_env())` — evaluated exactly once at
+        // module-load during the first `ensure_initialized` call — captures
+        // the real env rather than the default `{}`. Subsequent requests still
+        // update `env_json` here so synchronous op reads from the handler see
+        // the current request's env (not the previous one's) in case user
+        // code calls `__zs_env()` directly.
         self.state.borrow_mut().set_env_snapshot(env);
+
+        self.ensure_initialized(modules);
 
         if self.fetch_handler_fn.is_none() {
             return crate::FetchOutcome::Response {
