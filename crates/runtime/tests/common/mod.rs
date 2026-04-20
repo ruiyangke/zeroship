@@ -10,9 +10,9 @@ use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
 /// Create a module list from a single JS source string.
 ///
 /// The caller writes `export function foo() {...}` style, and `m()` returns a
-/// single-entry `index.js` module. Tests that need the old `dispatch_rpc`-style
-/// named-export lookup go through [`dispatch`], which wraps this in a second
-/// module that exposes a default fetch handler on top of the user's exports.
+/// single-entry `index.js` module. The runtime itself injects a bootstrap
+/// module that routes `POST /_rpc/<name>` to the user's named export, so tests
+/// using [`dispatch`] can call their named exports as if they were RPC methods.
 pub fn m(source: &str) -> Vec<ModuleEntry> {
     vec![ModuleEntry {
         specifier: "index.js".into(),
@@ -25,139 +25,6 @@ pub fn no_env() -> HashMap<String, String> {
     HashMap::new()
 }
 
-/// Bootstrap module that replicates the pre-kernel-cut `DISPATCH_JS` contract
-/// on top of `call_fetch_handler`.
-///
-/// Imports everything from the user's entry as `user.*`, then re-exports a
-/// module-worker default whose `fetch` handler:
-///
-/// - extracts the method name from the URL path (`/<method>`),
-/// - reads args as a JSON array from the request body,
-/// - calls `user[method].apply(null, args)`,
-/// - JSON-serializes the return value into a `Response` (or passes through a
-///   `Response`, or SSE-wraps an async generator — matching the old contract).
-///
-/// This lets crypto/url/stream/env/etc. tests keep their concise
-/// `export function x() { ... }` shape without each file having to hand-write
-/// a fetch wrapper.
-const DISPATCH_BOOTSTRAP_JS: &str = r#"
-import * as user from "./user.js";
-
-function wrapAsyncGenerator(gen) {
-    var encoder = new TextEncoder();
-    var body = new ReadableStream({
-        async start(controller) {
-            try {
-                while (true) {
-                    var step = await gen.next();
-                    if (step.done) {
-                        var retJson = JSON.stringify(step.value === undefined ? null : step.value);
-                        controller.enqueue(encoder.encode("event: return\ndata: " + retJson + "\n\n"));
-                        break;
-                    }
-                    var valJson = JSON.stringify(step.value === undefined ? null : step.value);
-                    controller.enqueue(encoder.encode("event: yield\ndata: " + valJson + "\n\n"));
-                }
-            } catch (e) {
-                var payload = JSON.stringify({
-                    message: (e && e.message) || String(e),
-                    name: (e && e.name) || "Error",
-                });
-                controller.enqueue(encoder.encode("event: error\ndata: " + payload + "\n\n"));
-            } finally {
-                controller.close();
-            }
-        },
-    });
-    return new Response(body, {
-        status: 200,
-        headers: {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache, no-transform",
-            "X-Accel-Buffering": "no",
-        },
-    });
-}
-
-export default {
-    async fetch(request, env, ctx) {
-        var url = new URL(request.url);
-        var method = decodeURIComponent(url.pathname.replace(/^\//, ""));
-        var fn = user[method];
-        if (typeof fn !== 'function') {
-            var err = new Error('Method not found: ' + method);
-            err.status = 404;
-            throw err;
-        }
-
-        var bodyText = "";
-        try { bodyText = await request.text(); } catch (_) {}
-        var args;
-        if (!bodyText) {
-            args = [];
-        } else {
-            var parsed;
-            try { parsed = JSON.parse(bodyText); }
-            catch (_e) {
-                var err = new Error('Invalid args JSON');
-                err.status = 400;
-                throw err;
-            }
-            if (parsed == null) args = [];
-            else if (Array.isArray(parsed)) args = parsed;
-            else {
-                var err = new Error('RPC args body must be a JSON array');
-                err.status = 400;
-                throw err;
-            }
-        }
-
-        var result = fn.apply(null, args);
-        if (result && typeof result.then === 'function') result = await result;
-
-        if (result instanceof Response) return result;
-        if (result != null && typeof result === 'object'
-            && typeof result[Symbol.asyncIterator] === 'function'
-            && typeof result.next === 'function'
-            && typeof result.return === 'function') {
-            return wrapAsyncGenerator(result);
-        }
-        return new Response(
-            JSON.stringify(result === undefined ? null : result),
-            { status: 200, headers: { "Content-Type": "application/json" } }
-        );
-    },
-};
-"#;
-
-/// Wrap a single-file user module in the DISPATCH_BOOTSTRAP_JS bootstrap so
-/// the named-export + JSON args + JSON response contract of the old
-/// `dispatch_rpc` tests rides on top of `call_fetch_handler`.
-fn wrap_with_dispatch_bootstrap(modules: Vec<ModuleEntry>) -> Vec<ModuleEntry> {
-    // Move the user's entry aside to ./user.js; synthesize a new index.js
-    // that imports from it and re-exports a default fetch handler. The rest
-    // of the user modules (if any) are passed through unchanged; their
-    // specifiers must not be "user.js" or "index.js".
-    let mut out: Vec<ModuleEntry> = Vec::with_capacity(modules.len() + 1);
-    out.push(ModuleEntry {
-        specifier: "index.js".into(),
-        source: DISPATCH_BOOTSTRAP_JS.into(),
-    });
-
-    for (i, entry) in modules.into_iter().enumerate() {
-        if i == 0 {
-            // The first module is the entrypoint — rename to user.js.
-            out.push(ModuleEntry {
-                specifier: "user.js".into(),
-                source: entry.source,
-            });
-        } else {
-            out.push(entry);
-        }
-    }
-    out
-}
-
 /// Extract `{status, body, logs}` from a `FetchOutcome`. Caller must be
 /// inside a compio runtime (e.g. inside `block_on`) for Pending / Stream
 /// variants to drive the pump.
@@ -165,9 +32,8 @@ async fn drive_fetch_outcome(outcome: FetchOutcome) -> (u16, String, Vec<String>
     match outcome {
         FetchOutcome::Response { status, body, logs, .. } => (status, body, logs),
         FetchOutcome::Stream { status, body_reader, logs, .. } => {
-            // For dispatch_rpc tests the response was fully buffered by the
-            // DISPATCH_JS path; Response(JSON.stringify(...)) should collapse
-            // to the Response arm, but SSE (async-generator) tests intentionally
+            // Most dispatch calls return Response.json(...) which collapses to
+            // the Response arm; SSE (async-generator) tests intentionally
             // return a stream. Drain once synchronously — good enough for the
             // fully-buffered-at-send-time case.
             let mut body = Vec::new();
@@ -210,7 +76,7 @@ fn run_dispatch_on_runtime(runtime: &Runtime, method: &str, args_json: &str) -> 
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
     let body = if args_json.is_empty() { "".to_string() } else { args_json.to_string() };
-    let url = format!("http://localhost/{}", url_path_encode(method));
+    let url = format!("http://localhost/_rpc/{}", url_path_encode(method));
     let outcome = runtime.call_fetch_handler(
         "POST",
         &url,
@@ -257,8 +123,7 @@ fn run_dispatch_on_runtime(runtime: &Runtime, method: &str, args_json: &str) -> 
 /// JSON string + the status→Err mapping for 4xx/5xx errors).
 pub fn dispatch(modules: Vec<ModuleEntry>, method: &str, args_json: &str) -> Result<RequestResult, String> {
     init_v8();
-    let wrapped = wrap_with_dispatch_bootstrap(modules);
-    let runtime = Runtime::builder().modules(wrapped).build();
+    let runtime = Runtime::builder().modules(modules).build();
     run_dispatch_on_runtime(&runtime, method, args_json)
 }
 
@@ -297,8 +162,7 @@ pub fn dispatch_multi(
     requests: &[(&str, &str)],
 ) -> Vec<Result<RequestResult, String>> {
     init_v8();
-    let wrapped = wrap_with_dispatch_bootstrap(modules);
-    let runtime = Runtime::builder().modules(wrapped).build();
+    let runtime = Runtime::builder().modules(modules).build();
 
     requests
         .iter()
@@ -314,8 +178,7 @@ pub fn dispatch_with_env(
     args_json: &str,
 ) -> Result<RequestResult, String> {
     init_v8();
-    let wrapped = wrap_with_dispatch_bootstrap(modules);
-    let runtime = Runtime::builder().modules(wrapped).env_vars(env_vars).build();
+    let runtime = Runtime::builder().modules(modules).env_vars(env_vars).build();
     run_dispatch_on_runtime(&runtime, method, args_json)
 }
 

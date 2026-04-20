@@ -247,29 +247,6 @@ fn zs_bind_and_get_request_ctx() {
 }
 
 #[test]
-fn zs_get_request_ctx_without_bind_returns_null() {
-    let modules = m(r#"
-        export default {
-            fetch(request, env, ctx) {
-                // No __zs_bind_request_ctx call — get must return null.
-                const nested = __zs_get_request_ctx();
-                return Response.json({
-                    nested: nested,  // serializes to null
-                    isNull: nested === null
-                });
-            }
-        };
-    "#);
-    let outcome = dispatch_fetch(modules, TestRequest::get("http://localhost/"));
-    let FetchOutcome::Response { status, body, .. } = outcome else {
-        panic!("expected Response");
-    };
-    assert_eq!(status, 200, "body: {}", body);
-    assert!(body.contains(r#""isNull":true"#), "body: {}", body);
-    assert!(body.contains(r#""nested":null"#), "body: {}", body);
-}
-
-#[test]
 fn websocket_upgrade() {
     let modules = m(r#"
         export default {

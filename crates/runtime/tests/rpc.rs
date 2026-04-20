@@ -1,11 +1,10 @@
 mod common;
 use common::*;
 
-// These tests exercise the pre-kernel-cut named-export + JSON-args contract,
-// riding on top of `call_fetch_handler` via the `DISPATCH_BOOTSTRAP_JS` helper
-// in `common/mod.rs`. They prove that a simple user module can still expose
-// individual functions as RPC methods — the exact pattern the PR 2 bootstrap
-// will re-implement in user-space.
+// These tests exercise the named-export + JSON-args RPC contract, routed
+// through the runtime's own bootstrap module (which watches `/_rpc/<name>`
+// paths and dispatches to the user's named exports). They prove that a
+// simple user module can still expose individual functions as RPC methods.
 
 #[test]
 fn basic_rpc() {
@@ -77,8 +76,8 @@ fn promise_then_chain_sync() {
 #[test]
 fn async_generator_streams_sse() {
     // An async generator should be auto-wrapped in a Response(text/event-stream)
-    // by the DISPATCH_BOOTSTRAP_JS helper. dispatch() buffers the full stream
-    // body into a single string for assertion purposes.
+    // by the runtime bootstrap. dispatch() buffers the full stream body into a
+    // single string for assertion purposes.
     let r = dispatch(m(r#"
         export async function* chat() {
             yield { token: "Hi" };
