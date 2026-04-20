@@ -516,29 +516,24 @@ pub struct TimerResult {
 // Dispatch result
 // ---------------------------------------------------------------------------
 
-/// Return value from JS op dispatch — tells the event loop what to do next.
+/// Classification of what `call_fetch_handler`'s sync turn produced.
+/// `Pending` (handler returned an unsettled Promise) is tracked via the
+/// outer `Result<DispatchResult, v8::Global<v8::Promise>>` in call_fetch_inner.
 pub enum DispatchResult {
-    /// Handler completed synchronously with a plain value. The string is
-    /// already-serialized JSON ready to ship as `application/json`.
-    Sync(String),
-    /// Handler returned a Response object (either user-constructed or
-    /// produced by the async-generator wrapper). The runtime forwards it
-    /// via the HTTP streaming/inspection path.
+    /// Handler returned a `Response` (user-constructed or from the
+    /// async-generator wrapper). Forwarded via the HTTP streaming /
+    /// inspection path.
     HttpResponse(crate::http::ResponseInfo),
-    /// Handler returned a pending promise. The pump will settle it; when
-    /// it does, the runtime classifies the resolved value as Sync / HttpResponse
-    /// / ErrorValue just like here.
-    Async(v8::Global<v8::Promise>),
     /// Handler threw. All fields come from the JS exception. `status` is
     /// 500 by default, overridable by setting `err.status` to an integer
-    /// in 400-599 (the HttpError class, or any ad-hoc throw).
+    /// in 400-599.
     ErrorValue {
         message: String,
         name: String,
         stack: Option<String>,
         status: u16,
     },
-    /// Hard dispatch-layer error (method lookup failed, argument too large
-    /// for V8 string, etc). Not a user-thrown value — no stack/name.
+    /// Hard dispatch-layer error (Response inspection failed, Request
+    /// object construction failed). Not a user-thrown value — no stack/name.
     Error(String),
 }

@@ -1151,19 +1151,6 @@ impl RuntimeInner {
                     logs: vec![],
                 }
             }
-            Ok(DispatchResult::Sync(_)) | Ok(DispatchResult::Async(_)) => {
-                // `call_fetch_inner` never produces these variants (no
-                // JSON-plain-value path, no async-dispatch bubbling). If
-                // we ever get here it's a classification bug; fail loud.
-                self.clear_executing_request();
-                self.discard_request_state(request_id);
-                crate::FetchOutcome::Response {
-                    status: 500,
-                    headers: vec![("content-type".into(), "application/json".into())],
-                    body: r#"{"message":"internal: unexpected DispatchResult variant from fetch handler","name":"Error"}"#.into(),
-                    logs: vec![],
-                }
-            }
             Err(promise) => {
                 // Pending promise — hand off to the pump. Clear
                 // `executing_request_*` so the next synchronous dispatch
