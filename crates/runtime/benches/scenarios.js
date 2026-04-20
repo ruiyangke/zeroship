@@ -204,7 +204,39 @@ function handleSse(url) {
 // its own, with no URL/body work by the handler.
 const PONG_RESPONSE_BYTES = new TextEncoder().encode('"pong"');
 
+// Pre-rendered headers object for /ping (string table cached by V8).
+const PING_HEADERS = { "Content-Type": "application/json" };
+
 export default {
+    // zeroship extension: fast HTTP dispatch. Receives raw (method, url,
+    // body, env) — no Request construction, no user-side URL parse. Must
+    // return one of:
+    //   - a plain `{ status, headers, body }` object → HTTP response
+    //   - a string/Uint8Array → 200 OK with that body
+    //   - `null` → fall through to the WinterCG `fetch()` handler below
+    // This path is ~5x faster than `fetch()` for simple routes because
+    // it skips the Request/Response allocations and the URL parser.
+    fetchFast(method, url, body, env) {
+        // Cheap path check: look for "/ping" exactly at the path start.
+        // We receive the full url (e.g. "http://host:port/ping") so we
+        // pull the path via a single indexOf("/", 8) to skip the scheme.
+        const pathStart = url.indexOf("/", 8);
+        if (pathStart < 0) return null;
+        // Grab up to ? or # or end.
+        const qIdx = url.indexOf("?", pathStart);
+        const hIdx = url.indexOf("#", pathStart);
+        let pathEnd = url.length;
+        if (qIdx >= 0 && qIdx < pathEnd) pathEnd = qIdx;
+        if (hIdx >= 0 && hIdx < pathEnd) pathEnd = hIdx;
+        const path = url.slice(pathStart, pathEnd);
+
+        if (method === "GET" && path === "/ping") {
+            return { status: 200, headers: PING_HEADERS, body: '"pong"' };
+        }
+        // fall through to fetch() for /sse, WebSocket, and everything else
+        return null;
+    },
+
     fetch(request) {
         const url = new URL(request.url);
 

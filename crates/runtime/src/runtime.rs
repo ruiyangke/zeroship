@@ -468,6 +468,16 @@ pub(crate) struct RuntimeInner {
     /// export), in which case `call_fetch_handler` falls back to the slow
     /// `default.fetch` path for `/_rpc/*` as well.
     pub(crate) rpc_handler_fn: Option<v8::Global<v8::Function>>,
+    /// Cached reference to `module.default.fetchFast` — the zeroship
+    /// extension for bypassing the WinterCG Request/Response contract.
+    /// Signature: `fetchFast(method, url, body, env) → object | string | null`.
+    /// When non-null result: `{ status, headers, body }` plain object OR
+    /// a string body (200 OK). When null: kernel falls through to the
+    /// full `default.fetch(request, env, ctx)` path.
+    ///
+    /// Kernel routes /_rpc/* → rpc_handler_fn, everything else →
+    /// fetch_fast_fn first (if set) → fetch_handler_fn fallback.
+    pub(crate) fetch_fast_fn: Option<v8::Global<v8::Function>>,
     /// Cached JS helper that constructs a Request from Rust-supplied params.
     http_create_request_fn: Option<v8::Global<v8::Function>>,
     pub(crate) initialized: bool,
@@ -613,6 +623,7 @@ impl RuntimeInner {
             context,
             fetch_handler_fn: None,
             rpc_handler_fn: None,
+            fetch_fast_fn: None,
             http_create_request_fn: None,
             initialized: false,
             state,
@@ -932,6 +943,22 @@ impl RuntimeInner {
                                             Some(v8::Global::new(scope, func));
                                     }
                                 }
+                                // Zeroship extension: cache default.fetchFast
+                                // for the non-RPC HTTP fast-path. Null when
+                                // the user module doesn't opt into the
+                                // extension.
+                                let ff_key = v8::String::new(scope, "fetchFast").unwrap();
+                                if let Some(ff_val) =
+                                    default_obj.get(scope, ff_key.into())
+                                {
+                                    if ff_val.is_function() {
+                                        let func =
+                                            v8::Local::<v8::Function>::try_from(ff_val)
+                                                .unwrap();
+                                        self.fetch_fast_fn =
+                                            Some(v8::Global::new(scope, func));
+                                    }
+                                }
                             }
                         }
                     }
@@ -1171,12 +1198,38 @@ impl RuntimeInner {
             enter_v8!(self, |scope| {
                 let undefined = v8::undefined(scope).into();
 
+                let fetch_fast_result = if rpc_method.is_none() {
+                    if let Some(ff_fn_global) = self.fetch_fast_fn.as_ref() {
+                        let ff_fn = v8::Local::new(scope, ff_fn_global);
+                        let method_arg = v8::String::new(scope, method).unwrap().into();
+                        let url_arg = v8::String::new(scope, url).unwrap().into();
+                        let body_arg = v8::String::new(scope, body).unwrap().into();
+                        let env_arg: v8::Local<v8::Value> = {
+                            let maybe_global = self.state.borrow().env_obj.clone();
+                            match maybe_global {
+                                Some(g) => v8::Local::new(scope, g).into(),
+                                None => v8::Object::new(scope).into(),
+                            }
+                        };
+                        call_fetch_fast_inner(scope, ff_fn, method_arg, url_arg, body_arg, env_arg)
+                    } else {
+                        FetchFastResult::FallThrough
+                    }
+                } else {
+                    FetchFastResult::FallThrough  // unused — rpc path below
+                };
+
                 if let Some(method_name) = rpc_method {
-                    // ---- Fast path: dispatchRpc(methodName, bodyText) ----
+                    // ---- Fast path A: dispatchRpc(methodName, bodyText) ----
                     let rpc_fn = v8::Local::new(scope, self.rpc_handler_fn.as_ref().unwrap());
                     let method_arg = v8::String::new(scope, method_name).unwrap().into();
                     let body_arg = v8::String::new(scope, body).unwrap().into();
                     call_fetch_inner(scope, rpc_fn, undefined, method_arg, body_arg, undefined)
+                } else if let FetchFastResult::Handled(res) = fetch_fast_result {
+                    // ---- Fast path B: fetchFast(method, url, body, env) ----
+                    // Returned a concrete result — use it directly, no
+                    // Request/Response object construction needed.
+                    res
                 } else {
                     // ---- Slow path: full default.fetch(request, env, ctx) ----
                     let create_fn = v8::Local::new(scope, self.http_create_request_fn.as_ref().unwrap());
@@ -2166,6 +2219,189 @@ fn wait_until_noop_callback(
 /// - `Err(v8::Global<v8::Promise>)` — handler returned a still-pending
 ///   promise. The real async path lands in Task B4; caller serves 501
 ///   in the meantime.
+/// Outcome of the `fetchFast(method, url, body, env)` extension.
+///
+/// `Handled` means the user produced a definitive result (sync or
+/// promise-based). `FallThrough` means the user returned `null` /
+/// `undefined` — the kernel should continue to the slow `default.fetch`
+/// path. A rejected promise OR a synchronous throw surfaces through
+/// `Handled(Ok(DispatchResult::ErrorValue))` so the error status code
+/// reaches the client just like the regular fetch path.
+enum FetchFastResult {
+    Handled(Result<DispatchResult, v8::Global<v8::Promise>>),
+    FallThrough,
+}
+
+/// Materialize a `fetchFast` return value into a `DispatchResult`.
+///
+/// Accepted JS return shapes (sync or via fulfilled Promise):
+///   - `null` / `undefined` → `FetchFastResult::FallThrough` (kernel
+///     runs the full `default.fetch(request, env, ctx)` path).
+///   - `{ status, headers, body }` plain object → `ResponseInfo::Complete`
+///     with those exact fields. `headers` is an object `{ k: v }` or
+///     omitted. `body` is a string.
+///   - String → 200 OK with the string as the body, content-type
+///     `application/json` (matching the RPC path's default).
+///   - Response instance → standard inspect_response path (user mixed
+///     fast + slow).
+///   - anything else → JSON.stringify as 200 OK body.
+fn call_fetch_fast_inner(
+    scope: &mut v8::PinScope,
+    ff_fn: v8::Local<v8::Function>,
+    method_arg: v8::Local<v8::Value>,
+    url_arg: v8::Local<v8::Value>,
+    body_arg: v8::Local<v8::Value>,
+    env_arg: v8::Local<v8::Value>,
+) -> FetchFastResult {
+    let undefined = v8::undefined(scope).into();
+    let (result_val, caught_exception) = {
+        v8::tc_scope!(let tc, scope);
+        let r = ff_fn.call(tc, undefined, &[method_arg, url_arg, body_arg, env_arg]);
+        if tc.has_caught() {
+            let exc = tc.exception();
+            let exc_global = exc.map(|e| v8::Global::new(tc, e));
+            (None, exc_global)
+        } else {
+            (r.map(|v| v8::Global::new(tc, v)), None)
+        }
+    };
+
+    scope.perform_microtask_checkpoint();
+
+    if let Some(exc_global) = caught_exception {
+        let exc_local = v8::Local::new(scope, &exc_global);
+        return FetchFastResult::Handled(Ok(DispatchResult::ErrorValue {
+            message: crate::dispatch::v8_exception_to_message(scope, exc_local),
+            name: crate::dispatch::v8_exception_to_name(scope, exc_local),
+            stack: crate::dispatch::v8_exception_to_stack(scope, exc_local),
+            status: crate::dispatch::v8_exception_to_status(scope, exc_local).unwrap_or(500),
+        }));
+    }
+
+    let Some(result_global) = result_val else {
+        return FetchFastResult::Handled(Ok(DispatchResult::Error(
+            "fetchFast returned no value".to_string(),
+        )));
+    };
+
+    let result = v8::Local::new(scope, &result_global);
+
+    // Handle promise return (rare for fetchFast which is designed to be
+    // sync-friendly, but valid for async handlers).
+    if result.is_promise() {
+        let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+        return match promise.state() {
+            v8::PromiseState::Fulfilled => {
+                let resolved = promise.result(scope);
+                classify_fetch_fast_return(scope, resolved)
+            }
+            v8::PromiseState::Rejected => {
+                let exc = promise.result(scope);
+                FetchFastResult::Handled(Ok(DispatchResult::ErrorValue {
+                    message: crate::dispatch::v8_exception_to_message(scope, exc),
+                    name: crate::dispatch::v8_exception_to_name(scope, exc),
+                    stack: crate::dispatch::v8_exception_to_stack(scope, exc),
+                    status: crate::dispatch::v8_exception_to_status(scope, exc).unwrap_or(500),
+                }))
+            }
+            v8::PromiseState::Pending => {
+                FetchFastResult::Handled(Err(v8::Global::new(scope, promise)))
+            }
+        };
+    }
+
+    classify_fetch_fast_return(scope, result)
+}
+
+/// Turn a resolved `fetchFast` return value into a DispatchResult
+/// (after any promise unwrap).
+fn classify_fetch_fast_return(
+    scope: &mut v8::PinScope,
+    val: v8::Local<v8::Value>,
+) -> FetchFastResult {
+    if val.is_null() || val.is_undefined() {
+        return FetchFastResult::FallThrough;
+    }
+
+    // String → 200 OK with body, application/json content-type.
+    if val.is_string() {
+        let body = val.to_rust_string_lossy(scope);
+        return FetchFastResult::Handled(Ok(DispatchResult::HttpResponse(
+            http::ResponseInfo::Complete {
+                status: 200,
+                headers: vec![("content-type".into(), "application/json".into())],
+                body,
+            },
+        )));
+    }
+
+    // Response instance → inspect (user mixed fast + slow).
+    if crate::http::looks_like_response(scope, val) {
+        return match crate::http::inspect_response(scope, val) {
+            Ok(info) => FetchFastResult::Handled(Ok(DispatchResult::HttpResponse(info))),
+            Err(e) => FetchFastResult::Handled(Ok(DispatchResult::Error(e))),
+        };
+    }
+
+    // Plain object with { status, headers, body }.
+    if let Some(obj) = val.to_object(scope) {
+        let status = http::get_u32_property(scope, obj, "status") as u16;
+        let body = http::get_string_property(scope, obj, "body");
+        let headers = extract_plain_headers(scope, obj);
+        let effective_status = if status == 0 { 200 } else { status };
+        return FetchFastResult::Handled(Ok(DispatchResult::HttpResponse(
+            http::ResponseInfo::Complete {
+                status: effective_status,
+                headers,
+                body,
+            },
+        )));
+    }
+
+    // Fallback: JSON.stringify.
+    let body = v8::json::stringify(scope, val)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_else(|| "null".to_string());
+    FetchFastResult::Handled(Ok(DispatchResult::HttpResponse(
+        http::ResponseInfo::Complete {
+            status: 200,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body,
+        },
+    )))
+}
+
+/// Extract headers from a plain `{ k: v }` object. For the fetchFast
+/// extension — not a Headers instance, just a JS object literal.
+fn extract_plain_headers(
+    scope: &mut v8::PinScope,
+    obj: v8::Local<v8::Object>,
+) -> Vec<(String, String)> {
+    let headers_key = v8::String::new(scope, "headers").unwrap();
+    let Some(headers_val) = obj.get(scope, headers_key.into()) else {
+        return Vec::new();
+    };
+    let Some(headers_obj) = headers_val.to_object(scope) else {
+        return Vec::new();
+    };
+    let Some(names) = headers_obj.get_own_property_names(scope, Default::default()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(names.length() as usize);
+    for i in 0..names.length() {
+        let Some(name_val) = names.get_index(scope, i) else {
+            continue;
+        };
+        let name_str = name_val.to_rust_string_lossy(scope);
+        let Some(value_val) = headers_obj.get(scope, name_val) else {
+            continue;
+        };
+        let value_str = value_val.to_rust_string_lossy(scope);
+        out.push((name_str, value_str));
+    }
+    out
+}
+
 fn call_fetch_inner(
     scope: &mut v8::PinScope,
     handler: v8::Local<v8::Function>,

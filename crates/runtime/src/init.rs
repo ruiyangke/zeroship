@@ -299,6 +299,19 @@ const USER_FETCH = (user && user.default && typeof user.default.fetch === "funct
     ? user.default.fetch
     : null;
 
+// Optional zeroship extension: `user.default.fetchFast(method, url, body, env)`.
+// Opt-in handler that bypasses the Request/Response construction entirely.
+// Returns one of:
+//   - { status, headers, body } plain object → HTTP response
+//   - string / Uint8Array → 200 OK + that body
+//   - null → kernel falls back to the slow `fetch(request, env, ctx)` path
+// Kernel dispatches to this BEFORE constructing a Request. The path-routing
+// wiring lives in the kernel: it sees /_rpc/* → dispatchRpc; everything
+// else → fetchFast → (null) → fetch.
+const USER_FETCH_FAST = (user && user.default && typeof user.default.fetchFast === "function")
+    ? user.default.fetchFast
+    : null;
+
 const FALLBACK_RPC_TAG = "/_rpc/";
 
 // Fallback fetch — used only when the user's module doesn't export a
@@ -329,10 +342,13 @@ async function fallbackFetch(request) {
 export default {
     // Kernel fast-path — caller supplies methodName + raw body text.
     dispatchRpc,
-    // The user's `default.fetch` directly when present. No bootstrap
-    // wrapper: exceptions bubble to the kernel's classifier, which
-    // renders `err.status` / `err.message` / `err.name` identically to
-    // what `errorResponse` would have done.
+    // Zeroship extension: non-WinterCG fast HTTP dispatch. Kernel
+    // calls this with raw (method, url, body, env). User returns a
+    // plain response shape or null to fall through to fetch(). Skips
+    // Request/Response construction entirely — hot-path-only win.
+    fetchFast: USER_FETCH_FAST,
+    // Standard WinterCG fetch handler — the user's default.fetch
+    // directly (no bootstrap wrapper).
     fetch: USER_FETCH || fallbackFetch,
 };
 "##;
