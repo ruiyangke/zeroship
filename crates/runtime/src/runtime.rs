@@ -1492,13 +1492,28 @@ impl RuntimeInner {
                         self.stream_forwarders.remove(&stream_id);
                     }
                 } else {
-                    // Slow path: push into V8 ReadableStream
+                    // Slow path: push into V8 ReadableStream. Pushing a chunk
+                    // can wake a pending `reader.read()` promise, which in
+                    // turn may resolve `r.text()` / `r.json()`, the user's
+                    // `await`ing handler, and the outer `default.fetch`
+                    // promise — all via microtasks drained by the
+                    // `perform_microtask_checkpoint` inside `enter_v8!`.
+                    // We must run `collect_settled_promises` after so the
+                    // pump actually delivers the settled outer promise to
+                    // its `reply_fetch`. Without this, `await r.text()` hangs
+                    // even though the body has fully arrived.
                     self.arm_cpu_timer();
-                    enter_v8!(self, |scope| {
+                    let settled_results = enter_v8!(self, |scope| {
                         crate::streams::push_stream_chunk(scope, &self.state, stream_id, &data, done);
+                        collect_settled_promises(scope, &mut self.pending_requests)
                     });
                     self.disarm_cpu_timer();
                     self.check_v8_terminated();
+
+                    let cpu_elapsed = Duration::ZERO;
+                    for (id, req, settled) in settled_results {
+                        self.send_settled_reply_any(id, req, settled, cpu_elapsed);
+                    }
                 }
             }
             OpResult::Cancelled => {}
