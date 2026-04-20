@@ -256,6 +256,13 @@ pub struct RuntimeState {
     /// across every `.await` boundary in a single-threaded async runtime.
     pub per_request_user: HashMap<u64, String>,
 
+    /// For each in-flight request, the list of promises registered via
+    /// `ctx.waitUntil(p)` from JS. The kernel keeps the isolate alive past
+    /// the response body write until every promise settles or the wall
+    /// timeout fires. Cleared when the request is discarded (e.g. after
+    /// the wall budget elapses or the client cancels).
+    pub wait_until_by_request: HashMap<u64, Vec<v8::Global<v8::Promise>>>,
+
     /// In-memory KV store.
     pub kv_store: HashMap<String, String>,
     /// Process / runtime environment variables surfaced to JS.
@@ -316,6 +323,7 @@ impl RuntimeState {
 
             per_request_logs: HashMap::new(),
             per_request_user: HashMap::new(),
+            wait_until_by_request: HashMap::new(),
 
             kv_store: HashMap::new(),
             env_vars,
@@ -331,6 +339,22 @@ impl RuntimeState {
             perf_epoch: std::time::Instant::now(),
             pump_notify_tx: None,
         }
+    }
+
+    /// Register a promise passed to `ctx.waitUntil(p)`. The promise is
+    /// keyed by the currently executing request_id; returns false if no
+    /// request is active (the caller's native op should throw to JS in
+    /// that case). Promises stay alive until cleaned up when the request
+    /// completes.
+    pub fn register_wait_until(&mut self, promise: v8::Global<v8::Promise>) -> bool {
+        let Some(rid) = self.executing_request_id else {
+            return false;
+        };
+        self.wait_until_by_request
+            .entry(rid)
+            .or_default()
+            .push(promise);
+        true
     }
 
     /// Allocate a stream-id that is not currently held by an active stream or
