@@ -126,11 +126,16 @@ function waitUntil(promise) {
 }
 
 function getRequest() {
-    const ctx = __zs_get_request_ctx();
-    if (!ctx || !ctx.__zs_request) {
-        throw new Error("getRequest called outside a request");
+    // Kernel stashes the Request JS object on `state.request_by_id`
+    // when it builds one in call_fetch_handler's slow path. The RPC
+    // fast-path does NOT build a Request (body-is-args dispatch), so
+    // getRequest() returns null there — use the default.fetch contract
+    // when you need header/url access.
+    const req = __zs_get_request();
+    if (!req) {
+        throw new Error("getRequest called outside a fetch handler (RPC fast-path has no Request)");
     }
-    return ctx.__zs_request;
+    return req;
 }
 
 export { env, waitUntil, getRequest };
@@ -169,7 +174,7 @@ export function __bindRequest(ctx, request) {
 ///
 /// Non-`/_rpc/*` paths still fall through to `user.default?.fetch`, so
 /// existing module-worker apps keep working unchanged.
-pub(crate) const BOOTSTRAP_JS: &str = r#"
+pub(crate) const BOOTSTRAP_JS: &str = r##"
 import * as user from "./__user__.js";
 import { __bindRequest } from "zeroship/internal";
 
@@ -283,38 +288,54 @@ async function handleRpcFromRequest(request, methodName) {
     return await dispatchRpc(methodName, bodyText);
 }
 
+// Resolve the user's default.fetch once at module init. When present, we
+// export it directly as our `default.fetch` — no wrapper, no extra async
+// frame, no extra try/catch. The kernel's `call_fetch_inner` already
+// turns thrown exceptions into `DispatchResult::ErrorValue` with the
+// correct HTTP status (honoring `err.status`), so a JS-side try/catch
+// here would just add cost. This is the single biggest per-fetch win
+// after dropping the URL parse and __bindRequest.
+const USER_FETCH = (user && user.default && typeof user.default.fetch === "function")
+    ? user.default.fetch
+    : null;
+
+const FALLBACK_RPC_TAG = "/_rpc/";
+
+// Fallback fetch — used only when the user's module doesn't export a
+// default.fetch handler. Handles /_rpc/* via URL for JS-direct callers,
+// else 404.
+async function fallbackFetch(request) {
+    const urlStr = request.url;
+    const tagIdx = urlStr.indexOf(FALLBACK_RPC_TAG);
+    if (tagIdx >= 0) {
+        const methodStart = tagIdx + FALLBACK_RPC_TAG.length;
+        let methodEnd = urlStr.length;
+        const q = urlStr.indexOf("?", methodStart);
+        if (q >= 0 && q < methodEnd) methodEnd = q;
+        const h = urlStr.indexOf("#", methodStart);
+        if (h >= 0 && h < methodEnd) methodEnd = h;
+        const rawMethod = urlStr.slice(methodStart, methodEnd);
+        const method = rawMethod.indexOf("%") >= 0
+            ? decodeURIComponent(rawMethod)
+            : rawMethod;
+        return await handleRpcFromRequest(request, method);
+    }
+    return new Response(
+        '{"message":"Not Found","name":"Error"}',
+        { status: 404, headers: { "Content-Type": "application/json" } }
+    );
+}
+
 export default {
     // Kernel fast-path — caller supplies methodName + raw body text.
-    // No Request object is built; no URL parsing. ~10x cheaper than
-    // the full fetch() path for an empty-body RPC call.
     dispatchRpc,
-
-    async fetch(request, env, ctx) {
-        __bindRequest(ctx, request);
-        try {
-            const url = new URL(request.url);
-            if (url.pathname.startsWith("/_rpc/")) {
-                const method = decodeURIComponent(url.pathname.slice(6));
-                // Re-enter dispatchRpc via the request body — this path
-                // exists for non-bootstrap callers (e.g., a user exporting
-                // `default` that happens to include "/_rpc/" paths).
-                return await handleRpcFromRequest(request, method);
-            }
-            if (user.default && typeof user.default.fetch === "function") {
-                return await user.default.fetch(request, env, ctx);
-            }
-            return new Response(
-                JSON.stringify({ message: "Not Found", name: "Error" }),
-                { status: 404, headers: { "Content-Type": "application/json" } }
-            );
-        } catch (err) {
-            return errorResponse(err);
-        } finally {
-            __bindRequest(null);
-        }
-    },
+    // The user's `default.fetch` directly when present. No bootstrap
+    // wrapper: exceptions bubble to the kernel's classifier, which
+    // renders `err.status` / `err.message` / `err.name` identically to
+    // what `errorResponse` would have done.
+    fetch: USER_FETCH || fallbackFetch,
 };
-"#;
+"##;
 
 // ===========================================================================
 // Shared initialization: polyfills + module loading
@@ -730,6 +751,40 @@ fn zs_get_request_ctx_callback(
     }
 }
 
+/// `__zs_get_request()` — return the Request JS object for the current
+/// in-flight request, or `null` if none (e.g. the RPC fast-path doesn't
+/// construct a Request since there's no URL/header work to do).
+///
+/// The kernel stores the Request at call_fetch_handler's slow-path entry,
+/// immediately after it constructs one via HTTP_CREATE_REQUEST_JS. Stored
+/// keyed by the same `executing_request_id` that drives per_request_user
+/// / waitUntil / logs, so cleanup rides on `drain_request_logs`.
+fn zs_get_request_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    let rid_opt = state.borrow().executing_request_id;
+    let Some(rid) = rid_opt else {
+        rv.set(v8::null(scope).into());
+        return;
+    };
+    let req_opt = state.borrow().request_by_id.get(&rid).cloned();
+    match req_opt {
+        Some(req_global) => {
+            let local = v8::Local::new(scope, req_global);
+            rv.set(local.into());
+        }
+        None => {
+            rv.set(v8::null(scope).into());
+        }
+    }
+}
+
 // ===========================================================================
 // Timer callbacks (take v8::Function args — stays manual)
 // ===========================================================================
@@ -1137,6 +1192,14 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
         let get_key = v8::String::new(scope, "__zs_get_request_ctx").unwrap();
         let get_fn = v8::Function::new(scope, zs_get_request_ctx_callback).unwrap();
         global.set(scope, get_key.into(), get_fn.into());
+
+        // __zs_get_request — direct-read for the current Request JS object.
+        // Stored by the kernel in `state.request_by_id` on the fetch()
+        // slow path; empty for the RPC fast-path (no Request built). Lets
+        // `getRequest()` skip a per-request __bindRequest round-trip.
+        let req_key = v8::String::new(scope, "__zs_get_request").unwrap();
+        let req_fn = v8::Function::new(scope, zs_get_request_callback).unwrap();
+        global.set(scope, req_key.into(), req_fn.into());
     }
 
     // __zs_wait_until — registers a Promise against the current request's

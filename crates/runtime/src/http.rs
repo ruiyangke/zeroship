@@ -10,16 +10,24 @@ use crate::state::SharedState;
 // ---------------------------------------------------------------------------
 
 /// JS helper compiled once: constructs a `Request` from Rust-supplied params.
+///
+/// Fast paths:
+///   - Skips `JSON.parse` + `Headers._fromTrusted` entirely when
+///     `headersJson` is empty or `"[]"` (e.g. GET /ping from wrk). The
+///     Request constructor creates default empty Headers itself.
+///   - Skips `init.body` when body is empty or method is GET/HEAD.
 pub const HTTP_CREATE_REQUEST_JS: &str = r#"(function(method, url, headersJson, body) {
-    var map = Object.create(null);
-    if (headersJson) {
+    var init = { method: method };
+    // "[]" is 2 chars; anything longer means at least one real header.
+    if (headersJson && headersJson.length > 2) {
+        var map = Object.create(null);
         var arr = JSON.parse(headersJson);
         for (var i = 0; i < arr.length; i++) {
             var k = arr[i][0].toLowerCase(), v = arr[i][1];
             if (map[k]) map[k].push(v); else map[k] = [v];
         }
+        init.headers = Headers._fromTrusted(map);
     }
-    var init = { method: method, headers: Headers._fromTrusted(map) };
     if (body && method !== "GET" && method !== "HEAD") init.body = body;
     return new Request(url, init);
 })"#;

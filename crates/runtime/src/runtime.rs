@@ -947,6 +947,44 @@ impl RuntimeInner {
                     }
                 }
             }
+
+            // Build the shared `ctx` object once. Frozen so the user's
+            // fetch handler can't mutate our callbacks; reused every
+            // request. Eliminates the per-request Object::new + 2
+            // Function::new + 2 Object::Set that showed up as ~5% of
+            // fetch-path CPU in perf.
+            if self.state.borrow().ctx_obj.is_none() {
+                let obj = v8::Object::new(scope);
+
+                let wu_key = v8::String::new(scope, "waitUntil").unwrap();
+                let wu_fn = v8::Function::new(scope, wait_until_noop_callback).unwrap();
+                obj.set(scope, wu_key.into(), wu_fn.into());
+
+                let pt_key = v8::String::new(scope, "passThroughOnException").unwrap();
+                let pt_fn = v8::Function::new(scope, pass_through_on_exception_noop_callback).unwrap();
+                obj.set(scope, pt_key.into(), pt_fn.into());
+
+                // Freeze via Object.freeze to prevent user code from
+                // pointing our callbacks at their own impls (which
+                // would be a security hazard + a cache-invalidation
+                // nightmare across concurrent requests on this
+                // worker).
+                let freeze_src = v8::String::new(scope, "Object.freeze").unwrap();
+                if let Some(freeze_fn_val) = scope
+                    .get_current_context()
+                    .global(scope)
+                    .get(scope, v8::String::new(scope, "Object").unwrap().into())
+                    .and_then(|o| o.to_object(scope))
+                    .and_then(|o| o.get(scope, v8::String::new(scope, "freeze").unwrap().into()))
+                    && let Ok(freeze_fn) = v8::Local::<v8::Function>::try_from(freeze_fn_val)
+                {
+                    let undefined = v8::undefined(scope).into();
+                    let _ = freeze_fn.call(scope, undefined, &[obj.into()]);
+                }
+                let _ = freeze_src; // silence unused
+
+                self.state.borrow_mut().ctx_obj = Some(v8::Global::new(scope, obj));
+            }
         }
 
         self.initialized = true;
@@ -1153,6 +1191,16 @@ impl RuntimeInner {
                     } else {
                         let request = request_opt.unwrap();
 
+                        // Stash the Request so `getRequest()` can find it
+                        // without the bootstrap having to push `ctx.__zs_request`
+                        // through JS on every call. Cleared in drain_request_logs /
+                        // discard_request_state together with the other per-request
+                        // state (user, ctx, logs).
+                        if let Some(req_obj) = request.to_object(scope) {
+                            let global = v8::Global::new(scope, req_obj);
+                            self.state.borrow_mut().request_by_id.insert(request_id, global);
+                        }
+
                         let env_val: v8::Local<v8::Value> = {
                             let maybe_global = self.state.borrow().env_obj.clone();
                             match maybe_global {
@@ -1165,14 +1213,17 @@ impl RuntimeInner {
                             }
                         };
 
-                        let ctx_obj = v8::Object::new(scope);
-                        let wu_key = v8::String::new(scope, "waitUntil").unwrap();
-                        let wu_fn = v8::Function::new(scope, wait_until_noop_callback).unwrap();
-                        ctx_obj.set(scope, wu_key.into(), wu_fn.into());
-                        let pt_key = v8::String::new(scope, "passThroughOnException").unwrap();
-                        let pt_fn = v8::Function::new(scope, pass_through_on_exception_noop_callback).unwrap();
-                        ctx_obj.set(scope, pt_key.into(), pt_fn.into());
-                        let ctx_val: v8::Local<v8::Value> = ctx_obj.into();
+                        // Reuse the frozen ctx singleton built in
+                        // ensure_initialized. Same V8 Object across every
+                        // fetch request — no map transitions, no per-
+                        // request Function allocations.
+                        let ctx_val: v8::Local<v8::Value> = {
+                            let maybe = self.state.borrow().ctx_obj.clone();
+                            match maybe {
+                                Some(g) => v8::Local::new(scope, g).into(),
+                                None => v8::Object::new(scope).into(),
+                            }
+                        };
 
                         let handler = v8::Local::new(scope, self.fetch_handler_fn.as_ref().unwrap());
                         call_fetch_inner(scope, handler, undefined, request, env_val, ctx_val)
@@ -1757,11 +1808,12 @@ impl RuntimeInner {
         let mut s = self.state.borrow_mut();
         // Every terminal path for a request calls this exactly once, so it
         // also owns cleanup of sibling per-request state (auth user, bound
-        // ctx). Keeping these dropped together avoids "logs freed, user
-        // still resident" asymmetries that otherwise leak memory for
-        // long-lived workers.
+        // ctx, Request object). Keeping these dropped together avoids
+        // "logs freed, user still resident" asymmetries that otherwise
+        // leak memory for long-lived workers.
         s.per_request_user.remove(&request_id);
         s.request_ctx_by_id.remove(&request_id);
+        s.request_by_id.remove(&request_id);
         s.per_request_logs
             .remove(&request_id)
             .unwrap_or_default()
@@ -1782,6 +1834,7 @@ impl RuntimeInner {
         let mut s = self.state.borrow_mut();
         s.per_request_user.remove(&request_id);
         s.request_ctx_by_id.remove(&request_id);
+        s.request_by_id.remove(&request_id);
         s.per_request_logs.remove(&request_id);
     }
 

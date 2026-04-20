@@ -269,6 +269,19 @@ pub struct RuntimeState {
     /// isolate's lifetime.
     pub wait_until_by_request: HashMap<u64, Vec<v8::Global<v8::Promise>>>,
 
+    /// Per-request Request JS object, keyed by request_id. Stored by the
+    /// kernel when `call_fetch_handler` builds the Request; read by the
+    /// `__zs_get_request` native op so user code can do
+    /// `import { getRequest } from 'zeroship'; getRequest()` without the
+    /// bootstrap having to call `__bindRequest(ctx, request)` on every
+    /// request.
+    ///
+    /// Empty when the request is served through the RPC fast-path (no
+    /// Request is constructed). Callers of `getRequest()` inside a
+    /// "use server" function receive null/throw in that case — use the
+    /// `default.fetch` contract if header/URL access is needed.
+    pub request_by_id: HashMap<u64, v8::Global<v8::Object>>,
+
     /// Per-request JS-exposed `ctx` object, keyed by request_id.
     /// Populated via `__zs_bind_request_ctx(ctxObj)` from bootstrap JS;
     /// read via `__zs_get_request_ctx()` from any nested module that
@@ -300,6 +313,19 @@ pub struct RuntimeState {
     /// access) and `call_fetch_handler` both hand back the same frozen
     /// V8 Object reference. `None` until `ensure_initialized` has run.
     pub env_obj: Option<v8::Global<v8::Object>>,
+
+    /// Frozen `ctx` object reused across every fetch dispatch. Constructed
+    /// once at init with stateless `waitUntil` / `passThroughOnException`
+    /// callbacks (both resolve current-request state via
+    /// `executing_request_id`), then frozen. Passed as the third arg to
+    /// `default.fetch(request, env, ctx)`.
+    ///
+    /// Why cache: V8 allocates a fresh Object + 2 Functions for every
+    /// request when constructed inline, which triggers `JSObject::MigrateToMap`
+    /// + `Object::Set` + `ApplyTransitionToDataProperty` hotspots (visible
+    /// in perf report). A cached, frozen singleton is the same V8 object
+    /// every time — no new allocations, no map transitions.
+    pub ctx_obj: Option<v8::Global<v8::Object>>,
 
     /// WebCrypto key store, keyed by key-id.
     pub key_store: HashMap<u32, crate::crypto::KeyData>,
@@ -357,6 +383,7 @@ impl RuntimeState {
             per_request_logs: HashMap::new(),
             per_request_user: HashMap::new(),
             wait_until_by_request: HashMap::new(),
+            request_by_id: HashMap::new(),
             request_ctx_by_id: HashMap::new(),
 
             kv_store: HashMap::new(),
@@ -364,6 +391,7 @@ impl RuntimeState {
 
             env_json: "{}".into(),
             env_obj: None,
+            ctx_obj: None,
 
             key_store: HashMap::new(),
             next_key_id: 1,
