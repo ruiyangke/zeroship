@@ -2,7 +2,6 @@
 #![allow(missing_debug_implementations)]
 
 pub mod auth;
-pub mod native_ext;
 pub mod state;
 pub mod dispatch;
 pub mod init;
