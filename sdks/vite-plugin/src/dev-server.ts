@@ -24,6 +24,7 @@ import {
 } from "./environment.js";
 import { findServerEntry } from "./build.js";
 import type { TransformState } from "./transform.js";
+import { startDevPostgres, type DevPostgres } from "./dev-db.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -43,6 +44,7 @@ export function devServerPlugin(
   let root = "";
   let isDev = false;
   let serverProcess: ChildProcess | null = null;
+  let devDb: DevPostgres | null = null;
 
   // Accumulates file paths changed since the last HMR poll. The V8 runtime
   // polls GET /__zeroship_hmr_check every 500ms via setInterval + fetch().
@@ -235,7 +237,7 @@ export function devServerPlugin(
           "[zeroship] dev-bootstrap.js not found — skipping runtime spawn (run the bootstrap bundler first)"
         );
       } else {
-        const spawnRuntime = () => {
+        const spawnRuntime = async () => {
           // Resolve the actual listening port from the HTTP server.
           const addr = server.httpServer?.address();
           const vitePort =
@@ -263,9 +265,27 @@ export function devServerPlugin(
             }
           }
 
+          // Zero-setup Postgres: boot a PGlite-backed server when the
+          // creator hasn't provided DATABASE_URL via .env or the parent
+          // environment. Boot once; reused across runtime restarts.
+          const hasUserDbUrl = !!(dotenvVars.DATABASE_URL || process.env.DATABASE_URL);
+          if (!hasUserDbUrl && !devDb) {
+            try {
+              devDb = await startDevPostgres(root);
+              console.log(
+                `[zeroship] dev db ready (pglite) — ${devDb.databaseUrl.replace(/postgres:\/\/[^@]+@/, "postgres://*****@")}`
+              );
+            } catch (err) {
+              console.warn(
+                `[zeroship] failed to start pglite dev db: ${(err as Error).message} — zeroship.db.* will be unavailable`
+              );
+            }
+          }
+
           const childEnv: NodeJS.ProcessEnv = {
             ...process.env,
             ...dotenvVars,
+            ...(devDb && !hasUserDbUrl ? { DATABASE_URL: devDb.databaseUrl } : {}),
             [ENV_DEV]: "1",
             [ENV_VITE_WS]: `ws://localhost:${vitePort}${WS_PATH}`,
             ...(serverEntry ? { [ENV_ENTRY]: serverEntry } : {}),
@@ -300,14 +320,18 @@ export function devServerPlugin(
           }
         };
 
-        // Defer spawn until server is listening.
+        // Defer spawn until server is listening. spawnRuntime is async —
+        // wrap with a void handler so unhandled rejections surface in logs.
+        const runSpawn = () => { spawnRuntime().catch((err) => {
+          console.warn(`[zeroship] runtime spawn failed: ${(err as Error).message}`);
+        }); };
         if (server.httpServer?.listening) {
-          spawnRuntime();
+          runSpawn();
         } else {
-          server.httpServer?.once("listening", spawnRuntime);
+          server.httpServer?.once("listening", runSpawn);
         }
 
-        // Clean up child process on Vite exit (SIGINT, SIGTERM, process.exit)
+        // Clean up child process + dev db on Vite exit (SIGINT, SIGTERM, process.exit)
         const killChild = () => {
           if (serverProcess && !serverProcess.killed) {
             serverProcess.kill("SIGTERM");
@@ -316,6 +340,15 @@ export function devServerPlugin(
                 serverProcess.kill("SIGKILL");
               }
             }, 3000).unref();
+          }
+          // Best-effort: stop the dev PGlite instance. Fire-and-forget — we
+          // don't await since Vite's close path is synchronous in several
+          // entry points (e.g. process.exit). The data is already durable
+          // on disk under .zeroship/dev.db/, so a skipped close just costs
+          // a next-start WAL replay.
+          if (devDb) {
+            void devDb.stop();
+            devDb = null;
           }
         };
 
@@ -350,7 +383,7 @@ export function devServerPlugin(
             if (restartTimer) clearTimeout(restartTimer);
             restartTimer = setTimeout(() => {
               restartTimer = null;
-              spawnRuntime();
+              runSpawn();
               setupRestartHandler();
             }, 1000);
           });
