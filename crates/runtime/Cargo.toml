@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "zeroship V8 runtime — compio/io_uring, ESM modules, WebCrypto, fetch, streaming"
 
+[build-dependencies]
+cc = "1"
+cargo_metadata = "0.18"
+
 [dependencies]
 # V8
 v8 = { workspace = true }
