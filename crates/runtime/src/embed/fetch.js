@@ -382,6 +382,21 @@
     return new Request(this);
   };
 
+  // Spec-default values on the prototype — the Rust-side fast-path
+  // constructor (http::build_request_native) skips these per-instance
+  // sets and relies on prototype lookup, saving ~8 hidden-class transitions
+  // per hot-path Request. User-space `new Request()` still sets them
+  // explicitly (the constructor is unchanged).
+  Request.prototype.redirect = "follow";
+  Request.prototype.signal = null;
+  Request.prototype.cache = "default";
+  Request.prototype.credentials = "same-origin";
+  Request.prototype.mode = "cors";
+  Request.prototype.referrer = "about:client";
+  Request.prototype._bodyUsed = false;
+  Request.prototype._bodyBytes = null;
+  Request.prototype._bodyText = "";
+
   applyBodyMixin(Request.prototype);
 
   // =========================================================================

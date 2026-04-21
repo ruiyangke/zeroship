@@ -34,6 +34,21 @@ fn key<'s>(scope: &mut v8::PinScope<'s, '_>, k: &'static v8::OneByteConst) -> v8
     v8::String::new_from_onebyte_const(scope, k).unwrap()
 }
 
+// Note: a Rust-native Request builder (Tier 1) was prototyped here — it
+// used cached `Request.prototype` / `Headers.prototype` globals and built
+// the Request via direct V8 Object API (set_prototype + obj.set per field).
+// Bench result: 3-4% SLOWER than the JS helper. Each Rust→V8 FFI crossing
+// (~50-80ns via rusty_v8) exceeds the savings from skipping JS bytecode
+// interpretation, since the JS helper's inline field sets get JIT-inlined
+// into a stable hidden class after warmup. For Request-like shapes with
+// ≤10 fields, the JS helper wins.
+//
+// Getting faster than the JS helper in pure Rust would need `v8::FunctionTemplate`
+// with `InstanceTemplate::set_internal_field_count(N)` — internal-field
+// slots bypass the named-property path entirely. That's "Tier 2" and
+// requires accessor callbacks for user-facing getters (url, method, etc.),
+// which incur their own FFI cost on JS reads.
+
 // ---------------------------------------------------------------------------
 // HTTP helper constants
 // ---------------------------------------------------------------------------
@@ -54,15 +69,7 @@ pub const HTTP_CREATE_REQUEST_JS: &str = r#"(function(method, url, headersJson, 
     var req = Object.create(Request.prototype);
     req.url = url;
     req.method = method;
-    req.redirect = "follow";
-    req.signal = null;
-    req.cache = "default";
-    req.credentials = "same-origin";
-    req.mode = "cors";
-    req.referrer = "about:client";
-    req._bodyUsed = false;
-    req._bodyBytes = null;
-    req._bodyText = (body && method !== "GET" && method !== "HEAD") ? body : "";
+    if (body && method !== "GET" && method !== "HEAD") req._bodyText = body;
     var hMap = Object.create(null);
     // "[]" is 2 chars; anything longer means at least one real header.
     if (headersJson && headersJson.length > 2) {

@@ -1232,18 +1232,21 @@ impl RuntimeInner {
                     res
                 } else {
                     // ---- Slow path: full default.fetch(request, env, ctx) ----
+                    //
+                    // Rust-native Request construction via `obj.set_prototype`
+                    // + per-field `obj.set` was prototyped (Tier 1) and
+                    // measured ~3-4% SLOWER than the JS helper: every
+                    // Rust→V8 FFI crossing (~50-80ns via rusty_v8) exceeds
+                    // the savings from skipping JS bytecode interpretation,
+                    // since the JS helper's inline field sets get JIT-inlined
+                    // with a stable hidden class after warmup. See http.rs.
                     let create_fn = v8::Local::new(scope, self.http_create_request_fn.as_ref().unwrap());
                     let method_val = v8::String::new(scope, method).unwrap().into();
                     let url_val = v8::String::new(scope, url).unwrap().into();
                     let headers_val = v8::String::new(scope, &headers_json).unwrap().into();
                     let body_val = v8::String::new(scope, body).unwrap().into();
-
                     let request_opt = create_fn.call(scope, undefined, &[method_val, url_val, headers_val, body_val]);
-                    if request_opt.is_none() {
-                        Ok(DispatchResult::Error("Failed to construct Request object".to_string()))
-                    } else {
-                        let request = request_opt.unwrap();
-
+                    if let Some(request) = request_opt {
                         // Stash the Request so `getRequest()` can find it
                         // without the bootstrap having to push `ctx.__zs_request`
                         // through JS on every call. Cleared in drain_request_logs /
@@ -1280,6 +1283,8 @@ impl RuntimeInner {
 
                         let handler = v8::Local::new(scope, self.fetch_handler_fn.as_ref().unwrap());
                         call_fetch_inner(scope, handler, undefined, request, env_val, ctx_val)
+                    } else {
+                        Ok(DispatchResult::Error("Failed to construct Request object".to_string()))
                     }
                 }
             });
