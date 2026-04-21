@@ -193,7 +193,18 @@ pub async fn init_pool_async() -> Result<(), String> {
 
     let pool = Pool::connect(&url, 8)
         .await
-        .map_err(|e| format!("db: failed to connect: {e}"))?;
+        .map_err(|e| {
+            // Walk the error source chain so the root cause (e.g. ECONNREFUSED,
+            // TLS handshake failure) reaches the JS console instead of the
+            // generic "error connecting to server" wrapper.
+            let mut msg = format!("db: failed to connect: {e}");
+            let mut cur: &dyn std::error::Error = &e;
+            while let Some(src) = std::error::Error::source(cur) {
+                msg.push_str(&format!(" — caused by: {src}"));
+                cur = src;
+            }
+            msg
+        })?;
 
     DB_POOL.with(|p| *p.borrow_mut() = Some(Rc::new(pool)));
     Ok(())

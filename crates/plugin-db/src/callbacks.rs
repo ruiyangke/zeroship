@@ -148,6 +148,19 @@ fn setup_promise<'s>(
     (op_id, request_id, promise)
 }
 
+/// Format a compio_postgres::Error with its full source chain — surfaces
+/// the underlying Postgres DbError message instead of the bare wrapper
+/// kinds ("db error", "unexpected message from server").
+fn fmt_db_err(e: &compio_postgres::Error) -> String {
+    let mut msg = format!("db: {e}");
+    let mut cur: &dyn std::error::Error = e;
+    while let Some(src) = std::error::Error::source(cur) {
+        msg.push_str(&format!(" — caused by: {src}"));
+        cur = src;
+    }
+    msg
+}
+
 /// Execute SQL with text params — uses TX connection if active, otherwise pool.
 async fn run_sql(sql: &str, params: &[&str]) -> Result<Vec<compio_postgres::Row>, String> {
     // Check if there's an active transaction
@@ -159,7 +172,7 @@ async fn run_sql(sql: &str, params: &[&str]) -> Result<Vec<compio_postgres::Row>
         let result = client.query_text_params(sql, params).await;
         // Put it back
         crate::TX_CONN.with(|tx| { tx.borrow_mut().replace(client); });
-        return result.map_err(|e| format!("db: {e}"));
+        return result.map_err(|e| fmt_db_err(&e));
     }
 
     // No transaction — use pool
@@ -169,7 +182,7 @@ async fn run_sql(sql: &str, params: &[&str]) -> Result<Vec<compio_postgres::Row>
     }
     let pool = DB_POOL.with(|p| p.borrow().as_ref().map(Rc::clone));
     let pool = pool.ok_or_else(|| "db: pool not initialized".to_string())?;
-    pool.query_text_params(sql, params).await.map_err(|e| format!("db: {e}"))
+    pool.query_text_params(sql, params).await.map_err(|e| fmt_db_err(&e))
 }
 
 /// Execute a built query via pool (or TX conn) and return JSON string result.
@@ -972,7 +985,7 @@ async fn exec_register_model(
         .map_err(|e| format!("db: {e}"))?;
     pool.query_text_params(&create_table, &empty)
         .await
-        .map_err(|e| format!("db: create table failed: {e}"))?;
+        .map_err(|e| format!("db: create table failed: {}", fmt_db_err(&e)))?;
 
     // 3. ALTER TABLE ADD COLUMN IF NOT EXISTS for each field
     if let Some(obj) = schema.as_object() {

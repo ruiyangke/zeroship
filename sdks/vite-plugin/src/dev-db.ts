@@ -60,10 +60,24 @@ export async function startDevPostgres(projectRoot: string): Promise<DevPostgres
     db,
     port,
     host: "127.0.0.1",
+    // Our compio-postgres pool warms 2 connections on connect() by default,
+    // and a single worker can burst to ~8. Pglite-socket defaults to
+    // maxConnections=1 — which would reject the pool's second warm-up
+    // connection. Multiplex up to 16 simultaneous sockets (pglite-socket
+    // serializes queries onto the single underlying PGlite instance via
+    // its internal queue, so this is purely a connection-accept limit).
+    maxConnections: 16,
+    debug: process.env.ZEROSHIP_DEV_DB_DEBUG === "1",
   });
   await server.start();
 
-  const databaseUrl = `postgres://postgres:postgres@127.0.0.1:${port}/postgres`;
+  // `sslmode=disable` is required: PGlite-socket is a plain TCP proxy into
+  // PGlite's in-process query engine — it doesn't speak SSL. Without this
+  // our compio-postgres client defaults to `Prefer`, sends an SSLRequest
+  // packet, and PGlite handles that as an unknown startup message → hang
+  // / "error connecting to server". Disabling SSL keeps the handshake on
+  // the raw wire where pglite-socket can parse it.
+  const databaseUrl = `postgres://postgres:postgres@127.0.0.1:${port}/postgres?sslmode=disable`;
 
   const stop = async () => {
     try { await server.stop(); } catch { /* noop — server already closed */ }
