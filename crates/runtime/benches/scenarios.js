@@ -246,9 +246,21 @@ export default {
         if (url.pathname === "/sse") {
             return handleSse(url);
         }
-        // /ping — fetch-path counterpart to the /_rpc/ping scenario.
-        // Returns the same `"pong"` body so wrk transfer numbers are
-        // apples-to-apples between the two dispatch paths.
+        // WinterCG fetch-path counterparts to fetchFast /ping.
+        //   /wping — minimal Response with pre-encoded Uint8Array body
+        //   /wjson — Response.json (the common AI-generated idiom)
+        // Measured separately so we can see the Response construction
+        // + inspection cost in isolation.
+        if (url.pathname === "/wping") {
+            return new Response(PONG_RESPONSE_BYTES, {
+                status: 200,
+                headers: { "Content-Type": "application/json" },
+            });
+        }
+        if (url.pathname === "/wjson") {
+            return Response.json({ ok: true });
+        }
+        // /ping via fetch() (shouldn't be reached — fetchFast handles it).
         if (url.pathname === "/ping") {
             return new Response(PONG_RESPONSE_BYTES, {
                 status: 200,

@@ -165,9 +165,19 @@ run_wrk "v8-compio 1w"          $PORT_1W "/_rpc/ping" /tmp/wrk-rpc-empty.lua
 run_wrk "v8-compio ${WORKERS}w" $PORT_NW "/_rpc/ping" /tmp/wrk-rpc-empty.lua
 
 echo ""
-echo "--- ping  (fetch handler: GET  /ping) ---"
+echo "--- ping  (fetchFast extension: GET /ping) ---"
 run_wrk_get "v8-compio 1w"          $PORT_1W "/ping"
 run_wrk_get "v8-compio ${WORKERS}w" $PORT_NW "/ping"
+
+echo ""
+echo "--- wping (WinterCG default.fetch: new Response(bytes)) ---"
+run_wrk_get "v8-compio 1w"          $PORT_1W "/wping"
+run_wrk_get "v8-compio ${WORKERS}w" $PORT_NW "/wping"
+
+echo ""
+echo "--- wjson (WinterCG default.fetch: Response.json) ---"
+run_wrk_get "v8-compio 1w"          $PORT_1W "/wjson"
+run_wrk_get "v8-compio ${WORKERS}w" $PORT_NW "/wjson"
 
 echo ""
 echo "--- promiseChain (RPC) ---"

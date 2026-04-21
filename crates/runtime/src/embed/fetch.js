@@ -71,12 +71,16 @@
           this.append(pairArr[0], pairArr[1]);
         }
       } else if (typeof init === "object") {
-        // Record<string, string> — per spec, sort keys and skip Symbols
+        // Record<string, string> — per spec, sort keys and skip Symbols.
+        // Inline the set so we don't double-validate via append().
         var names = Object.keys(init).sort();
+        var map = this._map;
         for (var j = 0; j < names.length; j++) {
           var name = validateName(names[j]);
           var val = validateValue(String(init[names[j]]));
-          this.append(name, val);
+          var key = name.toLowerCase();
+          if (map[key]) map[key].push(val);
+          else map[key] = [val];
         }
       }
     }
@@ -207,17 +211,13 @@
       obj._bodyText = body;
     } else if (body instanceof ArrayBuffer) {
       obj._bodyBytes = body;
-      // Also set _bodyText for backwards compat (lossy for binary)
-      var bytes = new Uint8Array(body);
-      var text = "";
-      for (var i = 0; i < bytes.length; i++) text += String.fromCharCode(bytes[i]);
-      obj._bodyText = text;
+      // TextDecoder is native C++; the old JS char-code loop was O(n²)
+      // on string concat and wrong for UTF-8 (Latin-1 mapping). Native
+      // decode handles both issues and is cheaper for bodies above ~20 bytes.
+      obj._bodyText = new TextDecoder().decode(body);
     } else if (ArrayBuffer.isView && ArrayBuffer.isView(body)) {
       obj._bodyBytes = body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength);
-      var bytes = new Uint8Array(obj._bodyBytes);
-      var text = "";
-      for (var i = 0; i < bytes.length; i++) text += String.fromCharCode(bytes[i]);
-      obj._bodyText = text;
+      obj._bodyText = new TextDecoder().decode(body);
     } else {
       obj._bodyText = String(body);
     }
@@ -467,6 +467,13 @@
   // don't. See `http::looks_like_response`.
   Response.prototype.__zsResponse = 1;
 
+  // Shared, immutable headers-array for the `Response.json(x)` fast-path.
+  // Rust `extract_response_headers` reads `_zsHeadersArr` first and skips
+  // the `_map` walk when present. Every JSON response points at the same
+  // frozen array — no per-request allocation. The object is frozen so user
+  // code can't mutate the shared list (they'd need a real Headers instance).
+  var JSON_HEADERS_ARR = Object.freeze([Object.freeze(["content-type", "application/json"])]);
+
   Response.error = function() {
     var resp = Object.create(Response.prototype);
     resp.status = 0;
@@ -492,8 +499,33 @@
   };
 
   Response.json = function(data, init) {
-    init = init || {};
     var body = JSON.stringify(data);
+    // Fast path: plain `Response.json(x)` — no init, default status/headers.
+    // Skips Headers allocation, validateName/validateValue regex, and
+    // the Response constructor's init-branching. All subsequent property
+    // access works identically because we inherit from Response.prototype
+    // (bodyUsed getter, text/json/arrayBuffer methods).
+    if (!init) {
+      var resp = Object.create(Response.prototype);
+      resp.status = 200;
+      resp.statusText = "";
+      resp.type = "default";
+      resp.url = "";
+      resp.redirected = false;
+      resp.ok = true;
+      resp._bodyText = body;
+      resp._bodyBytes = null;
+      resp._bodyUsed = false;
+      resp._isStreamBody = false;
+      var h = Object.create(Headers.prototype);
+      h._map = { "content-type": ["application/json"] };
+      resp.headers = h;
+      // Rust-side `extract_response_headers` reads this array directly
+      // and skips the `_map` walk (~5-10 V8 property ops per header).
+      resp._zsHeadersArr = JSON_HEADERS_ARR;
+      return resp;
+    }
+    // Slow path — preserve full spec behaviour when init is present.
     var headers = new Headers(init.headers);
     if (!headers.has("content-type")) {
       headers.set("content-type", "application/json");
