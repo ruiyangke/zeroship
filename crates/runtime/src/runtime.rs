@@ -479,7 +479,13 @@ pub(crate) struct RuntimeInner {
     /// fetch_fast_fn first (if set) → fetch_handler_fn fallback.
     pub(crate) fetch_fast_fn: Option<v8::Global<v8::Function>>,
     /// Cached JS helper that constructs a Request from Rust-supplied params.
+    /// Fallback for when the native C++ builder can't resolve prototypes.
     http_create_request_fn: Option<v8::Global<v8::Function>>,
+    /// Cached `Request.prototype` — handed to the native C++ builder so it
+    /// can attach the prototype chain without a JS helper call.
+    pub(crate) request_proto: Option<v8::Global<v8::Object>>,
+    /// Cached `Headers.prototype` — same rationale.
+    pub(crate) headers_proto: Option<v8::Global<v8::Object>>,
     pub(crate) initialized: bool,
     pub(crate) state: SharedState,
     /// Plugins registered on the runtime at boot.
@@ -625,6 +631,8 @@ impl RuntimeInner {
             rpc_handler_fn: None,
             fetch_fast_fn: None,
             http_create_request_fn: None,
+            request_proto: None,
+            headers_proto: None,
             initialized: false,
             state,
             plugins,
@@ -975,6 +983,23 @@ impl RuntimeInner {
                 }
             }
 
+            // Cache globalThis.Request.prototype / Headers.prototype so the
+            // native C++ Request builder can attach the prototype chain
+            // directly. If either lookup fails (user module replaced the
+            // global constructor), we fall back to the JS helper.
+            let global_this = scope.get_current_context().global(scope);
+            let proto_key = v8::String::new(scope, "prototype").unwrap();
+            let resolve_proto = |scope: &mut v8::PinScope, ctor: &str| -> Option<v8::Global<v8::Object>> {
+                let name_key = v8::String::new(scope, ctor).unwrap();
+                let ctor_val = global_this.get(scope, name_key.into())?;
+                let ctor_obj = ctor_val.to_object(scope)?;
+                let proto_val = ctor_obj.get(scope, proto_key.into())?;
+                let proto_obj = proto_val.to_object(scope)?;
+                Some(v8::Global::new(scope, proto_obj))
+            };
+            self.request_proto = resolve_proto(scope, "Request");
+            self.headers_proto = resolve_proto(scope, "Headers");
+
             // Build the shared `ctx` object once. Frozen so the user's
             // fetch handler can't mutate our callbacks; reused every
             // request. Eliminates the per-request Object::new + 2
@@ -1233,13 +1258,13 @@ impl RuntimeInner {
                 } else {
                     // ---- Slow path: full default.fetch(request, env, ctx) ----
                     //
-                    // Rust-native Request construction via `obj.set_prototype`
-                    // + per-field `obj.set` was prototyped (Tier 1) and
-                    // measured ~3-4% SLOWER than the JS helper: every
-                    // Rust→V8 FFI crossing (~50-80ns via rusty_v8) exceeds
-                    // the savings from skipping JS bytecode interpretation,
-                    // since the JS helper's inline field sets get JIT-inlined
-                    // with a stable hidden class after warmup. See http.rs.
+                    // The native C++ Request builder (native_ext::build_request)
+                    // was measured 3-4% SLOWER than the JS helper across three
+                    // iterations (see docs/perf/cpp-request-builder.md). V8's
+                    // JIT-optimized JSON.parse for the headers wire + inline
+                    // field sets beat our per-header C++ loop. Infrastructure
+                    // kept for the Response-inspection experiment which has
+                    // no JS-helper equivalent.
                     let create_fn = v8::Local::new(scope, self.http_create_request_fn.as_ref().unwrap());
                     let method_val = v8::String::new(scope, method).unwrap().into();
                     let url_val = v8::String::new(scope, url).unwrap().into();
