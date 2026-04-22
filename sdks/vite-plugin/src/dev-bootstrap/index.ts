@@ -156,6 +156,32 @@ export async function onRequest(req: any): Promise<any> {
 }
 
 /**
+ * Kernel-level RPC dispatch override. The Rust bootstrap calls this BEFORE
+ * constructing a Request, so we avoid the Request/Response allocation tax
+ * on the dev RPC path too.
+ *
+ * `args` is a pre-parsed JS array (the kernel has already handled body-
+ * text parsing). We just need to populate the registry via
+ * `getUserModule()` and invoke the stored function.
+ */
+export async function dispatchRpc(methodName: string, args: any[]): Promise<any> {
+  try {
+    await getUserModule();
+  } catch (importErr: any) {
+    const e: any = new Error(`Module import failed: ${importErr.message ?? String(importErr)}`);
+    e.status = 500;
+    throw e;
+  }
+  const fn = registry.get(methodName);
+  if (typeof fn !== "function") {
+    const e: any = new Error(`Method not found: ${methodName}`);
+    e.status = 404;
+    throw e;
+  }
+  return await fn.apply(null, Array.isArray(args) ? args : []);
+}
+
+/**
  * Dispatch a URL-path RPC call. Loads the user module (which populates
  * the registry as a side effect), looks up the method, parses args, invokes.
  *

@@ -269,9 +269,26 @@ function parseRpcArgs(bodyText) {
 // Skips full Request construction, URL parsing, and stream-body reads —
 // the kernel already has the method name and body string in hand, and
 // passes them directly.
+//
+// User modules can override dispatch entirely by exporting
+// `dispatchRpc(methodName, args)` — the vite-plugin dev-bootstrap uses
+// this to route through its `__register`-populated registry, so
+// path-based method names like "src/index/addTodo" resolve via a
+// dynamic lookup instead of a static module-namespace property read.
 async function dispatchRpc(methodName, bodyText) {
     try {
         const args = parseRpcArgs(bodyText);
+        if (typeof user.dispatchRpc === "function") {
+            const result = await user.dispatchRpc(methodName, args);
+            if (result instanceof Response) return result;
+            if (result != null && typeof result === "object"
+                && typeof result[Symbol.asyncIterator] === "function"
+                && typeof result.next === "function"
+                && typeof result.return === "function") {
+                return sseFromAsyncGen(result);
+            }
+            return Response.json(result === undefined ? null : result);
+        }
         return await invokeMethod(methodName, args);
     } catch (err) {
         return errorResponse(err);

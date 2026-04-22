@@ -7,6 +7,7 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "^6.0.1",
+    "@zeroship/db": "file:../../sdks/db",
     "@zeroship/vite-plugin": "file:../../sdks/vite-plugin",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"

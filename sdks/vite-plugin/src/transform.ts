@@ -349,7 +349,6 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
             map: s.generateMap({ source: id, includeContent: true, hires: true }),
           };
         }
-
         // --- CLIENT ENVIRONMENT ---------------------------------------------
         //
         // Emit stubs that call the URL-path-based RPC wire. Unary exports
