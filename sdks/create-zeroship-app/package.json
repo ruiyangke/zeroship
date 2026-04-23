@@ -1,0 +1,14 @@
+{
+  "name": "create-zeroship-app",
+  "version": "0.1.0",
+  "description": "Scaffold a new zeroship app — npm create zeroship-app my-app",
+  "type": "module",
+  "bin": {
+    "create-zeroship-app": "bin/create.js"
+  },
+  "files": [
+    "bin",
+    "template"
+  ],
+  "license": "MIT"
+}
