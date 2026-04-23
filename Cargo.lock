@@ -6580,6 +6580,7 @@ dependencies = [
  "zeroship-bundle",
  "zeroship-compiler",
  "zeroship-plugin-db",
+ "zeroship-plugin-kv",
  "zeroship-plugin-storage",
  "zeroship-runtime",
 ]
@@ -6675,6 +6676,16 @@ dependencies = [
  "compio-postgres",
  "serde_json",
  "uuid",
+ "v8",
+ "zeroship-runtime",
+]
+
+[[package]]
+name = "zeroship-plugin-kv"
+version = "0.1.0"
+dependencies = [
+ "compio",
+ "serde_json",
  "v8",
  "zeroship-runtime",
 ]

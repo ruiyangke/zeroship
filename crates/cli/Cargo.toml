@@ -13,6 +13,7 @@ zeroship-bundle = { workspace = true }
 zeroship-runtime = { workspace = true }
 zeroship-plugin-db = { workspace = true }
 zeroship-plugin-storage = { workspace = true }
+zeroship-plugin-kv = { workspace = true }
 zeroship-compiler = { workspace = true }
 serde_json = { workspace = true }
 

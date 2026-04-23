@@ -1,0 +1,14 @@
+[package]
+name = "zeroship-plugin-kv"
+version = "0.1.0"
+edition = "2021"
+description = "Key-value plugin — zeroship.kv.* native primitives (in-memory for dev, Redis later)"
+
+[dependencies]
+zeroship-runtime = { workspace = true }
+compio = { workspace = true }
+serde_json = { workspace = true }
+v8 = { workspace = true }
+
+[lints]
+workspace = true

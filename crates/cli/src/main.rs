@@ -348,6 +348,11 @@ fn cmd_serve(args: &[String]) {
     plugins.push(Arc::new(zeroship_plugin_storage::StoragePlugin::new(storage_root.clone())));
     eprintln!("[zeroship] storage plugin registered (root={})", storage_root.display());
 
+    // KV plugin: in-memory only for dev. Redis backend lands when we need
+    // multi-worker shared state (production); dev apps rarely need it.
+    plugins.push(Arc::new(zeroship_plugin_kv::KvPlugin::new()));
+    eprintln!("[zeroship] kv plugin registered (in-memory)");
+
     // Forward process env to the V8 runtime so `process.env.FOO` works in JS.
     // Important for dev: the vite-plugin sets ZEROSHIP_ENTRY / ZEROSHIP_VITE_WS
     // in the spawned child env, and user apps expect access to OPENAI_API_KEY
