@@ -10,6 +10,13 @@ compio = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }
 v8 = { workspace = true }
+async-trait = "0.1"
+
+[features]
+default = []
+# S3-compatible backend (covers S3, R2, MinIO, Spaces, B2, etc.) via a
+# hand-rolled client on cyper + aws-sigv4. Adds no tokio.
+s3 = []
 
 [lints]
 workspace = true

@@ -4,11 +4,13 @@
 //! promise, push an async op into the runtime pump's spawned-ops queue,
 //! return the promise. The pump resolves/rejects via OpResult.
 
+use std::sync::Arc;
+
 use base64::Engine;
 use serde_json::json;
 use zeroship_runtime::state::{OpResult, SharedState};
 
-use crate::STORAGE_ROOT;
+use crate::{Backend, STORAGE_BACKEND};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -72,9 +74,9 @@ fn setup_promise<'s>(
     (op_id, request_id, promise)
 }
 
-fn current_root() -> Result<std::path::PathBuf, String> {
-    STORAGE_ROOT.with(|c| c.borrow().clone())
-        .ok_or_else(|| "storage: not configured — StoragePlugin::new() not registered".to_string())
+fn current_backend() -> Result<Arc<dyn Backend>, String> {
+    STORAGE_BACKEND.with(|c| c.borrow().as_ref().map(Arc::clone))
+        .ok_or_else(|| "storage: not configured — StoragePlugin not registered".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +113,7 @@ pub fn put(
         }
     };
 
-    let root = match current_root() {
+    let backend = match current_backend() {
         Ok(r) => r,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
@@ -123,7 +125,7 @@ pub fn put(
     };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match crate::backend::put(&root, &app_id, &bucket, &key, &bytes, content_type.as_deref()).await {
+        match backend.put(&app_id, &bucket, &key, &bytes, content_type.as_deref()).await {
             Ok(size) => OpResult::Completed {
                 op_id,
                 value: json!({ "bucket": bucket, "key": key, "size": size }).to_string(),
@@ -153,7 +155,7 @@ pub fn get(
     let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let root = match current_root() {
+    let backend = match current_backend() {
         Ok(r) => r,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
@@ -165,7 +167,7 @@ pub fn get(
     };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match crate::backend::get(&root, &app_id, &bucket, &key).await {
+        match backend.get(&app_id, &bucket, &key).await {
             Ok(None) => OpResult::Completed {
                 op_id,
                 value: "null".into(),
@@ -204,7 +206,7 @@ pub fn delete(
     let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let root = match current_root() {
+    let backend = match current_backend() {
         Ok(r) => r,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
@@ -216,7 +218,7 @@ pub fn delete(
     };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match crate::backend::delete(&root, &app_id, &bucket, &key).await {
+        match backend.delete(&app_id, &bucket, &key).await {
             Ok(deleted) => OpResult::Completed {
                 op_id,
                 value: json!({ "deleted": deleted }).to_string(),
@@ -246,7 +248,7 @@ pub fn list(
     let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let root = match current_root() {
+    let backend = match current_backend() {
         Ok(r) => r,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
@@ -258,7 +260,7 @@ pub fn list(
     };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match crate::backend::list(&root, &app_id, &bucket, &prefix).await {
+        match backend.list(&app_id, &bucket, &prefix).await {
             Ok(entries) => {
                 let arr: Vec<serde_json::Value> = entries.into_iter().map(|e| {
                     let modified = e.modified_at
