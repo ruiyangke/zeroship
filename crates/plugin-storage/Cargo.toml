@@ -1,0 +1,15 @@
+[package]
+name = "zeroship-plugin-storage"
+version = "0.1.0"
+edition = "2021"
+description = "Storage plugin — zeroship.storage.* native primitives (local FS + S3 later)"
+
+[dependencies]
+zeroship-runtime = { workspace = true }
+compio = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+v8 = { workspace = true }
+
+[lints]
+workspace = true

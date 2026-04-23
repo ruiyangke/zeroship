@@ -1,0 +1,33 @@
+{
+  "name": "@zeroship/storage",
+  "version": "0.1.0",
+  "description": "Object-storage SDK for zeroship — files, uploads, binary data",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zeroship-dev/zeroship",
+    "directory": "sdks/storage"
+  },
+  "files": ["dist", "src"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --import tsx --test tests/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.0.0",
+    "zeroship": "file:../zeroship-stub"
+  }
+}

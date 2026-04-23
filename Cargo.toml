@@ -75,6 +75,7 @@ zeroship-bundle = { path = "crates/bundle" }
 zeroship-core = { path = "crates/core" }
 compio-postgres = { path = "crates/compio-postgres" }
 zeroship-plugin-db = { path = "crates/plugin-db" }
+zeroship-plugin-storage = { path = "crates/plugin-storage" }
 zeroship-runtime = { path = "crates/runtime" }
 zeroship-runtime-macros = { path = "crates/runtime-macros" }
 zeroship-compiler = { path = "crates/compiler" }

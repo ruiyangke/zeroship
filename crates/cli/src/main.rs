@@ -338,6 +338,16 @@ fn cmd_serve(args: &[String]) {
         }
     }
 
+    // Storage plugin: always on in dev. Data lives under
+    // `$ZEROSHIP_STORAGE_ROOT` or (default) `<cwd>/.zeroship/storage`. The
+    // vite-plugin's scaffolded .gitignore already excludes `.zeroship/` so
+    // uploads aren't checked into git.
+    let storage_root: PathBuf = std::env::var_os("ZEROSHIP_STORAGE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".zeroship/storage"));
+    plugins.push(Arc::new(zeroship_plugin_storage::StoragePlugin::new(storage_root.clone())));
+    eprintln!("[zeroship] storage plugin registered (root={})", storage_root.display());
+
     // Forward process env to the V8 runtime so `process.env.FOO` works in JS.
     // Important for dev: the vite-plugin sets ZEROSHIP_ENTRY / ZEROSHIP_VITE_WS
     // in the spawned child env, and user apps expect access to OPENAI_API_KEY
