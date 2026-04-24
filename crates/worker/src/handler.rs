@@ -9,8 +9,7 @@ use uuid::Uuid;
 use zeroship_core::auth::{extract_bearer, validate_control_key};
 use zeroship_runtime::runtime::DispatchError;
 use zeroship_runtime::{
-    CancelFlag, EnvSnapshot, FetchOutcome, RequestCtx, ResultReceiver, Runtime, SettledFetch,
-    StreamReader,
+    CancelFlag, FetchOutcome, RequestCtx, ResultReceiver, Runtime, SettledFetch, StreamReader,
 };
 
 use crate::{cache, metrics, WorkerConfig};
@@ -145,20 +144,22 @@ pub async fn dispatch(
         }
     };
 
-    // Build env + ctx. env comes from the per-thread cache, populated
-    // alongside the bundle on load / version bump. If the env fetch
-    // failed (e.g., control unreachable), we fall back to empty rather
-    // than refusing the request — the handler can still do useful work
-    // without creator-supplied bindings.
+    // env comes from the per-thread cache, populated alongside the
+    // bundle on load / version bump. Parsed once at cache time, so
+    // the hot path just clones the EnvSnapshot (cheap — interior
+    // JSON string in an `Arc`).
+    //
+    // Fail-closed: if env is missing we return 503 rather than serve
+    // the app with empty bindings. A creator app that keys
+    // authorization off `env.ADMIN_TOKEN` presence would otherwise
+    // silently fail-open.
     let env = match cache::get_env(&app_id) {
-        Some(json) => match serde_json::from_str::<serde_json::Value>(&json) {
-            Ok(v) => EnvSnapshot::new(v),
-            Err(e) => {
-                eprintln!("[worker] bad env json for {app_id}: {e}; using empty");
-                EnvSnapshot::empty()
-            }
-        },
-        None => EnvSnapshot::empty(),
+        Some(snapshot) => snapshot,
+        None => {
+            metrics::inc(&metrics::ON_DEMAND_LOAD_FAILURES);
+            return HttpResponse::ServiceUnavailable()
+                .json(&serde_json::json!({"error": "env unavailable"}));
+        }
     };
     let cancel = CancelFlag::new();
     let ctx = RequestCtx::new(cancel.clone());
@@ -312,11 +313,23 @@ async fn load_on_demand(config: &WorkerConfig, app_id: &Uuid) -> Result<(), Stri
 
     if cache::load_app(*app_id, &bytes, app_version.runtime) {
         cache::set_hash(*app_id, hash);
-        // Fetch env alongside the bundle. Env failures don't block the
-        // cold-start — the handler falls back to EnvSnapshot::empty.
+        // Env MUST be available before we serve requests — otherwise
+        // the app runs without creator bindings and may fail-open on
+        // authorization checks. On fetch failure, evict the bundle so
+        // the next request retries the whole load path.
         match crate::sync::fetch_app_env(&config.control_url, &config.control_key, app_id).await {
-            Ok(env_json) => cache::set_env(*app_id, env_json),
-            Err(e) => eprintln!("[worker] cold-start env fetch for {app_id}: {e}"),
+            Ok(env_json) => {
+                if let Err(e) = cache::set_env_from_json(*app_id, &env_json) {
+                    cache::evict_app(app_id);
+                    cache::remove_hash(app_id);
+                    return Err(format!("env parse failed: {e}"));
+                }
+            }
+            Err(e) => {
+                cache::evict_app(app_id);
+                cache::remove_hash(app_id);
+                return Err(format!("env fetch failed: {e}"));
+            }
         }
         eprintln!("[worker] on-demand loaded {app_id}");
         Ok(())

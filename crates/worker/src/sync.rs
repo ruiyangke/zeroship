@@ -111,7 +111,11 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap) -> Result<
                                 // secrets) alongside the bundle — keeps the
                                 // in-worker env fresh on every version bump.
                                 match fetch_app_env(&config.control_url, &config.control_key, local_id).await {
-                                    Ok(env_json) => cache::set_env(*local_id, env_json),
+                                    Ok(env_json) => {
+                                        if let Err(e) = cache::set_env_from_json(*local_id, &env_json) {
+                                            eprintln!("[worker-sync] env parse {local_id}: {e}");
+                                        }
+                                    }
                                     Err(e) => eprintln!("[worker-sync] fetch env {local_id}: {e}"),
                                 }
                                 eprintln!(

@@ -7,6 +7,7 @@ use uuid::Uuid;
 use zeroship_core::types::AppRuntimeLimits;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
+use zeroship_runtime::EnvSnapshot;
 
 struct IsolateEntry {
     runtime: Runtime,
@@ -162,10 +163,9 @@ pub fn all_app_ids() -> Vec<Uuid> {
 thread_local! {
     static HASHES: RefCell<HashMap<Uuid, String>> = RefCell::new(HashMap::new());
 
-    /// Per-app env JSON. Populated alongside the bundle on load, handed to
-    /// `EnvSnapshot::new(...)` on every request. `None` for an uncached
-    /// app means the worker will fall back to an empty env.
-    static ENVS: RefCell<HashMap<Uuid, String>> = RefCell::new(HashMap::new());
+    /// Per-app env snapshot. Parsed once at cache-insert time so the
+    /// hot path avoids JSON parsing on every request.
+    static ENVS: RefCell<HashMap<Uuid, EnvSnapshot>> = RefCell::new(HashMap::new());
 }
 
 pub fn get_hash(app_id: &Uuid) -> Option<String> {
@@ -185,14 +185,22 @@ pub fn remove_hash(app_id: &Uuid) {
     });
 }
 
-pub fn get_env(app_id: &Uuid) -> Option<String> {
+pub fn get_env(app_id: &Uuid) -> Option<EnvSnapshot> {
     ENVS.with(|e| e.borrow().get(app_id).cloned())
 }
 
-pub fn set_env(app_id: Uuid, env_json: String) {
+/// Parse the JSON once at cache time. Returns `Err` if the JSON is
+/// malformed — callers decide whether to fail the request or fall
+/// back. Previously we silently kept the raw string and re-parsed on
+/// every request, which hid parse bugs in the bundle-load path.
+pub fn set_env_from_json(app_id: Uuid, env_json: &str) -> Result<(), String> {
+    let parsed: serde_json::Value = serde_json::from_str(env_json)
+        .map_err(|e| format!("env json: {e}"))?;
+    let snapshot = EnvSnapshot::new(parsed);
     ENVS.with(|e| {
-        e.borrow_mut().insert(app_id, env_json);
+        e.borrow_mut().insert(app_id, snapshot);
     });
+    Ok(())
 }
 
 #[allow(dead_code)]
