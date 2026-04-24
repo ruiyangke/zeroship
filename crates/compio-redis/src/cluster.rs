@@ -273,6 +273,76 @@ impl ClusterClient {
         let mut b = self.inner.borrow_mut();
         b.topology.slots[slot as usize] = Some(addr.to_string());
     }
+
+    /// Send an encoded command, routed to the owner of the slot of
+    /// `routing_key`. Transparently handles `-MOVED` (update slot map +
+    /// retry once on the new owner) and `-ASK` (one-shot redirect with
+    /// ASKING prefix). Retries capped at 2 redirects.
+    pub(crate) async fn send_to_slot(
+        &self,
+        routing_key: &[u8],
+        cmd: OwnedFrame,
+    ) -> Result<OwnedFrame> {
+        const MAX_REDIRECTS: u8 = 2;
+        let slot = redis_keyslot(routing_key);
+        let mut redirects = 0u8;
+
+        // First attempt uses our cached topology.
+        let mut addr_override: Option<String> = None;
+        let mut ask_once = false;
+
+        loop {
+            let addr = match addr_override.take() {
+                Some(a) => a,
+                None => self
+                    .inner
+                    .borrow()
+                    .topology
+                    .node_for_slot(slot)
+                    .cloned()
+                    .ok_or(Error::NoRoute { slot })?,
+            };
+
+            let pool = self.pool_for(&addr).await?;
+            let mut conn = pool.acquire().await.map_err(|e| Error::Pool(format!("{e}")))?;
+
+            // After an -ASK redirect, the target needs an ASKING marker
+            // before the replay. This is stateful per connection, one-shot.
+            if ask_once {
+                conn.asking().await?;
+                ask_once = false;
+            }
+
+            match conn.send_recv(cmd.clone()).await {
+                Ok(frame) => return Ok(frame),
+                Err(Error::Server(msg)) => {
+                    if let Some(redirect) = parse_redirect(&msg) {
+                        if redirects >= MAX_REDIRECTS {
+                            return Err(Error::ClusterBootstrap(format!(
+                                "exceeded {MAX_REDIRECTS} redirects, last: {msg}"
+                            )));
+                        }
+                        redirects += 1;
+                        match redirect {
+                            Error::Moved { slot: s, addr: new_addr } => {
+                                self.set_slot(s, &new_addr);
+                                addr_override = Some(new_addr);
+                                continue;
+                            }
+                            Error::Ask { addr: new_addr, .. } => {
+                                addr_override = Some(new_addr);
+                                ask_once = true;
+                                continue;
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    return Err(Error::Server(msg));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
 }
 
 fn credentials_from_url(url: &str) -> Result<(Option<String>, Option<i64>)> {
