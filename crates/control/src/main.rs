@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use ntex::web;
 use zeroship_core::vfs::{BundleStore, LocalFs};
-use zeroship_control::{api, env_handlers, internal, AppState, EnvStore, Registry};
+use zeroship_control::{api, env_handlers, internal, AppState, EnvStore, Registry, StripeStore};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -33,6 +33,7 @@ async fn main() -> std::io::Result<()> {
     let bundles_dir = arg_or_env(&args, "--bundles", "BUNDLES_DIR", "./bundles");
     let control_key = arg_or_env(&args, "--control-key", "CONTROL_KEY", "");
     let master_key = arg_or_env(&args, "--master-key", "MASTER_KEY", "");
+    let stripe_webhook_secret = arg_or_env(&args, "--stripe-webhook-secret", "STRIPE_WEBHOOK_SECRET", "");
 
     let registry = Registry::new(&db_url)
         .await
@@ -43,13 +44,16 @@ async fn main() -> std::io::Result<()> {
     ) as Arc<dyn BundleStore + Send + Sync>;
 
     let env_store = EnvStore::new(registry.clone(), &master_key);
+    let stripe_store = StripeStore::new(registry.clone());
 
     let state = Arc::new(AppState {
         registry,
         env_store,
+        stripe_store,
         vfs,
         control_key,
         master_key,
+        stripe_webhook_secret,
     });
 
     let bind_addr = format!("0.0.0.0:{port}");

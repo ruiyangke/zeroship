@@ -167,6 +167,47 @@ impl Registry {
         .await
         .map_err(|e| format!("migration: {e}"))?;
 
+        // Creator→Stripe-account link. One account per creator. The
+        // creator_id here can be any UUID the platform wants to use as
+        // its stable creator identifier (today that's auth_users.id).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS creator_accounts (
+                creator_id UUID PRIMARY KEY,
+                stripe_account_id TEXT NOT NULL,
+                onboarded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+
+        // Ledger of revenue events. Keyed by Stripe's evt_xxx to keep
+        // webhook delivery idempotent.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS payouts (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                creator_id UUID NOT NULL REFERENCES creator_accounts(creator_id) ON DELETE CASCADE,
+                event_id TEXT NOT NULL UNIQUE,
+                event_type TEXT NOT NULL,
+                gross_amount BIGINT NOT NULL,
+                platform_fee BIGINT NOT NULL,
+                net_amount BIGINT NOT NULL,
+                currency TEXT NOT NULL,
+                occurred_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_payouts_creator_time ON payouts(creator_id, occurred_at DESC)",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+
         // Dropping `conn` causes the driver task to send Terminate and exit.
         drop(conn);
 
