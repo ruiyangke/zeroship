@@ -1,4 +1,4 @@
-export { verifyWebhook, signWebhookForTest } from "./webhook";
+export { verifyWebhook } from "./webhook";
 export type { VerifyOpts, VerifyResult } from "./webhook";
 
 export { buildCheckoutSession } from "./checkout";

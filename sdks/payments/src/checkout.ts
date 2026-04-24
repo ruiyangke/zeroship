@@ -9,7 +9,7 @@ export interface CreateCheckoutOpts {
   priceId: string;
   /** The creator's connected account — `acct_...`. */
   creatorAccountId: string;
-  /** Platform fee in %. Default 15. Must be 0–100. */
+  /** Platform fee in %. Default 15. Must be in [0, 100]. */
   applicationFeePercent?: number;
   /** Where Stripe sends the user after a successful checkout. */
   successUrl: string;
@@ -17,8 +17,24 @@ export interface CreateCheckoutOpts {
   cancelUrl: string;
   /** Optional prefill. */
   customerEmail?: string;
-  /** Arbitrary key/value pairs. Persisted on the Subscription. */
+  /**
+   * Arbitrary key/value pairs. Written to BOTH the Checkout Session
+   * metadata AND `subscription_data[metadata]` — Stripe doesn't
+   * propagate session metadata to the subscription/invoice on its own,
+   * so webhook handlers looking at `invoice.paid` events would
+   * otherwise see no metadata at all.
+   *
+   * Must include `creator_id` so the platform's webhook ingest can
+   * attribute revenue. The platform API will reject a session with no
+   * `creator_id` key.
+   */
   metadata?: Record<string, string>;
+  /**
+   * Pin a Stripe API version (optional). Defaults to whatever Stripe
+   * promotes for the platform account, which may silently change.
+   * Recommended to pin to a known-good version in production.
+   */
+  stripeVersion?: string;
 }
 
 export interface CheckoutSessionRequest {
@@ -26,6 +42,18 @@ export interface CheckoutSessionRequest {
   url: string;
   headers: Record<string, string>;
   body: string;
+}
+
+/** Metadata keys Stripe allows: /^[a-zA-Z0-9_]{1,40}$/ per the docs. */
+const METADATA_KEY_RE = /^[a-zA-Z0-9_]{1,40}$/;
+
+function isHttpUrl(s: string): boolean {
+  try {
+    const u = new URL(s);
+    return u.protocol === "https:" || u.protocol === "http:";
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -46,9 +74,19 @@ export function buildCheckoutSession(
   if (!opts.successUrl) throw new Error("successUrl is required");
   if (!opts.cancelUrl) throw new Error("cancelUrl is required");
 
+  if (!isHttpUrl(opts.successUrl)) throw new Error("successUrl must be a valid http(s) URL");
+  if (!isHttpUrl(opts.cancelUrl)) throw new Error("cancelUrl must be a valid http(s) URL");
+
   const fee = opts.applicationFeePercent ?? 15;
   if (!Number.isFinite(fee) || fee < 0 || fee > 100) {
-    throw new Error(`applicationFeePercent must be 0..=100, got ${fee}`);
+    throw new Error(`applicationFeePercent must be in [0, 100], got ${fee}`);
+  }
+
+  const metadata = opts.metadata ?? {};
+  for (const k of Object.keys(metadata)) {
+    if (!METADATA_KEY_RE.test(k)) {
+      throw new Error(`metadata key '${k}' must match /^[a-zA-Z0-9_]{1,40}$/`);
+    }
   }
 
   const params = new URLSearchParams();
@@ -59,18 +97,29 @@ export function buildCheckoutSession(
   params.set("cancel_url", opts.cancelUrl);
   params.set("subscription_data[application_fee_percent]", String(fee));
   if (opts.customerEmail) params.set("customer_email", opts.customerEmail);
-  for (const [k, v] of Object.entries(opts.metadata ?? {})) {
+
+  // Write metadata on BOTH the session AND the subscription it will
+  // create. Stripe stores these in separate fields; the session's
+  // metadata never propagates to invoices on its own, so the webhook
+  // ingest (which fires on invoice.paid) needs `subscription_data[metadata]`
+  // set explicitly. Mirroring them on both surfaces means the same keys
+  // are visible to payment-intent hooks AND invoice hooks.
+  for (const [k, v] of Object.entries(metadata)) {
     params.set(`metadata[${k}]`, v);
+    params.set(`subscription_data[metadata][${k}]`, v);
   }
+
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${apiKey}`,
+    "stripe-account": opts.creatorAccountId,
+    "content-type": "application/x-www-form-urlencoded",
+  };
+  if (opts.stripeVersion) headers["stripe-version"] = opts.stripeVersion;
 
   return {
     method: "POST",
     url: "https://api.stripe.com/v1/checkout/sessions",
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      "stripe-account": opts.creatorAccountId,
-      "content-type": "application/x-www-form-urlencoded",
-    },
+    headers,
     body: params.toString(),
   };
 }
