@@ -55,6 +55,60 @@ mod redirect_tests {
     fn parse_unrelated_error_returns_none() {
         assert!(parse_redirect("WRONGTYPE Operation against a key holding the wrong kind of value").is_none());
     }
+
+    #[test]
+    fn parse_empty_string_returns_none() {
+        // splitn(3) yields at least one item even for "", but slot parse fails.
+        assert!(parse_redirect("").is_none());
+    }
+
+    #[test]
+    fn parse_malformed_slot_returns_none() {
+        // "abc" isn't a u16.
+        assert!(parse_redirect("MOVED abc 127.0.0.1:7000").is_none());
+    }
+
+    #[test]
+    fn parse_missing_addr_returns_none() {
+        assert!(parse_redirect("MOVED 1234").is_none());
+    }
+
+    #[test]
+    fn parse_slot_out_of_u16_returns_none() {
+        // 99999 overflows u16.
+        assert!(parse_redirect("MOVED 99999 127.0.0.1:7000").is_none());
+    }
+
+    #[test]
+    fn parse_lowercase_is_not_a_redirect() {
+        // Redis/Dragonfly emit MOVED/ASK uppercase only; we're strict so a
+        // lowercase payload is treated as an unrelated server message.
+        assert!(parse_redirect("moved 1 127.0.0.1:7000").is_none());
+        assert!(parse_redirect("ask 1 127.0.0.1:7000").is_none());
+    }
+
+    #[test]
+    fn parse_tryredirect_kinds_we_dont_know() {
+        // Any non-MOVED/ASK first word is not a redirect, regardless of shape.
+        assert!(parse_redirect("WAIT 0 1000").is_none());
+        assert!(parse_redirect("BUSYKEY Target key name already exists").is_none());
+    }
+
+    #[test]
+    fn addr_with_ipv6_braced() {
+        // Real-world MOVED replies can carry a bracketed IPv6 "[::1]:6379".
+        // Our parser takes everything after the second space verbatim, which
+        // is correct — the connector later parses it. The point: we don't
+        // mangle the address.
+        let e = parse_redirect("MOVED 100 [::1]:6379").unwrap();
+        match e {
+            Error::Moved { slot, addr } => {
+                assert_eq!(slot, 100);
+                assert_eq!(addr, "[::1]:6379");
+            }
+            _ => panic!("expected Moved"),
+        }
+    }
 }
 
 /// A cluster node address, canonicalized to `host:port` text form so it
@@ -185,6 +239,169 @@ mod slot_parse_tests {
         assert_eq!(redis_keyslot(b"foo"), 12182);
         // Hash-tag isolates keys under a shared slot.
         assert_eq!(redis_keyslot(b"{app1}:a"), redis_keyslot(b"{app1}:b"));
+    }
+
+    #[test]
+    fn empty_topology_parses_to_all_none() {
+        let topo = parse_cluster_slots(OwnedFrame::Array(vec![])).unwrap();
+        assert!(topo.slots.iter().all(Option::is_none));
+        assert!(topo.node_for_slot(0).is_none());
+        assert!(topo.node_for_slot(16383).is_none());
+    }
+
+    #[test]
+    fn single_range_covers_whole_slot_space() {
+        let reply = array(vec![
+            array(vec![
+                int(0), int(16383),
+                array(vec![bulk("10.0.0.1"), int(6379), bulk("node-x-id")]),
+            ]),
+        ]);
+        let topo = parse_cluster_slots(reply).unwrap();
+        assert_eq!(topo.node_for_slot(0), Some(&"10.0.0.1:6379".to_string()));
+        assert_eq!(topo.node_for_slot(8192), Some(&"10.0.0.1:6379".to_string()));
+        assert_eq!(topo.node_for_slot(16383), Some(&"10.0.0.1:6379".to_string()));
+    }
+
+    #[test]
+    fn replicas_ignored_in_range() {
+        // Reply carries primary + 2 replicas. Only the primary should land
+        // in our slot map — replica reads aren't supported day-one.
+        let reply = array(vec![
+            array(vec![
+                int(0), int(100),
+                array(vec![bulk("primary-host"), int(1000), bulk("p-id")]),
+                array(vec![bulk("replica-1"),    int(2000), bulk("r1-id")]),
+                array(vec![bulk("replica-2"),    int(3000), bulk("r2-id")]),
+            ]),
+        ]);
+        let topo = parse_cluster_slots(reply).unwrap();
+        assert_eq!(topo.node_for_slot(50), Some(&"primary-host:1000".to_string()));
+    }
+
+    #[test]
+    fn range_with_too_few_elements_errors() {
+        // Missing the primary-node triplet.
+        let reply = array(vec![array(vec![int(0), int(5)])]);
+        assert!(matches!(parse_cluster_slots(reply), Err(Error::ClusterBootstrap(_))));
+    }
+
+    #[test]
+    fn primary_with_too_few_elements_errors() {
+        // Primary missing port.
+        let reply = array(vec![
+            array(vec![
+                int(0), int(5),
+                array(vec![bulk("127.0.0.1")]),
+            ]),
+        ]);
+        assert!(matches!(parse_cluster_slots(reply), Err(Error::ClusterBootstrap(_))));
+    }
+
+    #[test]
+    fn slot_out_of_bounds_errors() {
+        let reply = array(vec![
+            array(vec![
+                int(0), int(100_000), // well past 16383
+                array(vec![bulk("127.0.0.1"), int(7000), bulk("x")]),
+            ]),
+        ]);
+        assert!(matches!(parse_cluster_slots(reply), Err(Error::ClusterBootstrap(_))));
+    }
+
+    #[test]
+    fn negative_slot_errors() {
+        let reply = array(vec![
+            array(vec![
+                int(-1), int(100),
+                array(vec![bulk("127.0.0.1"), int(7000), bulk("x")]),
+            ]),
+        ]);
+        assert!(matches!(parse_cluster_slots(reply), Err(Error::ClusterBootstrap(_))));
+    }
+
+    #[test]
+    fn non_integer_port_errors() {
+        let reply = array(vec![
+            array(vec![
+                int(0), int(100),
+                array(vec![bulk("127.0.0.1"), bulk("seven-thousand"), bulk("x")]),
+            ]),
+        ]);
+        assert!(matches!(parse_cluster_slots(reply), Err(Error::ClusterBootstrap(_))));
+    }
+
+    #[test]
+    fn integer_host_errors() {
+        let reply = array(vec![
+            array(vec![
+                int(0), int(100),
+                array(vec![int(42), int(7000), bulk("x")]),
+            ]),
+        ]);
+        assert!(matches!(parse_cluster_slots(reply), Err(Error::ClusterBootstrap(_))));
+    }
+
+    #[test]
+    fn primary_not_an_array_errors() {
+        let reply = array(vec![
+            array(vec![
+                int(0), int(100),
+                bulk("this should be an array"),
+            ]),
+        ]);
+        assert!(matches!(parse_cluster_slots(reply), Err(Error::ClusterBootstrap(_))));
+    }
+
+    #[test]
+    fn range_not_an_array_errors() {
+        // Top-level Array containing a non-array element.
+        let reply = array(vec![bulk("not an array")]);
+        assert!(matches!(parse_cluster_slots(reply), Err(Error::ClusterBootstrap(_))));
+    }
+
+    #[test]
+    fn multi_range_later_overlaps_win() {
+        // If a malformed reply overlaps ranges, the later range's primary
+        // wins — documented behavior. Matches Redis behavior on duplicate
+        // slot assignments during resharding.
+        let reply = array(vec![
+            array(vec![
+                int(0), int(100),
+                array(vec![bulk("first"), int(1111), bulk("f")]),
+            ]),
+            array(vec![
+                int(50), int(150),
+                array(vec![bulk("second"), int(2222), bulk("s")]),
+            ]),
+        ]);
+        let topo = parse_cluster_slots(reply).unwrap();
+        assert_eq!(topo.node_for_slot(0),   Some(&"first:1111".to_string()));
+        assert_eq!(topo.node_for_slot(49),  Some(&"first:1111".to_string()));
+        // 50..=100 now point at `second`.
+        assert_eq!(topo.node_for_slot(50),  Some(&"second:2222".to_string()));
+        assert_eq!(topo.node_for_slot(100), Some(&"second:2222".to_string()));
+        assert_eq!(topo.node_for_slot(150), Some(&"second:2222".to_string()));
+        // 151+ is untouched.
+        assert!(topo.node_for_slot(151).is_none());
+    }
+
+    #[test]
+    fn simple_string_host_accepted() {
+        // Some Redis flavors emit host as a simple string rather than bulk;
+        // our parser accepts both.
+        let reply = array(vec![
+            array(vec![
+                int(0), int(100),
+                array(vec![
+                    OwnedFrame::SimpleString(b"simple-host".to_vec()),
+                    int(6379),
+                    bulk("node-id"),
+                ]),
+            ]),
+        ]);
+        let topo = parse_cluster_slots(reply).unwrap();
+        assert_eq!(topo.node_for_slot(10), Some(&"simple-host:6379".to_string()));
     }
 }
 
@@ -548,6 +765,52 @@ mod cross_slot_tests {
         let keys = vec!["foo", "bar"];
         assert!(matches!(same_slot_or_err(&keys), Err(Error::CrossSlot)));
     }
+
+    #[test]
+    fn single_key_is_trivially_same_slot() {
+        let keys = vec!["only"];
+        same_slot_or_err(&keys).expect("single-key always ok");
+    }
+
+    #[test]
+    fn empty_keys_slice_errors() {
+        // No routing key → CrossSlot (matches what the mget/mset wrappers
+        // would report if someone called them with a non-empty sentinel
+        // that eventually resolves to zero).
+        let keys: Vec<&str> = vec![];
+        assert!(matches!(same_slot_or_err(&keys), Err(Error::CrossSlot)));
+    }
+
+    #[test]
+    fn duplicate_keys_are_same_slot() {
+        let keys = vec!["k", "k", "k"];
+        same_slot_or_err(&keys).expect("identical keys trivially same slot");
+    }
+
+    #[test]
+    fn empty_hash_tag_falls_back_to_full_key_hash() {
+        // Per Redis spec, `{}key` has an empty tag and therefore hashes
+        // the full key — so `{}:foo` and `{}:bar` land on different
+        // slots.
+        assert_ne!(redis_keyslot(b"{}:foo"), redis_keyslot(b"{}:bar"));
+        let keys = vec!["{}:foo", "{}:bar"];
+        assert!(matches!(same_slot_or_err(&keys), Err(Error::CrossSlot)));
+    }
+
+    #[test]
+    fn unclosed_brace_has_no_tag_effect() {
+        // No matching close brace → full-key hash.
+        assert_ne!(redis_keyslot(b"{app:foo"), redis_keyslot(b"{app:bar"));
+    }
+
+    #[test]
+    fn trailing_hash_tag_still_groups() {
+        // The hash-tag algorithm scans for the first `{…}` pair — so
+        // trailing-tag keys also group correctly.
+        assert_eq!(redis_keyslot(b"prefix{app}"), redis_keyslot(b"other{app}"));
+        let keys = vec!["prefix{app}", "other{app}"];
+        same_slot_or_err(&keys).expect("trailing tags group");
+    }
 }
 
 fn credentials_from_url(url: &str) -> Result<(Option<String>, Option<i64>)> {
@@ -571,4 +834,107 @@ fn build_node_url(addr: &str, password: Option<&str>, db: Option<i64>) -> String
         s.push_str(&d.to_string());
     }
     s
+}
+
+#[cfg(test)]
+mod url_helper_tests {
+    use super::*;
+
+    #[test]
+    fn credentials_from_url_plain() {
+        let (pw, db) = credentials_from_url("redis://127.0.0.1:6379").unwrap();
+        assert!(pw.is_none());
+        assert!(db.is_none());
+    }
+
+    #[test]
+    fn credentials_from_url_with_password() {
+        let (pw, db) = credentials_from_url("redis://:secret@127.0.0.1:6379").unwrap();
+        assert_eq!(pw.as_deref(), Some("secret"));
+        assert!(db.is_none());
+    }
+
+    #[test]
+    fn credentials_from_url_with_db() {
+        let (pw, db) = credentials_from_url("redis://127.0.0.1:6379/3").unwrap();
+        assert!(pw.is_none());
+        assert_eq!(db, Some(3));
+    }
+
+    #[test]
+    fn credentials_from_url_with_password_and_db() {
+        let (pw, db) = credentials_from_url("redis://:pw@127.0.0.1:6379/7").unwrap();
+        assert_eq!(pw.as_deref(), Some("pw"));
+        assert_eq!(db, Some(7));
+    }
+
+    #[test]
+    fn credentials_from_url_non_numeric_db_silently_dropped() {
+        // A path like "/foo" isn't a valid DB index — we silently treat
+        // it as "no db" rather than erroring. Matches Redis CLI laxness.
+        let (pw, db) = credentials_from_url("redis://127.0.0.1/foo").unwrap();
+        assert!(pw.is_none());
+        assert!(db.is_none());
+    }
+
+    #[test]
+    fn credentials_from_url_rejects_garbage() {
+        // `url::Url::parse` is permissive but rejects strings without any
+        // scheme. Empty string is a solid "no" — captures the error path.
+        let err = match credentials_from_url("") {
+            Ok(_) => panic!("expected parse error on empty URL"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn build_node_url_plain() {
+        assert_eq!(build_node_url("host:6379", None, None), "redis://host:6379");
+    }
+
+    #[test]
+    fn build_node_url_with_password_only() {
+        assert_eq!(
+            build_node_url("host:6379", Some("s3cret"), None),
+            "redis://:s3cret@host:6379"
+        );
+    }
+
+    #[test]
+    fn build_node_url_with_db_only() {
+        assert_eq!(
+            build_node_url("host:6379", None, Some(4)),
+            "redis://host:6379/4"
+        );
+    }
+
+    #[test]
+    fn build_node_url_full() {
+        assert_eq!(
+            build_node_url("host:6379", Some("pw"), Some(2)),
+            "redis://:pw@host:6379/2"
+        );
+    }
+}
+
+#[cfg(test)]
+mod connect_unit_tests {
+    use super::*;
+
+    #[compio::test]
+    async fn empty_seed_list_errors_without_network() {
+        let empty: [&str; 0] = [];
+        let result = ClusterClient::connect(&empty, 4).await;
+        // `Result<ClusterClient, _>::unwrap_err` needs `T: Debug` on the
+        // Ok arm; we don't derive it, so match explicitly.
+        let err = match result {
+            Ok(_) => panic!("expected connect to error on empty seeds"),
+            Err(e) => e,
+        };
+        match err {
+            Error::ClusterBootstrap(msg) => assert!(msg.contains("seed")),
+            other => panic!("expected ClusterBootstrap, got {other:?}"),
+        }
+    }
 }
