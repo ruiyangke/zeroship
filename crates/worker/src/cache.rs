@@ -161,6 +161,11 @@ pub fn all_app_ids() -> Vec<Uuid> {
 // Deploy hash tracking — separate thread-local map.
 thread_local! {
     static HASHES: RefCell<HashMap<Uuid, String>> = RefCell::new(HashMap::new());
+
+    /// Per-app env JSON. Populated alongside the bundle on load, handed to
+    /// `EnvSnapshot::new(...)` on every request. `None` for an uncached
+    /// app means the worker will fall back to an empty env.
+    static ENVS: RefCell<HashMap<Uuid, String>> = RefCell::new(HashMap::new());
 }
 
 pub fn get_hash(app_id: &Uuid) -> Option<String> {
@@ -180,12 +185,32 @@ pub fn remove_hash(app_id: &Uuid) {
     });
 }
 
+pub fn get_env(app_id: &Uuid) -> Option<String> {
+    ENVS.with(|e| e.borrow().get(app_id).cloned())
+}
+
+pub fn set_env(app_id: Uuid, env_json: String) {
+    ENVS.with(|e| {
+        e.borrow_mut().insert(app_id, env_json);
+    });
+}
+
+#[allow(dead_code)]
+pub fn remove_env(app_id: &Uuid) {
+    ENVS.with(|e| {
+        e.borrow_mut().remove(app_id);
+    });
+}
+
 fn evict_lru(cache: &mut AppCache) {
     if let Some((&oldest_id, _)) = cache.isolates.iter().min_by_key(|(_, e)| e.last_used) {
         eprintln!("[worker] evicting LRU isolate {oldest_id}");
         cache.isolates.remove(&oldest_id);
         HASHES.with(|h| {
             h.borrow_mut().remove(&oldest_id);
+        });
+        ENVS.with(|e| {
+            e.borrow_mut().remove(&oldest_id);
         });
     }
 }

@@ -107,6 +107,13 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap) -> Result<
                                 if let Some(remote_hash) = remote_hash {
                                     cache::set_hash(*local_id, remote_hash.clone());
                                 }
+                                // Fetch the app's env snapshot (vars + decrypted
+                                // secrets) alongside the bundle — keeps the
+                                // in-worker env fresh on every version bump.
+                                match fetch_app_env(&config.control_url, &config.control_key, local_id).await {
+                                    Ok(env_json) => cache::set_env(*local_id, env_json),
+                                    Err(e) => eprintln!("[worker-sync] fetch env {local_id}: {e}"),
+                                }
                                 eprintln!(
                                     "[worker-sync] updated {local_id} (plan: {}, hash: {}...)",
                                     info.plan_id,
@@ -136,6 +143,18 @@ pub async fn fetch_app_version(url_base: &str, auth_key: &str, app_id: &Uuid) ->
     let url = format!("{url_base}/internal/apps/{app_id}");
     let body = http_get(&url, auth_key).await?;
     serde_json::from_str(&body).map_err(|e| e.to_string())
+}
+
+/// Fetch the merged env (vars + decrypted secrets) for an app. The
+/// result is a JSON object string — stored verbatim and JSON.parsed
+/// once on the JS side per `EnvSnapshot::as_json` + `v8::json::parse`.
+///
+/// Control returns 404 / 500 for non-existent apps or decrypt failures;
+/// in both cases we propagate the error string so the caller can log it
+/// and decide whether to load-with-empty-env or fail the request.
+pub async fn fetch_app_env(url_base: &str, auth_key: &str, app_id: &Uuid) -> Result<String, String> {
+    let url = format!("{url_base}/internal/apps/{app_id}/env");
+    http_get(&url, auth_key).await
 }
 
 /// Simple HTTP GET returning response body as string.
