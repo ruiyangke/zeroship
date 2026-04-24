@@ -6,6 +6,8 @@
 //! type that layers on top of Pools keyed by node address.
 
 use crate::error::{Error, Result};
+use redis_protocol::redis_keyslot;
+use redis_protocol::resp2::types::OwnedFrame;
 
 /// Parse a `-MOVED <slot> <host:port>` or `-ASK <slot> <host:port>`
 /// reply into our error variants. Returns `None` if the server error
@@ -52,5 +54,136 @@ mod redirect_tests {
     #[test]
     fn parse_unrelated_error_returns_none() {
         assert!(parse_redirect("WRONGTYPE Operation against a key holding the wrong kind of value").is_none());
+    }
+}
+
+/// A cluster node address, canonicalized to `host:port` text form so it
+/// can be used as a `HashMap` key for the pool cache.
+pub type NodeAddr = String;
+
+/// Slot-to-node mapping. Exactly 16384 slots per the Redis cluster spec.
+pub(crate) const NUM_SLOTS: usize = 16384;
+
+#[derive(Default)]
+pub(crate) struct ClusterTopology {
+    pub slots: Vec<Option<NodeAddr>>, // len = NUM_SLOTS
+}
+
+impl ClusterTopology {
+    pub fn empty() -> Self {
+        Self { slots: vec![None; NUM_SLOTS] }
+    }
+
+    pub fn node_for_slot(&self, slot: u16) -> Option<&NodeAddr> {
+        self.slots.get(slot as usize).and_then(|o| o.as_ref())
+    }
+}
+
+/// Parse the RESP2 array returned by `CLUSTER SLOTS` into a topology.
+/// Returns `Error::ClusterBootstrap` on any shape mismatch.
+pub(crate) fn parse_cluster_slots(frame: OwnedFrame) -> Result<ClusterTopology> {
+    let ranges = match frame {
+        OwnedFrame::Array(a) => a,
+        OwnedFrame::Error(m) => return Err(Error::ClusterBootstrap(m)),
+        other => return Err(Error::ClusterBootstrap(format!(
+            "CLUSTER SLOTS: expected array, got {other:?}"
+        ))),
+    };
+
+    let mut topo = ClusterTopology::empty();
+    for range in ranges {
+        let items = match range {
+            OwnedFrame::Array(a) => a,
+            other => return Err(Error::ClusterBootstrap(format!(
+                "CLUSTER SLOTS range: expected array, got {other:?}"
+            ))),
+        };
+        if items.len() < 3 {
+            return Err(Error::ClusterBootstrap("range has < 3 elements".into()));
+        }
+        let mut iter = items.into_iter();
+        let start = expect_u16(iter.next().unwrap(), "slot start")?;
+        let end   = expect_u16(iter.next().unwrap(), "slot end")?;
+        let primary = iter.next().unwrap();
+        let primary_items = match primary {
+            OwnedFrame::Array(a) => a,
+            other => return Err(Error::ClusterBootstrap(format!(
+                "primary node: expected array, got {other:?}"
+            ))),
+        };
+        if primary_items.len() < 2 {
+            return Err(Error::ClusterBootstrap("primary has < 2 elements".into()));
+        }
+        let mut pi = primary_items.into_iter();
+        let host = expect_bulk_string(pi.next().unwrap(), "host")?;
+        let port = expect_u16(pi.next().unwrap(), "port")?;
+        let addr = format!("{host}:{port}");
+
+        for s in start..=end {
+            if (s as usize) >= NUM_SLOTS {
+                return Err(Error::ClusterBootstrap(format!("slot {s} out of range")));
+            }
+            topo.slots[s as usize] = Some(addr.clone());
+        }
+    }
+    Ok(topo)
+}
+
+fn expect_u16(f: OwnedFrame, label: &str) -> Result<u16> {
+    match f {
+        OwnedFrame::Integer(n) if n >= 0 && n <= u16::MAX as i64 => Ok(n as u16),
+        other => Err(Error::ClusterBootstrap(format!("{label}: not a u16 integer: {other:?}"))),
+    }
+}
+
+fn expect_bulk_string(f: OwnedFrame, label: &str) -> Result<String> {
+    match f {
+        OwnedFrame::BulkString(b) => Ok(String::from_utf8_lossy(&b).into_owned()),
+        OwnedFrame::SimpleString(b) => Ok(String::from_utf8_lossy(&b).into_owned()),
+        other => Err(Error::ClusterBootstrap(format!("{label}: not a string: {other:?}"))),
+    }
+}
+
+#[cfg(test)]
+mod slot_parse_tests {
+    use super::*;
+    use redis_protocol::resp2::types::OwnedFrame;
+
+    fn bulk(s: &str) -> OwnedFrame { OwnedFrame::BulkString(s.as_bytes().to_vec()) }
+    fn int(n: i64) -> OwnedFrame { OwnedFrame::Integer(n) }
+    fn array(v: Vec<OwnedFrame>) -> OwnedFrame { OwnedFrame::Array(v) }
+
+    #[test]
+    fn parses_two_range_topology() {
+        // Slots 0..5460 → node-a:7000;  5461..16383 → node-b:7001
+        let reply = array(vec![
+            array(vec![
+                int(0), int(5460),
+                array(vec![bulk("127.0.0.1"), int(7000), bulk("node-a-id")]),
+            ]),
+            array(vec![
+                int(5461), int(16383),
+                array(vec![bulk("127.0.0.1"), int(7001), bulk("node-b-id")]),
+            ]),
+        ]);
+        let topo = parse_cluster_slots(reply).expect("parse");
+        assert_eq!(topo.node_for_slot(0),      Some(&"127.0.0.1:7000".to_string()));
+        assert_eq!(topo.node_for_slot(5460),   Some(&"127.0.0.1:7000".to_string()));
+        assert_eq!(topo.node_for_slot(5461),   Some(&"127.0.0.1:7001".to_string()));
+        assert_eq!(topo.node_for_slot(16383),  Some(&"127.0.0.1:7001".to_string()));
+    }
+
+    #[test]
+    fn errors_on_non_array() {
+        let reply = OwnedFrame::Error("no cluster mode".into());
+        assert!(matches!(parse_cluster_slots(reply), Err(Error::ClusterBootstrap(_))));
+    }
+
+    #[test]
+    fn slot_hash_matches_redis_keyslot() {
+        // Well-known from redis docs: "foo" → slot 12182
+        assert_eq!(redis_keyslot(b"foo"), 12182);
+        // Hash-tag isolates keys under a shared slot.
+        assert_eq!(redis_keyslot(b"{app1}:a"), redis_keyslot(b"{app1}:b"));
     }
 }
