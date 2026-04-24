@@ -14,6 +14,9 @@ use crate::AppState;
 // ---------------------------------------------------------------------------
 
 fn check_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
+    if state.insecure_dev {
+        return None;
+    }
     let header = req
         .headers()
         .get("authorization")
@@ -21,11 +24,22 @@ fn check_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpRespo
         .unwrap_or("");
     let token = zeroship_core::auth::extract_bearer(header);
     match token {
-        Some(key) if zeroship_core::auth::validate_control_key(key, &state.control_key) => None,
-        _ => Some(
-            web::HttpResponse::Unauthorized()
-                .json(&serde_json::json!({"error":"unauthorized"})),
-        ),
+        // Empty control_key still requires a bearer token OR insecure_dev —
+        // otherwise an unauthenticated GET to /internal/* leaks decrypted
+        // secrets to anyone on the network.
+        Some(key)
+            if !state.control_key.is_empty()
+                && zeroship_core::auth::validate_control_key(key, &state.control_key) =>
+        {
+            None
+        }
+        _ => {
+            eprintln!("[control-internal] auth rejected on {} {}", req.method(), req.path());
+            Some(
+                web::HttpResponse::Unauthorized()
+                    .json(&serde_json::json!({"error":"unauthorized"})),
+            )
+        }
     }
 }
 

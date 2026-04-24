@@ -216,10 +216,11 @@ impl Registry {
         })
     }
 
-    /// Open a fresh connection. Pub so integration tests and out-of-tree
-    /// callers can run raw queries — the `Client` returned is the full
-    /// `compio_postgres::Client`, which is already a low-level surface.
-    pub async fn conn(&self) -> Result<Client, RegistryError> {
+    /// Open a fresh connection. Crate-internal: stores + internal
+    /// handlers are the only callers. Integration tests that need
+    /// raw DB access go through narrow `__…_for_test` helpers on
+    /// the store types (e.g. `EnvStore::__raw_ciphertext_for_test`).
+    pub(crate) async fn conn(&self) -> Result<Client, RegistryError> {
         open_conn(&self.db_url).await.map_err(RegistryError::from)
     }
 

@@ -21,6 +21,9 @@ pub enum StripeError {
     Db(String),
     Duplicate,
     NotFound,
+    /// Callsite-level validation failure (bad shape, invalid amount, …).
+    /// Maps to HTTP 400 — distinct from internal `Db` errors.
+    Validation(String),
 }
 
 impl std::fmt::Display for StripeError {
@@ -29,6 +32,7 @@ impl std::fmt::Display for StripeError {
             Self::Db(m) => write!(f, "{m}"),
             Self::Duplicate => write!(f, "event already recorded"),
             Self::NotFound => write!(f, "creator not linked"),
+            Self::Validation(m) => write!(f, "{m}"),
         }
     }
 }
@@ -79,10 +83,12 @@ impl StripeStore {
         creator_id: Uuid,
         stripe_account_id: &str,
     ) -> Result<(), StripeError> {
-        if !stripe_account_id.starts_with("acct_") {
-            return Err(StripeError::Db(
-                format!("stripe_account_id must start with acct_, got '{stripe_account_id}'"),
-            ));
+        if !is_valid_stripe_account_id(stripe_account_id) {
+            return Err(StripeError::Validation(format!(
+                "stripe_account_id must match /^acct_[A-Za-z0-9]{{12,64}}$/, got '{}'",
+                // Sanitize to guard against log-line injection.
+                sanitize_for_display(stripe_account_id),
+            )));
         }
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         conn.execute(
@@ -148,6 +154,19 @@ impl StripeStore {
         currency: &str,
         occurred_at_unix: i64,
     ) -> Result<PayoutRecord, StripeError> {
+        // Stripe guarantees non-negative amounts on its wire; defense
+        // in depth — a compromised webhook or malformed upstream could
+        // otherwise corrupt the ledger with negative totals.
+        if gross_amount < 0 || platform_fee < 0 {
+            return Err(StripeError::Validation(
+                "gross_amount and platform_fee must be non-negative".into(),
+            ));
+        }
+        if platform_fee > gross_amount {
+            return Err(StripeError::Validation(
+                "platform_fee cannot exceed gross_amount".into(),
+            ));
+        }
         let net = gross_amount - platform_fee;
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         let rows = conn
@@ -231,5 +250,58 @@ impl StripeStore {
                 occurred_at: r.get("occurred_at"),
             })
             .collect())
+    }
+}
+
+/// Stripe account IDs are `acct_` + 12–64 alphanumerics. `starts_with`
+/// alone accepts `acct_; DROP TABLE payouts;--` which is parameterized
+/// (safe from SQL injection) but still smells — tighten to the shape
+/// Stripe actually issues.
+pub(crate) fn is_valid_stripe_account_id(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("acct_") else { return false; };
+    let bytes = rest.as_bytes();
+    (12..=64).contains(&bytes.len())
+        && bytes.iter().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// Replace non-printable / non-ASCII chars with `?` so error messages
+/// (and the logs they land in) can't be polluted with CRLF injection.
+pub(crate) fn sanitize_for_display(s: &str) -> String {
+    s.chars()
+        .take(80)
+        .map(|c| if c.is_ascii_graphic() { c } else { '?' })
+        .collect()
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_real_account_shapes() {
+        assert!(is_valid_stripe_account_id("acct_1NfZo0Cz2XrwDw8A"));
+        assert!(is_valid_stripe_account_id("acct_abcDEF123456"));
+    }
+
+    #[test]
+    fn rejects_bogus_shapes() {
+        assert!(!is_valid_stripe_account_id(""));
+        assert!(!is_valid_stripe_account_id("cus_prefix_wrong"));
+        assert!(!is_valid_stripe_account_id("acct_"));
+        assert!(!is_valid_stripe_account_id("acct_short"));
+        assert!(!is_valid_stripe_account_id("acct_; DROP TABLE payouts;--"));
+        // 65 alphanumerics (one past the 64-char cap)
+        assert!(!is_valid_stripe_account_id(&format!("acct_{}", "a".repeat(65))));
+        assert!(!is_valid_stripe_account_id("acct_has-dash-chars"));
+    }
+
+    #[test]
+    fn sanitize_strips_crlf() {
+        assert_eq!(sanitize_for_display("normal"), "normal");
+        assert_eq!(sanitize_for_display("line1\nline2"), "line1?line2");
+        assert_eq!(sanitize_for_display("crlf\r\n"), "crlf??");
+        // Truncation at 80 chars.
+        let long: String = "a".repeat(200);
+        assert_eq!(sanitize_for_display(&long).len(), 80);
     }
 }

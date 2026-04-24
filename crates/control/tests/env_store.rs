@@ -25,7 +25,7 @@ async fn var_crud_roundtrip() {
         return;
     };
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "dev-master-key");
+    let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
     let app = create_test_app(&registry).await;
 
     // Empty initially.
@@ -55,7 +55,7 @@ async fn var_crud_roundtrip() {
 async fn secret_roundtrip_encrypted() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "dev-master-key");
+    let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
     let app = create_test_app(&registry).await;
 
     store.set_secret(app, "STRIPE_KEY", "sk_live_sensitive").await.unwrap();
@@ -71,16 +71,8 @@ async fn secret_roundtrip_encrypted() {
         Some("sk_live_sensitive")
     );
 
-    // Raw ciphertext in the DB must NOT contain the plaintext.
-    let conn = registry.conn().await.unwrap();
-    let rows = conn
-        .query(
-            "SELECT ciphertext FROM app_secrets WHERE app_id = $1",
-            &[&app],
-        )
-        .await
-        .unwrap();
-    let ct: Vec<u8> = rows.first().unwrap().get("ciphertext");
+    // Raw ciphertext at rest must NOT contain the plaintext.
+    let ct = store.__raw_ciphertext_for_test(app, "STRIPE_KEY").await.unwrap().expect("row");
     assert!(!ct.windows(b"sensitive".len()).any(|w| w == b"sensitive"),
         "ciphertext contained plaintext bytes");
 
@@ -100,7 +92,7 @@ async fn secret_roundtrip_encrypted() {
 async fn merged_env_secret_overrides_var() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "dev-master-key");
+    let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
     let app = create_test_app(&registry).await;
 
     // Same key in both tables — secret wins because it's applied last in merged_env.
@@ -117,7 +109,7 @@ async fn merged_env_secret_overrides_var() {
 async fn invalid_key_rejected_client_side() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "dev-master-key");
+    let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
     let app = create_test_app(&registry).await;
 
     for bad in ["lowercase", "1LEADING_DIGIT", "HAS-DASH", "_LEADING_US", "HAS SPACE", ""] {
@@ -136,7 +128,7 @@ async fn invalid_key_rejected_client_side() {
 async fn per_app_isolation() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "dev-master-key");
+    let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
     let app_a = create_test_app(&registry).await;
     let app_b = create_test_app(&registry).await;
 
@@ -160,8 +152,8 @@ async fn per_app_isolation() {
 async fn wrong_master_key_fails_decrypt() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
-    let writer = EnvStore::new(registry.clone(), "correct-key");
-    let reader = EnvStore::new(registry.clone(), "wrong-key");
+    let writer = EnvStore::new(registry.clone(), "correct-key", false).expect("store");
+    let reader = EnvStore::new(registry.clone(), "wrong-key", false).expect("store");
     let app = create_test_app(&registry).await;
 
     writer.set_secret(app, "TOKEN", "hidden").await.unwrap();
@@ -182,7 +174,7 @@ async fn wrong_master_key_fails_decrypt() {
 async fn delete_cascades_from_app() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "k");
+    let store = EnvStore::new(registry.clone(), "k", false).expect("store");
     let app = create_test_app(&registry).await;
 
     store.set_var(app, "V1", "x").await.unwrap();
@@ -198,7 +190,7 @@ async fn delete_cascades_from_app() {
 async fn long_value_roundtrip() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
-    let store = EnvStore::new(registry.clone(), "k");
+    let store = EnvStore::new(registry.clone(), "k", false).expect("store");
     let app = create_test_app(&registry).await;
 
     // 16 KiB — simulating a JSON Stripe-connect OAuth blob or similar.

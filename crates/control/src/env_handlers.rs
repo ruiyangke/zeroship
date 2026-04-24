@@ -20,9 +20,18 @@ fn bad_uuid() -> web::HttpResponse {
 fn env_err_response(e: EnvError) -> web::HttpResponse {
     use EnvError::*;
     match &e {
-        BadKey(_) => web::HttpResponse::BadRequest().json(&serde_json::json!({"error": e.to_string()})),
-        Db(_) | Crypto(_) => web::HttpResponse::InternalServerError()
+        BadKey(_) => web::HttpResponse::BadRequest()
             .json(&serde_json::json!({"error": e.to_string()})),
+        TooLarge(_) => web::HttpResponse::PayloadTooLarge()
+            .json(&serde_json::json!({"error": e.to_string()})),
+        // Db / Crypto messages may contain internal details (SQLSTATEs,
+        // column names, crypto internals). Log the raw error to stderr
+        // but return a generic body to the client.
+        Db(_) | Crypto(_) | MasterKeyRequired => {
+            eprintln!("[control] env_store error: {e}");
+            web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error":"internal error"}))
+        }
     }
 }
 

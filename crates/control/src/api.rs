@@ -37,8 +37,11 @@ pub struct SetPlanBody {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn check_admin_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
-    if state.master_key.is_empty() {
-        return None; // No master key configured — allow all (dev mode)
+    // Dev-insecure opt-in: skip auth entirely. Production startup
+    // (main.rs) refuses to boot with empty master_key unless this flag
+    // is on — see CONTROL_INSECURE_DEV guard. No implicit bypass.
+    if state.insecure_dev {
+        return None;
     }
     let header = req
         .headers()
@@ -48,10 +51,13 @@ pub(crate) fn check_admin_auth(req: &web::HttpRequest, state: &AppState) -> Opti
     let token = zeroship_core::auth::extract_bearer(header);
     match token {
         Some(key) if zeroship_core::auth::validate_control_key(key, &state.master_key) => None,
-        _ => Some(
-            web::HttpResponse::Unauthorized()
-                .json(&serde_json::json!({"error":"unauthorized — master key required"})),
-        ),
+        _ => {
+            eprintln!("[control] auth rejected on {} {}", req.method(), req.path());
+            Some(
+                web::HttpResponse::Unauthorized()
+                    .json(&serde_json::json!({"error":"unauthorized"})),
+            )
+        }
     }
 }
 

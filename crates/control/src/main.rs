@@ -34,6 +34,35 @@ async fn main() -> std::io::Result<()> {
     let control_key = arg_or_env(&args, "--control-key", "CONTROL_KEY", "");
     let master_key = arg_or_env(&args, "--master-key", "MASTER_KEY", "");
     let stripe_webhook_secret = arg_or_env(&args, "--stripe-webhook-secret", "STRIPE_WEBHOOK_SECRET", "");
+    // Opt-in: explicit "I know this is insecure" flag. Must be set to
+    // run without control_key / master_key / stripe_webhook_secret.
+    // Production refuses to boot without either the real secrets or
+    // this sentinel.
+    let insecure_dev =
+        args.iter().any(|a| a == "--dev-insecure")
+            || std::env::var("ZEROSHIP_DEV_INSECURE").map(|v| v == "1").unwrap_or(false);
+
+    if !insecure_dev {
+        let mut missing = Vec::new();
+        if master_key.is_empty() { missing.push("--master-key / MASTER_KEY"); }
+        if control_key.is_empty() { missing.push("--control-key / CONTROL_KEY"); }
+        // stripe_webhook_secret is optional in principle (control-plane
+        // may run without Stripe), but if it's empty the webhook
+        // handler rejects every request — so the operator is on notice
+        // via the startup log.
+        if !missing.is_empty() {
+            eprintln!(
+                "[control] refusing to start: required secrets missing: {}\n\
+                 Pass --dev-insecure (or ZEROSHIP_DEV_INSECURE=1) to run\n\
+                 without them — NEVER in production.",
+                missing.join(", "),
+            );
+            std::process::exit(1);
+        }
+    }
+    if insecure_dev {
+        eprintln!("[control] WARNING: --dev-insecure set; admin + internal auth disabled.");
+    }
 
     let registry = Registry::new(&db_url)
         .await
@@ -43,7 +72,8 @@ async fn main() -> std::io::Result<()> {
         LocalFs::new(&bundles_dir).expect("failed to initialise bundle store"),
     ) as Arc<dyn BundleStore + Send + Sync>;
 
-    let env_store = EnvStore::new(registry.clone(), &master_key);
+    let env_store = EnvStore::new(registry.clone(), &master_key, insecure_dev)
+        .expect("env store init");
     let stripe_store = StripeStore::new(registry.clone());
 
     let state = Arc::new(AppState {
@@ -54,6 +84,7 @@ async fn main() -> std::io::Result<()> {
         control_key,
         master_key,
         stripe_webhook_secret,
+        insecure_dev,
     });
 
     let bind_addr = format!("0.0.0.0:{port}");

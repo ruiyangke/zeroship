@@ -30,8 +30,13 @@ pub struct AppState {
     pub vfs: Arc<dyn BundleStore + Send + Sync>,
     pub control_key: String,
     pub master_key: String,
-    /// Stripe webhook signing secret — set via --stripe-webhook-secret
-    /// or the STRIPE_WEBHOOK_SECRET env var. Empty disables signature
-    /// checks (dev only).
+    /// Stripe webhook signing secret. Required in prod; `"dev-insecure"`
+    /// sentinel with `insecure_dev=true` skips verification.
     pub stripe_webhook_secret: String,
+    /// Set to `true` by the `--dev-insecure` CLI flag (or
+    /// `ZEROSHIP_DEV_INSECURE=1` env var). ONLY permits empty admin /
+    /// control / webhook secrets when explicitly opted in. Production
+    /// must leave this false; the startup guard in `main.rs` refuses
+    /// to boot with missing secrets otherwise.
+    pub insecure_dev: bool,
 }

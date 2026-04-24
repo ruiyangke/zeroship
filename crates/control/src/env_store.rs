@@ -15,6 +15,10 @@ pub enum EnvError {
     Db(String),
     Crypto(CryptoError),
     BadKey(String),
+    /// Value exceeded the per-secret/var length cap.
+    TooLarge(usize),
+    /// Master key is empty and `insecure_dev` was not set.
+    MasterKeyRequired,
 }
 
 impl std::fmt::Display for EnvError {
@@ -22,10 +26,21 @@ impl std::fmt::Display for EnvError {
         match self {
             Self::Db(m) => write!(f, "{m}"),
             Self::Crypto(e) => write!(f, "crypto: {e}"),
-            Self::BadKey(k) => write!(
-                f,
-                "key must match /^[A-Z][A-Z0-9_]{{0,63}}$/, got '{k}'"
-            ),
+            Self::BadKey(k) => {
+                // Sanitize the key — drop anything non-printable to keep
+                // stray bytes out of logs (defense against log injection).
+                let safe: String = k
+                    .chars()
+                    .take(80)
+                    .map(|c| if c.is_ascii_graphic() { c } else { '?' })
+                    .collect();
+                write!(
+                    f,
+                    "key must match /^[A-Z][A-Z0-9_]{{0,63}}$/, got '{safe}'"
+                )
+            }
+            Self::TooLarge(n) => write!(f, "value too large ({n} bytes; max {MAX_VALUE_BYTES})"),
+            Self::MasterKeyRequired => write!(f, "master key is empty — refusing to start without --dev-insecure"),
         }
     }
 }
@@ -35,6 +50,12 @@ impl std::error::Error for EnvError {}
 impl From<CryptoError> for EnvError {
     fn from(e: CryptoError) -> Self { Self::Crypto(e) }
 }
+
+/// Per-value byte cap. Chosen to comfortably fit the largest legitimate
+/// secret (OAuth refresh tokens, PEM-encoded keys, base64-encoded
+/// service-account blobs) while blocking DoS vectors that would push
+/// megabytes of ciphertext through the env-fetch pipe per app.
+pub const MAX_VALUE_BYTES: usize = 64 * 1024;
 
 /// Valid env key: uppercase ASCII letter then uppercase letters/digits/underscores.
 /// Matches the CF Workers + Unix-env convention.
@@ -50,21 +71,68 @@ fn valid_key(k: &str) -> bool {
         .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
 }
 
-#[allow(missing_debug_implementations)]
 pub struct EnvStore {
     registry: Registry,
     key: [u8; 32],
 }
 
+impl std::fmt::Debug for EnvStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never leak the derived key via Debug — log output is a
+        // real attack surface.
+        f.debug_struct("EnvStore")
+            .field("key", &"<redacted 32B>")
+            .finish()
+    }
+}
+
+impl Drop for EnvStore {
+    fn drop(&mut self) {
+        // Zeroize the derived key on drop so it doesn't linger in the
+        // heap for a post-mortem / core-dump read.
+        zeroize::Zeroize::zeroize(&mut self.key);
+    }
+}
+
 impl EnvStore {
-    pub fn new(registry: Registry, master_key: &str) -> Self {
-        Self {
+    /// Build a store. `master_key` must be non-empty unless `insecure_dev`
+    /// is true (opt-in dev/test mode). An empty master key in production
+    /// would SHA-256 the known prefix and produce a publicly-reproducible
+    /// encryption key — every secret in the DB would be decryptable by
+    /// anyone with read access.
+    pub fn new(registry: Registry, master_key: &str, insecure_dev: bool) -> Result<Self, EnvError> {
+        if master_key.is_empty() && !insecure_dev {
+            return Err(EnvError::MasterKeyRequired);
+        }
+        Ok(Self {
             registry,
             key: crypto::derive_key(master_key),
-        }
+        })
     }
 
-    pub fn registry(&self) -> &Registry { &self.registry }
+    /// Test-only access to the raw ciphertext bytes stored at rest —
+    /// lets integration tests verify "no plaintext leaks via the DB"
+    /// without the crate having to export a DB handle.
+    #[doc(hidden)]
+    pub async fn __raw_ciphertext_for_test(
+        &self,
+        app_id: uuid::Uuid,
+        key_name: &str,
+    ) -> Result<Option<Vec<u8>>, EnvError> {
+        let conn = self
+            .registry
+            .conn()
+            .await
+            .map_err(|e| EnvError::Db(format!("{e}")))?;
+        let rows = conn
+            .query(
+                "SELECT ciphertext FROM app_secrets WHERE app_id = $1 AND key_name = $2",
+                &[&app_id, &key_name],
+            )
+            .await
+            .map_err(|e| EnvError::Db(e.to_string()))?;
+        Ok(rows.first().map(|r| r.get::<_, Vec<u8>>("ciphertext")))
+    }
 
     // ------------------------------------------------------------------
     // Vars (plaintext)
@@ -93,6 +161,9 @@ impl EnvStore {
     pub async fn set_var(&self, app_id: Uuid, key: &str, value: &str) -> Result<(), EnvError> {
         if !valid_key(key) {
             return Err(EnvError::BadKey(key.into()));
+        }
+        if value.len() > MAX_VALUE_BYTES {
+            return Err(EnvError::TooLarge(value.len()));
         }
         let conn = self
             .registry
@@ -149,6 +220,9 @@ impl EnvStore {
     pub async fn set_secret(&self, app_id: Uuid, key: &str, value: &str) -> Result<(), EnvError> {
         if !valid_key(key) {
             return Err(EnvError::BadKey(key.into()));
+        }
+        if value.len() > MAX_VALUE_BYTES {
+            return Err(EnvError::TooLarge(value.len()));
         }
         let ct = crypto::encrypt(&self.key, value.as_bytes())?;
         let conn = self
@@ -213,7 +287,10 @@ impl EnvStore {
             let k: String = r.get("key_name");
             let ct: Vec<u8> = r.get("ciphertext");
             let plain = crypto::decrypt(&self.key, &ct)?;
-            let s = String::from_utf8_lossy(&plain).into_owned();
+            // Strict UTF-8 — `from_utf8_lossy` would silently replace
+            // invalid bytes with U+FFFD and hand the creator a mangled
+            // secret. Treat any non-UTF-8 in plaintext as corruption.
+            let s = String::from_utf8(plain).map_err(|_| EnvError::Crypto(CryptoError::Decrypt))?;
             map.insert(k, serde_json::Value::String(s));
         }
         Ok(map)

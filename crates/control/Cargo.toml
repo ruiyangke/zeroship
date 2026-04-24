@@ -20,6 +20,8 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }
 mimalloc = { workspace = true }
+subtle = "2"
+zeroize = "1"
 
 [lints]
 workspace = true

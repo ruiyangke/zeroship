@@ -13,6 +13,7 @@ hmac = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
 aes-gcm = "0.10"
+zeroize = { version = "1", features = ["derive"] }
 
 [lints]
 workspace = true
