@@ -15,6 +15,7 @@ services:
       --cluster_mode=yes
       --port=7000
       --cluster_announce_ip=127.0.0.1
+      --cluster_node_id=node-0
       --logtostderr
     network_mode: host
 
@@ -24,6 +25,7 @@ services:
       --cluster_mode=yes
       --port=7001
       --cluster_announce_ip=127.0.0.1
+      --cluster_node_id=node-1
       --logtostderr
     network_mode: host
 
@@ -33,5 +35,6 @@ services:
       --cluster_mode=yes
       --port=7002
       --cluster_announce_ip=127.0.0.1
+      --cluster_node_id=node-2
       --logtostderr
     network_mode: host
