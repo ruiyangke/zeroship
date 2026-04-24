@@ -153,6 +153,7 @@ impl StripeStore {
         platform_fee: i64,
         currency: &str,
         occurred_at_unix: i64,
+        payload_hash: Option<&[u8]>,
     ) -> Result<PayoutRecord, StripeError> {
         // Stripe guarantees non-negative amounts on its wire; defense
         // in depth — a compromised webhook or malformed upstream could
@@ -169,17 +170,52 @@ impl StripeStore {
         }
         let net = gross_amount - platform_fee;
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
+        // `to_char(... 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')` returns an
+        // RFC3339 UTC string regardless of the session's TimeZone.
+        // `occurred_at::text` was timezone-dependent.
         let rows = conn
             .query(
-                "INSERT INTO payouts(creator_id, event_id, event_type, gross_amount, platform_fee, net_amount, currency, occurred_at)
-                 VALUES($1, $2, $3, $4, $5, $6, $7, to_timestamp($8::double precision))
+                "INSERT INTO payouts(creator_id, event_id, event_type, gross_amount, platform_fee, net_amount, currency, occurred_at, payload_hash)
+                 VALUES($1, $2, $3, $4, $5, $6, $7, to_timestamp($8::double precision), $9)
                  ON CONFLICT (event_id) DO NOTHING
-                 RETURNING id, occurred_at::text AS occurred_at_text",
-                &[&creator_id, &event_id, &event_type, &gross_amount, &platform_fee, &net, &currency, &(occurred_at_unix as f64)],
+                 RETURNING id,
+                   to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS occurred_at_text",
+                &[&creator_id, &event_id, &event_type, &gross_amount, &platform_fee, &net, &currency, &(occurred_at_unix as f64), &payload_hash.map(|b| b.to_vec())],
             )
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
-        let row = rows.first().ok_or(StripeError::Duplicate)?;
+        let row = match rows.first() {
+            Some(r) => r,
+            None => {
+                // Row already exists. Verify payload matches so upstream
+                // tampering surfaces as a loud error rather than a silent
+                // "duplicate".
+                if let Some(new_hash) = payload_hash {
+                    let stored = conn
+                        .query(
+                            "SELECT payload_hash FROM payouts WHERE event_id = $1",
+                            &[&event_id],
+                        )
+                        .await
+                        .map_err(|e| StripeError::Db(e.to_string()))?;
+                    if let Some(r) = stored.first() {
+                        let stored_hash: Option<Vec<u8>> = r.get("payload_hash");
+                        if let Some(h) = stored_hash {
+                            if h != new_hash {
+                                eprintln!(
+                                    "[stripe] payload_hash mismatch for event_id={} — possible replay/tamper",
+                                    sanitize_for_display(event_id),
+                                );
+                                return Err(StripeError::Validation(
+                                    "duplicate event_id with mismatched payload".into(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                return Err(StripeError::Duplicate);
+            }
+        };
         Ok(PayoutRecord {
             id: row.get("id"),
             creator_id,

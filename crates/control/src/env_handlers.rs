@@ -24,6 +24,8 @@ fn env_err_response(e: EnvError) -> web::HttpResponse {
             .json(&serde_json::json!({"error": e.to_string()})),
         TooLarge(_) => web::HttpResponse::PayloadTooLarge()
             .json(&serde_json::json!({"error": e.to_string()})),
+        AppNotFound => web::HttpResponse::NotFound()
+            .json(&serde_json::json!({"error":"app not found"})),
         // Db / Crypto messages may contain internal details (SQLSTATEs,
         // column names, crypto internals). Log the raw error to stderr
         // but return a generic body to the client.
@@ -35,7 +37,7 @@ fn env_err_response(e: EnvError) -> web::HttpResponse {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct SetKv {
     pub key: String,
     pub value: String,

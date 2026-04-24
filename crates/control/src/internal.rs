@@ -68,8 +68,14 @@ pub async fn get_app_env(
     };
     match state.env_store.merged_env(id).await {
         Ok(map) => web::HttpResponse::Ok().json(&serde_json::Value::Object(map)),
-        Err(e) => web::HttpResponse::InternalServerError()
-            .json(&serde_json::json!({"error": e.to_string()})),
+        Err(crate::env_store::EnvError::AppNotFound) => {
+            web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
+        }
+        Err(e) => {
+            eprintln!("[control-internal] env fetch error for {id}: {e}");
+            web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error":"internal error"}))
+        }
     }
 }
 

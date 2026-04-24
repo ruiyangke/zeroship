@@ -72,7 +72,7 @@ pub async fn onboard(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct CallbackBody {
     pub stripe_account_id: String,
 }
@@ -369,6 +369,12 @@ pub async fn webhook(
         );
     };
 
+    // SHA-256 of the raw body — lets us detect a same-event_id retry
+    // arriving with different content (legitimate Stripe retries send
+    // the exact same body, so this catches tampering only).
+    use sha2::Digest;
+    let payload_hash = sha2::Sha256::digest(raw).to_vec();
+
     match state
         .stripe_store
         .record_payout(
@@ -379,6 +385,7 @@ pub async fn webhook(
             fee,
             &currency,
             event.created,
+            Some(&payload_hash),
         )
         .await
     {

@@ -187,6 +187,51 @@ async fn delete_cascades_from_app() {
 }
 
 #[compio::test]
+async fn merged_env_404s_on_missing_app() {
+    let Some(url) = db_url() else { return; };
+    let registry = Registry::new(&url).await.expect("registry");
+    let store = EnvStore::new(registry.clone(), "k", false).expect("store");
+
+    let ghost = Uuid::new_v4();
+    let err = store.merged_env(ghost).await.unwrap_err();
+    assert!(
+        matches!(err, zeroship_control::env_store::EnvError::AppNotFound),
+        "expected AppNotFound for missing app, got {err:?}",
+    );
+}
+
+#[compio::test]
+async fn empty_master_key_rejected_without_dev_flag() {
+    let Some(url) = db_url() else { return; };
+    let registry = Registry::new(&url).await.expect("registry");
+    let err = EnvStore::new(registry, "", false).unwrap_err();
+    assert!(matches!(err, zeroship_control::env_store::EnvError::MasterKeyRequired));
+}
+
+#[compio::test]
+async fn empty_master_key_allowed_in_dev_mode() {
+    let Some(url) = db_url() else { return; };
+    let registry = Registry::new(&url).await.expect("registry");
+    let _store = EnvStore::new(registry, "", true).expect("dev-mode should accept empty key");
+}
+
+#[compio::test]
+async fn set_value_over_cap_rejected() {
+    let Some(url) = db_url() else { return; };
+    let registry = Registry::new(&url).await.expect("registry");
+    let store = EnvStore::new(registry.clone(), "k", false).expect("store");
+    let app = create_test_app(&registry).await;
+
+    let too_big = "A".repeat(zeroship_control::env_store::MAX_VALUE_BYTES + 1);
+    let err = store.set_var(app, "FOO", &too_big).await.unwrap_err();
+    assert!(matches!(err, zeroship_control::env_store::EnvError::TooLarge(_)));
+    let err = store.set_secret(app, "FOO", &too_big).await.unwrap_err();
+    assert!(matches!(err, zeroship_control::env_store::EnvError::TooLarge(_)));
+
+    registry.delete_app(&app).await.ok();
+}
+
+#[compio::test]
 async fn long_value_roundtrip() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");

@@ -182,7 +182,12 @@ impl Registry {
         .map_err(|e| format!("migration: {e}"))?;
 
         // Ledger of revenue events. Keyed by Stripe's evt_xxx to keep
-        // webhook delivery idempotent.
+        // webhook delivery idempotent. `payload_hash` lets us detect
+        // tampering: if the same event_id arrives with different body
+        // bytes (shouldn't happen from Stripe; possible with a
+        // compromised upstream or an attacker who reached the
+        // webhook endpoint), we record the mismatch rather than
+        // silently accepting the first value.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS payouts (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -194,8 +199,17 @@ impl Registry {
                 net_amount BIGINT NOT NULL,
                 currency TEXT NOT NULL,
                 occurred_at TIMESTAMPTZ NOT NULL,
+                payload_hash BYTEA,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+
+        // Add column for existing deployments that predate the hash.
+        conn.execute(
+            "ALTER TABLE payouts ADD COLUMN IF NOT EXISTS payload_hash BYTEA",
             &[],
         )
         .await

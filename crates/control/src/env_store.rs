@@ -19,6 +19,9 @@ pub enum EnvError {
     TooLarge(usize),
     /// Master key is empty and `insecure_dev` was not set.
     MasterKeyRequired,
+    /// `merged_env` was called for an app that doesn't exist in the
+    /// `apps` table — differentiates "empty env" from "app deleted."
+    AppNotFound,
 }
 
 impl std::fmt::Display for EnvError {
@@ -41,6 +44,7 @@ impl std::fmt::Display for EnvError {
             }
             Self::TooLarge(n) => write!(f, "value too large ({n} bytes; max {MAX_VALUE_BYTES})"),
             Self::MasterKeyRequired => write!(f, "master key is empty — refusing to start without --dev-insecure"),
+            Self::AppNotFound => write!(f, "app not found"),
         }
     }
 }
@@ -267,15 +271,26 @@ impl EnvStore {
         &self,
         app_id: Uuid,
     ) -> Result<serde_json::Map<String, serde_json::Value>, EnvError> {
-        let mut map = serde_json::Map::new();
-        for (k, v) in self.list_vars(app_id).await? {
-            map.insert(k, serde_json::Value::String(v));
-        }
+        // Distinguish "app exists, empty env" from "app deleted." The
+        // latter should 404 on /internal/apps/:id/env so workers don't
+        // silently hydrate a stale or nonexistent app with empty env.
         let conn = self
             .registry
             .conn()
             .await
             .map_err(|e| EnvError::Db(format!("{e}")))?;
+        let exists = conn
+            .query("SELECT 1 FROM apps WHERE id = $1", &[&app_id])
+            .await
+            .map_err(|e| EnvError::Db(e.to_string()))?;
+        if exists.is_empty() {
+            return Err(EnvError::AppNotFound);
+        }
+
+        let mut map = serde_json::Map::new();
+        for (k, v) in self.list_vars(app_id).await? {
+            map.insert(k, serde_json::Value::String(v));
+        }
         let rows = conn
             .query(
                 "SELECT key_name, ciphertext FROM app_secrets WHERE app_id = $1",

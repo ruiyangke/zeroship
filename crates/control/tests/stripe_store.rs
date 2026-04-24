@@ -86,6 +86,7 @@ async fn record_payout_idempotent() {
             150,
             "usd",
             1_777_017_600i64,
+            None,
         )
         .await
         .unwrap();
@@ -103,6 +104,7 @@ async fn record_payout_idempotent() {
             9999,
             "usd",
             1_777_021_200i64,
+            None,
         )
         .await
         .unwrap_err();
@@ -135,6 +137,7 @@ async fn total_earnings_aggregates_correctly() {
                 *fee,
                 "usd",
                 1_777_024_800i64,
+                None,
             )
             .await
             .unwrap();
@@ -173,6 +176,7 @@ async fn recent_payouts_newest_first_with_limit() {
                 15,
                 "usd",
                 *t,
+                None,
             )
             .await
             .unwrap();
@@ -207,8 +211,10 @@ async fn per_creator_isolation() {
     store.link_account(a, "acct_isolationA1234").await.unwrap();
     store.link_account(b, "acct_isolationB1234").await.unwrap();
 
-    store.record_payout(a, "evt_A_1", "invoice.paid", 1000, 150, "usd", 1_777_024_800i64).await.unwrap();
-    store.record_payout(b, "evt_B_1", "invoice.paid", 500, 75, "usd", 1_777_024_800i64).await.unwrap();
+    store.record_payout(a, "evt_A_1", "invoice.paid", 1000, 150, "usd", 1_777_024_800i64, None).await.unwrap();
+
+    store.record_payout(b, "evt_B_1", "invoice.paid", 500, 75, "usd", 1_777_024_800i64, None).await.unwrap();
+
 
     let ta = store.total_earnings(a).await.unwrap();
     let tb = store.total_earnings(b).await.unwrap();
@@ -244,6 +250,52 @@ async fn empty_creator_totals_are_zero() {
 }
 
 #[compio::test]
+async fn payload_hash_mismatch_rejects_duplicate() {
+    let Some(url) = db_url() else { return; };
+    let registry = Registry::new(&url).await.expect("registry");
+    let store = StripeStore::new(registry);
+    let creator = fresh_creator_id();
+
+    store.link_account(creator, "acct_tamperCheck123").await.unwrap();
+
+    let hash_a: Vec<u8> = (0..32u8).collect();
+    let hash_b: Vec<u8> = (100..132u8).collect();
+
+    store
+        .record_payout(
+            creator, "evt_tamper", "invoice.paid", 1000, 150, "usd",
+            1_777_024_800i64, Some(&hash_a),
+        )
+        .await
+        .unwrap();
+
+    // Honest Stripe retry: same hash → Duplicate.
+    let dup_err = store
+        .record_payout(
+            creator, "evt_tamper", "invoice.paid", 1000, 150, "usd",
+            1_777_024_800i64, Some(&hash_a),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(dup_err, StripeError::Duplicate));
+
+    // Tampered replay: same event_id, different hash → Validation error.
+    let tamper_err = store
+        .record_payout(
+            creator, "evt_tamper", "invoice.paid", 9999, 999, "usd",
+            1_777_024_800i64, Some(&hash_b),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(tamper_err, StripeError::Validation(_)),
+        "expected Validation for tamper, got {tamper_err:?}",
+    );
+
+    store.unlink_account(creator).await.ok();
+}
+
+#[compio::test]
 async fn unlink_cascades_payouts() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
@@ -251,7 +303,8 @@ async fn unlink_cascades_payouts() {
     let creator = fresh_creator_id();
 
     store.link_account(creator, "acct_cascade12345").await.unwrap();
-    store.record_payout(creator, "evt_cascade_1", "invoice.paid", 100, 15, "usd", 1_777_024_800i64).await.unwrap();
+    store.record_payout(creator, "evt_cascade_1", "invoice.paid", 100, 15, "usd", 1_777_024_800i64, None).await.unwrap();
+
 
     assert_eq!(store.recent_payouts(creator, 10).await.unwrap().len(), 1);
 
