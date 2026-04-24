@@ -11,11 +11,12 @@ compio-redis = { workspace = true, optional = true }
 serde_json = { workspace = true }
 v8 = { workspace = true }
 async-trait = "0.1"
+url = { workspace = true, optional = true }
 
 [features]
 default = ["redis"]
 # Redis-backed distributed KV — the production default.
-redis = ["dep:compio-redis"]
+redis = ["dep:compio-redis", "dep:url"]
 
 [lints]
 workspace = true
