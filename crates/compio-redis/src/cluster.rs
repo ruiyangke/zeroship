@@ -313,34 +313,34 @@ impl ClusterClient {
                 ask_once = false;
             }
 
-            match conn.send_recv(cmd.clone()).await {
-                Ok(frame) => return Ok(frame),
-                Err(Error::Server(msg)) => {
-                    if let Some(redirect) = parse_redirect(&msg) {
-                        if redirects >= MAX_REDIRECTS {
-                            return Err(Error::ClusterBootstrap(format!(
-                                "exceeded {MAX_REDIRECTS} redirects, last: {msg}"
-                            )));
-                        }
-                        redirects += 1;
-                        match redirect {
-                            Error::Moved { slot: s, addr: new_addr } => {
-                                self.set_slot(s, &new_addr);
-                                addr_override = Some(new_addr);
-                                continue;
-                            }
-                            Error::Ask { addr: new_addr, .. } => {
-                                addr_override = Some(new_addr);
-                                ask_once = true;
-                                continue;
-                            }
-                            _ => unreachable!(),
-                        }
-                    }
-                    return Err(Error::Server(msg));
+            // `send_recv` returns the raw frame; -MOVED / -ASK come back
+            // as `OwnedFrame::Error("MOVED …")`. Intercept those before
+            // surfacing the frame to the caller.
+            let frame = conn.send_recv(cmd.clone()).await?;
+            if let OwnedFrame::Error(msg) = &frame
+                && let Some(redirect) = parse_redirect(msg)
+            {
+                if redirects >= MAX_REDIRECTS {
+                    return Err(Error::ClusterBootstrap(format!(
+                        "exceeded {MAX_REDIRECTS} redirects, last: {msg}"
+                    )));
                 }
-                Err(e) => return Err(e),
+                redirects += 1;
+                match redirect {
+                    Error::Moved { slot: s, addr: new_addr } => {
+                        self.set_slot(s, &new_addr);
+                        addr_override = Some(new_addr);
+                        continue;
+                    }
+                    Error::Ask { addr: new_addr, .. } => {
+                        addr_override = Some(new_addr);
+                        ask_once = true;
+                        continue;
+                    }
+                    _ => unreachable!(),
+                }
             }
+            return Ok(frame);
         }
     }
 
