@@ -175,8 +175,10 @@ impl Registry {
         })
     }
 
-    /// Open a fresh connection.
-    pub(crate) async fn conn(&self) -> Result<Client, RegistryError> {
+    /// Open a fresh connection. Pub so integration tests and out-of-tree
+    /// callers can run raw queries — the `Client` returned is the full
+    /// `compio_postgres::Client`, which is already a low-level surface.
+    pub async fn conn(&self) -> Result<Client, RegistryError> {
         open_conn(&self.db_url).await.map_err(RegistryError::from)
     }
 

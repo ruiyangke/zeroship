@@ -1,32 +1,14 @@
-//! zeroship-control — control plane binary.
-
-mod api;
-mod env_handlers;
-mod env_store;
-mod internal;
-mod metering;
-mod registry;
+//! zeroship-control — control plane binary. Thin wrapper over
+//! `zeroship_control` (the library crate).
 
 use std::sync::Arc;
 
-use zeroship_core::vfs::{BundleStore, LocalFs};
 use ntex::web;
-
-use env_store::EnvStore;
-use registry::Registry;
+use zeroship_core::vfs::{BundleStore, LocalFs};
+use zeroship_control::{api, env_handlers, internal, AppState, EnvStore, Registry};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-/// Shared application state injected into every handler.
-#[allow(missing_debug_implementations)]
-pub struct AppState {
-    pub registry: Registry,
-    pub env_store: EnvStore,
-    pub vfs: Arc<dyn BundleStore + Send + Sync>,
-    pub control_key: String,
-    pub master_key: String,
-}
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
