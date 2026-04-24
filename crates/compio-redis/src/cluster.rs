@@ -343,6 +343,101 @@ impl ClusterClient {
             }
         }
     }
+
+    // -----------------------------------------------------------------
+    // Single-key command wrappers — all route via `send_to_slot`.
+    // -----------------------------------------------------------------
+
+    /// GET a key. Returns None when the key doesn't exist.
+    pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let frame = self.send_to_slot(key.as_bytes(),
+            build_cmd(&[b"GET", key.as_bytes()])).await?;
+        crate::protocol::expect_bulk_or_null(frame)
+    }
+
+    /// SET key value [PX millis]. Always overwrites.
+    pub async fn set(&self, key: &str, value: &[u8], ttl_ms: Option<u64>) -> Result<()> {
+        let frame = if let Some(ms) = ttl_ms {
+            let ms_s = ms.to_string();
+            self.send_to_slot(key.as_bytes(),
+                build_cmd(&[b"SET", key.as_bytes(), value, b"PX", ms_s.as_bytes()])).await?
+        } else {
+            self.send_to_slot(key.as_bytes(),
+                build_cmd(&[b"SET", key.as_bytes(), value])).await?
+        };
+        crate::protocol::expect_ok(frame)
+    }
+
+    /// `SET key value NX [PX ms]` — lock primitive. Returns true on
+    /// create, false if the key already existed.
+    pub async fn set_nx(&self, key: &str, value: &[u8], ttl_ms: Option<u64>) -> Result<bool> {
+        let frame = if let Some(ms) = ttl_ms {
+            let ms_s = ms.to_string();
+            self.send_to_slot(key.as_bytes(),
+                build_cmd(&[b"SET", key.as_bytes(), value, b"NX", b"PX", ms_s.as_bytes()])).await?
+        } else {
+            self.send_to_slot(key.as_bytes(),
+                build_cmd(&[b"SET", key.as_bytes(), value, b"NX"])).await?
+        };
+        match frame {
+            OwnedFrame::SimpleString(s) if s == b"OK" => Ok(true),
+            OwnedFrame::Null => Ok(false),
+            OwnedFrame::Error(msg) => Err(Error::Server(msg)),
+            other => Err(Error::Unexpected(format!("SET NX: {other:?}"))),
+        }
+    }
+
+    /// DEL key. Returns true if the key existed.
+    pub async fn del(&self, key: &str) -> Result<bool> {
+        let frame = self.send_to_slot(key.as_bytes(),
+            build_cmd(&[b"DEL", key.as_bytes()])).await?;
+        Ok(crate::protocol::expect_integer(frame)? > 0)
+    }
+
+    /// EXISTS key. Returns true if the key exists.
+    pub async fn exists(&self, key: &str) -> Result<bool> {
+        let frame = self.send_to_slot(key.as_bytes(),
+            build_cmd(&[b"EXISTS", key.as_bytes()])).await?;
+        Ok(crate::protocol::expect_integer(frame)? > 0)
+    }
+
+    /// PEXPIRE key ms — set/refresh TTL in ms. False when key missing.
+    pub async fn pexpire(&self, key: &str, ttl_ms: u64) -> Result<bool> {
+        let ms = ttl_ms.to_string();
+        let frame = self.send_to_slot(key.as_bytes(),
+            build_cmd(&[b"PEXPIRE", key.as_bytes(), ms.as_bytes()])).await?;
+        Ok(crate::protocol::expect_integer(frame)? > 0)
+    }
+
+    /// PTTL key — remaining TTL in ms. Wire: >=0 / -1 (no TTL) / -2 (missing).
+    pub async fn pttl(&self, key: &str) -> Result<i64> {
+        let frame = self.send_to_slot(key.as_bytes(),
+            build_cmd(&[b"PTTL", key.as_bytes()])).await?;
+        crate::protocol::expect_integer(frame)
+    }
+
+    /// INCRBY — atomic counter increment. Creates missing key at 0 first.
+    pub async fn incr_by(&self, key: &str, delta: i64) -> Result<i64> {
+        let d = delta.to_string();
+        let frame = self.send_to_slot(key.as_bytes(),
+            build_cmd(&[b"INCRBY", key.as_bytes(), d.as_bytes()])).await?;
+        crate::protocol::expect_integer(frame)
+    }
+
+    /// DECRBY — symmetric with INCRBY for tooling visibility in MONITOR.
+    pub async fn decr_by(&self, key: &str, delta: i64) -> Result<i64> {
+        let d = delta.to_string();
+        let frame = self.send_to_slot(key.as_bytes(),
+            build_cmd(&[b"DECRBY", key.as_bytes(), d.as_bytes()])).await?;
+        crate::protocol::expect_integer(frame)
+    }
+
+    /// STRLEN key — byte length of the stored string (0 if missing).
+    pub async fn strlen(&self, key: &str) -> Result<u64> {
+        let frame = self.send_to_slot(key.as_bytes(),
+            build_cmd(&[b"STRLEN", key.as_bytes()])).await?;
+        Ok(crate::protocol::expect_integer(frame)?.max(0) as u64)
+    }
 }
 
 fn credentials_from_url(url: &str) -> Result<(Option<String>, Option<i64>)> {
