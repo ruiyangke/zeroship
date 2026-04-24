@@ -20,6 +20,7 @@
 //! parsing crate (pure parsing, no runtime).
 
 pub mod client;
+pub(crate) mod cluster;
 pub mod error;
 pub mod pool;
 pub mod protocol;

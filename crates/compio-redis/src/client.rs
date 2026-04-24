@@ -108,6 +108,13 @@ impl Client {
         }
     }
 
+    /// Send the ASKING marker — used once, after an -ASK redirect, before
+    /// replaying the redirected command. The target node answers with +OK.
+    pub async fn asking(&mut self) -> Result<()> {
+        let frame = self.send_recv(build_cmd(&[b"ASKING"])).await?;
+        expect_ok(frame)
+    }
+
     pub async fn auth(&mut self, password: &str) -> Result<()> {
         let frame = self.send_recv(build_cmd(&[b"AUTH", password.as_bytes()])).await?;
         expect_ok(frame).map_err(|e| match e {
@@ -286,7 +293,7 @@ impl Client {
     // -----------------------------------------------------------------
 
     /// Write a command frame, read until a full reply decodes, return it.
-    async fn send_recv(&mut self, cmd: OwnedFrame) -> Result<OwnedFrame> {
+    pub(crate) async fn send_recv(&mut self, cmd: OwnedFrame) -> Result<OwnedFrame> {
         timeout(self.cmd_timeout, self.send_recv_inner(cmd))
             .await
             .map_err(|_| Error::Io(std::io::Error::new(
