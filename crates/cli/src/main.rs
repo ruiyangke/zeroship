@@ -12,6 +12,8 @@ use std::sync::Arc;
 use zeroship_bundle::{AppBundle, ModuleType, ModuleEntry};
 use zeroship_runtime::NativePlugin;
 
+mod secrets;
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let command = args.get(1).map(|s| s.as_str()).unwrap_or("help");
@@ -21,6 +23,8 @@ fn main() {
         "inspect" => cmd_inspect(&args),
         "serve" => cmd_serve(&args),
         "deploy" => cmd_deploy(&args),
+        "secret" => secrets::cmd_secret(&args),
+        "var" => secrets::cmd_var(&args),
         _ => print_usage(),
     }
 }
@@ -806,7 +810,7 @@ fn flag_u16(args: &[String], prefix: &str) -> Option<u16> {
         .and_then(|s| s.parse().ok())
 }
 
-fn flag_str(args: &[String], prefix: &str) -> Option<String> {
+pub(crate) fn flag_str(args: &[String], prefix: &str) -> Option<String> {
     args.iter()
         .find(|a| a.starts_with(prefix))
         .and_then(|a| a.strip_prefix(prefix))
