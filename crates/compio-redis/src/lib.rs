@@ -20,11 +20,12 @@
 //! parsing crate (pure parsing, no runtime).
 
 pub mod client;
-pub(crate) mod cluster;
+pub mod cluster;
 pub mod error;
 pub mod pool;
 pub mod protocol;
 
 pub use client::Client;
+pub use cluster::ClusterClient;
 pub use error::{Error, Result};
 pub use pool::{Pool, PoolConfig};

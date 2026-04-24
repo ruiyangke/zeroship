@@ -187,3 +187,113 @@ mod slot_parse_tests {
         assert_eq!(redis_keyslot(b"{app1}:a"), redis_keyslot(b"{app1}:b"));
     }
 }
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
+use crate::client::Client;
+use crate::pool::Pool;
+use crate::protocol::build_cmd;
+
+/// Interior shared state — slot map + per-node pool cache. Wrapped in
+/// `Rc<RefCell<…>>` because compio futures are `!Send`, so everything
+/// lives per-thread.
+struct Inner {
+    topology: ClusterTopology,
+    pools: HashMap<NodeAddr, Pool>,
+    pool_size: usize,
+    /// Saved so we can rebuild pools for newly-discovered nodes.
+    password: Option<String>,
+    db: Option<i64>,
+}
+
+/// Cluster-aware client. One per worker thread; cheap to clone (the
+/// clone shares topology + pool cache via `Rc`).
+#[derive(Clone)]
+pub struct ClusterClient {
+    inner: Rc<RefCell<Inner>>,
+}
+
+impl ClusterClient {
+    /// Connect to a cluster using a list of seed URLs. Probes seeds in
+    /// order; the first one that answers `CLUSTER SLOTS` seeds the
+    /// topology. `pool_size` caps connections per node.
+    pub async fn connect(seeds: &[&str], pool_size: usize) -> Result<Self> {
+        if seeds.is_empty() {
+            return Err(Error::ClusterBootstrap("no seed URLs provided".into()));
+        }
+        let mut last_err: Option<Error> = None;
+        for url in seeds {
+            match Self::bootstrap_from(url, pool_size).await {
+                Ok(c) => return Ok(c),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            Error::ClusterBootstrap("all seeds failed".into())
+        }))
+    }
+
+    async fn bootstrap_from(url: &str, pool_size: usize) -> Result<Self> {
+        // Open one probe connection and issue CLUSTER SLOTS.
+        let mut probe = Client::connect(url).await?;
+        let frame = probe.send_recv(build_cmd(&[b"CLUSTER", b"SLOTS"])).await?;
+        let topology = parse_cluster_slots(frame)?;
+
+        // Capture auth credentials by re-parsing the URL so pools built
+        // for newly-discovered nodes can authenticate.
+        let (password, db) = credentials_from_url(url)?;
+
+        let pools = HashMap::new();
+        let inner = Inner { topology, pools, pool_size, password, db };
+        Ok(Self { inner: Rc::new(RefCell::new(inner)) })
+    }
+
+    /// Return a pool for `addr`, opening one lazily on first use. The
+    /// newly-opened Pool inherits auth/db from the seed URL.
+    async fn pool_for(&self, addr: &str) -> Result<Pool> {
+        if let Some(p) = self.inner.borrow().pools.get(addr).cloned() {
+            return Ok(p);
+        }
+        let (pw, db) = {
+            let b = self.inner.borrow();
+            (b.password.clone(), b.db)
+        };
+        let url = build_node_url(addr, pw.as_deref(), db);
+        let size = self.inner.borrow().pool_size;
+        let pool = Pool::connect(&url, size).await.map_err(|e| Error::Pool(format!("{e}")))?;
+        self.inner.borrow_mut().pools.insert(addr.to_string(), pool.clone());
+        Ok(pool)
+    }
+
+    /// Replace the owner of a single slot. Called when a MOVED reply
+    /// arrives with a more recent mapping than our cache.
+    fn set_slot(&self, slot: u16, addr: &str) {
+        let mut b = self.inner.borrow_mut();
+        b.topology.slots[slot as usize] = Some(addr.to_string());
+    }
+}
+
+fn credentials_from_url(url: &str) -> Result<(Option<String>, Option<i64>)> {
+    let parsed = url::Url::parse(url).map_err(|e|
+        Error::Config(format!("bad seed URL '{url}': {e}")))?;
+    let pw = parsed.password().map(str::to_string);
+    let db = parsed.path().trim_start_matches('/').parse::<i64>().ok();
+    Ok((pw, db))
+}
+
+fn build_node_url(addr: &str, password: Option<&str>, db: Option<i64>) -> String {
+    let mut s = String::from("redis://");
+    if let Some(p) = password {
+        s.push(':');
+        s.push_str(p);
+        s.push('@');
+    }
+    s.push_str(addr);
+    if let Some(d) = db {
+        s.push('/');
+        s.push_str(&d.to_string());
+    }
+    s
+}
