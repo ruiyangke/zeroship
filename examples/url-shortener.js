@@ -1,41 +1,50 @@
-// URL Shortener — generates short codes, stores in KV
-// Tests: kv, crypto.randomUUID, string manipulation
+// URL Shortener — demonstrates `env.KV` bindings.
+//
+// `env` comes from the zeroship module singleton (populated by the
+// platform at startup from zeroship.toml + creator-configured bindings).
+// KV is always present as a platform binding; no setup needed.
 
-export function shorten(url) {
-    if (!url || !url.startsWith("http")) {
-        throw new Error("Invalid URL: must start with http");
+import { env } from "zeroship";
+
+export default {
+  async fetch(request) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const method = request.method;
+
+    // POST /shorten — request body is the target URL (plain text).
+    if (method === "POST" && path === "/shorten") {
+      const target = (await request.text()).trim();
+      if (!/^https?:\/\//.test(target)) {
+        return Response.json({ error: "URL must start with http(s)://" }, { status: 400 });
+      }
+      const code = crypto.randomUUID().slice(0, 8);
+      await env.KV.set(`url:${code}`, target);
+      await env.KV.set(`clicks:${code}`, "0");
+      return Response.json({ code, short: `https://short.app/${code}`, target });
     }
-    const code = crypto.randomUUID().slice(0, 8);
-    kv.set("url:" + code, url);
-    kv.set("clicks:" + code, "0");
-    return { code, shortUrl: "https://short.app/" + code, originalUrl: url };
-}
 
-export function resolve(code) {
-    const url = kv.get("url:" + code);
-    if (!url) return null;
-    // Increment click counter
-    const clicks = parseInt(kv.get("clicks:" + code) || "0") + 1;
-    kv.set("clicks:" + code, String(clicks));
-    return { url, clicks };
-}
+    // GET /stats/:code — return counters without redirecting.
+    if (method === "GET" && path.startsWith("/stats/")) {
+      const code = path.slice("/stats/".length);
+      const target = await env.KV.get(`url:${code}`);
+      if (!target) return new Response("Not Found", { status: 404 });
+      const clicks = Number(await env.KV.get(`clicks:${code}`)) || 0;
+      return Response.json({ code, url: target, clicks });
+    }
 
-export function stats(code) {
-    const url = kv.get("url:" + code);
-    if (!url) return null;
-    const clicks = parseInt(kv.get("clicks:" + code) || "0");
-    return { code, url, clicks };
-}
+    // GET /:code — resolve, count the click, redirect.
+    if (method === "GET" && path.length > 1) {
+      const code = path.slice(1);
+      const target = await env.KV.get(`url:${code}`);
+      if (!target) return new Response("Not Found", { status: 404 });
+      const clicks = Number(await env.KV.get(`clicks:${code}`)) || 0;
+      await env.KV.set(`clicks:${code}`, String(clicks + 1));
+      return Response.redirect(target, 302);
+    }
 
-export function list() {
-    return kv.list()
-        .filter(k => k.startsWith("url:"))
-        .map(k => {
-            const code = k.slice(4);
-            return {
-                code,
-                url: kv.get(k),
-                clicks: parseInt(kv.get("clicks:" + code) || "0"),
-            };
-        });
-}
+    return Response.json({
+      routes: ["POST /shorten", "GET /:code", "GET /stats/:code"],
+    });
+  },
+};
