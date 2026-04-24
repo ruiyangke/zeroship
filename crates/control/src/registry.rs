@@ -68,7 +68,10 @@ fn source_chain(err: &dyn std::error::Error) -> String {
 
 /// Application registry backed by PostgreSQL. Stores the DB URL and creates a
 /// fresh connection per query — suitable for the low-traffic control plane.
-#[derive(Debug)]
+///
+/// `Clone` is cheap (just a `String` copy) so `AppState` can hold a separate
+/// handle alongside the `EnvStore`'s internal one.
+#[derive(Clone, Debug)]
 pub struct Registry {
     db_url: String,
 }
@@ -138,6 +141,32 @@ impl Registry {
         .await
         .map_err(|e| format!("migration: {e}"))?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS app_vars (
+                app_id UUID NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+                key_name TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (app_id, key_name)
+            )",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS app_secrets (
+                app_id UUID NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+                key_name TEXT NOT NULL,
+                ciphertext BYTEA NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (app_id, key_name)
+            )",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+
         // Dropping `conn` causes the driver task to send Terminate and exit.
         drop(conn);
 
@@ -147,7 +176,7 @@ impl Registry {
     }
 
     /// Open a fresh connection.
-    async fn conn(&self) -> Result<Client, RegistryError> {
+    pub(crate) async fn conn(&self) -> Result<Client, RegistryError> {
         open_conn(&self.db_url).await.map_err(RegistryError::from)
     }
 

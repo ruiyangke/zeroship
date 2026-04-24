@@ -37,6 +37,28 @@ pub async fn health() -> web::HttpResponse {
     web::HttpResponse::Ok().json(&serde_json::json!({"status":"ok"}))
 }
 
+/// Worker-authenticated: return the merged env (vars + decrypted secrets)
+/// for a given app as a JSON object. Workers call this on bundle load
+/// and cache the result per-thread.
+pub async fn get_app_env(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    app_id: Path<String>,
+) -> web::HttpResponse {
+    if let Some(resp) = check_auth(&req, &state) {
+        return resp;
+    }
+    let Ok(id) = Uuid::parse_str(&app_id) else {
+        return web::HttpResponse::BadRequest()
+            .json(&serde_json::json!({"error": "bad app_id"}));
+    };
+    match state.env_store.merged_env(id).await {
+        Ok(map) => web::HttpResponse::Ok().json(&serde_json::Value::Object(map)),
+        Err(e) => web::HttpResponse::InternalServerError()
+            .json(&serde_json::json!({"error": e.to_string()})),
+    }
+}
+
 pub async fn get_versions(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,

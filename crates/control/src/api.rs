@@ -36,7 +36,7 @@ pub struct SetPlanBody {
 // Admin auth — require master key on all mutating endpoints
 // ---------------------------------------------------------------------------
 
-fn check_admin_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
+pub(crate) fn check_admin_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
     if state.master_key.is_empty() {
         return None; // No master key configured — allow all (dev mode)
     }

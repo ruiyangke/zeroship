@@ -1,6 +1,8 @@
 //! zeroship-control — control plane binary.
 
 mod api;
+mod env_handlers;
+mod env_store;
 mod internal;
 mod metering;
 mod registry;
@@ -10,6 +12,7 @@ use std::sync::Arc;
 use zeroship_core::vfs::{BundleStore, LocalFs};
 use ntex::web;
 
+use env_store::EnvStore;
 use registry::Registry;
 
 #[global_allocator]
@@ -19,6 +22,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[allow(missing_debug_implementations)]
 pub struct AppState {
     pub registry: Registry,
+    pub env_store: EnvStore,
     pub vfs: Arc<dyn BundleStore + Send + Sync>,
     pub control_key: String,
     pub master_key: String,
@@ -56,8 +60,11 @@ async fn main() -> std::io::Result<()> {
         LocalFs::new(&bundles_dir).expect("failed to initialise bundle store"),
     ) as Arc<dyn BundleStore + Send + Sync>;
 
+    let env_store = EnvStore::new(registry.clone(), &master_key);
+
     let state = Arc::new(AppState {
         registry,
+        env_store,
         vfs,
         control_key,
         master_key,
@@ -96,6 +103,24 @@ async fn main() -> std::io::Result<()> {
                 web::resource("/api/apps/{id}/assets/{path:.*}")
                     .route(web::put().to(api::upload_asset)),
             )
+            .service(
+                web::resource("/api/apps/{id}/vars")
+                    .route(web::get().to(env_handlers::list_vars))
+                    .route(web::post().to(env_handlers::set_var)),
+            )
+            .service(
+                web::resource("/api/apps/{id}/vars/{key}")
+                    .route(web::delete().to(env_handlers::delete_var)),
+            )
+            .service(
+                web::resource("/api/apps/{id}/secrets")
+                    .route(web::get().to(env_handlers::list_secrets))
+                    .route(web::post().to(env_handlers::set_secret)),
+            )
+            .service(
+                web::resource("/api/apps/{id}/secrets/{key}")
+                    .route(web::delete().to(env_handlers::delete_secret)),
+            )
             // --- Internal API ---
             .service(
                 web::resource("/internal/versions")
@@ -108,6 +133,10 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/internal/apps/{app_id}")
                     .route(web::get().to(internal::get_app_version)),
+            )
+            .service(
+                web::resource("/internal/apps/{app_id}/env")
+                    .route(web::get().to(internal::get_app_env)),
             )
             .service(
                 web::resource("/internal/routes")
