@@ -100,11 +100,16 @@ impl Backend for Redis {
     async fn list(&self, app_id: &str, prefix: &str) -> Result<Vec<String>, String> {
         let pool = self.pool().await?;
         let mut conn = pool.acquire().await.map_err(|e| format!("kv: {e}"))?;
-        let pattern = format!("{}:*", scope(app_id, prefix).trim_end_matches(':'));
+        // Build the SCAN pattern around the hash tag so it targets exactly
+        // one shard's keyspace — `{app_id}:<prefix>*`. The braces are
+        // literal in Redis SCAN patterns.
+        let pattern = format!("{{{app_id}}}:{prefix}*");
 
         let mut cursor = String::from("0");
         let mut acc: Vec<String> = Vec::new();
-        let app_prefix = format!("{app_id}:");
+        // Strip the whole `{app_id}:` prefix (including braces) from each
+        // returned key before giving it back to user code.
+        let app_prefix = format!("{{{app_id}}}:");
         loop {
             let (next, batch) = conn
                 .scan(&cursor, &pattern, 500)

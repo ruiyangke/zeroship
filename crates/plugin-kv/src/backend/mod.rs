@@ -46,8 +46,27 @@ pub trait Backend: Send + Sync + std::fmt::Debug {
     async fn list(&self, app_id: &str, prefix: &str) -> Result<Vec<String>, String>;
 }
 
-/// Common `<app_id>:<key>` scoping helper — every backend uses this to
-/// enforce per-app isolation.
+/// Common per-app scoping helper. Every backend uses this to enforce
+/// isolation between tenants on a shared Redis/Dragonfly.
+///
+/// Wire format: `{<app_id>}:<key>`.
+///
+/// The `{...}` is a Redis cluster **hash tag**: every key sharing the same
+/// tag hashes to the same slot, and therefore the same shard. That means:
+///
+/// - One app's keyspace always lives on exactly one shard (fast SCAN,
+///   no cross-shard fan-out on prefix list).
+/// - Multi-key ops within an app (MULTI/EXEC, LUA) work even on a sharded
+///   cluster — they all stay local to one node.
+/// - When we later shard out, no data migration for existing apps.
+///
+/// Trade-off: a single *huge* app can't scale past one shard's capacity.
+/// For our "millions of small apps" model that's the correct default;
+/// whale-app handling is a v2 feature.
+///
+/// The InMemory backend doesn't care about the braces — they're just
+/// extra bytes in the map key. The Redis/Dragonfly backend is where the
+/// hash tag does real work.
 pub fn scope(app_id: &str, key: &str) -> String {
-    format!("{app_id}:{key}")
+    format!("{{{app_id}}}:{key}")
 }

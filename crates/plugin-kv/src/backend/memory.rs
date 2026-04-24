@@ -99,9 +99,12 @@ impl Backend for InMemory {
             .collect();
         for k in expired { map.remove(&k); }
 
+        // Strip the literal `{app_id}:` prefix (braces included) from each
+        // stored key so the user sees their unscoped names back.
+        let strip = format!("{{{app_id}}}:");
         Ok(map.keys()
             .filter(|k| k.starts_with(&scoped_prefix))
-            .filter_map(|k| k.splitn(2, ':').nth(1).map(str::to_string))
+            .filter_map(|k| k.strip_prefix(&strip).map(str::to_string))
             .collect())
     }
 }
