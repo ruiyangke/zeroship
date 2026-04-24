@@ -438,6 +438,116 @@ impl ClusterClient {
             build_cmd(&[b"STRLEN", key.as_bytes()])).await?;
         Ok(crate::protocol::expect_integer(frame)?.max(0) as u64)
     }
+
+    // -----------------------------------------------------------------
+    // Multi-key + SCAN. Multi-key ops require all keys to hash to the
+    // same slot (Redis/Dragonfly hard constraint). Day-1 zeroship apps
+    // use `{app_id}:` hash-tagging, so all of an app's keys already
+    // share a slot — callers rarely hit the CrossSlot error in practice.
+    // -----------------------------------------------------------------
+
+    /// MGET — batch fetch. All keys must hash to the same slot.
+    /// Returns one `Option<Vec<u8>>` per key, preserving input order.
+    pub async fn mget(&self, keys: &[&str]) -> Result<Vec<Option<Vec<u8>>>> {
+        if keys.is_empty() { return Ok(Vec::new()); }
+        let _slot = same_slot_or_err(keys)?;
+        let mut parts: Vec<&[u8]> = Vec::with_capacity(keys.len() + 1);
+        parts.push(b"MGET");
+        for k in keys { parts.push(k.as_bytes()); }
+        let frame = self.send_to_slot(keys[0].as_bytes(), build_cmd(&parts)).await?;
+        let items = crate::protocol::expect_array(frame)?;
+        items.into_iter().map(crate::protocol::expect_bulk_or_null).collect()
+    }
+
+    /// MSET — atomic batch write. All keys must hash to the same slot.
+    pub async fn mset(&self, kvs: &[(&str, &[u8])]) -> Result<()> {
+        if kvs.is_empty() { return Ok(()); }
+        let key_bytes: Vec<&[u8]> = kvs.iter().map(|(k, _)| k.as_bytes()).collect();
+        let _slot = same_slot_or_err(&key_bytes)?;
+        let mut parts: Vec<&[u8]> = Vec::with_capacity(kvs.len() * 2 + 1);
+        parts.push(b"MSET");
+        for (k, v) in kvs {
+            parts.push(k.as_bytes());
+            parts.push(v);
+        }
+        let frame = self.send_to_slot(kvs[0].0.as_bytes(), build_cmd(&parts)).await?;
+        crate::protocol::expect_ok(frame)
+    }
+
+    /// SCAN against the node owning `routing_key`'s slot. Scans ONE node;
+    /// full-cluster scans require iterating nodes manually (rarely needed
+    /// — hash-tag scoping keeps per-app keys on a single node).
+    pub async fn scan(
+        &self,
+        routing_key: &str,
+        cursor: &str,
+        pattern: &str,
+        count: u32,
+    ) -> Result<(String, Vec<String>)> {
+        let c = count.to_string();
+        let frame = self.send_to_slot(routing_key.as_bytes(),
+            build_cmd(&[
+                b"SCAN", cursor.as_bytes(), b"MATCH", pattern.as_bytes(),
+                b"COUNT", c.as_bytes(),
+            ])).await?;
+        let items = crate::protocol::expect_array(frame)?;
+        if items.len() != 2 {
+            return Err(Error::Unexpected(format!(
+                "SCAN: expected 2-elem array, got {}", items.len())));
+        }
+        let mut iter = items.into_iter();
+        let cursor = crate::protocol::expect_bulk_or_null(iter.next().unwrap())?
+            .map(|v| String::from_utf8_lossy(&v).into_owned())
+            .unwrap_or_default();
+        let keys_frame = iter.next().unwrap();
+        let keys_arr = crate::protocol::expect_array(keys_frame)?;
+        let keys: Vec<String> = keys_arr
+            .into_iter()
+            .filter_map(|f| match crate::protocol::expect_bulk_or_null(f).ok().flatten() {
+                Some(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+                None => None,
+            })
+            .collect();
+        Ok((cursor, keys))
+    }
+}
+
+/// Ensure every key in `keys` hashes to the same slot. Returns the
+/// slot, or `Error::CrossSlot` if they disagree.
+fn same_slot_or_err<T: AsRef<[u8]>>(keys: &[T]) -> Result<u16> {
+    let first = keys.first().ok_or(Error::CrossSlot)?;
+    let slot = redis_keyslot(first.as_ref());
+    for k in &keys[1..] {
+        if redis_keyslot(k.as_ref()) != slot {
+            return Err(Error::CrossSlot);
+        }
+    }
+    Ok(slot)
+}
+
+#[cfg(test)]
+mod cross_slot_tests {
+    use super::*;
+
+    #[test]
+    fn same_hash_tag_ok() {
+        // Same {app1} hash tag → same slot.
+        let keys = vec!["{app1}:a", "{app1}:b", "{app1}:c"];
+        same_slot_or_err(&keys).expect("same slot");
+    }
+
+    #[test]
+    fn different_hash_tags_err() {
+        let keys = vec!["{app1}:a", "{app2}:b"];
+        assert!(matches!(same_slot_or_err(&keys), Err(Error::CrossSlot)));
+    }
+
+    #[test]
+    fn plain_keys_usually_different() {
+        // "foo" slot 12182, "bar" slot 5061 — different.
+        let keys = vec!["foo", "bar"];
+        assert!(matches!(same_slot_or_err(&keys), Err(Error::CrossSlot)));
+    }
 }
 
 fn credentials_from_url(url: &str) -> Result<(Option<String>, Option<i64>)> {
