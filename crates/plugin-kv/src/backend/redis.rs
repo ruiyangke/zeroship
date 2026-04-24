@@ -235,3 +235,105 @@ impl Backend for Redis {
         Ok(acc)
     }
 }
+
+#[cfg(test)]
+mod url_helper_tests {
+    use super::*;
+
+    #[test]
+    fn is_cluster_url_accepts_true_variants() {
+        assert!(is_cluster_url("redis://x:1?cluster=true"));
+        assert!(is_cluster_url("redis://x:1?cluster=1"));
+        assert!(is_cluster_url("redis://x:1?cluster=yes"));
+    }
+
+    #[test]
+    fn is_cluster_url_rejects_false_variants() {
+        assert!(!is_cluster_url("redis://x:1"));
+        assert!(!is_cluster_url("redis://x:1?cluster=false"));
+        assert!(!is_cluster_url("redis://x:1?cluster=0"));
+        assert!(!is_cluster_url("redis://x:1?cluster=no"));
+        assert!(!is_cluster_url("redis://x:1?cluster="));
+    }
+
+    #[test]
+    fn is_cluster_url_is_case_sensitive() {
+        // We're strict by design — the plan spec says lowercase only.
+        assert!(!is_cluster_url("redis://x:1?cluster=TRUE"));
+        assert!(!is_cluster_url("redis://x:1?cluster=Yes"));
+    }
+
+    #[test]
+    fn is_cluster_url_ignores_other_query_keys() {
+        assert!(!is_cluster_url("redis://x:1?foo=bar"));
+        assert!(is_cluster_url("redis://x:1?foo=bar&cluster=true"));
+        assert!(is_cluster_url("redis://x:1?cluster=true&extra=x"));
+    }
+
+    #[test]
+    fn is_cluster_url_handles_unparseable() {
+        assert!(!is_cluster_url(""));
+        assert!(!is_cluster_url("literal garbage"));
+    }
+
+    #[test]
+    fn seeds_from_url_with_explicit_seeds() {
+        let s = seeds_from_url("redis://a:1?cluster=true&seeds=redis://b:2,redis://c:3");
+        assert_eq!(s, vec!["redis://b:2", "redis://c:3"]);
+    }
+
+    #[test]
+    fn seeds_from_url_whitespace_is_trimmed() {
+        let s = seeds_from_url("redis://a:1?cluster=true&seeds=redis://b:2 , redis://c:3 , ");
+        assert_eq!(s, vec!["redis://b:2", "redis://c:3"]);
+    }
+
+    #[test]
+    fn seeds_from_url_empty_seeds_param_falls_back_to_base() {
+        // `?seeds=` alone provides no seeds; fall through to base URL
+        // with the ?cluster=true query stripped so it's a clean probe URL.
+        let s = seeds_from_url("redis://a:1?cluster=true&seeds=");
+        assert_eq!(s.len(), 1);
+        assert!(!s[0].contains("cluster="));
+        assert!(!s[0].contains("seeds="));
+    }
+
+    #[test]
+    fn seeds_from_url_no_seeds_param_uses_base() {
+        let s = seeds_from_url("redis://only-host:7000?cluster=true");
+        assert_eq!(s.len(), 1);
+        assert!(s[0].starts_with("redis://only-host:7000"));
+        assert!(!s[0].contains("cluster="));
+    }
+
+    #[test]
+    fn seeds_from_url_unparseable_base_passes_through() {
+        // If url::Url::parse fails, we don't crash — caller will see
+        // the error when ClusterClient::connect rejects the seed.
+        let s = seeds_from_url("not a url");
+        assert_eq!(s, vec!["not a url"]);
+    }
+
+    #[test]
+    fn strip_cluster_query_removes_all_query() {
+        let out = strip_cluster_query("redis://h:1?cluster=true&x=y");
+        assert!(out.starts_with("redis://h:1"));
+        assert!(!out.contains('?'), "query not stripped: {out}");
+        assert!(!out.contains("cluster="));
+        assert!(!out.contains("x=y"));
+    }
+
+    #[test]
+    fn strip_cluster_query_leaves_query_less_urls_alone() {
+        let out = strip_cluster_query("redis://h:1");
+        // Roundtripping through url::Url is stable; accept either canonical
+        // form since both are valid Client::connect inputs.
+        assert!(out == "redis://h:1" || out == "redis://h:1/", "got {out}");
+    }
+
+    #[test]
+    fn strip_cluster_query_ungarbled_on_invalid_url() {
+        // Unparseable → pass through unchanged so downstream can error.
+        assert_eq!(strip_cluster_query("not a url"), "not a url");
+    }
+}
