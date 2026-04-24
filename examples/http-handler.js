@@ -1,45 +1,44 @@
-// HTTP Handler — demonstrates onRequest with routing
-// Tests: onRequest, Request/Response objects, headers, status codes
+// HTTP routing demo — new zeroship handler contract.
+//
+// The bootstrap dispatches every request to `default.fetch(req, env, ctx)`.
+// `env` is the module-singleton bindings object; `ctx` carries the cancel
+// flag and `waitUntil` registrar. This demo doesn't need either.
+//
+// The `ping` / `add` exports below stay available as RPC methods — the
+// same module can mix an HTTP handler with `"use server"` functions
+// (the bootstrap's /_rpc router dispatches them, the fetch handler
+// sees everything else).
 
-export function onRequest(request) {
+export default {
+  async fetch(request) {
     const url = new URL(request.url);
     const path = url.pathname;
     const method = request.method;
 
-    // Simple router
     if (method === "GET" && path === "/") {
-        return new Response(JSON.stringify({ message: "Welcome to the API" }), {
-            headers: { "Content-Type": "application/json" },
-        });
+      return Response.json({ message: "Welcome to the API" });
     }
 
     if (method === "GET" && path === "/health") {
-        return new Response("OK", { status: 200 });
+      return new Response("OK", { status: 200 });
     }
 
     if (method === "GET" && path.startsWith("/echo/")) {
-        const text = decodeURIComponent(path.slice(6));
-        return new Response(text, {
-            headers: { "Content-Type": "text/plain", "X-Echo": "true" },
-        });
+      const text = decodeURIComponent(path.slice(6));
+      return new Response(text, {
+        status: 200,
+        headers: { "content-type": "text/plain", "x-echo": "true" },
+      });
     }
 
     if (method === "POST" && path === "/json") {
-        return request.text().then(body => {
-            const data = JSON.parse(body);
-            return new Response(JSON.stringify({ received: data, timestamp: Date.now() }), {
-                status: 201,
-                headers: { "Content-Type": "application/json" },
-            });
-        });
+      const data = await request.json();
+      return Response.json({ received: data, timestamp: Date.now() }, { status: 201 });
     }
 
-    return new Response(JSON.stringify({ error: "Not Found", path }), {
-        status: 404,
-        headers: { "Content-Type": "application/json" },
-    });
-}
+    return Response.json({ error: "Not Found", path }, { status: 404 });
+  },
+};
 
-// RPC methods coexist with HTTP handler
 export function ping() { return "pong"; }
 export function add(a, b) { return a + b; }
