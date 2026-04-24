@@ -1,0 +1,16 @@
+{
+  "name": "hono-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite"
+  },
+  "dependencies": {
+    "hono": "^4.6.0",
+    "@zeroship/vite-plugin": "file:../../sdks/vite-plugin"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "vite": "^8.0.0"
+  }
+}
