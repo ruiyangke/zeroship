@@ -1,0 +1,17 @@
+[package]
+name = "compio-redis"
+version = "0.1.0"
+edition = "2024"
+description = "Minimal compio-native Redis client — RESP2, pooled connections, zero tokio"
+
+[dependencies]
+compio = { workspace = true }
+bytes = "1"
+redis-protocol = { version = "6", default-features = false, features = ["std", "resp2", "resp3", "bytes"] }
+url = { workspace = true }
+
+[dev-dependencies]
+compio = { workspace = true }
+
+[lints]
+workspace = true

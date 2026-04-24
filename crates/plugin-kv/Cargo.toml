@@ -7,8 +7,15 @@ description = "Key-value plugin — zeroship.kv.* native primitives (in-memory f
 [dependencies]
 zeroship-runtime = { workspace = true }
 compio = { workspace = true }
+compio-redis = { workspace = true, optional = true }
 serde_json = { workspace = true }
 v8 = { workspace = true }
+async-trait = "0.1"
+
+[features]
+default = ["redis"]
+# Redis-backed distributed KV — the production default.
+redis = ["dep:compio-redis"]
 
 [lints]
 workspace = true

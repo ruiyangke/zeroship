@@ -348,10 +348,22 @@ fn cmd_serve(args: &[String]) {
     plugins.push(Arc::new(zeroship_plugin_storage::StoragePlugin::new(storage_root.clone())));
     eprintln!("[zeroship] storage plugin registered (root={})", storage_root.display());
 
-    // KV plugin: in-memory only for dev. Redis backend lands when we need
-    // multi-worker shared state (production); dev apps rarely need it.
-    plugins.push(Arc::new(zeroship_plugin_kv::KvPlugin::new()));
-    eprintln!("[zeroship] kv plugin registered (in-memory)");
+    // KV plugin: Redis-backed when ZEROSHIP_KV_URL is set (distributed-
+    // correctness: shared across workers/regions), in-memory otherwise
+    // (dev default — single worker only).
+    let kv_plugin = match std::env::var("ZEROSHIP_KV_URL") {
+        Ok(url) if !url.is_empty() => {
+            eprintln!("[zeroship] kv plugin registered (redis)");
+            zeroship_plugin_kv::KvPlugin::with_backend(
+                Arc::new(zeroship_plugin_kv::Redis::new(url))
+            )
+        }
+        _ => {
+            eprintln!("[zeroship] kv plugin registered (in-memory; single-worker only)");
+            zeroship_plugin_kv::KvPlugin::in_memory()
+        }
+    };
+    plugins.push(Arc::new(kv_plugin));
 
     // Forward process env to the V8 runtime so `process.env.FOO` works in JS.
     // Important for dev: the vite-plugin sets ZEROSHIP_ENTRY / ZEROSHIP_VITE_WS

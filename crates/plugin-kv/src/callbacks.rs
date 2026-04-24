@@ -1,10 +1,14 @@
-//! V8 callbacks for `zeroship.kv.*` methods. In-memory ops — no async
-//! backend needed, but we still return Promises to match the rest of the
-//! platform's "everything is async" contract and keep door open for
-//! Redis backend later.
+//! V8 callbacks for `zeroship.kv.*`.
+//!
+//! Each callback: parse args, allocate a promise, push an async op into
+//! the runtime pump, return the promise. The pump resolves via OpResult.
+
+use std::sync::Arc;
 
 use serde_json::json;
 use zeroship_runtime::state::{OpResult, SharedState};
+
+use crate::{Backend, KV_BACKEND};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -85,8 +89,13 @@ fn setup_promise<'s>(
     (op_id, request_id, promise)
 }
 
+fn current_backend() -> Result<Arc<dyn Backend>, String> {
+    KV_BACKEND.with(|c| c.borrow().as_ref().map(Arc::clone))
+        .ok_or_else(|| "kv: not configured — KvPlugin not registered".to_string())
+}
+
 // ---------------------------------------------------------------------------
-// get(key)
+// Callback: get(key)
 // ---------------------------------------------------------------------------
 
 pub fn get(
@@ -97,23 +106,39 @@ pub fn get(
     let state: SharedState = scope.get_slot::<SharedState>().expect("state").clone();
     let Some(key) = require_string(scope, &args, 0, "key") else { return };
     let app_id = get_app_id(&state);
-    let scoped = crate::scoped_key(&app_id, &key);
-
-    // Sync in-memory op — still resolve via promise for API consistency.
     let (op_id, request_id, promise) = setup_promise(scope, &state);
-    let value = crate::store_get(&scoped);
+
+    let backend = match current_backend() {
+        Ok(b) => b,
+        Err(e) => {
+            state.borrow_mut().spawned_ops.push(Box::pin(async move {
+                OpResult::Failed { op_id, error: e, request_id }
+            }));
+            rv.set(promise.into());
+            return;
+        }
+    };
+
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let json = match value {
-            Some(v) => serde_json::Value::String(v).to_string(),
-            None => "null".into(),
-        };
-        OpResult::Completed { op_id, value: json, request_id }
+        match backend.get(&app_id, &key).await {
+            Ok(Some(v)) => OpResult::Completed {
+                op_id,
+                value: serde_json::Value::String(v).to_string(),
+                request_id,
+            },
+            Ok(None) => OpResult::Completed {
+                op_id,
+                value: "null".into(),
+                request_id,
+            },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
     }));
     rv.set(promise.into());
 }
 
 // ---------------------------------------------------------------------------
-// set(key, value, ttlMs?)
+// Callback: set(key, value, ttlMs?)
 // ---------------------------------------------------------------------------
 
 pub fn set(
@@ -123,36 +148,48 @@ pub fn set(
 ) {
     let state: SharedState = scope.get_slot::<SharedState>().expect("state").clone();
     let Some(key) = require_string(scope, &args, 0, "key") else { return };
-    let Some(value) = optional_string(scope, &args, 1).or_else(|| {
-        // Allow empty-string values but not null/undefined.
-        if args.length() > 1 && !args.get(1).is_null_or_undefined() {
-            Some(args.get(1).to_rust_string_lossy(scope))
-        } else {
+    // Accept empty-string values; require at least "defined" non-null for pos 1.
+    let Some(value) = ({
+        if args.length() <= 1 || args.get(1).is_null_or_undefined() {
             let msg = v8::String::new(scope, "kv: missing required argument 'value'").unwrap();
             let exc = v8::Exception::type_error(scope, msg);
             scope.throw_exception(exc);
             None
+        } else {
+            Some(args.get(1).to_rust_string_lossy(scope))
         }
     }) else { return };
     let ttl_ms = optional_u64(scope, &args, 2);
 
     let app_id = get_app_id(&state);
-    let scoped = crate::scoped_key(&app_id, &key);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    crate::store_set(scoped, value, ttl_ms);
+    let backend = match current_backend() {
+        Ok(b) => b,
+        Err(e) => {
+            state.borrow_mut().spawned_ops.push(Box::pin(async move {
+                OpResult::Failed { op_id, error: e, request_id }
+            }));
+            rv.set(promise.into());
+            return;
+        }
+    };
+
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        OpResult::Completed {
-            op_id,
-            value: json!({ "ok": true }).to_string(),
-            request_id,
+        match backend.set(&app_id, &key, &value, ttl_ms).await {
+            Ok(()) => OpResult::Completed {
+                op_id,
+                value: json!({ "ok": true }).to_string(),
+                request_id,
+            },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
         }
     }));
     rv.set(promise.into());
 }
 
 // ---------------------------------------------------------------------------
-// delete(key)
+// Callback: delete(key)
 // ---------------------------------------------------------------------------
 
 pub fn delete(
@@ -162,24 +199,35 @@ pub fn delete(
 ) {
     let state: SharedState = scope.get_slot::<SharedState>().expect("state").clone();
     let Some(key) = require_string(scope, &args, 0, "key") else { return };
-
     let app_id = get_app_id(&state);
-    let scoped = crate::scoped_key(&app_id, &key);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let deleted = crate::store_delete(&scoped);
+    let backend = match current_backend() {
+        Ok(b) => b,
+        Err(e) => {
+            state.borrow_mut().spawned_ops.push(Box::pin(async move {
+                OpResult::Failed { op_id, error: e, request_id }
+            }));
+            rv.set(promise.into());
+            return;
+        }
+    };
+
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        OpResult::Completed {
-            op_id,
-            value: json!({ "deleted": deleted }).to_string(),
-            request_id,
+        match backend.delete(&app_id, &key).await {
+            Ok(deleted) => OpResult::Completed {
+                op_id,
+                value: json!({ "deleted": deleted }).to_string(),
+                request_id,
+            },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
         }
     }));
     rv.set(promise.into());
 }
 
 // ---------------------------------------------------------------------------
-// incr(key, delta?)
+// Callback: incr(key, delta?)
 // ---------------------------------------------------------------------------
 
 pub fn incr(
@@ -192,28 +240,34 @@ pub fn incr(
     let delta = optional_i64(scope, &args, 1).unwrap_or(1);
 
     let app_id = get_app_id(&state);
-    let scoped = crate::scoped_key(&app_id, &key);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    // Read-modify-write under the single-threaded V8 isolate — no race.
-    let current = crate::store_get(&scoped)
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(0);
-    let next = current.saturating_add(delta);
-    crate::store_set(scoped, next.to_string(), None);
+    let backend = match current_backend() {
+        Ok(b) => b,
+        Err(e) => {
+            state.borrow_mut().spawned_ops.push(Box::pin(async move {
+                OpResult::Failed { op_id, error: e, request_id }
+            }));
+            rv.set(promise.into());
+            return;
+        }
+    };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        OpResult::Completed {
-            op_id,
-            value: next.to_string(),
-            request_id,
+        match backend.incr(&app_id, &key, delta).await {
+            Ok(n) => OpResult::Completed {
+                op_id,
+                value: n.to_string(),
+                request_id,
+            },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
         }
     }));
     rv.set(promise.into());
 }
 
 // ---------------------------------------------------------------------------
-// list(prefix?)
+// Callback: list(prefix?)
 // ---------------------------------------------------------------------------
 
 pub fn list(
@@ -224,17 +278,29 @@ pub fn list(
     let state: SharedState = scope.get_slot::<SharedState>().expect("state").clone();
     let prefix = optional_string(scope, &args, 0).unwrap_or_default();
     let app_id = get_app_id(&state);
-    let scoped_prefix = crate::scoped_key(&app_id, &prefix);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let keys = crate::store_list_prefix(&scoped_prefix);
+    let backend = match current_backend() {
+        Ok(b) => b,
+        Err(e) => {
+            state.borrow_mut().spawned_ops.push(Box::pin(async move {
+                OpResult::Failed { op_id, error: e, request_id }
+            }));
+            rv.set(promise.into());
+            return;
+        }
+    };
+
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        OpResult::Completed {
-            op_id,
-            value: serde_json::Value::Array(
-                keys.into_iter().map(serde_json::Value::String).collect()
-            ).to_string(),
-            request_id,
+        match backend.list(&app_id, &prefix).await {
+            Ok(keys) => OpResult::Completed {
+                op_id,
+                value: serde_json::Value::Array(
+                    keys.into_iter().map(serde_json::Value::String).collect()
+                ).to_string(),
+                request_id,
+            },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
         }
     }));
     rv.set(promise.into());
