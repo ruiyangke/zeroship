@@ -126,3 +126,91 @@ async fn binary_safe_values() {
     assert_eq!(back, value);
     c.del("zs:test:bin").await.unwrap();
 }
+
+#[compio::test]
+async fn set_nx_acts_as_lock() {
+    let Some(url) = test_url() else { return; };
+    let mut c = Client::connect(&url).await.expect("connect");
+    c.del("zs:test:lock").await.ok();
+
+    // First acquire: key doesn't exist, SET NX succeeds.
+    assert!(c.set_nx("zs:test:lock", b"owner-1", Some(5_000)).await.unwrap());
+    // Second acquire: key exists, SET NX returns false.
+    assert!(!c.set_nx("zs:test:lock", b"owner-2", Some(5_000)).await.unwrap());
+    // Holder is the original owner.
+    let v = c.get("zs:test:lock").await.unwrap();
+    assert_eq!(v.as_deref(), Some(b"owner-1".as_ref()));
+
+    c.del("zs:test:lock").await.ok();
+}
+
+#[compio::test]
+async fn exists_pexpire_pttl_lifecycle() {
+    let Some(url) = test_url() else { return; };
+    let mut c = Client::connect(&url).await.expect("connect");
+    c.del("zs:test:life").await.ok();
+
+    // Missing key: EXISTS=false, PTTL=-2.
+    assert!(!c.exists("zs:test:life").await.unwrap());
+    assert_eq!(c.pttl("zs:test:life").await.unwrap(), -2);
+
+    // Set without TTL: EXISTS=true, PTTL=-1.
+    c.set("zs:test:life", b"v", None).await.unwrap();
+    assert!(c.exists("zs:test:life").await.unwrap());
+    assert_eq!(c.pttl("zs:test:life").await.unwrap(), -1);
+
+    // PEXPIRE hits: PTTL becomes positive.
+    assert!(c.pexpire("zs:test:life", 10_000).await.unwrap());
+    let remaining = c.pttl("zs:test:life").await.unwrap();
+    assert!(remaining > 0 && remaining <= 10_000, "pttl={remaining}");
+
+    // PEXPIRE on missing key returns false.
+    c.del("zs:test:life").await.unwrap();
+    assert!(!c.pexpire("zs:test:life", 1_000).await.unwrap());
+}
+
+#[compio::test]
+async fn decr_by_and_strlen() {
+    let Some(url) = test_url() else { return; };
+    let mut c = Client::connect(&url).await.expect("connect");
+    c.del("zs:test:cnt").await.ok();
+
+    // Seed via incr, then decrement.
+    assert_eq!(c.incr_by("zs:test:cnt", 100).await.unwrap(), 100);
+    assert_eq!(c.decr_by("zs:test:cnt", 30).await.unwrap(), 70);
+    assert_eq!(c.decr_by("zs:test:cnt", 70).await.unwrap(), 0);
+
+    // STRLEN reads the byte length of the stringified counter.
+    c.set("zs:test:cnt", b"hello", None).await.unwrap();
+    assert_eq!(c.strlen("zs:test:cnt").await.unwrap(), 5);
+    // STRLEN on missing key returns 0, not an error.
+    c.del("zs:test:cnt").await.unwrap();
+    assert_eq!(c.strlen("zs:test:cnt").await.unwrap(), 0);
+}
+
+#[compio::test]
+async fn mget_mset_batch_roundtrip() {
+    let Some(url) = test_url() else { return; };
+    let mut c = Client::connect(&url).await.expect("connect");
+
+    let keys = ["zs:test:m1", "zs:test:m2", "zs:test:m3"];
+    for k in &keys { c.del(k).await.ok(); }
+
+    // Empty batch is a no-op that returns an empty vec / Ok.
+    assert!(c.mget(&[]).await.unwrap().is_empty());
+    c.mset(&[]).await.unwrap();
+
+    c.mset(&[
+        ("zs:test:m1", b"one" as &[u8]),
+        ("zs:test:m2", b"two"),
+        ("zs:test:m3", b"three"),
+    ]).await.unwrap();
+
+    let values = c.mget(&["zs:test:m1", "zs:test:missing", "zs:test:m3"]).await.unwrap();
+    assert_eq!(values.len(), 3);
+    assert_eq!(values[0].as_deref(), Some(b"one".as_ref()));
+    assert!(values[1].is_none());
+    assert_eq!(values[2].as_deref(), Some(b"three".as_ref()));
+
+    for k in &keys { c.del(k).await.ok(); }
+}

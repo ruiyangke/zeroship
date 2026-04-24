@@ -128,7 +128,7 @@ impl Client {
         expect_bulk_or_null(frame)
     }
 
-    /// SET key value [PX millis]. Value is any bytes.
+    /// SET key value [PX millis]. Value is any bytes. Always overwrites.
     pub async fn set(
         &mut self,
         key: &str,
@@ -144,16 +144,108 @@ impl Client {
         expect_ok(frame)
     }
 
+    /// `SET key value NX [PX ms]` — the canonical lock primitive.
+    /// Returns `true` if the key was set (it didn't exist), `false` if the
+    /// key already existed (NX condition failed). Redis returns null on the
+    /// NX miss and "+OK" on success.
+    pub async fn set_nx(
+        &mut self,
+        key: &str,
+        value: &[u8],
+        ttl_ms: Option<u64>,
+    ) -> Result<bool> {
+        let frame = if let Some(ms) = ttl_ms {
+            let ms_s = ms.to_string();
+            self.send_recv(build_cmd(&[
+                b"SET", key.as_bytes(), value, b"NX", b"PX", ms_s.as_bytes(),
+            ])).await?
+        } else {
+            self.send_recv(build_cmd(&[b"SET", key.as_bytes(), value, b"NX"])).await?
+        };
+        match frame {
+            OwnedFrame::SimpleString(s) if s == b"OK" => Ok(true),
+            OwnedFrame::Null => Ok(false),
+            OwnedFrame::Error(msg) => Err(Error::Server(msg)),
+            other => Err(Error::Unexpected(format!("SET NX: {other:?}"))),
+        }
+    }
+
     /// DEL key. Returns true if the key existed.
     pub async fn del(&mut self, key: &str) -> Result<bool> {
         let frame = self.send_recv(build_cmd(&[b"DEL", key.as_bytes()])).await?;
         Ok(expect_integer(frame)? > 0)
     }
 
+    /// EXISTS key. Returns true if the key exists.
+    pub async fn exists(&mut self, key: &str) -> Result<bool> {
+        let frame = self.send_recv(build_cmd(&[b"EXISTS", key.as_bytes()])).await?;
+        Ok(expect_integer(frame)? > 0)
+    }
+
+    /// PEXPIRE key ms — set/refresh the TTL in milliseconds.
+    /// Returns true if the TTL was set (key exists), false if the key is
+    /// missing and no TTL could be set.
+    pub async fn pexpire(&mut self, key: &str, ttl_ms: u64) -> Result<bool> {
+        let ms = ttl_ms.to_string();
+        let frame = self.send_recv(build_cmd(&[
+            b"PEXPIRE", key.as_bytes(), ms.as_bytes(),
+        ])).await?;
+        Ok(expect_integer(frame)? > 0)
+    }
+
+    /// PTTL key — remaining TTL in milliseconds. Wire semantics:
+    ///   >= 0 → milliseconds remaining
+    ///   -1   → key exists but has no TTL
+    ///   -2   → key does not exist
+    pub async fn pttl(&mut self, key: &str) -> Result<i64> {
+        let frame = self.send_recv(build_cmd(&[b"PTTL", key.as_bytes()])).await?;
+        expect_integer(frame)
+    }
+
     pub async fn incr_by(&mut self, key: &str, delta: i64) -> Result<i64> {
         let d = delta.to_string();
         let frame = self.send_recv(build_cmd(&[b"INCRBY", key.as_bytes(), d.as_bytes()])).await?;
         expect_integer(frame)
+    }
+
+    /// DECRBY — negative counterpart. `decr_by(k, n)` == `incr_by(k, -n)`
+    /// but ships the idiomatic command the Redis tools expect in MONITOR
+    /// output etc.
+    pub async fn decr_by(&mut self, key: &str, delta: i64) -> Result<i64> {
+        let d = delta.to_string();
+        let frame = self.send_recv(build_cmd(&[b"DECRBY", key.as_bytes(), d.as_bytes()])).await?;
+        expect_integer(frame)
+    }
+
+    /// STRLEN key — byte length of the value (0 if key missing).
+    pub async fn strlen(&mut self, key: &str) -> Result<u64> {
+        let frame = self.send_recv(build_cmd(&[b"STRLEN", key.as_bytes()])).await?;
+        Ok(expect_integer(frame)?.max(0) as u64)
+    }
+
+    /// MGET — batch fetch. Returns one `Option<Vec<u8>>` per key (None for
+    /// missing keys). Preserves input order.
+    pub async fn mget(&mut self, keys: &[&str]) -> Result<Vec<Option<Vec<u8>>>> {
+        if keys.is_empty() { return Ok(Vec::new()); }
+        let mut parts: Vec<&[u8]> = Vec::with_capacity(keys.len() + 1);
+        parts.push(b"MGET");
+        for k in keys { parts.push(k.as_bytes()); }
+        let frame = self.send_recv(build_cmd(&parts)).await?;
+        let items = expect_array(frame)?;
+        items.into_iter().map(expect_bulk_or_null).collect()
+    }
+
+    /// MSET — atomic batch write. All keys set or none.
+    pub async fn mset(&mut self, kvs: &[(&str, &[u8])]) -> Result<()> {
+        if kvs.is_empty() { return Ok(()); }
+        let mut parts: Vec<&[u8]> = Vec::with_capacity(kvs.len() * 2 + 1);
+        parts.push(b"MSET");
+        for (k, v) in kvs {
+            parts.push(k.as_bytes());
+            parts.push(v);
+        }
+        let frame = self.send_recv(build_cmd(&parts)).await?;
+        expect_ok(frame)
     }
 
     /// SCAN with a cursor + MATCH pattern. Returns (next_cursor, keys).
