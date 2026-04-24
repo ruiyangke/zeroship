@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use ntex::web;
 use zeroship_core::vfs::{BundleStore, LocalFs};
-use zeroship_control::{api, env_handlers, internal, AppState, EnvStore, Registry, StripeStore};
+use zeroship_control::{api, env_handlers, internal, stripe_handlers, AppState, EnvStore, Registry, StripeStore};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -107,6 +107,23 @@ async fn main() -> std::io::Result<()> {
                 web::resource("/api/apps/{id}/secrets/{key}")
                     .route(web::delete().to(env_handlers::delete_secret)),
             )
+            // --- Stripe Connect ---
+            .service(
+                web::resource("/api/creators/{id}/stripe/onboard")
+                    .route(web::post().to(stripe_handlers::onboard)),
+            )
+            .service(
+                web::resource("/api/creators/{id}/stripe/callback")
+                    .route(web::post().to(stripe_handlers::callback)),
+            )
+            .service(
+                web::resource("/api/creators/{id}/stripe")
+                    .route(web::delete().to(stripe_handlers::unlink)),
+            )
+            .service(
+                web::resource("/api/creators/{id}/earnings")
+                    .route(web::get().to(stripe_handlers::earnings)),
+            )
             // --- Internal API ---
             .service(
                 web::resource("/internal/versions")
@@ -135,6 +152,10 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/internal/usage")
                     .route(web::post().to(internal::report_usage)),
+            )
+            .service(
+                web::resource("/internal/webhooks/stripe")
+                    .route(web::post().to(stripe_handlers::webhook)),
             )
             // --- Health ---
             .service(

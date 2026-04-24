@@ -10,6 +10,7 @@ pub mod env_store;
 pub mod internal;
 pub mod metering;
 pub mod registry;
+pub mod stripe_handlers;
 pub mod stripe_store;
 
 use std::sync::Arc;
