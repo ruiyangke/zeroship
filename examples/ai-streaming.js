@@ -1,112 +1,78 @@
-// AI Streaming — Server-Sent Events proxy for OpenAI-compatible APIs
+// AI Streaming — async-generator RPC exports that the bootstrap
+// auto-wraps as SSE. Clients receive an `AsyncIterable<T>` via the
+// generated stub (see `sdks/vite-plugin`'s `__rpcStream`).
 //
-// Demonstrates: fetch → ReadableStream → SSE response
-// The response streams tokens to the client as they arrive from the AI API.
+// `"use server"` makes every export a platform-dispatched RPC method.
+// No manual ReadableStream plumbing — the bootstrap handles framing,
+// the runtime handles backpressure.
 
-export async function onRequest(request) {
-    const url = new URL(request.url);
+"use server";
 
-    if (url.pathname === "/chat" && request.method === "POST") {
-        const body = JSON.parse(request._bodyText || "{}");
-        const prompt = body.prompt || "Say hello";
-        const model = body.model || "gpt-3.5-turbo";
+import { env } from "zeroship";
 
-        // Call OpenAI-compatible API
-        const apiKey = env.get("OPENAI_API_KEY") || "test-key";
-        const apiUrl = body.api_url || "https://api.openai.com/v1/chat/completions";
-
-        const aiResponse = await fetch(apiUrl, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Authorization": "Bearer " + apiKey,
-            },
-            body: JSON.stringify({
-                model: model,
-                messages: [{ role: "user", content: prompt }],
-                stream: true,
-            }),
-        });
-
-        // For now, our fetch returns the full body as a string.
-        // Parse the SSE events and re-stream them to the client.
-        const responseText = aiResponse._bodyText || "";
-        const lines = responseText.split("\n");
-
-        const stream = new ReadableStream({
-            start(controller) {
-                for (const line of lines) {
-                    if (line.startsWith("data: ")) {
-                        const data = line.slice(6).trim();
-                        if (data === "[DONE]") {
-                            controller.enqueue("data: [DONE]\n\n");
-                            break;
-                        }
-                        try {
-                            const parsed = JSON.parse(data);
-                            const content = parsed.choices &&
-                                parsed.choices[0] &&
-                                parsed.choices[0].delta &&
-                                parsed.choices[0].delta.content;
-                            if (content) {
-                                controller.enqueue("data: " + JSON.stringify({ content }) + "\n\n");
-                            }
-                        } catch (e) {
-                            // Skip malformed SSE lines
-                        }
-                    }
-                }
-                controller.close();
-            }
-        });
-
-        return new Response(stream, {
-            status: 200,
-            headers: {
-                "Content-Type": "text/event-stream",
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-            },
-        });
-    }
-
-    // Simple non-streaming endpoint for testing
-    if (url.pathname === "/complete") {
-        const body = JSON.parse(request._bodyText || "{}");
-        const prompt = body.prompt || "Say hello";
-
-        // Simulate AI response without external API
-        const tokens = prompt.split(" ");
-        const stream = new ReadableStream({
-            start(controller) {
-                for (let i = 0; i < tokens.length; i++) {
-                    const chunk = {
-                        content: tokens[i] + (i < tokens.length - 1 ? " " : ""),
-                        index: i,
-                    };
-                    controller.enqueue("data: " + JSON.stringify(chunk) + "\n\n");
-                }
-                controller.enqueue("data: [DONE]\n\n");
-                controller.close();
-            }
-        });
-
-        return new Response(stream, {
-            status: 200,
-            headers: { "Content-Type": "text/event-stream" },
-        });
-    }
-
-    return new Response(JSON.stringify({
-        endpoints: [
-            "POST /chat   — proxy to OpenAI with SSE streaming",
-            "POST /complete — local echo with SSE streaming (no API key needed)",
-        ]
-    }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-    });
+/**
+ * Local echo stream — no API key needed. Yields each token of `prompt`
+ * separated by a newline. Good for smoke-testing the SSE pipe.
+ */
+export async function* echoStream(prompt = "hello world") {
+  for (const tok of String(prompt).split(/\s+/)) {
+    yield { token: tok };
+  }
 }
 
-// RPC method for testing
-export function ping() { return "pong"; }
+/**
+ * Proxy to an OpenAI-compatible chat completions endpoint.
+ * Requires `env.OPENAI_API_KEY` to be set via `zeroship secret set`.
+ *
+ * Yields one `{ content }` object per delta; resolves when the upstream
+ * sends `data: [DONE]`.
+ */
+export async function* chat(prompt, opts = {}) {
+  const apiKey = env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("OPENAI_API_KEY not configured");
+
+  const apiUrl = opts.apiUrl ?? "https://api.openai.com/v1/chat/completions";
+  const model = opts.model ?? "gpt-3.5-turbo";
+
+  const resp = await fetch(apiUrl, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      stream: true,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+  if (!resp.ok) throw new Error(`OpenAI ${resp.status}`);
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    buf += decoder.decode(value, { stream: true });
+    // SSE frames are separated by \n\n.
+    for (;;) {
+      const idx = buf.indexOf("\n\n");
+      if (idx < 0) break;
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      for (const line of frame.split("\n")) {
+        if (!line.startsWith("data: ")) continue;
+        const payload = line.slice(6).trim();
+        if (payload === "[DONE]") return;
+        try {
+          const parsed = JSON.parse(payload);
+          const content = parsed.choices?.[0]?.delta?.content;
+          if (content) yield { content };
+        } catch {
+          // Ignore malformed frames — upstream may send keepalives.
+        }
+      }
+    }
+  }
+}
