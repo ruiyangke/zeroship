@@ -5,7 +5,10 @@ use std::sync::Arc;
 
 use ntex::web;
 use zeroship_core::vfs::{BundleStore, LocalFs};
-use zeroship_control::{api, env_handlers, internal, stripe_handlers, AppState, EnvStore, Registry, StripeStore};
+use zeroship_control::{
+    api, env_handlers, internal, stripe_handlers, AppState, EnvStore, Quota, RateLimiter,
+    Registry, StripeStore,
+};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -103,6 +106,8 @@ async fn main() -> std::io::Result<()> {
         control_key: zeroship_control::SecretString::new(control_key),
         master_key: zeroship_control::SecretString::new(master_key),
         stripe_webhook_secret: zeroship_control::SecretString::new(stripe_webhook_secret),
+        admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(30, 60))),
+        webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(50, 600))),
         insecure_dev,
     });
 

@@ -23,6 +23,21 @@ fn source_ip(req: &web::HttpRequest) -> Option<String> {
         .or_else(|| req.peer_addr().map(|a| a.ip().to_string()))
 }
 
+/// Token-bucket gate for admin mutating endpoints. Returns 429 if the
+/// caller's IP is over quota.
+fn admin_rate_limit(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
+    let Some(addr) = req.peer_addr() else { return None };
+    if state.admin_limiter.check(addr.ip()) {
+        None
+    } else {
+        Some(
+            web::HttpResponse::TooManyRequests()
+                .header("retry-after", "1")
+                .json(&serde_json::json!({"error":"rate limited"})),
+        )
+    }
+}
+
 fn bad_uuid() -> web::HttpResponse {
     web::HttpResponse::BadRequest().json(&serde_json::json!({"error": "bad app_id"}))
 }
@@ -83,6 +98,7 @@ pub async fn set_var(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
     match state.env_store.set_var(id, &body.key, &body.value).await {
         Ok(()) => {
@@ -107,6 +123,7 @@ pub async fn delete_var(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
     let (id_s, key) = path.into_inner();
     let Ok(id) = Uuid::parse_str(&id_s) else { return bad_uuid(); };
     match state.env_store.delete_var(id, &key).await {
@@ -151,6 +168,7 @@ pub async fn set_secret(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
     match state.env_store.set_secret(id, &body.key, &body.value).await {
         Ok(()) => {
@@ -175,6 +193,7 @@ pub async fn delete_secret(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
     let (id_s, key) = path.into_inner();
     let Ok(id) = Uuid::parse_str(&id_s) else { return bad_uuid(); };
     match state.env_store.delete_secret(id, &key).await {

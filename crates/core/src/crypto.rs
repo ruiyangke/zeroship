@@ -221,14 +221,18 @@ mod tests {
 
     #[test]
     fn legacy_format_still_decrypts() {
-        // Synthesize a legacy blob (no version byte) by encrypting and
-        // stripping the version. Legacy data in production was created
-        // before key rotation shipped.
+        // Synthesize a legacy blob (no version byte) by encrypting,
+        // stripping the version, and retrying if the random nonce's
+        // first byte happens to equal CURRENT_VERSION (1/256 chance —
+        // would otherwise look like a versioned blob to `parse`).
         let key = derive_key("k");
-        let ct = encrypt(&key, b"old data").unwrap();
-        let legacy: Vec<u8> = ct[1..].to_vec(); // drop version byte
-        // Make sure first byte isn't accidentally the version + long enough.
-        assert!(legacy[0] != CURRENT_VERSION);
+        let legacy = loop {
+            let ct = encrypt(&key, b"old data").unwrap();
+            let l: Vec<u8> = ct[1..].to_vec(); // drop version prefix
+            if l[0] != CURRENT_VERSION {
+                break l;
+            }
+        };
         assert_eq!(decrypt(&key, &legacy).unwrap(), b"old data");
     }
 
