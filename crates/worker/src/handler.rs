@@ -317,7 +317,7 @@ async fn load_on_demand(
 
     let hash = hex::encode(Sha256::digest(&bytes));
 
-    if cache::load_app(*app_id, &bytes, app_version.runtime) {
+    if cache::load_app(*app_id, &bytes, app_version.runtime.clone()) {
         cache::set_hash(*app_id, hash);
         // Env MUST be available before we serve requests — otherwise
         // the app runs without creator bindings and may fail-open on
@@ -330,6 +330,7 @@ async fn load_on_demand(
                     cache::remove_hash(app_id);
                     return Err(format!("env parse failed: {e}"));
                 }
+                cache::set_env_version(*app_id, app_version.env_version);
             }
             Err(e) => {
                 cache::evict_app(app_id);

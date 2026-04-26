@@ -32,6 +32,12 @@ pub struct AppVersionInfo {
     pub deploy_hash: Option<String>,
     pub plan_id: String,
     pub runtime: AppRuntimeLimits,
+    /// Monotonic counter bumped on every var/secret mutation. Workers
+    /// compare local vs remote and refetch env when they differ —
+    /// closes the "rotated secret stays stale until next deploy" gap.
+    /// `0` for a freshly-created app with no env mutations.
+    #[serde(default)]
+    pub env_version: i64,
 }
 
 /// A routing entry resolved from an incoming request.

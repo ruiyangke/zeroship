@@ -188,6 +188,43 @@ async fn delete_cascades_from_app() {
 }
 
 #[compio::test]
+async fn env_version_bumps_on_every_mutation() {
+    let Some(url) = db_url() else { return; };
+    let registry = Registry::new(&url).await.expect("registry");
+    let store = EnvStore::new(registry.clone(), "k", false).expect("store");
+    let app = create_test_app(&registry).await;
+
+    // Freshly-created app starts at env_version=0.
+    let v0 = registry.get_versions().await.unwrap();
+    assert_eq!(v0.get(&app).unwrap().env_version, 0);
+
+    // Each mutation bumps by 1.
+    store.set_var(app, "FOO", "1").await.unwrap();
+    let v1 = registry.get_versions().await.unwrap();
+    assert_eq!(v1.get(&app).unwrap().env_version, 1);
+
+    store.set_secret(app, "STRIPE_KEY", "sk_live_1").await.unwrap();
+    let v2 = registry.get_versions().await.unwrap();
+    assert_eq!(v2.get(&app).unwrap().env_version, 2);
+
+    store.set_var(app, "FOO", "2").await.unwrap(); // overwrite still bumps
+    let v3 = registry.get_versions().await.unwrap();
+    assert_eq!(v3.get(&app).unwrap().env_version, 3);
+
+    store.delete_var(app, "FOO").await.unwrap();
+    let v4 = registry.get_versions().await.unwrap();
+    assert_eq!(v4.get(&app).unwrap().env_version, 4);
+
+    // Delete of a non-existent key does NOT bump.
+    let removed = store.delete_var(app, "GHOST").await.unwrap();
+    assert!(!removed);
+    let v5 = registry.get_versions().await.unwrap();
+    assert_eq!(v5.get(&app).unwrap().env_version, 4);
+
+    registry.delete_app(&app).await.ok();
+}
+
+#[compio::test]
 async fn rotation_decrypts_old_secrets_and_rewrites_to_new_key() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");

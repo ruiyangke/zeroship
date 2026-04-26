@@ -207,6 +207,7 @@ impl EnvStore {
         )
         .await
         .map_err(|e| EnvError::Db(e.to_string()))?;
+        self.bump_env_version(app_id).await;
         Ok(())
     }
 
@@ -223,7 +224,19 @@ impl EnvStore {
             )
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
+        if n > 0 {
+            self.bump_env_version(app_id).await;
+        }
         Ok(n > 0)
+    }
+
+    /// Best-effort env_version bump. Failure logged but not propagated —
+    /// the mutation has already committed; worst case workers refetch
+    /// env on the next reconcile interval anyway.
+    async fn bump_env_version(&self, app_id: Uuid) {
+        if let Err(e) = self.registry.bump_env_version(app_id).await {
+            eprintln!("[env_store] bump_env_version({app_id}) failed: {e}");
+        }
     }
 
     // ------------------------------------------------------------------
@@ -267,6 +280,7 @@ impl EnvStore {
         )
         .await
         .map_err(|e| EnvError::Db(e.to_string()))?;
+        self.bump_env_version(app_id).await;
         Ok(())
     }
 
@@ -283,6 +297,9 @@ impl EnvStore {
             )
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
+        if n > 0 {
+            self.bump_env_version(app_id).await;
+        }
         Ok(n > 0)
     }
 

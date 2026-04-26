@@ -88,7 +88,7 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
     let local_app_ids = cache::all_app_ids();
     for local_id in &local_app_ids {
         match versions.get(local_id) {
-            // App still exists — check if deploy hash OR limits changed.
+            // App still exists — check if deploy hash, limits, or env_version changed.
             Some(info) => {
                 let remote_hash = &info.deploy_hash;
                 let local_hash = cache::get_hash(local_id);
@@ -102,6 +102,28 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                     Some(lh) => remote_hash.as_ref().is_some_and(|rh| lh != rh),
                     None => remote_hash.is_some(),
                 } || local_limits != Some(target_limits);
+
+                // Env-only refresh: bundle didn't change but env_version did
+                // (creator rotated a secret). Skip the heavy bundle refetch
+                // — just re-pull /internal/apps/:id/env.
+                let local_env_version = cache::get_env_version(local_id);
+                let env_changed = local_env_version != Some(info.env_version);
+                if !needs_update && env_changed {
+                    match fetch_app_env(&config.control_url, &config.control_key, local_id).await {
+                        Ok(env_json) => {
+                            if let Err(e) = put_env_from_json(envs, *local_id, &env_json) {
+                                eprintln!("[worker-sync] env parse {local_id}: {e}");
+                            } else {
+                                cache::set_env_version(*local_id, info.env_version);
+                                eprintln!(
+                                    "[worker-sync] env refreshed for {local_id} (v{} → v{})",
+                                    local_env_version.unwrap_or(0), info.env_version,
+                                );
+                            }
+                        }
+                        Err(e) => eprintln!("[worker-sync] env-only refresh {local_id}: {e}"),
+                    }
+                }
 
                 if needs_update {
                     let bundle_url =
@@ -127,6 +149,8 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                                     Ok(env_json) => {
                                         if let Err(e) = put_env_from_json(envs, *local_id, &env_json) {
                                             eprintln!("[worker-sync] env parse {local_id}: {e}");
+                                        } else {
+                                            cache::set_env_version(*local_id, info.env_version);
                                         }
                                     }
                                     Err(e) => eprintln!("[worker-sync] fetch env {local_id}: {e}"),
@@ -147,6 +171,7 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                 eprintln!("[worker-sync] evicting deleted app {local_id}");
                 cache::evict_app(local_id);
                 cache::remove_hash(local_id);
+                cache::remove_env_version(local_id);
                 if let Ok(mut e) = envs.write() {
                     e.remove(local_id);
                 }

@@ -102,9 +102,18 @@ impl Registry {
                 deploy_hash TEXT,
                 api_key TEXT NOT NULL,
                 api_key_hash TEXT NOT NULL DEFAULT '',
+                env_version BIGINT NOT NULL DEFAULT 0,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+
+        // Backfill column for deployments that predate env_version.
+        conn.execute(
+            "ALTER TABLE apps ADD COLUMN IF NOT EXISTS env_version BIGINT NOT NULL DEFAULT 0",
             &[],
         )
         .await
@@ -393,20 +402,36 @@ impl Registry {
     pub async fn get_versions(&self) -> Result<VersionMap, RegistryError> {
         let conn = self.conn().await?;
         let rows = conn
-            .query("SELECT id, deploy_hash, plan_id FROM apps", &[])
+            .query("SELECT id, deploy_hash, plan_id, env_version FROM apps", &[])
             .await?;
         let mut map = HashMap::new();
         for row in &rows {
             let id: Uuid = row.get("id");
             let hash: Option<String> = row.get("deploy_hash");
             let plan_id: String = row.get("plan_id");
+            let env_version: i64 = row.get("env_version");
             map.insert(id, AppVersionInfo {
                 deploy_hash: hash,
                 runtime: runtime_limits_for_plan(&plan_id),
                 plan_id,
+                env_version,
             });
         }
         Ok(map)
+    }
+
+    /// Bump the env_version counter for an app — called by `EnvStore`
+    /// after every var/secret mutation. Best-effort: failure is logged
+    /// upstream, the mutation has already committed; worst case the
+    /// worker takes one extra reconcile interval to refetch env.
+    pub(crate) async fn bump_env_version(&self, app_id: Uuid) -> Result<(), RegistryError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE apps SET env_version = env_version + 1 WHERE id = $1",
+            &[&app_id],
+        )
+        .await?;
+        Ok(())
     }
 
     /// Build the full route table for the gateway.
