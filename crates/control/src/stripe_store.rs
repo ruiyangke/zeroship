@@ -47,6 +47,14 @@ pub struct CreatorAccount {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountHistoryRow {
+    pub id: Uuid,
+    pub stripe_account_id: String,
+    pub linked_at: String,
+    pub unlinked_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PayoutRecord {
     pub id: Uuid,
     pub creator_id: Uuid,
@@ -91,11 +99,34 @@ impl StripeStore {
             )));
         }
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
+
+        // Close out any open history row for this creator (mark
+        // unlinked) before opening a new one. Idempotent if the row is
+        // already closed or absent.
         conn.execute(
-            "INSERT INTO creator_accounts(creator_id, stripe_account_id) VALUES($1, $2)
+            "UPDATE creator_account_history SET unlinked_at = NOW()
+             WHERE creator_id = $1 AND unlinked_at IS NULL",
+            &[&creator_id],
+        )
+        .await
+        .map_err(|e| StripeError::Db(e.to_string()))?;
+        conn.execute(
+            "INSERT INTO creator_account_history(creator_id, stripe_account_id) VALUES($1, $2)",
+            &[&creator_id, &stripe_account_id],
+        )
+        .await
+        .map_err(|e| StripeError::Db(e.to_string()))?;
+
+        // Upsert into the live table. `unlinked_at = NULL` re-activates
+        // a previously-soft-deleted creator with a (possibly different)
+        // new account.
+        conn.execute(
+            "INSERT INTO creator_accounts(creator_id, stripe_account_id, unlinked_at)
+             VALUES($1, $2, NULL)
              ON CONFLICT (creator_id) DO UPDATE
                 SET stripe_account_id = EXCLUDED.stripe_account_id,
-                    onboarded_at = NOW()",
+                    onboarded_at = NOW(),
+                    unlinked_at = NULL",
             &[&creator_id, &stripe_account_id],
         )
         .await
@@ -103,15 +134,29 @@ impl StripeStore {
         Ok(())
     }
 
+    /// Soft-delete: mark `unlinked_at = NOW()`. Preserves the row +
+    /// every payouts FK pointing at it. `link_account` later re-opens
+    /// the row by clearing `unlinked_at`.
     pub async fn unlink_account(&self, creator_id: Uuid) -> Result<bool, StripeError> {
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         let n = conn
             .execute(
-                "DELETE FROM creator_accounts WHERE creator_id = $1",
+                "UPDATE creator_accounts SET unlinked_at = NOW()
+                 WHERE creator_id = $1 AND unlinked_at IS NULL",
                 &[&creator_id],
             )
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
+        if n > 0 {
+            // Mirror the close into the history row.
+            conn.execute(
+                "UPDATE creator_account_history SET unlinked_at = NOW()
+                 WHERE creator_id = $1 AND unlinked_at IS NULL",
+                &[&creator_id],
+            )
+            .await
+            .map_err(|e| StripeError::Db(e.to_string()))?;
+        }
         Ok(n > 0)
     }
 
@@ -119,8 +164,12 @@ impl StripeStore {
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         let rows = conn
             .query(
+                // Return None for a soft-deleted creator — caller treats
+                // the link as gone. History is still queryable via
+                // get_account_history.
                 "SELECT creator_id, stripe_account_id, onboarded_at::text
-                 FROM creator_accounts WHERE creator_id = $1",
+                 FROM creator_accounts
+                 WHERE creator_id = $1 AND unlinked_at IS NULL",
                 &[&creator_id],
             )
             .await
@@ -130,6 +179,36 @@ impl StripeStore {
             stripe_account_id: r.get("stripe_account_id"),
             onboarded_at: r.get("onboarded_at"),
         }))
+    }
+
+    /// Return the link-history rows for a creator (newest first).
+    /// Each row spans `[linked_at, unlinked_at)` for a single
+    /// stripe_account_id binding.
+    pub async fn account_history(
+        &self,
+        creator_id: Uuid,
+    ) -> Result<Vec<AccountHistoryRow>, StripeError> {
+        let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
+        let rows = conn
+            .query(
+                "SELECT id, stripe_account_id,
+                    to_char(linked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS linked_at_text,
+                    CASE WHEN unlinked_at IS NULL THEN NULL
+                         ELSE to_char(unlinked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+                    END AS unlinked_at_text
+                 FROM creator_account_history
+                 WHERE creator_id = $1
+                 ORDER BY linked_at DESC",
+                &[&creator_id],
+            )
+            .await
+            .map_err(|e| StripeError::Db(e.to_string()))?;
+        Ok(rows.iter().map(|r| AccountHistoryRow {
+            id: r.get("id"),
+            stripe_account_id: r.get("stripe_account_id"),
+            linked_at: r.get("linked_at_text"),
+            unlinked_at: r.get("unlinked_at_text"),
+        }).collect())
     }
 
     // ------------------------------------------------------------------

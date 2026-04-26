@@ -179,12 +179,47 @@ impl Registry {
         // Creator→Stripe-account link. One account per creator. The
         // creator_id here can be any UUID the platform wants to use as
         // its stable creator identifier (today that's auth_users.id).
+        // `unlinked_at` is non-null when the creator has soft-deleted
+        // the link — payouts (which FK on creator_id) survive so the
+        // financial ledger stays intact.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS creator_accounts (
                 creator_id UUID PRIMARY KEY,
                 stripe_account_id TEXT NOT NULL,
-                onboarded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                onboarded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                unlinked_at TIMESTAMPTZ
             )",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        // Backfill column for existing deployments.
+        conn.execute(
+            "ALTER TABLE creator_accounts ADD COLUMN IF NOT EXISTS unlinked_at TIMESTAMPTZ",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+
+        // Append-only history of link transitions. One row per
+        // link_account (with unlinked_at populated by the next unlink
+        // OR the next relink). Lets ops audit "did the creator's
+        // Stripe account ever change."
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS creator_account_history (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                creator_id UUID NOT NULL,
+                stripe_account_id TEXT NOT NULL,
+                linked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                unlinked_at TIMESTAMPTZ
+            )",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_creator_account_history_creator
+             ON creator_account_history(creator_id, linked_at DESC)",
             &[],
         )
         .await
@@ -200,7 +235,7 @@ impl Registry {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS payouts (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                creator_id UUID NOT NULL REFERENCES creator_accounts(creator_id) ON DELETE CASCADE,
+                creator_id UUID NOT NULL REFERENCES creator_accounts(creator_id) ON DELETE RESTRICT,
                 event_id TEXT NOT NULL UNIQUE,
                 event_type TEXT NOT NULL,
                 gross_amount BIGINT NOT NULL,

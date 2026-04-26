@@ -74,13 +74,16 @@ async fn record_payout_idempotent() {
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
     let creator = fresh_creator_id();
+    // Unique per test run — soft-delete preserves payouts so a fixed
+    // string would collide with previous runs' rows.
+    let evt = format!("evt_unique_{}", Uuid::new_v4());
 
     store.link_account(creator, "acct_idempotent123").await.unwrap();
 
     let rec = store
         .record_payout(
             creator,
-            "evt_unique_1",
+            &evt,
             "invoice.paid",
             1000,
             150,
@@ -98,7 +101,7 @@ async fn record_payout_idempotent() {
     let err = store
         .record_payout(
             creator,
-            "evt_unique_1",
+            &evt,
             "invoice.paid",
             9999,
             9999,
@@ -131,7 +134,7 @@ async fn total_earnings_aggregates_correctly() {
         store
             .record_payout(
                 creator,
-                &format!("evt_agg_{i}"),
+                &format!("evt_agg_{i}_{}", Uuid::new_v4()),
                 "invoice.paid",
                 *gross,
                 *fee,
@@ -170,7 +173,7 @@ async fn recent_payouts_newest_first_with_limit() {
         store
             .record_payout(
                 creator,
-                &format!("evt_recent_{i}"),
+                &format!("evt_recent_{i}_{}", Uuid::new_v4()),
                 "invoice.paid",
                 100,
                 15,
@@ -211,9 +214,8 @@ async fn per_creator_isolation() {
     store.link_account(a, "acct_isolationA1234").await.unwrap();
     store.link_account(b, "acct_isolationB1234").await.unwrap();
 
-    store.record_payout(a, "evt_A_1", "invoice.paid", 1000, 150, "usd", 1_777_024_800i64, None).await.unwrap();
-
-    store.record_payout(b, "evt_B_1", "invoice.paid", 500, 75, "usd", 1_777_024_800i64, None).await.unwrap();
+    store.record_payout(a, &format!("evt_A_{}", Uuid::new_v4()), "invoice.paid", 1000, 150, "usd", 1_777_024_800i64, None).await.unwrap();
+    store.record_payout(b, &format!("evt_B_{}", Uuid::new_v4()), "invoice.paid", 500, 75, "usd", 1_777_024_800i64, None).await.unwrap();
 
 
     let ta = store.total_earnings(a).await.unwrap();
@@ -257,13 +259,14 @@ async fn payload_hash_mismatch_rejects_duplicate() {
     let creator = fresh_creator_id();
 
     store.link_account(creator, "acct_tamperCheck123").await.unwrap();
+    let evt = format!("evt_tamper_{}", Uuid::new_v4());
 
     let hash_a: Vec<u8> = (0..32u8).collect();
     let hash_b: Vec<u8> = (100..132u8).collect();
 
     store
         .record_payout(
-            creator, "evt_tamper", "invoice.paid", 1000, 150, "usd",
+            creator, &evt, "invoice.paid", 1000, 150, "usd",
             1_777_024_800i64, Some(&hash_a),
         )
         .await
@@ -272,7 +275,7 @@ async fn payload_hash_mismatch_rejects_duplicate() {
     // Honest Stripe retry: same hash → Duplicate.
     let dup_err = store
         .record_payout(
-            creator, "evt_tamper", "invoice.paid", 1000, 150, "usd",
+            creator, &evt, "invoice.paid", 1000, 150, "usd",
             1_777_024_800i64, Some(&hash_a),
         )
         .await
@@ -282,7 +285,7 @@ async fn payload_hash_mismatch_rejects_duplicate() {
     // Tampered replay: same event_id, different hash → Validation error.
     let tamper_err = store
         .record_payout(
-            creator, "evt_tamper", "invoice.paid", 9999, 999, "usd",
+            creator, &evt, "invoice.paid", 9999, 999, "usd",
             1_777_024_800i64, Some(&hash_b),
         )
         .await
@@ -296,19 +299,65 @@ async fn payload_hash_mismatch_rejects_duplicate() {
 }
 
 #[compio::test]
-async fn unlink_cascades_payouts() {
+async fn unlink_is_soft_delete_payouts_preserved() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
     let store = StripeStore::new(registry);
     let creator = fresh_creator_id();
 
-    store.link_account(creator, "acct_cascade12345").await.unwrap();
-    store.record_payout(creator, "evt_cascade_1", "invoice.paid", 100, 15, "usd", 1_777_024_800i64, None).await.unwrap();
-
-
+    store.link_account(creator, "acct_softDelete12345").await.unwrap();
+    store.record_payout(
+        creator, &format!("evt_soft_{}", Uuid::new_v4()), "invoice.paid", 100, 15, "usd",
+        1_777_024_800i64, None,
+    ).await.unwrap();
     assert_eq!(store.recent_payouts(creator, 10).await.unwrap().len(), 1);
 
-    // Dropping the creator_accounts row should cascade via FK to payouts.
+    // Soft-delete: account becomes invisible via get_account but the
+    // ledger row survives.
+    assert!(store.unlink_account(creator).await.unwrap());
+    assert!(store.get_account(creator).await.unwrap().is_none(),
+        "soft-deleted account must not be visible via get_account");
+    assert_eq!(store.recent_payouts(creator, 10).await.unwrap().len(), 1,
+        "ledger must survive soft-delete");
+    let totals = store.total_earnings(creator).await.unwrap();
+    assert_eq!(totals.gross, 100);
+}
+
+#[compio::test]
+async fn double_unlink_returns_false_second_time() {
+    let Some(url) = db_url() else { return; };
+    let registry = Registry::new(&url).await.expect("registry");
+    let store = StripeStore::new(registry);
+    let creator = fresh_creator_id();
+
+    store.link_account(creator, "acct_doubleUnlink12").await.unwrap();
+    assert!(store.unlink_account(creator).await.unwrap());
+    assert!(!store.unlink_account(creator).await.unwrap(),
+        "second unlink must be a no-op (already soft-deleted)");
+}
+
+#[compio::test]
+async fn relink_clears_unlinked_at_and_records_history() {
+    let Some(url) = db_url() else { return; };
+    let registry = Registry::new(&url).await.expect("registry");
+    let store = StripeStore::new(registry);
+    let creator = fresh_creator_id();
+
+    store.link_account(creator, "acct_firstAccount12").await.unwrap();
     store.unlink_account(creator).await.unwrap();
-    assert!(store.recent_payouts(creator, 10).await.unwrap().is_empty());
+    assert!(store.get_account(creator).await.unwrap().is_none());
+
+    // Re-link with a different account id.
+    store.link_account(creator, "acct_secondAccount34").await.unwrap();
+    let acc = store.get_account(creator).await.unwrap().expect("re-linked");
+    assert_eq!(acc.stripe_account_id, "acct_secondAccount34");
+
+    // History shows newest-first with the OLD link closed and a new
+    // open one.
+    let h = store.account_history(creator).await.unwrap();
+    assert_eq!(h.len(), 2);
+    assert_eq!(h[0].stripe_account_id, "acct_secondAccount34");
+    assert!(h[0].unlinked_at.is_none(), "new link is open");
+    assert_eq!(h[1].stripe_account_id, "acct_firstAccount12");
+    assert!(h[1].unlinked_at.is_some(), "old link is closed");
 }
