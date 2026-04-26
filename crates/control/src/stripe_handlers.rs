@@ -293,14 +293,16 @@ fn extract_creator_id(obj: &StripeObject) -> Option<String> {
 /// Max raw webhook body we'll accept. Stripe's own `invoice.paid` is a
 /// few KB; we pad generously. Larger is rejected before we allocate
 /// anything for parsing — defense against POSTing gigabytes.
-pub const MAX_WEBHOOK_BODY: usize = 256 * 1024;
+const MAX_WEBHOOK_BODY_BYTES: usize = 256 * 1024;
+/// Max signature header. Stripe's is ~150 bytes; cap to refuse parser-DoS.
+const MAX_SIGNATURE_HEADER_BYTES: usize = 4096;
 
 pub async fn webhook(
     req: web::HttpRequest,
     body: Bytes,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if body.len() > MAX_WEBHOOK_BODY {
+    if body.len() > MAX_WEBHOOK_BODY_BYTES {
         return err_json(413, format!("webhook body too large: {} bytes", body.len()));
     }
     let raw = body.as_ref();
@@ -321,7 +323,7 @@ pub async fn webhook(
             .get("stripe-signature")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        if sig_header.len() > 4096 {
+        if sig_header.len() > MAX_SIGNATURE_HEADER_BYTES {
             return err_json(400, "signature header too large");
         }
         let now = std::time::SystemTime::now()
@@ -409,6 +411,19 @@ fn sanitize_event_id(s: &str) -> String {
 mod verification_tests {
     use super::*;
 
+    // Shared cross-validation fixture — these MUST match the constants
+    // in `sdks/payments/tests/webhook.test.ts` exactly. If either side
+    // drifts (algorithm change, payload-format change, hex casing,
+    // anything), `cross_validates_with_sdk_format` fails immediately.
+    const CROSS_SECRET: &str = "whsec_cross_validation_FIXTURE_v1";
+    const CROSS_BODY: &[u8] =
+        b"{\"id\":\"evt_cross\",\"type\":\"invoice.paid\",\"created\":1700000000}";
+    const CROSS_TIMESTAMP: i64 = 1_700_000_000;
+    /// Hex of HMAC-SHA256(CROSS_SECRET, "{CROSS_TIMESTAMP}.{CROSS_BODY}")
+    /// computed offline and pinned. The TS suite asserts the same hex.
+    const CROSS_EXPECTED_HEX: &str =
+        "3a9a1b18f1a3f804c7323a527d3f8588d54cac8e89d3c8572be160ebc904f765";
+
     const SECRET: &str = "whsec_test_CONTROL";
     const NOW: i64 = 1_700_000_000;
 
@@ -465,16 +480,24 @@ mod verification_tests {
 
     #[test]
     fn cross_validates_with_sdk_format() {
-        // Same body + secret + timestamp used in sdks/payments/tests —
-        // if our Rust implementation matches, the hex output matches too.
-        let body = b"{\"type\":\"invoice.paid\",\"data\":{\"object\":{\"amount_paid\":1000}}}";
-        let header = sign(body, NOW);
-        // Parse out the v1 and compare against the known SDK output for
-        // the same inputs. The JS test uses secret="whsec_test_EXAMPLE"
-        // whereas we use SECRET above — so this is a smoke test that
-        // the format matches rather than byte-identity with the JS test.
-        let v1 = header.split(',').find_map(|p| p.strip_prefix("v1=")).unwrap();
-        assert_eq!(v1.len(), 64); // SHA-256 hex is 64 chars
-        assert!(v1.chars().all(|c| c.is_ascii_hexdigit()));
+        // Pinned cross-validation: same secret + body + timestamp as the
+        // TS test in sdks/payments/tests/webhook.test.ts. If either
+        // side's HMAC implementation drifts (algorithm, encoding,
+        // payload format, hex casing), one of these assertions fails
+        // immediately and forces the maintainer to investigate.
+        let mut mac = HmacSha256::new_from_slice(CROSS_SECRET.as_bytes()).unwrap();
+        mac.update(format!("{CROSS_TIMESTAMP}.").as_bytes());
+        mac.update(CROSS_BODY);
+        let actual_hex = hex::encode(mac.finalize().into_bytes().as_slice());
+        assert_eq!(actual_hex, CROSS_EXPECTED_HEX,
+            "Rust HMAC drifted from pinned fixture — investigate before changing the constant");
+
+        // And confirm verify_stripe_signature accepts the same fixture
+        // through the public API (i.e., not just the raw HMAC).
+        let header = format!("t={CROSS_TIMESTAMP},v1={CROSS_EXPECTED_HEX}");
+        let result = verify_stripe_signature(
+            CROSS_BODY, &header, CROSS_SECRET, CROSS_TIMESTAMP, 300,
+        );
+        assert_eq!(result.unwrap(), CROSS_TIMESTAMP);
     }
 }

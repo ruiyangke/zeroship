@@ -28,6 +28,11 @@ pub struct Redis {
     max_size: usize,
 }
 
+// Both caches are correctly per-thread: `Pool` and `ClusterClient` are
+// `!Send` (compio executors are thread-bound), so a process-wide cache
+// would force an `Arc<Mutex<…>>` dance with no benefit. `HashMap::new`
+// is not `const` (RandomState seeds at runtime), so the inits stay
+// runtime — the first-access guard is one cmpxchg, negligible.
 thread_local! {
     /// Per-thread pool cache keyed by URL. Single-node mode only.
     static POOLS: RefCell<std::collections::HashMap<String, Pool>> =

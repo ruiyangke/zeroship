@@ -159,12 +159,23 @@ pub fn all_app_ids() -> Vec<Uuid> {
     })
 }
 
-// Deploy hash tracking — separate thread-local map.
+// Deploy hash + env tracking. `HashMap::new` is NOT const
+// (`RandomState` seeds at runtime) so we can't use the `const { ... }`
+// initializer here — the runtime first-access guard is one cmpxchg
+// and not on the hot path anyway.
 thread_local! {
     static HASHES: RefCell<HashMap<Uuid, String>> = RefCell::new(HashMap::new());
 
     /// Per-app env snapshot. Parsed once at cache-insert time so the
     /// hot path avoids JSON parsing on every request.
+    ///
+    /// **TODO (M1)**: refactor to a process-wide `Arc<RwLock<HashMap>>`
+    /// (mirroring `SharedVersions` in `sync.rs`) so 16 ntex threads
+    /// don't each hold a full duplicate copy + so secret rotation
+    /// invalidates ALL threads atomically. Per-thread is the only
+    /// option for the `!Send` V8 `Runtime` cache above; env data is
+    /// `Send` and could move to shared storage. Tracked separately
+    /// because it also touches the reconcile-loop topology.
     static ENVS: RefCell<HashMap<Uuid, EnvSnapshot>> = RefCell::new(HashMap::new());
 }
 

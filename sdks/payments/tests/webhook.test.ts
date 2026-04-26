@@ -6,6 +6,14 @@ import { buildCheckoutSession } from "../src/checkout";
 const SECRET = "whsec_test_EXAMPLE";
 const NOW = 1_700_000_000;
 
+// Pinned cross-validation fixture — these MUST match the constants in
+// crates/control/src/stripe_handlers.rs (verification_tests). If
+// either side's HMAC implementation drifts, both suites fail at once.
+const CROSS_SECRET = "whsec_cross_validation_FIXTURE_v1";
+const CROSS_BODY = '{"id":"evt_cross","type":"invoice.paid","created":1700000000}';
+const CROSS_TIMESTAMP = 1_700_000_000;
+const CROSS_EXPECTED_HEX = "3a9a1b18f1a3f804c7323a527d3f8588d54cac8e89d3c8572be160ebc904f765";
+
 describe("verifyWebhook", () => {
   it("accepts a freshly-signed body", async () => {
     const body = '{"type":"invoice.paid","data":{"object":{"amount_paid":1000}}}';
@@ -112,6 +120,22 @@ describe("verifyWebhook", () => {
   it("fails on floating-point t", async () => {
     const result = await verifyWebhook('{"x":1}', "t=1.5,v1=abc", SECRET, { now: () => NOW });
     expect(result).toEqual({ valid: false, reason: "bad t" });
+  });
+
+  it("cross-validates with the Rust verification_tests fixture", async () => {
+    // Same secret + body + timestamp as the Rust fixture in
+    // crates/control/src/stripe_handlers.rs::verification_tests. If the
+    // hex below diverges, EITHER the Rust HMAC or the TS HMAC has
+    // drifted — investigate before changing the constant.
+    const header = await signWebhookForTest(CROSS_BODY, CROSS_SECRET, CROSS_TIMESTAMP);
+    const v1 = header.split(",").find((p) => p.startsWith("v1="))!.slice("v1=".length);
+    expect(v1).toBe(CROSS_EXPECTED_HEX);
+
+    // And confirm verifyWebhook accepts the pinned header end-to-end.
+    const result = await verifyWebhook(
+      CROSS_BODY, header, CROSS_SECRET, { now: () => CROSS_TIMESTAMP },
+    );
+    expect(result).toEqual({ valid: true, timestamp: CROSS_TIMESTAMP });
   });
 });
 
