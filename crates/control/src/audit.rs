@@ -1,0 +1,123 @@
+//! Append-only audit log for sensitive operations.
+//!
+//! Every mutation of vars / secrets / Stripe accounts writes one row
+//! here. Reads are intentionally NOT audited — that would 10x the
+//! row volume on the hot worker-fetch path; if reads need to be
+//! audited later, do it at the gateway layer with a sampling
+//! middleware instead.
+//!
+//! `actor` today is always `"admin"` (we don't have multi-actor auth on
+//! the master key yet). When that lands, plumb the user identity in.
+
+use uuid::Uuid;
+
+use crate::registry::{Registry, RegistryError};
+
+#[derive(Debug, Clone, Copy)]
+pub enum Action {
+    SetVar,
+    DeleteVar,
+    SetSecret,
+    DeleteSecret,
+    LinkAccount,
+    UnlinkAccount,
+    RecordPayout,
+}
+
+impl Action {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SetVar => "set_var",
+            Self::DeleteVar => "delete_var",
+            Self::SetSecret => "set_secret",
+            Self::DeleteSecret => "delete_secret",
+            Self::LinkAccount => "link_account",
+            Self::UnlinkAccount => "unlink_account",
+            Self::RecordPayout => "record_payout",
+        }
+    }
+}
+
+pub struct AuditEntry<'a> {
+    pub app_id: Option<Uuid>,
+    pub creator_id: Option<Uuid>,
+    pub actor: &'a str,
+    pub action: Action,
+    pub resource: Option<&'a str>,
+    pub source_ip: Option<&'a str>,
+}
+
+/// Best-effort audit insert. We never fail the caller's operation just
+/// because we couldn't write an audit row — if the DB is partially down
+/// the user-facing op should still succeed and we log to stderr instead.
+pub async fn log(registry: &Registry, entry: AuditEntry<'_>) {
+    let conn = match registry.conn().await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[audit] connect failed: {e}");
+            return;
+        }
+    };
+    let result = conn
+        .execute(
+            "INSERT INTO app_audit(app_id, creator_id, actor, action, resource, source_ip)
+             VALUES($1, $2, $3, $4, $5, $6)",
+            &[
+                &entry.app_id,
+                &entry.creator_id,
+                &entry.actor,
+                &entry.action.as_str(),
+                &entry.resource,
+                &entry.source_ip,
+            ],
+        )
+        .await;
+    if let Err(e) = result {
+        eprintln!(
+            "[audit] insert failed (action={}): {e}",
+            entry.action.as_str()
+        );
+    }
+}
+
+/// Read recent audit entries for an app. Newest first.
+pub async fn recent_for_app(
+    registry: &Registry,
+    app_id: Uuid,
+    limit: i64,
+) -> Result<Vec<AuditRow>, RegistryError> {
+    let limit = limit.clamp(1, 500);
+    let conn = registry.conn().await?;
+    let rows = conn
+        .query(
+            "SELECT id, actor, action, resource, source_ip,
+                    to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS at_text
+             FROM app_audit
+             WHERE app_id = $1
+             ORDER BY at DESC
+             LIMIT $2",
+            &[&app_id, &limit],
+        )
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|r| AuditRow {
+            id: r.get("id"),
+            actor: r.get("actor"),
+            action: r.get("action"),
+            resource: r.get("resource"),
+            source_ip: r.get("source_ip"),
+            at: r.get("at_text"),
+        })
+        .collect())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditRow {
+    pub id: Uuid,
+    pub actor: String,
+    pub action: String,
+    pub resource: Option<String>,
+    pub source_ip: Option<String>,
+    pub at: String,
+}

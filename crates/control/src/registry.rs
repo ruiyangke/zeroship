@@ -222,6 +222,39 @@ impl Registry {
         .await
         .map_err(|e| format!("migration: {e}"))?;
 
+        // Append-only audit log of secret/var/stripe mutations. Lets ops
+        // answer "when did sk_live_xxx leak / who changed STRIPE_KEY."
+        // `app_id` is nullable for events that don't scope to an app
+        // (e.g., creator_account changes which key on creator_id).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS app_audit (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                app_id UUID,
+                creator_id UUID,
+                actor TEXT NOT NULL,
+                action TEXT NOT NULL,
+                resource TEXT,
+                source_ip TEXT,
+                at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_app_audit_app_at ON app_audit(app_id, at DESC)",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_app_audit_creator_at ON app_audit(creator_id, at DESC)",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+
         // Dropping `conn` causes the driver task to send Terminate and exit.
         drop(conn);
 

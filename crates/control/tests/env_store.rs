@@ -7,6 +7,7 @@
 //! Each test uses a unique app row so parallel runs don't collide.
 
 use uuid::Uuid;
+use zeroship_control::audit::{self, Action, AuditEntry};
 use zeroship_control::{EnvStore, Registry};
 
 fn db_url() -> Option<String> { std::env::var("CONTROL_TEST_DB").ok() }
@@ -184,6 +185,42 @@ async fn delete_cascades_from_app() {
     registry.delete_app(&app).await.unwrap();
     assert!(store.list_vars(app).await.unwrap().is_empty());
     assert!(store.list_secret_names(app).await.unwrap().is_empty());
+}
+
+#[compio::test]
+async fn audit_log_roundtrip() {
+    let Some(url) = db_url() else { return; };
+    let registry = Registry::new(&url).await.expect("registry");
+    let app = create_test_app(&registry).await;
+
+    audit::log(&registry, AuditEntry {
+        app_id: Some(app),
+        creator_id: None,
+        actor: "admin",
+        action: Action::SetSecret,
+        resource: Some("STRIPE_KEY"),
+        source_ip: Some("203.0.113.7"),
+    }).await;
+    audit::log(&registry, AuditEntry {
+        app_id: Some(app),
+        creator_id: None,
+        actor: "admin",
+        action: Action::DeleteSecret,
+        resource: Some("STRIPE_KEY"),
+        source_ip: None,
+    }).await;
+
+    let rows = audit::recent_for_app(&registry, app, 10).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    // Newest first.
+    assert_eq!(rows[0].action, "delete_secret");
+    assert_eq!(rows[0].resource.as_deref(), Some("STRIPE_KEY"));
+    assert_eq!(rows[0].source_ip, None);
+    assert_eq!(rows[1].action, "set_secret");
+    assert_eq!(rows[1].source_ip.as_deref(), Some("203.0.113.7"));
+    assert_eq!(rows[0].actor, "admin");
+
+    registry.delete_app(&app).await.ok();
 }
 
 #[compio::test]

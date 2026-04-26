@@ -81,9 +81,9 @@ async fn main() -> std::io::Result<()> {
         env_store,
         stripe_store,
         vfs,
-        control_key,
-        master_key,
-        stripe_webhook_secret,
+        control_key: zeroship_control::SecretString::new(control_key),
+        master_key: zeroship_control::SecretString::new(master_key),
+        stripe_webhook_secret: zeroship_control::SecretString::new(stripe_webhook_secret),
         insecure_dev,
     });
 

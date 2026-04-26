@@ -10,8 +10,18 @@ use ntex::web::{self, types::{Json, Path, State}};
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::audit::{self, Action, AuditEntry};
 use crate::AppState;
 use crate::env_store::EnvError;
+
+fn source_ip(req: &web::HttpRequest) -> Option<String> {
+    req.headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .or_else(|| req.peer_addr().map(|a| a.ip().to_string()))
+}
 
 fn bad_uuid() -> web::HttpResponse {
     web::HttpResponse::BadRequest().json(&serde_json::json!({"error": "bad app_id"}))
@@ -75,7 +85,18 @@ pub async fn set_var(
     if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
     match state.env_store.set_var(id, &body.key, &body.value).await {
-        Ok(()) => web::HttpResponse::NoContent().finish(),
+        Ok(()) => {
+            let ip = source_ip(&req);
+            audit::log(&state.registry, AuditEntry {
+                app_id: Some(id),
+                creator_id: None,
+                actor: "admin",
+                action: Action::SetVar,
+                resource: Some(&body.key),
+                source_ip: ip.as_deref(),
+            }).await;
+            web::HttpResponse::NoContent().finish()
+        }
         Err(e) => env_err_response(e),
     }
 }
@@ -89,7 +110,18 @@ pub async fn delete_var(
     let (id_s, key) = path.into_inner();
     let Ok(id) = Uuid::parse_str(&id_s) else { return bad_uuid(); };
     match state.env_store.delete_var(id, &key).await {
-        Ok(true) => web::HttpResponse::NoContent().finish(),
+        Ok(true) => {
+            let ip = source_ip(&req);
+            audit::log(&state.registry, AuditEntry {
+                app_id: Some(id),
+                creator_id: None,
+                actor: "admin",
+                action: Action::DeleteVar,
+                resource: Some(&key),
+                source_ip: ip.as_deref(),
+            }).await;
+            web::HttpResponse::NoContent().finish()
+        }
         Ok(false) => web::HttpResponse::NotFound().json(&serde_json::json!({"error": "not found"})),
         Err(e) => env_err_response(e),
     }
@@ -121,7 +153,18 @@ pub async fn set_secret(
     if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
     match state.env_store.set_secret(id, &body.key, &body.value).await {
-        Ok(()) => web::HttpResponse::NoContent().finish(),
+        Ok(()) => {
+            let ip = source_ip(&req);
+            audit::log(&state.registry, AuditEntry {
+                app_id: Some(id),
+                creator_id: None,
+                actor: "admin",
+                action: Action::SetSecret,
+                resource: Some(&body.key),
+                source_ip: ip.as_deref(),
+            }).await;
+            web::HttpResponse::NoContent().finish()
+        }
         Err(e) => env_err_response(e),
     }
 }
@@ -135,7 +178,18 @@ pub async fn delete_secret(
     let (id_s, key) = path.into_inner();
     let Ok(id) = Uuid::parse_str(&id_s) else { return bad_uuid(); };
     match state.env_store.delete_secret(id, &key).await {
-        Ok(true) => web::HttpResponse::NoContent().finish(),
+        Ok(true) => {
+            let ip = source_ip(&req);
+            audit::log(&state.registry, AuditEntry {
+                app_id: Some(id),
+                creator_id: None,
+                actor: "admin",
+                action: Action::DeleteSecret,
+                resource: Some(&key),
+                source_ip: ip.as_deref(),
+            }).await;
+            web::HttpResponse::NoContent().finish()
+        }
         Ok(false) => web::HttpResponse::NotFound().json(&serde_json::json!({"error": "not found"})),
         Err(e) => env_err_response(e),
     }

@@ -18,8 +18,18 @@ use serde::Deserialize;
 use sha2::Sha256;
 use uuid::Uuid;
 
+use crate::audit::{self, Action, AuditEntry};
 use crate::AppState;
 use crate::stripe_store::{self, StripeError};
+
+fn source_ip(req: &web::HttpRequest) -> Option<String> {
+    req.headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .or_else(|| req.peer_addr().map(|a| a.ip().to_string()))
+}
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -89,7 +99,18 @@ pub async fn callback(
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
     match state.stripe_store.link_account(creator_id, &body.stripe_account_id).await {
-        Ok(()) => web::HttpResponse::NoContent().finish(),
+        Ok(()) => {
+            let ip = source_ip(&req);
+            audit::log(&state.registry, AuditEntry {
+                app_id: None,
+                creator_id: Some(creator_id),
+                actor: "admin",
+                action: Action::LinkAccount,
+                resource: Some(&body.stripe_account_id),
+                source_ip: ip.as_deref(),
+            }).await;
+            web::HttpResponse::NoContent().finish()
+        }
         Err(e) => stripe_err_response(e),
     }
 }
@@ -141,7 +162,18 @@ pub async fn unlink(
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
     match state.stripe_store.unlink_account(creator_id).await {
-        Ok(true) => web::HttpResponse::NoContent().finish(),
+        Ok(true) => {
+            let ip = source_ip(&req);
+            audit::log(&state.registry, AuditEntry {
+                app_id: None,
+                creator_id: Some(creator_id),
+                actor: "admin",
+                action: Action::UnlinkAccount,
+                resource: None,
+                source_ip: ip.as_deref(),
+            }).await;
+            web::HttpResponse::NoContent().finish()
+        }
         Ok(false) => err_json(404, "creator not linked"),
         Err(e) => stripe_err_response(e),
     }
