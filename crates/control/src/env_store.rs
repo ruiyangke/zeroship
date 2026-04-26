@@ -77,40 +77,65 @@ fn valid_key(k: &str) -> bool {
 
 pub struct EnvStore {
     registry: Registry,
-    key: [u8; 32],
+    /// Primary key used for ALL encrypts. Always tried first on decrypt.
+    primary_key: [u8; 32],
+    /// Previous keys. Tried in order on decrypt failure. Empty in
+    /// steady state; populated during a rotation grace period so
+    /// secrets encrypted with an older key remain readable while we
+    /// re-encrypt them in the background.
+    previous_keys: Vec<[u8; 32]>,
 }
 
 impl std::fmt::Debug for EnvStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never leak the derived key via Debug — log output is a
-        // real attack surface.
+        // Never leak the derived keys via Debug.
         f.debug_struct("EnvStore")
-            .field("key", &"<redacted 32B>")
+            .field("primary_key", &"<redacted 32B>")
+            .field("previous_keys", &format!("<{} redacted>", self.previous_keys.len()))
             .finish()
     }
 }
 
 impl Drop for EnvStore {
     fn drop(&mut self) {
-        // Zeroize the derived key on drop so it doesn't linger in the
-        // heap for a post-mortem / core-dump read.
-        zeroize::Zeroize::zeroize(&mut self.key);
+        zeroize::Zeroize::zeroize(&mut self.primary_key);
+        for k in &mut self.previous_keys {
+            zeroize::Zeroize::zeroize(k);
+        }
     }
 }
 
 impl EnvStore {
-    /// Build a store. `master_key` must be non-empty unless `insecure_dev`
-    /// is true (opt-in dev/test mode). An empty master key in production
-    /// would SHA-256 the known prefix and produce a publicly-reproducible
-    /// encryption key — every secret in the DB would be decryptable by
-    /// anyone with read access.
+    /// Build a store with a primary master key. `master_key` must be
+    /// non-empty unless `insecure_dev`. An empty master key would
+    /// SHA-256 the known prefix and produce a publicly-reproducible
+    /// encryption key — every secret in the DB would be decryptable
+    /// by anyone with read access.
     pub fn new(registry: Registry, master_key: &str, insecure_dev: bool) -> Result<Self, EnvError> {
+        Self::new_with_previous(registry, master_key, &[], insecure_dev)
+    }
+
+    /// Build a store with rotation support. `previous_master_keys` is
+    /// tried in order on decrypt failure — lets ops rotate the primary
+    /// key without dumping the secrets table.
+    pub fn new_with_previous(
+        registry: Registry,
+        master_key: &str,
+        previous_master_keys: &[&str],
+        insecure_dev: bool,
+    ) -> Result<Self, EnvError> {
         if master_key.is_empty() && !insecure_dev {
             return Err(EnvError::MasterKeyRequired);
         }
+        let previous_keys = previous_master_keys
+            .iter()
+            .filter(|s| !s.is_empty())
+            .map(|s| crypto::derive_key(s))
+            .collect();
         Ok(Self {
             registry,
-            key: crypto::derive_key(master_key),
+            primary_key: crypto::derive_key(master_key),
+            previous_keys,
         })
     }
 
@@ -228,7 +253,7 @@ impl EnvStore {
         if value.len() > MAX_VALUE_BYTES {
             return Err(EnvError::TooLarge(value.len()));
         }
-        let ct = crypto::encrypt(&self.key, value.as_bytes())?;
+        let ct = crypto::encrypt(&self.primary_key, value.as_bytes())?;
         let conn = self
             .registry
             .conn()
@@ -298,10 +323,17 @@ impl EnvStore {
             )
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
+        // Decrypt path tries primary key first, then any previous
+        // keys (rotation grace). Building the keys vec once outside
+        // the loop avoids repeated allocs.
+        let mut keys: Vec<[u8; 32]> = Vec::with_capacity(1 + self.previous_keys.len());
+        keys.push(self.primary_key);
+        keys.extend_from_slice(&self.previous_keys);
+
         for r in rows.iter() {
             let k: String = r.get("key_name");
             let ct: Vec<u8> = r.get("ciphertext");
-            let plain = crypto::decrypt(&self.key, &ct)?;
+            let plain = crypto::decrypt_with_keys(&keys, &ct)?;
             // Strict UTF-8 — `from_utf8_lossy` would silently replace
             // invalid bytes with U+FFFD and hand the creator a mangled
             // secret. Treat any non-UTF-8 in plaintext as corruption.
@@ -309,6 +341,49 @@ impl EnvStore {
             map.insert(k, serde_json::Value::String(s));
         }
         Ok(map)
+    }
+
+    /// Re-encrypt every secret for `app_id` with the current primary
+    /// key. Used to drain a rotation grace period: after every secret
+    /// has been touched once, it's safe to drop `previous_keys`.
+    /// Returns the count rewritten.
+    pub async fn rotate_app(&self, app_id: Uuid) -> Result<usize, EnvError> {
+        let conn = self.registry.conn().await.map_err(|e| EnvError::Db(format!("{e}")))?;
+        let rows = conn
+            .query(
+                "SELECT key_name, ciphertext FROM app_secrets WHERE app_id = $1",
+                &[&app_id],
+            )
+            .await
+            .map_err(|e| EnvError::Db(e.to_string()))?;
+        let mut keys: Vec<[u8; 32]> = Vec::with_capacity(1 + self.previous_keys.len());
+        keys.push(self.primary_key);
+        keys.extend_from_slice(&self.previous_keys);
+
+        let mut count = 0;
+        for r in rows.iter() {
+            let k: String = r.get("key_name");
+            let ct: Vec<u8> = r.get("ciphertext");
+            let plain = crypto::decrypt_with_keys(&keys, &ct)?;
+            // Re-encrypt only if not already on the current version
+            // (avoids churn on already-current ciphertexts).
+            if ct.first().copied() == Some(crypto::CURRENT_VERSION) {
+                let primary_only = [self.primary_key];
+                if crypto::decrypt_with_keys(&primary_only, &ct).is_ok() {
+                    continue; // already on primary key; skip.
+                }
+            }
+            let new_ct = crypto::encrypt(&self.primary_key, &plain)?;
+            conn.execute(
+                "UPDATE app_secrets SET ciphertext = $1, updated_at = NOW()
+                 WHERE app_id = $2 AND key_name = $3",
+                &[&new_ct, &app_id, &k],
+            )
+            .await
+            .map_err(|e| EnvError::Db(e.to_string()))?;
+            count += 1;
+        }
+        Ok(count)
     }
 }
 

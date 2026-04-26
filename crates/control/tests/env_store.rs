@@ -188,6 +188,49 @@ async fn delete_cascades_from_app() {
 }
 
 #[compio::test]
+async fn rotation_decrypts_old_secrets_and_rewrites_to_new_key() {
+    let Some(url) = db_url() else { return; };
+    let registry = Registry::new(&url).await.expect("registry");
+    let app = create_test_app(&registry).await;
+
+    // Phase 1: write secret with key v1.
+    let store_v1 = EnvStore::new(registry.clone(), "key-v1", false).expect("store");
+    store_v1.set_secret(app, "STRIPE_KEY", "sk_live_old").await.unwrap();
+
+    // Phase 2: rotate to key v2; declare key-v1 as legacy. Existing
+    // ciphertexts decrypt via fallback; new writes use v2.
+    let store_v2 = EnvStore::new_with_previous(
+        registry.clone(),
+        "key-v2",
+        &["key-v1"],
+        false,
+    ).expect("store");
+
+    let merged = store_v2.merged_env(app).await.unwrap();
+    assert_eq!(merged.get("STRIPE_KEY").and_then(|v| v.as_str()), Some("sk_live_old"));
+
+    // New write goes through with v2.
+    store_v2.set_secret(app, "OPENAI_KEY", "sk-new").await.unwrap();
+    let merged = store_v2.merged_env(app).await.unwrap();
+    assert_eq!(merged.get("OPENAI_KEY").and_then(|v| v.as_str()), Some("sk-new"));
+
+    // Rewrite all secrets onto v2 (drains the rotation grace period).
+    let count = store_v2.rotate_app(app).await.unwrap();
+    // STRIPE_KEY needed re-encryption (was on v1); OPENAI_KEY already
+    // on v2 — skipped.
+    assert_eq!(count, 1);
+
+    // Phase 3: drop legacy key. Previously-rotated secret still
+    // decrypts via the new primary alone.
+    let store_v3 = EnvStore::new(registry.clone(), "key-v2", false).expect("store");
+    let merged = store_v3.merged_env(app).await.unwrap();
+    assert_eq!(merged.get("STRIPE_KEY").and_then(|v| v.as_str()), Some("sk_live_old"));
+    assert_eq!(merged.get("OPENAI_KEY").and_then(|v| v.as_str()), Some("sk-new"));
+
+    registry.delete_app(&app).await.ok();
+}
+
+#[compio::test]
 async fn audit_log_roundtrip() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");

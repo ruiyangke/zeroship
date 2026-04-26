@@ -34,6 +34,9 @@ async fn main() -> std::io::Result<()> {
     let control_key = arg_or_env(&args, "--control-key", "CONTROL_KEY", "");
     let master_key = arg_or_env(&args, "--master-key", "MASTER_KEY", "");
     let stripe_webhook_secret = arg_or_env(&args, "--stripe-webhook-secret", "STRIPE_WEBHOOK_SECRET", "");
+    // Comma-separated list of previous master keys, tried as fallbacks
+    // on decrypt failure during a rotation grace period.
+    let legacy_master_keys_raw = arg_or_env(&args, "--legacy-master-keys", "LEGACY_MASTER_KEYS", "");
     // Opt-in: explicit "I know this is insecure" flag. Must be set to
     // run without control_key / master_key / stripe_webhook_secret.
     // Production refuses to boot without either the real secrets or
@@ -72,8 +75,24 @@ async fn main() -> std::io::Result<()> {
         LocalFs::new(&bundles_dir).expect("failed to initialise bundle store"),
     ) as Arc<dyn BundleStore + Send + Sync>;
 
-    let env_store = EnvStore::new(registry.clone(), &master_key, insecure_dev)
-        .expect("env store init");
+    let legacy_keys: Vec<&str> = legacy_master_keys_raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !legacy_keys.is_empty() {
+        eprintln!(
+            "[control] EnvStore booted with {} legacy master key(s) for rotation grace period",
+            legacy_keys.len(),
+        );
+    }
+    let env_store = EnvStore::new_with_previous(
+        registry.clone(),
+        &master_key,
+        &legacy_keys,
+        insecure_dev,
+    )
+    .expect("env store init");
     let stripe_store = StripeStore::new(registry.clone());
 
     let state = Arc::new(AppState {
