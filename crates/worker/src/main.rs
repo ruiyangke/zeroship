@@ -7,7 +7,7 @@ use std::sync::{Arc, RwLock};
 use ntex::web;
 use zeroship_runtime::init::init_v8;
 
-use crate::sync::SharedVersions;
+use crate::sync::{SharedEnvs, SharedVersions};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -91,6 +91,10 @@ async fn main() -> std::io::Result<()> {
     // thread made its own HTTP poll — this multiplied control-plane traffic
     // by `workers_count` with no benefit.
     let shared_versions: SharedVersions = Arc::new(RwLock::new(None));
+    // Process-wide env cache (single source of truth across all ntex
+    // worker threads). Reconcile loops read+write through it, the
+    // dispatch handler reads under a brief read lock + Arc clone.
+    let shared_envs: SharedEnvs = Arc::new(RwLock::new(std::collections::HashMap::new()));
 
     eprintln!(
         "[zeroship-worker] http://{bind_addr} ({workers_count} threads, MAX_ISOLATES={} per thread, graceful shutdown={}s)",
@@ -116,13 +120,15 @@ async fn main() -> std::io::Result<()> {
     let mut server = web::server(async move || {
         let config = config.clone();
         let shared = shared_versions.clone();
+        let envs = shared_envs.clone();
         cache::init_cache(config.max_isolates, config.db_url.clone());
         // Per-thread reconcile loop — reads from the shared version map,
-        // does zero HTTP to the control plane.
-        sync::start_sync(config.clone(), shared);
+        // writes env into the process-wide env cache.
+        sync::start_sync(config.clone(), shared, envs.clone());
 
         web::App::new()
             .state(config)
+            .state(envs)
             .service(web::resource("/dispatch/{app_id}").route(web::post().to(handler::dispatch)))
             .service(web::resource("/health").route(web::get().to(|| async {
                 web::HttpResponse::Ok().body(r#"{"status":"ok"}"#)

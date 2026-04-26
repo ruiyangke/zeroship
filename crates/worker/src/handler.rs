@@ -9,9 +9,11 @@ use uuid::Uuid;
 use zeroship_core::auth::{extract_bearer, validate_control_key};
 use zeroship_runtime::runtime::DispatchError;
 use zeroship_runtime::{
-    CancelFlag, FetchOutcome, RequestCtx, ResultReceiver, Runtime, SettledFetch, StreamReader,
+    CancelFlag, EnvSnapshot, FetchOutcome, RequestCtx, ResultReceiver, Runtime, SettledFetch,
+    StreamReader,
 };
 
+use crate::sync::SharedEnvs;
 use crate::{cache, metrics, WorkerConfig};
 
 /// Verify the gateway-issued bearer token on /dispatch endpoints.
@@ -98,6 +100,7 @@ struct HttpEnvelope {
 pub async fn dispatch(
     req: HttpRequest,
     config: web::types::State<Arc<WorkerConfig>>,
+    envs: web::types::State<SharedEnvs>,
     path: web::types::Path<String>,
     body: Bytes,
 ) -> HttpResponse {
@@ -117,7 +120,7 @@ pub async fn dispatch(
     // On-demand loading: if app is not cached, pull from control plane.
     if cache::get_runtime(&app_id).is_none() {
         metrics::inc(&metrics::ON_DEMAND_LOADS_TOTAL);
-        if let Err(e) = load_on_demand(&config, &app_id).await {
+        if let Err(e) = load_on_demand(&config, &envs, &app_id).await {
             metrics::inc(&metrics::ON_DEMAND_LOAD_FAILURES);
             return HttpResponse::ServiceUnavailable()
                 .json(&serde_json::json!({"error": format!("failed to load app: {e}")}));
@@ -144,17 +147,16 @@ pub async fn dispatch(
         }
     };
 
-    // env comes from the per-thread cache, populated alongside the
-    // bundle on load / version bump. Parsed once at cache time, so
-    // the hot path just clones the EnvSnapshot (cheap — interior
-    // JSON string in an `Arc`).
+    // env comes from the process-wide SharedEnvs (Arc<RwLock>), populated
+    // by the reconcile loop or load-on-demand path. Read = brief read
+    // lock + Arc clone; never held across await.
     //
     // Fail-closed: if env is missing we return 503 rather than serve
-    // the app with empty bindings. A creator app that keys
-    // authorization off `env.ADMIN_TOKEN` presence would otherwise
-    // silently fail-open.
-    let env = match cache::get_env(&app_id) {
-        Some(snapshot) => snapshot,
+    // the app with empty bindings. A creator app keying authorization
+    // off `env.ADMIN_TOKEN` presence would otherwise silently
+    // fail-open.
+    let env: EnvSnapshot = match crate::sync::get_env(&envs, &app_id) {
+        Some(arc_snapshot) => (*arc_snapshot).clone(),
         None => {
             metrics::inc(&metrics::ON_DEMAND_LOAD_FAILURES);
             return HttpResponse::ServiceUnavailable()
@@ -300,7 +302,11 @@ fn make_error_msg(status: u16, msg: &str) -> HttpResponse {
 }
 
 /// Pull bundle from control plane and load into cache (cold start path).
-async fn load_on_demand(config: &WorkerConfig, app_id: &Uuid) -> Result<(), String> {
+async fn load_on_demand(
+    config: &WorkerConfig,
+    envs: &SharedEnvs,
+    app_id: &Uuid,
+) -> Result<(), String> {
     let app_version = crate::sync::fetch_app_version(&config.control_url, &config.control_key, app_id).await?;
     let bundle_url = format!("{}/internal/bundles/{}", config.control_url, app_id);
     let bytes = crate::sync::http_get_bytes(&bundle_url, &config.control_key).await?;
@@ -319,7 +325,7 @@ async fn load_on_demand(config: &WorkerConfig, app_id: &Uuid) -> Result<(), Stri
         // the next request retries the whole load path.
         match crate::sync::fetch_app_env(&config.control_url, &config.control_key, app_id).await {
             Ok(env_json) => {
-                if let Err(e) = cache::set_env_from_json(*app_id, &env_json) {
+                if let Err(e) = crate::sync::put_env_from_json(envs, *app_id, &env_json) {
                     cache::evict_app(app_id);
                     cache::remove_hash(app_id);
                     return Err(format!("env parse failed: {e}"));

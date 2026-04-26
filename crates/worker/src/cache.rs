@@ -7,7 +7,6 @@ use uuid::Uuid;
 use zeroship_core::types::AppRuntimeLimits;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
-use zeroship_runtime::EnvSnapshot;
 
 struct IsolateEntry {
     runtime: Runtime,
@@ -159,24 +158,11 @@ pub fn all_app_ids() -> Vec<Uuid> {
     })
 }
 
-// Deploy hash + env tracking. `HashMap::new` is NOT const
-// (`RandomState` seeds at runtime) so we can't use the `const { ... }`
-// initializer here — the runtime first-access guard is one cmpxchg
-// and not on the hot path anyway.
+// Deploy hash tracking — kept thread_local because it pairs 1:1 with
+// `CACHE` (which holds the `!Send` V8 Runtime). Env data lives in the
+// process-wide `SharedEnvs` (sync.rs) instead of per-thread.
 thread_local! {
     static HASHES: RefCell<HashMap<Uuid, String>> = RefCell::new(HashMap::new());
-
-    /// Per-app env snapshot. Parsed once at cache-insert time so the
-    /// hot path avoids JSON parsing on every request.
-    ///
-    /// **TODO (M1)**: refactor to a process-wide `Arc<RwLock<HashMap>>`
-    /// (mirroring `SharedVersions` in `sync.rs`) so 16 ntex threads
-    /// don't each hold a full duplicate copy + so secret rotation
-    /// invalidates ALL threads atomically. Per-thread is the only
-    /// option for the `!Send` V8 `Runtime` cache above; env data is
-    /// `Send` and could move to shared storage. Tracked separately
-    /// because it also touches the reconcile-loop topology.
-    static ENVS: RefCell<HashMap<Uuid, EnvSnapshot>> = RefCell::new(HashMap::new());
 }
 
 pub fn get_hash(app_id: &Uuid) -> Option<String> {
@@ -196,30 +182,8 @@ pub fn remove_hash(app_id: &Uuid) {
     });
 }
 
-pub fn get_env(app_id: &Uuid) -> Option<EnvSnapshot> {
-    ENVS.with(|e| e.borrow().get(app_id).cloned())
-}
-
-/// Parse the JSON once at cache time. Returns `Err` if the JSON is
-/// malformed — callers decide whether to fail the request or fall
-/// back. Previously we silently kept the raw string and re-parsed on
-/// every request, which hid parse bugs in the bundle-load path.
-pub fn set_env_from_json(app_id: Uuid, env_json: &str) -> Result<(), String> {
-    let parsed: serde_json::Value = serde_json::from_str(env_json)
-        .map_err(|e| format!("env json: {e}"))?;
-    let snapshot = EnvSnapshot::new(parsed);
-    ENVS.with(|e| {
-        e.borrow_mut().insert(app_id, snapshot);
-    });
-    Ok(())
-}
-
-#[allow(dead_code)]
-pub fn remove_env(app_id: &Uuid) {
-    ENVS.with(|e| {
-        e.borrow_mut().remove(app_id);
-    });
-}
+// Env get/put moved to crate::sync (SharedEnvs) — see put_env_from_json,
+// get_env, remove_env there.
 
 fn evict_lru(cache: &mut AppCache) {
     if let Some((&oldest_id, _)) = cache.isolates.iter().min_by_key(|(_, e)| e.last_used) {
@@ -228,8 +192,8 @@ fn evict_lru(cache: &mut AppCache) {
         HASHES.with(|h| {
             h.borrow_mut().remove(&oldest_id);
         });
-        ENVS.with(|e| {
-            e.borrow_mut().remove(&oldest_id);
-        });
+        // Env in `SharedEnvs` is process-wide and may still be needed
+        // by other threads — DON'T evict it here. The env-poller and
+        // explicit `remove_env` from `reconcile_once` handle cleanup.
     }
 }
