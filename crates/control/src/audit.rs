@@ -91,7 +91,7 @@ pub async fn recent_for_app(
     let rows = conn
         .query(
             "SELECT id, actor, action, resource, source_ip,
-                    to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS at_text
+                    to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS at_text
              FROM app_audit
              WHERE app_id = $1
              ORDER BY at DESC

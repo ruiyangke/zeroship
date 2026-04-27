@@ -337,6 +337,26 @@ async fn double_unlink_returns_false_second_time() {
 }
 
 #[compio::test]
+async fn same_account_link_is_idempotent_no_history_pollution() {
+    let Some(url) = db_url() else { return; };
+    let registry = Registry::new(&url).await.expect("registry");
+    let store = StripeStore::new(registry);
+    let creator = fresh_creator_id();
+
+    // Three back-to-back links of the SAME account — creator double-
+    // clicked "Connect Stripe" or a script retried.
+    store.link_account(creator, "acct_idempotentLink123").await.unwrap();
+    store.link_account(creator, "acct_idempotentLink123").await.unwrap();
+    store.link_account(creator, "acct_idempotentLink123").await.unwrap();
+
+    // Exactly ONE history row (idempotent re-links don't pollute).
+    let h = store.account_history(creator).await.unwrap();
+    assert_eq!(h.len(), 1, "same-account relinks must not append history");
+    assert_eq!(h[0].stripe_account_id, "acct_idempotentLink123");
+    assert!(h[0].unlinked_at.is_none());
+}
+
+#[compio::test]
 async fn relink_clears_unlinked_at_and_records_history() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");

@@ -191,6 +191,13 @@ pub async fn unlink(
 // Webhook ingest (signature-verified)
 // ----------------------------------------------------------------
 
+/// Cap on number of `v1=...` entries we'll process. Stripe never
+/// sends more than a handful (one per active secret during rotation;
+/// typically 1–2). A header padded with hundreds of garbage v1
+/// entries would otherwise force constant-time-compare work per entry
+/// — a CPU amplification attack via webhook (~60x at MAX_SIGNATURE_HEADER_BYTES).
+const MAX_V1_ENTRIES: usize = 8;
+
 /// Verify a Stripe webhook signature header. Mirrors the TypeScript
 /// `verifyWebhook` in `@zeroship/payments`.
 ///
@@ -215,6 +222,7 @@ pub fn verify_stripe_signature(
     let mut t: Option<i64> = None;
     let mut had_t_field = false;
     let mut v1s: Vec<&str> = Vec::new();
+    let mut v1_overflow = false;
     for part in sig_header.split(',') {
         let part = part.trim();
         if let Some((k, v)) = part.split_once('=') {
@@ -223,10 +231,19 @@ pub fn verify_stripe_signature(
                     had_t_field = true;
                     t = v.trim().parse().ok();
                 }
-                "v1" => v1s.push(v.trim()),
+                "v1" => {
+                    if v1s.len() < MAX_V1_ENTRIES {
+                        v1s.push(v.trim());
+                    } else {
+                        v1_overflow = true;
+                    }
+                }
                 _ => {}
             }
         }
+    }
+    if v1_overflow {
+        return Err(format!("too many v1 entries (max {MAX_V1_ENTRIES})"));
     }
     let t = match (had_t_field, t) {
         (false, _) => return Err("missing t".into()),
@@ -521,6 +538,20 @@ mod verification_tests {
             verify_stripe_signature(body, &header, SECRET, NOW, 300).unwrap(),
             NOW,
         );
+    }
+
+    #[test]
+    fn rejects_too_many_v1_entries_dos_amplification() {
+        // Attacker pads the header with hundreds of v1=garbage to
+        // amplify per-request HMAC compare work. Cap is MAX_V1_ENTRIES.
+        let body = b"{}";
+        let valid = sign(body, NOW);
+        let mut header = valid;
+        for _ in 0..(MAX_V1_ENTRIES + 5) {
+            header.push_str(",v1=deadbeefcafebabe");
+        }
+        let err = verify_stripe_signature(body, &header, SECRET, NOW, 300).unwrap_err();
+        assert!(err.contains("too many v1"), "got: {err}");
     }
 
     #[test]

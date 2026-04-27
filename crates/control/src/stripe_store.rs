@@ -100,64 +100,75 @@ impl StripeStore {
         }
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
 
-        // Close out any open history row for this creator (mark
-        // unlinked) before opening a new one. Idempotent if the row is
-        // already closed or absent.
-        conn.execute(
-            "UPDATE creator_account_history SET unlinked_at = NOW()
-             WHERE creator_id = $1 AND unlinked_at IS NULL",
-            &[&creator_id],
-        )
-        .await
-        .map_err(|e| StripeError::Db(e.to_string()))?;
-        conn.execute(
-            "INSERT INTO creator_account_history(creator_id, stripe_account_id) VALUES($1, $2)",
-            &[&creator_id, &stripe_account_id],
-        )
-        .await
-        .map_err(|e| StripeError::Db(e.to_string()))?;
+        // Same-account idempotency: a creator double-clicking "Connect
+        // Stripe" should NOT pollute the audit history with duplicate
+        // rows. Check the current LIVE binding first; if it matches
+        // exactly, just touch onboarded_at and return.
+        let current = conn
+            .query(
+                "SELECT stripe_account_id FROM creator_accounts
+                 WHERE creator_id = $1 AND unlinked_at IS NULL",
+                &[&creator_id],
+            )
+            .await
+            .map_err(|e| StripeError::Db(e.to_string()))?;
+        if let Some(row) = current.first() {
+            let current_acct: String = row.get("stripe_account_id");
+            if current_acct == stripe_account_id {
+                // Same account, still linked — refresh timestamp only.
+                conn.execute(
+                    "UPDATE creator_accounts SET onboarded_at = NOW() WHERE creator_id = $1",
+                    &[&creator_id],
+                )
+                .await
+                .map_err(|e| StripeError::Db(e.to_string()))?;
+                return Ok(());
+            }
+        }
 
-        // Upsert into the live table. `unlinked_at = NULL` re-activates
-        // a previously-soft-deleted creator with a (possibly different)
-        // new account.
-        conn.execute(
-            "INSERT INTO creator_accounts(creator_id, stripe_account_id, unlinked_at)
-             VALUES($1, $2, NULL)
-             ON CONFLICT (creator_id) DO UPDATE
-                SET stripe_account_id = EXCLUDED.stripe_account_id,
-                    onboarded_at = NOW(),
-                    unlinked_at = NULL",
-            &[&creator_id, &stripe_account_id],
-        )
-        .await
-        .map_err(|e| StripeError::Db(e.to_string()))?;
-        Ok(())
+        // Genuine link or relink-with-different-account. Wrap the
+        // multi-statement update in a transaction so a conn drop
+        // between any two leaves the table consistent.
+        conn.execute("BEGIN", &[])
+            .await
+            .map_err(|e| StripeError::Db(e.to_string()))?;
+        let txn_result = link_account_txn(&conn, creator_id, stripe_account_id).await;
+        match &txn_result {
+            Ok(()) => {
+                conn.execute("COMMIT", &[])
+                    .await
+                    .map_err(|e| StripeError::Db(e.to_string()))?;
+            }
+            Err(_) => {
+                // Best-effort ROLLBACK — if it fails the conn is dead
+                // anyway and Postgres will roll back on disconnect.
+                let _ = conn.execute("ROLLBACK", &[]).await;
+            }
+        }
+        txn_result
     }
 
     /// Soft-delete: mark `unlinked_at = NOW()`. Preserves the row +
     /// every payouts FK pointing at it. `link_account` later re-opens
-    /// the row by clearing `unlinked_at`.
+    /// the row by clearing `unlinked_at`. Wrapped in a transaction so
+    /// the live-table close + history close happen atomically.
     pub async fn unlink_account(&self, creator_id: Uuid) -> Result<bool, StripeError> {
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
-        let n = conn
-            .execute(
-                "UPDATE creator_accounts SET unlinked_at = NOW()
-                 WHERE creator_id = $1 AND unlinked_at IS NULL",
-                &[&creator_id],
-            )
+        conn.execute("BEGIN", &[])
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
-        if n > 0 {
-            // Mirror the close into the history row.
-            conn.execute(
-                "UPDATE creator_account_history SET unlinked_at = NOW()
-                 WHERE creator_id = $1 AND unlinked_at IS NULL",
-                &[&creator_id],
-            )
-            .await
-            .map_err(|e| StripeError::Db(e.to_string()))?;
+        let result = unlink_account_txn(&conn, creator_id).await;
+        match &result {
+            Ok(_) => {
+                conn.execute("COMMIT", &[])
+                    .await
+                    .map_err(|e| StripeError::Db(e.to_string()))?;
+            }
+            Err(_) => {
+                let _ = conn.execute("ROLLBACK", &[]).await;
+            }
         }
-        Ok(n > 0)
+        result
     }
 
     pub async fn get_account(&self, creator_id: Uuid) -> Result<Option<CreatorAccount>, StripeError> {
@@ -167,7 +178,8 @@ impl StripeStore {
                 // Return None for a soft-deleted creator — caller treats
                 // the link as gone. History is still queryable via
                 // get_account_history.
-                "SELECT creator_id, stripe_account_id, onboarded_at::text
+                "SELECT creator_id, stripe_account_id,
+                    to_char(onboarded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS onboarded_at
                  FROM creator_accounts
                  WHERE creator_id = $1 AND unlinked_at IS NULL",
                 &[&creator_id],
@@ -192,9 +204,9 @@ impl StripeStore {
         let rows = conn
             .query(
                 "SELECT id, stripe_account_id,
-                    to_char(linked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS linked_at_text,
+                    to_char(linked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS linked_at_text,
                     CASE WHEN unlinked_at IS NULL THEN NULL
-                         ELSE to_char(unlinked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+                         ELSE to_char(unlinked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
                     END AS unlinked_at_text
                  FROM creator_account_history
                  WHERE creator_id = $1
@@ -258,7 +270,7 @@ impl StripeStore {
                  VALUES($1, $2, $3, $4, $5, $6, $7, to_timestamp($8::double precision), $9)
                  ON CONFLICT (event_id) DO NOTHING
                  RETURNING id,
-                   to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS occurred_at_text",
+                   to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS occurred_at_text",
                 &[&creator_id, &event_id, &event_type, &gross_amount, &platform_fee, &net, &currency, &(occurred_at_unix as f64), &payload_hash.map(|b| b.to_vec())],
             )
             .await
@@ -342,7 +354,8 @@ impl StripeStore {
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         let rows = conn
             .query(
-                "SELECT id, creator_id, event_id, event_type, gross_amount, platform_fee, net_amount, currency, occurred_at::text
+                "SELECT id, creator_id, event_id, event_type, gross_amount, platform_fee, net_amount, currency,
+                    to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS occurred_at
                  FROM payouts
                  WHERE creator_id = $1
                  ORDER BY occurred_at DESC
@@ -366,6 +379,68 @@ impl StripeStore {
             })
             .collect())
     }
+}
+
+/// Body of `link_account` once we've decided this is a real link
+/// (not an idempotent same-account replay). Runs under BEGIN/COMMIT.
+async fn link_account_txn(
+    conn: &compio_postgres::Client,
+    creator_id: Uuid,
+    stripe_account_id: &str,
+) -> Result<(), StripeError> {
+    // Close any open history row.
+    conn.execute(
+        "UPDATE creator_account_history SET unlinked_at = NOW()
+         WHERE creator_id = $1 AND unlinked_at IS NULL",
+        &[&creator_id],
+    )
+    .await
+    .map_err(|e| StripeError::Db(e.to_string()))?;
+    // Open new history row.
+    conn.execute(
+        "INSERT INTO creator_account_history(creator_id, stripe_account_id) VALUES($1, $2)",
+        &[&creator_id, &stripe_account_id],
+    )
+    .await
+    .map_err(|e| StripeError::Db(e.to_string()))?;
+    // Upsert live row.
+    conn.execute(
+        "INSERT INTO creator_accounts(creator_id, stripe_account_id, unlinked_at)
+         VALUES($1, $2, NULL)
+         ON CONFLICT (creator_id) DO UPDATE
+            SET stripe_account_id = EXCLUDED.stripe_account_id,
+                onboarded_at = NOW(),
+                unlinked_at = NULL",
+        &[&creator_id, &stripe_account_id],
+    )
+    .await
+    .map_err(|e| StripeError::Db(e.to_string()))?;
+    Ok(())
+}
+
+/// Body of `unlink_account` under BEGIN/COMMIT.
+async fn unlink_account_txn(
+    conn: &compio_postgres::Client,
+    creator_id: Uuid,
+) -> Result<bool, StripeError> {
+    let n = conn
+        .execute(
+            "UPDATE creator_accounts SET unlinked_at = NOW()
+             WHERE creator_id = $1 AND unlinked_at IS NULL",
+            &[&creator_id],
+        )
+        .await
+        .map_err(|e| StripeError::Db(e.to_string()))?;
+    if n > 0 {
+        conn.execute(
+            "UPDATE creator_account_history SET unlinked_at = NOW()
+             WHERE creator_id = $1 AND unlinked_at IS NULL",
+            &[&creator_id],
+        )
+        .await
+        .map_err(|e| StripeError::Db(e.to_string()))?;
+    }
+    Ok(n > 0)
 }
 
 /// Stripe account IDs are `acct_` + 12–64 alphanumerics. `starts_with`

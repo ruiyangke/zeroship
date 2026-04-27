@@ -58,10 +58,6 @@ async fn main() -> std::io::Result<()> {
         let mut missing = Vec::new();
         if master_key.is_empty() { missing.push("--master-key / MASTER_KEY"); }
         if control_key.is_empty() { missing.push("--control-key / CONTROL_KEY"); }
-        // stripe_webhook_secret is optional in principle (control-plane
-        // may run without Stripe), but if it's empty the webhook
-        // handler rejects every request — so the operator is on notice
-        // via the startup log.
         if !missing.is_empty() {
             eprintln!(
                 "[control] refusing to start: required secrets missing: {}\n\
@@ -70,6 +66,17 @@ async fn main() -> std::io::Result<()> {
                 missing.join(", "),
             );
             std::process::exit(1);
+        }
+        if stripe_webhook_secret.is_empty() {
+            // Not fatal — operators may run a control plane without
+            // Stripe entirely. But every webhook delivery will reject
+            // with 500, so log loudly at startup so a misconfigured
+            // deploy isn't noticed only via Stripe-side retries.
+            eprintln!(
+                "[control] WARNING: stripe_webhook_secret unset — \
+                 /internal/webhooks/stripe will reject every request. \
+                 Set --stripe-webhook-secret if you need Stripe integration."
+            );
         }
     }
     if insecure_dev {
