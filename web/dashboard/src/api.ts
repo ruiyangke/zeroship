@@ -1,13 +1,22 @@
 // ── API Client ──────────────────────────────────────────────
 
 export interface AppRecord {
-  id: string;
+  id: string;             // UUID — primary key
+  name: string;           // creator-chosen slug (used for routing)
   plan_id: string;
-  version: number;
+  deploy_hash: string | null;
   api_key: string;
   created_at: string;
   updated_at: string;
-  server_js?: string;  // included when fetching single app
+  server_js?: string;     // included when fetching single app
+
+  /**
+   * @deprecated The control plane no longer tracks an integer
+   * version — `deploy_hash` is the source of truth. Kept on the
+   * type so existing dashboard pages compile; remove once those
+   * call sites switch to `deploy_hash`.
+   */
+  version?: number;
 }
 
 export interface Stats {
@@ -58,10 +67,25 @@ export function getApp(id: string): Promise<AppRecord> {
   return apiFetch(`/api/apps/${id}`);
 }
 
-export function createApp(id: string, plan_id: string): Promise<AppRecord> {
+export function createApp(name: string, plan_id: string): Promise<AppRecord> {
   return apiFetch("/api/apps", {
     method: "POST",
-    body: JSON.stringify({ id, plan_id }),
+    body: JSON.stringify({ name, plan_id }),
+  });
+}
+
+/** URL where a deployed app is reachable (path-based for local dev). */
+export function appPreviewUrl(appName: string, path: string = "/"): string {
+  const base = `/apps/${encodeURIComponent(appName)}`;
+  return path === "/" ? `${base}/` : `${base}${path.startsWith("/") ? "" : "/"}${path}`;
+}
+
+/** Upload a static asset (HTML/CSS/JS file). */
+export function uploadAsset(appId: string, path: string, content: string, contentType: string): Promise<{ uploaded: string; size: number }> {
+  return apiFetch(`/api/apps/${appId}/assets/${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": contentType },
+    body: content,
   });
 }
 

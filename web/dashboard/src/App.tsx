@@ -7,6 +7,7 @@ import AppList from "./pages/AppList";
 import AppDetail from "./pages/AppDetail";
 import CreateApp from "./pages/CreateApp";
 import AIChat from "./pages/AIChat";
+import Builder from "./pages/Builder";
 
 function App() {
   const [authed, setAuthed] = useState(() => !!localStorage.getItem("zeroship_key"));
@@ -33,16 +34,28 @@ function App() {
 
   return (
     <BrowserRouter>
-      <Layout onLogout={handleLogout}>
-        <Routes>
-          <Route path="/" element={<Overview />} />
-          <Route path="/apps" element={<AppList />} />
-          <Route path="/apps/new" element={<CreateApp />} />
-          <Route path="/apps/:id" element={<AppDetail />} />
-          <Route path="/ai" element={<AIChat />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </Layout>
+      <Routes>
+        {/* Builder routes own their full viewport (no Layout chrome). */}
+        <Route path="/builder" element={<Builder />} />
+        <Route path="/builder/:appId" element={<Builder />} />
+
+        {/* Existing dashboard routes wrap in Layout. */}
+        <Route
+          path="/*"
+          element={
+            <Layout onLogout={handleLogout}>
+              <Routes>
+                <Route path="/" element={<Overview />} />
+                <Route path="/apps" element={<AppList />} />
+                <Route path="/apps/new" element={<CreateApp />} />
+                <Route path="/apps/:id" element={<AppDetail />} />
+                <Route path="/ai" element={<AIChat />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </Layout>
+          }
+        />
+      </Routes>
     </BrowserRouter>
   );
 }

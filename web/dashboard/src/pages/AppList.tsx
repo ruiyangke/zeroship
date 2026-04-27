@@ -5,7 +5,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
-import { Plus, Copy, Check } from "lucide-react";
+import { Plus, Copy, Check, Sparkles } from "lucide-react";
 import StatusBadge from "../components/StatusBadge";
 import { useState } from "react";
 
@@ -69,12 +69,20 @@ export default function AppList() {
     <div>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-xl font-medium tracking-[0.05em]">// apps</h1>
-        <Button variant="primary" asChild>
-          <Link to="/apps/new">
-            <Plus className="h-3 w-3 mr-1.5" />
-            new app
-          </Link>
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="primary" asChild>
+            <Link to="/builder">
+              <Sparkles className="h-3 w-3 mr-1.5" />
+              build with ai
+            </Link>
+          </Button>
+          <Button variant="default" asChild>
+            <Link to="/apps/new">
+              <Plus className="h-3 w-3 mr-1.5" />
+              new app
+            </Link>
+          </Button>
+        </div>
       </div>
 
       {error && (
@@ -100,11 +108,11 @@ export default function AppList() {
                 <TableRow>
                   <TableHead>id</TableHead>
                   <TableHead>plan</TableHead>
-                  <TableHead>version</TableHead>
                   <TableHead>endpoint</TableHead>
                   <TableHead>requests</TableHead>
                   <TableHead>status</TableHead>
                   <TableHead>updated</TableHead>
+                  <TableHead className="w-[40px]" />
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -126,7 +134,6 @@ export default function AppList() {
                     <TableCell>
                       <Badge variant="muted">{app.plan_id}</Badge>
                     </TableCell>
-                    <TableCell>v{app.version}</TableCell>
                     <TableCell>
                       <CopyableEndpoint appId={app.id} />
                     </TableCell>
@@ -136,6 +143,16 @@ export default function AppList() {
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {new Date(app.updated_at).toLocaleDateString()}
+                    </TableCell>
+                    <TableCell>
+                      <Link
+                        to={`/builder/${app.id}`}
+                        onClick={(e) => e.stopPropagation()}
+                        title="Open in AI builder"
+                        className="inline-flex items-center justify-center h-6 w-6 hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                      >
+                        <Sparkles className="h-3 w-3" />
+                      </Link>
                     </TableCell>
                   </TableRow>
                 ))}

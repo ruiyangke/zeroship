@@ -1,6 +1,6 @@
 import { NavLink } from "react-router-dom";
 import { type ReactNode } from "react";
-import { LayoutDashboard, Box, Plus, LogOut, Bot } from "lucide-react";
+import { LayoutDashboard, Box, Plus, LogOut, Bot, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Separator } from "@/components/ui/separator";
 
@@ -13,7 +13,8 @@ const navItems = [
   { to: "/", label: "overview", icon: LayoutDashboard, end: true },
   { to: "/apps", label: "apps", icon: Box, end: false },
   { to: "/apps/new", label: "create app", icon: Plus, end: false },
-  { to: "/ai", label: "ai agent", icon: Bot, end: false },
+  { to: "/builder", label: "ai builder", icon: Sparkles, end: false },
+  { to: "/ai", label: "ai agent (legacy)", icon: Bot, end: false },
 ];
 
 export default function Layout({ children, onLogout }: LayoutProps) {

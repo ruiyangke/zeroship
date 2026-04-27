@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect } from "react";
-import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { Bot, User, Send, Loader2, Wrench, CheckCircle, AlertCircle } from "lucide-react";
+import { Bot, User, Send, Loader2, Wrench, CheckCircle } from "lucide-react";
 
 const AGENT_URL = "http://localhost:4444";
 
@@ -155,7 +155,7 @@ export default function AIChat() {
       <div className="flex items-center gap-2 mb-4">
         <Bot className="h-5 w-5 text-primary" />
         <h1 className="text-lg font-bold tracking-tight">AI AGENT</h1>
-        <Badge variant="outline" className="text-xs">
+        <Badge variant="muted" className="text-xs">
           deepagents + claude
         </Badge>
       </div>
@@ -214,7 +214,7 @@ export default function AIChat() {
                             calling <code className="text-foreground">{t.name}</code>
                           </span>
                           {t.input?.app_id && (
-                            <Badge variant="outline" className="text-[10px]">
+                            <Badge variant="muted" className="text-[10px]">
                               {t.input.app_id}
                             </Badge>
                           )}
