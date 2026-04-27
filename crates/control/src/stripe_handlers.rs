@@ -389,7 +389,7 @@ pub async fn webhook(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        if let Err(e) = verify_stripe_signature(raw, sig_header, &state.stripe_webhook_secret, now, 300) {
+        if let Err(e) = verify_stripe_signature(raw, sig_header, state.stripe_webhook_secret.expose_secret(), now, 300) {
             eprintln!("[stripe] webhook rejected: {e}");
             return err_json(400, format!("webhook verification failed: {e}"));
         }

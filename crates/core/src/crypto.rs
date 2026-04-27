@@ -1,45 +1,37 @@
 //! AES-256-GCM wrapper for secrets at rest with key-rotation support.
 //!
-//! ## Wire format
+//! ## Wire format (single, unambiguous)
 //!
-//! New ciphertexts (`encrypt`):
-//!     0x01 || nonce(12) || ciphertext || tag(16)
-//!     ^^^^   version byte; identifies KDF + cipher choice.
+//!     nonce(12) || ciphertext || tag(16)
 //!
-//! Legacy ciphertexts (pre-rotation deployments):
-//!     nonce(12) || ciphertext || tag(16)   // no version byte
+//! No version-byte heuristic — the previous design was probabilistic
+//! and lost ~12% of legacy blobs whose random nonce happened to start
+//! with bytes 0x01..=0x1F. If the cipher / KDF ever changes (e.g.,
+//! AES-256-GCM-SIV or XChaCha20-Poly1305) the version goes in a
+//! separate `cipher_version` DB column, NOT inline — the on-wire
+//! representation stays unambiguous.
 //!
-//! `decrypt_with_keys` tries the primary key first, then falls back to
-//! provided previous keys. This lets ops rotate the master key with a
-//! grace period: deploy the new primary, keep the old as `legacy_keys`,
-//! re-encrypt secrets in the background, then drop the old key.
+//! ## Key rotation
 //!
-//! Decoding rules:
-//! - If `blob[0] == 0x01` AND `blob.len() >= 1+12+16` → versioned format.
-//! - Otherwise → legacy unversioned format.
-//!
-//! Future versions: 0x02+ reserved for migrations to XChaCha20-Poly1305
-//! / AES-GCM-SIV / different KDF.
+//! `decrypt_with_keys(&[primary, ...legacy], blob)` tries the primary
+//! first, then each legacy key. Lets ops rotate the master key with a
+//! grace period: deploy the new primary, keep the old as `legacy`,
+//! re-encrypt secrets in the background via `EnvStore::rotate_app`,
+//! then drop the old key.
 
 use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
-
-/// Current ciphertext version. Increment when changing KDF / cipher /
-/// nonce strategy in a way that's incompatible with the previous reader.
-pub const CURRENT_VERSION: u8 = 0x01;
 
 #[derive(Debug)]
 pub enum CryptoError {
     TooShort,
     Decrypt,
     Encrypt,
-    /// Encountered a version byte the current binary doesn't know how
-    /// to decode. Either roll back, or upgrade the binary.
-    UnknownVersion(u8),
 }
 
 impl std::fmt::Display for CryptoError {
@@ -48,16 +40,20 @@ impl std::fmt::Display for CryptoError {
             Self::TooShort => write!(f, "ciphertext too short to contain a nonce"),
             Self::Decrypt => write!(f, "decryption failed (wrong key, tampered, or corrupt)"),
             Self::Encrypt => write!(f, "encryption failed"),
-            Self::UnknownVersion(v) => write!(f, "ciphertext has unknown version byte 0x{v:02x}"),
         }
     }
 }
 
 impl std::error::Error for CryptoError {}
 
-/// Derive a 32-byte AES key from a master-key string. We SHA-256 the
-/// string so callers can pass any length. For production, supply a
-/// pre-generated high-entropy master key; for dev, any string works.
+/// Derive a 32-byte AES key from a master-key string. SHA-256 over a
+/// domain-separating prefix + the master string. Caller-friendly: any
+/// length input. For production, supply a high-entropy master key.
+///
+/// **Per-app HKDF is a planned hardening (G-track follow-up).** The
+/// current single-key derivation means a master compromise leaks every
+/// app's secrets at once; an HKDF expansion mixing in `app_id` would
+/// bound blast radius to one app.
 pub fn derive_key(master: &str) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(b"zeroship-secret-key-v1");
@@ -68,21 +64,20 @@ pub fn derive_key(master: &str) -> [u8; 32] {
     k
 }
 
-/// Encrypt `plaintext`. Always emits the current versioned format.
+/// Encrypt `plaintext`. Always emits `nonce(12) || ct || tag(16)`.
 pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     let ct = cipher
         .encrypt(&nonce, plaintext)
         .map_err(|_| CryptoError::Encrypt)?;
-    let mut out = Vec::with_capacity(1 + NONCE_LEN + ct.len());
-    out.push(CURRENT_VERSION);
+    let mut out = Vec::with_capacity(NONCE_LEN + plaintext.len() + TAG_LEN);
     out.extend_from_slice(nonce.as_slice());
     out.extend_from_slice(&ct);
     Ok(out)
 }
 
-/// Decrypt a single-key blob. Accepts both versioned and legacy formats.
+/// Decrypt with a single key.
 pub fn decrypt(key: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let (nonce_bytes, ct) = parse(blob)?;
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
@@ -92,56 +87,43 @@ pub fn decrypt(key: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>, CryptoError> {
 
 /// Try every key in order; return the first successful decrypt. Used
 /// during key rotation: pass the new primary first, then old keys.
-/// Returns `Decrypt` only if EVERY key fails.
+/// Always tries every key regardless of intermediate failure (constant-
+/// time across key count to limit timing-side-channel info leak about
+/// rotation state).
 pub fn decrypt_with_keys(keys: &[[u8; 32]], blob: &[u8]) -> Result<Vec<u8>, CryptoError> {
     if keys.is_empty() {
         return Err(CryptoError::Decrypt);
     }
-    // Parse once; the nonce/ct slices don't change between key attempts.
     let (nonce_bytes, ct) = parse(blob)?;
     let nonce = Nonce::from_slice(nonce_bytes);
-    let mut last_err = CryptoError::Decrypt;
+    let mut result: Option<Vec<u8>> = None;
     for k in keys {
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(k));
         match cipher.decrypt(nonce, ct) {
-            Ok(plain) => return Ok(plain),
-            Err(_) => last_err = CryptoError::Decrypt,
+            // Keep the FIRST success — but don't early-return. Continuing
+            // through every key means the work is constant in `keys.len()`,
+            // so an attacker measuring response time can't tell which key
+            // (primary vs legacy) actually decrypted the ciphertext.
+            Ok(plain) if result.is_none() => result = Some(plain),
+            Ok(plain) => {
+                // Got success on a non-first key — discard, scrubbing the
+                // duplicate plaintext copy out of memory.
+                let mut p = plain;
+                p.zeroize();
+            }
+            Err(_) => {}
         }
     }
-    Err(last_err)
+    result.ok_or(CryptoError::Decrypt)
 }
 
-/// Parse a blob into `(nonce_slice, ciphertext_slice)`. Handles both
-/// versioned and legacy formats.
+/// Parse a blob into `(nonce_slice, ciphertext_slice)`.
+/// Single unambiguous format — minimum length is `NONCE_LEN + TAG_LEN`.
 fn parse(blob: &[u8]) -> Result<(&[u8], &[u8]), CryptoError> {
-    if blob.is_empty() {
+    if blob.len() < NONCE_LEN + TAG_LEN {
         return Err(CryptoError::TooShort);
     }
-    // Versioned format starts with a known version byte AND has at
-    // least 1 + NONCE_LEN + TAG_LEN bytes. Legacy format has no
-    // version byte and starts directly with the nonce.
-    let versioned = blob[0] == CURRENT_VERSION && blob.len() >= 1 + NONCE_LEN + TAG_LEN;
-    if versioned {
-        let body = &blob[1..];
-        let (n, c) = body.split_at(NONCE_LEN);
-        Ok((n, c))
-    } else {
-        // Legacy: blob must be at least nonce(12) + tag(16) = 28 bytes.
-        if blob.len() < NONCE_LEN + TAG_LEN {
-            return Err(CryptoError::TooShort);
-        }
-        // Reject blobs that look versioned with a future / unknown version.
-        if blob[0] != CURRENT_VERSION
-            && blob[0] != 0
-            && blob.len() >= 1 + NONCE_LEN + TAG_LEN
-            && blob[0] < 0x20
-        {
-            // Heuristic: small first byte that's not the current version
-            // suggests a future versioned format we can't decode.
-            return Err(CryptoError::UnknownVersion(blob[0]));
-        }
-        Ok(blob.split_at(NONCE_LEN))
-    }
+    Ok(blob.split_at(NONCE_LEN))
 }
 
 #[cfg(test)]
@@ -149,10 +131,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roundtrip_versioned() {
+    fn roundtrip() {
         let key = derive_key("platform-key");
         let ct = encrypt(&key, b"sk_live_hunter2").unwrap();
-        assert_eq!(ct[0], CURRENT_VERSION, "first byte should be version");
         assert_eq!(decrypt(&key, &ct).unwrap(), b"sk_live_hunter2");
     }
 
@@ -176,23 +157,14 @@ mod tests {
     fn tampered_nonce_fails() {
         let key = derive_key("k");
         let mut ct = encrypt(&key, b"hello").unwrap();
-        // Skip version byte (index 0) — flip a nonce byte.
-        ct[1] ^= 0x01;
+        ct[0] ^= 0x01;
         assert!(matches!(decrypt(&key, &ct), Err(CryptoError::Decrypt)));
     }
 
     #[test]
-    fn tampered_version_byte_fails() {
-        let key = derive_key("k");
-        let mut ct = encrypt(&key, b"hello").unwrap();
-        // Change to an unknown version that doesn't qualify as legacy.
-        ct[0] = 0x05;
-        let err = decrypt(&key, &ct).unwrap_err();
-        assert!(matches!(err, CryptoError::UnknownVersion(0x05) | CryptoError::Decrypt));
-    }
-
-    #[test]
     fn nonce_uniqueness() {
+        // Two encryptions of the same plaintext must produce different
+        // ciphertexts because nonces are random per call.
         let key = derive_key("k");
         let a = encrypt(&key, b"x").unwrap();
         let b = encrypt(&key, b"x").unwrap();
@@ -211,29 +183,14 @@ mod tests {
         let key = derive_key("k");
         assert!(matches!(decrypt(&key, &[]), Err(CryptoError::TooShort)));
         assert!(matches!(decrypt(&key, &[0u8; 5]), Err(CryptoError::TooShort)));
+        // Exactly NONCE_LEN bytes is below minimum (no tag).
+        assert!(matches!(decrypt(&key, &[0u8; NONCE_LEN]), Err(CryptoError::TooShort)));
     }
 
     #[test]
     fn derive_is_deterministic() {
         assert_eq!(derive_key("same"), derive_key("same"));
         assert_ne!(derive_key("a"), derive_key("b"));
-    }
-
-    #[test]
-    fn legacy_format_still_decrypts() {
-        // Synthesize a legacy blob (no version byte) by encrypting,
-        // stripping the version, and retrying if the random nonce's
-        // first byte happens to equal CURRENT_VERSION (1/256 chance —
-        // would otherwise look like a versioned blob to `parse`).
-        let key = derive_key("k");
-        let legacy = loop {
-            let ct = encrypt(&key, b"old data").unwrap();
-            let l: Vec<u8> = ct[1..].to_vec(); // drop version prefix
-            if l[0] != CURRENT_VERSION {
-                break l;
-            }
-        };
-        assert_eq!(decrypt(&key, &legacy).unwrap(), b"old data");
     }
 
     #[test]
@@ -263,12 +220,9 @@ mod tests {
 
     #[test]
     fn rotation_all_keys_fail_returns_decrypt() {
-        let k1 = derive_key("a");
-        let k2 = derive_key("b");
         let bad1 = derive_key("c");
         let bad2 = derive_key("d");
-        let ct = encrypt(&k1, b"x").unwrap();
-        let _ = k2;
+        let ct = encrypt(&derive_key("a"), b"x").unwrap();
         let err = decrypt_with_keys(&[bad1, bad2], &ct).unwrap_err();
         assert!(matches!(err, CryptoError::Decrypt));
     }
@@ -278,5 +232,17 @@ mod tests {
         let blob = encrypt(&derive_key("k"), b"x").unwrap();
         let err = decrypt_with_keys(&[], &blob).unwrap_err();
         assert!(matches!(err, CryptoError::Decrypt));
+    }
+
+    #[test]
+    fn rotation_constant_iterations() {
+        // Smoke test: with a successful primary, decrypt_with_keys
+        // doesn't panic / misbehave when given many extra (failing) keys.
+        let primary = derive_key("p");
+        let extras: Vec<[u8; 32]> = (0..10).map(|i| derive_key(&format!("extra-{i}"))).collect();
+        let ct = encrypt(&primary, b"value").unwrap();
+        let mut keys = vec![primary];
+        keys.extend(extras);
+        assert_eq!(decrypt_with_keys(&keys, &ct).unwrap(), b"value");
     }
 }

@@ -29,7 +29,7 @@ fn check_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpRespo
         // secrets to anyone on the network.
         Some(key)
             if !state.control_key.is_empty()
-                && zeroship_core::auth::validate_control_key(key, &state.control_key) =>
+                && zeroship_core::auth::validate_control_key(key, state.control_key.expose_secret()) =>
         {
             None
         }

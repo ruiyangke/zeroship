@@ -25,10 +25,39 @@ pub use rate_limit::{Quota, RateLimiter};
 pub use registry::Registry;
 pub use stripe_store::StripeStore;
 
-/// String that zeroizes its heap buffer on drop. Use for any secret
-/// that lives in `AppState` or other long-lived structs — keeps
-/// post-mortem `/proc/<pid>/mem` reads from recovering the value.
-pub type SecretString = Zeroizing<String>;
+/// String that zeroizes its heap buffer on drop AND refuses to leak
+/// via `Display` / `Debug` / `serde::Serialize`. Use for any secret
+/// that lives in `AppState` or any long-lived struct.
+///
+/// Designed to be a footgun-resistant replacement for the previous
+/// `pub type SecretString = Zeroizing<String>` alias — that alias
+/// still exposed `Display`, `to_string()`, and (via Deref) all
+/// `String` methods, which made it trivial for a tracing span or
+/// JSON serializer to leak the secret. This wrapping struct exposes
+/// ONLY `expose_secret()` for intentional access; every accidental
+/// path errors at compile time.
+pub struct SecretString(Zeroizing<String>);
+
+impl SecretString {
+    pub fn new(s: String) -> Self { Self(Zeroizing::new(s)) }
+
+    /// Borrow the underlying string. Name is intentionally noisy —
+    /// every call site documents that the caller knows it's holding
+    /// secret material.
+    pub fn expose_secret(&self) -> &str { &self.0 }
+
+    /// `true` for empty / unset secret. Lets callers gate on
+    /// "is this configured" without exposing the value.
+    pub fn is_empty(&self) -> bool { self.0.is_empty() }
+}
+
+impl std::fmt::Debug for SecretString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SecretString(<redacted {} bytes>)", self.0.len())
+    }
+}
+// Intentionally NO Display, NO serde::Serialize, NO Deref<Target=String>.
+// The only way to read the contents is `.expose_secret()`.
 
 /// Shared application state injected into every handler.
 ///

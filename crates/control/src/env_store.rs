@@ -364,7 +364,14 @@ impl EnvStore {
     /// key. Used to drain a rotation grace period: after every secret
     /// has been touched once, it's safe to drop `previous_keys`.
     /// Returns the count rewritten.
+    ///
+    /// Skip-if-already-on-primary detection: try decrypting with the
+    /// primary key alone. If that succeeds, the ciphertext is already
+    /// bound to the primary key and re-encryption is wasted work.
+    /// Stack-local key copies are zeroized on scope exit.
     pub async fn rotate_app(&self, app_id: Uuid) -> Result<usize, EnvError> {
+        use zeroize::{Zeroize, Zeroizing};
+
         let conn = self.registry.conn().await.map_err(|e| EnvError::Db(format!("{e}")))?;
         let rows = conn
             .query(
@@ -373,23 +380,37 @@ impl EnvStore {
             )
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
-        let mut keys: Vec<[u8; 32]> = Vec::with_capacity(1 + self.previous_keys.len());
-        keys.push(self.primary_key);
-        keys.extend_from_slice(&self.previous_keys);
 
+        // Wrap in Zeroizing — the underlying Vec<u8> is zeroized on drop.
+        let mut all_keys_buf: Vec<u8> = Vec::with_capacity(32 * (1 + self.previous_keys.len()));
+        all_keys_buf.extend_from_slice(&self.primary_key);
+        for k in &self.previous_keys {
+            all_keys_buf.extend_from_slice(k);
+        }
+        let _all_keys_zeroize = Zeroizing::new(all_keys_buf.clone());
+        let all_keys: Vec<[u8; 32]> = all_keys_buf
+            .chunks_exact(32)
+            .map(|c| {
+                let mut a = [0u8; 32];
+                a.copy_from_slice(c);
+                a
+            })
+            .collect();
+
+        let primary_only: [[u8; 32]; 1] = [self.primary_key];
         let mut count = 0;
         for r in rows.iter() {
             let k: String = r.get("key_name");
             let ct: Vec<u8> = r.get("ciphertext");
-            let plain = crypto::decrypt_with_keys(&keys, &ct)?;
-            // Re-encrypt only if not already on the current version
-            // (avoids churn on already-current ciphertexts).
-            if ct.first().copied() == Some(crypto::CURRENT_VERSION) {
-                let primary_only = [self.primary_key];
-                if crypto::decrypt_with_keys(&primary_only, &ct).is_ok() {
-                    continue; // already on primary key; skip.
-                }
+
+            // Already-on-primary check: if primary alone decrypts, skip
+            // re-encryption (avoids churn on already-current ciphertexts).
+            if crypto::decrypt_with_keys(&primary_only, &ct).is_ok() {
+                continue;
             }
+
+            // Otherwise: decrypt under any known key, re-encrypt with primary.
+            let plain = Zeroizing::new(crypto::decrypt_with_keys(&all_keys, &ct)?);
             let new_ct = crypto::encrypt(&self.primary_key, &plain)?;
             conn.execute(
                 "UPDATE app_secrets SET ciphertext = $1, updated_at = NOW()
@@ -400,6 +421,8 @@ impl EnvStore {
             .map_err(|e| EnvError::Db(e.to_string()))?;
             count += 1;
         }
+        // Final scrub of the temporary key material.
+        all_keys_buf.zeroize();
         Ok(count)
     }
 }

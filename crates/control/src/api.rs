@@ -50,7 +50,7 @@ pub(crate) fn check_admin_auth(req: &web::HttpRequest, state: &AppState) -> Opti
         .unwrap_or("");
     let token = zeroship_core::auth::extract_bearer(header);
     match token {
-        Some(key) if zeroship_core::auth::validate_control_key(key, &state.master_key) => None,
+        Some(key) if zeroship_core::auth::validate_control_key(key, state.master_key.expose_secret()) => None,
         _ => {
             eprintln!("[control] auth rejected on {} {}", req.method(), req.path());
             Some(
