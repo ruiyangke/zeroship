@@ -11,31 +11,16 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::audit::{self, Action, AuditEntry};
+use crate::http_util;
 use crate::AppState;
 use crate::env_store::EnvError;
 
-fn source_ip(req: &web::HttpRequest) -> Option<String> {
-    req.headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .or_else(|| req.peer_addr().map(|a| a.ip().to_string()))
+fn source_ip(req: &web::HttpRequest, state: &AppState) -> Option<String> {
+    http_util::source_ip(req, state.trust_proxy)
 }
 
-/// Token-bucket gate for admin mutating endpoints. Returns 429 if the
-/// caller's IP is over quota.
 fn admin_rate_limit(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
-    let Some(addr) = req.peer_addr() else { return None };
-    if state.admin_limiter.check(addr.ip()) {
-        None
-    } else {
-        Some(
-            web::HttpResponse::TooManyRequests()
-                .header("retry-after", "1")
-                .json(&serde_json::json!({"error":"rate limited"})),
-        )
-    }
+    http_util::rate_limit(req, &state.admin_limiter, state.trust_proxy)
 }
 
 fn bad_uuid() -> web::HttpResponse {
@@ -78,6 +63,7 @@ pub async fn list_vars(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
     match state.env_store.list_vars(id).await {
         Ok(rows) => {
@@ -102,7 +88,7 @@ pub async fn set_var(
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
     match state.env_store.set_var(id, &body.key, &body.value).await {
         Ok(()) => {
-            let ip = source_ip(&req);
+            let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
                 app_id: Some(id),
                 creator_id: None,
@@ -128,7 +114,7 @@ pub async fn delete_var(
     let Ok(id) = Uuid::parse_str(&id_s) else { return bad_uuid(); };
     match state.env_store.delete_var(id, &key).await {
         Ok(true) => {
-            let ip = source_ip(&req);
+            let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
                 app_id: Some(id),
                 creator_id: None,
@@ -154,6 +140,7 @@ pub async fn list_secrets(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
     match state.env_store.list_secret_names(id).await {
         Ok(names) => web::HttpResponse::Ok().json(&serde_json::json!({"secrets": names})),
@@ -172,7 +159,7 @@ pub async fn set_secret(
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
     match state.env_store.set_secret(id, &body.key, &body.value).await {
         Ok(()) => {
-            let ip = source_ip(&req);
+            let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
                 app_id: Some(id),
                 creator_id: None,
@@ -187,6 +174,49 @@ pub async fn set_secret(
     }
 }
 
+// ------------------------------------------------------------------
+// Audit log read
+// ------------------------------------------------------------------
+
+/// `GET /api/apps/:id/audit?limit=N` — newest-first audit entries.
+/// Master-key auth + admin rate limit. Limit clamped 1..=500 inside
+/// `audit::recent_for_app` so callers can't ask for a million rows.
+pub async fn list_audit(
+    req: web::HttpRequest,
+    path: Path<String>,
+    query: web::types::Query<AuditQuery>,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
+    let limit = query.limit.unwrap_or(50);
+    match audit::recent_for_app(&state.registry, id, limit).await {
+        Ok(rows) => web::HttpResponse::Ok().json(&serde_json::json!({
+            "audit": rows.iter().map(|r| serde_json::json!({
+                "id": r.id.to_string(),
+                "actor": r.actor,
+                "action": r.action,
+                "resource": r.resource,
+                "source_ip": r.source_ip,
+                "at": r.at,
+            })).collect::<Vec<_>>(),
+            "count": rows.len(),
+            "limit": limit.clamp(1, 500),
+        })),
+        Err(e) => {
+            eprintln!("[control] audit query error: {e}");
+            web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error": "internal error"}))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuditQuery {
+    pub limit: Option<i64>,
+}
+
 pub async fn delete_secret(
     req: web::HttpRequest,
     path: Path<(String, String)>,
@@ -198,7 +228,7 @@ pub async fn delete_secret(
     let Ok(id) = Uuid::parse_str(&id_s) else { return bad_uuid(); };
     match state.env_store.delete_secret(id, &key).await {
         Ok(true) => {
-            let ip = source_ip(&req);
+            let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
                 app_id: Some(id),
                 creator_id: None,

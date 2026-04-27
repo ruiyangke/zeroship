@@ -47,6 +47,12 @@ async fn main() -> std::io::Result<()> {
     let insecure_dev =
         args.iter().any(|a| a == "--dev-insecure")
             || std::env::var("ZEROSHIP_DEV_INSECURE").map(|v| v == "1").unwrap_or(false);
+    // Default: do NOT trust X-Forwarded-For. Operators behind a real
+    // load balancer opt in explicitly via --trust-proxy; everyone else
+    // gets the safe behavior (peer_addr only, no spoof surface).
+    let trust_proxy =
+        args.iter().any(|a| a == "--trust-proxy")
+            || std::env::var("TRUST_PROXY").map(|v| v == "1").unwrap_or(false);
 
     if !insecure_dev {
         let mut missing = Vec::new();
@@ -109,6 +115,7 @@ async fn main() -> std::io::Result<()> {
         admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(30, 60))),
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(50, 600))),
         insecure_dev,
+        trust_proxy,
     });
 
     let bind_addr = format!("0.0.0.0:{port}");
@@ -161,6 +168,10 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/api/apps/{id}/secrets/{key}")
                     .route(web::delete().to(env_handlers::delete_secret)),
+            )
+            .service(
+                web::resource("/api/apps/{id}/audit")
+                    .route(web::get().to(env_handlers::list_audit)),
             )
             // --- Stripe Connect ---
             .service(

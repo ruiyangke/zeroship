@@ -19,34 +19,20 @@ use sha2::Sha256;
 use uuid::Uuid;
 
 use crate::audit::{self, Action, AuditEntry};
+use crate::http_util;
 use crate::AppState;
 use crate::stripe_store::{self, StripeError};
 
-fn source_ip(req: &web::HttpRequest) -> Option<String> {
-    req.headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .or_else(|| req.peer_addr().map(|a| a.ip().to_string()))
+fn source_ip(req: &web::HttpRequest, state: &AppState) -> Option<String> {
+    http_util::source_ip(req, state.trust_proxy)
 }
 
-/// Token-bucket gate. Returns 429 if over quota. Pass either the
-/// admin or webhook limiter from AppState.
 fn rate_limit(
     req: &web::HttpRequest,
     limiter: &crate::RateLimiter,
+    state: &AppState,
 ) -> Option<web::HttpResponse> {
-    let Some(addr) = req.peer_addr() else { return None };
-    if limiter.check(addr.ip()) {
-        None
-    } else {
-        Some(
-            web::HttpResponse::TooManyRequests()
-                .header("retry-after", "1")
-                .json(&serde_json::json!({"error":"rate limited"})),
-        )
-    }
+    http_util::rate_limit(req, limiter, state.trust_proxy)
 }
 
 type HmacSha256 = Hmac<Sha256>;
@@ -90,7 +76,7 @@ pub async fn onboard(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
-    if let Some(r) = rate_limit(&req, &state.admin_limiter) { return r; }
+    if let Some(r) = rate_limit(&req, &state.admin_limiter, &state) { return r; }
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
     // Placeholder — real impl goes to api.stripe.com/v1/account_links.
@@ -115,12 +101,12 @@ pub async fn callback(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
-    if let Some(r) = rate_limit(&req, &state.admin_limiter) { return r; }
+    if let Some(r) = rate_limit(&req, &state.admin_limiter, &state) { return r; }
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
     match state.stripe_store.link_account(creator_id, &body.stripe_account_id).await {
         Ok(()) => {
-            let ip = source_ip(&req);
+            let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
                 app_id: None,
                 creator_id: Some(creator_id),
@@ -142,7 +128,7 @@ pub async fn earnings(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
-    if let Some(r) = rate_limit(&req, &state.admin_limiter) { return r; }
+    if let Some(r) = rate_limit(&req, &state.admin_limiter, &state) { return r; }
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
     let totals = match state.stripe_store.total_earnings(creator_id).await {
@@ -180,12 +166,12 @@ pub async fn unlink(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
-    if let Some(r) = rate_limit(&req, &state.admin_limiter) { return r; }
+    if let Some(r) = rate_limit(&req, &state.admin_limiter, &state) { return r; }
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
     match state.stripe_store.unlink_account(creator_id).await {
         Ok(true) => {
-            let ip = source_ip(&req);
+            let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
                 app_id: None,
                 creator_id: Some(creator_id),
@@ -358,7 +344,7 @@ pub async fn webhook(
 ) -> web::HttpResponse {
     // Rate limit FIRST — body cap second. Cheap-to-reject things go
     // before expensive ones (parsing 256 KiB, HMAC, DB write).
-    if let Some(r) = rate_limit(&req, &state.webhook_limiter) {
+    if let Some(r) = rate_limit(&req, &state.webhook_limiter, &state) {
         return r;
     }
     if body.len() > MAX_WEBHOOK_BODY_BYTES {

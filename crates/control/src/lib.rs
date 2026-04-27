@@ -8,6 +8,7 @@ pub mod api;
 pub mod audit;
 pub mod env_handlers;
 pub mod env_store;
+pub mod http_util;
 pub mod internal;
 pub mod metering;
 pub mod rate_limit;
@@ -88,4 +89,11 @@ pub struct AppState {
     /// must leave this false; the startup guard in `main.rs` refuses
     /// to boot with missing secrets otherwise.
     pub insecure_dev: bool,
+    /// Set via `--trust-proxy` (or `TRUST_PROXY=1`). When `false`
+    /// (default), `X-Forwarded-For` is ignored — peer_addr is the
+    /// only source-IP signal. Set to `true` ONLY when the control
+    /// plane is bound behind a trusted load balancer that overwrites
+    /// XFF; otherwise an attacker with direct network reach can spoof
+    /// audit log IPs and rate-limit buckets.
+    pub trust_proxy: bool,
 }
