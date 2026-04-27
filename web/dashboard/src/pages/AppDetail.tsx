@@ -239,7 +239,10 @@ export default function AppDetail() {
           <div className="grid grid-cols-2 gap-3">
             <InfoItem label="app id" value={app.id} />
             <InfoItem label="plan" value={app.plan_id} />
-            <InfoItem label="version" value={`v${app.version}`} />
+            <InfoItem
+              label="deploy"
+              value={app.deploy_hash ? `${app.deploy_hash.slice(0, 12)}…` : "—"}
+            />
             <div className="p-3 bg-background border border-border">
               <div className="text-[10px] uppercase tracking-[0.1em] text-muted-foreground mb-1">
                 api key
@@ -343,7 +346,7 @@ export default function AppDetail() {
           </Button>
           {deployMutation.isSuccess && (
             <div className="mt-3 p-2.5 text-xs border border-primary text-primary bg-primary/5">
-              deployed version {deployMutation.data.version}
+              deployed: {deployMutation.data.deploy_hash.slice(0, 12)}…
             </div>
           )}
           {deployMutation.isError && (

@@ -9,14 +9,6 @@ export interface AppRecord {
   created_at: string;
   updated_at: string;
   server_js?: string;     // included when fetching single app
-
-  /**
-   * @deprecated The control plane no longer tracks an integer
-   * version — `deploy_hash` is the source of truth. Kept on the
-   * type so existing dashboard pages compile; remove once those
-   * call sites switch to `deploy_hash`.
-   */
-  version?: number;
 }
 
 export interface Stats {
@@ -93,10 +85,10 @@ export function deleteApp(id: string): Promise<{ deleted: boolean }> {
   return apiFetch(`/api/apps/${id}`, { method: "DELETE" });
 }
 
-export function deployApp(id: string, code: string): Promise<{ version: number }> {
+export function deployApp(id: string, code: string): Promise<{ deploy_hash: string }> {
   return apiFetch(`/api/apps/${id}/deploy`, {
     method: "POST",
-    headers: { "Content-Type": "text/plain" },
+    headers: { "Content-Type": "application/javascript" },
     body: code,
   });
 }
