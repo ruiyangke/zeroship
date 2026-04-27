@@ -1,63 +1,69 @@
 /**
- * deploy_app tool — deploys a JS bundle to the zeroship platform.
+ * deploy_app tool — pushes a JS bundle to an existing zeroship app.
+ *
+ * Apps are identified by UUID (returned by create_app). Body is the
+ * raw module source — the agent should produce the new fetch-handler
+ * shape: `export default { fetch(req, env, ctx) { ... } }`.
+ *
+ * Returns a JSON-serialized result the LLM can parse to confirm the
+ * deploy hash + preview URL it should reload.
  */
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
+import { CONTROL_URL, CONTROL_KEY } from "../env.js";
 
-const ZEROSHIP_URL = process.env.ZEROSHIP_URL || "http://localhost:3333";
-const ZEROSHIP_KEY = process.env.ZEROSHIP_MASTER_KEY || "dev-master-key";
-
-/** Create the app if it doesn't exist, then deploy the JS bundle. */
 export const deployApp = tool(
   async ({ app_id, server_js }) => {
-    // Ensure app exists
-    const checkRes = await fetch(`${ZEROSHIP_URL}/api/apps/${app_id}`, {
-      headers: { Authorization: `Bearer ${ZEROSHIP_KEY}` },
-    });
-
-    if (checkRes.status === 404) {
-      // Create app
-      const createRes = await fetch(`${ZEROSHIP_URL}/api/apps`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${ZEROSHIP_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ id: app_id, plan_id: "free" }),
+    if (!server_js.includes("export default") || !server_js.includes("fetch")) {
+      return JSON.stringify({
+        ok: false,
+        error:
+          "server_js must use the fetch-handler shape: `export default { fetch(req, env, ctx) { ... } }`. Don't deploy single named exports — they are no longer supported.",
       });
-      if (!createRes.ok) {
-        return `Failed to create app: ${await createRes.text()}`;
-      }
     }
 
-    // Deploy
-    const res = await fetch(`${ZEROSHIP_URL}/api/apps/${app_id}/deploy`, {
+    const res = await fetch(`${CONTROL_URL}/api/apps/${app_id}/deploy`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${ZEROSHIP_KEY}`,
+        Authorization: `Bearer ${CONTROL_KEY}`,
         "Content-Type": "application/javascript",
       },
       body: server_js,
     });
 
     if (!res.ok) {
-      return `Deploy failed: ${await res.text()}`;
+      return JSON.stringify({
+        ok: false,
+        error: `HTTP ${res.status}: ${await res.text()}`,
+      });
     }
 
     const data = await res.json();
-    return `Deployed app "${app_id}" — version ${data.version}. Live at ${ZEROSHIP_URL}/rpc with header X-App-Id: ${app_id}`;
+
+    // Hint the chat layer that this turn ended in a deploy — the
+    // dashboard listens for `tool_end` on this name to reload the
+    // preview iframe.
+    return JSON.stringify({
+      ok: true,
+      app_id,
+      deploy_hash: data.deploy_hash,
+      message: `Deployed app ${app_id}. The preview iframe will refresh; ask the user to verify the live result.`,
+    });
   },
   {
     name: "deploy_app",
     description:
-      "Deploy a JavaScript app to the zeroship platform. The server_js should be an ES module with exported functions (export function methodName(params) { ... }). Each exported function becomes a JSON-RPC endpoint.",
+      "Deploy JavaScript source code to an existing zeroship app. The code MUST be a single ES module that exports a default object with a `fetch(request, env, ctx)` method that returns a Response. Always pass the UUID returned by create_app, not the slug name.",
     schema: z.object({
       app_id: z
         .string()
-        .describe("Unique app identifier (alphanumeric + hyphens, e.g. 'my-todo-api')"),
+        .uuid()
+        .describe("UUID of the target app (returned by create_app)."),
       server_js: z
         .string()
-        .describe("The complete server.js source code to deploy"),
+        .describe(
+          "The complete server.js source code. Must be `export default { fetch(req, env, ctx) { ... } }`.",
+        ),
     }),
-  }
+  },
 );
