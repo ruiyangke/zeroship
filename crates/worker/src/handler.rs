@@ -16,6 +16,13 @@ use zeroship_runtime::{
 use crate::sync::SharedEnvs;
 use crate::{cache, metrics, WorkerConfig};
 
+/// Cap on the dispatch envelope body. The envelope wraps a creator-app
+/// HTTP request including headers and body — most apps don't need
+/// huge inbound bodies on this surface (file uploads typically go
+/// straight to object storage). 4 MiB is generous enough for JSON
+/// APIs + form posts and small enough to bound per-request memory.
+pub const MAX_DISPATCH_BODY_BYTES: usize = 4 * 1024 * 1024;
+
 /// Verify the gateway-issued bearer token on /dispatch endpoints.
 /// Returns `None` if the request is authorized; otherwise a 401 response.
 fn check_worker_auth(req: &HttpRequest, worker_key: &str) -> Option<HttpResponse> {
@@ -109,6 +116,13 @@ pub async fn dispatch(
         return resp;
     }
 
+    // Cheap rejection BEFORE app_id parse / runtime lookup / env load.
+    if body.len() > MAX_DISPATCH_BODY_BYTES {
+        metrics::inc(&metrics::DISPATCH_REJECTED_BODY_TOO_LARGE);
+        return HttpResponse::PayloadTooLarge()
+            .json(&serde_json::json!({"error": "dispatch body too large"}));
+    }
+
     let app_id = match path.parse::<Uuid>() {
         Ok(id) => id,
         Err(_) => {
@@ -158,7 +172,7 @@ pub async fn dispatch(
     let env: EnvSnapshot = match crate::sync::get_env(&envs, &app_id) {
         Some(arc_snapshot) => (*arc_snapshot).clone(),
         None => {
-            metrics::inc(&metrics::ON_DEMAND_LOAD_FAILURES);
+            metrics::inc(&metrics::ENV_UNAVAILABLE_TOTAL);
             return HttpResponse::ServiceUnavailable()
                 .json(&serde_json::json!({"error": "env unavailable"}));
         }
@@ -298,10 +312,21 @@ fn make_error(err: &DispatchError) -> HttpResponse {
 }
 
 fn make_error_msg(status: u16, msg: &str) -> HttpResponse {
+    metrics::inc(&metrics::DISPATCH_ERRORS_TOTAL);
     make_error(&DispatchError::new(msg, status))
 }
 
 /// Pull bundle from control plane and load into cache (cold start path).
+///
+/// Order matters: fetch + verify bundle, fetch + parse env, THEN
+/// commit V8 isolate + env atomically. Doing it in the other order
+/// (commit isolate, then fetch env) would expose a window where
+/// `cache::get_runtime` returns a ready isolate but `get_env` returns
+/// None — concurrent dispatches on the same thread between the two
+/// steps would 503 unnecessarily AND the new V8 code might run
+/// against the OLD env on a later step in this function. Now we
+/// stage everything in locals first and only mutate cache at the
+/// end.
 async fn load_on_demand(
     config: &WorkerConfig,
     envs: &SharedEnvs,
@@ -315,32 +340,37 @@ async fn load_on_demand(
         return Err("empty bundle".into());
     }
 
-    let hash = hex::encode(Sha256::digest(&bytes));
-
-    if cache::load_app(*app_id, &bytes, app_version.runtime.clone()) {
-        cache::set_hash(*app_id, hash);
-        // Env MUST be available before we serve requests — otherwise
-        // the app runs without creator bindings and may fail-open on
-        // authorization checks. On fetch failure, evict the bundle so
-        // the next request retries the whole load path.
-        match crate::sync::fetch_app_env(&config.control_url, &config.control_key, app_id).await {
-            Ok(env_json) => {
-                if let Err(e) = crate::sync::put_env_from_json(envs, *app_id, &env_json) {
-                    cache::evict_app(app_id);
-                    cache::remove_hash(app_id);
-                    return Err(format!("env parse failed: {e}"));
-                }
-                cache::set_env_version(*app_id, app_version.env_version);
-            }
-            Err(e) => {
-                cache::evict_app(app_id);
-                cache::remove_hash(app_id);
-                return Err(format!("env fetch failed: {e}"));
-            }
+    // Verify bundle hash against control's claim BEFORE committing the
+    // bytes to V8. The reconcile path already does this; without it
+    // here, a wrong-bundle delivery (CDN bug, MITM on loopback hop,
+    // control bug) silently runs the wrong code AND becomes
+    // permanent because the next reconcile compares local==remote.
+    let computed = hex::encode(Sha256::digest(&bytes));
+    if let Some(expected) = app_version.deploy_hash.as_deref() {
+        if computed != expected {
+            return Err(format!(
+                "bundle hash mismatch for {app_id}: expected {expected}, got {computed}"
+            ));
         }
-        eprintln!("[worker] on-demand loaded {app_id}");
-        Ok(())
-    } else {
-        Err("failed to parse bundle".into())
     }
+
+    // Fetch env BEFORE committing the V8 isolate. If env fetch fails
+    // we never partially-load.
+    let env_json = crate::sync::fetch_app_env(&config.control_url, &config.control_key, app_id)
+        .await
+        .map_err(|e| format!("env fetch failed: {e}"))?;
+
+    // Now commit both atomically (env first so dispatchers always see
+    // env present once runtime is present).
+    if let Err(e) = crate::sync::put_env_from_json(envs, *app_id, &env_json) {
+        return Err(format!("env parse failed: {e}"));
+    }
+    if !cache::load_app(*app_id, &bytes, app_version.runtime.clone()) {
+        crate::sync::remove_env(envs, app_id);
+        return Err("failed to parse bundle".into());
+    }
+    cache::set_hash(*app_id, computed);
+    cache::set_env_version(*app_id, app_version.env_version);
+    eprintln!("[worker] on-demand loaded {app_id}");
+    Ok(())
 }

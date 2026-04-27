@@ -313,17 +313,31 @@ pub fn raw_fetch_callback(
 /// IP address that is in a non-public range before cyper attempts to connect.
 /// In dev mode (`ZEROSHIP_DEV=1`), a default resolver is used so loopback
 /// targets (Vite dev server, integration tests) can be reached.
-fn shared_client() -> &'static cyper::Client {
-    use std::sync::OnceLock;
-    static CLIENT: OnceLock<cyper::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
+thread_local! {
+    /// Per-thread cyper client.
+    ///
+    /// **Must be thread-local**, NOT a process-wide static. cyper's
+    /// connector wraps its I/O in `SendWrapper` (panics if dereferenced
+    /// from a thread other than the one that created it). With V8
+    /// isolates per worker thread each driving `fetch()` calls, a
+    /// process-wide `OnceLock<Client>` would cache pooled connections
+    /// on whichever thread ran first, then panic the moment a different
+    /// thread's isolate dispatched. Per-thread costs a small handful
+    /// of idle connections per host — cheap and correct.
+    static CLIENT: cyper::Client = {
         let builder = cyper::Client::builder();
         if std::env::var("ZEROSHIP_DEV").is_ok() {
             builder.build()
         } else {
             builder.custom_resolver(SsrfResolver).build()
         }
-    })
+    };
+}
+
+/// Clone this thread's cyper client. `cyper::Client` is cheaply clonable
+/// (Arc internally); the clone shares the per-thread pool.
+fn shared_client() -> cyper::Client {
+    CLIENT.with(|c| c.clone())
 }
 
 /// Execute a `FetchRequest` on the compio event loop via cyper.

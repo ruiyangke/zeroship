@@ -2,7 +2,9 @@
 //!
 //! ## Wire format (single, unambiguous)
 //!
-//!     nonce(12) || ciphertext || tag(16)
+//! ```text
+//! nonce(12) || ciphertext || tag(16)
+//! ```
 //!
 //! No version-byte heuristic — the previous design was probabilistic
 //! and lost ~12% of legacy blobs whose random nonce happened to start

@@ -109,7 +109,9 @@ async fn main() -> std::io::Result<()> {
 
     // Start the single process-wide version poller BEFORE ntex spawns worker
     // threads so the shared map is already being populated when they come up.
-    sync::start_version_poller(config.clone(), shared_versions.clone());
+    // Poller also GCs SharedEnvs against the current known-app set, so
+    // env entries for deleted apps don't leak forever.
+    sync::start_version_poller(config.clone(), shared_versions.clone(), shared_envs.clone());
 
     // ntex installs SIGINT/SIGTERM handlers by default; `shutdown_timeout`
     // bounds how long worker threads have to drain in-flight requests

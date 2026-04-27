@@ -208,11 +208,13 @@ pub fn remove_env_version(app_id: &Uuid) {
 fn evict_lru(cache: &mut AppCache) {
     if let Some((&oldest_id, _)) = cache.isolates.iter().min_by_key(|(_, e)| e.last_used) {
         eprintln!("[worker] evicting LRU isolate {oldest_id}");
+        crate::metrics::inc(&crate::metrics::LRU_EVICTIONS_TOTAL);
         cache.isolates.remove(&oldest_id);
         HASHES.with(|h| { h.borrow_mut().remove(&oldest_id); });
         ENV_VERSIONS.with(|v| { v.borrow_mut().remove(&oldest_id); });
         // Env in `SharedEnvs` is process-wide and may still be needed
-        // by other threads — DON'T evict it here. The env-poller and
-        // explicit `remove_env` from `reconcile_once` handle cleanup.
+        // by other threads — DON'T evict it here. The version_poll_loop
+        // GCs SharedEnvs against the known-app set every cycle, so an
+        // app deleted from control plane gets cleaned up there.
     }
 }

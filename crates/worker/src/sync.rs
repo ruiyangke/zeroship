@@ -26,10 +26,16 @@ pub type SharedVersions = Arc<RwLock<Option<VersionMap>>>;
 pub type SharedEnvs = Arc<RwLock<HashMap<Uuid, Arc<EnvSnapshot>>>>;
 
 /// Start the single process-wide version-polling task. All ntex worker
-/// threads observe its output through `shared`.
-pub fn start_version_poller(config: Arc<WorkerConfig>, shared: SharedVersions) {
+/// threads observe its output through `shared`. Also takes a handle
+/// to `SharedEnvs` so it can GC env entries for apps that the control
+/// plane has deleted (see `version_poll_loop`).
+pub fn start_version_poller(
+    config: Arc<WorkerConfig>,
+    shared: SharedVersions,
+    envs: SharedEnvs,
+) {
     compio::runtime::spawn(async move {
-        version_poll_loop(config, shared).await;
+        version_poll_loop(config, shared, envs).await;
     })
     .detach();
 }
@@ -46,12 +52,25 @@ pub fn start_sync(config: Arc<WorkerConfig>, shared: SharedVersions, envs: Share
     .detach();
 }
 
-async fn version_poll_loop(config: Arc<WorkerConfig>, shared: SharedVersions) {
+async fn version_poll_loop(
+    config: Arc<WorkerConfig>,
+    shared: SharedVersions,
+    envs: SharedEnvs,
+) {
     let interval = std::time::Duration::from_secs(config.poll_interval_secs);
     loop {
         match poll_versions(&config).await {
             Ok(versions) => {
-                // RwLock write is brief — just swap the map in.
+                // GC SharedEnvs against the latest known-app set BEFORE
+                // swapping the new version map in. Apps deleted from
+                // the control plane drop out of `versions`; their env
+                // entries would otherwise leak forever (per-thread
+                // reconcile only fires for locally-cached apps, so an
+                // app that's been LRU-evicted from every thread gets
+                // no `None`-branch cleanup).
+                if let Ok(mut e) = envs.write() {
+                    e.retain(|app_id, _| versions.contains_key(app_id));
+                }
                 if let Ok(mut guard) = shared.write() {
                     *guard = Some(versions);
                 }
@@ -71,11 +90,25 @@ async fn poll_versions(config: &WorkerConfig) -> Result<VersionMap, String> {
 
 async fn reconcile_loop(config: Arc<WorkerConfig>, shared: SharedVersions, envs: SharedEnvs) {
     let interval = std::time::Duration::from_secs(config.poll_interval_secs);
+    // Per-thread startup jitter so the N ntex workers don't all wake at
+    // the same instant and stampede the control plane every cycle.
+    // Address-derived "thread id" is portable across compio runtimes.
+    let jitter_seed = (&envs as *const _) as u64;
+    let initial = std::time::Duration::from_millis(jitter_seed % interval.as_millis() as u64);
+    compio::time::sleep(initial).await;
     loop {
         compio::time::sleep(interval).await;
+        crate::metrics::inc(&crate::metrics::RECONCILE_ITERATIONS_TOTAL);
         // Snapshot the shared map under a brief read lock, then drop the lock
         // before doing any async work (no .await while holding a std RwLock).
-        let snapshot: Option<VersionMap> = shared.read().ok().and_then(|g| g.clone());
+        let snapshot: Option<VersionMap> = match shared.read() {
+            Ok(g) => g.clone(),
+            Err(_) => {
+                crate::metrics::inc(&crate::metrics::LOCK_POISONED_TOTAL);
+                eprintln!("[worker-sync] SharedVersions lock poisoned — restart recommended");
+                continue;
+            }
+        };
         let Some(versions) = snapshot else { continue };
         if let Err(e) = reconcile_once(&config, &versions, &envs).await {
             eprintln!("[worker-sync] reconcile error: {e}");
@@ -121,7 +154,10 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                                 );
                             }
                         }
-                        Err(e) => eprintln!("[worker-sync] env-only refresh {local_id}: {e}"),
+                        Err(e) => {
+                            crate::metrics::inc(&crate::metrics::ENV_FETCH_FAILURES);
+                            eprintln!("[worker-sync] env-only refresh {local_id}: {e}");
+                        }
                     }
                 }
 
@@ -132,28 +168,46 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                         Ok(bytes) => {
                             let computed = hex::encode(Sha256::digest(&bytes));
                             if remote_hash.as_ref().is_some_and(|remote_hash| computed != *remote_hash) {
+                                crate::metrics::inc(&crate::metrics::BUNDLE_HASH_MISMATCH);
                                 eprintln!(
                                     "[worker-sync] hash mismatch for {local_id}: expected {}, got {computed}",
                                     remote_hash.as_deref().unwrap_or("")
                                 );
                                 continue;
                             }
+                            // Order: fetch+parse env BEFORE the V8 swap.
+                            // Otherwise concurrent dispatches on the same
+                            // thread between cache::load_app and
+                            // put_env_from_json see new code with stale env
+                            // (or 503 with no env at all). Skip the env
+                            // fetch when env_changed is false — the
+                            // existing SharedEnvs entry is still valid.
+                            let env_for_load: Option<String> = if env_changed {
+                                match fetch_app_env(&config.control_url, &config.control_key, local_id).await {
+                                    Ok(json) => Some(json),
+                                    Err(e) => {
+                                        crate::metrics::inc(&crate::metrics::ENV_FETCH_FAILURES);
+                                eprintln!("[worker-sync] fetch env {local_id}: {e}");
+                                        continue; // don't swap V8 with no env
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+
+                            if let Some(env_json) = env_for_load.as_deref() {
+                                if let Err(e) = put_env_from_json(envs, *local_id, env_json) {
+                                    eprintln!("[worker-sync] env parse {local_id}: {e}");
+                                    continue;
+                                }
+                            }
+
                             if cache::load_app(*local_id, &bytes, info.runtime.clone()) {
                                 if let Some(remote_hash) = remote_hash {
                                     cache::set_hash(*local_id, remote_hash.clone());
                                 }
-                                // Fetch the app's env snapshot (vars + decrypted
-                                // secrets) alongside the bundle — keeps the
-                                // shared env fresh on every version bump.
-                                match fetch_app_env(&config.control_url, &config.control_key, local_id).await {
-                                    Ok(env_json) => {
-                                        if let Err(e) = put_env_from_json(envs, *local_id, &env_json) {
-                                            eprintln!("[worker-sync] env parse {local_id}: {e}");
-                                        } else {
-                                            cache::set_env_version(*local_id, info.env_version);
-                                        }
-                                    }
-                                    Err(e) => eprintln!("[worker-sync] fetch env {local_id}: {e}"),
+                                if env_for_load.is_some() {
+                                    cache::set_env_version(*local_id, info.env_version);
                                 }
                                 eprintln!(
                                     "[worker-sync] updated {local_id} (plan: {}, hash: {}...)",
@@ -162,7 +216,10 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                                 );
                             }
                         }
-                        Err(e) => eprintln!("[worker-sync] fetch bundle {local_id}: {e}"),
+                        Err(e) => {
+                            crate::metrics::inc(&crate::metrics::BUNDLE_FETCH_FAILURES);
+                            eprintln!("[worker-sync] fetch bundle {local_id}: {e}");
+                        }
                     }
                 }
             }
@@ -235,14 +292,26 @@ async fn http_get(url: &str, auth_key: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|e| e.to_string())
 }
 
-/// Shared cyper client for control-plane calls. Unlike the fetch client, this
-/// one talks only to the operator-configured `CONTROL_URL`, so we use cyper's
-/// default resolver (no SSRF guard — the operator trusts this endpoint by
-/// construction).
-fn control_client() -> &'static cyper::Client {
-    use std::sync::OnceLock;
-    static CLIENT: OnceLock<cyper::Client> = OnceLock::new();
-    CLIENT.get_or_init(cyper::Client::new)
+thread_local! {
+    /// Per-thread cyper client for control-plane calls.
+    ///
+    /// **Must be thread-local**, NOT a process-wide static. cyper's
+    /// connector uses `SendWrapper` (panics if dereferenced from a
+    /// thread other than the one that created it). With multiple ntex
+    /// worker threads each running `reconcile_loop`, a process-wide
+    /// `OnceLock<Client>` would cache pooled connections on whichever
+    /// thread ran first, then panic the moment a different thread's
+    /// reconcile fires. Per-thread costs a small handful of idle
+    /// connections per host — cheap and correct.
+    static CONTROL_CLIENT: cyper::Client = cyper::Client::new();
+}
+
+/// Clone this thread's cyper client. `cyper::Client` is cheaply clonable
+/// (Arc internally); the clone shares the per-thread connection pool.
+/// Compio futures stay on the thread that spawned them, so the cloned
+/// client never touches the SendWrapper from another thread.
+fn this_thread_control_client() -> cyper::Client {
+    CONTROL_CLIENT.with(|c| c.clone())
 }
 
 /// HTTP GET returning the response body as bytes. Uses a proper HTTP client
@@ -253,7 +322,7 @@ fn control_client() -> &'static cyper::Client {
 ///
 /// Public so handler.rs can use it for on-demand bundle loading.
 pub async fn http_get_bytes(url: &str, auth_key: &str) -> Result<Vec<u8>, String> {
-    let client = control_client();
+    let client = this_thread_control_client();
     let mut builder = client
         .get(url)
         .map_err(|e| format!("invalid control URL: {e}"))?;

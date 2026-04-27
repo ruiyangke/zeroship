@@ -29,9 +29,17 @@ counter!(DISPATCH_TOTAL);
 counter!(DISPATCH_REJECTED_AUTH);
 counter!(DISPATCH_REJECTED_BAD_APP_ID);
 counter!(DISPATCH_REJECTED_BAD_ENVELOPE);
+counter!(DISPATCH_REJECTED_BODY_TOO_LARGE);
 counter!(DISPATCH_ERRORS_TOTAL);
 counter!(ON_DEMAND_LOADS_TOTAL);
 counter!(ON_DEMAND_LOAD_FAILURES);
+counter!(ENV_UNAVAILABLE_TOTAL);
+counter!(ENV_FETCH_FAILURES);
+counter!(BUNDLE_FETCH_FAILURES);
+counter!(BUNDLE_HASH_MISMATCH);
+counter!(LRU_EVICTIONS_TOTAL);
+counter!(LOCK_POISONED_TOTAL);
+counter!(RECONCILE_ITERATIONS_TOTAL);
 
 /// Increment a counter. Thin wrapper so call sites read more intentionally
 /// than a bare `ATOMIC.fetch_add(1, ...)`.
@@ -59,6 +67,9 @@ pub fn render() -> String {
     emit_counter(&mut out, "zeroship_worker_dispatch_rejected_bad_envelope",
         "HTTP-dispatch requests rejected for malformed envelope JSON",
         &DISPATCH_REJECTED_BAD_ENVELOPE);
+    emit_counter(&mut out, "zeroship_worker_dispatch_rejected_body_too_large",
+        "Dispatch envelopes rejected for exceeding MAX_DISPATCH_BODY_BYTES",
+        &DISPATCH_REJECTED_BODY_TOO_LARGE);
     emit_counter(&mut out, "zeroship_worker_dispatch_errors_total",
         "Dispatch results returned to the gateway as errors (excludes rejections)",
         &DISPATCH_ERRORS_TOTAL);
@@ -68,6 +79,27 @@ pub fn render() -> String {
     emit_counter(&mut out, "zeroship_worker_on_demand_load_failures",
         "On-demand app loads that failed",
         &ON_DEMAND_LOAD_FAILURES);
+    emit_counter(&mut out, "zeroship_worker_env_unavailable_total",
+        "Dispatches that returned 503 because the env cache had no entry for the app",
+        &ENV_UNAVAILABLE_TOTAL);
+    emit_counter(&mut out, "zeroship_worker_env_fetch_failures",
+        "Failed env fetches from the control plane",
+        &ENV_FETCH_FAILURES);
+    emit_counter(&mut out, "zeroship_worker_bundle_fetch_failures",
+        "Failed bundle fetches from the control plane",
+        &BUNDLE_FETCH_FAILURES);
+    emit_counter(&mut out, "zeroship_worker_bundle_hash_mismatch",
+        "Bundles whose SHA256 didn't match the control plane's reported deploy_hash",
+        &BUNDLE_HASH_MISMATCH);
+    emit_counter(&mut out, "zeroship_worker_lru_evictions_total",
+        "V8 isolates evicted from the per-thread cache to make room for new loads",
+        &LRU_EVICTIONS_TOTAL);
+    emit_counter(&mut out, "zeroship_worker_lock_poisoned_total",
+        "Times a SharedVersions/SharedEnvs RwLock returned PoisonError — indicates a panic in the holder thread",
+        &LOCK_POISONED_TOTAL);
+    emit_counter(&mut out, "zeroship_worker_reconcile_iterations_total",
+        "Reconcile-loop iterations (per-thread)",
+        &RECONCILE_ITERATIONS_TOTAL);
 
     // Gauges sourced live from the runtime.
     emit_gauge(
