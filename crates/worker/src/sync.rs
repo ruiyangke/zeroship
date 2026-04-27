@@ -126,7 +126,39 @@ async fn reconcile_loop(config: Arc<WorkerConfig>, shared: SharedVersions, envs:
 }
 
 async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &SharedEnvs) -> Result<(), String> {
-    // Only update apps that are ALREADY cached (not new ones — those load on-demand).
+    // PHASE 1: env-only refresh for any app whose env is in SharedEnvs
+    // (not just locally cached). Without this, an app loaded only on
+    // thread A would have stale env until thread A's next reconcile
+    // — staleness up to 2 × poll_interval. Iterating the union of
+    // (envs.keys() ∩ versions.keys()) means thread B's reconcile
+    // refreshes envs for apps thread A loaded too. The version dedup
+    // (`cached_env_version == info.env_version`) skips work that's
+    // already up-to-date, so this isn't N-thread amplification.
+    let env_app_ids: Vec<Uuid> = envs
+        .read()
+        .ok()
+        .map(|e| e.keys().copied().collect())
+        .unwrap_or_default();
+    for app_id in &env_app_ids {
+        let Some(info) = versions.get(app_id) else { continue };
+        let cached_version = cached_env_version(envs, app_id);
+        if cached_version == Some(info.env_version) { continue; }
+        match fetch_app_env(&config.control_url, &config.control_key, app_id).await {
+            Ok(env_json) => {
+                if let Err(e) = put_env_from_json(envs, *app_id, &env_json, info.env_version) {
+                    eprintln!("[worker-sync] env parse {app_id}: {e}");
+                }
+            }
+            Err(e) => {
+                crate::metrics::inc(&crate::metrics::ENV_FETCH_FAILURES);
+                eprintln!("[worker-sync] env-only refresh {app_id}: {e}");
+            }
+        }
+    }
+
+    // PHASE 2: bundle / limits updates for locally-cached apps.
+    // Bundle work is per-thread (each thread has its own V8 cache);
+    // env work above is process-wide.
     let local_app_ids = cache::all_app_ids();
     for local_id in &local_app_ids {
         match versions.get(local_id) {
@@ -145,37 +177,11 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                     None => remote_hash.is_some(),
                 } || local_limits != Some(target_limits);
 
-                // Env-only refresh: bundle didn't change but env_version did
-                // (creator rotated a secret). Skip the heavy bundle refetch
-                // — just re-pull /internal/apps/:id/env.
-                //
-                // `cached_env_version` reads from the PROCESS-WIDE
-                // SharedEnvs, NOT a thread_local — so if thread A
-                // already updated SharedEnvs to v=5, thread B's
-                // reconcile sees v=5 here and skips its own fetch.
-                // Eliminates the N-thread amplification on every
-                // rotation event.
+                // Env-only refresh handled in PHASE 1 above (covers
+                // apps not on this thread too). Local computation here
+                // just decides whether the bundle needs swap.
                 let cached_version = cached_env_version(envs, local_id);
                 let env_changed = cached_version != Some(info.env_version);
-                if !needs_update && env_changed {
-                    match fetch_app_env(&config.control_url, &config.control_key, local_id).await {
-                        Ok(env_json) => {
-                            if let Err(e) = put_env_from_json(envs, *local_id, &env_json, info.env_version) {
-                                eprintln!("[worker-sync] env parse {local_id}: {e}");
-                            } else {
-                                eprintln!(
-                                    "[worker-sync] env refreshed for {local_id} (v{} → v{})",
-                                    cached_version.map(|v| v.to_string()).unwrap_or_else(|| "unset".into()),
-                                    info.env_version,
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            crate::metrics::inc(&crate::metrics::ENV_FETCH_FAILURES);
-                            eprintln!("[worker-sync] env-only refresh {local_id}: {e}");
-                        }
-                    }
-                }
 
                 if needs_update {
                     let bundle_url =
@@ -274,18 +280,24 @@ pub async fn fetch_app_env(url_base: &str, auth_key: &str, app_id: &Uuid) -> Res
 }
 
 /// Parse + insert an env JSON into the shared cache, tagged with the
-/// version it was hydrated against. Failure modes are surfaced —
-/// caller decides whether to fail-loud or fall through.
+/// version it was hydrated against.
+///
+/// Validation is `IgnoredAny` — confirms the bytes are valid JSON
+/// without materializing a `serde_json::Value` (and without the
+/// follow-up `value.to_string()` re-serialize the previous code did).
+/// For a 64 KiB env the saved work is meaningful; the wire bytes
+/// arrive as JSON and the JS side parses with `JSON.parse`, so
+/// keeping them as bytes-in / bytes-out is the only sensible path.
 pub fn put_env_from_json(
     envs: &SharedEnvs,
     app_id: Uuid,
     env_json: &str,
     version: i64,
 ) -> Result<(), String> {
-    let parsed: serde_json::Value = serde_json::from_str(env_json)
+    serde_json::from_str::<serde::de::IgnoredAny>(env_json)
         .map_err(|e| format!("env json: {e}"))?;
     let entry = Arc::new(CachedEnv {
-        snapshot: EnvSnapshot::new(parsed),
+        snapshot: EnvSnapshot::from_validated_json(env_json.to_string()),
         version,
     });
     envs.write()

@@ -97,6 +97,16 @@ impl EnvSnapshot {
         Self { json: value.to_string() }
     }
 
+    /// Build a snapshot from a pre-validated JSON string. The caller
+    /// MUST guarantee `json` is a valid JSON object; this constructor
+    /// stores the bytes verbatim and the JS side trusts it on parse.
+    /// Skips the parse-then-reserialize round-trip when the wire
+    /// format is already a JSON string (the common case for env data
+    /// arriving from the control plane).
+    pub fn from_validated_json(json: String) -> Self {
+        Self { json }
+    }
+
     pub fn empty() -> Self {
         Self { json: "{}".into() }
     }
