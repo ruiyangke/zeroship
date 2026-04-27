@@ -169,8 +169,12 @@ pub async fn dispatch(
     // the app with empty bindings. A creator app keying authorization
     // off `env.ADMIN_TOKEN` presence would otherwise silently
     // fail-open.
+    // env clone is the EnvSnapshot inside the cached entry. The
+    // CachedEnv wrapper carries the version for cross-thread dedup
+    // in the reconcile path; the dispatch hot path just needs the
+    // snapshot.
     let env: EnvSnapshot = match crate::sync::get_env(&envs, &app_id) {
-        Some(arc_snapshot) => (*arc_snapshot).clone(),
+        Some(entry) => entry.snapshot.clone(),
         None => {
             metrics::inc(&metrics::ENV_UNAVAILABLE_TOTAL);
             return HttpResponse::ServiceUnavailable()
@@ -362,7 +366,7 @@ async fn load_on_demand(
 
     // Now commit both atomically (env first so dispatchers always see
     // env present once runtime is present).
-    if let Err(e) = crate::sync::put_env_from_json(envs, *app_id, &env_json) {
+    if let Err(e) = crate::sync::put_env_from_json(envs, *app_id, &env_json, app_version.env_version) {
         return Err(format!("env parse failed: {e}"));
     }
     if !cache::load_app(*app_id, &bytes, app_version.runtime.clone()) {
@@ -370,7 +374,6 @@ async fn load_on_demand(
         return Err("failed to parse bundle".into());
     }
     cache::set_hash(*app_id, computed);
-    cache::set_env_version(*app_id, app_version.env_version);
     eprintln!("[worker] on-demand loaded {app_id}");
     Ok(())
 }

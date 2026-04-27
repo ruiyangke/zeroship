@@ -158,14 +158,12 @@ pub fn all_app_ids() -> Vec<Uuid> {
     })
 }
 
-// Deploy hash + env_version tracking — kept thread_local because they
-// pair 1:1 with `CACHE` (which holds the `!Send` V8 Runtime). Env data
-// proper lives in the process-wide `SharedEnvs` (sync.rs) so all
-// threads see the same snapshot, but each thread tracks the version
-// it last hydrated against to detect stale env on its own apps.
+// Deploy hash tracking — kept thread_local because it pairs 1:1 with
+// `CACHE` (which holds the `!Send` V8 Runtime). Env data + version
+// both live in the process-wide `SharedEnvs` so cross-thread reconcile
+// sees a single source of truth — see `sync::CachedEnv`.
 thread_local! {
     static HASHES: RefCell<HashMap<Uuid, String>> = RefCell::new(HashMap::new());
-    static ENV_VERSIONS: RefCell<HashMap<Uuid, i64>> = RefCell::new(HashMap::new());
 }
 
 pub fn get_hash(app_id: &Uuid) -> Option<String> {
@@ -185,25 +183,10 @@ pub fn remove_hash(app_id: &Uuid) {
     });
 }
 
-// Env get/put moved to crate::sync (SharedEnvs) — see put_env_from_json,
-// get_env, remove_env there.
-
-pub fn get_env_version(app_id: &Uuid) -> Option<i64> {
-    ENV_VERSIONS.with(|v| v.borrow().get(app_id).copied())
-}
-
-pub fn set_env_version(app_id: Uuid, version: i64) {
-    ENV_VERSIONS.with(|v| {
-        v.borrow_mut().insert(app_id, version);
-    });
-}
-
-#[allow(dead_code)]
-pub fn remove_env_version(app_id: &Uuid) {
-    ENV_VERSIONS.with(|v| {
-        v.borrow_mut().remove(app_id);
-    });
-}
+// Env get/put + version moved to crate::sync (SharedEnvs). See
+// put_env_from_json, get_env, cached_env_version there. Version no
+// longer needs a per-thread tracker because it's bundled with the env
+// data in CachedEnv — cross-thread reconciles dedupe correctly.
 
 fn evict_lru(cache: &mut AppCache) {
     if let Some((&oldest_id, _)) = cache.isolates.iter().min_by_key(|(_, e)| e.last_used) {
@@ -211,7 +194,6 @@ fn evict_lru(cache: &mut AppCache) {
         crate::metrics::inc(&crate::metrics::LRU_EVICTIONS_TOTAL);
         cache.isolates.remove(&oldest_id);
         HASHES.with(|h| { h.borrow_mut().remove(&oldest_id); });
-        ENV_VERSIONS.with(|v| { v.borrow_mut().remove(&oldest_id); });
         // Env in `SharedEnvs` is process-wide and may still be needed
         // by other threads — DON'T evict it here. The version_poll_loop
         // GCs SharedEnvs against the known-app set every cycle, so an
