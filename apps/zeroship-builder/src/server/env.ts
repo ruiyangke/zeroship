@@ -14,9 +14,14 @@ declare const env: {
 };
 
 function readEnv(key: string, fallback: string): string {
-  // Zeroship `env` is a frozen object on globalThis; we read from
-  // it dynamically because the type declaration above is only for
-  // editor support.
+  // The zeroship runtime exposes per-app vars + secrets via
+  // `process.env.X` (init.rs `setup_globals`). Older revisions also
+  // installed a `globalThis.env` mirror; check it as a secondary
+  // source for forward-compat.
+  const proc = (globalThis as any).process;
+  if (proc?.env && typeof proc.env[key] === "string" && proc.env[key]) {
+    return proc.env[key];
+  }
   const e = (globalThis as any).env;
   if (e && typeof e[key] === "string" && e[key]) return e[key];
   return fallback;

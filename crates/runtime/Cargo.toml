@@ -7,6 +7,7 @@ description = "zeroship V8 runtime — compio/io_uring, ESM modules, WebCrypto, 
 [dependencies]
 # V8
 v8 = { workspace = true }
+deno_core_icudata = { workspace = true }
 libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

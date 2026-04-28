@@ -25,6 +25,13 @@ pub fn init_v8() {
         // Install the TLS crypto provider (rustls needs this for HTTPS fetch).
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
+        // Load ICU data so Intl.NumberFormat / .DateTimeFormat / .Collator
+        // work — npm packages bundled by deepagents (Anthropic SDK, etc.)
+        // construct these at module top-level and crash with "Internal
+        // error. Icu error." otherwise.
+        v8::icu::set_common_data_77(deno_core_icudata::ICU_DATA)
+            .expect("failed to load ICU data");
+
         let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform);
         v8::V8::initialize();
@@ -1246,14 +1253,16 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
     }
 
     // process.env polyfill — many npm packages (e.g. LangChain) read
-    // `process.env.OPENAI_API_KEY`. Populate from the per-app env_vars
-    // stored in RuntimeState (set by the worker cache during load_app).
+    // `process.env.OPENAI_API_KEY`. Populate from BOTH the per-app
+    // env_vars (cache.rs APP_ID + any worker-level state) AND the
+    // current EnvSnapshot JSON (vars + decrypted secrets fetched from
+    // the control plane). The snapshot is the canonical source for
+    // user-set env; env_vars layered on top covers worker-internal
+    // hand-injected keys.
     //
     // SECURITY: an earlier revision used `std::env::vars()` which leaked
     // every host-level secret (DATABASE_URL, WORKER_KEY, AWS credentials)
     // to every app. Multi-tenant apps must only see their own env vars.
-    // The control plane can inject per-app secrets into the app bundle or
-    // the deploy metadata; those arrive in `env_vars` via the worker.
     {
         let process = v8::Object::new(scope);
         let env_obj = v8::Object::new(scope);
@@ -1269,6 +1278,21 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
             let v = v8::String::new(scope, value).unwrap();
             env_obj.set(scope, k.into(), v.into());
         }
+        // Layer the EnvSnapshot JSON over the env_vars: snapshot keys
+        // override worker-internal keys when they collide. The snapshot
+        // is `set_env_snapshot`'d at the start of every call_fetch_handler
+        // before this lazy init runs, so by the time setup_globals fires
+        // it carries the freshest control-plane state.
+        let env_json = state.borrow().env_json.clone();
+        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&env_json) {
+            for (key, value) in &map {
+                if let Some(s) = value.as_str() {
+                    let k = v8::String::new(scope, key).unwrap();
+                    let v = v8::String::new(scope, s).unwrap();
+                    env_obj.set(scope, k.into(), v.into());
+                }
+            }
+        }
 
         let env_key = v8::String::new(scope, "env").unwrap();
         process.set(scope, env_key.into(), env_obj.into());
@@ -1276,6 +1300,39 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
         let version = v8::String::new(scope, "v20.0.0").unwrap();
         let version_key = v8::String::new(scope, "version").unwrap();
         process.set(scope, version_key.into(), version.into());
+
+        // process.versions — required by libraries that gate on
+        // process.versions.node (e.g. @nodelib/fs.scandir, used by
+        // anything that touches @nodelib/fs.walk → langchain → deepagents).
+        // Without this, the bundle errors at module evaluation with
+        // "Cannot read properties of undefined (reading 'node')".
+        {
+            let versions = v8::Object::new(scope);
+            for (k, v) in [
+                ("node", "20.0.0"),
+                ("v8", "12.0.0"),
+                ("openssl", "3.0.0"),
+            ] {
+                let k = v8::String::new(scope, k).unwrap();
+                let v = v8::String::new(scope, v).unwrap();
+                versions.set(scope, k.into(), v.into());
+            }
+            let key = v8::String::new(scope, "versions").unwrap();
+            process.set(scope, key.into(), versions.into());
+        }
+
+        // process.platform / process.arch — read by Node-platform-detection
+        // helpers. Pinning to linux/x64 is fine; the actual runtime is V8
+        // on whatever the host happens to be, but bundled libraries gate
+        // on these to choose code paths (e.g. picking newline conventions).
+        {
+            let platform = v8::String::new(scope, "linux").unwrap();
+            let key = v8::String::new(scope, "platform").unwrap();
+            process.set(scope, key.into(), platform.into());
+            let arch = v8::String::new(scope, "x64").unwrap();
+            let key = v8::String::new(scope, "arch").unwrap();
+            process.set(scope, key.into(), arch.into());
+        }
 
         let process_key = v8::String::new(scope, "process").unwrap();
         global.set(scope, process_key.into(), process.into());

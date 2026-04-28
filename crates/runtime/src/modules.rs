@@ -173,16 +173,58 @@ pub fn load_modules(
     }
 
     // Phase 4: Evaluate
-    {
+    let eval_rejection: Option<v8::Global<v8::Value>> = {
         let reg = registry.borrow();
         let module_global = reg.compiled.get(entrypoint).unwrap();
         let module = v8::Local::new(scope, module_global);
 
-        let result = module.evaluate(scope);
-        if result.is_none() {
+        let (result_global, sync_exc) = {
+            v8::tc_scope!(let tc, scope);
+            let r = module.evaluate(tc);
+            if tc.has_caught() {
+                let exc = tc.exception().map(|e| v8::Global::new(tc, e));
+                (None, exc)
+            } else {
+                (r.map(|v| v8::Global::new(tc, v)), None)
+            }
+        };
+
+        scope.perform_microtask_checkpoint();
+
+        if let Some(exc) = sync_exc {
+            let local = v8::Local::new(scope, &exc);
+            eprintln!("[v8] evaluate sync threw: {}", local.to_rust_string_lossy(scope));
             return Err(format!("Failed to evaluate: {entrypoint}"));
         }
-        scope.perform_microtask_checkpoint();
+
+        let Some(result_g) = result_global else {
+            return Err(format!("Failed to evaluate: {entrypoint}"));
+        };
+        let result = v8::Local::new(scope, &result_g);
+        if result.is_promise() {
+            let promise: v8::Local<v8::Promise> = result.try_into().unwrap();
+            if promise.state() == v8::PromiseState::Rejected {
+                Some(v8::Global::new(scope, promise.result(scope)))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    if let Some(rej) = eval_rejection {
+        let local = v8::Local::new(scope, &rej);
+        eprintln!("[v8] evaluate rejected: {}", local.to_rust_string_lossy(scope));
+        if let Some(obj) = local.to_object(scope) {
+            let stack_key = v8::String::new(scope, "stack").unwrap();
+            if let Some(stack_val) = obj.get(scope, stack_key.into()) {
+                if !stack_val.is_undefined() {
+                    eprintln!("[v8] stack: {}", stack_val.to_rust_string_lossy(scope));
+                }
+            }
+        }
+        return Err(format!("Evaluate rejected: {entrypoint}"));
     }
 
     // Phase 5: Extract namespace

@@ -64,6 +64,7 @@ ada-url = "3.4.4"
 
 # V8
 v8 = "147"
+deno_core_icudata = "0.77"
 
 # Proc macros
 proc-macro2 = "1"

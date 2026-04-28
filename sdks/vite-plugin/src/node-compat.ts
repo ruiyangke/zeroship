@@ -100,6 +100,48 @@ async function* _setInterval(ms, value) {
 }
 Object.assign(__vite_ssr_exports__, { setTimeout: _setTimeout, setImmediate: _setImmediate, setInterval: _setInterval, default: { setTimeout: _setTimeout, setImmediate: _setImmediate, setInterval: _setInterval } });
 `,
+
+  // node:process — unenv's polyfill clobbers process.versions = {}, which
+  // breaks libraries that read process.versions.node.split(".") during
+  // top-level evaluation (e.g. @nodelib/fs.scandir bundled by deepagents).
+  // Delegate to the runtime-prelude's globalThis.process which already has
+  // proper versions set.
+  "node:process": `
+const _proc = globalThis.process;
+Object.assign(__vite_ssr_exports__, {
+  default: _proc,
+  env: _proc.env,
+  argv: _proc.argv,
+  argv0: _proc.argv0,
+  pid: _proc.pid,
+  ppid: _proc.ppid,
+  title: _proc.title,
+  versions: _proc.versions,
+  version: _proc.version,
+  platform: _proc.platform,
+  arch: _proc.arch,
+  release: _proc.release,
+  cwd: _proc.cwd.bind(_proc),
+  chdir: _proc.chdir.bind(_proc),
+  exit: _proc.exit.bind(_proc),
+  nextTick: _proc.nextTick.bind(_proc),
+  hrtime: _proc.hrtime,
+  stdout: _proc.stdout,
+  stderr: _proc.stderr,
+  stdin: _proc.stdin,
+  emitWarning: _proc.emitWarning ? _proc.emitWarning.bind(_proc) : () => {},
+  on: _proc.on.bind(_proc),
+  off: _proc.off.bind(_proc),
+  once: _proc.once.bind(_proc),
+  removeListener: _proc.removeListener.bind(_proc),
+  removeAllListeners: _proc.removeAllListeners.bind(_proc),
+  listeners: _proc.listeners.bind(_proc),
+  addListener: _proc.addListener.bind(_proc),
+  setMaxListeners: _proc.setMaxListeners.bind(_proc),
+  getMaxListeners: _proc.getMaxListeners.bind(_proc),
+  eventNames: _proc.eventNames.bind(_proc),
+});
+`,
 };
 
 // ── Public API (used by environment.ts fetchModule override) ──────────────
