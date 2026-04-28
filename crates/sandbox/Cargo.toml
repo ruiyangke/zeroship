@@ -1,0 +1,25 @@
+[package]
+name = "zeroship-sandbox"
+version = "0.1.0"
+edition = "2021"
+description = "zeroship sandbox service — Docker-backed dev containers for the AI builder"
+
+[[bin]]
+name = "zeroship-sandbox"
+path = "src/main.rs"
+
+[dependencies]
+zeroship-core = { workspace = true }
+compio = { workspace = true }
+ntex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+mimalloc = { workspace = true }
+subtle = "2"
+bytes = { workspace = true }
+
+[lints]
+workspace = true

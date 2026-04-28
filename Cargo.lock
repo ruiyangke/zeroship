@@ -6892,6 +6892,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-sandbox"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "compio",
+ "hex",
+ "mimalloc",
+ "ntex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "uuid",
+ "zeroship-core",
+]
+
+[[package]]
 name = "zeroship-worker"
 version = "0.1.0"
 dependencies = [
