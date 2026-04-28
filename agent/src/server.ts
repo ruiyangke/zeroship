@@ -22,6 +22,75 @@ app.use("/*", cors());
 
 app.get("/health", (c) => c.json({ status: "ok" }));
 
+// ─── Files-CRUD broker ───────────────────────────────────────
+//
+// The dashboard's Files tab calls these to read/write the project's
+// workspace. Browser ↔ agent (CORS-free via vite proxy); agent ↔
+// sandbox (holds the sandbox token, so the browser never sees it).
+//
+// Project ids in the URL — the agent opens-or-attaches a session
+// for each on first call and caches the session id.
+import {
+  createOrAttachSession,
+  listFiles as sbxListFiles,
+  readFile as sbxReadFile,
+  writeFile as sbxWriteFile,
+  deleteFile as sbxDeleteFile,
+} from "./sandbox.js";
+
+async function sessionFor(projectId: string): Promise<string> {
+  const s = await createOrAttachSession(projectId);
+  return s.session_id;
+}
+
+app.get("/projects/:project/files", async (c) => {
+  try {
+    const sid = await sessionFor(c.req.param("project"));
+    return c.json({ entries: await sbxListFiles(sid) });
+  } catch (e: any) {
+    return c.json({ error: e?.message ?? String(e) }, 500);
+  }
+});
+
+app.get("/projects/:project/files/*", async (c) => {
+  const projectId = c.req.param("project");
+  const path = c.req.path.split(`/projects/${projectId}/files/`)[1] ?? "";
+  if (!path) return c.json({ error: "missing path" }, 400);
+  try {
+    const sid = await sessionFor(projectId);
+    return c.text(await sbxReadFile(sid, decodeURIComponent(path)));
+  } catch (e: any) {
+    return c.json({ error: e?.message ?? String(e) }, 404);
+  }
+});
+
+app.put("/projects/:project/files/*", async (c) => {
+  const projectId = c.req.param("project");
+  const path = c.req.path.split(`/projects/${projectId}/files/`)[1] ?? "";
+  if (!path) return c.json({ error: "missing path" }, 400);
+  try {
+    const body = await c.req.text();
+    const sid = await sessionFor(projectId);
+    const r = await sbxWriteFile(sid, decodeURIComponent(path), body);
+    return c.json({ written: path, size: r.size });
+  } catch (e: any) {
+    return c.json({ error: e?.message ?? String(e) }, 500);
+  }
+});
+
+app.delete("/projects/:project/files/*", async (c) => {
+  const projectId = c.req.param("project");
+  const path = c.req.path.split(`/projects/${projectId}/files/`)[1] ?? "";
+  if (!path) return c.json({ error: "missing path" }, 400);
+  try {
+    const sid = await sessionFor(projectId);
+    await sbxDeleteFile(sid, decodeURIComponent(path));
+    return c.body(null, 204);
+  } catch (e: any) {
+    return c.json({ error: e?.message ?? String(e) }, 500);
+  }
+});
+
 interface ChatBody {
   messages?: { role: string; content: string }[];
   thread_id?: string;

@@ -46,6 +46,11 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
     const text = await res.text();
     throw new Error(text || `HTTP ${res.status}`);
   }
+  // 204 / empty body — return undefined cast to T so the caller sees
+  // void instead of a JSON parse error.
+  if (res.status === 204) return undefined as unknown as T;
+  const ctype = res.headers.get("content-type") ?? "";
+  if (!ctype.includes("json")) return (await res.text()) as unknown as T;
   return res.json();
 }
 
@@ -122,6 +127,42 @@ export function getAllUsage(): Promise<AllUsage> {
 
 export function getAppLogs(id: string): Promise<string[]> {
   return apiFetch(`/api/apps/${id}/logs`);
+}
+
+// ── Env vars (plain config visible to the runtime) ───────
+
+export interface EnvVar { key: string; value: string }
+
+export function listVars(id: string): Promise<{ vars: EnvVar[] }> {
+  return apiFetch(`/api/apps/${id}/vars`);
+}
+
+export function setVar(id: string, key: string, value: string): Promise<void> {
+  return apiFetch(`/api/apps/${id}/vars`, {
+    method: "POST",
+    body: JSON.stringify({ key, value }),
+  });
+}
+
+export function deleteVar(id: string, key: string): Promise<void> {
+  return apiFetch(`/api/apps/${id}/vars/${encodeURIComponent(key)}`, { method: "DELETE" });
+}
+
+// ── Secrets (encrypted at rest, never returned in plaintext) ─
+
+export function listSecrets(id: string): Promise<{ secrets: string[] }> {
+  return apiFetch(`/api/apps/${id}/secrets`);
+}
+
+export function setSecret(id: string, key: string, value: string): Promise<void> {
+  return apiFetch(`/api/apps/${id}/secrets`, {
+    method: "POST",
+    body: JSON.stringify({ key, value }),
+  });
+}
+
+export function deleteSecret(id: string, key: string): Promise<void> {
+  return apiFetch(`/api/apps/${id}/secrets/${encodeURIComponent(key)}`, { method: "DELETE" });
 }
 
 // ── Templates ─────────────────────────────────────────────

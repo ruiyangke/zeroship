@@ -13,7 +13,7 @@ import path from 'path'
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), 'VITE_')
   const control = env.VITE_PROXY_CONTROL ?? 'http://localhost:9090'
-  const gateway = env.VITE_PROXY_GATEWAY ?? 'http://localhost:8000'
+  const gateway = env.VITE_PROXY_GATEWAY ?? 'http://localhost:8001'
   const agent = env.VITE_PROXY_AGENT ?? 'http://localhost:4444'
 
   return {
@@ -33,8 +33,17 @@ export default defineConfig(({ mode }) => {
         '/_usage': control,
         // Gateway (deployed apps' user-facing URLs — for the preview iframe)
         '/apps': gateway,
-        // Agent SSE chat
-        '/agent': agent,
+        // Agent SSE chat — single origin via Vite, no CORS. Strip
+        // the `/agent` prefix so the upstream sees its native paths
+        // (`/chat`, `/health`).
+        '/agent': {
+          target: agent,
+          changeOrigin: true,
+          rewrite: (p) => p.replace(/^\/agent/, ''),
+          // SSE responses must stream — keep the WS upgrade path open
+          // and don't buffer.
+          ws: true,
+        },
       },
     },
     build: {

@@ -4,7 +4,7 @@
 // up (a common UX bug we explicitly avoid).
 
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { Send, Loader2, Square } from "lucide-react";
+import { Send, Loader2, Square, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import type { BuilderChat } from "../useBuilderChat";
@@ -55,6 +55,27 @@ export function Chat({ chat }: Props) {
 
   return (
     <div className="flex flex-col h-full bg-background">
+      {/* Slim chat header — sets the rail apart from the tab content
+          and gives us somewhere to hang the "clear conversation"
+          affordance without cluttering the topbar. */}
+      <div className="flex items-center gap-2 px-3 h-7 border-b border-border bg-muted/30">
+        <span className="text-[10px] uppercase tracking-wider text-muted-foreground flex-1">
+          chat
+        </span>
+        {messages.length > 0 && (
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={actions.reset}
+            title="Clear conversation"
+            className="h-5 w-5 p-0 text-muted-foreground hover:text-destructive"
+            data-testid="chat-clear"
+          >
+            <Trash2 className="size-3" />
+          </Button>
+        )}
+      </div>
+
       <div
         ref={scrollRef}
         onScroll={onScroll}
