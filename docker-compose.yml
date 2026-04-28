@@ -93,5 +93,40 @@ services:
     depends_on:
       - control
 
+  # zeroship-sandbox — Docker-backed dev containers for the AI builder.
+  # Spawns sibling containers (Docker-out-of-Docker) by mounting
+  # /var/run/docker.sock from the host. Bind-mounts the host's
+  # /var/zeroship/projects so workspaces survive sandbox restarts AND
+  # are reachable directly from the host (the agent's `read_file` /
+  # `write_file` ops bypass docker exec for performance).
+  sandbox:
+    build: .
+    command: >
+      zeroship-sandbox
+    environment:
+      SANDBOX_PORT: "9091"
+      SANDBOX_TOKEN: sandbox-key
+      SANDBOX_IMAGE: zeroship/sandbox-base:latest
+      SANDBOX_WORKSPACE_ROOT: /var/zeroship/projects
+      SANDBOX_NETWORK: zeroship-sandbox-net
+      SANDBOX_AUTO_PULL: "false"
+      SANDBOX_IDLE_TIMEOUT_SECS: "1800"
+      SANDBOX_MAX_LIFETIME_SECS: "28800"
+    ports:
+      - "9091:9091"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/zeroship/projects:/var/zeroship/projects
+    networks:
+      - default
+      - zeroship-sandbox-net
+    security_opt:
+      - seccomp:unconfined
+
+networks:
+  zeroship-sandbox-net:
+    name: zeroship-sandbox-net
+    driver: bridge
+
 volumes:
   bundles:
