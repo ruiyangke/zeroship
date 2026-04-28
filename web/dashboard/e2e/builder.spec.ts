@@ -416,11 +416,14 @@ test.describe("Dev auth bypass", () => {
     await expect(page.locator("text=/// apps/").first()).toBeVisible({ timeout: 5000 });
   });
 
-  test("/login auto-redirects to / in dev", async ({ page }) => {
+  test("/login renders in dev (auth UI is reachable for iteration)", async ({ page }) => {
     await page.addInitScript(() => localStorage.clear());
     await page.goto("/login");
-    await page.waitForURL("**/", { timeout: 5000 });
-    await expect(page.getByTestId("home")).toBeVisible();
+    // The auto-bypass on /admin/* still works (covered above), but
+    // /login and /signup explicitly stay accessible so devs can
+    // poke at the form while building features.
+    await expect(page.getByTestId("login-page")).toBeVisible({ timeout: 5000 });
+    await expect(page.getByTestId("login-google")).toBeVisible();
   });
 
   test("api requests carry a Bearer header even when no key is stored", async ({ page }) => {
@@ -433,6 +436,84 @@ test.describe("Dev auth bypass", () => {
     await page.goto("/");
     await page.waitForResponse("**/api/apps", { timeout: 5000 });
     expect(captured).toMatch(/^Bearer .+/);
+  });
+});
+
+// =========================================================================
+// Auth UI — Login + Signup + protected-route gating
+// =========================================================================
+//
+// In dev mode the dashboard short-circuits authentication via
+// `import.meta.env.DEV` (see src/auth/AuthContext.tsx) — every
+// route renders without ever calling /auth/userinfo. These tests
+// exercise the surfaces that DO appear (Login + Signup pages,
+// /account) and the dev-bypass behavior we want to preserve.
+//
+// Production-mode auth (real cookie session round-trip) is covered
+// by the backend curl smoke-tests committed alongside the auth
+// service; testing it here would require shelling out to the
+// control plane during the test run, which is out of scope for the
+// dashboard e2e suite.
+
+test.describe("Auth UI", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => localStorage.clear());
+    await page.route("**/api/apps", async (r) =>
+      r.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+    );
+    await page.route("**/_health", async (r) =>
+      r.fulfill({ status: 200, contentType: "application/json", body: '{"status":"ok"}' }),
+    );
+  });
+
+  test("/login renders email + password form + Google button", async ({ page }) => {
+    await page.goto("/login");
+    await expect(page.getByTestId("login-page")).toBeVisible();
+    await expect(page.getByTestId("login-email")).toBeVisible();
+    await expect(page.getByTestId("login-password")).toBeVisible();
+    await expect(page.getByTestId("login-google")).toBeVisible();
+  });
+
+  test("/signup renders all fields", async ({ page }) => {
+    await page.goto("/signup");
+    await expect(page.getByTestId("signup-page")).toBeVisible();
+    await expect(page.getByTestId("signup-name")).toBeVisible();
+    await expect(page.getByTestId("signup-email")).toBeVisible();
+    await expect(page.getByTestId("signup-password")).toBeVisible();
+    await expect(page.getByTestId("signup-google")).toBeVisible();
+  });
+
+  test("/signup submit is disabled until all fields valid", async ({ page }) => {
+    await page.goto("/signup");
+    const submit = page.getByTestId("signup-submit");
+    await expect(submit).toBeDisabled();
+    await page.getByTestId("signup-name").fill("Alice");
+    await page.getByTestId("signup-email").fill("a@b.dev");
+    await page.getByTestId("signup-password").fill("short");
+    await expect(submit).toBeDisabled();
+    await page.getByTestId("signup-password").fill("longerpassword");
+    await expect(submit).toBeEnabled();
+  });
+
+  test("/signup → /login link works", async ({ page }) => {
+    await page.goto("/signup");
+    await page.getByTestId("signup-link-login").click();
+    await page.waitForURL(/\/login/, { timeout: 3000 });
+    await expect(page.getByTestId("login-page")).toBeVisible();
+  });
+
+  test("/account shows the (synthetic) dev user", async ({ page }) => {
+    await page.goto("/account");
+    await expect(page.getByTestId("account")).toBeVisible();
+    await expect(page.getByTestId("account-name")).toContainText("Dev");
+    await expect(page.getByTestId("account-email")).toContainText("dev@localhost");
+  });
+
+  test("Google start link points at /auth/google/start", async ({ page }) => {
+    await page.goto("/signup");
+    const href = await page.getByTestId("signup-google").getAttribute("href");
+    expect(href ?? "").toContain("/auth/google/start");
+    expect(href ?? "").toContain("return=");
   });
 });
 

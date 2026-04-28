@@ -1,33 +1,30 @@
 // ─── App — routing root ─────────────────────────────────────────
 //
-// Route map (post-refactor):
+// Route map:
 //
-//   /                        Home (gallery + prompt)
-//   /p/:appId                → /p/:appId/chat
-//   /p/:appId/chat           ChatTab (preview + chat rail)
-//   /p/:appId/files          FilesTab (CM6 + file tree)
-//   /p/:appId/logs           LogsTab
-//   /p/:appId/env            EnvTab
-//   /p/:appId/settings       SettingsTab
-//   /account                 Account
-//   /admin/apps              AppList (legacy)
-//   /admin/overview          Overview (legacy)
-//   /admin/apps/:id          AppDetail (legacy)
-//   /admin/apps/new          CreateApp (legacy)
-//   /login                   Login (auto-shown when unauthed)
+//   /                        Home (gallery + prompt) — auth required
+//   /p/:appId/{chat|files|logs|env|settings}        — auth required
+//   /account                 Account — auth required
+//   /admin/*                 Legacy admin pages — auth required
+//   /login                   Login (auto-redirects if authed)
+//   /signup                  Signup (auto-redirects if authed)
+//   Bookmark redirects: /builder, /apps/* → new routes
 //
-// Legacy /apps/* and /builder/* are aliased to the new routes below
-// so bookmarks keep working.
+// Auth state lives in AuthContext (src/auth/AuthContext.tsx). In
+// dev mode (`import.meta.env.DEV`) we short-circuit to a synthetic
+// user — no login screen ever appears. Prod gates everything except
+// /login + /signup.
 
-import { useEffect, useState } from "react";
 import {
-  BrowserRouter, Routes, Route, Navigate, useParams,
+  BrowserRouter, Routes, Route, Navigate, useParams, useLocation,
 } from "react-router-dom";
+import type { ReactNode } from "react";
 
-import { isDevAutoAuth } from "./api";
+import { AuthProvider, useAuth } from "./auth/AuthContext";
 import { Home } from "./pages/Home";
 import { Account } from "./pages/Account";
 import Login from "./pages/Login";
+import Signup from "./pages/Signup";
 import { ProjectWorkspace } from "./workspace/ProjectWorkspace";
 import { ChatTab } from "./workspace/tabs/ChatTab";
 import { FilesTab } from "./workspace/tabs/FilesTab";
@@ -43,94 +40,115 @@ import AppDetail from "./pages/AppDetail";
 import CreateApp from "./pages/CreateApp";
 
 function App() {
-  // In dev (vite dev / preview), bypass the login gate entirely —
-  // the api client also auto-fills the dev master key on every
-  // request. Production builds (DEV=false) preserve the original
-  // localStorage-key flow.
-  const devBypass = isDevAutoAuth();
-
-  const [authed, setAuthed] = useState(
-    () => devBypass || !!localStorage.getItem("zeroship_key"),
+  return (
+    <BrowserRouter>
+      <AuthProvider>
+        <AppRoutes />
+      </AuthProvider>
+    </BrowserRouter>
   );
+}
 
-  useEffect(() => {
-    const handler = () =>
-      setAuthed(devBypass || !!localStorage.getItem("zeroship_key"));
-    window.addEventListener("storage", handler);
-    return () => window.removeEventListener("storage", handler);
-  }, [devBypass]);
-
-  const handleLogin = () => setAuthed(true);
-  const handleLogout = () => {
-    localStorage.removeItem("zeroship_key");
-    // In dev we stay authed (the dev key is implicit); only prod
-    // boots the user back to /login.
-    if (!devBypass) setAuthed(false);
+function AppRoutes() {
+  const { logout } = useAuth();
+  const handleLogout = async () => {
+    await logout();
   };
 
   return (
-    <BrowserRouter>
-      <Routes>
-        {/* Login is its own surface — no top-bar. */}
-        <Route
-          path="/login"
-          element={
-            authed
-              ? <Navigate to="/" replace />
-              : <Login onLogin={handleLogin} />
-          }
-        />
+    <Routes>
+      {/* Auth pages. */}
+      <Route path="/login"  element={<RedirectIfAuthed><Login /></RedirectIfAuthed>} />
+      <Route path="/signup" element={<RedirectIfAuthed><Signup /></RedirectIfAuthed>} />
 
-        {/* Home page (gallery + prompt). */}
-        <Route path="/" element={<Home onLogout={handleLogout} />} />
+      {/* Home page (gallery + prompt). */}
+      <Route path="/"
+        element={<RequireAuth><Home onLogout={handleLogout} /></RequireAuth>} />
 
-        {/* Project workspace. Tabs are children of the shell. */}
-        <Route path="/p/:appId" element={<ProjectWorkspace onLogout={handleLogout} />}>
-          <Route index element={<Navigate to="chat" replace />} />
-          <Route path="chat"     element={<ChatTab />} />
-          <Route path="files"    element={<FilesTab />} />
-          <Route path="logs"     element={<LogsTab />} />
-          <Route path="env"      element={<EnvTab />} />
-          <Route path="settings" element={<SettingsTab />} />
-        </Route>
+      {/* Project workspace. Tabs are children of the shell. */}
+      <Route path="/p/:appId"
+        element={<RequireAuth><ProjectWorkspace onLogout={handleLogout} /></RequireAuth>}>
+        <Route index element={<Navigate to="chat" replace />} />
+        <Route path="chat"     element={<ChatTab />} />
+        <Route path="files"    element={<FilesTab />} />
+        <Route path="logs"     element={<LogsTab />} />
+        <Route path="env"      element={<EnvTab />} />
+        <Route path="settings" element={<SettingsTab />} />
+      </Route>
 
-        {/* Account. */}
-        <Route path="/account" element={<Account onLogout={handleLogout} />} />
+      {/* Account. */}
+      <Route path="/account"
+        element={<RequireAuth><Account onLogout={handleLogout} /></RequireAuth>} />
 
-        {/* Legacy admin under /admin/*. Auth-gated via Layout. */}
-        <Route
-          path="/admin/*"
-          element={
-            !authed ? (
-              <Navigate to="/login" replace />
-            ) : (
-              <Layout onLogout={handleLogout}>
-                <Routes>
-                  <Route index               element={<Overview />} />
-                  <Route path="overview"     element={<Overview />} />
-                  <Route path="apps"         element={<AppList />} />
-                  <Route path="apps/new"     element={<CreateApp />} />
-                  <Route path="apps/:id"     element={<AppDetail />} />
-                  <Route path="*"            element={<Navigate to="apps" replace />} />
-                </Routes>
-              </Layout>
-            )
-          }
-        />
+      {/* Legacy admin under /admin/*. */}
+      <Route path="/admin/*"
+        element={
+          <RequireAuth>
+            <Layout onLogout={handleLogout}>
+              <Routes>
+                <Route index           element={<Overview />} />
+                <Route path="overview" element={<Overview />} />
+                <Route path="apps"     element={<AppList />} />
+                <Route path="apps/new" element={<CreateApp />} />
+                <Route path="apps/:id" element={<AppDetail />} />
+                <Route path="*"        element={<Navigate to="apps" replace />} />
+              </Routes>
+            </Layout>
+          </RequireAuth>
+        }
+      />
 
-        {/* Bookmark redirects from the pre-refactor URLs. */}
-        <Route path="/builder"               element={<Navigate to="/" replace />} />
-        <Route path="/builder/:appId"        element={<RedirectBuilder />} />
-        <Route path="/apps"                  element={<Navigate to="/admin/apps" replace />} />
-        <Route path="/apps/new"              element={<Navigate to="/admin/apps/new" replace />} />
-        <Route path="/apps/:id"              element={<RedirectLegacyApp />} />
-        <Route path="/ai"                    element={<Navigate to="/" replace />} />
+      {/* Bookmark redirects from the pre-refactor URLs. */}
+      <Route path="/builder"        element={<Navigate to="/" replace />} />
+      <Route path="/builder/:appId" element={<RedirectBuilder />} />
+      <Route path="/apps"           element={<Navigate to="/admin/apps" replace />} />
+      <Route path="/apps/new"       element={<Navigate to="/admin/apps/new" replace />} />
+      <Route path="/apps/:id"       element={<RedirectLegacyApp />} />
+      <Route path="/ai"             element={<Navigate to="/" replace />} />
 
-        {/* Catch-all */}
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </BrowserRouter>
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   );
+}
+
+/** Block protected routes until auth resolves; redirect to /login
+ *  with a `?return=` carry so we land back here after sign-in. */
+function RequireAuth({ children }: { children: ReactNode }) {
+  const { user, loading, devBypass } = useAuth();
+  const location = useLocation();
+
+  if (devBypass) return <>{children}</>;
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center text-xs text-muted-foreground">
+        loading…
+      </div>
+    );
+  }
+  if (!user) {
+    const ret = encodeURIComponent(location.pathname + location.search);
+    return <Navigate to={`/login?return=${ret}`} replace />;
+  }
+  return <>{children}</>;
+}
+
+/** Bounce already-authed users away from /login + /signup.
+ *  Note: dev mode does NOT auto-redirect — /login and /signup render
+ *  so devs can iterate on the auth UI even with the implicit dev
+ *  user in the background. The auth call from the form still works
+ *  in dev (control plane runs with --dev-insecure). */
+function RedirectIfAuthed({ children }: { children: ReactNode }) {
+  const { user, loading, devBypass } = useAuth();
+  const location = useLocation();
+
+  if (devBypass) return <>{children}</>;
+  if (loading) return null;
+  if (user) {
+    const params = new URLSearchParams(location.search);
+    const ret = params.get("return") ?? "/";
+    return <Navigate to={ret} replace />;
+  }
+  return <>{children}</>;
 }
 
 function RedirectBuilder() {
@@ -140,9 +158,6 @@ function RedirectBuilder() {
 
 function RedirectLegacyApp() {
   const { id } = useParams<{ id: string }>();
-  // Old AppDetail page lives under /admin now, but redirect bookmarks
-  // to the new project workspace by default — that's where most users
-  // want to land.
   return <Navigate to={id ? `/p/${id}/chat` : "/"} replace />;
 }
 

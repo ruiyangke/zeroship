@@ -2,19 +2,18 @@
 // MVP: master key visible (masked + reveal), logout button.
 // Future: OAuth, billing, API keys, sessions.
 
-import { useState } from "react";
 import { TopBar } from "../workspace/components/TopBar";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Eye, EyeOff, LogOut } from "lucide-react";
+import { LogOut } from "lucide-react";
+import { useAuth } from "../auth/AuthContext";
 
 interface Props {
   onLogout?: () => void;
 }
 
 export function Account({ onLogout }: Props) {
-  const [reveal, setReveal] = useState(false);
-  const key = (typeof localStorage !== "undefined" && localStorage.getItem("zeroship_key")) || "";
+  const { user } = useAuth();
 
   return (
     <div className="h-screen flex flex-col">
@@ -26,29 +25,11 @@ export function Account({ onLogout }: Props) {
           </header>
 
           <Card>
-            <CardHeader><CardTitle>master key</CardTitle></CardHeader>
+            <CardHeader><CardTitle>profile</CardTitle></CardHeader>
             <CardContent className="space-y-3">
-              <p className="text-xs text-muted-foreground">
-                this key authorizes admin operations against the control plane.
-                anyone with it can deploy or delete apps. don't share it.
-              </p>
-              <div className="grid grid-cols-[1fr_auto] gap-2 items-center">
-                <code className="font-mono text-xs bg-muted p-2 break-all">
-                  {key
-                    ? reveal
-                      ? key
-                      : "*".repeat(Math.max(0, key.length - 4)) + key.slice(-4)
-                    : "(not set)"}
-                </code>
-                <Button
-                  type="button" variant="ghost" className="h-8 w-8 p-0"
-                  onClick={() => setReveal(!reveal)}
-                  title={reveal ? "Hide" : "Reveal"}
-                  data-testid="account-toggle-reveal"
-                >
-                  {reveal ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
-                </Button>
-              </div>
+              <Field label="name"  value={user?.name  ?? "—"} testid="account-name" />
+              <Field label="email" value={user?.email ?? "—"} testid="account-email" />
+              <Field label="id"    value={user?.id    ?? "—"} testid="account-id" mono />
             </CardContent>
           </Card>
 
@@ -66,6 +47,24 @@ export function Account({ onLogout }: Props) {
           </Card>
         </div>
       </main>
+    </div>
+  );
+}
+
+function Field({
+  label, value, testid, mono = false,
+}: { label: string; value: string; testid: string; mono?: boolean }) {
+  return (
+    <div className="grid grid-cols-[80px_1fr] gap-3 items-center">
+      <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+        {label}
+      </span>
+      <span
+        data-testid={testid}
+        className={`text-sm ${mono ? "font-mono text-xs" : ""}`}
+      >
+        {value}
+      </span>
     </div>
   );
 }
