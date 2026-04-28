@@ -109,8 +109,10 @@ async fn main() -> std::io::Result<()> {
                 web::resource("/sessions/{id}/file-tree")
                     .route(web::get().to(handlers::file_tree)),
             )
+            // {path}* is ntex's tail-match syntax (matches across slashes).
+            // {path:.*} only matches single segments — would 404 on src/App.tsx.
             .service(
-                web::resource("/sessions/{id}/files/{path:.*}")
+                web::resource("/sessions/{id}/files/{path}*")
                     .route(web::get().to(handlers::read_file))
                     .route(web::put().to(handlers::write_file))
                     .route(web::delete().to(handlers::delete_file)),

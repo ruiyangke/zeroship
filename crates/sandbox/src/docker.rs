@@ -97,11 +97,13 @@ pub async fn exec_in_container(
     let workdir_arg = cwd.map(|s| s.to_string()).unwrap_or_else(|| "/workspace".to_string());
 
     // We wrap the user's command in `timeout` so the child can't run
-    // forever inside the container. The timeout binary lives in
-    // coreutils which is in node:22-alpine via the busybox base.
+    // forever inside the container. We target BusyBox's `timeout`
+    // (the only one in node:22-alpine): `timeout [-s SIG] [-k SECS]
+    // SECS PROG ARGS`. GNU's `--foreground` is unsupported here, so
+    // we pass the bare flags both implementations accept.
     let wrapped = if let Some(ms) = timeout_ms {
         let secs = (ms / 1000).max(1);
-        format!("timeout --foreground -k 2 {secs} sh -c {}", shell_quote(cmd))
+        format!("timeout -k 2 {secs} sh -c {}", shell_quote(cmd))
     } else {
         format!("sh -c {}", shell_quote(cmd))
     };
