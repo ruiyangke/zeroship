@@ -16,3 +16,9 @@ export const CONTROL_KEY =
 
 export const GATEWAY_URL =
   process.env.ZEROSHIP_GATEWAY_URL ?? "http://localhost:8000";
+
+export const SANDBOX_URL =
+  process.env.ZEROSHIP_SANDBOX_URL ?? "http://localhost:9091";
+
+export const SANDBOX_TOKEN =
+  process.env.ZEROSHIP_SANDBOX_TOKEN ?? "";
