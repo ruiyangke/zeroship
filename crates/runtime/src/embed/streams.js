@@ -151,25 +151,48 @@
     // synchronously (value path → valueQueue / native slot) or return a
     // promise that will do so; either way, the read below will see the
     // result.
+    // Per the WHATWG spec, pull may run while a previous pull is still
+    // in flight: when a new read arrives during a pull, set a "pullAgain"
+    // flag and re-pull when the current one completes. Without this, a
+    // read that races a pull-in-progress will park, the pull will deliver
+    // its chunk to a DIFFERENT (older) waiter, and our new waiter sits
+    // forever — manifests as second-read hangs in pump-style consumers
+    // (langgraph's IterableReadableStreamWithAbortSignal pump).
     var pullFn = stream._pullFn;
-    if (pullFn && !stream._pulling && !stream._controller._closed) {
+    function startPull() {
+      if (!pullFn || stream._controller._closed) return;
+      if (stream._pulling) {
+        stream._pullAgain = true;
+        return;
+      }
       stream._pulling = true;
       try {
         var pullResult = pullFn(stream._controller);
-        var done = function() { stream._pulling = false; };
+        var settle = function() {
+          stream._pulling = false;
+          if (stream._pullAgain && !stream._controller._closed) {
+            stream._pullAgain = false;
+            // Only re-pull if there's a parked waiter that still needs
+            // a chunk. Otherwise the pull would prefetch unnecessarily.
+            if (stream._valueWaiters.length > 0 && stream._valueQueue.length === 0) {
+              startPull();
+            }
+          }
+        };
         if (pullResult && typeof pullResult.then === "function") {
-          pullResult.then(done, function(e) {
-            done();
+          pullResult.then(settle, function(e) {
+            settle();
             try { stream._controller.error(e); } catch (_e) {}
           });
         } else {
-          done();
+          settle();
         }
       } catch (e) {
         stream._pulling = false;
         try { stream._controller.error(e); } catch (_e) {}
       }
     }
+    startPull();
 
     // Value path takes priority when populated — it bypasses the native
     // slot entirely and avoids round-tripping arbitrary objects.
