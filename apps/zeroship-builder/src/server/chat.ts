@@ -1,30 +1,29 @@
 "use server";
-// AI chat — vanilla OpenAI tool-use loop in pure JS.
+// AI chat — runs deepagents (LangGraph) inside the zeroship V8 runtime.
 //
-// No LangGraph, no deepagents — those drag Node-only deps that the
-// V8 runtime can't host. This implements the tool-use loop directly:
+// The vite-plugin's node-compat layer (unenv-based, see
+// `sdks/vite-plugin/src/node-compat.ts`) provides shims for every
+// `node:*` specifier deepagents + langchain reach for. Anything still
+// missing surfaces at build/runtime as a clear error and we add it
+// to the polyfills there — the runtime itself stays clean WinterCG.
 //
-//   user msg → POST /v1/chat/completions
-//   if reply has tool_calls:
-//     run each tool (sandbox + control-plane proxies)
-//     append tool result messages
-//     loop
-//   else:
-//     return text
-//
-// Streamed via an async generator — the React side iterates it with
-// `for await`. The vite-plugin transforms the generator into a chunked
-// stream over the RPC wire automatically.
-//
-// Total cost: ~250 lines for what deepagents charges 5MB of bundle.
+// Dogfood: this module compiles into `dist/server/index.js` and
+// runs as part of our own zeroship app's fetch handler. There is no
+// out-of-process agent service.
 
+import { createDeepAgent } from "deepagents";
+import { ChatOpenAI } from "@langchain/openai";
+import { ChatAnthropic } from "@langchain/anthropic";
+import { HumanMessage, AIMessage } from "@langchain/core/messages";
+import { tool } from "@langchain/core/tools";
+import { z } from "zod";
 import { OPENAI_API_KEY } from "./env";
 import {
   openSession,
-  listFiles,
-  readFile,
-  writeFile,
-  deleteFile,
+  listFiles as sbxListFiles,
+  readFile as sbxReadFile,
+  writeFile as sbxWriteFile,
+  deleteFile as sbxDeleteFile,
   execCommand,
 } from "./sandbox";
 import {
@@ -38,6 +37,8 @@ import {
 export interface ChatRequest {
   messages: { role: "user" | "assistant" | "system"; content: string }[];
   context?: { app_id?: string; app_name?: string };
+  model?: string;
+  provider?: "openai" | "anthropic";
 }
 
 export type ChatEvent =
@@ -47,365 +48,312 @@ export type ChatEvent =
   | { type: "done" }
   | { type: "error"; content: string };
 
-// ─── Tool definitions ────────────────────────────────────────────
+// ─── Tool surface ────────────────────────────────────────────────
 //
-// We keep tool surface small — the bigger the surface, the more
-// confused gpt-4o gets. These six cover everything the AI builder
-// needs for vite + react + deploy.
+// Every sandbox / control-plane operation is a deepagents tool.
+// The `sandbox_*` prefix avoids collision with deepagents' built-in
+// virtual-FS tools (`read_file`, `write_file`, `edit_file`, `ls`,
+// `execute`) — those operate on agent-state memory; ours operate
+// on the real Docker container.
 
-interface ToolDef {
-  name: string;
-  description: string;
-  parameters: Record<string, unknown>;
-  run(args: any, ctx: { app_id?: string; app_name?: string }): Promise<string>;
+function makeTools(ctx: { app_id?: string; app_name?: string }) {
+  const pid = ctx.app_id;
+
+  return [
+    tool(
+      async ({ project_id }) => {
+        const id = project_id ?? pid;
+        if (!id) return JSON.stringify({ ok: false, error: "no project_id" });
+        const info = await openSession(id);
+        return JSON.stringify({ ok: true, ...info });
+      },
+      {
+        name: "open_session",
+        description: "Open or attach to the project's sandbox container. Idempotent.",
+        schema: z.object({
+          project_id: z.string().optional()
+            .describe("App UUID. Defaults to workspace context's app_id."),
+        }),
+      },
+    ),
+    tool(
+      async ({ project_id }) => {
+        const id = project_id ?? pid;
+        if (!id) return JSON.stringify({ ok: false, error: "no project_id" });
+        const entries = await sbxListFiles(id);
+        return JSON.stringify({ ok: true, entries });
+      },
+      {
+        name: "sandbox_list_files",
+        description: "List files in the project workspace (skips node_modules, .git, dist).",
+        schema: z.object({ project_id: z.string().optional() }),
+      },
+    ),
+    tool(
+      async ({ project_id, path }) => {
+        const id = project_id ?? pid;
+        if (!id) return JSON.stringify({ ok: false, error: "no project_id" });
+        try {
+          const content = await sbxReadFile(id, path);
+          return JSON.stringify({ ok: true, path, content });
+        } catch (e: any) {
+          return JSON.stringify({ ok: false, error: e?.message ?? String(e) });
+        }
+      },
+      {
+        name: "sandbox_read_file",
+        description:
+          "Read a file from the PROJECT WORKSPACE (real Docker container). " +
+          "Use this — NOT deepagents' built-in `read_file` (agent-state memory).",
+        schema: z.object({
+          project_id: z.string().optional(),
+          path: z.string(),
+        }),
+      },
+    ),
+    tool(
+      async ({ project_id, path, content }) => {
+        const id = project_id ?? pid;
+        if (!id) return JSON.stringify({ ok: false, error: "no project_id" });
+        try {
+          const r = await sbxWriteFile(id, path, content);
+          return JSON.stringify({ ok: true, ...r });
+        } catch (e: any) {
+          return JSON.stringify({ ok: false, error: e?.message ?? String(e) });
+        }
+      },
+      {
+        name: "sandbox_write_file",
+        description:
+          "Create or overwrite a file in the PROJECT WORKSPACE. 5 MB cap. " +
+          "Use this — NOT deepagents' built-in `write_file`.",
+        schema: z.object({
+          project_id: z.string().optional(),
+          path: z.string(),
+          content: z.string(),
+        }),
+      },
+    ),
+    tool(
+      async ({ project_id, path }) => {
+        const id = project_id ?? pid;
+        if (!id) return JSON.stringify({ ok: false, error: "no project_id" });
+        try {
+          await sbxDeleteFile(id, path);
+          return JSON.stringify({ ok: true });
+        } catch (e: any) {
+          return JSON.stringify({ ok: false, error: e?.message ?? String(e) });
+        }
+      },
+      {
+        name: "sandbox_delete_file",
+        description: "Delete a file from the project workspace. Idempotent.",
+        schema: z.object({
+          project_id: z.string().optional(),
+          path: z.string(),
+        }),
+      },
+    ),
+    tool(
+      async ({ project_id, cmd, cwd, timeout_ms }) => {
+        const id = project_id ?? pid;
+        if (!id) return JSON.stringify({ ok: false, error: "no project_id" });
+        try {
+          const out = await execCommand(id, cmd, { cwd, timeoutMs: timeout_ms });
+          const cap = (s: string) => s.length > 4000 ? s.slice(0, 4000) + "\n…(truncated)" : s;
+          return JSON.stringify({
+            ok: out.status === 0,
+            status: out.status,
+            stdout: cap(out.stdout),
+            stderr: cap(out.stderr),
+          });
+        } catch (e: any) {
+          return JSON.stringify({ ok: false, error: e?.message ?? String(e) });
+        }
+      },
+      {
+        name: "sandbox_exec",
+        description:
+          "Run a shell command inside the project's sandbox container. " +
+          "Useful for `npm install`, `npm run build`, `git`, etc. Default timeout 60s; max 600s.",
+        schema: z.object({
+          project_id: z.string().optional(),
+          cmd: z.string(),
+          cwd: z.string().optional(),
+          timeout_ms: z.number().int().positive().max(600_000).optional(),
+        }),
+      },
+    ),
+    tool(
+      async () => {
+        const apps = await cpListApps();
+        return JSON.stringify({ ok: true, apps });
+      },
+      {
+        name: "list_apps",
+        description: "Enumerate apps on the platform.",
+        schema: z.object({}),
+      },
+    ),
+    tool(
+      async ({ name }) => {
+        try {
+          const app = await cpCreateApp(name, "free");
+          return JSON.stringify({ ok: true, app_id: app.id, app_name: app.name });
+        } catch (e: any) {
+          return JSON.stringify({ ok: false, error: e?.message ?? String(e) });
+        }
+      },
+      {
+        name: "create_app",
+        description: "Create a new zeroship app with a slug name.",
+        schema: z.object({
+          name: z.string().regex(/^[a-zA-Z0-9_-]+$/).min(1).max(64),
+        }),
+      },
+    ),
+    tool(
+      async ({ app_id, server_js }) => {
+        try {
+          const r = await cpDeployApp(app_id, server_js);
+          return JSON.stringify({ ok: true, ...r });
+        } catch (e: any) {
+          return JSON.stringify({ ok: false, error: e?.message ?? String(e) });
+        }
+      },
+      {
+        name: "deploy_app",
+        description:
+          "Deploy a single ES module to an app. The module MUST be " +
+          "`export default { fetch(req, env, ctx) { ... } }`.",
+        schema: z.object({
+          app_id: z.string().uuid(),
+          server_js: z.string(),
+        }),
+      },
+    ),
+  ];
 }
 
-const TOOLS: ToolDef[] = [
-  {
-    name: "open_session",
-    description:
-      "Open or attach to the project's sandbox container. Returns session_id, container_ip, workspace_path. Idempotent.",
-    parameters: {
-      type: "object",
-      properties: {
-        project_id: { type: "string", description: "App UUID from the workspace context." },
-      },
-      required: ["project_id"],
-    },
-    async run(args) {
-      const info = await openSession(args.project_id);
-      return JSON.stringify({ ok: true, ...info });
-    },
-  },
-  {
-    name: "list_files",
-    description: "Walk the project workspace; returns a list of files + sizes (skips node_modules, .git, dist).",
-    parameters: {
-      type: "object",
-      properties: { project_id: { type: "string" } },
-      required: ["project_id"],
-    },
-    async run(args) {
-      const entries = await listFiles(args.project_id);
-      return JSON.stringify({ ok: true, entries });
-    },
-  },
-  {
-    name: "read_file",
-    description: "Read a file from the project workspace. Path is relative to the workspace root.",
-    parameters: {
-      type: "object",
-      properties: {
-        project_id: { type: "string" },
-        path: { type: "string" },
-      },
-      required: ["project_id", "path"],
-    },
-    async run(args) {
-      try {
-        const content = await readFile(args.project_id, args.path);
-        return JSON.stringify({ ok: true, path: args.path, content });
-      } catch (e: any) {
-        return JSON.stringify({ ok: false, error: e?.message ?? String(e) });
-      }
-    },
-  },
-  {
-    name: "write_file",
-    description:
-      "Create or overwrite a file in the project workspace. Parent directories are created automatically. 5 MB cap.",
-    parameters: {
-      type: "object",
-      properties: {
-        project_id: { type: "string" },
-        path: { type: "string" },
-        content: { type: "string" },
-      },
-      required: ["project_id", "path", "content"],
-    },
-    async run(args) {
-      try {
-        const r = await writeFile(args.project_id, args.path, args.content);
-        return JSON.stringify({ ok: true, ...r });
-      } catch (e: any) {
-        return JSON.stringify({ ok: false, error: e?.message ?? String(e) });
-      }
-    },
-  },
-  {
-    name: "delete_file",
-    description: "Delete a file from the project workspace. Idempotent.",
-    parameters: {
-      type: "object",
-      properties: {
-        project_id: { type: "string" },
-        path: { type: "string" },
-      },
-      required: ["project_id", "path"],
-    },
-    async run(args) {
-      try {
-        await deleteFile(args.project_id, args.path);
-        return JSON.stringify({ ok: true });
-      } catch (e: any) {
-        return JSON.stringify({ ok: false, error: e?.message ?? String(e) });
-      }
-    },
-  },
-  {
-    name: "exec",
-    description:
-      "Run a shell command inside the sandbox container. Useful for `npm install`, `npm run build`, `git ...`. Default cwd /workspace; default timeout 60s; max 600s. Output truncated at 4 KB per stream.",
-    parameters: {
-      type: "object",
-      properties: {
-        project_id: { type: "string" },
-        cmd: { type: "string" },
-        cwd: { type: "string" },
-        timeout_ms: { type: "integer" },
-      },
-      required: ["project_id", "cmd"],
-    },
-    async run(args) {
-      try {
-        const out = await execCommand(args.project_id, args.cmd, {
-          cwd: args.cwd, timeoutMs: args.timeout_ms,
-        });
-        const cap = (s: string) => s.length > 4000 ? s.slice(0, 4000) + "\n…(truncated)" : s;
-        return JSON.stringify({
-          ok: out.status === 0,
-          status: out.status,
-          stdout: cap(out.stdout),
-          stderr: cap(out.stderr),
-        });
-      } catch (e: any) {
-        return JSON.stringify({ ok: false, error: e?.message ?? String(e) });
-      }
-    },
-  },
-  {
-    name: "list_apps",
-    description: "List every zeroship app on the platform (id, name, plan, deploy state).",
-    parameters: { type: "object", properties: {} },
-    async run() {
-      const apps = await cpListApps();
-      return JSON.stringify({ ok: true, apps });
-    },
-  },
-  {
-    name: "create_app",
-    description: "Create a new zeroship app with a slug name. Returns the app's UUID + slug.",
-    parameters: {
-      type: "object",
-      properties: { name: { type: "string", description: "Slug (alphanumeric/dash/underscore, 1-64 chars)." } },
-      required: ["name"],
-    },
-    async run(args) {
-      try {
-        const app = await cpCreateApp(args.name, "free");
-        return JSON.stringify({ ok: true, app_id: app.id, app_name: app.name });
-      } catch (e: any) {
-        return JSON.stringify({ ok: false, error: e?.message ?? String(e) });
-      }
-    },
-  },
-  {
-    name: "deploy_app",
-    description:
-      "Deploy a single ES module to an app. Module MUST be `export default { fetch(req, env, ctx) { ... } }`. " +
-      "For React/Vite projects use the build_and_publish flow on the agent host instead — this tool is only " +
-      "for tiny single-file backends.",
-    parameters: {
-      type: "object",
-      properties: {
-        app_id: { type: "string" },
-        server_js: { type: "string" },
-      },
-      required: ["app_id", "server_js"],
-    },
-    async run(args) {
-      try {
-        const r = await cpDeployApp(args.app_id, args.server_js);
-        return JSON.stringify({ ok: true, ...r });
-      } catch (e: any) {
-        return JSON.stringify({ ok: false, error: e?.message ?? String(e) });
-      }
-    },
-  },
-];
+// ─── Model selection ─────────────────────────────────────────────
 
-const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
+function pickModel(req: ChatRequest) {
+  const proc = (globalThis as any).process;
+  const provider = req.provider
+    ?? (proc?.env?.OPENAI_API_KEY ? "openai"
+        : proc?.env?.ANTHROPIC_API_KEY ? "anthropic"
+        : "openai");
+
+  if (provider === "anthropic") {
+    return new ChatAnthropic({
+      model: req.model ?? "claude-sonnet-4-5-20250929",
+      maxTokens: 16_000,
+    });
+  }
+  return new ChatOpenAI({
+    model: req.model ?? "gpt-4o",
+    apiKey: OPENAI_API_KEY(),
+    maxTokens: 16_000,
+  });
+}
 
 // ─── System prompt ───────────────────────────────────────────────
 
 function systemPrompt(ctx: { app_id?: string; app_name?: string } | undefined): string {
   const ctxBlock = ctx?.app_id
-    ? `\n\n## Workspace context\n- app_id: ${ctx.app_id}\n- app_name: ${ctx.app_name ?? "<unknown>"}\n`
+    ? `\n\n## Workspace context\n- app_id (defaults sandbox tools' project_id): ${ctx.app_id}\n- app_name: ${ctx.app_name ?? "<unknown>"}\n`
     : "\n\n## Workspace context\n\nNo app exists yet. Call `create_app` first.\n";
+
   return `You are an expert app developer for the zeroship platform. You build complete, working full-stack apps from a creator's natural-language description.
 
 ## Architecture
 
-The project workspace lives in a Docker sandbox container with node, npm, git, vite. Use these tools to manipulate it:
+The project workspace lives in a Docker sandbox container with node, npm, git, vite. Tools (every \`sandbox_*\` tool defaults \`project_id\` from the workspace context — you can omit it):
 
-- \`open_session(project_id)\`     start/attach the sandbox session
-- \`list_files(project_id)\`       walk the workspace
-- \`read_file(project_id, path)\`  read a file
-- \`write_file(project_id, path, content)\`  create/overwrite a file
-- \`delete_file(project_id, path)\` remove a file
-- \`exec(project_id, cmd)\`        run a shell command (npm install, npm run build, git, …)
+- \`open_session\`        → start/attach the sandbox session
+- \`sandbox_list_files\`  → walk the workspace
+- \`sandbox_read_file\`   → read source
+- \`sandbox_write_file\`  → create/overwrite
+- \`sandbox_delete_file\` → remove
+- \`sandbox_exec\`        → shell commands (\`npm install\`, \`npm run build\`, \`git\`)
 
-For platform-level operations:
-- \`list_apps()\`                   enumerate apps on the platform
-- \`create_app(name)\`              provision a new app
-- \`deploy_app(app_id, server_js)\` push a single ES-module fetch handler
+For platform operations:
+- \`list_apps\`    enumerate apps
+- \`create_app\`   provision a new app
+- \`deploy_app\`   push a single ES-module fetch handler
 
-The starter project is Vite + React + Tailwind. Edit \`src/App.tsx\` for the main component, \`index.html\` for the shell. Use \`exec\` to install deps and run \`npm run build\`.
+The starter project is Vite + React + Tailwind. Edit \`src/App.tsx\` for the main component.
 
-## Workflow
-
-1. \`open_session\` once per conversation.
-2. \`read_file\` before editing — never blind-overwrite.
-3. \`write_file\` with focused, surgical edits.
-4. \`exec npm install\` once if package.json changes.
-5. \`exec npm run build\`.
-6. Tell the user the preview URL.${ctxBlock}`;
+**Important:** deepagents ships built-in tools (\`read_file\`, \`write_file\`, \`edit_file\`, \`ls\`, \`execute\`, \`grep\`) that operate on agent-state memory — DO NOT use those for the user's project. Always use the \`sandbox_*\` variants which target the real container.${ctxBlock}`;
 }
 
-// ─── The loop ────────────────────────────────────────────────────
+// ─── Entry point ─────────────────────────────────────────────────
 
-const MODEL = "gpt-4o";
-const MAX_TURNS = 15;
-
-interface OAIMessage {
-  role: "system" | "user" | "assistant" | "tool";
-  content: string | null;
-  name?: string;
-  tool_calls?: Array<{
-    id: string;
-    type: "function";
-    function: { name: string; arguments: string };
-  }>;
-  tool_call_id?: string;
-}
-
-/** Async generator: yields ChatEvents as the loop progresses.
- *  React side: `for await (const ev of chat({...})) { ... }`. */
 export async function* chat(req: ChatRequest): AsyncGenerator<ChatEvent> {
-  const apiKey = OPENAI_API_KEY();
-  if (!apiKey) {
-    yield { type: "error", content: "OPENAI_API_KEY not set on the deployed app" };
+  const proc = (globalThis as any).process;
+  if (!OPENAI_API_KEY() && !proc?.env?.ANTHROPIC_API_KEY) {
+    yield { type: "error", content: "no LLM key set (OPENAI_API_KEY or ANTHROPIC_API_KEY)" };
     yield { type: "done" };
     return;
   }
 
-  const ctx = req.context;
-  const conversation: OAIMessage[] = [
-    { role: "system", content: systemPrompt(ctx) },
-    ...req.messages.map((m) => ({ role: m.role, content: m.content })),
-  ];
-
-  for (let turn = 0; turn < MAX_TURNS; turn++) {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "authorization": `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: MODEL,
-        messages: conversation,
-        tools: TOOLS.map((t) => ({
-          type: "function",
-          function: { name: t.name, description: t.description, parameters: t.parameters },
-        })),
-        tool_choice: "auto",
-      }),
+  const ctx = req.context ?? {};
+  let agent;
+  try {
+    agent = createDeepAgent({
+      model: pickModel(req),
+      systemPrompt: systemPrompt(ctx),
+      tools: makeTools(ctx),
     });
-
-    if (!res.ok) {
-      const body = await res.text();
-      yield { type: "error", content: `openai → ${res.status}: ${body.slice(0, 500)}` };
-      yield { type: "done" };
-      return;
-    }
-
-    const data = await res.json();
-    const msg = data.choices?.[0]?.message as OAIMessage | undefined;
-    if (!msg) {
-      yield { type: "error", content: "openai response missing message" };
-      yield { type: "done" };
-      return;
-    }
-
-    // Reply text — surface incrementally. Even though we don't (yet)
-    // hit the streaming endpoint, we yield the full text in one chunk
-    // so the React side has a uniform `for await` loop.
-    if (msg.content) {
-      yield { type: "text", content: msg.content };
-    }
-
-    // No tool calls → final answer reached.
-    if (!msg.tool_calls || msg.tool_calls.length === 0) {
-      yield { type: "done" };
-      return;
-    }
-
-    // Append the assistant message + each tool result.
-    conversation.push({
-      role: "assistant",
-      content: msg.content,
-      tool_calls: msg.tool_calls,
-    });
-
-    for (const call of msg.tool_calls) {
-      const tool = TOOL_BY_NAME.get(call.function.name);
-      let parsed: any = {};
-      try { parsed = JSON.parse(call.function.arguments || "{}"); } catch {}
-
-      // Auto-inject project_id from the workspace context if the tool
-      // wants one and the LLM forgot to pass it.
-      if (
-        tool?.parameters &&
-        typeof tool.parameters === "object" &&
-        (tool.parameters as any).properties?.project_id &&
-        !parsed.project_id &&
-        ctx?.app_id
-      ) {
-        parsed.project_id = ctx.app_id;
-      }
-
-      yield { type: "tool_start", name: call.function.name, input: parsed };
-
-      let output = "";
-      let isError = false;
-      if (!tool) {
-        output = JSON.stringify({ ok: false, error: `unknown tool: ${call.function.name}` });
-        isError = true;
-      } else {
-        try {
-          output = await tool.run(parsed, ctx ?? {});
-          try {
-            const j = JSON.parse(output);
-            if (j && j.ok === false) isError = true;
-          } catch {}
-        } catch (e: any) {
-          output = JSON.stringify({ ok: false, error: e?.message ?? String(e) });
-          isError = true;
-        }
-      }
-
-      yield { type: "tool_end", name: call.function.name, output, error: isError };
-
-      conversation.push({
-        role: "tool",
-        tool_call_id: call.id,
-        name: call.function.name,
-        content: output,
-      });
-    }
+  } catch (err: any) {
+    yield { type: "error", content: `agent init failed: ${err?.message ?? String(err)}` };
+    yield { type: "done" };
+    return;
   }
 
-  yield { type: "error", content: `agent stopped after ${MAX_TURNS} turns without producing a final answer` };
-  yield { type: "done" };
+  const lcMessages = req.messages.map((m) =>
+    m.role === "user" ? new HumanMessage(m.content) : new AIMessage(m.content),
+  );
+
+  try {
+    const eventStream = agent.streamEvents(
+      { messages: lcMessages },
+      { configurable: { thread_id: ctx.app_id ?? "default" }, version: "v2" },
+    );
+
+    for await (const event of eventStream as AsyncIterable<any>) {
+      if (event.event === "on_chat_model_stream" && event.data?.chunk?.content) {
+        const content = event.data.chunk.content;
+        if (typeof content === "string" && content.length > 0) {
+          yield { type: "text", content };
+        } else if (Array.isArray(content)) {
+          for (const block of content) {
+            if (block.type === "text" && block.text) {
+              yield { type: "text", content: block.text };
+            }
+          }
+        }
+      }
+      if (event.event === "on_tool_start") {
+        yield { type: "tool_start", name: String(event.name), input: event.data?.input };
+      }
+      if (event.event === "on_tool_end") {
+        const out = event.data?.output;
+        const stringified = typeof out === "string" ? out : JSON.stringify(out);
+        let isError = false;
+        if (typeof out === "string") {
+          try {
+            const parsed = JSON.parse(out);
+            if (parsed && parsed.ok === false) isError = true;
+          } catch {}
+        }
+        yield { type: "tool_end", name: String(event.name), output: stringified, error: isError };
+      }
+    }
+
+    yield { type: "done" };
+  } catch (err: any) {
+    yield { type: "error", content: err?.message ?? String(err) };
+    yield { type: "done" };
+  }
 }

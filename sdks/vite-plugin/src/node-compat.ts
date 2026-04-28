@@ -141,9 +141,13 @@ export function nodeCompatPlugin(): Plugin {
     enforce: "pre" as const,
 
     resolveId(id: string) {
-      // Only for zeroship environment
+      // Apply node-compat for the dev "zeroship" environment AND
+      // the production SSR build (which doesn't have a named
+      // environment). Skip for the regular client environment so a
+      // bundle that incidentally references `node:` doesn't get
+      // polyfilled into the browser asset.
       const envName = (this as any).environment?.name;
-      if (envName && envName !== "zeroship") return null;
+      if (envName === "client") return null;
 
       const resolved = getNodeCompatId(id);
       if (!resolved) return null;
