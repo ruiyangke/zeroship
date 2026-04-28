@@ -1334,6 +1334,23 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
             process.set(scope, key.into(), arch.into());
         }
 
+        // process.nextTick — Node-only. langgraph's Pregel state machine
+        // schedules task transitions via nextTick; without it, agent.invoke
+        // never advances past the first node and the Promise never settles.
+        // Map onto queueMicrotask which is the closest semantic match.
+        {
+            let src = v8::String::new(
+                scope,
+                "(p, qm) => { p.nextTick = function(fn) { var args = Array.prototype.slice.call(arguments, 1); qm(function() { fn.apply(null, args); }); }; }",
+            ).unwrap();
+            let script = v8::Script::compile(scope, src, None).unwrap();
+            let factory: v8::Local<v8::Function> = script.run(scope).unwrap().try_into().unwrap();
+            let qm_key = v8::String::new(scope, "queueMicrotask").unwrap();
+            let qm = global.get(scope, qm_key.into()).unwrap();
+            let undef = v8::undefined(scope).into();
+            factory.call(scope, undef, &[process.into(), qm]);
+        }
+
         let process_key = v8::String::new(scope, "process").unwrap();
         global.set(scope, process_key.into(), process.into());
     }

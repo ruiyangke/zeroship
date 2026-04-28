@@ -613,6 +613,35 @@
     return signal;
   };
 
+  // AbortSignal.any(signals) — returns a signal that aborts when any of
+  // the input signals abort. Used by langgraph and other Web-native libs
+  // for combining cancellation sources. Without it, langgraph's state
+  // machine deadlocks on the first invoke().
+  AbortSignal.any = function(signals) {
+    var combined = new AbortSignal();
+    for (var i = 0; i < signals.length; i++) {
+      var s = signals[i];
+      if (s && s.aborted) {
+        combined.aborted = true;
+        combined.reason = s.reason;
+        return combined;
+      }
+    }
+    function onAbort(ev) {
+      if (combined.aborted) return;
+      combined.aborted = true;
+      combined.reason = ev && ev.target ? ev.target.reason : undefined;
+      combined.dispatchEvent({ type: "abort", target: combined, currentTarget: combined });
+    }
+    for (var j = 0; j < signals.length; j++) {
+      var sj = signals[j];
+      if (sj && typeof sj.addEventListener === "function") {
+        sj.addEventListener("abort", onAbort);
+      }
+    }
+    return combined;
+  };
+
   // =========================================================================
   // AbortController
   // =========================================================================
