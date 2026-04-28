@@ -27,6 +27,7 @@ interface ChatBody {
   thread_id?: string;
   context?: AgentContext;
   model?: string;
+  provider?: "openai" | "anthropic";
 }
 
 app.post("/chat", async (c) => {
@@ -43,7 +44,11 @@ app.post("/chat", async (c) => {
 
   let agent;
   try {
-    agent = createZeroshipAgent({ model: body.model, context });
+    agent = createZeroshipAgent({
+      model: body.model,
+      provider: body.provider,
+      context,
+    });
   } catch (err: any) {
     // Most common cause: ANTHROPIC_API_KEY missing. Surface as a
     // clean SSE error so the dashboard can render it instead of
@@ -138,8 +143,12 @@ app.post("/chat", async (c) => {
 
 const port = parseInt(process.env.AGENT_PORT ?? "4444");
 
-if (!process.env.ANTHROPIC_API_KEY) {
-  console.warn("[agent] ANTHROPIC_API_KEY not set — calls will fail");
+if (!process.env.OPENAI_API_KEY && !process.env.ANTHROPIC_API_KEY) {
+  console.warn("[agent] no LLM API key set — calls will fail (set OPENAI_API_KEY or ANTHROPIC_API_KEY)");
+} else {
+  console.log(
+    `[agent] LLM provider: ${process.env.OPENAI_API_KEY ? "openai" : "anthropic"}`,
+  );
 }
 if (!process.env.ZEROSHIP_MASTER_KEY) {
   console.warn("[agent] ZEROSHIP_MASTER_KEY not set — using 'dev-master-key'");

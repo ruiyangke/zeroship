@@ -58,14 +58,20 @@ export const sandboxListFiles = tool(
     });
   },
   {
-    name: "list_files",
+    name: "sandbox_list_files",
     description:
-      "Walk the project workspace and return every file/dir (skipping node_modules, .git, dist).",
+      "Walk the PROJECT WORKSPACE in the Docker sandbox and return every file/dir (skipping node_modules, .git, dist). Use this — NOT the built-in `ls` (which lists agent-state memory).",
     schema: z.object({
       session_id: z.string().uuid(),
     }),
   },
 );
+
+// All sandbox file/exec tools live under the `sandbox_` namespace so
+// they don't collide with deepagents' built-in virtual-FS tools
+// (`read_file`, `write_file`, `edit_file`, `ls`). The built-ins
+// operate on agent-state memory; ours operate on the real Docker
+// container's `/workspace`. Distinct names = unambiguous prompt.
 
 export const sandboxReadFile = tool(
   async ({ session_id, path }) => {
@@ -77,8 +83,9 @@ export const sandboxReadFile = tool(
     }
   },
   {
-    name: "read_file",
-    description: "Read a file from the project workspace. Returns its full content as a string.",
+    name: "sandbox_read_file",
+    description:
+      "Read a file from the PROJECT WORKSPACE in the Docker sandbox. Returns its full content as a string. Use this — NOT the built-in `read_file` (which reads agent-state memory, not the real workspace).",
     schema: z.object({
       session_id: z.string().uuid(),
       path: z.string().min(1).describe("Path relative to the workspace root, e.g. 'src/App.tsx'."),
@@ -96,9 +103,9 @@ export const sandboxWriteFile = tool(
     }
   },
   {
-    name: "write_file",
+    name: "sandbox_write_file",
     description:
-      "Create or overwrite a file in the project workspace. Parent directories are created automatically. 5 MB cap.",
+      "Create or overwrite a file in the PROJECT WORKSPACE in the Docker sandbox. Parent directories are created automatically. 5 MB cap. Use this — NOT the built-in `write_file` (which writes to agent-state memory, not the real workspace).",
     schema: z.object({
       session_id: z.string().uuid(),
       path: z.string().min(1).describe("Workspace-relative path."),
@@ -117,8 +124,8 @@ export const sandboxDeleteFile = tool(
     }
   },
   {
-    name: "delete_file",
-    description: "Delete a file from the project workspace. Idempotent.",
+    name: "sandbox_delete_file",
+    description: "Delete a file from the PROJECT WORKSPACE in the Docker sandbox. Idempotent.",
     schema: z.object({
       session_id: z.string().uuid(),
       path: z.string().min(1),
@@ -141,9 +148,9 @@ export const runCommand = tool(
     }
   },
   {
-    name: "run_command",
+    name: "sandbox_exec",
     description:
-      "Run a shell command inside the project's sandbox container. Useful for `npm install`, `npm run build`, `git commit -m ...`, `git log`, etc. Default cwd is /workspace; default timeout 60s; max 600s. Output truncated at 4 KB per stream.",
+      "Run a shell command inside the project's sandbox container. Useful for `npm install`, `npm run build`, `git commit -m ...`, `git log`, etc. Default cwd is /workspace; default timeout 60s; max 600s. Output truncated at 4 KB per stream. Use this — NOT the built-in `execute` (which runs in agent-state context).",
     schema: z.object({
       session_id: z.string().uuid(),
       cmd: z.string().min(1).describe("Shell command line. Runs under `sh -c`, so pipes / && / >> all work."),
