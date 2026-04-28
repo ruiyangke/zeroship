@@ -348,105 +348,11 @@
   globalThis.ReadableStreamDefaultReader = ReadableStreamDefaultReader;
   globalThis.ReadableStreamDefaultController = ReadableStreamDefaultController;
 
-  // =========================================================================
-  // WritableStream — minimal implementation for TransformStream and piping.
-  // =========================================================================
-
-  function WritableStream(underlyingSink) {
-    underlyingSink = underlyingSink || {};
-    this._sink = underlyingSink;
-    this._state = "writable";
-    this._writer = null;
-    this._writeQueue = [];
-    this._closePromise = null;
-
-    if (underlyingSink.start) {
-      underlyingSink.start(this._getController());
-    }
-  }
-  WritableStream.prototype._getController = function() {
-    var self = this;
-    return {
-      error: function(e) { self._state = "errored"; self._error = e; }
-    };
-  };
-  WritableStream.prototype.getWriter = function() {
-    if (this._writer) throw new TypeError("WritableStream already locked");
-    this._writer = new WritableStreamDefaultWriter(this);
-    return this._writer;
-  };
-  WritableStream.prototype.close = function() {
-    this._state = "closed";
-    if (this._sink.close) return Promise.resolve(this._sink.close());
-    return Promise.resolve();
-  };
-  Object.defineProperty(WritableStream.prototype, "locked", {
-    get: function() { return this._writer !== null; }
-  });
-
-  function WritableStreamDefaultWriter(stream) {
-    this._stream = stream;
-    this.closed = new Promise(function() {}); // never resolves until close
-    this.ready = Promise.resolve();
-    this.desiredSize = 1;
-  }
-  WritableStreamDefaultWriter.prototype.write = function(chunk) {
-    var sink = this._stream._sink;
-    if (sink.write) return Promise.resolve(sink.write(chunk));
-    return Promise.resolve();
-  };
-  WritableStreamDefaultWriter.prototype.close = function() {
-    return this._stream.close();
-  };
-  WritableStreamDefaultWriter.prototype.abort = function(reason) {
-    this._stream._state = "errored";
-    if (this._stream._sink.abort) return Promise.resolve(this._stream._sink.abort(reason));
-    return Promise.resolve();
-  };
-  WritableStreamDefaultWriter.prototype.releaseLock = function() {
-    this._stream._writer = null;
-  };
-
-  // =========================================================================
-  // TransformStream — connects a WritableStream to a ReadableStream via a
-  // transformer object { transform(chunk, controller), flush(controller) }.
-  // =========================================================================
-
-  function TransformStream(transformer) {
-    transformer = transformer || {};
-    var readableController;
-
-    var readable = new ReadableStream({
-      start: function(c) { readableController = c; }
-    });
-
-    var transformFn = transformer.transform || function(chunk, controller) {
-      controller.enqueue(chunk);
-    };
-    var flushFn = transformer.flush || null;
-
-    var transformController = {
-      enqueue: function(chunk) { readableController.enqueue(chunk); },
-      error: function(e) { readableController.error(e); },
-      terminate: function() { readableController.close(); }
-    };
-
-    var writable = new WritableStream({
-      write: function(chunk) {
-        return transformFn(chunk, transformController);
-      },
-      close: function() {
-        if (flushFn) flushFn(transformController);
-        readableController.close();
-      }
-    });
-
-    this.readable = readable;
-    this.writable = writable;
-  }
-
-  globalThis.WritableStream = WritableStream;
-  globalThis.WritableStreamDefaultWriter = WritableStreamDefaultWriter;
-  globalThis.TransformStream = TransformStream;
+  // WritableStream / TransformStream / queuing strategies / BYOB are
+  // provided by streams-polyfill.js (vendored web-streams-polyfill v3.3.3),
+  // loaded immediately after this file. We deliberately don't define stubs
+  // here — earlier stubs trapped TransformStream into using OUR ReadableStream
+  // class for its `.readable` side, which broke pipeThrough/pipeTo (the
+  // polyfill's spec checks rejected the foreign stream class).
 
 })(globalThis);

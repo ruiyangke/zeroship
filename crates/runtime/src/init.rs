@@ -97,6 +97,13 @@ pub const CRYPTO_JS: &str = include_str!("embed/crypto.js");
 /// Embedded ReadableStream/WritableStream/TransformStream polyfill (backed by native __streams callbacks).
 pub const STREAMS_JS: &str = include_str!("embed/streams.js");
 
+/// Vendored web-streams-polyfill v3.3.3. Provides spec-correct WritableStream,
+/// TransformStream, ByteLengthQueuingStrategy, CountQueuingStrategy,
+/// ReadableStreamBYOBReader, plus tee/pipeTo/pipeThrough on our ReadableStream.
+/// MUST load AFTER STREAMS_JS so our zero-copy ReadableStream stays as the
+/// global; the polyfill only fills in what we don't have.
+pub const STREAMS_POLYFILL_JS: &str = include_str!("embed/streams-polyfill.js");
+
 /// Embedded Event/CustomEvent/EventTarget polyfill.
 pub const EVENTS_JS: &str = include_str!("embed/events.js");
 
@@ -401,7 +408,7 @@ pub fn load_polyfills_and_modules(
     setup_globals(scope);
 
     // Load polyfills
-    for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS, EVENTS_JS, BLOB_JS, FORMDATA_JS, WEBSOCKET_JS] {
+    for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS, STREAMS_POLYFILL_JS, EVENTS_JS, BLOB_JS, FORMDATA_JS, WEBSOCKET_JS] {
         let code = v8::String::new(scope, polyfill).unwrap();
         let script = v8::Script::compile(scope, code, None).unwrap();
         script.run(scope).unwrap();
