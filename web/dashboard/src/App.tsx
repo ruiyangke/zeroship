@@ -24,6 +24,7 @@ import {
   BrowserRouter, Routes, Route, Navigate, useParams,
 } from "react-router-dom";
 
+import { isDevAutoAuth } from "./api";
 import { Home } from "./pages/Home";
 import { Account } from "./pages/Account";
 import Login from "./pages/Login";
@@ -42,18 +43,29 @@ import AppDetail from "./pages/AppDetail";
 import CreateApp from "./pages/CreateApp";
 
 function App() {
-  const [authed, setAuthed] = useState(() => !!localStorage.getItem("zeroship_key"));
+  // In dev (vite dev / preview), bypass the login gate entirely —
+  // the api client also auto-fills the dev master key on every
+  // request. Production builds (DEV=false) preserve the original
+  // localStorage-key flow.
+  const devBypass = isDevAutoAuth();
+
+  const [authed, setAuthed] = useState(
+    () => devBypass || !!localStorage.getItem("zeroship_key"),
+  );
 
   useEffect(() => {
-    const handler = () => setAuthed(!!localStorage.getItem("zeroship_key"));
+    const handler = () =>
+      setAuthed(devBypass || !!localStorage.getItem("zeroship_key"));
     window.addEventListener("storage", handler);
     return () => window.removeEventListener("storage", handler);
-  }, []);
+  }, [devBypass]);
 
   const handleLogin = () => setAuthed(true);
   const handleLogout = () => {
     localStorage.removeItem("zeroship_key");
-    setAuthed(false);
+    // In dev we stay authed (the dev key is implicit); only prod
+    // boots the user back to /login.
+    if (!devBypass) setAuthed(false);
   };
 
   return (

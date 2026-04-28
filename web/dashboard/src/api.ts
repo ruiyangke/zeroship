@@ -29,8 +29,26 @@ export type AllUsage = Record<string, Record<string, number>>;
 
 const API_BASE = '';
 
+/** Dev fallback key. Mirrors `--master-key` on the dev control-plane.
+ *  Production builds (`vite build`) set DEV=false, so the fallback is
+ *  off — the dashboard then strictly uses what the user logged in with. */
+const DEV_FALLBACK_KEY = "dev-master-key";
+
 function getKey(): string {
-  return localStorage.getItem("zeroship_key") || "";
+  const stored = localStorage.getItem("zeroship_key");
+  if (stored) return stored;
+  // In dev (vite dev / preview) auto-supply the dev-master-key so the
+  // user never sees a login screen. The control plane is expected to
+  // be running with `--dev-insecure` (which ignores the header) OR to
+  // accept this exact key.
+  if (import.meta.env.DEV) return DEV_FALLBACK_KEY;
+  return "";
+}
+
+/** True when we should treat the user as authed without a stored key.
+ *  Used by App.tsx to skip the login redirect on /admin/* in dev. */
+export function isDevAutoAuth(): boolean {
+  return import.meta.env.DEV;
 }
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {

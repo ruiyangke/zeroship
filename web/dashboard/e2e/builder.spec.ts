@@ -386,6 +386,57 @@ test.describe("Settings tab", () => {
 });
 
 // =========================================================================
+// Dev auth bypass — login should never gate the dashboard in dev mode.
+// =========================================================================
+
+test.describe("Dev auth bypass", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.route("**/api/apps", async (route) => {
+      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    });
+    await page.route("**/_health", async (route) => {
+      await route.fulfill({ status: 200, contentType: "application/json", body: '{"status":"ok"}' });
+    });
+    await page.route("**/_stats", async (route) => {
+      await route.fulfill({
+        status: 200, contentType: "application/json",
+        body: JSON.stringify({ active_isolates: 0, max_isolates: 100, apps: [] }),
+      });
+    });
+  });
+
+  test("/admin/apps renders without a stored key in dev", async ({ page }) => {
+    // Clear localStorage explicitly — even more strict than default.
+    await page.addInitScript(() => localStorage.clear());
+    await page.goto("/admin/apps");
+    // Sidebar is the legacy admin Layout; if dev bypass works the
+    // page mounts. The presence of /admin/apps text in the URL +
+    // the Layout sidebar's "apps" link is sufficient.
+    await expect(page).toHaveURL(/\/admin\/apps$/);
+    await expect(page.locator("text=/// apps/").first()).toBeVisible({ timeout: 5000 });
+  });
+
+  test("/login auto-redirects to / in dev", async ({ page }) => {
+    await page.addInitScript(() => localStorage.clear());
+    await page.goto("/login");
+    await page.waitForURL("**/", { timeout: 5000 });
+    await expect(page.getByTestId("home")).toBeVisible();
+  });
+
+  test("api requests carry a Bearer header even when no key is stored", async ({ page }) => {
+    await page.addInitScript(() => localStorage.clear());
+    let captured = "";
+    await page.route("**/api/apps", async (route) => {
+      captured = route.request().headers()["authorization"] ?? "";
+      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    });
+    await page.goto("/");
+    await page.waitForResponse("**/api/apps", { timeout: 5000 });
+    expect(captured).toMatch(/^Bearer .+/);
+  });
+});
+
+// =========================================================================
 // Live e2e — gated on AGENT_LIVE=1 because it needs all the platform
 // services running plus an OpenAI key on the agent process.
 // =========================================================================
