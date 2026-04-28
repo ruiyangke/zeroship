@@ -42,10 +42,20 @@ export default function Builder() {
 function BootstrapBuilder() {
   const navigate = useNavigate();
   const previewRef = useRef<PreviewHandle>(null);
-  const [bootstrapId] = useState(() => "draft-" + Math.random().toString(36).slice(2, 10));
+  // Generate a real UUID up front so the agent's tools (which validate
+  // app_id as UUID) and the sandbox session (which keys workspaces by
+  // project_id) both work from the very first turn. When the agent
+  // creates the app on the platform, the control plane assigns its
+  // own UUID — onAppCreated below migrates the chat history over.
+  const [bootstrapId] = useState(() =>
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : "00000000-0000-0000-0000-" + Math.random().toString(36).slice(2, 14).padStart(12, "0"),
+  );
 
   const chat = useBuilderChat({
     appId: bootstrapId,
+    context: { app_id: bootstrapId },
     onAppCreated: (newAppId) => {
       // Migrate the bootstrap chat history to the real app's storage key
       // so the conversation continues seamlessly after navigation.

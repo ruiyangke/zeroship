@@ -155,7 +155,10 @@ async fn main() -> std::io::Result<()> {
                     .route(web::get().to(api::get_usage)),
             )
             .service(
-                web::resource("/api/apps/{id}/assets/{path:.*}")
+                // ntex's `{path:.*}` only matches a single segment;
+                // `{path}*` is the tail-match syntax that handles
+                // nested paths like `assets/index-abc.js`.
+                web::resource("/api/apps/{id}/assets/{path}*")
                     .route(web::put().to(api::upload_asset)),
             )
             .service(
@@ -219,7 +222,8 @@ async fn main() -> std::io::Result<()> {
                     .route(web::get().to(internal::get_routes)),
             )
             .service(
-                web::resource("/internal/assets/{app_id}/{path:.*}")
+                // Same tail-match note as /api/apps/{id}/assets/{path}*.
+                web::resource("/internal/assets/{app_id}/{path}*")
                     .route(web::get().to(internal::get_asset)),
             )
             .service(

@@ -11,9 +11,11 @@ import type { AgentEvent, BuilderStatus, ChatMessage, ToolEvent } from "./types"
 import { genId, streamAgent, type AgentContext } from "./agentClient";
 import { loadConversation, saveConversation } from "./storage";
 
-const DEPLOY_TOOLS = new Set(["deploy_app", "deploy_full_app"]);
+const DEPLOY_TOOLS = new Set(["deploy_app", "deploy_full_app", "build_and_publish"]);
 /** Tools whose successful completion should trigger iframe reload. */
-const APP_MUTATION_TOOLS = new Set(["deploy_app", "create_app"]);
+const APP_MUTATION_TOOLS = new Set(["deploy_app", "create_app", "build_and_publish"]);
+/** Tools whose result may carry a freshly-provisioned app_id we should navigate to. */
+const APP_PROVISION_TOOLS = new Set(["create_app", "build_and_publish"]);
 
 interface Options {
   /** Stable id per project; used as thread_id and storage key. */
@@ -144,8 +146,16 @@ export function useBuilderChat({ appId, context, onDeploy, onAppCreated }: Optio
             let parsed: any = null;
             try { parsed = JSON.parse(out); } catch { /* not JSON */ }
 
-            if (!isErr && ev.name === "create_app" && parsed?.ok && parsed?.app_id) {
-              onAppCreatedRef.current?.(String(parsed.app_id), String(parsed.app_name ?? ""));
+            // create_app and build_and_publish both surface app_id +
+            // app_name on success — when we're still in bootstrap
+            // mode (synthetic appId), let the page navigate to the
+            // freshly-provisioned project so subsequent tool calls
+            // operate against the right URL.
+            if (!isErr && APP_PROVISION_TOOLS.has(ev.name) && parsed?.ok && parsed?.app_id) {
+              onAppCreatedRef.current?.(
+                String(parsed.app_id),
+                String(parsed.app_name ?? ""),
+              );
             }
             if (!isErr && APP_MUTATION_TOOLS.has(ev.name)) {
               didDeploySucceed = true;

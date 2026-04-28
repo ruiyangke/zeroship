@@ -28,6 +28,7 @@ import {
   sandboxDeleteFile,
   runCommand,
 } from "./tools/sandbox-fs.js";
+import { buildAndPublish } from "./tools/build-and-publish.js";
 
 export interface AgentContext {
   /** UUID of the current project's app, if one exists. */
@@ -115,23 +116,26 @@ Runtime APIs in deployed code:
 
 3. **Edit.** Use \`sandbox_write_file\` to change source files. Tight, focused edits — don't rewrite the whole app for one tweak.
 
-4. **Build.** Run \`npm install\` (only on first edit and after changing package.json) then \`npm run build\` via \`sandbox_exec\`. Read \`dist/index.html\` and \`dist/assets/*\` back via \`sandbox_read_file\`.
+4. **Install (first time only).** If \`node_modules\` doesn't exist, \`sandbox_exec({ cmd: "npm install --no-audit --no-fund --prefer-offline" })\`. Skip on subsequent edits unless \`package.json\` changed.
 
-5. **Wrap into a deploy module.** Construct the ES-module string that serves the dist files via the fetch handler. Inline asset content as JS template literals.
+5. **Publish.** Call \`build_and_publish({ session_id, app_id })\`. This runs \`npm run build\` for you, walks \`dist/\`, uploads every asset to the platform, deploys a minimal handler. Returns the live preview URL. **Always use this — never try to inline JS bundles into a deploy_app call manually; the agent context can't fit a 200 KB built bundle.**
 
-6. **Deploy.** \`deploy_app({ app_id, server_js })\` with the wrapped module.
+6. **Smoke test.** \`test_app({ app_name, path: "/" })\` — confirm 200 + reasonable HTML.
 
-7. **Smoke test.** \`test_app({ app_name, path: "/" })\` — confirm 200 + reasonable HTML.
+7. **Commit.** \`sandbox_exec({ cmd: "git add -A && git commit -m 'agent: <summary>'" })\` so the project has history.
 
-8. **Commit.** \`sandbox_exec({ cmd: "git add -A && git commit -m 'agent: <summary>'" })\` so the project has history.
+8. **Tell the user what shipped.** One short paragraph. Preview iframe reloads automatically.
 
-9. **Tell the user what shipped.** One short paragraph. Preview iframe reloads automatically.
+## When to use deploy_app vs build_and_publish
+
+- \`build_and_publish\` is the default for any Vite-based React/HTML/CSS project. It handles the build pipeline, asset upload, and stub-server deploy in one call. **Use this 99% of the time.**
+- \`deploy_app\` is only for the rare case where the entire app is a single small \`server.js\` (a pure backend or RPC handler) with no frontend dist/ to upload.
 
 ## Iteration rules
 
 - For follow-ups, ALWAYS read affected files first (\`sandbox_read_file\`) before writing — never blind-overwrite.
-- Re-run \`npm run build\` after every code change. Don't deploy a stale dist.
 - Localized changes. Don't reformat or restyle whole files unprompted.
+- \`build_and_publish\` automatically re-runs \`npm run build\` (you can pass \`build_first=false\` if you literally just built and nothing changed since).
 - \`npm install\` is slow (10-30s in the sandbox). Skip if package.json hasn't changed.
 
 ## Code style
@@ -216,6 +220,8 @@ export function createZeroshipAgent(opts?: {
       sandboxWriteFile,
       sandboxDeleteFile,
       runCommand,
+      // High-level: vite build + upload dist/ + deploy stub
+      buildAndPublish,
     ],
   });
 }

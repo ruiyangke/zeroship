@@ -94,7 +94,10 @@ async fn main() -> std::io::Result<()> {
         web::App::new()
             .state(state.clone())
             .service(
-                web::resource("/apps/{app_name}/{tail:.*}")
+                // ntex's `{path:.*}` only matches a single segment;
+                // `{tail}*` is the tail-match syntax that handles
+                // nested asset paths like `assets/index-abc.js`.
+                web::resource("/apps/{app_name}/{tail}*")
                     .route(web::route().to(router::handle)),
             )
             .service(web::resource("/health").route(web::get().to(|| async {
@@ -102,7 +105,7 @@ async fn main() -> std::io::Result<()> {
             })))
             // Subdomain catch-all — must be last (lowest priority)
             .service(
-                web::resource("/{tail:.*}")
+                web::resource("/{tail}*")
                     .route(web::route().to(router::handle_subdomain)),
             )
     })
