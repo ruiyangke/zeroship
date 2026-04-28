@@ -6,8 +6,8 @@ use std::sync::Arc;
 use ntex::web;
 use zeroship_core::vfs::{BundleStore, LocalFs};
 use zeroship_control::{
-    api, env_handlers, internal, stripe_handlers, AppState, EnvStore, Quota, RateLimiter,
-    Registry, StripeStore,
+    api, auth_handlers, auth_service, env_handlers, internal, oauth, stripe_handlers,
+    AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
 };
 
 #[global_allocator]
@@ -111,10 +111,47 @@ async fn main() -> std::io::Result<()> {
     .expect("env store init");
     let stripe_store = StripeStore::new(registry.clone());
 
+    // JWT secret — used to sign session cookies. Must be stable across
+    // restarts in prod (else everyone gets logged out). In dev a random
+    // boot-time secret is fine.
+    let jwt_secret = arg_or_env(&args, "--jwt-secret", "JWT_SECRET", "");
+    let jwt_secret = if jwt_secret.is_empty() {
+        if !insecure_dev {
+            eprintln!("[control] refusing to start: --jwt-secret / JWT_SECRET required (or pass --dev-insecure)");
+            std::process::exit(1);
+        }
+        // Stable fallback so cookies survive a quick restart in dev.
+        "dev-jwt-secret-please-override-in-prod".to_string()
+    } else {
+        jwt_secret
+    };
+
+    let auth = auth_service::AuthService::new(&db_url, &jwt_secret)
+        .await
+        .expect("failed to init auth service");
+
+    // Optional Google OAuth config — only set if all three env vars present.
+    let google_client_id = env_or("GOOGLE_CLIENT_ID", "");
+    let google_client_secret = env_or("GOOGLE_CLIENT_SECRET", "");
+    let google_redirect = env_or("GOOGLE_REDIRECT_URI", "http://localhost:5173/auth/google/callback");
+    let google_oauth = if !google_client_id.is_empty() && !google_client_secret.is_empty() {
+        eprintln!("[control] Google OAuth enabled — redirect_uri = {google_redirect}");
+        Some(oauth::GoogleConfig {
+            client_id: google_client_id,
+            client_secret: google_client_secret,
+            redirect_uri: google_redirect,
+        })
+    } else {
+        eprintln!("[control] Google OAuth disabled (set GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET)");
+        None
+    };
+
     let state = Arc::new(AppState {
         registry,
         env_store,
         stripe_store,
+        auth,
+        google_oauth,
         vfs,
         control_key: zeroship_control::SecretString::new(control_key),
         master_key: zeroship_control::SecretString::new(master_key),
@@ -183,6 +220,15 @@ async fn main() -> std::io::Result<()> {
                 web::resource("/api/apps/{id}/audit")
                     .route(web::get().to(env_handlers::list_audit)),
             )
+            // --- Auth (creator + end-user) ---
+            .service(web::resource("/auth/register").route(web::post().to(auth_handlers::register)))
+            .service(web::resource("/auth/login").route(web::post().to(auth_handlers::login)))
+            .service(web::resource("/auth/logout").route(web::post().to(auth_handlers::logout)))
+            .service(web::resource("/auth/userinfo").route(web::get().to(auth_handlers::userinfo)))
+            .service(web::resource("/auth/consent").route(web::post().to(auth_handlers::consent)))
+            .service(web::resource("/auth/authorize").route(web::get().to(auth_handlers::authorize)))
+            .service(web::resource("/auth/google/start").route(web::get().to(auth_handlers::google_start)))
+            .service(web::resource("/auth/google/callback").route(web::get().to(auth_handlers::google_callback)))
             // --- Stripe Connect ---
             .service(
                 web::resource("/api/creators/{id}/stripe/onboard")

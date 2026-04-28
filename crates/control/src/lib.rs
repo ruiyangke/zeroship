@@ -6,11 +6,14 @@
 
 pub mod api;
 pub mod audit;
+pub mod auth_handlers;
+pub mod auth_service;
 pub mod env_handlers;
 pub mod env_store;
 pub mod http_util;
 pub mod internal;
 pub mod metering;
+pub mod oauth;
 pub mod rate_limit;
 pub mod registry;
 pub mod stripe_handlers;
@@ -70,6 +73,9 @@ pub struct AppState {
     pub registry: Registry,
     pub env_store: EnvStore,
     pub stripe_store: StripeStore,
+    pub auth: auth_service::AuthService,
+    /// Optional Google OAuth config — `Some` enables /auth/google/* routes.
+    pub google_oauth: Option<oauth::GoogleConfig>,
     pub vfs: Arc<dyn BundleStore + Send + Sync>,
     pub control_key: SecretString,
     pub master_key: SecretString,

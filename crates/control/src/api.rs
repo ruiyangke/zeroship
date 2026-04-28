@@ -39,10 +39,18 @@ pub struct SetPlanBody {
 pub(crate) fn check_admin_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
     // Dev-insecure opt-in: skip auth entirely. Production startup
     // (main.rs) refuses to boot with empty master_key unless this flag
-    // is on — see CONTROL_INSECURE_DEV guard. No implicit bypass.
+    // is on. No implicit bypass.
     if state.insecure_dev {
         return None;
     }
+
+    // Authenticated dashboard sessions count as admin. Cookie is
+    // httpOnly, signed JWT — set by /auth/login or /auth/google/callback.
+    if crate::auth_handlers::validate_session(req, state).is_some() {
+        return None;
+    }
+
+    // Fallback: master-key Bearer header — for tooling (CLI, agents).
     let header = req
         .headers()
         .get("authorization")

@@ -22,6 +22,15 @@ hmac = { workspace = true }
 mimalloc = { workspace = true }
 subtle = "2"
 zeroize = "1"
+# Auth
+bcrypt = { workspace = true }
+jsonwebtoken = { workspace = true }
+base64 = { workspace = true }
+cyper = { workspace = true }
+url = { workspace = true }
+http = { workspace = true }
+# RNG for OAuth state / PKCE — small, no async runtime dep.
+rand = "0.8"
 
 [lints]
 workspace = true
