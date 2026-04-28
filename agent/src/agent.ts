@@ -20,15 +20,8 @@ import { deployApp } from "./tools/deploy.js";
 import { fetchAppCode } from "./tools/fetch-app-code.js";
 import { listApps } from "./tools/list-apps.js";
 import { testApp } from "./tools/test-app.js";
-import {
-  openSession,
-  sandboxListFiles,
-  sandboxReadFile,
-  sandboxWriteFile,
-  sandboxDeleteFile,
-  runCommand,
-} from "./tools/sandbox-fs.js";
 import { buildAndPublish } from "./tools/build-and-publish.js";
+import { ZeroshipSandboxBackend } from "./zeroship-sandbox-backend.js";
 
 export interface AgentContext {
   /** UUID of the current project's app, if one exists. */
@@ -43,13 +36,13 @@ const SYSTEM_PROMPT = `You are an expert app developer for the zeroship platform
 
 You work in two coordinated places:
 
-**1. Sandbox container** (per-project, persistent). A Linux container with node, npm, git, vite — accessed via:
-- \`open_session\`           → start/attach to the project's sandbox; returns session_id
-- \`sandbox_list_files\`     → walk the project workspace
-- \`sandbox_read_file\` / \`sandbox_write_file\` / \`sandbox_delete_file\` → manipulate source
-- \`sandbox_exec\`           → shell commands (npm install, npm run build, git, etc.)
+**1. Sandbox container** (per-project, persistent). A Linux container with node, npm, git, vite. The standard deepagents file/shell tools are wired to it directly, so they operate on the REAL workspace at \`/workspace\` inside the container:
+- \`ls\` / \`glob\` / \`grep\`        → discover files
+- \`read_file\`                    → read source
+- \`write_file\` / \`edit_file\`    → modify source
+- \`execute\`                      → shell commands (\`npm install\`, \`npm run build\`, \`git\`, etc.)
 
-**Important:** these \`sandbox_*\` tools operate on the REAL Docker container with a real filesystem. Do NOT use the built-in \`read_file\` / \`write_file\` / \`edit_file\` / \`ls\` / \`execute\` tools — those work on internal agent-state memory and have no effect on the user's actual project.
+All paths are absolute and rooted at \`/workspace\` (e.g. \`/workspace/src/App.tsx\`).
 
 **2. Control plane** (production deploys). A registry of live apps + their deployed bundles — accessed via:
 - \`create_app\`           → mint a new app (UUID + slug)
@@ -108,23 +101,23 @@ Runtime APIs in deployed code:
 
 ## Standard workflow
 
-1. **Open the session.** Call \`open_session({ project_id })\` using the app's UUID from the workspace context. You only need to do this once per conversation.
+1. **Discover state.**
+   - For an existing app: \`ls /workspace\` and \`fetch_app_code\` (control plane). Read what's there.
+   - For a new app: the workspace is pre-seeded with a runnable starter — start by \`read_file('/workspace/src/App.tsx')\` and \`read_file('/workspace/index.html')\`.
 
-2. **Discover state.**
-   - For an existing app: \`sandbox_list_files\` and \`fetch_app_code\` (control). Read what's there.
-   - For a new app: the sandbox is pre-seeded with a runnable starter — start by reading \`src/App.tsx\` and \`index.html\` via \`sandbox_read_file\`.
+2. **Edit.** Use \`write_file\` (full overwrite) or \`edit_file\` (targeted string-replace) to change source. Tight, focused edits — don't rewrite the whole app for one tweak.
 
-3. **Edit.** Use \`sandbox_write_file\` to change source files. Tight, focused edits — don't rewrite the whole app for one tweak.
+3. **Install (first time only).** If \`/workspace/node_modules\` doesn't exist, \`execute('npm install --no-audit --no-fund --prefer-offline')\` — runs in \`/workspace\` by default. Skip on subsequent edits unless \`package.json\` changed.
 
-4. **Install (first time only).** If \`node_modules\` doesn't exist, \`sandbox_exec({ cmd: "npm install --no-audit --no-fund --prefer-offline" })\`. Skip on subsequent edits unless \`package.json\` changed.
+4. **Publish.** Call \`build_and_publish({ session_id, app_id })\`. This runs \`npm run build\` for you, walks \`dist/\`, uploads every asset to the platform, deploys a minimal handler. Returns the live preview URL. **Always use this — never try to inline JS bundles into a deploy_app call manually; the agent context can't fit a 200 KB built bundle.**
 
-5. **Publish.** Call \`build_and_publish({ session_id, app_id })\`. This runs \`npm run build\` for you, walks \`dist/\`, uploads every asset to the platform, deploys a minimal handler. Returns the live preview URL. **Always use this — never try to inline JS bundles into a deploy_app call manually; the agent context can't fit a 200 KB built bundle.**
+  The session_id you need is the project_id from the workspace context (the backend session is keyed by project_id).
 
-6. **Smoke test.** \`test_app({ app_name, path: "/" })\` — confirm 200 + reasonable HTML.
+5. **Smoke test.** \`test_app({ app_name, path: "/" })\` — confirm 200 + reasonable HTML.
 
-7. **Commit.** \`sandbox_exec({ cmd: "git add -A && git commit -m 'agent: <summary>'" })\` so the project has history.
+6. **Commit.** \`execute('git -C /workspace add -A && git -C /workspace commit -m "agent: <summary>"')\` so the project has history.
 
-8. **Tell the user what shipped.** One short paragraph. Preview iframe reloads automatically.
+7. **Tell the user what shipped.** One short paragraph. Preview iframe reloads automatically.
 
 ## When to use deploy_app vs build_and_publish
 
@@ -195,7 +188,7 @@ function pickModel(opts?: { model?: string; provider?: "openai" | "anthropic" })
   });
 }
 
-export function createZeroshipAgent(opts?: {
+export async function createZeroshipAgent(opts?: {
   model?: string;
   provider?: "openai" | "anthropic";
   context?: AgentContext;
@@ -203,9 +196,25 @@ export function createZeroshipAgent(opts?: {
   const model = pickModel(opts);
   const systemPrompt = SYSTEM_PROMPT + "\n\n" + workspaceContextBlock(opts?.context);
 
+  // Plug our zeroship-sandbox HTTP service in as deepagents' backend.
+  // The built-in `read_file`, `write_file`, `edit_file`, `ls`,
+  // `grep`, `glob`, and `execute` tools all route through this —
+  // we don't need to redefine them. The session is opened eagerly
+  // so the container is warm by the time the agent's first turn
+  // hits a file-op.
+  //
+  // If no app_id was provided (hard error in practice), we don't
+  // create a backend. createDeepAgent then falls back to its
+  // default in-memory `StateBackend` and the user gets a clear
+  // signal that nothing is persistent.
+  const backend = opts?.context?.app_id
+    ? await ZeroshipSandboxBackend.open(opts.context.app_id)
+    : undefined;
+
   return createDeepAgent({
     model,
     systemPrompt,
+    backend,
     tools: [
       // Project lifecycle (control plane)
       createApp,
@@ -213,15 +222,12 @@ export function createZeroshipAgent(opts?: {
       fetchAppCode,
       deployApp,
       testApp,
-      // Sandbox file system + shell (zeroship-sandbox)
-      openSession,
-      sandboxListFiles,
-      sandboxReadFile,
-      sandboxWriteFile,
-      sandboxDeleteFile,
-      runCommand,
       // High-level: vite build + upload dist/ + deploy stub
       buildAndPublish,
+      // (File ops + shell come from deepagents' built-in tools wired
+      // through our backend above — read_file, write_file,
+      // edit_file, ls, grep, glob, execute. We don't add `sandbox_*`
+      // shadows.)
     ],
   });
 }

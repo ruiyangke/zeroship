@@ -21,7 +21,11 @@ import { z } from "zod";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CONTROL_URL, CONTROL_KEY, GATEWAY_URL } from "../env.js";
-import { execCommand, getSession } from "../sandbox.js";
+import {
+  execCommand,
+  getSession,
+  createOrAttachSession,
+} from "../sandbox.js";
 
 // Minimal fetch handler — every request returns 404 unless the
 // gateway's static-asset path matches first. A bare 200 root is
@@ -138,12 +142,26 @@ function contentTypeFor(p: string): string {
 }
 
 export const buildAndPublish = tool(
-  async ({ session_id, app_id, app_name, build_first }) => {
+  async ({ project_id, app_id, app_name, session_id, build_first }) => {
+    // Resolve the sandbox session. Two valid call shapes:
+    //   1. session_id passed directly (caller already opened one)
+    //   2. project_id passed — we open-or-attach idempotently
+    // (The deepagents backend opens sessions implicitly per chat,
+    // so the agent typically only knows the project_id.)
     let session;
     try {
-      session = await getSession(session_id);
+      if (session_id) {
+        session = await getSession(session_id);
+      } else if (project_id) {
+        session = await createOrAttachSession(project_id);
+      } else {
+        return JSON.stringify({
+          ok: false,
+          error: "must pass either session_id or project_id",
+        });
+      }
     } catch (e: any) {
-      return JSON.stringify({ ok: false, error: `bad session: ${e?.message ?? e}` });
+      return JSON.stringify({ ok: false, error: `resolve session: ${e?.message ?? e}` });
     }
 
     // Ensure the target app exists (create it if not). Note: the
@@ -258,11 +276,14 @@ export const buildAndPublish = tool(
     description:
       "Build the project (vite build) and publish it to the platform in one shot. Reads every file from dist/ and uploads them as static assets, then deploys a minimal fetch handler that lets the gateway serve them. Auto-creates the target app if app_id doesn't exist yet. Use this instead of trying to inline JS bundles into a deploy_app call.",
     schema: z.object({
-      session_id: z.string().uuid(),
+      project_id: z.string().min(1).max(64).optional()
+        .describe("Project id (typically the workspace context's app_id). The tool opens or re-attaches the matching sandbox session. Pass this OR session_id."),
+      session_id: z.string().uuid().optional()
+        .describe("Sandbox session UUID. Only needed if you have one in hand; usually project_id is enough."),
       app_id: z.string().uuid()
         .describe("Target zeroship app UUID. If it doesn't exist yet, the tool creates it under app_name."),
       app_name: z.string().min(1).max(64).regex(/^[a-zA-Z0-9_-]+$/).optional()
-        .describe("Slug to use if the app needs to be created (defaults to a derivation from session.project_id)."),
+        .describe("Slug to use if the app needs to be created (defaults to a derivation from project_id)."),
       build_first: z.boolean().optional().default(true)
         .describe("Run `npm run build` before publishing (default true). Set false if you just built."),
     }),

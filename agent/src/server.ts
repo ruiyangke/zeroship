@@ -44,7 +44,7 @@ app.post("/chat", async (c) => {
 
   let agent;
   try {
-    agent = createZeroshipAgent({
+    agent = await createZeroshipAgent({
       model: body.model,
       provider: body.provider,
       context,
