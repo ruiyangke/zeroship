@@ -158,5 +158,10 @@ console.log(`[agent] http://localhost:${port}`);
 
 export default {
   port,
+  // Long-running agent turns can take 60-120s (npm install, vite
+  // build, multi-step LLM reasoning). Bun.serve's 10s default cuts
+  // SSE streams off mid-flight; bump the per-request idle timeout
+  // to 5 min — the request-level cap above the model's own timeouts.
+  idleTimeout: 255,
   fetch: app.fetch,
 };
