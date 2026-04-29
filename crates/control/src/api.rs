@@ -117,7 +117,11 @@ pub async fn list_apps(state: State<Arc<AppState>>) -> web::HttpResponse {
     }
 }
 
-pub async fn get_app(state: State<Arc<AppState>>, id: Path<String>) -> web::HttpResponse {
+pub async fn get_app(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    id: Path<String>,
+) -> web::HttpResponse {
     let uid = match id.parse::<Uuid>() {
         Ok(u) => u,
         Err(_) => {
@@ -125,8 +129,20 @@ pub async fn get_app(state: State<Arc<AppState>>, id: Path<String>) -> web::Http
                 .json(&serde_json::json!({"error":"invalid uuid"}))
         }
     };
+    // Admin auth surfaces the app's api_key in the response (the same
+    // bearer-master-key gate that allows create/delete). Anonymous reads
+    // get the public AppRecord without the secret.
+    let is_admin = check_admin_auth(&req, &state).is_none();
     match state.registry.get_app(&uid).await {
-        Ok(Some(record)) => web::HttpResponse::Ok().json(&record),
+        Ok(Some(record)) => {
+            if is_admin {
+                let mut json = serde_json::to_value(&record).unwrap();
+                json["api_key"] = serde_json::Value::String(record.api_key.clone());
+                web::HttpResponse::Ok().json(&json)
+            } else {
+                web::HttpResponse::Ok().json(&record)
+            }
+        }
         Ok(None) => {
             web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
         }

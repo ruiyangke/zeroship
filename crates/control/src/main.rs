@@ -180,7 +180,10 @@ async fn main() -> std::io::Result<()> {
                     .route(web::delete().to(api::delete_app)),
             )
             .service(
+                // 16MB body cap so server bundles bundling
+                // langchain/deepagents/etc. (1-2MB) fit.
                 web::resource("/api/apps/{id}/deploy")
+                    .state(web::types::PayloadConfig::new(16 * 1024 * 1024))
                     .route(web::post().to(api::deploy)),
             )
             .service(
@@ -195,7 +198,11 @@ async fn main() -> std::io::Result<()> {
                 // ntex's `{path:.*}` only matches a single segment;
                 // `{path}*` is the tail-match syntax that handles
                 // nested paths like `assets/index-abc.js`.
+                //
+                // 16MB body cap — ntex's default is 256KB which is
+                // too small for typical SPA bundles (1-2MB minified).
                 web::resource("/api/apps/{id}/assets/{path}*")
+                    .state(web::types::PayloadConfig::new(16 * 1024 * 1024))
                     .route(web::put().to(api::upload_asset)),
             )
             .service(
