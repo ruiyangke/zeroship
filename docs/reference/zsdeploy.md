@@ -1,10 +1,12 @@
 # `.zsdeploy` — deploy artifact format
 
-**Version:** 1
+**Version:** 2
 **Status:** Draft
-**Replaces:** `.appbundle`-only uploads + per-file `PUT /api/apps/{id}/assets/{path}`.
+**Replaces:** `.appbundle` (deleted) + per-file `PUT /api/apps/{id}/assets/{path}` (deleted).
 
-A single artifact emitted by the build pipeline and ingested by the control plane. Carries the server bundle, all client assets, prerendered HTML, source maps, and a manifest naming everything by content hash. Hard-cut replacement: the old paths go away in the same milestone the new ones land.
+A single artifact emitted by the build pipeline and ingested by the control plane. Carries the server bundle, all client assets, prerendered HTML, source maps, and a manifest naming everything by content hash. Hard-cut replacement: there is no v1 in production data; the launch version is **v2**, which adds a multi-module `server_bundle` shape on top of the v1 design we briefly drafted.
+
+No backward compatibility with v1 is provided — readers reject `version != 2`.
 
 ## Container
 
@@ -32,14 +34,14 @@ A blob is one file. **One file ↔ one blob.** No grouping, no chunk-level dedup
 
 ## `manifest.json`
 
-JSON, schema version `1`. Fields and their semantics:
+JSON, schema version `2`. Fields and their semantics:
 
 ```jsonc
 {
-  "version": 1,                                          // schema version (u16)
+  "version": 2,                                          // schema version (u16); readers reject != 2
   "deploy_hash": "<sha256>",                             // computed; see "deploy_hash"
-  "server_bundle": "<sha256>",                           // hash of the server JS blob; null for SSG-only
-  "rules": [<Rule>, ...],                                // routing rules — same shape as today's Manifest.rules
+  "server_bundle": <ServerBundleRef> | null,             // see "Server bundle" below
+  "rules": [<Rule>, ...],                                // routing rules
   "assets": {                                            // path -> asset metadata
     "/index.html": {
       "hash": "<sha256>",
@@ -63,13 +65,55 @@ JSON, schema version `1`. Fields and their semantics:
 }
 ```
 
+### Server bundle
+
+`server_bundle` is a tagged enum with two shapes — a single bundled blob (the typical case for esbuild/rollup-bundled servers) or an explicit module map (for code-splitting / lazy loading via V8's module resolver):
+
+```jsonc
+// Single-blob server (the v1 of zeroship platform; what vite-plugin emits today)
+"server_bundle": {
+  "kind": "single",
+  "hash": "<sha256>"
+}
+
+// Multi-module server (future use case: lazy import paths, shared chunks, finer V8 code-cache)
+"server_bundle": {
+  "kind": "multi",
+  "entry":   "src/index.js",                             // the module specifier V8 evaluates first
+  "modules": {                                            // specifier -> blob hash
+    "src/index.js":      "<sha256>",
+    "src/routes/api.js": "<sha256>",
+    "src/lib/db.js":     "<sha256>"
+  }
+}
+
+// SSG-only deploys (no worker code at all)
+"server_bundle": null
+```
+
+The Rust type:
+
+```rust
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ServerBundleRef {
+    Single { hash: String },
+    Multi  { entry: String, modules: HashMap<String, String> },
+}
+```
+
+The worker:
+- For `Single`, fetches one blob and constructs `vec![ModuleEntry { specifier: "index.js", source: <bytes-as-utf8> }]`.
+- For `Multi`, fetches the `entry` blob, constructs a `ModuleEntry` for it, and resolves further imports lazily through V8's module-resolve callback against the `modules` map (each callback fetches the corresponding blob via `BlobStore`).
+
+The build pipeline emits `Single` today. `Multi` is a future use case the schema is forward-prepared for; vite-plugin does not emit it in the launch milestone.
+
 ### Required vs optional
 
 | Field | Required | Notes |
 | --- | --- | --- |
-| `version` | yes | reject unknown values |
+| `version` | yes | MUST be `2`; readers reject any other value |
 | `deploy_hash` | computed | absent or empty in build output; control plane fills it on receipt |
-| `server_bundle` | iff worker rules exist | null/missing means SSG-only |
+| `server_bundle` | iff worker rules exist | a `ServerBundleRef` (Single or Multi) or null. null/missing means SSG-only |
 | `rules` | yes | may be `[]` for asset-only static deploys (gateway 404s on no match) |
 | `assets` | yes | may be `{}` |
 | `prerendered` | yes | may be `{}` |
@@ -91,7 +135,7 @@ This means **any change to any blob's content cascades to a new `deploy_hash`** 
 
 ### Cross-references
 
-- Every hash appearing in `assets[].hash`, `prerendered[]` (the resolved asset path's `assets[].hash`), `sourcemaps` keys/values, and `server_bundle` MUST correspond to a blob in the archive — UNLESS it already exists in the control plane's blob store (dedup).
+- Every hash appearing in `assets[].hash`, `prerendered[]` (the resolved asset path's `assets[].hash`), `sourcemaps` keys/values, and the hashes inside `server_bundle` (one for `Single`, N for `Multi`) MUST correspond to a tar entry in the archive. The client always uploads every referenced blob — no "we already have it" claims (server-internal dedup is invisible to the client).
 - Every key in `prerendered` MUST be a path that won't conflict with `rules` matches. Validation responsibility: build pipeline emits sane manifests; control plane's `Manifest::validate()` rejects ambiguous ones.
 
 ## Multi-tenancy and possession proof
@@ -206,7 +250,11 @@ Validate at the streaming boundary, not after the fact — reject early.
 
 ## Versioning
 
-`version: u16`. Adding fields is backward-compatible (readers ignore unknowns). Changing semantics or removing fields requires a `version` bump. Control plane MUST reject unknown versions; never trust an unknown manifest as an unparsed JSON blob.
+`version: u16`. Current value: `2` (the launch version — there is no v1 in production data).
+
+Adding fields stays backward-compatible (readers ignore unknowns within the same major version). Changing semantics or removing fields requires a `version` bump. Control plane MUST reject any `version` value it doesn't explicitly support; never trust an unknown manifest as an unparsed JSON blob.
+
+There is no migration path for v1 → v2 because no v1 deploys exist. Future schema bumps will land hard-cut as well unless we have production data that justifies a migration cost.
 
 ## What this format intentionally does NOT carry
 
