@@ -16,6 +16,7 @@ exclude = [
 compio = { version = "0.18", features = ["io", "net", "runtime", "macros", "time"] }
 compio-tls = { version = "0.9", features = ["native-tls"] }
 futures = "0.3"
+async-trait = "0.1"
 
 # HTTP
 ntex = { version = "3", features = ["compio"] }

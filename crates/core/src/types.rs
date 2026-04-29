@@ -65,9 +65,25 @@ pub struct RouteEntry {
 // ---------------------------------------------------------------------------
 
 /// One per app. Carries everything the gateway needs to route a request
-/// without consulting the control plane on the hot path.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// without consulting the control plane on the hot path. Wire format:
+/// see `docs/reference/zsdeploy.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
+    /// Schema version. Reject unknown values.
+    #[serde(default = "Manifest::default_version")]
+    pub version: u16,
+
+    /// Computed from the canonical (deploy_hash-omitted) manifest by the
+    /// control plane on receipt. `None` at build time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy_hash: Option<String>,
+
+    /// Hash of the server-only JS blob the worker should load. `None`
+    /// for SSG-only deploys (no worker rules). Replaces the legacy
+    /// `server_bundle_hash` field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_bundle: Option<String>,
+
     /// Ordered routing rules. Walked first-match-wins on every
     /// request.
     #[serde(default)]
@@ -77,7 +93,11 @@ pub struct Manifest {
     /// until the next deploy. `path → asset entry` (path is the URL
     /// the asset is served at, e.g. `/index.html`).
     #[serde(default)]
-    pub build_assets: HashMap<String, AssetEntry>,
+    pub assets: HashMap<String, AssetEntry>,
+
+    /// Route → asset path. Each value MUST resolve via `assets`.
+    #[serde(default)]
+    pub prerendered: HashMap<String, String>,
 
     /// Runtime-emitted asset map. Populated by the user's server
     /// code via `zeroship.assets.put(...)`. Bumped via
@@ -86,17 +106,47 @@ pub struct Manifest {
     #[serde(default)]
     pub runtime_assets: HashMap<String, AssetEntry>,
 
-    /// Hash of the server-only sub-bundle the worker should load.
-    /// Distinct from `deploy_hash` (the whole-upload hash) so an
-    /// asset-only deploy doesn't invalidate the worker's V8 isolate.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub server_bundle_hash: Option<String>,
-
     /// Bumped on every `runtime_assets` mutation. Gateway compares
     /// local vs remote and refetches the runtime map only when this
     /// changes — keeps the hot path cheap.
     #[serde(default)]
     pub asset_version: i64,
+
+    /// Asset hash → sourcemap blob hash. Optional, may be `{}`.
+    #[serde(default)]
+    pub sourcemaps: HashMap<String, String>,
+
+    /// Informational; not load-bearing on the hot path.
+    #[serde(default)]
+    pub metadata: ManifestMetadata,
+}
+
+impl Default for Manifest {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            deploy_hash: None,
+            server_bundle: None,
+            rules: Vec::new(),
+            assets: HashMap::new(),
+            prerendered: HashMap::new(),
+            runtime_assets: HashMap::new(),
+            asset_version: 0,
+            sourcemaps: HashMap::new(),
+            metadata: ManifestMetadata::default(),
+        }
+    }
+}
+
+/// Informational metadata about how the manifest was produced.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ManifestMetadata {
+    /// Compiler identifier, e.g. `@zeroship/vite-plugin@0.x`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiler: Option<String>,
+    /// RFC 3339 build timestamp.
+    #[serde(default)]
+    pub built_at: String,
 }
 
 /// A single routing rule. Match describes *when* it fires; action
@@ -108,12 +158,20 @@ pub struct Rule {
 }
 
 impl Manifest {
+    /// Default schema version for `#[serde(default)]`.
+    fn default_version() -> u16 { 1 }
+
     /// Synthesize the default "everything goes to the worker" manifest.
     /// Preserves the kernel-cut behavior: POST /_rpc/* gets `WorkerMode::Rpc`
     /// (gateway gates the API key); everything else gets `WorkerMode::Ssr`.
     /// Used for apps that haven't yet shipped a manifest of their own.
+    /// Synthesized rather than built — `metadata.built_at` is the fixed
+    /// epoch sentinel so it's recognizable.
     pub fn passthrough() -> Self {
         Self {
+            version: 1,
+            deploy_hash: None,
+            server_bundle: None,
             rules: vec![
                 Rule {
                     r#match: Match::Prefix {
@@ -135,10 +193,18 @@ impl Manifest {
                     },
                 },
             ],
-            build_assets: HashMap::new(),
+            assets: HashMap::new(),
+            prerendered: HashMap::new(),
             runtime_assets: HashMap::new(),
-            server_bundle_hash: None,
             asset_version: 0,
+            sourcemaps: HashMap::new(),
+            metadata: ManifestMetadata {
+                compiler: Some(format!(
+                    "zeroship-passthrough@{}",
+                    env!("CARGO_PKG_VERSION")
+                )),
+                built_at: "1970-01-01T00:00:00Z".to_string(),
+            },
         }
     }
 
@@ -146,10 +212,21 @@ impl Manifest {
     /// human-readable message. Cheap — call on every load.
     ///
     /// Checks:
+    /// * `version == 1` (unknown versions rejected).
     /// * `Action::Static.status` ∈ [100, 599]
     /// * `Action::Redirect.status` ∈ [300, 399]
     /// * No rule is shadowed (made unreachable) by an earlier rule.
+    /// * Every `prerendered` value resolves to a known `assets` entry.
+    /// * Every `sourcemaps` key/value is sha256-hex (lowercase, 64 chars).
+    ///
+    /// Note: `runtime_assets == {}` and `asset_version == 0` are
+    /// fresh-deploy invariants, NOT type-level ones. `validate()` is
+    /// also called on already-deployed manifests with mutated runtime
+    /// state, so we don't reject those here.
     pub fn validate(&self) -> Result<(), String> {
+        if self.version != 1 {
+            return Err(format!("unsupported manifest version {}", self.version));
+        }
         for (i, rule) in self.rules.iter().enumerate() {
             match &rule.action {
                 Action::Static { status: Some(s), .. } => {
@@ -180,8 +257,31 @@ impl Manifest {
                 }
             }
         }
+        for (route, asset_path) in &self.prerendered {
+            if !self.assets.contains_key(asset_path) {
+                return Err(format!(
+                    "prerendered[{route}] points to unknown asset {asset_path}"
+                ));
+            }
+        }
+        for (k, v) in &self.sourcemaps {
+            if !is_sha256_hex(k) {
+                return Err(format!(
+                    "sourcemaps key {k:?} is not a lowercase 64-char sha256 hex"
+                ));
+            }
+            if !is_sha256_hex(v) {
+                return Err(format!(
+                    "sourcemaps[{k}] value {v:?} is not a lowercase 64-char sha256 hex"
+                ));
+            }
+        }
         Ok(())
     }
+}
+
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
 }
 
 // ---------------------------------------------------------------------------
@@ -315,7 +415,7 @@ pub enum Match {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
-    /// Serve from `build_assets` / `runtime_assets`. The `try` chain
+    /// Serve from `assets` / `runtime_assets`. The `try` chain
     /// is resolved left-to-right; first hit wins. `$path` substitutes
     /// the request path; `[name]` captures from the matching glob
     /// substitute as `[name]`.

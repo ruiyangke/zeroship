@@ -65,10 +65,10 @@ fn request_method_bit(method: &str) -> u8 {
 #[allow(missing_debug_implementations)]
 pub struct CompiledManifest {
     rules: Vec<CompiledRule>,
-    build_assets: HashMap<String, AssetEntry>,
+    assets: HashMap<String, AssetEntry>,
     runtime_assets: HashMap<String, AssetEntry>,
     #[allow(dead_code)]
-    server_bundle_hash: Option<String>,
+    server_bundle: Option<String>,
     #[allow(dead_code)]
     asset_version: i64,
 }
@@ -155,9 +155,9 @@ impl CompiledManifest {
         let rules = m.rules.iter().map(compile_rule).collect();
         Self {
             rules,
-            build_assets: m.build_assets.clone(),
+            assets: m.assets.clone(),
             runtime_assets: m.runtime_assets.clone(),
-            server_bundle_hash: m.server_bundle_hash.clone(),
+            server_bundle: m.server_bundle.clone(),
             asset_version: m.asset_version,
         }
     }
@@ -483,7 +483,7 @@ impl CompiledManifest {
         if let Some(e) = self.runtime_assets.get(path) {
             return Some((e, true));
         }
-        if let Some(e) = self.build_assets.get(path) {
+        if let Some(e) = self.assets.get(path) {
             return Some((e, false));
         }
         None
@@ -574,13 +574,11 @@ mod tests {
                     status: None,
                 },
             }],
-            build_assets: HashMap::from([(
+            assets: HashMap::from([(
                 "/index.html".into(),
                 asset("h1", "text/html"),
             )]),
-            runtime_assets: HashMap::new(),
-            server_bundle_hash: None,
-            asset_version: 0,
+            ..Manifest::default()
         };
         let c = CompiledManifest::compile(&m);
         match c.dispatch("GET", "/") {
@@ -606,10 +604,7 @@ mod tests {
                     status: 301,
                 },
             }],
-            build_assets: HashMap::new(),
-            runtime_assets: HashMap::new(),
-            server_bundle_hash: None,
-            asset_version: 0,
+            ..Manifest::default()
         };
         let c = CompiledManifest::compile(&m);
         match c.dispatch("GET", "/old/foo") {
@@ -638,13 +633,11 @@ mod tests {
                     },
                 },
             ],
-            build_assets: HashMap::from([(
+            assets: HashMap::from([(
                 "/new.html".into(),
                 asset("h-new", "text/html"),
             )]),
-            runtime_assets: HashMap::new(),
-            server_bundle_hash: None,
-            asset_version: 0,
+            ..Manifest::default()
         };
         let c = CompiledManifest::compile(&m);
         match c.dispatch("GET", "/old") {
@@ -666,10 +659,7 @@ mod tests {
                     action: Action::Rewrite { to: "/a".into() },
                 },
             ],
-            build_assets: HashMap::new(),
-            runtime_assets: HashMap::new(),
-            server_bundle_hash: None,
-            asset_version: 0,
+            ..Manifest::default()
         };
         let c = CompiledManifest::compile(&m);
         match c.dispatch("GET", "/a") {

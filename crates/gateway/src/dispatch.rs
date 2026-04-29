@@ -117,13 +117,11 @@ mod tests {
                     },
                 },
             ],
-            build_assets: HashMap::from([
+            assets: HashMap::from([
                 ("/index.html".into(), asset("h1", "text/html")),
                 ("/_assets/main.js".into(), asset("h2", "application/javascript")),
             ]),
-            runtime_assets: HashMap::new(),
-            server_bundle_hash: None,
-            asset_version: 0,
+            ..Manifest::default()
         }
     }
 
@@ -213,10 +211,8 @@ mod tests {
                     },
                 },
             ],
-            build_assets: HashMap::from([("/new.html".into(), asset("h-new", "text/html"))]),
-            runtime_assets: HashMap::new(),
-            server_bundle_hash: None,
-            asset_version: 0,
+            assets: HashMap::from([("/new.html".into(), asset("h-new", "text/html"))]),
+            ..Manifest::default()
         };
         match dispatch_manifest("GET", "/old", &m) {
             Outcome::Static(hit) => assert_eq!(hit.hash, "h-new"),
@@ -237,10 +233,7 @@ mod tests {
                     action: Action::Rewrite { to: "/a".into() },
                 },
             ],
-            build_assets: HashMap::new(),
-            runtime_assets: HashMap::new(),
-            server_bundle_hash: None,
-            asset_version: 0,
+            ..Manifest::default()
         };
         match dispatch_manifest("GET", "/a", &m) {
             Outcome::NotFound => {}
@@ -275,10 +268,7 @@ mod tests {
                     }),
                 },
             }],
-            build_assets: HashMap::new(),
-            runtime_assets: HashMap::new(),
-            server_bundle_hash: None,
-            asset_version: 0,
+            ..Manifest::default()
         };
         match dispatch_manifest("GET", "/api", &m) {
             Outcome::Worker { rate_limit: Some(rl), .. } => {

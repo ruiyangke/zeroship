@@ -1,6 +1,6 @@
 use zeroship_core::types::{
-    Action, AppUsage, AssetEntry, ControlEvent, HttpMethod, Manifest, Match, RouteEntry, Rule,
-    UsageReport, WorkerMode,
+    Action, AppUsage, AssetEntry, ControlEvent, HttpMethod, Manifest, ManifestMetadata, Match,
+    RouteEntry, Rule, UsageReport, WorkerMode,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -332,10 +332,7 @@ fn manifest_validate_rejects_invalid_status() {
                 status: Some(99), // out of range
             },
         }],
-        build_assets: HashMap::new(),
-        runtime_assets: HashMap::new(),
-        server_bundle_hash: None,
-        asset_version: 0,
+        ..Manifest::default()
     };
     assert!(bad.validate().is_err(), "status=99 must be rejected");
 
@@ -348,10 +345,7 @@ fn manifest_validate_rejects_invalid_status() {
                 status: Some(404),
             },
         }],
-        build_assets: HashMap::new(),
-        runtime_assets: HashMap::new(),
-        server_bundle_hash: None,
-        asset_version: 0,
+        ..Manifest::default()
     };
     assert!(good.validate().is_ok(), "status=404 must be accepted");
 
@@ -429,7 +423,7 @@ fn manifest_roundtrip_json() {
                 },
             },
         ],
-        build_assets: HashMap::from([(
+        assets: HashMap::from([(
             "/index.html".to_string(),
             AssetEntry {
                 hash: "sha256-abc".into(),
@@ -439,14 +433,172 @@ fn manifest_roundtrip_json() {
                 updated_at: 0,
             },
         )]),
-        runtime_assets: HashMap::new(),
-        server_bundle_hash: Some("sha256-xyz".into()),
-        asset_version: 0,
+        server_bundle: Some("sha256-xyz".into()),
+        ..Manifest::default()
     };
 
     let json = serde_json::to_string(&m).unwrap();
     let decoded: Manifest = serde_json::from_str(&json).unwrap();
     assert_eq!(decoded.rules.len(), 3);
-    assert_eq!(decoded.server_bundle_hash.as_deref(), Some("sha256-xyz"));
-    assert_eq!(decoded.build_assets["/index.html"].hash, "sha256-abc");
+    assert_eq!(decoded.server_bundle.as_deref(), Some("sha256-xyz"));
+    assert_eq!(decoded.assets["/index.html"].hash, "sha256-abc");
+}
+
+// -- v2 schema -------------------------------------------------------------
+
+const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+#[test]
+fn manifest_v2_round_trips_through_json() {
+    let m = Manifest {
+        version: 1,
+        deploy_hash: Some(SHA_A.to_string()),
+        server_bundle: Some(SHA_B.to_string()),
+        rules: vec![Rule {
+            r#match: Match::Any,
+            action: Action::Worker {
+                mode: WorkerMode::Ssr,
+                cache: None,
+                rate_limit: None,
+            },
+        }],
+        assets: HashMap::from([(
+            "/_prerendered/about.html".to_string(),
+            AssetEntry {
+                hash: SHA_A.into(),
+                content_type: "text/html".into(),
+                size: 42,
+                cache: None,
+                updated_at: 0,
+            },
+        )]),
+        prerendered: HashMap::from([(
+            "/about".to_string(),
+            "/_prerendered/about.html".to_string(),
+        )]),
+        runtime_assets: HashMap::new(),
+        asset_version: 0,
+        sourcemaps: HashMap::from([(SHA_A.to_string(), SHA_B.to_string())]),
+        metadata: ManifestMetadata {
+            compiler: Some("@zeroship/vite-plugin@0.1".into()),
+            built_at: "2026-04-29T12:34:56Z".into(),
+        },
+    };
+
+    let json = serde_json::to_string(&m).unwrap();
+    let d: Manifest = serde_json::from_str(&json).unwrap();
+    assert_eq!(d.version, 1);
+    assert_eq!(d.deploy_hash.as_deref(), Some(SHA_A));
+    assert_eq!(d.server_bundle.as_deref(), Some(SHA_B));
+    assert_eq!(d.rules.len(), 1);
+    assert_eq!(d.assets["/_prerendered/about.html"].hash, SHA_A);
+    assert_eq!(
+        d.prerendered.get("/about").map(String::as_str),
+        Some("/_prerendered/about.html"),
+    );
+    assert_eq!(d.sourcemaps.get(SHA_A).map(String::as_str), Some(SHA_B));
+    assert_eq!(d.metadata.compiler.as_deref(), Some("@zeroship/vite-plugin@0.1"));
+    assert_eq!(d.metadata.built_at, "2026-04-29T12:34:56Z");
+}
+
+#[test]
+fn manifest_validate_rejects_bad_prerendered_ref() {
+    let m = Manifest {
+        prerendered: HashMap::from([(
+            "/about".to_string(),
+            "/missing.html".to_string(),
+        )]),
+        ..Manifest::default()
+    };
+    let err = m.validate().unwrap_err();
+    assert!(err.contains("/missing.html"), "error mentions missing path: {err}");
+}
+
+#[test]
+fn manifest_validate_rejects_non_hex_sourcemap_key() {
+    let m = Manifest {
+        sourcemaps: HashMap::from([("NOT_HEX".to_string(), SHA_A.to_string())]),
+        ..Manifest::default()
+    };
+    assert!(m.validate().is_err(), "non-hex key must be rejected");
+
+    // Uppercase is also rejected.
+    let upper = "A".repeat(64);
+    let m2 = Manifest {
+        sourcemaps: HashMap::from([(upper, SHA_A.to_string())]),
+        ..Manifest::default()
+    };
+    assert!(m2.validate().is_err(), "uppercase hex must be rejected");
+
+    // Wrong length.
+    let m3 = Manifest {
+        sourcemaps: HashMap::from([("abcd".to_string(), SHA_A.to_string())]),
+        ..Manifest::default()
+    };
+    assert!(m3.validate().is_err(), "length != 64 must be rejected");
+
+    // Non-hex value.
+    let m4 = Manifest {
+        sourcemaps: HashMap::from([(SHA_A.to_string(), "not_a_hash".to_string())]),
+        ..Manifest::default()
+    };
+    assert!(m4.validate().is_err(), "non-hex value must be rejected");
+}
+
+#[test]
+fn manifest_validate_rejects_unsupported_version() {
+    let m = Manifest { version: 99, ..Manifest::default() };
+    let err = m.validate().unwrap_err();
+    assert!(err.contains("99"), "error mentions bad version: {err}");
+}
+
+#[test]
+fn manifest_passthrough_v2_validates() {
+    let p = Manifest::passthrough();
+    assert_eq!(p.version, 1);
+    assert_eq!(p.metadata.built_at, "1970-01-01T00:00:00Z");
+    assert!(
+        p.metadata.compiler
+            .as_deref()
+            .is_some_and(|s| s.starts_with("zeroship-passthrough@")),
+        "passthrough compiler tag should be set: {:?}",
+        p.metadata.compiler,
+    );
+    p.validate().expect("passthrough must validate");
+}
+
+#[test]
+fn manifest_existing_v1_data_round_trips_minimally() {
+    // Minimal v1 wire format: omit prerendered/sourcemaps/metadata; the
+    // serde defaults fill them in. version defaults to 1.
+    let json = r#"{
+        "rules": [],
+        "assets": {},
+        "runtime_assets": {},
+        "asset_version": 0
+    }"#;
+    let m: Manifest = serde_json::from_str(json).unwrap();
+    assert_eq!(m.version, 1);
+    assert!(m.assets.is_empty());
+    assert!(m.prerendered.is_empty());
+    assert!(m.sourcemaps.is_empty());
+    assert_eq!(m.metadata.built_at, "");
+    m.validate().expect("minimal v1 manifest must validate");
+
+    // Hard-cut: legacy `build_assets` key is no longer recognized. The
+    // field is silently ignored (serde's default behavior) and `assets`
+    // ends up empty — callers reading old manifests on disk get empty
+    // assets, not an error. Documented in `docs/reference/zsdeploy.md`.
+    let legacy = r#"{
+        "rules": [],
+        "build_assets": {
+            "/old.html": {"hash": "h", "content_type": "text/html", "size": 0}
+        }
+    }"#;
+    let m2: Manifest = serde_json::from_str(legacy).unwrap();
+    assert!(
+        m2.assets.is_empty(),
+        "legacy build_assets is dropped under hard-cut rename"
+    );
 }
