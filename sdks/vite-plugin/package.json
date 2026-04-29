@@ -18,12 +18,14 @@
   "scripts": {
     "build": "tsc && node --import tsx scripts/build-bootstrap.ts",
     "build:bootstrap": "node --import tsx scripts/build-bootstrap.ts",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "node --import tsx --test test/*.test.ts"
   },
   "peerDependencies": {
     "vite": ">=6.0.0"
   },
   "devDependencies": {
+    "@types/mime": "^3.0.4",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",
     "esbuild": "^0.28.0",
@@ -39,6 +41,8 @@
     "@electric-sql/pglite": "^0.4.4",
     "@electric-sql/pglite-socket": "^0.1.4",
     "magic-string": "^0.30.21",
+    "mime": "^3.0.0",
+    "tar": "^7.5.13",
     "unenv": "^1.10.0",
     "ws": "^8.20.0"
   }
