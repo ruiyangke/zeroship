@@ -1,4 +1,5 @@
 mod auth;
+mod blob_cache;
 mod compiled;
 mod dispatch;
 mod enforce;
@@ -7,9 +8,11 @@ mod router;
 mod sync;
 mod user_auth;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use ntex::web;
+use zeroship_core::blob::{BlobStore, LocalDiskBlobStore};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -35,6 +38,13 @@ pub struct GateState {
     pub hash_ring: proxy::HashRing,
     pub rate_limiters: enforce::RateLimitRegistry,
     pub concurrency: enforce::ConcurrencyRegistry,
+    /// Content-addressed blob store. Phase 4 of the artifact rollout —
+    /// the gateway fetches asset bytes here directly instead of round-
+    /// tripping through the control plane.
+    pub blob_store: Arc<dyn BlobStore>,
+    /// In-memory LRU cache in front of `blob_store`. Phase A of the
+    /// zero-copy plan.
+    pub blob_cache: blob_cache::BlobCache,
 }
 
 #[ntex::main]
@@ -47,12 +57,26 @@ async fn main() -> std::io::Result<()> {
     let poll_interval = arg_or_env(&args, "--poll-interval", "POLL_INTERVAL", "5");
     let auth_secret = arg_or_env(&args, "--auth-secret", "AUTH_SECRET", "");
     let worker_key = arg_or_env(&args, "--worker-key", "WORKER_KEY", "");
+    let blob_store_root = arg_or_env(&args, "--blob-store", "BLOB_STORE", "./bundles");
+    let blob_cache_mem_mb = arg_or_env(&args, "--blob-cache-mem-mb", "BLOB_CACHE_MEM_MB", "256");
 
     if worker_key.is_empty() {
         eprintln!(
             "[zeroship-gate] WARNING: WORKER_KEY not set — worker endpoints are unauthenticated"
         );
     }
+
+    let blob_cache_bytes: usize = blob_cache_mem_mb
+        .parse::<usize>()
+        .unwrap_or(256)
+        .saturating_mul(1024 * 1024);
+    let blob_store: Arc<dyn BlobStore> = Arc::new(
+        LocalDiskBlobStore::new(PathBuf::from(&blob_store_root))
+            .expect("failed to initialise blob store"),
+    );
+    eprintln!(
+        "[zeroship-gate] blob store at {blob_store_root}, mem cache budget {blob_cache_mem_mb} MB"
+    );
 
     let worker_urls: Vec<String> = workers_str
         .split(',')
@@ -85,6 +109,8 @@ async fn main() -> std::io::Result<()> {
         hash_ring,
         rate_limiters: enforce::RateLimitRegistry::new(1000, 2000),
         concurrency: enforce::ConcurrencyRegistry::new(100),
+        blob_store,
+        blob_cache: blob_cache::BlobCache::new(blob_cache_bytes),
     });
 
     sync::start_sync(state.clone());

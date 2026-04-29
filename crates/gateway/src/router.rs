@@ -1,8 +1,5 @@
 use std::sync::Arc;
 
-use compio::buf::BufResult;
-use compio::io::{AsyncRead, AsyncWriteExt};
-use compio::net::TcpStream;
 use ntex::util::Bytes;
 use ntex::web::{self, HttpRequest, HttpResponse};
 use uuid::Uuid;
@@ -59,58 +56,6 @@ pub fn extract_app_name(req: &HttpRequest, path_name: Option<&str>) -> Option<St
     }
 
     Some(subdomain.to_string())
-}
-
-// ---------------------------------------------------------------------------
-// Fetch asset from control plane
-// ---------------------------------------------------------------------------
-
-/// HTTP GET to control plane, returning (status, body_bytes).
-async fn fetch_asset(control_url: &str, app_id: &Uuid, path: &str) -> Result<(u16, Vec<u8>), String> {
-    let url = format!("{control_url}/internal/assets/{app_id}/{path}");
-    let parsed = url::Url::parse(&url).map_err(|e| e.to_string())?;
-    let host = parsed.host_str().ok_or("no host")?.to_string();
-    let port = parsed.port().unwrap_or(80);
-    let req_path = parsed.path();
-
-    let addr = format!("{host}:{port}");
-    let mut stream = TcpStream::connect(&addr).await.map_err(|e| e.to_string())?;
-
-    let request = format!(
-        "GET {req_path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-    );
-
-    let BufResult(r, _) = stream.write_all(request.into_bytes()).await;
-    r.map_err(|e| e.to_string())?;
-
-    let mut response = Vec::new();
-    loop {
-        let buf = vec![0u8; 8192];
-        let BufResult(r, returned) = stream.read(buf).await;
-        let n = r.map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
-        }
-        response.extend_from_slice(&returned[..n]);
-    }
-
-    let header_end = response
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or("no header end")?;
-
-    let header = std::str::from_utf8(&response[..header_end]).map_err(|e| e.to_string())?;
-
-    // Parse status code from first line
-    let status_line = header.lines().next().unwrap_or("");
-    let status: u16 = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(502);
-
-    let body = response[header_end + 4..].to_vec();
-    Ok((status, body))
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +170,7 @@ async fn execute_outcome(
             }
             handle_dispatch(req, &state, app_id, route, tail, body, wall_start).await
         }
-        Outcome::Static(hit) => serve_static_hit(&state, app_id, hit, wall_start).await,
+        Outcome::Static(hit) => serve_static_hit(&state, hit, wall_start).await,
         Outcome::Redirect { to, status } => {
             let st = ntex::http::StatusCode::from_u16(status)
                 .unwrap_or(ntex::http::StatusCode::FOUND);
@@ -242,40 +187,68 @@ async fn execute_outcome(
     }
 }
 
-/// Serve a [`StaticHit`] from the BundleStore via the control plane's
-/// asset endpoint.
+/// Outcome of the cache → blob-store fetch for a static hit. Pulled out
+/// so it can be unit-tested with a `MockBlobStore` without constructing a
+/// full `GateState`.
+enum BlobFetch {
+    Hit(bytes::Bytes),
+    NotFound,
+    Unavailable(String),
+}
+
+/// Resolve a blob through the in-memory LRU first, falling back to the
+/// underlying store and filling the cache on miss.
+async fn fetch_static_bytes(
+    cache: &crate::blob_cache::BlobCache,
+    store: &dyn zeroship_core::blob::BlobStore,
+    hash: &str,
+) -> BlobFetch {
+    if let Some(b) = cache.get(hash) {
+        return BlobFetch::Hit(b);
+    }
+    match store.get_blob(hash).await {
+        Ok(b) => {
+            cache.insert(hash.to_string(), b.clone());
+            BlobFetch::Hit(b)
+        }
+        Err(zeroship_core::blob::BlobError::NotFound(_)) => BlobFetch::NotFound,
+        Err(e) => BlobFetch::Unavailable(e.to_string()),
+    }
+}
+
+/// Serve a [`StaticHit`] from the gateway's blob cache, falling back to
+/// the underlying [`BlobStore`]. No HTTP round-trip to the control
+/// plane on the hot path.
 async fn serve_static_hit(
     state: &GateState,
-    app_id: &Uuid,
     hit: crate::dispatch::StaticHit,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
-    let asset_path = hit.path.trim_start_matches('/');
-    match fetch_asset(&state.config.control_url, app_id, asset_path).await {
-        Ok((200, data)) => {
-            let status = hit.status.unwrap_or(200);
-            let st = ntex::http::StatusCode::from_u16(status)
-                .unwrap_or(ntex::http::StatusCode::OK);
-            let mut resp = HttpResponse::build(st);
-            resp.content_type(hit.content_type);
-            resp.header("etag", format!("\"{}\"", hit.hash));
-            resp.header("cache-control", cache_control_header(&hit.cache));
-            resp.header(
-                "x-wall-time-ms",
-                format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
-            );
-            resp.body(data)
+    let bytes = match fetch_static_bytes(&state.blob_cache, &*state.blob_store, &hit.hash).await {
+        BlobFetch::Hit(b) => b,
+        BlobFetch::NotFound => {
+            return HttpResponse::NotFound()
+                .json(&serde_json::json!({"error": "asset bytes missing"}));
         }
-        Ok((404, _)) => HttpResponse::NotFound()
-            .json(&serde_json::json!({"error": "asset bytes missing"})),
-        Ok((status, body)) => HttpResponse::build(
-            ntex::http::StatusCode::from_u16(status)
-                .unwrap_or(ntex::http::StatusCode::INTERNAL_SERVER_ERROR),
-        )
-        .body(body),
-        Err(_) => HttpResponse::ServiceUnavailable()
-            .json(&serde_json::json!({"error": "control plane unavailable"})),
-    }
+        BlobFetch::Unavailable(err) => {
+            eprintln!("[gate] blob fetch error for {}: {err}", hit.hash);
+            return HttpResponse::ServiceUnavailable()
+                .json(&serde_json::json!({"error": "blob store unavailable"}));
+        }
+    };
+    let status = hit.status.unwrap_or(200);
+    let st = ntex::http::StatusCode::from_u16(status).unwrap_or(ntex::http::StatusCode::OK);
+    let mut resp = HttpResponse::build(st);
+    resp.content_type(hit.content_type.clone());
+    resp.header("etag", format!("\"{}\"", hit.hash));
+    resp.header("cache-control", cache_control_header(&hit.cache));
+    resp.header(
+        "x-wall-time-ms",
+        format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
+    );
+    // ntex's body() wants ntex_bytes::Bytes; Phase B will switch to mmap
+    // and emit zero-copy via Bytes::from_owner.
+    resp.body(Bytes::copy_from_slice(&bytes))
 }
 
 /// Build the `Cache-Control` header value from a [`CacheCtl`].
@@ -412,3 +385,144 @@ async fn handle_dispatch(
     response
 }
 
+// ---------------------------------------------------------------------------
+// Tests — cache → blob_store → cache-fill path
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    use crate::blob_cache::BlobCache;
+    use zeroship_core::blob::{BlobError, BlobStore};
+
+    /// In-memory `BlobStore` shim that counts `get_blob` calls so tests
+    /// can assert the cache short-circuited a second fetch.
+    #[derive(Debug, Default)]
+    struct MockBlobStore {
+        blobs: Mutex<HashMap<String, bytes::Bytes>>,
+        get_calls: Mutex<HashMap<String, usize>>,
+        force_unavailable: Mutex<bool>,
+    }
+
+    impl MockBlobStore {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn put(&self, hash: &str, data: &[u8]) {
+            self.blobs
+                .lock()
+                .unwrap()
+                .insert(hash.to_string(), bytes::Bytes::copy_from_slice(data));
+        }
+
+        fn calls_for(&self, hash: &str) -> usize {
+            *self.get_calls.lock().unwrap().get(hash).unwrap_or(&0)
+        }
+
+        fn set_unavailable(&self, on: bool) {
+            *self.force_unavailable.lock().unwrap() = on;
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl BlobStore for MockBlobStore {
+        async fn get_blob(&self, hash: &str) -> Result<bytes::Bytes, BlobError> {
+            *self
+                .get_calls
+                .lock()
+                .unwrap()
+                .entry(hash.to_string())
+                .or_insert(0) += 1;
+            if *self.force_unavailable.lock().unwrap() {
+                return Err(BlobError::Backend("synthetic outage".into()));
+            }
+            self.blobs
+                .lock()
+                .unwrap()
+                .get(hash)
+                .cloned()
+                .ok_or_else(|| BlobError::NotFound(hash.to_string()))
+        }
+        fn local_path(&self, _hash: &str) -> Option<PathBuf> {
+            None
+        }
+        async fn put_blob(&self, hash: &str, data: &[u8]) -> Result<(), BlobError> {
+            self.put(hash, data);
+            Ok(())
+        }
+        async fn has_blob(&self, hash: &str) -> Result<bool, BlobError> {
+            Ok(self.blobs.lock().unwrap().contains_key(hash))
+        }
+        async fn put_manifest(
+            &self,
+            _app_id: &uuid::Uuid,
+            _deploy_hash: &str,
+            _json: &[u8],
+        ) -> Result<(), BlobError> {
+            unimplemented!("not used by the gateway")
+        }
+        async fn get_manifest(
+            &self,
+            _app_id: &uuid::Uuid,
+            _deploy_hash: &str,
+        ) -> Result<bytes::Bytes, BlobError> {
+            unimplemented!("not used by the gateway")
+        }
+    }
+
+    #[compio::test]
+    async fn miss_falls_through_to_blob_store_and_fills_cache() {
+        let cache = BlobCache::new(1024);
+        let store = MockBlobStore::new();
+        let hash = "h1";
+        store.put(hash, b"hello world");
+
+        let r = fetch_static_bytes(&cache, &store, hash).await;
+        match r {
+            BlobFetch::Hit(b) => assert_eq!(&b[..], b"hello world"),
+            other => panic!("expected Hit, got {other:?}"),
+        }
+        assert_eq!(store.calls_for(hash), 1);
+        // Cache was filled — second call must NOT reach the store.
+        let r = fetch_static_bytes(&cache, &store, hash).await;
+        assert!(matches!(r, BlobFetch::Hit(_)));
+        assert_eq!(store.calls_for(hash), 1, "second hit must come from cache");
+    }
+
+    #[compio::test]
+    async fn missing_blob_yields_not_found() {
+        let cache = BlobCache::new(1024);
+        let store = MockBlobStore::new();
+        let r = fetch_static_bytes(&cache, &store, "nope").await;
+        assert!(matches!(r, BlobFetch::NotFound));
+        // Cache must stay empty on NotFound — otherwise a transient deploy
+        // race would poison the cache.
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[compio::test]
+    async fn store_error_yields_unavailable_and_does_not_cache() {
+        let cache = BlobCache::new(1024);
+        let store = MockBlobStore::new();
+        store.put("h1", b"abc");
+        store.set_unavailable(true);
+        let r = fetch_static_bytes(&cache, &store, "h1").await;
+        assert!(matches!(r, BlobFetch::Unavailable(_)));
+        assert_eq!(cache.len(), 0);
+    }
+
+    impl std::fmt::Debug for BlobFetch {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Hit(b) => f.debug_tuple("Hit").field(&b.len()).finish(),
+                Self::NotFound => f.write_str("NotFound"),
+                Self::Unavailable(s) => f.debug_tuple("Unavailable").field(s).finish(),
+            }
+        }
+    }
+}
