@@ -6,8 +6,9 @@ use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::TcpStream;
 use uuid::Uuid;
 
-use zeroship_core::types::{RouteEntry, RouteMap};
+use zeroship_core::types::{Manifest, RouteEntry, RouteMap};
 
+use crate::compiled::CompiledManifest;
 use crate::GateState;
 
 impl std::fmt::Debug for RouteCache {
@@ -16,8 +17,16 @@ impl std::fmt::Debug for RouteCache {
     }
 }
 
+/// One route plus its pre-compiled manifest. The compiled form is built
+/// once on update and shared via Arc so dispatch is allocation-free.
+#[allow(missing_debug_implementations)]
+pub struct CompiledRoute {
+    pub entry: RouteEntry,
+    pub manifest: Arc<CompiledManifest>,
+}
+
 pub struct RouteCache {
-    routes: RwLock<RouteMap>,
+    routes: RwLock<HashMap<Uuid, Arc<CompiledRoute>>>,
     name_index: RwLock<HashMap<String, Uuid>>,
 }
 
@@ -31,18 +40,39 @@ impl RouteCache {
 
     pub fn update(&self, new_routes: RouteMap) {
         let mut name_idx = HashMap::new();
-        for (id, entry) in &new_routes {
-            name_idx.insert(entry.name.clone(), *id);
+        let mut compiled: HashMap<Uuid, Arc<CompiledRoute>> = HashMap::new();
+        for (id, entry) in new_routes {
+            name_idx.insert(entry.name.clone(), id);
+            // Validate first; on Err, fall back to passthrough for parity
+            // with the rest of the platform's "always have a manifest"
+            // invariant. Log so deploys with bad manifests are visible.
+            let manifest = if let Err(e) = entry.manifest.validate() {
+                eprintln!(
+                    "[gate-sync] manifest validation failed for app {id} ({}): {e}",
+                    entry.name
+                );
+                Manifest::passthrough()
+            } else {
+                entry.manifest.clone()
+            };
+            let compiled_manifest = Arc::new(CompiledManifest::compile(&manifest));
+            compiled.insert(
+                id,
+                Arc::new(CompiledRoute {
+                    entry,
+                    manifest: compiled_manifest,
+                }),
+            );
         }
-        *self.routes.write().unwrap() = new_routes;
+        *self.routes.write().unwrap() = compiled;
         *self.name_index.write().unwrap() = name_idx;
     }
 
-    pub fn lookup_by_name(&self, name: &str) -> Option<(Uuid, RouteEntry)> {
+    pub fn lookup_by_name(&self, name: &str) -> Option<(Uuid, Arc<CompiledRoute>)> {
         let name_idx = self.name_index.read().unwrap();
         let app_id = name_idx.get(name)?;
         let routes = self.routes.read().unwrap();
-        routes.get(app_id).map(|e| (*app_id, e.clone()))
+        routes.get(app_id).map(|r| (*app_id, r.clone()))
     }
 }
 

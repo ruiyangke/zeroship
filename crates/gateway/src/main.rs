@@ -1,4 +1,5 @@
 mod auth;
+mod compiled;
 mod dispatch;
 mod enforce;
 mod proxy;

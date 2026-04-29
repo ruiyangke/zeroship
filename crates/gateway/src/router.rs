@@ -162,7 +162,7 @@ async fn handle_request(
     let wall_start = std::time::Instant::now();
 
     // 1. Route resolution — we need the app_id for both dispatch and static assets.
-    let (app_id, route) = match state.routes.lookup_by_name(app_name) {
+    let (app_id, compiled_route) = match state.routes.lookup_by_name(app_name) {
         Some(r) => r,
         None => {
             return HttpResponse::NotFound()
@@ -175,10 +175,23 @@ async fn handle_request(
 
     // Manifest-driven dispatch. Every app has a manifest (synthesized
     // passthrough for apps that haven't declared one), so dispatch is
-    // always defined. The pure walk decides the outcome; we execute it.
+    // always defined. The pre-compiled form does the work — no per-request
+    // HashMap allocation, no per-call String::replace.
     let dispatch_path = format!("/{tail}");
-    let outcome = crate::dispatch::dispatch(req.method().as_str(), &dispatch_path, &route);
-    execute_outcome(outcome, req, state, &app_id, &route, tail, body, wall_start).await
+    let outcome = compiled_route
+        .manifest
+        .dispatch(req.method().as_str(), &dispatch_path);
+    execute_outcome(
+        outcome,
+        req,
+        state,
+        &app_id,
+        &compiled_route.entry,
+        tail,
+        body,
+        wall_start,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
