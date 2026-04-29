@@ -14,7 +14,7 @@ ntex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
-compio = { workspace = true }
+compio = { workspace = true, features = ["fs"] }
 url = { workspace = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 httparse = { workspace = true }

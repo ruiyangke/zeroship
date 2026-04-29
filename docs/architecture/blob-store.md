@@ -183,13 +183,27 @@ The kernel handles page-cache hits transparently. The body write becomes a vecto
 
 ### Phase C (Phase 6 of the rollout)
 
-True zero-copy via `sendfile(2)` or `IORING_OP_SPLICE`. The remaining page-cache → socket copy goes away.
+Two parts: a streaming-body path that lands today, and a true sendfile path that remains future work.
 
-Catch: ntex's `HttpResponse` doesn't expose the underlying socket fd. Two options:
+**What ships now: streaming bodies for large blobs.**
+
+`crates/gateway/src/router.rs::serve_static_hit` dispatches on `hit.size`:
+
+- Below `STREAM_THRESHOLD_BYTES` (1 MiB, configurable via the constant): the Phase A/B buffered path — mem LRU → disk LRU (mmap) → backend, full body written in one go. `Bytes` is `Arc`-refcounted so concurrent requests for the same hash share the buffer.
+- At or above the threshold: the streaming path. `compio::fs::File::read_at` reads the on-disk LRU file in 64 KiB chunks (`STREAM_CHUNK_BYTES`) and feeds them into `ntex::http::body::SizedStream`, which preserves Content-Length and serves identity transfer encoding. The mem LRU is **intentionally skipped** for streamed serves — a multi-MB blob would either bypass the per-entry budget cap or silently fail to cache, neither of which helps. The disk LRU is still filled on a cold backend miss so subsequent serves hit the warm path.
+
+This eliminates the multi-MB user-space allocation that Phase B still required (mmap'd `Bytes` are cheap, but `Bytes::copy_from_slice` over to `ntex_bytes::Bytes` for the response body still cost a full-size allocation per request). Streaming starts immediately, RSS doesn't balloon for fat assets, and slow-client backpressure is honoured per-chunk.
+
+The chunk-by-chunk write still goes through user space — `ntex_bytes::Bytes::from(Vec<u8>)` copies — so this is **not** true zero-copy. The win is bounded RSS and time-to-first-byte.
+
+**What's still future work: true zero-copy via `sendfile(2)` or `IORING_OP_SPLICE`.**
+
+The remaining page-cache → socket copy goes away if the gateway can hand a file descriptor + offset/length to the kernel. Catch: ntex's `HttpResponse` doesn't expose the underlying socket fd. Two options:
+
 - Custom response path for static rules — short-circuit before ntex's response builder, take ownership of the socket, splice file → socket.
 - Patch ntex to accept a "serve from fd" body type.
 
-Real work, only worth doing if Phase B leaves measurable headroom. Most workloads won't need it.
+Both reach past ntex's abstractions and require either a custom fork or upstreaming. Only worth doing if profiling shows the per-chunk user-space copy is the bottleneck — for typical asset-serving workloads, TCP/TLS overhead dominates. The streaming path above gives most of the benefit with none of the abstraction violation.
 
 ## Garbage collection
 
