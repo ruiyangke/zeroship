@@ -4,7 +4,7 @@
 **Status:** Draft
 **Replaces:** `.appbundle` (deleted) + per-file `PUT /api/apps/{id}/assets/{path}` (deleted).
 
-A single artifact emitted by the build pipeline and ingested by the control plane. Carries the server bundle, all client assets, prerendered HTML, source maps, and a manifest naming everything by content hash. Hard-cut replacement: there is no v1 in production data; the launch version is **v2**, which adds a multi-module `server_bundle` shape on top of the v1 design we briefly drafted.
+A single artifact emitted by the build pipeline and ingested by the control plane. Carries the worker code, all client assets, prerendered HTML, source maps, and a manifest naming everything by content hash. Hard-cut replacement: there is no v1 in production data; the launch version is **v2**, which represents the worker code as a uniform `{ entry, modules }` map (single-module today, code-split later).
 
 No backward compatibility with v1 is provided — readers reject `version != 2`.
 
@@ -40,7 +40,7 @@ JSON, schema version `2`. Fields and their semantics:
 {
   "version": 2,                                          // schema version (u16); readers reject != 2
   "deploy_hash": "<sha256>",                             // computed; see "deploy_hash"
-  "server_bundle": <ServerBundleRef> | null,             // see "Server bundle" below
+  "worker": <WorkerCode> | null,                         // see "Worker code" below
   "rules": [<Rule>, ...],                                // routing rules
   "assets": {                                            // path -> asset metadata
     "/index.html": {
@@ -65,47 +65,49 @@ JSON, schema version `2`. Fields and their semantics:
 }
 ```
 
-### Server bundle
+### Worker code
 
-`server_bundle` is a tagged enum with two shapes — a single bundled blob (the typical case for esbuild/rollup-bundled servers) or an explicit module map (for code-splitting / lazy loading via V8's module resolver):
+`worker` is the JS that runs in a V8 worker isolate (the user's `default.fetch` handler plus its module graph). The shape is uniform — always an `entry` specifier plus a `modules` map of specifier → blob hash. Single-bundled servers have one entry in `modules`; code-split servers have many. There is no enum or discriminator.
 
 ```jsonc
-// Single-blob server (the v1 of zeroship platform; what vite-plugin emits today)
-"server_bundle": {
-  "kind": "single",
-  "hash": "<sha256>"
+// Typical: vite/esbuild emits one bundled file
+"worker": {
+  "entry":   "index.js",
+  "modules": { "index.js": "<sha256>" }
 }
 
-// Multi-module server (future use case: lazy import paths, shared chunks, finer V8 code-cache)
-"server_bundle": {
-  "kind": "multi",
-  "entry":   "src/index.js",                             // the module specifier V8 evaluates first
-  "modules": {                                            // specifier -> blob hash
+// Future: code-splitting via V8's module-resolve callback
+"worker": {
+  "entry":   "src/index.js",
+  "modules": {
     "src/index.js":      "<sha256>",
     "src/routes/api.js": "<sha256>",
     "src/lib/db.js":     "<sha256>"
   }
 }
 
-// SSG-only deploys (no worker code at all)
-"server_bundle": null
+// SSG-only — no JS runs in V8
+"worker": null
 ```
 
-The Rust type:
+Rust type:
 
 ```rust
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ServerBundleRef {
-    Single { hash: String },
-    Multi  { entry: String, modules: HashMap<String, String> },
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerCode {
+    pub entry:   String,                       // specifier V8 evaluates first; must be a key in `modules`
+    pub modules: HashMap<String, String>,      // specifier → blob hash
 }
 ```
 
-The worker:
-- For `Single`, fetches one blob and constructs `vec![ModuleEntry { specifier: "index.js", source: <bytes-as-utf8> }]`.
-- For `Multi`, fetches the `entry` blob, constructs a `ModuleEntry` for it, and resolves further imports lazily through V8's module-resolve callback against the `modules` map (each callback fetches the corresponding blob via `BlobStore`).
+The worker, on cold start:
+1. Fetches `manifest.worker.modules[entry]` blob.
+2. Constructs `ModuleEntry { specifier: entry, source: bytes_as_utf8 }`.
+3. Hands it to V8 with a module-resolve callback that looks up further imports against the `modules` map and fetches their blobs lazily through `BlobStore`.
 
-The build pipeline emits `Single` today. `Multi` is a future use case the schema is forward-prepared for; vite-plugin does not emit it in the launch milestone.
+For the single-module case, the callback is never invoked — V8 evaluates `index.js` and returns. For the multi-module case, V8 walks the import graph; each `import` triggers a callback → blob fetch → module construction.
+
+The build pipeline emits a single-module shape today. Multi-module is unlocked when there's a concrete code-splitting use case; the schema is already forward-prepared.
 
 ### Required vs optional
 
@@ -113,7 +115,7 @@ The build pipeline emits `Single` today. `Multi` is a future use case the schema
 | --- | --- | --- |
 | `version` | yes | MUST be `2`; readers reject any other value |
 | `deploy_hash` | computed | absent or empty in build output; control plane fills it on receipt |
-| `server_bundle` | iff worker rules exist | a `ServerBundleRef` (Single or Multi) or null. null/missing means SSG-only |
+| `worker` | iff worker rules exist | a `WorkerCode { entry, modules }` or null. null/missing means SSG-only |
 | `rules` | yes | may be `[]` for asset-only static deploys (gateway 404s on no match) |
 | `assets` | yes | may be `{}` |
 | `prerendered` | yes | may be `{}` |
@@ -135,7 +137,7 @@ This means **any change to any blob's content cascades to a new `deploy_hash`** 
 
 ### Cross-references
 
-- Every hash appearing in `assets[].hash`, `prerendered[]` (the resolved asset path's `assets[].hash`), `sourcemaps` keys/values, and the hashes inside `server_bundle` (one for `Single`, N for `Multi`) MUST correspond to a tar entry in the archive. The client always uploads every referenced blob — no "we already have it" claims (server-internal dedup is invisible to the client).
+- Every hash appearing in `assets[].hash`, `prerendered[]` (the resolved asset path's `assets[].hash`), `sourcemaps` keys/values, and `worker.modules` values MUST correspond to a tar entry in the archive. The client always uploads every referenced blob — no "we already have it" claims (server-internal dedup is invisible to the client).
 - Every key in `prerendered` MUST be a path that won't conflict with `rules` matches. Validation responsibility: build pipeline emits sane manifests; control plane's `Manifest::validate()` rejects ambiguous ones.
 
 ## Multi-tenancy and possession proof
@@ -178,7 +180,7 @@ Server algorithm:
    - `version` is supported.
    - All required fields present.
    - `runtime_assets == {}`, `asset_version == 0`.
-   - Every hash referenced in `assets`, `prerendered`, `sourcemaps`, and `server_bundle` MUST appear as a tar entry later in the stream. (No "we already have it" claims — clients always include every referenced blob.)
+   - Every hash referenced in `assets`, `prerendered`, `sourcemaps`, and `worker.modules` MUST appear as a tar entry later in the stream. (No "we already have it" claims — clients always include every referenced blob.)
    - `Manifest::validate()` rule shadowing checks pass.
 4. **Compute `deploy_hash`** from the canonical (deploy_hash-omitted) manifest.
 5. **For each subsequent tar entry** `blobs/<hash>`:
