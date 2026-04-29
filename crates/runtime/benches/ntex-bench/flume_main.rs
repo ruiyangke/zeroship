@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use ntex::web::{self, App, HttpRequest, HttpResponse};
 
-use zeroship_runtime::bundle::{AppBundle, ModuleType};
 use zeroship_runtime::init::init_v8;
 use zeroship_runtime::modules::ModuleEntry;
 use zeroship_runtime::runtime::Runtime;
@@ -21,13 +20,10 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 const SERVER_JS: &str = include_str!("../scenarios.js");
 
 fn server_modules() -> Vec<ModuleEntry> {
-    let bundle = AppBundle::new(
-        "index.js",
-        vec![("index.js".into(), ModuleType::EsModule, SERVER_JS.into())],
-    );
-    let bytes = bundle.to_bytes();
-    let mut loaded = AppBundle::from_bytes(&bytes).expect("Failed to parse .appbundle");
-    loaded.to_module_entries()
+    vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: SERVER_JS.into(),
+    }]
 }
 
 // ---------------------------------------------------------------------------

@@ -64,6 +64,20 @@ pub struct RouteEntry {
 // + framework conventions.
 // ---------------------------------------------------------------------------
 
+/// Reference to a server-side JS bundle inside a deploy. Two shapes:
+/// `Single` for the typical case (one esbuild/rollup output blob),
+/// `Multi` for code-split deploys with explicit module specifiers.
+/// See `docs/reference/zsdeploy.md` Server bundle section.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ServerBundleRef {
+    /// One bundled blob — the worker fetches it and runs as `index.js`.
+    Single { hash: String },
+    /// Explicit module map — V8's resolve callback fetches modules
+    /// lazily by specifier.
+    Multi { entry: String, modules: HashMap<String, String> },
+}
+
 /// One per app. Carries everything the gateway needs to route a request
 /// without consulting the control plane on the hot path. Wire format:
 /// see `docs/reference/zsdeploy.md`.
@@ -78,11 +92,10 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deploy_hash: Option<String>,
 
-    /// Hash of the server-only JS blob the worker should load. `None`
-    /// for SSG-only deploys (no worker rules). Replaces the legacy
-    /// `server_bundle_hash` field.
+    /// Server-side JS bundle reference. `None` for SSG-only deploys
+    /// (no worker rules). See [`ServerBundleRef`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub server_bundle: Option<String>,
+    pub server_bundle: Option<ServerBundleRef>,
 
     /// Ordered routing rules. Walked first-match-wins on every
     /// request.
@@ -124,7 +137,7 @@ pub struct Manifest {
 impl Default for Manifest {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             deploy_hash: None,
             server_bundle: None,
             rules: Vec::new(),
@@ -159,7 +172,7 @@ pub struct Rule {
 
 impl Manifest {
     /// Default schema version for `#[serde(default)]`.
-    fn default_version() -> u16 { 1 }
+    fn default_version() -> u16 { 2 }
 
     /// Synthesize the default "everything goes to the worker" manifest.
     /// Preserves the kernel-cut behavior: POST /_rpc/* gets `WorkerMode::Rpc`
@@ -169,7 +182,7 @@ impl Manifest {
     /// epoch sentinel so it's recognizable.
     pub fn passthrough() -> Self {
         Self {
-            version: 1,
+            version: 2,
             deploy_hash: None,
             server_bundle: None,
             rules: vec![
@@ -212,7 +225,9 @@ impl Manifest {
     /// human-readable message. Cheap — call on every load.
     ///
     /// Checks:
-    /// * `version == 1` (unknown versions rejected).
+    /// * `version == 2` (unknown versions rejected).
+    /// * `server_bundle` hashes are 64-char lowercase hex; for `Multi`,
+    ///   `entry` is a key in `modules`.
     /// * `Action::Static.status` ∈ [100, 599]
     /// * `Action::Redirect.status` ∈ [300, 399]
     /// * No rule is shadowed (made unreachable) by an earlier rule.
@@ -224,8 +239,33 @@ impl Manifest {
     /// also called on already-deployed manifests with mutated runtime
     /// state, so we don't reject those here.
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != 1 {
+        if self.version != 2 {
             return Err(format!("unsupported manifest version {}", self.version));
+        }
+        if let Some(sb) = &self.server_bundle {
+            match sb {
+                ServerBundleRef::Single { hash } => {
+                    if !crate::blob::validate_hash_format(hash) {
+                        return Err(format!(
+                            "server_bundle.hash {hash:?} is not a 64-char lowercase sha256 hex"
+                        ));
+                    }
+                }
+                ServerBundleRef::Multi { entry, modules } => {
+                    if !modules.contains_key(entry) {
+                        return Err(format!(
+                            "server_bundle.entry {entry:?} is not a key in server_bundle.modules"
+                        ));
+                    }
+                    for (spec, hash) in modules {
+                        if !crate::blob::validate_hash_format(hash) {
+                            return Err(format!(
+                                "server_bundle.modules[{spec}] {hash:?} is not a 64-char lowercase sha256 hex"
+                            ));
+                        }
+                    }
+                }
+            }
         }
         for (i, rule) in self.rules.iter().enumerate() {
             match &rule.action {

@@ -74,7 +74,6 @@ quote = "1"
 syn = { version = "2", features = ["full"] }
 
 # Internal crates
-zeroship-bundle = { path = "crates/bundle" }
 zeroship-core = { path = "crates/core" }
 compio-postgres = { path = "crates/compio-postgres" }
 compio-redis = { path = "crates/compio-redis" }
@@ -83,7 +82,6 @@ zeroship-plugin-storage = { path = "crates/plugin-storage" }
 zeroship-plugin-kv = { path = "crates/plugin-kv" }
 zeroship-runtime = { path = "crates/runtime" }
 zeroship-runtime-macros = { path = "crates/runtime-macros" }
-zeroship-compiler = { path = "crates/compiler" }
 
 # ---------------------------------------------------------------------------
 # Shared lints

@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use zeroship_control::deploy::{self, IngestError};
 use zeroship_core::types::{
-    AssetEntry, Manifest, ManifestMetadata,
+    AssetEntry, Manifest, ManifestMetadata, ServerBundleRef,
 };
 use zeroship_core::{BlobStore, LocalDiskBlobStore};
 
@@ -69,9 +69,10 @@ fn manifest_for(
         );
     }
     Manifest {
-        version: 1,
+        version: 2,
         deploy_hash: None,
-        server_bundle: server_bundle.map(str::to_string),
+        server_bundle: server_bundle
+            .map(|h| ServerBundleRef::Single { hash: h.to_string() }),
         rules: Vec::new(),
         assets: a,
         prerendered: HashMap::new(),
@@ -179,7 +180,10 @@ async fn deploy_round_trip() {
         .expect("manifest stored");
     let parsed: Manifest = serde_json::from_slice(&stored_manifest).unwrap();
     assert_eq!(parsed.deploy_hash.as_deref(), Some(success.deploy_hash.as_str()));
-    assert_eq!(parsed.server_bundle.as_deref(), Some(server_hash.as_str()));
+    assert_eq!(
+        parsed.server_bundle,
+        Some(ServerBundleRef::Single { hash: server_hash.clone() })
+    );
 
     // DB-side assert (only when CONTROL_TEST_DB is set).
     if let Some(url) = db_url() {

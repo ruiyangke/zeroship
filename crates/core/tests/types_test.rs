@@ -1,6 +1,6 @@
 use zeroship_core::types::{
     Action, AppUsage, AssetEntry, ControlEvent, HttpMethod, Manifest, ManifestMetadata, Match,
-    RouteEntry, Rule, UsageReport, WorkerMode,
+    RouteEntry, Rule, ServerBundleRef, UsageReport, WorkerMode,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -426,22 +426,25 @@ fn manifest_roundtrip_json() {
         assets: HashMap::from([(
             "/index.html".to_string(),
             AssetEntry {
-                hash: "sha256-abc".into(),
+                hash: SHA_A.into(),
                 content_type: "text/html".into(),
                 size: 1024,
                 cache: None,
                 updated_at: 0,
             },
         )]),
-        server_bundle: Some("sha256-xyz".into()),
+        server_bundle: Some(ServerBundleRef::Single { hash: SHA_B.into() }),
         ..Manifest::default()
     };
 
     let json = serde_json::to_string(&m).unwrap();
     let decoded: Manifest = serde_json::from_str(&json).unwrap();
     assert_eq!(decoded.rules.len(), 3);
-    assert_eq!(decoded.server_bundle.as_deref(), Some("sha256-xyz"));
-    assert_eq!(decoded.assets["/index.html"].hash, "sha256-abc");
+    assert_eq!(
+        decoded.server_bundle,
+        Some(ServerBundleRef::Single { hash: SHA_B.into() })
+    );
+    assert_eq!(decoded.assets["/index.html"].hash, SHA_A);
 }
 
 // -- v2 schema -------------------------------------------------------------
@@ -452,9 +455,9 @@ const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 #[test]
 fn manifest_v2_round_trips_through_json() {
     let m = Manifest {
-        version: 1,
+        version: 2,
         deploy_hash: Some(SHA_A.to_string()),
-        server_bundle: Some(SHA_B.to_string()),
+        server_bundle: Some(ServerBundleRef::Single { hash: SHA_B.into() }),
         rules: vec![Rule {
             r#match: Match::Any,
             action: Action::Worker {
@@ -488,9 +491,12 @@ fn manifest_v2_round_trips_through_json() {
 
     let json = serde_json::to_string(&m).unwrap();
     let d: Manifest = serde_json::from_str(&json).unwrap();
-    assert_eq!(d.version, 1);
+    assert_eq!(d.version, 2);
     assert_eq!(d.deploy_hash.as_deref(), Some(SHA_A));
-    assert_eq!(d.server_bundle.as_deref(), Some(SHA_B));
+    assert_eq!(
+        d.server_bundle,
+        Some(ServerBundleRef::Single { hash: SHA_B.into() })
+    );
     assert_eq!(d.rules.len(), 1);
     assert_eq!(d.assets["/_prerendered/about.html"].hash, SHA_A);
     assert_eq!(
@@ -556,7 +562,8 @@ fn manifest_validate_rejects_unsupported_version() {
 #[test]
 fn manifest_passthrough_v2_validates() {
     let p = Manifest::passthrough();
-    assert_eq!(p.version, 1);
+    assert_eq!(p.version, 2);
+    assert!(p.server_bundle.is_none(), "passthrough has no server_bundle");
     assert_eq!(p.metadata.built_at, "1970-01-01T00:00:00Z");
     assert!(
         p.metadata.compiler
@@ -569,9 +576,9 @@ fn manifest_passthrough_v2_validates() {
 }
 
 #[test]
-fn manifest_existing_v1_data_round_trips_minimally() {
-    // Minimal v1 wire format: omit prerendered/sourcemaps/metadata; the
-    // serde defaults fill them in. version defaults to 1.
+fn manifest_v2_minimal_round_trips() {
+    // Minimal v2 wire format: omit prerendered/sourcemaps/metadata; the
+    // serde defaults fill them in. version defaults to 2.
     let json = r#"{
         "rules": [],
         "assets": {},
@@ -579,26 +586,76 @@ fn manifest_existing_v1_data_round_trips_minimally() {
         "asset_version": 0
     }"#;
     let m: Manifest = serde_json::from_str(json).unwrap();
-    assert_eq!(m.version, 1);
+    assert_eq!(m.version, 2);
     assert!(m.assets.is_empty());
     assert!(m.prerendered.is_empty());
     assert!(m.sourcemaps.is_empty());
+    assert!(m.server_bundle.is_none());
     assert_eq!(m.metadata.built_at, "");
-    m.validate().expect("minimal v1 manifest must validate");
+    m.validate().expect("minimal v2 manifest must validate");
+}
 
-    // Hard-cut: legacy `build_assets` key is no longer recognized. The
-    // field is silently ignored (serde's default behavior) and `assets`
-    // ends up empty — callers reading old manifests on disk get empty
-    // assets, not an error. Documented in `docs/reference/zsdeploy.md`.
-    let legacy = r#"{
-        "rules": [],
-        "build_assets": {
-            "/old.html": {"hash": "h", "content_type": "text/html", "size": 0}
-        }
-    }"#;
-    let m2: Manifest = serde_json::from_str(legacy).unwrap();
+#[test]
+fn manifest_validate_rejects_v1() {
+    // Hard cut: v1 is no longer accepted. Production data is v2 only.
+    let m = Manifest { version: 1, ..Manifest::default() };
+    let err = m.validate().unwrap_err();
+    assert!(err.contains("1"), "error mentions bad version: {err}");
+}
+
+#[test]
+fn manifest_validate_rejects_multi_entry_not_in_modules() {
+    let m = Manifest {
+        server_bundle: Some(ServerBundleRef::Multi {
+            entry: "src/a.js".into(),
+            modules: HashMap::from([("src/b.js".to_string(), SHA_A.to_string())]),
+        }),
+        ..Manifest::default()
+    };
+    let err = m.validate().unwrap_err();
     assert!(
-        m2.assets.is_empty(),
-        "legacy build_assets is dropped under hard-cut rename"
+        err.contains("entry") && err.contains("src/a.js"),
+        "error mentions missing entry: {err}"
     );
+}
+
+#[test]
+fn manifest_validate_rejects_bad_server_bundle_hash() {
+    let m = Manifest {
+        server_bundle: Some(ServerBundleRef::Single {
+            hash: "not-hex".into(),
+        }),
+        ..Manifest::default()
+    };
+    let err = m.validate().unwrap_err();
+    assert!(
+        err.contains("server_bundle"),
+        "error mentions server_bundle: {err}"
+    );
+}
+
+#[test]
+fn server_bundle_single_round_trips() {
+    let sb = ServerBundleRef::Single { hash: SHA_A.into() };
+    let json = serde_json::to_string(&sb).unwrap();
+    assert!(json.contains("\"kind\":\"single\""), "tag present: {json}");
+    assert!(json.contains(SHA_A), "hash present: {json}");
+    let decoded: ServerBundleRef = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded, sb);
+}
+
+#[test]
+fn server_bundle_multi_round_trips() {
+    let sb = ServerBundleRef::Multi {
+        entry: "src/index.js".into(),
+        modules: HashMap::from([
+            ("src/index.js".to_string(), SHA_A.to_string()),
+            ("src/lib.js".to_string(), SHA_B.to_string()),
+        ]),
+    };
+    let json = serde_json::to_string(&sb).unwrap();
+    assert!(json.contains("\"kind\":\"multi\""), "tag present: {json}");
+    assert!(json.contains("src/index.js"), "entry present: {json}");
+    let decoded: ServerBundleRef = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded, sb);
 }

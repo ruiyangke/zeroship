@@ -39,9 +39,6 @@ mimalloc = { workspace = true }
 itoa = { workspace = true }
 socket2 = { workspace = true }
 
-# Bundle format
-zeroship-bundle = { workspace = true }
-zstd = { workspace = true }
 sha2 = { workspace = true }
 
 # WebSocket handshake (SHA-1 for Sec-WebSocket-Accept per RFC 6455)
@@ -57,9 +54,6 @@ path = "src/server.rs"
 [[bin]]
 name = "echo-server"
 path = "src/echo_server.rs"
-
-[dev-dependencies]
-zeroship-compiler = { workspace = true }
 
 [lints]
 workspace = true

@@ -12,7 +12,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use zeroship_core::types::Manifest;
+use zeroship_core::types::{Manifest, ServerBundleRef};
 use zeroship_core::BlobStore;
 
 // ---------------------------------------------------------------------------
@@ -105,7 +105,7 @@ pub async fn ingest(
     // Step 4: parse + validate the manifest.
     let mut manifest: Manifest = serde_json::from_slice(&parsed.manifest_bytes)
         .map_err(|e| IngestError::bad("invalid manifest", format!("parse: {e}")))?;
-    if manifest.version != 1 {
+    if manifest.version != 2 {
         return Err(IngestError::bad(
             "unsupported manifest version",
             format!("version {} not supported", manifest.version),
@@ -360,14 +360,37 @@ fn parse_archive(compressed: &[u8]) -> Result<ParsedArchive, IngestError> {
 /// keys+values of `sourcemaps`.
 fn collect_expected_hashes(manifest: &Manifest) -> Result<HashSet<String>, IngestError> {
     let mut out: HashSet<String> = HashSet::new();
-    if let Some(h) = &manifest.server_bundle {
-        if !zeroship_core::validate_hash_format(h) {
-            return Err(IngestError::bad(
-                "invalid manifest",
-                format!("server_bundle hash {h:?} is not lowercase sha256 hex"),
-            ));
+    if let Some(sb) = &manifest.server_bundle {
+        match sb {
+            ServerBundleRef::Single { hash } => {
+                if !zeroship_core::validate_hash_format(hash) {
+                    return Err(IngestError::bad(
+                        "invalid manifest",
+                        format!("server_bundle.hash {hash:?} is not lowercase sha256 hex"),
+                    ));
+                }
+                out.insert(hash.clone());
+            }
+            ServerBundleRef::Multi { entry, modules } => {
+                if !modules.contains_key(entry) {
+                    return Err(IngestError::bad(
+                        "invalid manifest",
+                        format!("server_bundle.entry {entry:?} is not in modules"),
+                    ));
+                }
+                for (spec, hash) in modules {
+                    if !zeroship_core::validate_hash_format(hash) {
+                        return Err(IngestError::bad(
+                            "invalid manifest",
+                            format!(
+                                "server_bundle.modules[{spec}] {hash:?} is not lowercase sha256 hex"
+                            ),
+                        ));
+                    }
+                    out.insert(hash.clone());
+                }
+            }
         }
-        out.insert(h.clone());
     }
     for (path, entry) in &manifest.assets {
         if !zeroship_core::validate_hash_format(&entry.hash) {
@@ -489,8 +512,8 @@ mod tests {
         let h2 = "b".repeat(64);
         let h3 = "c".repeat(64);
         let m: Manifest = serde_json::from_value(json!({
-            "version": 1,
-            "server_bundle": h,
+            "version": 2,
+            "server_bundle": { "kind": "single", "hash": h },
             "rules": [],
             "assets": { "/index.html": {
                 "hash": h2,
@@ -507,5 +530,33 @@ mod tests {
         assert!(set.contains(&"a".repeat(64)));
         assert!(set.contains(&"b".repeat(64)));
         assert!(set.contains(&"c".repeat(64)));
+    }
+
+    #[test]
+    fn collect_expected_walks_multi_module_server_bundle() {
+        let entry_hash = "a".repeat(64);
+        let lib_hash = "d".repeat(64);
+        let m: Manifest = serde_json::from_value(json!({
+            "version": 2,
+            "server_bundle": {
+                "kind": "multi",
+                "entry": "src/index.js",
+                "modules": {
+                    "src/index.js": entry_hash,
+                    "src/lib.js": lib_hash,
+                }
+            },
+            "rules": [],
+            "assets": {},
+            "prerendered": {},
+            "runtime_assets": {},
+            "asset_version": 0,
+            "sourcemaps": {},
+            "metadata": { "built_at": "2026-04-29T00:00:00Z" }
+        })).unwrap();
+        let set = collect_expected_hashes(&m).unwrap();
+        assert!(set.contains(&"a".repeat(64)));
+        assert!(set.contains(&"d".repeat(64)));
+        assert_eq!(set.len(), 2, "Multi covers all module hashes");
     }
 }

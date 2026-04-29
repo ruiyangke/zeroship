@@ -1,12 +1,11 @@
 //! Benchmark HTTP server for V8 runtime using compio (io_uring).
 //!
 //! This is the v8-server-compio binary. It loads the embedded `scenarios.js`
-//! into an .appbundle and starts the compio HTTP server via the shared
+//! as a single ES module and starts the compio HTTP server via the shared
 //! `zeroship_runtime::serve` module.
 
 use std::time::Duration;
 
-use zeroship_runtime::bundle::{AppBundle, ModuleType};
 use zeroship_runtime::modules::ModuleEntry;
 use zeroship_runtime::serve::{start_server, ServerOptions};
 
@@ -16,24 +15,11 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// Default JS loaded when no --js flag is provided.
 const SERVER_JS: &str = include_str!("../benches/scenarios.js");
 
-/// Build an .appbundle at startup, then load modules from it.
-/// This exercises the real production path: bundle -> parse -> decompress -> V8.
 fn server_modules() -> Vec<ModuleEntry> {
-    let bundle = AppBundle::new("index.js", vec![
-        ("index.js".into(), ModuleType::EsModule, SERVER_JS.into()),
-    ]);
-    let bytes = bundle.to_bytes();
-
-    eprintln!(
-        "[v8-server-compio] appbundle: {} -> {} bytes ({:.0}% ratio)",
-        SERVER_JS.len(),
-        bytes.len(),
-        bytes.len() as f64 / SERVER_JS.len() as f64 * 100.0,
-    );
-
-    let mut loaded = AppBundle::from_bytes(&bytes)
-        .expect("Failed to parse .appbundle");
-    loaded.to_module_entries()
+    vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: SERVER_JS.into(),
+    }]
 }
 
 fn main() {

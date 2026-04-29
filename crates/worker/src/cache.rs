@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use zeroship_bundle::ModuleEntry;
 use zeroship_core::types::AppRuntimeLimits;
+use zeroship_runtime::ModuleEntry;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
 
@@ -64,31 +64,23 @@ pub fn get_limits(app_id: &Uuid) -> Option<RuntimeLimits> {
 }
 
 /// Load an app from bundle bytes. Creates V8 runtime + starts pump task.
+///
+/// Bundle bytes are the raw ES module source (UTF-8). Phase 4b will switch
+/// the worker to fetching server-bundle blobs by `manifest.server_bundle`
+/// hash via `BlobStore` directly; for now the caller pre-fetches the bytes
+/// and hands them in.
 pub fn load_app(app_id: Uuid, bundle_bytes: &[u8], app_limits: AppRuntimeLimits) -> bool {
-    // Two deploy shapes hit this entry point:
-    //  - .appbundle (APPB magic) — produced by the CLI / vite plugin
-    //  - raw ES module bytes — `POST /api/apps/:id/deploy` with
-    //    `application/javascript`, used by the chat agent's `deploy_app`
-    //    tool. Single-module case; we synthesize a one-entry module list.
-    let modules: Vec<ModuleEntry> = match zeroship_bundle::AppBundle::from_bytes(bundle_bytes) {
-        Ok(mut bundle) => bundle.to_module_entries(),
-        Err(zeroship_bundle::BundleError::BadMagic) => {
-            match std::str::from_utf8(bundle_bytes) {
-                Ok(src) => vec![ModuleEntry {
-                    specifier: "index.js".to_string(),
-                    source: src.to_string(),
-                }],
-                Err(e) => {
-                    eprintln!("[worker] raw module bundle is not UTF-8 for {app_id}: {e}");
-                    return false;
-                }
-            }
-        }
+    let source = match std::str::from_utf8(bundle_bytes) {
+        Ok(s) => s,
         Err(e) => {
-            eprintln!("[worker] failed to parse bundle for {app_id}: {e}");
+            eprintln!("[worker] bundle is not UTF-8 for {app_id}: {e}");
             return false;
         }
     };
+    let modules: Vec<ModuleEntry> = vec![ModuleEntry {
+        specifier: "index.js".to_string(),
+        source: source.to_string(),
+    }];
 
     CACHE.with(|c| {
         let mut cache = c.borrow_mut();
