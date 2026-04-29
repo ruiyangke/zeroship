@@ -40,6 +40,22 @@ pub enum BlobError {
 
 The `local_path` accessor is the zero-copy hook. Implementations expose it iff the blob is on a local filesystem the caller can `mmap` or `sendfile` from.
 
+## Multi-tenancy and possession proof
+
+The trait operates on a **single global keyspace** (`blobs/<hash>`). Cross-tenant dedup is safe by construction under two protocol constraints (see `docs/reference/zsdeploy.md` for the full argument):
+
+1. Clients always upload every blob in their deploy — no client-side `has_blob` skip.
+2. The server verifies `sha256(bytes) == hash` on every `put_blob`.
+
+Together these give a cryptographic possession proof: any successful deploy referencing hash `X` proves the deployer had the bytes for `X`. Cross-tenant dedup therefore can't leak content — anyone with access to hash `X` already had the bytes via their own manifest.
+
+Consequences for this layer:
+
+- `has_blob` is **internal-only**. It MUST NOT be exposed over any HTTP endpoint — doing so would create an oracle that defeats the possession-proof argument.
+- The gateway MUST NOT serve a route shaped like `GET /blobs/<hash>`. Bytes are served only via manifest-routed paths (e.g., `assets["/foo.js"].hash` → fetch).
+- No per-tenant scoping in `BlobStore` method signatures. `get_blob(hash)`, `put_blob(hash, data)` are scope-free.
+- Server-internal dedup is implemented inside `put_blob` (idempotent on identical hash+content already-present).
+
 ## Implementations
 
 ### `LocalDiskBlobStore`

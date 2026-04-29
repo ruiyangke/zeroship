@@ -94,6 +94,28 @@ This means **any change to any blob's content cascades to a new `deploy_hash`** 
 - Every hash appearing in `assets[].hash`, `prerendered[]` (the resolved asset path's `assets[].hash`), `sourcemaps` keys/values, and `server_bundle` MUST correspond to a blob in the archive — UNLESS it already exists in the control plane's blob store (dedup).
 - Every key in `prerendered` MUST be a path that won't conflict with `rules` matches. Validation responsibility: build pipeline emits sane manifests; control plane's `Manifest::validate()` rejects ambiguous ones.
 
+## Multi-tenancy and possession proof
+
+Blobs share a single global keyspace (`blobs/<hash>`). Cross-tenant dedup is **safe by construction** because two constraints together provide a cryptographic possession proof:
+
+1. **Clients always upload every blob in the deploy.** No client-side "skip if hash already exists" optimization. The protocol has no `has_blob` query.
+2. **The server verifies `sha256(bytes) == hash`** for every uploaded blob. Mismatches are rejected.
+
+Together: any successful deploy referencing hash `X` proves the deployer had the bytes for `X`. Finding bytes that hash to a value without possessing them is preimage-hard (2^256 work for SHA-256). When App A and App B both reference the same hash, they each independently demonstrated possession — there is no privilege to escalate via deduplication.
+
+Consequences:
+
+- **No public/private flag** on assets. Single keyspace.
+- **No per-tenant namespacing** in storage. `blobs/<hash>` is global.
+- **`has_blob` is a server-internal trait method** used by ingestion to discard duplicate writes. It is never exposed over HTTP — exposing it would create an oracle that defeats the possession-proof argument.
+- **The gateway serves blobs only via manifest-routed paths** (`GET /index.html` resolves through `assets["/index.html"].hash`). It never exposes `/blobs/<hash>` directly. Possession is preserved end-to-end: anyone who can fetch hash `X` already had the bytes via their manifest.
+
+Operational concerns that aren't security:
+
+- **Billing**: each tenant is billed for `sum(assets[].size)` over the blobs they reference, regardless of whether storage actually allocated bytes for them (dedup is the platform's optimization, not the customer's discount).
+- **GC**: manifest-driven mark-and-sweep walks `manifests/*/*.json`, collects the union of referenced hashes, deletes unreferenced blobs older than the retention window.
+- **Compliance opt-out**: a future per-tenant `dedicated_storage: bool` flag can disable dedup for tenants whose contracts forbid shared infrastructure. Not in v1.
+
 ## Control plane ingestion
 
 ```
@@ -112,13 +134,13 @@ Server algorithm:
    - `version` is supported.
    - All required fields present.
    - `runtime_assets == {}`, `asset_version == 0`.
-   - All cross-references resolve (every hash either has a tar entry or a known existing blob).
+   - Every hash referenced in `assets`, `prerendered`, `sourcemaps`, and `server_bundle` MUST appear as a tar entry later in the stream. (No "we already have it" claims — clients always include every referenced blob.)
    - `Manifest::validate()` rule shadowing checks pass.
 4. **Compute `deploy_hash`** from the canonical (deploy_hash-omitted) manifest.
 5. **For each subsequent tar entry** `blobs/<hash>`:
-   - Verify `sha256(entry_bytes) == hash`. Reject on mismatch.
-   - If `blob_store.has_blob(hash)`: skip (dedup hit).
-   - Else: stream the entry to `blob_store.put_blob(hash, ...)`.
+   - Verify `sha256(entry_bytes) == hash`. Reject on mismatch — this is the possession-proof checkpoint.
+   - If `blob_store.has_blob(hash)`: discard the bytes (dedup hit, internal optimization invisible to the client).
+   - Else: write via `blob_store.put_blob(hash, bytes)`.
 6. **Write the manifest** under `manifests/<app_id>/<deploy_hash>.json` (with `deploy_hash` inserted).
 7. **Atomic update**:
    ```sql
