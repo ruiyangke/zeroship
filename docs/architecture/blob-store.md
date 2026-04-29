@@ -1,0 +1,215 @@
+# Blob store + edge serving
+
+The storage and serving layer that backs `.zsdeploy`. Content-addressed bytes, edge-cached on the gateway, served zero-copy where possible.
+
+## Trait
+
+```rust
+pub trait BlobStore: Send + Sync + std::fmt::Debug {
+    /// Fetch a blob by hash. Allocates.
+    async fn get_blob(&self, hash: &str) -> Result<Bytes, BlobError>;
+
+    /// Local on-disk path of a blob, if file-backed. Used by the
+    /// gateway for mmap / sendfile zero-copy. Returns None for purely
+    /// remote backends.
+    fn local_path(&self, hash: &str) -> Option<PathBuf>;
+
+    /// Insert a blob. Idempotent — repeated puts of the same hash
+    /// are no-ops by content equivalence.
+    async fn put_blob(&self, hash: &str, data: &[u8]) -> Result<(), BlobError>;
+
+    async fn has_blob(&self, hash: &str) -> Result<bool, BlobError>;
+
+    /// Manifest storage — separate keyspace from blobs.
+    async fn put_manifest(&self, app_id: &Uuid, deploy_hash: &str, json: &[u8]) -> Result<(), BlobError>;
+    async fn get_manifest(&self, app_id: &Uuid, deploy_hash: &str) -> Result<Bytes, BlobError>;
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BlobError {
+    #[error("blob not found: {0}")]
+    NotFound(String),
+    #[error("hash mismatch: expected {expected}, got {got}")]
+    HashMismatch { expected: String, got: String },
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("backend: {0}")]
+    Backend(String),
+}
+```
+
+The `local_path` accessor is the zero-copy hook. Implementations expose it iff the blob is on a local filesystem the caller can `mmap` or `sendfile` from.
+
+## Implementations
+
+### `LocalDiskBlobStore`
+
+```
+<root>/blobs/<hash[0..2]>/<hash[2..]>            ← sharded by 2-char prefix
+<root>/manifests/<app_id>/<deploy_hash>.json
+```
+
+`local_path` returns `Some(path)`. Used in dev / single-host prod (gateway and control share a volume).
+
+### `S3BlobStore` (later phase)
+
+Talks to S3/R2 via `cyper` (already in workspace deps). Keys map directly:
+
+```
+s3://<bucket>/blobs/<hash>
+s3://<bucket>/manifests/<app_id>/<deploy_hash>.json
+```
+
+`local_path` returns `None`.
+
+### `CachedBlobStore<Backend>` (the edge wrapper)
+
+Wraps any backend with two cache tiers:
+
+```
+                   ┌── mem LRU (Bytes-keyed, ~256 MB default)
+       get_blob ───┤
+                   └── disk LRU (file-backed, ~20 GB default)
+                       │
+                       ▼ miss
+                   backend.get_blob()
+```
+
+On miss: fetch from backend, write to disk LRU (so subsequent serves can mmap), insert into mem LRU. Return `Bytes`.
+
+`local_path` returns `Some(disk_cache_path)` once the blob is in the disk LRU — even when the backing store is remote (S3). This is what makes mmap+sendfile work behind a cloud-storage origin.
+
+Cache coherence is **free**: blob hashes are content-stable, so cache entries never go stale. Invalidation is purely about footprint (LRU eviction).
+
+## Storage layout (recap)
+
+Whether `LocalDiskBlobStore` or `S3BlobStore`:
+
+```
+blobs/<hash>                              ← shared across apps and deploys
+manifests/<app_id>/<deploy_hash>.json    ← immutable per deploy
+```
+
+Active deploy is a column on the `apps` table (`deploy_hash` + `manifest_json`). Rollback is a single UPDATE.
+
+## Edge cache (in `crates/gateway`)
+
+```
+GateState {
+    blob_store: Arc<dyn BlobStore>,        ← typically CachedBlobStore<S3BlobStore>
+    routes: RouteCache,
+    ...
+}
+```
+
+Configuration:
+
+```bash
+zeroship-gate \
+  --blob-store local:/var/zeroship/blobs              # dev / shared volume
+  # OR
+  --blob-store s3://prod-bucket?region=us-east-1      # multi-region prod
+  --blob-cache /var/cache/zeroship/blobs              # disk LRU root (CachedBlobStore)
+  --blob-cache-mem-mb 256
+  --blob-cache-disk-gb 20
+```
+
+The control plane is **not on the hot path** for static asset bytes. It's consulted only for manifest sync (every 5s, small JSON).
+
+## Zero-copy serving — three phases
+
+### Phase A (Phase 4 of the rollout)
+
+Memory LRU only. Serve as `Bytes`:
+
+```rust
+async fn serve_static_hit(state, hit) -> HttpResponse {
+    let bytes = state.blob_store.get_blob(&hit.hash).await?;
+    HttpResponse::Ok()
+        .content_type(&hit.content_type)
+        .header("etag", format!("\"{}\"", hit.hash))
+        .header("cache-control", cache_control_header(&hit.cache))
+        .body(bytes)              // ntex writes Bytes to socket — one userspace→kernel copy
+}
+```
+
+`Bytes` is `Arc`-refcounted; concurrent requests for the same hash share the buffer.
+
+This eliminates the network round-trip to the control plane — by far the dominant cost. Ships in Phase 4.
+
+### Phase B (Phase 5 of the rollout)
+
+Disk LRU + mmap. When the blob is on local disk:
+
+```rust
+if let Some(path) = state.blob_store.local_path(&hit.hash) {
+    let mmap = unsafe { memmap2::Mmap::map(&File::open(&path)?)? };
+    let bytes = Bytes::from_owner(mmap);  // zero-copy wrap; mmap holds the bytes
+    return HttpResponse::Ok()
+        .content_type(&hit.content_type)
+        .header("etag", format!("\"{}\"", hit.hash))
+        .header("cache-control", cache_control_header(&hit.cache))
+        .body(bytes);
+}
+// fallback: cold path → backend → fill → mmap
+```
+
+The kernel handles page-cache hits transparently. The body write becomes a vectorized send straight from the page cache to the socket.
+
+`unsafe`: blobs are content-addressed and immutable once written; the unsafety is bounded. The workspace lint denies `unsafe_code`; opt-out at the module level (`#![allow(unsafe_code)]` with a `// SAFETY:` justification).
+
+### Phase C (Phase 6 of the rollout)
+
+True zero-copy via `sendfile(2)` or `IORING_OP_SPLICE`. The remaining page-cache → socket copy goes away.
+
+Catch: ntex's `HttpResponse` doesn't expose the underlying socket fd. Two options:
+- Custom response path for static rules — short-circuit before ntex's response builder, take ownership of the socket, splice file → socket.
+- Patch ntex to accept a "serve from fd" body type.
+
+Real work, only worth doing if Phase B leaves measurable headroom. Most workloads won't need it.
+
+## Garbage collection
+
+Background sweep, runs weekly (configurable):
+
+```
+1. Read all rows: SELECT id, deploy_hash, manifest_json FROM apps
+2. Optionally walk manifests/<app_id>/*.json to retain N most recent deploys per app
+3. Build set R = union of all hashes referenced
+4. For each blob in blobs/, if mtime > retention_days AND hash ∉ R: delete
+```
+
+Tunables:
+- `retention_days` (default 30) — protects blobs whose manifest just landed but isn't yet in cache state.
+- `keep_n_deploys_per_app` (default 5) — how many historical deploys per app to keep manifests + their blobs alive for. Supports rollback.
+
+## Failure modes
+
+| Cause | Behavior |
+| --- | --- |
+| Mem LRU miss + disk LRU hit | mmap from disk; promote to mem |
+| Disk LRU miss | fetch backend; fill both caches |
+| Backend (S3) unavailable | 502 to the asset request; do not poison caches with the error |
+| Disk full on cache fill | skip cache fill; serve from in-memory; log warning |
+| Hash mismatch on read (data corruption) | invalidate cache entry, re-fetch from backend, log error |
+| `local_path` returns Some but the file is missing | re-fetch via `get_blob`, refill cache |
+
+## Migration
+
+Hard cut. Old `BundleStore` is removed in favor of `BlobStore`. Migrating callers:
+
+- `crates/control/src/main.rs` — boots `Arc<dyn BlobStore>` (LocalDiskBlobStore in dev).
+- `crates/control/src/api.rs::deploy` — replaced entirely by `.zsdeploy` ingestion.
+- `crates/control/src/api.rs::upload_asset` — **removed**; assets land via `.zsdeploy`.
+- `crates/control/src/internal.rs::get_asset` — **removed**; gateway fetches direct from blob store.
+- `crates/gateway/src/router.rs::fetch_asset` — **removed**; replaced by direct `state.blob_store.get_blob(...)`.
+- `crates/worker/src/cache.rs::load_app` — fetches the server bundle blob via `BlobStore` instead of the control plane's existing `/internal/bundle/<id>`.
+
+Phase boundaries enforce no half-built states: each phase compiles, tests pass, and the workspace builds clean before the next dispatches.
+
+## What this architecture intentionally does NOT do
+
+- **No CDN integration in v1.** Edge nodes ARE the CDN. CloudFront/Fastly can be layered later if multi-continent traffic demands it.
+- **No automatic blob compression negotiation in v1.** The build pipeline pre-compresses assets if it wants to (Brotli, gzip variants), and stores them as separate blobs with the right `content_type`. Selecting variants by `Accept-Encoding` is gateway logic, not blob-store logic.
+- **No partial range serving in v1.** Range request support is Tier 4 work; the blob store doesn't need to know about it.
+- **No streaming write API.** `put_blob` takes `&[u8]`. Streaming `put_blob_stream(hash, impl AsyncRead)` is added in Phase 2 when the deploy ingestion needs it.
