@@ -520,6 +520,26 @@ pub(crate) struct RuntimeInner {
     pump_cpu_accumulated: Duration,
     /// Wall-clock start of the current budget window.
     pump_wall_start: Instant,
+
+    /// Captured error message if `ensure_initialized` failed to load the
+    /// user's module graph (e.g. parse error, evaluation throw). Surfaced
+    /// to callers via the dispatch error path so a syntactically-broken
+    /// deploy doesn't masquerade as "No default.fetch handler exported".
+    init_error: Option<String>,
+
+    /// Net depth of `enter_isolate`/`exit_isolate` pairs. Tracks whether
+    /// the V8 isolate is currently the topmost-entered on its thread.
+    ///
+    /// `v8::Isolate::new()` already enters the isolate (so depth starts
+    /// at 1). Multi-tenant workers that hold N isolates per thread call
+    /// `exit_isolate` after `build()` to drop back to depth=0, allowing
+    /// other isolates to be entered for their own work.
+    ///
+    /// At drop time, `v8::OwnedIsolate::Drop` asserts the dropping
+    /// isolate is `Isolate::GetCurrent()`. Our `Drop` impl uses this
+    /// counter to re-enter the isolate just-in-time if it was sitting
+    /// in the cache's exited state.
+    enter_depth: u32,
 }
 
 // `RuntimeInner` is intentionally *not* `Send`.
@@ -535,6 +555,30 @@ pub(crate) struct RuntimeInner {
 // to catch a future accidental cross-thread move, so it has been removed.
 // If a new executor ever needs `Send`, switch to channel-based ownership
 // transfer instead of re-adding this impl.
+
+impl Drop for RuntimeInner {
+    /// Make `OwnedIsolate::Drop`'s `current == self` assertion pass even
+    /// when the isolate was sitting in the worker's per-thread cache in
+    /// the exited state. We track depth in `enter_depth`; if it's zero we
+    /// re-enter just-in-time so the subsequent field drop (which runs
+    /// `OwnedIsolate::Drop`) sees this isolate as the topmost-entered.
+    ///
+    /// Without this, dropping N cached isolates in HashMap-iteration
+    /// order would panic on the very first one because none of them is
+    /// currently entered.
+    fn drop(&mut self) {
+        if self.enter_depth == 0 {
+            // SAFETY: pushes `self` onto V8's per-thread isolate stack.
+            // The OwnedIsolate field drop, which runs immediately after
+            // this method returns, pops it. No other isolate may be
+            // entered on this thread between this enter and the field
+            // drop — the caller (typically a HashMap drop in the cache)
+            // is single-threaded and synchronous, so that holds.
+            unsafe { self.isolate.enter(); }
+            self.enter_depth = 1;
+        }
+    }
+}
 
 impl RuntimeInner {
     /// Create a new runtime with plugins.
@@ -641,6 +685,9 @@ impl RuntimeInner {
 
             pump_cpu_accumulated: Duration::ZERO,
             pump_wall_start: Instant::now(),
+            init_error: None,
+            // `Isolate::new()` enters the isolate, so we boot with depth 1.
+            enter_depth: 1,
         }
     }
 
@@ -651,6 +698,8 @@ impl RuntimeInner {
     /// The isolate must not be used between `exit_isolate` and `enter_isolate`.
     pub fn exit_isolate(&mut self) {
         unsafe { self.isolate.exit(); }
+        debug_assert!(self.enter_depth > 0, "exit_isolate without matching enter");
+        self.enter_depth = self.enter_depth.saturating_sub(1);
     }
 
     /// Enter the V8 isolate before dispatching requests.
@@ -659,6 +708,7 @@ impl RuntimeInner {
     /// Only one isolate can be entered at a time per thread.
     pub fn enter_isolate(&mut self) {
         unsafe { self.isolate.enter(); }
+        self.enter_depth = self.enter_depth.saturating_add(1);
     }
 
     /// Set the pump notification sender. The pump task holds the receiver.
@@ -899,7 +949,13 @@ impl RuntimeInner {
             // Load polyfills and the user's entry module. The returned global
             // is the entry module's Namespace Object; the kernel reads
             // `default.fetch` directly off it (no more `__rpc` reach-through).
-            let namespace = load_polyfills_and_modules(scope, modules, &self.plugins);
+            let namespace = match load_polyfills_and_modules(scope, modules, &self.plugins) {
+                Ok(ns) => Some(ns),
+                Err(e) => {
+                    self.init_error = Some(e);
+                    None
+                }
+            };
 
             // Resolve `export default { fetch(...) }` on the entry module's
             // namespace. This is the sole dispatch target of the new kernel:
@@ -1141,6 +1197,22 @@ impl RuntimeInner {
         self.ensure_initialized(modules);
 
         if self.fetch_handler_fn.is_none() {
+            // If module init failed (parse/runtime error) we have a real
+            // diagnostic; surface it as 500 so the deployer sees the cause
+            // rather than the symptom. Fall through to 404 only when the
+            // module loaded but didn't export `default.fetch`.
+            if let Some(err) = &self.init_error {
+                let payload = serde_json::json!({
+                    "message": format!("module init failed: {err}"),
+                    "name": "Error",
+                });
+                return crate::FetchOutcome::Response {
+                    status: 500,
+                    headers: vec![("content-type".into(), "application/json".into())],
+                    body: payload.to_string(),
+                    logs: vec![],
+                };
+            }
             return crate::FetchOutcome::Response {
                 status: 404,
                 headers: vec![("content-type".into(), "application/json".into())],

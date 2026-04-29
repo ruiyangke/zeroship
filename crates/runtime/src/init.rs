@@ -345,9 +345,22 @@ const USER_FETCH_FAST = (user && user.default && typeof user.default.fetchFast =
 
 const FALLBACK_RPC_TAG = "/_rpc/";
 
+// Coerce a user-supplied page handler return value into a Response.
+// Strings/null are wrapped as text/html. Response is passed through.
+function coerceToHtmlResponse(result, status) {
+    if (result instanceof Response) return result;
+    if (result == null) return null;
+    return new Response(String(result), {
+        status: status ?? 200,
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+}
+
 // Fallback fetch — used only when the user's module doesn't export a
-// default.fetch handler. Handles /_rpc/* via URL for JS-direct callers,
-// else 404.
+// default.fetch handler. Handles:
+//   - /_rpc/<method>  → dispatchRpc (named-export RPC dispatch)
+//   - GET /           → user.index() if exported, returns HTML
+//   - else            → 404
 async function fallbackFetch(request) {
     const urlStr = request.url;
     const tagIdx = urlStr.indexOf(FALLBACK_RPC_TAG);
@@ -364,6 +377,23 @@ async function fallbackFetch(request) {
             : rawMethod;
         return await handleRpcFromRequest(request, method);
     }
+
+    // GET / (or any path) → user.index() convention. The export
+    // returns HTML (string or Response). Lets RPC-only apps still
+    // render a UI without forcing creators to handle URL routing.
+    if (request.method === "GET" && typeof user.index === "function") {
+        try {
+            const url = new URL(request.url);
+            if (url.pathname === "/" || url.pathname === "") {
+                const result = await user.index(request);
+                const resp = coerceToHtmlResponse(result, 200);
+                if (resp) return resp;
+            }
+        } catch (err) {
+            return errorResponse(err);
+        }
+    }
+
     return new Response(
         '{"message":"Not Found","name":"Error"}',
         { status: 404, headers: { "Content-Type": "application/json" } }
@@ -404,7 +434,7 @@ pub fn load_polyfills_and_modules(
     scope: &mut v8::PinScope,
     modules: &[crate::modules::ModuleEntry],
     _plugins: &[std::sync::Arc<dyn crate::plugin::NativePlugin>],
-) -> Option<v8::Global<v8::Value>> {
+) -> Result<v8::Global<v8::Value>, String> {
     setup_globals(scope);
 
     // Load polyfills
@@ -435,10 +465,10 @@ pub fn load_polyfills_and_modules(
     // The kernel reads `default.fetch` directly off the namespace — no more
     // `__rpc` copy loop, no more `DISPATCH_JS`, no more URL-path router.
     match crate::modules::load_modules(scope, &wrapped) {
-        Ok(namespace) => Some(namespace),
+        Ok(namespace) => Ok(namespace),
         Err(e) => {
             eprintln!("[v8] Module loading failed: {e}");
-            None
+            Err(e)
         }
     }
 }
