@@ -4,7 +4,7 @@
 **Status:** Draft
 **Replaces:** `.appbundle` (deleted) + per-file `PUT /api/apps/{id}/assets/{path}` (deleted).
 
-A single artifact emitted by the build pipeline and ingested by the control plane. Carries the worker code, all client assets, prerendered HTML, source maps, and a manifest naming everything by content hash. Hard-cut replacement: there is no v1 in production data; the launch version is **v2**, which represents the worker code as a uniform `{ entry, modules }` map (single-module today, code-split later).
+A single artifact emitted by the build pipeline and ingested by the control plane. Carries the worker code, all client-side assets (HTML, JS, CSS, images, prerendered pages), source maps, and a manifest naming everything by content hash. Hard-cut replacement: there is no v1 in production data; the launch version is **v2**, which represents the worker code as a uniform `{ entry, modules }` map (single-module today, code-split later).
 
 No backward compatibility with v1 is provided — readers reject `version != 2`.
 
@@ -42,16 +42,13 @@ JSON, schema version `2`. Fields and their semantics:
   "deploy_hash": "<sha256>",                             // computed; see "deploy_hash"
   "worker": <WorkerCode> | null,                         // see "Worker code" below
   "rules": [<Rule>, ...],                                // routing rules
-  "assets": {                                            // path -> asset metadata
-    "/index.html": {
-      "hash": "<sha256>",
-      "content_type": "text/html",
+  "assets": {                                            // path -> asset metadata; ALL static bytes
+    "/index.html": {                                     //   the SPA shell, prerendered HTML,
+      "hash": "<sha256>",                                //   JS chunks, CSS, images, public files —
+      "content_type": "text/html",                       //   every static file is just an asset
       "size": 2048,
       "cache": null                                      // optional CacheCtl override
     }
-  },
-  "prerendered": {                                       // route -> asset path (must exist in `assets`)
-    "/about": "/_prerendered/about.html"
   },
   "runtime_assets": {},                                  // MUST be {} on fresh deploy; mutated post-deploy
   "asset_version": 0,                                    // MUST be 0 on fresh deploy
@@ -109,6 +106,24 @@ For the single-module case, the callback is never invoked — V8 evaluates `inde
 
 The build pipeline emits a single-module shape today. Multi-module is unlocked when there's a concrete code-splitting use case; the schema is already forward-prepared.
 
+### No frontend entry
+
+Symmetric question to "what's the worker entry?" — answer: there isn't one, by design.
+
+The platform never executes frontend code. Browsers do. The platform's job for the frontend is **to ship bytes**: HTML files, JS chunks, CSS, images. All of those are entries in `assets[]`, treated identically.
+
+What the browser loads first is decided by the rules (which HTML gets served for a given URL) and by the HTML's own `<script>` / `<link>` tags. Each rendering mode handles "what loads first" without a manifest field:
+
+| Mode | What the browser loads first | How |
+| --- | --- | --- |
+| CSR (SPA) | `/index.html` (or whatever the SPA-fallback rule names) | A `Match::Any → Static{ try: ["$path", "/index.html"] }` rule serves it for unmatched routes. The shell's `<script>` tag points to the JS entry chunk. |
+| SSG | The prerendered HTML for that route | A per-route `Match::Exact → Static{ try: ["/about.html"] }` rule serves it. Each prerendered HTML embeds its own `<script>` tags at build time. |
+| SSR | Worker-generated HTML | The worker's `default.fetch` returns the HTML. The server bundle's source code references hashed JS filenames via Vite's build-time manifest (separate from this deploy manifest). |
+
+For Vite-using apps, the build pipeline's `vite build --ssr` step imports Vite's emitted `manifest.json` (Vite's own asset manifest, NOT this deploy manifest) so the server bundle knows which hashed filename to inject. That manifest is a build-time artifact baked into the server bundle's source — it never appears in the deploy manifest.
+
+So: `worker.entry` exists because the platform actually evaluates that module in V8. There's no frontend-side equivalent because the platform never evaluates frontend code; it just serves bytes.
+
 ### Required vs optional
 
 | Field | Required | Notes |
@@ -118,7 +133,6 @@ The build pipeline emits a single-module shape today. Multi-module is unlocked w
 | `worker` | iff worker rules exist | a `WorkerCode { entry, modules }` or null. null/missing means SSG-only |
 | `rules` | yes | may be `[]` for asset-only static deploys (gateway 404s on no match) |
 | `assets` | yes | may be `{}` |
-| `prerendered` | yes | may be `{}` |
 | `runtime_assets` | yes | MUST be `{}` |
 | `asset_version` | yes | MUST be `0` |
 | `sourcemaps` | yes | may be `{}` |
@@ -137,8 +151,8 @@ This means **any change to any blob's content cascades to a new `deploy_hash`** 
 
 ### Cross-references
 
-- Every hash appearing in `assets[].hash`, `prerendered[]` (the resolved asset path's `assets[].hash`), `sourcemaps` keys/values, and `worker.modules` values MUST correspond to a tar entry in the archive. The client always uploads every referenced blob — no "we already have it" claims (server-internal dedup is invisible to the client).
-- Every key in `prerendered` MUST be a path that won't conflict with `rules` matches. Validation responsibility: build pipeline emits sane manifests; control plane's `Manifest::validate()` rejects ambiguous ones.
+- Every hash appearing in `assets[].hash`, `sourcemaps` keys/values, and `worker.modules` values MUST correspond to a tar entry in the archive. The client always uploads every referenced blob — no "we already have it" claims (server-internal dedup is invisible to the client).
+- Every asset path referenced by a rule's `try` chain (e.g., `try: ["/about.html"]`) MUST exist as a key in `assets` (or be substituted by `$path`/captures into a path that does). Validation responsibility: build pipeline emits sane manifests; control plane's `Manifest::validate()` rejects dangling references.
 
 ## Multi-tenancy and possession proof
 
@@ -180,7 +194,7 @@ Server algorithm:
    - `version` is supported.
    - All required fields present.
    - `runtime_assets == {}`, `asset_version == 0`.
-   - Every hash referenced in `assets`, `prerendered`, `sourcemaps`, and `worker.modules` MUST appear as a tar entry later in the stream. (No "we already have it" claims — clients always include every referenced blob.)
+   - Every hash referenced in `assets`, `sourcemaps`, and `worker.modules` MUST appear as a tar entry later in the stream. (No "we already have it" claims — clients always include every referenced blob.)
    - `Manifest::validate()` rule shadowing checks pass.
 4. **Compute `deploy_hash`** from the canonical (deploy_hash-omitted) manifest.
 5. **For each subsequent tar entry** `blobs/<hash>`:
