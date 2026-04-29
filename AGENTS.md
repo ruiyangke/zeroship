@@ -14,7 +14,7 @@ This file is the AI-agent landing page. Read the **task router** below first.
 | **V8 runtime** (fetch, streams, WebSocket, modules) | `docs/architecture/runtime.md` · `crates/runtime/` |
 | **Adding a native primitive** (`zeroship.*`) | `docs/reference/plugin-system.md` · `crates/runtime-macros/` · `crates/plugin-{db,kv,storage}/` |
 | **Control plane** (app CRUD, deploy, env, route registry) | `docs/architecture/control-plane.md` · `crates/control/src/api.rs` · `crates/control/src/registry.rs` |
-| **Bundle format** (.appbundle on disk + in V8) | `docs/reference/appbundle-format.md` · `crates/bundle/src/lib.rs` |
+| **Deploy artifact** (.zsdeploy + manifest + blob storage) | `docs/reference/zsdeploy.md` · `docs/architecture/blob-store.md` · `crates/control/src/deploy.rs` · `crates/core/src/blob.rs` |
 | **Auth** (creator + end-user, OAuth, JWT) | `docs/reference/auth.md` · `crates/control/src/auth_*.rs` · `crates/gateway/src/auth.rs` |
 | **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `docs/reference/mongoose-compat.md` · `crates/plugin-db/` |
 | **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/control/src/{stripe_handlers,stripe_store,metering}.rs` |
@@ -170,7 +170,7 @@ Stable contracts, live in `docs/reference/`:
 - `db.md` — `@zeroship/db`: createDb, schema, CRUD, aggregation, naming strategy
 - `auth.md` — platform-managed auth, gateway JWT, OAuth, consent
 - `billing-metering.md` — Meter trait, 25+ metrics, pricing, spending limits
-- `appbundle-format.md` — binary bundle layout
+- `zsdeploy.md` — `.zsdeploy` deploy artifact format (replaces the deleted `.appbundle`)
 - `websocket-design.md` — WebSocketPair, RFC 6455
 - `plugin-system.md` — how to add a `zeroship.*` namespace
 - `node-compat.md` — Node.js module resolution in V8
