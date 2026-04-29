@@ -22,7 +22,7 @@ A worker thread owns:
 3. A "pump" task that drains async-op responses back into V8.
 
 When a request arrives:
-- The worker resolves `app_id` → V8 isolate (cache hit) or loads `.appbundle` from object storage (cache miss).
+- The worker resolves `app_id` → V8 isolate (cache hit) or fetches `manifest.worker.modules[entry]` from `BlobStore` and creates the isolate (cache miss).
 - Calls `Runtime::call_fetch_handler(modules, method, url, headers, body, ctx)` which invokes the user's exported `default.fetch`.
 - Returns a `FetchOutcome` (status, headers, body or stream).
 

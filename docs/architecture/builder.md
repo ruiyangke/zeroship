@@ -566,18 +566,18 @@ CREATE INDEX ON messages (conversation_id, created_at);
      POST /api/projects/:id/publish
 2. Editor backend POSTs to sandbox service:
      POST /sessions/:id/exec
-       cmd: "npm run build && zeroship bundle --out /tmp/app.appbundle"
-3. Sandbox runs:
-     - vite build → dist/
-     - zeroship bundle picks up dist/ + src/server.ts
-     - emits .appbundle (zstd-compressed)
-4. Editor backend reads /tmp/app.appbundle from sandbox
-     GET /sessions/:id/files/tmp/app.appbundle
-5. Editor backend POSTs bundle to control plane:
-     POST /api/apps/{production-app-id}/bundle
-     (uses creator's session token; control plane authorizes via existing per-app rules)
-6. Control plane stores bundle + bumps env_version
-7. Workers pick up new bundle on next request
+       cmd: "vite build"
+3. Sandbox runs `vite build`:
+     - @zeroship/vite-plugin's closeBundle hook fires
+     - emits dist/app.zsdeploy (tar.zst: manifest.json + blobs/<hash>)
+4. Editor backend reads dist/app.zsdeploy from sandbox:
+     GET /sessions/:id/files/dist/app.zsdeploy
+5. Editor backend POSTs to control plane:
+     POST /api/apps/{production-app-id}/deploy
+     Content-Type: application/x-zsdeploy
+6. Control plane: streams + verifies blob hashes, dedups against has_blob,
+   writes manifest, atomically updates apps.deploy_hash + manifest_json
+7. Gateway + worker pick up the new manifest on their next 5s poll
 8. Editor surfaces "Published! Live at https://{app-slug}.zeroship.ai"
 ```
 

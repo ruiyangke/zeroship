@@ -136,11 +136,18 @@ The control plane is **not on the hot path** for static asset bytes. It's consul
 
 ### Phase A (Phase 4 of the rollout)
 
-Memory LRU only. Serve as `Bytes`:
+Memory LRU in front of the underlying `BlobStore`. Serve as `Bytes`:
 
 ```rust
 async fn serve_static_hit(state, hit) -> HttpResponse {
-    let bytes = state.blob_store.get_blob(&hit.hash).await?;
+    let bytes = match state.blob_cache.get(&hit.hash) {
+        Some(b) => b,
+        None => {
+            let b = state.blob_store.get_blob(&hit.hash).await?;
+            state.blob_cache.insert(hit.hash.clone(), b.clone());
+            b
+        }
+    };
     HttpResponse::Ok()
         .content_type(&hit.content_type)
         .header("etag", format!("\"{}\"", hit.hash))
@@ -149,7 +156,7 @@ async fn serve_static_hit(state, hit) -> HttpResponse {
 }
 ```
 
-`Bytes` is `Arc`-refcounted; concurrent requests for the same hash share the buffer.
+`Bytes` is `Arc`-refcounted; concurrent requests for the same hash share the buffer. The cache (`BlobCache` in `crates/gateway/src/blob_cache.rs`) is bounded by total bytes (default 256 MB, overridable with `--blob-cache-mem-mb`); a single entry larger than the budget is rejected so one fat asset can't evict everything else.
 
 This eliminates the network round-trip to the control plane — by far the dominant cost. Ships in Phase 4.
 
@@ -210,22 +217,16 @@ Tunables:
 | Hash mismatch on read (data corruption) | invalidate cache entry, re-fetch from backend, log error |
 | `local_path` returns Some but the file is missing | re-fetch via `get_blob`, refill cache |
 
-## Migration
+## Callers
 
-Hard cut. Old `BundleStore` is removed in favor of `BlobStore`. Migrating callers:
-
-- `crates/control/src/main.rs` — boots `Arc<dyn BlobStore>` (LocalDiskBlobStore in dev).
-- `crates/control/src/api.rs::deploy` — replaced entirely by `.zsdeploy` ingestion.
-- `crates/control/src/api.rs::upload_asset` — **removed**; assets land via `.zsdeploy`.
-- `crates/control/src/internal.rs::get_asset` — **removed**; gateway fetches direct from blob store.
-- `crates/gateway/src/router.rs::fetch_asset` — **removed**; replaced by direct `state.blob_store.get_blob(...)`.
-- `crates/worker/src/cache.rs::load_app` — fetches the server bundle blob via `BlobStore` instead of the control plane's existing `/internal/bundle/<id>`.
-
-Phase boundaries enforce no half-built states: each phase compiles, tests pass, and the workspace builds clean before the next dispatches.
+- `crates/control/src/main.rs` — boots `Arc<dyn BlobStore>` (`LocalDiskBlobStore` in dev).
+- `crates/control/src/deploy.rs` — `.zsdeploy` ingestion. Verifies hashes, deduplicates against `has_blob`, calls `put_blob` for new content, writes the manifest via `put_manifest`.
+- `crates/gateway/src/router.rs::serve_static_hit` — fetches asset bytes via `state.blob_cache.get(hash)` then falls through to `state.blob_store.get_blob(hash)`.
+- `crates/worker/src/sync.rs` — fetches `manifest.worker.modules[entry]` via `BlobStore` on cold start / deploy change.
 
 ## What this architecture intentionally does NOT do
 
-- **No CDN integration in v1.** Edge nodes ARE the CDN. CloudFront/Fastly can be layered later if multi-continent traffic demands it.
-- **No automatic blob compression negotiation in v1.** The build pipeline pre-compresses assets if it wants to (Brotli, gzip variants), and stores them as separate blobs with the right `content_type`. Selecting variants by `Accept-Encoding` is gateway logic, not blob-store logic.
-- **No partial range serving in v1.** Range request support is Tier 4 work; the blob store doesn't need to know about it.
-- **No streaming write API.** `put_blob` takes `&[u8]`. Streaming `put_blob_stream(hash, impl AsyncRead)` is added in Phase 2 when the deploy ingestion needs it.
+- **No CDN integration.** Edge nodes ARE the CDN. CloudFront/Fastly can be layered later if multi-continent traffic demands it.
+- **No automatic blob compression negotiation.** The build pipeline pre-compresses assets if it wants to (Brotli, gzip variants) and stores them as separate blobs with the right `content_type`. Selecting variants by `Accept-Encoding` is gateway logic, not blob-store logic.
+- **No partial range serving.** Range request support belongs to a higher HTTP layer; the blob store doesn't need to know about it.
+- **No streaming write API.** `put_blob` takes `&[u8]`. A streaming `put_blob_stream(hash, impl AsyncRead)` would be added when ingestion outgrows the buffered model.

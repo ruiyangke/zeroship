@@ -75,21 +75,23 @@ The gateway polls `/internal/routes` every 5s. `crates/gateway/src/sync.rs::sync
 ## Deploy path
 
 ```
-1. Creator → POST /api/apps/{id}/deploy  (16 MB body cap)
-   Body: .appbundle bytes (binary) OR raw ES module bytes (text/javascript fallback)
+1. Creator → POST /api/apps/{id}/deploy
+   Content-Type: application/x-zsdeploy
+   Body: streaming tar.zst of { manifest.json + blobs/<hash> }
 
-2. api::deploy:
-   - Verify master key
-   - Compute deploy_hash = sha256(body)
-   - vfs.put(app_id, body)
-   - UPDATE apps SET deploy_hash = ..., updated_at = now()
+2. crates/control/src/deploy.rs::ingest:
+   - Stream-decompress (cap: 256 MB decompressed)
+   - First tar entry MUST be manifest.json — parse + validate
+   - For each subsequent blobs/<hash> entry:
+       verify sha256(bytes) == hash (possession proof)
+       blob_store.has_blob(hash) ? discard : put_blob(hash, bytes)
+   - Compute deploy_hash from canonical manifest (deploy_hash field omitted)
+   - blob_store.put_manifest(app_id, deploy_hash, manifest_json)
+   - UPDATE apps SET deploy_hash = $1, manifest_json = $2 WHERE id = $3
 
-3. (Future) Build adapter writes manifest_json alongside the deploy.
-
-4. Worker polls /internal/routes every 5s
-   - Sees deploy_hash changed for this app
-   - Fetches new bundle bytes via /internal/bundle/{app_id}
-   - Reloads V8 isolate (cache.rs::load_app)
+3. Worker + Gateway pick up the new deploy on their next 5s poll
+   - Worker fetches manifest.worker.modules[entry] blob via BlobStore
+   - Gateway re-compiles the manifest into its routing form
 ```
 
 ## End-user auth flow

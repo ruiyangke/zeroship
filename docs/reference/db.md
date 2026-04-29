@@ -47,7 +47,7 @@ zeroship.db.* (Rust, frozen global)       ← native layer: security boundary, S
 zeroship-pg → Postgres
 ```
 
-The SDK is a standard npm package bundled by esbuild into the `.appbundle`. The native `zeroship.db.*` global is registered by Rust, frozen, and enforces schema isolation + parameterized queries.
+The SDK is a standard npm package; vite/rollup bundles it into the deploy's worker code. The native `zeroship.db.*` global is registered by Rust, frozen, and enforces schema isolation + parameterized queries.
 
 ### Native primitives (`zeroship.db.*`)
 

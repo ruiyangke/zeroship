@@ -91,9 +91,12 @@ curl -X POST http://localhost:9090/api/apps \
   -d '{"name":"hello","plan_id":"free"}'
 # → {"id":"<uuid>", "api_key":"...", ...}
 
-# Deploy code (build .appbundle first)
-./target/release/zeroship build ./examples/hello
-./target/release/zeroship deploy ./examples/hello/dist/app.appbundle \
+# Build (.zsdeploy via vite-plugin)
+cd examples/hello && npx vite build
+# Produces dist/app.zsdeploy (tar.zst archive: manifest.json + blobs/<hash>)
+
+# Deploy
+./target/release/zeroship deploy ./examples/hello/dist/app.zsdeploy \
   --app=<uuid> \
   --control=http://localhost:9090 \
   --key=dev-master
@@ -111,7 +114,7 @@ Subdomain routing requires DNS pointing `*.zeroship.local` at the gateway and `/
 # Per crate
 cargo test -p zeroship-core
 cargo test -p zeroship-gateway
-cargo test -p zeroship-bundle
+cargo test -p zeroship-control
 cargo test -p zeroship-runtime --lib
 
 # Postgres-backed (needs a live DB at $DATABASE_URL)
@@ -137,8 +140,8 @@ DURATION=10s CONNS=300 WORKERS=16 ./run_zerobench.sh
 
 ## Common gotchas
 
-- **`Manifest::passthrough()` is synthesized when `manifest_json` is NULL.** If you deployed before manifests existed, your routes still work — POST `/_rpc/*` goes to RPC, everything else to SSR.
+- **`Manifest::passthrough()` is synthesized when `manifest_json` is NULL.** Apps without their own manifest get the default routing: POST `/_rpc/*` goes to RPC, everything else to SSR.
 - **Worker holds isolates per-thread.** If you change `--workers`, restart the whole binary; the LRU cache doesn't carry across processes.
 - **Gateway polls control every 5s.** New deploys aren't instant — wait one cycle, or restart the gateway.
-- **Bundle parse errors are silent.** If `zeroship deploy` succeeds but the worker logs `[worker] failed to parse bundle for <id>`, the .appbundle is malformed. Re-run `zeroship build` and check the output.
-- **`init_error` shows up as 500.** A syntax error in your app's JS now returns 500 with the message instead of a misleading 404 "no default.fetch handler exported."
+- **Deploy hash mismatch is loud.** The control plane verifies `sha256(blob bytes) == filename hash` for every blob in the `.zsdeploy`. Any mismatch returns 400 with the offending hash; nothing is partially written.
+- **`init_error` shows up as 500.** A syntax error in your app's JS returns 500 with the message instead of a misleading 404 "no default.fetch handler exported."

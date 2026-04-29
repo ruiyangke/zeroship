@@ -16,7 +16,7 @@ HTTP request
   │    matcher (Exact/Prefix/Glob/Any)
   │    action → Outcome
   │
-  ├─ Outcome::Static    → fetch from control plane → respond with cache headers
+  ├─ Outcome::Static    → blob_cache.get → blob_store.get_blob → respond with cache headers
   ├─ Outcome::Worker    → forward via CHWBL hash ring → worker (V8)
   ├─ Outcome::Redirect  → 30x with Location header
   └─ Outcome::NotFound  → 404
@@ -48,20 +48,20 @@ Compiled form: `crates/gateway/src/compiled.rs`. Built once at route-update time
       }
     }
   ],
-  "build_assets": {
+  "assets": {
     "/index.html":     { "hash": "sha256-...", "content_type": "text/html",       "size": 2048 },
     "/_assets/main.js":{ "hash": "sha256-...", "content_type": "application/javascript", "size": 84203 }
   },
   "runtime_assets": {},
-  "server_bundle_hash": "sha256-...",
+  "worker": { "entry": "index.js", "modules": { "index.js": "sha256-..." } },
   "asset_version": 0
 }
 ```
 
 - **`rules`** are walked first-match-wins. Specificity ordering is enforced at parse time by `Manifest::validate()` (shadow detection).
-- **`build_assets`** is the immutable map of paths → content-addressed assets. Populated on deploy.
+- **`assets`** is the immutable map of paths → content-addressed assets. Populated on deploy. Includes HTML shells, JS chunks, CSS, images, prerendered HTML — every static byte.
 - **`runtime_assets`** is mutable, populated by the user's server code via `zeroship.assets.put(...)`. `asset_version` bumps on each mutation; the gateway re-syncs only when it changes.
-- **`server_bundle_hash`** is distinct from the deploy's overall `deploy_hash` so an asset-only deploy doesn't bust the worker's V8 isolate.
+- **`worker`** is the JS code that runs in V8 (`entry` specifier + `modules` map of specifier → blob hash). `null` for SSG-only deploys. The hash set is distinct from any asset hashes, so an asset-only deploy doesn't bust the worker's V8 isolate.
 
 ## `Match` variants
 
@@ -136,9 +136,9 @@ Reproduces the pre-manifest behavior: POST `/_rpc/<method>` is RPC (gateway gate
 
 ## Common things to look up
 
-- "How does the gateway find an asset by path?" → `serve_static_hit` in `crates/gateway/src/router.rs` calls `fetch_asset` which does `GET /internal/assets/{app_id}/{path}` against control. Bytes flow back; ETag = `hash`; Cache-Control composed from `CacheCtl` precedence (entry → rule → default).
-- "Why doesn't `manifest.hosts` work?" → It was deleted (Tier 1). Custom-domain support requires a verified `host → app_id` map at the gateway level; reintroduce when DNS TXT or ACME verification lands.
-- "What's `Outcome::Rewrite`?" → It doesn't exist anymore. Rewrites are walked internally via `MAX_HOPS = 8`. If the hop budget is exhausted (cycle), the dispatcher returns `Outcome::NotFound`.
+- "How does the gateway find an asset by path?" → `serve_static_hit` in `crates/gateway/src/router.rs` checks `state.blob_cache` (in-memory LRU keyed by hash); on miss it calls `state.blob_store.get_blob(hash)` and fills the cache. ETag = `hash`; Cache-Control composed from `CacheCtl` precedence (entry → rule → default).
+- "How are rewrites handled?" → `walk_rules` in `crates/gateway/src/compiled.rs` re-enters with the new path up to `MAX_HOPS = 8` times. Hop budget exhausted (cycle) → `Outcome::NotFound`.
+- "How does an app get a custom domain?" → Not currently supported. Adding it needs a verified `host → app_id` map at the gateway, sourced from a DNS TXT or ACME challenge.
 
 ## Where to start when changing routing behavior
 
@@ -146,5 +146,5 @@ Reproduces the pre-manifest behavior: POST `/_rpc/<method>` is RPC (gateway gate
 | --- | --- | --- |
 | Adding a new `Match` kind | `crates/core/src/types.rs` (`Match` enum, `Match::test`) | Add variant; extend `CompiledMatch` in `crates/gateway/src/compiled.rs`; extend shadow detection's `covers_path` |
 | Adding a new `Action` kind | `crates/core/src/types.rs` (`Action`); `crates/gateway/src/dispatch.rs` (`Outcome`) | Add variants in both places; extend `CompiledAction`; extend `execute_outcome` in `router.rs` |
-| Changing how assets are fetched | `crates/gateway/src/router.rs` (`fetch_asset`, `serve_static_hit`) | Replace the hand-rolled HTTP client (Tier 3 plan: pooled `cyper` client + LRU bytes cache) |
+| Changing how assets are fetched | `crates/gateway/src/router.rs` (`serve_static_hit`, `fetch_static_bytes`); `crates/gateway/src/blob_cache.rs` | Phase A is in-memory LRU; Phase B layers mmap (see `docs/architecture/blob-store.md`) |
 | Adding a manifest validator | `crates/core/src/types.rs` (`Manifest::validate`) | Append a check; add tests in `crates/core/tests/types_test.rs` |

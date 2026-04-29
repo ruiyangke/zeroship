@@ -1,12 +1,8 @@
 # `.zsdeploy` — deploy artifact format
 
-**Version:** 2
-**Status:** Draft
-**Replaces:** `.appbundle` (deleted) + per-file `PUT /api/apps/{id}/assets/{path}` (deleted).
+**Schema:** `version: 2`
 
-A single artifact emitted by the build pipeline and ingested by the control plane. Carries the worker code, all client-side assets (HTML, JS, CSS, images, prerendered pages), source maps, and a manifest naming everything by content hash. Hard-cut replacement: there is no v1 in production data; the launch version is **v2**, which represents the worker code as a uniform `{ entry, modules }` map (single-module today, code-split later).
-
-No backward compatibility with v1 is provided — readers reject `version != 2`.
+A single artifact emitted by the build pipeline and ingested by the control plane. Carries the worker code, all client-side assets (HTML, JS, CSS, images, prerendered pages), source maps, and a manifest naming everything by content hash. Worker code is represented as a uniform `{ entry, modules }` map — single-module today, code-split later, same shape either way.
 
 ## Container
 
@@ -174,7 +170,7 @@ Operational concerns that aren't security:
 
 - **Billing**: each tenant is billed for `sum(assets[].size)` over the blobs they reference, regardless of whether storage actually allocated bytes for them (dedup is the platform's optimization, not the customer's discount).
 - **GC**: manifest-driven mark-and-sweep walks `manifests/*/*.json`, collects the union of referenced hashes, deletes unreferenced blobs older than the retention window.
-- **Compliance opt-out**: a future per-tenant `dedicated_storage: bool` flag can disable dedup for tenants whose contracts forbid shared infrastructure. Not in v1.
+- **Compliance opt-out**: a per-tenant `dedicated_storage: bool` flag (not currently supported) would disable dedup for tenants whose contracts forbid shared infrastructure.
 
 ## Control plane ingestion
 
@@ -266,11 +262,9 @@ Validate at the streaming boundary, not after the fact — reject early.
 
 ## Versioning
 
-`version: u16`. Current value: `2` (the launch version — there is no v1 in production data).
+`version: u16`. The schema version is `2`. Readers MUST reject any `version` value they don't explicitly support; never trust an unknown manifest as an unparsed JSON blob.
 
-Adding fields stays backward-compatible (readers ignore unknowns within the same major version). Changing semantics or removing fields requires a `version` bump. Control plane MUST reject any `version` value it doesn't explicitly support; never trust an unknown manifest as an unparsed JSON blob.
-
-There is no migration path for v1 → v2 because no v1 deploys exist. Future schema bumps will land hard-cut as well unless we have production data that justifies a migration cost.
+Adding fields stays backward-compatible (readers ignore unknowns within the same major version). Changing semantics or removing fields requires a `version` bump.
 
 ## What this format intentionally does NOT carry
 

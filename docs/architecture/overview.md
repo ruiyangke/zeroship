@@ -12,8 +12,8 @@ zeroship is two systems that share infrastructure. Reading this gives you the me
 │                             billing, env)                                          │
 │                                  │                                                 │
 │                                  ▼                                                 │
-│                            Object Storage                                          │
-│                            (.appbundle + assets)                                   │
+│                            Blob Store                                              │
+│                            (content-addressed: blobs/<hash>)                       │
 └────────────────────────────────────────────────────────────────────────────────────┘
                                   │
                                   │ deploys flow down
@@ -38,17 +38,15 @@ The systems are physically separate (different binaries, different processes, di
 
 | Component | Crate | Single-line responsibility |
 | --- | --- | --- |
-| Control plane | `crates/control` | App CRUD · deploy · env/secrets · billing · route registry · auth service |
-| Gateway | `crates/gateway` | Manifest dispatch · JWT validation · rate limit · CHWBL routing · asset proxy |
-| Worker | `crates/worker` | V8-per-thread · on-demand bundle loading · LRU isolate eviction · usage reporting |
+| Control plane | `crates/control` | App CRUD · `.zsdeploy` ingestion · env/secrets · billing · route registry · auth service |
+| Gateway | `crates/gateway` | Manifest dispatch · JWT validation · rate limit · CHWBL routing · BlobStore-backed asset serving with edge LRU |
+| Worker | `crates/worker` | V8-per-thread · BlobStore-backed module fetch · LRU isolate eviction · usage reporting |
 | Runtime (lib) | `crates/runtime` | V8 + compio event loop · fetch · WebSocket · streams · WebCrypto · auth context |
-| Bundle | `crates/bundle` | `.appbundle` binary format (read, write, lazy decompress) |
-| Compiler | `crates/compiler` | SWC + esbuild → `.appbundle` |
 | Plugins (DB/KV/Storage) | `crates/plugin-{db,kv,storage}` | `zeroship.{db,kv,storage}.*` native ops |
-| Postgres driver | `crates/compio-postgres` | compio-native PG, replaces sqlx, eliminates tokio |
+| Postgres driver | `crates/compio-postgres` | compio-native PG driver |
 | Redis driver | `crates/compio-redis` | compio-native Redis, cluster-aware |
-| Core | `crates/core` | Shared types · typed_id · VFS · `Manifest` schema · auth utilities |
-| CLI | `crates/cli` | `zeroship build · serve · deploy · inspect` |
+| Core | `crates/core` | Shared types · typed_id · `Manifest` schema · `BlobStore` trait + `LocalDiskBlobStore` · auth utilities |
+| CLI | `crates/cli` | `zeroship serve · deploy` |
 
 ## Request paths
 
@@ -60,7 +58,7 @@ The systems are physically separate (different binaries, different processes, di
              validate JWT cookie if present → inject ZeroShip-User header
              check rate limit + concurrency
              walk compiled manifest:
-               - matched a static rule? → fetch bytes from control plane → respond
+               - matched a static rule? → blob_cache.get → blob_store.get_blob → respond
                - matched a worker rule? → forward via CHWBL hash ring → worker
                - matched a redirect/rewrite? → respond / re-walk
 3. Worker:   route to the V8 isolate for this app_id (LRU-cached)
@@ -73,9 +71,9 @@ The systems are physically separate (different binaries, different processes, di
 
 ```
 1. Creator → CLI: `zeroship deploy ./src --app=<id> --key=<master>`
-2. CLI:     SWC + esbuild bundle → .appbundle on disk
+2. Build:   `vite build` (client) + `vite build --ssr` (server) → `dist/app.zsdeploy` (tar.zst with manifest + blobs)
 3. CLI →    Control plane: POST /api/apps/<id>/deploy (16 MB body cap)
-4. Control: write .appbundle to object storage
+4. Control: stream-decompress + verify per-blob hashes; write blobs to `BlobStore`; persist `manifest.json`
             UPDATE apps SET deploy_hash = <hash>
             (manifest_json column written here when the build emits a manifest)
 5. Worker:  next 5s sync sees the new deploy_hash → reload bundle → swap V8 isolate
@@ -95,7 +93,8 @@ The systems are physically separate (different binaries, different processes, di
 
 ## What's NOT in this document
 
-- The `.appbundle` byte layout → `docs/reference/appbundle-format.md`
+- The `.zsdeploy` archive layout + manifest schema → `docs/reference/zsdeploy.md`
+- The blob store + edge cache architecture → `docs/architecture/blob-store.md`
 - The `Manifest` JSON shape → `crates/core/src/types.rs` and `docs/architecture/gateway-routing.md`
 - Auth flows (creator login, end-user OAuth, JWT cookie semantics) → `docs/reference/auth.md`
 - Billing wiring (Stripe Connect, usage metering) → `docs/reference/billing-metering.md`
