@@ -27,7 +27,12 @@ pub struct AppRuntimeLimits {
 }
 
 /// Worker-facing metadata for an app version/config snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// `PartialEq`/`Eq` are intentionally NOT derived: `manifest`'s recursive
+/// types (`CacheCtl`, `RateLimit`, `AssetEntry`, …) don't carry them, and
+/// the worker's hot path only reads individual fields (no whole-struct
+/// comparison). Add them only when a caller actually needs `==`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppVersionInfo {
     pub deploy_hash: Option<String>,
     pub plan_id: String,
@@ -38,6 +43,14 @@ pub struct AppVersionInfo {
     /// `0` for a freshly-created app with no env mutations.
     #[serde(default)]
     pub env_version: i64,
+    /// Per-app routing manifest. Carried inline on every `/internal/versions`
+    /// poll so workers can resolve the worker-bundle blob hash
+    /// (`manifest.worker.modules[manifest.worker.entry]`) without an extra
+    /// round trip. `None` for apps that have not deployed yet (NULL
+    /// `manifest_json` row); SSG-only deploys still carry a manifest with
+    /// `worker = None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<Manifest>,
 }
 
 /// A routing entry resolved from an incoming request.

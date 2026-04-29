@@ -3,8 +3,10 @@ mod sync;
 mod cache;
 mod metrics;
 
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use ntex::web;
+use zeroship_core::blob::{BlobStore, LocalDiskBlobStore};
 use zeroship_runtime::init::init_v8;
 
 use crate::sync::{SharedEnvs, SharedVersions};
@@ -30,6 +32,13 @@ pub struct WorkerConfig {
     /// fatal for Kubernetes preemption (which will SIGKILL after its own
     /// `terminationGracePeriodSeconds`).
     pub shutdown_timeout_secs: u64,
+    /// Content-addressed blob store. Phase 4b of the artifact rollout —
+    /// the worker fetches worker-bundle bytes here directly instead of
+    /// round-tripping through the control plane. In dev / single-host
+    /// prod the gateway, control, and worker all point at the same path;
+    /// in multi-host prod each crate keeps its own `Arc` over a shared
+    /// remote backend (S3 + on-disk LRU, later phase).
+    pub blob_store: Arc<dyn BlobStore>,
 }
 
 #[ntex::main]
@@ -54,6 +63,9 @@ async fn main() -> std::io::Result<()> {
     let db_url = arg_or_env(&args, "--db", "DATABASE_URL", "");
     let worker_key = arg_or_env(&args, "--worker-key", "WORKER_KEY", "");
     let shutdown_timeout = arg_or_env(&args, "--shutdown-timeout", "SHUTDOWN_TIMEOUT", "30");
+    // Same default + flag name as zeroship-control / zeroship-gate so a
+    // single-host dev box can point all three at one shared volume.
+    let blob_store_root = arg_or_env(&args, "--blob-store", "BLOB_STORE", "./bundles");
     // Default to loopback. Operators must explicitly opt into a public bind
     // (--bind 0.0.0.0) after ensuring WORKER_KEY is set; without the shared
     // secret, any network-reachable caller can impersonate users and run code.
@@ -72,6 +84,12 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
+    let blob_store: Arc<dyn BlobStore> = Arc::new(
+        LocalDiskBlobStore::new(PathBuf::from(&blob_store_root))
+            .expect("failed to initialise blob store"),
+    );
+    eprintln!("[zeroship-worker] blob store at {blob_store_root}");
+
     let config = Arc::new(WorkerConfig {
         control_url,
         control_key,
@@ -80,6 +98,7 @@ async fn main() -> std::io::Result<()> {
         poll_interval_secs: poll_interval.parse().unwrap_or(5),
         worker_key,
         shutdown_timeout_secs: shutdown_timeout.parse().unwrap_or(30),
+        blob_store,
     });
 
     let socket_path = arg_or_env(&args, "--socket", "WORKER_SOCKET", "");

@@ -65,10 +65,13 @@ pub fn get_limits(app_id: &Uuid) -> Option<RuntimeLimits> {
 
 /// Load an app from bundle bytes. Creates V8 runtime + starts pump task.
 ///
-/// Bundle bytes are the raw ES module source (UTF-8). Phase 4b will switch
-/// the worker to fetching the entry blob by `manifest.worker.entry`'s hash
-/// via `BlobStore` directly; for now the caller pre-fetches the bytes and
-/// hands them in.
+/// Bundle bytes are the raw ES module source (UTF-8). Phase 4b: the
+/// caller (`sync::reconcile_once` or `handler::load_on_demand`) resolves
+/// the worker-entry blob hash from the manifest and reads it via
+/// `BlobStore::get_blob` before calling here. Single-module bundles
+/// (today's only shape) become a one-element `modules` vector tagged
+/// `index.js`; multi-module deploys will pass a richer slice once the
+/// V8 module-resolve callback lands.
 pub fn load_app(app_id: Uuid, bundle_bytes: &[u8], app_limits: AppRuntimeLimits) -> bool {
     let source = match std::str::from_utf8(bundle_bytes) {
         Ok(s) => s,

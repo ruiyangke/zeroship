@@ -3,7 +3,6 @@ use std::sync::Arc;
 use futures::{pin_mut, FutureExt};
 use ntex::web::{self, HttpRequest, HttpResponse};
 use ntex::util::Bytes;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use zeroship_core::auth::{extract_bearer, validate_control_key};
@@ -320,7 +319,7 @@ fn make_error_msg(status: u16, msg: &str) -> HttpResponse {
     make_error(&DispatchError::new(msg, status))
 }
 
-/// Pull bundle from control plane and load into cache (cold start path).
+/// Pull bundle from the blob store and load into cache (cold start path).
 ///
 /// Order matters: fetch + verify bundle, fetch + parse env, THEN
 /// commit V8 isolate + env atomically. Doing it in the other order
@@ -331,31 +330,35 @@ fn make_error_msg(status: u16, msg: &str) -> HttpResponse {
 /// against the OLD env on a later step in this function. Now we
 /// stage everything in locals first and only mutate cache at the
 /// end.
+///
+/// Phase 4b: bytes come from `BlobStore` keyed by
+/// `manifest.worker.modules[manifest.worker.entry]` rather than from a
+/// dedicated control-plane endpoint. The blob store enforces
+/// `sha256(bytes) == hash` on read, so the previous explicit hash
+/// re-check is redundant — `LocalDiskBlobStore::get_blob` already
+/// rejects on mismatch.
 async fn load_on_demand(
     config: &WorkerConfig,
     envs: &SharedEnvs,
     app_id: &Uuid,
 ) -> Result<(), String> {
     let app_version = crate::sync::fetch_app_version(&config.control_url, &config.control_key, app_id).await?;
-    let bundle_url = format!("{}/internal/bundles/{}", config.control_url, app_id);
-    let bytes = crate::sync::http_get_bytes(&bundle_url, &config.control_key).await?;
+
+    let manifest = app_version
+        .manifest
+        .as_ref()
+        .ok_or_else(|| format!("app {app_id} has no manifest yet"))?;
+    let bundle_hash = crate::sync::worker_entry_hash(manifest, app_id)
+        .ok_or_else(|| format!("app {app_id} has no worker code (SSG-only or malformed manifest)"))?;
+
+    let bytes = config
+        .blob_store
+        .get_blob(&bundle_hash)
+        .await
+        .map_err(|e| format!("blob fetch failed: {e}"))?;
 
     if bytes.is_empty() {
         return Err("empty bundle".into());
-    }
-
-    // Verify bundle hash against control's claim BEFORE committing the
-    // bytes to V8. The reconcile path already does this; without it
-    // here, a wrong-bundle delivery (CDN bug, MITM on loopback hop,
-    // control bug) silently runs the wrong code AND becomes
-    // permanent because the next reconcile compares local==remote.
-    let computed = hex::encode(Sha256::digest(&bytes));
-    if let Some(expected) = app_version.deploy_hash.as_deref() {
-        if computed != expected {
-            return Err(format!(
-                "bundle hash mismatch for {app_id}: expected {expected}, got {computed}"
-            ));
-        }
     }
 
     // Fetch env BEFORE committing the V8 isolate. If env fetch fails
@@ -373,7 +376,16 @@ async fn load_on_demand(
         crate::sync::remove_env(envs, app_id);
         return Err("failed to parse bundle".into());
     }
-    cache::set_hash(*app_id, computed);
-    eprintln!("[worker] on-demand loaded {app_id}");
+    // Track the deploy_hash (if any) so the reconcile loop can detect
+    // future swaps. Synthesize-on-load: we have bundle_hash here, but
+    // the worker's reconcile compares against `info.deploy_hash` (the
+    // canonical manifest hash), not the per-blob hash, so use that.
+    if let Some(dh) = app_version.deploy_hash.clone() {
+        cache::set_hash(*app_id, dh);
+    }
+    eprintln!(
+        "[worker] on-demand loaded {app_id} (blob: {}...)",
+        &bundle_hash[..bundle_hash.len().min(8)]
+    );
     Ok(())
 }

@@ -1,6 +1,6 @@
 use zeroship_core::types::{
-    Action, AppUsage, AssetEntry, ControlEvent, HttpMethod, Manifest, ManifestMetadata, Match,
-    RouteEntry, Rule, UsageReport, WorkerCode, WorkerMode,
+    Action, AppRuntimeLimits, AppUsage, AppVersionInfo, AssetEntry, ControlEvent, HttpMethod,
+    Manifest, ManifestMetadata, Match, RouteEntry, Rule, UsageReport, WorkerCode, WorkerMode,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -641,4 +641,71 @@ fn worker_round_trips_through_json() {
     assert!(json.contains("src/index.js"), "entry present: {json}");
     let decoded: WorkerCode = serde_json::from_str(&json).unwrap();
     assert_eq!(decoded, w);
+}
+
+// -- AppVersionInfo wire format -------------------------------------------
+
+#[test]
+fn app_version_info_serializes_with_manifest() {
+    // Phase 4b: workers get the manifest inline on every /internal/versions
+    // poll so they can resolve worker.modules[entry] without an extra hop.
+    let info = AppVersionInfo {
+        deploy_hash: Some(SHA_A.to_string()),
+        plan_id: "pro".into(),
+        runtime: AppRuntimeLimits::default(),
+        env_version: 7,
+        manifest: Some(Manifest {
+            worker: Some(WorkerCode {
+                entry: "index.js".into(),
+                modules: HashMap::from([("index.js".to_string(), SHA_B.to_string())]),
+            }),
+            ..Manifest::default()
+        }),
+    };
+    let json = serde_json::to_string(&info).unwrap();
+    assert!(json.contains("\"manifest\""), "manifest is on the wire: {json}");
+    assert!(json.contains(SHA_B), "worker module hash present: {json}");
+
+    let decoded: AppVersionInfo = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded.env_version, 7);
+    assert_eq!(decoded.deploy_hash.as_deref(), Some(SHA_A));
+    let worker = decoded.manifest.unwrap().worker.unwrap();
+    assert_eq!(worker.entry, "index.js");
+    assert_eq!(worker.modules.get("index.js").map(String::as_str), Some(SHA_B));
+}
+
+#[test]
+fn app_version_info_omits_missing_manifest() {
+    // Apps that have not deployed yet have no manifest. The field uses
+    // `skip_serializing_if = Option::is_none`, so the wire payload stays
+    // compact and forward-compatible.
+    let info = AppVersionInfo {
+        deploy_hash: None,
+        plan_id: "free".into(),
+        runtime: AppRuntimeLimits::default(),
+        env_version: 0,
+        manifest: None,
+    };
+    let json = serde_json::to_string(&info).unwrap();
+    assert!(
+        !json.contains("\"manifest\""),
+        "manifest absent when None: {json}"
+    );
+    let decoded: AppVersionInfo = serde_json::from_str(&json).unwrap();
+    assert!(decoded.manifest.is_none());
+}
+
+#[test]
+fn app_version_info_accepts_legacy_payload_without_manifest() {
+    // Deserialising a payload from a control plane that doesn't yet
+    // emit `manifest` must succeed — `manifest` is `#[serde(default)]`.
+    let json = r#"{
+        "deploy_hash": null,
+        "plan_id": "free",
+        "runtime": {},
+        "env_version": 3
+    }"#;
+    let info: AppVersionInfo = serde_json::from_str(json).unwrap();
+    assert!(info.manifest.is_none());
+    assert_eq!(info.env_version, 3);
 }

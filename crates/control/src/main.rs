@@ -265,10 +265,6 @@ async fn main() -> std::io::Result<()> {
                     .route(web::get().to(internal::get_versions)),
             )
             .service(
-                web::resource("/internal/bundles/{app_id}")
-                    .route(web::get().to(internal::get_bundle)),
-            )
-            .service(
                 web::resource("/internal/apps/{app_id}")
                     .route(web::get().to(internal::get_app_version)),
             )
@@ -279,11 +275,6 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/internal/routes")
                     .route(web::get().to(internal::get_routes)),
-            )
-            .service(
-                // Same tail-match note as /api/apps/{id}/assets/{path}*.
-                web::resource("/internal/assets/{app_id}/{path}*")
-                    .route(web::get().to(internal::get_asset)),
             )
             .service(
                 web::resource("/internal/usage")

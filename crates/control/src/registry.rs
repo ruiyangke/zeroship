@@ -476,10 +476,20 @@ impl Registry {
     // -- Versions / Routes --------------------------------------------------
 
     /// Return every app's current deploy hash (used by workers to sync).
+    ///
+    /// Includes the per-app routing manifest inline so the worker can
+    /// resolve the worker-bundle blob hash without an extra round trip.
+    /// NULL `manifest_json` rows (apps that have not deployed yet) and
+    /// rows whose JSON fails to parse both surface as `manifest: None`;
+    /// the worker treats that as "no V8 isolate to load" and skips the
+    /// app on its reconcile pass.
     pub async fn get_versions(&self) -> Result<VersionMap, RegistryError> {
         let conn = self.conn().await?;
         let rows = conn
-            .query("SELECT id, deploy_hash, plan_id, env_version FROM apps", &[])
+            .query(
+                "SELECT id, deploy_hash, plan_id, env_version, manifest_json FROM apps",
+                &[],
+            )
             .await?;
         let mut map = HashMap::new();
         for row in &rows {
@@ -487,11 +497,24 @@ impl Registry {
             let hash: Option<String> = row.get("deploy_hash");
             let plan_id: String = row.get("plan_id");
             let env_version: i64 = row.get("env_version");
+            let manifest_json: Option<String> = row.get("manifest_json");
+            let manifest = manifest_json.as_deref().and_then(|j| {
+                match serde_json::from_str::<zeroship_core::types::Manifest>(j) {
+                    Ok(m) => Some(m),
+                    Err(e) => {
+                        eprintln!(
+                            "[registry] versions: manifest parse failure for {id}: {e} — emitting None"
+                        );
+                        None
+                    }
+                }
+            });
             map.insert(id, AppVersionInfo {
                 deploy_hash: hash,
                 runtime: runtime_limits_for_plan(&plan_id),
                 plan_id,
                 env_version,
+                manifest,
             });
         }
         Ok(map)

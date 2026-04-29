@@ -1,12 +1,29 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use zeroship_core::types::{AppVersionInfo, VersionMap};
+use zeroship_core::types::{AppVersionInfo, Manifest, VersionMap};
 use zeroship_runtime::{EnvSnapshot, RuntimeLimits};
 
 use crate::{cache, WorkerConfig};
+
+/// Resolve the worker-entry blob hash from a manifest. Returns `None` for
+/// SSG-only deploys (worker missing) and logs+returns `None` if the
+/// manifest is malformed (entry not in modules) so the worker stays
+/// loud rather than silently running stale code.
+pub(crate) fn worker_entry_hash(manifest: &Manifest, app_id: &Uuid) -> Option<String> {
+    let worker = manifest.worker.as_ref()?;
+    match worker.modules.get(&worker.entry) {
+        Some(h) => Some(h.clone()),
+        None => {
+            eprintln!(
+                "[worker-sync] manifest.worker.entry {:?} missing from modules for {app_id}",
+                worker.entry
+            );
+            None
+        }
+    }
+}
 
 /// Process-wide snapshot of `/internal/versions`, refreshed by a single
 /// background poller regardless of how many ntex worker threads are running.
@@ -184,19 +201,29 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                 let env_changed = cached_version != Some(info.env_version);
 
                 if needs_update {
-                    let bundle_url =
-                        format!("{}/internal/bundles/{}", config.control_url, local_id);
-                    match http_get_bytes(&bundle_url, &config.control_key).await {
+                    // Resolve the worker-bundle blob hash from the manifest
+                    // shipped in `info`. The platform's invariant is that
+                    // a deployed app has `manifest.worker.modules[entry]` —
+                    // anything else is either an undeployed app (manifest
+                    // is None) or an SSG-only deploy (worker is None);
+                    // neither needs a V8 isolate.
+                    let bundle_hash = match info
+                        .manifest
+                        .as_ref()
+                        .and_then(|m| worker_entry_hash(m, local_id))
+                    {
+                        Some(h) => h,
+                        None => {
+                            // No worker code → drop any cached isolate so
+                            // the LRU slot is freed and on-demand load
+                            // doesn't fall back to a stale runtime.
+                            cache::evict_app(local_id);
+                            cache::remove_hash(local_id);
+                            continue;
+                        }
+                    };
+                    match config.blob_store.get_blob(&bundle_hash).await {
                         Ok(bytes) => {
-                            let computed = hex::encode(Sha256::digest(&bytes));
-                            if remote_hash.as_ref().is_some_and(|remote_hash| computed != *remote_hash) {
-                                crate::metrics::inc(&crate::metrics::BUNDLE_HASH_MISMATCH);
-                                eprintln!(
-                                    "[worker-sync] hash mismatch for {local_id}: expected {}, got {computed}",
-                                    remote_hash.as_deref().unwrap_or("")
-                                );
-                                continue;
-                            }
                             // Order: fetch+parse env BEFORE the V8 swap.
                             // Otherwise concurrent dispatches on the same
                             // thread between cache::load_app and
@@ -229,9 +256,9 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                                     cache::set_hash(*local_id, remote_hash.clone());
                                 }
                                 eprintln!(
-                                    "[worker-sync] updated {local_id} (plan: {}, hash: {}...)",
+                                    "[worker-sync] updated {local_id} (plan: {}, blob: {}...)",
                                     info.plan_id,
-                                    &computed[..computed.len().min(8)]
+                                    &bundle_hash[..bundle_hash.len().min(8)]
                                 );
                             }
                         }
@@ -362,8 +389,10 @@ fn this_thread_control_client() -> cyper::Client {
 /// instead of a hand-rolled TCP GET that assumed port 80, dropped the query,
 /// and split the body on `\r\n\r\n`.
 ///
-/// Public so handler.rs can use it for on-demand bundle loading.
-pub async fn http_get_bytes(url: &str, auth_key: &str) -> Result<Vec<u8>, String> {
+/// Used by the env / version polls (still HTTP). Worker-bundle bytes
+/// come from `BlobStore` directly — see `reconcile_once` and
+/// `handler::load_on_demand`.
+async fn http_get_bytes(url: &str, auth_key: &str) -> Result<Vec<u8>, String> {
     let client = this_thread_control_client();
     let mut builder = client
         .get(url)
