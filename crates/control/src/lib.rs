@@ -8,6 +8,7 @@ pub mod api;
 pub mod audit;
 pub mod auth_handlers;
 pub mod auth_service;
+pub mod deploy;
 pub mod env_handlers;
 pub mod env_store;
 pub mod http_util;
@@ -23,6 +24,7 @@ use std::sync::Arc;
 
 use zeroize::Zeroizing;
 use zeroship_core::vfs::BundleStore;
+use zeroship_core::BlobStore;
 
 pub use env_store::EnvStore;
 pub use rate_limit::{Quota, RateLimiter};
@@ -77,6 +79,10 @@ pub struct AppState {
     /// Optional Google OAuth config — `Some` enables /auth/google/* routes.
     pub google_oauth: Option<oauth::GoogleConfig>,
     pub vfs: Arc<dyn BundleStore + Send + Sync>,
+    /// Content-addressed blob store. Backs `.zsdeploy` ingestion and
+    /// (via the `internal::get_asset` shim, until phase 4) the
+    /// gateway's asset reads.
+    pub blob_store: Arc<dyn BlobStore>,
     pub control_key: SecretString,
     pub master_key: SecretString,
     /// Stripe webhook signing secret. Required in prod; empty +

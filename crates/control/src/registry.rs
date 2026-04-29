@@ -428,6 +428,38 @@ impl Registry {
         Ok(n > 0)
     }
 
+    /// Atomic deploy commit. Sets `deploy_hash` and `manifest_json` in
+    /// the same UPDATE so the gateway never observes a half-applied
+    /// deploy. Used by the .zsdeploy ingest path.
+    pub async fn set_deploy_with_manifest(
+        &self,
+        id: &Uuid,
+        deploy_hash: &str,
+        manifest_json: &str,
+    ) -> Result<bool, RegistryError> {
+        let conn = self.conn().await?;
+        let n = conn
+            .execute(
+                "UPDATE apps SET deploy_hash = $1, manifest_json = $2, \
+                 updated_at = NOW() WHERE id = $3",
+                &[&deploy_hash, &manifest_json, id],
+            )
+            .await?;
+        Ok(n > 0)
+    }
+
+    /// Fetch the raw manifest JSON for an app, if it has one. Used by
+    /// the legacy `internal::get_asset` shim while the gateway still
+    /// asks the control plane for asset bytes.
+    /// TODO(phase 4): remove once the gateway switches to BlobStore directly.
+    pub async fn get_manifest_json(&self, id: &Uuid) -> Result<Option<String>, RegistryError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query("SELECT manifest_json FROM apps WHERE id = $1", &[id])
+            .await?;
+        Ok(rows.first().and_then(|r| r.get::<_, Option<String>>("manifest_json")))
+    }
+
     /// Change the plan for an app.
     pub async fn set_plan(&self, id: &Uuid, plan_id: &str) -> Result<bool, RegistryError> {
         let conn = self.conn().await?;

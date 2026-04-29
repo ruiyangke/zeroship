@@ -19,6 +19,10 @@ uuid = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }
+zstd = { workspace = true }
+tar = { workspace = true }
+bytes = { workspace = true }
+async-trait = { workspace = true }
 mimalloc = { workspace = true }
 subtle = "2"
 zeroize = "1"

@@ -164,34 +164,19 @@ pub async fn get_routes(
 // Asset serving
 // ---------------------------------------------------------------------------
 
-/// Return the MIME content type for a file extension.
-fn content_type_for_ext(path: &str) -> &'static str {
-    if let Some(ext) = path.rsplit('.').next() {
-        match ext.to_ascii_lowercase().as_str() {
-            "html" => "text/html; charset=utf-8",
-            "js" | "mjs" => "application/javascript; charset=utf-8",
-            "css" => "text/css; charset=utf-8",
-            "json" => "application/json; charset=utf-8",
-            "png" => "image/png",
-            "jpg" | "jpeg" => "image/jpeg",
-            "gif" => "image/gif",
-            "svg" => "image/svg+xml",
-            "ico" => "image/x-icon",
-            "woff" => "font/woff",
-            "woff2" => "font/woff2",
-            "ttf" => "font/ttf",
-            "webp" => "image/webp",
-            "txt" => "text/plain; charset=utf-8",
-            "xml" => "application/xml; charset=utf-8",
-            "webmanifest" => "application/manifest+json",
-            _ => "application/octet-stream",
-        }
-    } else {
-        "application/octet-stream"
-    }
-}
-
 /// GET /internal/assets/{app_id}/{path:.*} — serve a static asset to the gateway.
+///
+/// TODO(phase 4): remove after gateway switches to BlobStore directly.
+/// Today this exists so the gateway still has a working asset path
+/// while phase 4 migrates `crates/gateway/src/router.rs` away from the
+/// legacy `/internal/assets/...` HTTP fetch.
+///
+/// Resolution order matches `crates/gateway/src/compiled.rs::lookup_asset`:
+/// `runtime_assets` wins on conflict, then `assets`. The hash from
+/// either map keys into `blob_store.get_blob`. The `content_type` on
+/// the response is what the manifest carries (not a sniffed extension)
+/// — that matches what the gateway will emit once it reads from
+/// `BlobStore` directly.
 pub async fn get_asset(
     state: State<Arc<AppState>>,
     path: web::types::Path<(String, String)>,
@@ -207,22 +192,57 @@ pub async fn get_asset(
         }
     };
 
-    let app_id_str = uid.to_string();
-    match state.vfs.get_asset(&app_id_str, &asset_path) {
-        Ok(data) => {
-            let ct = content_type_for_ext(&asset_path);
-            web::HttpResponse::Ok()
-                .content_type(ct)
-                .body(data)
-        }
-        Err(zeroship_core::vfs::VfsError::NotFound(_)) => {
-            web::HttpResponse::NotFound()
-                .json(&serde_json::json!({"error":"asset not found"}))
+    // Normalise the asset path to a leading-slash URL form. The gateway
+    // sends e.g. `index.html`, but the manifest keys are `/index.html`.
+    let lookup_path = if asset_path.starts_with('/') {
+        asset_path.clone()
+    } else {
+        format!("/{asset_path}")
+    };
+
+    // Pull the manifest JSON and look the asset up. NULL → 404 (the app
+    // hasn't deployed yet); parse failure → 500 (corrupt row).
+    let manifest_json = match state.registry.get_manifest_json(&uid).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return web::HttpResponse::NotFound()
+                .json(&serde_json::json!({"error": "asset not found"}));
         }
         Err(e) => {
-            web::HttpResponse::InternalServerError()
-                .json(&serde_json::json!({"error": e.to_string()}))
+            return web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error": e.to_string()}));
         }
+    };
+    let manifest: zeroship_core::types::Manifest = match serde_json::from_str(&manifest_json) {
+        Ok(m) => m,
+        Err(e) => {
+            return web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error": format!("manifest parse: {e}")}));
+        }
+    };
+
+    let entry = manifest
+        .runtime_assets
+        .get(&lookup_path)
+        .or_else(|| manifest.assets.get(&lookup_path));
+    let Some(entry) = entry else {
+        return web::HttpResponse::NotFound()
+            .json(&serde_json::json!({"error": "asset not found"}));
+    };
+
+    match state.blob_store.get_blob(&entry.hash).await {
+        Ok(bytes) => {
+            // bytes::Bytes -> Vec<u8> for ntex's body — phase 4 will let
+            // the gateway mmap directly and skip this copy entirely.
+            let body: Vec<u8> = bytes.to_vec();
+            web::HttpResponse::Ok()
+                .content_type(entry.content_type.clone())
+                .body(body)
+        }
+        Err(zeroship_core::BlobError::NotFound(_)) => web::HttpResponse::NotFound()
+            .json(&serde_json::json!({"error": "asset blob missing"})),
+        Err(e) => web::HttpResponse::InternalServerError()
+            .json(&serde_json::json!({"error": e.to_string()})),
     }
 }
 

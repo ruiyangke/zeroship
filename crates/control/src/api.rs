@@ -6,9 +6,9 @@ use ntex::web;
 use ntex::util::Bytes;
 use ntex::web::types::{Json, Path, State};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::deploy::{self, IngestError};
 use crate::registry::RegistryError;
 use crate::AppState;
 
@@ -179,6 +179,11 @@ pub async fn delete_app(req: web::HttpRequest, state: State<Arc<AppState>>, id: 
     }
 }
 
+/// Streaming `.zsdeploy` ingest. Replaces the legacy raw-bundle path —
+/// deploy bundles now arrive as zstd-compressed tar archives carrying
+/// `manifest.json` + `blobs/<sha256>` entries. See
+/// `docs/reference/zsdeploy.md` for the wire format and ingestion
+/// algorithm.
 pub async fn deploy(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,
@@ -194,27 +199,76 @@ pub async fn deploy(
         }
     };
 
-    // Compute SHA-256 hash of the bundle bytes.
-    let mut hasher = Sha256::new();
-    hasher.update(&body);
-    let deploy_hash = hex::encode(hasher.finalize());
-
-    // Store in VFS.
-    let app_id_str = uid.to_string();
-    if let Err(e) = state.vfs.put(&app_id_str, &body) {
-        return web::HttpResponse::InternalServerError()
-            .json(&serde_json::json!({"error": e.to_string()}));
+    // Hard cut: only `application/x-zsdeploy` is accepted. The legacy
+    // raw `.appbundle` and `application/javascript` paths are gone.
+    let content_type = req
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !is_zsdeploy_content_type(content_type) {
+        return web::HttpResponse::UnsupportedMediaType().json(&serde_json::json!({
+            "error": "unsupported content type",
+            "detail": "expected application/x-zsdeploy",
+        }));
     }
 
-    // Update deploy_hash in DB.
-    match state.registry.set_deploy_hash(&uid, &deploy_hash).await {
-        Ok(true) => {
-            web::HttpResponse::Ok().json(&serde_json::json!({"deploy_hash": deploy_hash}))
+    match deploy::ingest(&state.blob_store, &uid, &body).await {
+        Ok(success) => {
+            // Atomic UPDATE: deploy_hash + manifest_json land together
+            // so the gateway never sees half-applied state.
+            match state
+                .registry
+                .set_deploy_with_manifest(&uid, &success.deploy_hash, &success.manifest_json)
+                .await
+            {
+                Ok(true) => web::HttpResponse::Ok().json(&serde_json::json!({
+                    "deploy_hash": success.deploy_hash,
+                    "blobs_uploaded": success.blobs_uploaded,
+                    "blobs_deduped": success.blobs_deduped,
+                })),
+                Ok(false) => web::HttpResponse::NotFound()
+                    .json(&serde_json::json!({"error": "app not found"})),
+                Err(e) => error_response(e),
+            }
         }
-        Ok(false) => {
-            web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
+        Err(e) => ingest_error_to_response(e),
+    }
+}
+
+/// Permissive content-type check. We accept the canonical
+/// `application/x-zsdeploy` plus parameterised variants like
+/// `application/x-zsdeploy; charset=utf-8` (some clients add charset
+/// even on binary uploads).
+fn is_zsdeploy_content_type(value: &str) -> bool {
+    let primary = value.split(';').next().unwrap_or("").trim();
+    primary.eq_ignore_ascii_case("application/x-zsdeploy")
+}
+
+/// Map the structured ingest error to an HTTP response.
+fn ingest_error_to_response(e: IngestError) -> web::HttpResponse {
+    match e {
+        IngestError::BadRequest { error, detail } => web::HttpResponse::BadRequest()
+            .json(&serde_json::json!({"error": error, "detail": detail})),
+        IngestError::TooLarge { cap_bytes, observed_bytes } => {
+            web::HttpResponse::PayloadTooLarge().json(&serde_json::json!({
+                "error": "deploy too large",
+                "cap_bytes": cap_bytes,
+                "observed_bytes": observed_bytes,
+            }))
         }
-        Err(e) => error_response(e),
+        IngestError::UnsupportedMediaType => web::HttpResponse::UnsupportedMediaType()
+            .json(&serde_json::json!({
+                "error": "unsupported content type",
+                "detail": "expected application/x-zsdeploy",
+            })),
+        IngestError::BlobStoreUnavailable(detail) => web::HttpResponse::ServiceUnavailable()
+            .json(&serde_json::json!({
+                "error": "blob store unavailable",
+                "detail": detail,
+            })),
+        IngestError::Internal(detail) => web::HttpResponse::InternalServerError()
+            .json(&serde_json::json!({"error": "internal", "detail": detail})),
     }
 }
 
@@ -255,39 +309,3 @@ pub async fn get_usage(state: State<Arc<AppState>>, id: Path<String>) -> web::Ht
     }
 }
 
-// ---------------------------------------------------------------------------
-// Asset upload
-// ---------------------------------------------------------------------------
-
-pub async fn upload_asset(
-    req: web::HttpRequest,
-    state: State<Arc<AppState>>,
-    path: Path<(String, String)>,
-    body: Bytes,
-) -> web::HttpResponse {
-    if let Some(resp) = check_admin_auth(&req, &state) {
-        return resp;
-    }
-    let (id, asset_path) = path.into_inner();
-    let uid = match id.parse::<Uuid>() {
-        Ok(u) => u,
-        Err(_) => {
-            return web::HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error":"invalid uuid"}))
-        }
-    };
-
-    if asset_path.is_empty() {
-        return web::HttpResponse::BadRequest()
-            .json(&serde_json::json!({"error":"asset path required"}));
-    }
-
-    let app_id_str = uid.to_string();
-    if let Err(e) = state.vfs.put_asset(&app_id_str, &asset_path, &body) {
-        return web::HttpResponse::InternalServerError()
-            .json(&serde_json::json!({"error": e.to_string()}));
-    }
-
-    web::HttpResponse::Ok()
-        .json(&serde_json::json!({"uploaded": asset_path, "size": body.len()}))
-}

@@ -1,10 +1,12 @@
 //! zeroship-control — control plane binary. Thin wrapper over
 //! `zeroship_control` (the library crate).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use ntex::web;
 use zeroship_core::vfs::{BundleStore, LocalFs};
+use zeroship_core::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::{
     api, auth_handlers, auth_service, env_handlers, internal, oauth, stripe_handlers,
     AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
@@ -91,6 +93,16 @@ async fn main() -> std::io::Result<()> {
         LocalFs::new(&bundles_dir).expect("failed to initialise bundle store"),
     ) as Arc<dyn BundleStore + Send + Sync>;
 
+    // Phase 2: BlobStore lives alongside the legacy BundleStore on the
+    // same root. New `.zsdeploy` deploys land in `<bundles_dir>/blobs/`
+    // and `<bundles_dir>/manifests/`; legacy `<bundles_dir>/<app_id>/...`
+    // files stay where they are until phase 4 retires the BundleStore.
+    let blob_root = PathBuf::from(&bundles_dir);
+    let blob_store: Arc<dyn BlobStore> = Arc::new(
+        LocalDiskBlobStore::new(blob_root)
+            .expect("failed to initialise blob store"),
+    );
+
     let legacy_keys: Vec<&str> = legacy_master_keys_raw
         .split(',')
         .map(str::trim)
@@ -153,6 +165,7 @@ async fn main() -> std::io::Result<()> {
         auth,
         google_oauth,
         vfs,
+        blob_store,
         control_key: zeroship_control::SecretString::new(control_key),
         master_key: zeroship_control::SecretString::new(master_key),
         stripe_webhook_secret: zeroship_control::SecretString::new(stripe_webhook_secret),
@@ -180,10 +193,14 @@ async fn main() -> std::io::Result<()> {
                     .route(web::delete().to(api::delete_app)),
             )
             .service(
-                // 16MB body cap so server bundles bundling
-                // langchain/deepagents/etc. (1-2MB) fit.
+                // 256MB cap matches `MAX_COMPRESSED_BYTES` in deploy.rs.
+                // ntex's PayloadConfig only enforces a single upper
+                // bound on the request body — the decompressed cap is
+                // enforced separately as we read the tar stream.
                 web::resource("/api/apps/{id}/deploy")
-                    .state(web::types::PayloadConfig::new(16 * 1024 * 1024))
+                    .state(web::types::PayloadConfig::new(
+                        zeroship_control::deploy::MAX_COMPRESSED_BYTES,
+                    ))
                     .route(web::post().to(api::deploy)),
             )
             .service(
@@ -193,17 +210,6 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/api/apps/{id}/usage")
                     .route(web::get().to(api::get_usage)),
-            )
-            .service(
-                // ntex's `{path:.*}` only matches a single segment;
-                // `{path}*` is the tail-match syntax that handles
-                // nested paths like `assets/index-abc.js`.
-                //
-                // 16MB body cap — ntex's default is 256KB which is
-                // too small for typical SPA bundles (1-2MB minified).
-                web::resource("/api/apps/{id}/assets/{path}*")
-                    .state(web::types::PayloadConfig::new(16 * 1024 * 1024))
-                    .route(web::put().to(api::upload_asset)),
             )
             .service(
                 web::resource("/api/apps/{id}/vars")
