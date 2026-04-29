@@ -42,7 +42,7 @@ weeks. Calibration points from recent sessions:
 - PGlite integration end-to-end + 4 real bugs fixed: ~1 day
 - Runtime WinterCG refactor with 7 perf rounds: ~2 days
 - C++ tier-1 experiment (3 iterations + revert): ~half day
-- Original zeroship platform (CLAUDE.md note): ~2 weeks
+- Original zeroship platform (AGENTS.md note): ~2 weeks
 
 **Fast-compression work** (AI writes, human reviews): CRUD SDKs, native plugins,
 dashboard UI, tests, migrations — expect 3-10× speedup vs pre-AI estimates.

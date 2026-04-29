@@ -52,7 +52,7 @@ We already have much of this. What CF *doesn't* have is the creator-economy laye
 
 ## Current state inventory
 
-What we have today (from CLAUDE.md + this codebase):
+What we have today (from AGENTS.md + this codebase):
 
 | Layer | Status | Notes |
 |---|---|---|
