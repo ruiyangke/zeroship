@@ -1,0 +1,150 @@
+# Gateway routing
+
+Per-request flow through `crates/gateway`. This is the most actively edited surface — read this before touching `dispatch.rs`, `router.rs`, or `core/src/types.rs`'s `Manifest`.
+
+## Pipeline
+
+```
+HTTP request
+  │
+  ├─ extract_app_name (subdomain or path-prefix)        crates/gateway/src/router.rs
+  ├─ lookup_by_name → (Uuid, Arc<CompiledRoute>)        crates/gateway/src/sync.rs
+  │
+  ├─ COMPILED MANIFEST DISPATCH                          crates/gateway/src/compiled.rs
+  │    walk pre-compiled rules in declaration order
+  │    method bitset check (1 bit-AND)
+  │    matcher (Exact/Prefix/Glob/Any)
+  │    action → Outcome
+  │
+  ├─ Outcome::Static    → fetch from control plane → respond with cache headers
+  ├─ Outcome::Worker    → forward via CHWBL hash ring → worker (V8)
+  ├─ Outcome::Redirect  → 30x with Location header
+  └─ Outcome::NotFound  → 404
+```
+
+Source manifest: `crates/core/src/types.rs` (`Manifest`, `Rule`, `Match`, `Action`). JSON wire format, stays serializable.
+
+Compiled form: `crates/gateway/src/compiled.rs`. Built once at route-update time. Gateway-private.
+
+## The `Manifest` JSON shape
+
+```jsonc
+{
+  "rules": [
+    {
+      "match": { "kind": "prefix", "method": "POST", "path": "/_rpc/" },
+      "action": { "kind": "worker", "mode": "rpc" }
+    },
+    {
+      "match": { "kind": "glob", "path": "/blog/[slug]" },
+      "action": { "kind": "worker", "mode": "ssr" }
+    },
+    {
+      "match": { "kind": "any" },
+      "action": {
+        "kind": "static",
+        "try": ["$path", "/index.html"],
+        "cache": { "max_age": 60 }
+      }
+    }
+  ],
+  "build_assets": {
+    "/index.html":     { "hash": "sha256-...", "content_type": "text/html",       "size": 2048 },
+    "/_assets/main.js":{ "hash": "sha256-...", "content_type": "application/javascript", "size": 84203 }
+  },
+  "runtime_assets": {},
+  "server_bundle_hash": "sha256-...",
+  "asset_version": 0
+}
+```
+
+- **`rules`** are walked first-match-wins. Specificity ordering is enforced at parse time by `Manifest::validate()` (shadow detection).
+- **`build_assets`** is the immutable map of paths → content-addressed assets. Populated on deploy.
+- **`runtime_assets`** is mutable, populated by the user's server code via `zeroship.assets.put(...)`. `asset_version` bumps on each mutation; the gateway re-syncs only when it changes.
+- **`server_bundle_hash`** is distinct from the deploy's overall `deploy_hash` so an asset-only deploy doesn't bust the worker's V8 isolate.
+
+## `Match` variants
+
+| Variant | What it matches | Captures |
+| --- | --- | --- |
+| `Exact { method?, path }` | path equality | none |
+| `Prefix { method?, path }` | segment-aware prefix; `/admin` matches `/admin`, `/admin/`, `/admin/users`, **not** `/administrator` | none |
+| `Glob { method?, path }` | Next.js-style: `[slug]` (single segment), `[...rest]` (catch-all, must be last), `*` (anonymous single segment) | named, by capture group |
+| `Any` | every request | none |
+
+Method-omitted (or `"*"`) means all methods.
+
+## `Action` variants
+
+| Variant | Effect |
+| --- | --- |
+| `Static { try, cache?, status? }` | Walk `try` chain (each entry is a template). First entry that resolves to an asset wins. Substitutes `$path` and `[name]`. |
+| `Worker { mode, cache?, rate_limit? }` | Forward to worker. `mode = rpc` checks API key first; `mode = ssr` is open. |
+| `Redirect { to, status }` | HTTP 30x. `to` accepts the same templates as `Static`. |
+| `Rewrite { to }` | Internal rewrite. Restart the rule walk with the new path. Bounded by `MAX_HOPS = 8`. |
+
+## Two non-obvious invariants
+
+1. **`Action::Static` only fires for GET/HEAD.** Even if the matching rule is `Match::Any`, a POST/PUT/DELETE skips Static rules and falls to the next match. Without this, `Any → Static` would serve the SPA shell HTML on POST. This invariant is encoded in the dispatcher; manifest writers don't have to add the method gate themselves.
+
+2. **The first entry of `try` does NOT have to be `$path`.** It's just a template. `try: ["/404.html"]` with `status: 404` is a legal final rule. The dispatcher walks the chain in order and serves the first asset that exists.
+
+## Validation (parse-time errors)
+
+`Manifest::validate()` in `crates/core/src/types.rs` checks:
+
+- `Action::Static.status` ∈ `[100, 599]` and `Action::Redirect.status` ∈ `[300, 399]`. Out-of-range = parse error.
+- **Shadow detection.** A rule is shadowed when an earlier rule's `(effective_methods, path-coverage)` is a strict superset. `Manifest::passthrough()` and the standard SSR app shape (`POST /_rpc/`, `Glob /blog/[slug]`, `Any → Static`) all pass. Glob-as-shadower is deferred (TODO in code).
+
+Apps whose manifest fails validation get `Manifest::passthrough()` synthesized with a logged warning — they're never served from a broken manifest.
+
+## Compiled dispatch (the hot path)
+
+`CompiledManifest::compile(&Manifest)` builds:
+
+- A `Vec<CompiledRule>` in declaration order.
+- Per rule: pre-computed method bitset (1 byte), pre-segmented `Glob` patterns, pre-parsed templates (`$path`/`[name]` resolved into a `Vec<TemplateChunk>` so `String::replace` doesn't run per request).
+- The `Match::Prefix` strings are normalized at compile time (trailing slash stripped).
+
+Per-request dispatch:
+
+```
+for rule in compiled.rules:
+    if (req_method_bit & rule.methods) == 0: continue
+    if not rule.matcher.matches(path, &mut captures): continue
+    return rule.action.evaluate(path, &captures)
+```
+
+No HashMap allocation on the hot path for non-glob matches. Captures are an inline-sized `SmallVec` (or empty slice) collected only for `Match::Glob`.
+
+## Synthesized passthrough
+
+Apps that haven't shipped a manifest get this default at registry-load time:
+
+```jsonc
+{
+  "rules": [
+    { "match": { "kind": "prefix", "method": "POST", "path": "/_rpc/" },
+      "action": { "kind": "worker", "mode": "rpc" } },
+    { "match": { "kind": "any" },
+      "action": { "kind": "worker", "mode": "ssr" } }
+  ]
+}
+```
+
+Reproduces the pre-manifest behavior: POST `/_rpc/<method>` is RPC (gateway gates the API key); everything else goes to the worker as SSR.
+
+## Common things to look up
+
+- "How does the gateway find an asset by path?" → `serve_static_hit` in `crates/gateway/src/router.rs` calls `fetch_asset` which does `GET /internal/assets/{app_id}/{path}` against control. Bytes flow back; ETag = `hash`; Cache-Control composed from `CacheCtl` precedence (entry → rule → default).
+- "Why doesn't `manifest.hosts` work?" → It was deleted (Tier 1). Custom-domain support requires a verified `host → app_id` map at the gateway level; reintroduce when DNS TXT or ACME verification lands.
+- "What's `Outcome::Rewrite`?" → It doesn't exist anymore. Rewrites are walked internally via `MAX_HOPS = 8`. If the hop budget is exhausted (cycle), the dispatcher returns `Outcome::NotFound`.
+
+## Where to start when changing routing behavior
+
+| You're doing… | First read | Then edit |
+| --- | --- | --- |
+| Adding a new `Match` kind | `crates/core/src/types.rs` (`Match` enum, `Match::test`) | Add variant; extend `CompiledMatch` in `crates/gateway/src/compiled.rs`; extend shadow detection's `covers_path` |
+| Adding a new `Action` kind | `crates/core/src/types.rs` (`Action`); `crates/gateway/src/dispatch.rs` (`Outcome`) | Add variants in both places; extend `CompiledAction`; extend `execute_outcome` in `router.rs` |
+| Changing how assets are fetched | `crates/gateway/src/router.rs` (`fetch_asset`, `serve_static_hit`) | Replace the hand-rolled HTTP client (Tier 3 plan: pooled `cyper` client + LRU bytes cache) |
+| Adding a manifest validator | `crates/core/src/types.rs` (`Manifest::validate`) | Append a check; add tests in `crates/core/tests/types_test.rs` |

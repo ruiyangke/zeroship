@@ -1,54 +1,61 @@
 # zeroship
 
-A platform where anyone can create, launch, and monetize software — without writing code.
+A platform where anyone can create, launch, and monetize software — without writing code. Creators describe what they want in natural language. AI builds it. The platform handles everything: hosting, database, auth, payments, scaling. The platform takes 15%; the creator keeps the rest. Think Shopify for AI-generated apps.
 
-Creators describe what they want. AI builds it. The platform handles everything: hosting, database, auth, payments, scaling. Creators earn money. The platform takes 15%.
+This file is the AI-agent landing page. Read the **task router** below first.
 
-Think Shopify for AI-generated apps.
+---
 
-## Vision
+## Where to start, by task
 
-Non-technical creators should be able to go from idea to profitable app in minutes:
+| If you're working on… | Start here |
+| --- | --- |
+| **Routing / dispatch / manifest** | `docs/architecture/gateway-routing.md` · `crates/gateway/src/dispatch.rs` · `crates/core/src/types.rs` (`Manifest`, `Rule`, `Match`, `Action`) |
+| **V8 runtime** (fetch, streams, WebSocket, modules) | `docs/architecture/runtime.md` · `crates/runtime/` |
+| **Adding a native primitive** (`zeroship.*`) | `docs/reference/plugin-system.md` · `crates/runtime-macros/` · `crates/plugin-{db,kv,storage}/` |
+| **Control plane** (app CRUD, deploy, env, route registry) | `docs/architecture/control-plane.md` · `crates/control/src/api.rs` · `crates/control/src/registry.rs` |
+| **Bundle format** (.appbundle on disk + in V8) | `docs/reference/appbundle-format.md` · `crates/bundle/src/lib.rs` |
+| **Auth** (creator + end-user, OAuth, JWT) | `docs/reference/auth.md` · `crates/control/src/auth_*.rs` · `crates/gateway/src/auth.rs` |
+| **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `docs/reference/mongoose-compat.md` · `crates/plugin-db/` |
+| **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/control/src/{stripe_handlers,stripe_store,metering}.rs` |
+| **WebSocket** (RFC 6455 implementation) | `docs/reference/websocket-design.md` · `crates/runtime/src/` (search `WebSocket`) |
+| **Vite plugin / build pipeline** | `docs/reference/vite-environment-api.md` · `sdks/vite-plugin/` |
+| **Node.js compat** (npm packages in V8) | `docs/reference/node-compat.md` · `crates/runtime/src/init.rs` |
+| **Benchmarks** | `crates/runtime/benches/` · `docs/reference/zerobench.md` · `docs/benchmarks/` |
+| **Local dev setup** | `docs/runbooks/local-dev.md` |
+| **Multi-node / Docker Compose** | `docs/runbooks/docker-compose.md` |
+| **Why we made decision X** | `docs/decisions/` (date-prefixed ADRs, immutable once landed) |
+| **Pre-ship proposals** | `docs/proposals/` (active, may not have shipped) |
+| **AI-builder competitive landscape** | `docs/research/ai-builder-features.md` |
 
-1. Creator: "I want a recipe sharing app with user accounts and a paid tier"
-2. AI generates the full app (code, database schema, auth flow, payment integration)
-3. Platform deploys and runs it (compute, database, auth, billing — all handled)
-4. Creator sets pricing (free tier + $9/mo pro)
-5. End users sign up, subscribe, use the app
-6. Creator gets paid (Stripe → 85% to creator, 15% platform fee)
+---
 
-The creator never touches code, infrastructure, or ops. They focus on their product and audience.
+## System map
 
-## Architecture
+Two systems, shared infrastructure, **zero tokio** — everything on compio/io_uring.
 
-Two systems, shared infrastructure, zero tokio, everything on compio/io_uring.
-
-### System 1: Creator Platform
-
-For creators — build, deploy, manage, monetize apps.
+### System 1 — Creator Platform (creators build, deploy, monetize)
 
 ```
 Creator Dashboard (web UI)
-  → Control Plane     App CRUD, deploy, billing, analytics, route registry
-  → Builder Service   AI app generation, templates, preview (future)
+  → Control Plane     App CRUD, deploy, billing, route registry
+  → Builder Service   AI app generation, templates, preview
 ```
 
-### System 2: App Runtime
-
-For end users — use the apps creators built.
+### System 2 — App Runtime (end users hit the apps creators ship)
 
 ```
-End Users → Gateway          JWT validation, rate limiting, CHWBL routing, static assets
+End Users → Gateway          JWT, rate-limit, manifest dispatch, asset proxy, CHWBL routing
            → Auth Service    Login/signup, OAuth, consent, sessions
-           → Workers (V8)    App code, zeroship.db/auth/kv/storage primitives
+           → Workers (V8)    App code · zeroship.{db,auth,kv,storage,meter} primitives
 ```
 
-### Shared Infrastructure
+### Shared
 
 ```
 PostgreSQL          One database, separate schemas (control, auth, per-app)
-Object Storage      Bundles, assets, user uploads
-DNS/Domains         console.zeroship.ai, auth.zeroship.ai, {app}.zeroship.ai
+Object Storage      Bundles, assets, user uploads (LocalFs in dev; S3/R2 in prod)
+DNS                 console.zeroship.ai · auth.zeroship.ai · {app}.zeroship.ai
 ```
 
 ### How they connect
@@ -57,84 +64,81 @@ DNS/Domains         console.zeroship.ai, auth.zeroship.ai, {app}.zeroship.ai
 Creator Platform                          App Runtime
 ────────────────                          ───────────
 Control Plane ───deploy bundle──────────→ Object Storage
-              ───update routes──────────→ Gateway (syncs every 5s)
+              ───update routes──────────→ Gateway (HTTP pull every 5s)
               ───register model─────────→ PostgreSQL (per-app schema)
 
 Auth Service ←──401 redirect────────────← Gateway (end-user not logged in)
-             ───JWT cookie──────────────→ Gateway (validates on every request)
+             ───JWT cookie──────────────→ Gateway (validates per request)
              ───user profile────────────→ Workers (via ZeroShip-User header)
 ```
 
-### Key technical decisions
+For the long form with sequence diagrams, see `docs/architecture/distributed.md`.
 
-- **Runtime**: V8 + compio/io_uring (394K req/s raw, 354K through full pipeline)
-- **HTTP framework**: ntex + compio (matches raw httparse at scale)
-- **Database**: zeroship-pg (compio-native PostgreSQL driver, no tokio)
-- **Routing**: CHWBL (Consistent Hashing with Bounded Loads, XXH3, 150 vnodes)
-- **Gateway → worker**: HTTP/1.1 keep-alive connection pool + Unix domain socket support
-- **Bundle format**: .appbundle (APPB magic, zstd compression, SHA-256 integrity, lazy decompression)
-- **Worker dispatch**: V8 per thread (Option B), on-demand bundle loading, LRU eviction
-- **Sync**: HTTP pull every 5s (worker polls control for version changes)
+---
 
-## Crates
+## Crate index
 
 ```
 crates/
-├── core/           Shared types, typed_id (UUIDv7 + base62), VFS, auth utilities
-├── pg/             PostgreSQL driver (compio-native, zero tokio)
-├── bundle/         .appbundle binary format (read, write, lazy decompress)
-├── runtime/        V8 engine + compio event loop + fetch + WebSocket + crypto + auth context
-├── runtime-macros/ #[zeroship_op] proc macro
-├── compiler/       SWC + esbuild → .appbundle
+├── core/             Shared types, typed_id (UUIDv7 + base62), VFS, auth utils, Manifest
+├── compio-postgres/  PostgreSQL driver (compio-native, replaces sqlx)
+├── compio-redis/     Redis driver (cluster-aware, compio-native)
+├── bundle/           .appbundle binary format (read, write, lazy decompress)
+├── runtime/          V8 + compio event loop + fetch + WebSocket + crypto + auth context
+├── runtime-macros/   #[zeroship_op] proc macro
+├── compiler/         SWC + esbuild → .appbundle
+├── plugin-db/        zeroship.db.* native ops
+├── plugin-kv/        zeroship.kv.* native ops
+├── plugin-storage/   zeroship.storage.* native ops
 │
-│ System 1: Creator Platform
-├── control/        Control plane (app CRUD, deploy, billing, route registry)
+│ System 1 — Creator Platform
+├── control/          Control plane (app CRUD, deploy, billing, env, route registry)
 │
-│ System 2: App Runtime
-├── auth/           Auth service (users, login, OAuth, consent, JWT) [to be extracted]
-├── gateway/        Gateway (JWT validation, rate limiting, CHWBL routing, proxy)
-├── worker/         Worker (V8 per thread, on-demand bundle loading, LRU)
+│ System 2 — App Runtime
+├── gateway/          Manifest dispatch, JWT, rate-limit, CHWBL routing, asset proxy
+├── worker/           V8-per-thread, on-demand bundle loading, LRU eviction
 │
 │ Tools
-└── cli/            CLI: build, serve, deploy, inspect
+└── cli/              CLI: build, serve, deploy, inspect
 ```
 
-## What's built
+Per-crate READMEs (where present) carry the responsibility statement and list of important files.
 
-- V8 runtime: fetch, WebSocket (RFC 6455), WebCrypto, streams, .appbundle
-- Platform: control + auth + gateway + worker (4 components)
-- PostgreSQL driver (compio-native, replaces sqlx, eliminates tokio)
-- CHWBL routing with XXH3, connection pool, UDS support
-- On-demand V8 loading, LRU eviction, V8 isolate enter/exit for multi-app
-- Auth service: user registration, login, bcrypt, JWT (HS256), OAuth (pluggable), consent
-- Gateway JWT middleware: cookie validation, user injection, 401 redirect
-- Typed IDs: UUIDv7 + base62 encoding + entity prefix (usr_, app_, ses_)
-- Docker Compose deployment (tested at 50 workers)
-- CLI: zeroship build, serve, deploy, inspect
-- E2E tests (20/20 passing), benchmarks (354K req/s pipeline)
-- Zero tokio in the entire stack
+---
 
-## SDK Architecture
+## Key invariants
+
+These don't change. If you're about to violate one, stop and ask.
+
+- **Zero tokio in the stack.** Everything is compio/io_uring. Drivers are bespoke (`compio-postgres`, `compio-redis`).
+- **V8 per thread, one isolate per app.** Worker uses LRU eviction; isolates `enter`/`exit` to allow many apps per thread (`crates/worker/src/cache.rs`).
+- **typed_id everywhere.** UUIDv7 + base62 + entity prefix (`usr_…`, `app_…`, `ses_…`). Defined in `crates/core/src/typed_id.rs`.
+- **Wire formats are immutable contracts.** `Manifest`, `RouteEntry`, `AppRecord`, `.appbundle` headers — back-compat is required at the wire level even when internal types change.
+- **Native primitives are the kernel.** Anything user code can do via `fetch` or composition belongs in an npm package (`@zeroship/*`), not in Rust. The native surface is small and stable on purpose.
+- **The gateway is dumb.** It does manifest dispatch, JWT, rate-limit, CHWBL routing — and forwards. All app logic runs in the worker.
+
+---
+
+## SDK layers
 
 Two layers: native primitives (Rust kernel) and npm packages (JS ecosystem).
 
 ### Native primitives (`zeroship.*` global)
 
-Registered by Rust on every V8 isolate. The "syscalls" of the platform — stable, secure, low-level:
+Registered by Rust on every V8 isolate. The "syscalls" of the platform — small, stable, low-level:
 
 ```
-zeroship.db.*       — structured database operations (no raw SQL)
-zeroship.auth.*     — getUser/requireUser (reads gateway-injected user context)
-zeroship.storage.*  — object storage put/get/delete
-zeroship.kv.*       — key-value get/set/delete
-zeroship.meter.*    — billing counter increment
+zeroship.db.*       structured database operations (no raw SQL)
+zeroship.auth.*     getUser/requireUser (reads gateway-injected user context)
+zeroship.storage.*  object storage put/get/delete
+zeroship.kv.*       key-value get/set/delete
+zeroship.meter.*    billing counter increment
+zeroship.assets.*   runtime-emitted static asset CRUD (manifest runtime_assets)
 ```
 
 Creators don't call these directly. SDK packages wrap them.
 
 ### SDK packages (`@zeroship/*` npm scope)
-
-High-level APIs published as standard npm packages. Creators install and import them:
 
 ```javascript
 import { createDb, t, schema } from "@zeroship/db";
@@ -143,86 +147,73 @@ import { storage } from "@zeroship/storage";
 import { kv } from "@zeroship/kv";
 ```
 
-SDK packages call `zeroship.*` primitives internally. They handle validation, query building, error mapping, and TypeScript types. They evolve independently of the Rust runtime.
+SDK packages call `zeroship.*` primitives internally. Validation, query building, error mapping, TypeScript types all live in JS. They evolve independently of the Rust runtime.
 
-### Extensibility
+### When to add a native primitive vs. an npm package
 
-Features that compose existing primitives are pure JS packages — no Rust needed:
+| Needs Rust (new primitive) | Pure JS (npm package) |
+| --- | --- |
+| New storage backend | `@zeroship/email` (calls fetch) |
+| New database engine | `@zeroship/payments` (Stripe wrapper) |
+| Low-level crypto ops | `@zeroship/ai` (OpenAI/Claude wrapper) |
+| New protocol (e.g., gRPC) | `@zeroship/permissions` (uses db + auth) |
 
-```
-Needs Rust (new primitive):        Pure JS (npm package):
-  New storage backend               @zeroship/email (calls fetch)
-  New database engine                @zeroship/payments (calls fetch to Stripe)
-  Low-level crypto ops               @zeroship/ai (calls fetch to OpenAI/Claude)
-                                     @zeroship/permissions (uses db + auth)
-                                     @zeroship/analytics (uses db)
-                                     Third-party: @cooldev/zeroship-redis
-```
+Default to npm package. Native primitives are forever.
 
-~90% of new features are pure JS. The native layer is the stable kernel.
+---
 
-## What's next
+## Reference docs
 
-### Phase 2: Creator platform (the product) — IN PROGRESS
+Stable contracts, live in `docs/reference/`:
 
-- **@zeroship/db** — DONE: createDb, schema builder, typed CRUD, naming strategy, soft delete, transactions, aggregation
-- **@zeroship/auth** — DONE: platform-managed auth, getUser/requireUser, gateway JWT, OAuth (pluggable)
-- **@zeroship/storage** — per-app file storage, put/get/delete
-- **@zeroship/kv** — key-value store, sessions, cache, feature flags
-- **Stripe Connect** — creators connect Stripe, end users subscribe, revenue splits
-- **Creator dashboard** — web UI for apps, pricing, revenue, analytics
-- **Custom domains** — {app-name}.zeroship.ai + creator's own domain
+- `api-design-guidelines.md` — 10 principles for AI-friendly APIs
+- `db.md` — `@zeroship/db`: createDb, schema, CRUD, aggregation, naming strategy
+- `auth.md` — platform-managed auth, gateway JWT, OAuth, consent
+- `billing-metering.md` — Meter trait, 25+ metrics, pricing, spending limits
+- `appbundle-format.md` — binary bundle layout
+- `websocket-design.md` — WebSocketPair, RFC 6455
+- `plugin-system.md` — how to add a `zeroship.*` namespace
+- `node-compat.md` — Node.js module resolution in V8
+- `vite-environment-api.md` — Vite dev server inside the V8 runtime
+- `mongoose-compat.md` — what `@zeroship/db` matches from Mongoose
+- `zerobench.md` — the HTTP/SSE/WS benchmark tool
 
-### Phase 3: AI app builder (the differentiator)
-
-- Creator describes the app in natural language
-- AI generates: app code, database schema, auth flow, pricing page
-- One-click deploy to the platform
-- Iterative: "add a feature that..." → AI updates the app
-
-### Phase 4: Ecosystem
-
-- **@zeroship/email** — transactional email (via Resend/Sendgrid)
-- **@zeroship/payments** — Stripe wrapper for subscriptions
-- **@zeroship/ai** — LLM inference wrapper
-- **Marketplace** — discover and install published apps
-
-## Specs
-
-- `docs/specs/api-design-guidelines.md` — 10 principles for AI-friendly APIs
-- `docs/specs/db.md` — @zeroship/db: createDb, schema builder, CRUD, aggregation, naming strategy
-- `docs/specs/auth.md` — @zeroship/auth: platform-managed auth, gateway JWT, OAuth, consent
-- `docs/specs/billing-metering.md` — Meter trait, 25+ metrics, pricing, spending limits
-- `docs/specs/appbundle-format.md` — binary bundle format
-- `docs/specs/websocket-design.md` — WebSocketPair, RFC 6455
+---
 
 ## Development
 
 ```bash
-# Build
+# Build (workspace)
 cargo build --release
 
 # Run single-tenant (dev)
 zeroship serve myapp.js --port 3000
 
-# Run platform (production)
-zeroship-control --port 9090 --db postgres://... --bundles ./bundles --auth-secret <secret>
+# Run platform (multi-node)
+zeroship-control --port 9090 --db postgres://... --bundles ./bundles --auth-secret <s>
 zeroship-worker --port 8080 --workers 16 --control http://localhost:9090
-zeroship-gate --port 80 --control http://localhost:9090 --workers http://localhost:8080 --auth-secret <secret>
+zeroship-gate    --port 80   --control http://localhost:9090 --workers http://localhost:8080 --auth-secret <s>
 
-# Deploy an app
-zeroship deploy ./src --app=<uuid> --control=http://localhost:9090 --key=<master-key>
+# Deploy
+zeroship deploy ./src --app=<uuid> --control=http://localhost:9090 --key=<master>
 
-# Docker Compose (multi-node)
+# Docker Compose
 docker compose up -d --scale worker=10
 
-# Tests
-./tests/e2e_platform.sh       # 20 E2E tests
-./tests/bench_platform.sh     # performance benchmarks
-cargo test -p zeroship-pg -- --test-threads=1  # 26 Postgres driver tests
-cargo test -p zeroship-core    # 22 core tests
-cargo test -p zeroship-bundle  # 10 bundle tests
+# Tests (per crate)
+cargo test -p zeroship-core
+cargo test -p zeroship-gateway
+cargo test -p zeroship-bundle
+cargo test -p compio-postgres -- --test-threads=1   # needs DB
+
+# E2E + benchmarks
+./tests/e2e_platform.sh
+./tests/bench_platform.sh
 ```
+
+Detailed setup: `docs/runbooks/local-dev.md`. Multi-node: `docs/runbooks/docker-compose.md`.
+
+---
 
 ## Revenue model
 
@@ -235,4 +226,4 @@ Creator's app earns $100/mo from subscribers:
 Infrastructure cost per app: ~$0.12/mo (98% gross margin)
 ```
 
-Platform only earns when creators earn. Aligned incentives.
+The platform only earns when creators earn. Aligned incentives.
