@@ -25,6 +25,10 @@ RHAI="$SCRIPT_DIR/zeroship-bench.rhai"
 DURATION="${DURATION:-10s}"
 CONNS="${CONNS:-300}"
 WORKERS="${WORKERS:-16}"
+# Client-side zerobench worker threads — separate knob from the
+# server's WORKERS so asymmetric loads (e.g. 16-core bench vs 4-core
+# server) can be modelled without editing this script.
+CLIENT_THREADS="${CLIENT_THREADS:-$WORKERS}"
 RATE="${RATE:-}"
 MODE="${MODE:-saturate}"
 PORT_V8_1=5100
@@ -120,9 +124,13 @@ sleep 1
 # nginx — echo target used by the fetchEcho scenario.
 $NUMA_SERVER "$NGINX_BIN" -c "$NGINX_DIR/nginx.conf" -p "$NGINX_DIR" > /dev/null 2>&1 &
 PIDS+=($!)
-$NUMA_SERVER "$BIN/v8-server-compio" --port="$PORT_V8_1" --workers=1 > /dev/null 2>&1 &
+# ZEROSHIP_DEV=1 disables the runtime's SSRF protection so the
+# fetchEcho scenario can hit the in-NUMA nginx on 127.0.0.1 —
+# otherwise the runtime returns 500 "Blocked request to
+# private/internal IP" on every fetchExternal call.
+ZEROSHIP_DEV=1 $NUMA_SERVER "$BIN/v8-server-compio" --port="$PORT_V8_1" --workers=1 > /dev/null 2>&1 &
 PIDS+=($!)
-$NUMA_SERVER "$BIN/v8-server-compio" --port="$PORT_V8_N" --workers="$WORKERS" > /dev/null 2>&1 &
+ZEROSHIP_DEV=1 $NUMA_SERVER "$BIN/v8-server-compio" --port="$PORT_V8_N" --workers="$WORKERS" > /dev/null 2>&1 &
 PIDS+=($!)
 $NUMA_SERVER node "$SCRIPT_DIR/node_server.js" $PORT_NODE > /dev/null 2>&1 &
 PIDS+=($!)
@@ -131,9 +139,9 @@ PIDS+=($!)
 sleep 4
 
 for port in $PORT_V8_1 $PORT_V8_N $PORT_NODE $PORT_NODE_CLUSTER; do
+    # URL-path RPC wire — POST /_rpc/ping with body=[] (appbase ee2fd5f).
     if ! curl -sf -X POST -H 'Content-Type: application/json' \
-        -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' \
-        "http://127.0.0.1:$port/rpc" > /dev/null 2>&1; then
+        -d '[]' "http://127.0.0.1:$port/_rpc/ping" > /dev/null 2>&1; then
         echo "FATAL: port $port not responding"; exit 1
     fi
 done
@@ -184,9 +192,16 @@ bench_target() {
         env_vars+=(BENCH_SKIP_STREAMING=1 BENCH_HTTP_GET=0)
     fi
     local start=$(date +%s)
+    # zerobench's exit policy now gates on hard transport errors only
+    # (connect / read / write / timeout / keepup) — 4xx / 5xx / assertion
+    # failures are part of the benchmark signal and exit 0. That means
+    # a non-zero exit here genuinely indicates a transport-layer failure
+    # worth surfacing in the raw output, so we no longer swallow it.
     env "${env_vars[@]}" $NUMA_CLIENT "$ZB" run "$RHAI" \
-        -c "$CONNS" --duration "$DURATION" "${MODE_ARGS[@]}" \
-        --color never > "$out_file" 2>&1
+        -c "$CONNS" -t "$CLIENT_THREADS" --duration "$DURATION" "${MODE_ARGS[@]}" \
+        --color never > "$out_file" 2>&1 || {
+        echo "  (zerobench exit $? — transport errors in $out_file)"
+    }
     local dur=$(( $(date +%s) - start ))
     printf " done (%ds)\n" "$dur"
     # Save the label for the summary.
@@ -217,8 +232,9 @@ parse_results() {
             scenario="${BASH_REMATCH[1]}"
         elif [[ "$line" =~ throughput[[:space:]]+([0-9,]+)[[:space:]]+(req|ops)/s ]]; then
             rps="${BASH_REMATCH[1]//,/}"
-        elif [[ "$line" =~ latency[[:space:]]+p50=([^[:space:]]+) ]]; then
-            p50="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ (latency|chunk-gap|rtt|broadcast-rtt)[[:space:]]+p50=([^[:space:]]+) ]]; then
+            # BASH_REMATCH[2] is the p50 value (group 1 is the label).
+            p50="${BASH_REMATCH[2]}"
             if [[ "$line" =~ p99=([^[:space:]]+) ]]; then
                 p99="${BASH_REMATCH[1]}"
             fi

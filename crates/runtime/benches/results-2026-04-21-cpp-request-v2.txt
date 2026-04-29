@@ -1,0 +1,36 @@
+=== Build ===
+    Finished `release` profile [optimized] target(s) in 0.64s
+=== Start servers ===
+
+==================================================================
+  zeroship fast bench — 2026-04-21T18:31:41Z
+  gce  |  32 cores  |  load: 3.77 5.44 5.24
+  wrk: -t16 -c512 -d10s  |  workers=16
+  NUMA: server=node0 / client=node1
+==================================================================
+
+--- ping  (RPC fast-path:  POST /_rpc/ping) ---
+  v8-compio 1w                       90507.10 req/s  p50=5.63ms   p99=8.00ms   (total 914077)
+  v8-compio 16w                    1020072.63 req/s  p50=476.00us p99=0.98ms   (total 10302655)
+
+--- ping  (fetchFast extension: GET /ping) ---
+  v8-compio 1w                       99241.29 req/s  p50=5.16ms   p99=5.68ms   (total 1002296)
+  v8-compio 16w                    1149463.48 req/s  p50=425.00us p99=772.00us (total 11609265)
+
+--- wping (WinterCG default.fetch: new Response(bytes)) ---
+  v8-compio 1w                       44472.37 req/s  p50=11.47ms  p99=14.05ms  (total 449155)
+  v8-compio 16w                     394309.26 req/s  p50=1.27ms   p99=1.99ms   (total 3982378)
+
+--- wjson (WinterCG default.fetch: Response.json) ---
+  v8-compio 1w                       54363.71 req/s  p50=9.41ms   p99=11.78ms  (total 549056)
+  v8-compio 16w                     496269.14 req/s  p50=1.05ms   p99=1.35ms   (total 5012089)
+
+--- promiseChain (RPC) ---
+  v8-compio 1w                       81739.48 req/s  p50=6.16ms   p99=11.75ms  (total 825539)
+  v8-compio 16w                     934722.76 req/s  p50=521.00us p99=2.44ms   (total 9440583)
+
+--- fetchLocal (RPC → echo @ 8888) ---
+  v8-compio 1w                       32135.80 req/s  p50=12.99ms  p99=51.83ms  (total 324297)
+  v8-compio 16w                     145936.10 req/s  p50=3.36ms   p99=7.68ms   (total 1473894)
+
+==================================================================

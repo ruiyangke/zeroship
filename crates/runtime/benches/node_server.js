@@ -12,25 +12,30 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    if (req.method === 'POST' && req.url === '/rpc') {
+    // URL-path RPC wire (matches appbase ee2fd5f): POST /_rpc/<method>
+    // with body = JSON array of positional args. Response is the raw
+    // return value JSON with Content-Type: application/json. No
+    // JSON-RPC envelope.
+    if (req.method === 'POST' && req.url.startsWith('/_rpc/')) {
+        const method = req.url.slice('/_rpc/'.length);
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', async () => {
             try {
-                const rpc = JSON.parse(body);
-                const fn = scenarios[rpc.method];
+                const args = body ? JSON.parse(body) : [];
+                const fn = scenarios[method];
                 if (!fn) {
-                    res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32601, message: 'not found' }, id: rpc.id }));
+                    res.writeHead(404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ message: `method ${method} not found`, name: 'Error' }));
                     return;
                 }
-                let result = fn.apply(null, rpc.params || []);
+                let result = fn.apply(null, args);
                 if (result && typeof result.then === 'function') result = await result;
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ jsonrpc: '2.0', result, id: rpc.id }));
+                res.end(JSON.stringify(result));
             } catch (e) {
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: e.message }, id: null }));
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ message: e.message, name: e.name || 'Error' }));
             }
         });
         return;
