@@ -430,7 +430,7 @@ impl Registry {
 
     /// Atomic deploy commit. Sets `deploy_hash` and `manifest_json` in
     /// the same UPDATE so the gateway never observes a half-applied
-    /// deploy. Used by the .zsdeploy ingest path.
+    /// deploy. Used by the .zsapp ingest path.
     pub async fn set_deploy_with_manifest(
         &self,
         id: &Uuid,

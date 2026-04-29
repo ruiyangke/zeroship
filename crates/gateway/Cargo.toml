@@ -23,6 +23,7 @@ jsonwebtoken = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
 lru = { workspace = true }
+memmap2 = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

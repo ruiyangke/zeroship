@@ -179,10 +179,10 @@ pub async fn delete_app(req: web::HttpRequest, state: State<Arc<AppState>>, id: 
     }
 }
 
-/// Streaming `.zsdeploy` ingest. Replaces the legacy raw-bundle path —
+/// Streaming `.zsapp` ingest. Replaces the legacy raw-bundle path —
 /// deploy bundles now arrive as zstd-compressed tar archives carrying
 /// `manifest.json` + `blobs/<sha256>` entries. See
-/// `docs/reference/zsdeploy.md` for the wire format and ingestion
+/// `docs/reference/zsapp.md` for the wire format and ingestion
 /// algorithm.
 pub async fn deploy(
     req: web::HttpRequest,
@@ -199,17 +199,17 @@ pub async fn deploy(
         }
     };
 
-    // Hard cut: only `application/x-zsdeploy` is accepted. The legacy
+    // Hard cut: only `application/x-zsapp` is accepted. The legacy
     // raw `.appbundle` and `application/javascript` paths are gone.
     let content_type = req
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !is_zsdeploy_content_type(content_type) {
+    if !is_zsapp_content_type(content_type) {
         return web::HttpResponse::UnsupportedMediaType().json(&serde_json::json!({
             "error": "unsupported content type",
-            "detail": "expected application/x-zsdeploy",
+            "detail": "expected application/x-zsapp",
         }));
     }
 
@@ -237,12 +237,12 @@ pub async fn deploy(
 }
 
 /// Permissive content-type check. We accept the canonical
-/// `application/x-zsdeploy` plus parameterised variants like
-/// `application/x-zsdeploy; charset=utf-8` (some clients add charset
+/// `application/x-zsapp` plus parameterised variants like
+/// `application/x-zsapp; charset=utf-8` (some clients add charset
 /// even on binary uploads).
-fn is_zsdeploy_content_type(value: &str) -> bool {
+fn is_zsapp_content_type(value: &str) -> bool {
     let primary = value.split(';').next().unwrap_or("").trim();
-    primary.eq_ignore_ascii_case("application/x-zsdeploy")
+    primary.eq_ignore_ascii_case("application/x-zsapp")
 }
 
 /// Map the structured ingest error to an HTTP response.
@@ -260,7 +260,7 @@ fn ingest_error_to_response(e: IngestError) -> web::HttpResponse {
         IngestError::UnsupportedMediaType => web::HttpResponse::UnsupportedMediaType()
             .json(&serde_json::json!({
                 "error": "unsupported content type",
-                "detail": "expected application/x-zsdeploy",
+                "detail": "expected application/x-zsapp",
             })),
         IngestError::BlobStoreUnavailable(detail) => web::HttpResponse::ServiceUnavailable()
             .json(&serde_json::json!({

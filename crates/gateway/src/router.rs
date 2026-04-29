@@ -196,19 +196,52 @@ enum BlobFetch {
     Unavailable(String),
 }
 
-/// Resolve a blob through the in-memory LRU first, falling back to the
-/// underlying store and filling the cache on miss.
+/// Resolve a blob through the gateway's three-tier cache:
+///
+/// 1. Memory LRU — `BlobCache::get` returns refcounted `Bytes`.
+/// 2. Disk LRU — `DiskBlobCache::local_path` returns a path; we
+///    `mmap` it and wrap as `Bytes::from_owner(mmap)` for zero-copy
+///    serving (Phase B).
+/// 3. Backend — fetch from `BlobStore`, fill both tiers.
+///
+/// On a disk miss + backend hit we ALWAYS write to the disk cache so
+/// subsequent serves take the mmap path. The mem cache is also filled
+/// so hot blobs short-circuit before disk I/O.
 async fn fetch_static_bytes(
-    cache: &crate::blob_cache::BlobCache,
+    mem: &crate::blob_cache::BlobCache,
+    disk: &crate::blob_cache::DiskBlobCache,
     store: &dyn zeroship_core::blob::BlobStore,
     hash: &str,
 ) -> BlobFetch {
-    if let Some(b) = cache.get(hash) {
+    // Tier 1: memory.
+    if let Some(b) = mem.get(hash) {
         return BlobFetch::Hit(b);
     }
+    // Tier 2: disk (mmap).
+    if let Some(path) = disk.local_path(hash) {
+        match crate::blob_cache::mmap_to_bytes(&path) {
+            Ok(b) => {
+                mem.insert(hash.to_string(), b.clone());
+                return BlobFetch::Hit(b);
+            }
+            Err(e) => {
+                // The on-disk file may have been unlinked under us
+                // (eviction race) or the FS could be sick. Don't
+                // panic — fall through to the backend and let it
+                // refill both tiers.
+                eprintln!("[gate] mmap failed for {hash}: {e}");
+            }
+        }
+    }
+    // Tier 3: backend.
     match store.get_blob(hash).await {
         Ok(b) => {
-            cache.insert(hash.to_string(), b.clone());
+            // Best-effort disk fill: a failure here doesn't stop the
+            // serve. The mem tier still gets the bytes.
+            if let Err(e) = disk.insert(hash, &b) {
+                eprintln!("[gate] disk cache insert failed for {hash}: {e}");
+            }
+            mem.insert(hash.to_string(), b.clone());
             BlobFetch::Hit(b)
         }
         Err(zeroship_core::blob::BlobError::NotFound(_)) => BlobFetch::NotFound,
@@ -224,7 +257,14 @@ async fn serve_static_hit(
     hit: crate::dispatch::StaticHit,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
-    let bytes = match fetch_static_bytes(&state.blob_cache, &*state.blob_store, &hit.hash).await {
+    let bytes = match fetch_static_bytes(
+        &state.blob_cache,
+        &state.disk_cache,
+        &*state.blob_store,
+        &hit.hash,
+    )
+    .await
+    {
         BlobFetch::Hit(b) => b,
         BlobFetch::NotFound => {
             return HttpResponse::NotFound()
@@ -246,8 +286,10 @@ async fn serve_static_hit(
         "x-wall-time-ms",
         format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
     );
-    // ntex's body() wants ntex_bytes::Bytes; Phase B will switch to mmap
-    // and emit zero-copy via Bytes::from_owner.
+    // bytes is either an `Arc<Vec<u8>>` (memory tier) or backed by an
+    // mmap (disk tier via `Bytes::from_owner`). Either way ntex needs
+    // its own `ntex_bytes::Bytes`; the conversion is one userspace
+    // copy today, replaced by `sendfile(2)` in Phase C.
     resp.body(Bytes::copy_from_slice(&bytes))
 }
 
@@ -396,8 +438,22 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
-    use crate::blob_cache::BlobCache;
+    use crate::blob_cache::{BlobCache, DiskBlobCache};
     use zeroship_core::blob::{BlobError, BlobStore};
+
+    /// Build a disk cache rooted in a fresh tmpdir with a generous
+    /// budget. Caller is responsible for cleanup (we keep tests
+    /// self-contained — the OS will reclaim tmp on reboot if a panic
+    /// short-circuits us).
+    fn fresh_disk_cache(tag: &str) -> (DiskBlobCache, PathBuf) {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "zsgate-{tag}-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let cache = DiskBlobCache::new(p.clone(), 1024 * 1024).expect("disk cache");
+        (cache, p)
+    }
 
     /// In-memory `BlobStore` shim that counts `get_blob` calls so tests
     /// can assert the cache short-circuited a second fetch.
@@ -477,43 +533,111 @@ mod tests {
 
     #[compio::test]
     async fn miss_falls_through_to_blob_store_and_fills_cache() {
-        let cache = BlobCache::new(1024);
+        let mem = BlobCache::new(1024);
+        let (disk, root) = fresh_disk_cache("miss-fallthrough");
         let store = MockBlobStore::new();
         let hash = "h1";
         store.put(hash, b"hello world");
 
-        let r = fetch_static_bytes(&cache, &store, hash).await;
+        let r = fetch_static_bytes(&mem, &disk, &store, hash).await;
         match r {
             BlobFetch::Hit(b) => assert_eq!(&b[..], b"hello world"),
             other => panic!("expected Hit, got {other:?}"),
         }
         assert_eq!(store.calls_for(hash), 1);
-        // Cache was filled — second call must NOT reach the store.
-        let r = fetch_static_bytes(&cache, &store, hash).await;
+        // Both tiers were filled — second call must NOT reach the store.
+        let r = fetch_static_bytes(&mem, &disk, &store, hash).await;
         assert!(matches!(r, BlobFetch::Hit(_)));
         assert_eq!(store.calls_for(hash), 1, "second hit must come from cache");
+        assert_eq!(mem.len(), 1, "mem tier filled");
+        assert_eq!(disk.len(), 1, "disk tier filled");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[compio::test]
     async fn missing_blob_yields_not_found() {
-        let cache = BlobCache::new(1024);
+        let mem = BlobCache::new(1024);
+        let (disk, root) = fresh_disk_cache("not-found");
         let store = MockBlobStore::new();
-        let r = fetch_static_bytes(&cache, &store, "nope").await;
+        let r = fetch_static_bytes(&mem, &disk, &store, "nope").await;
         assert!(matches!(r, BlobFetch::NotFound));
         // Cache must stay empty on NotFound — otherwise a transient deploy
         // race would poison the cache.
-        assert_eq!(cache.len(), 0);
+        assert_eq!(mem.len(), 0);
+        assert_eq!(disk.len(), 0);
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[compio::test]
     async fn store_error_yields_unavailable_and_does_not_cache() {
-        let cache = BlobCache::new(1024);
+        let mem = BlobCache::new(1024);
+        let (disk, root) = fresh_disk_cache("store-err");
         let store = MockBlobStore::new();
         store.put("h1", b"abc");
         store.set_unavailable(true);
-        let r = fetch_static_bytes(&cache, &store, "h1").await;
+        let r = fetch_static_bytes(&mem, &disk, &store, "h1").await;
         assert!(matches!(r, BlobFetch::Unavailable(_)));
-        assert_eq!(cache.len(), 0);
+        assert_eq!(mem.len(), 0);
+        assert_eq!(disk.len(), 0);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[compio::test]
+    async fn mem_miss_disk_hit_uses_mmap_and_skips_backend() {
+        // Pre-fill the disk tier; clear mem; verify the next fetch
+        // goes through mmap and never touches the backend.
+        let mem = BlobCache::new(1024);
+        let (disk, root) = fresh_disk_cache("disk-hit");
+        let store = MockBlobStore::new();
+        let hash = "deadbeef";
+        let payload = b"served from mmap";
+        // Manually pre-load the disk cache (simulates a prior fetch
+        // that wrote to disk and then aged out of memory).
+        disk.insert(hash, payload).expect("disk insert");
+        assert_eq!(mem.len(), 0);
+        assert_eq!(disk.len(), 1);
+
+        let r = fetch_static_bytes(&mem, &disk, &store, hash).await;
+        match r {
+            BlobFetch::Hit(b) => assert_eq!(&b[..], payload),
+            other => panic!("expected Hit, got {other:?}"),
+        }
+        assert_eq!(
+            store.calls_for(hash),
+            0,
+            "backend must NOT be called when disk has the blob"
+        );
+        // The mmap tier promoted into memory on serve.
+        assert_eq!(mem.len(), 1, "mem tier filled from disk hit");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[compio::test]
+    async fn mem_and_disk_miss_fills_both_tiers() {
+        // Cold-cold case: nothing in either tier. The backend serves
+        // the bytes; both tiers fill so the second hit short-circuits.
+        let mem = BlobCache::new(1024);
+        let (disk, root) = fresh_disk_cache("cold-cold");
+        let store = MockBlobStore::new();
+        let hash = "abc12345";
+        store.put(hash, b"backend served");
+
+        let r = fetch_static_bytes(&mem, &disk, &store, hash).await;
+        assert!(matches!(r, BlobFetch::Hit(_)));
+        assert_eq!(store.calls_for(hash), 1, "first call hits backend");
+        assert_eq!(mem.len(), 1, "mem tier filled on miss");
+        assert_eq!(disk.len(), 1, "disk tier filled on miss");
+
+        // Verify the disk tier path actually exists on disk.
+        let path = disk.local_path(hash).expect("disk entry");
+        assert!(path.exists(), "disk file written");
+        assert_eq!(std::fs::read(&path).unwrap(), b"backend served");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     impl std::fmt::Debug for BlobFetch {

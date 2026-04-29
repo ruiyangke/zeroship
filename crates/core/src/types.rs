@@ -80,7 +80,7 @@ pub struct RouteEntry {
 /// Reference to the worker-side JS for a deploy. Uniform shape: an
 /// `entry` specifier plus a `modules` map of specifier → blob hash.
 /// Single-bundled servers have one entry in `modules`; code-split
-/// servers have many. See `docs/reference/zsdeploy.md` Worker code section.
+/// servers have many. See `docs/reference/zsapp.md` Worker code section.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkerCode {
     /// Specifier V8 evaluates first; must be a key in `modules`.
@@ -91,7 +91,7 @@ pub struct WorkerCode {
 
 /// One per app. Carries everything the gateway needs to route a request
 /// without consulting the control plane on the hot path. Wire format:
-/// see `docs/reference/zsdeploy.md`.
+/// see `docs/reference/zsapp.md`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     /// Schema version. Reject unknown values.

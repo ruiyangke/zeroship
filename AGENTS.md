@@ -14,7 +14,7 @@ This file is the AI-agent landing page. Read the **task router** below first.
 | **V8 runtime** (fetch, streams, WebSocket, modules) | `docs/architecture/runtime.md` · `crates/runtime/` |
 | **Adding a native primitive** (`zeroship.*`) | `docs/reference/plugin-system.md` · `crates/runtime-macros/` · `crates/plugin-{db,kv,storage}/` |
 | **Control plane** (app CRUD, deploy, env, route registry) | `docs/architecture/control-plane.md` · `crates/control/src/api.rs` · `crates/control/src/registry.rs` |
-| **Deploy artifact** (.zsdeploy + manifest + blob storage) | `docs/reference/zsdeploy.md` · `docs/architecture/blob-store.md` · `crates/control/src/deploy.rs` · `crates/core/src/blob.rs` |
+| **Deploy artifact** (.zsapp + manifest + blob storage) | `docs/reference/zsapp.md` · `docs/architecture/blob-store.md` · `crates/control/src/deploy.rs` · `crates/core/src/blob.rs` |
 | **Auth** (creator + end-user, OAuth, JWT) | `docs/reference/auth.md` · `crates/control/src/auth_*.rs` · `crates/gateway/src/auth.rs` |
 | **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `docs/reference/mongoose-compat.md` · `crates/plugin-db/` |
 | **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/control/src/{stripe_handlers,stripe_store,metering}.rs` |
@@ -83,10 +83,8 @@ crates/
 ├── core/             Shared types, typed_id (UUIDv7 + base62), VFS, auth utils, Manifest
 ├── compio-postgres/  PostgreSQL driver (compio-native, replaces sqlx)
 ├── compio-redis/     Redis driver (cluster-aware, compio-native)
-├── bundle/           .appbundle binary format (read, write, lazy decompress)
 ├── runtime/          V8 + compio event loop + fetch + WebSocket + crypto + auth context
 ├── runtime-macros/   #[zeroship_op] proc macro
-├── compiler/         SWC + esbuild → .appbundle
 ├── plugin-db/        zeroship.db.* native ops
 ├── plugin-kv/        zeroship.kv.* native ops
 ├── plugin-storage/   zeroship.storage.* native ops
@@ -113,7 +111,7 @@ These don't change. If you're about to violate one, stop and ask.
 - **Zero tokio in the stack.** Everything is compio/io_uring. Drivers are bespoke (`compio-postgres`, `compio-redis`).
 - **V8 per thread, one isolate per app.** Worker uses LRU eviction; isolates `enter`/`exit` to allow many apps per thread (`crates/worker/src/cache.rs`).
 - **typed_id everywhere.** UUIDv7 + base62 + entity prefix (`usr_…`, `app_…`, `ses_…`). Defined in `crates/core/src/typed_id.rs`.
-- **Wire formats are immutable contracts.** `Manifest`, `RouteEntry`, `AppRecord`, `.appbundle` headers — back-compat is required at the wire level even when internal types change.
+- **Wire formats are immutable contracts.** `Manifest`, `RouteEntry`, `AppRecord`, `.zsapp` archive layout — back-compat is required at the wire level even when internal types change.
 - **Native primitives are the kernel.** Anything user code can do via `fetch` or composition belongs in an npm package (`@zeroship/*`), not in Rust. The native surface is small and stable on purpose.
 - **The gateway is dumb.** It does manifest dispatch, JWT, rate-limit, CHWBL routing — and forwards. All app logic runs in the worker.
 
@@ -170,7 +168,7 @@ Stable contracts, live in `docs/reference/`:
 - `db.md` — `@zeroship/db`: createDb, schema, CRUD, aggregation, naming strategy
 - `auth.md` — platform-managed auth, gateway JWT, OAuth, consent
 - `billing-metering.md` — Meter trait, 25+ metrics, pricing, spending limits
-- `zsdeploy.md` — `.zsdeploy` deploy artifact format (replaces the deleted `.appbundle`)
+- `zsapp.md` — `.zsapp` deploy artifact format (tar.zst with content-addressed blobs)
 - `websocket-design.md` — WebSocketPair, RFC 6455
 - `plugin-system.md` — how to add a `zeroship.*` namespace
 - `node-compat.md` — Node.js module resolution in V8
@@ -203,7 +201,7 @@ docker compose up -d --scale worker=10
 # Tests (per crate)
 cargo test -p zeroship-core
 cargo test -p zeroship-gateway
-cargo test -p zeroship-bundle
+cargo test -p zeroship-runtime --lib
 cargo test -p compio-postgres -- --test-threads=1   # needs DB
 
 # E2E + benchmarks

@@ -1,8 +1,8 @@
 /**
- * Tests for the `.zsdeploy` emitter.
+ * Tests for the `.zsapp` emitter.
  *
  * The emitter walks `dist/`, hashes every file, packs into a tar.zst archive,
- * and emits `dist/app.zsdeploy`. These tests build a hand-crafted fixture
+ * and emits `dist/app.zsapp`. These tests build a hand-crafted fixture
  * directory tree, run the emitter, and inspect the output for the
  * cross-references the control plane will validate (manifest schema,
  * blob presence, manifest-first tar order, hash format).
@@ -16,7 +16,7 @@ import { dirname, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { zstdDecompressSync } from "node:zlib";
 
-import { emitZsdeploy } from "../src/zsdeploy.js";
+import { emitZsapp } from "../src/zsapp.js";
 
 // ── Fixture builder ────────────────────────────────────────────────────────
 
@@ -26,7 +26,7 @@ interface Fixture {
 }
 
 async function makeFixture(files: Record<string, string | Buffer>): Promise<Fixture> {
-  const root = join(tmpdir(), `zsdeploy-test-${randomUUID()}`);
+  const root = join(tmpdir(), `zsapp-test-${randomUUID()}`);
   await fs.mkdir(root, { recursive: true });
 
   for (const [relPath, content] of Object.entries(files)) {
@@ -100,8 +100,8 @@ function sha256Hex(b: Buffer | string): string {
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
-describe("emitZsdeploy", () => {
-  test("emits a .zsdeploy archive with manifest first and all referenced blobs present", async () => {
+describe("emitZsapp", () => {
+  test("emits a .zsapp archive with manifest first and all referenced blobs present", async () => {
     const fix = await makeFixture({
       "dist/index.html":
         '<!doctype html><html><head><script type="module" src="/assets/main-abc.js"></script></head><body><div id="root"></div></body></html>',
@@ -112,7 +112,7 @@ describe("emitZsdeploy", () => {
     });
 
     try {
-      const result = await emitZsdeploy({
+      const result = await emitZsapp({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         compiler: "@zeroship/vite-plugin@test",
@@ -122,7 +122,7 @@ describe("emitZsdeploy", () => {
       // Archive exists at the documented path.
       assert.equal(
         result.outputPath,
-        resolve(fix.root, "dist/app.zsdeploy"),
+        resolve(fix.root, "dist/app.zsapp"),
         "archive path"
       );
       const archiveBytes = await fs.readFile(result.outputPath);
@@ -297,7 +297,7 @@ describe("emitZsdeploy", () => {
       "dist/assets/style-x.css": "body{color:red}",
     });
     try {
-      const result = await emitZsdeploy({
+      const result = await emitZsapp({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
@@ -341,7 +341,7 @@ describe("emitZsdeploy", () => {
       "dist/assets/app.js.map": '{"version":3,"sources":[]}',
     });
     try {
-      const result = await emitZsdeploy({
+      const result = await emitZsapp({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
@@ -385,7 +385,7 @@ describe("emitZsdeploy", () => {
       "dist/server/index.js.map": '{"version":3,"sources":[]}',
     });
     try {
-      const result = await emitZsdeploy({
+      const result = await emitZsapp({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
@@ -423,7 +423,7 @@ describe("emitZsdeploy", () => {
       "dist/c.txt": "same content",
     });
     try {
-      const result = await emitZsdeploy({
+      const result = await emitZsapp({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
@@ -444,7 +444,7 @@ describe("emitZsdeploy", () => {
     try {
       await assert.rejects(
         () =>
-          emitZsdeploy({
+          emitZsapp({
             root: fix.root,
             builtAt: "2026-04-29T00:00:00Z",
             silent: true,
@@ -463,7 +463,7 @@ describe("emitZsdeploy", () => {
       "dist/assets/x.js": "x",
     });
     try {
-      const result = await emitZsdeploy({
+      const result = await emitZsapp({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
@@ -490,7 +490,7 @@ describe("emitZsdeploy", () => {
   test("manifest validation rejects orphan asset hashes (defensive — should never happen)", async () => {
     // This is exercised internally by validateManifest(); we verify by
     // running a happy-path build and confirming validation passes (no
-    // throw from emitZsdeploy). The unit-level test for the validation
+    // throw from emitZsapp). The unit-level test for the validation
     // function would require exporting it; we keep that internal and
     // rely on the integration test above which would catch any
     // cross-reference bug as a missing-blob assertion failure.
@@ -500,7 +500,7 @@ describe("emitZsdeploy", () => {
     });
     try {
       await assert.doesNotReject(() =>
-        emitZsdeploy({
+        emitZsapp({
           root: fix.root,
           builtAt: "2026-04-29T00:00:00Z",
           silent: true,
@@ -517,12 +517,12 @@ describe("emitZsdeploy", () => {
       "dist/server/index.js": "export default { fetch: () => new Response('') };",
     });
     try {
-      await emitZsdeploy({
+      await emitZsapp({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
       });
-      const stagingPath = resolve(fix.root, "dist/.zsdeploy");
+      const stagingPath = resolve(fix.root, "dist/.zsapp");
       const exists = await fs
         .stat(stagingPath)
         .then(() => true)

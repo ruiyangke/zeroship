@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { transformPlugin, type TransformState } from "./transform.js";
 import { nodeCompatPlugin } from "./node-compat.js";
 import { DEFAULT_RPC_ENDPOINT } from "./constants.js";
-import { emitZsdeploy } from "./zsdeploy.js";
+import { emitZsapp } from "./zsapp.js";
 
 const HERE = resolve(fileURLToPath(import.meta.url), "..");
 const PRELUDE_PATH   = resolve(HERE, "../src/runtime-prelude.js");   // prepended — Node-globals shim
@@ -50,14 +50,14 @@ export function buildPlugin(state: TransformState, options: { serverEntry?: stri
   let root = "";
   let isDev = false;
   // The client build's `outDir` (resolved). Read in configResolved so the
-  // closeBundle hook knows where to look for `.zsdeploy` inputs.
+  // closeBundle hook knows where to look for `.zsapp` inputs.
   let clientOutDir = "";
   // Whether we already ran the server SSR build for this Vite invocation.
   // closeBundle fires once per environment per invocation; without this
   // guard we'd re-emit the same archive (or worse, re-trigger the SSR
   // build inside its own closeBundle).
   let serverBuilt = false;
-  let zsdeployEmitted = false;
+  let zsappEmitted = false;
 
   return {
     name: "zeroship:build",
@@ -78,7 +78,7 @@ export function buildPlugin(state: TransformState, options: { serverEntry?: stri
       const entry = findServerEntry(root, options.serverEntry);
       if (!entry) {
         console.warn("[zeroship] no server entry found — skipping server bundle");
-        // We still want to emit a static-only .zsdeploy in this case,
+        // We still want to emit a static-only .zsapp in this case,
         // so the closeBundle hook handles the SSG path.
         return;
       }
@@ -151,7 +151,7 @@ export function buildPlugin(state: TransformState, options: { serverEntry?: stri
 
     /**
      * After both client and server builds have written their bundles,
-     * emit the `.zsdeploy` archive. closeBundle fires at the very end
+     * emit the `.zsapp` archive. closeBundle fires at the very end
      * of the Vite build lifecycle — once for this plugin instance per
      * `vite build` invocation, regardless of how many environments
      * Vite ran. (Each environment in a multi-env build gets its own
@@ -169,17 +169,17 @@ export function buildPlugin(state: TransformState, options: { serverEntry?: stri
      */
     async closeBundle() {
       if (isDev) return;
-      if (zsdeployEmitted) return;
-      zsdeployEmitted = true;
+      if (zsappEmitted) return;
+      zsappEmitted = true;
 
       try {
-        await emitZsdeploy({
+        await emitZsapp({
           root,
           distDir: clientOutDir,
           compiler: getCompilerId(),
         });
       } catch (e) {
-        console.error(`[zeroship] failed to emit .zsdeploy: ${(e as Error).message}`);
+        console.error(`[zeroship] failed to emit .zsapp: ${(e as Error).message}`);
         throw e;
       }
     },

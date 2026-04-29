@@ -1,6 +1,6 @@
 # Blob store + edge serving
 
-The storage and serving layer that backs `.zsdeploy`. Content-addressed bytes, edge-cached on the gateway, served zero-copy where possible.
+The storage and serving layer that backs `.zsapp`. Content-addressed bytes, edge-cached on the gateway, served zero-copy where possible.
 
 ## Trait
 
@@ -42,7 +42,7 @@ The `local_path` accessor is the zero-copy hook. Implementations expose it iff t
 
 ## Multi-tenancy and possession proof
 
-The trait operates on a **single global keyspace** (`blobs/<hash>`). Cross-tenant dedup is safe by construction under two protocol constraints (see `docs/reference/zsdeploy.md` for the full argument):
+The trait operates on a **single global keyspace** (`blobs/<hash>`). Cross-tenant dedup is safe by construction under two protocol constraints (see `docs/reference/zsapp.md` for the full argument):
 
 1. Clients always upload every blob in their deploy — no client-side `has_blob` skip.
 2. The server verifies `sha256(bytes) == hash` on every `put_blob`.
@@ -220,7 +220,7 @@ Tunables:
 ## Callers
 
 - `crates/control/src/main.rs` — boots `Arc<dyn BlobStore>` (`LocalDiskBlobStore` in dev).
-- `crates/control/src/deploy.rs` — `.zsdeploy` ingestion. Verifies hashes, deduplicates against `has_blob`, calls `put_blob` for new content, writes the manifest via `put_manifest`.
+- `crates/control/src/deploy.rs` — `.zsapp` ingestion. Verifies hashes, deduplicates against `has_blob`, calls `put_blob` for new content, writes the manifest via `put_manifest`.
 - `crates/gateway/src/router.rs::serve_static_hit` — fetches asset bytes via `state.blob_cache.get(hash)` then falls through to `state.blob_store.get_blob(hash)`.
 - `crates/worker/src/sync.rs` — fetches `manifest.worker.modules[entry]` via `BlobStore` on cold start / deploy change.
 

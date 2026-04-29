@@ -79,7 +79,7 @@ pub struct AppState {
     /// Optional Google OAuth config — `Some` enables /auth/google/* routes.
     pub google_oauth: Option<oauth::GoogleConfig>,
     pub vfs: Arc<dyn BundleStore + Send + Sync>,
-    /// Content-addressed blob store. Backs `.zsdeploy` ingestion. The
+    /// Content-addressed blob store. Backs `.zsapp` ingestion. The
     /// gateway reads asset bytes from its own `BlobStore` instance
     /// (Phase 4), so no asset-serving HTTP shim lives here.
     pub blob_store: Arc<dyn BlobStore>,

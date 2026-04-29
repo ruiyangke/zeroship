@@ -66,7 +66,7 @@ What we have today (from AGENTS.md + this codebase):
 | Storage plugin | ✅ just refactored | Backend trait; only LocalFs impl |
 | KV plugin | ✅ | In-memory only |
 | Auth service | ✅ | Email/pw + OAuth + JWT |
-| Deploy | ✅ | `zeroship deploy` + `.zsdeploy` (tar.zst with content-addressed blobs) |
+| Deploy | ✅ | `zeroship deploy` + `.zsapp` (tar.zst with content-addressed blobs) |
 | Observability | ❌ | Scattered logs, no aggregation |
 | Metering | ❌ | Not implemented |
 | Stripe Connect | ❌ | Not implemented |

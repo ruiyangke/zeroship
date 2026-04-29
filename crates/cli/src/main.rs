@@ -2,11 +2,11 @@
 //!
 //! Commands:
 //!   zeroship serve   <file-or-dir> [--port=3000] [--workers=0]
-//!   zeroship deploy  <path-to-.zsdeploy> --app=<id> [--control=URL] [--key=KEY]
+//!   zeroship deploy  <path-to-.zsapp> --app=<id> [--control=URL] [--key=KEY]
 //!
 //! `build` and `inspect` were removed in the artifact-layout redesign —
 //! the canonical build path is now `@zeroship/vite-plugin`, which emits
-//! `.zsdeploy` archives. `deploy` uploads those archives directly to the
+//! `.zsapp` archives. `deploy` uploads those archives directly to the
 //! control plane.
 
 use std::path::PathBuf;
@@ -150,12 +150,12 @@ fn cmd_serve(args: &[String]) {
 // deploy
 // ---------------------------------------------------------------------------
 
-/// Upload a pre-built `.zsdeploy` archive to the control plane. The
+/// Upload a pre-built `.zsapp` archive to the control plane. The
 /// vite-plugin emits these; this command is a thin curl wrapper that
 /// posts the bytes to `POST /api/apps/{id}/deploy`.
 fn cmd_deploy(args: &[String]) {
     let input = args.get(2).expect(
-        "Usage: zeroship deploy <path-to-.zsdeploy> --app=<name-or-id> [--control=http://localhost:9090] [--key=<master-key>]",
+        "Usage: zeroship deploy <path-to-.zsapp> --app=<name-or-id> [--control=http://localhost:9090] [--key=<master-key>]",
     );
     let app = flag_str(args, "--app=").expect("--app=<name-or-id> is required");
     let control_url = flag_str(args, "--control=")
@@ -168,7 +168,7 @@ fn cmd_deploy(args: &[String]) {
     let input_path = PathBuf::from(input);
     let body = std::fs::read(&input_path).unwrap_or_else(|e| {
         eprintln!("Failed to read {}: {e}", input_path.display());
-        eprintln!("Run `vite build` (with @zeroship/vite-plugin) to produce a .zsdeploy archive.");
+        eprintln!("Run `vite build` (with @zeroship/vite-plugin) to produce a .zsapp archive.");
         std::process::exit(1);
     });
 
@@ -190,7 +190,7 @@ fn cmd_deploy(args: &[String]) {
             "-H",
             &format!("Authorization: Bearer {master_key}"),
             "-H",
-            "Content-Type: application/x-zsdeploy",
+            "Content-Type: application/x-zsapp",
             "--data-binary",
             "@-",
         ])
@@ -246,8 +246,8 @@ fn print_usage() {
     eprintln!("Usage:");
     eprintln!("  zeroship serve    <file> [--port=3000] [--workers=0]");
     eprintln!("                   Run a single JS file with the V8 runtime.");
-    eprintln!("  zeroship deploy   <path-to-.zsdeploy> --app=<id> [--control=URL] [--key=KEY]");
-    eprintln!("                   Upload a pre-built .zsdeploy to the control plane.");
+    eprintln!("  zeroship deploy   <path-to-.zsapp> --app=<id> [--control=URL] [--key=KEY]");
+    eprintln!("                   Upload a pre-built .zsapp to the control plane.");
     eprintln!("  zeroship secret   set|list|rm  --app=<uuid>");
     eprintln!("  zeroship var      set|list|rm  --app=<uuid>");
     eprintln!();

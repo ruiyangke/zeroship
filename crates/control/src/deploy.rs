@@ -1,6 +1,6 @@
-//! `.zsdeploy` ingestion. Streaming tar.zst → blob store + manifest.
+//! `.zsapp` ingestion. Streaming tar.zst → blob store + manifest.
 //!
-//! See `docs/reference/zsdeploy.md` for the wire format and the
+//! See `docs/reference/zsapp.md` for the wire format and the
 //! ingestion algorithm. Phase 2 of the artifact-layout redesign.
 
 use std::collections::{BTreeMap, HashSet};
@@ -16,7 +16,7 @@ use zeroship_core::types::Manifest;
 use zeroship_core::BlobStore;
 
 // ---------------------------------------------------------------------------
-// Limits — see "Limits" table in docs/reference/zsdeploy.md
+// Limits — see "Limits" table in docs/reference/zsapp.md
 // ---------------------------------------------------------------------------
 
 /// Compressed-body cap. The wire-level limit before any decompression
@@ -57,7 +57,7 @@ pub enum IngestError {
     BadRequest { error: String, detail: String },
     /// 413 Payload Too Large — compressed or decompressed cap exceeded.
     TooLarge { cap_bytes: u64, observed_bytes: u64 },
-    /// 415 Unsupported Media Type — Content-Type wasn't application/x-zsdeploy.
+    /// 415 Unsupported Media Type — Content-Type wasn't application/x-zsapp.
     UnsupportedMediaType,
     /// 503 Service Unavailable — blob store backend errored.
     BlobStoreUnavailable(String),

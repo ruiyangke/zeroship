@@ -1,4 +1,4 @@
-//! Content-addressed blob store. The storage layer that backs `.zsdeploy`.
+//! Content-addressed blob store. The storage layer that backs `.zsapp`.
 //!
 //! See `docs/architecture/blob-store.md` for the full design.
 

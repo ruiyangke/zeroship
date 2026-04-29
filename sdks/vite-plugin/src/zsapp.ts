@@ -1,6 +1,6 @@
-// sdks/vite-plugin/src/zsdeploy.ts
+// sdks/vite-plugin/src/zsapp.ts
 //
-// Emit `.zsdeploy` artifacts from the `dist/` directory produced by Vite.
+// Emit `.zsapp` artifacts from the `dist/` directory produced by Vite.
 //
 // The build pipeline:
 //
@@ -9,8 +9,8 @@
 //                                                 dist/index.html
 //
 // We then walk `dist/`, content-hash every file, emit a manifest, and pack
-// it into a tar.zst archive at `dist/app.zsdeploy`. The wire format is
-// defined in `docs/reference/zsdeploy.md` (schema v2).
+// it into a tar.zst archive at `dist/app.zsapp`. The wire format is
+// defined in `docs/reference/zsapp.md` (schema v2).
 //
 // The control plane ingests this via `POST /api/apps/{id}/deploy`.
 
@@ -105,14 +105,14 @@ interface Manifest {
 
 // ── Public configuration ───────────────────────────────────────────────────
 
-export interface ZsdeployOptions {
+export interface ZsappOptions {
   /** Project root (defaults to Vite's resolved root). */
   root: string;
   /** `outDir` of the client/static build. Default: `dist`. */
   distDir?: string;
   /** Subdir under `distDir` containing the worker bundle. Default: `server`. */
   serverDir?: string;
-  /** Output archive path. Default: `<distDir>/app.zsdeploy`. */
+  /** Output archive path. Default: `<distDir>/app.zsapp`. */
   outputPath?: string;
   /** The compiler identifier baked into `metadata.compiler`. */
   compiler?: string;
@@ -124,8 +124,8 @@ export interface ZsdeployOptions {
   silent?: boolean;
 }
 
-export interface ZsdeployResult {
-  /** Absolute path of the emitted `.zsdeploy` archive. */
+export interface ZsappResult {
+  /** Absolute path of the emitted `.zsapp` archive. */
   outputPath: string;
   /** The manifest that was packed (with deploy_hash absent — control plane fills it). */
   manifest: Manifest;
@@ -139,20 +139,20 @@ export interface ZsdeployResult {
 
 const DEFAULT_DIST_DIR = "dist";
 const DEFAULT_SERVER_SUBDIR = "server";
-const DEFAULT_OUTPUT_NAME = "app.zsdeploy";
-const STAGING_DIR_NAME = ".zsdeploy";
+const DEFAULT_OUTPUT_NAME = "app.zsapp";
+const STAGING_DIR_NAME = ".zsapp";
 const DEFAULT_ASSET_PREFIX = "/assets/";
 
 /**
- * Build a `.zsdeploy` archive from the project's `dist/` directory.
+ * Build a `.zsapp` archive from the project's `dist/` directory.
  *
  * Walks `dist/` (excluding the staging dir), hashes every file, builds the
  * manifest, packs into `tar.zst`. The resulting archive is the exact bytes
  * the CLI uploads to the control plane.
  */
-export async function emitZsdeploy(
-  options: ZsdeployOptions
-): Promise<ZsdeployResult> {
+export async function emitZsapp(
+  options: ZsappOptions
+): Promise<ZsappResult> {
   const root = resolve(options.root);
   const distDir = resolve(root, options.distDir ?? DEFAULT_DIST_DIR);
   const serverSubdir = options.serverDir ?? DEFAULT_SERVER_SUBDIR;
@@ -166,10 +166,10 @@ export async function emitZsdeploy(
   const builtAt = options.builtAt ?? new Date().toISOString();
   const log = options.silent
     ? () => {}
-    : (msg: string) => console.log(`[zeroship:zsdeploy] ${msg}`);
+    : (msg: string) => console.log(`[zeroship:zsapp] ${msg}`);
 
   if (!(await pathExists(distDir))) {
-    throw new Error(`zsdeploy: dist dir not found at ${distDir}`);
+    throw new Error(`zsapp: dist dir not found at ${distDir}`);
   }
 
   // 1. Walk dist/ — collect candidate files with their absolute path,
@@ -184,7 +184,7 @@ export async function emitZsdeploy(
 
   if (items.length === 0) {
     throw new Error(
-      `zsdeploy: no files found under ${distDir} — did the build run?`
+      `zsapp: no files found under ${distDir} — did the build run?`
     );
   }
 
@@ -550,12 +550,12 @@ function validateManifest(
   for (const [path, entry] of Object.entries(m.assets)) {
     if (!blobsByHash.has(entry.hash)) {
       throw new Error(
-        `zsdeploy: asset ${path} references hash ${entry.hash} but the blob is missing`
+        `zsapp: asset ${path} references hash ${entry.hash} but the blob is missing`
       );
     }
     if (!isSha256Hex(entry.hash)) {
       throw new Error(
-        `zsdeploy: asset ${path} hash ${entry.hash} is not lowercase 64-char sha256 hex`
+        `zsapp: asset ${path} hash ${entry.hash} is not lowercase 64-char sha256 hex`
       );
     }
   }
@@ -563,17 +563,17 @@ function validateManifest(
   for (const [k, v] of Object.entries(m.sourcemaps)) {
     if (!isSha256Hex(k) || !isSha256Hex(v)) {
       throw new Error(
-        `zsdeploy: sourcemaps entry ${k} -> ${v} contains non-sha256 hex`
+        `zsapp: sourcemaps entry ${k} -> ${v} contains non-sha256 hex`
       );
     }
     if (!blobsByHash.has(k)) {
       throw new Error(
-        `zsdeploy: sourcemap key ${k} has no corresponding asset blob`
+        `zsapp: sourcemap key ${k} has no corresponding asset blob`
       );
     }
     if (!blobsByHash.has(v)) {
       throw new Error(
-        `zsdeploy: sourcemap value ${v} has no corresponding blob`
+        `zsapp: sourcemap value ${v} has no corresponding blob`
       );
     }
   }
@@ -581,18 +581,18 @@ function validateManifest(
   if (m.worker != null) {
     if (!m.worker.entry || !(m.worker.entry in m.worker.modules)) {
       throw new Error(
-        `zsdeploy: worker.entry ${JSON.stringify(m.worker.entry)} is not a key in worker.modules`
+        `zsapp: worker.entry ${JSON.stringify(m.worker.entry)} is not a key in worker.modules`
       );
     }
     for (const [spec, hash] of Object.entries(m.worker.modules)) {
       if (!isSha256Hex(hash)) {
         throw new Error(
-          `zsdeploy: worker.modules[${spec}] hash ${hash} is not lowercase 64-char sha256 hex`
+          `zsapp: worker.modules[${spec}] hash ${hash} is not lowercase 64-char sha256 hex`
         );
       }
       if (!blobsByHash.has(hash)) {
         throw new Error(
-          `zsdeploy: worker.modules[${spec}] hash ${hash} has no corresponding blob`
+          `zsapp: worker.modules[${spec}] hash ${hash} has no corresponding blob`
         );
       }
     }
@@ -607,7 +607,7 @@ function validateManifest(
       if (t === "$path" || t.includes("[")) continue;
       if (!(t in m.assets)) {
         throw new Error(
-          `zsdeploy: rule ${i}: try chain references ${t} but it's not in assets`
+          `zsapp: rule ${i}: try chain references ${t} but it's not in assets`
         );
       }
     }

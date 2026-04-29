@@ -45,6 +45,11 @@ pub struct GateState {
     /// In-memory LRU cache in front of `blob_store`. Phase A of the
     /// zero-copy plan.
     pub blob_cache: blob_cache::BlobCache,
+    /// On-disk LRU cache underneath `blob_cache`. Phase B of the
+    /// zero-copy plan — large blobs that don't fit in memory land
+    /// here, and `serve_static_hit` mmaps them on serve so the
+    /// userspace → kernel copy goes away.
+    pub disk_cache: blob_cache::DiskBlobCache,
 }
 
 #[ntex::main]
@@ -59,6 +64,13 @@ async fn main() -> std::io::Result<()> {
     let worker_key = arg_or_env(&args, "--worker-key", "WORKER_KEY", "");
     let blob_store_root = arg_or_env(&args, "--blob-store", "BLOB_STORE", "./bundles");
     let blob_cache_mem_mb = arg_or_env(&args, "--blob-cache-mem-mb", "BLOB_CACHE_MEM_MB", "256");
+    let blob_cache_disk_gb = arg_or_env(&args, "--blob-cache-disk-gb", "BLOB_CACHE_DISK_GB", "20");
+    let blob_cache_disk_root = arg_or_env(
+        &args,
+        "--blob-cache-disk-root",
+        "BLOB_CACHE_DISK_ROOT",
+        "./blob-cache",
+    );
 
     if worker_key.is_empty() {
         eprintln!(
@@ -70,12 +82,22 @@ async fn main() -> std::io::Result<()> {
         .parse::<usize>()
         .unwrap_or(256)
         .saturating_mul(1024 * 1024);
+    let disk_cache_bytes: u64 = blob_cache_disk_gb
+        .parse::<u64>()
+        .unwrap_or(20)
+        .saturating_mul(1024 * 1024 * 1024);
     let blob_store: Arc<dyn BlobStore> = Arc::new(
         LocalDiskBlobStore::new(PathBuf::from(&blob_store_root))
             .expect("failed to initialise blob store"),
     );
+    let disk_cache = blob_cache::DiskBlobCache::new(
+        PathBuf::from(&blob_cache_disk_root),
+        disk_cache_bytes,
+    )
+    .expect("failed to initialise disk blob cache");
     eprintln!(
-        "[zeroship-gate] blob store at {blob_store_root}, mem cache budget {blob_cache_mem_mb} MB"
+        "[zeroship-gate] blob store at {blob_store_root}, mem cache budget {blob_cache_mem_mb} MB, \
+         disk cache at {blob_cache_disk_root} ({blob_cache_disk_gb} GB)"
     );
 
     let worker_urls: Vec<String> = workers_str
@@ -111,6 +133,7 @@ async fn main() -> std::io::Result<()> {
         concurrency: enforce::ConcurrencyRegistry::new(100),
         blob_store,
         blob_cache: blob_cache::BlobCache::new(blob_cache_bytes),
+        disk_cache,
     });
 
     sync::start_sync(state.clone());

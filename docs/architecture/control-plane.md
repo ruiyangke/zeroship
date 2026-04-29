@@ -76,7 +76,7 @@ The gateway polls `/internal/routes` every 5s. `crates/gateway/src/sync.rs::sync
 
 ```
 1. Creator → POST /api/apps/{id}/deploy
-   Content-Type: application/x-zsdeploy
+   Content-Type: application/x-zsapp
    Body: streaming tar.zst of { manifest.json + blobs/<hash> }
 
 2. crates/control/src/deploy.rs::ingest:
