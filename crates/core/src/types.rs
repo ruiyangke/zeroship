@@ -148,6 +148,7 @@ impl Manifest {
     /// Checks:
     /// * `Action::Static.status` ∈ [100, 599]
     /// * `Action::Redirect.status` ∈ [300, 399]
+    /// * No rule is shadowed (made unreachable) by an earlier rule.
     pub fn validate(&self) -> Result<(), String> {
         for (i, rule) in self.rules.iter().enumerate() {
             match &rule.action {
@@ -168,7 +169,119 @@ impl Manifest {
                 _ => {}
             }
         }
+        for j in 1..self.rules.len() {
+            for i in 0..j {
+                if self.rules[i].shadows(&self.rules[j]) {
+                    return Err(format!(
+                        "rule {j} ({}) is unreachable behind rule {i} ({})",
+                        rule_summary(&self.rules[j]),
+                        rule_summary(&self.rules[i]),
+                    ));
+                }
+            }
+        }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shadow detection helpers
+// ---------------------------------------------------------------------------
+
+const M_GET: u8 = 1 << 0;
+const M_POST: u8 = 1 << 1;
+const M_PUT: u8 = 1 << 2;
+const M_PATCH: u8 = 1 << 3;
+const M_DELETE: u8 = 1 << 4;
+const M_HEAD: u8 = 1 << 5;
+const M_OPTIONS: u8 = 1 << 6;
+const M_ALL: u8 = M_GET | M_POST | M_PUT | M_PATCH | M_DELETE | M_HEAD | M_OPTIONS;
+const M_GET_HEAD: u8 = M_GET | M_HEAD;
+
+fn method_bit(m: HttpMethod) -> u8 {
+    match m {
+        HttpMethod::Get => M_GET,
+        HttpMethod::Post => M_POST,
+        HttpMethod::Put => M_PUT,
+        HttpMethod::Patch => M_PATCH,
+        HttpMethod::Delete => M_DELETE,
+        HttpMethod::Head => M_HEAD,
+        HttpMethod::Options => M_OPTIONS,
+        HttpMethod::Any => M_ALL,
+    }
+}
+
+/// Segment-aware prefix containment — must match `Match::Prefix` test semantics.
+fn prefix_covers(prefix: &str, path: &str) -> bool {
+    if let Some(bare) = prefix.strip_suffix('/') {
+        path == bare || path.starts_with(prefix)
+    } else {
+        path == prefix || path.starts_with(&format!("{prefix}/"))
+    }
+}
+
+fn rule_summary(rule: &Rule) -> String {
+    let method = match rule.r#match {
+        Match::Exact { method, .. }
+        | Match::Prefix { method, .. }
+        | Match::Glob { method, .. } => method,
+        Match::Any => None,
+    };
+    let m_str = method.map(|m| m.as_str()).unwrap_or("*");
+    match &rule.r#match {
+        Match::Exact { path, .. } => format!("Exact {m_str} {path}"),
+        Match::Prefix { path, .. } => format!("Prefix {m_str} {path}"),
+        Match::Glob { path, .. } => format!("Glob {m_str} {path}"),
+        Match::Any => "Any".to_string(),
+    }
+}
+
+impl Rule {
+    /// Bitset of methods this rule actually fires for.
+    fn effective_methods(&self) -> u8 {
+        let base = match self.r#match {
+            Match::Exact { method, .. }
+            | Match::Prefix { method, .. }
+            | Match::Glob { method, .. } => match method {
+                None | Some(HttpMethod::Any) => M_ALL,
+                Some(m) => method_bit(m),
+            },
+            Match::Any => M_ALL,
+        };
+        // Tier 1 invariant: Static actions only fire for GET/HEAD (the
+        // dispatcher skips them for other methods).
+        if matches!(self.action, Action::Static { .. }) {
+            base & M_GET_HEAD
+        } else {
+            base
+        }
+    }
+
+    /// Does this rule's match cover every path the `other` matcher could match?
+    // TODO: extend covers_path for Glob ↔ Glob and Glob ↔ Exact/Prefix
+    fn covers_path(&self, other: &Match) -> bool {
+        match (&self.r#match, other) {
+            (Match::Any, _) => true,
+            (Match::Exact { path: a, .. }, Match::Exact { path: b, .. }) => a == b,
+            (Match::Prefix { path: p, .. }, Match::Exact { path: e, .. }) => prefix_covers(p, e),
+            (Match::Prefix { path: p, .. }, Match::Prefix { path: q, .. }) => prefix_covers(p, q),
+            _ => false,
+        }
+    }
+
+    /// True if this rule makes `other` unreachable.
+    fn shadows(&self, other: &Rule) -> bool {
+        let s = self.effective_methods();
+        let r = other.effective_methods();
+        // Subset: every method bit set in r is also set in s.
+        if (r & !s) != 0 {
+            return false;
+        }
+        // If self has zero effective methods, it can't shadow anything.
+        if s == 0 {
+            return false;
+        }
+        self.covers_path(&other.r#match)
     }
 }
 

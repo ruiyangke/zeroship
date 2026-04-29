@@ -118,6 +118,209 @@ fn match_prefix_with_method() {
     assert!(m.test("POST", "/api/listTodos").is_none());
 }
 
+// -- shadow / unreachable rule detection ------------------------------------
+
+#[test]
+fn validate_detects_any_shadowing_subsequent_rule() {
+    let m = Manifest {
+        rules: vec![
+            Rule {
+                r#match: Match::Any,
+                action: Action::Worker {
+                    mode: WorkerMode::Ssr,
+                    cache: None,
+                    rate_limit: None,
+                },
+            },
+            Rule {
+                r#match: Match::Exact { method: None, path: "/foo".into() },
+                action: Action::Worker {
+                    mode: WorkerMode::Ssr,
+                    cache: None,
+                    rate_limit: None,
+                },
+            },
+        ],
+        ..Manifest::default()
+    };
+    assert!(m.validate().is_err(), "rule below Any → Worker(all methods) is unreachable");
+}
+
+#[test]
+fn validate_allows_any_at_end() {
+    let m = Manifest {
+        rules: vec![
+            Rule {
+                r#match: Match::Exact { method: None, path: "/foo".into() },
+                action: Action::Worker {
+                    mode: WorkerMode::Ssr,
+                    cache: None,
+                    rate_limit: None,
+                },
+            },
+            Rule {
+                r#match: Match::Any,
+                action: Action::Worker {
+                    mode: WorkerMode::Ssr,
+                    cache: None,
+                    rate_limit: None,
+                },
+            },
+        ],
+        ..Manifest::default()
+    };
+    assert!(m.validate().is_ok(), "Any at end is the canonical catch-all");
+}
+
+#[test]
+fn validate_detects_prefix_shadowing_exact() {
+    let m = Manifest {
+        rules: vec![
+            Rule {
+                r#match: Match::Prefix { method: None, path: "/admin".into() },
+                action: Action::Worker {
+                    mode: WorkerMode::Ssr,
+                    cache: None,
+                    rate_limit: None,
+                },
+            },
+            Rule {
+                r#match: Match::Exact { method: None, path: "/admin/users".into() },
+                action: Action::Worker {
+                    mode: WorkerMode::Ssr,
+                    cache: None,
+                    rate_limit: None,
+                },
+            },
+        ],
+        ..Manifest::default()
+    };
+    assert!(m.validate().is_err(), "/admin/users sits under /admin prefix");
+}
+
+#[test]
+fn validate_detects_prefix_shadowing_longer_prefix() {
+    let m = Manifest {
+        rules: vec![
+            Rule {
+                r#match: Match::Prefix { method: None, path: "/admin".into() },
+                action: Action::Worker {
+                    mode: WorkerMode::Ssr,
+                    cache: None,
+                    rate_limit: None,
+                },
+            },
+            Rule {
+                r#match: Match::Prefix { method: None, path: "/admin/users".into() },
+                action: Action::Worker {
+                    mode: WorkerMode::Ssr,
+                    cache: None,
+                    rate_limit: None,
+                },
+            },
+        ],
+        ..Manifest::default()
+    };
+    assert!(m.validate().is_err(), "/admin/users prefix is contained in /admin prefix");
+}
+
+#[test]
+fn validate_allows_method_disjoint_rules() {
+    let m = Manifest {
+        rules: vec![
+            Rule {
+                r#match: Match::Exact {
+                    method: Some(HttpMethod::Get),
+                    path: "/a".into(),
+                },
+                action: Action::Worker {
+                    mode: WorkerMode::Ssr,
+                    cache: None,
+                    rate_limit: None,
+                },
+            },
+            Rule {
+                r#match: Match::Exact {
+                    method: Some(HttpMethod::Post),
+                    path: "/a".into(),
+                },
+                action: Action::Worker {
+                    mode: WorkerMode::Rpc,
+                    cache: None,
+                    rate_limit: None,
+                },
+            },
+        ],
+        ..Manifest::default()
+    };
+    assert!(m.validate().is_ok(), "GET and POST on same path don't shadow each other");
+}
+
+#[test]
+fn validate_static_does_not_shadow_non_get_head_rule() {
+    // Tier 1 invariant: Static actions only fire for GET/HEAD; a POST
+    // rule below `Any → Static` is reachable, not shadowed.
+    let m = Manifest {
+        rules: vec![
+            Rule {
+                r#match: Match::Any,
+                action: Action::Static {
+                    r#try: vec!["/index.html".into()],
+                    cache: None,
+                    status: None,
+                },
+            },
+            Rule {
+                r#match: Match::Prefix {
+                    method: Some(HttpMethod::Post),
+                    path: "/api/".into(),
+                },
+                action: Action::Worker {
+                    mode: WorkerMode::Ssr,
+                    cache: None,
+                    rate_limit: None,
+                },
+            },
+        ],
+        ..Manifest::default()
+    };
+    assert!(m.validate().is_ok(), "Static narrows to GET/HEAD; POST rule is reachable");
+}
+
+#[test]
+fn validate_detects_duplicate_exact_rules() {
+    let m = Manifest {
+        rules: vec![
+            Rule {
+                r#match: Match::Exact { method: None, path: "/a".into() },
+                action: Action::Worker {
+                    mode: WorkerMode::Ssr,
+                    cache: None,
+                    rate_limit: None,
+                },
+            },
+            Rule {
+                r#match: Match::Exact { method: None, path: "/a".into() },
+                action: Action::Worker {
+                    mode: WorkerMode::Rpc,
+                    cache: None,
+                    rate_limit: None,
+                },
+            },
+        ],
+        ..Manifest::default()
+    };
+    assert!(m.validate().is_err(), "duplicate Exact /a is dead second time");
+}
+
+#[test]
+fn validate_passthrough_is_valid() {
+    // The synthesized default for apps without their own manifest must
+    // pass shadow detection; if it didn't, every legacy app would refuse
+    // to load.
+    assert!(Manifest::passthrough().validate().is_ok());
+}
+
 #[test]
 fn manifest_validate_rejects_invalid_status() {
     let bad = Manifest {
