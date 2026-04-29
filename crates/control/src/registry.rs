@@ -119,6 +119,16 @@ impl Registry {
         .await
         .map_err(|e| format!("migration: {e}"))?;
 
+        // Per-app routing manifest (dispatch rules + asset maps).
+        // NULL for apps deployed before the manifest era — gateway
+        // falls back to its legacy dispatch in that case.
+        conn.execute(
+            "ALTER TABLE apps ADD COLUMN IF NOT EXISTS manifest_json TEXT",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+
         conn.execute(
             "CREATE TABLE IF NOT EXISTS usage (
                 app_id UUID NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
@@ -470,17 +480,40 @@ impl Registry {
     }
 
     /// Build the full route table for the gateway.
+    ///
+    /// The `manifest_json` column carries the per-app routing manifest
+    /// (dispatch rules + asset maps) emitted by the build adapter. NULL
+    /// or invalid → synthesize [`Manifest::passthrough`] so dispatch is
+    /// always defined (legacy fallback path was removed).
     pub async fn get_routes(&self) -> Result<RouteMap, RegistryError> {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT id, name, plan_id, api_key_hash, deploy_hash FROM apps",
+                "SELECT id, name, plan_id, api_key_hash, deploy_hash, manifest_json \
+                 FROM apps",
                 &[],
             )
             .await?;
         let mut map = HashMap::new();
         for row in &rows {
             let id: Uuid = row.get("id");
+            let manifest_json: Option<String> = row.get("manifest_json");
+            let manifest = manifest_json
+                .as_deref()
+                .and_then(|j| match serde_json::from_str::<zeroship_core::types::Manifest>(j) {
+                    Ok(m) => match m.validate() {
+                        Ok(()) => Some(m),
+                        Err(e) => {
+                            eprintln!("[registry] invalid manifest for {id}: {e} — using passthrough");
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("[registry] manifest parse failure for {id}: {e} — using passthrough");
+                        None
+                    }
+                })
+                .unwrap_or_else(zeroship_core::types::Manifest::passthrough);
             map.insert(
                 id,
                 RouteEntry {
@@ -488,7 +521,7 @@ impl Registry {
                     plan_id: row.get("plan_id"),
                     api_key_hash: row.get("api_key_hash"),
                     deploy_hash: row.get("deploy_hash"),
-                    has_http_handler: false,
+                    manifest,
                 },
             );
         }

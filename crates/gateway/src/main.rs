@@ -1,4 +1,5 @@
 mod auth;
+mod dispatch;
 mod enforce;
 mod proxy;
 mod router;

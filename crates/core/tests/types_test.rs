@@ -1,4 +1,7 @@
-use zeroship_core::types::{AppUsage, ControlEvent, RouteEntry, UsageReport};
+use zeroship_core::types::{
+    Action, AppUsage, AssetEntry, ControlEvent, HttpMethod, Manifest, Match, RouteEntry, Rule,
+    UsageReport, WorkerMode,
+};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -72,7 +75,7 @@ fn route_entry_roundtrip() {
         plan_id: "pro".to_string(),
         api_key_hash: "deadbeef".repeat(8),
         deploy_hash: Some("abc123".to_string()),
-        has_http_handler: false,
+        manifest: Manifest::passthrough(),
     };
 
     let json = serde_json::to_string(&entry).unwrap();
@@ -81,4 +84,166 @@ fn route_entry_roundtrip() {
     assert_eq!(decoded.name, "my-app");
     assert_eq!(decoded.plan_id, "pro");
     assert_eq!(decoded.deploy_hash, Some("abc123".to_string()));
+    // Every route has a manifest after deserialization.
+    assert!(!decoded.manifest.rules.is_empty(), "passthrough has rules");
+}
+
+#[test]
+fn route_entry_missing_manifest_field_synthesizes_passthrough() {
+    // Older rows (or rows produced before the manifest field) must still
+    // deserialize cleanly — the missing field defaults to passthrough.
+    let json = r#"{
+        "name": "legacy-app",
+        "plan_id": "free",
+        "api_key_hash": "h",
+        "deploy_hash": null
+    }"#;
+    let decoded: RouteEntry = serde_json::from_str(json).unwrap();
+    assert!(!decoded.manifest.rules.is_empty(), "default to passthrough");
+}
+
+#[test]
+fn match_exact() {
+    let m = Match::Exact { method: None, path: "/robots.txt".into() };
+    assert!(m.test("GET", "/robots.txt").is_some());
+    assert!(m.test("GET", "/robots.txt/").is_none());
+    assert!(m.test("GET", "/other").is_none());
+}
+
+#[test]
+fn match_prefix_with_method() {
+    let m = Match::Prefix { method: Some(HttpMethod::Post), path: "/_rpc/".into() };
+    assert!(m.test("POST", "/_rpc/listTodos").is_some());
+    assert!(m.test("GET", "/_rpc/listTodos").is_none());
+    assert!(m.test("POST", "/api/listTodos").is_none());
+}
+
+#[test]
+fn manifest_validate_rejects_invalid_status() {
+    let bad = Manifest {
+        rules: vec![Rule {
+            r#match: Match::Any,
+            action: Action::Static {
+                r#try: vec!["/x.html".into()],
+                cache: None,
+                status: Some(99), // out of range
+            },
+        }],
+        build_assets: HashMap::new(),
+        runtime_assets: HashMap::new(),
+        server_bundle_hash: None,
+        asset_version: 0,
+    };
+    assert!(bad.validate().is_err(), "status=99 must be rejected");
+
+    let good = Manifest {
+        rules: vec![Rule {
+            r#match: Match::Any,
+            action: Action::Static {
+                r#try: vec!["/x.html".into()],
+                cache: None,
+                status: Some(404),
+            },
+        }],
+        build_assets: HashMap::new(),
+        runtime_assets: HashMap::new(),
+        server_bundle_hash: None,
+        asset_version: 0,
+    };
+    assert!(good.validate().is_ok(), "status=404 must be accepted");
+
+    let unset = Manifest::default();
+    assert!(unset.validate().is_ok(), "no status is fine");
+}
+
+#[test]
+fn match_prefix_segment_boundary() {
+    // /admin must match exactly, with trailing slash, or with a sub-path —
+    // but NOT span across a segment boundary (no /administrator match).
+    let m = Match::Prefix { method: None, path: "/admin".into() };
+    assert!(m.test("GET", "/admin").is_some(), "exact /admin");
+    assert!(m.test("GET", "/admin/").is_some(), "trailing slash");
+    assert!(m.test("GET", "/admin/users").is_some(), "sub-path");
+    assert!(m.test("GET", "/administrator").is_none(), "must not span segment");
+    assert!(m.test("GET", "/admin-panel").is_none(), "must not span segment");
+}
+
+#[test]
+fn match_glob_single() {
+    let m = Match::Glob { method: None, path: "/blog/[slug]".into() };
+    let caps = m.test("GET", "/blog/hello").unwrap();
+    assert_eq!(caps.get("slug").unwrap(), "hello");
+    assert!(m.test("GET", "/blog/").is_none());
+    assert!(m.test("GET", "/blog/hello/extra").is_none());
+}
+
+#[test]
+fn match_glob_catchall() {
+    let m = Match::Glob { method: None, path: "/api/[...rest]".into() };
+    let caps = m.test("GET", "/api/v1/users/42").unwrap();
+    assert_eq!(caps.get("rest").unwrap(), "v1/users/42");
+}
+
+#[test]
+fn match_any() {
+    let m = Match::Any;
+    assert!(m.test("GET", "/anything").is_some());
+    assert!(m.test("DELETE", "/random/path").is_some());
+}
+
+#[test]
+fn manifest_roundtrip_json() {
+    let m = Manifest {
+        rules: vec![
+            Rule {
+                r#match: Match::Prefix {
+                    method: Some(HttpMethod::Post),
+                    path: "/_rpc/".into(),
+                },
+                action: Action::Worker {
+                    mode: WorkerMode::Rpc,
+                    cache: None,
+                    rate_limit: None,
+                },
+            },
+            Rule {
+                r#match: Match::Glob {
+                    method: None,
+                    path: "/blog/[slug]".into(),
+                },
+                action: Action::Worker {
+                    mode: WorkerMode::Ssr,
+                    cache: None,
+                    rate_limit: None,
+                },
+            },
+            Rule {
+                r#match: Match::Any,
+                action: Action::Static {
+                    r#try: vec!["$path".into(), "/index.html".into()],
+                    cache: None,
+                    status: None,
+                },
+            },
+        ],
+        build_assets: HashMap::from([(
+            "/index.html".to_string(),
+            AssetEntry {
+                hash: "sha256-abc".into(),
+                content_type: "text/html".into(),
+                size: 1024,
+                cache: None,
+                updated_at: 0,
+            },
+        )]),
+        runtime_assets: HashMap::new(),
+        server_bundle_hash: Some("sha256-xyz".into()),
+        asset_version: 0,
+    };
+
+    let json = serde_json::to_string(&m).unwrap();
+    let decoded: Manifest = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded.rules.len(), 3);
+    assert_eq!(decoded.server_bundle_hash.as_deref(), Some("sha256-xyz"));
+    assert_eq!(decoded.build_assets["/index.html"].hash, "sha256-abc");
 }

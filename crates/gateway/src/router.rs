@@ -10,66 +10,6 @@ use uuid::Uuid;
 use crate::{auth, enforce, proxy, user_auth, GateState};
 
 // ---------------------------------------------------------------------------
-// Content-Type mapping
-// ---------------------------------------------------------------------------
-
-fn content_type_for_ext(path: &str) -> &'static str {
-    if let Some(ext) = path.rsplit('.').next() {
-        match ext.to_ascii_lowercase().as_str() {
-            "html" => "text/html; charset=utf-8",
-            "js" | "mjs" => "application/javascript; charset=utf-8",
-            "css" => "text/css; charset=utf-8",
-            "json" => "application/json; charset=utf-8",
-            "png" => "image/png",
-            "jpg" | "jpeg" => "image/jpeg",
-            "gif" => "image/gif",
-            "svg" => "image/svg+xml",
-            "ico" => "image/x-icon",
-            "woff" => "font/woff",
-            "woff2" => "font/woff2",
-            "ttf" => "font/ttf",
-            "webp" => "image/webp",
-            "txt" => "text/plain; charset=utf-8",
-            "xml" => "application/xml; charset=utf-8",
-            "webmanifest" => "application/manifest+json",
-            _ => "application/octet-stream",
-        }
-    } else {
-        "application/octet-stream"
-    }
-}
-
-/// Known static file extensions that should be served directly (not SPA fallback).
-fn is_static_ext(path: &str) -> bool {
-    if let Some(ext) = path.rsplit('.').next() {
-        matches!(
-            ext.to_ascii_lowercase().as_str(),
-            "html"
-                | "js"
-                | "mjs"
-                | "css"
-                | "json"
-                | "png"
-                | "jpg"
-                | "jpeg"
-                | "gif"
-                | "svg"
-                | "ico"
-                | "woff"
-                | "woff2"
-                | "ttf"
-                | "webp"
-                | "txt"
-                | "xml"
-                | "webmanifest"
-                | "map"
-        )
-    } else {
-        false
-    }
-}
-
-// ---------------------------------------------------------------------------
 // App name extraction
 // ---------------------------------------------------------------------------
 
@@ -233,40 +173,108 @@ async fn handle_request(
     // Normalize tail: strip leading slash
     let tail = tail.strip_prefix('/').unwrap_or(tail);
 
-    // 2. Legacy /rpc JSON-RPC endpoint removed — surface the migration.
-    if tail == "rpc" {
-        return HttpResponse::Gone().json(&serde_json::json!({
-            "message": "The /rpc JSON-RPC endpoint is gone. Use POST /_rpc/<methodName> with a JSON array body.",
-            "name": "Error",
-        }));
-    }
+    // Manifest-driven dispatch. Every app has a manifest (synthesized
+    // passthrough for apps that haven't declared one), so dispatch is
+    // always defined. The pure walk decides the outcome; we execute it.
+    let dispatch_path = format!("/{tail}");
+    let outcome = crate::dispatch::dispatch(req.method().as_str(), &dispatch_path, &route);
+    execute_outcome(outcome, req, state, &app_id, &route, tail, body, wall_start).await
+}
 
-    // 3. `_rpc/<method>` URLs still require the app's X-Api-Key check. The
-    //    URL itself is preserved in the envelope we forward; the bootstrap
-    //    router in the runtime (PR 2) dispatches `_rpc/*` internally.
-    if tail.starts_with("_rpc/") {
-        if let Err(resp) = auth::check_api_key(&req, &route) {
-            return resp;
+// ---------------------------------------------------------------------------
+// Manifest-driven outcome execution
+// ---------------------------------------------------------------------------
+
+/// Execute the [`Outcome`] produced by the manifest's rule walk.
+async fn execute_outcome(
+    outcome: crate::dispatch::Outcome,
+    req: HttpRequest,
+    state: web::types::State<Arc<GateState>>,
+    app_id: &Uuid,
+    route: &zeroship_core::types::RouteEntry,
+    tail: &str,
+    body: Bytes,
+    wall_start: std::time::Instant,
+) -> HttpResponse {
+    use crate::dispatch::Outcome;
+    use zeroship_core::types::WorkerMode;
+
+    match outcome {
+        Outcome::Worker { mode, cache: _, rate_limit: _ } => {
+            // TODO: honor per-rule rate_limit. Today we still enforce the
+            // global per-app bucket inside handle_dispatch.
+            // RPC requires the X-Api-Key check. SSR is open by default
+            // (the app's own pages can call it; gating is in user code).
+            if mode == WorkerMode::Rpc {
+                if let Err(resp) = auth::check_api_key(&req, route) {
+                    return resp;
+                }
+            }
+            handle_dispatch(req, &state, app_id, route, tail, body, wall_start).await
         }
+        Outcome::Static(hit) => serve_static_hit(&state, app_id, hit, wall_start).await,
+        Outcome::Redirect { to, status } => {
+            let st = ntex::http::StatusCode::from_u16(status)
+                .unwrap_or(ntex::http::StatusCode::FOUND);
+            HttpResponse::build(st)
+                .header("location", to)
+                .header(
+                    "x-wall-time-ms",
+                    format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
+                )
+                .finish()
+        }
+        Outcome::NotFound => HttpResponse::NotFound()
+            .json(&serde_json::json!({"error": "no rule matched"})),
     }
+}
 
-    // 4. If the app exports a fetch handler, proxy non-static HTTP requests
-    //    to the worker via the unified dispatch endpoint. This enables
-    //    streaming (SSE) and server-side routing; the JS handler receives
-    //    a proper `Request` object.
-    if route.has_http_handler && (tail.starts_with("_rpc/") || !is_static_ext(tail)) {
-        return handle_dispatch(req, &state, &app_id, &route, tail, body, wall_start).await;
+/// Serve a [`StaticHit`] from the BundleStore via the control plane's
+/// asset endpoint.
+async fn serve_static_hit(
+    state: &GateState,
+    app_id: &Uuid,
+    hit: crate::dispatch::StaticHit,
+    wall_start: std::time::Instant,
+) -> HttpResponse {
+    let asset_path = hit.path.trim_start_matches('/');
+    match fetch_asset(&state.config.control_url, app_id, asset_path).await {
+        Ok((200, data)) => {
+            let status = hit.status.unwrap_or(200);
+            let st = ntex::http::StatusCode::from_u16(status)
+                .unwrap_or(ntex::http::StatusCode::OK);
+            let mut resp = HttpResponse::build(st);
+            resp.content_type(hit.content_type);
+            resp.header("etag", format!("\"{}\"", hit.hash));
+            resp.header("cache-control", cache_control_header(&hit.cache));
+            resp.header(
+                "x-wall-time-ms",
+                format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
+            );
+            resp.body(data)
+        }
+        Ok((404, _)) => HttpResponse::NotFound()
+            .json(&serde_json::json!({"error": "asset bytes missing"})),
+        Ok((status, body)) => HttpResponse::build(
+            ntex::http::StatusCode::from_u16(status)
+                .unwrap_or(ntex::http::StatusCode::INTERNAL_SERVER_ERROR),
+        )
+        .body(body),
+        Err(_) => HttpResponse::ServiceUnavailable()
+            .json(&serde_json::json!({"error": "control plane unavailable"})),
     }
+}
 
-    // 5. `_rpc/*` URLs on apps without a fetch handler have nowhere to go —
-    //    the legacy RPC-only wire is gone.
-    if tail.starts_with("_rpc/") {
-        return HttpResponse::NotFound()
-            .json(&serde_json::json!({"error": "app has no fetch handler"}));
+/// Build the `Cache-Control` header value from a [`CacheCtl`].
+fn cache_control_header(c: &zeroship_core::types::CacheCtl) -> String {
+    let mut parts: Vec<String> = vec!["public".into(), format!("max-age={}", c.max_age)];
+    if let Some(swr) = c.swr_window {
+        parts.push(format!("stale-while-revalidate={swr}"));
     }
-
-    // 6. Static file serving — no auth required.
-    handle_static(&state, &app_id, tail).await
+    if c.immutable {
+        parts.push("immutable".into());
+    }
+    parts.join(", ")
 }
 
 // ---------------------------------------------------------------------------
@@ -391,63 +399,3 @@ async fn handle_dispatch(
     response
 }
 
-// ---------------------------------------------------------------------------
-// Static file handler
-// ---------------------------------------------------------------------------
-
-async fn handle_static(
-    state: &GateState,
-    app_id: &Uuid,
-    tail: &str,
-) -> HttpResponse {
-    // Determine the asset path to fetch
-    let asset_path = if tail.is_empty() || tail == "index.html" {
-        "index.html"
-    } else {
-        tail
-    };
-
-    // Fetch from control plane
-    match fetch_asset(&state.config.control_url, app_id, asset_path).await {
-        Ok((200, data)) => {
-            let ct = content_type_for_ext(asset_path);
-            HttpResponse::Ok()
-                .content_type(ct)
-                .body(data)
-        }
-        Ok((404, _)) => {
-            // If it's a known static extension, return 404
-            if is_static_ext(asset_path) {
-                return HttpResponse::NotFound()
-                    .json(&serde_json::json!({"error": "asset not found"}));
-            }
-            // SPA fallback: try index.html for unknown paths
-            match fetch_asset(&state.config.control_url, app_id, "index.html").await {
-                Ok((200, data)) => {
-                    HttpResponse::Ok()
-                        .content_type("text/html; charset=utf-8")
-                        .body(data)
-                }
-                Ok(_) => {
-                    HttpResponse::NotFound()
-                        .json(&serde_json::json!({"error": "index.html not found"}))
-                }
-                Err(_) => {
-                    HttpResponse::ServiceUnavailable()
-                        .json(&serde_json::json!({"error": "control plane unavailable"}))
-                }
-            }
-        }
-        Ok((status, body)) => {
-            HttpResponse::build(
-                ntex::http::StatusCode::from_u16(status)
-                    .unwrap_or(ntex::http::StatusCode::INTERNAL_SERVER_ERROR),
-            )
-            .body(body)
-        }
-        Err(_) => {
-            HttpResponse::ServiceUnavailable()
-                .json(&serde_json::json!({"error": "control plane unavailable"}))
-        }
-    }
-}
