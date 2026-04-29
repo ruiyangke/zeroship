@@ -1,6 +1,6 @@
 use zeroship_core::types::{
     Action, AppUsage, AssetEntry, ControlEvent, HttpMethod, Manifest, ManifestMetadata, Match,
-    RouteEntry, Rule, ServerBundleRef, UsageReport, WorkerMode,
+    RouteEntry, Rule, UsageReport, WorkerCode, WorkerMode,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -433,7 +433,10 @@ fn manifest_roundtrip_json() {
                 updated_at: 0,
             },
         )]),
-        server_bundle: Some(ServerBundleRef::Single { hash: SHA_B.into() }),
+        worker: Some(WorkerCode {
+            entry: "index.js".into(),
+            modules: HashMap::from([("index.js".to_string(), SHA_B.to_string())]),
+        }),
         ..Manifest::default()
     };
 
@@ -441,8 +444,11 @@ fn manifest_roundtrip_json() {
     let decoded: Manifest = serde_json::from_str(&json).unwrap();
     assert_eq!(decoded.rules.len(), 3);
     assert_eq!(
-        decoded.server_bundle,
-        Some(ServerBundleRef::Single { hash: SHA_B.into() })
+        decoded.worker,
+        Some(WorkerCode {
+            entry: "index.js".into(),
+            modules: HashMap::from([("index.js".to_string(), SHA_B.to_string())]),
+        })
     );
     assert_eq!(decoded.assets["/index.html"].hash, SHA_A);
 }
@@ -457,7 +463,10 @@ fn manifest_v2_round_trips_through_json() {
     let m = Manifest {
         version: 2,
         deploy_hash: Some(SHA_A.to_string()),
-        server_bundle: Some(ServerBundleRef::Single { hash: SHA_B.into() }),
+        worker: Some(WorkerCode {
+            entry: "index.js".into(),
+            modules: HashMap::from([("index.js".to_string(), SHA_B.to_string())]),
+        }),
         rules: vec![Rule {
             r#match: Match::Any,
             action: Action::Worker {
@@ -467,7 +476,7 @@ fn manifest_v2_round_trips_through_json() {
             },
         }],
         assets: HashMap::from([(
-            "/_prerendered/about.html".to_string(),
+            "/about.html".to_string(),
             AssetEntry {
                 hash: SHA_A.into(),
                 content_type: "text/html".into(),
@@ -475,10 +484,6 @@ fn manifest_v2_round_trips_through_json() {
                 cache: None,
                 updated_at: 0,
             },
-        )]),
-        prerendered: HashMap::from([(
-            "/about".to_string(),
-            "/_prerendered/about.html".to_string(),
         )]),
         runtime_assets: HashMap::new(),
         asset_version: 0,
@@ -494,31 +499,17 @@ fn manifest_v2_round_trips_through_json() {
     assert_eq!(d.version, 2);
     assert_eq!(d.deploy_hash.as_deref(), Some(SHA_A));
     assert_eq!(
-        d.server_bundle,
-        Some(ServerBundleRef::Single { hash: SHA_B.into() })
+        d.worker,
+        Some(WorkerCode {
+            entry: "index.js".into(),
+            modules: HashMap::from([("index.js".to_string(), SHA_B.to_string())]),
+        })
     );
     assert_eq!(d.rules.len(), 1);
-    assert_eq!(d.assets["/_prerendered/about.html"].hash, SHA_A);
-    assert_eq!(
-        d.prerendered.get("/about").map(String::as_str),
-        Some("/_prerendered/about.html"),
-    );
+    assert_eq!(d.assets["/about.html"].hash, SHA_A);
     assert_eq!(d.sourcemaps.get(SHA_A).map(String::as_str), Some(SHA_B));
     assert_eq!(d.metadata.compiler.as_deref(), Some("@zeroship/vite-plugin@0.1"));
     assert_eq!(d.metadata.built_at, "2026-04-29T12:34:56Z");
-}
-
-#[test]
-fn manifest_validate_rejects_bad_prerendered_ref() {
-    let m = Manifest {
-        prerendered: HashMap::from([(
-            "/about".to_string(),
-            "/missing.html".to_string(),
-        )]),
-        ..Manifest::default()
-    };
-    let err = m.validate().unwrap_err();
-    assert!(err.contains("/missing.html"), "error mentions missing path: {err}");
 }
 
 #[test]
@@ -563,7 +554,7 @@ fn manifest_validate_rejects_unsupported_version() {
 fn manifest_passthrough_v2_validates() {
     let p = Manifest::passthrough();
     assert_eq!(p.version, 2);
-    assert!(p.server_bundle.is_none(), "passthrough has no server_bundle");
+    assert!(p.worker.is_none(), "passthrough has no worker");
     assert_eq!(p.metadata.built_at, "1970-01-01T00:00:00Z");
     assert!(
         p.metadata.compiler
@@ -577,8 +568,8 @@ fn manifest_passthrough_v2_validates() {
 
 #[test]
 fn manifest_v2_minimal_round_trips() {
-    // Minimal v2 wire format: omit prerendered/sourcemaps/metadata; the
-    // serde defaults fill them in. version defaults to 2.
+    // Minimal v2 wire format: omit sourcemaps/metadata; the serde
+    // defaults fill them in. version defaults to 2.
     let json = r#"{
         "rules": [],
         "assets": {},
@@ -588,9 +579,8 @@ fn manifest_v2_minimal_round_trips() {
     let m: Manifest = serde_json::from_str(json).unwrap();
     assert_eq!(m.version, 2);
     assert!(m.assets.is_empty());
-    assert!(m.prerendered.is_empty());
     assert!(m.sourcemaps.is_empty());
-    assert!(m.server_bundle.is_none());
+    assert!(m.worker.is_none());
     assert_eq!(m.metadata.built_at, "");
     m.validate().expect("minimal v2 manifest must validate");
 }
@@ -604,9 +594,10 @@ fn manifest_validate_rejects_v1() {
 }
 
 #[test]
-fn manifest_validate_rejects_multi_entry_not_in_modules() {
+fn manifest_validate_rejects_entry_not_in_modules() {
+    // The flat WorkerCode shape requires `entry` to be a key of `modules`.
     let m = Manifest {
-        server_bundle: Some(ServerBundleRef::Multi {
+        worker: Some(WorkerCode {
             entry: "src/a.js".into(),
             modules: HashMap::from([("src/b.js".to_string(), SHA_A.to_string())]),
         }),
@@ -620,42 +611,34 @@ fn manifest_validate_rejects_multi_entry_not_in_modules() {
 }
 
 #[test]
-fn manifest_validate_rejects_bad_server_bundle_hash() {
+fn manifest_validate_rejects_bad_worker_hash() {
     let m = Manifest {
-        server_bundle: Some(ServerBundleRef::Single {
-            hash: "not-hex".into(),
+        worker: Some(WorkerCode {
+            entry: "index.js".into(),
+            modules: HashMap::from([("index.js".to_string(), "not-hex".to_string())]),
         }),
         ..Manifest::default()
     };
     let err = m.validate().unwrap_err();
     assert!(
-        err.contains("server_bundle"),
-        "error mentions server_bundle: {err}"
+        err.contains("worker"),
+        "error mentions worker: {err}"
     );
 }
 
 #[test]
-fn server_bundle_single_round_trips() {
-    let sb = ServerBundleRef::Single { hash: SHA_A.into() };
-    let json = serde_json::to_string(&sb).unwrap();
-    assert!(json.contains("\"kind\":\"single\""), "tag present: {json}");
-    assert!(json.contains(SHA_A), "hash present: {json}");
-    let decoded: ServerBundleRef = serde_json::from_str(&json).unwrap();
-    assert_eq!(decoded, sb);
-}
-
-#[test]
-fn server_bundle_multi_round_trips() {
-    let sb = ServerBundleRef::Multi {
+fn worker_round_trips_through_json() {
+    // Flat shape — no `kind` discriminator.
+    let w = WorkerCode {
         entry: "src/index.js".into(),
         modules: HashMap::from([
             ("src/index.js".to_string(), SHA_A.to_string()),
             ("src/lib.js".to_string(), SHA_B.to_string()),
         ]),
     };
-    let json = serde_json::to_string(&sb).unwrap();
-    assert!(json.contains("\"kind\":\"multi\""), "tag present: {json}");
+    let json = serde_json::to_string(&w).unwrap();
+    assert!(!json.contains("\"kind\""), "no discriminator in flat shape: {json}");
     assert!(json.contains("src/index.js"), "entry present: {json}");
-    let decoded: ServerBundleRef = serde_json::from_str(&json).unwrap();
-    assert_eq!(decoded, sb);
+    let decoded: WorkerCode = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded, w);
 }

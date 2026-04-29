@@ -12,7 +12,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use zeroship_core::types::{Manifest, ServerBundleRef};
+use zeroship_core::types::Manifest;
 use zeroship_core::BlobStore;
 
 // ---------------------------------------------------------------------------
@@ -355,41 +355,27 @@ fn parse_archive(compressed: &[u8]) -> Result<ParsedArchive, IngestError> {
 // Cross-references + deploy_hash canonicalization
 // ---------------------------------------------------------------------------
 
-/// Walk the manifest and gather every hash it references — server bundle,
-/// asset hashes, prerendered targets (resolved via `assets`), and both
-/// keys+values of `sourcemaps`.
+/// Walk the manifest and gather every hash it references — worker
+/// modules, asset hashes, and both keys+values of `sourcemaps`.
 fn collect_expected_hashes(manifest: &Manifest) -> Result<HashSet<String>, IngestError> {
     let mut out: HashSet<String> = HashSet::new();
-    if let Some(sb) = &manifest.server_bundle {
-        match sb {
-            ServerBundleRef::Single { hash } => {
-                if !zeroship_core::validate_hash_format(hash) {
-                    return Err(IngestError::bad(
-                        "invalid manifest",
-                        format!("server_bundle.hash {hash:?} is not lowercase sha256 hex"),
-                    ));
-                }
-                out.insert(hash.clone());
+    if let Some(worker) = &manifest.worker {
+        if !worker.modules.contains_key(&worker.entry) {
+            return Err(IngestError::bad(
+                "invalid manifest",
+                format!("worker.entry {entry:?} is not in modules", entry = worker.entry),
+            ));
+        }
+        for (spec, hash) in &worker.modules {
+            if !zeroship_core::validate_hash_format(hash) {
+                return Err(IngestError::bad(
+                    "invalid manifest",
+                    format!(
+                        "worker.modules[{spec}] {hash:?} is not lowercase sha256 hex"
+                    ),
+                ));
             }
-            ServerBundleRef::Multi { entry, modules } => {
-                if !modules.contains_key(entry) {
-                    return Err(IngestError::bad(
-                        "invalid manifest",
-                        format!("server_bundle.entry {entry:?} is not in modules"),
-                    ));
-                }
-                for (spec, hash) in modules {
-                    if !zeroship_core::validate_hash_format(hash) {
-                        return Err(IngestError::bad(
-                            "invalid manifest",
-                            format!(
-                                "server_bundle.modules[{spec}] {hash:?} is not lowercase sha256 hex"
-                            ),
-                        ));
-                    }
-                    out.insert(hash.clone());
-                }
-            }
+            out.insert(hash.clone());
         }
     }
     for (path, entry) in &manifest.assets {
@@ -402,15 +388,6 @@ fn collect_expected_hashes(manifest: &Manifest) -> Result<HashSet<String>, Inges
                 ),
             ));
         }
-        out.insert(entry.hash.clone());
-    }
-    for (route, asset_path) in &manifest.prerendered {
-        let entry = manifest.assets.get(asset_path).ok_or_else(|| {
-            IngestError::bad(
-                "invalid manifest",
-                format!("prerendered[{route}] -> {asset_path} not in assets"),
-            )
-        })?;
         out.insert(entry.hash.clone());
     }
     for (k, v) in &manifest.sourcemaps {
@@ -513,14 +490,16 @@ mod tests {
         let h3 = "c".repeat(64);
         let m: Manifest = serde_json::from_value(json!({
             "version": 2,
-            "server_bundle": { "kind": "single", "hash": h },
+            "worker": {
+                "entry": "index.js",
+                "modules": { "index.js": h }
+            },
             "rules": [],
             "assets": { "/index.html": {
                 "hash": h2,
                 "content_type": "text/html",
                 "size": 0,
             }},
-            "prerendered": { "/about": "/index.html" },
             "runtime_assets": {},
             "asset_version": 0,
             "sourcemaps": { h2.clone(): h3 },
@@ -533,13 +512,12 @@ mod tests {
     }
 
     #[test]
-    fn collect_expected_walks_multi_module_server_bundle() {
+    fn collect_expected_walks_worker_modules() {
         let entry_hash = "a".repeat(64);
         let lib_hash = "d".repeat(64);
         let m: Manifest = serde_json::from_value(json!({
             "version": 2,
-            "server_bundle": {
-                "kind": "multi",
+            "worker": {
                 "entry": "src/index.js",
                 "modules": {
                     "src/index.js": entry_hash,
@@ -548,7 +526,6 @@ mod tests {
             },
             "rules": [],
             "assets": {},
-            "prerendered": {},
             "runtime_assets": {},
             "asset_version": 0,
             "sourcemaps": {},
@@ -557,6 +534,6 @@ mod tests {
         let set = collect_expected_hashes(&m).unwrap();
         assert!(set.contains(&"a".repeat(64)));
         assert!(set.contains(&"d".repeat(64)));
-        assert_eq!(set.len(), 2, "Multi covers all module hashes");
+        assert_eq!(set.len(), 2, "worker covers all module hashes");
     }
 }

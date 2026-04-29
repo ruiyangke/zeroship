@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use zeroship_core::types::{
-    Action, AssetEntry, CacheCtl, HttpMethod, Manifest, Match, RateLimit, Rule, ServerBundleRef,
+    Action, AssetEntry, CacheCtl, HttpMethod, Manifest, Match, RateLimit, Rule, WorkerCode,
     WorkerMode,
 };
 
@@ -69,7 +69,7 @@ pub struct CompiledManifest {
     assets: HashMap<String, AssetEntry>,
     runtime_assets: HashMap<String, AssetEntry>,
     #[allow(dead_code)]
-    server_bundle: Option<ServerBundleRef>,
+    worker: Option<WorkerCode>,
     #[allow(dead_code)]
     asset_version: i64,
 }
@@ -158,7 +158,7 @@ impl CompiledManifest {
             rules,
             assets: m.assets.clone(),
             runtime_assets: m.runtime_assets.clone(),
-            server_bundle: m.server_bundle.clone(),
+            worker: m.worker.clone(),
             asset_version: m.asset_version,
         }
     }

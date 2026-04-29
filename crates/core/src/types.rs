@@ -64,18 +64,16 @@ pub struct RouteEntry {
 // + framework conventions.
 // ---------------------------------------------------------------------------
 
-/// Reference to a server-side JS bundle inside a deploy. Two shapes:
-/// `Single` for the typical case (one esbuild/rollup output blob),
-/// `Multi` for code-split deploys with explicit module specifiers.
-/// See `docs/reference/zsdeploy.md` Server bundle section.
+/// Reference to the worker-side JS for a deploy. Uniform shape: an
+/// `entry` specifier plus a `modules` map of specifier → blob hash.
+/// Single-bundled servers have one entry in `modules`; code-split
+/// servers have many. See `docs/reference/zsdeploy.md` Worker code section.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ServerBundleRef {
-    /// One bundled blob — the worker fetches it and runs as `index.js`.
-    Single { hash: String },
-    /// Explicit module map — V8's resolve callback fetches modules
-    /// lazily by specifier.
-    Multi { entry: String, modules: HashMap<String, String> },
+pub struct WorkerCode {
+    /// Specifier V8 evaluates first; must be a key in `modules`.
+    pub entry: String,
+    /// Specifier → blob hash.
+    pub modules: HashMap<String, String>,
 }
 
 /// One per app. Carries everything the gateway needs to route a request
@@ -92,10 +90,10 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deploy_hash: Option<String>,
 
-    /// Server-side JS bundle reference. `None` for SSG-only deploys
-    /// (no worker rules). See [`ServerBundleRef`].
+    /// Worker-side JS for the deploy. `None` for SSG-only deploys
+    /// (no worker rules). See [`WorkerCode`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub server_bundle: Option<ServerBundleRef>,
+    pub worker: Option<WorkerCode>,
 
     /// Ordered routing rules. Walked first-match-wins on every
     /// request.
@@ -107,10 +105,6 @@ pub struct Manifest {
     /// the asset is served at, e.g. `/index.html`).
     #[serde(default)]
     pub assets: HashMap<String, AssetEntry>,
-
-    /// Route → asset path. Each value MUST resolve via `assets`.
-    #[serde(default)]
-    pub prerendered: HashMap<String, String>,
 
     /// Runtime-emitted asset map. Populated by the user's server
     /// code via `zeroship.assets.put(...)`. Bumped via
@@ -139,10 +133,9 @@ impl Default for Manifest {
         Self {
             version: 2,
             deploy_hash: None,
-            server_bundle: None,
+            worker: None,
             rules: Vec::new(),
             assets: HashMap::new(),
-            prerendered: HashMap::new(),
             runtime_assets: HashMap::new(),
             asset_version: 0,
             sourcemaps: HashMap::new(),
@@ -184,7 +177,7 @@ impl Manifest {
         Self {
             version: 2,
             deploy_hash: None,
-            server_bundle: None,
+            worker: None,
             rules: vec![
                 Rule {
                     r#match: Match::Prefix {
@@ -207,7 +200,6 @@ impl Manifest {
                 },
             ],
             assets: HashMap::new(),
-            prerendered: HashMap::new(),
             runtime_assets: HashMap::new(),
             asset_version: 0,
             sourcemaps: HashMap::new(),
@@ -226,12 +218,11 @@ impl Manifest {
     ///
     /// Checks:
     /// * `version == 2` (unknown versions rejected).
-    /// * `server_bundle` hashes are 64-char lowercase hex; for `Multi`,
-    ///   `entry` is a key in `modules`.
+    /// * `worker.entry` is a key in `worker.modules`; every value in
+    ///   `worker.modules` is 64-char lowercase sha256 hex.
     /// * `Action::Static.status` ∈ [100, 599]
     /// * `Action::Redirect.status` ∈ [300, 399]
     /// * No rule is shadowed (made unreachable) by an earlier rule.
-    /// * Every `prerendered` value resolves to a known `assets` entry.
     /// * Every `sourcemaps` key/value is sha256-hex (lowercase, 64 chars).
     ///
     /// Note: `runtime_assets == {}` and `asset_version == 0` are
@@ -242,28 +233,17 @@ impl Manifest {
         if self.version != 2 {
             return Err(format!("unsupported manifest version {}", self.version));
         }
-        if let Some(sb) = &self.server_bundle {
-            match sb {
-                ServerBundleRef::Single { hash } => {
-                    if !crate::blob::validate_hash_format(hash) {
-                        return Err(format!(
-                            "server_bundle.hash {hash:?} is not a 64-char lowercase sha256 hex"
-                        ));
-                    }
-                }
-                ServerBundleRef::Multi { entry, modules } => {
-                    if !modules.contains_key(entry) {
-                        return Err(format!(
-                            "server_bundle.entry {entry:?} is not a key in server_bundle.modules"
-                        ));
-                    }
-                    for (spec, hash) in modules {
-                        if !crate::blob::validate_hash_format(hash) {
-                            return Err(format!(
-                                "server_bundle.modules[{spec}] {hash:?} is not a 64-char lowercase sha256 hex"
-                            ));
-                        }
-                    }
+        if let Some(WorkerCode { entry, modules }) = &self.worker {
+            if !modules.contains_key(entry) {
+                return Err(format!(
+                    "worker.entry {entry:?} is not a key in worker.modules"
+                ));
+            }
+            for (spec, hash) in modules {
+                if !crate::blob::validate_hash_format(hash) {
+                    return Err(format!(
+                        "worker.modules[{spec}] {hash:?} is not a 64-char lowercase sha256 hex"
+                    ));
                 }
             }
         }
@@ -295,13 +275,6 @@ impl Manifest {
                         rule_summary(&self.rules[i]),
                     ));
                 }
-            }
-        }
-        for (route, asset_path) in &self.prerendered {
-            if !self.assets.contains_key(asset_path) {
-                return Err(format!(
-                    "prerendered[{route}] points to unknown asset {asset_path}"
-                ));
             }
         }
         for (k, v) in &self.sourcemaps {

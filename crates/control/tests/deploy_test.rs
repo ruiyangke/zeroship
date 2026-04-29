@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use zeroship_control::deploy::{self, IngestError};
 use zeroship_core::types::{
-    AssetEntry, Manifest, ManifestMetadata, ServerBundleRef,
+    AssetEntry, Manifest, ManifestMetadata, WorkerCode,
 };
 use zeroship_core::{BlobStore, LocalDiskBlobStore};
 
@@ -50,9 +50,9 @@ fn sha256_hex(data: &[u8]) -> String {
 }
 
 /// Build a minimal valid manifest referencing `assets` + an optional
-/// server bundle, with `built_at` set to a fixed RFC 3339 string.
+/// worker bundle, with `built_at` set to a fixed RFC 3339 string.
 fn manifest_for(
-    server_bundle: Option<&str>,
+    worker_hash: Option<&str>,
     assets: &[(&str, &str, &str)], // (path, hash, content_type)
 ) -> Manifest {
     let mut a: HashMap<String, AssetEntry> = HashMap::new();
@@ -71,11 +71,12 @@ fn manifest_for(
     Manifest {
         version: 2,
         deploy_hash: None,
-        server_bundle: server_bundle
-            .map(|h| ServerBundleRef::Single { hash: h.to_string() }),
+        worker: worker_hash.map(|h| WorkerCode {
+            entry: "index.js".into(),
+            modules: HashMap::from([("index.js".to_string(), h.to_string())]),
+        }),
         rules: Vec::new(),
         assets: a,
-        prerendered: HashMap::new(),
         runtime_assets: HashMap::new(),
         asset_version: 0,
         sourcemaps: HashMap::new(),
@@ -181,8 +182,11 @@ async fn deploy_round_trip() {
     let parsed: Manifest = serde_json::from_slice(&stored_manifest).unwrap();
     assert_eq!(parsed.deploy_hash.as_deref(), Some(success.deploy_hash.as_str()));
     assert_eq!(
-        parsed.server_bundle,
-        Some(ServerBundleRef::Single { hash: server_hash.clone() })
+        parsed.worker,
+        Some(WorkerCode {
+            entry: "index.js".into(),
+            modules: HashMap::from([("index.js".to_string(), server_hash.clone())]),
+        })
     );
 
     // DB-side assert (only when CONTROL_TEST_DB is set).
@@ -306,7 +310,6 @@ async fn deploy_rejects_unsupported_version() {
         "version": 99,
         "rules": [],
         "assets": {},
-        "prerendered": {},
         "runtime_assets": {},
         "asset_version": 0,
         "sourcemaps": {},
