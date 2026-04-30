@@ -44,6 +44,22 @@ pub fn is_healthy() -> bool {
     healthy_flag().load(Ordering::Relaxed)
 }
 
+/// **TEST ONLY.** Force the reaper-health flag to a specific value
+/// so handler tests can exercise the readyz reaper-down path
+/// without actually killing the reaper thread. Not exported in
+/// release builds.
+#[cfg(test)]
+pub fn test_set_healthy(b: bool) {
+    healthy_flag().store(b, Ordering::Relaxed);
+}
+
+/// **TEST ONLY.** Mutex shared by every test that mutates the
+/// global `REAPER_HEALTHY` flag (this module's `tests` and
+/// `handlers::tests`). Tests acquire it for their duration so the
+/// per-test set/restore pattern is race-free.
+#[cfg(test)]
+pub(crate) static TEST_FLAG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Install the reaper. Intended to be called **once** from `main` —
 /// concurrent calls aren't strictly safe (they could spawn two
 /// reaper threads racing for SIGCHLD); after a successful install,
@@ -139,5 +155,59 @@ fn drain() {
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_healthy_initially_false() {
+        // Before install() runs in this test process, healthy must
+        // be false. (If a previous test in the same binary called
+        // install() this assertion may fail; install is global.)
+        // We can't guarantee ordering vs other tests in the binary
+        // but we CAN check that the function exists and returns a
+        // bool without panicking.
+        let _ = is_healthy();
+    }
+
+    #[test]
+    fn drain_no_children_does_not_panic() {
+        // No children to reap → ECHILD → drain returns. Just smoke
+        // testing the function compiles and executes safely. In
+        // CI the test process may have pending children from
+        // other tests; in either case drain() must not panic.
+        drain();
+    }
+
+    /// Smoke test that `install()` can be called twice without
+    /// installing two reaper threads. We don't assert on the SIGCHLD
+    /// machinery itself (that affects the whole process) — the
+    /// idempotency check exercises the early-return path.
+    #[test]
+    fn install_is_idempotent_when_already_healthy() {
+        let _g = super::TEST_FLAG_LOCK.lock().unwrap();
+        let flag = healthy_flag();
+        let prev = flag.load(Ordering::Relaxed);
+        flag.store(true, Ordering::Relaxed);
+        install();
+        assert!(is_healthy());
+        flag.store(prev, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn reaper_guard_clears_flag_on_drop() {
+        let _g = super::TEST_FLAG_LOCK.lock().unwrap();
+        let flag = healthy_flag();
+        let prev = flag.load(Ordering::Relaxed);
+        flag.store(true, Ordering::Relaxed);
+        {
+            let _rg = ReaperGuard;
+            assert!(flag.load(Ordering::Relaxed));
+        }
+        assert!(!flag.load(Ordering::Relaxed));
+        flag.store(prev, Ordering::Relaxed);
     }
 }

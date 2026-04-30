@@ -56,3 +56,54 @@ pub mod events {
 pub fn record(event: &'static str, fields: &str) {
     warn!(target: "audit", event, fields);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_does_not_panic_with_simple_input() {
+        record(events::AUTH_FAIL, "method=GET path=/healthz");
+    }
+
+    #[test]
+    fn record_handles_newlines_and_quotes() {
+        // Defense-in-depth check: even with adversarial input, we
+        // must not panic. JSON encoder downstream handles escaping.
+        record(events::FS_SYMLINK_REJECT, "op=read path=foo\nbar=\"quux\"");
+    }
+
+    #[test]
+    fn record_handles_empty_fields() {
+        record(events::EXEC_TIMEOUT, "");
+    }
+
+    #[test]
+    fn event_names_are_stable() {
+        // Locks the wire-level identifier strings. Renaming any of
+        // these is a breaking audit-pipeline change.
+        assert_eq!(events::AUTH_FAIL, "auth.fail");
+        assert_eq!(events::FS_SYMLINK_REJECT, "fs.symlink_reject");
+        assert_eq!(events::FS_ESCAPE_REJECT, "fs.escape_reject");
+        assert_eq!(events::FS_SIZE_REJECT, "fs.size_reject");
+        assert_eq!(events::EXEC_TIMEOUT, "exec.timeout");
+        assert_eq!(events::EXEC_TRUNCATED, "exec.truncated");
+    }
+
+    #[test]
+    fn event_names_are_unique() {
+        let names = [
+            events::AUTH_FAIL,
+            events::FS_SYMLINK_REJECT,
+            events::FS_ESCAPE_REJECT,
+            events::FS_SIZE_REJECT,
+            events::EXEC_TIMEOUT,
+            events::EXEC_TRUNCATED,
+        ];
+        let mut sorted = names.to_vec();
+        sorted.sort();
+        let len = sorted.len();
+        sorted.dedup();
+        assert_eq!(sorted.len(), len, "duplicate event names");
+    }
+}

@@ -304,3 +304,468 @@ pub async fn delete_file(
         Err(e) => fs_error_response("delete", &p, e, None),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! HTTP-level handler tests using `ntex::web::test`. Each test
+    //! builds a fresh `AppState` against a unique temp workspace and
+    //! a freshly-mounted token, then issues requests through the
+    //! in-memory test transport.
+
+    use super::*;
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomOrd};
+    use ntex::http::StatusCode;
+    use ntex::web::test;
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+    const TEST_TOKEN: &str = "test-token-must-be-at-least-32-chars-long-32";
+
+    /// Serializes tests that mutate the global `reap::REAPER_HEALTHY`
+    /// flag. Shared with `reap::tests` so a reap test and a handler
+    /// test never race the flag concurrently.
+    use crate::reap::TEST_FLAG_LOCK as REAPER_STATE_LOCK;
+
+    fn unique_dir(label: &str) -> std::path::PathBuf {
+        let n = TEST_COUNTER.fetch_add(1, AtomOrd::SeqCst);
+        let pid = std::process::id();
+        let p = std::env::temp_dir().join(format!("zsbx-htest-{label}-{pid}-{n}"));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn make_state(label: &str) -> (AppState, std::path::PathBuf) {
+        let dir = unique_dir(label);
+        let token_path = dir.join("token");
+        let mut f = std::fs::File::create(&token_path).unwrap();
+        f.write_all(TEST_TOKEN.as_bytes()).unwrap();
+        let token = crate::auth::Token::from_path(&token_path).unwrap();
+        let workspace = crate::files::Workspace::open(&dir.join("ws")).unwrap();
+        let state = AppState {
+            token: Arc::new(token),
+            workspace: Arc::new(workspace),
+            draining: Arc::new(AtomicBool::new(false)),
+            started_at_unix: 1234,
+        };
+        (state, dir)
+    }
+
+    /// Build the test app inline. Macro keeps each test a one-liner
+    /// but avoids the typed-helper signature that depends on
+    /// ntex private types.
+    macro_rules! make_app {
+        ($state:expr) => {
+            test::init_service(
+                ntex::web::App::new()
+                    .state($state)
+                    .service(web::resource("/livez").route(web::get().to(livez)))
+                    .service(web::resource("/readyz").route(web::get().to(readyz)))
+                    .service(web::resource("/version").route(web::get().to(version_info)))
+                    .service(web::resource("/healthz").route(web::get().to(livez)))
+                    .service(web::resource("/exec").route(web::post().to(exec_cmd)))
+                    .service(web::resource("/tree").route(web::get().to(file_tree)))
+                    .service(web::resource("/shutdown").route(web::post().to(shutdown)))
+                    .service(
+                        web::resource("/files/{path}*")
+                            .route(web::get().to(read_file))
+                            .route(web::put().to(write_file))
+                            .route(web::delete().to(delete_file)),
+                    ),
+            )
+            .await
+        };
+    }
+
+    /// Parse `WebResponse` body as JSON. ntex 3 doesn't ship a
+    /// `read_body_json` helper, so we wrap `read_body` + serde_json.
+    async fn body_json(resp: ntex::web::WebResponse) -> serde_json::Value {
+        let bytes = test::read_body(resp).await;
+        serde_json::from_slice(&bytes).expect("response body is valid JSON")
+    }
+
+    fn auth_value() -> String {
+        format!("Bearer {TEST_TOKEN}")
+    }
+
+    // ─── Probes / version (unauthenticated) ────────────────────
+
+    #[ntex::test]
+    async fn livez_returns_200() {
+        let (state, _d) = make_state("livez");
+        let app = make_app!(state);
+        let req = test::TestRequest::get().uri("/livez").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[ntex::test]
+    async fn healthz_aliases_livez() {
+        let (state, _d) = make_state("hz");
+        let app = make_app!(state);
+        let req = test::TestRequest::get().uri("/healthz").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[ntex::test]
+    async fn readyz_ready_when_not_draining() {
+        let _lock = REAPER_STATE_LOCK.lock().unwrap();
+        crate::reap::test_set_healthy(true);
+        let (state, _d) = make_state("ready");
+        let app = make_app!(state);
+        let req = test::TestRequest::get().uri("/readyz").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[ntex::test]
+    async fn readyz_503_when_draining() {
+        let _lock = REAPER_STATE_LOCK.lock().unwrap();
+        crate::reap::test_set_healthy(true);
+        let (state, _d) = make_state("draining");
+        state.mark_draining();
+        let app = make_app!(state);
+        let req = test::TestRequest::get().uri("/readyz").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[ntex::test]
+    async fn readyz_503_when_reaper_down() {
+        let _lock = REAPER_STATE_LOCK.lock().unwrap();
+        crate::reap::test_set_healthy(false);
+        let (state, _d) = make_state("noreaper");
+        let app = make_app!(state);
+        let req = test::TestRequest::get().uri("/readyz").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        crate::reap::test_set_healthy(true); // restore for other tests
+    }
+
+    #[ntex::test]
+    async fn version_info_has_required_fields() {
+        let (state, _d) = make_state("ver");
+        let app = make_app!(state);
+        let req = test::TestRequest::get().uri("/version").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert!(body["agent_version"].is_string());
+        assert!(body["git_commit"].is_string());
+        assert_eq!(body["protocol_version"], 1);
+        assert!(body["capabilities"].is_array());
+        assert_eq!(body["started_at_unix"], 1234);
+    }
+
+    // ─── Auth: 401 on missing/wrong, 200 on right ──────────────
+
+    #[ntex::test]
+    async fn exec_without_auth_returns_401() {
+        let (state, _d) = make_state("noauth");
+        let app = make_app!(state);
+        let req = test::TestRequest::post()
+            .uri("/exec")
+            .set_json(&serde_json::json!({"cmd": "echo hi"}))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[ntex::test]
+    async fn exec_with_wrong_auth_returns_401() {
+        let (state, _d) = make_state("wrongauth");
+        let app = make_app!(state);
+        let req = test::TestRequest::post()
+            .uri("/exec")
+            .header("authorization", "Bearer NOT_THE_RIGHT_TOKEN_at_all_33chars")
+            .set_json(&serde_json::json!({"cmd": "echo hi"}))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[ntex::test]
+    async fn exec_with_no_bearer_prefix_returns_401() {
+        let (state, _d) = make_state("noprefix");
+        let app = make_app!(state);
+        let req = test::TestRequest::post()
+            .uri("/exec")
+            .header("authorization", TEST_TOKEN) // missing "Bearer "
+            .set_json(&serde_json::json!({"cmd": "echo hi"}))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ─── /exec ────────────────────────────────────────────────
+
+    #[ntex::test]
+    async fn exec_runs_command_and_returns_output() {
+        let (state, _d) = make_state("exec_ok");
+        let v = auth_value();
+        let app = make_app!(state);
+        let req = test::TestRequest::post()
+            .uri("/exec")
+            .header("authorization", v.clone())
+            .set_json(&serde_json::json!({"cmd": "echo agent_test"}))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["status"], 0);
+        assert_eq!(body["stdout"].as_str().unwrap().trim(), "agent_test");
+        assert_eq!(body["timed_out"], false);
+    }
+
+    #[ntex::test]
+    async fn exec_propagates_nonzero_exit() {
+        let (state, _d) = make_state("exec_exit");
+        let v = auth_value();
+        let app = make_app!(state);
+        let req = test::TestRequest::post()
+            .uri("/exec")
+            .header("authorization", v.clone())
+            .set_json(&serde_json::json!({"cmd": "exit 42"}))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        let body = body_json(resp).await;
+        assert_eq!(body["status"], 42);
+    }
+
+    // ─── /files write/read/tree/delete ────────────────────────
+
+    #[ntex::test]
+    async fn write_then_read_roundtrip() {
+        let (state, _d) = make_state("rw");
+        let v = auth_value();
+        let app = make_app!(state);
+
+        let req = test::TestRequest::put()
+            .uri("/files/note.txt")
+            .header("authorization", v.clone())
+            .set_payload("hello world")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let req = test::TestRequest::get()
+            .uri("/files/note.txt")
+            .header("authorization", v.clone())
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = test::read_body(resp).await;
+        assert_eq!(&body[..], b"hello world");
+    }
+
+    #[ntex::test]
+    async fn read_missing_returns_404() {
+        let (state, _d) = make_state("read_404");
+        let v = auth_value();
+        let app = make_app!(state);
+        let req = test::TestRequest::get()
+            .uri("/files/missing.txt")
+            .header("authorization", v.clone())
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[ntex::test]
+    async fn write_to_path_with_parent_dir_creates_parents() {
+        let (state, dir) = make_state("nested");
+        let v = auth_value();
+        let app = make_app!(state);
+        let req = test::TestRequest::put()
+            .uri("/files/src/lib/index.ts")
+            .header("authorization", v.clone())
+            .set_payload("export {}")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(dir.join("ws/src/lib/index.ts").exists());
+    }
+
+    #[ntex::test]
+    async fn delete_existing_returns_200() {
+        let (state, _d) = make_state("del_ok");
+        let v = auth_value();
+        state.workspace.write_file("a.txt", b"x").unwrap();
+        let app = make_app!(state);
+        let req = test::TestRequest::delete()
+            .uri("/files/a.txt")
+            .header("authorization", v.clone())
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[ntex::test]
+    async fn delete_missing_returns_404_with_path() {
+        let (state, _d) = make_state("del_404");
+        let v = auth_value();
+        let app = make_app!(state);
+        let req = test::TestRequest::delete()
+            .uri("/files/no-such")
+            .header("authorization", v.clone())
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = body_json(resp).await;
+        // Per Round 4 fix: 404 includes the path.
+        assert!(body["error"].as_str().unwrap().contains("no-such"));
+    }
+
+    #[ntex::test]
+    async fn tree_lists_workspace() {
+        let (state, _d) = make_state("tree");
+        state.workspace.write_file("a.txt", b"a").unwrap();
+        state.workspace.write_file("nested/b.txt", b"b").unwrap();
+        let v = auth_value();
+        let app = make_app!(state);
+        let req = test::TestRequest::get().uri("/tree").header("authorization", v.clone()).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["truncated"], false);
+        let entries = body["entries"].as_array().unwrap();
+        let paths: Vec<&str> = entries.iter().map(|e| e["path"].as_str().unwrap()).collect();
+        assert!(paths.contains(&"a.txt"));
+        assert!(paths.contains(&"nested/b.txt"));
+        // mtime_unix is included on every entry.
+        for e in entries {
+            assert!(e["mtime_unix"].is_number());
+        }
+    }
+
+    // ─── /shutdown ────────────────────────────────────────────
+
+    #[ntex::test]
+    async fn shutdown_flips_drain_flag() {
+        let _lock = REAPER_STATE_LOCK.lock().unwrap();
+        crate::reap::test_set_healthy(true);
+        let (state, _d) = make_state("shut");
+        let v = auth_value();
+        assert!(!state.is_draining());
+        let app = make_app!(state.clone());
+
+        let req = test::TestRequest::post()
+            .uri("/shutdown")
+            .header("authorization", v.clone())
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(state.is_draining(), "shutdown must flip the drain flag");
+
+        // /readyz should now report 503.
+        let req = test::TestRequest::get().uri("/readyz").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[ntex::test]
+    async fn shutdown_requires_auth() {
+        let (state, _d) = make_state("shut_noauth");
+        let app = make_app!(state);
+        let req = test::TestRequest::post().uri("/shutdown").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ─── Symlink-escape responses (403 + audit signal) ────────
+
+    #[ntex::test]
+    async fn symlink_leaf_returns_403() {
+        let (state, dir) = make_state("symleaf");
+        std::os::unix::fs::symlink("/etc/passwd", dir.join("ws/escape")).unwrap();
+        let v = auth_value();
+        let app = make_app!(state);
+        let req = test::TestRequest::get()
+            .uri("/files/escape")
+            .header("authorization", v.clone())
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[ntex::test]
+    async fn deep_path_returns_400() {
+        let (state, _d) = make_state("deep");
+        let v = auth_value();
+        let app = make_app!(state);
+        // 33 components > MAX_PATH_COMPONENTS (32)
+        let mut deep = String::from("/files/");
+        for _ in 0..33 {
+            deep.push_str("a/");
+        }
+        deep.push_str("file.txt");
+        let req = test::TestRequest::put()
+            .uri(&deep)
+            .header("authorization", v.clone())
+            .set_payload("x")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ─── content_type unit tests ───────────────────────────────
+
+    #[test]
+    fn content_type_known_extensions() {
+        assert_eq!(content_type("file.html"), "text/html; charset=utf-8");
+        assert_eq!(content_type("file.css"), "text/css; charset=utf-8");
+        assert_eq!(content_type("file.js"), "application/javascript; charset=utf-8");
+        assert_eq!(content_type("file.tsx"), "application/javascript; charset=utf-8");
+        assert_eq!(content_type("file.json"), "application/json; charset=utf-8");
+        assert_eq!(content_type("file.md"), "text/plain; charset=utf-8");
+        assert_eq!(content_type("file.svg"), "image/svg+xml");
+        assert_eq!(content_type("file.png"), "image/png");
+        assert_eq!(content_type("file.jpg"), "image/jpeg");
+        assert_eq!(content_type("file.jpeg"), "image/jpeg");
+    }
+
+    #[test]
+    fn content_type_unknown_falls_back_to_octet_stream() {
+        assert_eq!(content_type("file.xyz"), "application/octet-stream");
+        assert_eq!(content_type("noext"), "application/octet-stream");
+        assert_eq!(content_type(""), "application/octet-stream");
+    }
+
+    #[test]
+    fn content_type_is_case_insensitive() {
+        assert_eq!(content_type("file.HTML"), "text/html; charset=utf-8");
+        assert_eq!(content_type("file.PNG"), "image/png");
+    }
+
+    // ─── fs_error_response unit tests ──────────────────────────
+
+    #[test]
+    fn fs_error_response_symlink_yields_403() {
+        let r = fs_error_response("read", "x", "read x: refusing to follow symlink".into(), None);
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn fs_error_response_escape_yields_403() {
+        let r = fs_error_response("read", "x", "read x: path escapes workspace".into(), None);
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn fs_error_response_too_large_yields_400() {
+        let r = fs_error_response("write", "big", "file too large: 100".into(), Some(100));
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn fs_error_response_not_found_yields_404() {
+        let r = fs_error_response("read", "x", "read x: No such file or directory".into(), None);
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn fs_error_response_other_yields_400() {
+        let r = fs_error_response("read", "x", "read x: some other I/O error".into(), None);
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+}

@@ -400,4 +400,38 @@ mod tests {
         // Process should have completed normally (not timed out).
         assert!(!out.timed_out, "should NOT time out — pipe must keep draining");
     }
+
+    #[compio::test]
+    async fn stdin_is_closed_returns_eof_immediately() {
+        // `cat` with no args reads stdin; with stdin=null it sees
+        // EOF and exits 0 with empty stdout.
+        let out = run("cat", "/tmp", 5_000).await.unwrap();
+        assert_eq!(out.status, 0);
+        assert!(out.stdout.is_empty());
+    }
+
+    #[compio::test]
+    async fn binary_output_is_lossy_not_panic() {
+        // 0x80 alone is invalid UTF-8. from_utf8_lossy turns it
+        // into the U+FFFD replacement char rather than panicking.
+        let out = run("printf '\\x80\\x81'", "/tmp", 5_000).await.unwrap();
+        assert_eq!(out.status, 0);
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[compio::test]
+    async fn cwd_affects_command() {
+        let out = run("pwd", "/tmp", 5_000).await.unwrap();
+        assert_eq!(out.stdout.trim(), "/tmp");
+    }
+
+    #[compio::test]
+    async fn multiple_runs_are_independent() {
+        let a = run("echo a", "/tmp", 5_000).await.unwrap();
+        let b = run("echo b", "/tmp", 5_000).await.unwrap();
+        let c = run("echo c", "/tmp", 5_000).await.unwrap();
+        assert_eq!(a.stdout.trim(), "a");
+        assert_eq!(b.stdout.trim(), "b");
+        assert_eq!(c.stdout.trim(), "c");
+    }
 }

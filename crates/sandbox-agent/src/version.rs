@@ -49,3 +49,76 @@ pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Short git commit at build time. `"unknown"` if the build wasn't in
 /// a git checkout.
 pub const GIT_COMMIT: &str = env!("AGENT_GIT_COMMIT");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_version_matches_cargo_pkg() {
+        // Sanity: AGENT_VERSION reflects the crate's Cargo.toml.
+        assert_eq!(AGENT_VERSION, env!("CARGO_PKG_VERSION"));
+        assert!(!AGENT_VERSION.is_empty());
+    }
+
+    #[test]
+    fn git_commit_present() {
+        // build.rs writes either a short hash or "unknown" — both
+        // are acceptable but the env var must be set.
+        assert!(!GIT_COMMIT.is_empty());
+    }
+
+    #[test]
+    fn protocol_version_at_least_one() {
+        assert!(PROTOCOL_VERSION >= 1);
+    }
+
+    #[test]
+    fn capabilities_nonempty_and_unique() {
+        assert!(!CAPABILITIES.is_empty(), "must advertise at least one capability");
+        let mut sorted: Vec<&str> = CAPABILITIES.to_vec();
+        sorted.sort();
+        let len_before = sorted.len();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            len_before,
+            "duplicate entries in CAPABILITIES (each must be unique)",
+        );
+    }
+
+    #[test]
+    fn capability_strings_are_well_formed() {
+        // Convention: `category.feature` lowercase, dots and dashes.
+        for cap in CAPABILITIES {
+            assert!(!cap.is_empty(), "empty capability string");
+            assert!(
+                cap.chars().all(|c| c.is_ascii_lowercase() || c == '.' || c == '-'),
+                "capability {cap:?} contains chars outside [a-z.-]",
+            );
+            assert!(
+                !cap.starts_with('.') && !cap.ends_with('.'),
+                "capability {cap:?} has leading/trailing dot",
+            );
+        }
+    }
+
+    #[test]
+    fn known_capabilities_present() {
+        // Lock the v1 contract: removing any of these is a wire
+        // breakage and would force PROTOCOL_VERSION to bump.
+        let expected = [
+            "exec",
+            "files.crud",
+            "files.tree",
+            "fs.no-symlink-escape",
+            "auth.bearer-file",
+        ];
+        for e in expected {
+            assert!(
+                CAPABILITIES.contains(&e),
+                "missing baseline v1 capability: {e}"
+            );
+        }
+    }
+}
