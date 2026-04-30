@@ -539,9 +539,24 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
             `  } catch (_) { /* @zeroship/server not installed — SSR hooks unavailable. RPC dispatch still works. */ }\n` +
             `}\n`
           );
+          // Also emit __register calls for dev-bootstrap registry compatibility.
+          // The dev-bootstrap (dist/dev-bootstrap.js) is loaded by the Rust
+          // runtime and uses a `registry` Map populated via `globalThis.__register`.
+          // Without these calls, POST /_rpc/<name> returns 404 in dev mode.
+          // These are no-ops in production (the synthetic SSR entry does static
+          // dispatch without touching the registry).
+          const registerCalls = serverFns
+            .map((fn) => {
+              const wid = wireIdFor(fn);
+              return `if (typeof globalThis.__register === "function") globalThis.__register(${JSON.stringify(wid)}, ${fn.name});`;
+            })
+            .join("\n");
+
           s.append(
             `\n\n// zeroship: SSR hooks\n` +
-            `${ssrPatches}\n`
+            `${ssrPatches}\n` +
+            `\n// zeroship: dev-bootstrap registry (harmless no-op outside dev)\n` +
+            `${registerCalls}\n`
           );
           return {
             code: s.toString(),

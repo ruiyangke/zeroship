@@ -3,14 +3,20 @@ import { defineConfig, devices } from "@playwright/test";
 
 // ─── e2e config ──────────────────────────────────────────────────
 //
-// Runs against the real dev server at :5173 + the real zeroship
-// runtime + RPC handler at :3001. No mocks. Tests that need to
-// create + delete apps hit the real control plane via the same
-// RPC stubs the app uses.
+// Plan 01 tests run against the worktree's own dev server on :5174
+// so they don't conflict with the main branch dev server at :5173.
+// The zeroship API backend runs on :3002 (ZEROSHIP_DEV_PORT=3002)
+// for the same reason.
+//
+// The chat-mock tests exercise the WorkspaceShell + mock postChat
+// stream — no real control plane needed.
+//
+// Other test files (workspace.spec.ts, etc.) were written against
+// the old architecture (real backend at :9090). They are left intact
+// but may fail when no backend is running; that is expected.
 //
 // `reuseExistingServer` means the runner uses your already-running
-// `npm run dev` if one exists, otherwise it starts one for the
-// suite.
+// `npm run dev` if one exists on :5174, otherwise it starts one.
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: false, // serial — tests share the real backend
@@ -22,7 +28,7 @@ export default defineConfig({
   timeout: 30_000,
   expect: { timeout: 5_000 },
   use: {
-    baseURL: "http://localhost:5173",
+    baseURL: "http://localhost:5174",
     trace: "on-first-retry",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
@@ -49,10 +55,13 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "npm run dev",
-    url: "http://localhost:5173",
+    // ZEROSHIP_MOCK_CHAT=1 activates the Node.js mock middleware in
+    // vite.config.ts that serves /_rpc/postChat directly (no V8 runtime).
+    // Port 5174 avoids clashing with the main branch dev server on :5173.
+    command: "ZEROSHIP_MOCK_CHAT=1 npm run dev -- --port 5174",
+    url: "http://localhost:5174",
     timeout: 60_000,
-    reuseExistingServer: true,
+    reuseExistingServer: !process.env.CI,
     stdout: "ignore",
     stderr: "pipe",
   },
