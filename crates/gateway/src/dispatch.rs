@@ -29,6 +29,12 @@ pub enum Outcome {
         /// Per-rule rate limit declared in the manifest. Enforced on top
         /// of the gateway's global per-app limit.
         rate_limit: Option<zeroship_core::types::RateLimit>,
+        /// Index of the rule that matched, in declaration order. Used
+        /// by the gateway's per-rule rate limiter so two worker rules
+        /// with the same `rate_limit` config get independent buckets,
+        /// and the bucket survives manifest re-orderings only as far
+        /// as the rule's position is stable.
+        rule_idx: u32,
     },
     /// Redirect (HTTP 30x).
     Redirect { to: String, status: u16 },

@@ -37,6 +37,11 @@ pub struct GateState {
     pub routes: sync::RouteCache,
     pub hash_ring: proxy::HashRing,
     pub rate_limiters: enforce::RateLimitRegistry,
+    /// Per-rule rate limits declared in `Action::Worker.rate_limit`.
+    /// Layered on top of the global per-app `rate_limiters` — runs
+    /// FIRST in the request path so a rule that's already saturated
+    /// short-circuits without the global bucket lookup.
+    pub per_rule_rate_limits: enforce::PerRuleRateLimitRegistry,
     pub concurrency: enforce::ConcurrencyRegistry,
     /// Content-addressed blob store. Phase 4 of the artifact rollout —
     /// the gateway fetches asset bytes here directly instead of round-
@@ -130,6 +135,7 @@ async fn main() -> std::io::Result<()> {
         routes: sync::RouteCache::new(),
         hash_ring,
         rate_limiters: enforce::RateLimitRegistry::new(1000, 2000),
+        per_rule_rate_limits: enforce::PerRuleRateLimitRegistry::new(),
         concurrency: enforce::ConcurrencyRegistry::new(100),
         blob_store,
         blob_cache: blob_cache::BlobCache::new(blob_cache_bytes),

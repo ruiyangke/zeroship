@@ -83,6 +83,71 @@ pub fn extract_app_name(req: &HttpRequest, path_name: Option<&str>) -> Option<St
 }
 
 // ---------------------------------------------------------------------------
+// Per-rule rate-limit bucket key derivation
+// ---------------------------------------------------------------------------
+
+/// Resolve the bucket discriminator for a per-rule rate limit. The
+/// returned string is concatenated with `(app_id, rule_idx)` in
+/// `PerRuleKey` to form the bucket key — clients sharing the same
+/// discriminator share a token bucket.
+///
+/// * `RateLimitPer::Ip` — request's client IP. Falls back to "unknown"
+///   when the connection has no peer address (test fixtures, exotic
+///   transports). Reads from `connection_info().remote()` so a trusted
+///   proxy's `X-Forwarded-For` is honored when present (matches what
+///   the gateway already does for scheme detection a few lines below).
+/// * `RateLimitPer::Session` — the `__zs_session` cookie value.
+///   Anonymous callers (no cookie) fall back to the IP so an
+///   unauthenticated burst still gets bucketed; without the fallback
+///   they'd all share one "" key.
+/// * `RateLimitPer::App` — constant `"app"`. One bucket platform-wide;
+///   `(app_id, rule_idx, "app")` is the key, equivalent to a global
+///   per-app limit at the rule level.
+pub(crate) fn compute_bucket_id(
+    req: &HttpRequest,
+    per: zeroship_core::types::RateLimitPer,
+) -> String {
+    use zeroship_core::types::RateLimitPer;
+    match per {
+        RateLimitPer::Ip => req
+            .connection_info()
+            .remote()
+            .unwrap_or("unknown")
+            .to_string(),
+        RateLimitPer::Session => {
+            let cookie = req
+                .headers()
+                .get("cookie")
+                .and_then(|v| v.to_str().ok());
+            extract_session_cookie(cookie).unwrap_or_else(|| {
+                req.connection_info()
+                    .remote()
+                    .unwrap_or("unknown")
+                    .to_string()
+            })
+        }
+        RateLimitPer::App => "app".to_string(),
+    }
+}
+
+/// Pull the `__zs_session` value out of a Cookie header. Returns
+/// `None` when the cookie is missing or empty so callers can fall
+/// back to a different discriminator.
+fn extract_session_cookie(cookie_header: Option<&str>) -> Option<String> {
+    let s = cookie_header?;
+    let token = s
+        .split(';')
+        .map(|p| p.trim())
+        .find(|p| p.starts_with("__zs_session="))?
+        .strip_prefix("__zs_session=")?;
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Existing path-based handler
 // ---------------------------------------------------------------------------
 
@@ -220,9 +285,23 @@ async fn execute_outcome(
         .map(|s| s.to_string());
 
     let mut response = match outcome {
-        Outcome::Worker { mode, cache: _, rate_limit: _ } => {
-            // TODO: honor per-rule rate_limit. Today we still enforce the
-            // global per-app bucket inside handle_dispatch.
+        Outcome::Worker { mode, cache: _, rate_limit, rule_idx } => {
+            // Per-rule rate limit fires FIRST — cheaper for high-rule-rate
+            // cases (early reject before the global per-app check inside
+            // `handle_dispatch`). The global limit is the platform-level
+            // DoS guard; per-rule is creator-defined business logic on top.
+            if let Some(rl) = rate_limit.as_ref() {
+                let bucket_id = compute_bucket_id(&req, rl.per);
+                if let Err(resp) = state.per_rule_rate_limits.check(
+                    app_id,
+                    rule_idx,
+                    rl.per,
+                    &bucket_id,
+                    rl,
+                ) {
+                    return resp;
+                }
+            }
             // RPC requires the X-Api-Key check. SSR is open by default
             // (the app's own pages can call it; gating is in user code).
             if mode == WorkerMode::Rpc {
@@ -1730,6 +1809,7 @@ mod tests {
             routes: crate::sync::RouteCache::new(),
             hash_ring: crate::proxy::HashRing::new(vec!["http://0.0.0.0:0".into()], 1),
             rate_limiters: crate::enforce::RateLimitRegistry::new(1, 1),
+            per_rule_rate_limits: crate::enforce::PerRuleRateLimitRegistry::new(),
             concurrency: crate::enforce::ConcurrencyRegistry::new(1),
             blob_store: store,
             blob_cache: BlobCache::new(8 * 1024 * 1024),
@@ -2938,5 +3018,127 @@ mod tests {
         assert_eq!(hdr(&resp, "content-encoding").as_deref(), Some("br"));
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-rule rate-limit bucket key derivation
+    // -----------------------------------------------------------------------
+
+    use zeroship_core::types::RateLimitPer;
+
+    #[test]
+    fn compute_bucket_id_app_returns_constant() {
+        // RateLimitPer::App always returns "app" regardless of IP or
+        // cookie state — every caller shares the same bucket.
+        let req = ntex::web::test::TestRequest::default()
+            .header("cookie", "__zs_session=abc")
+            .to_http_request();
+        assert_eq!(compute_bucket_id(&req, RateLimitPer::App), "app");
+    }
+
+    #[test]
+    fn compute_bucket_id_ip_falls_back_to_unknown() {
+        // The TestRequest has no peer addr → "unknown" sentinel keeps
+        // the bucket lookup well-defined instead of crashing.
+        let req = ntex::web::test::TestRequest::default().to_http_request();
+        let id = compute_bucket_id(&req, RateLimitPer::Ip);
+        assert_eq!(id, "unknown");
+    }
+
+    #[test]
+    fn compute_bucket_id_session_uses_cookie() {
+        let req = ntex::web::test::TestRequest::default()
+            .header(
+                "cookie",
+                "other=foo; __zs_session=abc123; trailing=x",
+            )
+            .to_http_request();
+        let id = compute_bucket_id(&req, RateLimitPer::Session);
+        assert_eq!(id, "abc123");
+    }
+
+    #[test]
+    fn compute_bucket_id_session_falls_back_to_ip_when_cookie_missing() {
+        // Anonymous caller (no __zs_session) → fall back to IP. The
+        // TestRequest has no peer → "unknown".
+        let req = ntex::web::test::TestRequest::default()
+            .header("cookie", "other=foo")
+            .to_http_request();
+        let id = compute_bucket_id(&req, RateLimitPer::Session);
+        assert_eq!(id, "unknown");
+    }
+
+    #[test]
+    fn extract_session_cookie_handles_empty_value() {
+        // `__zs_session=` (empty value) → None, so the caller falls
+        // back to IP. Treating empty as a real bucket key would
+        // collapse every cookie-empty client into one shared bucket.
+        assert_eq!(extract_session_cookie(Some("__zs_session=")), None);
+        assert_eq!(extract_session_cookie(None), None);
+        assert_eq!(extract_session_cookie(Some("other=foo")), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Wiring smoke test — bucket lookup matches what the router does
+    // -----------------------------------------------------------------------
+    //
+    // The Outcome::Worker arm wires `compute_bucket_id` and
+    // `state.per_rule_rate_limits.check(...)` together. Driving the full
+    // `execute_outcome` would need a constructable `web::types::State`,
+    // which ntex doesn't expose outside its `App` builder. Instead we
+    // recreate the exact bucket-key composition the router uses and
+    // assert it agrees with the registry's view of "drained vs fresh"
+    // — same code path in two parts.
+
+    use zeroship_core::types::RateLimit;
+
+    #[test]
+    fn router_wiring_bucket_id_matches_registry_key() {
+        // rps=1 with RateLimitPer::Ip. First call fills, second 429s.
+        // The bucket key is `compute_bucket_id(req, RateLimitPer::Ip)`
+        // — verifies the IP-derived discriminator is the same string
+        // the registry's key uses, otherwise the second call would
+        // hit a fresh bucket and pass.
+        let reg = crate::enforce::PerRuleRateLimitRegistry::new();
+        let app_id = uuid::Uuid::nil();
+        let rl = RateLimit { rps: Some(1), rpm: None, per: RateLimitPer::Ip };
+        let req = ntex::web::test::TestRequest::default().to_http_request();
+        let bucket_id = compute_bucket_id(&req, rl.per);
+        assert!(reg.check(&app_id, 0, rl.per, &bucket_id, &rl).is_ok());
+        // Second call with the same request → same bucket id → drained.
+        let bucket_id2 = compute_bucket_id(&req, rl.per);
+        assert_eq!(bucket_id, bucket_id2, "bucket id is stable for same request");
+        let err = reg
+            .check(&app_id, 0, rl.per, &bucket_id2, &rl)
+            .expect_err("second call must 429 — bucket key matched");
+        assert_eq!(err.status(), ntex::http::StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[test]
+    fn router_wiring_session_buckets_separate_from_ip_buckets() {
+        // Two requests carrying distinct __zs_session cookies under
+        // RateLimitPer::Session must hit independent buckets even when
+        // the IP is the same.
+        let reg = crate::enforce::PerRuleRateLimitRegistry::new();
+        let app_id = uuid::Uuid::nil();
+        let rl = RateLimit { rps: Some(1), rpm: None, per: RateLimitPer::Session };
+
+        let req_a = ntex::web::test::TestRequest::default()
+            .header("cookie", "__zs_session=user-a")
+            .to_http_request();
+        let req_b = ntex::web::test::TestRequest::default()
+            .header("cookie", "__zs_session=user-b")
+            .to_http_request();
+        let bucket_a = compute_bucket_id(&req_a, rl.per);
+        let bucket_b = compute_bucket_id(&req_b, rl.per);
+        assert_eq!(bucket_a, "user-a");
+        assert_eq!(bucket_b, "user-b");
+        assert!(reg.check(&app_id, 0, rl.per, &bucket_a, &rl).is_ok());
+        assert!(reg.check(&app_id, 0, rl.per, &bucket_b, &rl).is_ok());
+        // Reusing user-a within the same second 429s.
+        let err = reg
+            .check(&app_id, 0, rl.per, &bucket_a, &rl)
+            .expect_err("user-a drained");
+        assert_eq!(err.status(), ntex::http::StatusCode::TOO_MANY_REQUESTS);
     }
 }

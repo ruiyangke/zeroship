@@ -83,6 +83,11 @@ struct CompiledRule {
     /// Threaded out of `dispatch` and `cors_for` so the router can apply
     /// preflight responses + post-dispatch header injection.
     cors: Option<Cors>,
+    /// Position of this rule in the source `Manifest::rules` vector.
+    /// Captured at compile time so the per-rule rate limiter can key
+    /// buckets on it without rule_idx leaking through dispatcher
+    /// internals as a separate parameter.
+    rule_idx: u32,
 }
 
 enum CompiledMatch {
@@ -158,7 +163,12 @@ impl<'a> Captures<'a> {
 
 impl CompiledManifest {
     pub fn compile(m: &Manifest) -> Self {
-        let rules = m.rules.iter().map(compile_rule).collect();
+        let rules = m
+            .rules
+            .iter()
+            .enumerate()
+            .map(|(i, r)| compile_rule(r, i as u32))
+            .collect();
         Self {
             rules,
             assets: m.assets.clone(),
@@ -169,7 +179,7 @@ impl CompiledManifest {
     }
 }
 
-fn compile_rule(rule: &Rule) -> CompiledRule {
+fn compile_rule(rule: &Rule, rule_idx: u32) -> CompiledRule {
     let methods = effective_methods(rule);
     let matcher = compile_match(&rule.r#match);
     let action = compile_action(&rule.action);
@@ -178,6 +188,7 @@ fn compile_rule(rule: &Rule) -> CompiledRule {
         matcher,
         action,
         cors: rule.cors.clone(),
+        rule_idx,
     }
 }
 
@@ -433,7 +444,7 @@ impl CompiledManifest {
                     },
                     CompiledMatch::Any => Captures::Empty,
                 };
-                match self.resolve(&rule.action, &current_path, &captures) {
+                match self.resolve(&rule.action, rule.rule_idx, &current_path, &captures) {
                     ResolveResult::Outcome(o) => return (o, rule.cors.clone()),
                     ResolveResult::Rewrite(new_path) => {
                         current_path = new_path;
@@ -512,6 +523,7 @@ impl CompiledManifest {
     fn resolve(
         &self,
         action: &CompiledAction,
+        rule_idx: u32,
         path: &str,
         captures: &Captures<'_>,
     ) -> ResolveResult {
@@ -541,6 +553,7 @@ impl CompiledManifest {
                     mode: *mode,
                     cache: cache.clone(),
                     rate_limit: rate_limit.clone(),
+                    rule_idx,
                 })
             }
             CompiledAction::Redirect { to, status } => {

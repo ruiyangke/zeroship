@@ -172,10 +172,32 @@ The gateway negotiates pre-compressed asset variants emitted by the build pipeli
 
 v1 limits: only `br` and `gzip` are supported. `Manifest::validate()` rejects unknown variant keys at parse time so a typo can't silently disable negotiation on the wire.
 
+## Rate limiting
+
+Two layers, both enforced at the gateway before any request reaches a worker.
+
+| Layer | Source | Bucket key | Lives in |
+| --- | --- | --- | --- |
+| Global per-app | Gateway boot (`RateLimitRegistry::new(rate, burst)`) | `app_id` | `state.rate_limiters` |
+| Per-rule | Manifest's `Action::Worker.rate_limit` | `(app_id, rule_idx, RateLimitPer)` | `state.per_rule_rate_limits` |
+
+The two are conceptually distinct: the global limit is a platform-level DoS guard with a fixed lifetime; the per-rule limit is creator-defined business logic that changes with every deploy. They live in separate registries so the lifetimes don't tangle.
+
+Order of checks in `execute_outcome`'s `Outcome::Worker` arm:
+
+1. **Per-rule first.** Cheaper for the common "rule is already saturated" case — a 429 short-circuits before the global bucket lookup. Bucket id is derived from `RateLimitPer` (`Ip` → `connection_info().remote()`, `Session` → `__zs_session` cookie value with IP fallback, `App` → constant `"app"`).
+2. **API-key check** (RPC mode only).
+3. **Global per-app limit + concurrency guard** inside `handle_dispatch`.
+
+429 responses from the per-rule layer carry `Retry-After: 1` so clients back off for at least one refill window. The bucket capacity comes from `rate_limit.rps` (preferred) or `rate_limit.rpm.div_ceil(60)` (fallback). With both `rps` and `rpm` absent, the check is a no-op pass-through.
+
+`rule_idx` is the rule's position in `Manifest::rules` and is captured at compile time. Two worker rules with identical `rate_limit` shape but different positions get independent buckets — the bucket survives manifest re-orderings only as far as the rule's position is stable.
+
 ## Common things to look up
 
 - "How does the gateway find an asset by path?" → `serve_static_hit` in `crates/gateway/src/router.rs` checks `state.blob_cache` (in-memory LRU keyed by hash); on miss it calls `state.blob_store.get_blob(hash)` and fills the cache. ETag = `hash`; Cache-Control composed from `CacheCtl` precedence (entry → rule → default).
 - "How are rewrites handled?" → `walk_rules` in `crates/gateway/src/compiled.rs` re-enters with the new path up to `MAX_HOPS = 8` times. Hop budget exhausted (cycle) → `Outcome::NotFound`.
+- "How does the gateway enforce per-rule rate limits?" → `compute_bucket_id` in `crates/gateway/src/router.rs` derives the bucket discriminator from `RateLimitPer`; `state.per_rule_rate_limits.check(app_id, rule_idx, per, &bucket_id, &rl)` (in `crates/gateway/src/enforce.rs`) takes a token from the matching bucket or returns 429 with `Retry-After: 1`. The check fires inside `execute_outcome`'s `Outcome::Worker` arm before any worker dispatch.
 - "How does an app get a custom domain?" → Not currently supported. Adding it needs a verified `host → app_id` map at the gateway, sourced from a DNS TXT or ACME challenge.
 
 ## Where to start when changing routing behavior

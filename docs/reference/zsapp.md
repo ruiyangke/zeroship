@@ -159,6 +159,54 @@ v1 simplifications:
 - Origins are exact strings; the literal `"*"` matches any origin (when credentials disabled). No glob, no automatic header reflection.
 - Method/header lists are emitted verbatim as joined header values.
 
+### Rules — rate limiting
+
+`Action::Worker` may carry an optional `rate_limit` block. Enforced at the gateway *before* the worker is invoked, on top of the platform's global per-app DoS guard.
+
+```jsonc
+{
+  "match":  { "kind": "prefix", "method": "POST", "path": "/_rpc/" },
+  "action": {
+    "kind": "worker",
+    "mode": "rpc",
+    "rate_limit": {
+      "rps": 5,                    // bucket capacity + refill (preferred)
+      "rpm": null,                 // alternative: requests/minute
+      "per": "ip"                  // bucket key: "ip" | "session" | "app"
+    }
+  }
+}
+```
+
+Rust shape (`crates/core/src/types.rs`):
+
+```rust
+pub struct RateLimit {
+    pub rps: Option<u32>,
+    pub rpm: Option<u32>,
+    pub per: RateLimitPer,         // default = Ip
+}
+pub enum RateLimitPer { Ip, Session, App }
+```
+
+Bucket key:
+
+- `Ip` — request's client IP (`connection_info().remote()`); `"unknown"` when absent.
+- `Session` — `__zs_session` cookie value; falls back to IP for anonymous callers.
+- `App` — constant `"app"`; one bucket platform-wide for the rule.
+
+Capacity / refill:
+
+- `rps` set → bucket capacity = `rps`, refill = `rps`/sec.
+- `rpm` set, `rps` not → bucket capacity = `ceil(rpm / 60)` (so 30 rpm still gets a 1-token bucket).
+- Both `null` → no enforcement.
+
+Behavior:
+
+- Per-rule check fires FIRST in `execute_outcome`'s `Outcome::Worker` arm (cheaper than the global check for high-rule-rate cases).
+- Overflow → `429 Too Many Requests` with `Retry-After: 1`.
+- Buckets are keyed by `(app_id, rule_idx, RateLimitPer)` — two rules with identical shape but different positions get independent buckets.
+
 ### Asset variants — pre-compressed encodings
 
 Every `AssetEntry` MAY carry a `variants` map with pre-compressed bytes for the gateway to serve via `Accept-Encoding` negotiation:
