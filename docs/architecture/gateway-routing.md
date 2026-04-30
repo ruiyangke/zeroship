@@ -147,6 +147,17 @@ Apps that haven't shipped a manifest get this default at registry-load time:
 
 Reproduces the pre-manifest behavior: POST `/_rpc/<method>` is RPC (gateway gates the API key); everything else goes to the worker as SSR.
 
+## HTTP completeness on the static path
+
+`serve_static_hit` (and its streaming sibling) honour the standard HTTP semantics that browsers, proxies, and CLIs assume:
+
+- **`If-None-Match` → 304 Not Modified.** Short-circuited at the top of `serve_static_hit`, **before any blob fetch** — the whole point of the conditional GET is to skip the byte transfer. `etag_matches` accepts an exact strong ETag, the wildcard `*`, and a comma-separated list. Weak ETags (`W/"…"`) are NOT accepted (our hashes are content-addressed and always strong).
+- **`Range: bytes=N-M`** on both buffered and streaming paths. Single ranges return `206 Partial Content` with `Content-Range: bytes <start>-<end>/<size>`. Open-end (`bytes=N-`) and suffix (`bytes=-N`) forms are supported. Multi-range syntax (`bytes=A-B,C-D`) degrades to a `200` with the full body — RFC 7233 allows ignoring `Range` entirely. Unsatisfiable ranges return `416 Range Not Satisfiable` with `Content-Range: bytes */<size>`.
+- **`Accept-Ranges: bytes`** is advertised on every 200 / 206 / 304 static response, so clients know they can re-request a range.
+- **`Cache-Control: stale-if-error=<n>`** (RFC 5861) is emitted alongside `stale-while-revalidate` when both `swr_window` is set and `stale_on_error: true`. The `background_refresh` flag in `CacheCtl` is gateway-internal — it does NOT translate into a Cache-Control directive, and the current blob_cache LRU does not yet honour it (TODO in `serve_static_hit`).
+
+The streaming path's range support is wired through `chunk_stream_from_path_range`, which passes a starting offset to `compio::fs::File::read_at` — only the requested slice is read off disk, no overshoot.
+
 ## Common things to look up
 
 - "How does the gateway find an asset by path?" → `serve_static_hit` in `crates/gateway/src/router.rs` checks `state.blob_cache` (in-memory LRU keyed by hash); on miss it calls `state.blob_store.get_blob(hash)` and fills the cache. ETag = `hash`; Cache-Control composed from `CacheCtl` precedence (entry → rule → default).

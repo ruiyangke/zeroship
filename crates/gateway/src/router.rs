@@ -232,7 +232,7 @@ async fn execute_outcome(
             }
             handle_dispatch(req, &state, app_id, route, tail, body, wall_start).await
         }
-        Outcome::Static(hit) => serve_static_hit(&state, hit, wall_start).await,
+        Outcome::Static(hit) => serve_static_hit(&state, &req, hit, wall_start).await,
         Outcome::Redirect { to, status } => {
             let st = ntex::http::StatusCode::from_u16(status)
                 .unwrap_or(ntex::http::StatusCode::FOUND);
@@ -489,6 +489,19 @@ fn chunk_stream_from_path(
     size: u64,
     chunk_bytes: usize,
 ) -> ntex::channel::mpsc::Receiver<Result<Bytes, Rc<dyn std::error::Error>>> {
+    chunk_stream_from_path_range(path, 0, size, chunk_bytes)
+}
+
+/// Range-aware variant of [`chunk_stream_from_path`]. Reads `length`
+/// bytes starting at `start` from the file, in `chunk_bytes`-sized
+/// chunks. Used for `Range:` requests on the streaming path so we
+/// only ship the requested slice.
+fn chunk_stream_from_path_range(
+    path: PathBuf,
+    start: u64,
+    length: u64,
+    chunk_bytes: usize,
+) -> ntex::channel::mpsc::Receiver<Result<Bytes, Rc<dyn std::error::Error>>> {
     let (tx, rx) = ntex::channel::mpsc::channel();
     compio::runtime::spawn(async move {
         let file = match compio::fs::File::open(&path).await {
@@ -498,7 +511,7 @@ fn chunk_stream_from_path(
                 return;
             }
         };
-        chunk_stream_from_file(&file, size, chunk_bytes, &tx).await;
+        chunk_stream_from_file_range(&file, start, length, chunk_bytes, &tx).await;
     })
     .detach();
     rx
@@ -514,6 +527,7 @@ fn chunk_stream_from_path(
 /// * The source returns 0 bytes — short read; assume EOF.
 /// * The source returns an error — propagate it as the final stream
 ///   item, then close.
+#[cfg(test)]
 async fn chunk_stream_from_file<R>(
     source: &R,
     size: u64,
@@ -522,12 +536,27 @@ async fn chunk_stream_from_file<R>(
 ) where
     R: compio::io::AsyncReadAt,
 {
+    chunk_stream_from_file_range(source, 0, size, chunk_bytes, tx).await
+}
+
+/// Range-aware variant of [`chunk_stream_from_file`]. Starts reading
+/// at `start` and emits exactly `length` bytes (or fewer on a short
+/// read / error). Same exit conditions as the non-range version.
+async fn chunk_stream_from_file_range<R>(
+    source: &R,
+    start: u64,
+    length: u64,
+    chunk_bytes: usize,
+    tx: &ntex::channel::mpsc::Sender<Result<Bytes, Rc<dyn std::error::Error>>>,
+) where
+    R: compio::io::AsyncReadAt,
+{
     use compio::buf::BufResult;
-    let mut offset: u64 = 0;
-    while offset < size {
-        let want = std::cmp::min(chunk_bytes as u64, size - offset) as usize;
+    let mut sent: u64 = 0;
+    while sent < length {
+        let want = std::cmp::min(chunk_bytes as u64, length - sent) as usize;
         let buf = vec![0u8; want];
-        let BufResult(res, returned) = source.read_at(buf, offset).await;
+        let BufResult(res, returned) = source.read_at(buf, start + sent).await;
         match res {
             Ok(0) => return,
             Ok(n) => {
@@ -543,7 +572,7 @@ async fn chunk_stream_from_file<R>(
                 if tx.send(Ok(Bytes::from(chunk))).is_err() {
                     return;
                 }
-                offset += n as u64;
+                sent += n as u64;
             }
             Err(e) => {
                 let _ = tx.send(Err::<Bytes, Rc<dyn std::error::Error>>(Rc::new(e)));
@@ -553,12 +582,169 @@ async fn chunk_stream_from_file<R>(
     }
 }
 
+// ---------------------------------------------------------------------------
+// HTTP completeness helpers (Tier 4a)
+//   * `If-None-Match` → 304 short-circuit
+//   * `Range:` parsing (single, suffix, open-end, multi, unsatisfiable)
+//   * `Cache-Control` extensions (`stale-if-error`)
+//   * `Accept-Ranges: bytes` advertised on every static response
+// ---------------------------------------------------------------------------
+
+/// Match an `If-None-Match` request-header value against the asset's
+/// strong ETag. Accepts:
+///
+/// * an exact match: `If-None-Match: "<etag>"`,
+/// * the wildcard `*`,
+/// * a comma-separated list (`"a", "b", "c"`) — match if any element
+///   matches.
+///
+/// **Strong-only**: `W/"…"` weak prefixes are NOT considered a match.
+/// Our hashes are content-addressed (SHA-256), so every ETag we emit
+/// is strong — a weak match would be lying about byte-for-byte
+/// equivalence.
+fn etag_matches(if_none_match: &str, etag: &str) -> bool {
+    let trimmed = if_none_match.trim();
+    if trimmed == "*" {
+        return true;
+    }
+    for part in trimmed.split(',') {
+        let p = part.trim();
+        if p.is_empty() {
+            continue;
+        }
+        // Reject weak ETags (`W/"…"`) — strong comparison only.
+        if p.starts_with("W/") || p.starts_with("w/") {
+            continue;
+        }
+        if p == etag {
+            return true;
+        }
+    }
+    false
+}
+
+/// Parsed `Range:` request — what the client asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeSpec {
+    /// `bytes=N-M` (inclusive on both ends), normalised against `size`.
+    /// `start <= end < size`.
+    Single(u64, u64),
+    /// Multiple ranges (`bytes=0-10,20-30`). RFC 7233 allows a
+    /// `multipart/byteranges` response; we degrade gracefully to a
+    /// 200 + full body — still RFC-compliant.
+    MultiRange,
+    /// Range is past EOF (`start >= size`) or otherwise unsatisfiable.
+    /// Caller emits 416 with `Content-Range: bytes */<size>`.
+    Unsatisfiable,
+}
+
+/// Parse a `Range` header against the asset's identity size. Returns
+/// `None` when the header is absent or syntactically broken (caller
+/// falls through to a normal 200). RFC 7233 §3.1 grammar — minimal
+/// subset:
+///
+/// * `bytes=N-M`   — inclusive range; clamped to `size - 1` on overflow.
+/// * `bytes=N-`    — open-end; ends at `size - 1`.
+/// * `bytes=-N`    — last `N` bytes; clamped to `size`.
+/// * `bytes=A-B,C-D[, …]` — multi-range; returns `MultiRange`.
+///
+/// Unrecognised units (`items=…`) → `None`. Non-bytes-prefixed → `None`.
+fn parse_range(
+    header: Option<&ntex::http::header::HeaderValue>,
+    size: u64,
+) -> Option<RangeSpec> {
+    let raw = header?.to_str().ok()?;
+    let spec = raw.strip_prefix("bytes=")?;
+    let parts: Vec<&str> = spec.split(',').map(|s| s.trim()).collect();
+    if parts.is_empty() {
+        return None;
+    }
+    if parts.len() > 1 {
+        // Multi-range: caller falls through to a 200 + full body. Per
+        // RFC 7233 §4.1 a server MAY ignore Range — graceful degrade.
+        return Some(RangeSpec::MultiRange);
+    }
+    let single = parts[0];
+    if single.is_empty() {
+        return None;
+    }
+
+    // `-N` → last N bytes. Suffix form.
+    if let Some(n_str) = single.strip_prefix('-') {
+        let n: u64 = n_str.parse().ok()?;
+        if n == 0 || size == 0 {
+            return Some(RangeSpec::Unsatisfiable);
+        }
+        let n = std::cmp::min(n, size);
+        return Some(RangeSpec::Single(size - n, size - 1));
+    }
+
+    let (start_str, end_str) = single.split_once('-')?;
+    let start: u64 = start_str.parse().ok()?;
+    if start >= size {
+        return Some(RangeSpec::Unsatisfiable);
+    }
+    let end: u64 = if end_str.is_empty() {
+        size - 1
+    } else {
+        let parsed: u64 = end_str.parse().ok()?;
+        std::cmp::min(parsed, size - 1)
+    };
+    if end < start {
+        return Some(RangeSpec::Unsatisfiable);
+    }
+    Some(RangeSpec::Single(start, end))
+}
+
+/// Pull the `If-None-Match` header off a request as a borrowed `&str`.
+/// `None` when absent or non-UTF-8.
+fn header_str_borrowed<'a>(req: &'a HttpRequest, name: &str) -> Option<&'a str> {
+    req.headers().get(name).and_then(|v| v.to_str().ok())
+}
+
+/// Build a 304 Not Modified response carrying the headers that the
+/// client needs to reuse its cached copy. RFC 7232 §4.1: 304 must
+/// include any `Cache-Control`, `ETag`, `Vary`, `Content-Location`
+/// fields the corresponding 200 would have. We add `Accept-Ranges`
+/// so the client knows ranged requests still work.
+fn build_not_modified(
+    etag: &str,
+    cache_ctl: &str,
+    wall_start: std::time::Instant,
+) -> HttpResponse {
+    let mut resp = HttpResponse::NotModified();
+    resp.header("etag", etag);
+    resp.header("cache-control", cache_ctl);
+    resp.header("accept-ranges", "bytes");
+    resp.header(
+        "x-wall-time-ms",
+        format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
+    );
+    resp.finish()
+}
+
+/// Build a 416 Range Not Satisfiable response. Includes
+/// `Content-Range: bytes */<size>` per RFC 7233 §4.4.
+fn build_range_not_satisfiable(size: u64, etag: &str) -> HttpResponse {
+    let mut resp = HttpResponse::RangeNotSatisfiable();
+    resp.header("content-range", format!("bytes */{size}"));
+    resp.header("etag", etag);
+    resp.header("accept-ranges", "bytes");
+    resp.finish()
+}
+
 /// Build a streaming `HttpResponse` for a single static hit whose
 /// bytes live on the gateway's disk LRU. Falls back to a buffered
 /// response when the file isn't (or can't be) on disk.
+///
+/// Honours `Range:` against the streaming path — `compio::fs::File::read_at`
+/// already supports a starting offset, so we only ship the requested
+/// slice. Multi-range requests degrade to a 200 + full body.
 async fn serve_static_streaming(
     state: &GateState,
+    req: &HttpRequest,
     hit: &crate::dispatch::StaticHit,
+    etag: &str,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
     let path = match ensure_disk_path(&state.disk_cache, &*state.blob_store, &hit.hash).await {
@@ -567,7 +753,7 @@ async fn serve_static_streaming(
             // Disk fill failed — fall back to buffered. Skip the
             // mem cache: a multi-MB blob would either evict
             // everything else or silently fail the budget check.
-            return build_buffered_response(hit, &b, wall_start);
+            return build_buffered_response(req, hit, etag, &b, wall_start);
         }
         DiskAvailability::NotFound => {
             return HttpResponse::NotFound()
@@ -579,13 +765,42 @@ async fn serve_static_streaming(
                 .json(&serde_json::json!({"error": "blob store unavailable"}));
         }
     };
+
+    // Range parsing — done after we know the file is available so a
+    // bad range on a missing blob still yields 404 first.
+    let range = parse_range(req.headers().get("range"), hit.size);
+    match range {
+        Some(RangeSpec::Unsatisfiable) => return build_range_not_satisfiable(hit.size, etag),
+        Some(RangeSpec::Single(start, end)) => {
+            let length = end - start + 1;
+            let rx = chunk_stream_from_path_range(path, start, length, STREAM_CHUNK_BYTES);
+            let mut resp = HttpResponse::PartialContent();
+            resp.content_type(hit.content_type.clone());
+            resp.header("etag", etag);
+            resp.header("cache-control", cache_control_header(&hit.cache));
+            resp.header(
+                "content-range",
+                format!("bytes {start}-{end}/{}", hit.size),
+            );
+            resp.header("accept-ranges", "bytes");
+            resp.header(
+                "x-wall-time-ms",
+                format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
+            );
+            return resp.body(SizedStream::new(length, rx));
+        }
+        // None or MultiRange → fall through to the full body.
+        _ => {}
+    }
+
     let rx = chunk_stream_from_path(path, hit.size, STREAM_CHUNK_BYTES);
     let status = hit.status.unwrap_or(200);
     let st = ntex::http::StatusCode::from_u16(status).unwrap_or(ntex::http::StatusCode::OK);
     let mut resp = HttpResponse::build(st);
     resp.content_type(hit.content_type.clone());
-    resp.header("etag", format!("\"{}\"", hit.hash));
+    resp.header("etag", etag);
     resp.header("cache-control", cache_control_header(&hit.cache));
+    resp.header("accept-ranges", "bytes");
     resp.header(
         "x-wall-time-ms",
         format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
@@ -613,14 +828,41 @@ async fn serve_static_streaming(
 ///   per-entry budget cap or silently fail to cache, so we don't
 ///   bother. The kernel page cache is the warm path here, just as
 ///   it is for the mmap-buffered path.
+///
+/// Tier 4a additions (HTTP completeness):
+///
+/// * `If-None-Match` → 304 short-circuit BEFORE any blob fetch. Saves
+///   the byte transfer entirely on warm-cache clients.
+/// * `Range:` request handling on both buffered and streaming paths.
+/// * `Accept-Ranges: bytes` advertised on every 200/206/304 response.
+///
+/// TODO: `CacheCtl::background_refresh` is currently advisory only —
+/// the gateway's blob_cache LRU doesn't distinguish "stale, refresh
+/// in background" from "fresh", so we can't honour it without a
+/// background-revalidation tier on top of the cache. The flag IS
+/// preserved in the manifest for the day we add it.
 async fn serve_static_hit(
     state: &GateState,
+    req: &HttpRequest,
     hit: crate::dispatch::StaticHit,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
-    if hit.size >= STREAM_THRESHOLD_BYTES {
-        return serve_static_streaming(state, &hit, wall_start).await;
+    let etag = format!("\"{}\"", hit.hash);
+
+    // 1. Conditional GET — short-circuit BEFORE any blob fetch.
+    //    The whole point of If-None-Match is to avoid the byte transfer.
+    if let Some(if_none_match) = header_str_borrowed(req, "if-none-match") {
+        if etag_matches(if_none_match, &etag) {
+            return build_not_modified(&etag, &cache_control_header(&hit.cache), wall_start);
+        }
     }
+
+    // 2. Streaming path for large blobs.
+    if hit.size >= STREAM_THRESHOLD_BYTES {
+        return serve_static_streaming(state, req, &hit, &etag, wall_start).await;
+    }
+
+    // 3. Buffered path — fetch bytes through the cache tiers.
     let bytes = match fetch_static_bytes(
         &state.blob_cache,
         &state.disk_cache,
@@ -640,23 +882,56 @@ async fn serve_static_hit(
                 .json(&serde_json::json!({"error": "blob store unavailable"}));
         }
     };
-    build_buffered_response(&hit, &bytes, wall_start)
+    build_buffered_response(req, &hit, &etag, &bytes, wall_start)
 }
 
 /// Build a buffered (single-write) static response. Used by the small
 /// branch of `serve_static_hit` and by the streaming path's fallback
 /// when a disk insert fails.
+///
+/// Honours single `Range:` requests by slicing `bytes` (cheap — `Bytes`
+/// is refcounted, so a `slice()` is a view, not a copy). Multi-range
+/// degrades gracefully to a 200 + full body.
 fn build_buffered_response(
+    req: &HttpRequest,
     hit: &crate::dispatch::StaticHit,
+    etag: &str,
     bytes: &bytes::Bytes,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
+    // Range handling — resolve before building the response so we set
+    // the right status (200 vs 206 vs 416) and Content-Range header.
+    let range = parse_range(req.headers().get("range"), hit.size);
+    match range {
+        Some(RangeSpec::Unsatisfiable) => return build_range_not_satisfiable(hit.size, etag),
+        Some(RangeSpec::Single(start, end)) => {
+            let slice = bytes.slice(start as usize..=end as usize);
+            let mut resp = HttpResponse::PartialContent();
+            resp.content_type(hit.content_type.clone());
+            resp.header("etag", etag);
+            resp.header("cache-control", cache_control_header(&hit.cache));
+            resp.header(
+                "content-range",
+                format!("bytes {start}-{end}/{}", hit.size),
+            );
+            resp.header("accept-ranges", "bytes");
+            resp.header(
+                "x-wall-time-ms",
+                format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
+            );
+            return resp.body(Bytes::copy_from_slice(&slice));
+        }
+        // None or MultiRange → fall through to a full 200.
+        _ => {}
+    }
+
     let status = hit.status.unwrap_or(200);
     let st = ntex::http::StatusCode::from_u16(status).unwrap_or(ntex::http::StatusCode::OK);
     let mut resp = HttpResponse::build(st);
     resp.content_type(hit.content_type.clone());
-    resp.header("etag", format!("\"{}\"", hit.hash));
+    resp.header("etag", etag);
     resp.header("cache-control", cache_control_header(&hit.cache));
+    resp.header("accept-ranges", "bytes");
     resp.header(
         "x-wall-time-ms",
         format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
@@ -670,10 +945,26 @@ fn build_buffered_response(
 }
 
 /// Build the `Cache-Control` header value from a [`CacheCtl`].
+///
+/// Emitted directives:
+/// * `public, max-age=<n>`    — always
+/// * `stale-while-revalidate=<n>`  — when `swr_window` set (RFC 5861)
+/// * `stale-if-error=<n>`     — when `stale_on_error` AND `swr_window` (RFC 5861)
+/// * `immutable`              — when `immutable: true`
+///
+/// `background_refresh` is intentionally NOT translated into a
+/// Cache-Control directive — it's gateway-internal logic ("re-fetch
+/// in the background after max-age expires") rather than a thing
+/// browsers / proxies act on. See `serve_static_hit` for the TODO.
 fn cache_control_header(c: &zeroship_core::types::CacheCtl) -> String {
     let mut parts: Vec<String> = vec!["public".into(), format!("max-age={}", c.max_age)];
     if let Some(swr) = c.swr_window {
         parts.push(format!("stale-while-revalidate={swr}"));
+        if c.stale_on_error {
+            // RFC 5861: `stale-if-error` shares the same delta-seconds
+            // window as `stale-while-revalidate` for the common case.
+            parts.push(format!("stale-if-error={swr}"));
+        }
     }
     if c.immutable {
         parts.push("immutable".into());
@@ -1056,6 +1347,14 @@ mod tests {
         }
     }
 
+    /// Bare HttpRequest — no headers — for tests that don't care about
+    /// conditional-GET / Range parsing. The serve path reads
+    /// `if-none-match`, `range`, and `accept-encoding`; an empty
+    /// header bag exercises the "no special headers" code path.
+    fn bare_request() -> HttpRequest {
+        ntex::web::test::TestRequest::default().to_http_request()
+    }
+
     /// Return a 64-char hex hash string for tests. The disk cache
     /// shards by the first two chars; using a real-shaped hash
     /// exercises that path.
@@ -1302,7 +1601,8 @@ mod tests {
 
         let state = make_state(mock.store(), disk);
         let hit = static_hit(&hash, payload.len() as u64);
-        let mut resp = serve_static_hit(&state, hit, std::time::Instant::now()).await;
+        let req = bare_request();
+        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
 
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         let body = resp.take_body();
@@ -1335,7 +1635,8 @@ mod tests {
 
         let state = make_state(mock.store(), disk);
         let hit = static_hit(&hash, payload.len() as u64);
-        let mut resp = serve_static_hit(&state, hit, std::time::Instant::now()).await;
+        let req = bare_request();
+        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
 
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         let body = resp.take_body();
@@ -1379,7 +1680,8 @@ mod tests {
 
         let state = make_state(mock.store(), disk);
         let hit = static_hit(&hash, payload.len() as u64);
-        let mut resp = serve_static_hit(&state, hit, std::time::Instant::now()).await;
+        let req = bare_request();
+        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
 
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         let body = resp.take_body();
@@ -1401,7 +1703,8 @@ mod tests {
         let mock = MockHandle::new();
         let state = make_state(mock.store(), disk);
         let hit = static_hit(&hex_hash(0x77), STREAM_THRESHOLD_BYTES + 1);
-        let resp = serve_static_hit(&state, hit, std::time::Instant::now()).await;
+        let req = bare_request();
+        let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::NOT_FOUND);
 
         std::fs::remove_dir_all(&root).ok();
@@ -1632,5 +1935,479 @@ mod tests {
             Some("*")
         );
         assert!(resp.headers().get("vary").is_none(), "no Vary on wildcard");
+    }
+
+    // -----------------------------------------------------------------------
+    // Tier 4a — HTTP completeness tests
+    //   * If-None-Match → 304 (with no blob fetch)
+    //   * Range: parsing + 206/416 responses on buffered + streaming paths
+    //   * Cache-Control extensions (stale-if-error)
+    //   * Accept-Ranges always advertised
+    // -----------------------------------------------------------------------
+
+    /// Build a static hit with a real-shaped 64-char hex hash.
+    fn hex_static_hit(byte: u8, size: u64) -> crate::dispatch::StaticHit {
+        let mut hit = static_hit(&hex_hash(byte), size);
+        hit.size = size;
+        hit
+    }
+
+    /// Helper: extract an owned String for a response header.
+    fn hdr(resp: &HttpResponse, name: &str) -> Option<String> {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    }
+
+    // ── etag_matches ────────────────────────────────────────────────────────
+
+    #[test]
+    fn etag_matches_exact() {
+        assert!(etag_matches("\"abc\"", "\"abc\""));
+        assert!(!etag_matches("\"abc\"", "\"xyz\""));
+    }
+
+    #[test]
+    fn etag_matches_wildcard() {
+        assert!(etag_matches("*", "\"abc\""));
+        // Wildcard with surrounding whitespace is also valid.
+        assert!(etag_matches("  *  ", "\"abc\""));
+    }
+
+    #[test]
+    fn etag_matches_list() {
+        assert!(etag_matches("\"abc\", \"def\"", "\"def\""));
+        assert!(etag_matches("\"abc\",\"def\"", "\"abc\""));
+        assert!(!etag_matches("\"abc\", \"def\"", "\"xyz\""));
+    }
+
+    #[test]
+    fn etag_matches_weak_rejected() {
+        // Weak ETags must NOT match — strong comparison only.
+        assert!(!etag_matches("W/\"abc\"", "\"abc\""));
+        // Mixed strong + weak in a list — only the strong entries
+        // can match.
+        assert!(etag_matches("W/\"abc\", \"def\"", "\"def\""));
+        assert!(!etag_matches("W/\"abc\", W/\"def\"", "\"def\""));
+    }
+
+    // ── parse_range ─────────────────────────────────────────────────────────
+
+    fn range_header(s: &str) -> ntex::http::header::HeaderValue {
+        ntex::http::header::HeaderValue::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn parse_range_single() {
+        let h = range_header("bytes=0-9");
+        assert_eq!(parse_range(Some(&h), 100), Some(RangeSpec::Single(0, 9)));
+    }
+
+    #[test]
+    fn parse_range_open_end() {
+        let h = range_header("bytes=10-");
+        assert_eq!(parse_range(Some(&h), 100), Some(RangeSpec::Single(10, 99)));
+    }
+
+    #[test]
+    fn parse_range_suffix() {
+        let h = range_header("bytes=-20");
+        assert_eq!(parse_range(Some(&h), 100), Some(RangeSpec::Single(80, 99)));
+        // Suffix bigger than file → clamp to whole file.
+        let h2 = range_header("bytes=-500");
+        assert_eq!(parse_range(Some(&h2), 100), Some(RangeSpec::Single(0, 99)));
+    }
+
+    #[test]
+    fn parse_range_clamps_end_to_size_minus_one() {
+        let h = range_header("bytes=50-9999");
+        assert_eq!(parse_range(Some(&h), 100), Some(RangeSpec::Single(50, 99)));
+    }
+
+    #[test]
+    fn parse_range_unsatisfiable() {
+        let h = range_header("bytes=200-300");
+        assert_eq!(parse_range(Some(&h), 100), Some(RangeSpec::Unsatisfiable));
+        // start > end with start in range → still unsatisfiable.
+        let h2 = range_header("bytes=99-50");
+        assert_eq!(parse_range(Some(&h2), 100), Some(RangeSpec::Unsatisfiable));
+    }
+
+    #[test]
+    fn parse_range_multi() {
+        let h = range_header("bytes=0-10,20-30");
+        assert_eq!(parse_range(Some(&h), 100), Some(RangeSpec::MultiRange));
+    }
+
+    #[test]
+    fn parse_range_unknown_unit() {
+        let h = range_header("items=1-2");
+        assert_eq!(parse_range(Some(&h), 100), None);
+    }
+
+    #[test]
+    fn parse_range_garbage() {
+        let h = range_header("bytes=abc");
+        assert_eq!(parse_range(Some(&h), 100), None);
+    }
+
+    #[test]
+    fn parse_range_absent() {
+        assert_eq!(parse_range(None, 100), None);
+    }
+
+    // ── If-None-Match → 304 ─────────────────────────────────────────────────
+
+    #[compio::test]
+    async fn if_none_match_returns_304_without_blob_fetch() {
+        let (disk, root) = fresh_disk_cache("inm-304");
+        let mock = MockHandle::new();
+        let hash = hex_hash(0x10);
+        // Note: NOT putting the blob in the store. Conditional GET
+        // must short-circuit BEFORE the fetch even tries.
+        let state = make_state(mock.store(), disk);
+        let hit = hex_static_hit(0x10, 1024);
+
+        let req = ntex::web::test::TestRequest::default()
+            .header("if-none-match", format!("\"{}\"", hash))
+            .to_http_request();
+        let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+
+        assert_eq!(resp.status(), ntex::http::StatusCode::NOT_MODIFIED);
+        // ETag, Cache-Control, Accept-Ranges all present on the 304.
+        assert!(hdr(&resp, "etag").is_some(), "etag on 304");
+        assert!(hdr(&resp, "cache-control").is_some(), "cache-control on 304");
+        assert_eq!(hdr(&resp, "accept-ranges").as_deref(), Some("bytes"));
+        // Critical: backend was NOT called.
+        assert_eq!(mock.calls_for(&hash), 0, "no blob fetch on 304");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[compio::test]
+    async fn if_none_match_wildcard_matches() {
+        let (disk, root) = fresh_disk_cache("inm-wildcard");
+        let mock = MockHandle::new();
+        let hash = hex_hash(0x11);
+        let state = make_state(mock.store(), disk);
+        let hit = hex_static_hit(0x11, 1024);
+
+        let req = ntex::web::test::TestRequest::default()
+            .header("if-none-match", "*")
+            .to_http_request();
+        let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::NOT_MODIFIED);
+        assert_eq!(mock.calls_for(&hash), 0);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[compio::test]
+    async fn if_none_match_list_matches() {
+        let (disk, root) = fresh_disk_cache("inm-list");
+        let mock = MockHandle::new();
+        let hash = hex_hash(0x12);
+        let state = make_state(mock.store(), disk);
+        let hit = hex_static_hit(0x12, 1024);
+
+        // List with the matching ETag in the middle.
+        let req = ntex::web::test::TestRequest::default()
+            .header("if-none-match", format!("\"abc\", \"{}\", \"def\"", hash))
+            .to_http_request();
+        let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::NOT_MODIFIED);
+        assert_eq!(mock.calls_for(&hash), 0);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[compio::test]
+    async fn if_none_match_weak_etag_rejected() {
+        // W/"<hash>" must NOT short-circuit. Caller must fetch the blob
+        // and respond 200.
+        let (disk, root) = fresh_disk_cache("inm-weak");
+        let mock = MockHandle::new();
+        let hash = hex_hash(0x13);
+        let payload = vec![0xAAu8; 1024];
+        mock.put(&hash, &payload);
+        let state = make_state(mock.store(), disk);
+        let hit = hex_static_hit(0x13, payload.len() as u64);
+
+        let req = ntex::web::test::TestRequest::default()
+            .header("if-none-match", format!("W/\"{}\"", hash))
+            .to_http_request();
+        let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::OK);
+        assert_eq!(mock.calls_for(&hash), 1, "weak match must fetch the blob");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── Range — buffered path ───────────────────────────────────────────────
+
+    #[compio::test]
+    async fn range_serves_partial_content() {
+        let (disk, root) = fresh_disk_cache("range-206");
+        let mock = MockHandle::new();
+        let hash = hex_hash(0x20);
+        let payload: Vec<u8> = (0..100).collect();
+        mock.put(&hash, &payload);
+        let state = make_state(mock.store(), disk);
+        let hit = hex_static_hit(0x20, payload.len() as u64);
+
+        let req = ntex::web::test::TestRequest::default()
+            .header("range", "bytes=0-9")
+            .to_http_request();
+        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::PARTIAL_CONTENT);
+        assert_eq!(hdr(&resp, "content-range").as_deref(), Some("bytes 0-9/100"));
+        assert_eq!(hdr(&resp, "accept-ranges").as_deref(), Some("bytes"));
+        let body = resp.take_body();
+        let got = collect_body(body).await;
+        assert_eq!(got, payload[0..10]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[compio::test]
+    async fn range_open_end() {
+        let (disk, root) = fresh_disk_cache("range-open");
+        let mock = MockHandle::new();
+        let hash = hex_hash(0x21);
+        let payload: Vec<u8> = (0..100).collect();
+        mock.put(&hash, &payload);
+        let state = make_state(mock.store(), disk);
+        let hit = hex_static_hit(0x21, payload.len() as u64);
+
+        let req = ntex::web::test::TestRequest::default()
+            .header("range", "bytes=10-")
+            .to_http_request();
+        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::PARTIAL_CONTENT);
+        assert_eq!(hdr(&resp, "content-range").as_deref(), Some("bytes 10-99/100"));
+        let got = collect_body(resp.take_body()).await;
+        assert_eq!(got, payload[10..]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[compio::test]
+    async fn range_suffix() {
+        let (disk, root) = fresh_disk_cache("range-suffix");
+        let mock = MockHandle::new();
+        let hash = hex_hash(0x22);
+        let payload: Vec<u8> = (0..100).collect();
+        mock.put(&hash, &payload);
+        let state = make_state(mock.store(), disk);
+        let hit = hex_static_hit(0x22, payload.len() as u64);
+
+        let req = ntex::web::test::TestRequest::default()
+            .header("range", "bytes=-20")
+            .to_http_request();
+        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::PARTIAL_CONTENT);
+        assert_eq!(hdr(&resp, "content-range").as_deref(), Some("bytes 80-99/100"));
+        let got = collect_body(resp.take_body()).await;
+        assert_eq!(got, payload[80..]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[compio::test]
+    async fn range_unsatisfiable_returns_416() {
+        let (disk, root) = fresh_disk_cache("range-416");
+        let mock = MockHandle::new();
+        let hash = hex_hash(0x23);
+        let payload: Vec<u8> = (0..100).collect();
+        mock.put(&hash, &payload);
+        let state = make_state(mock.store(), disk);
+        let hit = hex_static_hit(0x23, payload.len() as u64);
+
+        let req = ntex::web::test::TestRequest::default()
+            .header("range", "bytes=200-300")
+            .to_http_request();
+        let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(hdr(&resp, "content-range").as_deref(), Some("bytes */100"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[compio::test]
+    async fn range_multi_falls_through_to_200() {
+        let (disk, root) = fresh_disk_cache("range-multi");
+        let mock = MockHandle::new();
+        let hash = hex_hash(0x24);
+        let payload: Vec<u8> = (0..100).collect();
+        mock.put(&hash, &payload);
+        let state = make_state(mock.store(), disk);
+        let hit = hex_static_hit(0x24, payload.len() as u64);
+
+        let req = ntex::web::test::TestRequest::default()
+            .header("range", "bytes=0-10,20-30")
+            .to_http_request();
+        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::OK, "multi-range degrades to 200");
+        let got = collect_body(resp.take_body()).await;
+        assert_eq!(got, payload, "full body served on multi-range");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── Range — streaming path ──────────────────────────────────────────────
+
+    #[compio::test]
+    async fn range_on_streaming_path() {
+        // Asset over the streaming threshold; range request slices it.
+        let (disk, root) = fresh_disk_cache_with_budget("range-streaming", 8 * 1024 * 1024);
+        let mock = MockHandle::new();
+        let hash = hex_hash(0x30);
+        let size: usize = (STREAM_THRESHOLD_BYTES + 1024) as usize;
+        let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        mock.put(&hash, &payload);
+        let state = make_state(mock.store(), disk);
+        let hit = hex_static_hit(0x30, payload.len() as u64);
+
+        let req = ntex::web::test::TestRequest::default()
+            .header("range", "bytes=100-199")
+            .to_http_request();
+        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            hdr(&resp, "content-range"),
+            Some(format!("bytes 100-199/{}", payload.len()))
+        );
+        let got = collect_body(resp.take_body()).await;
+        assert_eq!(got.len(), 100, "exactly 100 bytes streamed");
+        assert_eq!(got, payload[100..200], "streamed bytes match the requested slice");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[compio::test]
+    async fn chunk_stream_from_file_range_reads_offset_correctly() {
+        // Verify the range-aware chunk reader skips to the offset and
+        // emits exactly `length` bytes — no overshoot.
+        let payload: Vec<u8> = (0..200).map(|i| i as u8).collect();
+        let (tx, rx) = ntex::channel::mpsc::channel::<Result<Bytes, Rc<dyn std::error::Error>>>();
+        chunk_stream_from_file_range(&payload, 50, 30, 16, &tx).await;
+        drop(tx);
+
+        let chunks = drain_chunks(rx).await;
+        let mut joined = Vec::new();
+        for c in &chunks {
+            joined.extend_from_slice(c);
+        }
+        assert_eq!(joined.len(), 30, "exactly 30 bytes streamed");
+        assert_eq!(joined, payload[50..80], "bytes match offset/length");
+    }
+
+    // ── cache_control_header ────────────────────────────────────────────────
+
+    #[test]
+    fn cache_ctl_emits_stale_if_error() {
+        // stale_on_error AND swr_window set → both stale-while-revalidate
+        // and stale-if-error directives.
+        let c = zeroship_core::types::CacheCtl {
+            max_age: 60,
+            swr_window: Some(30),
+            immutable: false,
+            background_refresh: false,
+            stale_on_error: true,
+        };
+        let v = cache_control_header(&c);
+        assert!(v.contains("stale-while-revalidate=30"), "swr present: {v}");
+        assert!(v.contains("stale-if-error=30"), "stale-if-error present: {v}");
+    }
+
+    #[test]
+    fn cache_ctl_no_stale_if_error_without_swr() {
+        // stale_on_error WITHOUT swr_window → no stale-if-error.
+        let c = zeroship_core::types::CacheCtl {
+            max_age: 60,
+            swr_window: None,
+            immutable: false,
+            background_refresh: false,
+            stale_on_error: true,
+        };
+        let v = cache_control_header(&c);
+        assert!(!v.contains("stale-if-error"), "no swr → no stale-if-error: {v}");
+    }
+
+    #[test]
+    fn cache_ctl_immutable_still_works() {
+        let c = zeroship_core::types::CacheCtl {
+            max_age: 31_536_000,
+            swr_window: None,
+            immutable: true,
+            background_refresh: false,
+            stale_on_error: false,
+        };
+        let v = cache_control_header(&c);
+        assert!(v.contains("immutable"), "immutable preserved: {v}");
+        assert!(v.contains("max-age=31536000"));
+    }
+
+    // ── Accept-Ranges always advertised ─────────────────────────────────────
+
+    #[compio::test]
+    async fn accept_ranges_header_always_present() {
+        // 200 (buffered), 206 (range), 304 (conditional GET) all carry
+        // Accept-Ranges so clients know they can range.
+        let (disk, root) = fresh_disk_cache("accept-ranges");
+        let mock = MockHandle::new();
+        let hash = hex_hash(0x40);
+        let payload = vec![0xCDu8; 1024];
+        mock.put(&hash, &payload);
+        let state = make_state(mock.store(), disk);
+
+        // 200 OK
+        let hit = hex_static_hit(0x40, payload.len() as u64);
+        let req = bare_request();
+        let resp200 = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        assert_eq!(resp200.status(), ntex::http::StatusCode::OK);
+        assert_eq!(hdr(&resp200, "accept-ranges").as_deref(), Some("bytes"));
+
+        // 206 Partial Content
+        let hit = hex_static_hit(0x40, payload.len() as u64);
+        let req = ntex::web::test::TestRequest::default()
+            .header("range", "bytes=0-9")
+            .to_http_request();
+        let resp206 = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        assert_eq!(resp206.status(), ntex::http::StatusCode::PARTIAL_CONTENT);
+        assert_eq!(hdr(&resp206, "accept-ranges").as_deref(), Some("bytes"));
+
+        // 304 Not Modified
+        let hit = hex_static_hit(0x40, payload.len() as u64);
+        let req = ntex::web::test::TestRequest::default()
+            .header("if-none-match", format!("\"{}\"", hash))
+            .to_http_request();
+        let resp304 = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        assert_eq!(resp304.status(), ntex::http::StatusCode::NOT_MODIFIED);
+        assert_eq!(hdr(&resp304, "accept-ranges").as_deref(), Some("bytes"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── Streaming path advertises Accept-Ranges too ─────────────────────────
+
+    #[compio::test]
+    async fn streaming_path_emits_accept_ranges() {
+        let (disk, root) = fresh_disk_cache_with_budget("stream-ar", 8 * 1024 * 1024);
+        let mock = MockHandle::new();
+        let hash = hex_hash(0x50);
+        let size: usize = (STREAM_THRESHOLD_BYTES + 1024) as usize;
+        let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        mock.put(&hash, &payload);
+        let state = make_state(mock.store(), disk);
+        let hit = hex_static_hit(0x50, payload.len() as u64);
+
+        let req = bare_request();
+        let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::OK);
+        assert_eq!(hdr(&resp, "accept-ranges").as_deref(), Some("bytes"));
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }
