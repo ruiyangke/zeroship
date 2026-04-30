@@ -1,0 +1,37 @@
+[package]
+name = "zeroship-sandbox-agent"
+version = "0.1.0"
+edition = "2021"
+description = "In-VM agent (PID 1) for zeroship sandbox microVMs — exposes /exec, /files, /tree to the controller over HTTP."
+
+[lib]
+name = "zeroship_sandbox_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sandbox-agent"
+path = "src/main.rs"
+
+[dependencies]
+# tokio + axum: this binary runs INSIDE the VM, isolated from the rest of
+# the workspace's compio/ntex stack. We pick the tokio ecosystem here for
+# axum + minimal dependency surface; static-musl builds drop in fine.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "signal", "fs", "io-util", "time", "net", "sync"] }
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio", "matched-path", "tracing"] }
+tower = { version = "0.5", default-features = false }
+tower-http = { version = "0.5", default-features = false, features = ["limit"] }
+
+# Serde
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Crypto / safety
+subtle = "2"
+hex = { workspace = true }
+
+# OS bits — signals, file flags
+nix = { version = "0.29", default-features = false, features = ["signal", "process", "fs"] }
+libc = { workspace = true }
+
+[lints]
+workspace = true
