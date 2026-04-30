@@ -1,15 +1,25 @@
 //! HTTP handlers for the agent.
 //!
-//! Endpoints (every one except `/healthz` requires `Authorization:
-//! Bearer <token>` — checked inline at the top of each handler, same
-//! pattern as `crates/sandbox/src/handlers.rs`):
+//! ## Endpoints
 //!
-//!   GET  /healthz           — liveness, no auth (used for cold-start polling)
-//!   POST /exec              — run shell command (JSON in/out)
-//!   GET  /tree              — workspace file listing
-//!   GET  /files/{path}*     — read file
-//!   PUT  /files/{path}*     — write file (raw bytes)
-//!   DELETE /files/{path}*   — delete file
+//! **Unauthenticated** (no `Authorization` required — used by k8s
+//! probes and the controller's pre-handshake feature detect):
+//!
+//!   - `GET /livez`    — always 200 if the process is alive
+//!   - `GET /readyz`   — 200 normally, 503 while draining
+//!   - `GET /healthz`  — alias for `/livez` (back-compat)
+//!   - `GET /version`  — agent version + protocol + capabilities
+//!
+//! **Auth-gated** (require `Authorization: Bearer <token>` matching
+//! the file-mounted token; checked inline at the top of each handler
+//! via [`check_token`]):
+//!
+//!   - `POST /exec`              — run shell command (JSON in/out)
+//!   - `GET  /tree`              — workspace file listing
+//!   - `GET  /files/{path}*`     — read file
+//!   - `PUT  /files/{path}*`     — write file (raw bytes)
+//!   - `DELETE /files/{path}*`   — delete file
+//!   - `POST /shutdown`          — flip drain flag (graceful drain)
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -108,8 +118,9 @@ fn content_type(path: &str) -> &'static str {
 // All three are unauthenticated:
 //   - `/livez`  — "is the process alive?" Always 200 if responding.
 //                  Used as k8s liveness probe.
-//   - `/readyz` — "should I send traffic?" 200 normally, 503 while
-//                  draining. Used as k8s readiness probe.
+//   - `/readyz` — "should I send traffic?" 200 normally; 503 while
+//                  draining OR when the PID 1 reaper is not healthy.
+//                  Used as k8s readiness probe.
 //   - `/version`— version + capabilities, used by controllers for
 //                  feature detection.
 //
@@ -121,10 +132,17 @@ pub async fn livez() -> HttpResponse {
 
 pub async fn readyz(state: State) -> HttpResponse {
     if state.is_draining() {
-        HttpResponse::ServiceUnavailable().json(&json!({"status": "draining"}))
-    } else {
-        HttpResponse::Ok().json(&json!({"status": "ready"}))
+        return HttpResponse::ServiceUnavailable()
+            .json(&json!({"status": "draining"}));
     }
+    if !crate::reap::is_healthy() {
+        // The PID 1 reaper failed to install. Inside a libkrun VM
+        // this means zombies pile up unbounded — so we report
+        // not-ready rather than silently degrade.
+        return HttpResponse::ServiceUnavailable()
+            .json(&json!({"status": "reaper-down"}));
+    }
+    HttpResponse::Ok().json(&json!({"status": "ready"}))
 }
 
 pub async fn version_info(state: State) -> HttpResponse {
@@ -209,6 +227,37 @@ pub async fn file_tree(req: HttpRequest, state: State) -> HttpResponse {
 
 // ─── /files/{path}* ──────────────────────────────────────────────
 
+/// Map a `files::Workspace` error string to an HTTP response and
+/// emit the matching audit event. Centralizes the string-matching so
+/// a wording change in `files::map_open_err` only needs an update
+/// here, and the audit-event mapping can never silently drift across
+/// the three file handlers.
+///
+/// Also captures: oversize → 400 + `fs.size_reject`, NotFound → 404
+/// (no audit; ENOENT is normal user behavior, not an attack signal).
+fn fs_error_response(op: &'static str, path: &str, e: String, write_size: Option<usize>) -> HttpResponse {
+    if e.contains("symlink") {
+        audit::record(audit::events::FS_SYMLINK_REJECT, &format!("op={op} path={path}"));
+        return err(403, e);
+    }
+    if e.contains("escapes") {
+        audit::record(audit::events::FS_ESCAPE_REJECT, &format!("op={op} path={path}"));
+        return err(403, e);
+    }
+    if e.contains("too large") {
+        let size = write_size.unwrap_or(0);
+        audit::record(
+            audit::events::FS_SIZE_REJECT,
+            &format!("op={op} path={path} size={size}"),
+        );
+        return err(400, e);
+    }
+    if e.contains("No such file") {
+        return err(404, e);
+    }
+    err(400, e)
+}
+
 pub async fn read_file(
     req: HttpRequest,
     state: State,
@@ -221,12 +270,7 @@ pub async fn read_file(
         Ok(bytes) => HttpResponse::Ok()
             .content_type(content_type(&p))
             .body(bytes),
-        Err(e) if e.contains("symlink") || e.contains("escapes") => {
-            audit::record(audit::events::FS_SYMLINK_REJECT, &format!("op=read path={p}"));
-            err(403, e)
-        }
-        Err(e) if e.contains("No such file") => err(404, e),
-        Err(e) => err(400, e),
+        Err(e) => fs_error_response("read", &p, e, None),
     }
 }
 
@@ -242,15 +286,7 @@ pub async fn write_file(
     let n = body.len();
     match state.workspace.write_file(&p, &body) {
         Ok(()) => HttpResponse::Ok().json(&json!({"written": p, "size": n})),
-        Err(e) if e.contains("symlink") || e.contains("escapes") => {
-            audit::record(audit::events::FS_SYMLINK_REJECT, &format!("op=write path={p}"));
-            err(403, e)
-        }
-        Err(e) if e.contains("too large") => {
-            audit::record(audit::events::FS_SIZE_REJECT, &format!("op=write path={p} size={n}"));
-            err(400, e)
-        }
-        Err(e) => err(400, e),
+        Err(e) => fs_error_response("write", &p, e, Some(n)),
     }
 }
 
@@ -264,11 +300,7 @@ pub async fn delete_file(
     let p = path.into_inner();
     match state.workspace.delete_file(&p) {
         Ok(true) => HttpResponse::Ok().json(&json!({"deleted": p})),
-        Ok(false) => err(404, "file not found"),
-        Err(e) if e.contains("symlink") || e.contains("escapes") => {
-            audit::record(audit::events::FS_SYMLINK_REJECT, &format!("op=delete path={p}"));
-            err(403, e)
-        }
-        Err(e) => err(400, e),
+        Ok(false) => err(404, format!("delete {p}: No such file or directory")),
+        Err(e) => fs_error_response("delete", &p, e, None),
     }
 }

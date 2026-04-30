@@ -67,6 +67,17 @@ impl Token {
         // `read` returns Vec<u8>; wrap in Zeroizing so the original
         // unwrapped buffer also gets scrubbed if we discard it.
         let raw = Zeroizing::new(raw);
+        // Unlink BEFORE validation. We already have the bytes in
+        // memory, and removing the file as soon as possible bounds
+        // the window during which a bad-token startup leaves the
+        // file lying around on the tmpfs.
+        if let Err(e) = std::fs::remove_file(path) {
+            tracing::warn!(
+                error = %e,
+                token_path = %path.display(),
+                "failed to unlink token file (token already in memory)"
+            );
+        }
         let trimmed = trim_trailing_whitespace(&raw);
         if trimmed.len() < MIN_TOKEN_BYTES {
             return Err(format!(
@@ -75,17 +86,6 @@ impl Token {
                 trimmed.len(),
                 MIN_TOKEN_BYTES,
             ));
-        }
-        // Best-effort unlink. If the mount is read-only or the file
-        // is already gone, log and continue — the token is already
-        // in memory, the file's existence after this point is just
-        // a leak surface, not a correctness issue.
-        if let Err(e) = std::fs::remove_file(path) {
-            tracing::warn!(
-                error = %e,
-                token_path = %path.display(),
-                "failed to unlink token file (token already in memory)"
-            );
         }
         Ok(Self(Zeroizing::new(trimmed.to_vec())))
     }
@@ -99,8 +99,7 @@ impl Token {
         // ct_eq returns Choice(0) immediately on length mismatch — that
         // can leak length but not byte contents. Token length is fixed
         // by the controller, so length is effectively public.
-        let eq: bool = presented.as_bytes().ct_eq(self.0.as_slice()).into();
-        eq
+        presented.as_bytes().ct_eq(self.0.as_slice()).into()
     }
 }
 
@@ -167,8 +166,9 @@ mod tests {
         // 31 bytes < MIN_TOKEN_BYTES (32)
         let path = write_token(b"0123456789abcdef0123456789abcde");
         let r = Token::from_path(&path);
-        // Cleanup since from_path errored before unlink.
-        let _ = std::fs::remove_file(&path);
+        // After Round 4 fix: unlink happens before validation, so
+        // even on rejection the file should be gone.
+        assert!(!path.exists(), "file must be unlinked even on validation failure");
         assert!(r.is_err(), "must reject too-short token");
     }
 

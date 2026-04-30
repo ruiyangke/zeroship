@@ -13,13 +13,26 @@
 //! On a fleet of agents, a spike in any of these is an attack signal:
 //!
 //!   - `auth.fail`              — wrong / missing bearer
-//!   - `auth.token_load_fail`   — agent boot couldn't load token
 //!   - `fs.symlink_reject`      — caller tried to read/write/delete a
-//!                                  symlink (or escape via parent)
-//!   - `fs.escape_reject`       — RESOLVE_BENEATH refused a path
+//!                                  workspace path that contains a
+//!                                  symlink at any component (ELOOP
+//!                                  from `RESOLVE_NO_SYMLINKS`).
+//!                                  This catches both leaf symlinks
+//!                                  (`/files/escape -> /etc/passwd`)
+//!                                  and parent-component symlinks
+//!                                  (`/files/safedir/x` where
+//!                                  `safedir` is a link out).
+//!   - `fs.escape_reject`       — `RESOLVE_BENEATH` refused a path
+//!                                  that resolved outside the
+//!                                  workspace WITHOUT a symlink
+//!                                  involved (EXDEV). Rare in
+//!                                  practice — defensive constant
+//!                                  for future kernel/mount setups
+//!                                  where this could fire (e.g. bind
+//!                                  mounts crossing dirfds).
 //!   - `fs.size_reject`         — over-cap write rejected
 //!   - `exec.timeout`           — command killed at wall clock
-//!   - `exec.truncated`         — output capped at MAX_OUTPUT_BYTES
+//!   - `exec.truncated`         — output capped at `MAX_OUTPUT_BYTES`
 
 use tracing::warn;
 
@@ -35,6 +48,11 @@ pub mod events {
 }
 
 /// Record an audit event. Goes to `tracing` with `target = "audit"`.
+///
+/// `fields` may include attacker-controlled values (e.g., the
+/// requested path on `auth.fail`). We rely on the JSON-formatted
+/// subscriber configured in `main` to escape `\n`, quotes, etc. —
+/// log injection on a non-JSON subscriber is a known caveat.
 pub fn record(event: &'static str, fields: &str) {
     warn!(target: "audit", event, fields);
 }

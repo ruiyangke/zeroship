@@ -7,7 +7,6 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
 
 use ntex::web::middleware::DefaultHeaders;
 use ntex::web::{self, HttpResponse};
@@ -76,11 +75,14 @@ async fn run() -> Result<(), String> {
     let body_limit = zeroship_sandbox_agent::files::MAX_BYTES + 1024 * 1024;
 
     let proto = version::PROTOCOL_VERSION.to_string();
-    let state = Arc::new(state);
+    // AppState is already cheap-clone (`Arc<Token>`, `Arc<Workspace>`,
+    // `Arc<AtomicBool>`), so we capture by move and clone per-worker
+    // inside the factory. No outer Arc<AppState> needed.
     web::server(async move || {
+        let state = state.clone();
         let proto = proto.clone();
         web::App::new()
-            .state((*state).clone())
+            .state(state)
             // Bytes extractor used by PUT /files
             .state(web::types::PayloadConfig::default().limit(body_limit))
             // X-Sbx-Protocol on every response — controller checks

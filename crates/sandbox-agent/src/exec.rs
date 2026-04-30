@@ -65,6 +65,9 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 /// writer doesn't block, but stop appending and set `*_truncated`.
 pub const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 
+/// Reader thread per-iteration buffer size.
+const CHUNK_SIZE: usize = 8192;
+
 const PASSTHROUGH_VARS: &[&str] = &["PATH", "HOME", "LANG", "LC_ALL", "TERM", "USER", "TZ"];
 
 fn curated_env() -> Vec<(String, String)> {
@@ -124,9 +127,10 @@ pub async fn run(cmd: &str, cwd: &str, timeout_ms: u64) -> Result<ExecOutput, St
 
     let (status, timed_out) = race_wait(waiter, timeout_fut, pgid).await;
 
-    // Pipes close when the child exits; readers see EOF and finish.
-    // Joining is best-effort — if the reader panicked we still
-    // return what was buffered.
+    // Child exit closes the child's end of each pipe; readers see
+    // EOF and finish (which then drops our end of the pipe via the
+    // ChildStdout/ChildStderr's Drop). Joining is best-effort — if
+    // a reader panicked, take_buf below recovers via PoisonError.
     if let Some(t) = stdout_task {
         let _ = t.await;
     }
@@ -134,9 +138,11 @@ pub async fn run(cmd: &str, cwd: &str, timeout_ms: u64) -> Result<ExecOutput, St
         let _ = t.await;
     }
 
-    // Snapshot buffers (cheap clone of the captured bytes).
-    let stdout_bytes = std::mem::take(&mut *stdout_buf.lock().unwrap());
-    let stderr_bytes = std::mem::take(&mut *stderr_buf.lock().unwrap());
+    // Snapshot buffers. Tolerate a poisoned mutex (reader thread
+    // panicked) by recovering the inner Vec — better to return what
+    // we have than to crash the ntex worker on .unwrap().
+    let stdout_bytes = take_buf(&stdout_buf);
+    let stderr_bytes = take_buf(&stderr_buf);
 
     Ok(ExecOutput {
         status,
@@ -150,6 +156,19 @@ pub async fn run(cmd: &str, cwd: &str, timeout_ms: u64) -> Result<ExecOutput, St
 
 // ─── child wait + timeout race ────────────────────────────────────
 
+/// Three-deep nesting because `compio::runtime::spawn_blocking` wraps
+/// the closure's result in `Result<_, Box<dyn Any + Send>>` (panic
+/// payload), the closure here returns `std::io::Result<ExitStatus>`
+/// (the OS-level wait error), and `ExitStatus` is the actual code.
+///
+/// Layers, outer → inner:
+///
+///   `Result<                                            // panic?
+///       std::io::Result<                                // wait err?
+///           std::process::ExitStatus                    // exit code
+///       >,
+///       Box<dyn Any + Send>                             // panic payload
+///   >`
 type WaitJoin = Result<std::io::Result<std::process::ExitStatus>, Box<dyn std::any::Any + Send>>;
 
 async fn race_wait<W>(
@@ -199,6 +218,17 @@ fn status_from(j: WaitJoin) -> i32 {
     }
 }
 
+/// Drain the buffer, recovering from a poisoned Mutex (reader thread
+/// panicked) rather than propagating the panic. We always know we're
+/// the last reader by the time this is called (reader tasks have
+/// been awaited), so taking the inner Vec is safe.
+fn take_buf(m: &Mutex<Vec<u8>>) -> Vec<u8> {
+    match m.lock() {
+        Ok(mut g) => std::mem::take(&mut *g),
+        Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+    }
+}
+
 // ─── pipe readers ─────────────────────────────────────────────────
 
 fn spawn_stdout_reader(
@@ -224,15 +254,23 @@ fn spawn_stderr_reader(
 /// Drain `stream` into `buf`, capped at [`MAX_OUTPUT_BYTES`]. After
 /// the cap is hit we keep reading (so the writer doesn't block on a
 /// full pipe) but stop appending; `trunc` is flipped.
+///
+/// Tolerates a poisoned Mutex by recovering the inner Vec — important
+/// because the parent task uses `take_buf` which itself recovers. If
+/// THIS function panicked on poison, the reader thread would die and
+/// the pipe might fill up, blocking the child.
 fn drain_into<R: Read>(mut stream: R, buf: &Mutex<Vec<u8>>, trunc: &AtomicBool) {
-    let mut chunk = [0u8; 8192];
+    let mut chunk = [0u8; CHUNK_SIZE];
     let mut capped = false;
     loop {
         match stream.read(&mut chunk) {
             Ok(0) => return, // EOF
             Ok(n) => {
                 if !capped {
-                    let mut b = buf.lock().unwrap();
+                    let mut b = match buf.lock() {
+                        Ok(g) => g,
+                        Err(p) => p.into_inner(),
+                    };
                     let space = MAX_OUTPUT_BYTES.saturating_sub(b.len());
                     if n <= space {
                         b.extend_from_slice(&chunk[..n]);
@@ -291,20 +329,32 @@ mod tests {
         assert_eq!(out.status, 0);
     }
 
-    #[compio::test]
-    async fn does_not_leak_agent_token_to_child() {
-        std::env::set_var("SANDBOX_AGENT_TOKEN", "SENTINEL_TOKEN_VALUE_zzzzzzzz");
-        std::env::set_var("SANDBOX_AGENT_TOKEN_FILE", "/some/path");
-        let out = run(
-            "printenv | grep -E '^SANDBOX_AGENT' || echo none",
-            "/tmp",
-            5_000,
-        )
-        .await
-        .unwrap();
-        std::env::remove_var("SANDBOX_AGENT_TOKEN");
-        std::env::remove_var("SANDBOX_AGENT_TOKEN_FILE");
-        assert_eq!(out.stdout.trim(), "none", "no SANDBOX_AGENT_* may leak: {}", out.stdout);
+    /// **C1 regression: token from agent's env never reaches child.**
+    ///
+    /// We don't mutate the parent process env (that races with other
+    /// parallel tests). Instead we use the unit-tested helper
+    /// [`curated_env`] directly — if it ever starts including
+    /// `SANDBOX_AGENT_*`, the assertion catches it. The integration-
+    /// flavor "real spawn with sentinel env" check lives in the
+    /// end-to-end smoke run (a sub-process so its env mutation is
+    /// scoped), not here.
+    #[test]
+    fn curated_env_excludes_sandbox_agent_vars() {
+        // Even if the parent process happens to have these set,
+        // curated_env() must not propagate them.
+        let parent_var_seen = curated_env()
+            .iter()
+            .any(|(k, _)| k.starts_with("SANDBOX_AGENT"));
+        assert!(!parent_var_seen, "curated_env leaked SANDBOX_AGENT_*");
+        // The set of allowed keys is exactly PASSTHROUGH_VARS.
+        let allowed: std::collections::HashSet<&str> =
+            PASSTHROUGH_VARS.iter().copied().collect();
+        for (k, _) in curated_env() {
+            assert!(
+                allowed.contains(k.as_str()) || k == "PATH",
+                "unexpected env var passed through: {k}"
+            );
+        }
     }
 
     #[compio::test]

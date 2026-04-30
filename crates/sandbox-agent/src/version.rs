@@ -6,8 +6,22 @@
 //! means **bumping `PROTOCOL_VERSION` and adding a capability string**
 //! — old controllers gracefully feature-detect.
 
-/// Wire-protocol version. Bump on any breaking change to request /
-/// response shapes. Sent on every response as `X-Sbx-Protocol: <N>`.
+/// Wire-protocol version. Sent on every response as
+/// `X-Sbx-Protocol: <N>`.
+///
+/// **Bump when a breaking change ships:**
+///   - existing endpoint changes URL, method, or required field shape
+///   - existing endpoint changes the meaning of a status code
+///   - existing field is removed or its type changes incompatibly
+///
+/// **Do NOT bump for additive changes:**
+///   - new endpoint added (announce via [`CAPABILITIES`])
+///   - new optional response field added (older clients ignore it)
+///   - new audit event kind
+///
+/// Controllers prefer feature-detection over version comparison —
+/// see [`CAPABILITIES`] — but the protocol version is the single
+/// breaking-change tripwire so we can't drift silently.
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Capability strings, stable identifiers. Controllers do feature

@@ -115,20 +115,29 @@ impl Workspace {
     /// Read a file's bytes (capped at [`MAX_BYTES`]). Error messages
     /// contain only the **relative** path — host paths never escape
     /// to the client.
+    ///
+    /// The read is **bounded** at `MAX_BYTES + 1` via `Read::take`, so
+    /// a multi-GiB file in the workspace can't OOM the agent — the
+    /// `take` reader stops at the cap, we observe the overflow byte
+    /// (or hit EOF first), and reject if it's set.
     pub fn read_file(&self, relative: &str) -> Result<Vec<u8>, String> {
         validate_relative(relative)?;
         let how = sandbox_open_how(OFlag::O_RDONLY | OFlag::O_CLOEXEC);
         let raw = openat2(self.dirfd(), relative, how)
             .map_err(|e| map_open_err("read", relative, e))?;
         // SAFETY: openat2 returned a fresh fd we own.
-        let mut file = unsafe { File::from_raw_fd(raw) };
+        let file = unsafe { File::from_raw_fd(raw) };
+        // Bound the read at MAX_BYTES + 1: if `take` returns that many
+        // bytes, the file has at least one more byte → over the cap.
+        // If it returns fewer, that's the full file and we're under cap.
         let mut buf = Vec::new();
-        file.read_to_end(&mut buf)
+        let mut limited = file.take(MAX_BYTES as u64 + 1);
+        limited
+            .read_to_end(&mut buf)
             .map_err(|e| format!("read {relative}: {e}"))?;
         if buf.len() > MAX_BYTES {
             return Err(format!(
-                "file too large to read: {} bytes (max {MAX_BYTES})",
-                buf.len()
+                "file too large to read (>{MAX_BYTES} bytes)"
             ));
         }
         Ok(buf)
@@ -330,9 +339,15 @@ fn map_open_err(op: &str, rel: &str, e: nix::Error) -> String {
     }
 }
 
-/// Reject empty / absolute / `..` paths. Belt over the kernel's
-/// suspenders (`RESOLVE_BENEATH` would catch `..`, but a clearer
-/// 4xx is friendlier than "EXDEV").
+/// Cap on the number of path components, applied by [`validate_relative`].
+/// 32 is comfortably above any real project layout and bounds the
+/// per-call syscall count for `create_dir_all_relative` so a hostile
+/// caller can't spam unbounded-depth paths.
+pub const MAX_PATH_COMPONENTS: usize = 32;
+
+/// Reject empty / absolute / `..` / pathologically deep paths. Belt
+/// over the kernel's suspenders (`RESOLVE_BENEATH` would catch `..`,
+/// but a clearer 4xx is friendlier than "EXDEV").
 fn validate_relative(relative: &str) -> Result<(), String> {
     if relative.is_empty() {
         return Err("path is empty".into());
@@ -340,6 +355,7 @@ fn validate_relative(relative: &str) -> Result<(), String> {
     if relative.starts_with('/') {
         return Err("absolute paths not allowed".into());
     }
+    let mut depth = 0usize;
     for c in Path::new(relative).components() {
         match c {
             std::path::Component::ParentDir => {
@@ -348,8 +364,14 @@ fn validate_relative(relative: &str) -> Result<(), String> {
             std::path::Component::Prefix(_) | std::path::Component::RootDir => {
                 return Err("absolute paths not allowed".into())
             }
+            std::path::Component::Normal(_) => depth += 1,
             _ => {}
         }
+    }
+    if depth > MAX_PATH_COMPONENTS {
+        return Err(format!(
+            "path too deep ({depth} components; max {MAX_PATH_COMPONENTS})"
+        ));
     }
     Ok(())
 }
@@ -399,6 +421,21 @@ mod tests {
     fn rejects_parent_dir() {
         let ws = unique_workspace("c");
         assert!(ws.write_file("../boom", b"x").is_err());
+    }
+
+    #[test]
+    fn rejects_pathologically_deep_path() {
+        let ws = unique_workspace("deep");
+        // 33 components > MAX_PATH_COMPONENTS (32)
+        let mut deep = String::new();
+        for _ in 0..MAX_PATH_COMPONENTS + 1 {
+            deep.push_str("a/");
+        }
+        deep.push_str("file.txt");
+        let r = ws.write_file(&deep, b"x");
+        assert!(r.is_err(), "deep path must be rejected");
+        let msg = r.unwrap_err();
+        assert!(msg.contains("too deep"), "expected 'too deep', got: {msg}");
     }
 
     #[test]
