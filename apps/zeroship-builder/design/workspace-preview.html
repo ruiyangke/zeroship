@@ -1,0 +1,721 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>zeroship — workspace · atelier redesign</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..800;1,9..144,300..800&family=Public+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+  rel="stylesheet"
+/>
+<style>
+  :root {
+    --paper:   oklch(0.97 0.012 89);
+    --paper-2: oklch(0.94 0.014 86);
+    --paper-3: oklch(0.91 0.014 84);
+    --ink:     oklch(0.18 0.013 60);
+    --ink-soft:oklch(0.36 0.013 65);
+    --pencil:  oklch(0.55 0.012 70);
+    --rule:    oklch(0.78 0.014 75);
+    --rule-2:  oklch(0.85 0.014 78);
+    --tomato:  oklch(0.61 0.21 27);
+    --tomato-2:oklch(0.55 0.21 25);
+    --clay:    oklch(0.84 0.04 60);
+    --serif:   "Fraunces", "Times New Roman", serif;
+    --sans:    "Public Sans", system-ui, sans-serif;
+    --mono:    "JetBrains Mono", ui-monospace, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 16px;
+    line-height: 1.55;
+    font-feature-settings: "ss01" 1, "onum" 1;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    opacity: 0.45; mix-blend-mode: multiply;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.18 0 0 0 0 0.13 0 0 0 0 0.10 0 0 0 0.06 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  }
+
+  ::selection { background: var(--tomato); color: var(--paper); }
+
+  /* shell */
+  .app {
+    position: relative; z-index: 1;
+    height: 100vh;
+    display: grid;
+    grid-template-rows: auto 1fr;
+  }
+
+  /* topbar */
+  header.topbar {
+    display: grid;
+    grid-template-columns: 280px 1fr auto;
+    align-items: center;
+    padding: 12px 24px;
+    border-bottom: 1px solid var(--rule);
+    background: var(--paper);
+  }
+  .crumb {
+    display: flex; align-items: baseline; gap: 14px;
+    font-family: var(--serif);
+  }
+  .crumb a {
+    color: var(--ink-soft);
+    text-decoration: none;
+    font-size: 13px;
+    border-bottom: 1px solid transparent;
+    padding-bottom: 1px;
+    font-style: italic;
+  }
+  .crumb a:hover { color: var(--ink); border-color: var(--rule); }
+  .crumb .sep { color: var(--rule); }
+  .crumb .title {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 18px;
+    letter-spacing: -0.005em;
+    font-feature-settings: "ss01" 1;
+  }
+  .crumb .title em {
+    font-style: italic;
+    color: var(--tomato);
+    font-weight: 500;
+  }
+
+  .status-strip {
+    justify-self: center;
+    display: inline-flex; align-items: baseline; gap: 14px;
+    font-family: var(--serif);
+    font-size: 14px;
+    color: var(--ink-soft);
+    font-style: italic;
+  }
+  .status-strip .pulse {
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--tomato); margin-right: 6px;
+    transform: translateY(-1px);
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(220, 75, 50, 0.5); }
+    50%      { box-shadow: 0 0 0 8px rgba(220, 75, 50, 0); }
+  }
+  .status-strip .now {
+    color: var(--ink);
+    font-style: normal;
+    font-weight: 500;
+    font-family: var(--serif);
+  }
+  .status-strip .meta {
+    font-family: var(--sans);
+    font-size: 11px;
+    color: var(--pencil);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    font-style: normal;
+  }
+
+  .topbar .right {
+    display: flex; align-items: center; gap: 16px;
+    justify-self: end;
+  }
+  .url-chip {
+    display: inline-flex; align-items: center; gap: 10px;
+    padding: 8px 14px;
+    background: var(--paper-2);
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-soft);
+    text-decoration: none;
+    transition: border-color 200ms;
+  }
+  .url-chip:hover { border-color: var(--ink); color: var(--ink); }
+  .url-chip .live {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--tomato);
+    box-shadow: 0 0 0 3px rgba(220,75,50,0.18);
+  }
+  .topbar .iconbtn {
+    background: transparent;
+    border: 1px solid var(--rule);
+    color: var(--ink-soft);
+    padding: 7px 12px;
+    font-family: var(--sans);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    cursor: pointer;
+    transition: all 200ms;
+  }
+  .topbar .iconbtn:hover { border-color: var(--ink); color: var(--ink); }
+  .topbar .account {
+    width: 32px; height: 32px; border-radius: 50%;
+    background: var(--ink); color: var(--paper);
+    display: inline-flex; align-items: center; justify-content: center;
+    font-family: var(--sans); font-weight: 600; font-size: 11px;
+    cursor: pointer;
+  }
+
+  /* the layout: preview is the page, chat is the desk-side notebook */
+  .stage {
+    display: grid;
+    grid-template-columns: 1fr 440px;
+    min-height: 0;
+  }
+  /* preview takes the bulk; chat is the writing desk */
+
+  /* preview "frame" — like a printed plate */
+  .preview {
+    position: relative;
+    padding: 32px 32px 32px 48px;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .preview .plate {
+    position: relative;
+    flex: 1;
+    background: #fff;
+    border: 1px solid var(--rule);
+    box-shadow:
+      0 1px 0 0 #fff,
+      0 28px 36px -22px rgba(34, 22, 12, 0.16),
+      0 8px 16px -10px rgba(34, 22, 12, 0.08);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .plate-bar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 14px;
+    background: var(--paper-2);
+    border-bottom: 1px solid var(--rule);
+    font-family: var(--sans);
+    font-size: 11px;
+    color: var(--ink-soft);
+  }
+  .plate-bar .dots {
+    display: inline-flex; gap: 5px;
+  }
+  .plate-bar .dots span {
+    width: 9px; height: 9px; border-radius: 50%; background: var(--rule);
+  }
+  .plate-bar .dots span:first-child { background: var(--tomato); opacity: 0.7; }
+  .plate-bar .url {
+    flex: 1;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-soft);
+    text-align: center;
+  }
+  .plate-bar .url strong { color: var(--ink); font-weight: 500; }
+  .plate-bar .ctrl {
+    font-family: var(--sans);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--pencil);
+    cursor: pointer;
+    padding: 2px 6px;
+  }
+  .plate-bar .ctrl:hover { color: var(--ink); }
+
+  /* a fake rendered app inside the plate */
+  .preview-body {
+    flex: 1;
+    background: #fff;
+    overflow: auto;
+    padding: 56px 64px;
+  }
+  .demo-h1 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 48px;
+    line-height: 1.05;
+    margin: 0 0 8px 0;
+    color: var(--ink);
+    letter-spacing: -0.02em;
+  }
+  .demo-h1 em { font-style: italic; color: var(--tomato); }
+  .demo-lede {
+    font-family: var(--serif);
+    font-size: 18px;
+    color: var(--ink-soft);
+    margin-bottom: 32px;
+    max-width: 560px;
+  }
+  .demo-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 18px;
+    max-width: 720px;
+  }
+  .demo-card {
+    border: 1px solid var(--rule-2);
+    padding: 18px;
+    background: var(--paper);
+  }
+  .demo-card h4 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 18px;
+    margin: 0 0 4px 0;
+  }
+  .demo-card p {
+    font-family: var(--serif);
+    font-size: 13px;
+    color: var(--ink-soft);
+    font-style: italic;
+    margin: 0 0 10px 0;
+    line-height: 1.45;
+  }
+  .demo-card .meta {
+    font-family: var(--sans);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--pencil);
+  }
+
+  /* secondary tabs as a developer drawer at preview's foot */
+  .drawer {
+    border-top: 1px solid var(--rule);
+    background: var(--paper);
+    padding: 8px 32px;
+    display: flex; align-items: center; gap: 6px;
+    font-family: var(--sans);
+    font-size: 11px;
+    color: var(--pencil);
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+  }
+  .drawer .label { margin-right: 12px; font-style: italic; text-transform: none; font-family: var(--serif); font-size: 12px; color: var(--pencil); letter-spacing: 0; }
+  .drawer .pill {
+    padding: 4px 10px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: all 200ms;
+    border-radius: 0;
+  }
+  .drawer .pill:hover { color: var(--ink); }
+  .drawer .pill.active { color: var(--ink); border-color: var(--rule); background: var(--paper-2); }
+  .drawer .right {
+    margin-left: auto;
+    font-family: var(--serif); font-size: 12px; font-style: italic;
+    color: var(--ink-soft); letter-spacing: 0; text-transform: none;
+  }
+
+  /* chat — the desk-side notebook */
+  .desk {
+    border-left: 1px solid var(--rule);
+    background: var(--paper-2);
+    display: flex; flex-direction: column;
+    min-height: 0;
+    position: relative;
+  }
+  .desk::before {
+    /* the bound-edge stitching look */
+    content: "";
+    position: absolute;
+    top: 0; bottom: 0; left: 0;
+    width: 1px; background: var(--rule);
+  }
+  .desk-head {
+    padding: 20px 24px 14px 28px;
+    border-bottom: 1px dashed var(--rule);
+    display: flex; align-items: baseline; justify-content: space-between;
+  }
+  .desk-head h3 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-style: italic;
+    font-size: 22px;
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+  .desk-head .meta {
+    font-family: var(--sans);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--pencil);
+  }
+
+  .turns {
+    flex: 1;
+    overflow-y: auto;
+    padding: 22px 28px 16px 28px;
+    display: flex; flex-direction: column; gap: 28px;
+  }
+
+  /* user turns: handwritten feel */
+  .turn-user .who {
+    font-family: var(--serif); font-style: italic;
+    font-size: 13px; color: var(--tomato);
+    margin-bottom: 6px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+  }
+  .turn-user .body {
+    font-family: var(--serif);
+    font-size: 18px;
+    line-height: 1.45;
+    color: var(--ink);
+    border-left: 2px solid var(--tomato);
+    padding-left: 14px;
+    font-feature-settings: "ss01" 1;
+  }
+  .turn-user .body em { font-style: italic; }
+
+  /* assistant turns: typeset journal entry */
+  .turn-bot .who {
+    font-family: var(--sans);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.2em;
+    color: var(--ink-soft);
+    margin-bottom: 6px;
+  }
+  .turn-bot .body {
+    font-family: var(--serif);
+    font-size: 16px;
+    line-height: 1.55;
+    color: var(--ink);
+  }
+
+  /* tool calls — paper receipts, plain language */
+  .receipt {
+    margin-top: 10px;
+    background: #fff;
+    border: 1px solid var(--rule-2);
+    padding: 12px 14px;
+    display: flex; align-items: flex-start; gap: 12px;
+    font-family: var(--serif);
+  }
+  .receipt .glyph {
+    width: 22px; height: 22px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    background: var(--paper-3);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--ink-soft);
+    font-family: var(--sans);
+    font-size: 12px;
+    font-weight: 600;
+    margin-top: 1px;
+  }
+  .receipt .glyph.done {
+    background: var(--tomato);
+    color: var(--paper);
+  }
+  .receipt .glyph.run {
+    background: var(--paper-3);
+    position: relative;
+  }
+  .receipt .glyph.run::before {
+    content: "";
+    position: absolute;
+    inset: 4px;
+    border-radius: 50%;
+    border: 1.5px solid var(--ink-soft);
+    border-top-color: transparent;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .receipt .what {
+    flex: 1;
+    font-size: 14px;
+    color: var(--ink);
+    line-height: 1.45;
+  }
+  .receipt .what em { font-style: italic; color: var(--ink-soft); }
+  .receipt .what .path {
+    font-family: var(--mono);
+    font-size: 12px;
+    background: var(--paper-2);
+    padding: 1px 5px;
+    border-radius: 2px;
+    color: var(--ink);
+  }
+  .receipt .when {
+    font-family: var(--sans);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--pencil);
+    margin-top: 4px;
+    display: block;
+  }
+  .receipt .show {
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 12px;
+    color: var(--pencil);
+    cursor: pointer;
+    border: 0;
+    background: transparent;
+    align-self: center;
+  }
+  .receipt .show:hover { color: var(--ink); }
+
+  /* composer */
+  .composer {
+    border-top: 1px solid var(--rule);
+    padding: 16px 24px 20px 28px;
+    background: var(--paper);
+  }
+  .composer .pad {
+    background: #fff;
+    border: 1px solid var(--rule);
+    padding: 14px 16px 8px 18px;
+    position: relative;
+  }
+  .composer .pad::before {
+    content: "";
+    position: absolute;
+    top: 0; bottom: 0; left: 8px; width: 1px;
+    background: var(--tomato);
+    opacity: 0.3;
+  }
+  .composer textarea {
+    width: 100%; resize: none; border: 0;
+    font-family: var(--serif);
+    font-size: 16px;
+    line-height: 1.5;
+    color: var(--ink);
+    background: transparent;
+    outline: none;
+    min-height: 56px;
+  }
+  .composer textarea::placeholder {
+    color: var(--pencil);
+    font-style: italic;
+  }
+  .composer .row {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-top: 8px;
+  }
+  .composer .hint {
+    font-family: var(--sans);
+    font-size: 10.5px;
+    color: var(--pencil);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+  }
+  .composer .send {
+    background: var(--tomato);
+    color: var(--paper);
+    border: 0;
+    padding: 9px 18px 7px 18px;
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    cursor: pointer;
+    box-shadow: 0 2px 0 -1px var(--tomato-2);
+    transition: transform 80ms ease, box-shadow 80ms ease;
+  }
+  .composer .send:hover { transform: translateY(-1px); box-shadow: 0 3px 0 -1px var(--tomato-2); }
+  .composer .send:active { transform: translateY(1px); box-shadow: 0 0 0 0 var(--tomato-2); }
+  .composer .send::after {
+    content: " →"; font-family: var(--serif); font-style: italic;
+    font-weight: 400; font-size: 13px;
+    text-transform: none; letter-spacing: 0;
+    margin-left: 4px;
+  }
+
+  /* responsive: collapse desk on narrow */
+  @media (max-width: 1100px) {
+    .stage { grid-template-columns: 1fr; }
+    .desk { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- topbar -->
+  <header class="topbar">
+    <div class="crumb">
+      <a href="#">studio</a>
+      <span class="sep">/</span>
+      <span class="title">Supper <em>Society</em></span>
+    </div>
+    <div class="status-strip">
+      <span class="pulse"></span>
+      <span class="now">building the recipe page</span>
+      <span class="meta">3 of 7</span>
+    </div>
+    <div class="right">
+      <a class="url-chip" href="#">
+        <span class="live"></span>
+        supper-society.zeroship.app
+      </a>
+      <button class="iconbtn">share</button>
+      <span class="account">RY</span>
+    </div>
+  </header>
+
+  <!-- main -->
+  <div class="stage">
+
+    <!-- preview as the page (left/main) -->
+    <section class="preview">
+      <div class="plate">
+        <div class="plate-bar">
+          <div class="dots"><span></span><span></span><span></span></div>
+          <div class="url">https://<strong>supper-society.zeroship.app</strong></div>
+          <button class="ctrl" title="reload">reload</button>
+          <button class="ctrl" title="open">↗</button>
+        </div>
+        <div class="preview-body">
+          <h1 class="demo-h1">Welcome to <em>Supper Society</em>.</h1>
+          <p class="demo-lede">A small place for our supper club to share recipes, photos, and vote on who hosts next.</p>
+          <div class="demo-grid">
+            <div class="demo-card">
+              <h4>Beet & feta tart</h4>
+              <p>Marisol's grandmother's recipe — best with pencil-thin asparagus on top.</p>
+              <span class="meta">Posted Sept 12 · 14 ❤︎</span>
+            </div>
+            <div class="demo-card">
+              <h4>Slow lamb shoulder</h4>
+              <p>Eight hours, dry-rubbed with za'atar — Levi's contribution from his Tel Aviv trip.</p>
+              <span class="meta">Posted Sept 28 · 9 ❤︎</span>
+            </div>
+            <div class="demo-card">
+              <h4>Lemon-thyme cake</h4>
+              <p>Anya's polenta cake — the one she brought to the rooftop dinner in May.</p>
+              <span class="meta">Posted Oct 03 · 22 ❤︎</span>
+            </div>
+            <div class="demo-card">
+              <h4>Roasted carrots, again</h4>
+              <p>Yes, again. They're really good. With cumin and a bit of honey.</p>
+              <span class="meta">Posted Oct 09 · 6 ❤︎</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- developer drawer — quiet, only for when you actually need it -->
+      <div class="drawer">
+        <span class="label">If you're curious:</span>
+        <button class="pill active">preview</button>
+        <button class="pill">files</button>
+        <button class="pill">logs</button>
+        <button class="pill">env</button>
+        <button class="pill">settings</button>
+        <span class="right">last shipped just now · 380 ms cold start</span>
+      </div>
+    </section>
+
+    <!-- desk (chat) -->
+    <aside class="desk">
+
+      <div class="desk-head">
+        <h3>Notes &amp; thoughts</h3>
+        <span class="meta">14 turns</span>
+      </div>
+
+      <div class="turns">
+
+        <!-- user turn -->
+        <div class="turn-user">
+          <div class="who">You · 12:04</div>
+          <div class="body">
+            A recipe sharing space for my supper club — guests sign in,
+            post photos, vote on who hosts next.
+          </div>
+        </div>
+
+        <!-- assistant turn with receipts -->
+        <div class="turn-bot">
+          <div class="who">The studio</div>
+          <div class="body">
+            Lovely. I'll start with a small landing page, a sign-in flow,
+            and a feed where members post recipes with photos. We can add
+            voting next.
+            <div class="receipt">
+              <span class="glyph done">✓</span>
+              <div class="what">
+                Set up the project — <em>Vite, React, Tailwind</em>, with
+                a serif typeface picked for warmth.
+                <span class="when">12:04 · 6 s</span>
+              </div>
+              <button class="show">show details</button>
+            </div>
+            <div class="receipt">
+              <span class="glyph done">✓</span>
+              <div class="what">
+                Wrote <span class="path">src/App.tsx</span> and the recipe
+                feed component.
+                <span class="when">12:04 · 11 s</span>
+              </div>
+              <button class="show">show details</button>
+            </div>
+            <div class="receipt">
+              <span class="glyph run"></span>
+              <div class="what">
+                Building the recipe page and wiring the photo upload —
+                <em>three more files to write.</em>
+                <span class="when">in progress</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- user follow-up -->
+        <div class="turn-user">
+          <div class="who">You · 12:05</div>
+          <div class="body">
+            Make the title a bit warmer — like a small printed magazine.
+            And the cards should feel like Polaroids.
+          </div>
+        </div>
+
+      </div>
+
+      <!-- composer -->
+      <div class="composer">
+        <div class="pad">
+          <textarea
+            rows="3"
+            placeholder="Iterate, refine, or ask for something new…"
+          ></textarea>
+          <div class="row">
+            <span class="hint">↵ to send · ⇧↵ for newline</span>
+            <button class="send">Send</button>
+          </div>
+        </div>
+      </div>
+
+    </aside>
+
+  </div>
+</div>
+
+<script>
+  // tiny: drawer pill toggling for demo
+  document.querySelectorAll(".drawer .pill").forEach((p) => {
+    p.addEventListener("click", () => {
+      document.querySelectorAll(".drawer .pill").forEach((q) => q.classList.remove("active"));
+      p.classList.add("active");
+    });
+  });
+</script>
+</body>
+</html>

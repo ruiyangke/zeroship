@@ -52,7 +52,18 @@ export function useBuilderChat({ appId, context, onDeploy, onAppCreated }: Optio
   onAppCreatedRef.current = onAppCreated;
 
   // Re-load when the page switches between projects.
+  //
+  // We track the previous `appId` in a ref to skip the destructive
+  // reset on the initial mount — `useState(loadConversation(appId))`
+  // already covers that case, and re-running it here clobbers any
+  // messages that an effect ordered AFTER this one (e.g. the
+  // workspace's auto-send) added in the same render. React 19
+  // StrictMode dev re-runs effects twice on mount, which makes that
+  // clobber observable as "I sent a message and the chat went blank".
+  const prevAppIdRef = useRef(appId);
   useEffect(() => {
+    if (prevAppIdRef.current === appId) return;
+    prevAppIdRef.current = appId;
     setMessages(loadConversation(appId));
     setStatus("idle");
     setError(null);

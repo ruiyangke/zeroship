@@ -1,67 +1,83 @@
-// ─── LogsTab — live tail ────────────────────────────────────────
-// Polls /api/apps/:id/logs every 2s and renders the most recent
-// lines with a sticky-bottom auto-scroll the user can detach by
-// scrolling up.
+// ─── LogsTab — the ledger ───────────────────────────────────────
 
+import { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useRef } from "react";
 import { getAppLogs } from "../../api";
 import { useWorkspace } from "../ProjectWorkspace";
-import { Loader2, ScrollText } from "lucide-react";
+import { TabDrawer } from "../components/TabDrawer";
+import { FilterPill } from "../../components/FilterPill";
+import { LedgerRow, LedgerCode, type LedgerLevel } from "../../components/LedgerRow";
+
+type Filter = "all" | "info" | "warn" | "error";
 
 export function LogsTab() {
   const { appId } = useWorkspace();
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const stickRef = useRef(true);
+  const [filter, setFilter] = useState<Filter>("all");
 
   const { data: lines, isLoading, error } = useQuery({
-    queryKey: ["app-logs", appId],
+    queryKey: ["logs", appId],
     queryFn: () => getAppLogs(appId).catch(() => [] as string[]),
-    refetchInterval: 2000,
+    refetchInterval: 4000,
   });
 
-  useEffect(() => {
-    if (!stickRef.current) return;
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [lines]);
-
-  function onScroll() {
-    const el = scrollRef.current;
-    if (!el) return;
-    const distance = el.scrollHeight - el.clientHeight - el.scrollTop;
-    stickRef.current = distance < 60;
-  }
+  const visible = useMemo(() => {
+    const all = (lines ?? []).map(parseLine);
+    return filter === "all" ? all : all.filter((l) => l.level === filter);
+  }, [lines, filter]);
 
   return (
-    <div data-testid="logs-tab" className="h-full flex flex-col">
-      <div className="border-b border-border bg-muted/30 px-3 py-1.5 flex items-center gap-2 text-xs font-mono text-muted-foreground">
-        <ScrollText className="size-3" />
-        logs
-        {isLoading && <Loader2 className="size-3 animate-spin ml-1" />}
-        <span className="ml-auto text-muted-foreground/60">
-          {lines?.length ?? 0} lines · polled every 2s
-        </span>
-      </div>
-      <div
-        ref={scrollRef}
-        onScroll={onScroll}
-        className="flex-1 overflow-auto bg-background text-[12px] font-mono leading-snug px-3 py-2"
-      >
-        {error ? (
-          <div className="text-destructive">{(error as Error).message}</div>
-        ) : !lines || lines.length === 0 ? (
-          <div className="text-muted-foreground">
-            no logs yet — make a request to the deployed app to see something here.
-          </div>
-        ) : (
-          lines.map((line, i) => (
-            <div key={i} className="whitespace-pre-wrap break-all">
-              {line}
-            </div>
-          ))
+    <div className="h-full flex flex-col" data-testid="logs-tab">
+      <div className="flex-1 px-10 pt-8 pb-0 overflow-auto">
+        <div className="flex items-baseline gap-2.5 mb-6">
+          <FilterPill active={filter === "all"} onClick={() => setFilter("all")}>all</FilterPill>
+          <FilterPill active={filter === "info"} onClick={() => setFilter("info")}>info</FilterPill>
+          <FilterPill active={filter === "warn"} onClick={() => setFilter("warn")}>warn</FilterPill>
+          <FilterPill active={filter === "error"} onClick={() => setFilter("error")}>error</FilterPill>
+          <span className="ml-auto font-serif italic text-ink-soft text-[13px]">
+            today · last {visible.length} events
+          </span>
+        </div>
+
+        {isLoading && <div className="font-serif italic text-pencil">loading…</div>}
+        {error && <div className="font-serif italic text-tomato">couldn't load logs</div>}
+        {!isLoading && visible.length === 0 && (
+          <div className="font-serif italic text-pencil">No events yet — once your app runs, they'll appear here.</div>
         )}
+
+        <div>
+          {visible.map((log, i) => (
+            <LedgerRow
+              key={i}
+              num={i + 1}
+              timestamp="—"
+              level={log.level}
+              message={renderMessage(log.message)}
+            />
+          ))}
+        </div>
       </div>
+      <TabDrawer appId={appId} />
     </div>
+  );
+}
+
+interface ParsedLine {
+  level: LedgerLevel;
+  message: string;
+}
+
+function parseLine(raw: string): ParsedLine {
+  const lower = raw.toLowerCase();
+  if (/\b(error|err|fail|failed|exception|panic)\b/.test(lower)) return { level: "error", message: raw };
+  if (/\b(warn|warning|deprecated)\b/.test(lower)) return { level: "warn", message: raw };
+  return { level: "info", message: raw };
+}
+
+function renderMessage(msg: string): React.ReactNode {
+  const parts = msg.split(/(`[^`]+`)/g);
+  return parts.map((p, i) =>
+    p.startsWith("`") && p.endsWith("`")
+      ? <LedgerCode key={i}>{p.slice(1, -1)}</LedgerCode>
+      : <span key={i}>{p}</span>
   );
 }

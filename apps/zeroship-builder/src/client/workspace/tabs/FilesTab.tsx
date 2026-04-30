@@ -1,271 +1,128 @@
-// ─── FilesTab — file tree + CodeMirror ──────────────────────────
-// File tree on the left, CodeMirror 6 editor on the right.
-// Open files become tabs across the top. Saving (cmd-s or button)
-// PUTs to the agent's /projects/:id/files/* proxy and bumps the
-// workspace deploy version so the preview reloads.
+// ─── FilesTab — the manuscript view ─────────────────────────────
+//
+// Tree on the left, file in focus center, marginalia (size, path,
+// modified) in the right rail. Code in mono, framing in serif.
 
-import { useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import CodeMirror from "@uiw/react-codemirror";
-import { javascript } from "@codemirror/lang-javascript";
-import { html } from "@codemirror/lang-html";
-import { css } from "@codemirror/lang-css";
-import { json } from "@codemirror/lang-json";
-import { oneDark } from "@codemirror/theme-one-dark";
-import { EditorView, keymap } from "@codemirror/view";
-import { Loader2, Save, X, RefreshCw, AlertCircle } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { listProjectFiles, readProjectFile } from "../../api/files";
 import { useWorkspace } from "../ProjectWorkspace";
-import {
-  listProjectFiles, readProjectFile, writeProjectFile,
-  languageFor,
-} from "../../api/files";
-import { FileTree } from "../components/FileTree";
-
-interface OpenTab {
-  path: string;
-  /** content as last fetched / saved */
-  saved: string;
-  /** current editor buffer */
-  draft: string;
-}
+import { TabDrawer } from "../components/TabDrawer";
 
 export function FilesTab() {
-  const { appId, bumpDeployVersion } = useWorkspace();
-  const queryClient = useQueryClient();
-  const [tabs, setTabs] = useState<OpenTab[]>([]);
-  const [active, setActive] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const { appId } = useWorkspace();
+  const [selected, setSelected] = useState<string | null>(null);
 
-  // File-tree query.
-  const { data: entries, isLoading, error: listError, refetch } = useQuery({
-    queryKey: ["sandbox-files", appId],
+  const tree = useQuery({
+    queryKey: ["files", appId],
     queryFn: () => listProjectFiles(appId),
-    refetchOnWindowFocus: false,
   });
 
-  // Open a file: fetch it, push as a tab, focus it.
-  async function openFile(path: string) {
-    const existing = tabs.find((t) => t.path === path);
-    if (existing) {
-      setActive(path);
-      return;
-    }
-    try {
-      const content = await readProjectFile(appId, path);
-      setTabs((prev) => [...prev, { path, saved: content, draft: content }]);
-      setActive(path);
-    } catch (e: any) {
-      setSaveError(e?.message ?? String(e));
-    }
-  }
+  const file = useQuery({
+    queryKey: ["file", appId, selected],
+    queryFn: () => selected ? readProjectFile(appId, selected) : Promise.resolve(""),
+    enabled: !!selected,
+  });
 
-  function closeTab(path: string) {
-    setTabs((prev) => prev.filter((t) => t.path !== path));
-    if (active === path) {
-      const next = tabs.findIndex((t) => t.path === path);
-      const fallback = tabs[next - 1] ?? tabs[next + 1];
-      setActive(fallback?.path ?? null);
-    }
+  // Auto-select first file once the tree loads
+  if (!selected && tree.data && tree.data.length > 0) {
+    setSelected(tree.data[0].path);
   }
-
-  function updateDraft(path: string, draft: string) {
-    setTabs((prev) => prev.map((t) => (t.path === path ? { ...t, draft } : t)));
-  }
-
-  async function save(path: string) {
-    const tab = tabs.find((t) => t.path === path);
-    if (!tab || tab.draft === tab.saved) return;
-    setSaving(true); setSaveError(null);
-    try {
-      await writeProjectFile(appId, path, tab.draft);
-      setTabs((prev) => prev.map((t) => (t.path === path ? { ...t, saved: t.draft } : t)));
-      // Re-list the tree in case the save created a new file.
-      queryClient.invalidateQueries({ queryKey: ["sandbox-files", appId] });
-      // Tell the workspace to reload the preview iframe — file change
-      // alone won't trigger redeploy, but the UX feels right.
-      bumpDeployVersion();
-    } catch (e: any) {
-      setSaveError(e?.message ?? String(e));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  const activeTab = tabs.find((t) => t.path === active) ?? null;
 
   return (
-    <div data-testid="files-tab" className="h-full grid grid-cols-[240px_1fr] min-h-0">
-      <aside className="border-r border-border min-h-0 flex flex-col">
-        <div className="px-3 py-1.5 border-b border-border bg-muted/30 flex items-center gap-2 text-xs font-mono text-muted-foreground">
-          <span className="flex-1 truncate">workspace</span>
-          <Button
-            type="button" variant="ghost" className="h-6 w-6 p-0"
-            onClick={() => refetch()}
-            title="Refresh"
-          >
-            <RefreshCw className={`size-3 ${isLoading ? "animate-spin" : ""}`} />
-          </Button>
-        </div>
-        <div className="flex-1 overflow-auto py-1">
-          {isLoading && <div className="text-xs text-muted-foreground px-3 py-2">loading…</div>}
-          {listError && (
-            <div className="text-xs text-destructive px-3 py-2 flex items-center gap-1.5">
-              <AlertCircle className="size-3" />
-              {(listError as Error).message}
-            </div>
+    <div className="h-full flex flex-col" data-testid="files-tab">
+      <div className="flex-1 grid min-h-0" style={{ gridTemplateColumns: "240px 1fr 200px" }}>
+        <aside className="border-r border-rule bg-paper-2 p-4 overflow-auto font-serif text-[14px]">
+          <div className="label-uc mb-2">Manuscript</div>
+          {tree.isLoading && <div className="font-serif italic text-pencil">loading…</div>}
+          {tree.error && <div className="font-serif italic text-tomato">couldn't list files</div>}
+          {tree.data?.length === 0 && (
+            <div className="font-serif italic text-pencil">no files yet</div>
           )}
-          {entries && entries.length === 0 && (
-            <div className="text-xs text-muted-foreground italic px-3 py-2">empty workspace</div>
-          )}
-          {entries && entries.length > 0 && (
-            <FileTree entries={entries} selected={active} onSelect={openFile} />
-          )}
-        </div>
-      </aside>
+          <ul className="list-none p-0 m-0">
+            {tree.data?.map((entry) => {
+              const isActive = entry.path === selected;
+              return (
+                <li key={entry.path} className="py-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setSelected(entry.path)}
+                    className={
+                      "w-full text-left bg-transparent border-0 cursor-pointer font-serif px-1 py-0.5 " +
+                      (isActive
+                        ? "text-ink font-medium"
+                        : "text-ink-soft hover:text-ink")
+                    }
+                    style={isActive ? { borderLeft: "2px solid var(--color-tomato)", paddingLeft: "10px", marginLeft: "-12px" } : undefined}
+                  >
+                    {entry.path}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </aside>
 
-      <section className="min-h-0 min-w-0 flex flex-col">
-        {/* Open-file tab strip */}
-        <div className="flex items-stretch border-b border-border bg-muted/20 overflow-x-auto">
-          {tabs.length === 0 ? (
-            <div className="px-3 py-2 text-xs text-muted-foreground italic">
-              click a file in the tree to open it
-            </div>
+        <div className="bg-white p-5 overflow-auto font-mono text-[13px] leading-[1.65] relative" data-testid="files-editor">
+          {!selected ? (
+            <div className="font-serif italic text-pencil">Pick a file from the manuscript to read it.</div>
+          ) : file.isLoading ? (
+            <div className="font-serif italic text-pencil">loading…</div>
+          ) : file.error ? (
+            <div className="font-serif italic text-tomato">couldn't read file</div>
           ) : (
-            tabs.map((t) => (
-              <div
-                key={t.path}
-                className={`group inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono border-r border-border cursor-pointer ${
-                  active === t.path
-                    ? "bg-background text-foreground"
-                    : "bg-transparent text-muted-foreground hover:text-foreground"
-                }`}
-                onClick={() => setActive(t.path)}
-                data-testid={`files-tab-open:${t.path}`}
-              >
-                <span className="truncate max-w-[200px]">{t.path}</span>
-                {t.draft !== t.saved && <span className="size-1.5 rounded-full bg-amber-500" />}
-                <button
-                  type="button"
-                  className="opacity-50 group-hover:opacity-100 hover:text-destructive"
-                  onClick={(e) => { e.stopPropagation(); closeTab(t.path); }}
-                  title="Close"
-                >
-                  <X className="size-3" />
-                </button>
-              </div>
-            ))
+            <CodeView code={file.data ?? ""} />
           )}
         </div>
 
-        {/* Editor */}
-        <div className="flex-1 min-h-0 min-w-0 overflow-hidden">
-          {activeTab ? (
-            <Editor
-              key={activeTab.path}
-              path={activeTab.path}
-              value={activeTab.draft}
-              dirty={activeTab.draft !== activeTab.saved}
-              saving={saving}
-              onChange={(v) => updateDraft(activeTab.path, v)}
-              onSave={() => save(activeTab.path)}
+        <aside className="border-l border-rule bg-paper p-5 overflow-auto">
+          <div className="label-uc mb-1.5">Currently open</div>
+          <dl className="m-0 space-y-3">
+            <DlRow label="Path" value={selected ?? "—"} mono />
+            <DlRow
+              label="Size"
+              value={file.data ? `${file.data.length} chars · ${file.data.split("\n").length} lines` : "—"}
             />
-          ) : (
-            <div className="h-full flex items-center justify-center text-xs text-muted-foreground">
-              no file open
-            </div>
-          )}
-        </div>
-
-        {saveError && (
-          <div className="border-t border-destructive/40 bg-destructive/10 text-destructive px-3 py-1.5 text-xs flex items-center gap-1.5">
-            <AlertCircle className="size-3" />
-            {saveError}
-          </div>
-        )}
-      </section>
+            <DlRow label="Modified" value={<em className="italic">just now</em>} />
+            <DlRow label="Author" value={<em className="italic">The studio</em>} />
+          </dl>
+          <div className="label-uc mt-7 mb-1.5">Project</div>
+          <dl className="m-0 space-y-3">
+            <DlRow label="Files" value={String(tree.data?.length ?? "—")} />
+          </dl>
+        </aside>
+      </div>
+      <TabDrawer appId={appId} />
     </div>
   );
 }
 
-// ─── Editor ─────────────────────────────────────────────────────
-
-interface EditorProps {
-  path: string;
-  value: string;
-  dirty: boolean;
-  saving: boolean;
-  onChange: (v: string) => void;
-  onSave: () => void;
+function CodeView({ code }: { code: string }) {
+  const lines = code.split("\n");
+  return (
+    <div>
+      {lines.map((line, i) => (
+        <div key={i} className="whitespace-pre">
+          <span
+            className="inline-block w-7 pr-3 text-right select-none font-mono text-[12px]"
+            style={{ color: "var(--color-tomato)", opacity: 0.55 }}
+          >
+            {i + 1}
+          </span>
+          {line || " "}
+        </div>
+      ))}
+    </div>
+  );
 }
 
-function Editor({ path, value, dirty, saving, onChange, onSave }: EditorProps) {
-  const onSaveRef = useRef(onSave);
-  onSaveRef.current = onSave;
-
-  const extensions = useMemo(() => {
-    const langExt = (() => {
-      switch (languageFor(path)) {
-        case "javascript": return javascript({ jsx: true, typescript: true });
-        case "html":       return html();
-        case "css":        return css();
-        case "json":       return json();
-        default:           return null;
-      }
-    })();
-
-    return [
-      ...(langExt ? [langExt] : []),
-      EditorView.theme({
-        "&": { fontSize: "12.5px", height: "100%" },
-        ".cm-scroller": { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" },
-      }),
-      keymap.of([
-        {
-          key: "Mod-s",
-          run: () => { onSaveRef.current(); return true; },
-        },
-      ]),
-    ];
-  }, [path]);
-
+function DlRow({ label, value, mono }: { label: string; value: React.ReactNode; mono?: boolean }) {
   return (
-    <div className="h-full flex flex-col">
-      <div className="border-b border-border bg-muted/30 px-3 py-1 flex items-center gap-2 text-xs font-mono text-muted-foreground">
-        <span className="flex-1">{path}</span>
-        {dirty && (
-          <Button
-            type="button" variant="primary"
-            disabled={saving}
-            onClick={onSave}
-            className="h-6 px-2 text-xs gap-1"
-            data-testid="files-save"
-          >
-            {saving ? <Loader2 className="size-3 animate-spin" /> : <Save className="size-3" />}
-            {saving ? "saving" : "save (⌘S)"}
-          </Button>
-        )}
-      </div>
-      <div className="flex-1 min-h-0 overflow-hidden">
-        <CodeMirror
-          value={value}
-          theme={oneDark}
-          extensions={extensions}
-          onChange={onChange}
-          height="100%"
-          style={{ height: "100%" }}
-          basicSetup={{
-            lineNumbers: true,
-            highlightActiveLine: true,
-            foldGutter: true,
-            bracketMatching: true,
-            closeBrackets: true,
-            autocompletion: true,
-            highlightSelectionMatches: false,
-          }}
-        />
-      </div>
+    <div>
+      <dt className="font-sans text-[10px] uppercase tracking-[0.16em] text-pencil">{label}</dt>
+      <dd className={"mt-0.5 m-0 " + (mono ? "font-mono text-[11.5px] text-ink" : "font-serif text-[13px] text-ink")}>
+        {value}
+      </dd>
     </div>
   );
 }

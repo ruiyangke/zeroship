@@ -1,15 +1,13 @@
-// Builder chat client — wraps the server's async-generator chat
-// function in the same shape useBuilderChat already consumes.
+// Builder chat client — wraps the server's async-generator `chat`
+// function in the same shape `useBuilderChat` already consumes.
 //
-// Browser-side import flows through @zeroship/vite-plugin's
-// `"use server"` transform: the function below calls the server's
-// `chat` generator directly, and the plugin chunks each yielded
-// event over the wire as an RPC stream.
+// We import `chat` from the server module like any other async fn —
+// the @zeroship/vite-plugin transform replaces the server file with
+// RPC stubs on the client side, so this `chatServer(req)` call hits
+// the wire automatically. No `fetch` plumbing leaks into customer code.
 
-import { chat as chatServer, type ChatRequest, type ChatEvent } from "../../server/chat";
+import { chat as chatServer, type ChatRequest } from "../../server/chat";
 import type { AgentEvent, ChatMessage } from "./types";
-
-export const AGENT_URL = "/agent"; // unused — kept for compat
 
 export interface AgentContext {
   app_id?: string;
@@ -38,8 +36,6 @@ export async function streamAgent(
 
   for await (const ev of chatServer(req)) {
     if (opts.signal?.aborted) return;
-    // Wire shapes are aligned by design — both use the same
-    // `{type, ...}` discriminated union.
     opts.onEvent(ev as AgentEvent);
   }
 }

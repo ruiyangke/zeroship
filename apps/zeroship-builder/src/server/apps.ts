@@ -117,8 +117,8 @@ export async function deleteSecret(id: string, key: string): Promise<void> {
   });
 }
 
-/** URL where a deployed app is reachable (path-based). */
-export function appPreviewUrl(appName: string, path: string = "/"): string {
-  const base = `/apps/${encodeURIComponent(appName)}`;
-  return path === "/" ? `${base}/` : `${base}${path.startsWith("/") ? "" : "/"}${path}`;
-}
+// `appPreviewUrl` moved to `src/client/lib/preview-url.ts` — it's a
+// pure URL-builder that the iframe consumes synchronously, so it must
+// not live in a "use server" module (the vite-plugin would otherwise
+// turn it into an async RPC stub and the iframe src would receive a
+// stringified Promise).

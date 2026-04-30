@@ -11,3 +11,7 @@ refs/
 test-results/
 perf.data
 perf-compio.data
+
+# Superpowers brainstorm scratch
+.superpowers/
+.worktrees/

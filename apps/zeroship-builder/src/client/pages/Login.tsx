@@ -1,24 +1,13 @@
-// ─── Login — email+password + Google ────────────────────────────
-//
-// Single-column auth page. Email + password form on top, divider,
-// "Continue with Google" button below. Errors from /auth/login
-// surface inline. After success, refreshes the auth context and
-// bounces to "/" (or whatever ?return param the URL has).
+// ─── Login — atelier auth ───────────────────────────────────────
 
 import { useState, type FormEvent } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useMutation } from "@tanstack/react-query";
 import { login as apiLogin, googleStartUrl } from "../api/auth";
 import { useAuth } from "../auth/AuthContext";
-import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Loader2 } from "lucide-react";
+import { StampButton } from "../components/StampButton";
 
-interface Props { onLogin?: () => void }
-
-export default function Login({ onLogin }: Props) {
+export default function Login() {
   const location = useLocation();
   const navigate = useNavigate();
   const { refresh } = useAuth();
@@ -33,7 +22,6 @@ export default function Login({ onLogin }: Props) {
     mutationFn: () => apiLogin({ email, password }),
     onSuccess: async () => {
       await refresh();
-      onLogin?.();
       navigate(returnTo, { replace: true });
     },
   });
@@ -45,87 +33,118 @@ export default function Login({ onLogin }: Props) {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-5 bg-background">
-      <div className="w-[380px] max-w-full" data-testid="login-page">
-        <h1 className="text-sm font-bold tracking-[0.18em] uppercase text-primary mb-1">
-          zeroship
+    <div className="min-h-screen flex items-center justify-center px-5">
+      <div className="w-[440px] max-w-full bg-white border border-rule px-10 py-10 reveal" data-testid="login-page">
+        <Link to="/" className="font-serif italic text-[20px] font-medium text-ink hover:opacity-80 mb-8 inline-block" style={{ textDecoration: "none" }}>
+          zeroship<span className="text-tomato">.</span>
+        </Link>
+
+        <h1 className="font-serif font-medium text-[36px] -tracking-[0.015em] leading-[1.05] mb-1.5">
+          Welcome <em className="italic text-tomato">back</em>.
         </h1>
-        <div className="text-xs text-muted-foreground mb-6">
-          sign in to your creator account
+        <p className="font-serif text-[14.5px] text-ink-soft mb-7 leading-[1.55]">
+          Pick up where you left off — your projects are right where you saved them.
+        </p>
+
+        {oauthError && (
+          <div className="mb-4 px-3 py-2 border border-tomato bg-tomato/10 font-serif italic text-tomato text-[13px]" data-testid="login-oauth-error">
+            google sign-in: {oauthError}
+          </div>
+        )}
+
+        <form onSubmit={submit} className="space-y-4">
+          <Field
+            label="Email"
+            type="email"
+            autoComplete="email"
+            autoFocus
+            required
+            value={email}
+            onChange={setEmail}
+            testId="login-email"
+          />
+          <Field
+            label="Password"
+            type="password"
+            autoComplete="current-password"
+            required
+            value={password}
+            onChange={setPassword}
+            testId="login-password"
+          />
+          <div className="pt-2">
+            <StampButton
+              type="submit"
+              loading={loginMut.isPending}
+              disabled={loginMut.isPending || !email.trim() || !password}
+              className="w-full"
+              data-testid="login-submit"
+              noArrow
+            >
+              {loginMut.isPending ? "Signing in…" : "Sign in"}
+            </StampButton>
+          </div>
+          {loginMut.isError && (
+            <div className="font-serif italic text-tomato text-[13px]" data-testid="login-error">
+              {loginMut.error.message}
+            </div>
+          )}
+        </form>
+
+        <div className="my-6 flex items-center gap-3 font-sans text-[10px] uppercase tracking-[0.2em] text-pencil">
+          <span className="flex-1 h-px bg-rule" />or<span className="flex-1 h-px bg-rule" />
         </div>
 
-        <Card>
-          <CardContent>
-            {oauthError && (
-              <div
-                className="text-xs text-destructive border border-destructive/30 bg-destructive/5 p-2 mb-4"
-                data-testid="login-oauth-error"
-              >
-                google sign-in: {oauthError}
-              </div>
-            )}
+        <a
+          href={googleStartUrl(returnTo)}
+          data-testid="login-google"
+          className="flex items-center justify-center gap-2 w-full h-10 border border-rule bg-white text-ink font-sans text-[11px] uppercase tracking-[0.18em] hover:border-ink transition-colors"
+          style={{ textDecoration: "none" }}
+        >
+          <GoogleG />
+          continue with google
+        </a>
 
-            <form onSubmit={submit} className="space-y-3">
-              <div>
-                <Label htmlFor="email">email</Label>
-                <Input
-                  id="email" type="email" autoComplete="email" autoFocus required
-                  value={email} onChange={(e) => setEmail(e.target.value)}
-                  data-testid="login-email"
-                />
-              </div>
-              <div>
-                <Label htmlFor="password">password</Label>
-                <Input
-                  id="password" type="password" autoComplete="current-password" required
-                  value={password} onChange={(e) => setPassword(e.target.value)}
-                  data-testid="login-password"
-                />
-              </div>
-              <Button
-                type="submit" variant="primary" className="w-full"
-                disabled={loginMut.isPending || !email.trim() || !password}
-                data-testid="login-submit"
-              >
-                {loginMut.isPending ? <Loader2 className="size-3 animate-spin mr-1" /> : null}
-                {loginMut.isPending ? "signing in…" : "sign in"}
-              </Button>
-              {loginMut.isError && (
-                <div className="text-xs text-destructive" data-testid="login-error">
-                  {loginMut.error.message}
-                </div>
-              )}
-            </form>
-
-            <div className="my-4 flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
-              <div className="flex-1 h-px bg-border" />
-              or
-              <div className="flex-1 h-px bg-border" />
-            </div>
-
-            <a
-              href={googleStartUrl(returnTo)}
-              data-testid="login-google"
-              className="flex items-center justify-center gap-2 w-full h-9 border border-border bg-card text-foreground text-xs uppercase tracking-widest hover:border-muted-foreground hover:bg-white/5 transition-colors"
-            >
-              <GoogleG />
-              continue with google
-            </a>
-
-            <div className="text-xs text-muted-foreground text-center mt-4">
-              no account?{" "}
-              <Link to="/signup" className="text-primary hover:opacity-80" data-testid="login-link-signup">
-                create one
-              </Link>
-            </div>
-          </CardContent>
-        </Card>
+        <div className="font-serif text-[14px] text-ink-soft text-center mt-6">
+          No account?{" "}
+          <Link to="/signup" className="text-tomato hover:opacity-80" style={{ textDecoration: "none" }} data-testid="login-link-signup">
+            Make one →
+          </Link>
+        </div>
       </div>
     </div>
   );
 }
 
-/** Reject anything that isn't a same-origin path. */
+function Field({
+  label, type, autoComplete, autoFocus, required, value, onChange, testId,
+}: {
+  label: string;
+  type: string;
+  autoComplete?: string;
+  autoFocus?: boolean;
+  required?: boolean;
+  value: string;
+  onChange: (v: string) => void;
+  testId?: string;
+}) {
+  return (
+    <label className="block">
+      <span className="block label-uc mb-1.5">{label}</span>
+      <input
+        type={type}
+        autoComplete={autoComplete}
+        autoFocus={autoFocus}
+        required={required}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        data-testid={testId}
+        className="w-full px-3 py-2.5 border border-rule bg-white font-serif text-[15px] text-ink outline-none focus:border-ink"
+      />
+    </label>
+  );
+}
+
 function sanitizeReturn(raw: string | null): string {
   if (!raw) return "/";
   if (raw.startsWith("//") || raw.includes("://") || !raw.startsWith("/")) return "/";
@@ -133,7 +152,6 @@ function sanitizeReturn(raw: string | null): string {
 }
 
 function GoogleG() {
-  // Inlined SVG so we don't pull a CDN or commit a binary asset.
   return (
     <svg viewBox="0 0 24 24" className="size-3.5" aria-hidden="true">
       <path fill="#EA4335" d="M12 11v3.4h5.4c-.2 1.3-1.5 3.7-5.4 3.7-3.2 0-5.9-2.7-5.9-5.9 0-3.3 2.7-5.9 5.9-5.9 1.8 0 3.1.8 3.8 1.5l2.6-2.5C16.7 3.7 14.6 2.8 12 2.8 6.9 2.8 2.8 6.9 2.8 12s4.1 9.2 9.2 9.2c5.3 0 8.8-3.7 8.8-9 0-.6-.1-1.1-.2-1.5H12z" />

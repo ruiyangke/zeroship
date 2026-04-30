@@ -37,6 +37,14 @@ export default defineConfig(({ mode }) => {
       // identically through env vars on the deployed app.
       proxy: {
         "/api/control": env.VITE_PROXY_CONTROL ?? "http://localhost:9090",
+        // The preview iframe in the workspace points at `/apps/<name>/`
+        // which is path-style routing on the production gateway. In dev
+        // we forward those to the local zeroship-gate so the iframe
+        // shows the live deployed app instead of vite's SPA fallback.
+        "/apps": {
+          target: env.VITE_PROXY_GATEWAY ?? "http://localhost:8001",
+          changeOrigin: true,
+        },
       },
     },
   };

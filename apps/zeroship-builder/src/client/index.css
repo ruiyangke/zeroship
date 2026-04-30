@@ -1,31 +1,158 @@
+@import url("https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..800;1,9..144,300..800&family=Public+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
 @import "tailwindcss";
 
 @theme {
-  --color-background: oklch(0.145 0 0);
-  --color-foreground: oklch(0.985 0 0);
-  --color-card: oklch(0.18 0 0);
-  --color-card-foreground: oklch(0.985 0 0);
-  --color-popover: oklch(0.18 0 0);
-  --color-popover-foreground: oklch(0.985 0 0);
-  --color-primary: oklch(0.78 0.18 142);
-  --color-primary-foreground: oklch(0.145 0 0);
-  --color-secondary: oklch(0.22 0 0);
-  --color-secondary-foreground: oklch(0.985 0 0);
-  --color-muted: oklch(0.22 0 0);
-  --color-muted-foreground: oklch(0.65 0 0);
-  --color-accent: oklch(0.22 0 0);
-  --color-accent-foreground: oklch(0.985 0 0);
-  --color-destructive: oklch(0.65 0.21 27);
-  --color-destructive-foreground: oklch(0.985 0 0);
-  --color-warning: oklch(0.72 0.16 75);
-  --color-border: oklch(0.27 0 0);
-  --color-input: oklch(0.27 0 0);
-  --color-ring: oklch(0.78 0.18 142);
+  /* ─── Atelier palette ─────────────────────────────────────── */
+  --color-paper:   oklch(0.97 0.012 89);
+  --color-paper-2: oklch(0.94 0.014 86);
+  --color-paper-3: oklch(0.91 0.014 84);
+  --color-ink:     oklch(0.18 0.013 60);
+  --color-ink-soft:oklch(0.36 0.013 65);
+  --color-pencil:  oklch(0.55 0.012 70);
+  --color-rule:    oklch(0.78 0.014 75);
+  --color-rule-2:  oklch(0.85 0.014 78);
+  --color-tomato:  oklch(0.61 0.21 27);
+  --color-tomato-2:oklch(0.55 0.21 25);
+  --color-tomato-3:oklch(0.90 0.06 27);
+  --color-clay:    oklch(0.84 0.04 60);
+
+  /* Tailwind defaults — map to Atelier so legacy utilities still resolve */
+  --color-background:           var(--color-paper);
+  --color-foreground:           var(--color-ink);
+  --color-card:                 #fff;
+  --color-card-foreground:      var(--color-ink);
+  --color-popover:              #fff;
+  --color-popover-foreground:   var(--color-ink);
+  --color-primary:              var(--color-tomato);
+  --color-primary-foreground:   var(--color-paper);
+  --color-secondary:            var(--color-paper-2);
+  --color-secondary-foreground: var(--color-ink);
+  --color-muted:                var(--color-paper-2);
+  --color-muted-foreground:     var(--color-ink-soft);
+  --color-accent:               var(--color-tomato);
+  --color-accent-foreground:    var(--color-paper);
+  --color-destructive:          var(--color-tomato);
+  --color-destructive-foreground: var(--color-paper);
+  --color-border:               var(--color-rule);
+  --color-input:                var(--color-rule);
+  --color-ring:                 var(--color-tomato);
+  --color-warning:              var(--color-tomato);
+
+  /* Type */
+  --font-serif: "Fraunces", "Times New Roman", serif;
+  --font-sans:  "Public Sans", system-ui, sans-serif;
+  --font-mono:  "JetBrains Mono", ui-monospace, monospace;
 }
 
 html, body, #root { height: 100%; }
 body {
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  font-feature-settings: "rlig" 1, "calt" 1;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-serif);
+  font-size: 16px;
+  line-height: 1.55;
+  font-feature-settings: "ss01" 1, "onum" 1;
   -webkit-font-smoothing: antialiased;
+  /* paper grain — multiplies into the page */
+  background-image:
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.18 0 0 0 0 0.13 0 0 0 0 0.10 0 0 0 0.05 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  background-size: 200px 200px;
+  background-attachment: fixed;
 }
+
+::selection { background: var(--color-tomato); color: var(--color-paper); }
+
+/* Reusable atoms — small bits of CSS that compose into Tailwind */
+.label-uc {
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--color-pencil);
+}
+.hairline { height: 1px; background: var(--color-rule); border: 0; }
+
+/* Stamp button: the tomato, slightly-rotated press button */
+.stamp-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  appearance: none;
+  border: 0;
+  background: var(--color-tomato);
+  color: var(--color-paper);
+  font-family: var(--font-sans);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 11.5px;
+  padding: 12px 22px 10px 22px;
+  cursor: pointer;
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,0.18),
+    0 1px 0 0 var(--color-tomato-2),
+    0 5px 0 -2px rgba(60,12,0,0.18);
+  transition: transform 80ms ease, box-shadow 80ms ease;
+  transform: rotate(-0.5deg);
+  border-radius: 1px;
+}
+.stamp-btn:hover { transform: rotate(-0.2deg) translateY(-1px); }
+.stamp-btn:active {
+  transform: rotate(-0.4deg) translateY(2px);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.22), 0 0 0 0 var(--color-tomato-2), 0 1px 0 -2px rgba(60,12,0,0.18);
+}
+.stamp-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.stamp-btn .arrow {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: 13px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+
+/* Ghost button — outlined paper */
+.ghost-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--color-rule);
+  color: var(--color-ink-soft);
+  padding: 9px 16px 7px 16px;
+  font-family: var(--font-sans);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 200ms;
+}
+.ghost-btn:hover { border-color: var(--color-ink); color: var(--color-ink); }
+.ghost-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.ghost-btn.danger { border-color: var(--color-tomato); color: var(--color-tomato); }
+.ghost-btn.danger:hover { background: var(--color-tomato); color: var(--color-paper); }
+
+/* Spin */
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 0.9s linear infinite; }
+
+/* Pulse for live dots */
+@keyframes pulse-tomato {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220,75,50,0.5); }
+  50%      { box-shadow: 0 0 0 7px rgba(220,75,50,0); }
+}
+.pulse-dot { animation: pulse-tomato 1.5s ease-in-out infinite; }
+
+/* Stagger reveal */
+@keyframes rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.reveal { animation: rise 700ms cubic-bezier(.2,.7,.2,1) both; }
+.d-1 { animation-delay: 60ms; }
+.d-2 { animation-delay: 160ms; }
+.d-3 { animation-delay: 260ms; }
+.d-4 { animation-delay: 380ms; }
+.d-5 { animation-delay: 520ms; }

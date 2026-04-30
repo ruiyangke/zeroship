@@ -12,7 +12,6 @@ export {
   deployApp,
   updatePlan,
   getAppLogs,
-  appPreviewUrl,
   listVars,
   setVar,
   deleteVar,
@@ -22,6 +21,8 @@ export {
   type AppRecord,
   type EnvVar,
 } from "../../server/apps";
+
+export { appPreviewUrl } from "../lib/preview-url";
 
 /** Dev-mode auto-auth shim — kept for compatibility with dashboard
  *  components that import this. In zeroship-builder we always have
