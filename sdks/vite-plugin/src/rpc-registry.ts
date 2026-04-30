@@ -184,15 +184,15 @@ export async function dispatch(methodName, args, opts) {
   }
 
   // Output validation runs in dev only. Production hot-path skips it.
-  // Output validators throw on mismatch — that's an INTERNAL error
-  // (the handler returned the wrong shape), distinct from
-  // INVALID_ARGUMENT which is the caller's fault.
-  const isProd =
+  // Default is "production" — secure-by-default and aligned with the
+  // V8 runtime's behavior where process.env is per-app and rarely sets
+  // NODE_ENV. Opt into output validation by setting NODE_ENV=development.
+  const isDev =
     typeof process !== "undefined" &&
     process &&
     process.env &&
-    process.env.NODE_ENV === "production";
-  if (!isProd && _isParseable(outputSchema)) {
+    process.env.NODE_ENV === "development";
+  if (isDev && _isParseable(outputSchema)) {
     try {
       outputSchema.parse(result);
     } catch (e) {
@@ -261,27 +261,74 @@ const _userDefault = (_zsUser && _zsUser.default && typeof _zsUser.default === "
   ? _zsUser.default : null;
 const _userFetch = _userDefault && typeof _userDefault.fetch === "function" ? _userDefault.fetch : null;
 
+function _zsErrResponse(status, code, message, details) {
+  const body = { message, name: "Error", code };
+  if (details !== undefined) body.details = details;
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 async function _zsFetch(request) {
   const url = new URL(request.url);
-  if (url.pathname.startsWith("/_rpc/")) {
-    const methodName = url.pathname.slice("/_rpc/".length);
-    let args = [];
-    const text = await request.text();
-    if (text) {
-      try {
-        const parsed = JSON.parse(text);
-        if (Array.isArray(parsed)) args = parsed;
-        else throw new Error("RPC body must be a JSON array");
-      } catch (e) {
-        return new Response(
-          JSON.stringify({ message: e?.message ?? String(e), name: "Error" }),
-          { status: 400, headers: { "content-type": "application/json" } },
-        );
+
+  // --- Spec wire: /_zs/v1/<id> ---
+  // Body shape: superjson \`{ json, meta? }\` envelope (POST) or
+  // base64url-encoded same envelope on \`?input=\` (GET, when input < 6 KB).
+  // For first-pass v1 we extract \`.json\` and ignore \`.meta\` — Date/BigInt
+  // round-trip as their JSON-stringified forms; full superjson revival
+  // is a follow-up.
+  if (url.pathname.startsWith("/_zs/v1/")) {
+    const id = decodeURIComponent(url.pathname.slice("/_zs/v1/".length));
+    if (!id) return _zsErrResponse(400, "INVALID_ARGUMENT", "missing wireId");
+
+    let input = undefined;
+    const xMethod = request.headers.get("x-method");
+    const effectiveMethod = xMethod ? xMethod.toUpperCase() : request.method;
+
+    if (effectiveMethod === "GET") {
+      const param = url.searchParams.get("input");
+      if (param) {
+        try {
+          const b64 = param.replace(/-/g, "+").replace(/_/g, "/");
+          const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+          const env = JSON.parse(atob(padded));
+          input = env && typeof env === "object" && "json" in env ? env.json : env;
+        } catch (e) {
+          return _zsErrResponse(400, "INVALID_ARGUMENT", \`invalid base64url input: \${e?.message ?? e}\`);
+        }
       }
+    } else if (effectiveMethod === "POST") {
+      const text = await request.text();
+      if (text) {
+        try {
+          const env = JSON.parse(text);
+          input = env && typeof env === "object" && "json" in env ? env.json : env;
+        } catch (e) {
+          return _zsErrResponse(400, "INVALID_ARGUMENT", \`invalid JSON body: \${e?.message ?? e}\`);
+        }
+      }
+    } else {
+      return _zsErrResponse(405, "FAILED_PRECONDITION", \`method \${effectiveMethod} not allowed on /_zs/v1/\`);
     }
 
+    // wantStream=true tells the registry to skip output-schema validation
+    // for async-iterator return values (those are streamed regardless of
+    // the Accept header — the encoder picks the right wire shape based on
+    // the result's iterator-ness).
+    return await _zsDispatchAndRespond(id, [input], { wantsStream: true, wrapSuperjson: true });
+  }
+
+  if (_userFetch) return _userFetch.call(_userDefault, request);
+  return new Response("Not Found", { status: 404 });
+}
+
+async function _zsDispatchAndRespond(methodName, args, opts) {
+    const wantsStream = !!(opts && opts.wantsStream);
+    const wrapSuperjson = !!(opts && opts.wrapSuperjson);
     try {
-      const result = await _zsDispatch(methodName, args, { wantStream: true });
+      const result = await _zsDispatch(methodName, args, { wantStream: wantsStream });
 
       if (
         result != null &&
@@ -343,8 +390,12 @@ async function _zsFetch(request) {
 
       if (result instanceof Response) return result;
 
+      // Wrap response in superjson \`{ json }\` envelope on the spec wire.
+      const payload = wrapSuperjson
+        ? { json: result === undefined ? null : result }
+        : (result === undefined ? null : result);
       return new Response(
-        JSON.stringify(result === undefined ? null : result),
+        JSON.stringify(payload),
         { status: 200, headers: { "content-type": "application/json" } },
       );
     } catch (err) {
@@ -354,19 +405,14 @@ async function _zsFetch(request) {
         message: err?.message ?? String(err),
         name: err?.name ?? "Error",
       };
-      // Carry the structured error envelope when dispatch attached
-      // INVALID_ARGUMENT / INTERNAL metadata (Zod validation path).
       if (err && typeof err.code === "string") body.code = err.code;
       if (err && err.details !== undefined) body.details = err.details;
+      if (err && typeof err.retryable === "boolean") body.retryable = err.retryable;
       return new Response(
         JSON.stringify(body),
         { status, headers: { "content-type": "application/json" } },
       );
     }
-  }
-
-  if (_userFetch) return _userFetch.call(_userDefault, request);
-  return new Response("Not Found", { status: 404 });
 }
 
 export default { fetch: _zsFetch };

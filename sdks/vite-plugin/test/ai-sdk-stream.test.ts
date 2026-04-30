@@ -152,10 +152,10 @@ describe("synthetic-entry — AI-SDK Data Stream wire", () => {
     });
     try {
       const res = await fetch(
-        new Request("http://localhost/_rpc/sayHello", {
+        new Request("http://localhost/_zs/v1/sayHello", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: "[]",
+          body: "{}",
         }),
       );
       assert.equal(res.status, 200);
@@ -184,10 +184,10 @@ describe("synthetic-entry — AI-SDK Data Stream wire", () => {
     });
     try {
       const res = await fetch(
-        new Request("http://localhost/_rpc/streamTodos", {
+        new Request("http://localhost/_zs/v1/streamTodos", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: "[]",
+          body: "{}",
         }),
       );
       const text = await readBody(res);
@@ -228,10 +228,10 @@ describe("synthetic-entry — AI-SDK Data Stream wire", () => {
     });
     try {
       const res = await fetch(
-        new Request("http://localhost/_rpc/boom", {
+        new Request("http://localhost/_zs/v1/boom", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: "[]",
+          body: "{}",
         }),
       );
       const text = await readBody(res);
@@ -278,10 +278,10 @@ describe("synthetic-entry — AI-SDK Data Stream wire", () => {
     });
     try {
       const res = await fetch(
-        new Request("http://localhost/_rpc/numbers", {
+        new Request("http://localhost/_zs/v1/numbers", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: "[]",
+          body: "{}",
         }),
       );
       const text = await readBody(res);

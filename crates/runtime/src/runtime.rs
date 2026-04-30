@@ -2220,7 +2220,7 @@ fn rpc_method_from_url(url: &str) -> Option<&str> {
         0
     };
     let path_and_query = url.get(path_start..)?;
-    let method_and_rest = path_and_query.strip_prefix("/_rpc/")?;
+    let method_and_rest = path_and_query.strip_prefix("/_zs/v1/")?;
     // Stop at `?` or `#` — we want just the method identifier.
     let end = method_and_rest
         .find(|c: char| c == '?' || c == '#')

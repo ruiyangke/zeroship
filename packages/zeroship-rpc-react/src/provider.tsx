@@ -58,6 +58,7 @@ export function ZeroshipProvider({ client, children }: ZeroshipProviderProps): R
   // Stash on every render — defensive against the slot being cleared
   // by some other module. Cheap (a property write).
   _hookRegistry.queryClient = client;
+  _hookRegistry.providerMounted = true;
 
   return (
     <QueryClientProvider client={client}>

@@ -46,6 +46,10 @@ export interface HookRegistry {
   useStream?: Function;
   useSubscription?: Function;
   queryClient?: unknown;
+  /** Set by `<ZeroshipProvider>`'s mount. False if the framework adapter
+   *  imported but no provider was rendered — in that case hooks would
+   *  return stale forever. The getter throws a more specific error. */
+  providerMounted?: boolean;
 }
 
 /**

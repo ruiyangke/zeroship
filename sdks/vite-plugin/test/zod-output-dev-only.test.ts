@@ -111,9 +111,11 @@ describe("synthetic-entry — output validation gating", () => {
     }
   });
 
-  test("undefined NODE_ENV: behaves as dev (validation runs)", async () => {
-    // Per spec, only NODE_ENV=production opts out. Anything else
-    // (including unset) keeps the dev-time correctness check on.
+  test("undefined NODE_ENV: behaves as production (validation skipped)", async () => {
+    // Secure-by-default: only NODE_ENV=development opts INTO validation.
+    // Unset / anything else is treated as production. Aligns with the
+    // V8 worker runtime where process.env is per-app and rarely carries
+    // NODE_ENV at all.
     const { mod, cleanup } = await loadRegistry();
     try {
       async function f() {
@@ -123,12 +125,10 @@ describe("synthetic-entry — output validation gating", () => {
       mod._zsRegister("f", f as never);
 
       await withNodeEnv(undefined, async () => {
-        await assert.rejects(mod.dispatch("f", []), (err: unknown) => {
-          const e = err as { status?: number; code?: string };
-          assert.equal(e.status, 500);
-          assert.equal(e.code, "INTERNAL");
-          return true;
-        });
+        // FAILING_OUTPUT_SCHEMA would throw if validation ran; absence
+        // of an error confirms the dev-only gate skipped it.
+        const result = await mod.dispatch("f", []);
+        assert.equal(result, null);
       });
     } finally {
       await cleanup();

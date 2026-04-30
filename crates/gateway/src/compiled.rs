@@ -70,6 +70,10 @@ pub struct EffectivePolicy {
     /// `idempotent: true`. `None` → gateway default of 24h. Bounded to
     /// `[1, 168]` at validate-time; the gateway clamps defensively.
     pub idempotency_ttl_hours: Option<u32>,
+    /// Per-procedure handler timeout in milliseconds (spec §7). `None`
+    /// inherits the app-level `wall_timeout_ms`. Idempotency in-flight
+    /// wait caps to this value when set.
+    pub timeout_ms: Option<u64>,
     pub max_input_bytes: Option<u32>,
     pub middleware: Vec<String>,
     pub publicly_accessible: bool,
@@ -390,6 +394,7 @@ fn resolve_effective_policy(
         csrf_origins,
         idempotent,
         idempotency_ttl_hours,
+        timeout_ms: None, // wired through ResourceEntry once the field lands
         max_input_bytes,
         middleware,
         publicly_accessible,

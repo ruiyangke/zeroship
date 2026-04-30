@@ -136,6 +136,11 @@ function requireHook(name: keyof typeof _hookRegistry): AdapterHook {
   if (typeof hook !== "function") {
     throw new Error(HOOK_UNAVAILABLE_MESSAGE);
   }
+  // We don't gate on `providerMounted` here — React Query itself throws
+  // a clear "no QueryClient set" error when its own context is missing,
+  // and tests legitimately call hooks without rendering through the
+  // <ZeroshipProvider>. The `providerMounted` flag is exposed for
+  // diagnostic purposes only.
   return hook as AdapterHook;
 }
 

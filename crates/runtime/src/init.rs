@@ -575,33 +575,30 @@ async function invokeMethod(methodName, args) {
         // a Zod string. Absent → per-yield typeof check (the default).
         return sseFromAsyncGen(result, !!result.__zsOutputIsString);
     }
-    return Response.json(result === undefined ? null : result);
+    // Spec wire: response wrapped in `{ json }` envelope (superjson shape).
+    return Response.json({ json: result === undefined ? null : result });
 }
 
-// Parse the RPC body into a JS positional-args array.
-// Empty body → []. JSON.parse errors → 400. Non-array → 400. null → [].
+// Parse the RPC body — spec wire is a superjson `{ json, meta? }`
+// envelope wrapping a single input value. Empty body → undefined.
+// JSON.parse errors → 400.
 function parseRpcArgs(bodyText) {
-    if (!bodyText) return [];
+    if (!bodyText) return [undefined];
     let parsed;
     try { parsed = JSON.parse(bodyText); }
     catch (_e) {
-        throw Object.assign(new Error("Invalid args JSON"), { status: 400 });
+        throw Object.assign(new Error("Invalid JSON body"), { status: 400, code: "INVALID_ARGUMENT" });
     }
-    if (parsed == null) return [];
-    if (Array.isArray(parsed)) return parsed;
-    throw Object.assign(new Error("RPC args body must be a JSON array"), { status: 400 });
+    const input = parsed && typeof parsed === "object" && "json" in parsed ? parsed.json : parsed;
+    return [input];
 }
 
-// Fast RPC path called by the kernel when the URL starts with /_rpc/<method>.
+// Fast RPC path called by the kernel when the URL starts with /_zs/v1/<id>.
 // Skips full Request construction, URL parsing, and stream-body reads —
-// the kernel already has the method name and body string in hand, and
-// passes them directly.
-//
-// User modules can override dispatch entirely by exporting
-// `dispatchRpc(methodName, args)` — the vite-plugin dev-bootstrap uses
-// this to route through its `__register`-populated registry, so
-// path-based method names like "src/index/addTodo" resolve via a
-// dynamic lookup instead of a static module-namespace property read.
+// the kernel already has the wireId and body string in hand, and
+// passes them directly. The synthetic entry's `dispatchRpc` resolves
+// the wireId against the registry (closure-private map populated by
+// the transform's `__zsRegister` calls).
 async function dispatchRpc(methodName, bodyText) {
     try {
         const args = parseRpcArgs(bodyText);
@@ -616,7 +613,7 @@ async function dispatchRpc(methodName, bodyText) {
                 // declared output schema is a Zod string.
                 return sseFromAsyncGen(result, !!result.__zsOutputIsString);
             }
-            return Response.json(result === undefined ? null : result);
+            return Response.json({ json: result === undefined ? null : result });
         }
         return await invokeMethod(methodName, args);
     } catch (err) {
@@ -658,7 +655,6 @@ const USER_FETCH_FAST = (user && user.default && typeof user.default.fetchFast =
     ? user.default.fetchFast
     : null;
 
-const FALLBACK_RPC_TAG = "/_rpc/";
 const FALLBACK_ZS_V1_TAG = "/_zs/v1/";
 
 // Coerce a user-supplied page handler return value into a Response.
@@ -675,36 +671,20 @@ function coerceToHtmlResponse(result, status) {
 // Fallback fetch — used only when the user's module doesn't export a
 // default.fetch handler. Handles:
 //   - /_zs/v1/<id>    + WS upgrade  → dispatchSubscription
-//   - /_zs/v1/<id>    + plain HTTP  → dispatchRpc (POST/GET via header)
-//   - /_rpc/<method>  → dispatchRpc (legacy path)
 //   - GET /           → user.index() if exported, returns HTML
 //   - else            → 404
+//
+// Unary /_zs/v1/<id> requests fall through here when there's no
+// `default.fetch` (the synthetic SSR entry handles them otherwise).
+// The fallback intentionally does NOT try to dispatch unary RPC —
+// real apps ship via the synthetic entry; this branch exists only
+// for hand-written `__zsRegister` test fixtures.
 async function fallbackFetch(request) {
     const urlStr = request.url;
 
-    // /_zs/v1/<id> — Phase 7 subscription path. WS-upgrade requests get
-    // the dedicated handler; everything else falls through to the
-    // existing RPC dispatcher (currently the bootstrap doesn't route
-    // unary /_zs/v1/* — the synthetic SSR entry does — so this is a
-    // best-effort wire for the bare-bones test path).
     const zsIdx = urlStr.indexOf(FALLBACK_ZS_V1_TAG);
     if (zsIdx >= 0 && _zsIsWsUpgrade(request)) {
         return _zsAcceptSubscription(urlStr);
-    }
-
-    const tagIdx = urlStr.indexOf(FALLBACK_RPC_TAG);
-    if (tagIdx >= 0) {
-        const methodStart = tagIdx + FALLBACK_RPC_TAG.length;
-        let methodEnd = urlStr.length;
-        const q = urlStr.indexOf("?", methodStart);
-        if (q >= 0 && q < methodEnd) methodEnd = q;
-        const h = urlStr.indexOf("#", methodStart);
-        if (h >= 0 && h < methodEnd) methodEnd = h;
-        const rawMethod = urlStr.slice(methodStart, methodEnd);
-        const method = rawMethod.indexOf("%") >= 0
-            ? decodeURIComponent(rawMethod)
-            : rawMethod;
-        return await handleRpcFromRequest(request, method);
     }
 
     // GET / (or any path) → user.index() convention. The export

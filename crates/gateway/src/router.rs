@@ -1695,12 +1695,16 @@ fn build_replay_response(
     builder.body(stored.body_bytes())
 }
 
-/// Resolve the per-procedure inflight wait timeout. Capped at 30s by
-/// default — anything longer would let dedupe contention block a
-/// worker thread for impractical durations. A future revision can
-/// honor `policy.timeout` once that field lands.
-fn inflight_wait_ms(_policy: &crate::compiled::EffectivePolicy) -> u64 {
-    idempotency::DEFAULT_INFLIGHT_WAIT_MS
+/// Resolve the per-procedure inflight wait timeout. Bounded by the
+/// procedure's declared timeout (spec §7) when present, and capped at
+/// `DEFAULT_INFLIGHT_WAIT_MS` (~30s) — letting dedupe contention block
+/// a worker thread for longer than the handler itself could run is
+/// pointless.
+fn inflight_wait_ms(policy: &crate::compiled::EffectivePolicy) -> u64 {
+    match policy.timeout_ms {
+        Some(t) if t > 0 => t.min(idempotency::DEFAULT_INFLIGHT_WAIT_MS),
+        _ => idempotency::DEFAULT_INFLIGHT_WAIT_MS,
+    }
 }
 
 /// Spec §8 pre-dispatch hook: extract `Idempotency-Key`, hash body,
@@ -3991,6 +3995,7 @@ mod resource_tree_tests {
             publicly_accessible: true,
             kind: Some(ProcedureKind::Query),
             action: crate::compiled::ResolvedAction::WorkerRpc,
+            timeout_ms: None,
             input_schema: None,
             output_schema: None,
         };
@@ -4013,6 +4018,7 @@ mod resource_tree_tests {
             publicly_accessible: false,
             kind: Some(ProcedureKind::Mutation),
             action: crate::compiled::ResolvedAction::WorkerRpc,
+            timeout_ms: None,
             input_schema: None,
             output_schema: None,
         };
@@ -4038,6 +4044,7 @@ mod resource_tree_tests {
             publicly_accessible: false,
             kind: Some(ProcedureKind::Mutation),
             action: crate::compiled::ResolvedAction::WorkerRpc,
+            timeout_ms: None,
             input_schema: None,
             output_schema: None,
         };
@@ -4128,6 +4135,7 @@ mod resource_tree_tests {
             publicly_accessible: true,
             kind: Some(ProcedureKind::Mutation),
             action: crate::compiled::ResolvedAction::WorkerRpc,
+            timeout_ms: None,
             input_schema: None,
             output_schema: None,
         }
@@ -4573,6 +4581,7 @@ mod resource_tree_tests {
             publicly_accessible: true,
             kind: Some(ProcedureKind::Subscription),
             action: crate::compiled::ResolvedAction::WorkerRpc,
+            timeout_ms: None,
             input_schema: None,
             output_schema: None,
         };

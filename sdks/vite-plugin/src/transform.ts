@@ -84,31 +84,43 @@ function moduleBaseName(root: string, id: string): string {
   return ext ? rel.slice(0, -ext.length) : rel;
 }
 
-/** Shared runtime: emitted once per client bundle. Minimal, no deps. */
+/** Shared runtime: emitted once per client bundle. Speaks the spec wire
+ *  (`/_zs/v1/<id>` with superjson `{ json, meta? }` envelope, AI-SDK Data
+ *  Stream Protocol for streams). No npm deps; superjson revival is left
+ *  to the consumer (rare on the bare-stub path — most apps use
+ *  `@zeroship/rpc-client` directly). */
 const CLIENT_HELPERS = `
-async function __rpcUnary(name, args) {
-  const r = await fetch("/_rpc/" + name, {
+async function __rpcUnary(id, input) {
+  const r = await fetch("/_zs/v1/" + id, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(args),
+    body: JSON.stringify({ json: input }),
   });
   if (!r.ok) {
-    let msg = r.statusText;
-    try { msg = (await r.json()).message || msg; } catch {}
-    throw new Error(msg);
+    let body = null;
+    try { body = await r.json(); } catch {}
+    const e = new Error((body && body.message) || r.statusText);
+    if (body && body.code) e.code = body.code;
+    if (body && body.details !== undefined) e.details = body.details;
+    e.status = r.status;
+    throw e;
   }
-  return r.json();
+  const env = await r.json();
+  return env && typeof env === "object" && "json" in env ? env.json : env;
 }
-async function* __rpcStream(name, args) {
-  const r = await fetch("/_rpc/" + name, {
+async function* __rpcStream(id, input) {
+  const r = await fetch("/_zs/v1/" + id, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(args),
+    headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
+    body: JSON.stringify({ json: input }),
   });
   if (!r.ok) {
-    let msg = r.statusText;
-    try { msg = (await r.json()).message || msg; } catch {}
-    throw new Error(msg);
+    let body = null;
+    try { body = await r.json(); } catch {}
+    const e = new Error((body && body.message) || r.statusText);
+    if (body && body.code) e.code = body.code;
+    e.status = r.status;
+    throw e;
   }
   const reader = r.body.getReader();
   const dec = new TextDecoder();
@@ -117,19 +129,17 @@ async function* __rpcStream(name, args) {
     const { value, done } = await reader.read();
     if (done) break;
     buf += dec.decode(value, { stream: true });
-    let idx;
-    while ((idx = buf.indexOf("\\n\\n")) !== -1) {
-      const frame = buf.slice(0, idx);
-      buf = buf.slice(idx + 2);
-      const evMatch = frame.match(/^event: (.*)$/m);
-      const dataMatch = frame.match(/^data: (.*)$/m);
-      if (!evMatch || !dataMatch) continue;
-      const ev = evMatch[1];
-      const data = dataMatch[1];
-      const parsed = JSON.parse(data);
-      if (ev === "yield") yield parsed;
-      else if (ev === "error") throw new Error(parsed.message || "stream error");
-      else if (ev === "return") return parsed;
+    let nl;
+    while ((nl = buf.indexOf("\\n")) !== -1) {
+      const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+      if (!line) continue;
+      const colon = line.indexOf(":"); if (colon < 0) continue;
+      const tag = line.slice(0, colon);
+      const data = line.slice(colon + 1);
+      if (tag === "0") yield JSON.parse(data);
+      else if (tag === "2") { const arr = JSON.parse(data); for (const v of arr) yield v; }
+      else if (tag === "e") { const env = JSON.parse(data); const e = new Error(env.message || "stream error"); if (env.code) e.code = env.code; if (env.details !== undefined) e.details = env.details; throw e; }
+      else if (tag === "d") return;
     }
   }
 }
@@ -459,32 +469,38 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
           }
         }
 
+        // Resolve wireId per spec §2: explicit fn.config.id wins; default
+        // is bare exportName. Production-mode "missing id" check happens
+        // in manifest.ts; here we just pick the same shape so register
+        // and dispatch agree on the key.
+        const { perFn: perFnForWireIds } = collectConfig(ast.body);
+        const wireIdFor = (fn: { name: string }) => {
+          const explicit = perFnForWireIds.get(fn.name)?.id;
+          return typeof explicit === "string" && explicit.length > 0
+            ? explicit
+            : fn.name;
+        };
+
         // --- SERVER ENVIRONMENT ---------------------------------------------
         //
-        // Append `__zsRegister(methodName, fn)` side effects so the V8 runtime
-        // registry can resolve the URL-path-style method name to the export.
-        // Keep all original exports (including `onRequest`, tainted helpers,
-        // imports) untouched — only add registrations at the bottom of the
-        // module. The transform is a superset of the source, never a
-        // rewrite of the bodies.
-        //
-        // The registry is owned by `virtual:zeroship/_rpc-registry`, a
-        // closure-private module — `_zsRegister` is a plain ESM import,
-        // not a global. After bundling, the registry binding is a flat
-        // scope `const` with a rolldown-mangled name; user-bundled npm
-        // packages cannot reach it (no `globalThis.__zsRegistry` leak).
+        // Append `__zsRegister(wireId, fn)` calls keyed by the same wireId
+        // the manifest emits. The registry is owned by
+        // `virtual:zeroship/_rpc-registry`, a closure-private module —
+        // `_zsRegister` is a plain ESM import, not a global. After
+        // bundling, the registry binding is a flat scope `const` with a
+        // rolldown-mangled name; user-bundled npm packages cannot reach
+        // it.
         if (isServerEnv) {
           const s = new MagicString(code);
           const registrations = serverFns
             .map((fn) => {
-              const methodName = `${modPath}/${fn.name}`;
-              return `__zsRegister(${JSON.stringify(methodName)}, ${fn.name});`;
+              return `__zsRegister(${JSON.stringify(wireIdFor(fn))}, ${fn.name});`;
             })
             .join("\n");
           s.prepend(
             `import { _zsRegister as __zsRegister } from "virtual:zeroship/_rpc-registry";\n`
           );
-          s.append(`\n\n// zeroship: register server functions for URL-path RPC\n${registrations}\n`);
+          s.append(`\n\n// zeroship: register server functions\n${registrations}\n`);
           return {
             code: s.toString(),
             map: s.generateMap({ source: id, includeContent: true, hires: true }),
@@ -492,21 +508,14 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
         }
         // --- CLIENT ENVIRONMENT ---------------------------------------------
         //
-        // Emit stubs that call the URL-path-based RPC wire. Unary exports
-        // (plain async functions, regular functions) become `__rpcUnary`;
-        // async generators become `__rpcStream`. The stubs live in the
-        // client bundle; the actual implementation lives on the server
-        // and is invoked over HTTP.
-        //
-        // The whole file is replaced — server modules are wholly
-        // server-side by path convention; there is no "mixed" file shape.
+        // Emit stubs that call the spec wire. The whole file is replaced.
         const s = new MagicString(code);
 
         const stubs = serverFns.map((fn) => {
-          const methodName = `${modPath}/${fn.name}`;
+          const wid = wireIdFor(fn);
           return fn.isStream
-            ? clientStreamStub(fn.name, methodName)
-            : clientUnaryStub(fn.name, methodName);
+            ? clientStreamStub(fn.name, wid)
+            : clientUnaryStub(fn.name, wid);
         });
 
         s.overwrite(0, code.length, CLIENT_HELPERS + "\n\n" + stubs.join("\n") + "\n");

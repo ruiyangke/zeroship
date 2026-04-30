@@ -202,4 +202,87 @@ describe("__makeProcedure — populated registry plumbing", () => {
     fn.invalidate({ limit: 50 });
     assert.deepEqual(receivedKey, ["todos.list", { limit: 50 }]);
   });
+
+  // ── Spec §10 "Idempotency × retry interaction" ─────────────────────
+  //
+  // React Query retries call the mutationFn multiple times for one
+  // logical `mutate(input)` call. The transport must reuse a SINGLE
+  // Idempotency-Key across all attempts so Phase 6's gateway dedupe
+  // table replays the first attempt's response on retries 2..N.
+  //
+  // We assert this by capturing the `idempotencyKey` option that the
+  // wrapped mutationFn passes to `call(...)` on each retry.
+  test("useMutation: retries reuse the same Idempotency-Key (idempotent: true)", async () => {
+    const passedKeys: Array<string | undefined> = [];
+    const callImpl = async (
+      _input: unknown,
+      opts?: { idempotencyKey?: string },
+    ) => {
+      passedKeys.push(opts?.idempotencyKey);
+      return { ok: true };
+    };
+
+    let mutationFnRef: ((input: unknown) => Promise<unknown>) | null = null;
+    _hookRegistry.useMutation = (config: { mutationFn: (input: unknown) => Promise<unknown> }) => {
+      mutationFnRef = config.mutationFn;
+      return null;
+    };
+
+    const fn = __makeProcedure(callImpl, {
+      id: "todos.add",
+      kind: "mutation",
+      idempotent: true,
+    });
+    fn.useMutation();
+    assert.ok(mutationFnRef, "mutationFn captured");
+
+    // Simulate React Query retry semantics: same input reference is
+    // passed to the mutationFn multiple times within one logical
+    // mutate() call.
+    const input = { text: "hi" };
+    await mutationFnRef!(input);
+    await mutationFnRef!(input);
+    await mutationFnRef!(input);
+    await mutationFnRef!(input);
+
+    assert.equal(passedKeys.length, 4);
+    for (const k of passedKeys) assert.equal(typeof k, "string", "key set");
+    assert.equal(
+      new Set(passedKeys).size,
+      1,
+      `all 4 attempts should reuse the same key, got: ${JSON.stringify(passedKeys)}`,
+    );
+  });
+
+  test("useMutation: idempotent: false → per-attempt key absent", async () => {
+    const passedKeys: Array<string | undefined> = [];
+    const callImpl = async (
+      _input: unknown,
+      opts?: { idempotencyKey?: string },
+    ) => {
+      passedKeys.push(opts?.idempotencyKey);
+      return null;
+    };
+
+    let mutationFnRef: ((input: unknown) => Promise<unknown>) | null = null;
+    _hookRegistry.useMutation = (config: { mutationFn: (input: unknown) => Promise<unknown> }) => {
+      mutationFnRef = config.mutationFn;
+      return null;
+    };
+
+    const fn = __makeProcedure(callImpl, {
+      id: "todos.delete",
+      kind: "mutation",
+      // idempotent omitted → false
+    });
+    fn.useMutation();
+    assert.ok(mutationFnRef, "mutationFn captured");
+
+    const input = { id: "x" };
+    await mutationFnRef!(input);
+    await mutationFnRef!(input);
+
+    assert.equal(passedKeys.length, 2);
+    for (const k of passedKeys) assert.equal(k, undefined, "no key set");
+  });
 });
