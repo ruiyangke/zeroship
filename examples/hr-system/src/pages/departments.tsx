@@ -12,7 +12,7 @@ import {
 import { PageHeader } from "@/components/shared/page-header";
 import { EmptyState } from "@/components/shared/empty-state";
 import { TableSkeleton } from "@/components/shared/loading";
-import { getDepartments, createDepartment, getEmployeesByDepartment } from "@/index";
+import { getDepartments, createDepartment, getEmployeesByDepartment } from "@/server";
 
 export default function DepartmentsPage() {
   const [departments, setDepartments] = useState<any[]>([]);

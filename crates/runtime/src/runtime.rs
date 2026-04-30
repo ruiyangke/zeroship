@@ -1260,10 +1260,18 @@ impl RuntimeInner {
         // Measured on this machine: master 844K req/s vs the slow fetch
         // path 160-330K — the fast-path recovers the gap for an
         // empty-body RPC call.
-        let rpc_method: Option<&str> = self
-            .rpc_handler_fn
-            .as_ref()
-            .and_then(|_| rpc_method_from_url(url));
+        // Fast-path is for POST only. GET /_zs/v1/<id>?input=<b64> carries
+        // its input in the query string; the synthetic entry's slow
+        // path handles the b64-decode + envelope-unwrap. Routing GET
+        // through the fast path would bypass that and hand an empty
+        // body to dispatchRpc → "input: undefined" validation error.
+        let rpc_method: Option<&str> = if method.eq_ignore_ascii_case("POST") {
+            self.rpc_handler_fn
+                .as_ref()
+                .and_then(|_| rpc_method_from_url(url))
+        } else {
+            None
+        };
 
         self.arm_cpu_timer();
         let dispatch_result: Result<DispatchResult, v8::Global<v8::Promise>> =

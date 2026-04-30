@@ -16,7 +16,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { PageHeader } from "@/components/shared/page-header";
 import { EmptyState } from "@/components/shared/empty-state";
 import { TableSkeleton } from "@/components/shared/loading";
-import { getGoals, createGoal, updateGoalProgress, getEmployees } from "@/index";
+import { getGoals, createGoal, updateGoalProgress, getEmployees } from "@/server";
 
 const STATUS_COLORS: Record<string, any> = {
   active: "default",

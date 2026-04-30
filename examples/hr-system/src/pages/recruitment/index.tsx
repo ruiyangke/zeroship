@@ -21,7 +21,7 @@ import { DataTable, Column } from "@/components/shared/data-table";
 import {
   getJobPostings, createJobPosting, publishJobPosting, closeJobPosting,
   getPositions,
-} from "@/index";
+} from "@/server";
 
 const STATUS_COLORS: Record<string, any> = {
   draft: "secondary",

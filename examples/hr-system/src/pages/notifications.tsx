@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
 import { EmptyState } from "@/components/shared/empty-state";
 import { TableSkeleton } from "@/components/shared/loading";
-import { getNotifications, markAsRead, markAllAsRead } from "@/index";
+import { getNotifications, markAsRead, markAllAsRead } from "@/server";
 
 const MY_EMPLOYEE_ID = 1;
 

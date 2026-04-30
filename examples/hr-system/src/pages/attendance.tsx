@@ -9,7 +9,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { EmptyState } from "@/components/shared/empty-state";
 import { TableSkeleton } from "@/components/shared/loading";
 import { DataTable, Column } from "@/components/shared/data-table";
-import { getEmployees, getTimesheets, clockIn, clockOut, approveTimesheet, submitTimesheet } from "@/index";
+import { getEmployees, getTimesheets, clockIn, clockOut, approveTimesheet, submitTimesheet } from "@/server";
 
 const STATUS_COLORS: Record<string, any> = {
   draft: "secondary",

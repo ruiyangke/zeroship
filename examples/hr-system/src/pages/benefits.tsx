@@ -8,7 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageHeader } from "@/components/shared/page-header";
 import { EmptyState } from "@/components/shared/empty-state";
 import { TableSkeleton } from "@/components/shared/loading";
-import { getBenefitsPlans, getBenefitsEnrollments, enrollInBenefit } from "@/index";
+import { getBenefitsPlans, getBenefitsEnrollments, enrollInBenefit } from "@/server";
 
 const MY_EMPLOYEE_ID = 1;
 

@@ -16,7 +16,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { EmptyState } from "@/components/shared/empty-state";
 import { TableSkeleton } from "@/components/shared/loading";
 import { DataTable, Column } from "@/components/shared/data-table";
-import { getDocuments, uploadDocument, getExpiringDocuments, getPolicies } from "@/index";
+import { getDocuments, uploadDocument, getExpiringDocuments, getPolicies } from "@/server";
 
 const MY_EMPLOYEE_ID = 1;
 const DOC_TYPES = ["contract", "id", "certification", "policy", "other"];

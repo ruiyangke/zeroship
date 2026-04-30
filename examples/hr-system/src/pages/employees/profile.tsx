@@ -16,7 +16,7 @@ import {
   getEmployee, getDepartment, getLeaveBalance, getLeaveRequests,
   getPayslipsByEmployee, getReviewsForEmployee, getDocuments,
   getGoals, terminateEmployee,
-} from "@/index";
+} from "@/server";
 
 const STATUS_COLORS: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
   active: "default",

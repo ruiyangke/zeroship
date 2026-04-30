@@ -7,7 +7,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { EmptyState } from "@/components/shared/empty-state";
 import { TableSkeleton } from "@/components/shared/loading";
 import { DataTable, Column } from "@/components/shared/data-table";
-import { getLeaveRequests, approveLeave, denyLeave, getEmployees } from "@/index";
+import { getLeaveRequests, approveLeave, denyLeave, getEmployees } from "@/server";
 
 const APPROVER_ID = 1;
 

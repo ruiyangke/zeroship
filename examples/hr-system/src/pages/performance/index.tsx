@@ -16,7 +16,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { EmptyState } from "@/components/shared/empty-state";
 import { TableSkeleton } from "@/components/shared/loading";
 import { DataTable, Column } from "@/components/shared/data-table";
-import { getPendingReviews, getEmployees, createReview, submitReview } from "@/index";
+import { getPendingReviews, getEmployees, createReview, submitReview } from "@/server";
 
 const STATUS_COLORS: Record<string, any> = {
   draft: "secondary",

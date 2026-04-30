@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { createPayrollRun, processPayroll, finalizePayroll } from "@/index";
+import { createPayrollRun, processPayroll, finalizePayroll } from "@/server";
 
 const STEPS = ["Configure", "Process", "Review", "Finalize"] as const;
 

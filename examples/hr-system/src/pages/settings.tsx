@@ -15,7 +15,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageHeader } from "@/components/shared/page-header";
 import { EmptyState } from "@/components/shared/empty-state";
 import { TableSkeleton } from "@/components/shared/loading";
-import { getHolidays, createHoliday } from "@/index";
+import { getHolidays, createHoliday } from "@/server";
 
 export default function SettingsPage() {
   const [holidays, setHolidays] = useState<any[]>([]);

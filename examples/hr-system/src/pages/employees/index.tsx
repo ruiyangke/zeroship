@@ -12,7 +12,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { DataTable, Column } from "@/components/shared/data-table";
 import { EmptyState } from "@/components/shared/empty-state";
 import { TableSkeleton } from "@/components/shared/loading";
-import { getEmployees, getDepartments, searchEmployees } from "@/index";
+import { getEmployees, getDepartments, searchEmployees } from "@/server";
 
 const STATUS_COLORS: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
   active: "default",

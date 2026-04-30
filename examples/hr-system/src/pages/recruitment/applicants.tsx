@@ -12,7 +12,7 @@ import {
 import { PageHeader } from "@/components/shared/page-header";
 import { EmptyState } from "@/components/shared/empty-state";
 import { TableSkeleton } from "@/components/shared/loading";
-import { getApplicants, getJobPosting, updateApplicantStage } from "@/index";
+import { getApplicants, getJobPosting, updateApplicantStage } from "@/server";
 
 const STAGES = ["applied", "screening", "interview", "offer", "hired", "rejected"];
 
