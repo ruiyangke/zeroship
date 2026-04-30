@@ -5,21 +5,25 @@ import {
   streamResponse,
 } from "./_shared/stream";
 
-export interface ChatRequest {
-  /** Messages in the conversation. */
-  messages: Array<{ role: "user" | "assistant"; content: string }>;
-  /** Optional app context. */
-  context?: { app_id?: string; app_name?: string };
+export interface ChatTurnInput {
+  /** Plain text prompt. */
+  text: string;
+  /** Image attachments — V1 supports image input only; later expands. */
+  images?: Array<{ name: string; mediaType: string; bytes: Uint8Array }>;
 }
 
 /**
- * Mock chat generator — yields a realistic AI-SDK stream exercising
- * every data-part shape (text, survey, tool call+result, diff, critic-round).
+ * Mock chat — produces a streamed sequence that exercises every
+ * data-part shape the client handles.
  *
  * Plan 02 replaces the body with the deepagents → translator pipeline.
  * The wire format (AIStreamChunk) stays the same.
  */
-export async function* chat(req: ChatRequest): AsyncGenerator<AIStreamChunk> {
+export async function postChat(input: ChatTurnInput): Promise<Response> {
+  return streamResponse(generate(input));
+}
+
+async function* generate(input: ChatTurnInput): AsyncIterable<AIStreamChunk> {
   // 1. Initial preamble text streaming
   const preamble = "Got it — let me think about that.\n\n";
   for (const ch of preamble) {
