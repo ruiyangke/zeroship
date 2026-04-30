@@ -17,6 +17,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { brotliDecompressSync, gunzipSync, zstdDecompressSync } from "node:zlib";
 
 import { emitZsapp } from "../src/zsapp.js";
+import {
+  BOOTSTRAP_MARKER,
+  userSourceHasDefaultExport,
+  wrapServerBundle,
+} from "../src/build.js";
 
 // ── Fixture builder ────────────────────────────────────────────────────────
 
@@ -795,5 +800,136 @@ describe("emitZsapp", () => {
     } finally {
       await fix.cleanup();
     }
+  });
+});
+
+// ── Bug 2: skip bootstrap append when user has default.fetch ──────────────
+describe("wrapServerBundle", () => {
+  const PRELUDE = "// fake prelude\nglobalThis.__register=()=>{};\n";
+  const BOOTSTRAP =
+    "export async function dispatchRpc(){}\nexport default { fetch(){} };\n";
+
+  test("user_default_export_skips_bootstrap_append", () => {
+    // SSR-style bundle — user exports their own default.
+    const bundle =
+      'export default { fetch: async (req) => new Response("hi") };\n';
+    const wrapped = wrapServerBundle({
+      prelude: PRELUDE,
+      bootstrap: BOOTSTRAP,
+      bundle,
+      userHasDefaultFetch: true,
+    });
+
+    // Marker is absent — bootstrap was NOT appended.
+    assert.ok(
+      !wrapped.includes(BOOTSTRAP_MARKER),
+      "bootstrap marker absent when user has default"
+    );
+    // The user's default.fetch made it through.
+    assert.ok(
+      wrapped.includes("export default"),
+      "user default still in wrapped bundle"
+    );
+    // Single `export default` — no ESM duplicate-default error.
+    const defaultCount = (wrapped.match(/^\s*export\s+default\b/gm) ?? []).length;
+    assert.equal(defaultCount, 1, "exactly one export default");
+  });
+
+  test("no_default_export_appends_bootstrap", () => {
+    // RPC-only bundle — only `__register` side effects.
+    const bundle = '__register("listTodos", () => []);\n';
+    const wrapped = wrapServerBundle({
+      prelude: PRELUDE,
+      bootstrap: BOOTSTRAP,
+      bundle,
+      userHasDefaultFetch: false,
+    });
+
+    // Marker is present — bootstrap WAS appended.
+    assert.ok(
+      wrapped.includes(BOOTSTRAP_MARKER),
+      "bootstrap marker present when user has no default"
+    );
+    // Bootstrap's default.fetch is what handles requests.
+    assert.ok(
+      wrapped.includes("export default"),
+      "bootstrap default in wrapped bundle"
+    );
+    // Single `export default` — bootstrap's only.
+    const defaultCount = (wrapped.match(/^\s*export\s+default\b/gm) ?? []).length;
+    assert.equal(defaultCount, 1, "exactly one export default");
+  });
+
+  test("strips_use_server_directive", () => {
+    // The `"use server"` pragma is bytes after we've prepended the
+    // prelude. Strip it so the resulting module isn't accidentally a
+    // strict-mode directive disguised as a string expression.
+    const bundle = '"use server";\nexport function ping(){}\n';
+    const wrapped = wrapServerBundle({
+      prelude: PRELUDE,
+      bootstrap: BOOTSTRAP,
+      bundle,
+      userHasDefaultFetch: false,
+    });
+    // The prelude is at the very top.
+    assert.ok(
+      wrapped.startsWith(PRELUDE),
+      "prelude is at the top of the bundle"
+    );
+    // The directive doesn't appear standalone in the user portion.
+    const userStart = wrapped.indexOf("export function ping");
+    assert.ok(userStart > 0, "user code present");
+    const beforeUser = wrapped.slice(PRELUDE.length, userStart);
+    assert.ok(
+      !beforeUser.includes('"use server"'),
+      "use server directive stripped from user code"
+    );
+  });
+});
+
+describe("userSourceHasDefaultExport", () => {
+  test("detects export default object", () => {
+    assert.equal(
+      userSourceHasDefaultExport("export default { fetch: () => {} };"),
+      true
+    );
+  });
+
+  test("detects export default function", () => {
+    assert.equal(
+      userSourceHasDefaultExport("export default function handler(){}"),
+      true
+    );
+  });
+
+  test("returns false for RPC-only entry", () => {
+    assert.equal(
+      userSourceHasDefaultExport(
+        '"use server";\nexport function ping(){}\n'
+      ),
+      false
+    );
+  });
+
+  test("ignores commented-out default", () => {
+    // A commented-out export default in the docs of an RPC-only file
+    // should NOT trigger the match.
+    const src = `
+// IDEAL SHAPE:
+// export default { fetch: req => new Response("ok") };
+"use server";
+export function listTodos() { return []; }
+`;
+    assert.equal(userSourceHasDefaultExport(src), false);
+  });
+
+  test("ignores block-commented default", () => {
+    const src = `
+/*
+ * export default { fetch }
+ */
+export function ping(){}
+`;
+    assert.equal(userSourceHasDefaultExport(src), false);
   });
 });

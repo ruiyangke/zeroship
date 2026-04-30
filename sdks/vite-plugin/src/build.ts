@@ -11,6 +11,13 @@ const HERE = resolve(fileURLToPath(import.meta.url), "..");
 const PRELUDE_PATH   = resolve(HERE, "../src/runtime-prelude.js");   // prepended — Node-globals shim
 const BOOTSTRAP_PATH = resolve(HERE, "../src/server-bootstrap.js");  // appended  — dispatchRpc + default.fetch
 
+/**
+ * Marker line emitted at the top of the appended server bootstrap.
+ * Tests (and humans inspecting the bundle) can grep for this to tell
+ * whether the bootstrap was actually attached to a given SSR bundle.
+ */
+export const BOOTSTRAP_MARKER = "// zeroship server bootstrap";
+
 /** Compiler identifier used in metadata.compiler. Read from package.json. */
 function getCompilerId(): string {
   try {
@@ -54,6 +61,37 @@ export function userSourceHasDefaultExport(source: string): boolean {
     .replace(/(^|[^:])\/\/.*$/gm, "$1");
   // Multi-line: matches at the start of any line (after optional ws).
   return /^\s*export\s+default\b/m.test(stripped);
+}
+
+/**
+ * Wrap the rolled-up SSR bundle with the prelude (always) and the
+ * bootstrap (only when the user did NOT export their own default).
+ *
+ * Two ESM `export default` statements in the same module are a syntax
+ * error, so when the user provides `default.fetch` we have to skip the
+ * append. The user is then responsible for handling /_rpc/* themselves;
+ * the prelude still installs the registry side-effect target (`__register`).
+ *
+ * TODO(mode 3): wrap-pattern that renames the user's default to
+ * `__userFetch`, keeps the bootstrap's RPC dispatch, and falls through
+ * to `__userFetch` for non-RPC. Not needed for the current SSR demo.
+ */
+export function wrapServerBundle(opts: {
+  prelude: string;
+  bootstrap: string;
+  bundle: string;
+  userHasDefaultFetch: boolean;
+}): string {
+  // Drop the leading `"use server";` directive — it's a no-op once
+  // we prepend the prelude.
+  const stripped = opts.bundle.replace(/^"use server"\s*;\s*/, "");
+  const head = opts.prelude + "\n" + stripped;
+  if (opts.userHasDefaultFetch) {
+    // User owns default.fetch — appending the bootstrap would create
+    // a duplicate `export default`, breaking the bundle.
+    return head + "\n";
+  }
+  return head + "\n" + BOOTSTRAP_MARKER + "\n" + opts.bootstrap;
 }
 
 /** Find server entry point in project */
@@ -176,17 +214,23 @@ export function buildPlugin(state: TransformState, options: { serverEntry?: stri
       // Prelude (prepended) installs Node-shaped globals + the
       // Map-backed __register registry. Bootstrap (appended) adds
       // the dispatchRpc + default.fetch exports that the runtime's
-      // BOOTSTRAP_JS looks for. Without either, the worker loads the
-      // bundle but logs "No default.fetch handler exported".
+      // BOOTSTRAP_JS looks for — but ONLY if the user didn't already
+      // export their own default. Two `export default` statements in
+      // the same ESM module are a syntax error.
       const bundlePath = resolve(root, "dist/server/index.js");
       try {
-        const prelude = readFileSync(PRELUDE_PATH, "utf8");
-        const bootstrap = readFileSync(BOOTSTRAP_PATH, "utf8");
-        const original = readFileSync(bundlePath, "utf8");
-        // Drop the leading `"use server";` that the bundler emits —
-        // it's a no-op directive that's just bytes after we prepend.
-        const stripped = original.replace(/^"use server"\s*;\s*/, "");
-        writeFileSync(bundlePath, prelude + "\n" + stripped + "\n" + bootstrap, "utf8");
+        const wrapped = wrapServerBundle({
+          prelude: readFileSync(PRELUDE_PATH, "utf8"),
+          bootstrap: readFileSync(BOOTSTRAP_PATH, "utf8"),
+          bundle: readFileSync(bundlePath, "utf8"),
+          userHasDefaultFetch,
+        });
+        writeFileSync(bundlePath, wrapped, "utf8");
+        if (userHasDefaultFetch) {
+          console.log(
+            `[zeroship] user exports default.fetch — bootstrap append skipped`
+          );
+        }
       } catch (e) {
         console.warn(`[zeroship] failed to wrap prelude+bootstrap: ${(e as Error).message}`);
       }

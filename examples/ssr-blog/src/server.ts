@@ -1,37 +1,23 @@
-"use server";
-// Server entry — picked up by the `@zeroship/vite-plugin` (it looks for
-// `src/server.ts` by convention) and bundled into `dist/server/index.js`.
+// Server entry — picked up by `@zeroship/vite-plugin` and bundled into
+// `dist/server/index.js`. The plugin appends the prelude (always) and
+// the dispatchRpc/default.fetch bootstrap (ONLY when this file has no
+// own `export default`). Since we DO export default below, the
+// bootstrap is skipped and our `default.fetch` is the runtime entry.
 //
-// IDEAL SHAPE (NOT WHAT THIS FILE DOES TODAY — see "Known limitations" in
-// the README):
-//
-//   import { renderToString } from "react-dom/server";
-//   import { App } from "./components/App";
-//   import manifest from "./.vite-manifest.json";   // baked in at build time
-//
-//   export default {
-//     async fetch(req: Request) {
-//       const url = new URL(req.url);
-//       const html = renderToString(<App url={url.pathname} posts={POSTS} />);
-//       const jsAsset = manifest["src/entry-client.tsx"].file;  // hashed
-//       return new Response(
-//         shell.replace("<!--app-html-->", html)
-//              .replace("</body>", `<script type="module" src="/${jsAsset}"></script></body>`),
-//         { headers: { "content-type": "text/html" } }
-//       );
-//     }
-//   };
-//
-// What this file ACTUALLY does: exports a single "use server" RPC method
-// `ssrRender(url)` that returns the rendered HTML as a JSON-wrapped string.
-// The current build pipeline appends its own `export default { fetch }` for
-// the RPC bootstrap, so user code can't define `export default` without
-// breaking the bundle. See README → "Known limitations" → gap (2).
+// See README. Real per-request SSR: every GET hits this fetch handler
+// and gets back a freshly-rendered HTML page.
 
 import { renderToString } from "react-dom/server";
 import { createElement } from "react";
 import { App } from "./components/App";
 import { POSTS } from "./components/posts";
+
+// TODO(bug 3): the entry-client filename is hashed at build time. Read
+// it from the Vite client manifest via `virtual:zeroship/client-manifest`
+// so the rendered HTML loads the right `/_assets/<hash>.js`. For now,
+// hard-code the unhashed dev path; production builds will 404 until
+// bug 3 lands.
+const ENTRY_CLIENT = "/src/entry-client.tsx";
 
 const SHELL = `<!doctype html>
 <html lang="en">
@@ -43,17 +29,22 @@ const SHELL = `<!doctype html>
   <body>
     <div id="root">{{HTML}}</div>
     <script>window.__SSR_PROPS__ = {{PROPS}};</script>
-    <!-- Real SSR would inject the hashed JS path here. See README. -->
-    <script type="module" src="/src/entry-client.tsx"></script>
+    <script type="module" src="${ENTRY_CLIENT}"></script>
   </body>
 </html>`;
 
-/**
- * Server-render the React tree for a given URL and return the full HTML.
- * Intended to be called as `ssrRender("/")` or `ssrRender("/post/first")`.
- */
-export async function ssrRender(url: string): Promise<string> {
-  const html = renderToString(createElement(App, { url, posts: POSTS }));
-  const props = JSON.stringify({ url });
-  return SHELL.replace("{{HTML}}", html).replace("{{PROPS}}", props);
-}
+export default {
+  async fetch(req: Request): Promise<Response> {
+    const url = new URL(req.url);
+    if (req.method !== "GET") {
+      return new Response("Method Not Allowed", { status: 405 });
+    }
+    const html = renderToString(createElement(App, { url: url.pathname, posts: POSTS }));
+    const props = JSON.stringify({ url: url.pathname });
+    const page = SHELL.replace("{{HTML}}", html).replace("{{PROPS}}", props);
+    return new Response(page, {
+      status: 200,
+      headers: { "content-type": "text/html; charset=utf-8" },
+    });
+  },
+};

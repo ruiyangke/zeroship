@@ -1,6 +1,6 @@
 # ssr-blog (SSR demo)
 
-A 3-post React blog where the **server** renders HTML on each request and the **client** hydrates after. Demonstrates the SSR shape — what the deploy artifact should look like for a real per-request rendering setup — but read **Known limitations** below first: the current build pipeline can't actually serve SSR end-to-end yet.
+A 3-post React blog where the **server** renders HTML on each request and the **client** hydrates after. Demonstrates the SSR shape — `src/server.ts` exports `default.fetch`, which the V8 worker invokes on every non-RPC GET, returning freshly-rendered HTML.
 
 ## Build
 
@@ -60,22 +60,7 @@ In a working SSR pipeline, the SSR bundle imports the Vite client manifest at bu
 
 In this demo, `src/entry-server.tsx` hardcodes the entry-client filename as a placeholder; real SSR would read it from the manifest.
 
-### Gap 2 — User-defined `default.fetch` collides with the appended RPC bootstrap
-
-The vite-plugin always appends `sdks/vite-plugin/src/server-bootstrap.js` to the SSR bundle. That bootstrap exports its own `export default { fetch }` (which only handles `/_rpc/*` and 404s on everything else). If user code in `entry-server.tsx` also exports `export default`, the bundle has two `export default` statements — an ESM syntax error — and the build fails.
-
-This is the load-bearing gap. Until the build pipeline:
-
-- Skips appending the bootstrap when the user's bundle already defines a `default.fetch`, OR
-- Wraps the user's `default.fetch` so the bootstrap delegates to it for non-RPC requests,
-
-…SSR via `default.fetch` is impossible.
-
-**Workaround in this demo**: `src/server.ts` exports a single `"use server"` named function `ssrRender(url)` that returns the rendered HTML as JSON. Calling it via `POST /_rpc/src/server/ssrRender` works, but every `GET /` and `GET /post/:id` would land at the appended bootstrap's catch-all 404. So the manifest's `Any → Worker(ssr)` rule is correct in shape but dead in practice.
-
-`src/entry-server.tsx` is included in the source tree but **not built into the bundle** — it documents what the file would look like once gap (2) is closed.
-
-### Gap 3 — SSR build copies `public/` assets
+### Gap 2 — SSR build copies `public/` assets
 
 Same as the CSR demo — Vite's SSR build with the current plugin config copies `public/*` into `dist/server/`, so harmless static assets (e.g. `favicon.ico`) end up referenced as worker modules in the manifest. Cosmetic but confusing.
 
@@ -83,10 +68,10 @@ Same as the CSR demo — Vite's SSR build with the current plugin config copies 
 
 | Path | Role |
 | ---- | ---- |
-| `index.html` | Shell with `<!--app-html-->` placeholder for the SSR'd body |
+| `index.html` | Dev-time entry; SSR builds inject the rendered HTML into a fresh shell |
 | `src/entry-client.tsx` | Hydrates the SSR'd HTML with `hydrateRoot` |
-| `src/entry-server.tsx` | The intended SSR entry — **not used by the build today** (gap 2) |
-| `src/server.ts` | Workaround entry: exposes `ssrRender(url)` as a "use server" RPC method |
+| `src/entry-server.tsx` | Reference shape — **not used by the build**; `src/server.ts` is the wired-up entry |
+| `src/server.ts` | SSR entry: `export default { fetch }`, returns rendered HTML on every GET |
 | `src/components/App.tsx` | Top-level component picking PostList or Post by URL |
 | `src/components/PostList.tsx` | The 3-post list page |
 | `src/components/Post.tsx` | Single-post view with prev/next nav |
@@ -94,10 +79,6 @@ Same as the CSR demo — Vite's SSR build with the current plugin config copies 
 
 ## Deploy
 
-Once gaps (1) and (2) are closed:
-
 ```bash
 zeroship deploy ./dist/app.zsapp --app=<uuid> --control=<url> --key=<master>
 ```
-
-Until then, the build produces a valid `.zsapp` archive with the right manifest shape, but the worker will only respond to `POST /_rpc/src/server/ssrRender`.
