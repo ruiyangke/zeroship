@@ -51,6 +51,49 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+# build_zsapp <js_file> <out_zsapp_path>
+#
+# Pack a single-module worker into a `.zsapp` archive (tar.zst) the
+# control plane accepts at `POST /api/apps/{id}/deploy` with
+# `Content-Type: application/x-zsapp`. Manifest is the first tar entry,
+# the JS payload lives at `blobs/<sha256>`. Schema v2 — see
+# `docs/reference/zsapp.md`.
+build_zsapp() {
+    local js_file="$1"
+    local out_path="$2"
+
+    local stage; stage=$(mktemp -d -t zeroship-e2e-zsapp-XXXXXX)
+    mkdir -p "$stage/blobs"
+
+    # SHA-256 the raw JS bytes — this hash is the blob's filename inside
+    # the tar AND the value referenced in `manifest.worker.modules`.
+    local hash
+    hash=$(sha256sum "$js_file" | awk '{print $1}')
+    cp "$js_file" "$stage/blobs/$hash"
+
+    # Minimal manifest: one worker module, no static assets, the same
+    # routing rules as `Manifest::passthrough()` (POST /_rpc/* → rpc,
+    # everything else → ssr).
+    local now
+    now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    cat > "$stage/manifest.json" <<EOF
+{"version":2,"rules":[{"action":{"kind":"worker","mode":"rpc"},"match":{"kind":"prefix","method":"POST","path":"/_rpc/"}},{"action":{"kind":"worker","mode":"ssr"},"match":{"kind":"any"}}],"assets":{},"runtime_assets":{},"asset_version":0,"sourcemaps":{},"worker":{"entry":"index.js","modules":{"index.js":"$hash"}},"metadata":{"compiler":"e2e-test-fixture","built_at":"$now"}}
+EOF
+
+    # Tar manifest.json first, then blobs/<hash>. Listing files
+    # explicitly avoids a directory entry and pins the order. Stream
+    # the tar through zstd so we never write the intermediate tar to
+    # disk; the inner `cd` means the tar paths are relative to $stage
+    # while $out_path stays in the caller's cwd.
+    (cd "$stage" && tar --format=ustar -cf - manifest.json "blobs/$hash") \
+        | zstd -q -f -o "$out_path"
+    rm -rf "$stage"
+}
+
 echo "============================================"
 echo "  zeroship E2E Platform Test"
 echo "============================================"
@@ -116,9 +159,11 @@ API_KEY=$(echo "$APP" | jq -r '.api_key')
 
 # Deploy
 tmpf=$(mktemp --suffix=.js)
+tmpz=$(mktemp --suffix=.zsapp)
 echo 'export function ping() { return "lifecycle-ok"; }' > "$tmpf"
-DEPLOY=$("$BIN/zeroship" deploy "$tmpf" --app="$APP_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" 2>&1)
-rm "$tmpf"
+build_zsapp "$tmpf" "$tmpz"
+DEPLOY=$("$BIN/zeroship" deploy "$tmpz" --app="$APP_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" 2>&1)
+rm "$tmpf" "$tmpz"
 echo "$DEPLOY" | grep -q "deploy_hash" && pass "deploy" || fail "deploy"
 
 # Verify via internal API
@@ -149,9 +194,11 @@ for i in $(seq 1 10); do
     APP_KEYS[$name]=$(echo "$result" | jq -r '.api_key')
 
     tmpf=$(mktemp --suffix=.js)
+    tmpz=$(mktemp --suffix=.zsapp)
     echo "export function ping() { return \"I am $name\"; }" > "$tmpf"
-    "$BIN/zeroship" deploy "$tmpf" --app="${APP_IDS[$name]}" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
-    rm "$tmpf"
+    build_zsapp "$tmpf" "$tmpz"
+    "$BIN/zeroship" deploy "$tmpz" --app="${APP_IDS[$name]}" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
+    rm "$tmpf" "$tmpz"
 done
 sleep 4
 
@@ -188,12 +235,14 @@ CID=$(echo "$result" | jq -r '.id')
 CKEY=$(echo "$result" | jq -r '.api_key')
 
 tmpf=$(mktemp --suffix=.js)
+tmpz=$(mktemp --suffix=.zsapp)
 cat > "$tmpf" << 'JSEOF'
 let counter = 0;
 export function ping() { counter++; return { count: counter }; }
 JSEOF
-"$BIN/zeroship" deploy "$tmpf" --app="$CID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
-rm "$tmpf"
+build_zsapp "$tmpf" "$tmpz"
+"$BIN/zeroship" deploy "$tmpz" --app="$CID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
+rm "$tmpf" "$tmpz"
 sleep 4
 
 # Send 10 requests — counters should increase (across 1-2 threads)
@@ -283,9 +332,11 @@ COLD_ID=$(echo "$result" | jq -r '.id')
 COLD_KEY=$(echo "$result" | jq -r '.api_key')
 
 tmpf=$(mktemp --suffix=.js)
+tmpz=$(mktemp --suffix=.zsapp)
 echo 'export function ping() { return "cold-ok"; }' > "$tmpf"
-"$BIN/zeroship" deploy "$tmpf" --app="$COLD_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
-rm "$tmpf"
+build_zsapp "$tmpf" "$tmpz"
+"$BIN/zeroship" deploy "$tmpz" --app="$COLD_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
+rm "$tmpf" "$tmpz"
 sleep 3
 
 # First request triggers on-demand load
@@ -324,9 +375,11 @@ HOT_ID=$(echo "$result" | jq -r '.id')
 HOT_KEY=$(echo "$result" | jq -r '.api_key')
 
 tmpf=$(mktemp --suffix=.js)
+tmpz=$(mktemp --suffix=.zsapp)
 echo 'export function ping() { return "v1"; }' > "$tmpf"
-"$BIN/zeroship" deploy "$tmpf" --app="$HOT_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
-rm "$tmpf"
+build_zsapp "$tmpf" "$tmpz"
+"$BIN/zeroship" deploy "$tmpz" --app="$HOT_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
+rm "$tmpf" "$tmpz"
 sleep 3
 
 # Verify v1
@@ -339,9 +392,11 @@ v=$(echo "$result" | jq -r '.result // empty')
 
 # Deploy v2
 tmpf=$(mktemp --suffix=.js)
+tmpz=$(mktemp --suffix=.zsapp)
 echo 'export function ping() { return "v2"; }' > "$tmpf"
-"$BIN/zeroship" deploy "$tmpf" --app="$HOT_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
-rm "$tmpf"
+build_zsapp "$tmpf" "$tmpz"
+"$BIN/zeroship" deploy "$tmpz" --app="$HOT_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
+rm "$tmpf" "$tmpz"
 
 # Wait for worker sync to pick up new hash + reload
 # Worker polls every 2s, needs time to detect + download + reload
