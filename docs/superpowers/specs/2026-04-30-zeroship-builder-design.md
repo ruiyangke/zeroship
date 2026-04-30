@@ -488,7 +488,7 @@ Mitigations:
 1. **Server: never load LangChain on the client.** Chat UI uses AI SDK's stream parser; LangChain ecosystem stays server-only.
 2. **Server: lazy import** — `await import('deepagents')` only when Builder is *first invoked*, not on every server function call. Light tasks (auth, list apps, list files) don't load it.
 3. **V8 isolate cache reuse** — the worker keeps the loaded module graph in its isolate's compilation cache; second-invocation cost is much lower than first.
-4. **Pin versions** — `@langchain/core@1.x`, `@langchain/langgraph@1.x`, `deepagents@1.x`, `@ai-sdk/react@^4.x` pinned to avoid surprise breaks.
+4. **Pin versions** — `@langchain/core@1.x`, `@langchain/langgraph@1.x`, `deepagents@1.x`, `@ai-sdk/react@^1.x` + `ai@^4.x` (matched pair — these track different major lines) pinned to avoid surprise breaks.
 5. **Facade layers** — all deepagents/LangChain calls go through `crates/control/src/agents/` modules; the translator (§4.8.4b) is the *only* place that knows about both ecosystems. When upgrading versions, only the facade or translator changes.
 
 #### 4.8.6 Version churn risk (LangChain + AI SDK)
