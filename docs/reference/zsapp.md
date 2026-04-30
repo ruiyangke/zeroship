@@ -120,6 +120,41 @@ For Vite-using apps, the build pipeline's `vite build --ssr` step imports Vite's
 
 So: `worker.entry` exists because the platform actually evaluates that module in V8. There's no frontend-side equivalent because the platform never evaluates frontend code; it just serves bytes.
 
+### Rules — CORS
+
+Each rule may carry an optional `cors` block. Per-rule (not global, not per-action) so apps can opt in selectively. The gateway short-circuits CORS preflight (`OPTIONS` with `Origin`) before dispatch and injects the response headers after dispatch — user code never sees the preflight.
+
+```jsonc
+{
+  "match":  { "kind": "prefix", "path": "/api/" },
+  "action": { "kind": "worker", "mode": "ssr" },
+  "cors": {
+    "allow_origins":     ["https://app.example.com"],   // exact match; "*" = any origin
+    "allow_methods":     ["GET", "POST", "OPTIONS"],
+    "allow_headers":     ["content-type", "authorization"],
+    "expose_headers":    ["x-request-id"],
+    "allow_credentials": true,
+    "max_age_seconds":   600                            // preflight cache window
+  }
+}
+```
+
+Validation:
+
+- `allow_origins` MUST be non-empty; an empty list defeats the purpose.
+- `allow_credentials: true` MUST NOT pair with `allow_origins: ["*"]`. The browser's CORS spec forbids that combination — the runtime rejects it at parse time so the misconfiguration never reaches a browser.
+- `cors` is `Option<Cors>` with `#[serde(default)]`; manifests without the field deserialize as `None` and emit no CORS headers.
+
+Behavior:
+
+- **Preflight short-circuit.** `OPTIONS` request with an `Origin` header. The gateway walks the rules using the method named in `Access-Control-Request-Method` (the *future* method, not `OPTIONS` itself). If a matching rule has `cors`, the gateway answers 204 with the appropriate `Access-Control-Allow-*` headers and the request never reaches the worker. If no CORS-bearing rule matches, the OPTIONS request falls through to normal dispatch.
+- **Response-header injection.** On a non-preflight request whose matched rule has `cors` AND whose `Origin` header is allowed, the gateway adds `Access-Control-Allow-Origin` (and `Vary: Origin` for non-wildcard origins), `Access-Control-Expose-Headers` (when configured), and `Access-Control-Allow-Credentials: true` (when configured) to the worker's or static response. If the Origin isn't allowed, no CORS headers are added — the browser enforces the deny.
+
+v1 simplifications:
+
+- Origins are exact strings; the literal `"*"` matches any origin (when credentials disabled). No glob, no automatic header reflection.
+- Method/header lists are emitted verbatim as joined header values.
+
 ### Required vs optional
 
 | Field | Required | Notes |

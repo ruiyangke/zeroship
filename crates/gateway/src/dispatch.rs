@@ -56,9 +56,12 @@ pub struct StaticHit {
 /// Test-only entry: compile + dispatch a [`Manifest`] in one shot.
 /// Production code goes through `RouteCache` so manifests are compiled
 /// once per route update; this helper keeps the existing test surface.
+/// Drops the per-rule `Cors` returned alongside the outcome — tests in
+/// this module don't exercise the CORS plumbing (the gateway router
+/// tests do).
 #[cfg(test)]
 pub fn dispatch_manifest(method: &str, path: &str, m: &Manifest) -> Outcome {
-    CompiledManifest::compile(m).dispatch(method, path)
+    CompiledManifest::compile(m).dispatch(method, path).0
 }
 
 // ---------------------------------------------------------------------------
@@ -96,6 +99,7 @@ mod tests {
                         cache: None,
                         rate_limit: None,
                     },
+                    cors: None,
                 },
                 Rule {
                     r#match: Match::Glob {
@@ -107,6 +111,7 @@ mod tests {
                         cache: None,
                         rate_limit: None,
                     },
+                    cors: None,
                 },
                 Rule {
                     r#match: Match::Any,
@@ -115,6 +120,7 @@ mod tests {
                         cache: None,
                         status: None,
                     },
+                    cors: None,
                 },
             ],
             assets: HashMap::from([
@@ -201,6 +207,7 @@ mod tests {
                 Rule {
                     r#match: Match::Exact { method: None, path: "/old".into() },
                     action: Action::Rewrite { to: "/new".into() },
+                    cors: None,
                 },
                 Rule {
                     r#match: Match::Exact { method: None, path: "/new".into() },
@@ -209,6 +216,7 @@ mod tests {
                         cache: None,
                         status: None,
                     },
+                    cors: None,
                 },
             ],
             assets: HashMap::from([("/new.html".into(), asset("h-new", "text/html"))]),
@@ -227,10 +235,12 @@ mod tests {
                 Rule {
                     r#match: Match::Exact { method: None, path: "/a".into() },
                     action: Action::Rewrite { to: "/b".into() },
+                    cors: None,
                 },
                 Rule {
                     r#match: Match::Exact { method: None, path: "/b".into() },
                     action: Action::Rewrite { to: "/a".into() },
+                    cors: None,
                 },
             ],
             ..Manifest::default()
@@ -267,6 +277,7 @@ mod tests {
                         per: RateLimitPer::Ip,
                     }),
                 },
+                cors: None,
             }],
             ..Manifest::default()
         };

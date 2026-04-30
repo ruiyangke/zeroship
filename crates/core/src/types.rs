@@ -174,6 +174,39 @@ pub struct ManifestMetadata {
 pub struct Rule {
     pub r#match: Match,
     pub action: Action,
+    /// Optional CORS policy applied to this rule. When set, the gateway
+    /// short-circuits CORS preflight (`OPTIONS` with `Origin`) before
+    /// dispatch and injects the response headers after dispatch.
+    /// Defaults to `None`, keeping legacy manifests deserializable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cors: Option<Cors>,
+}
+
+/// CORS policy attached to a [`Rule`]. Per-rule (not global, not
+/// per-action) so apps can opt in selectively.
+///
+/// v1 simplifications: origins are exact strings; the literal `"*"`
+/// matches any origin (subject to credentials rules); no glob, no
+/// automatic header reflection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Cors {
+    /// Origins to allow. Each entry is an exact string match. The
+    /// literal "*" matches any origin (subject to credentials rules).
+    pub allow_origins: Vec<String>,
+    /// HTTP methods to allow on cross-origin requests.
+    #[serde(default)]
+    pub allow_methods: Vec<HttpMethod>,
+    /// Request headers the browser may send.
+    #[serde(default)]
+    pub allow_headers: Vec<String>,
+    /// Response headers the browser may expose to the calling page.
+    #[serde(default)]
+    pub expose_headers: Vec<String>,
+    #[serde(default)]
+    pub allow_credentials: bool,
+    /// Cache duration for the preflight response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age_seconds: Option<u64>,
 }
 
 impl Manifest {
@@ -202,6 +235,7 @@ impl Manifest {
                         cache: None,
                         rate_limit: None,
                     },
+                    cors: None,
                 },
                 Rule {
                     r#match: Match::Any,
@@ -210,6 +244,7 @@ impl Manifest {
                         cache: None,
                         rate_limit: None,
                     },
+                    cors: None,
                 },
             ],
             assets: HashMap::new(),
@@ -277,6 +312,25 @@ impl Manifest {
                     }
                 }
                 _ => {}
+            }
+            if let Some(cors) = &rule.cors {
+                // Browser CORS spec: allow_credentials=true with a
+                // wildcard origin is forbidden — the browser would
+                // refuse to send credentials anyway.
+                if cors.allow_credentials
+                    && cors.allow_origins.iter().any(|o| o == "*")
+                {
+                    return Err(format!(
+                        "rule {i}: cors.allow_credentials=true cannot pair with allow_origins containing \"*\""
+                    ));
+                }
+                // Empty allow_origins is meaningless — every cross-origin
+                // request would fail to receive an Allow-Origin header.
+                if cors.allow_origins.is_empty() {
+                    return Err(format!(
+                        "rule {i}: cors.allow_origins must be non-empty"
+                    ));
+                }
             }
         }
         for j in 1..self.rules.len() {

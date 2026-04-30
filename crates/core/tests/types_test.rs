@@ -1,5 +1,5 @@
 use zeroship_core::types::{
-    Action, AppRuntimeLimits, AppUsage, AppVersionInfo, AssetEntry, ControlEvent, HttpMethod,
+    Action, AppRuntimeLimits, AppUsage, AppVersionInfo, AssetEntry, ControlEvent, Cors, HttpMethod,
     Manifest, ManifestMetadata, Match, RouteEntry, Rule, UsageReport, WorkerCode, WorkerMode,
 };
 use std::collections::HashMap;
@@ -131,6 +131,7 @@ fn validate_detects_any_shadowing_subsequent_rule() {
                     cache: None,
                     rate_limit: None,
                 },
+                cors: None,
             },
             Rule {
                 r#match: Match::Exact { method: None, path: "/foo".into() },
@@ -139,6 +140,7 @@ fn validate_detects_any_shadowing_subsequent_rule() {
                     cache: None,
                     rate_limit: None,
                 },
+                cors: None,
             },
         ],
         ..Manifest::default()
@@ -157,6 +159,7 @@ fn validate_allows_any_at_end() {
                     cache: None,
                     rate_limit: None,
                 },
+                cors: None,
             },
             Rule {
                 r#match: Match::Any,
@@ -165,6 +168,7 @@ fn validate_allows_any_at_end() {
                     cache: None,
                     rate_limit: None,
                 },
+                cors: None,
             },
         ],
         ..Manifest::default()
@@ -183,6 +187,7 @@ fn validate_detects_prefix_shadowing_exact() {
                     cache: None,
                     rate_limit: None,
                 },
+                cors: None,
             },
             Rule {
                 r#match: Match::Exact { method: None, path: "/admin/users".into() },
@@ -191,6 +196,7 @@ fn validate_detects_prefix_shadowing_exact() {
                     cache: None,
                     rate_limit: None,
                 },
+                cors: None,
             },
         ],
         ..Manifest::default()
@@ -209,6 +215,7 @@ fn validate_detects_prefix_shadowing_longer_prefix() {
                     cache: None,
                     rate_limit: None,
                 },
+                cors: None,
             },
             Rule {
                 r#match: Match::Prefix { method: None, path: "/admin/users".into() },
@@ -217,6 +224,7 @@ fn validate_detects_prefix_shadowing_longer_prefix() {
                     cache: None,
                     rate_limit: None,
                 },
+                cors: None,
             },
         ],
         ..Manifest::default()
@@ -238,6 +246,7 @@ fn validate_allows_method_disjoint_rules() {
                     cache: None,
                     rate_limit: None,
                 },
+                cors: None,
             },
             Rule {
                 r#match: Match::Exact {
@@ -249,6 +258,7 @@ fn validate_allows_method_disjoint_rules() {
                     cache: None,
                     rate_limit: None,
                 },
+                cors: None,
             },
         ],
         ..Manifest::default()
@@ -269,6 +279,7 @@ fn validate_static_does_not_shadow_non_get_head_rule() {
                     cache: None,
                     status: None,
                 },
+                cors: None,
             },
             Rule {
                 r#match: Match::Prefix {
@@ -280,6 +291,7 @@ fn validate_static_does_not_shadow_non_get_head_rule() {
                     cache: None,
                     rate_limit: None,
                 },
+                cors: None,
             },
         ],
         ..Manifest::default()
@@ -298,6 +310,7 @@ fn validate_detects_duplicate_exact_rules() {
                     cache: None,
                     rate_limit: None,
                 },
+                cors: None,
             },
             Rule {
                 r#match: Match::Exact { method: None, path: "/a".into() },
@@ -306,6 +319,7 @@ fn validate_detects_duplicate_exact_rules() {
                     cache: None,
                     rate_limit: None,
                 },
+                cors: None,
             },
         ],
         ..Manifest::default()
@@ -331,6 +345,7 @@ fn manifest_validate_rejects_invalid_status() {
                 cache: None,
                 status: Some(99), // out of range
             },
+            cors: None,
         }],
         ..Manifest::default()
     };
@@ -344,6 +359,7 @@ fn manifest_validate_rejects_invalid_status() {
                 cache: None,
                 status: Some(404),
             },
+            cors: None,
         }],
         ..Manifest::default()
     };
@@ -402,6 +418,7 @@ fn manifest_roundtrip_json() {
                     cache: None,
                     rate_limit: None,
                 },
+                cors: None,
             },
             Rule {
                 r#match: Match::Glob {
@@ -413,6 +430,7 @@ fn manifest_roundtrip_json() {
                     cache: None,
                     rate_limit: None,
                 },
+                cors: None,
             },
             Rule {
                 r#match: Match::Any,
@@ -421,6 +439,7 @@ fn manifest_roundtrip_json() {
                     cache: None,
                     status: None,
                 },
+                cors: None,
             },
         ],
         assets: HashMap::from([(
@@ -474,6 +493,7 @@ fn manifest_v2_round_trips_through_json() {
                 cache: None,
                 rate_limit: None,
             },
+            cors: None,
         }],
         assets: HashMap::from([(
             "/about.html".to_string(),
@@ -708,4 +728,135 @@ fn app_version_info_accepts_legacy_payload_without_manifest() {
     let info: AppVersionInfo = serde_json::from_str(json).unwrap();
     assert!(info.manifest.is_none());
     assert_eq!(info.env_version, 3);
+}
+
+// -- CORS schema -----------------------------------------------------------
+
+fn cors_rule_with(cors: Cors) -> Rule {
+    Rule {
+        r#match: Match::Prefix {
+            method: None,
+            path: "/api/".into(),
+        },
+        action: Action::Worker {
+            mode: WorkerMode::Ssr,
+            cache: None,
+            rate_limit: None,
+        },
+        cors: Some(cors),
+    }
+}
+
+#[test]
+fn cors_round_trips_through_json() {
+    let cors = Cors {
+        allow_origins: vec!["https://example.com".into(), "https://app.example.com".into()],
+        allow_methods: vec![HttpMethod::Get, HttpMethod::Post, HttpMethod::Options],
+        allow_headers: vec!["content-type".into(), "authorization".into()],
+        expose_headers: vec!["x-request-id".into()],
+        allow_credentials: true,
+        max_age_seconds: Some(600),
+    };
+    let m = Manifest {
+        rules: vec![cors_rule_with(cors.clone())],
+        ..Manifest::default()
+    };
+    let json = serde_json::to_string(&m).unwrap();
+    let decoded: Manifest = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded.rules.len(), 1);
+    assert_eq!(decoded.rules[0].cors.as_ref(), Some(&cors));
+}
+
+#[test]
+fn cors_credentials_with_wildcard_rejected() {
+    // Per the browser CORS spec, allow_credentials=true MUST NOT pair
+    // with allow_origins=["*"]. validate() must catch this.
+    let m = Manifest {
+        rules: vec![cors_rule_with(Cors {
+            allow_origins: vec!["*".into()],
+            allow_methods: vec![HttpMethod::Get],
+            allow_headers: vec![],
+            expose_headers: vec![],
+            allow_credentials: true,
+            max_age_seconds: None,
+        })],
+        ..Manifest::default()
+    };
+    let err = m.validate().unwrap_err();
+    assert!(
+        err.to_lowercase().contains("credentials") || err.contains("*"),
+        "error must mention the credentials/* combination: {err}"
+    );
+}
+
+#[test]
+fn cors_empty_allow_origins_rejected() {
+    let m = Manifest {
+        rules: vec![cors_rule_with(Cors {
+            allow_origins: vec![],
+            allow_methods: vec![HttpMethod::Get],
+            allow_headers: vec![],
+            expose_headers: vec![],
+            allow_credentials: false,
+            max_age_seconds: None,
+        })],
+        ..Manifest::default()
+    };
+    let err = m.validate().unwrap_err();
+    assert!(
+        err.to_lowercase().contains("allow_origins"),
+        "error must mention allow_origins: {err}"
+    );
+}
+
+#[test]
+fn cors_omitted_round_trips() {
+    // A rule without `cors` must serialize without the field present
+    // and deserialize as cors: None, preserving back-compat with
+    // existing manifests.
+    let m = Manifest {
+        rules: vec![Rule {
+            r#match: Match::Any,
+            action: Action::Worker {
+                mode: WorkerMode::Ssr,
+                cache: None,
+                rate_limit: None,
+            },
+            cors: None,
+        }],
+        ..Manifest::default()
+    };
+    let json = serde_json::to_string(&m).unwrap();
+    assert!(!json.contains("\"cors\""), "no cors field when None: {json}");
+    let decoded: Manifest = serde_json::from_str(&json).unwrap();
+    assert!(decoded.rules[0].cors.is_none());
+
+    // Older manifest payloads (no cors field at all) still parse.
+    let legacy = r#"{
+        "rules": [
+            {"match": {"kind": "any"},
+             "action": {"kind": "worker", "mode": "ssr"}}
+        ],
+        "assets": {},
+        "runtime_assets": {},
+        "asset_version": 0
+    }"#;
+    let m2: Manifest = serde_json::from_str(legacy).unwrap();
+    assert!(m2.rules[0].cors.is_none());
+}
+
+#[test]
+fn cors_credentials_with_specific_origin_validates() {
+    let m = Manifest {
+        rules: vec![cors_rule_with(Cors {
+            allow_origins: vec!["https://example.com".into()],
+            allow_methods: vec![HttpMethod::Post],
+            allow_headers: vec!["content-type".into()],
+            expose_headers: vec![],
+            allow_credentials: true,
+            max_age_seconds: Some(86_400),
+        })],
+        ..Manifest::default()
+    };
+    m.validate().expect("credentials with specific origin must validate");
 }

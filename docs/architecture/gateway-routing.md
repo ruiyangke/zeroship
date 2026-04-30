@@ -95,8 +95,21 @@ Method-omitted (or `"*"`) means all methods.
 
 - `Action::Static.status` ∈ `[100, 599]` and `Action::Redirect.status` ∈ `[300, 399]`. Out-of-range = parse error.
 - **Shadow detection.** A rule is shadowed when an earlier rule's `(effective_methods, path-coverage)` is a strict superset. `Manifest::passthrough()` and the standard SSR app shape (`POST /_rpc/`, `Glob /blog/[slug]`, `Any → Static`) all pass. Glob-as-shadower is deferred (TODO in code).
+- **CORS sanity.** A rule's `cors` block (when present) MUST have non-empty `allow_origins`, and `allow_credentials: true` MUST NOT pair with `allow_origins: ["*"]` (the browser CORS spec forbids that combination).
 
 Apps whose manifest fails validation get `Manifest::passthrough()` synthesized with a logged warning — they're never served from a broken manifest.
+
+## CORS handling
+
+CORS is a per-rule concern. `Manifest::Rule { cors: Option<Cors> }` lets apps opt into CORS on the rules that need it (typically the API rule) without leaking headers everywhere.
+
+Two gateway-side hooks:
+
+1. **Preflight short-circuit.** `OPTIONS` with an `Origin` header. Before normal dispatch, `router::handle_request` calls `CompiledManifest::cors_for(request_method, path)`, where `request_method` comes from `Access-Control-Request-Method` (the future request's method, not `OPTIONS` itself). If the matched rule has `cors`, the gateway answers `204 No Content` with `Access-Control-Allow-*` headers built from the policy and returns. If no CORS-bearing rule matches, OPTIONS falls through to normal dispatch (which usually 404s).
+
+2. **Response-header injection.** `CompiledManifest::dispatch` returns `(Outcome, Option<Cors>)`. After `execute_outcome` builds the worker/static/redirect response, `inject_cors_response_headers` adds `Access-Control-Allow-Origin` (and `Vary: Origin` for non-wildcard origins), `Access-Control-Expose-Headers`, and `Access-Control-Allow-Credentials` when the request's `Origin` is in the rule's allow list. If it isn't, no CORS headers are added — the browser enforces the deny.
+
+The `Outcome` enum stays lean (no per-variant cors field); the `(Outcome, Option<Cors>)` tuple keeps the policy reachable at the response stage regardless of which variant fired.
 
 ## Compiled dispatch (the hot path)
 

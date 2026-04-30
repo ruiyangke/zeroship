@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use zeroship_core::types::{
-    Action, AssetEntry, CacheCtl, HttpMethod, Manifest, Match, RateLimit, Rule, WorkerCode,
+    Action, AssetEntry, CacheCtl, Cors, HttpMethod, Manifest, Match, RateLimit, Rule, WorkerCode,
     WorkerMode,
 };
 
@@ -78,6 +78,11 @@ struct CompiledRule {
     methods: u8,
     matcher: CompiledMatch,
     action: CompiledAction,
+    /// Per-rule CORS policy. Cloned from the source rule; no compile-time
+    /// transform needed (no globs to compile, no templates to parse).
+    /// Threaded out of `dispatch` and `cors_for` so the router can apply
+    /// preflight responses + post-dispatch header injection.
+    cors: Option<Cors>,
 }
 
 enum CompiledMatch {
@@ -168,7 +173,12 @@ fn compile_rule(rule: &Rule) -> CompiledRule {
     let methods = effective_methods(rule);
     let matcher = compile_match(&rule.r#match);
     let action = compile_action(&rule.action);
-    CompiledRule { methods, matcher, action }
+    CompiledRule {
+        methods,
+        matcher,
+        action,
+        cors: rule.cors.clone(),
+    }
 }
 
 fn effective_methods(rule: &Rule) -> u8 {
@@ -387,7 +397,12 @@ fn match_glob<'a>(glob: &'a CompiledGlob, path: &'a str) -> Option<Vec<(&'a str,
 // ---------------------------------------------------------------------------
 
 impl CompiledManifest {
-    pub fn dispatch(&self, method: &str, path: &str) -> Outcome {
+    /// Walk the rules and return the dispatch outcome plus the matched
+    /// rule's CORS policy (if any). The router applies CORS headers
+    /// regardless of which `Outcome` variant fired, so threading the
+    /// `Option<Cors>` through here keeps it visible at the response stage
+    /// without bloating the `Outcome` enum.
+    pub fn dispatch(&self, method: &str, path: &str) -> (Outcome, Option<Cors>) {
         const MAX_HOPS: u32 = 8;
         let method_mask = request_method_bit(method);
         let mut current_path = path.to_string();
@@ -419,7 +434,7 @@ impl CompiledManifest {
                     CompiledMatch::Any => Captures::Empty,
                 };
                 match self.resolve(&rule.action, &current_path, &captures) {
-                    ResolveResult::Outcome(o) => return o,
+                    ResolveResult::Outcome(o) => return (o, rule.cors.clone()),
                     ResolveResult::Rewrite(new_path) => {
                         current_path = new_path;
                         rewrote = true;
@@ -429,10 +444,69 @@ impl CompiledManifest {
                 }
             }
             if !rewrote {
-                return Outcome::NotFound;
+                return (Outcome::NotFound, None);
             }
         }
-        Outcome::NotFound
+        (Outcome::NotFound, None)
+    }
+
+    /// Look up the CORS policy attached to the rule that *would* match
+    /// `(method, path)`. Used by the gateway's preflight handler to
+    /// decide what `Access-Control-*` headers to emit on a CORS
+    /// preflight (`OPTIONS` with `Origin`). Walks the same matcher chain
+    /// as `dispatch`, but inspects each candidate rule's `cors` instead
+    /// of running its action — so we can answer the question for a
+    /// `request_method` (e.g. `POST`) carried in the
+    /// `Access-Control-Request-Method` header even though the actual
+    /// request method on the wire is `OPTIONS`.
+    ///
+    /// Rewrites are followed exactly the same way as `dispatch` so a
+    /// CORS rule on the rewritten path is honored.
+    pub fn cors_for(&self, request_method: &str, path: &str) -> Option<Cors> {
+        const MAX_HOPS: u32 = 8;
+        let method_mask = request_method_bit(request_method);
+        let mut current_path = path.to_string();
+        for _hop in 0..MAX_HOPS {
+            let mut rewrote = false;
+            for rule in &self.rules {
+                if (method_mask & rule.methods) == 0 {
+                    continue;
+                }
+                let captures = match &rule.matcher {
+                    CompiledMatch::Exact(p) => {
+                        if current_path == *p {
+                            Captures::Empty
+                        } else {
+                            continue;
+                        }
+                    }
+                    CompiledMatch::Prefix(bare) => {
+                        if match_prefix_bare(bare, &current_path) {
+                            Captures::Empty
+                        } else {
+                            continue;
+                        }
+                    }
+                    CompiledMatch::Glob(g) => match match_glob(g, &current_path) {
+                        Some(c) => Captures::Glob(c),
+                        None => continue,
+                    },
+                    CompiledMatch::Any => Captures::Empty,
+                };
+                // Rewrites still mutate the path before the rule whose
+                // `cors` we'd return — keep parity with `dispatch`.
+                if let CompiledAction::Rewrite { to } = &rule.action {
+                    current_path = to.render(&current_path, &captures);
+                    rewrote = true;
+                    break;
+                }
+                return rule.cors.clone();
+            }
+            if !rewrote {
+                return None;
+            }
+        }
+        None
     }
 
     fn resolve(
@@ -554,11 +628,11 @@ mod tests {
     fn compile_preserves_dispatch_semantics_for_passthrough() {
         let m = Manifest::passthrough();
         let c = CompiledManifest::compile(&m);
-        match c.dispatch("POST", "/_rpc/listTodos") {
+        match c.dispatch("POST", "/_rpc/listTodos").0 {
             Outcome::Worker { mode, .. } => assert_eq!(mode, WorkerMode::Rpc),
             other => panic!("expected Worker(Rpc), got {other:?}"),
         }
-        match c.dispatch("GET", "/") {
+        match c.dispatch("GET", "/").0 {
             Outcome::Worker { mode, .. } => assert_eq!(mode, WorkerMode::Ssr),
             other => panic!("expected Worker(Ssr), got {other:?}"),
         }
@@ -574,6 +648,7 @@ mod tests {
                     cache: None,
                     status: None,
                 },
+                cors: None,
             }],
             assets: HashMap::from([(
                 "/index.html".into(),
@@ -582,11 +657,11 @@ mod tests {
             ..Manifest::default()
         };
         let c = CompiledManifest::compile(&m);
-        match c.dispatch("GET", "/") {
+        match c.dispatch("GET", "/").0 {
             Outcome::Static(hit) => assert_eq!(hit.hash, "h1"),
             other => panic!("expected Static, got {other:?}"),
         }
-        match c.dispatch("POST", "/") {
+        match c.dispatch("POST", "/").0 {
             Outcome::NotFound => {}
             other => panic!("expected NotFound for POST, got {other:?}"),
         }
@@ -604,11 +679,12 @@ mod tests {
                     to: "/new/[slug]".into(),
                     status: 301,
                 },
+                cors: None,
             }],
             ..Manifest::default()
         };
         let c = CompiledManifest::compile(&m);
-        match c.dispatch("GET", "/old/foo") {
+        match c.dispatch("GET", "/old/foo").0 {
             Outcome::Redirect { to, status } => {
                 assert_eq!(to, "/new/foo");
                 assert_eq!(status, 301);
@@ -624,6 +700,7 @@ mod tests {
                 Rule {
                     r#match: Match::Exact { method: None, path: "/old".into() },
                     action: Action::Rewrite { to: "/new".into() },
+                    cors: None,
                 },
                 Rule {
                     r#match: Match::Exact { method: None, path: "/new".into() },
@@ -632,6 +709,7 @@ mod tests {
                         cache: None,
                         status: None,
                     },
+                    cors: None,
                 },
             ],
             assets: HashMap::from([(
@@ -641,7 +719,7 @@ mod tests {
             ..Manifest::default()
         };
         let c = CompiledManifest::compile(&m);
-        match c.dispatch("GET", "/old") {
+        match c.dispatch("GET", "/old").0 {
             Outcome::Static(hit) => assert_eq!(hit.hash, "h-new"),
             other => panic!("expected Static after rewrite, got {other:?}"),
         }
@@ -654,16 +732,18 @@ mod tests {
                 Rule {
                     r#match: Match::Exact { method: None, path: "/a".into() },
                     action: Action::Rewrite { to: "/b".into() },
+                    cors: None,
                 },
                 Rule {
                     r#match: Match::Exact { method: None, path: "/b".into() },
                     action: Action::Rewrite { to: "/a".into() },
+                    cors: None,
                 },
             ],
             ..Manifest::default()
         };
         let c = CompiledManifest::compile(&m);
-        match c.dispatch("GET", "/a") {
+        match c.dispatch("GET", "/a").0 {
             Outcome::NotFound => {}
             other => panic!("expected NotFound after circular rewrite, got {other:?}"),
         }

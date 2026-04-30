@@ -141,17 +141,44 @@ async fn handle_request(
 
     // Normalize tail: strip leading slash
     let tail = tail.strip_prefix('/').unwrap_or(tail);
+    let dispatch_path = format!("/{tail}");
+
+    // CORS preflight short-circuit. The browser sends `OPTIONS` with
+    // `Origin` and `Access-Control-Request-Method` *before* the actual
+    // request; we walk the rules using the *requested* method (carried
+    // in the header) to find a matching rule's CORS policy, and answer
+    // with a 204. If no CORS-bearing rule matches, fall through to
+    // normal dispatch (which will probably return 404 or hit an OPTIONS
+    // handler in the worker).
+    if req.method() == ntex::http::Method::OPTIONS && req.headers().contains_key("origin") {
+        let request_method = req
+            .headers()
+            .get("access-control-request-method")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("GET");
+        if let Some(cors) = compiled_route
+            .manifest
+            .cors_for(request_method, &dispatch_path)
+        {
+            let origin = req
+                .headers()
+                .get("origin")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            return build_preflight_response(&cors, origin, wall_start);
+        }
+    }
 
     // Manifest-driven dispatch. Every app has a manifest (synthesized
     // passthrough for apps that haven't declared one), so dispatch is
     // always defined. The pre-compiled form does the work — no per-request
     // HashMap allocation, no per-call String::replace.
-    let dispatch_path = format!("/{tail}");
-    let outcome = compiled_route
+    let (outcome, matched_cors) = compiled_route
         .manifest
         .dispatch(req.method().as_str(), &dispatch_path);
     execute_outcome(
         outcome,
+        matched_cors,
         req,
         state,
         &app_id,
@@ -170,6 +197,7 @@ async fn handle_request(
 /// Execute the [`Outcome`] produced by the manifest's rule walk.
 async fn execute_outcome(
     outcome: crate::dispatch::Outcome,
+    matched_cors: Option<zeroship_core::types::Cors>,
     req: HttpRequest,
     state: web::types::State<Arc<GateState>>,
     app_id: &Uuid,
@@ -181,7 +209,17 @@ async fn execute_outcome(
     use crate::dispatch::Outcome;
     use zeroship_core::types::WorkerMode;
 
-    match outcome {
+    // Capture the request Origin once — used to decide whether to inject
+    // CORS response headers after the underlying handler builds the
+    // response. Empty when the client didn't send an `Origin` header
+    // (same-origin request); we leave headers off in that case.
+    let origin_value = req
+        .headers()
+        .get("origin")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let mut response = match outcome {
         Outcome::Worker { mode, cache: _, rate_limit: _ } => {
             // TODO: honor per-rule rate_limit. Today we still enforce the
             // global per-app bucket inside handle_dispatch.
@@ -208,6 +246,115 @@ async fn execute_outcome(
         }
         Outcome::NotFound => HttpResponse::NotFound()
             .json(&serde_json::json!({"error": "no rule matched"})),
+    };
+
+    // Inject CORS response headers when the matched rule had a `cors`
+    // policy AND the request carried an `Origin` allowed by it. The
+    // browser is the enforcer here — we only emit headers for allowed
+    // origins, and the lack of `Access-Control-Allow-Origin` causes the
+    // browser to block the response.
+    if let (Some(cors), Some(origin)) = (matched_cors.as_ref(), origin_value.as_deref()) {
+        if !origin.is_empty() {
+            inject_cors_response_headers(response.headers_mut(), cors, origin);
+        }
+    }
+    response
+}
+
+/// Build a 204 preflight response for a matching CORS rule. Called when
+/// the request is `OPTIONS` with an `Origin` header AND a CORS-bearing
+/// rule matches the `Access-Control-Request-Method` + path. The body is
+/// empty; the headers tell the browser whether to proceed with the
+/// actual request.
+fn build_preflight_response(
+    cors: &zeroship_core::types::Cors,
+    origin: &str,
+    wall_start: std::time::Instant,
+) -> HttpResponse {
+    use ntex::http::StatusCode;
+    let mut resp = HttpResponse::build(StatusCode::NO_CONTENT);
+    // Allow-Origin: "*" only when credentials disabled; specific origin
+    // when in the explicit allow list. Anything else → no Allow-Origin
+    // header at all and the browser blocks.
+    let wildcard_ok = cors.allow_origins.iter().any(|o| o == "*") && !cors.allow_credentials;
+    let exact_match = cors.allow_origins.iter().any(|o| o == origin);
+    if wildcard_ok {
+        resp.header("access-control-allow-origin", "*");
+    } else if exact_match {
+        resp.header("access-control-allow-origin", origin);
+        resp.header("vary", "Origin");
+    }
+    if (wildcard_ok || exact_match) && !cors.allow_methods.is_empty() {
+        let methods = cors
+            .allow_methods
+            .iter()
+            .map(|m| m.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        resp.header("access-control-allow-methods", methods);
+    }
+    if (wildcard_ok || exact_match) && !cors.allow_headers.is_empty() {
+        resp.header(
+            "access-control-allow-headers",
+            cors.allow_headers.join(", "),
+        );
+    }
+    if cors.allow_credentials && exact_match {
+        resp.header("access-control-allow-credentials", "true");
+    }
+    if let Some(seconds) = cors.max_age_seconds {
+        if wildcard_ok || exact_match {
+            resp.header("access-control-max-age", seconds.to_string());
+        }
+    }
+    resp.header(
+        "x-wall-time-ms",
+        format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
+    );
+    resp.finish()
+}
+
+/// Inject `Access-Control-*` response headers on a non-preflight
+/// response. Mirrors the preflight logic for Allow-Origin/Vary; also
+/// emits `Expose-Headers` and `Allow-Credentials` so the browser exposes
+/// the right response surface.
+fn inject_cors_response_headers(
+    headers: &mut ntex::http::HeaderMap,
+    cors: &zeroship_core::types::Cors,
+    origin: &str,
+) {
+    use ntex::http::header::{HeaderName, HeaderValue};
+    let wildcard_ok = cors.allow_origins.iter().any(|o| o == "*") && !cors.allow_credentials;
+    let exact_match = cors.allow_origins.iter().any(|o| o == origin);
+    if wildcard_ok {
+        if let Ok(v) = HeaderValue::from_str("*") {
+            headers.insert(HeaderName::from_static("access-control-allow-origin"), v);
+        }
+    } else if exact_match {
+        if let Ok(v) = HeaderValue::from_str(origin) {
+            headers.insert(HeaderName::from_static("access-control-allow-origin"), v);
+        }
+        headers.insert(
+            HeaderName::from_static("vary"),
+            HeaderValue::from_static("Origin"),
+        );
+    } else {
+        // Origin not in allow list → no headers; the browser blocks.
+        return;
+    }
+    if !cors.expose_headers.is_empty() {
+        if let Ok(v) = HeaderValue::from_str(&cors.expose_headers.join(", ")) {
+            headers.insert(
+                HeaderName::from_static("access-control-expose-headers"),
+                v,
+            );
+        }
+    }
+    if cors.allow_credentials && exact_match {
+        headers.insert(
+            HeaderName::from_static("access-control-allow-credentials"),
+            HeaderValue::from_static("true"),
+        );
     }
 }
 
@@ -1269,5 +1416,221 @@ mod tests {
                 Self::Unavailable(s) => f.debug_tuple("Unavailable").field(s).finish(),
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // CORS tests — preflight + response-header injection
+    // -----------------------------------------------------------------------
+
+    use crate::compiled::CompiledManifest;
+    use zeroship_core::types::{
+        Action, Cors, HttpMethod, Manifest, Match, Rule, WorkerMode,
+    };
+
+    /// Single-rule manifest with a worker action carrying a CORS policy.
+    /// All preflight tests use this shape; the path/method narrowness
+    /// keeps the assertions specific.
+    fn manifest_with_cors(cors: Cors) -> Manifest {
+        Manifest {
+            rules: vec![Rule {
+                r#match: Match::Prefix {
+                    method: None,
+                    path: "/api/".into(),
+                },
+                action: Action::Worker {
+                    mode: WorkerMode::Ssr,
+                    cache: None,
+                    rate_limit: None,
+                },
+                cors: Some(cors),
+            }],
+            ..Manifest::default()
+        }
+    }
+
+    fn header_str<'a>(resp: &'a HttpResponse, name: &str) -> Option<&'a str> {
+        resp.headers().get(name).and_then(|v| v.to_str().ok())
+    }
+
+    #[test]
+    fn preflight_allowed_origin() {
+        let cors = Cors {
+            allow_origins: vec!["https://example.com".into()],
+            allow_methods: vec![HttpMethod::Get, HttpMethod::Post],
+            allow_headers: vec!["content-type".into(), "authorization".into()],
+            expose_headers: vec![],
+            allow_credentials: false,
+            max_age_seconds: Some(600),
+        };
+        let m = manifest_with_cors(cors.clone());
+        let c = CompiledManifest::compile(&m);
+        // Preflight asks "can I POST /api/users?" — POST matches the
+        // worker rule; the rule carries CORS so we answer 204.
+        let policy = c.cors_for("POST", "/api/users").expect("cors should match");
+        assert_eq!(policy.allow_origins, cors.allow_origins);
+        let resp = build_preflight_response(
+            &policy,
+            "https://example.com",
+            std::time::Instant::now(),
+        );
+        assert_eq!(resp.status(), ntex::http::StatusCode::NO_CONTENT);
+        assert_eq!(
+            header_str(&resp, "access-control-allow-origin"),
+            Some("https://example.com")
+        );
+        assert_eq!(header_str(&resp, "vary"), Some("Origin"));
+        let methods = header_str(&resp, "access-control-allow-methods").unwrap();
+        assert!(methods.contains("GET"));
+        assert!(methods.contains("POST"));
+        let headers = header_str(&resp, "access-control-allow-headers").unwrap();
+        assert!(headers.contains("content-type"));
+        assert_eq!(header_str(&resp, "access-control-max-age"), Some("600"));
+    }
+
+    #[test]
+    fn preflight_disallowed_origin() {
+        // Origin is not in the allow list — respond 204 but WITHOUT
+        // `Access-Control-Allow-Origin`. The browser blocks.
+        let cors = Cors {
+            allow_origins: vec!["https://allowed.com".into()],
+            allow_methods: vec![HttpMethod::Post],
+            allow_headers: vec![],
+            expose_headers: vec![],
+            allow_credentials: false,
+            max_age_seconds: None,
+        };
+        let resp = build_preflight_response(
+            &cors,
+            "https://evil.com",
+            std::time::Instant::now(),
+        );
+        assert_eq!(resp.status(), ntex::http::StatusCode::NO_CONTENT);
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "no allow-origin header for disallowed origin"
+        );
+        assert!(resp.headers().get("vary").is_none());
+    }
+
+    #[test]
+    fn preflight_wildcard_origin_no_credentials() {
+        let cors = Cors {
+            allow_origins: vec!["*".into()],
+            allow_methods: vec![HttpMethod::Get],
+            allow_headers: vec![],
+            expose_headers: vec![],
+            allow_credentials: false,
+            max_age_seconds: None,
+        };
+        let resp = build_preflight_response(
+            &cors,
+            "https://anything.example",
+            std::time::Instant::now(),
+        );
+        assert_eq!(
+            header_str(&resp, "access-control-allow-origin"),
+            Some("*")
+        );
+        // No `Vary` for wildcard responses — they don't depend on origin.
+        assert!(resp.headers().get("vary").is_none());
+        assert!(
+            resp.headers()
+                .get("access-control-allow-credentials")
+                .is_none(),
+            "no credentials header on wildcard preflight"
+        );
+    }
+
+    #[test]
+    fn preflight_no_matching_rule_falls_through() {
+        // Manifest has a CORS rule on /api/, but the request targets
+        // /other. cors_for returns None → router falls through to
+        // normal dispatch. With no matching rule for /other, dispatch
+        // returns NotFound.
+        let cors = Cors {
+            allow_origins: vec!["https://example.com".into()],
+            allow_methods: vec![HttpMethod::Post],
+            allow_headers: vec![],
+            expose_headers: vec![],
+            allow_credentials: false,
+            max_age_seconds: None,
+        };
+        let m = manifest_with_cors(cors);
+        let c = CompiledManifest::compile(&m);
+        assert!(c.cors_for("POST", "/other").is_none());
+        // Confirm dispatch returns NotFound for the same path so the
+        // fall-through behaviour is end-to-end coherent.
+        let (outcome, matched) = c.dispatch("OPTIONS", "/other");
+        assert!(matches!(outcome, crate::dispatch::Outcome::NotFound));
+        assert!(matched.is_none());
+    }
+
+    #[test]
+    fn actual_request_injects_cors_headers() {
+        // Non-preflight: real POST with Origin matching → response
+        // headers include allow-origin + Vary.
+        let cors = Cors {
+            allow_origins: vec!["https://example.com".into()],
+            allow_methods: vec![HttpMethod::Post],
+            allow_headers: vec![],
+            expose_headers: vec!["x-request-id".into()],
+            allow_credentials: false,
+            max_age_seconds: None,
+        };
+        let mut resp = HttpResponse::Ok().finish();
+        inject_cors_response_headers(resp.headers_mut(), &cors, "https://example.com");
+        assert_eq!(
+            header_str(&resp, "access-control-allow-origin"),
+            Some("https://example.com")
+        );
+        assert_eq!(header_str(&resp, "vary"), Some("Origin"));
+        assert_eq!(
+            header_str(&resp, "access-control-expose-headers"),
+            Some("x-request-id")
+        );
+    }
+
+    #[test]
+    fn actual_request_disallowed_origin_no_headers() {
+        let cors = Cors {
+            allow_origins: vec!["https://allowed.com".into()],
+            allow_methods: vec![HttpMethod::Post],
+            allow_headers: vec![],
+            expose_headers: vec!["x-request-id".into()],
+            allow_credentials: false,
+            max_age_seconds: None,
+        };
+        let mut resp = HttpResponse::Ok().finish();
+        inject_cors_response_headers(resp.headers_mut(), &cors, "https://evil.com");
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "no allow-origin for disallowed origin"
+        );
+        assert!(resp.headers().get("vary").is_none());
+        assert!(
+            resp.headers()
+                .get("access-control-expose-headers")
+                .is_none(),
+            "expose-headers requires an allowed origin"
+        );
+    }
+
+    #[test]
+    fn actual_request_wildcard_no_credentials() {
+        let cors = Cors {
+            allow_origins: vec!["*".into()],
+            allow_methods: vec![HttpMethod::Get],
+            allow_headers: vec![],
+            expose_headers: vec![],
+            allow_credentials: false,
+            max_age_seconds: None,
+        };
+        let mut resp = HttpResponse::Ok().finish();
+        inject_cors_response_headers(resp.headers_mut(), &cors, "https://anything.example");
+        assert_eq!(
+            header_str(&resp, "access-control-allow-origin"),
+            Some("*")
+        );
+        assert!(resp.headers().get("vary").is_none(), "no Vary on wildcard");
     }
 }
