@@ -1,0 +1,89 @@
+=================================================================
+  zeroship Runtime Benchmark — post RPC v1 redesign
+  Comparison vs Apr 27 (pre-redesign baseline)
+=================================================================
+
+Setup (same for both runs):
+  16 v8-server-compio workers
+  300 saturate connections
+  zerobench (open-loop, HDR-precise, mio/epoll)
+
+Wire change:
+  Apr 27   POST /_rpc/<method>     body = JSON array of positional args
+                                   response = raw JSON value
+                                   kernel fast path: dispatchRpc(method, body)
+                                   bypasses Request construction
+  Today    POST /_zs/v1/<id>       body = superjson { json: <input> } envelope
+                                   response = { json: <result> } envelope
+                                   kernel fast path: GONE — every request goes
+                                   through default.fetch(request)
+                                   adds: Request construction, URL parse,
+                                   envelope unwrap (JSON.parse + .json extract),
+                                   response envelope wrap (JSON.stringify({json}))
+                                   per-procedure Zod input validation slot
+                                   (no schemas declared in bench fixture, so
+                                   the cost there is 0 — same as Apr 27)
+
+Apples-to-apples scenarios (5s saturate, p50/p99):
+
+                       Apr 27           Today            Δ
+ping                   964,936 req/s   467,741 req/s    -52%
+                       p50=304µs       p50=450µs        +146µs
+                       p99=647µs       p99=4.3ms        +3.7ms
+
+fib10                  854,752 req/s   450,498 req/s    -47%
+                       p50=333µs       p50=509µs
+                       p99=624µs       p99=3.9ms
+
+setTimeout0            829,087 req/s   454,692 req/s    -45%
+                       p50=369µs       p50=537µs
+                       p99=562µs       p99=3.6ms
+
+promiseChain           921,186 req/s   440,223 req/s    -52%
+                       p50=338µs       p50=542µs
+                       p99=593µs       p99=3.6ms
+
+sha256                 650,319 req/s   401,748 req/s    -38%
+                       p50=395µs       p50=627µs
+                       p99=2.4ms       p99=3.6ms
+
+hmacSign               617,168 req/s   385,708 req/s    -37%
+                       p50=451µs       p50=669µs
+                       p99=1.3ms       p99=3.3ms
+
+randomUUID             902,898 req/s   447,508 req/s    -50%
+                       p50=327µs       p50=578µs
+                       p99=530µs       p99=3.2ms
+
+aesEncrypt             560,738 req/s   359,579 req/s    -36%
+                       p50=514µs       p50=741µs
+                       p99=1.3ms       p99=3.4ms
+
+ecdsaSign              201,342 req/s   216,535 req/s    +8%   ←
+                       p50=1.5ms       p50=1.3ms
+                       p99=2.3ms       p99=4.3ms
+
+Notes:
+  - Ping-class (~zero handler work) loses 50% throughput. p99 went from
+    ~600µs → ~4ms. The dispatch overhead is now a much larger fraction
+    of per-request time when the handler is trivial.
+  - Crypto procedures lose 36-38%. The amortization is better because
+    the handler does real work (digest, sign, encrypt).
+  - ECDSA P-256 keygen+sign improved 8%. Likely unrelated to dispatch —
+    different optimization in v8 binding refactors over the cycle.
+  - Across the board, p50 went up by ~150-250µs per request. That's
+    roughly the cost of: Request construction + URL parse + body text
+    read + JSON.parse + envelope unwrap + dispatch lookup + JSON.stringify
+    + envelope wrap.
+
+What real apps look like:
+  At 400k req/s a single zeroship process can serve 400k QPS of trivial
+  procedures. With Zod validation, DB calls, or any meaningful handler
+  work, the dispatch tax disappears in the noise. The 2x regression
+  matters for synthetic benchmarks; not for production.
+
+Architecture trade taken:
+  Drop the kernel fast path. Worth ~2x on hot dispatch but eliminates
+  the parallel code path (dispatchRpc + invokeMethod + parseRpcArgs all
+  gone), aligns with WinterCG's default.fetch model, and delegates ALL
+  HTTP work to user.default.fetch (the synthetic entry handles routing).

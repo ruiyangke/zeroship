@@ -184,19 +184,28 @@ export function __bindRequest(ctx, request) {
 /// Runtime-injected bootstrap module. Becomes the new entry (`index.js`),
 /// wrapping the user's original entry (renamed internally to `__user__.js`).
 ///
-/// Provides three things the user's handler doesn't have to hand-write:
+/// The kernel always invokes `user.default.fetch(request)` — the synthetic
+/// SSR entry (emitted by `@zeroship/vite-plugin`) provides the
+/// WinterCG-symmetric `default.{fetch, rpc}` shape and owns the
+/// `/_zs/v1/<id>` wire dispatch.
 ///
-/// 1. **RPC routing**: `POST /_rpc/<name>` → `user[<name>](...args)`, with
-///    args as a JSON array in the body. Matches the "use server" named-export
-///    idiom the AI compiler emits.
-/// 2. **Request-context binding**: before invoking user code, stashes the
-///    ctx + Request so nested modules can call `getRequest()` without
-///    threading the request through every function signature.
-/// 3. **Error/stream normalization**: JSON-formats thrown errors (honoring
-///    `err.status`), auto-wraps async generators as SSE.
+/// This module exists to:
+///   1. **WS-subscription dispatch**: WebSocket upgrades on `/_zs/v1/<id>`
+///      reach `_zsAcceptSubscription` → `dispatchSubscription` →
+///      `user.default.rpc(name, input, ctx)`. The kernel itself doesn't
+///      know about subscriptions — they ride entirely on user-space JS
+///      over the existing WebSocketPair primitive.
+///   2. **Bare-app fallback**: when the user's module doesn't export
+///      `default.fetch`, return a 404 (or the legacy `user.index()`
+///      convention for hand-written test apps).
+///   3. **Request-context binding**: before invoking user code, the
+///      kernel stashes the ctx + Request so nested modules can call
+///      `getRequest()` without threading the request everywhere.
 ///
-/// Non-`/_rpc/*` paths still fall through to `user.default?.fetch`, so
-/// existing module-worker apps keep working unchanged.
+/// The `default` export shape is `{ fetch, fetchFast, subscribe }` —
+/// `fetchFast` is the optional zeroship-extension fast path, `subscribe`
+/// is the WS-subscription dispatcher. There is NO `dispatchRpc` export
+/// any more; the kernel routes all HTTP through `default.fetch`.
 pub(crate) const BOOTSTRAP_JS: &str = r##"
 import * as user from "./__user__.js";
 import { __bindRequest } from "zeroship/internal";
@@ -388,37 +397,18 @@ async function _zsRunSubscriptionGen(gen, ws) {
 // `ws` is the *server-side* WebSocket of the pair created by the
 // caller; it's already been .accept()ed before we're invoked.
 //
-// Three resolution paths for the handler:
-//   1. `user.dispatchSubscription(name, input, ws)` — opt-in fully
-//      custom dispatch (mirrors `user.dispatchRpc`). Used by the
-//      synthetic SSR entry to route through the registry.
-//   2. `user.dispatchRpc(name, [input])` — falls through; we expect
-//      an async iterator back (registry returns the iterator
-//      directly when `wantStream: true`). Lets the synthetic
-//      entry's existing dispatcher handle subscription procedures
-//      without a separate code path.
-//   3. `user[methodName](input)` — bare-export fallback for the
-//      bootstrap test path (apps without the synthetic entry).
+// Routes through `user.default.rpc(name, input, ctx)` — the symmetric
+// shape the synthetic SSR entry exposes. Subscription procedures are
+// async generators; the handler returns the iterator directly.
 async function dispatchSubscription(methodName, input, ws) {
     try {
-        if (typeof user.dispatchSubscription === "function") {
-            await user.dispatchSubscription(methodName, input, ws);
-            return;
+        if (!user.default || typeof user.default.rpc !== "function") {
+            throw Object.assign(
+                new Error("default.rpc not exported — subscription requires the synthetic SSR entry"),
+                { code: "INTERNAL" },
+            );
         }
-        let gen;
-        if (typeof user.dispatchRpc === "function") {
-            const result = await user.dispatchRpc(methodName, [input]);
-            gen = result;
-        } else {
-            const fn = user[methodName];
-            if (typeof fn !== "function") {
-                throw Object.assign(new Error("Method not found: " + methodName), {
-                    status: 404,
-                    code: "NOT_FOUND",
-                });
-            }
-            gen = await fn(input);
-        }
+        const gen = await user.default.rpc(methodName, input);
         if (gen == null || typeof gen !== "object"
             || typeof gen[Symbol.asyncIterator] !== "function"
             || typeof gen.next !== "function") {
@@ -551,86 +541,6 @@ function _zsIsWsUpgrade(request) {
     return true;
 }
 
-// Core RPC dispatch — shared by the kernel fast-path (dispatchRpc, called
-// from Rust without building a full Request) and the fetch() handler's
-// /_rpc/ route (which already has a Request in hand).
-//
-// `args` is a already-parsed JS array of positional arguments. Callers
-// are responsible for the JSON.parse + array validation that precedes it.
-async function invokeMethod(methodName, args) {
-    const fn = user[methodName];
-    if (typeof fn !== "function") {
-        throw Object.assign(new Error("Method not found: " + methodName), { status: 404 });
-    }
-    let result = fn.apply(null, args);
-    if (result && typeof result.then === "function") result = await result;
-
-    if (result instanceof Response) return result;
-    if (result != null && typeof result === "object"
-        && typeof result[Symbol.asyncIterator] === "function"
-        && typeof result.next === "function"
-        && typeof result.return === "function") {
-        // Read an opt-in `__zsOutputIsString` property the synthetic
-        // entry attaches when it knows the procedure's output schema is
-        // a Zod string. Absent → per-yield typeof check (the default).
-        return sseFromAsyncGen(result, !!result.__zsOutputIsString);
-    }
-    // Spec wire: response wrapped in `{ json }` envelope (superjson shape).
-    return Response.json({ json: result === undefined ? null : result });
-}
-
-// Parse the RPC body — spec wire is a superjson `{ json, meta? }`
-// envelope wrapping a single input value. Empty body → undefined.
-// JSON.parse errors → 400.
-function parseRpcArgs(bodyText) {
-    if (!bodyText) return [undefined];
-    let parsed;
-    try { parsed = JSON.parse(bodyText); }
-    catch (_e) {
-        throw Object.assign(new Error("Invalid JSON body"), { status: 400, code: "INVALID_ARGUMENT" });
-    }
-    const input = parsed && typeof parsed === "object" && "json" in parsed ? parsed.json : parsed;
-    return [input];
-}
-
-// Fast RPC path called by the kernel when the URL starts with /_zs/v1/<id>.
-// Skips full Request construction, URL parsing, and stream-body reads —
-// the kernel already has the wireId and body string in hand, and
-// passes them directly. The synthetic entry's `dispatchRpc` resolves
-// the wireId against the registry (closure-private map populated by
-// the transform's `__zsRegister` calls).
-async function dispatchRpc(methodName, bodyText) {
-    try {
-        const args = parseRpcArgs(bodyText);
-        if (typeof user.dispatchRpc === "function") {
-            const result = await user.dispatchRpc(methodName, args);
-            if (result instanceof Response) return result;
-            if (result != null && typeof result === "object"
-                && typeof result[Symbol.asyncIterator] === "function"
-                && typeof result.next === "function"
-                && typeof result.return === "function") {
-                // The synthetic entry tags the iterator when the
-                // declared output schema is a Zod string.
-                return sseFromAsyncGen(result, !!result.__zsOutputIsString);
-            }
-            return Response.json({ json: result === undefined ? null : result });
-        }
-        return await invokeMethod(methodName, args);
-    } catch (err) {
-        return errorResponse(err);
-    }
-}
-
-// Full fetch handler — covers non-RPC paths, WebSocket upgrades, and
-// WinterCG-style `default.fetch` delegation to user modules.
-// Also handles /_rpc/* if the kernel ever routes it here (e.g., a
-// third-party framework exporting `default` that isn't the bootstrap).
-async function handleRpcFromRequest(request, methodName) {
-    let bodyText = "";
-    try { bodyText = await request.text(); } catch (_) {}
-    return await dispatchRpc(methodName, bodyText);
-}
-
 // Resolve the user's default.fetch once at module init. When present, we
 // export it directly as our `default.fetch` — no wrapper, no extra async
 // frame, no extra try/catch. The kernel's `call_fetch_inner` already
@@ -648,9 +558,9 @@ const USER_FETCH = (user && user.default && typeof user.default.fetch === "funct
 //   - { status, headers, body } plain object → HTTP response
 //   - string / Uint8Array → 200 OK + that body
 //   - null → kernel falls back to the slow `fetch(request, env, ctx)` path
-// Kernel dispatches to this BEFORE constructing a Request. The path-routing
-// wiring lives in the kernel: it sees /_rpc/* → dispatchRpc; everything
-// else → fetchFast → (null) → fetch.
+// Kernel dispatches to this BEFORE constructing a Request — every HTTP
+// request, including /_zs/v1/<id> RPC dispatch, goes through fetchFast
+// first (when present), then fetch. There is no separate /_rpc fast path.
 const USER_FETCH_FAST = (user && user.default && typeof user.default.fetchFast === "function")
     ? user.default.fetchFast
     : null;
@@ -675,10 +585,8 @@ function coerceToHtmlResponse(result, status) {
 //   - else            → 404
 //
 // Unary /_zs/v1/<id> requests fall through here when there's no
-// `default.fetch` (the synthetic SSR entry handles them otherwise).
-// The fallback intentionally does NOT try to dispatch unary RPC —
-// real apps ship via the synthetic entry; this branch exists only
-// for hand-written `__zsRegister` test fixtures.
+// `default.fetch`; we 404. Real apps ship via the synthetic SSR
+// entry which exports `default.{fetch, rpc}` and handles them.
 async function fallbackFetch(request) {
     const urlStr = request.url;
 
@@ -710,12 +618,10 @@ async function fallbackFetch(request) {
 }
 
 export default {
-    // Kernel fast-path — caller supplies methodName + raw body text.
-    dispatchRpc,
     // Phase 7: subscription dispatch. Caller hands in (name, input,
-    // server-side WebSocket already accepted). Used by the
-    // synthetic SSR entry's WS-upgrade path; tests can drive this
-    // directly via the runtime's WebSocketPair primitive.
+    // server-side WebSocket already accepted). Used by the kernel's
+    // WS-upgrade path; tests can drive this directly via the
+    // runtime's WebSocketPair primitive.
     subscribe: dispatchSubscription,
     // Zeroship extension: non-WinterCG fast HTTP dispatch. Kernel
     // calls this with raw (method, url, body, env). User returns a
@@ -723,7 +629,8 @@ export default {
     // Request/Response construction entirely — hot-path-only win.
     fetchFast: USER_FETCH_FAST,
     // Standard WinterCG fetch handler — the user's default.fetch
-    // directly (no bootstrap wrapper).
+    // directly (no bootstrap wrapper). Every HTTP request, including
+    // /_zs/v1/<id> RPC dispatch, flows through here.
     fetch: USER_FETCH || fallbackFetch,
 };
 "##;

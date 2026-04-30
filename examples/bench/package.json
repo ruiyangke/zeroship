@@ -1,0 +1,20 @@
+{
+  "name": "bench",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Benchmark fixture — built via @zeroship/vite-plugin so the runtime exercises the same dispatch path real apps use.",
+  "scripts": {
+    "build": "vite build --mode development",
+    "build:prod": "vite build --mode production"
+  },
+  "dependencies": {
+    "@zeroship/server": "file:../../packages/zeroship-server",
+    "@zeroship/vite-plugin": "file:../../sdks/vite-plugin",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3",
+    "vite": "^8.0.0"
+  }
+}

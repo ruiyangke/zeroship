@@ -437,7 +437,11 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
 
         // 6b. Phase 1 RPC v2: collect per-procedure metadata for the
         //     manifest emitter. We do this once per server-env transform
-        //     pass; idempotent on (filePath, exportName).
+        //     pass; idempotent on (filePath, exportName). The synthetic
+        //     SSR entry's dispatch table is populated at module-init
+        //     time from the user namespace's exports — it does NOT read
+        //     this state — so we only record in the server env (where
+        //     the manifest emitter runs).
         if (isServerEnv) {
           const { perFn, moduleConfig } = collectConfig(ast.body);
           const slug = moduleSlug(root, id);
@@ -483,24 +487,62 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
 
         // --- SERVER ENVIRONMENT ---------------------------------------------
         //
-        // Append `__zsRegister(wireId, fn)` calls keyed by the same wireId
-        // the manifest emits. The registry is owned by
-        // `virtual:zeroship/_rpc-registry`, a closure-private module —
-        // `_zsRegister` is a plain ESM import, not a global. After
-        // bundling, the registry binding is a flat scope `const` with a
-        // rolldown-mangled name; user-bundled npm packages cannot reach
-        // it.
+        // No more `__zsRegister(wireId, fn)` calls — the synthetic SSR
+        // entry imports each procedure directly via per-(filePath,
+        // exportName) ESM imports and builds a static `_procedures` map
+        // at build time from `state.discoveredProcedures`. The
+        // user-module init has zero dispatch side effects.
+        //
+        // We still monkey-patch SSR hooks (.useQuery, .prefetch, .id,
+        // .kind, .queryKey) onto each procedure export so React
+        // components rendering server-side find them on import. The
+        // patching runs at user-module-init time, BEFORE the synthetic
+        // entry's `import { fn as _pN }` resolves the import binding —
+        // the patches are visible there.
         if (isServerEnv) {
+          // Resolve kind for SSR-side hook attachment.
+          const { perFn: perFnForKind } = collectConfig(ast.body);
+          const kindFor = (fn: { name: string; isStream: boolean }) => {
+            const explicit = perFnForKind.get(fn.name)?.kind as
+              | "query" | "mutation" | "stream" | "subscription" | undefined;
+            return explicit ?? inferKind(fn.name, fn.isStream);
+          };
+
           const s = new MagicString(code);
-          const registrations = serverFns
+
+          // Monkey-patch SSR hooks onto each procedure export. Append-only;
+          // doesn't touch the original declarations, so recursive references
+          // inside handler bodies keep working. Properties from
+          // __makeServerProcedure (id, kind, queryKey, useQuery,
+          // useSuspenseQuery, prefetch, useMutation, useStream,
+          // useSubscription) are copied onto the original function via
+          // Object.defineProperty — components importing the export see
+          // them attached.
+          const hookKeys = '["id","kind","queryKey","useQuery","useSuspenseQuery","prefetch","useMutation","useStream","useSubscription"]';
+          const ssrPatches = serverFns
             .map((fn) => {
-              return `__zsRegister(${JSON.stringify(wireIdFor(fn))}, ${fn.name});`;
+              const meta = JSON.stringify({ id: wireIdFor(fn), kind: kindFor(fn) });
+              return `__zsAttachHooks(${fn.name}, ${meta});`;
             })
             .join("\n");
+
           s.prepend(
-            `import { _zsRegister as __zsRegister } from "virtual:zeroship/_rpc-registry";\n`
+            `import { __makeServerProcedure as __zsMakeServerProc } from "@zeroship/server";\n` +
+            `function __zsAttachHooks(target, meta) {\n` +
+            `  try {\n` +
+            `    const w = __zsMakeServerProc(target, meta);\n` +
+            `    for (const k of ${hookKeys}) {\n` +
+            `      if (k in w) {\n` +
+            `        try { Object.defineProperty(target, k, { value: w[k], enumerable: true, configurable: true, writable: true }); } catch (_) {}\n` +
+            `      }\n` +
+            `    }\n` +
+            `  } catch (_) { /* @zeroship/server not installed — SSR hooks unavailable. RPC dispatch still works. */ }\n` +
+            `}\n`
           );
-          s.append(`\n\n// zeroship: register server functions\n${registrations}\n`);
+          s.append(
+            `\n\n// zeroship: SSR hooks\n` +
+            `${ssrPatches}\n`
+          );
           return {
             code: s.toString(),
             map: s.generateMap({ source: id, includeContent: true, hires: true }),

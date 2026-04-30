@@ -383,16 +383,21 @@ export function buildPlugin(
           // the polyfill path before Vite tries to load `node:crypto`
           // etc. as bare specifiers.
           nodeCompatPlugin(),
-          // The RPC registry + synthetic-entry virtual module owner.
-          // Must come before transformPlugin so its imports of the
-          // registry virtual id resolve.
-          rpcRegistryPlugin({ userEntryRel }),
+          // transformPlugin rewrites server modules with SSR-hook
+          // patches (.useQuery / .prefetch / etc.) and records procedure
+          // metadata into `state.discoveredProcedures` for the manifest
+          // emitter. It does NOT inject any registry side-effects any
+          // more — the synthetic SSR entry discovers procedures at
+          // module-init time from the user namespace's exports.
+          transformPlugin(DEFAULT_RPC_ENDPOINT, state),
+          // Synthetic SSR entry virtual module owner. The entry's body
+          // is build-time-static and order-independent.
+          rpcRegistryPlugin({ root, userEntryRel, state }),
           // Expose `virtual:zeroship/client-manifest` so SSR code can
           // read hashed asset paths at build time. The client build's
           // `writeBundle` (this hook) finishes BEFORE we kick off the
           // SSR build, so `dist/.vite/manifest.json` is already on disk.
           clientManifestPlugin({ root, distDir: relative(root, clientOutDir) }),
-          transformPlugin(DEFAULT_RPC_ENDPOINT, state),
         ],
       });
       // Cast — buildSsrInlineConfig returns a record so it can be

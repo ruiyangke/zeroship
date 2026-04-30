@@ -459,24 +459,16 @@ pub(crate) struct RuntimeInner {
     pub(crate) context: v8::Global<v8::Context>,
     /// Cached reference to `module.default.fetch`, resolved once at module
     /// init. None if the module doesn't export a default.fetch handler.
+    /// Every HTTP request — including /_zs/v1/<id> RPC dispatch — flows
+    /// through here. The synthetic SSR entry's `default.fetch` owns the
+    /// /_zs/v1/<id> wire; raw user code can ignore it entirely.
     pub(crate) fetch_handler_fn: Option<v8::Global<v8::Function>>,
-    /// Cached reference to `module.default.dispatchRpc`, the bootstrap's
-    /// kernel fast-path for /_rpc/<method> calls. Takes `(methodName,
-    /// bodyText)` and returns a Promise<Response> — skips building a full
-    /// Request object, URL parsing, and stream reads. Null when the user's
-    /// module doesn't go through the zeroship bootstrap (e.g., raw Hono
-    /// export), in which case `call_fetch_handler` falls back to the slow
-    /// `default.fetch` path for `/_rpc/*` as well.
-    pub(crate) rpc_handler_fn: Option<v8::Global<v8::Function>>,
     /// Cached reference to `module.default.fetchFast` — the zeroship
     /// extension for bypassing the WinterCG Request/Response contract.
     /// Signature: `fetchFast(method, url, body, env) → object | string | null`.
     /// When non-null result: `{ status, headers, body }` plain object OR
     /// a string body (200 OK). When null: kernel falls through to the
     /// full `default.fetch(request, env, ctx)` path.
-    ///
-    /// Kernel routes /_rpc/* → rpc_handler_fn, everything else →
-    /// fetch_fast_fn first (if set) → fetch_handler_fn fallback.
     pub(crate) fetch_fast_fn: Option<v8::Global<v8::Function>>,
     /// Cached JS helper that constructs a Request from Rust-supplied params.
     http_create_request_fn: Option<v8::Global<v8::Function>>,
@@ -666,7 +658,6 @@ impl RuntimeInner {
             isolate,
             context,
             fetch_handler_fn: None,
-            rpc_handler_fn: None,
             fetch_fast_fn: None,
             http_create_request_fn: None,
             initialized: false,
@@ -981,24 +972,6 @@ impl RuntimeInner {
                                             Some(v8::Global::new(scope, func));
                                     }
                                 }
-                                // Also look for the bootstrap's fast-path
-                                // `default.dispatchRpc(methodName, bodyText)`.
-                                // When present, /_rpc/<method> requests skip
-                                // the full Request construction and JS URL
-                                // parsing, and land at the user function
-                                // roughly 5x cheaper than the fetch() path.
-                                let rpc_key = v8::String::new(scope, "dispatchRpc").unwrap();
-                                if let Some(rpc_val) =
-                                    default_obj.get(scope, rpc_key.into())
-                                {
-                                    if rpc_val.is_function() {
-                                        let func =
-                                            v8::Local::<v8::Function>::try_from(rpc_val)
-                                                .unwrap();
-                                        self.rpc_handler_fn =
-                                            Some(v8::Global::new(scope, func));
-                                    }
-                                }
                                 // Zeroship extension: cache default.fetchFast
                                 // for the non-RPC HTTP fast-path. Null when
                                 // the user module doesn't opt into the
@@ -1247,66 +1220,36 @@ impl RuntimeInner {
         let headers_json = serde_json::to_string(headers).unwrap_or_else(|_| "[]".into());
         let env_json = env.as_json().to_string();
 
-        // Kernel RPC fast-path. When the URL is `/_rpc/<method>` AND the
-        // module's default export surfaced a `dispatchRpc(methodName,
-        // bodyText)` shortcut (the zeroship bootstrap always does), skip
-        // constructing a Request / env / ctx and invoke dispatchRpc
-        // directly. This drops the per-request JS work from
-        //   (Request construction + URL parser + request.text() stream
-        //    + __bindRequest × 2 + property lookup + JSON.parse)
-        // to just
-        //   (JSON.parse on bodyText + property lookup).
-        //
-        // Measured on this machine: master 844K req/s vs the slow fetch
-        // path 160-330K — the fast-path recovers the gap for an
-        // empty-body RPC call.
-        // Fast-path is for POST only. GET /_zs/v1/<id>?input=<b64> carries
-        // its input in the query string; the synthetic entry's slow
-        // path handles the b64-decode + envelope-unwrap. Routing GET
-        // through the fast path would bypass that and hand an empty
-        // body to dispatchRpc → "input: undefined" validation error.
-        let rpc_method: Option<&str> = if method.eq_ignore_ascii_case("POST") {
-            self.rpc_handler_fn
-                .as_ref()
-                .and_then(|_| rpc_method_from_url(url))
-        } else {
-            None
-        };
-
+        // Kernel dispatch. Every HTTP request — including /_zs/v1/<id> RPC —
+        // goes through `default.fetch(request, env, ctx)`. The legacy
+        // `dispatchRpc(method, body)` fast-path is gone; the synthetic SSR
+        // entry's `default.fetch` owns /_zs/v1/<id> dispatch end-to-end.
+        // The optional `default.fetchFast(method, url, body, env)` extension
+        // can still bypass Request construction when the user opts in.
         self.arm_cpu_timer();
         let dispatch_result: Result<DispatchResult, v8::Global<v8::Promise>> =
             enter_v8!(self, |scope| {
                 let undefined = v8::undefined(scope).into();
 
-                let fetch_fast_result = if rpc_method.is_none() {
-                    if let Some(ff_fn_global) = self.fetch_fast_fn.as_ref() {
-                        let ff_fn = v8::Local::new(scope, ff_fn_global);
-                        let method_arg = v8::String::new(scope, method).unwrap().into();
-                        let url_arg = v8::String::new(scope, url).unwrap().into();
-                        let body_arg = v8::String::new(scope, body).unwrap().into();
-                        let env_arg: v8::Local<v8::Value> = {
-                            let maybe_global = self.state.borrow().env_obj.clone();
-                            match maybe_global {
-                                Some(g) => v8::Local::new(scope, g).into(),
-                                None => v8::Object::new(scope).into(),
-                            }
-                        };
-                        call_fetch_fast_inner(scope, ff_fn, method_arg, url_arg, body_arg, env_arg)
-                    } else {
-                        FetchFastResult::FallThrough
-                    }
+                let fetch_fast_result = if let Some(ff_fn_global) = self.fetch_fast_fn.as_ref() {
+                    let ff_fn = v8::Local::new(scope, ff_fn_global);
+                    let method_arg = v8::String::new(scope, method).unwrap().into();
+                    let url_arg = v8::String::new(scope, url).unwrap().into();
+                    let body_arg = v8::String::new(scope, body).unwrap().into();
+                    let env_arg: v8::Local<v8::Value> = {
+                        let maybe_global = self.state.borrow().env_obj.clone();
+                        match maybe_global {
+                            Some(g) => v8::Local::new(scope, g).into(),
+                            None => v8::Object::new(scope).into(),
+                        }
+                    };
+                    call_fetch_fast_inner(scope, ff_fn, method_arg, url_arg, body_arg, env_arg)
                 } else {
-                    FetchFastResult::FallThrough  // unused — rpc path below
+                    FetchFastResult::FallThrough
                 };
 
-                if let Some(method_name) = rpc_method {
-                    // ---- Fast path A: dispatchRpc(methodName, bodyText) ----
-                    let rpc_fn = v8::Local::new(scope, self.rpc_handler_fn.as_ref().unwrap());
-                    let method_arg = v8::String::new(scope, method_name).unwrap().into();
-                    let body_arg = v8::String::new(scope, body).unwrap().into();
-                    call_fetch_inner(scope, rpc_fn, undefined, method_arg, body_arg, undefined)
-                } else if let FetchFastResult::Handled(res) = fetch_fast_result {
-                    // ---- Fast path B: fetchFast(method, url, body, env) ----
+                if let FetchFastResult::Handled(res) = fetch_fast_result {
+                    // ---- Fast path: fetchFast(method, url, body, env) ----
                     // Returned a concrete result — use it directly, no
                     // Request/Response object construction needed.
                     res
@@ -2206,39 +2149,6 @@ fn call_ws_method(
     let Ok(func) = v8::Local::<v8::Function>::try_from(method_val) else { return };
 
     func.call(scope, ws_val, args);
-}
-
-/// Extract the `<method>` segment from a URL whose path starts with `/_rpc/`.
-///
-/// Returns `None` if the URL isn't an RPC request (kernel will fall through
-/// to the full `default.fetch(request, env, ctx)` path). Handles `http://`
-/// and `https://` schemes; the method name is everything after `/_rpc/` up
-/// to `?`, `#`, or end-of-string. Percent-encoding is left to the JS side
-/// to decode — the fast-path passes the raw segment to `dispatchRpc` which
-/// does not need decoding for the common "ping"-style identifier case.
-#[inline]
-fn rpc_method_from_url(url: &str) -> Option<&str> {
-    // Find the path: skip "scheme://host". If the URL is a raw path
-    // (e.g. "/_rpc/ping"), start at 0.
-    let path_start = if let Some(rest) = url.strip_prefix("http://") {
-        url.len() - rest.len() + rest.find('/').unwrap_or(rest.len())
-    } else if let Some(rest) = url.strip_prefix("https://") {
-        url.len() - rest.len() + rest.find('/').unwrap_or(rest.len())
-    } else {
-        0
-    };
-    let path_and_query = url.get(path_start..)?;
-    let method_and_rest = path_and_query.strip_prefix("/_zs/v1/")?;
-    // Stop at `?` or `#` — we want just the method identifier.
-    let end = method_and_rest
-        .find(|c: char| c == '?' || c == '#')
-        .unwrap_or(method_and_rest.len());
-    let method = &method_and_rest[..end];
-    if method.is_empty() {
-        None
-    } else {
-        Some(method)
-    }
 }
 
 /// Call the onRequest handler and inspect the result. Separated out to avoid

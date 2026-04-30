@@ -1,14 +1,23 @@
 import { PostList } from "./PostList";
 import { Post } from "./Post";
-import type { Post as PostT } from "./posts";
+import { listPosts } from "../server";
 
 export interface AppProps {
   url: string;          // path the server is rendering
-  posts: PostT[];       // injected at SSR time, hydrated client-side
 }
 
-/** Top-level component. Picks PostList or Post based on `url`. */
-export function App({ url, posts }: AppProps) {
+/** Top-level component. Calls `listPosts.useQuery()` — works on both
+ *  the SSR side (synchronous, prefetched into QueryClient) and the
+ *  browser side (HTTP /_zs/v1/listPosts via the client SDK). */
+export function App({ url }: AppProps) {
+  // The cast is needed because the vite-plugin monkey-patches
+  // hooks on at build time; TS doesn't see them statically.
+  const lp = listPosts as typeof listPosts & {
+    useQuery: (input?: undefined) => { data?: unknown[] };
+  };
+  const { data } = lp.useQuery();
+  const posts = (data as { id: string; title: string; body: string }[] | undefined) ?? [];
+
   if (url === "/" || url === "") {
     return <PostList posts={posts} />;
   }

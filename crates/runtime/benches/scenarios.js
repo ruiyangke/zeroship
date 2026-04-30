@@ -1,15 +1,24 @@
 // Benchmark scenarios — exercises the full zeroship runtime surface.
 //
-// Two shapes, one file:
+// Three exports, one file:
 //
 //   1. Named exports (`ping`, `fib`, `sha256`, etc.) — invoked via RPC.
-//      The runtime bootstrap dispatches `POST /_rpc/<name>` to these with
-//      the request body parsed as a positional-args JSON array. This is
-//      the AI-generated "use server" idiom.
+//      The runtime bootstrap dispatches `POST /_zs/v1/<name>` to these
+//      with the request body parsed as a superjson `{ json: <input> }`
+//      envelope (single-arg dispatch). This is what the vite-plugin
+//      transform produces for real apps.
 //
-//   2. `export default { fetch }` — a WinterCG / Cloudflare Workers-style
-//      HTTP handler. The runtime bootstrap delegates every non-/_rpc path
-//      to it. Handles `/hello`, `/sse`, and WebSocket upgrades here.
+//   2. `dispatchRpc(method, [input])` — the kernel fast-path entry.
+//      Receives the unwrapped input as a 1-element args array; looks
+//      the function up by name and dispatches. Without this export
+//      the runtime falls through to `default.fetch`, defeating the
+//      bench (default.fetch's catch-all returns the request envelope,
+//      not the procedure's result).
+//
+//   3. `export default { fetch, fetchFast }` — WinterCG-style HTTP
+//      handler for everything not on `/_zs/v1/`. Handles `/sse`,
+//      WebSocket upgrades, the `/ping` /`/wping` /`/wjson` HTTP-only
+//      endpoints used by separate bench scenarios.
 //
 // Both shapes coexist in one module; the bootstrap routes based on path.
 // The same file is loaded by the Node.js bench servers (node_server.js etc.)
@@ -149,6 +158,34 @@ export async function ecdsaSign() {
 }
 
 // ---------------------------------------------------------------------------
+// dispatchRpc — kernel fast-path entry.
+//
+// The runtime kernel's bootstrap (init.rs::BOOTSTRAP_JS) calls
+// `user.dispatchRpc(method, args)` for /_zs/v1/<method> requests
+// before falling through to default.fetch. `args` is a 1-element
+// array `[input]` — the unwrapped superjson `{ json: <input> }` body.
+// Real apps get this auto-emitted by the vite-plugin's synthetic
+// entry; the bench fixture provides it inline so the named exports
+// above are reachable on the wire.
+
+const _scenarios = {
+    ping, fib,
+    timeout0, promiseChain, promiseChainTimeout, fetchExternal,
+    uuid, randomBytes, sha256,
+    hmacSign, hmacVerify, aesEncrypt, ecdsaSign,
+};
+
+export async function dispatchRpc(method, args) {
+    const fn = _scenarios[method];
+    if (typeof fn !== "function") {
+        throw Object.assign(new Error("Method not found: " + method), {
+            status: 404, code: "NOT_FOUND",
+        });
+    }
+    return await fn.apply(null, Array.isArray(args) ? args : [args]);
+}
+
+// ---------------------------------------------------------------------------
 // HTTP handler — WinterCG `default.fetch` contract.
 //
 // Runs for every request the runtime bootstrap doesn't route to `/_rpc/*`:
@@ -237,8 +274,42 @@ export default {
         return null;
     },
 
-    fetch(request) {
+    async fetch(request) {
         const url = new URL(request.url);
+
+        // RPC dispatch: /_zs/v1/<id> with superjson `{ json: <input> }`
+        // body. Mirrors what the vite-plugin's synthetic entry does for
+        // real apps. Inlined here because the bench fixture is loaded
+        // verbatim — no plugin transform.
+        if (url.pathname.startsWith("/_zs/v1/")) {
+            const id = decodeURIComponent(url.pathname.slice("/_zs/v1/".length));
+            const fn = _scenarios[id];
+            if (typeof fn !== "function") {
+                return new Response(
+                    JSON.stringify({ message: "Method not found: " + id, name: "Error", code: "NOT_FOUND" }),
+                    { status: 404, headers: { "content-type": "application/json" } },
+                );
+            }
+            let input;
+            const text = await request.text();
+            if (text) {
+                try {
+                    const env = JSON.parse(text);
+                    input = env && typeof env === "object" && "json" in env ? env.json : env;
+                } catch {
+                    return new Response(
+                        JSON.stringify({ message: "Invalid JSON body", name: "Error", code: "INVALID_ARGUMENT" }),
+                        { status: 400, headers: { "content-type": "application/json" } },
+                    );
+                }
+            }
+            let result = fn(input);
+            if (result && typeof result.then === "function") result = await result;
+            return new Response(
+                JSON.stringify({ json: result === undefined ? null : result }),
+                { status: 200, headers: { "content-type": "application/json" } },
+            );
+        }
 
         if (request.headers.get("upgrade") === "websocket") {
             return handleWebSocket();

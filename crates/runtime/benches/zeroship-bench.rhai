@@ -31,26 +31,30 @@ let base = `http://${host}:${port}`;
 let ws_base = `ws://${host}:${port}`;
 let echo_url = `http://${host}:${echo_port}`;
 
-// RPC wire (appbase ee2fd5f): POST /_rpc/<method> with body = JSON
-// array of positional args. No JSON-RPC envelope, no id, no
-// method-in-body. The zeroship runtime dispatches by URL path.
-fn rpc(base, method, params) {
-    POST(`${base}/_rpc/${method}`)
+// RPC wire (zeroship v1, /_zs/v1/<id> with superjson `{ json }`
+// envelope). Body is a single JSON value wrapped under `json` —
+// `null` for no-arg procedures, `<value>` for single-arg. Response
+// arrives as `{ json: <value> }`. Status 200 on success; 4xx/5xx
+// for validation/dispatch errors.
+fn rpc(base, method, body) {
+    POST(`${base}/_zs/v1/${method}`)
         .header("Content-Type", "application/json")
-        .body(params)
+        .body(body)
         .expect_status(200)
 }
 
-scenario("ping",         |s| { s.step(rpc(base, "ping", "[]")); });
-scenario("fib10",        |s| { s.step(rpc(base, "fib", "[10]")); });
-scenario("setTimeout0",  |s| { s.step(rpc(base, "timeout0", "[]")); });
-scenario("promiseChain", |s| { s.step(rpc(base, "promiseChain", "[]")); });
-scenario("fetchEcho",    |s| { s.step(rpc(base, "fetchExternal", `["${echo_url}"]`)); });
-scenario("sha256",       |s| { s.step(rpc(base, "sha256", "[]")); });
-scenario("hmacSign",     |s| { s.step(rpc(base, "hmacSign", "[]")); });
-scenario("randomUUID",   |s| { s.step(rpc(base, "uuid", "[]")); });
-scenario("aesEncrypt",   |s| { s.step(rpc(base, "aesEncrypt", "[]")); });
-scenario("ecdsaSign",    |s| { s.step(rpc(base, "ecdsaSign", "[]")); });
+// No-arg procedures: empty `{}` body. The dispatcher unwraps to
+// `undefined`, which all the no-arg fixtures ignore.
+scenario("ping",         |s| { s.step(rpc(base, "ping",         "{}")); });
+scenario("fib10",        |s| { s.step(rpc(base, "fib",          `{"json":10}`)); });
+scenario("setTimeout0",  |s| { s.step(rpc(base, "timeout0",     "{}")); });
+scenario("promiseChain", |s| { s.step(rpc(base, "promiseChain", "{}")); });
+scenario("fetchEcho",    |s| { s.step(rpc(base, "fetchExternal", `{"json":"${echo_url}"}`)); });
+scenario("sha256",       |s| { s.step(rpc(base, "sha256",       "{}")); });
+scenario("hmacSign",     |s| { s.step(rpc(base, "hmacSign",     "{}")); });
+scenario("randomUUID",   |s| { s.step(rpc(base, "uuid",         "{}")); });
+scenario("aesEncrypt",   |s| { s.step(rpc(base, "aesEncrypt",   "{}")); });
+scenario("ecdsaSign",    |s| { s.step(rpc(base, "ecdsaSign",    "{}")); });
 
 // HTTP dispatch scenario (zeroship only — node doesn't implement /hello)
 if env("BENCH_HTTP_GET", "1") != "0" {

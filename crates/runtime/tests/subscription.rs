@@ -103,15 +103,24 @@ async fn pump_until<F: FnMut() -> bool>(runtime: &Runtime, mut predicate: F) {
 #[test]
 fn subscription_runs_async_gen_and_emits_frames() {
     init_v8();
+    // Bootstrap's `dispatchSubscription` calls `user.default.rpc(name,
+    // input, ctx)` — the WinterCG-symmetric shape the synthetic SSR
+    // entry exports. Tests synthesize a tiny `default.rpc` that
+    // dispatches by name to a hand-coded procedures map.
     let modules = vec![ModuleEntry {
         specifier: "index.js".into(),
         source: r#"
-            export async function* sub() {
+            async function* sub() {
                 yield { tick: 0 };
                 yield { tick: 1 };
                 yield { tick: 2 };
             }
-            sub.config = { id: "sub", kind: "subscription" };
+            export default {
+                rpc: async (name, input, _ctx) => {
+                    if (name === "sub") return sub(input);
+                    throw Object.assign(new Error("Method not found: " + name), { status: 404, code: "NOT_FOUND" });
+                },
+            };
         "#
         .into(),
     }];
@@ -159,14 +168,19 @@ fn subscription_emits_error_envelope_on_throw() {
     let modules = vec![ModuleEntry {
         specifier: "index.js".into(),
         source: r#"
-            export async function* sub() {
+            async function* sub() {
                 yield { tick: 0 };
                 const err = new Error("kaboom");
                 err.code = "INTERNAL";
                 err.details = { hint: "demo" };
                 throw err;
             }
-            sub.config = { id: "sub", kind: "subscription" };
+            export default {
+                rpc: async (name, input, _ctx) => {
+                    if (name === "sub") return sub(input);
+                    throw Object.assign(new Error("Method not found: " + name), { status: 404, code: "NOT_FOUND" });
+                },
+            };
         "#
         .into(),
     }];
@@ -210,10 +224,15 @@ fn subscription_rejects_non_iterator_handler() {
     let modules = vec![ModuleEntry {
         specifier: "index.js".into(),
         source: r#"
-            export async function sub() {
+            async function sub() {
                 return { tick: 0 };
             }
-            sub.config = { id: "sub", kind: "subscription" };
+            export default {
+                rpc: async (name, input, _ctx) => {
+                    if (name === "sub") return sub(input);
+                    throw Object.assign(new Error("Method not found: " + name), { status: 404, code: "NOT_FOUND" });
+                },
+            };
         "#
         .into(),
     }];
@@ -259,7 +278,7 @@ fn subscription_stops_when_client_closes() {
         specifier: "index.js".into(),
         source: r#"
             globalThis.__cleanupRan = false;
-            export async function* sub() {
+            async function* sub() {
                 try {
                     for (let i = 0; ; i++) {
                         yield { tick: i };
@@ -269,7 +288,12 @@ fn subscription_stops_when_client_closes() {
                     globalThis.__cleanupRan = true;
                 }
             }
-            sub.config = { id: "sub", kind: "subscription" };
+            export default {
+                rpc: async (name, input, _ctx) => {
+                    if (name === "sub") return sub(input);
+                    throw Object.assign(new Error("Method not found: " + name), { status: 404, code: "NOT_FOUND" });
+                },
+            };
         "#
         .into(),
     }];
@@ -316,8 +340,13 @@ fn subscription_rejects_malformed_hello() {
     let modules = vec![ModuleEntry {
         specifier: "index.js".into(),
         source: r#"
-            export async function* sub() { yield 1; }
-            sub.config = { id: "sub", kind: "subscription" };
+            async function* sub() { yield 1; }
+            export default {
+                rpc: async (name, input, _ctx) => {
+                    if (name === "sub") return sub(input);
+                    throw Object.assign(new Error("Method not found: " + name), { status: 404, code: "NOT_FOUND" });
+                },
+            };
         "#
         .into(),
     }];

@@ -1,122 +1,118 @@
 // sdks/vite-plugin/src/rpc-registry.ts
 //
-// Closure-private RPC registry virtual module.
+// Synthetic SSR entry generator.
 //
-// Replaces the old `globalThis.__zsRegistry` / `globalThis.__register` leak,
-// which exposed the registry to every npm package in the SSR bundle. After
-// build, no `__zsRegistry`, `__register`, or `__zsBufferModule__` symbol
-// exists anywhere on globalThis — the registry lives as a top-level
-// (rolldown-mangled) `const` inside the bundled module's flat scope.
-//
-// Two virtual modules are exposed by `rpcRegistryPlugin`:
-//
-//   virtual:zeroship/_rpc-registry  — ESM module declaring the registry,
-//                                     `_zsRegister(name, fn)` and
-//                                     `dispatch(method, args)`. The
-//                                     `_registry` Map is **not** exported,
-//                                     so user code can't read or mutate it.
+// The plugin emits one virtual module:
 //
 //   virtual:zeroship/_server-entry  — synthetic SSR entry that imports the
-//                                     user's entry, re-exports its bindings,
-//                                     and provides our own `default.fetch`
-//                                     + `dispatchRpc` exports. Used as
-//                                     `build.ssr` so the SSR sub-build
-//                                     starts from a module we own.
+//                                     user's entry, builds a static
+//                                     `_procedures` map from procedures
+//                                     discovered at transform time, and
+//                                     exports `default.{fetch, rpc}` —
+//                                     mirroring WinterCG's `default.fetch`.
 //
-// The transform plugin emits
-//   `import { _zsRegister as __zsRegister } from "virtual:zeroship/_rpc-registry"`
-// in every transformed server module. When rolldown bundles the SSR build,
-// it merges the registry virtual module's source into the same flat scope
-// as the user code; the registration calls run as plain function calls on
-// a module-private Map.
+// Wire shape — `default`:
+//
+//   fetch(request)         WinterCG-symmetric HTTP handler. /_zs/v1/<id>
+//                          requests dispatch through `rpc`; everything
+//                          else falls through to the user's own
+//                          `default.fetch` (when present), or 404s.
+//   rpc(name, input, ctx)  RPC dispatcher. Looks up the wireId in the
+//                          static `_procedures` map populated at build
+//                          time, validates `fn.config.input` (Zod), runs
+//                          the handler, optionally validates
+//                          `fn.config.output` (dev only, when
+//                          NODE_ENV === "development"). Returns either
+//                          the handler's value (unary) or its
+//                          AsyncIterator (stream — tagged with
+//                          `__zsOutputIsString` when output schema is a
+//                          Zod string so the wire encoder picks the `0:`
+//                          lane).
+//
+// No virtual registry module, no `_zsRegister`, no side effects in user
+// modules — the dispatch table is statically built by the plugin from
+// `state.discoveredProcedures` at `load()` time.
 
 import type { Plugin } from "vite";
+import type { TransformState } from "./transform.js";
 
 // ── Public IDs ─────────────────────────────────────────────────────────────
-
-/** Public specifier for the RPC registry virtual module. */
-export const RPC_REGISTRY_VIRTUAL_ID = "virtual:zeroship/_rpc-registry";
-/** Internal (\0-prefixed) id Vite uses for the same module. */
-export const RPC_REGISTRY_RESOLVED_ID = "\0" + RPC_REGISTRY_VIRTUAL_ID;
 
 /** Public specifier for the synthetic server entry. */
 export const SERVER_ENTRY_VIRTUAL_ID = "virtual:zeroship/_server-entry";
 /** Internal (\0-prefixed) id Vite uses for the synthetic entry. */
 export const SERVER_ENTRY_RESOLVED_ID = "\0" + SERVER_ENTRY_VIRTUAL_ID;
 
-// ── Registry source ────────────────────────────────────────────────────────
+// ── Synthetic entry source ─────────────────────────────────────────────────
 
 /**
- * ESM source of the closure-private registry module.
- *
- * The `_registry` Map is module-scoped (NOT exported). Once the rolldown
- * bundler merges this into the flat-scope output, the binding becomes a
- * top-level `const` with a rolldown-mangled name, unreachable from
- * user-bundled npm packages.
- *
- * Exports:
- *   _zsRegister(name, fn)   — register a server function under a name.
- *   dispatch(method, args)  — invoke a registered function. On miss
- *                             throws `Object.assign(new Error("Method not found: " + name),
- *                                                  { status: 404 })` so the runtime
- *                             can map err.status -> HTTP status.
- *
- * NOT exported (intentional):
- *   _registry — closure-private. No way to enumerate, replace, or delete
- *               registered methods from outside this module.
- *
- * Validation:
- *   `dispatch` reads `fn.config.input` and `fn.config.output` at call
- *   time. When `fn.config.input` is a Zod schema (anything with a
- *   `.parse()` method), the input is validated against it; failures
- *   throw an `INVALID_ARGUMENT` error (status 400) carrying the Zod
- *   issues array. This is the Level 1 trust model — procedures without
- *   declared schemas pass arguments through unchecked.
- *
- *   Output validation runs only when `process.env.NODE_ENV !==
- *   "production"`. It's a cheap dev-time correctness check; the hot
- *   path skips it in production.
+ * Pick the wireId for a procedure. Mirrors `pickWireId()` in manifest.ts:
+ * explicit `fn.config.id` (when string and non-empty) wins; default is
+ * the bare export name. Kept in sync because the synthetic entry's
+ * dispatch table must use the same key the manifest emitter advertises.
  */
-export const RPC_REGISTRY_SOURCE = `// virtual:zeroship/_rpc-registry — closure-private
-const _registry = new Map();
-
-export function _zsRegister(name, fn) {
-  _registry.set(name, fn);
+export function pickEntryWireId(p: {
+  exportName: string;
+  config?: Record<string, unknown>;
+}): string {
+  const explicit = p.config?.id;
+  if (typeof explicit === "string" && explicit.length > 0) return explicit;
+  return p.exportName;
 }
 
-function _isParseable(s) {
-  return s != null && typeof s === "object" && typeof s.parse === "function";
+/**
+ * Build the source of the synthetic server entry.
+ *
+ * The dispatch table (`_procedures`) is populated at module-init time
+ * by iterating the user module's namespace exports — every callable
+ * non-`default`, non-`dispatchRpc`, non-`dispatchSubscription` export
+ * is registered under `fn.config.id` (when explicit) or its export
+ * name. There are no per-procedure static imports; the user module's
+ * namespace is the source of truth.
+ *
+ * Emits `default.{fetch, rpc}` — symmetric to WinterCG's
+ * `default.fetch`. No runtime registration, no virtual registry
+ * module, no side effects in user modules.
+ *
+ * @param opts.userEntryRel  Specifier the synthetic entry should use to
+ *                           import the user module (its default export
+ *                           and named procedure exports surface via
+ *                           `_zsUser.*`).
+ */
+export function buildServerEntrySource(opts: {
+  userEntryRel: string;
+}): string {
+  const userImport = JSON.stringify(opts.userEntryRel);
+
+  return `// virtual:zeroship/_server-entry — auto-generated synthetic entry
+// Procedures are discovered at module-init time from the user module's
+// own namespace exports. Each callable export (other than \`default\`)
+// is registered under its export name, with \`fn.config.id\` overriding
+// when present.
+
+import * as _zsUser from ${userImport};
+
+const _procedures = {};
+for (const _k of Object.keys(_zsUser)) {
+  if (_k === "default" || _k === "dispatchRpc" || _k === "dispatchSubscription") continue;
+  const _v = _zsUser[_k];
+  if (typeof _v !== "function") continue;
+  const _id = (_v.config && typeof _v.config.id === "string" && _v.config.id) || _k;
+  _procedures[_id] = _v;
 }
 
-function _zodIssues(err) {
-  // ZodError carries either err.issues (modern) or err.errors (legacy).
-  // Either way we forward the raw structured array — clients that want
-  // structured errors get them, raw error message readers still see
-  // err.message.
-  if (err && Array.isArray(err.issues)) return err.issues;
-  if (err && Array.isArray(err.errors)) return err.errors;
-  return undefined;
-}
+const _userDefault = (_zsUser && _zsUser.default && typeof _zsUser.default === "object")
+  ? _zsUser.default : null;
+const _userFetch = _userDefault && typeof _userDefault.fetch === "function"
+  ? _userDefault.fetch : null;
 
-function _isZodError(err) {
-  if (!err || typeof err !== "object") return false;
-  if (err.name === "ZodError") return true;
-  // Some Zod versions don't set the name; detect by issues/errors shape.
-  return Array.isArray(err.issues) || Array.isArray(err.errors);
-}
-
-// Detect a Zod string schema (for AI-SDK \`0:\` text-part wire framing).
-// Zod schemas carry a \`_def.typeName === "ZodString"\` tag in v3+; some
-// builds expose \`.def.type === "string"\` (Zod v4) instead. We check both.
-// Anything that doesn't match returns false → the encoder defaults to
-// \`2:\` (object lane) for unknown shapes.
-function _isZodStringSchema(s) {
-  if (!s || typeof s !== "object") return false;
-  const def = s._def || s.def;
-  if (!def) return false;
-  if (def.typeName === "ZodString") return true;
-  if (def.type === "string") return true;
-  return false;
+function _zsErrResponse(status, code, message, details) {
+  const body = { message, name: "Error", code };
+  if (details !== undefined) body.details = details;
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
 }
 
 function _isAsyncIterator(x) {
@@ -128,157 +124,96 @@ function _isAsyncIterator(x) {
   );
 }
 
-export async function dispatch(methodName, args, opts) {
-  const fn = _registry.get(methodName);
-  if (typeof fn !== "function") {
-    throw Object.assign(new Error("Method not found: " + methodName), { status: 404 });
-  }
-  const argv = Array.isArray(args) ? args.slice() : [];
-  const cfg = fn.config;
-  const inputSchema  = cfg ? cfg.input  : undefined;
-  const outputSchema = cfg ? cfg.output : undefined;
-  const wantStream = !!(opts && opts.wantStream);
+function _isParseable(s) {
+  return s != null && typeof s === "object" && typeof s.parse === "function";
+}
 
-  // Input validation. When declared, validates argv[0]; the parsed
-  // (possibly transformed) value is substituted back so transforms
-  // like .transform() and .default() reach the handler.
-  if (_isParseable(inputSchema)) {
+function _zodIssues(err) {
+  if (err && Array.isArray(err.issues)) return err.issues;
+  if (err && Array.isArray(err.errors)) return err.errors;
+  return [];
+}
+
+// Detect a Zod string schema (for AI-SDK \`0:\` text-part wire framing).
+function _isZodStringSchema(s) {
+  if (!s || typeof s !== "object") return false;
+  const def = s._def || s.def;
+  if (!def) return false;
+  if (def.typeName === "ZodString") return true;
+  if (def.type === "string") return true;
+  return false;
+}
+
+// _zsRpc(name, input, ctx) — the RPC dispatcher. Symmetric to fetch:
+// callers (the WS subscription path, the kernel's HTTP handler via
+// fetch, tests) hand in (wireId, input, ctx) and get the handler's
+// return value. Validation runs against fn.config.input (always) and
+// fn.config.output (dev only).
+async function _zsRpc(name, input, ctx) {
+  const fn = _procedures[name];
+  if (typeof fn !== "function") {
+    throw Object.assign(new Error("Method not found: " + name), {
+      status: 404,
+      code: "NOT_FOUND",
+    });
+  }
+
+  let validated = input;
+  const cfg = fn.config;
+  if (cfg && _isParseable(cfg.input)) {
     try {
-      argv[0] = inputSchema.parse(argv[0]);
+      validated = cfg.input.parse(input);
     } catch (e) {
-      if (_isZodError(e)) {
-        throw Object.assign(new Error("Invalid input"), {
-          status: 400,
-          code: "INVALID_ARGUMENT",
-          details: { issues: _zodIssues(e) },
-        });
-      }
-      throw e;
+      throw Object.assign(new Error("Invalid input"), {
+        status: 400,
+        code: "INVALID_ARGUMENT",
+        details: { issues: _zodIssues(e) },
+      });
     }
   }
 
-  const result = await fn.apply(null, argv);
+  const result = await fn(validated, ctx);
 
-  // Streaming path. When the caller (the synthetic entry's \`_zsFetch\`
-  // or the runtime kernel's fast path) signals \`wantStream\` AND the
-  // handler returned an async iterator, we tag the iterator with
-  // \`__zsOutputIsString\` (read by both sides) and skip output
-  // validation — the schema describes a single yield, not the
-  // iterator-as-a-whole.
-  if (wantStream && _isAsyncIterator(result)) {
-    if (_isZodStringSchema(outputSchema)) {
-      try {
-        Object.defineProperty(result, "__zsOutputIsString", {
-          value: true,
-          enumerable: false,
-          configurable: true,
-          writable: true,
-        });
-      } catch (_e) {
-        // Defensive: some iterator implementations are frozen. Fall
-        // back to a plain assignment which the encoder still reads.
-        try { result.__zsOutputIsString = true; } catch (_e2) { /* ignore */ }
-      }
+  // Async iterator → tag for stream encoding when output schema is a
+  // Zod string. The encoder (slow path here, runtime fast path
+  // elsewhere) reads __zsOutputIsString to decide between AI-SDK \`0:\`
+  // (text) and \`2:\` (object) lanes.
+  if (_isAsyncIterator(result)) {
+    if (cfg && _isZodStringSchema(cfg.output)) {
+      try { result.__zsOutputIsString = true; } catch (_e) { /* frozen iterator */ }
     }
     return result;
   }
 
-  // Output validation runs in dev only. Production hot-path skips it.
-  // Default is "production" — secure-by-default and aligned with the
-  // V8 runtime's behavior where process.env is per-app and rarely sets
-  // NODE_ENV. Opt into output validation by setting NODE_ENV=development.
+  // Output validation runs in dev only. Production hot-path skips.
+  // Default is NOT dev — only NODE_ENV === "development" opts in.
   const isDev =
     typeof process !== "undefined" &&
     process &&
     process.env &&
     process.env.NODE_ENV === "development";
-  if (isDev && _isParseable(outputSchema)) {
+  if (isDev && cfg && _isParseable(cfg.output)) {
     try {
-      outputSchema.parse(result);
+      cfg.output.parse(result);
     } catch (e) {
-      if (_isZodError(e)) {
-        throw Object.assign(new Error("Invalid handler output"), {
-          status: 500,
-          code: "INTERNAL",
-          details: { issues: _zodIssues(e) },
-        });
-      }
-      throw e;
+      throw Object.assign(new Error("Invalid handler output"), {
+        status: 500,
+        code: "INTERNAL",
+        details: { issues: _zodIssues(e) },
+      });
     }
   }
 
   return result;
 }
-`;
 
-// ── Synthetic entry source ─────────────────────────────────────────────────
-
-/**
- * Build the source of the synthetic server entry.
- *
- * Behavior:
- *   - Imports the user's entry as a namespace AND re-exports it.
- *   - Imports `dispatch` from the registry (re-exported as `dispatchRpc` so
- *     the runtime's BOOTSTRAP_JS finds it on `user.dispatchRpc`).
- *   - Provides `default.fetch` that handles `/_rpc/*` via the registry,
- *     and falls through to the user's `default.fetch` for everything else.
- *
- * The user's `default` is imported via the namespace (`_zsUser.default`)
- * so we can detect their `fetch` at module-init time. Per AGENTS.md, the
- * platform contract requires `default` to be `{ fetch }`-shaped on the
- * SSR side — function-shaped defaults aren't supported.
- *
- * @param opts.userEntryRel  Specifier the synthetic entry should use to
- *                           import the user module. Posix-style relative
- *                           path (or absolute import-resolvable id).
- */
-export function buildServerEntrySource(opts: { userEntryRel: string }): string {
-  const userImport = JSON.stringify(opts.userEntryRel);
-  const registryImport = JSON.stringify(RPC_REGISTRY_VIRTUAL_ID);
-  return `// virtual:zeroship/_server-entry — synthetic SSR entry
-import * as _zsUser from ${userImport};
-export * from ${userImport};
-import { dispatch as _zsDispatch } from ${registryImport};
-
-// dispatchRpc — exported so the runtime kernel's fast path picks it up
-// (\`user.dispatchRpc(method, args)\`). Just rethrows; the kernel's
-// errorResponse serializer carries \`code\` / \`details\` / \`retryable\`
-// alongside the existing \`message\` / \`name\` / \`status\` fields, so
-// structured errors (INVALID_ARGUMENT, INTERNAL) reach the wire without
-// any local Response-building. Earlier revisions had to wrap manually
-// because the kernel dropped everything except message/name.
-//
-// We always pass \`wantStream: true\` here. The registry only honors it
-// when the handler actually returns an async iterator; for unary
-// procedures it's a no-op. This lets the runtime kernel's
-// \`sseFromAsyncGen\` read \`result.__zsOutputIsString\` to pick the
-// AI-SDK \`0:\` (text) vs \`2:\` (object) lane.
-export async function dispatchRpc(methodName, args) {
-  return await _zsDispatch(methodName, args, { wantStream: true });
-}
-
-const _userDefault = (_zsUser && _zsUser.default && typeof _zsUser.default === "object")
-  ? _zsUser.default : null;
-const _userFetch = _userDefault && typeof _userDefault.fetch === "function" ? _userDefault.fetch : null;
-
-function _zsErrResponse(status, code, message, details) {
-  const body = { message, name: "Error", code };
-  if (details !== undefined) body.details = details;
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
+// _zsFetch(request) — WinterCG-symmetric HTTP handler. Owns the
+// /_zs/v1/<id> wire (superjson \`{ json }\` envelope, AI-SDK Data Stream
+// Protocol for streams). Non-/_zs/v1/* paths fall through to the user's
+// own default.fetch (when present), or 404.
 async function _zsFetch(request) {
   const url = new URL(request.url);
 
-  // --- Spec wire: /_zs/v1/<id> ---
-  // Body shape: superjson \`{ json, meta? }\` envelope (POST) or
-  // base64url-encoded same envelope on \`?input=\` (GET, when input < 6 KB).
-  // For first-pass v1 we extract \`.json\` and ignore \`.meta\` — Date/BigInt
-  // round-trip as their JSON-stringified forms; full superjson revival
-  // is a follow-up.
   if (url.pathname.startsWith("/_zs/v1/")) {
     const id = decodeURIComponent(url.pathname.slice("/_zs/v1/".length));
     if (!id) return _zsErrResponse(400, "INVALID_ARGUMENT", "missing wireId");
@@ -313,145 +248,131 @@ async function _zsFetch(request) {
       return _zsErrResponse(405, "FAILED_PRECONDITION", \`method \${effectiveMethod} not allowed on /_zs/v1/\`);
     }
 
-    // wantStream=true tells the registry to skip output-schema validation
-    // for async-iterator return values (those are streamed regardless of
-    // the Accept header — the encoder picks the right wire shape based on
-    // the result's iterator-ness).
-    return await _zsDispatchAndRespond(id, [input], { wantsStream: true, wrapSuperjson: true });
+    return await _zsRpcAndRespond(id, input);
   }
 
   if (_userFetch) return _userFetch.call(_userDefault, request);
   return new Response("Not Found", { status: 404 });
 }
 
-async function _zsDispatchAndRespond(methodName, args, opts) {
-    const wantsStream = !!(opts && opts.wantsStream);
-    const wrapSuperjson = !!(opts && opts.wrapSuperjson);
-    try {
-      const result = await _zsDispatch(methodName, args, { wantStream: wantsStream });
+async function _zsRpcAndRespond(name, input) {
+  try {
+    const result = await _zsRpc(name, input);
 
-      if (
-        result != null &&
-        typeof result === "object" &&
-        typeof result[Symbol.asyncIterator] === "function" &&
-        typeof result.next === "function"
-      ) {
-        // Vercel AI-SDK Data Stream Protocol — line-prefixed framing:
-        //   0:"text"\\n          string yields
-        //   2:[<json>]\\n        object yields
-        //   e:{...}\\n           structured error envelope (zeroship ext)
-        //   d:{}\\n              done
-        // The synthetic entry's slow path mirrors the runtime kernel's
-        // \`sseFromAsyncGen\` byte-for-byte. The \`__zsOutputIsString\`
-        // tag (set by registry dispatch when \`fn.config.output\` is a
-        // Zod string schema) forces every yield to the \`0:\` lane.
-        const outputIsString = !!result.__zsOutputIsString;
-        const encoder = new TextEncoder();
-        const body = new ReadableStream({
-          async start(controller) {
-            try {
-              while (true) {
-                const step = await result.next();
-                if (step.done) {
-                  controller.enqueue(encoder.encode("d:{}\\n"));
-                  break;
-                }
-                const v = step.value;
-                if (outputIsString || typeof v === "string") {
-                  controller.enqueue(encoder.encode("0:" + JSON.stringify(String(v)) + "\\n"));
-                } else {
-                  controller.enqueue(encoder.encode("2:[" + JSON.stringify(v) + "]\\n"));
-                }
+    if (_isAsyncIterator(result)) {
+      // Vercel AI-SDK Data Stream Protocol — line-prefixed framing:
+      //   0:"text"\\n          string yields
+      //   2:[<json>]\\n        object yields
+      //   e:{...}\\n           structured error envelope (zeroship ext)
+      //   d:{}\\n              done
+      const outputIsString = !!result.__zsOutputIsString;
+      const encoder = new TextEncoder();
+      const body = new ReadableStream({
+        async start(controller) {
+          try {
+            while (true) {
+              const step = await result.next();
+              if (step.done) {
+                controller.enqueue(encoder.encode("d:{}\\n"));
+                break;
               }
-            } catch (e) {
-              const env = {
-                message: (e && e.message) || String(e),
-                name:    (e && e.name)    || "Error",
-              };
-              if (e && typeof e.code === "string") env.code = e.code;
-              if (e && e.details !== undefined)    env.details = e.details;
-              if (e && typeof e.retryable === "boolean") env.retryable = e.retryable;
-              controller.enqueue(encoder.encode("e:" + JSON.stringify(env) + "\\n"));
-              controller.enqueue(encoder.encode("d:{}\\n"));
-            } finally {
-              controller.close();
+              const v = step.value;
+              if (outputIsString || typeof v === "string") {
+                controller.enqueue(encoder.encode("0:" + JSON.stringify(String(v)) + "\\n"));
+              } else {
+                controller.enqueue(encoder.encode("2:[" + JSON.stringify(v) + "]\\n"));
+              }
             }
-          },
-        });
-        return new Response(body, {
-          status: 200,
-          headers: {
-            "content-type": "text/event-stream",
-            "cache-control": "no-cache, no-transform",
-            "x-accel-buffering": "no",
-          },
-        });
-      }
-
-      if (result instanceof Response) return result;
-
-      // Wrap response in superjson \`{ json }\` envelope on the spec wire.
-      const payload = wrapSuperjson
-        ? { json: result === undefined ? null : result }
-        : (result === undefined ? null : result);
-      return new Response(
-        JSON.stringify(payload),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
-    } catch (err) {
-      const status = (err && Number.isInteger(err.status) && err.status >= 400 && err.status < 600)
-        ? err.status : 500;
-      const body = {
-        message: err?.message ?? String(err),
-        name: err?.name ?? "Error",
-      };
-      if (err && typeof err.code === "string") body.code = err.code;
-      if (err && err.details !== undefined) body.details = err.details;
-      if (err && typeof err.retryable === "boolean") body.retryable = err.retryable;
-      return new Response(
-        JSON.stringify(body),
-        { status, headers: { "content-type": "application/json" } },
-      );
+          } catch (e) {
+            const env = {
+              message: (e && e.message) || String(e),
+              name:    (e && e.name)    || "Error",
+            };
+            if (e && typeof e.code === "string") env.code = e.code;
+            if (e && e.details !== undefined)    env.details = e.details;
+            if (e && typeof e.retryable === "boolean") env.retryable = e.retryable;
+            controller.enqueue(encoder.encode("e:" + JSON.stringify(env) + "\\n"));
+            controller.enqueue(encoder.encode("d:{}\\n"));
+          } finally {
+            controller.close();
+          }
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache, no-transform",
+          "x-accel-buffering": "no",
+        },
+      });
     }
+
+    if (result instanceof Response) return result;
+
+    // Wrap in superjson \`{ json }\` envelope on the spec wire.
+    return new Response(
+      JSON.stringify({ json: result === undefined ? null : result }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  } catch (err) {
+    const status = (err && Number.isInteger(err.status) && err.status >= 400 && err.status < 600)
+      ? err.status : 500;
+    const body = {
+      message: err?.message ?? String(err),
+      name: err?.name ?? "Error",
+    };
+    if (err && typeof err.code === "string") body.code = err.code;
+    if (err && err.details !== undefined) body.details = err.details;
+    if (err && typeof err.retryable === "boolean") body.retryable = err.retryable;
+    return new Response(
+      JSON.stringify(body),
+      { status, headers: { "content-type": "application/json" } },
+    );
+  }
 }
 
-export default { fetch: _zsFetch };
+export default { fetch: _zsFetch, rpc: _zsRpc };
 `;
 }
 
 // ── Vite plugin ────────────────────────────────────────────────────────────
 
 /**
- * Vite plugin that resolves and loads the two virtual modules.
+ * Vite plugin that resolves and loads the synthetic SSR entry.
  *
- * `enforce: "pre"` — run before user-installed plugins so the virtual ids
- * never leak to the file resolver. The plugin owns these specifiers in
- * full: any `virtual:zeroship/_rpc-registry` import in the graph (emitted
- * by `transformPlugin`) routes through `load` here.
+ * `enforce: "pre"` — runs before user-installed plugins so the virtual id
+ * never leaks to the file resolver. The plugin owns this specifier in
+ * full: any `virtual:zeroship/_server-entry` import in the graph routes
+ * through `load` here.
  *
+ * The entry's body is build-time-static. The dispatch table is
+ * populated at module-init time by iterating the user module's
+ * namespace exports — no shared mutable state, no order-dependence on
+ * the transform pass, no virtual registry module.
+ *
+ * @param opts.root          Project root (unused; reserved for future
+ *                           build-time procedure discovery if perf
+ *                           argues for it).
  * @param opts.userEntryRel  Path the synthetic entry should import from.
- *                           Required only when the synthetic entry is
- *                           used (i.e. when `build.ssr ===
- *                           SERVER_ENTRY_VIRTUAL_ID`). For dev-mode use
- *                           where only the registry virtual is needed,
- *                           `userEntryRel` is unused but still required
- *                           by the type — pass any string.
+ * @param opts.state         TransformState (unused; kept so call sites
+ *                           can pass shared state without a refactor).
  */
-export function rpcRegistryPlugin(opts: { userEntryRel: string }): Plugin {
+export function rpcRegistryPlugin(opts: {
+  root?: string;
+  userEntryRel: string;
+  state?: TransformState;
+}): Plugin {
   return {
-    name: "zeroship:rpc-registry",
+    name: "zeroship:server-entry",
     enforce: "pre",
     resolveId(id: string) {
-      if (id === RPC_REGISTRY_VIRTUAL_ID) return RPC_REGISTRY_RESOLVED_ID;
       if (id === SERVER_ENTRY_VIRTUAL_ID) return SERVER_ENTRY_RESOLVED_ID;
       return null;
     },
     load(id: string) {
-      if (id === RPC_REGISTRY_RESOLVED_ID) return RPC_REGISTRY_SOURCE;
-      if (id === SERVER_ENTRY_RESOLVED_ID) {
-        return buildServerEntrySource({ userEntryRel: opts.userEntryRel });
-      }
-      return null;
+      if (id !== SERVER_ENTRY_RESOLVED_ID) return null;
+      return buildServerEntrySource({ userEntryRel: opts.userEntryRel });
     },
   };
 }

@@ -23,7 +23,6 @@ import { devServerPlugin } from "./dev-server.js";
 import { buildPlugin } from "./build.js";
 import { nodeCompatPlugin } from "./node-compat.js";
 import { zeroshipModulePlugin } from "./zeroship-module.js";
-import { rpcRegistryPlugin } from "./rpc-registry.js";
 
 export interface ZeroshipOptions {
   /** RPC endpoint path (default: "/_rpc") */
@@ -58,16 +57,6 @@ export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
   return [
     nodeCompatPlugin(),
     zeroshipModulePlugin(),
-    // Closure-private RPC registry virtual module owner. Must be in
-    // the main plugin list so the transform's emitted
-    // `import { _zsRegister } from "virtual:zeroship/_rpc-registry"`
-    // resolves in dev mode. The build sub-build (build.ts) registers
-    // its own copy because Vite's SSR sub-build runs with
-    // `configFile: false` and does not inherit plugins.
-    //
-    // `userEntryRel` is unused outside the synthetic-entry path
-    // (only the registry virtual is consumed in dev) — pass empty.
-    rpcRegistryPlugin({ userEntryRel: "" }),
     transformPlugin(rpcEndpoint, state),
     ...devServerPlugin(options, state),
     buildPlugin(state, {

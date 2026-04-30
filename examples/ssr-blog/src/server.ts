@@ -57,14 +57,55 @@ function shell(body: string, props: string): string {
 </html>`;
 }
 
+// ── RPC procedures (also usable server-side via .useQuery) ───────────
+//
+// `listPosts` is a regular RPC procedure. The vite-plugin's
+// transform monkey-patches React Query hooks onto every server-module
+// export, so the App component can call `listPosts.useQuery()` BOTH
+// from the browser (hits HTTP /_zs/v1/listPosts) AND from the SSR
+// renderer (calls impl directly via __makeServerProcedure's hook).
+
+export async function listPosts() {
+  return POSTS;
+}
+listPosts.config = { id: "listPosts", kind: "query" } as const;
+
+// ── SSR fetch handler ────────────────────────────────────────────────
+
+import { QueryClient, QueryClientProvider, dehydrate, HydrationBoundary } from "@tanstack/react-query";
+
 export default {
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     if (req.method !== "GET") {
       return new Response("Method Not Allowed", { status: 405 });
     }
-    const html = renderToString(createElement(App, { url: url.pathname, posts: POSTS }));
-    const props = JSON.stringify({ url: url.pathname });
+
+    // Per-request QueryClient. Prefetch the data we know the page
+    // needs, then render — useQuery hooks land on cached data with
+    // no loading state.
+    const qc = new QueryClient();
+    // `listPosts.prefetch` is attached by __makeServerProcedure (see
+    // SSR hooks block at top of bundle). Calls impl directly, no HTTP.
+    const lp = listPosts as typeof listPosts & {
+      prefetch: (input: undefined, qc: QueryClient) => Promise<unknown>;
+    };
+    await lp.prefetch(undefined, qc);
+
+    const html = renderToString(
+      createElement(
+        QueryClientProvider,
+        { client: qc },
+        createElement(HydrationBoundary, { state: dehydrate(qc) },
+          createElement(App, { url: url.pathname }),
+        ),
+      ),
+    );
+    // Dehydrated state ships in the HTML for client-side rehydration.
+    const props = JSON.stringify({
+      url: url.pathname,
+      dehydrated: dehydrate(qc),
+    });
     return new Response(shell(html, props), {
       status: 200,
       headers: { "content-type": "text/html; charset=utf-8" },

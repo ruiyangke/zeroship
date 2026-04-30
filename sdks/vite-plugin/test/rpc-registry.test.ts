@@ -1,28 +1,37 @@
 /**
- * Tests for the closure-private RPC registry virtual module.
+ * Tests for the synthetic SSR entry generator.
  *
- * Replaces the old `globalThis.__zsRegistry` + `globalThis.__register`
- * leak. The new design owns the registry inside a virtual module owned
- * by the rolldown bundle. After build, no `__zsRegistry` / `__register`
- * symbol exists on globalThis.
+ * After the WinterCG-symmetric refactor, the plugin owns one virtual
+ * module — `virtual:zeroship/_server-entry` — that imports the user
+ * module's namespace, builds a `_procedures` map at module-init time
+ * by iterating the namespace's callable exports, and exposes
+ * `default.{fetch, rpc}`. There is no separate registry virtual module,
+ * no `_zsRegister` runtime side-effect, no static per-procedure imports.
  *
- * The plugin under test is the `rpcRegistryPlugin` factory from
- * `../src/rpc-registry.js` — it provides:
- *   - `virtual:zeroship/_rpc-registry`     closure-private registry
- *   - `virtual:zeroship/_server-entry`     synthetic SSR entry that
- *                                          re-exports user + dispatchRpc
+ * These tests verify:
+ *   - resolveId returns the resolved id for the synthetic entry
+ *   - load emits a source string with the right shape
+ *   - the source is structurally clean (no leftover `_zsRegister`,
+ *     `__zsRegister`, or `_rpc-registry` references)
  */
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import {
-  RPC_REGISTRY_SOURCE,
-  RPC_REGISTRY_VIRTUAL_ID,
-  RPC_REGISTRY_RESOLVED_ID,
-  rpcRegistryPlugin,
-} from "../src/rpc-registry.js";
 
-describe("rpcRegistryPlugin", () => {
+import {
+  rpcRegistryPlugin,
+  buildServerEntrySource,
+  pickEntryWireId,
+  SERVER_ENTRY_VIRTUAL_ID,
+  SERVER_ENTRY_RESOLVED_ID,
+} from "../src/rpc-registry.js";
+import type { TransformState } from "../src/transform.js";
+
+function emptyState(): TransformState {
+  return { serverFunctionMap: new Map(), discoveredProcedures: [] };
+}
+
+describe("rpcRegistryPlugin — resolveId / load", () => {
   function callResolveId(plugin: ReturnType<typeof rpcRegistryPlugin>, id: string): unknown {
     const fn = plugin.resolveId as (id: string) => unknown;
     return fn.call(plugin, id);
@@ -32,71 +41,114 @@ describe("rpcRegistryPlugin", () => {
     return fn.call(plugin, id);
   }
 
-  test("resolveId returns the resolved id for the public specifier", () => {
-    const plugin = rpcRegistryPlugin({ userEntryRel: "src/server.ts" });
+  test("resolveId returns the resolved id for the synthetic entry id", () => {
+    const plugin = rpcRegistryPlugin({
+      root: "/tmp",
+      userEntryRel: "src/server.ts",
+      state: emptyState(),
+    });
     assert.equal(
-      callResolveId(plugin, RPC_REGISTRY_VIRTUAL_ID),
-      RPC_REGISTRY_RESOLVED_ID,
-      "resolveId returns \\0-prefixed id"
+      callResolveId(plugin, SERVER_ENTRY_VIRTUAL_ID),
+      SERVER_ENTRY_RESOLVED_ID,
     );
   });
 
   test("resolveId returns null for unrelated ids", () => {
-    const plugin = rpcRegistryPlugin({ userEntryRel: "src/server.ts" });
-    assert.equal(callResolveId(plugin, "some/other/module"), null);
+    const plugin = rpcRegistryPlugin({
+      root: "/tmp",
+      userEntryRel: "src/server.ts",
+      state: emptyState(),
+    });
     assert.equal(callResolveId(plugin, "react"), null);
+    assert.equal(callResolveId(plugin, "virtual:zeroship/_rpc-registry"), null);
   });
 
-  test("load returns ESM source declaring _zsRegister and dispatch", () => {
-    const plugin = rpcRegistryPlugin({ userEntryRel: "src/server.ts" });
-    const code = callLoad(plugin, RPC_REGISTRY_RESOLVED_ID);
-    assert.equal(typeof code, "string", "load returns string");
-    const codeStr = code as string;
-    assert.match(codeStr, /export function _zsRegister/, "exports _zsRegister");
-    assert.match(codeStr, /export async function dispatch/, "exports dispatch");
+  test("load returns synthetic entry source importing the user module", () => {
+    const plugin = rpcRegistryPlugin({
+      root: "/proj",
+      userEntryRel: "/proj/src/server.ts",
+      state: emptyState(),
+    });
+    const code = callLoad(plugin, SERVER_ENTRY_RESOLVED_ID) as string;
+    assert.equal(typeof code, "string");
+    assert.match(code, /import \* as _zsUser from "\/proj\/src\/server\.ts"/);
+    assert.match(code, /const _procedures = \{\}/);
+    assert.match(code, /export default \{ fetch: _zsFetch, rpc: _zsRpc \}/);
   });
 
-  test("registry is closure-private (no _registry export, no globalThis access)", async () => {
-    // Data-URL import the source — confirms it's syntactically valid ESM,
-    // _registry is not exposed via the namespace, and _zsRegister + dispatch
-    // round-trip a registered method correctly.
-    const dataUrl =
-      "data:text/javascript;base64," +
-      Buffer.from(RPC_REGISTRY_SOURCE, "utf8").toString("base64");
-    const mod: any = await import(dataUrl);
-    assert.equal(typeof mod._zsRegister, "function", "_zsRegister exported");
-    assert.equal(typeof mod.dispatch, "function", "dispatch exported");
-    assert.equal(mod._registry, undefined, "_registry is NOT exported");
+  test("load returns null for unrelated ids", () => {
+    const plugin = rpcRegistryPlugin({
+      root: "/tmp",
+      userEntryRel: "src/server.ts",
+      state: emptyState(),
+    });
+    assert.equal(callLoad(plugin, "some/other/module"), null);
+  });
+});
 
-    // Round-trip: register and dispatch.
-    mod._zsRegister("doubleIt", (n: number) => n * 2);
-    const result = await mod.dispatch("doubleIt", [21]);
-    assert.equal(result, 42, "registered fn dispatched correctly");
+describe("buildServerEntrySource — runtime _procedures population", () => {
+  test("emits a runtime loop that walks _zsUser's namespace", () => {
+    const code = buildServerEntrySource({
+      userEntryRel: "/proj/src/server.ts",
+    });
+    // The dispatch table is populated at module-init time from the user
+    // module's namespace, not from a static build-time import list.
+    assert.match(code, /for \(const _k of Object\.keys\(_zsUser\)\)/);
+    assert.match(code, /typeof _v !== "function"/);
+    // wireId resolution: explicit fn.config.id wins, default is the
+    // export name. The runtime loop should encode that.
+    assert.match(code, /_v\.config && typeof _v\.config\.id === "string"/);
   });
 
-  test("dispatch on missing method rejects with err.status === 404", async () => {
-    const dataUrl =
-      "data:text/javascript;base64," +
-      Buffer.from(RPC_REGISTRY_SOURCE, "utf8").toString("base64");
-    const mod: any = await import(dataUrl);
-    await assert.rejects(
-      () => mod.dispatch("doesNotExist", []),
-      (err: any) => {
-        assert.equal(err.status, 404, "err.status is 404");
-        assert.match(String(err.message), /Method not found/, "error message");
-        return true;
-      }
+  test("source contains no _zsRegister / __zsRegister / _rpc-registry references", () => {
+    const code = buildServerEntrySource({
+      userEntryRel: "/proj/src/server.ts",
+    });
+    assert.ok(
+      !code.includes("_zsRegister"),
+      "source must not reference _zsRegister",
+    );
+    assert.ok(
+      !code.includes("__zsRegister"),
+      "source must not reference __zsRegister",
+    );
+    assert.ok(
+      !code.includes("_rpc-registry"),
+      "source must not reference _rpc-registry",
     );
   });
 
-  test("source contains no globalThis or __zsRegistry references", () => {
-    assert.ok(
-      !RPC_REGISTRY_SOURCE.includes("globalThis"),
-      "source has no `globalThis` reference"
+  test("default export is { fetch, rpc } (WinterCG-symmetric)", () => {
+    const code = buildServerEntrySource({
+      userEntryRel: "/proj/src/server.ts",
+    });
+    assert.match(code, /export default \{ fetch: _zsFetch, rpc: _zsRpc \}/);
+  });
+});
+
+describe("pickEntryWireId — resolution order", () => {
+  test("explicit fn.config.id wins", () => {
+    assert.equal(
+      pickEntryWireId({ exportName: "addPost", config: { id: "posts.add" } }),
+      "posts.add",
     );
-    assert.ok(
-      !RPC_REGISTRY_SOURCE.includes("__zsRegistry"),
-      "source has no `__zsRegistry` reference"
+  });
+
+  test("falls back to bare exportName when no config.id", () => {
+    assert.equal(pickEntryWireId({ exportName: "listTodos" }), "listTodos");
+  });
+
+  test("ignores empty-string config.id (uses default)", () => {
+    assert.equal(
+      pickEntryWireId({ exportName: "x", config: { id: "" } }),
+      "x",
+    );
+  });
+
+  test("ignores non-string config.id (uses default)", () => {
+    assert.equal(
+      pickEntryWireId({ exportName: "x", config: { id: 42 as unknown as string } }),
+      "x",
     );
   });
 });

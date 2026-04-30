@@ -1,0 +1,32 @@
+=================================================================
+  zeroship vs Node.js — RPC v1 spec wire
+  Same setup: zerobench saturate, 300 conns, 5s, 16 workers
+=================================================================
+
+Wire: POST /_zs/v1/<id> with body { json: <input> }
+      Response { json: <result> }
+
+Scenario       zeroship 16w    node cluster 16w   node single
+─────────────  ─────────────   ──────────────────  ─────────────
+ping            467,741          296,431             29,628
+fib10           450,498          287,112             28,236
+setTimeout0     454,692          168,219             34,799
+promiseChain    440,223          299,498             29,135
+sha256          401,748          206,021             24,126
+hmacSign        385,708          196,265             23,351
+randomUUID      447,508          293,326             28,594
+aesEncrypt      359,579          181,786             20,917
+ecdsaSign       216,535          155,275             19,065
+
+(req/s)
+
+zeroship × node-cluster ratio: 1.4× to 2.7× across all scenarios.
+zeroship × node-single ratio: 15× to 25×.
+
+Largest delta: setTimeout(0) — zeroship 2.7× cluster.
+  Node setTimeout(0) has a 1ms minimum delay; V8 microtask
+  scheduling has no such floor.
+
+Smallest delta: ecdsaSign — zeroship 1.4× cluster.
+  Both runtimes use OS crypto libs for P-256; dispatch tax
+  amortizes across the heavy work.

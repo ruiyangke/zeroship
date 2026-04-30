@@ -553,19 +553,127 @@ fn zeroship_get_request_returns_request() {
 }
 
 // ===========================================================================
-// PR 2 Task 3 — bootstrap RPC contract tests
+// Spec wire: /_zs/v1/<id> + superjson { json } envelope
 // ===========================================================================
 //
-// These four tests are effectively the B3/B4/B5 status-probe tests from the
-// PR 1 plan — they moved into PR 2 because the status-code assertions now
-// live in the bootstrap (JS-level), not the kernel (Rust-level).
+// After the WinterCG-symmetric refactor, every HTTP request flows
+// through `default.fetch(request, env, ctx)`. The synthetic SSR entry
+// (emitted by @zeroship/vite-plugin in real apps; written by hand
+// here) owns the /_zs/v1/<id> wire and dispatches via `default.rpc`.
+//
+// Tests synthesize a tiny `default.{fetch, rpc}` that mirrors the
+// synthetic-entry contract — the bootstrap's WS-subscription path and
+// the kernel's HTTP path both call into this shape.
+
+const SYNTHETIC_ENTRY_PROLOG: &str = r#"
+function _zsErrResponse(status, code, message) {
+    return new Response(JSON.stringify({ message, name: "Error", code }), {
+        status, headers: { "content-type": "application/json" },
+    });
+}
+async function _zsRpcAndRespond(rpc, name, input) {
+    try {
+        const result = await rpc(name, input);
+        if (result != null && typeof result === "object"
+            && typeof result[Symbol.asyncIterator] === "function"
+            && typeof result.next === "function") {
+            const enc = new TextEncoder();
+            const body = new ReadableStream({
+                async start(controller) {
+                    try {
+                        while (true) {
+                            const step = await result.next();
+                            if (step.done) { controller.enqueue(enc.encode("d:{}\n")); break; }
+                            const v = step.value;
+                            if (typeof v === "string") {
+                                controller.enqueue(enc.encode("0:" + JSON.stringify(v) + "\n"));
+                            } else {
+                                controller.enqueue(enc.encode("2:[" + JSON.stringify(v) + "]\n"));
+                            }
+                        }
+                    } catch (e) {
+                        const env = { message: e?.message ?? String(e), name: e?.name ?? "Error" };
+                        if (e && typeof e.code === "string") env.code = e.code;
+                        if (e && e.details !== undefined) env.details = e.details;
+                        if (e && typeof e.retryable === "boolean") env.retryable = e.retryable;
+                        controller.enqueue(enc.encode("e:" + JSON.stringify(env) + "\n"));
+                        controller.enqueue(enc.encode("d:{}\n"));
+                    } finally { controller.close(); }
+                },
+            });
+            return new Response(body, {
+                status: 200,
+                headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
+            });
+        }
+        if (result instanceof Response) return result;
+        return new Response(
+            JSON.stringify({ json: result === undefined ? null : result }),
+            { status: 200, headers: { "content-type": "application/json" } },
+        );
+    } catch (err) {
+        const status = (err && Number.isInteger(err.status) && err.status >= 400 && err.status < 600) ? err.status : 500;
+        const body = { message: err?.message ?? String(err), name: err?.name ?? "Error" };
+        if (err && typeof err.code === "string") body.code = err.code;
+        if (err && err.details !== undefined) body.details = err.details;
+        if (err && typeof err.retryable === "boolean") body.retryable = err.retryable;
+        return new Response(JSON.stringify(body), {
+            status, headers: { "content-type": "application/json" },
+        });
+    }
+}
+async function _zsFetchEntry(request, rpc) {
+    const url = new URL(request.url);
+    if (!url.pathname.startsWith("/_zs/v1/")) {
+        return new Response("Not Found", { status: 404 });
+    }
+    const id = decodeURIComponent(url.pathname.slice("/_zs/v1/".length));
+    if (!id) return _zsErrResponse(400, "INVALID_ARGUMENT", "missing wireId");
+    let input = undefined;
+    if (request.method === "POST") {
+        const text = await request.text();
+        if (text) {
+            try {
+                const env = JSON.parse(text);
+                input = env && typeof env === "object" && "json" in env ? env.json : env;
+            } catch (e) {
+                return _zsErrResponse(400, "INVALID_ARGUMENT", "invalid JSON body: " + (e?.message ?? e));
+            }
+        }
+    }
+    return await _zsRpcAndRespond(rpc, id, input);
+}
+"#;
+
+fn synthetic_entry(procs: &str) -> Vec<zeroship_runtime::ModuleEntry> {
+    let src = format!(
+        r#"
+{prolog}
+{procs}
+const _procedures = _makeProcedures();
+async function _zsRpc(name, input, _ctx) {{
+    const fn = _procedures[name];
+    if (typeof fn !== "function") {{
+        throw Object.assign(new Error("Method not found: " + name), {{ status: 404, code: "NOT_FOUND" }});
+    }}
+    return await fn(input);
+}}
+export default {{
+    fetch: (request) => _zsFetchEntry(request, _zsRpc),
+    rpc: _zsRpc,
+}};
+"#,
+        prolog = SYNTHETIC_ENTRY_PROLOG,
+        procs = procs,
+    );
+    m(&src)
+}
 
 #[test]
 fn bootstrap_routes_rpc_to_named_export() {
-    let modules = m(r#"
-        export function greet(name) {
-            return { hello: name };
-        }
+    let modules = synthetic_entry(r#"
+        function greet(name) { return { hello: name }; }
+        function _makeProcedures() { return { greet }; }
     "#);
     init_v8();
     let runtime = Runtime::builder().modules(modules).build();
@@ -573,9 +681,9 @@ fn bootstrap_routes_rpc_to_named_export() {
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "POST",
-        "http://localhost/_rpc/greet",
+        "http://localhost/_zs/v1/greet",
         &[("content-type".into(), "application/json".into())],
-        r#"["world"]"#,
+        r#"{"json":"world"}"#,
         &env,
         ctx,
     );
@@ -583,21 +691,25 @@ fn bootstrap_routes_rpc_to_named_export() {
         panic!("expected Response");
     };
     assert_eq!(status, 200, "body: {}", body);
+    // Wire wraps the result in `{ json: ... }`.
     assert!(body.contains(r#""hello":"world""#), "body: {}", body);
 }
 
 #[test]
 fn bootstrap_rpc_method_not_found_returns_404() {
-    let modules = m(r#"export function greet() { return "hi"; }"#);
+    let modules = synthetic_entry(r#"
+        function greet() { return "hi"; }
+        function _makeProcedures() { return { greet }; }
+    "#);
     init_v8();
     let runtime = Runtime::builder().modules(modules).build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "POST",
-        "http://localhost/_rpc/unknown",
+        "http://localhost/_zs/v1/unknown",
         &[("content-type".into(), "application/json".into())],
-        "[]",
+        "{}",
         &env,
         ctx,
     );
@@ -610,14 +722,17 @@ fn bootstrap_rpc_method_not_found_returns_404() {
 
 #[test]
 fn bootstrap_rpc_malformed_json_returns_400() {
-    let modules = m(r#"export function greet(x) { return x; }"#);
+    let modules = synthetic_entry(r#"
+        function greet(x) { return x; }
+        function _makeProcedures() { return { greet }; }
+    "#);
     init_v8();
     let runtime = Runtime::builder().modules(modules).build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "POST",
-        "http://localhost/_rpc/greet",
+        "http://localhost/_zs/v1/greet",
         &[("content-type".into(), "application/json".into())],
         "not-json",
         &env,
@@ -627,29 +742,34 @@ fn bootstrap_rpc_malformed_json_returns_400() {
         panic!("expected Response");
     };
     assert_eq!(status, 400, "body: {}", body);
-    assert!(body.contains("Invalid args JSON"), "body: {}", body);
+    assert!(body.contains("invalid JSON body"), "body: {}", body);
 }
 
 #[test]
-fn bootstrap_rpc_non_array_body_returns_400() {
-    let modules = m(r#"export function greet(x) { return x; }"#);
+fn bootstrap_rpc_input_extracted_from_json_envelope() {
+    // New wire: body is `{"json": <input>}`. The input is unwrapped before
+    // being passed to the handler.
+    let modules = synthetic_entry(r#"
+        function echo(x) { return { received: x }; }
+        function _makeProcedures() { return { echo }; }
+    "#);
     init_v8();
     let runtime = Runtime::builder().modules(modules).build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "POST",
-        "http://localhost/_rpc/greet",
+        "http://localhost/_zs/v1/echo",
         &[("content-type".into(), "application/json".into())],
-        r#"{"not":"array"}"#,
+        r#"{"json":{"hello":"world"}}"#,
         &env,
         ctx,
     );
     let FetchOutcome::Response { status, body, .. } = outcome else {
         panic!("expected Response");
     };
-    assert_eq!(status, 400, "body: {}", body);
-    assert!(body.contains("JSON array"), "body: {}", body);
+    assert_eq!(status, 200, "body: {}", body);
+    assert!(body.contains(r#""hello":"world""#), "body: {}", body);
 }
 
 // ===========================================================================
@@ -666,11 +786,11 @@ fn bootstrap_rpc_non_array_body_returns_400() {
 #[test]
 fn rpc_error_envelope_carries_code_details_retryable() {
     // Procedure throws an Error with `code`, `details`, `retryable`, and
-    // `status`. The kernel's `errorResponse` must forward all four to the
-    // wire. This is the regression guard for the structured-error path
-    // that the WebSocket subscription / slow fetch paths will rely on.
-    let modules = m(r#"
-        export function fail(_input) {
+    // `status`. The synthetic entry's error envelope must forward all
+    // four to the wire — regression guard for the structured-error path
+    // the WebSocket subscription / fetch paths rely on.
+    let modules = synthetic_entry(r#"
+        function fail(_input) {
             throw Object.assign(new Error("limit must be at most 100"), {
                 code: "INVALID_ARGUMENT",
                 details: { issues: [{ path: ["limit"], message: "too big" }] },
@@ -678,6 +798,7 @@ fn rpc_error_envelope_carries_code_details_retryable() {
                 status: 400,
             });
         }
+        function _makeProcedures() { return { fail }; }
     "#);
     init_v8();
     let runtime = Runtime::builder().modules(modules).build();
@@ -685,9 +806,9 @@ fn rpc_error_envelope_carries_code_details_retryable() {
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "POST",
-        "http://localhost/_rpc/fail",
+        "http://localhost/_zs/v1/fail",
         &[("content-type".into(), "application/json".into())],
-        "[]",
+        "{}",
         &env,
         ctx,
     );
@@ -713,10 +834,9 @@ fn rpc_error_envelope_omits_absent_optional_fields() {
     // Procedure throws a plain Error with only `status` (and the implicit
     // `message` / `name`). The wire must NOT carry `code`, `details`, or
     // `retryable` keys at all — additive forwarding only when present.
-    let modules = m(r#"
-        export function fail() {
-            throw Object.assign(new Error("plain"), { status: 418 });
-        }
+    let modules = synthetic_entry(r#"
+        function fail() { throw Object.assign(new Error("plain"), { status: 418 }); }
+        function _makeProcedures() { return { fail }; }
     "#);
     init_v8();
     let runtime = Runtime::builder().modules(modules).build();
@@ -724,9 +844,9 @@ fn rpc_error_envelope_omits_absent_optional_fields() {
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "POST",
-        "http://localhost/_rpc/fail",
+        "http://localhost/_zs/v1/fail",
         &[("content-type".into(), "application/json".into())],
-        "[]",
+        "{}",
         &env,
         ctx,
     );
@@ -750,8 +870,8 @@ fn rpc_error_envelope_ignores_non_string_code_and_non_bool_retryable() {
     // Other types are silently dropped — the envelope is a contract the
     // wire side relies on; we don't propagate `code: 42` as a number.
     // `details` accepts any JSON value (including non-objects).
-    let modules = m(r#"
-        export function fail() {
+    let modules = synthetic_entry(r#"
+        function fail() {
             throw Object.assign(new Error("bad shape"), {
                 code: 42,                        // not a string → drop
                 retryable: "yes",                // not a boolean → drop
@@ -759,6 +879,7 @@ fn rpc_error_envelope_ignores_non_string_code_and_non_bool_retryable() {
                 status: 500,
             });
         }
+        function _makeProcedures() { return { fail }; }
     "#);
     init_v8();
     let runtime = Runtime::builder().modules(modules).build();
@@ -766,9 +887,9 @@ fn rpc_error_envelope_ignores_non_string_code_and_non_bool_retryable() {
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "POST",
-        "http://localhost/_rpc/fail",
+        "http://localhost/_zs/v1/fail",
         &[("content-type".into(), "application/json".into())],
-        "[]",
+        "{}",
         &env,
         ctx,
     );
@@ -785,14 +906,13 @@ fn rpc_error_envelope_ignores_non_string_code_and_non_bool_retryable() {
 
 #[test]
 fn sse_error_frame_carries_code_details_retryable() {
-    // Async generator throws partway through. The bootstrap's
-    // `sseFromAsyncGen` wraps the throw as an `e:` envelope frame
-    // (AI-SDK Data Stream Protocol; the `e:` typeId is our extension —
-    // ai-sdk parsers tolerate unknown ids). The payload must carry the
-    // same envelope shape as the RPC error wire (code, details,
-    // retryable). Always followed by a `d:{}` done frame.
-    let modules = m(r#"
-        export async function* stream() {
+    // Async generator throws partway through. The synthetic entry's
+    // SSE encoder wraps the throw as an `e:` envelope frame (AI-SDK
+    // Data Stream Protocol; the `e:` typeId is our extension — ai-sdk
+    // parsers tolerate unknown ids). The payload carries the same
+    // envelope shape as the RPC error wire. Always followed by `d:{}`.
+    let modules = synthetic_entry(r#"
+        async function* stream() {
             yield { tick: 0 };
             throw Object.assign(new Error("upstream gone"), {
                 code: "UNAVAILABLE",
@@ -801,15 +921,61 @@ fn sse_error_frame_carries_code_details_retryable() {
                 status: 503,
             });
         }
+        function _makeProcedures() { return { stream }; }
     "#);
-    let r = dispatch(modules, "stream", "[]").unwrap();
-    // SSE buffered into a single body string by `dispatch`.
-    assert!(r.json.contains("2:[{\"tick\":0}]\n"), "got: {}", r.json);
-    assert!(r.json.contains("e:"), "got: {}", r.json);
 
-    // Locate the error envelope line — `e:<json>\n` — and parse it.
-    let e_idx = r.json.find("e:").expect("error frame missing");
-    let after = &r.json[e_idx + 2..];
+    init_v8();
+    let runtime = zeroship_runtime::runtime::Runtime::builder().modules(modules).build();
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler(
+        "POST",
+        "http://localhost/_zs/v1/stream",
+        &[("content-type".into(), "application/json".into())],
+        "{}",
+        &env,
+        ctx,
+    );
+
+    // Drain the response body into a single string. SSE may surface as
+    // Stream variant if the outer Response was async.
+    let body = compio::runtime::Runtime::new().unwrap().block_on(async move {
+        runtime.start_pump();
+        match outcome {
+            FetchOutcome::Response { body, .. } => body,
+            FetchOutcome::Stream { body_reader, .. } => {
+                let mut out = Vec::new();
+                for chunk in body_reader.drain() { out.extend_from_slice(&chunk); }
+                String::from_utf8_lossy(&out).into_owned()
+            }
+            FetchOutcome::Pending { rx, cancel: _ } => {
+                let settled = compio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await.expect("timeout").expect("dispatch error");
+                match settled {
+                    SettledFetch::Stream { body_reader, .. } => {
+                        let mut out = Vec::new();
+                        loop {
+                            while let Some(chunk) = body_reader.pop() {
+                                out.extend_from_slice(&chunk);
+                            }
+                            if body_reader.is_done() { break; }
+                            body_reader.wait_for_data().await;
+                        }
+                        String::from_utf8_lossy(&out).into_owned()
+                    }
+                    SettledFetch::Response { body, .. } => body,
+                    _ => panic!("unexpected outcome"),
+                }
+            }
+            _ => panic!("unexpected outcome"),
+        }
+    });
+
+    assert!(body.contains("2:[{\"tick\":0}]\n"), "got: {}", body);
+    assert!(body.contains("e:"), "got: {}", body);
+
+    let e_idx = body.find("e:").expect("error frame missing");
+    let after = &body[e_idx + 2..];
     let line_end = after.find('\n').expect("error frame not newline-terminated");
     let payload: serde_json::Value = serde_json::from_str(&after[..line_end])
         .unwrap_or_else(|e| panic!("error data not JSON: {} (line: {})", e, &after[..line_end]));
@@ -822,12 +988,7 @@ fn sse_error_frame_carries_code_details_retryable() {
         serde_json::json!({ "upstream": "db", "attempt": 3 }),
         "payload: {}", payload
     );
-    // `d:{}` always follows the error envelope.
-    assert!(
-        r.json[e_idx..].contains("d:{}\n"),
-        "expected d:{{}} after error: {}",
-        r.json
-    );
+    assert!(body[e_idx..].contains("d:{}\n"), "expected d:{{}} after error: {}", body);
 }
 
 // ===========================================================================
