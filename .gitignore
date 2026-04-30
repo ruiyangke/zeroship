@@ -11,3 +11,5 @@ refs/
 test-results/
 perf.data
 perf-compio.data
+.worktrees/
+.superpowers/
