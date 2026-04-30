@@ -60,10 +60,6 @@ zeroship deploy ./dist/app.zsapp --app=<uuid> --control=<url> --key=<master>
 - The RPC URL is `POST /_rpc/src/server/listTodos`, not `POST /_rpc/listTodos`. The vite-plugin's transform synthesises method names as `<modulePath>/<exportName>` so two unrelated server modules can have an export with the same name without collision. Client-side calls just use the imported `listTodos()` symbol — the wire path is opaque.
 - The trailing **catch-all rule** is `Static{ try: ["$path", "/index.html"] }`, not `Worker(ssr)`, because the build pipeline detects that `src/server.ts` exports no `default.fetch` (only `"use server"` RPC handlers). Unknown URLs serve the SPA shell so the browser router can claim them.
 
-## Known limitations (gaps surfaced)
+## Notes on the build output
 
-### Gap — `public/` assets get duplicated into `dist/server/`
-
-When the SSR build runs (kicked off automatically by the plugin), Vite's default `publicDir` behaviour copies `public/*` into the SSR build's output directory (`dist/server/`). Those files then end up cataloged as `worker.modules` entries in the deploy manifest — see the example output above where `favicon.ico` lives in `worker.modules` next to `index.js`.
-
-The fix is to set `publicDir: false` on the SSR sub-build inside `sdks/vite-plugin/src/build.ts:viteBuild({...})`. The deduplication in `zsapp.ts` keeps both references pointing at the same blob hash so it's harmless on the wire, but the worker's module map should not list static-only files.
+`worker.modules` lists exactly `index.js` — no `favicon.ico` or other `public/` files. The vite-plugin's SSR sub-build runs with `publicDir: false`; the client build keeps `publicDir`, so `public/*` ends up in `dist/<root>/` and gets cataloged in `assets`.

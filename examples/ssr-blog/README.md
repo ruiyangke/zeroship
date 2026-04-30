@@ -56,11 +56,9 @@ Then `clientScriptTag(ENTRY_SRC)` looks up `entry.file` and emits `<script type=
 
 Type declarations: a triple-slash `<reference types="@zeroship/vite-plugin/types" />` at the top of `vite.config.ts` brings the `virtual:zeroship/client-manifest` module declaration into TypeScript's lookup.
 
-## Known limitations (gaps surfaced)
+## Notes on the build output
 
-### Gap — SSR build copies `public/` assets
-
-Same as the CSR demo — Vite's SSR build with the current plugin config copies `public/*` into `dist/server/`, so harmless static assets (e.g. `favicon.ico`) end up referenced as worker modules in the manifest. Cosmetic but confusing.
+`worker.modules` lists exactly `index.js` — the SSR sub-build runs with `publicDir: false`, so any `public/*` files stay on the client build's side.
 
 ## Files
 

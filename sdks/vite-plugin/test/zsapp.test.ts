@@ -21,6 +21,7 @@ import {
   BOOTSTRAP_MARKER,
   CLIENT_MANIFEST_RESOLVED_ID,
   CLIENT_MANIFEST_VIRTUAL_ID,
+  buildSsrInlineConfig,
   clientManifestPlugin,
   userSourceHasDefaultExport,
   wrapServerBundle,
@@ -1023,5 +1024,64 @@ describe("clientManifestPlugin", () => {
     // Also ignores the public specifier on `load` — Vite calls load
     // only with the resolved id.
     assert.equal(callLoad(plugin, CLIENT_MANIFEST_VIRTUAL_ID), null);
+  });
+});
+
+// ── Bug 4: SSR build should NOT copy public/ ──────────────────────────────
+describe("buildSsrInlineConfig", () => {
+  test("ssr_build_no_publicdir_copy", () => {
+    // The SSR sub-build's `publicDir` MUST be `false` — otherwise Vite
+    // copies `<root>/public/*` into `dist/server/`, and those files
+    // get cataloged as worker.modules entries by the .zsapp emitter.
+    const config = buildSsrInlineConfig({
+      root: "/tmp/myapp",
+      ssrEntry: "/tmp/myapp/src/server.ts",
+      outDir: "dist/server",
+      ssrPlugins: [],
+    });
+    assert.equal(
+      config.publicDir,
+      false,
+      "publicDir is false on the SSR sub-build"
+    );
+    // Sanity: the rest of the contract is intact.
+    assert.equal(config.root, "/tmp/myapp");
+    const ssr = config.ssr as { noExternal?: boolean; target?: string };
+    assert.equal(ssr.noExternal, true);
+    assert.equal(ssr.target, "webworker");
+    const build = config.build as { ssr?: string; outDir?: string };
+    assert.equal(build.ssr, "/tmp/myapp/src/server.ts");
+    assert.equal(build.outDir, "dist/server");
+  });
+
+  test("only_index_js_in_worker_modules_when_no_public_copy", async () => {
+    // Walker sanity: when dist/server/ contains only `index.js` (which
+    // is what the SSR build produces with `publicDir: false`), the
+    // emitted manifest's `worker.modules` has only `index.js` — and
+    // the public favicon ends up in `assets` from the client build.
+    const fix = await makeFixture({
+      "dist/index.html": "<!doctype html>",
+      "dist/favicon.ico": "icon-bytes",
+      "dist/assets/main.js": "console.log('csr')",
+      "dist/server/index.js": "export default { fetch: () => new Response('') }",
+    });
+    try {
+      const result = await emitZsapp({
+        root: fix.root,
+        builtAt: "2026-04-29T00:00:00Z",
+        silent: true,
+      });
+      const tarBytes = zstdDecompressSync(await fs.readFile(result.outputPath));
+      const manifest = JSON.parse(parseTar(tarBytes)[0].bytes.toString("utf8"));
+
+      assert.deepEqual(
+        Object.keys(manifest.worker.modules).sort(),
+        ["index.js"],
+        "worker.modules has only index.js"
+      );
+      assert.ok(manifest.assets["/favicon.ico"], "favicon.ico in assets");
+    } finally {
+      await fix.cleanup();
+    }
   });
 });

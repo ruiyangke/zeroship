@@ -24,6 +24,54 @@ export const CLIENT_MANIFEST_VIRTUAL_ID = "virtual:zeroship/client-manifest";
 export const CLIENT_MANIFEST_RESOLVED_ID = "\0" + CLIENT_MANIFEST_VIRTUAL_ID;
 
 /**
+ * Build the InlineConfig the plugin passes to `viteBuild()` for the
+ * SSR sub-build.
+ *
+ * Exposed (and exported) so tests can verify the shape without spinning
+ * up a real Vite environment. Notable invariants:
+ *   - `publicDir: false` — the SSR outDir is `dist/server/`, and Vite's
+ *     default would copy `public/*` into it. Those copies then end up
+ *     cataloged as `worker.modules` entries, which is wrong: public
+ *     files are static assets, not worker code. The client build keeps
+ *     its `publicDir` so they still ship to `dist/<root>/`.
+ *   - `noExternal: true` — bundle every dep (npm packages have no
+ *     ESM resolver inside the V8 runtime).
+ *   - `target: "webworker"` — picks the right export-conditions map.
+ *   - `entryFileNames: "index.js"` — deterministic name; the .zsapp
+ *     emitter uses it as the worker entry.
+ */
+export function buildSsrInlineConfig(opts: {
+  root: string;
+  ssrEntry: string;
+  outDir: string;
+  ssrPlugins: unknown[];
+}): Record<string, unknown> {
+  return {
+    root: opts.root,
+    configFile: false,
+    plugins: opts.ssrPlugins,
+    // Vite would otherwise copy `<root>/public/*` into the SSR outDir.
+    // We don't want public files cataloged as worker modules — they're
+    // static assets. The client build keeps publicDir.
+    publicDir: false,
+    ssr: {
+      noExternal: true,
+      target: "webworker",
+    },
+    build: {
+      ssr: opts.ssrEntry,
+      outDir: opts.outDir,
+      emptyOutDir: false,
+      rolldownOptions: {
+        output: { format: "esm", entryFileNames: "index.js" },
+      },
+      minify: true,
+    },
+    logLevel: "warn",
+  };
+}
+
+/**
  * Build the Vite plugin that exposes the Vite client manifest as a
  * virtual ESM module to the SSR bundle. Resolved at the SSR build's
  * `load` time, which happens AFTER the client build has written
@@ -229,10 +277,11 @@ export function buildPlugin(state: TransformState, options: { serverEntry?: stri
       // bundle has the plain function bodies but no registry
       // population, so the V8 runtime sees "Method not found" for
       // every URL-path RPC call.
-      await viteBuild({
+      const ssrConfig = buildSsrInlineConfig({
         root,
-        configFile: false,
-        plugins: [
+        ssrEntry: entry,
+        outDir: "dist/server",
+        ssrPlugins: [
           // node-compat MUST come first so its `resolve.id` returns
           // the polyfill path before Vite tries to load `node:crypto`
           // etc. as bare specifiers.
@@ -244,28 +293,10 @@ export function buildPlugin(state: TransformState, options: { serverEntry?: stri
           clientManifestPlugin({ root, distDir: relative(root, clientOutDir) }),
           transformPlugin(DEFAULT_RPC_ENDPOINT, state),
         ],
-        ssr: {
-          // Bundle every dependency into the server bundle. Without
-          // this, the SSR build leaves `import "deepagents"` etc. as
-          // ESM imports the V8 runtime can't resolve at boot — we
-          // need a single self-contained file. `noExternal: true`
-          // forces all deps to be inlined; the node-compat plugin
-          // intercepts `node:*` reaches at the import-resolution
-          // stage so they don't bundle node-only code.
-          noExternal: true,
-          target: "webworker",
-        },
-        build: {
-          ssr: entry,
-          outDir: "dist/server",
-          emptyOutDir: false,
-          rolldownOptions: {
-            output: { format: "esm", entryFileNames: "index.js" },
-          },
-          minify: true,
-        },
-        logLevel: "warn",
       });
+      // Cast — buildSsrInlineConfig returns a record so it can be
+      // tested without importing Vite types into the test runner.
+      await viteBuild(ssrConfig as Parameters<typeof viteBuild>[0]);
 
       // Prelude (prepended) installs Node-shaped globals + the
       // Map-backed __register registry. Bootstrap (appended) adds
