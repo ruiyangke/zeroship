@@ -9,6 +9,9 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./types": {
+      "types": "./dist/client-manifest.d.ts"
     }
   },
   "files": [
@@ -16,7 +19,7 @@
     "src"
   ],
   "scripts": {
-    "build": "tsc && node --import tsx scripts/build-bootstrap.ts",
+    "build": "tsc && cp src/client-manifest.d.ts dist/ && node --import tsx scripts/build-bootstrap.ts",
     "build:bootstrap": "node --import tsx scripts/build-bootstrap.ts",
     "dev": "tsc --watch",
     "test": "node --import tsx --test test/*.test.ts"

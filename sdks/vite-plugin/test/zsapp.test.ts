@@ -19,6 +19,9 @@ import { brotliDecompressSync, gunzipSync, zstdDecompressSync } from "node:zlib"
 import { emitZsapp } from "../src/zsapp.js";
 import {
   BOOTSTRAP_MARKER,
+  CLIENT_MANIFEST_RESOLVED_ID,
+  CLIENT_MANIFEST_VIRTUAL_ID,
+  clientManifestPlugin,
   userSourceHasDefaultExport,
   wrapServerBundle,
 } from "../src/build.js";
@@ -931,5 +934,94 @@ export function listTodos() { return []; }
 export function ping(){}
 `;
     assert.equal(userSourceHasDefaultExport(src), false);
+  });
+});
+
+// ── Bug 3: virtual:zeroship/client-manifest ────────────────────────────────
+describe("clientManifestPlugin", () => {
+  // Helpers — reach into the plugin's hook functions directly so we
+  // don't have to spin up a full Vite dev server.
+  function callResolveId(plugin: ReturnType<typeof clientManifestPlugin>, id: string): unknown {
+    const fn = plugin.resolveId as (id: string) => unknown;
+    return fn.call(plugin, id);
+  }
+  function callLoad(plugin: ReturnType<typeof clientManifestPlugin>, id: string): unknown {
+    const fn = plugin.load as (id: string) => unknown;
+    return fn.call(plugin, id);
+  }
+
+  test("resolves the virtual specifier", () => {
+    const plugin = clientManifestPlugin({ root: "/tmp", distDir: "dist" });
+    assert.equal(
+      callResolveId(plugin, CLIENT_MANIFEST_VIRTUAL_ID),
+      CLIENT_MANIFEST_RESOLVED_ID,
+      "resolveId returns the \\0-prefixed id"
+    );
+    assert.equal(
+      callResolveId(plugin, "some-other-module"),
+      null,
+      "resolveId ignores unrelated specifiers"
+    );
+  });
+
+  test("virtual_client_manifest_resolves", async () => {
+    // Set up a fixture with a client manifest on disk.
+    const sample = {
+      "src/entry-client.tsx": {
+        file: "assets/entry-client-DEADBEEF.js",
+        src: "src/entry-client.tsx",
+        isEntry: true,
+        css: ["assets/entry-client-CAFEBABE.css"],
+      },
+    };
+    const fix = await makeFixture({
+      "dist/.vite/manifest.json": JSON.stringify(sample),
+    });
+    try {
+      const plugin = clientManifestPlugin({
+        root: fix.root,
+        distDir: "dist",
+      });
+      const code = callLoad(plugin, CLIENT_MANIFEST_RESOLVED_ID);
+      assert.equal(typeof code, "string", "load returns code string");
+      // The emitted module must be valid ESM that exports a default
+      // matching the on-disk JSON.
+      const codeStr = code as string;
+      assert.match(
+        codeStr,
+        /^export default /,
+        "starts with `export default`"
+      );
+      // Eval via dynamic import via data: URL — confirms the module is
+      // syntactically valid and the inlined JSON matches.
+      const dataUrl =
+        "data:text/javascript;base64," +
+        Buffer.from(codeStr, "utf8").toString("base64");
+      const mod = await import(dataUrl);
+      assert.deepEqual(mod.default, sample, "default export matches JSON");
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
+  test("falls back to empty object when manifest missing", () => {
+    const plugin = clientManifestPlugin({
+      root: "/non/existent/path",
+      distDir: "dist",
+    });
+    const code = callLoad(plugin, CLIENT_MANIFEST_RESOLVED_ID);
+    assert.equal(
+      code,
+      "export default {};",
+      "fallback returns empty-object module"
+    );
+  });
+
+  test("ignores unrelated module ids on load", () => {
+    const plugin = clientManifestPlugin({ root: "/tmp", distDir: "dist" });
+    assert.equal(callLoad(plugin, "some-other-module"), null);
+    // Also ignores the public specifier on `load` — Vite calls load
+    // only with the resolved id.
+    assert.equal(callLoad(plugin, CLIENT_MANIFEST_VIRTUAL_ID), null);
   });
 });

@@ -45,22 +45,20 @@ The shape we want:
 }
 ```
 
+## Client manifest
+
+The SSR bundle reads hashed asset filenames from the Vite client manifest. Two pieces wire this up:
+
+1. `vite.config.ts` enables `build.manifest: true`, so Vite writes `dist/.vite/manifest.json`.
+2. `src/server.ts` does `import clientManifest from "virtual:zeroship/client-manifest";` — a virtual module the `@zeroship/vite-plugin` exposes during the SSR build. It inlines `dist/.vite/manifest.json` (read off disk after the client build's `writeBundle` finishes) into the SSR bundle as a `Record<string, ManifestChunk>`.
+
+Then `clientScriptTag(ENTRY_SRC)` looks up `entry.file` and emits `<script type="module" src="/<hash>.js">`. CSS imports come through `entry.css`.
+
+Type declarations: a triple-slash `<reference types="@zeroship/vite-plugin/types" />` at the top of `vite.config.ts` brings the `virtual:zeroship/client-manifest` module declaration into TypeScript's lookup.
+
 ## Known limitations (gaps surfaced)
 
-These are the real reasons SSR doesn't work end-to-end today. Each is a fix in the platform, not in this demo.
-
-### Gap 1 — The Vite client manifest never reaches the SSR bundle
-
-In a working SSR pipeline, the SSR bundle imports the Vite client manifest at build time so it knows which hashed `_assets/main-<hash>.js` filename to inject into the rendered HTML. Vite already emits it at `dist/.vite/manifest.json` when `build.manifest: true` is set in vite.config (which this demo does), but:
-
-1. There's no virtual import path for the SSR bundle to ask for it. A real pipeline would either:
-   - Copy `dist/.vite/manifest.json` to a stable import path (e.g. `node_modules/.zeroship/manifest.json`) before the SSR build runs, OR
-   - Expose a Vite virtual module like `virtual:zeroship/client-manifest` that the SSR bundle can `import`.
-2. `sdks/vite-plugin/src/zsapp.ts:484` explicitly skips `.vite/` when collecting files, so even the file-on-disk path can't survive the deploy.
-
-In this demo, `src/entry-server.tsx` hardcodes the entry-client filename as a placeholder; real SSR would read it from the manifest.
-
-### Gap 2 — SSR build copies `public/` assets
+### Gap — SSR build copies `public/` assets
 
 Same as the CSR demo — Vite's SSR build with the current plugin config copies `public/*` into `dist/server/`, so harmless static assets (e.g. `favicon.ico`) end up referenced as worker modules in the manifest. Cosmetic but confusing.
 

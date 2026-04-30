@@ -12,6 +12,8 @@
  *   4. build: bundles server code for production via esbuild
  */
 
+/// <reference path="./client-manifest.d.ts" />
+
 import type { Plugin } from "vite";
 import { DEFAULT_RPC_ENDPOINT } from "./constants.js";
 import { transformPlugin, type TransformState } from "./transform.js";

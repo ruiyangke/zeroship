@@ -1,15 +1,20 @@
 // SSR demo vite config.
 //
 // Two builds happen here:
-//   1. Client build (this config): emits `index.html` + `_assets/*.js` for the
+//   1. Client build (this config): emits `index.html` + `assets/*.js` for the
 //      browser. We turn on `build.manifest: true` so a `dist/.vite/manifest.json`
 //      is written; the SSR bundle imports it at build time to inject the right
 //      hashed JS filename into the rendered HTML.
 //   2. Server build: kicked off automatically by `@zeroship/vite-plugin` from
-//      `writeBundle`. It bundles `src/server.ts` (which re-exports the SSR
-//      entry) into `dist/server/index.js`.
+//      `writeBundle`. It bundles `src/server.ts` (which exports `default.fetch`)
+//      into `dist/server/index.js`.
+//
+// The plugin exposes `virtual:zeroship/client-manifest` to the SSR build so
+// `src/server.ts` can `import clientManifest from "virtual:zeroship/client-manifest"`
+// and look up the hashed filenames by source path.
 //
 // The plugin then packs both into `dist/app.zsapp`.
+/// <reference types="@zeroship/vite-plugin/types" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { zeroship } from "@zeroship/vite-plugin";
@@ -17,15 +22,9 @@ import { zeroship } from "@zeroship/vite-plugin";
 export default defineConfig({
   plugins: [react(), zeroship()],
   build: {
-    // Vite emits `dist/.vite/manifest.json` mapping source paths to hashed
-    // filenames. The SSR bundle reads this at build time so it can inject
-    // <script src="/assets/main-<hash>.js"> into the rendered HTML.
-    //
-    // KNOWN GAP: today the vite-plugin's `.zsapp` emitter explicitly skips
-    // `.vite/` (see `zsapp.ts` collectFiles), so the SSR bundle CAN'T import
-    // it from the bundled output. We work around this by reading the file
-    // from disk in the SSR build's `closeBundle` and inlining it — see
-    // README under "Known limitations".
+    // Required for the `virtual:zeroship/client-manifest` virtual module
+    // to have anything to inline — the plugin reads `dist/.vite/manifest.json`
+    // off disk after the client build's writeBundle, before the SSR build runs.
     manifest: true,
   },
 });

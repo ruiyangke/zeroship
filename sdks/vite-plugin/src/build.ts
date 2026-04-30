@@ -18,6 +18,57 @@ const BOOTSTRAP_PATH = resolve(HERE, "../src/server-bootstrap.js");  // appended
  */
 export const BOOTSTRAP_MARKER = "// zeroship server bootstrap";
 
+/** Public specifier for the client manifest virtual module. */
+export const CLIENT_MANIFEST_VIRTUAL_ID = "virtual:zeroship/client-manifest";
+/** Internal (\0-prefixed) id Vite uses for the same module. */
+export const CLIENT_MANIFEST_RESOLVED_ID = "\0" + CLIENT_MANIFEST_VIRTUAL_ID;
+
+/**
+ * Build the Vite plugin that exposes the Vite client manifest as a
+ * virtual ESM module to the SSR bundle. Resolved at the SSR build's
+ * `load` time, which happens AFTER the client build has written
+ * `<root>/<distDir>/.vite/manifest.json` to disk.
+ *
+ * Usage in user SSR code:
+ *
+ *   import clientManifest from "virtual:zeroship/client-manifest";
+ *   const entry = clientManifest["src/entry-client.tsx"];
+ *   `<script type="module" src="/${entry.file}"></script>`;
+ *
+ * Behavior:
+ *   - manifest exists  → emit `export default <inlined JSON>`
+ *   - manifest missing → emit `export default {}` (graceful fallback;
+ *                        client build hasn't run yet, dev mode, etc.)
+ */
+export function clientManifestPlugin(opts: {
+  root: string;
+  distDir: string;
+}): Plugin {
+  return {
+    name: "zeroship:client-manifest",
+    enforce: "pre",
+    resolveId(id: string) {
+      if (id === CLIENT_MANIFEST_VIRTUAL_ID) return CLIENT_MANIFEST_RESOLVED_ID;
+      return null;
+    },
+    load(id: string) {
+      if (id !== CLIENT_MANIFEST_RESOLVED_ID) return null;
+      const path = resolve(opts.root, opts.distDir, ".vite", "manifest.json");
+      if (!existsSync(path)) {
+        // Client build hasn't run yet (e.g., SSR-only build, dev, or
+        // the build runs before the client's writeBundle finished).
+        return "export default {};";
+      }
+      try {
+        const json = JSON.parse(readFileSync(path, "utf8"));
+        return `export default ${JSON.stringify(json)};`;
+      } catch {
+        return "export default {};";
+      }
+    },
+  };
+}
+
 /** Compiler identifier used in metadata.compiler. Read from package.json. */
 function getCompilerId(): string {
   try {
@@ -186,6 +237,11 @@ export function buildPlugin(state: TransformState, options: { serverEntry?: stri
           // the polyfill path before Vite tries to load `node:crypto`
           // etc. as bare specifiers.
           nodeCompatPlugin(),
+          // Expose `virtual:zeroship/client-manifest` so SSR code can
+          // read hashed asset paths at build time. The client build's
+          // `writeBundle` (this hook) finishes BEFORE we kick off the
+          // SSR build, so `dist/.vite/manifest.json` is already on disk.
+          clientManifestPlugin({ root, distDir: relative(root, clientOutDir) }),
           transformPlugin(DEFAULT_RPC_ENDPOINT, state),
         ],
         ssr: {
