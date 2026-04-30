@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ssg-docs — zeroship</title>
+  <style>
+    body  { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; color: #1c1c1c; }
+    nav   { display: flex; gap: 16px; padding-bottom: 16px; border-bottom: 1px solid #eee; margin-bottom: 24px; }
+    nav a { color: #6366f1; text-decoration: none; }
+    nav a:hover { text-decoration: underline; }
+    .hero { padding: 24px 0; }
+    .hero h1 { margin: 0; font-size: 36px; }
+    .hero p  { color: #666; }
+    code  { background: #f4f4f7; padding: 2px 6px; border-radius: 4px; font-size: 0.92em; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="/">Home</a>
+    <a href="/about">About</a>
+    <a href="/docs/intro">Docs</a>
+  </nav>
+  <section class="hero">
+    <h1>ssg-docs</h1>
+    <p>A 3-page documentation site built entirely from prerendered HTML.</p>
+  </section>
+  <p>This page is one of three pre-rendered at build time:</p>
+  <ul>
+    <li><code>/</code> &mdash; you are here</li>
+    <li><code>/about</code> &mdash; what this demo shows</li>
+    <li><code>/docs/intro</code> &mdash; a deeper writeup</li>
+  </ul>
+  <p>The deploy artifact ships with <strong>no worker</strong> &mdash; every byte is static.</p>
+</body>
+</html>

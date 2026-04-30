@@ -1,0 +1,19 @@
+{
+  "name": "ssg-docs",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "SSG demo — pre-rendered HTML, no worker, no JS at runtime.",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@zeroship/vite-plugin": "file:../../sdks/vite-plugin"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3",
+    "vite": "^8.0.0"
+  }
+}
