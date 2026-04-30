@@ -146,22 +146,34 @@ describe("client — typed proxy surface", () => {
     assert.ok(spy.calls[0].url.includes("/_zs/v1/todos.list"));
   });
 
-  test("stream throws UNIMPLEMENTED in Phase 3", async () => {
+  test("stream returns an async-iter (Phase 4)", async () => {
+    // Phase 4 — stream() now returns an AsyncIterableIterator that
+    // consumes the AI-SDK Data Stream protocol response. The full
+    // wire / parser tests live in test/stream.test.ts; here we just
+    // smoke-test the proxy → handle → streamCall plumbing.
+    const enc = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(ctrl) {
+        ctrl.enqueue(enc.encode('2:[{"x":1}]\n'));
+        ctrl.enqueue(enc.encode("d:{}\n"));
+        ctrl.close();
+      },
+    });
     const rpc = client({
       baseUrl: "https://api.test",
       fetch: async () =>
-        new Response(JSON.stringify({ json: null }), {
+        new Response(body, {
           status: 200,
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "text/event-stream" },
         }),
     });
-    type App = { x: { kind: "stream"; input: void; output: string } };
+    type App = { x: { kind: "stream"; input: void; output: { x: number } } };
     const typed = rpc as unknown as {
-      x: { stream: () => Promise<unknown> };
+      x: { stream: () => AsyncIterableIterator<unknown> };
     };
-    await assert.rejects(typed.x.stream(), (err: Error & { code?: string }) => {
-      return err.code === "UNIMPLEMENTED";
-    });
+    const out: unknown[] = [];
+    for await (const v of typed.x.stream()) out.push(v);
+    assert.deepEqual(out, [{ x: 1 }]);
     void ({} as App);
   });
 

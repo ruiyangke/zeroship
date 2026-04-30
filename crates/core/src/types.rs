@@ -406,6 +406,14 @@ impl Manifest {
                     ));
                 }
             }
+            // Idempotency TTL band: spec §8 — [1, 168] hours.
+            if let Some(h) = entry.idempotency_ttl_hours {
+                if !(1..=168).contains(&h) {
+                    return Err(format!(
+                        "resource {key:?}: idempotency_ttl_hours {h} out of band [1, 168]"
+                    ));
+                }
+            }
             // Schema hash format + existence.
             if let Some(s) = &entry.input_schema {
                 if !is_schema_ref(s) {
@@ -550,6 +558,9 @@ fn shadowed_fields<'a>(child: &'a ResourceEntry, ancestor: &'a ResourceEntry) ->
     if child.idempotent.is_some() && ancestor.idempotent.is_some() {
         out.push("idempotent");
     }
+    if child.idempotency_ttl_hours.is_some() && ancestor.idempotency_ttl_hours.is_some() {
+        out.push("idempotency_ttl_hours");
+    }
     if child.max_input_bytes.is_some() && ancestor.max_input_bytes.is_some() {
         out.push("max_input_bytes");
     }
@@ -606,6 +617,13 @@ pub struct ResourceEntry {
     pub csrf_origins: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotent: Option<bool>,
+    /// Per-procedure idempotency dedupe TTL in hours. Honored by the
+    /// gateway only when `idempotent: true`. Min 1, max 168 (7 days).
+    /// Absent → gateway default of 24h. Authored as
+    /// `fn.config.idempotencyTtl: { hours: 168 }`; the vite-plugin
+    /// extracts the `hours` field and writes it here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_ttl_hours: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_input_bytes: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

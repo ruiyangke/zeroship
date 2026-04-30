@@ -20,8 +20,13 @@ import type { Todo } from "./server";
 // per the spec). Each entry pins the kind + input/output types. This
 // keeps the surface fully type-safe end-to-end without virtual modules
 // or a tooling-emitted .d.ts file.
+//
+// Phase 4 — `searchTodos` is a stream procedure. The handle exposes
+// `.stream(input): AsyncIterableIterator<Todo>` plus `.streamUrl(input)`
+// for handing to ai-sdk's `useChat`.
 export type App = {
   listTodos: ProcedureType<"query", { limit?: number }, Todo[]>;
+  searchTodos: ProcedureType<"stream", { query: string }, Todo>;
 };
 
 /**
@@ -94,6 +99,13 @@ const adapterFetch: typeof globalThis.fetch = async (input, init) => {
   // the expected `{ json, meta? }` shape. Errors surface through the
   // status code; the client's parseErrorResponse handles them.
   if (!res.ok) return res;
+  // Pass SSE / event-stream responses through verbatim — they're the
+  // AI-SDK Data Stream wire (`<typeId>:<json>\n` per line) and the
+  // client's `streamCall` parser expects raw bytes, not a JSON envelope.
+  const ct = res.headers.get("Content-Type") ?? "";
+  if (ct.includes("text/event-stream")) {
+    return res;
+  }
   const text = await res.text();
   let value: unknown;
   try {

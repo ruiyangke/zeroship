@@ -105,7 +105,30 @@ function _isZodError(err) {
   return Array.isArray(err.issues) || Array.isArray(err.errors);
 }
 
-export async function dispatch(methodName, args) {
+// Detect a Zod string schema (for AI-SDK \`0:\` text-part wire framing).
+// Zod schemas carry a \`_def.typeName === "ZodString"\` tag in v3+; some
+// builds expose \`.def.type === "string"\` (Zod v4) instead. We check both.
+// Anything that doesn't match returns false → the encoder defaults to
+// \`2:\` (object lane) for unknown shapes.
+function _isZodStringSchema(s) {
+  if (!s || typeof s !== "object") return false;
+  const def = s._def || s.def;
+  if (!def) return false;
+  if (def.typeName === "ZodString") return true;
+  if (def.type === "string") return true;
+  return false;
+}
+
+function _isAsyncIterator(x) {
+  return (
+    x != null &&
+    typeof x === "object" &&
+    typeof x[Symbol.asyncIterator] === "function" &&
+    typeof x.next === "function"
+  );
+}
+
+export async function dispatch(methodName, args, opts) {
   const fn = _registry.get(methodName);
   if (typeof fn !== "function") {
     throw Object.assign(new Error("Method not found: " + methodName), { status: 404 });
@@ -114,6 +137,7 @@ export async function dispatch(methodName, args) {
   const cfg = fn.config;
   const inputSchema  = cfg ? cfg.input  : undefined;
   const outputSchema = cfg ? cfg.output : undefined;
+  const wantStream = !!(opts && opts.wantStream);
 
   // Input validation. When declared, validates argv[0]; the parsed
   // (possibly transformed) value is substituted back so transforms
@@ -134,6 +158,30 @@ export async function dispatch(methodName, args) {
   }
 
   const result = await fn.apply(null, argv);
+
+  // Streaming path. When the caller (the synthetic entry's \`_zsFetch\`
+  // or the runtime kernel's fast path) signals \`wantStream\` AND the
+  // handler returned an async iterator, we tag the iterator with
+  // \`__zsOutputIsString\` (read by both sides) and skip output
+  // validation — the schema describes a single yield, not the
+  // iterator-as-a-whole.
+  if (wantStream && _isAsyncIterator(result)) {
+    if (_isZodStringSchema(outputSchema)) {
+      try {
+        Object.defineProperty(result, "__zsOutputIsString", {
+          value: true,
+          enumerable: false,
+          configurable: true,
+          writable: true,
+        });
+      } catch (_e) {
+        // Defensive: some iterator implementations are frozen. Fall
+        // back to a plain assignment which the encoder still reads.
+        try { result.__zsOutputIsString = true; } catch (_e2) { /* ignore */ }
+      }
+    }
+    return result;
+  }
 
   // Output validation runs in dev only. Production hot-path skips it.
   // Output validators throw on mismatch — that's an INTERNAL error
@@ -199,8 +247,14 @@ import { dispatch as _zsDispatch } from ${registryImport};
 // structured errors (INVALID_ARGUMENT, INTERNAL) reach the wire without
 // any local Response-building. Earlier revisions had to wrap manually
 // because the kernel dropped everything except message/name.
+//
+// We always pass \`wantStream: true\` here. The registry only honors it
+// when the handler actually returns an async iterator; for unary
+// procedures it's a no-op. This lets the runtime kernel's
+// \`sseFromAsyncGen\` read \`result.__zsOutputIsString\` to pick the
+// AI-SDK \`0:\` (text) vs \`2:\` (object) lane.
 export async function dispatchRpc(methodName, args) {
-  return await _zsDispatch(methodName, args);
+  return await _zsDispatch(methodName, args, { wantStream: true });
 }
 
 const _userDefault = (_zsUser && _zsUser.default && typeof _zsUser.default === "object")
@@ -227,7 +281,7 @@ async function _zsFetch(request) {
     }
 
     try {
-      const result = await _zsDispatch(methodName, args);
+      const result = await _zsDispatch(methodName, args, { wantStream: true });
 
       if (
         result != null &&
@@ -235,6 +289,16 @@ async function _zsFetch(request) {
         typeof result[Symbol.asyncIterator] === "function" &&
         typeof result.next === "function"
       ) {
+        // Vercel AI-SDK Data Stream Protocol — line-prefixed framing:
+        //   0:"text"\\n          string yields
+        //   2:[<json>]\\n        object yields
+        //   e:{...}\\n           structured error envelope (zeroship ext)
+        //   d:{}\\n              done
+        // The synthetic entry's slow path mirrors the runtime kernel's
+        // \`sseFromAsyncGen\` byte-for-byte. The \`__zsOutputIsString\`
+        // tag (set by registry dispatch when \`fn.config.output\` is a
+        // Zod string schema) forces every yield to the \`0:\` lane.
+        const outputIsString = !!result.__zsOutputIsString;
         const encoder = new TextEncoder();
         const body = new ReadableStream({
           async start(controller) {
@@ -242,22 +306,26 @@ async function _zsFetch(request) {
               while (true) {
                 const step = await result.next();
                 if (step.done) {
-                  const v = step.value === undefined ? null : step.value;
-                  controller.enqueue(encoder.encode("event: return\\ndata: " + JSON.stringify(v) + "\\n\\n"));
+                  controller.enqueue(encoder.encode("d:{}\\n"));
                   break;
                 }
-                const v = step.value === undefined ? null : step.value;
-                controller.enqueue(encoder.encode("event: yield\\ndata: " + JSON.stringify(v) + "\\n\\n"));
+                const v = step.value;
+                if (outputIsString || typeof v === "string") {
+                  controller.enqueue(encoder.encode("0:" + JSON.stringify(String(v)) + "\\n"));
+                } else {
+                  controller.enqueue(encoder.encode("2:[" + JSON.stringify(v) + "]\\n"));
+                }
               }
             } catch (e) {
-              const errBody = { message: e?.message ?? String(e), name: e?.name ?? "Error" };
-              if (e && typeof e.code === "string") errBody.code = e.code;
-              if (e && e.details !== undefined) errBody.details = e.details;
-              controller.enqueue(encoder.encode(
-                "event: error\\ndata: " +
-                JSON.stringify(errBody) +
-                "\\n\\n",
-              ));
+              const env = {
+                message: (e && e.message) || String(e),
+                name:    (e && e.name)    || "Error",
+              };
+              if (e && typeof e.code === "string") env.code = e.code;
+              if (e && e.details !== undefined)    env.details = e.details;
+              if (e && typeof e.retryable === "boolean") env.retryable = e.retryable;
+              controller.enqueue(encoder.encode("e:" + JSON.stringify(env) + "\\n"));
+              controller.enqueue(encoder.encode("d:{}\\n"));
             } finally {
               controller.close();
             }

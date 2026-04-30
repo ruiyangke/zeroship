@@ -66,6 +66,10 @@ pub struct EffectivePolicy {
     pub cache: Option<CacheCtl>,
     pub csrf_origins: Option<Vec<String>>,
     pub idempotent: bool,
+    /// Idempotency dedupe TTL in hours. Honored only when
+    /// `idempotent: true`. `None` → gateway default of 24h. Bounded to
+    /// `[1, 168]` at validate-time; the gateway clamps defensively.
+    pub idempotency_ttl_hours: Option<u32>,
     pub max_input_bytes: Option<u32>,
     pub middleware: Vec<String>,
     pub publicly_accessible: bool,
@@ -313,6 +317,7 @@ fn resolve_effective_policy(
     let mut cache: Option<CacheCtl> = None;
     let mut csrf_origins: Option<Vec<String>> = None;
     let mut idempotent: bool = false;
+    let mut idempotency_ttl_hours: Option<u32> = None;
     let mut max_input_bytes: Option<u32> = None;
     let mut middleware: Vec<String> = Vec::new();
     let mut publicly_accessible: bool = false;
@@ -350,6 +355,11 @@ fn resolve_effective_policy(
         if let Some(b) = node.idempotent {
             idempotent = b;
         }
+        if let Some(h) = node.idempotency_ttl_hours {
+            // Child overrides — same merge rule as `idempotent`. The
+            // override-marker validator catches accidental shadows.
+            idempotency_ttl_hours = Some(h);
+        }
         if let Some(b) = node.max_input_bytes {
             max_input_bytes = Some(match max_input_bytes {
                 None => b,
@@ -379,6 +389,7 @@ fn resolve_effective_policy(
         cache,
         csrf_origins,
         idempotent,
+        idempotency_ttl_hours,
         max_input_bytes,
         middleware,
         publicly_accessible,

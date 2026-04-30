@@ -786,9 +786,11 @@ fn rpc_error_envelope_ignores_non_string_code_and_non_bool_retryable() {
 #[test]
 fn sse_error_frame_carries_code_details_retryable() {
     // Async generator throws partway through. The bootstrap's
-    // sseFromAsyncGen wraps the throw as an `event: error` frame; the
-    // payload of that frame must carry the same envelope shape as the
-    // RPC error wire (code, details, retryable).
+    // `sseFromAsyncGen` wraps the throw as an `e:` envelope frame
+    // (AI-SDK Data Stream Protocol; the `e:` typeId is our extension —
+    // ai-sdk parsers tolerate unknown ids). The payload must carry the
+    // same envelope shape as the RPC error wire (code, details,
+    // retryable). Always followed by a `d:{}` done frame.
     let modules = m(r#"
         export async function* stream() {
             yield { tick: 0 };
@@ -802,20 +804,15 @@ fn sse_error_frame_carries_code_details_retryable() {
     "#);
     let r = dispatch(modules, "stream", "[]").unwrap();
     // SSE buffered into a single body string by `dispatch`.
-    assert!(r.json.contains("event: yield"), "got: {}", r.json);
-    assert!(r.json.contains(r#"{"tick":0}"#), "got: {}", r.json);
-    assert!(r.json.contains("event: error"), "got: {}", r.json);
+    assert!(r.json.contains("2:[{\"tick\":0}]\n"), "got: {}", r.json);
+    assert!(r.json.contains("e:"), "got: {}", r.json);
 
-    // Locate the error frame's data line and parse its payload.
-    let data_line = r.json
-        .split("event: error")
-        .nth(1)
-        .expect("error frame missing")
-        .lines()
-        .find_map(|l| l.strip_prefix("data: "))
-        .expect("error frame data line missing");
-    let payload: serde_json::Value = serde_json::from_str(data_line)
-        .unwrap_or_else(|e| panic!("error data not JSON: {} (line: {})", e, data_line));
+    // Locate the error envelope line — `e:<json>\n` — and parse it.
+    let e_idx = r.json.find("e:").expect("error frame missing");
+    let after = &r.json[e_idx + 2..];
+    let line_end = after.find('\n').expect("error frame not newline-terminated");
+    let payload: serde_json::Value = serde_json::from_str(&after[..line_end])
+        .unwrap_or_else(|e| panic!("error data not JSON: {} (line: {})", e, &after[..line_end]));
     assert_eq!(payload["message"], "upstream gone", "payload: {}", payload);
     assert_eq!(payload["name"], "Error", "payload: {}", payload);
     assert_eq!(payload["code"], "UNAVAILABLE", "payload: {}", payload);
@@ -824,6 +821,12 @@ fn sse_error_frame_carries_code_details_retryable() {
         payload["details"],
         serde_json::json!({ "upstream": "db", "attempt": 3 }),
         "payload: {}", payload
+    );
+    // `d:{}` always follows the error envelope.
+    assert!(
+        r.json[e_idx..].contains("d:{}\n"),
+        "expected d:{{}} after error: {}",
+        r.json
     );
 }
 

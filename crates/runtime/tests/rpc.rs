@@ -76,18 +76,17 @@ fn promise_then_chain_sync() {
 #[test]
 fn async_generator_streams_sse() {
     // An async generator should be auto-wrapped in a Response(text/event-stream)
-    // by the runtime bootstrap. dispatch() buffers the full stream body into a
-    // single string for assertion purposes.
+    // by the runtime bootstrap, using the AI-SDK Data Stream Protocol:
+    // object yields → `2:[<json>]\n`, completion → `d:{}\n`.
     let r = dispatch(m(r#"
         export async function* chat() {
             yield { token: "Hi" };
             yield { token: "!" };
         }
     "#), "chat", "[]").unwrap();
-    assert!(r.json.contains("event: yield"), "got: {}", r.json);
-    assert!(r.json.contains(r#"{"token":"Hi"}"#), "got: {}", r.json);
-    assert!(r.json.contains(r#"{"token":"!"}"#), "got: {}", r.json);
-    assert!(r.json.contains("event: return"), "got: {}", r.json);
+    assert!(r.json.contains("2:[{\"token\":\"Hi\"}]\n"), "got: {}", r.json);
+    assert!(r.json.contains("2:[{\"token\":\"!\"}]\n"), "got: {}", r.json);
+    assert!(r.json.contains("d:{}\n"), "got: {}", r.json);
 }
 
 #[test]

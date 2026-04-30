@@ -259,6 +259,56 @@ v2 manifests skip these entirely; v2 semantics are unchanged.
 - v3 manifests with both `rules` and `resources` → resource-tree runs first; on miss, the rule walker takes over. This lets the build ship partial v3 manifests (e.g. RPC-only resources with `rules` still covering URL paths and static assets).
 - Once the build emits every URL path under `resources`, the rule walker can retire and a resource-tree miss will become a 404 immediately.
 
+## Idempotency dedupe (rpc-v2 §8)
+
+`EffectivePolicy.idempotent: true` (set on a `kind: "mutation"` resource) opts that procedure into wire-level dedupe. The flow:
+
+```
+incoming POST /_zs/v1/<wireId>
+  │
+  ├─ has Idempotency-Key header?
+  │    no  → 400 INVALID_ARGUMENT (zs-error envelope)
+  │
+  ├─ body_hash = sha256(raw_body_bytes)
+  ├─ kv.get("idem:<app_id>:<wireId>:<key>")
+  │    hit, same input_hash      → return stored response (200 + x-zs-idempotent-replay: true)
+  │    hit, different input_hash → 409 ALREADY_EXISTS, Retry-After: <secs>
+  │    miss → kv.set_nx("idem-lock:<app_id>:<wireId>:<key>", "1", ttl=30s)
+  │             acquired      → forward to worker, capture response, store, release lock
+  │             not acquired  → wait for entry up to procedure timeout
+  │                              entry appears  → return as if hit
+  │                              wait expires   → 409 ABORTED
+```
+
+Implementation: `crates/gateway/src/idempotency.rs`. Pre/post hooks live in `crates/gateway/src/router.rs::execute_resource_tree`.
+
+### KV layout
+
+`IdempotencyStore` is the abstraction; `InMemoryIdempotencyStore` ships in dev / single-node, a Redis-backed impl drops in for prod (same wire format, no migration). Two key shapes:
+
+| Key                                              | Value (JSON)                                                          | TTL                  |
+| ------------------------------------------------ | --------------------------------------------------------------------- | -------------------- |
+| `idem:<app_id>:<wireId>:<idempotency_key>`       | `StoredResponse { input_hash, status, headers, body_b64, completed_at, ttl_until }` | per-procedure (1h–168h) |
+| `idem-lock:<app_id>:<wireId>:<idempotency_key>`  | `"1"`                                                                 | 30s                  |
+
+### TTL configuration
+
+Authoring side: `fn.config.idempotencyTtl: { hours: 168 }`. The vite-plugin extracts `hours`, clamps to `[1, 168]`, writes `idempotency_ttl_hours: <h>` on the wire. Default (when not pinned) is 24h. The gateway re-clamps defensively at runtime in case the manifest arrived from a less-trusted path.
+
+### Memory budget
+
+Spec §16: 1 M live keys per app, evict oldest on overflow with a log line. The in-memory backend enforces this via a per-app FIFO queue (`crates/gateway/src/idempotency.rs::InMemoryIdempotencyStore::put_entry`); production Redis backends should use the equivalent (a per-app counter check, or `maxmemory-policy=allkeys-lru` on a dedicated DB index).
+
+### Headers we replay verbatim vs. drop
+
+Hop-by-hop and per-request stamps (`Connection`, `Transfer-Encoding`, `X-Request-Id`, `X-Wall-Time-Ms`, etc.) are stripped before storage so a captured `Connection: close` doesn't poison the connection layer when replayed. Everything else is replayed exactly as the worker emitted it. The replay carries an extra `x-zs-idempotent-replay: true` for observability; the original capture stamps `x-zs-idempotent-stored: true`.
+
+### Failure modes
+
+- **Worker times out / crashes** → lock auto-expires after 30s; subsequent requests retry the operation. The lock TTL is the upper bound on "client retry can hang waiting for an in-flight original."
+- **Store unavailable** (Redis down) → fail closed with `503 UNAVAILABLE` + `Retry-After: 1`. We never silently wave through a duplicate when the dedupe table is unreachable; spec §8 is explicit that this is unsafe.
+- **Capture fails post-dispatch** (e.g. body too big to JSON-stringify) → log, release the lock, ship the worker's response anyway. The next retry sees no stored entry and either succeeds with the same outcome or hits the lock.
+
 ## Where to start when changing routing behavior
 
 | You're doing… | First read | Then edit |

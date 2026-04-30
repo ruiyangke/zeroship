@@ -3,6 +3,7 @@ mod blob_cache;
 mod compiled;
 mod dispatch;
 mod enforce;
+mod idempotency;
 mod proxy;
 mod router;
 mod sync;
@@ -55,6 +56,11 @@ pub struct GateState {
     /// here, and `serve_static_hit` mmaps them on serve so the
     /// userspace → kernel copy goes away.
     pub disk_cache: blob_cache::DiskBlobCache,
+    /// KV-backed dedupe table per spec §8 (Idempotency). The gateway
+    /// consults this BEFORE forwarding `idempotent: true` mutations
+    /// to the worker; on a hit it returns the stored response without
+    /// touching V8.
+    pub idempotency_store: std::sync::Arc<dyn idempotency::IdempotencyStore>,
 }
 
 #[ntex::main]
@@ -140,6 +146,7 @@ async fn main() -> std::io::Result<()> {
         blob_store,
         blob_cache: blob_cache::BlobCache::new(blob_cache_bytes),
         disk_cache,
+        idempotency_store: Arc::new(idempotency::InMemoryIdempotencyStore::new()),
     });
 
     sync::start_sync(state.clone());

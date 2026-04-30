@@ -24,7 +24,13 @@
 // The proxy unwraps dotted ids — `rpc.todos.list.query()` and
 // `rpc["todos.list"].query()` route to the same wire id "todos.list".
 
-import { sendUnary, type CallKind, type TransportConfig } from "./transport.js";
+import {
+  sendUnary,
+  streamCall,
+  buildStreamUrl,
+  type CallKind,
+  type TransportConfig,
+} from "./transport.js";
 import { createBatchLink, type BatchLink } from "./batch.js";
 import { type Transformer } from "./encoding.js";
 import { RpcError } from "./error.js";
@@ -131,13 +137,25 @@ export interface ProcedureType<
 /**
  * Compute the per-procedure handle. `query` / `mutation` are always
  * present — calling the wrong one throws at runtime via dispatchKind.
- * `stream` / `subscribe` exist on the type to keep ergonomics consistent;
- * each throws UNIMPLEMENTED until Phase 4 / 8 ship.
+ * `stream` returns an async-iter consuming the AI-SDK Data Stream
+ * Protocol response. `streamUrl` gives the URL form for handing to
+ * ai-sdk's `useChat`. `subscribe` exists on the type to keep
+ * ergonomics consistent and throws UNIMPLEMENTED until Phase 8 ships.
  */
 export interface ProcedureHandle<TIn = unknown, TOut = unknown> {
   query(input?: TIn, opts?: CallOptions): Promise<TOut>;
   mutation(input?: TIn, opts?: CallOptions): Promise<TOut>;
-  stream(input?: TIn, opts?: CallOptions): Promise<never>;
+  stream(input?: TIn, opts?: CallOptions): AsyncIterableIterator<TOut>;
+  /**
+   * Returns the streaming URL for this procedure. Use when handing the
+   * URL directly to ai-sdk's `useChat({ api: ... })` — the stream
+   * itself is consumed by ai-sdk's parser, not this client.
+   *
+   * Returns a Promise<string> when the input requires async serialization
+   * (the default with `transformer: "superjson"`); a plain string when
+   * input is undefined (no body, no query-string).
+   */
+  streamUrl(input?: TIn): string | Promise<string>;
   subscribe(input?: TIn, opts?: CallOptions): Promise<never>;
 }
 
@@ -190,12 +208,15 @@ interface UntypedClientMethods {
   /**
    * Escape-hatch dispatch. Useful when calling procedures whose ids
    * aren't part of the `App` type (e.g. dynamically-named handlers).
+   *
+   * For `kind: "query"` / `"mutation"` returns `Promise<TOut>`.
+   * For `kind: "stream"` returns `AsyncIterableIterator<TOut>`.
    */
   call<TOut = unknown>(
     procId: string,
     input?: unknown,
     opts?: FullCallOptions,
-  ): Promise<TOut>;
+  ): Promise<TOut> | AsyncIterableIterator<TOut>;
 }
 
 // ── Runtime kind inference (for type-only mode) ────────────────────────
@@ -300,14 +321,11 @@ export function client<App = Record<string, never>>(
           idempotent: meta?.idempotent ?? false,
         });
       },
-      stream() {
-        return Promise.reject(
-          new RpcError({
-            code: "UNIMPLEMENTED",
-            message: `stream procedures are not supported in Phase 3 (proc: ${procId})`,
-            retryable: false,
-          }),
-        );
+      stream(input?: unknown, opts?: CallOptions): AsyncIterableIterator<unknown> {
+        return streamCall(procId, input, transportCfg, opts ?? {});
+      },
+      streamUrl(input?: unknown): string | Promise<string> {
+        return buildStreamUrl(procId, input, transportCfg);
       },
       subscribe() {
         return Promise.reject(
@@ -352,8 +370,15 @@ export function client<App = Record<string, never>>(
               id: string,
               input?: unknown,
               opts?: FullCallOptions,
-            ): Promise<TOut> {
+            ): Promise<TOut> | AsyncIterableIterator<TOut> {
               const kind = opts?.kind ?? inferKindFromName(id);
+              if (kind === "stream") {
+                return streamCall<TOut>(id, input, transportCfg, {
+                  signal: opts?.signal,
+                  headers: opts?.headers,
+                  timeout: opts?.timeout,
+                });
+              }
               return dispatch<TOut>(id, input, {
                 ...opts,
                 kind,
@@ -372,6 +397,7 @@ export function client<App = Record<string, never>>(
           if (prop === "query") return handle.query.bind(handle);
           if (prop === "mutation") return handle.mutation.bind(handle);
           if (prop === "stream") return handle.stream.bind(handle);
+          if (prop === "streamUrl") return handle.streamUrl.bind(handle);
           if (prop === "subscribe") return handle.subscribe.bind(handle);
           // Avoid `then`/`Symbol.iterator`-driven misuses bouncing into
           // a deeper proxy.

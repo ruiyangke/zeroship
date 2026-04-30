@@ -52,3 +52,41 @@ listTodos.config = {
     }),
   ),
 };
+
+// Phase 4 — async-generator stream procedure.
+//
+// `async function*` is auto-classified as `kind: "stream"` by the
+// vite-plugin transform. The synthetic SSR entry pipes the iterator
+// into the AI-SDK Data Stream Protocol on the wire (`2:[<json>]\n`
+// per yield, `d:{}\n` at end). Client code consumes via:
+//
+//   for await (const todo of rpc.searchTodos.stream({ query: "build" })) {
+//     console.log(todo);
+//   }
+//
+// Or hand `rpc.searchTodos.streamUrl({ query })` to ai-sdk's `useChat`.
+export async function* searchTodos(input: { query: string }): AsyncGenerator<Todo> {
+  const q = input.query.toLowerCase();
+  for (const todo of TODOS) {
+    if (todo.text.toLowerCase().includes(q)) {
+      yield todo;
+      // Tiny await so the wire shows distinct chunks instead of one
+      // microtask-fused buffer flush.
+      await new Promise((r) => setTimeout(r, 30));
+    }
+  }
+}
+searchTodos.config = {
+  id: "searchTodos",
+  kind: "stream",
+  input: z.object({
+    query: z.string().min(1).max(200),
+  }),
+  // Per-yield schema. The synthetic entry skips output validation for
+  // streams (see rpc-registry.ts) — we still declare it for typing.
+  output: z.object({
+    id: z.number(),
+    text: z.string(),
+    done: z.boolean(),
+  }),
+};

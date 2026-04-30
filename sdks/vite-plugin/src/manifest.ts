@@ -140,6 +140,31 @@ function renameRedirectKeys(
 }
 
 /**
+ * Spec §8: `fn.config.idempotencyTtl: { hours: 168 }` → wire field
+ * `idempotency_ttl_hours: 168`. The authoring surface uses an object
+ * so future TTL units (`days`, `minutes`) can land without breaking
+ * the existing shape; the wire stores hours since that's what the
+ * gateway honours.
+ *
+ * Returns `undefined` when the input is not a plain `{ hours }`
+ * object; callers drop the field (gateway falls back to the 24h
+ * default). Out-of-band values (≤0, ≥168) are clamped here so the
+ * wire never carries a value the gateway would reject.
+ *
+ * Min 1, max 168 (7 days). Mirrors the Rust-side `clamp_ttl_hours`.
+ */
+function extractIdempotencyTtlHours(value: unknown): number | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const rec = value as Record<string, unknown>;
+  const h = rec.hours;
+  if (typeof h !== "number" || !Number.isFinite(h)) return undefined;
+  const rounded = Math.round(h);
+  if (rounded < 1) return 1;
+  if (rounded > 168) return 168;
+  return rounded;
+}
+
+/**
  * Convert a single authored resource node to the wire shape. Drops
  * `children:` (handled separately) and renames camelCase keys.
  */
@@ -157,6 +182,13 @@ function authorToWire(node: Record<string, unknown>): WireResource {
     }
     if (k === "redirect" && v != null) {
       out.redirect = renameRedirectKeys(v as string | Record<string, unknown>);
+      continue;
+    }
+    if (k === "idempotencyTtl") {
+      const hours = extractIdempotencyTtlHours(v);
+      if (hours !== undefined) {
+        out.idempotency_ttl_hours = hours;
+      }
       continue;
     }
     const renamed = CAMEL_TO_SNAKE[k] ?? k;
@@ -335,6 +367,7 @@ function validateResources(
     "csrf_origins",
     "publicly_accessible",
     "idempotent",
+    "idempotency_ttl_hours",
     "middleware",
   ];
   for (const [key, node] of Object.entries(flat)) {

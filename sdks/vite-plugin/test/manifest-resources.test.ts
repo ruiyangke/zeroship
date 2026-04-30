@@ -307,4 +307,188 @@ export default defineApp({
       await fix.cleanup();
     }
   });
+
+  test("fn.config.idempotencyTtl: { hours: 48 } emits idempotency_ttl_hours: 48", async () => {
+    // Authoring surface: `add.config = { idempotent: true, idempotencyTtl: { hours: 48 } }`
+    // Wire shape: `idempotency_ttl_hours: 48`. The wrapper object exists
+    // so future units (`days`, `minutes`) can land without breaking the
+    // existing shape.
+    const fix = await makeFixture({});
+    try {
+      const procedures: DiscoveredProcedure[] = [
+        {
+          filePath: resolve(fix.root, "src/server/billing.ts"),
+          exportName: "charge",
+          moduleSlug: "src-server-billing",
+          kind: "mutation",
+          isStream: false,
+          config: {
+            id: "billing.charge",
+            idempotent: true,
+            idempotencyTtl: { hours: 48 },
+          },
+        },
+      ];
+      const result = await computeManifestExtras({
+        root: fix.root,
+        procedures,
+        mode: "production",
+      });
+      const r = result.resources["rpc:billing.charge"] as Record<string, unknown>;
+      assert.ok(r, "resource emitted");
+      assert.equal(r.idempotent, true);
+      assert.equal(r.idempotency_ttl_hours, 48, "ttl flowed to wire field");
+      // Authoring-side key is dropped from the wire.
+      assert.ok(
+        !("idempotencyTtl" in r),
+        "camelCase authoring key removed from wire shape",
+      );
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
+  test("idempotencyTtl absent → no idempotency_ttl_hours on the wire (gateway default applies)", async () => {
+    // Default-TTL case: the wire field is undefined and the gateway
+    // falls back to its 24h default. Spec §8 — keeping the wire small
+    // means `skip_serializing_if = "Option::is_none"` on the Rust side.
+    const fix = await makeFixture({});
+    try {
+      const procedures: DiscoveredProcedure[] = [
+        {
+          filePath: resolve(fix.root, "src/server/todos.ts"),
+          exportName: "add",
+          moduleSlug: "src-server-todos",
+          kind: "mutation",
+          isStream: false,
+          config: {
+            id: "todos.add",
+            idempotent: true,
+          },
+        },
+      ];
+      const result = await computeManifestExtras({
+        root: fix.root,
+        procedures,
+        mode: "production",
+      });
+      const r = result.resources["rpc:todos.add"] as Record<string, unknown>;
+      assert.ok(r, "resource emitted");
+      assert.equal(r.idempotent, true);
+      assert.equal(
+        r.idempotency_ttl_hours,
+        undefined,
+        "no ttl field when not pinned",
+      );
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
+  test("idempotencyTtl out-of-band values clamp into [1, 168] hours", async () => {
+    // Spec §8 / spec hygiene: 1h–168h band. Authored values outside
+    // the band clamp at the boundary so the wire is always valid.
+    const fix = await makeFixture({});
+    try {
+      const procedures: DiscoveredProcedure[] = [
+        {
+          filePath: resolve(fix.root, "src/server/a.ts"),
+          exportName: "tooLow",
+          moduleSlug: "src-server-a",
+          kind: "mutation",
+          isStream: false,
+          config: { id: "a.tooLow", idempotent: true, idempotencyTtl: { hours: 0 } },
+        },
+        {
+          filePath: resolve(fix.root, "src/server/a.ts"),
+          exportName: "tooHigh",
+          moduleSlug: "src-server-a",
+          kind: "mutation",
+          isStream: false,
+          config: { id: "a.tooHigh", idempotent: true, idempotencyTtl: { hours: 9999 } },
+        },
+        {
+          filePath: resolve(fix.root, "src/server/a.ts"),
+          exportName: "exactlyMin",
+          moduleSlug: "src-server-a",
+          kind: "mutation",
+          isStream: false,
+          config: { id: "a.exactlyMin", idempotent: true, idempotencyTtl: { hours: 1 } },
+        },
+        {
+          filePath: resolve(fix.root, "src/server/a.ts"),
+          exactly: undefined,
+          exportName: "exactlyMax",
+          moduleSlug: "src-server-a",
+          kind: "mutation",
+          isStream: false,
+          config: { id: "a.exactlyMax", idempotent: true, idempotencyTtl: { hours: 168 } },
+        } as DiscoveredProcedure,
+      ];
+      const result = await computeManifestExtras({
+        root: fix.root,
+        procedures,
+        mode: "production",
+      });
+      assert.equal(
+        (result.resources["rpc:a.tooLow"] as Record<string, unknown>).idempotency_ttl_hours,
+        1,
+        "0h clamps up to 1",
+      );
+      assert.equal(
+        (result.resources["rpc:a.tooHigh"] as Record<string, unknown>).idempotency_ttl_hours,
+        168,
+        "9999h clamps down to 168",
+      );
+      assert.equal(
+        (result.resources["rpc:a.exactlyMin"] as Record<string, unknown>).idempotency_ttl_hours,
+        1,
+        "1h passes through",
+      );
+      assert.equal(
+        (result.resources["rpc:a.exactlyMax"] as Record<string, unknown>).idempotency_ttl_hours,
+        168,
+        "168h passes through",
+      );
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
+  test("idempotencyTtl with non-object value is silently dropped", async () => {
+    // Mistakes like `idempotencyTtl: 48` (number not object) shouldn't
+    // crash the build — drop the field and let the gateway fall back
+    // to the default. Future shape evolution wins this gracefully.
+    const fix = await makeFixture({});
+    try {
+      const procedures: DiscoveredProcedure[] = [
+        {
+          filePath: resolve(fix.root, "src/server/a.ts"),
+          exportName: "wrongShape",
+          moduleSlug: "src-server-a",
+          kind: "mutation",
+          isStream: false,
+          config: {
+            id: "a.wrongShape",
+            idempotent: true,
+            idempotencyTtl: 48 as unknown as { hours: number },
+          },
+        },
+      ];
+      const result = await computeManifestExtras({
+        root: fix.root,
+        procedures,
+        mode: "production",
+      });
+      const r = result.resources["rpc:a.wrongShape"] as Record<string, unknown>;
+      assert.equal(
+        r.idempotency_ttl_hours,
+        undefined,
+        "non-object idempotencyTtl dropped",
+      );
+      assert.ok(!("idempotencyTtl" in r), "raw key never reaches wire");
+    } finally {
+      await fix.cleanup();
+    }
+  });
 });

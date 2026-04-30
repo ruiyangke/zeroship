@@ -201,7 +201,28 @@ pub(crate) const BOOTSTRAP_JS: &str = r##"
 import * as user from "./__user__.js";
 import { __bindRequest } from "zeroship/internal";
 
-function sseFromAsyncGen(gen) {
+// Vercel AI-SDK Data Stream Protocol encoder.
+//
+// Each line is `<typeId>:<json>\n`. TypeIds we emit:
+//   0:"text"           — text part (string yield)
+//   2:[<json>]         — typed object yield (the array shape matches
+//                        the AI-SDK convention: a yield is one
+//                        element of a streaming array)
+//   e:{...}            — structured error envelope (zeroship extension;
+//                        the AI-SDK parser tolerates unknown ids)
+//   d:{}               — done
+//
+// `outputIsString`, when truthy, forces every yield to the `0:` lane —
+// even non-string values get coerced via String(). Set by callers that
+// know the procedure's declared output schema is a string. When
+// undefined, we per-value-typeof: strings go to `0:`, anything else
+// goes to `2:`.
+//
+// The async generator's `return` value (vs yields) is intentionally
+// dropped on the floor — the AI-SDK protocol has no equivalent. If the
+// creator wants a final value distinguished from yields, they emit it
+// as the last `yield` and `return undefined`.
+function sseFromAsyncGen(gen, outputIsString) {
     const encoder = new TextEncoder();
     const body = new ReadableStream({
         async start(controller) {
@@ -209,27 +230,31 @@ function sseFromAsyncGen(gen) {
                 while (true) {
                     const step = await gen.next();
                     if (step.done) {
-                        const retJson = JSON.stringify(step.value === undefined ? null : step.value);
-                        controller.enqueue(encoder.encode("event: return\ndata: " + retJson + "\n\n"));
+                        controller.enqueue(encoder.encode("d:{}\n"));
                         break;
                     }
-                    const valJson = JSON.stringify(step.value === undefined ? null : step.value);
-                    controller.enqueue(encoder.encode("event: yield\ndata: " + valJson + "\n\n"));
+                    const v = step.value;
+                    if (outputIsString || typeof v === "string") {
+                        controller.enqueue(encoder.encode("0:" + JSON.stringify(String(v)) + "\n"));
+                    } else {
+                        controller.enqueue(encoder.encode("2:[" + JSON.stringify(v) + "]\n"));
+                    }
                 }
             } catch (e) {
-                // Same envelope shape as errorResponse() — keeps the SSE
-                // error frame and HTTP error body field-compatible so a
-                // client decoding either can use a single parser. `code`
-                // and `retryable` are type-checked; `details` is forwarded
-                // as-is when present.
-                const payload = {
+                // `e:` carries the structured error envelope — keeps
+                // the SSE error frame field-compatible with the unary
+                // error body so clients can share a single parser.
+                // `code` and `retryable` are type-checked; `details`
+                // is forwarded as-is when present.
+                const env = {
                     message: (e && e.message) || String(e),
-                    name: (e && e.name) || "Error",
+                    name:    (e && e.name)    || "Error",
                 };
-                if (e && typeof e.code === "string") payload.code = e.code;
-                if (e && e.details !== undefined) payload.details = e.details;
-                if (e && typeof e.retryable === "boolean") payload.retryable = e.retryable;
-                controller.enqueue(encoder.encode("event: error\ndata: " + JSON.stringify(payload) + "\n\n"));
+                if (e && typeof e.code === "string") env.code = e.code;
+                if (e && e.details !== undefined)    env.details = e.details;
+                if (e && typeof e.retryable === "boolean") env.retryable = e.retryable;
+                controller.enqueue(encoder.encode("e:" + JSON.stringify(env) + "\n"));
+                controller.enqueue(encoder.encode("d:{}\n"));
             } finally {
                 controller.close();
             }
@@ -287,7 +312,10 @@ async function invokeMethod(methodName, args) {
         && typeof result[Symbol.asyncIterator] === "function"
         && typeof result.next === "function"
         && typeof result.return === "function") {
-        return sseFromAsyncGen(result);
+        // Read an opt-in `__zsOutputIsString` property the synthetic
+        // entry attaches when it knows the procedure's output schema is
+        // a Zod string. Absent → per-yield typeof check (the default).
+        return sseFromAsyncGen(result, !!result.__zsOutputIsString);
     }
     return Response.json(result === undefined ? null : result);
 }
@@ -326,7 +354,9 @@ async function dispatchRpc(methodName, bodyText) {
                 && typeof result[Symbol.asyncIterator] === "function"
                 && typeof result.next === "function"
                 && typeof result.return === "function") {
-                return sseFromAsyncGen(result);
+                // The synthetic entry tags the iterator when the
+                // declared output schema is a Zod string.
+                return sseFromAsyncGen(result, !!result.__zsOutputIsString);
             }
             return Response.json(result === undefined ? null : result);
         }

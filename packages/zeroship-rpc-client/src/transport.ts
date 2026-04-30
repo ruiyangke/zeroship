@@ -1,23 +1,26 @@
 // packages/zeroship-rpc-client/src/transport.ts
 //
-// Single-request transport for unary procedures (query / mutation).
-// Streams and subscriptions are NOT covered here — Phase 4 / Phase 8.
+// Request transports for unary procedures (query / mutation) and
+// streams (Phase 4). Subscriptions are Phase 8.
 //
 // Wire shape:
 //
 //   query (small)  → GET /_zs/v1/<id>?input=<base64url-superjson>
 //   query (>6 KB)  → POST /_zs/v1/<id> with `X-Method: GET` header
 //   mutation       → POST /_zs/v1/<id>
+//   stream         → POST /_zs/v1/<id> with Accept: text/event-stream
+//                    response body uses the Vercel AI-SDK Data Stream
+//                    Protocol (line-prefixed `<typeId>:<json>\n`).
 //
 // Request headers (always set):
-//   - Accept: application/json
+//   - Accept: application/json | text/event-stream (stream)
 //   - Content-Type: application/json (only when a body is present)
 //   - Authorization: Bearer <token>  (when auth resolves to a string)
 //   - Idempotency-Key: <uuidv7>      (mutations w/ idempotent: true)
 //   - X-Request-Id: <uuidv7>         (every request — for tracing)
 
 import { decodeBody, encodeBody, encodeQueryInput, type Transformer } from "./encoding.js";
-import { parseErrorResponse, RpcError } from "./error.js";
+import { parseErrorResponse, RpcError, type ErrorCode } from "./error.js";
 import { newUuidV7 } from "./idempotency.js";
 
 /** URL byte threshold above which queries fall back to POST + X-Method:GET. */
@@ -66,8 +69,9 @@ export async function sendUnary<TOut = unknown>(
 ): Promise<TOut> {
   if (opts.kind === "stream") {
     throw new RpcError({
-      code: "UNIMPLEMENTED",
-      message: "stream procedures are not supported in Phase 3 of @zeroship/rpc-client",
+      code: "INTERNAL",
+      message:
+        "[zeroship/rpc-client] streamCall must handle 'stream' kind, not sendUnary",
       retryable: false,
     });
   }
@@ -196,6 +200,351 @@ function isAbortError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const e = err as { name?: string; code?: string };
   return e.name === "AbortError" || e.code === "ABORT_ERR";
+}
+
+// ── Streams (Phase 4) ───────────────────────────────────────────────────
+
+/** Per-call options for `streamCall`. Same shape as `TransportOptions` minus `kind`. */
+export interface StreamOptions {
+  signal?: AbortSignal;
+  headers?: Record<string, string>;
+  timeout?: number;
+}
+
+/**
+ * POST /_zs/v1/<id> with `Accept: text/event-stream` and read the
+ * response body as a Vercel AI-SDK Data Stream.
+ *
+ * Returned async-iter yields each value (parsed per the typeId rule):
+ *
+ *   `0:"text"` → yield `"text"` (string)
+ *   `2:[<json>]` → yield each element of the array (objects)
+ *   `3:"err"` → throw RpcError(INTERNAL, "err")
+ *   `e:{...}` → throw RpcError using the structured envelope
+ *   `d:{}` → end iteration
+ *
+ * Iteration is fully demand-driven: the underlying ReadableStream
+ * reader is only advanced when the consumer asks for the next value.
+ */
+export function streamCall<TOut = unknown>(
+  procId: string,
+  input: unknown,
+  cfg: TransportConfig,
+  opts: StreamOptions = {},
+): AsyncIterableIterator<TOut> {
+  // Lazily kick off the request when iteration starts. We can't make
+  // it eager — the consumer may never iterate, in which case we'd
+  // leak an open connection.
+  let requestStarted = false;
+  let requestPromise: Promise<{ reader: ReadableStreamDefaultReader<Uint8Array> }> | null = null;
+  let pending: TOut[] = [];
+  let buffer = "";
+  let done = false;
+  let thrown: unknown = null;
+  const decoder = new TextDecoder();
+
+  // Compose abort signals.
+  const callerSignal = opts.signal;
+  const timeoutCtrl = opts.timeout && opts.timeout > 0 ? new AbortController() : null;
+  const timeoutHandle = timeoutCtrl
+    ? setTimeout(() => timeoutCtrl.abort(), opts.timeout!)
+    : null;
+  const signal = composeSignals(callerSignal, timeoutCtrl?.signal);
+
+  function clearTimeoutOnce(): void {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+
+  async function startRequest(): Promise<{ reader: ReadableStreamDefaultReader<Uint8Array> }> {
+    let authToken: string | null | undefined;
+    try {
+      authToken = await cfg.authResolver();
+    } catch (e) {
+      throw e instanceof Error ? e : new Error(String(e));
+    }
+
+    const headers = new Headers();
+    headers.set("Accept", "text/event-stream");
+    headers.set("Content-Type", "application/json");
+    if (authToken) headers.set("Authorization", `Bearer ${authToken}`);
+    headers.set("X-Request-Id", newUuidV7());
+    if (opts.headers) {
+      for (const [k, v] of Object.entries(opts.headers)) headers.set(k, v);
+    }
+
+    const url = `${cfg.baseUrl}/_zs/v1/${procId}`;
+    const body = await encodeBody(input, cfg.transformer);
+
+    let res: Response;
+    try {
+      res = await cfg.fetch(url, { method: "POST", headers, body, signal });
+    } catch (err) {
+      clearTimeoutOnce();
+      if (isAbortError(err)) {
+        const timedOut = timeoutCtrl?.signal.aborted ?? false;
+        const rpcErr = new RpcError({
+          code: timedOut ? "TIMEOUT" : "CANCELLED",
+          message: timedOut ? "request timed out" : "request cancelled",
+          retryable: timedOut,
+        });
+        cfg.onError?.(rpcErr);
+        throw rpcErr;
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      const rpcErr = new RpcError({
+        code: "UNAVAILABLE",
+        message: `transport error: ${message}`,
+        retryable: true,
+      });
+      cfg.onError?.(rpcErr);
+      throw rpcErr;
+    }
+
+    if (!res.ok) {
+      clearTimeoutOnce();
+      const err = await parseErrorResponse(res);
+      if (err.code === "UNAUTHENTICATED" && cfg.onAuthExpired) cfg.onAuthExpired();
+      cfg.onError?.(err);
+      throw err;
+    }
+    if (!res.body) {
+      clearTimeoutOnce();
+      const rpcErr = new RpcError({
+        code: "INTERNAL",
+        message: "stream response had no body",
+        retryable: false,
+      });
+      cfg.onError?.(rpcErr);
+      throw rpcErr;
+    }
+    return { reader: res.body.getReader() };
+  }
+
+  function consumeLine(line: string): boolean {
+    // Parse a single AI-SDK Data Stream frame. Returns true when the
+    // stream is done (`d:` typeId); false to keep reading.
+    if (line.length === 0) return false;
+    const colonIdx = line.indexOf(":");
+    if (colonIdx <= 0) return false;
+    const typeId = line.slice(0, colonIdx);
+    const json = line.slice(colonIdx + 1);
+    switch (typeId) {
+      case "0": {
+        // `0:"text"` — JSON-stringified string.
+        let v: string;
+        try {
+          v = JSON.parse(json);
+        } catch {
+          return false;
+        }
+        pending.push(v as TOut);
+        return false;
+      }
+      case "2": {
+        // `2:[<json>]` — array, yield each element.
+        let arr: unknown;
+        try {
+          arr = JSON.parse(json);
+        } catch {
+          return false;
+        }
+        if (Array.isArray(arr)) {
+          for (const el of arr) pending.push(el as TOut);
+        }
+        return false;
+      }
+      case "3": {
+        // `3:"err"` — string-only error message.
+        let msg: string;
+        try {
+          msg = JSON.parse(json);
+        } catch {
+          msg = json;
+        }
+        thrown = new RpcError({
+          code: "INTERNAL",
+          message: msg,
+          retryable: false,
+        });
+        return true;
+      }
+      case "e": {
+        // `e:{...}` — structured envelope. Lift code/message/details/retryable.
+        let env: Record<string, unknown>;
+        try {
+          env = JSON.parse(json) as Record<string, unknown>;
+        } catch {
+          thrown = new RpcError({
+            code: "INTERNAL",
+            message: "invalid error envelope",
+            retryable: false,
+          });
+          return true;
+        }
+        const code = (typeof env.code === "string" ? (env.code as ErrorCode) : "INTERNAL");
+        const message = typeof env.message === "string" ? env.message : "stream error";
+        thrown = new RpcError({
+          code,
+          message,
+          details: env.details,
+          retryable: typeof env.retryable === "boolean" ? env.retryable : undefined,
+        });
+        return true;
+      }
+      case "d": {
+        // `d:{}` — done.
+        return true;
+      }
+      default:
+        // Unknown typeId — ignore (forward-compat with future ai-sdk
+        // protocol additions).
+        return false;
+    }
+  }
+
+  async function pump(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+    // Read at most one chunk; transfer parsed lines into `pending`.
+    // Loops only when a chunk produced no lines (partial line buffered)
+    // — otherwise we return to give the consumer a chance to drain.
+    while (true) {
+      let read: ReadableStreamReadResult<Uint8Array>;
+      try {
+        read = await reader.read();
+      } catch (err) {
+        if (isAbortError(err)) {
+          const timedOut = timeoutCtrl?.signal.aborted ?? false;
+          thrown = new RpcError({
+            code: timedOut ? "TIMEOUT" : "CANCELLED",
+            message: timedOut ? "request timed out" : "request cancelled",
+            retryable: timedOut,
+          });
+        } else {
+          const message = err instanceof Error ? err.message : String(err);
+          thrown = new RpcError({
+            code: "UNAVAILABLE",
+            message: `transport error: ${message}`,
+            retryable: true,
+          });
+        }
+        done = true;
+        return;
+      }
+      if (read.done) {
+        // EOF without `d:` is OK — treat as clean stream end.
+        // Flush any remaining buffered partial line.
+        if (buffer.length > 0) {
+          const isDone = consumeLine(buffer);
+          buffer = "";
+          if (isDone) done = true;
+        }
+        done = true;
+        return;
+      }
+      buffer += decoder.decode(read.value, { stream: true });
+      let nl: number;
+      let producedLine = false;
+      while ((nl = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        producedLine = true;
+        const isDone = consumeLine(line);
+        if (isDone) {
+          done = true;
+          return;
+        }
+      }
+      // If we produced at least one line, return — let consumer drain.
+      if (producedLine) return;
+      // No line yet (partial); loop and read more.
+    }
+  }
+
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+
+  async function nextValue(): Promise<IteratorResult<TOut>> {
+    // First call: start the request. Errors here surface as the
+    // iterator throwing, matching `for await` semantics.
+    if (!requestStarted) {
+      requestStarted = true;
+      requestPromise = startRequest();
+    }
+    if (activeReader === null) {
+      try {
+        const { reader } = await requestPromise!;
+        activeReader = reader;
+      } catch (err) {
+        clearTimeoutOnce();
+        throw err;
+      }
+    }
+    while (pending.length === 0 && !done && thrown === null) {
+      await pump(activeReader);
+    }
+    if (pending.length > 0) {
+      const v = pending.shift()!;
+      return { value: v, done: false };
+    }
+    clearTimeoutOnce();
+    if (thrown !== null) {
+      const err = thrown;
+      thrown = null;
+      cfg.onError?.(err as RpcError);
+      throw err;
+    }
+    return { value: undefined as unknown as TOut, done: true };
+  }
+
+  const iter: AsyncIterableIterator<TOut> = {
+    next: nextValue,
+    async return(value?: TOut): Promise<IteratorResult<TOut>> {
+      // Consumer broke out of the loop early. Cancel the upstream
+      // reader so the connection closes cleanly.
+      clearTimeoutOnce();
+      try {
+        if (activeReader) await activeReader.cancel();
+      } catch {
+        // ignore — best effort.
+      }
+      done = true;
+      return { value: value as TOut, done: true };
+    },
+    async throw(err?: unknown): Promise<IteratorResult<TOut>> {
+      clearTimeoutOnce();
+      try {
+        if (activeReader) await activeReader.cancel();
+      } catch {
+        // ignore.
+      }
+      done = true;
+      throw err;
+    },
+    [Symbol.asyncIterator](): AsyncIterableIterator<TOut> {
+      return iter;
+    },
+  };
+  return iter;
+}
+
+/**
+ * Build the streaming URL for a procedure. Used by consumers handing
+ * the URL to ai-sdk's `useChat({ api: rpc.chat.completion.streamUrl(input) })`.
+ *
+ * Wire shape matches `streamCall` (POST + Accept: text/event-stream),
+ * but ai-sdk's `useChat` only takes a URL — it builds the body itself.
+ * For the input-via-query-string compat case we expose the query-string
+ * form as well: `?input=<base64url>`.
+ */
+export function buildStreamUrl(
+  procId: string,
+  input: unknown,
+  cfg: TransportConfig,
+): Promise<string> | string {
+  if (input === undefined) {
+    return `${cfg.baseUrl}/_zs/v1/${procId}`;
+  }
+  return encodeQueryInput(input, cfg.transformer).then(
+    (enc) => `${cfg.baseUrl}/_zs/v1/${procId}?input=${enc}`,
+  );
 }
 
 function byteLength(str: string): number {

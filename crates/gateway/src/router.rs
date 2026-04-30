@@ -7,7 +7,7 @@ use ntex::util::Bytes;
 use ntex::web::{self, HttpRequest, HttpResponse};
 use uuid::Uuid;
 
-use crate::{auth, enforce, proxy, user_auth, GateState};
+use crate::{enforce, idempotency, proxy, user_auth, GateState};
 
 // ---------------------------------------------------------------------------
 // Phase 6 — streaming static-asset serving
@@ -360,7 +360,45 @@ async fn execute_resource_tree(
         }
     }
 
-    // 7. Execute the resolved action.
+    // 7. Idempotency dedupe (only for `idempotent: true` mutations).
+    //    Resolved before the worker is touched: a hit returns the
+    //    stored response verbatim; a conflict / missing-header case
+    //    rejects with the right error envelope.
+    //
+    //    Only mutations enter the dedupe path. Queries are inherently
+    //    safe (the spec doesn't apply idempotency to them); streams /
+    //    subscriptions don't dedupe either — Phase 6 is out of scope
+    //    for those.
+    let idempotency_handle = if policy.idempotent
+        && matches!(policy.kind, Some(ProcedureKind::Mutation) | None)
+        && matches!(policy.action, ResolvedAction::WorkerRpc)
+    {
+        match handle_idempotency_pre_dispatch(
+            &req,
+            &state,
+            app_id,
+            dispatch_path,
+            policy,
+            &body,
+            wall_start,
+        )
+        .await
+        {
+            IdempotencyOutcome::ReturnNow(mut resp) => {
+                if let (Some(cors), Some(origin)) = (policy.cors.as_ref(), origin_value.as_deref()) {
+                    if !origin.is_empty() {
+                        inject_cors_response_headers(resp.headers_mut(), cors, origin);
+                    }
+                }
+                return resp;
+            }
+            IdempotencyOutcome::Proceed(handle) => Some(handle),
+        }
+    } else {
+        None
+    };
+
+    // 8. Execute the resolved action.
     let mut response = match &policy.action {
         ResolvedAction::WorkerRpc | ResolvedAction::WorkerSsr => {
             handle_dispatch(
@@ -418,8 +456,15 @@ async fn execute_resource_tree(
         }
     };
 
-    // 8. CORS injection on the response (resource-tree's flattened
-    //    `cors`).
+    // 9. Idempotency capture — store the worker's response under the
+    //    dedupe key when we held the in-flight lock through dispatch.
+    //    Errors here are logged but never block the response.
+    if let Some(handle) = idempotency_handle {
+        response = capture_response_for_idempotency(&state, app_id, handle, response).await;
+    }
+
+    // 10. CORS injection on the response (resource-tree's flattened
+    //     `cors`).
     if let (Some(cors), Some(origin)) = (policy.cors.as_ref(), origin_value.as_deref()) {
         if !origin.is_empty() {
             inject_cors_response_headers(response.headers_mut(), cors, origin);
@@ -1441,6 +1486,286 @@ fn cache_control_header(c: &zeroship_core::types::CacheCtl) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Idempotency dedupe (spec §8) — pre/post worker hooks
+// ---------------------------------------------------------------------------
+
+/// Outcome of [`handle_idempotency_pre_dispatch`]. The caller either
+/// returns the response right now (cache hit / conflict / missing
+/// header) or proceeds to dispatch with the [`InflightHandle`] in
+/// hand to capture the worker's response.
+enum IdempotencyOutcome {
+    /// Return this response without invoking the worker.
+    ReturnNow(HttpResponse),
+    /// Proceed to worker dispatch; capture the response after.
+    Proceed(InflightHandle),
+}
+
+/// Carries the post-dispatch metadata needed to persist the worker's
+/// response under the dedupe key. Constructed by `pre_dispatch` and
+/// consumed by `capture_response_for_idempotency`.
+struct InflightHandle {
+    entry_key: String,
+    lock_key: String,
+    body_hash: String,
+    ttl_hours: u32,
+}
+
+/// Resolve the wireId from a `/_zs/v1/<wireId>` dispatch path. The
+/// dispatch path always has a leading slash; the wireId is the rest
+/// after the literal prefix. Returns `None` for any non-RPC path —
+/// callers should only enter idempotency for `WorkerRpc` actions.
+fn dispatch_path_wire_id(dispatch_path: &str) -> Option<&str> {
+    dispatch_path.strip_prefix("/_zs/v1/")
+}
+
+/// Build the standard `application/zs-error+json` envelope for an
+/// idempotency rejection. Mirrors the spec §6 error code table.
+fn build_zs_error_response(
+    status: ntex::http::StatusCode,
+    code: &str,
+    message: &str,
+    details: serde_json::Value,
+    retryable: bool,
+    retry_after_secs: Option<u64>,
+    wall_start: std::time::Instant,
+) -> HttpResponse {
+    let body = serde_json::json!({
+        "code": code,
+        "message": message,
+        "details": details,
+        "retryable": retryable,
+    });
+    let mut builder = HttpResponse::build(status);
+    builder.header("content-type", "application/zs-error+json");
+    if let Some(secs) = retry_after_secs {
+        builder.header("retry-after", secs.to_string());
+    }
+    builder.header(
+        "x-wall-time-ms",
+        format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
+    );
+    builder.body(serde_json::to_vec(&body).unwrap_or_default())
+}
+
+/// Replay a stored response. Drops hop-by-hop headers (we re-synthesize
+/// the connection layer's headers fresh) and stamps `x-zs-idempotent-replay`
+/// so callers can observe a hit in the wild.
+fn build_replay_response(
+    stored: &idempotency::StoredResponse,
+    wall_start: std::time::Instant,
+) -> HttpResponse {
+    let status = ntex::http::StatusCode::from_u16(stored.status)
+        .unwrap_or(ntex::http::StatusCode::INTERNAL_SERVER_ERROR);
+    let mut builder = HttpResponse::build(status);
+    for (name, value) in &stored.headers {
+        // The stored map already has hop-by-hop headers stripped, but
+        // an extra defensive filter here protects against future
+        // schema drift.
+        builder.set_header(name.as_str(), value.as_str());
+    }
+    builder.set_header("x-zs-idempotent-replay", "true");
+    builder.header(
+        "x-wall-time-ms",
+        format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
+    );
+    builder.body(stored.body_bytes())
+}
+
+/// Resolve the per-procedure inflight wait timeout. Capped at 30s by
+/// default — anything longer would let dedupe contention block a
+/// worker thread for impractical durations. A future revision can
+/// honor `policy.timeout` once that field lands.
+fn inflight_wait_ms(_policy: &crate::compiled::EffectivePolicy) -> u64 {
+    idempotency::DEFAULT_INFLIGHT_WAIT_MS
+}
+
+/// Spec §8 pre-dispatch hook: extract `Idempotency-Key`, hash body,
+/// consult store, decide. Only called for `idempotent: true`
+/// mutations; the caller filters by policy.
+async fn handle_idempotency_pre_dispatch(
+    req: &HttpRequest,
+    state: &GateState,
+    app_id: &Uuid,
+    dispatch_path: &str,
+    policy: &crate::compiled::EffectivePolicy,
+    body: &Bytes,
+    wall_start: std::time::Instant,
+) -> IdempotencyOutcome {
+    let Some(wire_id) = dispatch_path_wire_id(dispatch_path) else {
+        // Not an RPC path — caller already filtered, but defensive
+        // fallthrough means we don't dedupe.
+        return IdempotencyOutcome::Proceed(InflightHandle {
+            entry_key: String::new(),
+            lock_key: String::new(),
+            body_hash: String::new(),
+            ttl_hours: idempotency::clamp_ttl_hours(policy.idempotency_ttl_hours),
+        });
+    };
+
+    let idem_key = req
+        .headers()
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let ttl_hours = idempotency::clamp_ttl_hours(policy.idempotency_ttl_hours);
+
+    let decision = idempotency::pre_dispatch(
+        state.idempotency_store.as_ref(),
+        app_id,
+        wire_id,
+        idem_key.as_deref(),
+        body,
+        ttl_hours,
+        inflight_wait_ms(policy),
+    )
+    .await;
+
+    match decision {
+        Ok(idempotency::DedupeDecision::Hit(stored)) => {
+            IdempotencyOutcome::ReturnNow(build_replay_response(&stored, wall_start))
+        }
+        Ok(idempotency::DedupeDecision::Conflict { retry_after_secs }) => {
+            IdempotencyOutcome::ReturnNow(build_zs_error_response(
+                ntex::http::StatusCode::CONFLICT,
+                "ALREADY_EXISTS",
+                "Idempotency-Key was used with a different input within the dedupe window",
+                serde_json::json!({
+                    "reason": "idempotency_key_reused_with_different_input"
+                }),
+                false,
+                Some(retry_after_secs),
+                wall_start,
+            ))
+        }
+        Ok(idempotency::DedupeDecision::MissingHeader) => {
+            IdempotencyOutcome::ReturnNow(build_zs_error_response(
+                ntex::http::StatusCode::BAD_REQUEST,
+                "INVALID_ARGUMENT",
+                "Idempotency-Key header required for this procedure",
+                serde_json::json!({ "reason": "missing_idempotency_key" }),
+                false,
+                None,
+                wall_start,
+            ))
+        }
+        Ok(idempotency::DedupeDecision::InFlightTimedOut) => {
+            IdempotencyOutcome::ReturnNow(build_zs_error_response(
+                ntex::http::StatusCode::CONFLICT,
+                "ABORTED",
+                "Idempotency-Key in flight; original request did not complete in time",
+                serde_json::json!({ "reason": "idempotency_inflight_timeout" }),
+                false,
+                None,
+                wall_start,
+            ))
+        }
+        Ok(idempotency::DedupeDecision::Proceed { entry_key, lock_key, body_hash, ttl_hours }) => {
+            IdempotencyOutcome::Proceed(InflightHandle { entry_key, lock_key, body_hash, ttl_hours })
+        }
+        Err(e) => {
+            // Store error → log and fail closed. A degraded dedupe
+            // backend MUST NOT silently let through duplicate
+            // mutations; spec §8 is explicit that this is unsafe.
+            eprintln!("[gate] idempotency store error: {e}");
+            IdempotencyOutcome::ReturnNow(build_zs_error_response(
+                ntex::http::StatusCode::SERVICE_UNAVAILABLE,
+                "UNAVAILABLE",
+                "idempotency store temporarily unavailable",
+                serde_json::json!({}),
+                true,
+                Some(1),
+                wall_start,
+            ))
+        }
+    }
+}
+
+/// Drain a response's body into bytes, returning a fresh
+/// `HttpResponse` with the buffered body. The original response is
+/// consumed because ntex's `take_body` empties it. Used after worker
+/// dispatch so we can both capture the body for idempotency storage
+/// AND ship it back to the client.
+///
+/// Streaming responses (chunked / SSE) flow through here too — we
+/// buffer them entirely. Idempotency only applies to mutation
+/// responses, which are virtually always small JSON envelopes; if a
+/// mutation streams back megabytes it pays the buffer cost. Streams
+/// and subscriptions don't enter this path (caller filters by kind).
+async fn buffer_response_body(mut resp: HttpResponse) -> (HttpResponse, Vec<u8>) {
+    use ntex::http::body::{Body, MessageBody};
+    let mut body = resp.take_body();
+    let mut buf: Vec<u8> = Vec::new();
+    std::future::poll_fn(|cx| {
+        loop {
+            match body.poll_next_chunk(cx) {
+                std::task::Poll::Ready(Some(Ok(chunk))) => buf.extend_from_slice(&chunk),
+                std::task::Poll::Ready(Some(Err(_))) | std::task::Poll::Ready(None) => {
+                    return std::task::Poll::Ready(());
+                }
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
+        }
+    })
+    .await;
+    let bytes = buf.clone();
+    let new_resp = resp.set_body(Body::Bytes(Bytes::from(buf)));
+    (new_resp, bytes)
+}
+
+/// Spec §8 post-dispatch hook: capture the worker's response under
+/// the dedupe key and release the in-flight lock. Returns the response
+/// to ship back to the client (with the body intact and an
+/// `x-zs-idempotent-stored` flag for observability).
+async fn capture_response_for_idempotency(
+    state: &GateState,
+    app_id: &Uuid,
+    handle: InflightHandle,
+    response: HttpResponse,
+) -> HttpResponse {
+    let (mut buffered, body_bytes) = buffer_response_body(response).await;
+
+    // Snapshot headers we want to replay. Drops hop-by-hop and
+    // per-request stamps before storage.
+    let mut header_pairs: Vec<(String, String)> = Vec::new();
+    for (name, value) in buffered.headers().iter() {
+        if let Ok(v) = value.to_str() {
+            header_pairs.push((name.as_str().to_string(), v.to_string()));
+        }
+    }
+    let stored_headers = idempotency::capture_response_headers(&header_pairs);
+    let status = buffered.status().as_u16();
+
+    if let Err(e) = idempotency::capture_response(
+        state.idempotency_store.as_ref(),
+        app_id,
+        &handle.entry_key,
+        &handle.lock_key,
+        &handle.body_hash,
+        status,
+        &stored_headers,
+        &body_bytes,
+        handle.ttl_hours,
+    )
+    .await
+    {
+        eprintln!("[gate] idempotency capture failed: {e}");
+        // Best-effort lock release.
+        let _ = idempotency::release_lock_without_storing(
+            state.idempotency_store.as_ref(),
+            &handle.lock_key,
+        )
+        .await;
+    }
+
+    buffered.headers_mut().insert(
+        ntex::http::header::HeaderName::from_static("x-zs-idempotent-stored"),
+        ntex::http::header::HeaderValue::from_static("true"),
+    );
+    buffered
+}
+
+// ---------------------------------------------------------------------------
 // Dispatch handler — the single worker-facing path
 // ---------------------------------------------------------------------------
 
@@ -2013,6 +2338,7 @@ mod tests {
             blob_store: store,
             blob_cache: BlobCache::new(8 * 1024 * 1024),
             disk_cache: disk,
+            idempotency_store: Arc::new(crate::idempotency::InMemoryIdempotencyStore::new()),
         }
     }
 
@@ -3344,6 +3670,7 @@ mod tests {
 mod resource_tree_tests {
     use super::*;
     use std::collections::HashMap;
+    use ntex::http::body::{Body, MessageBody, ResponseBody};
     use crate::compiled::{CompiledManifest, EffectivePolicy};
     use zeroship_core::types::{
         AuthLevel, Manifest, ProcedureKind, RateLimit, RateLimitPer, ResourceEntry,
@@ -3355,6 +3682,87 @@ mod resource_tree_tests {
             resources,
             ..Manifest::default()
         }
+    }
+
+    /// Drain a `ResponseBody<Body>` to bytes. Local copy of the helper
+    /// in `tests::collect_body` since Rust's module scoping doesn't
+    /// reach across sibling test modules.
+    async fn collect_body(mut body: ResponseBody<Body>) -> Vec<u8> {
+        let mut out = Vec::new();
+        std::future::poll_fn(|cx| {
+            loop {
+                match body.poll_next_chunk(cx) {
+                    std::task::Poll::Ready(Some(Ok(chunk))) => out.extend_from_slice(&chunk),
+                    std::task::Poll::Ready(Some(Err(e))) => panic!("body error: {e}"),
+                    std::task::Poll::Ready(None) => return std::task::Poll::Ready(()),
+                    std::task::Poll::Pending => return std::task::Poll::Pending,
+                }
+            }
+        })
+        .await;
+        out
+    }
+
+    /// Minimal in-memory blob store for the idempotency tests below.
+    /// They never actually read assets; the store exists only to
+    /// satisfy `GateState`'s required field.
+    #[derive(Debug, Default)]
+    struct StubBlobStore;
+
+    #[async_trait::async_trait(?Send)]
+    impl zeroship_core::blob::BlobStore for StubBlobStore {
+        async fn get_blob(&self, _hash: &str) -> Result<bytes::Bytes, zeroship_core::blob::BlobError> {
+            Err(zeroship_core::blob::BlobError::NotFound("unused".into()))
+        }
+        fn local_path(&self, _hash: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+        async fn put_blob(&self, _hash: &str, _data: &[u8]) -> Result<(), zeroship_core::blob::BlobError> {
+            Ok(())
+        }
+        async fn has_blob(&self, _hash: &str) -> Result<bool, zeroship_core::blob::BlobError> {
+            Ok(false)
+        }
+        async fn put_manifest(
+            &self,
+            _app_id: &uuid::Uuid,
+            _deploy_hash: &str,
+            _json: &[u8],
+        ) -> Result<(), zeroship_core::blob::BlobError> {
+            Ok(())
+        }
+        async fn get_manifest(
+            &self,
+            _app_id: &uuid::Uuid,
+            _deploy_hash: &str,
+        ) -> Result<bytes::Bytes, zeroship_core::blob::BlobError> {
+            Err(zeroship_core::blob::BlobError::NotFound("unused".into()))
+        }
+    }
+
+    fn build_idempotency_state() -> Arc<GateState> {
+        let mut tmp = std::env::temp_dir();
+        tmp.push(format!("zsgate-idem-{}", uuid::Uuid::new_v4().simple()));
+        let disk = crate::blob_cache::DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
+        Arc::new(GateState {
+            config: crate::GateConfig {
+                control_url: String::new(),
+                control_key: String::new(),
+                worker_urls: vec![],
+                poll_interval_secs: 5,
+                auth_secret: String::new(),
+                worker_key: String::new(),
+            },
+            routes: crate::sync::RouteCache::new(),
+            hash_ring: crate::proxy::HashRing::new(vec!["http://0.0.0.0:0".into()], 1),
+            rate_limiters: crate::enforce::RateLimitRegistry::new(1, 1),
+            per_rule_rate_limits: crate::enforce::PerRuleRateLimitRegistry::new(),
+            concurrency: crate::enforce::ConcurrencyRegistry::new(1),
+            blob_store: Arc::new(StubBlobStore),
+            blob_cache: crate::blob_cache::BlobCache::new(8 * 1024 * 1024),
+            disk_cache: disk,
+            idempotency_store: Arc::new(crate::idempotency::InMemoryIdempotencyStore::new()),
+        })
     }
 
     #[test]
@@ -3387,6 +3795,7 @@ mod resource_tree_tests {
             cache: None,
             csrf_origins: None,
             idempotent: false,
+            idempotency_ttl_hours: None,
             max_input_bytes: None,
             middleware: vec![],
             publicly_accessible: true,
@@ -3408,6 +3817,7 @@ mod resource_tree_tests {
             cache: None,
             csrf_origins: None,
             idempotent: false,
+            idempotency_ttl_hours: None,
             max_input_bytes: None,
             middleware: vec![],
             publicly_accessible: false,
@@ -3432,6 +3842,7 @@ mod resource_tree_tests {
             cache: None,
             csrf_origins: None,
             idempotent: false,
+            idempotency_ttl_hours: None,
             max_input_bytes: None,
             middleware: vec![],
             publicly_accessible: false,
@@ -3504,5 +3915,321 @@ mod resource_tree_tests {
             c.lookup_resource("/_rpc/listTodos").is_none(),
             "legacy /_rpc/ prefix is no longer routed"
         );
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Idempotency integration — exercises the gateway-side wiring on
+    // top of the `idempotency` module. End-to-end coverage of the
+    // module itself lives in `idempotency::tests`; these tests focus
+    // on the HTTP-shaped surface.
+    // ───────────────────────────────────────────────────────────────────
+
+    fn idempotent_mutation_policy() -> EffectivePolicy {
+        EffectivePolicy {
+            auth: AuthLevel::Anon,
+            rate_limit: None,
+            cors: None,
+            cache: None,
+            csrf_origins: None,
+            idempotent: true,
+            idempotency_ttl_hours: None,
+            max_input_bytes: None,
+            middleware: vec![],
+            publicly_accessible: true,
+            kind: Some(ProcedureKind::Mutation),
+            action: crate::compiled::ResolvedAction::WorkerRpc,
+            input_schema: None,
+            output_schema: None,
+        }
+    }
+
+    fn make_minimal_state() -> Arc<GateState> {
+        build_idempotency_state()
+    }
+
+    #[compio::test]
+    async fn idempotency_missing_header_returns_400_invalid_argument() {
+        let state = make_minimal_state();
+        let req = ntex::web::test::TestRequest::default()
+            .method(ntex::http::Method::POST)
+            .to_http_request();
+        let body = Bytes::from_static(b"{}");
+        let policy = idempotent_mutation_policy();
+
+        let outcome = handle_idempotency_pre_dispatch(
+            &req,
+            &state,
+            &uuid::Uuid::new_v4(),
+            "/_zs/v1/todos.add",
+            &policy,
+            &body,
+            std::time::Instant::now(),
+        )
+        .await;
+
+        match outcome {
+            IdempotencyOutcome::ReturnNow(mut resp) => {
+                assert_eq!(resp.status(), ntex::http::StatusCode::BAD_REQUEST);
+                let ct = resp
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                assert_eq!(ct, "application/zs-error+json");
+                let body = resp.take_body();
+                let bytes = collect_body(body).await;
+                let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(v["code"], "INVALID_ARGUMENT");
+            }
+            IdempotencyOutcome::Proceed(_) => panic!("must reject when header missing"),
+        }
+    }
+
+    #[compio::test]
+    async fn idempotency_first_request_proceeds_holds_lock() {
+        let state = make_minimal_state();
+        let app_id = uuid::Uuid::new_v4();
+        let req = ntex::web::test::TestRequest::default()
+            .header("idempotency-key", "test-key-123")
+            .to_http_request();
+        let policy = idempotent_mutation_policy();
+
+        let outcome = handle_idempotency_pre_dispatch(
+            &req,
+            &state,
+            &app_id,
+            "/_zs/v1/todos.add",
+            &policy,
+            &Bytes::from_static(b"{\"text\":\"hi\"}"),
+            std::time::Instant::now(),
+        )
+        .await;
+
+        match outcome {
+            IdempotencyOutcome::Proceed(handle) => {
+                assert_eq!(
+                    handle.entry_key,
+                    crate::idempotency::entry_key(&app_id, "todos.add", "test-key-123")
+                );
+                assert_eq!(handle.ttl_hours, crate::idempotency::DEFAULT_TTL_HOURS);
+            }
+            IdempotencyOutcome::ReturnNow(_) => panic!("first request must Proceed"),
+        }
+    }
+
+    #[compio::test]
+    async fn idempotency_second_same_body_replays_cached_response() {
+        let state = make_minimal_state();
+        let app_id = uuid::Uuid::new_v4();
+        let req = ntex::web::test::TestRequest::default()
+            .header("idempotency-key", "k")
+            .to_http_request();
+        let policy = idempotent_mutation_policy();
+        let body = Bytes::from_static(b"{\"x\":1}");
+
+        // First request claims the lock.
+        let first = handle_idempotency_pre_dispatch(
+            &req,
+            &state,
+            &app_id,
+            "/_zs/v1/todos.add",
+            &policy,
+            &body,
+            std::time::Instant::now(),
+        )
+        .await;
+        let IdempotencyOutcome::Proceed(handle) = first else {
+            panic!("expected Proceed");
+        };
+
+        // Build a fake worker response and capture it.
+        let worker_resp = HttpResponse::Created()
+            .header("content-type", "application/json")
+            .body(b"{\"id\":42}".to_vec());
+        let captured =
+            capture_response_for_idempotency(&state, &app_id, handle, worker_resp).await;
+        let captured: HttpResponse = captured;
+        assert_eq!(captured.status(), ntex::http::StatusCode::CREATED);
+        assert_eq!(
+            captured
+                .headers()
+                .get("x-zs-idempotent-stored")
+                .and_then(|v| v.to_str().ok()),
+            Some("true")
+        );
+
+        // Second request — same body — must replay verbatim.
+        let second = handle_idempotency_pre_dispatch(
+            &req,
+            &state,
+            &app_id,
+            "/_zs/v1/todos.add",
+            &policy,
+            &body,
+            std::time::Instant::now(),
+        )
+        .await;
+        match second {
+            IdempotencyOutcome::ReturnNow(mut resp) => {
+                assert_eq!(resp.status(), ntex::http::StatusCode::CREATED);
+                assert_eq!(
+                    resp.headers()
+                        .get("x-zs-idempotent-replay")
+                        .and_then(|v| v.to_str().ok()),
+                    Some("true")
+                );
+                let body = resp.take_body();
+                let body_bytes = collect_body(body).await;
+                assert_eq!(body_bytes, b"{\"id\":42}");
+            }
+            IdempotencyOutcome::Proceed(_) => panic!("must replay cached response"),
+        }
+    }
+
+    #[compio::test]
+    async fn idempotency_second_different_body_returns_409_already_exists() {
+        let state = make_minimal_state();
+        let app_id = uuid::Uuid::new_v4();
+        let req_with_key = |body_label: &str| {
+            ntex::web::test::TestRequest::default()
+                .header("idempotency-key", "shared-key")
+                .header("x-test-label", body_label)
+                .to_http_request()
+        };
+        let policy = idempotent_mutation_policy();
+
+        // Seed the dedupe table with the original.
+        let first = handle_idempotency_pre_dispatch(
+            &req_with_key("a"),
+            &state,
+            &app_id,
+            "/_zs/v1/todos.add",
+            &policy,
+            &Bytes::from_static(b"{\"a\":1}"),
+            std::time::Instant::now(),
+        )
+        .await;
+        let IdempotencyOutcome::Proceed(handle) = first else {
+            panic!("expected Proceed");
+        };
+        let worker_resp = HttpResponse::Ok().body(b"first".to_vec());
+        let _ = capture_response_for_idempotency(&state, &app_id, handle, worker_resp).await;
+
+        // Same key, different body → 409 ALREADY_EXISTS with Retry-After.
+        let conflict = handle_idempotency_pre_dispatch(
+            &req_with_key("b"),
+            &state,
+            &app_id,
+            "/_zs/v1/todos.add",
+            &policy,
+            &Bytes::from_static(b"{\"b\":2}"),
+            std::time::Instant::now(),
+        )
+        .await;
+
+        match conflict {
+            IdempotencyOutcome::ReturnNow(mut resp) => {
+                assert_eq!(resp.status(), ntex::http::StatusCode::CONFLICT);
+                let retry_after = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .expect("retry-after present and numeric");
+                assert!(retry_after > 0 && retry_after <= 24 * 3600);
+                let body = resp.take_body();
+                let bytes = collect_body(body).await;
+                let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(v["code"], "ALREADY_EXISTS");
+                assert_eq!(v["details"]["reason"], "idempotency_key_reused_with_different_input");
+            }
+            IdempotencyOutcome::Proceed(_) => panic!("must reject"),
+        }
+    }
+
+    #[compio::test]
+    async fn idempotency_per_procedure_ttl_clamps_into_band() {
+        // Authored 1h TTL is honored. Authored 0 clamps up to 1; authored
+        // 999 clamps down to 168.
+        assert_eq!(crate::idempotency::clamp_ttl_hours(Some(1)), 1);
+        assert_eq!(crate::idempotency::clamp_ttl_hours(Some(168)), 168);
+        assert_eq!(crate::idempotency::clamp_ttl_hours(Some(0)), 1);
+        assert_eq!(crate::idempotency::clamp_ttl_hours(Some(9999)), 168);
+        assert_eq!(crate::idempotency::clamp_ttl_hours(None), 24);
+    }
+
+    #[compio::test]
+    async fn idempotency_per_procedure_ttl_flows_into_handle() {
+        // A mutation pinned to 48h yields handle.ttl_hours = 48.
+        let state = make_minimal_state();
+        let app_id = uuid::Uuid::new_v4();
+        let req = ntex::web::test::TestRequest::default()
+            .header("idempotency-key", "k")
+            .to_http_request();
+        let mut policy = idempotent_mutation_policy();
+        policy.idempotency_ttl_hours = Some(48);
+
+        let outcome = handle_idempotency_pre_dispatch(
+            &req,
+            &state,
+            &app_id,
+            "/_zs/v1/todos.add",
+            &policy,
+            &Bytes::from_static(b"{}"),
+            std::time::Instant::now(),
+        )
+        .await;
+        let IdempotencyOutcome::Proceed(handle) = outcome else {
+            panic!("expected Proceed");
+        };
+        assert_eq!(handle.ttl_hours, 48);
+    }
+
+    #[compio::test]
+    async fn buffer_response_body_round_trips_payload() {
+        // The streaming/buffered conversion preserves bytes verbatim.
+        let resp = HttpResponse::Ok()
+            .header("content-type", "application/json")
+            .body(b"{\"hello\":\"world\"}".to_vec());
+        let (rebuilt, bytes) = buffer_response_body(resp).await;
+        assert_eq!(bytes, b"{\"hello\":\"world\"}");
+        assert_eq!(
+            rebuilt
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+        let mut rebuilt = rebuilt;
+        let body = rebuilt.take_body();
+        let drained = collect_body(body).await;
+        assert_eq!(drained, b"{\"hello\":\"world\"}");
+    }
+
+    #[compio::test]
+    async fn build_replay_response_carries_status_and_body() {
+        use base64::Engine as _;
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("content-type".to_string(), "application/json".to_string());
+        let stored = crate::idempotency::StoredResponse {
+            input_hash: crate::idempotency::hash_body(b"{}"),
+            status: 422,
+            headers,
+            body_b64: base64::engine::general_purpose::STANDARD.encode(b"{\"err\":\"x\"}"),
+            completed_at: 0,
+            ttl_until: u64::MAX,
+        };
+        let resp = build_replay_response(&stored, std::time::Instant::now());
+        assert_eq!(resp.status(), ntex::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            resp.headers()
+                .get("x-zs-idempotent-replay")
+                .and_then(|v| v.to_str().ok()),
+            Some("true")
+        );
+        let mut resp = resp;
+        let body = resp.take_body();
+        let drained = collect_body(body).await;
+        assert_eq!(drained, b"{\"err\":\"x\"}");
     }
 }
