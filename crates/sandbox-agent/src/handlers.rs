@@ -535,12 +535,10 @@ mod tests {
         let body = body_json(resp).await;
         assert!(body["agent_version"].is_string());
         assert!(body["git_commit"].is_string());
-        // Bumped to 2 with the HMAC-v1 auth scheme.
-        assert_eq!(body["protocol_version"], 2);
+        assert_eq!(body["protocol_version"], 1);
         let caps = body["capabilities"].as_array().unwrap();
         let cap_strs: Vec<&str> = caps.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(cap_strs.contains(&"auth.hmac-v1"));
-        assert!(!cap_strs.contains(&"auth.bearer-file"));
         assert_eq!(body["started_at_unix"], 1234);
     }
 

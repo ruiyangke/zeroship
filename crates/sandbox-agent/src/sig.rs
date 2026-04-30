@@ -1,13 +1,11 @@
-//! Per-request HMAC-SHA256 verification.
+//! Per-request HMAC-SHA256 verification (`auth.hmac-v1`).
 //!
-//! Replaces the static-bearer scheme (`auth.bearer-file`) with a
-//! signed-request scheme (`auth.hmac-v1`). Defeats the three classes
-//! of attack the bearer model couldn't:
+//! The agent's wire-protocol-v1 auth scheme. Defeats:
 //!
 //!   - **Replay** of a captured request beyond a 5-second window
 //!   - **In-flight body / path / method tampering**
-//!   - **Static-secret leak via wire capture** (the secret never
-//!     travels — only HMACs of canonical strings do)
+//!   - **Static-secret leak via wire capture** — the secret never
+//!     travels, only HMACs of canonical strings do
 //!
 //! ## Wire format
 //!

@@ -13,21 +13,17 @@
 ///   - existing endpoint changes URL, method, or required field shape
 ///   - existing endpoint changes the meaning of a status code
 ///   - existing field is removed or its type changes incompatibly
-///   - **auth scheme changes** (e.g., bearer → HMAC, HMAC → mTLS)
+///   - **auth scheme changes** (e.g., HMAC → mTLS)
 ///
 /// **Do NOT bump for additive changes:**
 ///   - new endpoint added (announce via [`CAPABILITIES`])
 ///   - new optional response field added (older clients ignore it)
 ///   - new audit event kind
 ///
-/// History:
-///   - v1: bearer-token auth (`Authorization: Bearer <token>`)
-///   - v2: HMAC-signed requests (`X-Sbx-{Timestamp,Nonce,Signature}`)
-///
 /// Controllers prefer feature-detection over version comparison —
 /// see [`CAPABILITIES`] — but the protocol version is the single
 /// breaking-change tripwire so we can't drift silently.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Capability strings, stable identifiers. Controllers do feature
 /// detection by membership in this list, not by version comparison.
@@ -74,9 +70,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_2() {
-        // v1 was bearer-token; v2 is HMAC-signed requests.
-        assert_eq!(PROTOCOL_VERSION, 2);
+    fn protocol_version_is_1() {
+        assert_eq!(PROTOCOL_VERSION, 1);
     }
 
     #[test]
@@ -114,8 +109,8 @@ mod tests {
 
     #[test]
     fn known_capabilities_present() {
-        // Lock the v2 contract: removing any of these is a wire
-        // breakage and would force PROTOCOL_VERSION to bump again.
+        // Baseline v1 contract: removing any of these is a wire
+        // breakage that would force PROTOCOL_VERSION to bump.
         let expected = [
             "exec",
             "files.crud",
@@ -126,7 +121,7 @@ mod tests {
         for e in expected {
             assert!(
                 CAPABILITIES.contains(&e),
-                "missing baseline v2 capability: {e}"
+                "missing baseline v1 capability: {e}"
             );
         }
     }
