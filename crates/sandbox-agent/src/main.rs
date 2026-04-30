@@ -1,17 +1,21 @@
 //! `sandbox-agent` — PID 1 in zeroship sandbox microVMs.
 //!
-//! Boots a tokio runtime, starts the SIGCHLD reaper, and serves the
-//! axum HTTP API on `:7777` until the host sends SIGTERM (graceful)
-//! or SIGINT (graceful, dev-friendly).
+//! Boots ntex on the compio reactor, installs the SIGCHLD reaper
+//! (pre-bind so blocking SIGCHLD process-wide is the first thing we
+//! do), and serves the agent HTTP API on `:7777` until ntex's own
+//! signal handling drains us on SIGTERM / SIGINT.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
-use tokio::signal::unix::{signal, SignalKind};
+use ntex::web::{self, HttpResponse};
 
-use zeroship_sandbox_agent::{router, state_from_env, DEFAULT_PORT, DEFAULT_WORKSPACE};
+use zeroship_sandbox_agent::{
+    handlers, reap, state_from_env, DEFAULT_PORT, DEFAULT_WORKSPACE,
+};
 
-#[tokio::main]
+#[ntex::main]
 async fn main() -> ExitCode {
     if let Err(e) = run().await {
         eprintln!("[agent] fatal: {e}");
@@ -30,42 +34,40 @@ async fn run() -> Result<(), String> {
         Err(_) => DEFAULT_PORT,
     };
 
-    // Make sure /workspace exists. In production it'll be a virtio-fs
-    // mount or PVC; in dev it might not be — we mkdir for ergonomics.
     std::fs::create_dir_all(&workspace)
         .map_err(|e| format!("create workspace {}: {e}", workspace.display()))?;
 
+    // Reaper FIRST. It blocks SIGCHLD process-wide, so it must run
+    // before ntex spawns workers (the block is inherited by every
+    // thread from this point on).
+    reap::install();
+
     let state = state_from_env(workspace.clone())?;
-    let app = router(state);
-
-    // PID 1 zombie reaper. No-op when not PID 1; harmless either way.
-    zeroship_sandbox_agent::reap::spawn();
-
     let bind = format!("0.0.0.0:{port}");
-    let listener = tokio::net::TcpListener::bind(&bind)
-        .await
-        .map_err(|e| format!("bind {bind}: {e}"))?;
     eprintln!("[agent] listening on http://{bind}, workspace={}", workspace.display());
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|e| format!("serve: {e}"))
-}
-
-/// Resolve when SIGTERM (graceful container stop) or SIGINT (Ctrl-C)
-/// arrives. Lets in-flight requests drain before the process exits.
-async fn shutdown_signal() {
-    let term = async {
-        let mut s = signal(SignalKind::terminate()).expect("install SIGTERM");
-        s.recv().await;
-    };
-    let int = async {
-        let mut s = signal(SignalKind::interrupt()).expect("install SIGINT");
-        s.recv().await;
-    };
-    tokio::select! {
-        _ = term => eprintln!("[agent] SIGTERM received, draining"),
-        _ = int  => eprintln!("[agent] SIGINT received, draining"),
-    }
+    let state = Arc::new(state);
+    web::server(async move || {
+        web::App::new()
+            .state((*state).clone())
+            .service(web::resource("/healthz").route(web::get().to(handlers::healthz)))
+            .service(web::resource("/exec").route(web::post().to(handlers::exec_cmd)))
+            .service(web::resource("/tree").route(web::get().to(handlers::file_tree)))
+            // {path}* is ntex's tail-match — captures across slashes.
+            .service(
+                web::resource("/files/{path}*")
+                    .route(web::get().to(handlers::read_file))
+                    .route(web::put().to(handlers::write_file))
+                    .route(web::delete().to(handlers::delete_file)),
+            )
+            // Default 404 with JSON body (ntex returns text/plain otherwise).
+            .default_service(web::route().to(|| async {
+                HttpResponse::NotFound().json(&serde_json::json!({"error": "not found"}))
+            }))
+    })
+    .bind(&bind)
+    .map_err(|e| format!("bind {bind}: {e}"))?
+    .run()
+    .await
+    .map_err(|e| format!("serve: {e}"))
 }

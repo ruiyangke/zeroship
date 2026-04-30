@@ -1,24 +1,21 @@
 //! HTTP handlers for the agent.
 //!
 //! Endpoints (every one except `/healthz` requires `Authorization:
-//! Bearer <token>`):
+//! Bearer <token>` — checked inline at the top of each handler, same
+//! pattern as `crates/sandbox/src/handlers.rs`):
 //!
 //!   GET  /healthz           — liveness, no auth (used for cold-start polling)
 //!   POST /exec              — run shell command (JSON in/out)
 //!   GET  /tree              — workspace file listing
-//!   GET  /files/{*path}     — read file
-//!   PUT  /files/{*path}     — write file (raw bytes)
-//!   DELETE /files/{*path}   — delete file
+//!   GET  /files/{path}*     — read file
+//!   PUT  /files/{path}*     — write file (raw bytes)
+//!   DELETE /files/{path}*   — delete file
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::body::Bytes;
-use axum::extract::{Path, Request, State};
-use axum::http::{header, HeaderMap, StatusCode};
-use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
-use axum::Json;
+use ntex::util::Bytes;
+use ntex::web::{self, HttpRequest, HttpResponse};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -32,115 +29,35 @@ pub struct AppState {
     pub workspace: PathBuf,
 }
 
-// ─── auth middleware ─────────────────────────────────────────────
-
-pub async fn require_token(
-    State(state): State<AppState>,
-    req: Request,
-    next: Next,
-) -> Response {
-    let header_val = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
-    if !state.token.verify_header(header_val) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "unauthorized"})),
-        )
-            .into_response();
-    }
-    next.run(req).await
-}
-
-// ─── /healthz ────────────────────────────────────────────────────
-
-pub async fn healthz() -> Response {
-    (StatusCode::OK, Json(json!({"status": "ok"}))).into_response()
-}
-
-// ─── /exec ───────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct ExecBody {
-    pub cmd: String,
-    pub cwd: Option<String>,
-    pub timeout_ms: Option<u64>,
-}
-
-pub async fn exec_cmd(
-    State(state): State<AppState>,
-    Json(body): Json<ExecBody>,
-) -> Response {
-    let cwd = body
-        .cwd
-        .as_deref()
-        .unwrap_or_else(|| state.workspace.to_str().unwrap_or("/workspace"));
-    let timeout = body.timeout_ms.unwrap_or(exec::DEFAULT_TIMEOUT_MS);
-    match exec::run(&body.cmd, cwd, timeout).await {
-        Ok(out) => Json(out).into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
-    }
-}
-
-// ─── /tree ───────────────────────────────────────────────────────
-
-pub async fn file_tree(State(state): State<AppState>) -> Response {
-    match files::file_tree(&state.workspace) {
-        Ok(entries) => Json(json!({"entries": entries})).into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e),
-    }
-}
-
-// ─── /files/* ────────────────────────────────────────────────────
-
-pub async fn read_file(
-    State(state): State<AppState>,
-    Path(path): Path<String>,
-) -> Response {
-    match files::read_file(&state.workspace, &path) {
-        Ok(bytes) => {
-            let mut h = HeaderMap::new();
-            h.insert(header::CONTENT_TYPE, content_type(&path).parse().unwrap());
-            (StatusCode::OK, h, bytes).into_response()
-        }
-        Err(e) if e.contains("No such file") || e.contains("not found") => {
-            err(StatusCode::NOT_FOUND, e)
-        }
-        Err(e) if e.contains("symlink") => err(StatusCode::FORBIDDEN, e),
-        Err(e) => err(StatusCode::BAD_REQUEST, e),
-    }
-}
-
-pub async fn write_file(
-    State(state): State<AppState>,
-    Path(path): Path<String>,
-    body: Bytes,
-) -> Response {
-    let n = body.len();
-    match files::write_file(&state.workspace, &path, &body) {
-        Ok(()) => Json(json!({"written": path, "size": n})).into_response(),
-        Err(e) if e.contains("symlink") => err(StatusCode::FORBIDDEN, e),
-        Err(e) => err(StatusCode::BAD_REQUEST, e),
-    }
-}
-
-pub async fn delete_file(
-    State(state): State<AppState>,
-    Path(path): Path<String>,
-) -> Response {
-    match files::delete_file(&state.workspace, &path) {
-        Ok(true) => Json(json!({"deleted": path})).into_response(),
-        Ok(false) => err(StatusCode::NOT_FOUND, "file not found"),
-        Err(e) if e.contains("symlink") => err(StatusCode::FORBIDDEN, e),
-        Err(e) => err(StatusCode::BAD_REQUEST, e),
-    }
-}
+type State = web::types::State<AppState>;
 
 // ─── helpers ─────────────────────────────────────────────────────
 
-fn err(status: StatusCode, msg: impl Into<String>) -> Response {
-    (status, Json(json!({"error": msg.into()}))).into_response()
+fn unauthorized() -> HttpResponse {
+    HttpResponse::Unauthorized().json(&json!({"error": "unauthorized"}))
+}
+
+fn err(status: u16, msg: impl Into<String>) -> HttpResponse {
+    let s = msg.into();
+    let mut resp = match status {
+        400 => HttpResponse::BadRequest(),
+        403 => HttpResponse::Forbidden(),
+        404 => HttpResponse::NotFound(),
+        500 => HttpResponse::InternalServerError(),
+        _ => HttpResponse::InternalServerError(),
+    };
+    resp.json(&json!({"error": s}))
+}
+
+/// Inline auth check. Reads `Authorization` header and constant-time
+/// compares against the loaded token. False on any miss; the handler
+/// uses that to short-circuit with 401.
+fn check_token(req: &HttpRequest, state: &AppState) -> bool {
+    let h = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok());
+    state.token.verify_header(h)
 }
 
 fn content_type(path: &str) -> &'static str {
@@ -155,5 +72,102 @@ fn content_type(path: &str) -> &'static str {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         _ => "application/octet-stream",
+    }
+}
+
+// ─── /healthz ────────────────────────────────────────────────────
+
+pub async fn healthz() -> HttpResponse {
+    HttpResponse::Ok().json(&json!({"status": "ok"}))
+}
+
+// ─── /exec ───────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ExecBody {
+    pub cmd: String,
+    pub cwd: Option<String>,
+    pub timeout_ms: Option<u64>,
+}
+
+pub async fn exec_cmd(
+    req: HttpRequest,
+    state: State,
+    body: web::types::Json<ExecBody>,
+) -> HttpResponse {
+    if !check_token(&req, &state) { return unauthorized(); }
+
+    let cwd = body
+        .cwd
+        .as_deref()
+        .unwrap_or_else(|| state.workspace.to_str().unwrap_or("/workspace"));
+    let timeout = body.timeout_ms.unwrap_or(exec::DEFAULT_TIMEOUT_MS);
+    match exec::run(&body.cmd, cwd, timeout).await {
+        Ok(out) => HttpResponse::Ok().json(&out),
+        Err(e) => err(500, e),
+    }
+}
+
+// ─── /tree ───────────────────────────────────────────────────────
+
+pub async fn file_tree(req: HttpRequest, state: State) -> HttpResponse {
+    if !check_token(&req, &state) { return unauthorized(); }
+
+    match files::file_tree(&state.workspace) {
+        Ok(entries) => HttpResponse::Ok().json(&json!({"entries": entries})),
+        Err(e) => err(500, e),
+    }
+}
+
+// ─── /files/{path}* ──────────────────────────────────────────────
+
+pub async fn read_file(
+    req: HttpRequest,
+    state: State,
+    path: web::types::Path<String>,
+) -> HttpResponse {
+    if !check_token(&req, &state) { return unauthorized(); }
+
+    let p = path.into_inner();
+    match files::read_file(&state.workspace, &p) {
+        Ok(bytes) => HttpResponse::Ok()
+            .content_type(content_type(&p))
+            .body(bytes),
+        Err(e) if e.contains("symlink") => err(403, e),
+        Err(e) if e.contains("No such file") || e.contains("not found") => err(404, e),
+        Err(e) => err(400, e),
+    }
+}
+
+pub async fn write_file(
+    req: HttpRequest,
+    state: State,
+    path: web::types::Path<String>,
+    body: Bytes,
+) -> HttpResponse {
+    if !check_token(&req, &state) { return unauthorized(); }
+
+    let p = path.into_inner();
+    let n = body.len();
+    match files::write_file(&state.workspace, &p, &body) {
+        Ok(()) => HttpResponse::Ok().json(&json!({"written": p, "size": n})),
+        Err(e) if e.contains("symlink") => err(403, e),
+        Err(e) => err(400, e),
+    }
+}
+
+pub async fn delete_file(
+    req: HttpRequest,
+    state: State,
+    path: web::types::Path<String>,
+) -> HttpResponse {
+    if !check_token(&req, &state) { return unauthorized(); }
+
+    let p = path.into_inner();
+    match files::delete_file(&state.workspace, &p) {
+        Ok(true) => HttpResponse::Ok().json(&json!({"deleted": p})),
+        Ok(false) => err(404, "file not found"),
+        Err(e) if e.contains("symlink") => err(403, e),
+        Err(e) => err(400, e),
     }
 }
