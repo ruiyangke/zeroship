@@ -22,6 +22,7 @@ export interface ChatTurnInput {
 export async function postChat(input: ChatTurnInput): Promise<Response> {
   return streamResponse(generate(input));
 }
+postChat.config = { id: "chat.postChat" };
 
 async function* generate(input: ChatTurnInput): AsyncIterable<AIStreamChunk> {
   // 1. Initial preamble text streaming

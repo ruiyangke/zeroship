@@ -21,6 +21,7 @@ export function encodeChunk(chunk: AIStreamChunk): string {
   // accepts when the response Content-Type is "text/plain" with proper headers.
   return JSON.stringify(chunk) + "\n";
 }
+encodeChunk.config = { id: "stream.encodeChunk" };
 
 /** Build a Response that streams from an async iterable of chunks. */
 export function streamResponse(
@@ -50,8 +51,10 @@ export function streamResponse(
     },
   });
 }
+streamResponse.config = { id: "stream.streamResponse" };
 
 /** Convenience: a delay that yields control. Used by the mock to feel realistic. */
 export function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+delay.config = { id: "stream.delay" };
