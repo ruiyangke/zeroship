@@ -27,6 +27,11 @@ bytes = { workspace = true }
 # Crypto / safety
 subtle = "2"
 zeroize = { version = "1", features = ["derive"] }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+lru = { workspace = true }
 
 # Observability — structured JSON logs + audit events.
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }

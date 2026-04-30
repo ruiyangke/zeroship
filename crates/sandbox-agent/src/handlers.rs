@@ -30,15 +30,15 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::audit;
-use crate::auth::Token;
 use crate::exec;
 use crate::files::Workspace;
+use crate::sig::{AuthFail, Verifier};
 use crate::version;
 
 /// State shared by every handler. Cheap to clone (`Arc` inside).
 #[derive(Clone, Debug)]
 pub struct AppState {
-    pub token: Arc<Token>,
+    pub verifier: Arc<Verifier>,
     pub workspace: Arc<Workspace>,
     /// `true` when the agent is shutting down — `/readyz` returns 503
     /// so orchestrators stop sending traffic. Set by SIGTERM handler
@@ -77,25 +77,54 @@ fn err(status: u16, msg: impl Into<String>) -> HttpResponse {
     resp.json(&json!({"error": s}))
 }
 
-/// Inline auth check. Reads `Authorization` header and constant-time
-/// compares against the loaded token. On miss, emits an audit event
-/// (so failed-auth attempts spike visibly in the security pipeline)
-/// and returns false; the handler uses that to short-circuit with 401.
-fn check_token(req: &HttpRequest, state: &AppState) -> bool {
-    let h = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok());
-    let ok = state.token.verify_header(h);
-    if !ok {
-        let path = req.path();
-        let method = req.method().as_str();
-        audit::record(
-            audit::events::AUTH_FAIL,
-            &format!("method={method} path={path}"),
-        );
+/// HMAC verification for an auth-gated request. Reads the three
+/// `X-Sbx-*` headers, recomputes the canonical-string HMAC over the
+/// request method, path, timestamp, nonce, and **body**, and rejects
+/// anything that doesn't match in constant time.
+///
+/// On any failure path, an audit event tagged with the specific
+/// failure reason is emitted (so alerting can distinguish a
+/// clock-skew operator mistake from an actual replay attack).
+/// Returns true iff every check passes.
+fn verify_signed(req: &HttpRequest, body: &[u8], state: &AppState) -> bool {
+    let h = req.headers();
+    let ts_hdr = h
+        .get("x-sbx-timestamp")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let nonce_hdr = h
+        .get("x-sbx-nonce")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let sig_hdr = h
+        .get("x-sbx-signature")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let method = req.method().as_str();
+    let path = req.path();
+
+    match state
+        .verifier
+        .verify(method, path, body, ts_hdr, nonce_hdr, sig_hdr)
+    {
+        Ok(()) => true,
+        Err(reason) => {
+            let event = match reason {
+                AuthFail::SkewTooLarge => audit::events::AUTH_SKEW,
+                AuthFail::ReplayedNonce => audit::events::AUTH_REPLAY,
+                _ => audit::events::AUTH_FAIL,
+            };
+            audit::record(
+                event,
+                &format!(
+                    "method={method} path={path} reason={}",
+                    reason.as_str()
+                ),
+            );
+            false
+        }
     }
-    ok
 }
 
 fn content_type(path: &str) -> &'static str {
@@ -167,7 +196,7 @@ pub async fn version_info(state: State) -> HttpResponse {
 // preStop-style lifecycle management.
 
 pub async fn shutdown(req: HttpRequest, state: State) -> HttpResponse {
-    if !check_token(&req, &state) { return unauthorized(); }
+    if !verify_signed(&req, &[], &state) { return unauthorized(); }
     state.mark_draining();
     tracing::info!("shutdown requested via /shutdown — readyz will now report 503");
     HttpResponse::Ok().json(&json!({"draining": true}))
@@ -185,16 +214,24 @@ pub struct ExecBody {
 pub async fn exec_cmd(
     req: HttpRequest,
     state: State,
-    body: web::types::Json<ExecBody>,
+    body: Bytes,
 ) -> HttpResponse {
-    if !check_token(&req, &state) { return unauthorized(); }
+    // Verify the signature BEFORE deserializing — body bytes are
+    // covered by the canonical hash, so any tampered payload fails
+    // the HMAC check before serde_json sees it.
+    if !verify_signed(&req, &body, &state) { return unauthorized(); }
 
-    let cwd = body
+    let parsed: ExecBody = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => return err(400, format!("invalid JSON body: {e}")),
+    };
+
+    let cwd = parsed
         .cwd
         .as_deref()
         .unwrap_or_else(|| state.workspace.path().to_str().unwrap_or("/workspace"));
-    let timeout = body.timeout_ms.unwrap_or(exec::DEFAULT_TIMEOUT_MS);
-    match exec::run(&body.cmd, cwd, timeout).await {
+    let timeout = parsed.timeout_ms.unwrap_or(exec::DEFAULT_TIMEOUT_MS);
+    match exec::run(&parsed.cmd, cwd, timeout).await {
         Ok(out) => {
             if out.timed_out {
                 audit::record(audit::events::EXEC_TIMEOUT, &format!("timeout_ms={timeout}"));
@@ -217,7 +254,7 @@ pub async fn exec_cmd(
 // ─── /tree ───────────────────────────────────────────────────────
 
 pub async fn file_tree(req: HttpRequest, state: State) -> HttpResponse {
-    if !check_token(&req, &state) { return unauthorized(); }
+    if !verify_signed(&req, &[], &state) { return unauthorized(); }
 
     match state.workspace.file_tree() {
         Ok(tree) => HttpResponse::Ok().json(&tree),
@@ -263,7 +300,7 @@ pub async fn read_file(
     state: State,
     path: web::types::Path<String>,
 ) -> HttpResponse {
-    if !check_token(&req, &state) { return unauthorized(); }
+    if !verify_signed(&req, &[], &state) { return unauthorized(); }
 
     let p = path.into_inner();
     match state.workspace.read_file(&p) {
@@ -280,7 +317,7 @@ pub async fn write_file(
     path: web::types::Path<String>,
     body: Bytes,
 ) -> HttpResponse {
-    if !check_token(&req, &state) { return unauthorized(); }
+    if !verify_signed(&req, &body, &state) { return unauthorized(); }
 
     let p = path.into_inner();
     let n = body.len();
@@ -295,7 +332,7 @@ pub async fn delete_file(
     state: State,
     path: web::types::Path<String>,
 ) -> HttpResponse {
-    if !check_token(&req, &state) { return unauthorized(); }
+    if !verify_signed(&req, &[], &state) { return unauthorized(); }
 
     let p = path.into_inner();
     match state.workspace.delete_file(&p) {
@@ -339,15 +376,38 @@ mod tests {
         let token_path = dir.join("token");
         let mut f = std::fs::File::create(&token_path).unwrap();
         f.write_all(TEST_TOKEN.as_bytes()).unwrap();
-        let token = crate::auth::Token::from_path(&token_path).unwrap();
+        let key = crate::auth::load_key_from_path(&token_path).unwrap();
+        let verifier = crate::sig::Verifier::new(key);
         let workspace = crate::files::Workspace::open(&dir.join("ws")).unwrap();
         let state = AppState {
-            token: Arc::new(token),
+            verifier: Arc::new(verifier),
             workspace: Arc::new(workspace),
             draining: Arc::new(AtomicBool::new(false)),
             started_at_unix: 1234,
         };
         (state, dir)
+    }
+
+    /// Sign a request with the test key. Returns the three header
+    /// values `(timestamp, nonce, signature)` to attach.
+    fn sign(method: &str, path: &str, body: &[u8]) -> (String, String, String) {
+        use std::sync::atomic::AtomicU64;
+        static NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = NONCE_COUNTER.fetch_add(1, AtomOrd::SeqCst);
+        let nonce = format!("test-nonce-{}-{}", std::process::id(), n);
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let sig = crate::sig::sign_for_test(
+            TEST_TOKEN.as_bytes(),
+            method,
+            path,
+            body,
+            ts,
+            &nonce,
+        );
+        (ts.to_string(), nonce, sig)
     }
 
     /// Build the test app inline. Macro keeps each test a one-liner
@@ -383,8 +443,31 @@ mod tests {
         serde_json::from_slice(&bytes).expect("response body is valid JSON")
     }
 
-    fn auth_value() -> String {
-        format!("Bearer {TEST_TOKEN}")
+    /// Build a TestRequest with HMAC-signed `X-Sbx-*` headers for an
+    /// auth-gated endpoint that takes no body.
+    fn signed(method: &str, path: &str) -> test::TestRequest {
+        signed_with_body(method, path, "")
+    }
+
+    /// Build a TestRequest with HMAC-signed `X-Sbx-*` headers and an
+    /// attached payload. The body bytes are baked into the signature
+    /// canonical string, so altering the payload after this call
+    /// will break verification (which is the whole point).
+    fn signed_with_body(method: &str, path: &str, body: &str) -> test::TestRequest {
+        let (ts, nonce, sig) = sign(method, path, body.as_bytes());
+        let r = match method {
+            "GET" => test::TestRequest::get(),
+            "POST" => test::TestRequest::post(),
+            "PUT" => test::TestRequest::put(),
+            "DELETE" => test::TestRequest::delete(),
+            other => panic!("unsupported method: {other}"),
+        };
+        let r = r
+            .uri(path)
+            .header("x-sbx-timestamp", ts)
+            .header("x-sbx-nonce", nonce)
+            .header("x-sbx-signature", sig);
+        if body.is_empty() { r } else { r.set_payload(body.to_string()) }
     }
 
     // ─── Probes / version (unauthenticated) ────────────────────
@@ -452,46 +535,118 @@ mod tests {
         let body = body_json(resp).await;
         assert!(body["agent_version"].is_string());
         assert!(body["git_commit"].is_string());
-        assert_eq!(body["protocol_version"], 1);
-        assert!(body["capabilities"].is_array());
+        // Bumped to 2 with the HMAC-v1 auth scheme.
+        assert_eq!(body["protocol_version"], 2);
+        let caps = body["capabilities"].as_array().unwrap();
+        let cap_strs: Vec<&str> = caps.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(cap_strs.contains(&"auth.hmac-v1"));
+        assert!(!cap_strs.contains(&"auth.bearer-file"));
         assert_eq!(body["started_at_unix"], 1234);
     }
 
-    // ─── Auth: 401 on missing/wrong, 200 on right ──────────────
+    // ─── Auth: 401 on missing / replayed / tampered ───────────
 
     #[ntex::test]
-    async fn exec_without_auth_returns_401() {
+    async fn auth_gated_endpoint_without_signature_returns_401() {
         let (state, _d) = make_state("noauth");
         let app = make_app!(state);
         let req = test::TestRequest::post()
             .uri("/exec")
-            .set_json(&serde_json::json!({"cmd": "echo hi"}))
+            .set_payload(r#"{"cmd": "echo hi"}"#)
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[ntex::test]
-    async fn exec_with_wrong_auth_returns_401() {
-        let (state, _d) = make_state("wrongauth");
+    async fn auth_gated_endpoint_with_bad_signature_returns_401() {
+        let (state, _d) = make_state("bad_sig");
         let app = make_app!(state);
+        let body = r#"{"cmd": "echo hi"}"#;
+        // Sign for the WRONG path — server recomputes for the actual
+        // path, mismatch, 401.
+        let (ts, nonce, sig) = sign("POST", "/somewhere-else", body.as_bytes());
         let req = test::TestRequest::post()
             .uri("/exec")
-            .header("authorization", "Bearer NOT_THE_RIGHT_TOKEN_at_all_33chars")
-            .set_json(&serde_json::json!({"cmd": "echo hi"}))
+            .header("x-sbx-timestamp", ts)
+            .header("x-sbx-nonce", nonce)
+            .header("x-sbx-signature", sig)
+            .set_payload(body)
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[ntex::test]
-    async fn exec_with_no_bearer_prefix_returns_401() {
-        let (state, _d) = make_state("noprefix");
+    async fn replayed_request_rejected_second_time() {
+        // First call: sign + send → OK. Second call: same nonce →
+        // 401 ReplayedNonce. The Verifier's LRU is per-AppState, so
+        // we share state across two requests.
+        let (state, _d) = make_state("replay");
         let app = make_app!(state);
+        let body = r#"{"cmd": "echo hi"}"#;
+        let (ts, nonce, sig) = sign("POST", "/exec", body.as_bytes());
+        let mk = || {
+            test::TestRequest::post()
+                .uri("/exec")
+                .header("x-sbx-timestamp", ts.clone())
+                .header("x-sbx-nonce", nonce.clone())
+                .header("x-sbx-signature", sig.clone())
+                .set_payload(body.to_string())
+                .to_request()
+        };
+        let r1 = test::call_service(&app, mk()).await;
+        assert_eq!(r1.status(), StatusCode::OK);
+        let r2 = test::call_service(&app, mk()).await;
+        assert_eq!(r2.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[ntex::test]
+    async fn body_tamper_after_signing_rejected() {
+        // Sign for body A, send body B → HMAC mismatch → 401.
+        let (state, _d) = make_state("tamper");
+        let app = make_app!(state);
+        let body_signed = r#"{"cmd": "echo expected"}"#;
+        let body_sent = r#"{"cmd": "rm -rf /"}"#;
+        let (ts, nonce, sig) = sign("POST", "/exec", body_signed.as_bytes());
         let req = test::TestRequest::post()
             .uri("/exec")
-            .header("authorization", TEST_TOKEN) // missing "Bearer "
-            .set_json(&serde_json::json!({"cmd": "echo hi"}))
+            .header("x-sbx-timestamp", ts)
+            .header("x-sbx-nonce", nonce)
+            .header("x-sbx-signature", sig)
+            .set_payload(body_sent)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[ntex::test]
+    async fn skewed_timestamp_rejected() {
+        let (state, _d) = make_state("skew");
+        let app = make_app!(state);
+        // Sign with a timestamp 60 s in the past → outside SKEW_S=5.
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts_old = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 60;
+        let nonce = "skew-nonce";
+        let body = r#"{"cmd": "echo hi"}"#;
+        let sig = crate::sig::sign_for_test(
+            TEST_TOKEN.as_bytes(),
+            "POST",
+            "/exec",
+            body.as_bytes(),
+            ts_old,
+            nonce,
+        );
+        let req = test::TestRequest::post()
+            .uri("/exec")
+            .header("x-sbx-timestamp", ts_old.to_string())
+            .header("x-sbx-nonce", nonce)
+            .header("x-sbx-signature", sig)
+            .set_payload(body)
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -502,13 +657,9 @@ mod tests {
     #[ntex::test]
     async fn exec_runs_command_and_returns_output() {
         let (state, _d) = make_state("exec_ok");
-        let v = auth_value();
         let app = make_app!(state);
-        let req = test::TestRequest::post()
-            .uri("/exec")
-            .header("authorization", v.clone())
-            .set_json(&serde_json::json!({"cmd": "echo agent_test"}))
-            .to_request();
+        let body = r#"{"cmd": "echo agent_test"}"#;
+        let req = signed_with_body("POST", "/exec", body).to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
@@ -520,16 +671,22 @@ mod tests {
     #[ntex::test]
     async fn exec_propagates_nonzero_exit() {
         let (state, _d) = make_state("exec_exit");
-        let v = auth_value();
         let app = make_app!(state);
-        let req = test::TestRequest::post()
-            .uri("/exec")
-            .header("authorization", v.clone())
-            .set_json(&serde_json::json!({"cmd": "exit 42"}))
-            .to_request();
+        let body = r#"{"cmd": "exit 42"}"#;
+        let req = signed_with_body("POST", "/exec", body).to_request();
         let resp = test::call_service(&app, req).await;
         let body = body_json(resp).await;
         assert_eq!(body["status"], 42);
+    }
+
+    #[ntex::test]
+    async fn exec_invalid_json_returns_400() {
+        let (state, _d) = make_state("exec_badjson");
+        let app = make_app!(state);
+        let body = r#"not json at all"#;
+        let req = signed_with_body("POST", "/exec", body).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     // ─── /files write/read/tree/delete ────────────────────────
@@ -537,21 +694,13 @@ mod tests {
     #[ntex::test]
     async fn write_then_read_roundtrip() {
         let (state, _d) = make_state("rw");
-        let v = auth_value();
         let app = make_app!(state);
 
-        let req = test::TestRequest::put()
-            .uri("/files/note.txt")
-            .header("authorization", v.clone())
-            .set_payload("hello world")
-            .to_request();
+        let req = signed_with_body("PUT", "/files/note.txt", "hello world").to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let req = test::TestRequest::get()
-            .uri("/files/note.txt")
-            .header("authorization", v.clone())
-            .to_request();
+        let req = signed("GET", "/files/note.txt").to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = test::read_body(resp).await;
@@ -561,12 +710,8 @@ mod tests {
     #[ntex::test]
     async fn read_missing_returns_404() {
         let (state, _d) = make_state("read_404");
-        let v = auth_value();
         let app = make_app!(state);
-        let req = test::TestRequest::get()
-            .uri("/files/missing.txt")
-            .header("authorization", v.clone())
-            .to_request();
+        let req = signed("GET", "/files/missing.txt").to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
@@ -574,13 +719,8 @@ mod tests {
     #[ntex::test]
     async fn write_to_path_with_parent_dir_creates_parents() {
         let (state, dir) = make_state("nested");
-        let v = auth_value();
         let app = make_app!(state);
-        let req = test::TestRequest::put()
-            .uri("/files/src/lib/index.ts")
-            .header("authorization", v.clone())
-            .set_payload("export {}")
-            .to_request();
+        let req = signed_with_body("PUT", "/files/src/lib/index.ts", "export {}").to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(dir.join("ws/src/lib/index.ts").exists());
@@ -589,13 +729,9 @@ mod tests {
     #[ntex::test]
     async fn delete_existing_returns_200() {
         let (state, _d) = make_state("del_ok");
-        let v = auth_value();
         state.workspace.write_file("a.txt", b"x").unwrap();
         let app = make_app!(state);
-        let req = test::TestRequest::delete()
-            .uri("/files/a.txt")
-            .header("authorization", v.clone())
-            .to_request();
+        let req = signed("DELETE", "/files/a.txt").to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
@@ -603,16 +739,11 @@ mod tests {
     #[ntex::test]
     async fn delete_missing_returns_404_with_path() {
         let (state, _d) = make_state("del_404");
-        let v = auth_value();
         let app = make_app!(state);
-        let req = test::TestRequest::delete()
-            .uri("/files/no-such")
-            .header("authorization", v.clone())
-            .to_request();
+        let req = signed("DELETE", "/files/no-such").to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let body = body_json(resp).await;
-        // Per Round 4 fix: 404 includes the path.
         assert!(body["error"].as_str().unwrap().contains("no-such"));
     }
 
@@ -621,9 +752,8 @@ mod tests {
         let (state, _d) = make_state("tree");
         state.workspace.write_file("a.txt", b"a").unwrap();
         state.workspace.write_file("nested/b.txt", b"b").unwrap();
-        let v = auth_value();
         let app = make_app!(state);
-        let req = test::TestRequest::get().uri("/tree").header("authorization", v.clone()).to_request();
+        let req = signed("GET", "/tree").to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
@@ -632,7 +762,6 @@ mod tests {
         let paths: Vec<&str> = entries.iter().map(|e| e["path"].as_str().unwrap()).collect();
         assert!(paths.contains(&"a.txt"));
         assert!(paths.contains(&"nested/b.txt"));
-        // mtime_unix is included on every entry.
         for e in entries {
             assert!(e["mtime_unix"].is_number());
         }
@@ -645,19 +774,14 @@ mod tests {
         let _lock = REAPER_STATE_LOCK.lock().unwrap();
         crate::reap::test_set_healthy(true);
         let (state, _d) = make_state("shut");
-        let v = auth_value();
         assert!(!state.is_draining());
         let app = make_app!(state.clone());
 
-        let req = test::TestRequest::post()
-            .uri("/shutdown")
-            .header("authorization", v.clone())
-            .to_request();
+        let req = signed("POST", "/shutdown").to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(state.is_draining(), "shutdown must flip the drain flag");
 
-        // /readyz should now report 503.
         let req = test::TestRequest::get().uri("/readyz").to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -678,12 +802,8 @@ mod tests {
     async fn symlink_leaf_returns_403() {
         let (state, dir) = make_state("symleaf");
         std::os::unix::fs::symlink("/etc/passwd", dir.join("ws/escape")).unwrap();
-        let v = auth_value();
         let app = make_app!(state);
-        let req = test::TestRequest::get()
-            .uri("/files/escape")
-            .header("authorization", v.clone())
-            .to_request();
+        let req = signed("GET", "/files/escape").to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
@@ -691,7 +811,6 @@ mod tests {
     #[ntex::test]
     async fn deep_path_returns_400() {
         let (state, _d) = make_state("deep");
-        let v = auth_value();
         let app = make_app!(state);
         // 33 components > MAX_PATH_COMPONENTS (32)
         let mut deep = String::from("/files/");
@@ -699,11 +818,7 @@ mod tests {
             deep.push_str("a/");
         }
         deep.push_str("file.txt");
-        let req = test::TestRequest::put()
-            .uri(&deep)
-            .header("authorization", v.clone())
-            .set_payload("x")
-            .to_request();
+        let req = signed_with_body("PUT", &deep, "x").to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }

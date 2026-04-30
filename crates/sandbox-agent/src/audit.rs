@@ -39,7 +39,18 @@ use tracing::warn;
 /// Structured audit-event names. Stable identifiers — once shipped,
 /// only **add** entries; never rename or remove.
 pub mod events {
+    /// Catch-all signature failure: bad-base64, missing headers,
+    /// wrong key, tampered method/path/body. The most common
+    /// "someone is poking us" signal.
     pub const AUTH_FAIL: &str = "auth.fail";
+    /// Clock skew between controller and agent exceeded the window.
+    /// Usually an NTP / timezone misconfig, occasionally a stale
+    /// captured request being replayed long after the fact.
+    pub const AUTH_SKEW: &str = "auth.skew";
+    /// Nonce reuse — the same `(timestamp, nonce)` pair was already
+    /// seen within the LRU window. Strong replay-attack signal:
+    /// clean traffic from the controller never reuses a nonce.
+    pub const AUTH_REPLAY: &str = "auth.replay";
     pub const FS_SYMLINK_REJECT: &str = "fs.symlink_reject";
     pub const FS_ESCAPE_REJECT: &str = "fs.escape_reject";
     pub const FS_SIZE_REJECT: &str = "fs.size_reject";
@@ -83,6 +94,8 @@ mod tests {
         // Locks the wire-level identifier strings. Renaming any of
         // these is a breaking audit-pipeline change.
         assert_eq!(events::AUTH_FAIL, "auth.fail");
+        assert_eq!(events::AUTH_SKEW, "auth.skew");
+        assert_eq!(events::AUTH_REPLAY, "auth.replay");
         assert_eq!(events::FS_SYMLINK_REJECT, "fs.symlink_reject");
         assert_eq!(events::FS_ESCAPE_REJECT, "fs.escape_reject");
         assert_eq!(events::FS_SIZE_REJECT, "fs.size_reject");
@@ -94,6 +107,8 @@ mod tests {
     fn event_names_are_unique() {
         let names = [
             events::AUTH_FAIL,
+            events::AUTH_SKEW,
+            events::AUTH_REPLAY,
             events::FS_SYMLINK_REJECT,
             events::FS_ESCAPE_REJECT,
             events::FS_SIZE_REJECT,

@@ -14,6 +14,7 @@ pub mod exec;
 pub mod files;
 pub mod handlers;
 pub mod reap;
+pub mod sig;
 pub mod version;
 
 use std::path::PathBuf;
@@ -39,14 +40,15 @@ pub fn state_with_paths(
     token_path: &std::path::Path,
     workspace_path: &std::path::Path,
 ) -> Result<AppState, String> {
-    let token = auth::Token::from_path(token_path)?;
+    let key = auth::load_key_from_path(token_path)?;
+    let verifier = sig::Verifier::new(key);
     let workspace = files::Workspace::open(workspace_path)?;
     let started_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     Ok(AppState {
-        token: Arc::new(token),
+        verifier: Arc::new(verifier),
         workspace: Arc::new(workspace),
         draining: Arc::new(AtomicBool::new(false)),
         started_at_unix: started_at,

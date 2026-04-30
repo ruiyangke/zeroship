@@ -13,16 +13,21 @@
 ///   - existing endpoint changes URL, method, or required field shape
 ///   - existing endpoint changes the meaning of a status code
 ///   - existing field is removed or its type changes incompatibly
+///   - **auth scheme changes** (e.g., bearer → HMAC, HMAC → mTLS)
 ///
 /// **Do NOT bump for additive changes:**
 ///   - new endpoint added (announce via [`CAPABILITIES`])
 ///   - new optional response field added (older clients ignore it)
 ///   - new audit event kind
 ///
+/// History:
+///   - v1: bearer-token auth (`Authorization: Bearer <token>`)
+///   - v2: HMAC-signed requests (`X-Sbx-{Timestamp,Nonce,Signature}`)
+///
 /// Controllers prefer feature-detection over version comparison —
 /// see [`CAPABILITIES`] — but the protocol version is the single
 /// breaking-change tripwire so we can't drift silently.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Capability strings, stable identifiers. Controllers do feature
 /// detection by membership in this list, not by version comparison.
@@ -40,7 +45,7 @@ pub const CAPABILITIES: &[&str] = &[
     "files.tree",            // GET /tree
     "files.tree-truncated",  // /tree response includes `truncated: bool`
     "fs.no-symlink-escape",  // openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)
-    "auth.bearer-file",      // token provisioned via file mount, not env
+    "auth.hmac-v1",          // X-Sbx-{Timestamp,Nonce,Signature} HMAC-SHA256
 ];
 
 /// Agent crate version (`Cargo.toml`).
@@ -69,8 +74,9 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_at_least_one() {
-        assert!(PROTOCOL_VERSION >= 1);
+    fn protocol_version_is_2() {
+        // v1 was bearer-token; v2 is HMAC-signed requests.
+        assert_eq!(PROTOCOL_VERSION, 2);
     }
 
     #[test]
@@ -89,12 +95,15 @@ mod tests {
 
     #[test]
     fn capability_strings_are_well_formed() {
-        // Convention: `category.feature` lowercase, dots and dashes.
+        // Convention: `category.feature[-vN]` — lowercase ASCII +
+        // digits, dots and dashes. Digits are allowed for version
+        // suffixes like `auth.hmac-v1`.
         for cap in CAPABILITIES {
             assert!(!cap.is_empty(), "empty capability string");
             assert!(
-                cap.chars().all(|c| c.is_ascii_lowercase() || c == '.' || c == '-'),
-                "capability {cap:?} contains chars outside [a-z.-]",
+                cap.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-'),
+                "capability {cap:?} contains chars outside [a-z0-9.-]",
             );
             assert!(
                 !cap.starts_with('.') && !cap.ends_with('.'),
@@ -105,19 +114,19 @@ mod tests {
 
     #[test]
     fn known_capabilities_present() {
-        // Lock the v1 contract: removing any of these is a wire
-        // breakage and would force PROTOCOL_VERSION to bump.
+        // Lock the v2 contract: removing any of these is a wire
+        // breakage and would force PROTOCOL_VERSION to bump again.
         let expected = [
             "exec",
             "files.crud",
             "files.tree",
             "fs.no-symlink-escape",
-            "auth.bearer-file",
+            "auth.hmac-v1",
         ];
         for e in expected {
             assert!(
                 CAPABILITIES.contains(&e),
-                "missing baseline v1 capability: {e}"
+                "missing baseline v2 capability: {e}"
             );
         }
     }
