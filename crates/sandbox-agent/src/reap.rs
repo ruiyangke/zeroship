@@ -23,6 +23,7 @@ use std::thread;
 use nix::sys::signal::{pthread_sigmask, SigSet, SigmaskHow, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
+use tracing::warn;
 
 /// Install the reaper. Idempotent — calling more than once is safe.
 /// Returns immediately; the reaper runs on a dedicated OS thread for
@@ -33,7 +34,7 @@ pub fn install() {
     let mut set = SigSet::empty();
     set.add(Signal::SIGCHLD);
     if let Err(e) = pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&set), None) {
-        eprintln!("[agent] reaper: pthread_sigmask: {e}");
+        warn!(error = %e, "reaper: pthread_sigmask failed");
         return;
     }
 
@@ -41,7 +42,7 @@ pub fn install() {
         .name("zsbx-agent-reaper".into())
         .spawn(move || reaper_loop(set))
         .map(|_| ())
-        .unwrap_or_else(|e| eprintln!("[agent] reaper: spawn: {e}"));
+        .unwrap_or_else(|e| warn!(error = %e, "reaper: spawn failed"));
 }
 
 fn reaper_loop(set: SigSet) {
@@ -55,7 +56,7 @@ fn reaper_loop(set: SigSet) {
                 // Spurious wakeups / EINTR: just retry. Anything else
                 // is fatal-ish for the reaper, but we keep looping —
                 // if we exit this thread, zombies pile up forever.
-                eprintln!("[agent] reaper: sigwait: {e}");
+                warn!(error = %e, "reaper: sigwait error (continuing)");
                 continue;
             }
         }
@@ -72,7 +73,7 @@ fn drain() {
             Ok(_) => continue,
             Err(nix::errno::Errno::ECHILD) => return,
             Err(e) => {
-                eprintln!("[agent] reaper: waitpid: {e}");
+                warn!(error = %e, "reaper: waitpid error");
                 return;
             }
         }

@@ -11,7 +11,7 @@
 //!   PUT  /files/{path}*     — write file (raw bytes)
 //!   DELETE /files/{path}*   — delete file
 
-use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use ntex::util::Bytes;
@@ -19,14 +19,32 @@ use ntex::web::{self, HttpRequest, HttpResponse};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::audit;
 use crate::auth::Token;
-use crate::{exec, files};
+use crate::exec;
+use crate::files::Workspace;
+use crate::version;
 
 /// State shared by every handler. Cheap to clone (`Arc` inside).
 #[derive(Clone, Debug)]
 pub struct AppState {
     pub token: Arc<Token>,
-    pub workspace: PathBuf,
+    pub workspace: Arc<Workspace>,
+    /// `true` when the agent is shutting down — `/readyz` returns 503
+    /// so orchestrators stop sending traffic. Set by SIGTERM handler
+    /// or `POST /shutdown`.
+    pub draining: Arc<AtomicBool>,
+    /// Unix timestamp at agent start; reported via `/version`.
+    pub started_at_unix: u64,
+}
+
+impl AppState {
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::Relaxed)
+    }
+    pub fn mark_draining(&self) {
+        self.draining.store(true, Ordering::Relaxed);
+    }
 }
 
 type State = web::types::State<AppState>;
@@ -50,14 +68,24 @@ fn err(status: u16, msg: impl Into<String>) -> HttpResponse {
 }
 
 /// Inline auth check. Reads `Authorization` header and constant-time
-/// compares against the loaded token. False on any miss; the handler
-/// uses that to short-circuit with 401.
+/// compares against the loaded token. On miss, emits an audit event
+/// (so failed-auth attempts spike visibly in the security pipeline)
+/// and returns false; the handler uses that to short-circuit with 401.
 fn check_token(req: &HttpRequest, state: &AppState) -> bool {
     let h = req
         .headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok());
-    state.token.verify_header(h)
+    let ok = state.token.verify_header(h);
+    if !ok {
+        let path = req.path();
+        let method = req.method().as_str();
+        audit::record(
+            audit::events::AUTH_FAIL,
+            &format!("method={method} path={path}"),
+        );
+    }
+    ok
 }
 
 fn content_type(path: &str) -> &'static str {
@@ -75,10 +103,56 @@ fn content_type(path: &str) -> &'static str {
     }
 }
 
-// ─── /healthz ────────────────────────────────────────────────────
+// ─── liveness / readiness / version ──────────────────────────────
+//
+// All three are unauthenticated:
+//   - `/livez`  — "is the process alive?" Always 200 if responding.
+//                  Used as k8s liveness probe.
+//   - `/readyz` — "should I send traffic?" 200 normally, 503 while
+//                  draining. Used as k8s readiness probe.
+//   - `/version`— version + capabilities, used by controllers for
+//                  feature detection.
+//
+// `/healthz` is kept as an alias for `/livez` for back-compat.
 
-pub async fn healthz() -> HttpResponse {
+pub async fn livez() -> HttpResponse {
     HttpResponse::Ok().json(&json!({"status": "ok"}))
+}
+
+pub async fn readyz(state: State) -> HttpResponse {
+    if state.is_draining() {
+        HttpResponse::ServiceUnavailable().json(&json!({"status": "draining"}))
+    } else {
+        HttpResponse::Ok().json(&json!({"status": "ready"}))
+    }
+}
+
+pub async fn version_info(state: State) -> HttpResponse {
+    HttpResponse::Ok().json(&json!({
+        "agent_version": version::AGENT_VERSION,
+        "git_commit": version::GIT_COMMIT,
+        "protocol_version": version::PROTOCOL_VERSION,
+        "capabilities": version::CAPABILITIES,
+        "started_at_unix": state.started_at_unix,
+    }))
+}
+
+// ─── /shutdown — controller-initiated drain ──────────────────────
+//
+// POST /shutdown (auth-gated) flips the agent into draining mode.
+// Subsequent `/readyz` returns 503 so the orchestrator (k8s preStop
+// hook, controller, etc) stops sending traffic. Existing in-flight
+// requests run to completion. The agent does NOT exit — that's the
+// orchestrator's job; we just stop being ready.
+//
+// This is the "graceful drain without process exit" hook for
+// preStop-style lifecycle management.
+
+pub async fn shutdown(req: HttpRequest, state: State) -> HttpResponse {
+    if !check_token(&req, &state) { return unauthorized(); }
+    state.mark_draining();
+    tracing::info!("shutdown requested via /shutdown — readyz will now report 503");
+    HttpResponse::Ok().json(&json!({"draining": true}))
 }
 
 // ─── /exec ───────────────────────────────────────────────────────
@@ -100,10 +174,24 @@ pub async fn exec_cmd(
     let cwd = body
         .cwd
         .as_deref()
-        .unwrap_or_else(|| state.workspace.to_str().unwrap_or("/workspace"));
+        .unwrap_or_else(|| state.workspace.path().to_str().unwrap_or("/workspace"));
     let timeout = body.timeout_ms.unwrap_or(exec::DEFAULT_TIMEOUT_MS);
     match exec::run(&body.cmd, cwd, timeout).await {
-        Ok(out) => HttpResponse::Ok().json(&out),
+        Ok(out) => {
+            if out.timed_out {
+                audit::record(audit::events::EXEC_TIMEOUT, &format!("timeout_ms={timeout}"));
+            }
+            if out.stdout_truncated || out.stderr_truncated {
+                audit::record(
+                    audit::events::EXEC_TRUNCATED,
+                    &format!(
+                        "stdout_truncated={} stderr_truncated={}",
+                        out.stdout_truncated, out.stderr_truncated
+                    ),
+                );
+            }
+            HttpResponse::Ok().json(&out)
+        }
         Err(e) => err(500, e),
     }
 }
@@ -113,8 +201,8 @@ pub async fn exec_cmd(
 pub async fn file_tree(req: HttpRequest, state: State) -> HttpResponse {
     if !check_token(&req, &state) { return unauthorized(); }
 
-    match files::file_tree(&state.workspace) {
-        Ok(entries) => HttpResponse::Ok().json(&json!({"entries": entries})),
+    match state.workspace.file_tree() {
+        Ok(tree) => HttpResponse::Ok().json(&tree),
         Err(e) => err(500, e),
     }
 }
@@ -129,12 +217,15 @@ pub async fn read_file(
     if !check_token(&req, &state) { return unauthorized(); }
 
     let p = path.into_inner();
-    match files::read_file(&state.workspace, &p) {
+    match state.workspace.read_file(&p) {
         Ok(bytes) => HttpResponse::Ok()
             .content_type(content_type(&p))
             .body(bytes),
-        Err(e) if e.contains("symlink") => err(403, e),
-        Err(e) if e.contains("No such file") || e.contains("not found") => err(404, e),
+        Err(e) if e.contains("symlink") || e.contains("escapes") => {
+            audit::record(audit::events::FS_SYMLINK_REJECT, &format!("op=read path={p}"));
+            err(403, e)
+        }
+        Err(e) if e.contains("No such file") => err(404, e),
         Err(e) => err(400, e),
     }
 }
@@ -149,9 +240,16 @@ pub async fn write_file(
 
     let p = path.into_inner();
     let n = body.len();
-    match files::write_file(&state.workspace, &p, &body) {
+    match state.workspace.write_file(&p, &body) {
         Ok(()) => HttpResponse::Ok().json(&json!({"written": p, "size": n})),
-        Err(e) if e.contains("symlink") => err(403, e),
+        Err(e) if e.contains("symlink") || e.contains("escapes") => {
+            audit::record(audit::events::FS_SYMLINK_REJECT, &format!("op=write path={p}"));
+            err(403, e)
+        }
+        Err(e) if e.contains("too large") => {
+            audit::record(audit::events::FS_SIZE_REJECT, &format!("op=write path={p} size={n}"));
+            err(400, e)
+        }
         Err(e) => err(400, e),
     }
 }
@@ -164,10 +262,13 @@ pub async fn delete_file(
     if !check_token(&req, &state) { return unauthorized(); }
 
     let p = path.into_inner();
-    match files::delete_file(&state.workspace, &p) {
+    match state.workspace.delete_file(&p) {
         Ok(true) => HttpResponse::Ok().json(&json!({"deleted": p})),
         Ok(false) => err(404, "file not found"),
-        Err(e) if e.contains("symlink") => err(403, e),
+        Err(e) if e.contains("symlink") || e.contains("escapes") => {
+            audit::record(audit::events::FS_SYMLINK_REJECT, &format!("op=delete path={p}"));
+            err(403, e)
+        }
         Err(e) => err(400, e),
     }
 }

@@ -1,13 +1,41 @@
-//! Run a shell command in the VM, with a hard timeout.
+//! Run a shell command in the VM.
 //!
-//! We use `std::process::Command` (synchronous spawn) inside
-//! `compio::runtime::spawn_blocking` for the wait-for-output path,
-//! and race that future against a `compio::time::sleep`. On timeout
-//! we send `SIGKILL` to the child's process group via `killpg(2)` so
-//! sub-shells / npm scripts go down too.
+//! Design:
+//!
+//!   - Spawn `sh -c <cmd>` synchronously with stdout/stderr piped.
+//!   - Take ownership of the pipe handles BEFORE waiting (so we can
+//!     read them concurrently with the wait, instead of relying on
+//!     `wait_with_output` which is all-or-nothing).
+//!   - Two **reader threads** (via `compio::runtime::spawn_blocking`)
+//!     drain stdout/stderr into bounded `Mutex<Vec<u8>>` buffers.
+//!     Each stream is capped at [`MAX_OUTPUT_BYTES`]; on overflow the
+//!     reader keeps draining the pipe (so the writer doesn't block)
+//!     but stops appending and flips `truncated`.
+//!   - A **waiter task** awaits the child's exit.
+//!   - We race waiter vs `compio::time::sleep(timeout)`. On timeout
+//!     we `killpg(SIGKILL)` the whole process group, then await the
+//!     waiter (the dead child completes quickly).
+//!   - Whichever path we took, the readers see EOF when pipes close
+//!     (child exit closes them) and finish. We await both, then
+//!     return the captured bytes.
+//!
+//! This means **a timeout still returns whatever output was buffered
+//! before the kill** — important for debugging long-running commands
+//! that fail on the wall clock with useful logs.
+//!
+//! ## Security
+//!
+//! `env_clear()` is called before re-adding only [`PASSTHROUGH_VARS`].
+//! That strips `SANDBOX_AGENT_TOKEN`, `SANDBOX_AGENT_*`, and any other
+//! agent-internal state, so user code can't `printenv` its way to the
+//! bearer token. See the C1 regression test
+//! `does_not_leak_agent_token_to_child`.
 
+use std::io::Read;
 use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::{ChildStderr, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nix::sys::signal::{killpg, Signal};
@@ -21,23 +49,47 @@ pub struct ExecOutput {
     pub stderr: String,
     /// Whether the wall-clock timeout fired before the process exited.
     pub timed_out: bool,
+    /// Whether stdout was truncated at [`MAX_OUTPUT_BYTES`].
+    pub stdout_truncated: bool,
+    /// Whether stderr was truncated at [`MAX_OUTPUT_BYTES`].
+    pub stderr_truncated: bool,
 }
 
-/// Hard ceiling on a single command's wall time (10 min). Caller may
-/// pass a smaller value via `timeout_ms`; we clamp to this.
+/// Hard ceiling on a single command's wall time (10 min).
 pub const MAX_TIMEOUT_MS: u64 = 600_000;
 
-/// Default if caller omits `timeout_ms`. Long enough for `npm install`
-/// in most cases, short enough that mistakes don't hang forever.
+/// Default if caller omits `timeout_ms`.
 pub const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 
-/// Run `sh -c <cmd>` in the given working directory.
+/// Per-stream output cap. We keep draining the pipe past this so the
+/// writer doesn't block, but stop appending and set `*_truncated`.
+pub const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+
+const PASSTHROUGH_VARS: &[&str] = &["PATH", "HOME", "LANG", "LC_ALL", "TERM", "USER", "TZ"];
+
+fn curated_env() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for k in PASSTHROUGH_VARS {
+        if let Ok(v) = std::env::var(k) {
+            out.push(((*k).to_string(), v));
+        }
+    }
+    if !out.iter().any(|(k, _)| k == "PATH") {
+        out.push((
+            "PATH".to_string(),
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+        ));
+    }
+    out
+}
+
 pub async fn run(cmd: &str, cwd: &str, timeout_ms: u64) -> Result<ExecOutput, String> {
     let timeout_ms = timeout_ms.clamp(1, MAX_TIMEOUT_MS);
 
-    // Spawn synchronously (cheap). `process_group(0)` puts the child
-    // into its own process group so we can kill the whole tree later.
-    let child = Command::new("sh")
+    // Spawn. process_group(0) so we can kill the whole tree on timeout.
+    // env_clear() prevents `SANDBOX_AGENT_TOKEN` and other agent
+    // state from leaking into the child's environ.
+    let mut child = Command::new("sh")
         .arg("-c")
         .arg(cmd)
         .current_dir(cwd)
@@ -45,70 +97,160 @@ pub async fn run(cmd: &str, cwd: &str, timeout_ms: u64) -> Result<ExecOutput, St
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
+        .env_clear()
+        .envs(curated_env())
         .spawn()
         .map_err(|e| format!("spawn sh: {e}"))?;
 
     let pid = child.id() as i32;
     let pgid = Pid::from_raw(pid);
 
-    // Move the child into a blocking task so wait_with_output() can
-    // park a thread without blocking the compio reactor.
-    let wait = compio::runtime::spawn_blocking(move || child.wait_with_output());
+    // Take the pipe handles BEFORE we move child into the waiter task.
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
 
-    // Race the wait against the timeout.
-    let timeout = compio::time::sleep(Duration::from_millis(timeout_ms));
+    // Reader buffers (shared with the spawn_blocking tasks).
+    let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let stdout_trunc: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let stderr_trunc: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
-    futures_lite_select(wait, timeout, pgid).await
+    let stdout_task = spawn_stdout_reader(stdout, stdout_buf.clone(), stdout_trunc.clone());
+    let stderr_task = spawn_stderr_reader(stderr, stderr_buf.clone(), stderr_trunc.clone());
+
+    // Waiter and timeout.
+    let waiter = compio::runtime::spawn_blocking(move || child.wait());
+    let timeout_fut = compio::time::sleep(Duration::from_millis(timeout_ms));
+
+    let (status, timed_out) = race_wait(waiter, timeout_fut, pgid).await;
+
+    // Pipes close when the child exits; readers see EOF and finish.
+    // Joining is best-effort — if the reader panicked we still
+    // return what was buffered.
+    if let Some(t) = stdout_task {
+        let _ = t.await;
+    }
+    if let Some(t) = stderr_task {
+        let _ = t.await;
+    }
+
+    // Snapshot buffers (cheap clone of the captured bytes).
+    let stdout_bytes = std::mem::take(&mut *stdout_buf.lock().unwrap());
+    let stderr_bytes = std::mem::take(&mut *stderr_buf.lock().unwrap());
+
+    Ok(ExecOutput {
+        status,
+        stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
+        timed_out,
+        stdout_truncated: stdout_trunc.load(Ordering::Relaxed),
+        stderr_truncated: stderr_trunc.load(Ordering::Relaxed),
+    })
 }
 
-/// Outer Result is the spawn_blocking join (Err = closure panicked);
-/// inner Result is the closure's own return value (the wait_with_output
-/// io::Result). We collapse both into our `Result<ExecOutput, String>`.
-type WaitJoin = Result<std::io::Result<std::process::Output>, Box<dyn std::any::Any + Send>>;
+// ─── child wait + timeout race ────────────────────────────────────
 
-async fn futures_lite_select<W>(
-    wait: W,
+type WaitJoin = Result<std::io::Result<std::process::ExitStatus>, Box<dyn std::any::Any + Send>>;
+
+async fn race_wait<W>(
+    waiter: W,
     timeout: impl std::future::Future<Output = ()>,
     pgid: Pid,
-) -> Result<ExecOutput, String>
+) -> (i32, bool)
 where
     W: std::future::Future<Output = WaitJoin>,
 {
     use std::pin::pin;
     use std::task::Poll;
 
-    let mut wait = pin!(wait);
+    let mut waiter = pin!(waiter);
     let mut timeout = pin!(timeout);
 
-    std::future::poll_fn(move |cx| {
-        if let Poll::Ready(joined) = wait.as_mut().poll(cx) {
-            return Poll::Ready(map_output(joined));
+    enum Outcome { Wait(WaitJoin), Timeout }
+
+    let outcome = std::future::poll_fn(|cx| {
+        if let Poll::Ready(j) = waiter.as_mut().poll(cx) {
+            return Poll::Ready(Outcome::Wait(j));
         }
         if timeout.as_mut().poll(cx).is_ready() {
-            // Best-effort kill the whole process group. ESRCH means
-            // the group is already gone (race with exit); ignore.
-            let _ = killpg(pgid, Signal::SIGKILL);
-            return Poll::Ready(Ok(ExecOutput {
-                status: -1,
-                stdout: String::new(),
-                stderr: "timed out".to_string(),
-                timed_out: true,
-            }));
+            return Poll::Ready(Outcome::Timeout);
         }
         Poll::Pending
     })
-    .await
+    .await;
+
+    match outcome {
+        Outcome::Wait(j) => (status_from(j), false),
+        Outcome::Timeout => {
+            // SIGKILL the whole process group. ESRCH = already gone.
+            let _ = killpg(pgid, Signal::SIGKILL);
+            // Now wait for the (now-dead) child to be reaped. This
+            // returns quickly because the kernel just delivered exit.
+            let j = waiter.await;
+            (status_from(j), true)
+        }
+    }
 }
 
-fn map_output(joined: WaitJoin) -> Result<ExecOutput, String> {
-    let inner = joined.map_err(|_| "wait child: blocking task panicked".to_string())?;
-    let o = inner.map_err(|e| format!("wait child: {e}"))?;
-    Ok(ExecOutput {
-        status: o.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
-        timed_out: false,
+fn status_from(j: WaitJoin) -> i32 {
+    match j {
+        Ok(Ok(s)) => s.code().unwrap_or(-1),
+        Ok(Err(_)) | Err(_) => -1,
+    }
+}
+
+// ─── pipe readers ─────────────────────────────────────────────────
+
+fn spawn_stdout_reader(
+    pipe: Option<ChildStdout>,
+    buf: Arc<Mutex<Vec<u8>>>,
+    trunc: Arc<AtomicBool>,
+) -> Option<compio::runtime::Task<Result<(), Box<dyn std::any::Any + Send>>>> {
+    pipe.map(|p| {
+        compio::runtime::spawn_blocking(move || drain_into(p, &buf, &trunc))
     })
+}
+
+fn spawn_stderr_reader(
+    pipe: Option<ChildStderr>,
+    buf: Arc<Mutex<Vec<u8>>>,
+    trunc: Arc<AtomicBool>,
+) -> Option<compio::runtime::Task<Result<(), Box<dyn std::any::Any + Send>>>> {
+    pipe.map(|p| {
+        compio::runtime::spawn_blocking(move || drain_into(p, &buf, &trunc))
+    })
+}
+
+/// Drain `stream` into `buf`, capped at [`MAX_OUTPUT_BYTES`]. After
+/// the cap is hit we keep reading (so the writer doesn't block on a
+/// full pipe) but stop appending; `trunc` is flipped.
+fn drain_into<R: Read>(mut stream: R, buf: &Mutex<Vec<u8>>, trunc: &AtomicBool) {
+    let mut chunk = [0u8; 8192];
+    let mut capped = false;
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => return, // EOF
+            Ok(n) => {
+                if !capped {
+                    let mut b = buf.lock().unwrap();
+                    let space = MAX_OUTPUT_BYTES.saturating_sub(b.len());
+                    if n <= space {
+                        b.extend_from_slice(&chunk[..n]);
+                    } else {
+                        if space > 0 {
+                            b.extend_from_slice(&chunk[..space]);
+                        }
+                        capped = true;
+                        trunc.store(true, Ordering::Relaxed);
+                    }
+                }
+                // Whether or not we stored, keep reading so the
+                // writer doesn't block on a full pipe.
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -121,6 +263,7 @@ mod tests {
         assert_eq!(out.status, 0);
         assert_eq!(out.stdout.trim(), "hi");
         assert!(!out.timed_out);
+        assert!(!out.stdout_truncated);
     }
 
     #[compio::test]
@@ -146,5 +289,65 @@ mod tests {
     async fn timeout_clamps_to_max() {
         let out = run("echo ok", "/tmp", u64::MAX).await.unwrap();
         assert_eq!(out.status, 0);
+    }
+
+    #[compio::test]
+    async fn does_not_leak_agent_token_to_child() {
+        std::env::set_var("SANDBOX_AGENT_TOKEN", "SENTINEL_TOKEN_VALUE_zzzzzzzz");
+        std::env::set_var("SANDBOX_AGENT_TOKEN_FILE", "/some/path");
+        let out = run(
+            "printenv | grep -E '^SANDBOX_AGENT' || echo none",
+            "/tmp",
+            5_000,
+        )
+        .await
+        .unwrap();
+        std::env::remove_var("SANDBOX_AGENT_TOKEN");
+        std::env::remove_var("SANDBOX_AGENT_TOKEN_FILE");
+        assert_eq!(out.stdout.trim(), "none", "no SANDBOX_AGENT_* may leak: {}", out.stdout);
+    }
+
+    #[compio::test]
+    async fn passes_through_path() {
+        let out = run("printenv PATH", "/tmp", 5_000).await.unwrap();
+        assert!(!out.stdout.trim().is_empty());
+    }
+
+    /// **C4 regression: timeout returns whatever stdout was already
+    /// buffered before the kill.** Without the new architecture the
+    /// timeout path returned an empty stdout, losing all the progress
+    /// logs the caller needed to diagnose why a long-running command
+    /// hit the wall clock.
+    #[compio::test]
+    async fn timeout_preserves_partial_output() {
+        // Print "early" then sleep past the timeout. The "early"
+        // bytes must survive the SIGKILL and reach the response.
+        let out = run("echo early; sleep 5", "/tmp", 500).await.unwrap();
+        assert!(out.timed_out);
+        assert_eq!(out.stdout.trim(), "early", "partial output must survive");
+    }
+
+    /// **H1 regression: huge output is capped, marked truncated,
+    /// reader keeps draining.** Without draining the pipe the writer
+    /// blocks at the kernel buffer (~64 KiB) and never reaches the
+    /// cap, so this test would also catch a missing drain.
+    #[compio::test]
+    async fn huge_output_truncated() {
+        // ~24 MiB of output via dd if /dev/zero (24 MB > 16 MB cap).
+        let out = run(
+            "head -c 25000000 /dev/zero | base64",
+            "/tmp",
+            30_000,
+        )
+        .await
+        .unwrap();
+        assert!(out.stdout_truncated, "stdout should be marked truncated");
+        assert!(
+            out.stdout.len() <= MAX_OUTPUT_BYTES,
+            "stdout {} exceeds cap {MAX_OUTPUT_BYTES}",
+            out.stdout.len()
+        );
+        // Process should have completed normally (not timed out).
+        assert!(!out.timed_out, "should NOT time out — pipe must keep draining");
     }
 }
