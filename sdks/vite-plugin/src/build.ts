@@ -25,6 +25,37 @@ function getCompilerId(): string {
   }
 }
 
+/**
+ * Probe a server-entry source string for `export default`.
+ *
+ * Source-string regex (not AST) — fast, no parser dependency, and the
+ * shape we care about is unambiguous in practice:
+ *   - `export default <expr>` (object, function, identifier, …)
+ *   - `export default function …`
+ *   - `export default class …`
+ *
+ * NOT detected (returns false → "user has no default"):
+ *   - `export { foo as default }`  — rare, ambiguous
+ *   - the alias / re-export form  — also rare in SSR entries
+ *
+ * Per the platform contract, `default.fetch` must come from the entry
+ * file directly, so we do not chase imports.
+ *
+ * Default behavior on ambiguity is to return `true` (assume user has
+ * default), since the conservative choice is to emit Worker(SSR) — an
+ * unwanted SSR catch-all 404s, while an unwanted Static catch-all
+ * serves a stale shell on intended SSR routes.
+ */
+export function userSourceHasDefaultExport(source: string): boolean {
+  // Strip /* ... */ block comments and // line comments before probing
+  // so a commented-out `export default` doesn't trip the match.
+  const stripped = source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/.*$/gm, "$1");
+  // Multi-line: matches at the start of any line (after optional ws).
+  return /^\s*export\s+default\b/m.test(stripped);
+}
+
 /** Find server entry point in project */
 export function findServerEntry(root: string, explicit?: string): string | null {
   if (explicit && existsSync(resolve(root, explicit))) return resolve(root, explicit);
@@ -58,6 +89,11 @@ export function buildPlugin(state: TransformState, options: { serverEntry?: stri
   // build inside its own closeBundle).
   let serverBuilt = false;
   let zsappEmitted = false;
+  // Whether the user's SSR entry source contains `export default`.
+  // Probed before Rollup runs so it isn't confused by the bootstrap's
+  // own appended default. Conservative default = true (emit Worker(SSR)
+  // catch-all when in doubt; better to 404 than serve stale shell).
+  let userHasDefaultFetch = true;
 
   return {
     name: "zeroship:build",
@@ -83,6 +119,18 @@ export function buildPlugin(state: TransformState, options: { serverEntry?: stri
         return;
       }
       serverBuilt = true;
+
+      // Probe the entry source BEFORE Rollup runs and BEFORE the
+      // bootstrap is appended — otherwise the bootstrap's own
+      // `export default { fetch }` would always trigger the match.
+      try {
+        const entrySource = readFileSync(entry, "utf8");
+        userHasDefaultFetch = userSourceHasDefaultExport(entrySource);
+      } catch {
+        // If we can't read the entry, fall back to the conservative
+        // default (true → Worker(SSR) catch-all).
+        userHasDefaultFetch = true;
+      }
 
       console.log(`[zeroship] building server bundle from ${relative(root, entry)}`);
 
@@ -177,6 +225,7 @@ export function buildPlugin(state: TransformState, options: { serverEntry?: stri
           root,
           distDir: clientOutDir,
           compiler: getCompilerId(),
+          userHasDefaultFetch,
         });
       } catch (e) {
         console.error(`[zeroship] failed to emit .zsapp: ${(e as Error).message}`);

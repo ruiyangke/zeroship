@@ -167,6 +167,20 @@ export interface ZsappOptions {
    * every browser made in the last decade; gzip is opt-in for legacy.
    */
   precompress?: PrecompressOptions;
+  /**
+   * Whether the user's SSR entry exports its own `default.fetch`.
+   *
+   * Drives the catch-all rule choice:
+   *   - true  → `Match::Any → Worker(ssr)` (user owns routing)
+   *   - false → `Match::Any → Static{ try: ["$path", "/index.html"] }`
+   *             (RPC-only app; SPA shell handles unmatched URLs)
+   *
+   * Default: `true` — conservative; an unwanted Worker(SSR) catch-all
+   * 404s, which is preferable to a stale shell on an intended SSR
+   * route. The vite-plugin sets this from a regex probe of the SSR
+   * entry source before Rollup runs (see `build.ts`).
+   */
+  userHasDefaultFetch?: boolean;
 }
 
 export interface ZsappResult {
@@ -213,6 +227,9 @@ export async function emitZsapp(
     brotli: options.precompress?.brotli ?? true,
     gzip: options.precompress?.gzip ?? false,
   };
+  // Default `true` — the conservative choice. An unwanted Worker(SSR)
+  // catch-all 404s; an unwanted Static catch-all serves stale shell.
+  const userHasDefaultFetch = options.userHasDefaultFetch ?? true;
   const log = options.silent
     ? () => {}
     : (msg: string) => console.log(`[zeroship:zsapp] ${msg}`);
@@ -358,6 +375,7 @@ export async function emitZsapp(
     assetPrefix,
     assets,
     hasWorker: worker != null,
+    userHasDefaultFetch,
   });
 
   // 8. Assemble the manifest. Rust's serde accepts both `null` and
@@ -556,9 +574,10 @@ function buildRules(opts: {
   assetPrefix: string;
   assets: Record<string, AssetEntry>;
   hasWorker: boolean;
+  userHasDefaultFetch: boolean;
 }): Rule[] {
   const rules: Rule[] = [];
-  const { assetPrefix, assets, hasWorker } = opts;
+  const { assetPrefix, assets, hasWorker, userHasDefaultFetch } = opts;
 
   // Asset prefix → static, immutable cache (1y).
   if (Object.keys(assets).some((p) => p.startsWith(assetPrefix))) {
@@ -609,11 +628,25 @@ function buildRules(opts: {
       match: { kind: "prefix", method: "POST", path: "/_rpc/" },
       action: { kind: "worker", mode: "rpc" },
     });
-    // Catch-all: any → Worker (ssr). The worker's default.fetch decides.
-    rules.push({
-      match: { kind: "any" },
-      action: { kind: "worker", mode: "ssr" },
-    });
+    if (userHasDefaultFetch) {
+      // SSR: catch-all → Worker (ssr). The user's default.fetch decides.
+      rules.push({
+        match: { kind: "any" },
+        action: { kind: "worker", mode: "ssr" },
+      });
+    } else if (assets["/index.html"]) {
+      // RPC-only with SPA shell: catch-all serves index.html so the
+      // browser router can claim unknown URLs.
+      rules.push({
+        match: { kind: "any" },
+        action: {
+          kind: "static",
+          try: ["$path", "/index.html"],
+        },
+      });
+    }
+    // RPC-only without /index.html: no catch-all — gateway 404s on
+    // anything outside /_rpc/. Matches the SSG-only-no-index branch.
   } else {
     // SSG-only: serve index.html as SPA fallback if it exists, else 404.
     if (assets["/index.html"]) {

@@ -677,6 +677,91 @@ describe("emitZsapp", () => {
     }
   });
 
+  // ── Bug 1: SPA fallback for RPC-only apps ──────────────────────────────
+
+  test("csr_only_app_emits_static_spa_fallback", async () => {
+    // RPC-only app: server bundle has registry side-effects but no
+    // user-defined default.fetch. The bootstrap-injected default.fetch
+    // is sufficient for /_rpc/* routing, so the catch-all should NOT
+    // hit the worker — it should serve the SPA shell instead.
+    const fix = await makeFixture({
+      "dist/index.html": "<!doctype html><html><body><div id=root></div></body></html>",
+      "dist/assets/main.js": "console.log('spa');\n",
+      "dist/server/index.js":
+        "// pretend RPC bundle\n__register('foo', () => 1);\n",
+    });
+    try {
+      const result = await emitZsapp({
+        root: fix.root,
+        builtAt: "2026-04-29T00:00:00Z",
+        silent: true,
+        // New flag: user did not export default.fetch — this is RPC-only.
+        userHasDefaultFetch: false,
+      });
+      const tarBytes = zstdDecompressSync(await fs.readFile(result.outputPath));
+      const manifest = JSON.parse(parseTar(tarBytes)[0].bytes.toString("utf8"));
+
+      // Worker bundle is still present (RPC needs it).
+      assert.ok(manifest.worker, "worker present for RPC-only");
+
+      // POST /_rpc/ rule still emitted.
+      const hasRpcRule = manifest.rules.some(
+        (r: { match: { kind: string; method?: string; path?: string }; action: { kind: string; mode?: string } }) =>
+          r.match.kind === "prefix" &&
+          r.match.method === "POST" &&
+          r.match.path === "/_rpc/" &&
+          r.action.kind === "worker" &&
+          r.action.mode === "rpc"
+      );
+      assert.ok(hasRpcRule, "RPC rule still present");
+
+      // Last rule (catch-all) is Static SPA fallback, NOT Worker(SSR).
+      const last = manifest.rules[manifest.rules.length - 1];
+      assert.equal(last.match.kind, "any", "last rule is catch-all");
+      assert.equal(last.action.kind, "static", "catch-all is static");
+      assert.deepEqual(
+        last.action.try,
+        ["$path", "/index.html"],
+        "SPA fallback try chain"
+      );
+
+      // No Worker(SSR) rule anywhere.
+      const hasWorkerSsr = manifest.rules.some(
+        (r: { action: { kind: string; mode?: string } }) =>
+          r.action.kind === "worker" && r.action.mode === "ssr"
+      );
+      assert.ok(!hasWorkerSsr, "no Worker(SSR) rule for RPC-only app");
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
+  test("ssr_app_emits_worker_catchall", async () => {
+    // SSR app: user has default.fetch. Catch-all is Worker(SSR).
+    const fix = await makeFixture({
+      "dist/index.html": "<!doctype html>",
+      "dist/server/index.js":
+        "export default { fetch: async (req) => new Response('hi') };\n",
+    });
+    try {
+      const result = await emitZsapp({
+        root: fix.root,
+        builtAt: "2026-04-29T00:00:00Z",
+        silent: true,
+        userHasDefaultFetch: true,
+      });
+      const tarBytes = zstdDecompressSync(await fs.readFile(result.outputPath));
+      const manifest = JSON.parse(parseTar(tarBytes)[0].bytes.toString("utf8"));
+
+      const last = manifest.rules[manifest.rules.length - 1];
+      assert.equal(last.match.kind, "any");
+      assert.equal(last.action.kind, "worker");
+      assert.equal(last.action.mode, "ssr");
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
   test("precompress_emits_gzip_variant_when_opted_in", async () => {
     // Sanity: gzip variant works when explicitly enabled.
     const jsBody = "console.log('hello world');\n".repeat(200);

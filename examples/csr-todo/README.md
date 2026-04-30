@@ -43,11 +43,11 @@ You should see (rules excerpt):
   { "match": { "kind": "prefix", "method": "POST", "path": "/_rpc/" },
     "action": { "kind": "worker", "mode": "rpc" } },
   { "match": { "kind": "any" },
-    "action": { "kind": "worker", "mode": "ssr" } }
+    "action": { "kind": "static", "try": ["$path", "/index.html"] } }
 ]
 ```
 
-`worker` is non-null with `entry: "index.js"` and a single module — the bundled server file.
+`worker` is non-null with `entry: "index.js"` and a single module — the bundled server file. The catch-all is `Static`, not `Worker(ssr)`, because the server bundle has no user-defined `default.fetch` (only RPC handlers via `"use server"`).
 
 ## Deploy
 
@@ -58,17 +58,11 @@ zeroship deploy ./dist/app.zsapp --app=<uuid> --control=<url> --key=<master>
 ## Notes
 
 - The RPC URL is `POST /_rpc/src/server/listTodos`, not `POST /_rpc/listTodos`. The vite-plugin's transform synthesises method names as `<modulePath>/<exportName>` so two unrelated server modules can have an export with the same name without collision. Client-side calls just use the imported `listTodos()` symbol — the wire path is opaque.
-- The trailing **catch-all rule** is `worker(ssr)`, not `static`, because the build pipeline knows you have a worker. The worker's bootstrap (provided by `@zeroship/vite-plugin`'s `server-bootstrap.js`) returns 404 for non-RPC paths, so the gateway's behaviour for unknown URLs is "ask the worker, which 404s." For a truly static SPA-fallback, you'd want `Any → Static{ try: ["$path", "/index.html"] }` — see "Known limitations" below.
+- The trailing **catch-all rule** is `Static{ try: ["$path", "/index.html"] }`, not `Worker(ssr)`, because the build pipeline detects that `src/server.ts` exports no `default.fetch` (only `"use server"` RPC handlers). Unknown URLs serve the SPA shell so the browser router can claim them.
 
 ## Known limitations (gaps surfaced)
 
-### Gap 1 — `Any → Worker(ssr)` catch-all on a CSR-only app
-
-The current `@zeroship/vite-plugin` (v0.3.0) emits `Any → Worker(ssr)` whenever a server bundle exists. For pure CSR apps that's wrong: the catch-all should be `Any → Static{ try: ["$path", "/index.html"] }` so unknown URLs serve the SPA shell instead of hitting the worker. The worker's bootstrap then 404s on every non-RPC path — the SPA never loads on a real GET to `/about`.
-
-The fix is in `sdks/vite-plugin/src/zsapp.ts`'s `buildRules()` — if the worker has no `default.fetch` (i.e. it only handles RPC), the catch-all should be the static-fallback rule, with a `Any → Worker(rpc)` rule before it for `POST /_rpc/`.
-
-### Gap 2 — `public/` assets get duplicated into `dist/server/`
+### Gap — `public/` assets get duplicated into `dist/server/`
 
 When the SSR build runs (kicked off automatically by the plugin), Vite's default `publicDir` behaviour copies `public/*` into the SSR build's output directory (`dist/server/`). Those files then end up cataloged as `worker.modules` entries in the deploy manifest — see the example output above where `favicon.ico` lives in `worker.modules` next to `index.js`.
 
