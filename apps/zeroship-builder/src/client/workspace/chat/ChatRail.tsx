@@ -5,7 +5,7 @@ import { ChatComposer } from "./ChatComposer";
 import { ChatMessages } from "./ChatMessages";
 import type { SurveyResponse } from "../../types/chat";
 
-const CHAT_API_URL = "/_zs/server/server/chat.ts/postChat";
+const CHAT_API_URL = "/_rpc/postChat";
 
 // ---------------------------------------------------------------------------
 // Protocol translation: server NDJSON → AI SDK data-stream protocol
