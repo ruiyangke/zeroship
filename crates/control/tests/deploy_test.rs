@@ -70,13 +70,16 @@ fn manifest_for(
         );
     }
     Manifest {
-        version: 2,
+        version: 1,
         deploy_hash: None,
         worker: worker_hash.map(|h| WorkerCode {
             entry: "index.js".into(),
             modules: HashMap::from([("index.js".to_string(), h.to_string())]),
         }),
-        rules: Vec::new(),
+        resources: HashMap::new(),
+        schemas: HashMap::new(),
+        aliases: HashMap::new(),
+        transformer: None,
         assets: a,
         runtime_assets: HashMap::new(),
         asset_version: 0,

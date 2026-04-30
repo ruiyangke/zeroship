@@ -96,13 +96,15 @@ impl NativeRegistrar {
 ///   - the `env` named export of the `zeroship` module
 ///
 /// Structure:
-///   env = { ...<plugin namespaces>, ...<scalar secrets from env_json> }
+///   env = { ...<plugin namespaces>, ...<merged vars+secrets from env_json> }
 ///
 /// Plugin namespaces are lowercase (matching the existing `NativePlugin::namespace()`
-/// convention — "db", "kv", etc.). Scalar secrets come from the `env_json`
-/// snapshot on `RuntimeState`. If a scalar name collides with a plugin
-/// namespace, the plugin wins (platform primitives override user config) —
-/// the overlay order below enforces this.
+/// convention — "db", "kv", etc.). User scalars come from the `env_json`
+/// snapshot's split `{ vars, secrets }` halves: vars are layered first,
+/// then secrets override on key collision (secrets win because they are
+/// the authoritative value for sensitive lookups). If a scalar name
+/// collides with a plugin namespace, the plugin wins (platform primitives
+/// override user config) — the overlay order below enforces this.
 ///
 /// The returned object is shallow-frozen (via `Object.freeze`), so user code
 /// can't monkey-patch `env.db = null` at runtime. Namespace sub-objects
@@ -114,15 +116,25 @@ pub(crate) fn build_env_object(
     plugins: &[Arc<dyn NativePlugin>],
     env_json: &str,
 ) -> v8::Global<v8::Object> {
-    // Start with scalar env JSON parsed into an object. If parsing fails
-    // (malformed JSON, non-object top-level) fall back to an empty object —
-    // the callback still has to return something valid.
-    let env_obj = {
-        let s = v8::String::new(scope, env_json).unwrap();
-        v8::json::parse(scope, s)
-            .and_then(|v| v.to_object(scope))
-            .unwrap_or_else(|| v8::Object::new(scope))
-    };
+    // Start with the merged user scalars. `env_json` arrives in the
+    // `{ vars, secrets, expose }` wire shape — flatten the two maps into
+    // a single object with secrets winning on collision (the authoritative
+    // sensitive value). Malformed JSON degrades to an empty object.
+    let env_obj = v8::Object::new(scope);
+    if let Ok(serde_json::Value::Object(root)) = serde_json::from_str::<serde_json::Value>(env_json) {
+        // Vars first, then secrets — secrets win on overwrite.
+        for half in ["vars", "secrets"] {
+            if let Some(serde_json::Value::Object(map)) = root.get(half) {
+                for (k, v) in map {
+                    if let Some(s) = v.as_str() {
+                        let k_v8 = v8::String::new(scope, k).unwrap();
+                        let v_v8 = v8::String::new(scope, s).unwrap();
+                        env_obj.set(scope, k_v8.into(), v_v8.into());
+                    }
+                }
+            }
+        }
+    }
 
     // Overlay plugin namespaces. Each plugin contributes an object under
     // its declared namespace with all its registered callbacks. A second

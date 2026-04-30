@@ -95,6 +95,9 @@ pub struct WorkerCode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     /// Schema version. Reject unknown values.
+    ///
+    /// * `1` — initial published shape: `resources` map is the source
+    ///   of truth. Future breaking changes bump to `2`.
     #[serde(default = "Manifest::default_version")]
     pub version: u16,
 
@@ -108,10 +111,31 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker: Option<WorkerCode>,
 
-    /// Ordered routing rules. Walked first-match-wins on every
-    /// request.
-    #[serde(default)]
-    pub rules: Vec<Rule>,
+    /// Unified resource map. Keys are `"rpc:<wireId>"` or `"/<path>"`
+    /// or `"*"`.
+    ///
+    /// See `docs/proposals/rpc-v2.md` §7 for the full shape and merge
+    /// semantics. The gateway compiles this into per-resource
+    /// `EffectivePolicy` records at app-load time so per-request lookup
+    /// is a single `HashMap::get`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub resources: HashMap<String, ResourceEntry>,
+
+    /// JSONSchemas keyed by `"sha256:<hex>"`, referenced by
+    /// `ResourceEntry.input_schema` / `output_schema`. Populated by
+    /// the build's TS-types-to-JSONSchema pass.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub schemas: HashMap<String, serde_json::Value>,
+
+    /// Wire-id stability map: `<filePath>::<exportName>` → `"rpc:<wireId>"`.
+    /// Used by the build (carried forward across builds to keep the
+    /// wire stable when files are renamed). Gateway parses + ignores.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub aliases: HashMap<String, String>,
+
+    /// JSON transformer for the wire (e.g. `"superjson"`, `"json"`). v3+.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transformer: Option<String>,
 
     /// Build-time static asset map. Populated on deploy; immutable
     /// until the next deploy. `path → asset entry` (path is the URL
@@ -144,10 +168,13 @@ pub struct Manifest {
 impl Default for Manifest {
     fn default() -> Self {
         Self {
-            version: 2,
+            version: 1,
             deploy_hash: None,
             worker: None,
-            rules: Vec::new(),
+            resources: HashMap::new(),
+            schemas: HashMap::new(),
+            aliases: HashMap::new(),
+            transformer: None,
             assets: HashMap::new(),
             runtime_assets: HashMap::new(),
             asset_version: 0,
@@ -211,42 +238,36 @@ pub struct Cors {
 
 impl Manifest {
     /// Default schema version for `#[serde(default)]`.
-    fn default_version() -> u16 { 2 }
+    ///
+    /// v1 is the initial published shape — see `docs/proposals/rpc-v2.md`
+    /// §7. Future breaking changes bump to v2.
+    fn default_version() -> u16 { 1 }
 
     /// Synthesize the default "everything goes to the worker" manifest.
-    /// Preserves the kernel-cut behavior: POST /_rpc/* gets `WorkerMode::Rpc`
-    /// (gateway gates the API key); everything else gets `WorkerMode::Ssr`.
     /// Used for apps that haven't yet shipped a manifest of their own.
-    /// Synthesized rather than built — `metadata.built_at` is the fixed
-    /// epoch sentinel so it's recognizable.
+    /// One catch-all `*` resource entry keeps every URL path landing on
+    /// the worker as SSR; an `anon` policy with `publicly_accessible: true`
+    /// satisfies the secure-by-default check. Synthesized rather than
+    /// built — `metadata.built_at` is the fixed epoch sentinel so it's
+    /// recognizable.
     pub fn passthrough() -> Self {
+        let mut resources: HashMap<String, ResourceEntry> = HashMap::new();
+        resources.insert(
+            "*".to_string(),
+            ResourceEntry {
+                auth: Some(AuthLevel::Anon),
+                publicly_accessible: Some(true),
+                ..Default::default()
+            },
+        );
         Self {
-            version: 2,
+            version: 1,
             deploy_hash: None,
             worker: None,
-            rules: vec![
-                Rule {
-                    r#match: Match::Prefix {
-                        method: Some(HttpMethod::Post),
-                        path: "/_rpc/".into(),
-                    },
-                    action: Action::Worker {
-                        mode: WorkerMode::Rpc,
-                        cache: None,
-                        rate_limit: None,
-                    },
-                    cors: None,
-                },
-                Rule {
-                    r#match: Match::Any,
-                    action: Action::Worker {
-                        mode: WorkerMode::Ssr,
-                        cache: None,
-                        rate_limit: None,
-                    },
-                    cors: None,
-                },
-            ],
+            resources,
+            schemas: HashMap::new(),
+            aliases: HashMap::new(),
+            transformer: Some("superjson".into()),
             assets: HashMap::new(),
             runtime_assets: HashMap::new(),
             asset_version: 0,
@@ -265,21 +286,27 @@ impl Manifest {
     /// human-readable message. Cheap — call on every load.
     ///
     /// Checks:
-    /// * `version == 2` (unknown versions rejected).
+    /// * `version == 1` (unknown versions rejected with a clear error).
     /// * `worker.entry` is a key in `worker.modules`; every value in
     ///   `worker.modules` is 64-char lowercase sha256 hex.
-    /// * `Action::Static.status` ∈ [100, 599]
-    /// * `Action::Redirect.status` ∈ [300, 399]
-    /// * No rule is shadowed (made unreachable) by an earlier rule.
     /// * Every `sourcemaps` key/value is sha256-hex (lowercase, 64 chars).
+    /// * `resources` keys conform to the `rpc:` / URL / `*` shape.
+    /// * Each resource has at most one routing action.
+    /// * Override marker required when shadowing an inherited field.
+    /// * `auth: anon` requires `publicly_accessible: true`.
+    /// * Schema-hash references match `sha256:[0-9a-f]{64}` and
+    ///   exist in `manifest.schemas`.
     ///
     /// Note: `runtime_assets == {}` and `asset_version == 0` are
     /// fresh-deploy invariants, NOT type-level ones. `validate()` is
     /// also called on already-deployed manifests with mutated runtime
     /// state, so we don't reject those here.
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != 2 {
-            return Err(format!("unsupported manifest version {}", self.version));
+        if self.version != 1 {
+            return Err(format!(
+                "unsupported manifest version {}: only version 1 is accepted",
+                self.version
+            ));
         }
         if let Some(WorkerCode { entry, modules }) = &self.worker {
             if !modules.contains_key(entry) {
@@ -291,55 +318,6 @@ impl Manifest {
                 if !crate::blob::validate_hash_format(hash) {
                     return Err(format!(
                         "worker.modules[{spec}] {hash:?} is not a 64-char lowercase sha256 hex"
-                    ));
-                }
-            }
-        }
-        for (i, rule) in self.rules.iter().enumerate() {
-            match &rule.action {
-                Action::Static { status: Some(s), .. } => {
-                    if !(100..600).contains(s) {
-                        return Err(format!(
-                            "rule {i}: Static.status {s} out of range [100, 599]"
-                        ));
-                    }
-                }
-                Action::Redirect { status, .. } => {
-                    if !(300..400).contains(status) {
-                        return Err(format!(
-                            "rule {i}: Redirect.status {status} must be 3xx"
-                        ));
-                    }
-                }
-                _ => {}
-            }
-            if let Some(cors) = &rule.cors {
-                // Browser CORS spec: allow_credentials=true with a
-                // wildcard origin is forbidden — the browser would
-                // refuse to send credentials anyway.
-                if cors.allow_credentials
-                    && cors.allow_origins.iter().any(|o| o == "*")
-                {
-                    return Err(format!(
-                        "rule {i}: cors.allow_credentials=true cannot pair with allow_origins containing \"*\""
-                    ));
-                }
-                // Empty allow_origins is meaningless — every cross-origin
-                // request would fail to receive an Allow-Origin header.
-                if cors.allow_origins.is_empty() {
-                    return Err(format!(
-                        "rule {i}: cors.allow_origins must be non-empty"
-                    ));
-                }
-            }
-        }
-        for j in 1..self.rules.len() {
-            for i in 0..j {
-                if self.rules[i].shadows(&self.rules[j]) {
-                    return Err(format!(
-                        "rule {j} ({}) is unreachable behind rule {i} ({})",
-                        rule_summary(&self.rules[j]),
-                        rule_summary(&self.rules[i]),
                     ));
                 }
             }
@@ -389,8 +367,196 @@ impl Manifest {
                 }
             }
         }
+        if !self.resources.is_empty() {
+            self.validate_resources()?;
+        }
         Ok(())
     }
+
+    /// Resource-tree checks. Run only when the resource map is non-empty.
+    fn validate_resources(&self) -> Result<(), String> {
+        // 1. Per-entry well-formedness.
+        for (key, entry) in &self.resources {
+            if !is_valid_resource_key(key) {
+                return Err(format!(
+                    "resource key {key:?} is malformed: must be \"*\", \"/<path>\", or \"rpc:<id>\""
+                ));
+            }
+            // Routing-action exclusivity: at most one of redirect/rewrite/static.
+            let action_count = (entry.redirect.is_some() as u8)
+                + (entry.rewrite.is_some() as u8)
+                + (entry.r#static.is_some() as u8);
+            if action_count > 1 {
+                return Err(format!(
+                    "resource {key:?}: at most one of `redirect`, `rewrite`, `static` may be set"
+                ));
+            }
+            // Secure-by-default.
+            if entry.auth == Some(AuthLevel::Anon) && entry.publicly_accessible != Some(true) {
+                return Err(format!(
+                    "resource {key:?}: `auth: anon` requires `publicly_accessible: true`"
+                ));
+            }
+            // Redirect status must be 3xx.
+            if let Some(r) = &entry.redirect {
+                if !(300..400).contains(&r.status) {
+                    return Err(format!(
+                        "resource {key:?}: redirect.status {} must be 3xx",
+                        r.status
+                    ));
+                }
+            }
+            // Schema hash format + existence.
+            if let Some(s) = &entry.input_schema {
+                if !is_schema_ref(s) {
+                    return Err(format!(
+                        "resource {key:?}: input_schema {s:?} must match `sha256:[0-9a-f]{{64}}`"
+                    ));
+                }
+                if !self.schemas.contains_key(s) {
+                    return Err(format!(
+                        "resource {key:?}: input_schema {s:?} not present in manifest.schemas"
+                    ));
+                }
+            }
+            if let Some(s) = &entry.output_schema {
+                if !is_schema_ref(s) {
+                    return Err(format!(
+                        "resource {key:?}: output_schema {s:?} must match `sha256:[0-9a-f]{{64}}`"
+                    ));
+                }
+                if !self.schemas.contains_key(s) {
+                    return Err(format!(
+                        "resource {key:?}: output_schema {s:?} not present in manifest.schemas"
+                    ));
+                }
+            }
+        }
+        // 2. Override-marker presence — every shadowed field needs an
+        //    explicit `override: [field]` on the child. Walk the
+        //    inheritance chain (root `*` → ancestors → self) for each
+        //    resource and check that any field declared on the child
+        //    that is also declared on an ancestor is listed in the
+        //    child's override.
+        for (key, entry) in &self.resources {
+            let chain = inheritance_chain(key, &self.resources);
+            // Bail if the chain didn't terminate at the expected depth
+            // (defense in depth — keys are structural so cycles are
+            // impossible, but check anyway).
+            if chain.len() > 16 {
+                return Err(format!(
+                    "resource {key:?}: inheritance chain exceeded depth 16"
+                ));
+            }
+            // The chain is root → … → self. Iterate ancestors only.
+            for ancestor_key in chain.iter().rev().skip(1) {
+                let Some(ancestor) = self.resources.get(ancestor_key) else { continue };
+                for field in shadowed_fields(entry, ancestor) {
+                    if !entry.r#override.iter().any(|f| f == field) {
+                        return Err(format!(
+                            "resource {key:?} declares `{field}` already declared by ancestor \
+                             {ancestor_key:?}; add `override: [\"{field}\"]` to confirm"
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Resource-key syntax check. Three legal shapes:
+/// * `*` — root default policy.
+/// * `/<path>` — URL namespace (path-segment globs allowed).
+/// * `rpc:<id>` — RPC namespace; `id` is `[a-zA-Z0-9._*-]+`.
+fn is_valid_resource_key(s: &str) -> bool {
+    if s == "*" {
+        return true;
+    }
+    if let Some(rpc_id) = s.strip_prefix("rpc:") {
+        if rpc_id.is_empty() {
+            return false;
+        }
+        return rpc_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '*' | '-'));
+    }
+    s.starts_with('/')
+}
+
+fn is_schema_ref(s: &str) -> bool {
+    if let Some(hex) = s.strip_prefix("sha256:") {
+        is_sha256_hex(hex)
+    } else {
+        false
+    }
+}
+
+/// Build the inheritance chain root → … → key. Empty when `key` is
+/// `*` (root has no ancestors). Walks dot segments for `rpc:`, path
+/// segments for URL, `*` for both. Always ends at `*` if it's
+/// declared, then bottoms out at `key` itself.
+fn inheritance_chain(key: &str, resources: &HashMap<String, ResourceEntry>) -> Vec<String> {
+    let mut chain: Vec<String> = Vec::new();
+    if key == "*" {
+        return vec!["*".to_string()];
+    }
+    if resources.contains_key("*") {
+        chain.push("*".to_string());
+    }
+    if let Some(rpc_id) = key.strip_prefix("rpc:") {
+        // dot-segment ancestors: "todos.add" → "todos"
+        let segs: Vec<&str> = rpc_id.split('.').collect();
+        for end in 1..segs.len() {
+            let ancestor = format!("rpc:{}", segs[..end].join("."));
+            if resources.contains_key(&ancestor) {
+                chain.push(ancestor);
+            }
+        }
+    } else if key.starts_with('/') {
+        // Path-segment ancestors: "/api/admin/users" → "/api/admin", "/api"
+        let trimmed = key.trim_start_matches('/');
+        let segs: Vec<&str> = trimmed.split('/').collect();
+        for end in 1..segs.len() {
+            let ancestor = format!("/{}", segs[..end].join("/"));
+            if resources.contains_key(&ancestor) {
+                chain.push(ancestor);
+            }
+        }
+    }
+    chain.push(key.to_string());
+    chain
+}
+
+/// Names of fields the child declares that an ancestor also declares.
+/// Used by the override-marker check to enforce explicit shadowing.
+fn shadowed_fields<'a>(child: &'a ResourceEntry, ancestor: &'a ResourceEntry) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    if child.auth.is_some() && ancestor.auth.is_some() {
+        out.push("auth");
+    }
+    if child.rate_limit.is_some() && ancestor.rate_limit.is_some() {
+        out.push("rate_limit");
+    }
+    if child.cors.is_some() && ancestor.cors.is_some() {
+        out.push("cors");
+    }
+    if child.cache.is_some() && ancestor.cache.is_some() {
+        out.push("cache");
+    }
+    if child.csrf_origins.is_some() && ancestor.csrf_origins.is_some() {
+        out.push("csrf_origins");
+    }
+    if child.idempotent.is_some() && ancestor.idempotent.is_some() {
+        out.push("idempotent");
+    }
+    if child.max_input_bytes.is_some() && ancestor.max_input_bytes.is_some() {
+        out.push("max_input_bytes");
+    }
+    if child.publicly_accessible.is_some() && ancestor.publicly_accessible.is_some() {
+        out.push("publicly_accessible");
+    }
+    out
 }
 
 /// Permitted `Content-Encoding` tokens for `AssetEntry::variants`.
@@ -400,109 +566,126 @@ fn is_supported_variant_encoding(s: &str) -> bool {
     matches!(s, "br" | "gzip")
 }
 
+// ---------------------------------------------------------------------------
+// v3 resource tree (rpc-v2 §7).
+//
+// One entry per resource keyed off `Manifest.resources`. The shape is the
+// public wire — clients (the build, the gateway, future codegen) must agree
+// on field names, so every optional field skips serialization when absent.
+// The gateway compiles this map into per-resource `EffectivePolicy` records
+// at app-load time; the wire layout itself isn't walked on the hot path.
+// ---------------------------------------------------------------------------
+
+/// One resource entry in `Manifest.resources`. Mixes routing-action
+/// hints (redirect / rewrite / static — at most one), policy fields
+/// (auth, cors, …) and procedure metadata (kind, schemas).
+///
+/// All fields default and all optional fields skip serialization when
+/// absent — keeps v3 manifests small and lets future fields land without
+/// breaking on-the-wire compat.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ResourceEntry {
+    // ── Routing actions (at most one of redirect / rewrite / static) ─────
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect: Option<RedirectAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewrite: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#static: Option<StaticAction>,
+
+    // ── Policy fields (any combination) ──────────────────────────────────
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AuthLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cors: Option<Cors>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheCtl>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub csrf_origins: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotent: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_bytes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub middleware: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publicly_accessible: Option<bool>,
+
+    // ── Override marker — required when shadowing inherited fields ───────
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub r#override: Vec<String>,
+
+    // ── Procedure metadata (RPC only) ────────────────────────────────────
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ProcedureKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<String>,
+}
+
+/// Authentication level applied to a resource. Strictness order is
+/// `admin > user > anon`; the inheritance walk uses this to decide who
+/// wins (stricter wins; weakening requires `override`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthLevel {
+    /// No authentication required. Unsafe by default — must pair with
+    /// `publicly_accessible: true` to confirm intent.
+    Anon,
+    /// Authenticated end-user.
+    User,
+    /// Platform admin. Highest level.
+    Admin,
+}
+
+impl AuthLevel {
+    /// Strictness rank — higher number = stricter. Used by the merge
+    /// rule "stricter wins".
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::Anon => 0,
+            Self::User => 1,
+            Self::Admin => 2,
+        }
+    }
+}
+
+/// Procedure kind, declared on `rpc:` resource entries. Drives method
+/// gating (mutations refuse `GET`) and the wire shape (streams use SSE,
+/// subscriptions use WebSocket).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcedureKind {
+    Query,
+    Mutation,
+    Stream,
+    Subscription,
+}
+
+/// HTTP redirect declaration on a resource entry. Status defaults to
+/// 302 (a soft redirect) so apps that just want to forward a path
+/// don't have to think about cacheability.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RedirectAction {
+    pub to: String,
+    #[serde(default = "redirect_default_status")]
+    pub status: u16,
+}
+
+fn redirect_default_status() -> u16 { 302 }
+
+/// Static-asset declaration on a resource entry. Mirrors the
+/// `Action::Static.try` chain — first asset that resolves wins.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct StaticAction {
+    pub r#try: Vec<String>,
+}
+
 fn is_sha256_hex(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
-}
-
-// ---------------------------------------------------------------------------
-// Shadow detection helpers
-// ---------------------------------------------------------------------------
-
-const M_GET: u8 = 1 << 0;
-const M_POST: u8 = 1 << 1;
-const M_PUT: u8 = 1 << 2;
-const M_PATCH: u8 = 1 << 3;
-const M_DELETE: u8 = 1 << 4;
-const M_HEAD: u8 = 1 << 5;
-const M_OPTIONS: u8 = 1 << 6;
-const M_ALL: u8 = M_GET | M_POST | M_PUT | M_PATCH | M_DELETE | M_HEAD | M_OPTIONS;
-const M_GET_HEAD: u8 = M_GET | M_HEAD;
-
-fn method_bit(m: HttpMethod) -> u8 {
-    match m {
-        HttpMethod::Get => M_GET,
-        HttpMethod::Post => M_POST,
-        HttpMethod::Put => M_PUT,
-        HttpMethod::Patch => M_PATCH,
-        HttpMethod::Delete => M_DELETE,
-        HttpMethod::Head => M_HEAD,
-        HttpMethod::Options => M_OPTIONS,
-        HttpMethod::Any => M_ALL,
-    }
-}
-
-/// Segment-aware prefix containment — must match `Match::Prefix` test semantics.
-fn prefix_covers(prefix: &str, path: &str) -> bool {
-    if let Some(bare) = prefix.strip_suffix('/') {
-        path == bare || path.starts_with(prefix)
-    } else {
-        path == prefix || path.starts_with(&format!("{prefix}/"))
-    }
-}
-
-fn rule_summary(rule: &Rule) -> String {
-    let method = match rule.r#match {
-        Match::Exact { method, .. }
-        | Match::Prefix { method, .. }
-        | Match::Glob { method, .. } => method,
-        Match::Any => None,
-    };
-    let m_str = method.map(|m| m.as_str()).unwrap_or("*");
-    match &rule.r#match {
-        Match::Exact { path, .. } => format!("Exact {m_str} {path}"),
-        Match::Prefix { path, .. } => format!("Prefix {m_str} {path}"),
-        Match::Glob { path, .. } => format!("Glob {m_str} {path}"),
-        Match::Any => "Any".to_string(),
-    }
-}
-
-impl Rule {
-    /// Bitset of methods this rule actually fires for.
-    fn effective_methods(&self) -> u8 {
-        let base = match self.r#match {
-            Match::Exact { method, .. }
-            | Match::Prefix { method, .. }
-            | Match::Glob { method, .. } => match method {
-                None | Some(HttpMethod::Any) => M_ALL,
-                Some(m) => method_bit(m),
-            },
-            Match::Any => M_ALL,
-        };
-        // Tier 1 invariant: Static actions only fire for GET/HEAD (the
-        // dispatcher skips them for other methods).
-        if matches!(self.action, Action::Static { .. }) {
-            base & M_GET_HEAD
-        } else {
-            base
-        }
-    }
-
-    /// Does this rule's match cover every path the `other` matcher could match?
-    // TODO: extend covers_path for Glob ↔ Glob and Glob ↔ Exact/Prefix
-    fn covers_path(&self, other: &Match) -> bool {
-        match (&self.r#match, other) {
-            (Match::Any, _) => true,
-            (Match::Exact { path: a, .. }, Match::Exact { path: b, .. }) => a == b,
-            (Match::Prefix { path: p, .. }, Match::Exact { path: e, .. }) => prefix_covers(p, e),
-            (Match::Prefix { path: p, .. }, Match::Prefix { path: q, .. }) => prefix_covers(p, q),
-            _ => false,
-        }
-    }
-
-    /// True if this rule makes `other` unreachable.
-    fn shadows(&self, other: &Rule) -> bool {
-        let s = self.effective_methods();
-        let r = other.effective_methods();
-        // Subset: every method bit set in r is also set in s.
-        if (r & !s) != 0 {
-            return false;
-        }
-        // If self has zero effective methods, it can't shadow anything.
-        if s == 0 {
-            return false;
-        }
-        self.covers_path(&other.r#match)
-    }
 }
 
 /// How an incoming request is matched against a rule.

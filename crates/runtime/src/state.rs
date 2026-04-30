@@ -4,7 +4,7 @@
 //! callbacks can borrow it without crossing thread boundaries.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -191,6 +191,36 @@ impl WebSocketState {
     }
 }
 
+/// Parse the EnvSnapshot wire JSON `{ vars, secrets, expose }` into typed
+/// maps + the expose list. Defensive — missing or malformed fields
+/// degrade to empty values. Non-string entries inside `vars` / `secrets`
+/// are dropped (env values are string-to-string by contract).
+fn parse_env_snapshot(json: &str) -> (BTreeMap<String, String>, BTreeMap<String, String>, Vec<String>) {
+    let Ok(serde_json::Value::Object(root)) = serde_json::from_str::<serde_json::Value>(json) else {
+        return (BTreeMap::new(), BTreeMap::new(), Vec::new());
+    };
+
+    fn pull_map(root: &serde_json::Map<String, serde_json::Value>, key: &str) -> BTreeMap<String, String> {
+        let Some(serde_json::Value::Object(map)) = root.get(key) else {
+            return BTreeMap::new();
+        };
+        map.iter()
+            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect()
+    }
+
+    let vars = pull_map(&root, "vars");
+    let secrets = pull_map(&root, "secrets");
+    let expose = match root.get("expose") {
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    };
+    (vars, secrets, expose)
+}
+
 // ---------------------------------------------------------------------------
 // Core state
 // ---------------------------------------------------------------------------
@@ -297,13 +327,40 @@ pub struct RuntimeState {
 
     /// In-memory KV store.
     pub kv_store: HashMap<String, String>,
-    /// Process / runtime environment variables surfaced to JS.
+    /// Worker-internal environment variables — NOT user-facing.
+    ///
+    /// Carries hand-injected slots like `APP_ID` (set by
+    /// `crates/worker/src/cache.rs` so plugin-db / plugin-storage /
+    /// plugin-kv can resolve the per-tenant scope). Distinct from the
+    /// per-app `env_app_vars` / `env_app_secrets` which are the
+    /// user-controlled environment.
     pub env_vars: HashMap<String, String>,
 
-    /// Frozen env JSON snapshot — JSON.parse-able string. Passed to JS via
-    /// the `__zs_env` native op. Same value for every request; populated
-    /// at worker boot from zeroship.toml + control-plane secrets. Empty
-    /// object (`"{}"`) by default.
+    /// User-controlled `vars` half of the EnvSnapshot. Plaintext. Always
+    /// surfaced via `process.env`, the `zeroship.env` import, and
+    /// `env.get()`. `BTreeMap` for deterministic iteration order.
+    pub env_app_vars: BTreeMap<String, String>,
+
+    /// User-controlled `secrets` half of the EnvSnapshot. Decrypted on
+    /// the control plane, transmitted to the worker over an authenticated
+    /// channel. NEVER lands in `process.env` unless the secret's name is
+    /// explicitly listed in `env_expose_keys`. Visible via the
+    /// `zeroship.env` import and `env.get()`.
+    pub env_app_secrets: BTreeMap<String, String>,
+
+    /// Per-app opt-in list: secret names the creator has explicitly
+    /// allowed to surface in `process.env`. Empty by default. Lets
+    /// libraries like LangChain that defensively read
+    /// `process.env.OPENAI_API_KEY` continue to work, while keeping
+    /// the rest of the secret namespace out of `process.env`.
+    pub env_expose_keys: Vec<String>,
+
+    /// Frozen env JSON snapshot — JSON.parse-able string in the
+    /// `{ vars, secrets, expose }` wire shape. Passed across the worker
+    /// → runtime boundary as bytes; mirrored on `RuntimeState` so the
+    /// `__zs_env` callback's degraded fallback path (used only if
+    /// `ensure_initialized` hasn't run yet) can hand back at least the
+    /// merged map without rebuilding from the typed fields.
     pub env_json: String,
 
     /// Composite `env` object surfaced to user code — plugin namespaces
@@ -388,8 +445,11 @@ impl RuntimeState {
 
             kv_store: HashMap::new(),
             env_vars,
+            env_app_vars: BTreeMap::new(),
+            env_app_secrets: BTreeMap::new(),
+            env_expose_keys: Vec::new(),
 
-            env_json: "{}".into(),
+            env_json: r#"{"vars":{},"secrets":{},"expose":[]}"#.into(),
             env_obj: None,
             ctx_obj: None,
 
@@ -422,13 +482,23 @@ impl RuntimeState {
         true
     }
 
-    /// Stash the env snapshot JSON so the `__zs_env` native op can return
-    /// the same payload as the second arg of `fetch(req, env, ctx)`. Called
-    /// by `call_fetch_handler` immediately after `ensure_initialized` and
-    /// before dispatching into JS, so op reads during the current V8 turn
-    /// see the correct value.
+    /// Stash the env snapshot JSON so the `__zs_env` native op and
+    /// `setup_globals`' `process.env` builder both see the same payload
+    /// as the second arg of `fetch(req, env, ctx)`. Called by
+    /// `call_fetch_handler` immediately after `ensure_initialized` and
+    /// before dispatching into JS.
+    ///
+    /// Parses the `{ vars, secrets, expose }` wire shape into the typed
+    /// fields. Malformed JSON degrades to empty maps — the runtime is
+    /// the consumer of last resort and shouldn't panic on a bad payload
+    /// from the control plane; the producer should already have
+    /// validated.
     pub fn set_env_snapshot(&mut self, env: &crate::EnvSnapshot) {
         self.env_json = env.as_json().to_string();
+        let (vars, secrets, expose) = parse_env_snapshot(&self.env_json);
+        self.env_app_vars = vars;
+        self.env_app_secrets = secrets;
+        self.env_expose_keys = expose;
     }
 
     /// Allocate a stream-id that is not currently held by an active stream or

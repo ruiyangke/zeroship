@@ -105,10 +105,13 @@ pub async fn ingest(
     // Step 4: parse + validate the manifest.
     let mut manifest: Manifest = serde_json::from_slice(&parsed.manifest_bytes)
         .map_err(|e| IngestError::bad("invalid manifest", format!("parse: {e}")))?;
-    if manifest.version != 2 {
+    if manifest.version != 1 {
         return Err(IngestError::bad(
             "unsupported manifest version",
-            format!("version {} not supported", manifest.version),
+            format!(
+                "version {} not supported: only version 1 is accepted",
+                manifest.version
+            ),
         ));
     }
     // Fresh-deploy invariants — see manifest spec.

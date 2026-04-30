@@ -6,17 +6,16 @@ import { transformPlugin, type TransformState } from "./transform.js";
 import { nodeCompatPlugin } from "./node-compat.js";
 import { DEFAULT_RPC_ENDPOINT } from "./constants.js";
 import { emitZsapp } from "./zsapp.js";
+import {
+  rpcRegistryPlugin,
+  SERVER_ENTRY_VIRTUAL_ID,
+} from "./rpc-registry.js";
+import {
+  computeManifestExtras,
+  type DiscoveredProcedure,
+} from "./manifest.js";
 
 const HERE = resolve(fileURLToPath(import.meta.url), "..");
-const PRELUDE_PATH   = resolve(HERE, "../src/runtime-prelude.js");   // prepended — Node-globals shim
-const BOOTSTRAP_PATH = resolve(HERE, "../src/server-bootstrap.js");  // appended  — dispatchRpc + default.fetch
-
-/**
- * Marker line emitted at the top of the appended server bootstrap.
- * Tests (and humans inspecting the bundle) can grep for this to tell
- * whether the bootstrap was actually attached to a given SSR bundle.
- */
-export const BOOTSTRAP_MARKER = "// zeroship server bootstrap";
 
 /** Public specifier for the client manifest virtual module. */
 export const CLIENT_MANIFEST_VIRTUAL_ID = "virtual:zeroship/client-manifest";
@@ -49,6 +48,12 @@ export const STATIC_STUB_RESOLVED_ID = "\0" + STATIC_STUB_VIRTUAL_ID;
  *   - `target: "webworker"` — picks the right export-conditions map.
  *   - `entryFileNames: "index.js"` — deterministic name; the .zsapp
  *     emitter uses it as the worker entry.
+ *   - `build.ssr: true` + `rollupOptions.input` — when ssrEntry is a
+ *     virtual specifier (e.g. `virtual:zeroship/_server-entry`), Vite's
+ *     own SSR-string handler prepends `path.resolve(root, …)` and
+ *     mangles it. Threading the virtual id through `rollupOptions.input`
+ *     bypasses that; the plugin's `resolveId` hook sees the literal
+ *     specifier and routes it to our virtual-module loader.
  */
 export function buildSsrInlineConfig(opts: {
   root: string;
@@ -56,6 +61,10 @@ export function buildSsrInlineConfig(opts: {
   outDir: string;
   ssrPlugins: unknown[];
 }): Record<string, unknown> {
+  // If ssrEntry is a virtual id (`virtual:…`), pass it via rollupOptions.input
+  // so Vite doesn't `path.resolve()` it into nonsense. For real file paths
+  // we keep the historical `build.ssr: <path>` form.
+  const isVirtual = opts.ssrEntry.startsWith("virtual:");
   return {
     root: opts.root,
     configFile: false,
@@ -69,10 +78,14 @@ export function buildSsrInlineConfig(opts: {
       target: "webworker",
     },
     build: {
-      ssr: opts.ssrEntry,
+      // `true` (instead of a path string) tells Vite "this is an SSR
+      // build" without specifying the entry — entry comes from
+      // rollupOptions.input below.
+      ssr: isVirtual ? true : opts.ssrEntry,
       outDir: opts.outDir,
       emptyOutDir: false,
       rolldownOptions: {
+        ...(isVirtual ? { input: { index: opts.ssrEntry } } : {}),
         output: { format: "esm", entryFileNames: "index.js" },
       },
       minify: true,
@@ -142,10 +155,33 @@ function getCompilerId(): string {
 }
 
 /**
+ * Strip the leading `"use server"` directive from the rolled-up SSR
+ * bundle. The Node-globals shim (`Buffer`, `setImmediate`, etc.) is
+ * installed on every isolate by the Rust runtime before any user
+ * module evaluates (see `crates/runtime/src/embed/node-globals.js`),
+ * so the vite-plugin no longer needs to prepend a prelude.
+ *
+ * The directive itself is just a string expression at the top of the
+ * module; if we leave it in place, it is a no-op but pollutes the
+ * output. The synthetic server entry (loaded via
+ * `virtual:zeroship/_server-entry`) handles `default.fetch` and
+ * `dispatchRpc`.
+ */
+export function stripUseServer(bundle: string): string {
+  return bundle.replace(/^"use server"\s*;\s*/, "");
+}
+
+/**
  * Probe a server-entry source string for `export default`.
  *
- * Source-string regex (not AST) — fast, no parser dependency, and the
- * shape we care about is unambiguous in practice:
+ * Internal helper — we call this on the user's untransformed entry
+ * source to decide which catch-all rule the .zsapp emitter should
+ * write (Worker(SSR) when the user wrote their own fetch, Static SPA
+ * fallback otherwise). The synthetic SSR entry always exports a
+ * default, so probing the bundled output would always say "yes" —
+ * we have to look at the user's source instead.
+ *
+ * Detected:
  *   - `export default <expr>` (object, function, identifier, …)
  *   - `export default function …`
  *   - `export default class …`
@@ -153,54 +189,12 @@ function getCompilerId(): string {
  * NOT detected (returns false → "user has no default"):
  *   - `export { foo as default }`  — rare, ambiguous
  *   - the alias / re-export form  — also rare in SSR entries
- *
- * Per the platform contract, `default.fetch` must come from the entry
- * file directly, so we do not chase imports.
- *
- * Default behavior on ambiguity is to return `true` (assume user has
- * default), since the conservative choice is to emit Worker(SSR) — an
- * unwanted SSR catch-all 404s, while an unwanted Static catch-all
- * serves a stale shell on intended SSR routes.
  */
-export function userSourceHasDefaultExport(source: string): boolean {
-  // Strip /* ... */ block comments and // line comments before probing
-  // so a commented-out `export default` doesn't trip the match.
+function probeUserDefaultExport(source: string): boolean {
   const stripped = source
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/(^|[^:])\/\/.*$/gm, "$1");
-  // Multi-line: matches at the start of any line (after optional ws).
   return /^\s*export\s+default\b/m.test(stripped);
-}
-
-/**
- * Wrap the rolled-up SSR bundle with the prelude (always) and the
- * bootstrap (only when the user did NOT export their own default).
- *
- * Two ESM `export default` statements in the same module are a syntax
- * error, so when the user provides `default.fetch` we have to skip the
- * append. The user is then responsible for handling /_rpc/* themselves;
- * the prelude still installs the registry side-effect target (`__register`).
- *
- * TODO(mode 3): wrap-pattern that renames the user's default to
- * `__userFetch`, keeps the bootstrap's RPC dispatch, and falls through
- * to `__userFetch` for non-RPC. Not needed for the current SSR demo.
- */
-export function wrapServerBundle(opts: {
-  prelude: string;
-  bootstrap: string;
-  bundle: string;
-  userHasDefaultFetch: boolean;
-}): string {
-  // Drop the leading `"use server";` directive — it's a no-op once
-  // we prepend the prelude.
-  const stripped = opts.bundle.replace(/^"use server"\s*;\s*/, "");
-  const head = opts.prelude + "\n" + stripped;
-  if (opts.userHasDefaultFetch) {
-    // User owns default.fetch — appending the bootstrap would create
-    // a duplicate `export default`, breaking the bundle.
-    return head + "\n";
-  }
-  return head + "\n" + BOOTSTRAP_MARKER + "\n" + opts.bootstrap;
 }
 
 /** Find server entry point in project */
@@ -249,6 +243,10 @@ export function buildPlugin(
   // own appended default. Conservative default = true (emit Worker(SSR)
   // catch-all when in doubt; better to 404 than serve stale shell).
   let userHasDefaultFetch = true;
+  // Vite's resolved mode — drives the manifest emitter's
+  // production-mode gate (every procedure must have an explicit `id`
+  // when shipping a production build).
+  let viteMode: "production" | "development" = "production";
 
   return {
     name: "zeroship:build",
@@ -316,6 +314,12 @@ export function buildPlugin(
     configResolved(config: any) {
       root = config.root;
       isDev = config.command === "serve";
+      // Vite's ResolvedConfig.mode reflects the `--mode` flag
+      // (`production` for `vite build` by default; `development` for
+      // `vite build --mode development`). Anything other than the two
+      // recognized values falls back to `production` for the gate —
+      // custom modes (e.g. "staging") are still real ships.
+      viteMode = config.mode === "development" ? "development" : "production";
       // Resolve the client outDir relative to root. By default this is
       // `dist`; user can override via `build.outDir`.
       const buildOutDir = config.build?.outDir ?? "dist";
@@ -341,35 +345,48 @@ export function buildPlugin(
       }
       serverBuilt = true;
 
-      // Probe the entry source BEFORE Rollup runs and BEFORE the
-      // bootstrap is appended — otherwise the bootstrap's own
-      // `export default { fetch }` would always trigger the match.
+      // Probe the user's untransformed entry source for `export default`.
+      // The synthetic SSR entry ALWAYS exports a default, so we can't
+      // probe the bundled output for this — we need the user's source.
+      // This drives the .zsapp's catch-all rule choice (Worker(SSR) vs
+      // Static SPA fallback). Conservative default is true on read
+      // failure: an unwanted Worker(SSR) 404s while an unwanted Static
+      // catch-all serves stale shell on intended SSR routes.
       try {
         const entrySource = readFileSync(entry, "utf8");
-        userHasDefaultFetch = userSourceHasDefaultExport(entrySource);
+        userHasDefaultFetch = probeUserDefaultExport(entrySource);
       } catch {
-        // If we can't read the entry, fall back to the conservative
-        // default (true → Worker(SSR) catch-all).
         userHasDefaultFetch = true;
       }
 
       console.log(`[zeroship] building server bundle from ${relative(root, entry)}`);
 
-      // Reuse the shared transform state so the server bundle emits
-      // `__register(...)` side effects for every "use server" export
-      // the client build already registered. Without this, the server
-      // bundle has the plain function bodies but no registry
-      // population, so the V8 runtime sees "Method not found" for
-      // every URL-path RPC call.
+      // Build via the synthetic server entry (`virtual:zeroship/_server-entry`)
+      // — that virtual module imports the user's entry, re-exports its
+      // bindings, and provides our own `default.fetch` + `dispatchRpc`.
+      // Rolldown collapses everything into a single ESM file at `dist/server/index.js`.
+      // The closure-private RPC registry virtual module is also pulled
+      // into the same flat scope; the registration calls the transform
+      // emitted (`__zsRegister("name", fn)`) run as plain function calls
+      // on a top-level mangled `const` Map — no global leak.
+      //
+      // Use the user's absolute entry path as the synthetic entry's
+      // import specifier — virtual modules have no parent path, so
+      // relative specifiers don't anchor to anything sensible.
+      const userEntryRel = entry.replace(/\\/g, "/");
       const ssrConfig = buildSsrInlineConfig({
         root,
-        ssrEntry: entry,
+        ssrEntry: SERVER_ENTRY_VIRTUAL_ID,
         outDir: "dist/server",
         ssrPlugins: [
           // node-compat MUST come first so its `resolve.id` returns
           // the polyfill path before Vite tries to load `node:crypto`
           // etc. as bare specifiers.
           nodeCompatPlugin(),
+          // The RPC registry + synthetic-entry virtual module owner.
+          // Must come before transformPlugin so its imports of the
+          // registry virtual id resolve.
+          rpcRegistryPlugin({ userEntryRel }),
           // Expose `virtual:zeroship/client-manifest` so SSR code can
           // read hashed asset paths at build time. The client build's
           // `writeBundle` (this hook) finishes BEFORE we kick off the
@@ -382,28 +399,17 @@ export function buildPlugin(
       // tested without importing Vite types into the test runner.
       await viteBuild(ssrConfig as Parameters<typeof viteBuild>[0]);
 
-      // Prelude (prepended) installs Node-shaped globals + the
-      // Map-backed __register registry. Bootstrap (appended) adds
-      // the dispatchRpc + default.fetch exports that the runtime's
-      // BOOTSTRAP_JS looks for — but ONLY if the user didn't already
-      // export their own default. Two `export default` statements in
-      // the same ESM module are a syntax error.
+      // Strip the leading `"use server"` directive (a bare string
+      // expression that is a no-op but pollutes the output). Node-shaped
+      // globals (process, Buffer, setImmediate, etc.) are installed by
+      // the Rust runtime on every isolate before any user module
+      // evaluates — see `crates/runtime/src/embed/node-globals.js`.
       const bundlePath = resolve(root, "dist/server/index.js");
       try {
-        const wrapped = wrapServerBundle({
-          prelude: readFileSync(PRELUDE_PATH, "utf8"),
-          bootstrap: readFileSync(BOOTSTRAP_PATH, "utf8"),
-          bundle: readFileSync(bundlePath, "utf8"),
-          userHasDefaultFetch,
-        });
-        writeFileSync(bundlePath, wrapped, "utf8");
-        if (userHasDefaultFetch) {
-          console.log(
-            `[zeroship] user exports default.fetch — bootstrap append skipped`
-          );
-        }
+        const stripped = stripUseServer(readFileSync(bundlePath, "utf8"));
+        writeFileSync(bundlePath, stripped, "utf8");
       } catch (e) {
-        console.warn(`[zeroship] failed to wrap prelude+bootstrap: ${(e as Error).message}`);
+        console.warn(`[zeroship] failed to strip use-server directive: ${(e as Error).message}`);
       }
 
       const totalFns = [...serverFunctionMap.values()].reduce((sum, fns) => sum + fns.size, 0);
@@ -436,11 +442,43 @@ export function buildPlugin(
       zsappEmitted = true;
 
       try {
+        // Compute the manifest's resource tree (auto-derived RPC
+        // procedure entries plus any user-declared resources from
+        // `src/server/config.ts`). WireIds are a pure function of
+        // current source — explicit `fn.config.id` wins, otherwise
+        // the bare `<exportName>` is the default (rejected in
+        // production by the manifest emitter).
+        //
+        // Schemas (Zod) live on the procedures themselves at runtime;
+        // the synthetic SSR entry's dispatch validates against them.
+        // The manifest never carries JSONSchemas.
+        const procedures: DiscoveredProcedure[] = state.discoveredProcedures.map(
+          (p) => ({
+            filePath: p.filePath,
+            exportName: p.exportName,
+            moduleSlug: p.moduleSlug,
+            kind: p.kind,
+            isStream: p.isStream,
+            config: p.config,
+            moduleConfig: p.moduleConfig,
+          }),
+        );
+
+        const extras = await computeManifestExtras({
+          root,
+          procedures,
+          mode: viteMode,
+        });
+
         await emitZsapp({
           root,
           distDir: clientOutDir,
           compiler: getCompilerId(),
           userHasDefaultFetch,
+          rpcExtras: {
+            resources: extras.resources,
+            transformer: extras.transformer,
+          },
         });
       } catch (e) {
         console.error(`[zeroship] failed to emit .zsapp: ${(e as Error).message}`);

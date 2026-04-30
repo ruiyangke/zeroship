@@ -186,6 +186,26 @@ impl Registry {
         .await
         .map_err(|e| format!("migration: {e}"))?;
 
+        // Per-app opt-in list: secret names the creator has explicitly
+        // allowed to surface in `process.env` for libraries (e.g.
+        // LangChain) that defensively read `process.env.OPENAI_API_KEY`.
+        // Empty by default — secrets stay out of `process.env` unless
+        // listed here. One row per (app, key) so unique-constraints on
+        // (app_id, key_name) prevent duplicates and ON DELETE CASCADE
+        // cleans up when an app is removed. Sticky across deploys —
+        // it's app-config, not deploy-config.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS app_env_expose (
+                app_id UUID NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+                key_name TEXT NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (app_id, key_name)
+            )",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+
         // Creator→Stripe-account link. One account per creator. The
         // creator_id here can be any UUID the platform wants to use as
         // its stable creator identifier (today that's auth_users.id).

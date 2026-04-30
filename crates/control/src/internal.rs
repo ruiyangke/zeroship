@@ -51,9 +51,15 @@ pub async fn health() -> web::HttpResponse {
     web::HttpResponse::Ok().json(&serde_json::json!({"status":"ok"}))
 }
 
-/// Worker-authenticated: return the merged env (vars + decrypted secrets)
-/// for a given app as a JSON object. Workers call this on bundle load
-/// and cache the result per-thread.
+/// Worker-authenticated: return the merged env for a given app as a
+/// JSON object in the split `{ vars, secrets, expose }` shape. Workers
+/// call this on bundle load and cache the result per-thread.
+///
+/// The split shape is the contract the runtime expects (see
+/// `crates/runtime/src/fetch_outcome.rs::EnvSnapshot`): vars are always
+/// in `process.env`, secrets are NOT in `process.env` unless their name
+/// is in the per-app `expose` list, and both are visible via
+/// `import { env } from "zeroship"` and `env.get(name)`.
 pub async fn get_app_env(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,
@@ -66,8 +72,8 @@ pub async fn get_app_env(
         return web::HttpResponse::BadRequest()
             .json(&serde_json::json!({"error": "bad app_id"}));
     };
-    match state.env_store.merged_env(id).await {
-        Ok(map) => web::HttpResponse::Ok().json(&serde_json::Value::Object(map)),
+    match state.env_store.merged_env_for_worker(id).await {
+        Ok(value) => web::HttpResponse::Ok().json(&value),
         Err(crate::env_store::EnvError::AppNotFound) => {
             web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
         }

@@ -7,8 +7,9 @@
  *   *                                       → user's onRequest or default export
  *
  * The registry is populated on the server side by `__register(name, fn)`
- * side-effects that the vite-plugin transform appends to each "use server"
- * module. Importing the user entry runs those side-effects.
+ * side-effects that the vite-plugin transform appends to each path-based
+ * server module (anything under `src/server/**` or `src/server.{ts,js}`).
+ * Importing the user entry runs those side-effects.
  */
 import { createRunner } from "./transport";
 import type { ModuleRunner } from "vite/module-runner";

@@ -10,22 +10,30 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { promises as fs } from "node:fs";
+import { promises as fs, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import { brotliDecompressSync, gunzipSync, zstdDecompressSync } from "node:zlib";
 
 import { emitZsapp } from "../src/zsapp.js";
 import {
-  BOOTSTRAP_MARKER,
   CLIENT_MANIFEST_RESOLVED_ID,
   CLIENT_MANIFEST_VIRTUAL_ID,
   buildSsrInlineConfig,
   clientManifestPlugin,
-  userSourceHasDefaultExport,
-  wrapServerBundle,
+  stripUseServer,
 } from "../src/build.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+// Rust runtime's embedded Node-globals polyfill — replaces the deleted
+// `runtime-prelude.js` once shipped by the vite-plugin. Resolves from
+// the vite-plugin test dir up to the workspace root.
+const NODE_GLOBALS_PATH = resolve(
+  __dirname,
+  "../../../crates/runtime/src/embed/node-globals.js"
+);
 
 // ── Fixture builder ────────────────────────────────────────────────────────
 
@@ -159,12 +167,17 @@ describe("emitZsapp", () => {
       const manifest = JSON.parse(entries[0].bytes.toString("utf8"));
 
       // Schema invariants.
-      assert.equal(manifest.version, 2, "version=2");
+      assert.equal(manifest.version, 1, "version=1");
       assert.equal(manifest.asset_version, 0, "asset_version=0");
       assert.deepEqual(manifest.runtime_assets, {}, "runtime_assets={}");
       assert.equal(typeof manifest.metadata.built_at, "string", "built_at present");
       assert.equal(manifest.metadata.built_at, "2026-04-29T00:00:00Z");
       assert.equal(manifest.metadata.compiler, "@zeroship/vite-plugin@test");
+      // The legacy `rules` array does not ship in v1.
+      assert.ok(
+        !("rules" in manifest),
+        "manifest must not carry a `rules` array"
+      );
 
       // Worker shape: { entry, modules } with entry as a key in modules.
       assert.ok(manifest.worker, "worker present");
@@ -276,18 +289,22 @@ describe("emitZsapp", () => {
         );
       }
 
-      // Rules — at minimum the worker rules.
-      const ruleSummary = manifest.rules.map(
-        (r: { match: { kind: string }; action: { kind: string; mode?: string } }) =>
-          `${r.match.kind}/${r.action.kind}${r.action.mode ? "/" + r.action.mode : ""}`
+      // Resources — for an SSR-enabled app with /assets/ static
+      // bundle, the auto-derived resource map covers the /assets/*
+      // glob and a `/[...rest]` SSR catch-all (no explicit static
+      // action so the gateway forwards to the worker).
+      assert.ok(manifest.resources, "resources block present");
+      assert.ok(
+        manifest.resources["/assets/*"]?.static,
+        "/assets/* static resource present"
       );
       assert.ok(
-        ruleSummary.some((s: string) => s === "prefix/worker/rpc"),
-        "has POST /_rpc/ -> worker(rpc) rule"
+        manifest.resources["/[...rest]"],
+        "/[...rest] catch-all resource present"
       );
       assert.ok(
-        ruleSummary.some((s: string) => s === "any/worker/ssr"),
-        "has catch-all -> worker(ssr) rule"
+        !manifest.resources["/[...rest]"].static,
+        "SSR catch-all has no static action — falls through to worker"
       );
 
       // No deploy_hash at build time — control plane fills it.
@@ -300,7 +317,7 @@ describe("emitZsapp", () => {
     }
   });
 
-  test("emits SSG-only archive (no worker) with SPA fallback rule when no server bundle exists", async () => {
+  test("emits SSG-only archive (no worker) with SPA fallback resource when no server bundle exists", async () => {
     const fix = await makeFixture({
       "dist/index.html": "<!doctype html><html><body>hello</body></html>",
       "dist/assets/style-x.css": "body{color:red}",
@@ -315,29 +332,17 @@ describe("emitZsapp", () => {
       const entries = parseTar(tarBytes);
       const manifest = JSON.parse(entries[0].bytes.toString("utf8"));
 
-      // No worker — field is omitted entirely for SSG-only builds (matches
-      // the spec's "null/missing means SSG-only" wording, and Rust's serde
-      // skip_serializing_if = Option::is_none).
+      // No worker — field is omitted entirely for SSG-only builds.
       assert.ok(!("worker" in manifest), "worker field absent for SSG-only");
 
-      // SPA-fallback rule is present.
-      const hasSpaRule = manifest.rules.some(
-        (r: {
-          match: { kind: string };
-          action: { kind: string; try?: string[] };
-        }) =>
-          r.match.kind === "any" &&
-          r.action.kind === "static" &&
-          Array.isArray(r.action.try) &&
-          r.action.try.includes("/index.html")
+      // SPA-fallback catch-all is present and static.
+      const fallback = manifest.resources?.["/[...rest]"];
+      assert.ok(fallback, "/[...rest] catch-all resource present");
+      assert.ok(
+        Array.isArray(fallback.static?.try)
+          && fallback.static.try.includes("/index.html"),
+        "SPA fallback `try` chain contains /index.html"
       );
-      assert.ok(hasSpaRule, "SPA fallback rule present");
-
-      // No worker rules.
-      const hasWorkerRule = manifest.rules.some(
-        (r: { action: { kind: string } }) => r.action.kind === "worker"
-      );
-      assert.ok(!hasWorkerRule, "no worker rules in SSG-only build");
     } finally {
       await fix.cleanup();
     }
@@ -481,16 +486,8 @@ describe("emitZsapp", () => {
       const entries = parseTar(tarBytes);
       const manifest = JSON.parse(entries[0].bytes.toString("utf8"));
 
-      const hasFaviconRule = manifest.rules.some(
-        (r: {
-          match: { kind: string; path?: string };
-          action: { kind: string };
-        }) =>
-          r.match.kind === "exact" &&
-          r.match.path === "/favicon.ico" &&
-          r.action.kind === "static"
-      );
-      assert.ok(hasFaviconRule, "favicon.ico has its own static rule");
+      const favicon = manifest.resources?.["/favicon.ico"];
+      assert.ok(favicon?.static, "favicon.ico has its own static resource");
     } finally {
       await fix.cleanup();
     }
@@ -689,15 +686,19 @@ describe("emitZsapp", () => {
   // ── Bug 1: SPA fallback for RPC-only apps ──────────────────────────────
 
   test("csr_only_app_emits_static_spa_fallback", async () => {
-    // RPC-only app: server bundle has registry side-effects but no
-    // user-defined default.fetch. The bootstrap-injected default.fetch
-    // is sufficient for /_rpc/* routing, so the catch-all should NOT
-    // hit the worker — it should serve the SPA shell instead.
+    // RPC-only app: server bundle exists (has registered methods) but
+    // the user did NOT export their own default.fetch. The synthetic
+    // server entry's default.fetch is sufficient for /_rpc/* routing,
+    // so the catch-all should NOT hit the worker — it should serve
+    // the SPA shell instead. The .zsapp emitter's behavior depends
+    // only on (a) whether the server bundle exists and (b) the
+    // explicit `userHasDefaultFetch` flag, never on the bundle's
+    // contents.
     const fix = await makeFixture({
       "dist/index.html": "<!doctype html><html><body><div id=root></div></body></html>",
       "dist/assets/main.js": "console.log('spa');\n",
       "dist/server/index.js":
-        "// pretend RPC bundle\n__register('foo', () => 1);\n",
+        "// RPC-only bundle (synthetic-entry-shaped; opaque to the emitter)\n",
     });
     try {
       const result = await emitZsapp({
@@ -713,40 +714,29 @@ describe("emitZsapp", () => {
       // Worker bundle is still present (RPC needs it).
       assert.ok(manifest.worker, "worker present for RPC-only");
 
-      // POST /_rpc/ rule still emitted.
-      const hasRpcRule = manifest.rules.some(
-        (r: { match: { kind: string; method?: string; path?: string }; action: { kind: string; mode?: string } }) =>
-          r.match.kind === "prefix" &&
-          r.match.method === "POST" &&
-          r.match.path === "/_rpc/" &&
-          r.action.kind === "worker" &&
-          r.action.mode === "rpc"
+      // No legacy `rules` array on the wire.
+      assert.ok(
+        !("rules" in manifest),
+        "manifest must not carry a `rules` array"
       );
-      assert.ok(hasRpcRule, "RPC rule still present");
 
-      // Last rule (catch-all) is Static SPA fallback, NOT Worker(SSR).
-      const last = manifest.rules[manifest.rules.length - 1];
-      assert.equal(last.match.kind, "any", "last rule is catch-all");
-      assert.equal(last.action.kind, "static", "catch-all is static");
+      // Catch-all is a static SPA fallback (no SSR worker entry — the
+      // user did not export default.fetch).
+      const fallback = manifest.resources?.["/[...rest]"];
+      assert.ok(fallback?.static, "catch-all is static");
       assert.deepEqual(
-        last.action.try,
+        fallback.static.try,
         ["$path", "/index.html"],
         "SPA fallback try chain"
       );
-
-      // No Worker(SSR) rule anywhere.
-      const hasWorkerSsr = manifest.rules.some(
-        (r: { action: { kind: string; mode?: string } }) =>
-          r.action.kind === "worker" && r.action.mode === "ssr"
-      );
-      assert.ok(!hasWorkerSsr, "no Worker(SSR) rule for RPC-only app");
     } finally {
       await fix.cleanup();
     }
   });
 
   test("ssr_app_emits_worker_catchall", async () => {
-    // SSR app: user has default.fetch. Catch-all is Worker(SSR).
+    // SSR app: user has default.fetch. Catch-all forwards to the
+    // worker (no static action on the resource entry).
     const fix = await makeFixture({
       "dist/index.html": "<!doctype html>",
       "dist/server/index.js":
@@ -762,10 +752,12 @@ describe("emitZsapp", () => {
       const tarBytes = zstdDecompressSync(await fs.readFile(result.outputPath));
       const manifest = JSON.parse(parseTar(tarBytes)[0].bytes.toString("utf8"));
 
-      const last = manifest.rules[manifest.rules.length - 1];
-      assert.equal(last.match.kind, "any");
-      assert.equal(last.action.kind, "worker");
-      assert.equal(last.action.mode, "ssr");
+      const fallback = manifest.resources?.["/[...rest]"];
+      assert.ok(fallback, "catch-all resource present");
+      assert.ok(
+        !fallback.static,
+        "SSR catch-all has no static action (forwards to worker)"
+      );
     } finally {
       await fix.cleanup();
     }
@@ -807,134 +799,66 @@ describe("emitZsapp", () => {
   });
 });
 
-// ── Bug 2: skip bootstrap append when user has default.fetch ──────────────
-describe("wrapServerBundle", () => {
-  const PRELUDE = "// fake prelude\nglobalThis.__register=()=>{};\n";
-  const BOOTSTRAP =
-    "export async function dispatchRpc(){}\nexport default { fetch(){} };\n";
-
-  test("user_default_export_skips_bootstrap_append", () => {
-    // SSR-style bundle — user exports their own default.
-    const bundle =
-      'export default { fetch: async (req) => new Response("hi") };\n';
-    const wrapped = wrapServerBundle({
-      prelude: PRELUDE,
-      bootstrap: BOOTSTRAP,
-      bundle,
-      userHasDefaultFetch: true,
-    });
-
-    // Marker is absent — bootstrap was NOT appended.
-    assert.ok(
-      !wrapped.includes(BOOTSTRAP_MARKER),
-      "bootstrap marker absent when user has default"
-    );
-    // The user's default.fetch made it through.
-    assert.ok(
-      wrapped.includes("export default"),
-      "user default still in wrapped bundle"
-    );
-    // Single `export default` — no ESM duplicate-default error.
-    const defaultCount = (wrapped.match(/^\s*export\s+default\b/gm) ?? []).length;
-    assert.equal(defaultCount, 1, "exactly one export default");
+// ── stripUseServer: drop leading `"use server"` directive ────────────────
+//
+// Post-refactor: the vite-plugin no longer prepends a Node-globals
+// prelude — that's installed by the Rust runtime on every isolate
+// before user modules evaluate (see
+// `crates/runtime/src/embed/node-globals.js`). The only post-rollup
+// transform left is dropping the leading `"use server"` directive,
+// which is a bare string expression that pollutes the output.
+describe("stripUseServer", () => {
+  test("returns bundle unchanged when no directive present", () => {
+    const bundle = 'export default { fetch: async (req) => new Response("hi") };\n';
+    assert.equal(stripUseServer(bundle), bundle);
   });
 
-  test("no_default_export_appends_bootstrap", () => {
-    // RPC-only bundle — only `__register` side effects.
-    const bundle = '__register("listTodos", () => []);\n';
-    const wrapped = wrapServerBundle({
-      prelude: PRELUDE,
-      bootstrap: BOOTSTRAP,
-      bundle,
-      userHasDefaultFetch: false,
-    });
-
-    // Marker is present — bootstrap WAS appended.
-    assert.ok(
-      wrapped.includes(BOOTSTRAP_MARKER),
-      "bootstrap marker present when user has no default"
-    );
-    // Bootstrap's default.fetch is what handles requests.
-    assert.ok(
-      wrapped.includes("export default"),
-      "bootstrap default in wrapped bundle"
-    );
-    // Single `export default` — bootstrap's only.
-    const defaultCount = (wrapped.match(/^\s*export\s+default\b/gm) ?? []).length;
-    assert.equal(defaultCount, 1, "exactly one export default");
-  });
-
-  test("strips_use_server_directive", () => {
-    // The `"use server"` pragma is bytes after we've prepended the
-    // prelude. Strip it so the resulting module isn't accidentally a
-    // strict-mode directive disguised as a string expression.
+  test("strips a leading use-server directive", () => {
     const bundle = '"use server";\nexport function ping(){}\n';
-    const wrapped = wrapServerBundle({
-      prelude: PRELUDE,
-      bootstrap: BOOTSTRAP,
-      bundle,
-      userHasDefaultFetch: false,
-    });
-    // The prelude is at the very top.
+    const stripped = stripUseServer(bundle);
     assert.ok(
-      wrapped.startsWith(PRELUDE),
-      "prelude is at the top of the bundle"
+      !stripped.startsWith('"use server"'),
+      "directive removed from top"
     );
-    // The directive doesn't appear standalone in the user portion.
-    const userStart = wrapped.indexOf("export function ping");
-    assert.ok(userStart > 0, "user code present");
-    const beforeUser = wrapped.slice(PRELUDE.length, userStart);
-    assert.ok(
-      !beforeUser.includes('"use server"'),
-      "use server directive stripped from user code"
-    );
+    assert.ok(stripped.includes("export function ping"), "user code preserved");
+  });
+
+  test("only strips the LEADING directive (in-body strings untouched)", () => {
+    // A `"use server"` literal anywhere other than the very top is just
+    // bytes — leave it alone.
+    const bundle = 'export const x = "use server";\n';
+    assert.equal(stripUseServer(bundle), bundle);
   });
 });
 
-describe("userSourceHasDefaultExport", () => {
-  test("detects export default object", () => {
-    assert.equal(
-      userSourceHasDefaultExport("export default { fetch: () => {} };"),
-      true
+// ── node-globals.js no-leak guarantee ─────────────────────────────────────
+//
+// Post-refactor: the Node-globals polyfill (Buffer lazy stub +
+// setImmediate / clearImmediate) is now embedded in the Rust runtime,
+// not prepended by the vite-plugin. It must NOT reference the legacy
+// in-bundle symbols `__zsRegistry`, `__register`, or `__zsBufferModule__`
+// — those were vite-plugin globals that are now closure-private to
+// the synthetic server entry's virtual module.
+describe("node-globals.js no-leak guarantee", () => {
+  const polyfillSrc = readFileSync(NODE_GLOBALS_PATH, "utf8");
+
+  test("polyfill has no __zsRegistry reference", () => {
+    assert.ok(
+      !polyfillSrc.includes("__zsRegistry"),
+      "node-globals.js must not mention __zsRegistry"
     );
   });
-
-  test("detects export default function", () => {
-    assert.equal(
-      userSourceHasDefaultExport("export default function handler(){}"),
-      true
+  test("polyfill has no __register reference", () => {
+    assert.ok(
+      !polyfillSrc.includes("__register"),
+      "node-globals.js must not mention __register"
     );
   });
-
-  test("returns false for RPC-only entry", () => {
-    assert.equal(
-      userSourceHasDefaultExport(
-        '"use server";\nexport function ping(){}\n'
-      ),
-      false
+  test("polyfill has no __zsBufferModule__ reference", () => {
+    assert.ok(
+      !polyfillSrc.includes("__zsBufferModule__"),
+      "node-globals.js must not mention __zsBufferModule__"
     );
-  });
-
-  test("ignores commented-out default", () => {
-    // A commented-out export default in the docs of an RPC-only file
-    // should NOT trigger the match.
-    const src = `
-// IDEAL SHAPE:
-// export default { fetch: req => new Response("ok") };
-"use server";
-export function listTodos() { return []; }
-`;
-    assert.equal(userSourceHasDefaultExport(src), false);
-  });
-
-  test("ignores block-commented default", () => {
-    const src = `
-/*
- * export default { fetch }
- */
-export function ping(){}
-`;
-    assert.equal(userSourceHasDefaultExport(src), false);
   });
 });
 
@@ -1054,6 +978,31 @@ describe("buildSsrInlineConfig", () => {
     assert.equal(build.outDir, "dist/server");
   });
 
+  test("virtual_ssr_entry_routes_via_rollup_input", () => {
+    // When `ssrEntry` is a virtual specifier, `build.ssr` becomes `true`
+    // (so Vite still treats this as an SSR build) and the entry is
+    // threaded through `rolldownOptions.input.index`. This bypasses
+    // Vite's default `path.resolve(root, ssrEntry)` mangling, which
+    // would otherwise turn `virtual:zeroship/_server-entry` into a
+    // bogus filesystem path.
+    const config = buildSsrInlineConfig({
+      root: "/tmp/myapp",
+      ssrEntry: "virtual:zeroship/_server-entry",
+      outDir: "dist/server",
+      ssrPlugins: [],
+    });
+    const build = config.build as {
+      ssr?: boolean | string;
+      rolldownOptions?: { input?: Record<string, string> };
+    };
+    assert.equal(build.ssr, true, "build.ssr === true for virtual entry");
+    assert.deepEqual(
+      build.rolldownOptions?.input,
+      { index: "virtual:zeroship/_server-entry" },
+      "virtual id threaded through rolldown input"
+    );
+  });
+
   test("static_only_mode_skips_rollup", async () => {
     // SSG-only fixture: no JS, only static HTML files. After build,
     // the .zsapp should contain those HTML files as assets, no worker,
@@ -1097,25 +1046,21 @@ describe("buildSsrInlineConfig", () => {
         `no JS assets in SSG-only build (found ${JSON.stringify(jsBlobs)})`
       );
 
-      // Per-route exact rules emitted for non-index HTML, plus SPA-style
-      // catch-all serving index.html.
-      const ruleSummary = manifest.rules.map(
-        (r: {
-          match: { kind: string; path?: string };
-          action: { kind: string; try?: string[] };
-        }) =>
-          `${r.match.kind}${r.match.path ? "(" + r.match.path + ")" : ""}/${r.action.kind}`
-      );
+      // Per-route exact resources emitted for non-index HTML, plus
+      // SPA-style catch-all serving index.html.
       assert.ok(
-        ruleSummary.some((s: string) => s === "exact(/about)/static"),
+        manifest.resources?.["/about"]?.static,
         "/about route emitted"
       );
       assert.ok(
-        ruleSummary.some((s: string) => s === "exact(/docs/intro)/static"),
+        manifest.resources?.["/docs/intro"]?.static,
         "/docs/intro route emitted"
       );
+      const fallback = manifest.resources?.["/[...rest]"];
       assert.ok(
-        ruleSummary.some((s: string) => s === "any/static"),
+        fallback?.static
+          && Array.isArray(fallback.static.try)
+          && fallback.static.try.includes("/index.html"),
         "SPA fallback emitted"
       );
     } finally {
@@ -1145,25 +1090,16 @@ describe("buildSsrInlineConfig", () => {
       assert.ok(manifest.assets["/index.html"]);
       assert.ok(manifest.assets["/assets/main-abc.js"]);
       assert.ok(manifest.assets["/about.html"]);
-      // /assets/ prefix rule emitted for the Vite-hashed JS.
-      const hasAssetsRule = manifest.rules.some(
-        (r: {
-          match: { kind: string; path?: string };
-          action: { kind: string };
-        }) =>
-          r.match.kind === "prefix" &&
-          r.match.path === "/assets/" &&
-          r.action.kind === "static"
+      // /assets/* glob resource emitted for the Vite-hashed JS.
+      assert.ok(
+        manifest.resources?.["/assets/*"]?.static,
+        "/assets/* glob resource emitted"
       );
-      assert.ok(hasAssetsRule, "/assets/ prefix rule emitted");
       // /about route emitted.
-      const hasAboutRule = manifest.rules.some(
-        (r: {
-          match: { kind: string; path?: string };
-          action: { kind: string };
-        }) => r.match.kind === "exact" && r.match.path === "/about"
+      assert.ok(
+        manifest.resources?.["/about"]?.static,
+        "/about route emitted"
       );
-      assert.ok(hasAboutRule, "/about route emitted");
     } finally {
       await fix.cleanup();
     }

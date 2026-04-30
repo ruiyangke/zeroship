@@ -1,63 +1,17 @@
-//! Pre-compiled manifest dispatch — Tier 2 items 7 + 10.
+//! Pre-compiled manifest dispatch.
 //!
 //! Source `Manifest` is unchanged on the wire. At route-update time the
 //! gateway compiles each app's manifest into a hot-path-friendly form:
-//! method bitsets, pre-segmented globs, pre-parsed templates. Per-request
-//! work drops to bit-AND for method gating, segment compares for path
-//! matching, and a chunk-walk for template render — no per-request
-//! HashMap, no per-call `String::replace`.
+//! one `EffectivePolicy` per resource, an RPC wire-id index, and a
+//! path-segment trie for URL resources. Per-request work drops to a
+//! single `HashMap::get` on the most-specific resource key.
 
 use std::collections::HashMap;
 
 use zeroship_core::types::{
-    Action, AssetEntry, CacheCtl, Cors, HttpMethod, Manifest, Match, RateLimit, Rule, WorkerCode,
-    WorkerMode,
+    AssetEntry, AuthLevel, CacheCtl, Cors, HttpMethod, Manifest, ProcedureKind, RateLimit,
+    ResourceEntry, WorkerCode,
 };
-
-use crate::dispatch::{Outcome, StaticHit};
-
-// ---------------------------------------------------------------------------
-// Method bitset constants — local copy of core's helpers so we don't
-// depend on `pub`-ifying them. Must stay in sync with crates/core/src/types.rs.
-// ---------------------------------------------------------------------------
-
-const M_GET: u8 = 1 << 0;
-const M_POST: u8 = 1 << 1;
-const M_PUT: u8 = 1 << 2;
-const M_PATCH: u8 = 1 << 3;
-const M_DELETE: u8 = 1 << 4;
-const M_HEAD: u8 = 1 << 5;
-const M_OPTIONS: u8 = 1 << 6;
-const M_ALL: u8 = M_GET | M_POST | M_PUT | M_PATCH | M_DELETE | M_HEAD | M_OPTIONS;
-const M_GET_HEAD: u8 = M_GET | M_HEAD;
-
-fn method_bit(m: HttpMethod) -> u8 {
-    match m {
-        HttpMethod::Get => M_GET,
-        HttpMethod::Post => M_POST,
-        HttpMethod::Put => M_PUT,
-        HttpMethod::Patch => M_PATCH,
-        HttpMethod::Delete => M_DELETE,
-        HttpMethod::Head => M_HEAD,
-        HttpMethod::Options => M_OPTIONS,
-        HttpMethod::Any => M_ALL,
-    }
-}
-
-/// Map a request's method string to a single-bit mask. Returns 0 for
-/// unrecognized methods so they short-circuit to "no match".
-fn request_method_bit(method: &str) -> u8 {
-    match method {
-        "GET" => M_GET,
-        "POST" => M_POST,
-        "PUT" => M_PUT,
-        "PATCH" => M_PATCH,
-        "DELETE" => M_DELETE,
-        "HEAD" => M_HEAD,
-        "OPTIONS" => M_OPTIONS,
-        _ => 0,
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Compiled manifest types
@@ -65,42 +19,30 @@ fn request_method_bit(method: &str) -> u8 {
 
 #[allow(missing_debug_implementations)]
 pub struct CompiledManifest {
-    rules: Vec<CompiledRule>,
     assets: HashMap<String, AssetEntry>,
     runtime_assets: HashMap<String, AssetEntry>,
     #[allow(dead_code)]
     worker: Option<WorkerCode>,
     #[allow(dead_code)]
     asset_version: i64,
+    /// Per-resource flattened policy, computed once at app load.
+    effective_policies: HashMap<String, EffectivePolicy>,
+    /// RPC wire-id (without the `rpc:` prefix) → key into
+    /// `effective_policies`. The wire URL `/_zs/v1/<wireId>` strips the
+    /// prefix; this table answers "is there an RPC resource for this id?"
+    /// in O(1).
+    rpc_index: HashMap<String, String>,
+    /// URL-path lookup for resource-tree dispatch. Most-specific match
+    /// wins (literal beats glob; longer literal beats shorter).
+    url_index: PathMatcher,
 }
 
-struct CompiledRule {
-    methods: u8,
-    matcher: CompiledMatch,
-    action: CompiledAction,
-    /// Per-rule CORS policy. Cloned from the source rule; no compile-time
-    /// transform needed (no globs to compile, no templates to parse).
-    /// Threaded out of `dispatch` and `cors_for` so the router can apply
-    /// preflight responses + post-dispatch header injection.
-    cors: Option<Cors>,
-    /// Position of this rule in the source `Manifest::rules` vector.
-    /// Captured at compile time so the per-rule rate limiter can key
-    /// buckets on it without rule_idx leaking through dispatcher
-    /// internals as a separate parameter.
-    rule_idx: u32,
-}
-
-enum CompiledMatch {
-    Exact(String),
-    Prefix(String),
-    Glob(CompiledGlob),
-    Any,
-}
-
+#[derive(Debug, Clone)]
 struct CompiledGlob {
     segments: Vec<GlobSegment>,
 }
 
+#[derive(Debug, Clone)]
 enum GlobSegment {
     Literal(String),
     SingleCapture(String),
@@ -108,53 +50,139 @@ enum GlobSegment {
     Star,
 }
 
-enum CompiledAction {
-    Static {
-        try_chain: Vec<CompiledTemplate>,
-        cache: Option<CacheCtl>,
-        status: Option<u16>,
-    },
-    Worker {
-        mode: WorkerMode,
-        cache: Option<CacheCtl>,
-        rate_limit: Option<RateLimit>,
-    },
-    Redirect {
-        to: CompiledTemplate,
-        status: u16,
-    },
-    Rewrite {
-        to: CompiledTemplate,
-    },
-}
-
-#[allow(missing_debug_implementations)]
-pub struct CompiledTemplate {
-    chunks: Vec<TemplateChunk>,
-}
-
-enum TemplateChunk {
-    Literal(String),
-    Path,
-    Capture(String),
-}
-
 // ---------------------------------------------------------------------------
-// Captures — keep allocation off the non-glob hot path.
+// Resource-tree compile target
 // ---------------------------------------------------------------------------
 
-enum Captures<'a> {
-    Empty,
-    Glob(Vec<(&'a str, String)>),
+/// Flattened per-resource policy + dispatch action. Computed once at
+/// app-load time by `CompiledManifest::compile`; the per-request lookup
+/// is a single `HashMap::get` keyed by the resource id.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct EffectivePolicy {
+    pub auth: AuthLevel,
+    pub rate_limit: Option<RateLimit>,
+    pub cors: Option<Cors>,
+    pub cache: Option<CacheCtl>,
+    pub csrf_origins: Option<Vec<String>>,
+    pub idempotent: bool,
+    pub max_input_bytes: Option<u32>,
+    pub middleware: Vec<String>,
+    pub publicly_accessible: bool,
+    pub kind: Option<ProcedureKind>,
+    pub action: ResolvedAction,
+    pub input_schema: Option<String>,
+    pub output_schema: Option<String>,
 }
 
-impl<'a> Captures<'a> {
-    fn lookup(&self, name: &str) -> Option<&str> {
-        match self {
-            Self::Empty => None,
-            Self::Glob(v) => v.iter().find(|(k, _)| *k == name).map(|(_, v)| v.as_str()),
+/// What dispatch should actually do once the policy is satisfied.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum ResolvedAction {
+    /// Forward to the worker as an RPC call (key was `rpc:<id>`, no
+    /// explicit redirect/rewrite/static).
+    WorkerRpc,
+    /// Forward to the worker as an SSR fetch (key was a URL path, no
+    /// explicit redirect/rewrite/static).
+    WorkerSsr,
+    Redirect { to: String, status: u16 },
+    Rewrite { to: String },
+    Static { try_chain: Vec<String> },
+}
+
+/// URL-path lookup for resource-tree dispatch. Holds two layers:
+///
+/// * `literals` — exact path → resource id (O(1))
+/// * `globs` — glob-shaped resource keys ordered by specificity
+///   (most specific first; ties broken by lexicographic order so a
+///   given match is deterministic)
+#[derive(Debug, Default, Clone)]
+struct PathMatcher {
+    /// All literal-path resource keys (no glob characters), keyed by the
+    /// path itself for O(1) exact match.
+    literals: HashMap<String, String>,
+    /// Compiled globs ordered most-specific first.
+    globs: Vec<UrlGlob>,
+}
+
+#[derive(Debug, Clone)]
+struct UrlGlob {
+    /// Original resource key, used as the lookup key into
+    /// `effective_policies`.
+    key: String,
+    /// Compiled segment matcher.
+    glob: CompiledGlob,
+    /// Number of literal segments — used to break ties when ranking.
+    /// More literal segments == more specific.
+    literal_segs: usize,
+}
+
+impl PathMatcher {
+    /// Look up the most-specific matching resource id for `path`.
+    /// Returns `None` if nothing matched.
+    ///
+    /// Order:
+    /// 1. Exact literal hit — O(1).
+    /// 2. Glob match — first hit in the pre-sorted (most specific first)
+    ///    list wins.
+    fn find(&self, path: &str) -> Option<String> {
+        if let Some(id) = self.literals.get(path) {
+            return Some(id.clone());
         }
+        for g in &self.globs {
+            if match_glob_simple(&g.glob, path) {
+                return Some(g.key.clone());
+            }
+        }
+        None
     }
+}
+
+/// Test a CompiledGlob against a path without collecting captures.
+fn match_glob_simple(glob: &CompiledGlob, path: &str) -> bool {
+    let path_segs: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let mut pi = 0;
+    let mut xi = 0;
+    while pi < glob.segments.len() {
+        let seg = &glob.segments[pi];
+        if matches!(seg, GlobSegment::CatchAll(_)) {
+            return true;
+        }
+        if xi >= path_segs.len() {
+            return false;
+        }
+        let x = path_segs[xi];
+        match seg {
+            GlobSegment::Literal(lit) => {
+                if lit != x {
+                    return false;
+                }
+            }
+            GlobSegment::SingleCapture(_) | GlobSegment::Star => {
+                if x.is_empty() {
+                    return false;
+                }
+            }
+            GlobSegment::CatchAll(_) => unreachable!(),
+        }
+        pi += 1;
+        xi += 1;
+    }
+    xi == path_segs.len()
+}
+
+/// `/api/admin/users` → ["", "api", "admin", "users"] then trimmed.
+/// Returns the literal-segment count (used by `PathMatcher` for
+/// most-specific tie-breaking when both globs match).
+fn count_literal_segments(key: &str) -> usize {
+    key.trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty() && !s.contains('[') && !s.contains('*'))
+        .count()
+}
+
+fn is_glob_path(s: &str) -> bool {
+    s.contains('[') || s.contains('*')
 }
 
 // ---------------------------------------------------------------------------
@@ -163,63 +191,320 @@ impl<'a> Captures<'a> {
 
 impl CompiledManifest {
     pub fn compile(m: &Manifest) -> Self {
-        let rules = m
-            .rules
-            .iter()
-            .enumerate()
-            .map(|(i, r)| compile_rule(r, i as u32))
-            .collect();
+        let (effective_policies, rpc_index, url_index) = compile_resource_tree(&m.resources);
+
         Self {
-            rules,
             assets: m.assets.clone(),
             runtime_assets: m.runtime_assets.clone(),
             worker: m.worker.clone(),
             asset_version: m.asset_version,
+            effective_policies,
+            rpc_index,
+            url_index,
         }
+    }
+
+    /// Resolve a request to a resource id using the resource-tree.
+    /// Returns `None` if no resource matched.
+    ///
+    /// * URL beginning with `/_zs/v1/` → strip prefix; lookup
+    ///   `rpc:<remainder>` in `rpc_index`.
+    /// * Otherwise → `url_index` lookup (most specific wins).
+    pub fn lookup_resource(&self, path: &str) -> Option<&EffectivePolicy> {
+        let key = self.lookup_resource_key(path)?;
+        self.effective_policies.get(&key)
+    }
+
+    /// Same lookup as `lookup_resource`, but returns the resource key
+    /// instead of the policy. Used by the per-resource rate-limiter to
+    /// hash the matched key into a stable `rule_idx`.
+    pub fn lookup_resource_key(&self, path: &str) -> Option<String> {
+        if let Some(rest) = path.strip_prefix("/_zs/v1/") {
+            return self.rpc_index.get(rest).cloned();
+        }
+        self.url_index.find(path)
+    }
+
+    /// Look up an asset (build-time or runtime-emitted) by path.
+    /// Returns `(entry, is_runtime)`. Used by the resource-tree static
+    /// action to resolve a `try` chain entry to bytes.
+    pub fn lookup_asset_for_static(&self, path: &str) -> Option<(&AssetEntry, bool)> {
+        if let Some(e) = self.runtime_assets.get(path) {
+            return Some((e, true));
+        }
+        if let Some(e) = self.assets.get(path) {
+            return Some((e, false));
+        }
+        None
     }
 }
 
-fn compile_rule(rule: &Rule, rule_idx: u32) -> CompiledRule {
-    let methods = effective_methods(rule);
-    let matcher = compile_match(&rule.r#match);
-    let action = compile_action(&rule.action);
-    CompiledRule {
-        methods,
-        matcher,
+// ---------------------------------------------------------------------------
+// Resource-tree compilation
+// ---------------------------------------------------------------------------
+
+/// Compile the `manifest.resources` map into the gateway's three
+/// per-resource lookup tables: flattened per-resource policy, an
+/// `rpc_index` keyed by wire id (prefix-stripped), and a `url_index`
+/// (path-segment matcher).
+fn compile_resource_tree(
+    resources: &HashMap<String, ResourceEntry>,
+) -> (
+    HashMap<String, EffectivePolicy>,
+    HashMap<String, String>,
+    PathMatcher,
+) {
+    if resources.is_empty() {
+        return (HashMap::new(), HashMap::new(), PathMatcher::default());
+    }
+    let mut policies: HashMap<String, EffectivePolicy> = HashMap::new();
+    let mut rpc_index: HashMap<String, String> = HashMap::new();
+    let mut literals: HashMap<String, String> = HashMap::new();
+    let mut globs: Vec<UrlGlob> = Vec::new();
+
+    for key in resources.keys() {
+        let policy = resolve_effective_policy(key, resources);
+        policies.insert(key.clone(), policy);
+
+        if let Some(rpc_id) = key.strip_prefix("rpc:") {
+            rpc_index.insert(rpc_id.to_string(), key.clone());
+        } else if key.starts_with('/') {
+            if is_glob_path(key) {
+                let glob = compile_glob(key);
+                let literal_segs = count_literal_segments(key);
+                globs.push(UrlGlob {
+                    key: key.clone(),
+                    glob,
+                    literal_segs,
+                });
+            } else {
+                literals.insert(key.clone(), key.clone());
+            }
+        }
+        // `*` is the root default — it never dispatches itself; it just
+        // contributes to inheritance.
+    }
+
+    // Order globs most-specific first. More literal segments → more
+    // specific. Tie-break by descending key length, then by lexical
+    // order so the result is deterministic.
+    globs.sort_by(|a, b| {
+        b.literal_segs
+            .cmp(&a.literal_segs)
+            .then_with(|| b.key.len().cmp(&a.key.len()))
+            .then_with(|| a.key.cmp(&b.key))
+    });
+
+    let url_index = PathMatcher { literals, globs };
+    (policies, rpc_index, url_index)
+}
+
+/// Walk the inheritance chain (root `*` → ancestors → key) and apply
+/// the per-field merge rules from the spec.
+fn resolve_effective_policy(
+    key: &str,
+    resources: &HashMap<String, ResourceEntry>,
+) -> EffectivePolicy {
+    let chain = build_inheritance_chain(key, resources);
+
+    let mut auth: AuthLevel = AuthLevel::Anon;
+    let mut rate_limit: Option<RateLimit> = None;
+    let mut cors: Option<Cors> = None;
+    let mut cache: Option<CacheCtl> = None;
+    let mut csrf_origins: Option<Vec<String>> = None;
+    let mut idempotent: bool = false;
+    let mut max_input_bytes: Option<u32> = None;
+    let mut middleware: Vec<String> = Vec::new();
+    let mut publicly_accessible: bool = false;
+    let mut kind: Option<ProcedureKind> = None;
+    let mut input_schema: Option<String> = None;
+    let mut output_schema: Option<String> = None;
+
+    for ancestor_key in &chain {
+        let Some(node) = resources.get(ancestor_key) else { continue };
+        let is_self = ancestor_key == key;
+
+        if let Some(a) = node.auth {
+            // stricter wins — child only weakens via override (validated).
+            if a.rank() > auth.rank() {
+                auth = a;
+            } else if is_self && node.r#override.iter().any(|f| f == "auth") {
+                auth = a;
+            }
+        }
+        if let Some(rl) = &node.rate_limit {
+            // min wins (stricter cap survives).
+            rate_limit = Some(merge_rate_limit_min(rate_limit.as_ref(), rl));
+        }
+        if let Some(c) = &node.cors {
+            // intersect: child can only narrow.
+            cors = Some(merge_cors_intersect(cors.as_ref(), c));
+        }
+        if let Some(c) = &node.cache {
+            // child overrides per-resource decision.
+            cache = Some(c.clone());
+        }
+        if let Some(origins) = &node.csrf_origins {
+            csrf_origins = Some(merge_string_intersect(csrf_origins.as_ref(), origins));
+        }
+        if let Some(b) = node.idempotent {
+            idempotent = b;
+        }
+        if let Some(b) = node.max_input_bytes {
+            max_input_bytes = Some(match max_input_bytes {
+                None => b,
+                Some(prev) => prev.min(b),
+            });
+        }
+        // middleware appends in chain order (root → child).
+        for m in &node.middleware {
+            middleware.push(m.clone());
+        }
+        if let Some(b) = node.publicly_accessible {
+            publicly_accessible = b;
+        }
+        if is_self {
+            kind = node.kind;
+            input_schema.clone_from(&node.input_schema);
+            output_schema.clone_from(&node.output_schema);
+        }
+    }
+
+    let action = resolve_action(key, resources);
+
+    EffectivePolicy {
+        auth,
+        rate_limit,
+        cors,
+        cache,
+        csrf_origins,
+        idempotent,
+        max_input_bytes,
+        middleware,
+        publicly_accessible,
+        kind,
         action,
-        cors: rule.cors.clone(),
-        rule_idx,
+        input_schema,
+        output_schema,
     }
 }
 
-fn effective_methods(rule: &Rule) -> u8 {
-    let base = match rule.r#match {
-        Match::Exact { method, .. }
-        | Match::Prefix { method, .. }
-        | Match::Glob { method, .. } => match method {
-            None | Some(HttpMethod::Any) => M_ALL,
-            Some(m) => method_bit(m),
-        },
-        Match::Any => M_ALL,
-    };
-    if matches!(rule.action, Action::Static { .. }) {
-        base & M_GET_HEAD
-    } else {
-        base
+/// Build the parent chain root → … → key for a given resource.
+///
+/// Mirrors the validation-side helper but lives here so the gateway
+/// doesn't take a dep on `validate`'s private function. For RPC keys
+/// the ancestors come from dot-segments; for URL paths from path
+/// segments; `*` is always at the head when declared.
+fn build_inheritance_chain(
+    key: &str,
+    resources: &HashMap<String, ResourceEntry>,
+) -> Vec<String> {
+    if key == "*" {
+        return vec!["*".to_string()];
     }
-}
-
-fn compile_match(m: &Match) -> CompiledMatch {
-    match m {
-        Match::Exact { path, .. } => CompiledMatch::Exact(path.clone()),
-        Match::Prefix { path, .. } => {
-            // Normalize: store without trailing slash so the boundary check
-            // is uniform — `path == bare || path.starts_with("{bare}/")`.
-            let bare = path.strip_suffix('/').unwrap_or(path).to_string();
-            CompiledMatch::Prefix(bare)
+    let mut chain: Vec<String> = Vec::new();
+    if resources.contains_key("*") {
+        chain.push("*".to_string());
+    }
+    if let Some(rpc_id) = key.strip_prefix("rpc:") {
+        let segs: Vec<&str> = rpc_id.split('.').collect();
+        for end in 1..segs.len() {
+            let ancestor = format!("rpc:{}", segs[..end].join("."));
+            if resources.contains_key(&ancestor) {
+                chain.push(ancestor);
+            }
         }
-        Match::Glob { path, .. } => CompiledMatch::Glob(compile_glob(path)),
-        Match::Any => CompiledMatch::Any,
+    } else if key.starts_with('/') {
+        let trimmed = key.trim_start_matches('/');
+        let segs: Vec<&str> = trimmed.split('/').collect();
+        for end in 1..segs.len() {
+            let ancestor = format!("/{}", segs[..end].join("/"));
+            if resources.contains_key(&ancestor) {
+                chain.push(ancestor);
+            }
+        }
+    }
+    chain.push(key.to_string());
+    chain
+}
+
+/// `min` merge for rate_limit. We collapse onto whichever side has the
+/// smaller `rps`/`rpm` (treating absent → unbounded).
+fn merge_rate_limit_min(prev: Option<&RateLimit>, next: &RateLimit) -> RateLimit {
+    let Some(p) = prev else { return next.clone() };
+    let pick_min = |a: Option<u32>, b: Option<u32>| match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y),
+        (None, None) => None,
+    };
+    RateLimit {
+        rpm: pick_min(p.rpm, next.rpm),
+        rps: pick_min(p.rps, next.rps),
+        // Use the child's `per` — it's a discriminator, not a cap.
+        per: next.per,
+    }
+}
+
+/// Intersection merge for `Cors`. Origins / methods / headers all
+/// narrow as we walk root → child. `allow_credentials` is `&&` (any
+/// ancestor can revoke credentials).
+fn merge_cors_intersect(prev: Option<&Cors>, next: &Cors) -> Cors {
+    let Some(p) = prev else { return next.clone() };
+    let intersect_strings = |a: &[String], b: &[String]| -> Vec<String> {
+        a.iter().filter(|x| b.iter().any(|y| x == &y)).cloned().collect()
+    };
+    let intersect_methods = |a: &[HttpMethod], b: &[HttpMethod]| -> Vec<HttpMethod> {
+        a.iter().filter(|x| b.iter().any(|y| x == &y)).copied().collect()
+    };
+    Cors {
+        allow_origins: intersect_strings(&p.allow_origins, &next.allow_origins),
+        allow_methods: intersect_methods(&p.allow_methods, &next.allow_methods),
+        allow_headers: intersect_strings(&p.allow_headers, &next.allow_headers),
+        expose_headers: intersect_strings(&p.expose_headers, &next.expose_headers),
+        allow_credentials: p.allow_credentials && next.allow_credentials,
+        max_age_seconds: match (p.max_age_seconds, next.max_age_seconds) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            _ => p.max_age_seconds.or(next.max_age_seconds),
+        },
+    }
+}
+
+fn merge_string_intersect(prev: Option<&Vec<String>>, next: &[String]) -> Vec<String> {
+    match prev {
+        None => next.to_vec(),
+        Some(p) => p
+            .iter()
+            .filter(|x| next.iter().any(|y| x == &y))
+            .cloned()
+            .collect(),
+    }
+}
+
+fn resolve_action(key: &str, resources: &HashMap<String, ResourceEntry>) -> ResolvedAction {
+    let Some(entry) = resources.get(key) else {
+        // Root-only fallback (key isn't in the map). Should never happen
+        // because every callsite walks `resources.keys()`.
+        return ResolvedAction::WorkerSsr;
+    };
+    if let Some(r) = &entry.redirect {
+        return ResolvedAction::Redirect {
+            to: r.to.clone(),
+            status: r.status,
+        };
+    }
+    if let Some(t) = &entry.rewrite {
+        return ResolvedAction::Rewrite { to: t.clone() };
+    }
+    if let Some(s) = &entry.r#static {
+        return ResolvedAction::Static {
+            try_chain: s.r#try.clone(),
+        };
+    }
+    if key.starts_with("rpc:") {
+        ResolvedAction::WorkerRpc
+    } else {
+        ResolvedAction::WorkerSsr
     }
 }
 
@@ -247,375 +532,6 @@ fn compile_glob(pattern: &str) -> CompiledGlob {
     CompiledGlob { segments }
 }
 
-fn compile_action(a: &Action) -> CompiledAction {
-    match a {
-        Action::Static { r#try, cache, status } => CompiledAction::Static {
-            try_chain: r#try.iter().map(|t| CompiledTemplate::parse(t)).collect(),
-            cache: cache.clone(),
-            status: *status,
-        },
-        Action::Worker { mode, cache, rate_limit } => CompiledAction::Worker {
-            mode: *mode,
-            cache: cache.clone(),
-            rate_limit: rate_limit.clone(),
-        },
-        Action::Redirect { to, status } => CompiledAction::Redirect {
-            to: CompiledTemplate::parse(to),
-            status: *status,
-        },
-        Action::Rewrite { to } => CompiledAction::Rewrite {
-            to: CompiledTemplate::parse(to),
-        },
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Template parsing + rendering
-// ---------------------------------------------------------------------------
-
-impl CompiledTemplate {
-    pub fn parse(s: &str) -> Self {
-        let bytes = s.as_bytes();
-        let mut chunks: Vec<TemplateChunk> = Vec::new();
-        let mut lit = String::new();
-        let mut i = 0;
-        while i < bytes.len() {
-            // $path token
-            if bytes[i] == b'$' && bytes[i..].starts_with(b"$path") {
-                if !lit.is_empty() {
-                    chunks.push(TemplateChunk::Literal(std::mem::take(&mut lit)));
-                }
-                chunks.push(TemplateChunk::Path);
-                i += 5;
-                continue;
-            }
-            // [name] or [...name] capture token
-            if bytes[i] == b'[' {
-                if let Some(end_rel) = bytes[i..].iter().position(|&b| b == b']') {
-                    let end = i + end_rel;
-                    let inner = &s[i + 1..end];
-                    let name = inner.strip_prefix("...").unwrap_or(inner);
-                    if !lit.is_empty() {
-                        chunks.push(TemplateChunk::Literal(std::mem::take(&mut lit)));
-                    }
-                    chunks.push(TemplateChunk::Capture(name.to_string()));
-                    i = end + 1;
-                    continue;
-                }
-            }
-            lit.push(bytes[i] as char);
-            i += 1;
-        }
-        if !lit.is_empty() {
-            chunks.push(TemplateChunk::Literal(lit));
-        }
-        if chunks.is_empty() {
-            chunks.push(TemplateChunk::Literal(String::new()));
-        }
-        Self { chunks }
-    }
-
-    fn render(&self, path: &str, captures: &Captures<'_>) -> String {
-        // Pre-size the buffer for the common case (literal-only template).
-        let mut hint = 0;
-        for c in &self.chunks {
-            match c {
-                TemplateChunk::Literal(s) => hint += s.len(),
-                TemplateChunk::Path => hint += path.len(),
-                TemplateChunk::Capture(_) => hint += 8,
-            }
-        }
-        let mut out = String::with_capacity(hint);
-        for c in &self.chunks {
-            match c {
-                TemplateChunk::Literal(s) => out.push_str(s),
-                TemplateChunk::Path => out.push_str(path),
-                TemplateChunk::Capture(name) => {
-                    if let Some(v) = captures.lookup(name) {
-                        out.push_str(v);
-                    }
-                }
-            }
-        }
-        out
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Path matching
-// ---------------------------------------------------------------------------
-
-fn match_prefix_bare(bare: &str, path: &str) -> bool {
-    // `bare` has no trailing slash. Match the whole path or require a `/`
-    // boundary so `/admin` doesn't match `/administrator`.
-    if path == bare {
-        return true;
-    }
-    if let Some(rest) = path.strip_prefix(bare) {
-        return rest.starts_with('/');
-    }
-    false
-}
-
-fn match_glob<'a>(glob: &'a CompiledGlob, path: &'a str) -> Option<Vec<(&'a str, String)>> {
-    let path_segs: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-    let mut captures: Vec<(&str, String)> = Vec::new();
-    let mut pi = 0;
-    let mut xi = 0;
-    while pi < glob.segments.len() {
-        let seg = &glob.segments[pi];
-        if let GlobSegment::CatchAll(name) = seg {
-            // CatchAll consumes the rest of the path; compile_glob already
-            // asserted it's the last segment.
-            let rest = path_segs[xi..].join("/");
-            captures.push((name.as_str(), rest));
-            return Some(captures);
-        }
-        if xi >= path_segs.len() {
-            return None;
-        }
-        let x = path_segs[xi];
-        match seg {
-            GlobSegment::Literal(lit) => {
-                if lit != x {
-                    return None;
-                }
-            }
-            GlobSegment::SingleCapture(name) => {
-                if x.is_empty() {
-                    return None;
-                }
-                captures.push((name.as_str(), x.to_string()));
-            }
-            GlobSegment::Star => {
-                if x.is_empty() {
-                    return None;
-                }
-            }
-            GlobSegment::CatchAll(_) => unreachable!(),
-        }
-        pi += 1;
-        xi += 1;
-    }
-    if xi != path_segs.len() {
-        return None;
-    }
-    Some(captures)
-}
-
-// ---------------------------------------------------------------------------
-// Dispatch
-// ---------------------------------------------------------------------------
-
-impl CompiledManifest {
-    /// Walk the rules and return the dispatch outcome plus the matched
-    /// rule's CORS policy (if any). The router applies CORS headers
-    /// regardless of which `Outcome` variant fired, so threading the
-    /// `Option<Cors>` through here keeps it visible at the response stage
-    /// without bloating the `Outcome` enum.
-    pub fn dispatch(&self, method: &str, path: &str) -> (Outcome, Option<Cors>) {
-        const MAX_HOPS: u32 = 8;
-        let method_mask = request_method_bit(method);
-        let mut current_path = path.to_string();
-        for _hop in 0..MAX_HOPS {
-            let mut rewrote = false;
-            for rule in &self.rules {
-                if (method_mask & rule.methods) == 0 {
-                    continue;
-                }
-                let captures = match &rule.matcher {
-                    CompiledMatch::Exact(p) => {
-                        if current_path == *p {
-                            Captures::Empty
-                        } else {
-                            continue;
-                        }
-                    }
-                    CompiledMatch::Prefix(bare) => {
-                        if match_prefix_bare(bare, &current_path) {
-                            Captures::Empty
-                        } else {
-                            continue;
-                        }
-                    }
-                    CompiledMatch::Glob(g) => match match_glob(g, &current_path) {
-                        Some(c) => Captures::Glob(c),
-                        None => continue,
-                    },
-                    CompiledMatch::Any => Captures::Empty,
-                };
-                match self.resolve(&rule.action, rule.rule_idx, &current_path, &captures) {
-                    ResolveResult::Outcome(o) => return (o, rule.cors.clone()),
-                    ResolveResult::Rewrite(new_path) => {
-                        current_path = new_path;
-                        rewrote = true;
-                        break;
-                    }
-                    ResolveResult::Continue => continue,
-                }
-            }
-            if !rewrote {
-                return (Outcome::NotFound, None);
-            }
-        }
-        (Outcome::NotFound, None)
-    }
-
-    /// Look up the CORS policy attached to the rule that *would* match
-    /// `(method, path)`. Used by the gateway's preflight handler to
-    /// decide what `Access-Control-*` headers to emit on a CORS
-    /// preflight (`OPTIONS` with `Origin`). Walks the same matcher chain
-    /// as `dispatch`, but inspects each candidate rule's `cors` instead
-    /// of running its action — so we can answer the question for a
-    /// `request_method` (e.g. `POST`) carried in the
-    /// `Access-Control-Request-Method` header even though the actual
-    /// request method on the wire is `OPTIONS`.
-    ///
-    /// Rewrites are followed exactly the same way as `dispatch` so a
-    /// CORS rule on the rewritten path is honored.
-    pub fn cors_for(&self, request_method: &str, path: &str) -> Option<Cors> {
-        const MAX_HOPS: u32 = 8;
-        let method_mask = request_method_bit(request_method);
-        let mut current_path = path.to_string();
-        for _hop in 0..MAX_HOPS {
-            let mut rewrote = false;
-            for rule in &self.rules {
-                if (method_mask & rule.methods) == 0 {
-                    continue;
-                }
-                let captures = match &rule.matcher {
-                    CompiledMatch::Exact(p) => {
-                        if current_path == *p {
-                            Captures::Empty
-                        } else {
-                            continue;
-                        }
-                    }
-                    CompiledMatch::Prefix(bare) => {
-                        if match_prefix_bare(bare, &current_path) {
-                            Captures::Empty
-                        } else {
-                            continue;
-                        }
-                    }
-                    CompiledMatch::Glob(g) => match match_glob(g, &current_path) {
-                        Some(c) => Captures::Glob(c),
-                        None => continue,
-                    },
-                    CompiledMatch::Any => Captures::Empty,
-                };
-                // Rewrites still mutate the path before the rule whose
-                // `cors` we'd return — keep parity with `dispatch`.
-                if let CompiledAction::Rewrite { to } = &rule.action {
-                    current_path = to.render(&current_path, &captures);
-                    rewrote = true;
-                    break;
-                }
-                return rule.cors.clone();
-            }
-            if !rewrote {
-                return None;
-            }
-        }
-        None
-    }
-
-    fn resolve(
-        &self,
-        action: &CompiledAction,
-        rule_idx: u32,
-        path: &str,
-        captures: &Captures<'_>,
-    ) -> ResolveResult {
-        match action {
-            CompiledAction::Static { try_chain, cache, status } => {
-                for tpl in try_chain {
-                    let resolved = tpl.render(path, captures);
-                    if let Some((entry, mutable)) = self.lookup_asset(&resolved) {
-                        return ResolveResult::Outcome(Outcome::Static(StaticHit {
-                            path: resolved.clone(),
-                            hash: entry.hash.clone(),
-                            content_type: entry.content_type.clone(),
-                            size: entry.size,
-                            cache: pick_cache(entry, cache.as_ref(), &resolved, mutable),
-                            status: *status,
-                            mutable,
-                            variants: entry.variants.clone(),
-                        }));
-                    }
-                }
-                // Static rule matched but no asset resolved — the original
-                // walker bubbled this as Outcome::NotFound (terminal).
-                ResolveResult::Outcome(Outcome::NotFound)
-            }
-            CompiledAction::Worker { mode, cache, rate_limit } => {
-                ResolveResult::Outcome(Outcome::Worker {
-                    mode: *mode,
-                    cache: cache.clone(),
-                    rate_limit: rate_limit.clone(),
-                    rule_idx,
-                })
-            }
-            CompiledAction::Redirect { to, status } => {
-                ResolveResult::Outcome(Outcome::Redirect {
-                    to: to.render(path, captures),
-                    status: *status,
-                })
-            }
-            CompiledAction::Rewrite { to } => {
-                ResolveResult::Rewrite(to.render(path, captures))
-            }
-        }
-    }
-
-    fn lookup_asset(&self, path: &str) -> Option<(&AssetEntry, bool)> {
-        if let Some(e) = self.runtime_assets.get(path) {
-            return Some((e, true));
-        }
-        if let Some(e) = self.assets.get(path) {
-            return Some((e, false));
-        }
-        None
-    }
-}
-
-enum ResolveResult {
-    Outcome(Outcome),
-    Rewrite(String),
-    #[allow(dead_code)]
-    Continue,
-}
-
-fn pick_cache(
-    entry: &AssetEntry,
-    rule_cache: Option<&CacheCtl>,
-    resolved_path: &str,
-    mutable: bool,
-) -> CacheCtl {
-    if let Some(c) = &entry.cache {
-        return c.clone();
-    }
-    if let Some(c) = rule_cache {
-        return c.clone();
-    }
-    if !mutable && resolved_path.starts_with("/_assets/") {
-        return CacheCtl {
-            max_age: 31_536_000,
-            swr_window: None,
-            immutable: true,
-            background_refresh: false,
-            stale_on_error: false,
-        };
-    }
-    CacheCtl {
-        max_age: 60,
-        swr_window: None,
-        immutable: false,
-        background_refresh: false,
-        stale_on_error: false,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -625,209 +541,288 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use zeroship_core::types::{
-        Action, AssetEntry, Manifest, Match, Rule, WorkerMode,
+        AuthLevel, Manifest, ProcedureKind, RateLimit, RateLimitPer, RedirectAction,
+        ResourceEntry, StaticAction,
     };
 
-    fn asset(hash: &str, ct: &str) -> AssetEntry {
-        AssetEntry {
-            hash: hash.into(),
-            content_type: ct.into(),
-            size: 0,
-            cache: None,
-            updated_at: 0,
-            variants: HashMap::new(),
+    fn rpc_entry(kind: ProcedureKind) -> ResourceEntry {
+        ResourceEntry {
+            kind: Some(kind),
+            ..Default::default()
         }
     }
 
     #[test]
-    fn compile_preserves_dispatch_semantics_for_passthrough() {
-        let m = Manifest::passthrough();
+    fn empty_resources_yields_no_lookup_hits() {
+        let m = Manifest::default();
         let c = CompiledManifest::compile(&m);
-        match c.dispatch("POST", "/_rpc/listTodos").0 {
-            Outcome::Worker { mode, .. } => assert_eq!(mode, WorkerMode::Rpc),
-            other => panic!("expected Worker(Rpc), got {other:?}"),
-        }
-        match c.dispatch("GET", "/").0 {
-            Outcome::Worker { mode, .. } => assert_eq!(mode, WorkerMode::Ssr),
-            other => panic!("expected Worker(Ssr), got {other:?}"),
-        }
+        assert!(c.lookup_resource("/foo").is_none());
+        assert!(c.lookup_resource("/_zs/v1/x").is_none());
     }
 
     #[test]
-    fn compile_handles_static_method_narrowing() {
+    fn resource_tree_rpc_lookup_strips_wire_prefix() {
+        let mut resources = HashMap::new();
+        resources.insert(
+            "rpc:todos.list".to_string(),
+            rpc_entry(ProcedureKind::Query),
+        );
         let m = Manifest {
-            rules: vec![Rule {
-                r#match: Match::Any,
-                action: Action::Static {
-                    r#try: vec!["/index.html".into()],
-                    cache: None,
-                    status: None,
-                },
-                cors: None,
-            }],
-            assets: HashMap::from([(
-                "/index.html".into(),
-                asset("h1", "text/html"),
-            )]),
+            version: 1,
+            resources,
             ..Manifest::default()
         };
         let c = CompiledManifest::compile(&m);
-        match c.dispatch("GET", "/").0 {
-            Outcome::Static(hit) => assert_eq!(hit.hash, "h1"),
-            other => panic!("expected Static, got {other:?}"),
-        }
-        match c.dispatch("POST", "/").0 {
-            Outcome::NotFound => {}
-            other => panic!("expected NotFound for POST, got {other:?}"),
-        }
+        let p = c.lookup_resource("/_zs/v1/todos.list").expect("matches");
+        assert_eq!(p.kind, Some(ProcedureKind::Query));
+        assert!(matches!(p.action, ResolvedAction::WorkerRpc));
+        // Unknown wire id → no match.
+        assert!(c.lookup_resource("/_zs/v1/unknown.method").is_none());
+        // Same id without the wire prefix is NOT looked up via rpc_index.
+        assert!(c.lookup_resource("/todos.list").is_none());
     }
 
     #[test]
-    fn compile_glob_captures_propagate_to_redirect_template() {
+    fn resource_tree_url_lookup_picks_most_specific() {
+        let mut resources = HashMap::new();
+        resources.insert(
+            "/api".into(),
+            ResourceEntry {
+                auth: Some(AuthLevel::User),
+                ..Default::default()
+            },
+        );
+        resources.insert(
+            "/api/admin".into(),
+            ResourceEntry {
+                auth: Some(AuthLevel::Admin),
+                r#override: vec!["auth".into()],
+                ..Default::default()
+            },
+        );
         let m = Manifest {
-            rules: vec![Rule {
-                r#match: Match::Glob {
-                    method: None,
-                    path: "/old/[slug]".into(),
-                },
-                action: Action::Redirect {
-                    to: "/new/[slug]".into(),
-                    status: 301,
-                },
-                cors: None,
-            }],
+            version: 1,
+            resources,
             ..Manifest::default()
         };
         let c = CompiledManifest::compile(&m);
-        match c.dispatch("GET", "/old/foo").0 {
-            Outcome::Redirect { to, status } => {
-                assert_eq!(to, "/new/foo");
-                assert_eq!(status, 301);
+        // Exact-literal match takes priority.
+        let key = c.lookup_resource_key("/api/admin").expect("matches");
+        assert_eq!(key, "/api/admin");
+    }
+
+    #[test]
+    fn resource_tree_glob_url_lookup() {
+        let mut resources = HashMap::new();
+        resources.insert("/blog/[slug]".into(), ResourceEntry::default());
+        let m = Manifest {
+            version: 1,
+            resources,
+            ..Manifest::default()
+        };
+        let c = CompiledManifest::compile(&m);
+        let key = c.lookup_resource_key("/blog/hello").expect("glob matches");
+        assert_eq!(key, "/blog/[slug]");
+        // Empty segment after the prefix doesn't match a single-segment capture.
+        assert!(c.lookup_resource_key("/blog/").is_none());
+    }
+
+    #[test]
+    fn effective_policy_inherits_auth_from_root() {
+        let mut resources = HashMap::new();
+        resources.insert(
+            "*".into(),
+            ResourceEntry {
+                auth: Some(AuthLevel::Admin),
+                ..Default::default()
+            },
+        );
+        resources.insert(
+            "rpc:todos.list".into(),
+            rpc_entry(ProcedureKind::Query),
+        );
+        let m = Manifest {
+            version: 1,
+            resources,
+            ..Manifest::default()
+        };
+        let c = CompiledManifest::compile(&m);
+        let p = c.lookup_resource("/_zs/v1/todos.list").expect("matches");
+        assert_eq!(p.auth, AuthLevel::Admin, "inherits root admin");
+        assert_eq!(p.kind, Some(ProcedureKind::Query));
+    }
+
+    #[test]
+    fn effective_policy_stricter_auth_wins_along_chain() {
+        let mut resources = HashMap::new();
+        // Root: anon, parent: user, child: doesn't override → user wins.
+        resources.insert(
+            "*".into(),
+            ResourceEntry {
+                auth: Some(AuthLevel::Anon),
+                publicly_accessible: Some(true),
+                ..Default::default()
+            },
+        );
+        resources.insert(
+            "rpc:todos".into(),
+            ResourceEntry {
+                auth: Some(AuthLevel::User),
+                r#override: vec!["auth".into(), "publicly_accessible".into()],
+                publicly_accessible: Some(false),
+                ..Default::default()
+            },
+        );
+        resources.insert(
+            "rpc:todos.list".into(),
+            rpc_entry(ProcedureKind::Query),
+        );
+        let m = Manifest {
+            version: 1,
+            resources,
+            ..Manifest::default()
+        };
+        let c = CompiledManifest::compile(&m);
+        let p = c.lookup_resource("/_zs/v1/todos.list").expect("matches");
+        assert_eq!(p.auth, AuthLevel::User, "stricter user beats root anon");
+    }
+
+    #[test]
+    fn effective_policy_rate_limit_min_wins() {
+        let mut resources = HashMap::new();
+        resources.insert(
+            "*".into(),
+            ResourceEntry {
+                auth: Some(AuthLevel::Admin),
+                rate_limit: Some(RateLimit {
+                    rpm: Some(600),
+                    rps: None,
+                    per: RateLimitPer::Ip,
+                }),
+                ..Default::default()
+            },
+        );
+        resources.insert(
+            "rpc:todos.add".into(),
+            ResourceEntry {
+                kind: Some(ProcedureKind::Mutation),
+                rate_limit: Some(RateLimit {
+                    rpm: Some(60),
+                    rps: None,
+                    per: RateLimitPer::Ip,
+                }),
+                r#override: vec!["rate_limit".into()],
+                ..Default::default()
+            },
+        );
+        let m = Manifest {
+            version: 1,
+            resources,
+            ..Manifest::default()
+        };
+        let c = CompiledManifest::compile(&m);
+        let p = c.lookup_resource("/_zs/v1/todos.add").expect("matches");
+        assert_eq!(p.rate_limit.as_ref().unwrap().rpm, Some(60), "stricter cap wins");
+    }
+
+    #[test]
+    fn resolved_action_picks_explicit_over_default() {
+        let mut resources = HashMap::new();
+        resources.insert(
+            "/old".into(),
+            ResourceEntry {
+                redirect: Some(RedirectAction { to: "/new".into(), status: 301 }),
+                ..Default::default()
+            },
+        );
+        resources.insert(
+            "/_assets/main.js".into(),
+            ResourceEntry {
+                r#static: Some(StaticAction { r#try: vec!["$path".into()] }),
+                ..Default::default()
+            },
+        );
+        let m = Manifest {
+            version: 1,
+            resources,
+            ..Manifest::default()
+        };
+        let c = CompiledManifest::compile(&m);
+        let p1 = c.lookup_resource("/old").expect("matches");
+        match &p1.action {
+            ResolvedAction::Redirect { to, status } => {
+                assert_eq!(to, "/new");
+                assert_eq!(*status, 301);
             }
             other => panic!("expected Redirect, got {other:?}"),
         }
+        let p2 = c.lookup_resource("/_assets/main.js").expect("matches");
+        assert!(matches!(p2.action, ResolvedAction::Static { .. }));
     }
 
     #[test]
-    fn compile_rewrite_chain_resolves_to_terminal() {
+    fn middleware_appends_root_to_child() {
+        let mut resources = HashMap::new();
+        resources.insert(
+            "*".into(),
+            ResourceEntry {
+                auth: Some(AuthLevel::Admin),
+                middleware: vec!["audit".into()],
+                ..Default::default()
+            },
+        );
+        resources.insert(
+            "rpc:billing.charge".into(),
+            ResourceEntry {
+                kind: Some(ProcedureKind::Mutation),
+                middleware: vec!["transaction".into()],
+                ..Default::default()
+            },
+        );
         let m = Manifest {
-            rules: vec![
-                Rule {
-                    r#match: Match::Exact { method: None, path: "/old".into() },
-                    action: Action::Rewrite { to: "/new".into() },
-                    cors: None,
-                },
-                Rule {
-                    r#match: Match::Exact { method: None, path: "/new".into() },
-                    action: Action::Static {
-                        r#try: vec!["/new.html".into()],
-                        cache: None,
-                        status: None,
-                    },
-                    cors: None,
-                },
-            ],
-            assets: HashMap::from([(
-                "/new.html".into(),
-                asset("h-new", "text/html"),
-            )]),
+            version: 1,
+            resources,
             ..Manifest::default()
         };
         let c = CompiledManifest::compile(&m);
-        match c.dispatch("GET", "/old").0 {
-            Outcome::Static(hit) => assert_eq!(hit.hash, "h-new"),
-            other => panic!("expected Static after rewrite, got {other:?}"),
-        }
+        let p = c.lookup_resource("/_zs/v1/billing.charge").expect("matches");
+        assert_eq!(
+            p.middleware,
+            vec!["audit".to_string(), "transaction".to_string()]
+        );
     }
 
     #[test]
-    fn compile_circular_rewrite_trips_max_hops() {
+    fn url_index_orders_globs_by_specificity() {
+        // Glob `/api/v1/*` should win over a less specific glob; literals
+        // beat globs when both could match.
+        let mut resources = HashMap::new();
+        resources.insert("/api/v1/users".into(), ResourceEntry::default());
+        resources.insert("/api/v1/*".into(), ResourceEntry::default());
         let m = Manifest {
-            rules: vec![
-                Rule {
-                    r#match: Match::Exact { method: None, path: "/a".into() },
-                    action: Action::Rewrite { to: "/b".into() },
-                    cors: None,
-                },
-                Rule {
-                    r#match: Match::Exact { method: None, path: "/b".into() },
-                    action: Action::Rewrite { to: "/a".into() },
-                    cors: None,
-                },
-            ],
+            version: 1,
+            resources,
             ..Manifest::default()
         };
         let c = CompiledManifest::compile(&m);
-        match c.dispatch("GET", "/a").0 {
-            Outcome::NotFound => {}
-            other => panic!("expected NotFound after circular rewrite, got {other:?}"),
-        }
+        // Literal path takes priority.
+        assert_eq!(
+            c.lookup_resource_key("/api/v1/users").as_deref(),
+            Some("/api/v1/users")
+        );
+        // Glob picks up unmatched paths.
+        assert_eq!(
+            c.lookup_resource_key("/api/v1/teams").as_deref(),
+            Some("/api/v1/*")
+        );
     }
 
     #[test]
-    fn compile_template_path_substitution() {
-        // Bare $path
-        let t = CompiledTemplate::parse("$path");
-        assert_eq!(t.chunks.len(), 1);
-        assert!(matches!(t.chunks[0], TemplateChunk::Path));
-        assert_eq!(t.render("/foo", &Captures::Empty), "/foo");
-
-        // $path/x — Path then literal
-        let t = CompiledTemplate::parse("$path/x");
-        assert_eq!(t.chunks.len(), 2);
-        assert!(matches!(t.chunks[0], TemplateChunk::Path));
-        assert!(matches!(&t.chunks[1], TemplateChunk::Literal(s) if s == "/x"));
-        assert_eq!(t.render("/foo", &Captures::Empty), "/foo/x");
-
-        // /[slug]/x — literal "/", capture, literal "/x"
-        let t = CompiledTemplate::parse("/[slug]/x");
-        assert_eq!(t.chunks.len(), 3);
-        assert!(matches!(&t.chunks[0], TemplateChunk::Literal(s) if s == "/"));
-        assert!(matches!(&t.chunks[1], TemplateChunk::Capture(n) if n == "slug"));
-        assert!(matches!(&t.chunks[2], TemplateChunk::Literal(s) if s == "/x"));
-        let caps = Captures::Glob(vec![("slug", "hello".to_string())]);
-        assert_eq!(t.render("/ignored", &caps), "/hello/x");
-
-        // /[...rest] — literal "/", capture (catch-all uses the same name)
-        let t = CompiledTemplate::parse("/[...rest]");
-        assert_eq!(t.chunks.len(), 2);
-        assert!(matches!(&t.chunks[0], TemplateChunk::Literal(s) if s == "/"));
-        assert!(matches!(&t.chunks[1], TemplateChunk::Capture(n) if n == "rest"));
-        let caps = Captures::Glob(vec![("rest", "a/b/c".to_string())]);
-        assert_eq!(t.render("/ignored", &caps), "/a/b/c");
-
-        // All-literal collapses to one chunk
-        let t = CompiledTemplate::parse("/static/path");
-        assert_eq!(t.chunks.len(), 1);
-        assert!(matches!(&t.chunks[0], TemplateChunk::Literal(s) if s == "/static/path"));
-    }
-
-    #[test]
-    fn compile_prefix_normalizes_trailing_slash() {
-        // Both "/admin/" and "/admin" should produce a matcher that hits
-        // /admin and /admin/users identically.
-        let with_slash = compile_match(&Match::Prefix {
-            method: None,
-            path: "/admin/".into(),
-        });
-        let without_slash = compile_match(&Match::Prefix {
-            method: None,
-            path: "/admin".into(),
-        });
-        let CompiledMatch::Prefix(a) = with_slash else {
-            panic!("expected Prefix");
-        };
-        let CompiledMatch::Prefix(b) = without_slash else {
-            panic!("expected Prefix");
-        };
-        assert_eq!(a, b, "trailing slash should be normalized away");
-        assert_eq!(a, "/admin");
-
-        for p in [&a, &b] {
-            assert!(match_prefix_bare(p, "/admin"));
-            assert!(match_prefix_bare(p, "/admin/users"));
-            assert!(!match_prefix_bare(p, "/administrator"));
-            assert!(!match_prefix_bare(p, "/other"));
-        }
+    fn passthrough_resolves_to_worker_ssr_via_root_star() {
+        let m = Manifest::passthrough();
+        let c = CompiledManifest::compile(&m);
+        // `*` doesn't dispatch; nothing matches by URL.
+        assert!(c.lookup_resource("/anything").is_none());
+        assert!(c.lookup_resource("/_zs/v1/anything").is_none());
     }
 }

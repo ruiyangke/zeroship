@@ -360,6 +360,155 @@ impl EnvStore {
         Ok(map)
     }
 
+    // ------------------------------------------------------------------
+    // Expose list (per-app opt-in for `process.env`)
+    // ------------------------------------------------------------------
+
+    /// Read the list of secret names the creator has opted to surface in
+    /// `process.env`. Sorted, deterministic — used both for the worker
+    /// wire format and the admin API readback.
+    pub async fn list_expose(&self, app_id: Uuid) -> Result<Vec<String>, EnvError> {
+        let conn = self
+            .registry
+            .conn()
+            .await
+            .map_err(|e| EnvError::Db(format!("{e}")))?;
+        let rows = conn
+            .query(
+                "SELECT key_name FROM app_env_expose WHERE app_id = $1 ORDER BY key_name",
+                &[&app_id],
+            )
+            .await
+            .map_err(|e| EnvError::Db(e.to_string()))?;
+        Ok(rows.iter().map(|r| r.get::<_, String>("key_name")).collect())
+    }
+
+    /// Replace the per-app expose list atomically. Empty `keys` clears
+    /// the list. Returns the new list (sorted, deduplicated).
+    ///
+    /// Each name is validated against the same `valid_key` regex that
+    /// gates `set_var` / `set_secret` — bad input is rejected wholesale
+    /// (no partial application). Two-statement transaction ensures the
+    /// list is replaced atomically; a worker fetching env mid-replace
+    /// sees either the old set or the new set, never a torn state.
+    pub async fn set_expose(&self, app_id: Uuid, keys: &[String]) -> Result<Vec<String>, EnvError> {
+        // Validate all names first — fail loud before touching the DB.
+        for k in keys {
+            if !valid_key(k) {
+                return Err(EnvError::BadKey(k.clone()));
+            }
+        }
+        // Sort + dedup so rows are deterministic and the
+        // PRIMARY KEY (app_id, key_name) constraint can't reject a
+        // duplicate input.
+        let mut sorted: Vec<String> = keys.iter().cloned().collect();
+        sorted.sort();
+        sorted.dedup();
+
+        let mut conn = self
+            .registry
+            .conn()
+            .await
+            .map_err(|e| EnvError::Db(format!("{e}")))?;
+        let tx = conn
+            .transaction()
+            .await
+            .map_err(|e| EnvError::Db(e.to_string()))?;
+        tx.execute(
+            "DELETE FROM app_env_expose WHERE app_id = $1",
+            &[&app_id],
+        )
+        .await
+        .map_err(|e| EnvError::Db(e.to_string()))?;
+        for name in &sorted {
+            tx.execute(
+                "INSERT INTO app_env_expose(app_id, key_name) VALUES($1, $2)
+                 ON CONFLICT (app_id, key_name) DO NOTHING",
+                &[&app_id, &name],
+            )
+            .await
+            .map_err(|e| EnvError::Db(e.to_string()))?;
+        }
+        tx.commit().await.map_err(|e| EnvError::Db(e.to_string()))?;
+        // Bump env_version so workers refetch and re-derive process.env
+        // membership on the next reconcile cycle.
+        self.bump_env_version(app_id).await;
+        Ok(sorted)
+    }
+
+    // ------------------------------------------------------------------
+    // Worker wire format
+    // ------------------------------------------------------------------
+
+    /// Merged env for worker consumption in the new split shape:
+    ///
+    /// ```json
+    /// { "vars": {...}, "secrets": {...}, "expose": [...] }
+    /// ```
+    ///
+    /// This is the canonical worker-facing payload. The runtime parses
+    /// it once and uses the three parts to decide what lands in
+    /// `process.env` (vars + opt-in-exposed secrets) vs. what's only
+    /// reachable through the explicit `zeroship.env` import / `env.get()`
+    /// (the merged map).
+    ///
+    /// **Never expose over a public API** — only `/internal/apps/:id/env`
+    /// authenticated by the control/master key.
+    pub async fn merged_env_for_worker(
+        &self,
+        app_id: Uuid,
+    ) -> Result<serde_json::Value, EnvError> {
+        let conn = self
+            .registry
+            .conn()
+            .await
+            .map_err(|e| EnvError::Db(format!("{e}")))?;
+        let exists = conn
+            .query("SELECT 1 FROM apps WHERE id = $1", &[&app_id])
+            .await
+            .map_err(|e| EnvError::Db(e.to_string()))?;
+        if exists.is_empty() {
+            return Err(EnvError::AppNotFound);
+        }
+
+        // Vars — already plaintext.
+        let mut vars = serde_json::Map::new();
+        for (k, v) in self.list_vars(app_id).await? {
+            vars.insert(k, serde_json::Value::String(v));
+        }
+
+        // Secrets — decrypt each row. Same key fallback as `merged_env`
+        // (primary first, then any rotation-grace previous keys).
+        let secret_rows = conn
+            .query(
+                "SELECT key_name, ciphertext FROM app_secrets WHERE app_id = $1",
+                &[&app_id],
+            )
+            .await
+            .map_err(|e| EnvError::Db(e.to_string()))?;
+        let mut keys: Vec<[u8; 32]> = Vec::with_capacity(1 + self.previous_keys.len());
+        keys.push(self.primary_key);
+        keys.extend_from_slice(&self.previous_keys);
+
+        let mut secrets = serde_json::Map::new();
+        for r in secret_rows.iter() {
+            let k: String = r.get("key_name");
+            let ct: Vec<u8> = r.get("ciphertext");
+            let plain = crypto::decrypt_with_keys(&keys, &ct)?;
+            let s = String::from_utf8(plain).map_err(|_| EnvError::Crypto(CryptoError::Decrypt))?;
+            secrets.insert(k, serde_json::Value::String(s));
+        }
+
+        // Expose list — sorted ascending.
+        let expose = self.list_expose(app_id).await?;
+
+        Ok(serde_json::json!({
+            "vars": vars,
+            "secrets": secrets,
+            "expose": expose,
+        }))
+    }
+
     /// Re-encrypt every secret for `app_id` with the current primary
     /// key. Used to drain a rotation grace period: after every secret
     /// has been touched once, it's safe to drop `previous_keys`.

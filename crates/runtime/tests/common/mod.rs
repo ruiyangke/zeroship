@@ -170,7 +170,10 @@ pub fn dispatch_multi(
         .collect()
 }
 
-/// Like [`dispatch`] but with caller-supplied env vars.
+/// Like [`dispatch`] but with caller-supplied env vars surfaced as the
+/// user-facing `vars` half of the EnvSnapshot. Routes through the same
+/// path as production: snapshot → `set_env_snapshot` → `env_app_vars`,
+/// reachable via `env.get(name)` and the `zeroship` module's `env`.
 pub fn dispatch_with_env(
     modules: Vec<ModuleEntry>,
     env_vars: HashMap<String, String>,
@@ -178,8 +181,47 @@ pub fn dispatch_with_env(
     args_json: &str,
 ) -> Result<RequestResult, String> {
     init_v8();
-    let runtime = Runtime::builder().modules(modules).env_vars(env_vars).build();
-    run_dispatch_on_runtime(&runtime, method, args_json)
+    let runtime = Runtime::builder().modules(modules).build();
+    let vars: std::collections::BTreeMap<String, String> = env_vars.into_iter().collect();
+    let env = EnvSnapshot::new(vars, std::collections::BTreeMap::new(), Vec::new());
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let body = if args_json.is_empty() { "".to_string() } else { args_json.to_string() };
+    let url = format!("http://localhost/_rpc/{}", url_path_encode(method));
+    let outcome = runtime.call_fetch_handler(
+        "POST",
+        &url,
+        &[("content-type".into(), "application/json".into())],
+        &body,
+        &env,
+        ctx,
+    );
+
+    if let FetchOutcome::Response { status, body: json_body, logs, .. } = &outcome {
+        let (status, json_body, logs) = (*status, json_body.clone(), logs.clone());
+        if !(200..300).contains(&status) {
+            return Err(parse_error_message(&json_body));
+        }
+        return Ok(RequestResult {
+            json: json_body,
+            cpu_time: Duration::ZERO,
+            wall_time: Duration::ZERO,
+            logs,
+        });
+    }
+
+    let (status, json_body, logs) = compio::runtime::Runtime::new().unwrap().block_on(async {
+        runtime.start_pump();
+        drive_fetch_outcome(outcome).await
+    });
+    if !(200..300).contains(&status) {
+        return Err(parse_error_message(&json_body));
+    }
+    Ok(RequestResult {
+        json: json_body,
+        cpu_time: Duration::ZERO,
+        wall_time: Duration::ZERO,
+        logs,
+    })
 }
 
 /// Helper: feed an HTTP request straight through `call_fetch_handler`.
@@ -283,6 +325,28 @@ pub fn dispatch_fetch(modules: Vec<ModuleEntry>, req: TestRequest) -> FetchOutco
     init_v8();
     let runtime = Runtime::builder().modules(modules).build();
     let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    runtime.call_fetch_handler(
+        req.method,
+        req.url,
+        &req.headers,
+        &req.body,
+        &env,
+        ctx,
+    )
+}
+
+/// Build a Runtime + call `call_fetch_handler` with a caller-supplied
+/// EnvSnapshot. Used by Part B tests that want to assert visibility of
+/// vars vs. secrets vs. the per-app `expose` opt-in across `process.env`,
+/// the `zeroship` module's `env` import, and `env.get()`.
+pub fn dispatch_fetch_with_env(
+    modules: Vec<ModuleEntry>,
+    req: TestRequest,
+    env: EnvSnapshot,
+) -> FetchOutcome {
+    init_v8();
+    let runtime = Runtime::builder().modules(modules).build();
     let ctx = RequestCtx::new(CancelFlag::new());
     runtime.call_fetch_handler(
         req.method,

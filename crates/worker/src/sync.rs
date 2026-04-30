@@ -294,9 +294,11 @@ pub async fn fetch_app_version(url_base: &str, auth_key: &str, app_id: &Uuid) ->
     serde_json::from_str(&body).map_err(|e| e.to_string())
 }
 
-/// Fetch the merged env (vars + decrypted secrets) for an app. The
-/// result is a JSON object string — JSON.parsed once into an
-/// `EnvSnapshot` at cache-insert time so the hot path skips parsing.
+/// Fetch the merged env for an app in the split `{vars, secrets, expose}`
+/// wire shape (see `crates/runtime/src/fetch_outcome.rs::EnvSnapshot`).
+/// The result is a JSON object string passed through verbatim to
+/// `EnvSnapshot::from_validated_json` at cache-insert time so the hot
+/// path skips the parse-then-reserialize round-trip.
 ///
 /// Control returns 404 / 500 for non-existent apps or decrypt failures;
 /// in both cases we propagate the error string so the caller can log it

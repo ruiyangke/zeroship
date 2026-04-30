@@ -78,37 +78,103 @@ impl RequestCtx {
     }
 }
 
-/// Frozen env snapshot — the `env` object user code imports from `zeroship`
-/// and receives as the second `fetch(req, env, ctx)` parameter. Same
-/// reference every request; populated once at worker boot from the app's
-/// zeroship.toml + control-plane secrets.
+/// Frozen env snapshot — carries the per-app environment as a three-part
+/// split:
 ///
-/// Encoded as JSON for simple cross-boundary handoff; the JS side
-/// JSON.parses once at module init and freezes the result. Richer
-/// per-binding shapes (`env.DB.query(...)`) come in PR 3 when SDKs
-/// land.
+/// ```json
+/// {
+///   "vars":    { "NODE_ENV": "production" },
+///   "secrets": { "OPENAI_API_KEY": "sk-..." },
+///   "expose":  ["OPENAI_API_KEY"]
+/// }
+/// ```
+///
+/// Why split: any third-party npm package in the bundle can read
+/// `process.env` (`Object.keys(process.env)`, `JSON.stringify(process.env)`,
+/// `dotenv` debug printing, …). If secrets land there by default they
+/// can be exfiltrated by a single malicious dependency. With this shape
+/// the runtime keeps secrets out of `process.env` unless the creator
+/// explicitly opts a name into the `expose` list (for libraries like
+/// LangChain that defensively read `process.env.OPENAI_API_KEY`).
+///
+/// The merged map (`vars + secrets`) is what user code sees as
+/// `import { env } from "zeroship"` and `fetch(req, env, ctx)`'s second
+/// arg — the explicit, audited surface.
+///
+/// Wire format is JSON for simple cross-boundary handoff; the worker
+/// receives it as bytes from the control plane, the runtime parses it
+/// once and caches both the merged V8 object and the per-key
+/// classification needed for `process.env`.
 #[derive(Clone)]
 pub struct EnvSnapshot {
     json: String,
 }
 
 impl EnvSnapshot {
-    pub fn new(value: serde_json::Value) -> Self {
+    /// Build a snapshot from typed maps. Serializes to the JSON wire
+    /// shape `{ vars, secrets, expose }`.
+    ///
+    /// `BTreeMap` is used so the JSON output is deterministic — the
+    /// snapshot is hashed/compared against cached versions on the
+    /// worker hot path, and a HashMap iterator order would inflate
+    /// false-positive cache misses.
+    pub fn new(
+        vars: std::collections::BTreeMap<String, String>,
+        secrets: std::collections::BTreeMap<String, String>,
+        expose: Vec<String>,
+    ) -> Self {
+        let mut expose_sorted = expose;
+        expose_sorted.sort();
+        let value = serde_json::json!({
+            "vars": vars,
+            "secrets": secrets,
+            "expose": expose_sorted,
+        });
         Self { json: value.to_string() }
     }
 
-    /// Build a snapshot from a pre-validated JSON string. The caller
-    /// MUST guarantee `json` is a valid JSON object; this constructor
-    /// stores the bytes verbatim and the JS side trusts it on parse.
-    /// Skips the parse-then-reserialize round-trip when the wire
-    /// format is already a JSON string (the common case for env data
-    /// arriving from the control plane).
+    /// Convenience: build a snapshot from a `vars` map only — no secrets,
+    /// empty expose. Accepts a `serde_json::Value::Object` for ergonomic
+    /// use with the `serde_json::json!({...})` macro.
+    ///
+    /// Non-object values silently degrade to an empty vars map.
+    pub fn vars_only(value: serde_json::Value) -> Self {
+        let vars = match value {
+            serde_json::Value::Object(map) => map
+                .into_iter()
+                .filter_map(|(k, v)| {
+                    // Coerce scalars to string the same way the JS side
+                    // would when reading env.X — preserves test ergonomics
+                    // (`json!({"N": 42})` → "42").
+                    match v {
+                        serde_json::Value::String(s) => Some((k, s)),
+                        serde_json::Value::Bool(b) => Some((k, b.to_string())),
+                        serde_json::Value::Number(n) => Some((k, n.to_string())),
+                        _ => None,
+                    }
+                })
+                .collect(),
+            _ => std::collections::BTreeMap::new(),
+        };
+        Self::new(vars, std::collections::BTreeMap::new(), Vec::new())
+    }
+
+    /// Trust pre-validated wire JSON. Used on the worker hot path —
+    /// the bytes arrive from the control plane (which is the only
+    /// producer of this JSON) and skip the parse-then-reserialize
+    /// round-trip a second `from_str` would impose.
+    ///
+    /// The caller MUST guarantee `json` is a valid JSON object with
+    /// the expected `{ vars, secrets, expose }` keys. Validation
+    /// happens once at the producer; this constructor does no checks.
     pub fn from_validated_json(json: String) -> Self {
         Self { json }
     }
 
     pub fn empty() -> Self {
-        Self { json: "{}".into() }
+        Self {
+            json: r#"{"vars":{},"secrets":{},"expose":[]}"#.into(),
+        }
     }
 
     pub fn as_json(&self) -> &str {

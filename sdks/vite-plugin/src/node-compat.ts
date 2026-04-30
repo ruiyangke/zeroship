@@ -101,10 +101,39 @@ async function* _setInterval(ms, value) {
 Object.assign(__vite_ssr_exports__, { setTimeout: _setTimeout, setImmediate: _setImmediate, setInterval: _setInterval, default: { setTimeout: _setTimeout, setImmediate: _setImmediate, setInterval: _setInterval } });
 `,
 
+  // node:module — unenv aliases this to `unenv/runtime/mock/proxy-cjs`,
+  // which itself uses the CJS-interop helpers exported by Vite's optimizer
+  // chunk. The optimizer chunk imports node:module first to wire those
+  // helpers, creating a circular dependency: chunk → node:module →
+  // proxy-cjs → chunk.t. By the time proxy-cjs reads `chunk.t`, the
+  // helper hasn't been assigned yet, so the eval throws
+  // "(0 , __vite_ssr_import_0__.t) is not a function".
+  // Inline a tiny stub here to break the cycle. Real Node code that needs
+  // createRequire is rare in our app surface; deepagents only reaches it
+  // via fs-bundler internals that don't actually invoke require at
+  // runtime.
+  "node:module": `
+const _noop = function() { return new Proxy(function(){}, { get: () => _noop, apply: () => undefined, construct: () => ({}) }); };
+function createRequire() { return _noop; }
+function builtinModules() { return []; }
+function isBuiltin() { return false; }
+function syncBuiltinESMExports() {}
+const _default = { createRequire, builtinModules: [], isBuiltin, syncBuiltinESMExports };
+Object.assign(__vite_ssr_exports__, {
+  default: _default,
+  createRequire,
+  builtinModules: [],
+  isBuiltin,
+  syncBuiltinESMExports,
+  Module: function(){},
+});
+`,
+
   // node:process — unenv's polyfill clobbers process.versions = {}, which
   // breaks libraries that read process.versions.node.split(".") during
   // top-level evaluation (e.g. @nodelib/fs.scandir bundled by deepagents).
-  // Delegate to the runtime-prelude's globalThis.process which already has
+  // Delegate to the Rust runtime's globalThis.process (installed by
+  // setup_globals — see crates/runtime/src/init.rs) which already has
   // proper versions set.
   "node:process": `
 const _proc = globalThis.process;

@@ -200,6 +200,65 @@ Order of checks in `execute_outcome`'s `Outcome::Worker` arm:
 - "How does the gateway enforce per-rule rate limits?" → `compute_bucket_id` in `crates/gateway/src/router.rs` derives the bucket discriminator from `RateLimitPer`; `state.per_rule_rate_limits.check(app_id, rule_idx, per, &bucket_id, &rl)` (in `crates/gateway/src/enforce.rs`) takes a token from the matching bucket or returns 429 with `Retry-After: 1`. The check fires inside `execute_outcome`'s `Outcome::Worker` arm before any worker dispatch.
 - "How does an app get a custom domain?" → Not currently supported. Adding it needs a verified `host → app_id` map at the gateway, sourced from a DNS TXT or ACME challenge.
 
+## Resource-tree dispatch (v3 manifests)
+
+`docs/proposals/rpc-v2.md` §7 introduces a unified `Manifest.resources` map keyed by `rpc:<wireId>`, `/<path>`, or `*` (root). v3 manifests carry both `rules` (legacy) and `resources` (new); the gateway prefers the resource-tree path when it produces a match, falling through to the rule walker otherwise. Once Phase 1 is fully migrated and the build emits every URL path under `resources`, the rule walker retires.
+
+### Compile-time
+
+`CompiledManifest::compile` walks `Manifest.resources` once per route update and builds:
+
+- **`effective_policies: HashMap<String, EffectivePolicy>`** — per-resource flattened policy. Auth, rate_limit, cors, csrf_origins, cache, idempotent, max_input_bytes, middleware, publicly_accessible, and the resolved `ResolvedAction` are computed by walking the inheritance chain (root `*` → ancestors → self) and applying the per-field merge rules from §7:
+  - `auth`: stricter wins (`admin > user > anon`).
+  - `rate_limit`, `max_input_bytes`: min wins.
+  - `cors`, `csrf_origins`, `allow_methods`: intersect (child can only narrow).
+  - `middleware`: append (root → child).
+  - `cache`, `idempotent`, `publicly_accessible`: child overrides.
+- **`rpc_index: HashMap<String, String>`** — wire-id (with `rpc:` prefix stripped) → resource key. Used by per-request lookup to resolve `/_zs/v1/<wireId>` in O(1).
+- **`url_index: PathMatcher`** — literal-path table + glob list ordered by descending specificity. Most-specific match wins; literals beat globs.
+
+### Per request
+
+```
+URL begins with /_zs/v1/?
+  yes → strip prefix; lookup `<wireId>` in rpc_index
+  no  → walk url_index (literal first, then globs in specificity order)
+match?
+  yes → apply EffectivePolicy → execute ResolvedAction
+  no  → fall back to legacy rule walker (migration window)
+```
+
+`EffectivePolicy` enforcement happens before the worker is touched: method-vs-kind gate (mutations refuse `GET`), auth gate, csrf origin check, max_input_bytes guard, per-resource rate limit (rule_idx is `xxh3(resource_key)` so two distinct keys with the same shape get independent buckets). When all checks pass:
+
+| `ResolvedAction` | Effect |
+| --- | --- |
+| `WorkerRpc` | Forward to worker (key was `rpc:<id>`, no explicit routing override) |
+| `WorkerSsr` | Forward to worker (URL key, no explicit override) |
+| `Redirect { to, status }` | 30x with `Location` header |
+| `Rewrite { to }` | Forward to worker under the rewritten path (Phase 2: no recursion yet) |
+| `Static { try_chain }` | First entry that resolves to an asset wins; serves via `serve_static_hit` |
+
+The wire URL stays as `/_zs/v1/<wireId>` end-to-end — the `rpc:` prefix only appears in `manifest.resources` keys. The gateway translates: incoming `/_zs/v1/todos.add` → lookup key `rpc:todos.add`.
+
+### Validation (parse-time)
+
+`Manifest::validate()` runs the v3-only checks when `version >= 3 && !resources.is_empty()`:
+
+- **Resource-key shape** — `*`, `/<path-with-globs>`, or `rpc:[a-zA-Z0-9._*-]+`.
+- **Routing-action exclusivity** — at most one of `redirect` / `rewrite` / `static` per entry.
+- **Override marker** — when a child resource declares a field also declared by an ancestor, the child must list that field in `override: [...]`.
+- **Secure-by-default** — `auth: anon` requires `publicly_accessible: true` on the same resource.
+- **Schema hash** — every `input_schema` / `output_schema` value matches `sha256:[0-9a-f]{64}` and exists in `manifest.schemas`.
+- **Inheritance walk depth** — capped at 16; structural shape rules out cycles.
+
+v2 manifests skip these entirely; v2 semantics are unchanged.
+
+### Back-compat during the migration window
+
+- v2 manifests (no `resources` field) → `has_resource_tree() == false` → only the rule walker runs.
+- v3 manifests with both `rules` and `resources` → resource-tree runs first; on miss, the rule walker takes over. This lets the build ship partial v3 manifests (e.g. RPC-only resources with `rules` still covering URL paths and static assets).
+- Once the build emits every URL path under `resources`, the rule walker can retire and a resource-tree miss will become a 404 immediately.
+
 ## Where to start when changing routing behavior
 
 | You're doing… | First read | Then edit |
@@ -208,3 +267,4 @@ Order of checks in `execute_outcome`'s `Outcome::Worker` arm:
 | Adding a new `Action` kind | `crates/core/src/types.rs` (`Action`); `crates/gateway/src/dispatch.rs` (`Outcome`) | Add variants in both places; extend `CompiledAction`; extend `execute_outcome` in `router.rs` |
 | Changing how assets are fetched | `crates/gateway/src/router.rs` (`serve_static_hit`, `fetch_static_bytes`); `crates/gateway/src/blob_cache.rs` | Phase A is in-memory LRU; Phase B layers mmap (see `docs/architecture/blob-store.md`) |
 | Adding a manifest validator | `crates/core/src/types.rs` (`Manifest::validate`) | Append a check; add tests in `crates/core/tests/types_test.rs` |
+| Adding a v3 resource policy field | `crates/core/src/types.rs` (`ResourceEntry`); `crates/gateway/src/compiled.rs` (`EffectivePolicy`, `resolve_effective_policy`) | Add field; extend the merge rule; extend `Manifest::validate_resources` for the override-marker check |

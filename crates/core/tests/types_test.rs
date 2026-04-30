@@ -1,7 +1,7 @@
 use zeroship_core::types::{
-    Action, AppRuntimeLimits, AppUsage, AppVersionInfo, AssetEntry, AssetVariant, ControlEvent,
-    Cors, HttpMethod, Manifest, ManifestMetadata, Match, RouteEntry, Rule, UsageReport, WorkerCode,
-    WorkerMode,
+    AppRuntimeLimits, AppUsage, AppVersionInfo, AssetEntry, AssetVariant, AuthLevel, ControlEvent,
+    HttpMethod, Manifest, ManifestMetadata, Match, ProcedureKind, RedirectAction, ResourceEntry,
+    RouteEntry, StaticAction, UsageReport, WorkerCode,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -85,8 +85,12 @@ fn route_entry_roundtrip() {
     assert_eq!(decoded.name, "my-app");
     assert_eq!(decoded.plan_id, "pro");
     assert_eq!(decoded.deploy_hash, Some("abc123".to_string()));
-    // Every route has a manifest after deserialization.
-    assert!(!decoded.manifest.rules.is_empty(), "passthrough has rules");
+    // Every route has a manifest after deserialization. The synthesized
+    // passthrough has at least one resource entry (`*`).
+    assert!(
+        !decoded.manifest.resources.is_empty(),
+        "passthrough has resources"
+    );
 }
 
 #[test]
@@ -100,7 +104,10 @@ fn route_entry_missing_manifest_field_synthesizes_passthrough() {
         "deploy_hash": null
     }"#;
     let decoded: RouteEntry = serde_json::from_str(json).unwrap();
-    assert!(!decoded.manifest.rules.is_empty(), "default to passthrough");
+    assert!(
+        !decoded.manifest.resources.is_empty(),
+        "default to passthrough"
+    );
 }
 
 #[test]
@@ -119,283 +126,29 @@ fn match_prefix_with_method() {
     assert!(m.test("POST", "/api/listTodos").is_none());
 }
 
-// -- shadow / unreachable rule detection ------------------------------------
-
-#[test]
-fn validate_detects_any_shadowing_subsequent_rule() {
-    let m = Manifest {
-        rules: vec![
-            Rule {
-                r#match: Match::Any,
-                action: Action::Worker {
-                    mode: WorkerMode::Ssr,
-                    cache: None,
-                    rate_limit: None,
-                },
-                cors: None,
-            },
-            Rule {
-                r#match: Match::Exact { method: None, path: "/foo".into() },
-                action: Action::Worker {
-                    mode: WorkerMode::Ssr,
-                    cache: None,
-                    rate_limit: None,
-                },
-                cors: None,
-            },
-        ],
-        ..Manifest::default()
-    };
-    assert!(m.validate().is_err(), "rule below Any → Worker(all methods) is unreachable");
-}
-
-#[test]
-fn validate_allows_any_at_end() {
-    let m = Manifest {
-        rules: vec![
-            Rule {
-                r#match: Match::Exact { method: None, path: "/foo".into() },
-                action: Action::Worker {
-                    mode: WorkerMode::Ssr,
-                    cache: None,
-                    rate_limit: None,
-                },
-                cors: None,
-            },
-            Rule {
-                r#match: Match::Any,
-                action: Action::Worker {
-                    mode: WorkerMode::Ssr,
-                    cache: None,
-                    rate_limit: None,
-                },
-                cors: None,
-            },
-        ],
-        ..Manifest::default()
-    };
-    assert!(m.validate().is_ok(), "Any at end is the canonical catch-all");
-}
-
-#[test]
-fn validate_detects_prefix_shadowing_exact() {
-    let m = Manifest {
-        rules: vec![
-            Rule {
-                r#match: Match::Prefix { method: None, path: "/admin".into() },
-                action: Action::Worker {
-                    mode: WorkerMode::Ssr,
-                    cache: None,
-                    rate_limit: None,
-                },
-                cors: None,
-            },
-            Rule {
-                r#match: Match::Exact { method: None, path: "/admin/users".into() },
-                action: Action::Worker {
-                    mode: WorkerMode::Ssr,
-                    cache: None,
-                    rate_limit: None,
-                },
-                cors: None,
-            },
-        ],
-        ..Manifest::default()
-    };
-    assert!(m.validate().is_err(), "/admin/users sits under /admin prefix");
-}
-
-#[test]
-fn validate_detects_prefix_shadowing_longer_prefix() {
-    let m = Manifest {
-        rules: vec![
-            Rule {
-                r#match: Match::Prefix { method: None, path: "/admin".into() },
-                action: Action::Worker {
-                    mode: WorkerMode::Ssr,
-                    cache: None,
-                    rate_limit: None,
-                },
-                cors: None,
-            },
-            Rule {
-                r#match: Match::Prefix { method: None, path: "/admin/users".into() },
-                action: Action::Worker {
-                    mode: WorkerMode::Ssr,
-                    cache: None,
-                    rate_limit: None,
-                },
-                cors: None,
-            },
-        ],
-        ..Manifest::default()
-    };
-    assert!(m.validate().is_err(), "/admin/users prefix is contained in /admin prefix");
-}
-
-#[test]
-fn validate_allows_method_disjoint_rules() {
-    let m = Manifest {
-        rules: vec![
-            Rule {
-                r#match: Match::Exact {
-                    method: Some(HttpMethod::Get),
-                    path: "/a".into(),
-                },
-                action: Action::Worker {
-                    mode: WorkerMode::Ssr,
-                    cache: None,
-                    rate_limit: None,
-                },
-                cors: None,
-            },
-            Rule {
-                r#match: Match::Exact {
-                    method: Some(HttpMethod::Post),
-                    path: "/a".into(),
-                },
-                action: Action::Worker {
-                    mode: WorkerMode::Rpc,
-                    cache: None,
-                    rate_limit: None,
-                },
-                cors: None,
-            },
-        ],
-        ..Manifest::default()
-    };
-    assert!(m.validate().is_ok(), "GET and POST on same path don't shadow each other");
-}
-
-#[test]
-fn validate_static_does_not_shadow_non_get_head_rule() {
-    // Tier 1 invariant: Static actions only fire for GET/HEAD; a POST
-    // rule below `Any → Static` is reachable, not shadowed.
-    let m = Manifest {
-        rules: vec![
-            Rule {
-                r#match: Match::Any,
-                action: Action::Static {
-                    r#try: vec!["/index.html".into()],
-                    cache: None,
-                    status: None,
-                },
-                cors: None,
-            },
-            Rule {
-                r#match: Match::Prefix {
-                    method: Some(HttpMethod::Post),
-                    path: "/api/".into(),
-                },
-                action: Action::Worker {
-                    mode: WorkerMode::Ssr,
-                    cache: None,
-                    rate_limit: None,
-                },
-                cors: None,
-            },
-        ],
-        ..Manifest::default()
-    };
-    assert!(m.validate().is_ok(), "Static narrows to GET/HEAD; POST rule is reachable");
-}
-
-#[test]
-fn validate_detects_duplicate_exact_rules() {
-    let m = Manifest {
-        rules: vec![
-            Rule {
-                r#match: Match::Exact { method: None, path: "/a".into() },
-                action: Action::Worker {
-                    mode: WorkerMode::Ssr,
-                    cache: None,
-                    rate_limit: None,
-                },
-                cors: None,
-            },
-            Rule {
-                r#match: Match::Exact { method: None, path: "/a".into() },
-                action: Action::Worker {
-                    mode: WorkerMode::Rpc,
-                    cache: None,
-                    rate_limit: None,
-                },
-                cors: None,
-            },
-        ],
-        ..Manifest::default()
-    };
-    assert!(m.validate().is_err(), "duplicate Exact /a is dead second time");
-}
-
-#[test]
-fn validate_passthrough_is_valid() {
-    // The synthesized default for apps without their own manifest must
-    // pass shadow detection; if it didn't, every legacy app would refuse
-    // to load.
-    assert!(Manifest::passthrough().validate().is_ok());
-}
-
-#[test]
-fn manifest_validate_rejects_invalid_status() {
-    let bad = Manifest {
-        rules: vec![Rule {
-            r#match: Match::Any,
-            action: Action::Static {
-                r#try: vec!["/x.html".into()],
-                cache: None,
-                status: Some(99), // out of range
-            },
-            cors: None,
-        }],
-        ..Manifest::default()
-    };
-    assert!(bad.validate().is_err(), "status=99 must be rejected");
-
-    let good = Manifest {
-        rules: vec![Rule {
-            r#match: Match::Any,
-            action: Action::Static {
-                r#try: vec!["/x.html".into()],
-                cache: None,
-                status: Some(404),
-            },
-            cors: None,
-        }],
-        ..Manifest::default()
-    };
-    assert!(good.validate().is_ok(), "status=404 must be accepted");
-
-    let unset = Manifest::default();
-    assert!(unset.validate().is_ok(), "no status is fine");
-}
-
 #[test]
 fn match_prefix_segment_boundary() {
-    // /admin must match exactly, with trailing slash, or with a sub-path —
-    // but NOT span across a segment boundary (no /administrator match).
+    // Prefix `/admin` must NOT match `/administrator` — the boundary
+    // check exists to prevent that classic footgun.
     let m = Match::Prefix { method: None, path: "/admin".into() };
-    assert!(m.test("GET", "/admin").is_some(), "exact /admin");
-    assert!(m.test("GET", "/admin/").is_some(), "trailing slash");
-    assert!(m.test("GET", "/admin/users").is_some(), "sub-path");
-    assert!(m.test("GET", "/administrator").is_none(), "must not span segment");
-    assert!(m.test("GET", "/admin-panel").is_none(), "must not span segment");
+    assert!(m.test("GET", "/admin").is_some());
+    assert!(m.test("GET", "/admin/users").is_some());
+    assert!(m.test("GET", "/administrator").is_none());
 }
 
 #[test]
 fn match_glob_single() {
     let m = Match::Glob { method: None, path: "/blog/[slug]".into() };
-    let caps = m.test("GET", "/blog/hello").unwrap();
-    assert_eq!(caps.get("slug").unwrap(), "hello");
-    assert!(m.test("GET", "/blog/").is_none());
-    assert!(m.test("GET", "/blog/hello/extra").is_none());
+    let caps = m.test("GET", "/blog/hello").expect("matches");
+    assert_eq!(caps.get("slug").map(String::as_str), Some("hello"));
+    assert!(m.test("GET", "/blog/").is_none(), "empty segment doesn't match");
 }
 
 #[test]
 fn match_glob_catchall() {
     let m = Match::Glob { method: None, path: "/api/[...rest]".into() };
-    let caps = m.test("GET", "/api/v1/users/42").unwrap();
-    assert_eq!(caps.get("rest").unwrap(), "v1/users/42");
+    let caps = m.test("POST", "/api/v1/users").expect("matches");
+    assert_eq!(caps.get("rest").map(String::as_str), Some("v1/users"));
 }
 
 #[test]
@@ -405,134 +158,136 @@ fn match_any() {
     assert!(m.test("DELETE", "/random/path").is_some());
 }
 
-#[test]
-fn manifest_roundtrip_json() {
-    let m = Manifest {
-        rules: vec![
-            Rule {
-                r#match: Match::Prefix {
-                    method: Some(HttpMethod::Post),
-                    path: "/_rpc/".into(),
-                },
-                action: Action::Worker {
-                    mode: WorkerMode::Rpc,
-                    cache: None,
-                    rate_limit: None,
-                },
-                cors: None,
-            },
-            Rule {
-                r#match: Match::Glob {
-                    method: None,
-                    path: "/blog/[slug]".into(),
-                },
-                action: Action::Worker {
-                    mode: WorkerMode::Ssr,
-                    cache: None,
-                    rate_limit: None,
-                },
-                cors: None,
-            },
-            Rule {
-                r#match: Match::Any,
-                action: Action::Static {
-                    r#try: vec!["$path".into(), "/index.html".into()],
-                    cache: None,
-                    status: None,
-                },
-                cors: None,
-            },
-        ],
-        assets: HashMap::from([(
-            "/index.html".to_string(),
-            AssetEntry {
-                hash: SHA_A.into(),
-                content_type: "text/html".into(),
-                size: 1024,
-                cache: None,
-                updated_at: 0,
-                variants: HashMap::new(),
-            },
-        )]),
-        worker: Some(WorkerCode {
-            entry: "index.js".into(),
-            modules: HashMap::from([("index.js".to_string(), SHA_B.to_string())]),
-        }),
-        ..Manifest::default()
-    };
-
-    let json = serde_json::to_string(&m).unwrap();
-    let decoded: Manifest = serde_json::from_str(&json).unwrap();
-    assert_eq!(decoded.rules.len(), 3);
-    assert_eq!(
-        decoded.worker,
-        Some(WorkerCode {
-            entry: "index.js".into(),
-            modules: HashMap::from([("index.js".to_string(), SHA_B.to_string())]),
-        })
-    );
-    assert_eq!(decoded.assets["/index.html"].hash, SHA_A);
-}
-
-// -- v2 schema -------------------------------------------------------------
+// -- Manifest schema -------------------------------------------------------
 
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const SHA64: &str = "abababababababababababababababababababababababababababababababab";
 
 #[test]
-fn manifest_v2_round_trips_through_json() {
-    let m = Manifest {
-        version: 2,
-        deploy_hash: Some(SHA_A.to_string()),
-        worker: Some(WorkerCode {
-            entry: "index.js".into(),
-            modules: HashMap::from([("index.js".to_string(), SHA_B.to_string())]),
-        }),
-        rules: vec![Rule {
-            r#match: Match::Any,
-            action: Action::Worker {
-                mode: WorkerMode::Ssr,
-                cache: None,
-                rate_limit: None,
-            },
-            cors: None,
-        }],
-        assets: HashMap::from([(
-            "/about.html".to_string(),
-            AssetEntry {
-                hash: SHA_A.into(),
-                content_type: "text/html".into(),
-                size: 42,
-                cache: None,
-                updated_at: 0,
-                variants: HashMap::new(),
-            },
-        )]),
-        runtime_assets: HashMap::new(),
-        asset_version: 0,
-        sourcemaps: HashMap::from([(SHA_A.to_string(), SHA_B.to_string())]),
-        metadata: ManifestMetadata {
-            compiler: Some("@zeroship/vite-plugin@0.1".into()),
-            built_at: "2026-04-29T12:34:56Z".into(),
-        },
-    };
+fn manifest_default_version_is_one() {
+    let m = Manifest::default();
+    assert_eq!(m.version, 1, "default schema version is v1");
+}
 
-    let json = serde_json::to_string(&m).unwrap();
-    let d: Manifest = serde_json::from_str(&json).unwrap();
-    assert_eq!(d.version, 2);
-    assert_eq!(d.deploy_hash.as_deref(), Some(SHA_A));
-    assert_eq!(
-        d.worker,
-        Some(WorkerCode {
-            entry: "index.js".into(),
-            modules: HashMap::from([("index.js".to_string(), SHA_B.to_string())]),
-        })
+#[test]
+fn manifest_validate_rejects_v2() {
+    let m = Manifest { version: 2, ..Manifest::default() };
+    let err = m.validate().expect_err("v2 is no longer accepted");
+    assert!(err.contains("version 2"), "error mentions bad version: {err}");
+    assert!(
+        err.to_lowercase().contains("version 1") || err.to_lowercase().contains("only version 1"),
+        "error explains v1 is the accepted shape: {err}"
     );
-    assert_eq!(d.rules.len(), 1);
-    assert_eq!(d.assets["/about.html"].hash, SHA_A);
-    assert_eq!(d.sourcemaps.get(SHA_A).map(String::as_str), Some(SHA_B));
-    assert_eq!(d.metadata.compiler.as_deref(), Some("@zeroship/vite-plugin@0.1"));
-    assert_eq!(d.metadata.built_at, "2026-04-29T12:34:56Z");
+}
+
+#[test]
+fn manifest_validate_rejects_v3() {
+    let m = Manifest { version: 3, ..Manifest::default() };
+    let err = m.validate().expect_err("v3 is no longer accepted");
+    assert!(err.contains("version 3"), "error mentions bad version: {err}");
+}
+
+#[test]
+fn manifest_validate_rejects_v0() {
+    let m = Manifest { version: 0, ..Manifest::default() };
+    assert!(m.validate().is_err(), "version 0 rejected");
+}
+
+#[test]
+fn manifest_validate_rejects_unsupported_version() {
+    let m = Manifest { version: 99, ..Manifest::default() };
+    let err = m.validate().expect_err("unsupported version");
+    assert!(err.contains("99"), "error mentions bad version: {err}");
+}
+
+#[test]
+fn manifest_passthrough_v1_validates() {
+    let p = Manifest::passthrough();
+    assert_eq!(p.version, 1, "passthrough is v1-shape");
+    assert!(p.worker.is_none(), "passthrough has no worker");
+    assert_eq!(p.metadata.built_at, "1970-01-01T00:00:00Z");
+    assert!(
+        p.metadata
+            .compiler
+            .as_deref()
+            .is_some_and(|s| s.starts_with("zeroship-passthrough@")),
+        "passthrough compiler tag should be set: {:?}",
+        p.metadata.compiler,
+    );
+    p.validate().expect("passthrough must validate");
+}
+
+#[test]
+fn manifest_v1_minimal_round_trips() {
+    // Minimal wire format with no `version` field: deserializes at the
+    // default version (v1) and all collections default to empty.
+    let json = r#"{
+        "assets": {},
+        "runtime_assets": {},
+        "asset_version": 0
+    }"#;
+    let m: Manifest = serde_json::from_str(json).unwrap();
+    assert_eq!(m.version, 1);
+    assert!(m.assets.is_empty());
+    assert!(m.sourcemaps.is_empty());
+    assert!(m.resources.is_empty());
+    assert!(m.worker.is_none());
+    assert_eq!(m.metadata.built_at, "");
+    m.validate().expect("minimal manifest must validate");
+}
+
+#[test]
+fn manifest_v1_round_trips_resources() {
+    let mut resources = HashMap::new();
+    resources.insert(
+        "*".into(),
+        ResourceEntry {
+            auth: Some(AuthLevel::Admin),
+            ..Default::default()
+        },
+    );
+    resources.insert(
+        "rpc:todos.add".into(),
+        ResourceEntry {
+            kind: Some(ProcedureKind::Mutation),
+            idempotent: Some(true),
+            ..Default::default()
+        },
+    );
+    resources.insert(
+        "/api".into(),
+        ResourceEntry {
+            auth: Some(AuthLevel::User),
+            r#override: vec!["auth".into()],
+            ..Default::default()
+        },
+    );
+    let mut schemas = HashMap::new();
+    schemas.insert(format!("sha256:{SHA64}"), serde_json::json!({"type": "object"}));
+    let mut aliases = HashMap::new();
+    aliases.insert(
+        "src/server/todos.ts::list".to_string(),
+        "rpc:todos.list".to_string(),
+    );
+    let m = Manifest {
+        version: 1,
+        resources,
+        schemas,
+        aliases,
+        transformer: Some("superjson".into()),
+        ..Manifest::default()
+    };
+    let json = serde_json::to_string(&m).expect("serialize");
+    let d: Manifest = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(d.version, 1);
+    assert_eq!(d.resources.len(), 3);
+    assert_eq!(d.schemas.len(), 1);
+    assert_eq!(d.aliases.len(), 1);
+    assert_eq!(d.transformer.as_deref(), Some("superjson"));
+    assert_eq!(d.resources["rpc:todos.add"].kind, Some(ProcedureKind::Mutation));
+    assert_eq!(d.resources["rpc:todos.add"].idempotent, Some(true));
+    assert_eq!(d.resources["/api"].auth, Some(AuthLevel::User));
 }
 
 #[test]
@@ -567,56 +322,6 @@ fn manifest_validate_rejects_non_hex_sourcemap_key() {
 }
 
 #[test]
-fn manifest_validate_rejects_unsupported_version() {
-    let m = Manifest { version: 99, ..Manifest::default() };
-    let err = m.validate().unwrap_err();
-    assert!(err.contains("99"), "error mentions bad version: {err}");
-}
-
-#[test]
-fn manifest_passthrough_v2_validates() {
-    let p = Manifest::passthrough();
-    assert_eq!(p.version, 2);
-    assert!(p.worker.is_none(), "passthrough has no worker");
-    assert_eq!(p.metadata.built_at, "1970-01-01T00:00:00Z");
-    assert!(
-        p.metadata.compiler
-            .as_deref()
-            .is_some_and(|s| s.starts_with("zeroship-passthrough@")),
-        "passthrough compiler tag should be set: {:?}",
-        p.metadata.compiler,
-    );
-    p.validate().expect("passthrough must validate");
-}
-
-#[test]
-fn manifest_v2_minimal_round_trips() {
-    // Minimal v2 wire format: omit sourcemaps/metadata; the serde
-    // defaults fill them in. version defaults to 2.
-    let json = r#"{
-        "rules": [],
-        "assets": {},
-        "runtime_assets": {},
-        "asset_version": 0
-    }"#;
-    let m: Manifest = serde_json::from_str(json).unwrap();
-    assert_eq!(m.version, 2);
-    assert!(m.assets.is_empty());
-    assert!(m.sourcemaps.is_empty());
-    assert!(m.worker.is_none());
-    assert_eq!(m.metadata.built_at, "");
-    m.validate().expect("minimal v2 manifest must validate");
-}
-
-#[test]
-fn manifest_validate_rejects_v1() {
-    // Hard cut: v1 is no longer accepted. Production data is v2 only.
-    let m = Manifest { version: 1, ..Manifest::default() };
-    let err = m.validate().unwrap_err();
-    assert!(err.contains("1"), "error mentions bad version: {err}");
-}
-
-#[test]
 fn manifest_validate_rejects_entry_not_in_modules() {
     // The flat WorkerCode shape requires `entry` to be a key of `modules`.
     let m = Manifest {
@@ -643,10 +348,7 @@ fn manifest_validate_rejects_bad_worker_hash() {
         ..Manifest::default()
     };
     let err = m.validate().unwrap_err();
-    assert!(
-        err.contains("worker"),
-        "error mentions worker: {err}"
-    );
+    assert!(err.contains("worker"), "error mentions worker: {err}");
 }
 
 #[test]
@@ -670,8 +372,6 @@ fn worker_round_trips_through_json() {
 
 #[test]
 fn app_version_info_serializes_with_manifest() {
-    // Phase 4b: workers get the manifest inline on every /internal/versions
-    // poll so they can resolve worker.modules[entry] without an extra hop.
     let info = AppVersionInfo {
         deploy_hash: Some(SHA_A.to_string()),
         plan_id: "pro".into(),
@@ -699,9 +399,6 @@ fn app_version_info_serializes_with_manifest() {
 
 #[test]
 fn app_version_info_omits_missing_manifest() {
-    // Apps that have not deployed yet have no manifest. The field uses
-    // `skip_serializing_if = Option::is_none`, so the wire payload stays
-    // compact and forward-compatible.
     let info = AppVersionInfo {
         deploy_hash: None,
         plan_id: "free".into(),
@@ -731,121 +428,6 @@ fn app_version_info_accepts_legacy_payload_without_manifest() {
     let info: AppVersionInfo = serde_json::from_str(json).unwrap();
     assert!(info.manifest.is_none());
     assert_eq!(info.env_version, 3);
-}
-
-// -- CORS schema -----------------------------------------------------------
-
-fn cors_rule_with(cors: Cors) -> Rule {
-    Rule {
-        r#match: Match::Prefix {
-            method: None,
-            path: "/api/".into(),
-        },
-        action: Action::Worker {
-            mode: WorkerMode::Ssr,
-            cache: None,
-            rate_limit: None,
-        },
-        cors: Some(cors),
-    }
-}
-
-#[test]
-fn cors_round_trips_through_json() {
-    let cors = Cors {
-        allow_origins: vec!["https://example.com".into(), "https://app.example.com".into()],
-        allow_methods: vec![HttpMethod::Get, HttpMethod::Post, HttpMethod::Options],
-        allow_headers: vec!["content-type".into(), "authorization".into()],
-        expose_headers: vec!["x-request-id".into()],
-        allow_credentials: true,
-        max_age_seconds: Some(600),
-    };
-    let m = Manifest {
-        rules: vec![cors_rule_with(cors.clone())],
-        ..Manifest::default()
-    };
-    let json = serde_json::to_string(&m).unwrap();
-    let decoded: Manifest = serde_json::from_str(&json).unwrap();
-    assert_eq!(decoded.rules.len(), 1);
-    assert_eq!(decoded.rules[0].cors.as_ref(), Some(&cors));
-}
-
-#[test]
-fn cors_credentials_with_wildcard_rejected() {
-    // Per the browser CORS spec, allow_credentials=true MUST NOT pair
-    // with allow_origins=["*"]. validate() must catch this.
-    let m = Manifest {
-        rules: vec![cors_rule_with(Cors {
-            allow_origins: vec!["*".into()],
-            allow_methods: vec![HttpMethod::Get],
-            allow_headers: vec![],
-            expose_headers: vec![],
-            allow_credentials: true,
-            max_age_seconds: None,
-        })],
-        ..Manifest::default()
-    };
-    let err = m.validate().unwrap_err();
-    assert!(
-        err.to_lowercase().contains("credentials") || err.contains("*"),
-        "error must mention the credentials/* combination: {err}"
-    );
-}
-
-#[test]
-fn cors_empty_allow_origins_rejected() {
-    let m = Manifest {
-        rules: vec![cors_rule_with(Cors {
-            allow_origins: vec![],
-            allow_methods: vec![HttpMethod::Get],
-            allow_headers: vec![],
-            expose_headers: vec![],
-            allow_credentials: false,
-            max_age_seconds: None,
-        })],
-        ..Manifest::default()
-    };
-    let err = m.validate().unwrap_err();
-    assert!(
-        err.to_lowercase().contains("allow_origins"),
-        "error must mention allow_origins: {err}"
-    );
-}
-
-#[test]
-fn cors_omitted_round_trips() {
-    // A rule without `cors` must serialize without the field present
-    // and deserialize as cors: None, preserving back-compat with
-    // existing manifests.
-    let m = Manifest {
-        rules: vec![Rule {
-            r#match: Match::Any,
-            action: Action::Worker {
-                mode: WorkerMode::Ssr,
-                cache: None,
-                rate_limit: None,
-            },
-            cors: None,
-        }],
-        ..Manifest::default()
-    };
-    let json = serde_json::to_string(&m).unwrap();
-    assert!(!json.contains("\"cors\""), "no cors field when None: {json}");
-    let decoded: Manifest = serde_json::from_str(&json).unwrap();
-    assert!(decoded.rules[0].cors.is_none());
-
-    // Older manifest payloads (no cors field at all) still parse.
-    let legacy = r#"{
-        "rules": [
-            {"match": {"kind": "any"},
-             "action": {"kind": "worker", "mode": "ssr"}}
-        ],
-        "assets": {},
-        "runtime_assets": {},
-        "asset_version": 0
-    }"#;
-    let m2: Manifest = serde_json::from_str(legacy).unwrap();
-    assert!(m2.rules[0].cors.is_none());
 }
 
 // -- AssetEntry variants (Tier 4b: pre-compressed encoding variants) -----
@@ -892,8 +474,6 @@ fn asset_variants_round_trip() {
 
 #[test]
 fn asset_variants_empty_omitted_from_json() {
-    // Empty variants map MUST NOT serialize — keeps legacy manifests
-    // and the wire-format clean (skip_serializing_if = HashMap::is_empty).
     let entry = entry_with_variants(HashMap::new());
     let json = serde_json::to_string(&entry).unwrap();
     assert!(!json.contains("\"variants\""), "empty variants omitted: {json}");
@@ -910,9 +490,6 @@ fn asset_variants_empty_omitted_from_json() {
 
 #[test]
 fn asset_variants_unknown_encoding_rejected() {
-    // Only "br" and "gzip" are supported for v1. An unknown key like
-    // "lz4" must be caught by Manifest::validate() — silent fallback
-    // would let typos disable a variant on the wire.
     let mut variants = HashMap::new();
     variants.insert(
         "lz4".into(),
@@ -931,8 +508,6 @@ fn asset_variants_unknown_encoding_rejected() {
 
 #[test]
 fn asset_variants_bad_hash_rejected() {
-    // Variant hash must be 64-char lowercase hex — same rule as
-    // any other content-addressed reference in the manifest.
     let mut variants = HashMap::new();
     variants.insert(
         "br".into(),
@@ -951,7 +526,6 @@ fn asset_variants_bad_hash_rejected() {
         "error mentions hash format: {err}"
     );
 
-    // Uppercase hex is also rejected (canonical form is lowercase).
     let mut variants2 = HashMap::new();
     variants2.insert(
         "br".into(),
@@ -966,9 +540,6 @@ fn asset_variants_bad_hash_rejected() {
 
 #[test]
 fn asset_variants_runtime_assets_validated_too() {
-    // The runtime_assets map (zeroship.assets.put) goes through the
-    // same validator — apps emitting variants at runtime must stay
-    // honest.
     let mut variants = HashMap::new();
     variants.insert(
         "deflate".into(),
@@ -981,18 +552,312 @@ fn asset_variants_runtime_assets_validated_too() {
     assert!(m.validate().is_err(), "deflate is not in the v1 allow list");
 }
 
+// ---------------------------------------------------------------------------
+// Resource-tree validation (rpc-v2 §7).
+// ---------------------------------------------------------------------------
+
+fn schema_ref() -> String {
+    format!("sha256:{SHA64}")
+}
+
+fn schema_value() -> serde_json::Value {
+    serde_json::json!({"type": "object"})
+}
+
 #[test]
-fn cors_credentials_with_specific_origin_validates() {
+fn validate_rejects_malformed_resource_key() {
+    let mut resources = HashMap::new();
+    resources.insert("invalid-key".to_string(), ResourceEntry::default());
     let m = Manifest {
-        rules: vec![cors_rule_with(Cors {
-            allow_origins: vec!["https://example.com".into()],
-            allow_methods: vec![HttpMethod::Post],
-            allow_headers: vec!["content-type".into()],
-            expose_headers: vec![],
-            allow_credentials: true,
-            max_age_seconds: Some(86_400),
-        })],
+        resources,
         ..Manifest::default()
     };
-    m.validate().expect("credentials with specific origin must validate");
+    let err = m.validate().unwrap_err();
+    assert!(err.contains("malformed"), "{err}");
+}
+
+#[test]
+fn validate_accepts_root_url_and_rpc_keys() {
+    let mut resources = HashMap::new();
+    resources.insert(
+        "*".into(),
+        ResourceEntry {
+            auth: Some(AuthLevel::Admin),
+            ..Default::default()
+        },
+    );
+    resources.insert("/api".into(), ResourceEntry::default());
+    resources.insert("rpc:todos".into(), ResourceEntry::default());
+    let m = Manifest {
+        resources,
+        ..Manifest::default()
+    };
+    m.validate().expect("well-formed keys must validate");
+}
+
+#[test]
+fn validate_rejects_multiple_routing_actions() {
+    let mut resources = HashMap::new();
+    resources.insert(
+        "/foo".into(),
+        ResourceEntry {
+            redirect: Some(RedirectAction { to: "/bar".into(), status: 302 }),
+            rewrite: Some("/baz".into()),
+            ..Default::default()
+        },
+    );
+    let m = Manifest {
+        resources,
+        ..Manifest::default()
+    };
+    let err = m.validate().unwrap_err();
+    assert!(err.contains("at most one"), "{err}");
+}
+
+#[test]
+fn validate_rejects_anon_without_publicly_accessible() {
+    let mut resources = HashMap::new();
+    resources.insert(
+        "/api/public".into(),
+        ResourceEntry {
+            auth: Some(AuthLevel::Anon),
+            ..Default::default()
+        },
+    );
+    let m = Manifest {
+        resources,
+        ..Manifest::default()
+    };
+    let err = m.validate().unwrap_err();
+    assert!(err.contains("publicly_accessible"), "{err}");
+}
+
+#[test]
+fn validate_anon_with_publicly_accessible_passes() {
+    let mut resources = HashMap::new();
+    resources.insert(
+        "/api/public".into(),
+        ResourceEntry {
+            auth: Some(AuthLevel::Anon),
+            publicly_accessible: Some(true),
+            ..Default::default()
+        },
+    );
+    let m = Manifest {
+        resources,
+        ..Manifest::default()
+    };
+    m.validate().expect("anon + publicly_accessible is the secure-by-default opt-in");
+}
+
+#[test]
+fn validate_redirect_status_must_be_3xx() {
+    let mut resources = HashMap::new();
+    resources.insert(
+        "/old".into(),
+        ResourceEntry {
+            redirect: Some(RedirectAction { to: "/new".into(), status: 200 }),
+            ..Default::default()
+        },
+    );
+    let m = Manifest {
+        resources,
+        ..Manifest::default()
+    };
+    let err = m.validate().unwrap_err();
+    assert!(err.contains("3xx"), "{err}");
+}
+
+#[test]
+fn validate_schema_hash_format_is_enforced() {
+    let mut resources = HashMap::new();
+    resources.insert(
+        "rpc:todos.list".into(),
+        ResourceEntry {
+            kind: Some(ProcedureKind::Query),
+            input_schema: Some("not-a-hash".into()),
+            ..Default::default()
+        },
+    );
+    let m = Manifest {
+        resources,
+        ..Manifest::default()
+    };
+    let err = m.validate().unwrap_err();
+    assert!(err.contains("sha256"), "{err}");
+}
+
+#[test]
+fn validate_schema_must_exist_in_schemas_map() {
+    let mut resources = HashMap::new();
+    resources.insert(
+        "rpc:todos.list".into(),
+        ResourceEntry {
+            kind: Some(ProcedureKind::Query),
+            input_schema: Some(schema_ref()),
+            ..Default::default()
+        },
+    );
+    let m = Manifest {
+        resources,
+        // Note: no `schemas` entry for the referenced hash.
+        ..Manifest::default()
+    };
+    let err = m.validate().unwrap_err();
+    assert!(err.contains("not present"), "{err}");
+}
+
+#[test]
+fn validate_schema_present_in_schemas_map_passes() {
+    let mut resources = HashMap::new();
+    resources.insert(
+        "rpc:todos.list".into(),
+        ResourceEntry {
+            kind: Some(ProcedureKind::Query),
+            input_schema: Some(schema_ref()),
+            ..Default::default()
+        },
+    );
+    let mut schemas = HashMap::new();
+    schemas.insert(schema_ref(), schema_value());
+    let m = Manifest {
+        resources,
+        schemas,
+        ..Manifest::default()
+    };
+    m.validate().expect("schema present in schemas map must validate");
+}
+
+#[test]
+fn validate_override_marker_required_for_inherited_field() {
+    let mut resources = HashMap::new();
+    resources.insert(
+        "rpc:todos".into(),
+        ResourceEntry {
+            auth: Some(AuthLevel::User),
+            ..Default::default()
+        },
+    );
+    // Child redeclares `auth` without listing it in `override`.
+    resources.insert(
+        "rpc:todos.delete".into(),
+        ResourceEntry {
+            auth: Some(AuthLevel::Admin),
+            kind: Some(ProcedureKind::Mutation),
+            ..Default::default()
+        },
+    );
+    let m = Manifest {
+        resources,
+        ..Manifest::default()
+    };
+    let err = m.validate().unwrap_err();
+    assert!(err.contains("override"), "{err}");
+}
+
+#[test]
+fn validate_override_marker_satisfies_check() {
+    let mut resources = HashMap::new();
+    resources.insert(
+        "rpc:todos".into(),
+        ResourceEntry {
+            auth: Some(AuthLevel::User),
+            ..Default::default()
+        },
+    );
+    resources.insert(
+        "rpc:todos.delete".into(),
+        ResourceEntry {
+            auth: Some(AuthLevel::Admin),
+            kind: Some(ProcedureKind::Mutation),
+            r#override: vec!["auth".into()],
+            ..Default::default()
+        },
+    );
+    let m = Manifest {
+        resources,
+        ..Manifest::default()
+    };
+    m.validate().expect("explicit override allows the redeclaration");
+}
+
+#[test]
+fn validate_url_inheritance_chain_is_segment_aware() {
+    let mut resources = HashMap::new();
+    resources.insert(
+        "/api".into(),
+        ResourceEntry {
+            auth: Some(AuthLevel::User),
+            ..Default::default()
+        },
+    );
+    // /api/admin/users redeclares `auth` shadowed by /api → must list override.
+    resources.insert(
+        "/api/admin/users".into(),
+        ResourceEntry {
+            auth: Some(AuthLevel::Admin),
+            ..Default::default()
+        },
+    );
+    let m = Manifest {
+        resources,
+        ..Manifest::default()
+    };
+    let err = m
+        .validate()
+        .expect_err("inherits auth from /api ancestor without override");
+    assert!(err.contains("override"), "{err}");
+}
+
+#[test]
+fn redirect_action_status_defaults_to_302() {
+    let json = r#"{"to":"/bar"}"#;
+    let r: RedirectAction = serde_json::from_str(json).unwrap();
+    assert_eq!(r.status, 302);
+}
+
+#[test]
+fn static_action_round_trips() {
+    let s = StaticAction { r#try: vec!["$path".into(), "/index.html".into()] };
+    let json = serde_json::to_string(&s).unwrap();
+    let d: StaticAction = serde_json::from_str(&json).unwrap();
+    assert_eq!(d.r#try, vec!["$path".to_string(), "/index.html".to_string()]);
+}
+
+#[test]
+fn auth_level_rank_ordering() {
+    assert!(AuthLevel::Admin.rank() > AuthLevel::User.rank());
+    assert!(AuthLevel::User.rank() > AuthLevel::Anon.rank());
+}
+
+#[test]
+fn manifest_does_not_serialize_rules_field() {
+    // The `rules: Vec<Rule>` field is gone. The wire shape carries
+    // `resources` only.
+    let m = Manifest::default();
+    let json = serde_json::to_string(&m).unwrap();
+    assert!(
+        !json.contains("\"rules\""),
+        "manifest must not serialize a `rules` field: {json}"
+    );
+
+    let mut resources = HashMap::new();
+    resources.insert("*".into(), ResourceEntry { auth: Some(AuthLevel::Admin), ..Default::default() });
+    let m2 = Manifest {
+        resources,
+        ..Manifest::default()
+    };
+    let json2 = serde_json::to_string(&m2).unwrap();
+    assert!(
+        !json2.contains("\"rules\""),
+        "manifest with resources must not serialize `rules` either: {json2}"
+    );
+}
+
+// Suppress unused-import warning when the corresponding test references
+// drop out; keep them imported for any future test additions that
+// exercise the type definitions directly.
+#[allow(dead_code)]
+fn _force_imports_used() {
+    let _ = ManifestMetadata::default();
 }

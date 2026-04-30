@@ -5,6 +5,45 @@ use std::time::Duration;
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, RequestCtx, Runtime, SettledFetch};
 
+// Regression test: the runtime installs `globalThis.Buffer` (lazy stub)
+// and `globalThis.setImmediate` / `clearImmediate` on every isolate at
+// boot — before any user module evaluates. This replaces the old
+// `runtime-prelude.js` that the vite-plugin used to prepend to every
+// server bundle. Many isomorphic npm packages reach for these globals
+// without first importing `node:buffer` / `node:timers`, so they MUST
+// be present on the bare globalThis.
+#[test]
+fn node_globals_buffer_and_set_immediate_present() {
+    let modules = m(r#"
+        export default {
+            fetch(request, env, ctx) {
+                return Response.json({
+                    bufferIsFn: typeof globalThis.Buffer === "function",
+                    bufferFromIsFn: typeof globalThis.Buffer.from === "function",
+                    bufferAllocIsFn: typeof globalThis.Buffer.alloc === "function",
+                    bufferConcatIsFn: typeof globalThis.Buffer.concat === "function",
+                    bufferIsBufferIsFn: typeof globalThis.Buffer.isBuffer === "function",
+                    setImmediateIsFn: typeof globalThis.setImmediate === "function",
+                    clearImmediateIsFn: typeof globalThis.clearImmediate === "function",
+                });
+            }
+        };
+    "#);
+    match dispatch_fetch(modules, TestRequest::get("http://localhost/")) {
+        FetchOutcome::Response { status, body, .. } => {
+            assert_eq!(status, 200, "body: {}", body);
+            assert!(body.contains(r#""bufferIsFn":true"#), "body: {}", body);
+            assert!(body.contains(r#""bufferFromIsFn":true"#), "body: {}", body);
+            assert!(body.contains(r#""bufferAllocIsFn":true"#), "body: {}", body);
+            assert!(body.contains(r#""bufferConcatIsFn":true"#), "body: {}", body);
+            assert!(body.contains(r#""bufferIsBufferIsFn":true"#), "body: {}", body);
+            assert!(body.contains(r#""setImmediateIsFn":true"#), "body: {}", body);
+            assert!(body.contains(r#""clearImmediateIsFn":true"#), "body: {}", body);
+        }
+        _ => panic!("expected Response outcome"),
+    }
+}
+
 #[test]
 fn simple_response() {
     let modules = m(r#"
@@ -198,7 +237,9 @@ fn zs_env_returns_snapshot() {
     "#);
     init_v8();
     let runtime = Runtime::builder().modules(modules).build();
-    let env = EnvSnapshot::new(serde_json::json!({"FOO": "bar", "N": 42}));
+    // Env is always string-to-string (matches the wire format from the
+    // control plane and the `env.get(name) → string | null` contract).
+    let env = EnvSnapshot::vars_only(serde_json::json!({"FOO": "bar", "N": "42"}));
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "GET", "http://localhost/", &[], "",
@@ -210,7 +251,7 @@ fn zs_env_returns_snapshot() {
     assert_eq!(status, 200, "body: {}", body);
     // Both arg and op must return the env contents.
     assert!(body.contains(r#""FOO":"bar""#), "body: {}", body);
-    assert!(body.contains(r#""N":42"#), "body: {}", body);
+    assert!(body.contains(r#""N":"42""#), "body: {}", body);
     // Should appear TWICE (once for viaArg, once for viaOp).
     let foo_count = body.matches(r#""FOO":"bar""#).count();
     assert_eq!(foo_count, 2, "env should appear in both fields, body: {}", body);
@@ -413,7 +454,7 @@ fn zeroship_module_env_import() {
     "#);
     init_v8();
     let runtime = Runtime::builder().modules(modules).build();
-    let env = EnvSnapshot::new(serde_json::json!({"FOO": "bar"}));
+    let env = EnvSnapshot::vars_only(serde_json::json!({"FOO": "bar"}));
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
         "GET", "http://localhost/", &[], "", &env, ctx,
@@ -609,6 +650,373 @@ fn bootstrap_rpc_non_array_body_returns_400() {
     };
     assert_eq!(status, 400, "body: {}", body);
     assert!(body.contains("JSON array"), "body: {}", body);
+}
+
+// ===========================================================================
+// Structured-error envelope (code / details / retryable)
+// ===========================================================================
+//
+// The bootstrap's `errorResponse` helper forwards optional fields from a
+// thrown error — `code` (gRPC-style string), `details` (any JSON), and
+// `retryable` (boolean) — alongside the existing `message` / `name` /
+// `status`. Lets RPC procedures throw structured errors that the wire
+// preserves, so callers (and the SSE path) can branch on `.code` or read
+// the `.details` payload without re-deriving them from `.message`.
+
+#[test]
+fn rpc_error_envelope_carries_code_details_retryable() {
+    // Procedure throws an Error with `code`, `details`, `retryable`, and
+    // `status`. The kernel's `errorResponse` must forward all four to the
+    // wire. This is the regression guard for the structured-error path
+    // that the WebSocket subscription / slow fetch paths will rely on.
+    let modules = m(r#"
+        export function fail(_input) {
+            throw Object.assign(new Error("limit must be at most 100"), {
+                code: "INVALID_ARGUMENT",
+                details: { issues: [{ path: ["limit"], message: "too big" }] },
+                retryable: false,
+                status: 400,
+            });
+        }
+    "#);
+    init_v8();
+    let runtime = Runtime::builder().modules(modules).build();
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler(
+        "POST",
+        "http://localhost/_rpc/fail",
+        &[("content-type".into(), "application/json".into())],
+        "[]",
+        &env,
+        ctx,
+    );
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("expected Response");
+    };
+    assert_eq!(status, 400, "body: {}", body);
+    let v: serde_json::Value = serde_json::from_str(&body)
+        .unwrap_or_else(|e| panic!("body is not JSON: {} (body: {})", e, body));
+    assert_eq!(v["message"], "limit must be at most 100", "body: {}", body);
+    assert_eq!(v["name"], "Error", "body: {}", body);
+    assert_eq!(v["code"], "INVALID_ARGUMENT", "body: {}", body);
+    assert_eq!(v["retryable"], false, "body: {}", body);
+    assert_eq!(
+        v["details"],
+        serde_json::json!({ "issues": [{ "path": ["limit"], "message": "too big" }] }),
+        "body: {}", body
+    );
+}
+
+#[test]
+fn rpc_error_envelope_omits_absent_optional_fields() {
+    // Procedure throws a plain Error with only `status` (and the implicit
+    // `message` / `name`). The wire must NOT carry `code`, `details`, or
+    // `retryable` keys at all — additive forwarding only when present.
+    let modules = m(r#"
+        export function fail() {
+            throw Object.assign(new Error("plain"), { status: 418 });
+        }
+    "#);
+    init_v8();
+    let runtime = Runtime::builder().modules(modules).build();
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler(
+        "POST",
+        "http://localhost/_rpc/fail",
+        &[("content-type".into(), "application/json".into())],
+        "[]",
+        &env,
+        ctx,
+    );
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("expected Response");
+    };
+    assert_eq!(status, 418, "body: {}", body);
+    let v: serde_json::Value = serde_json::from_str(&body)
+        .unwrap_or_else(|e| panic!("body is not JSON: {} (body: {})", e, body));
+    assert_eq!(v["message"], "plain", "body: {}", body);
+    assert_eq!(v["name"], "Error", "body: {}", body);
+    let obj = v.as_object().expect("body must be a JSON object");
+    assert!(!obj.contains_key("code"), "code must be omitted when absent: {}", body);
+    assert!(!obj.contains_key("details"), "details must be omitted when absent: {}", body);
+    assert!(!obj.contains_key("retryable"), "retryable must be omitted when absent: {}", body);
+}
+
+#[test]
+fn rpc_error_envelope_ignores_non_string_code_and_non_bool_retryable() {
+    // Defensive: `code` must be a string, `retryable` must be a boolean.
+    // Other types are silently dropped — the envelope is a contract the
+    // wire side relies on; we don't propagate `code: 42` as a number.
+    // `details` accepts any JSON value (including non-objects).
+    let modules = m(r#"
+        export function fail() {
+            throw Object.assign(new Error("bad shape"), {
+                code: 42,                        // not a string → drop
+                retryable: "yes",                // not a boolean → drop
+                details: ["array", "is", "ok"],  // any JSON → keep
+                status: 500,
+            });
+        }
+    "#);
+    init_v8();
+    let runtime = Runtime::builder().modules(modules).build();
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler(
+        "POST",
+        "http://localhost/_rpc/fail",
+        &[("content-type".into(), "application/json".into())],
+        "[]",
+        &env,
+        ctx,
+    );
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("expected Response");
+    };
+    assert_eq!(status, 500, "body: {}", body);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let obj = v.as_object().unwrap();
+    assert!(!obj.contains_key("code"), "non-string code dropped: {}", body);
+    assert!(!obj.contains_key("retryable"), "non-bool retryable dropped: {}", body);
+    assert_eq!(v["details"], serde_json::json!(["array", "is", "ok"]), "body: {}", body);
+}
+
+#[test]
+fn sse_error_frame_carries_code_details_retryable() {
+    // Async generator throws partway through. The bootstrap's
+    // sseFromAsyncGen wraps the throw as an `event: error` frame; the
+    // payload of that frame must carry the same envelope shape as the
+    // RPC error wire (code, details, retryable).
+    let modules = m(r#"
+        export async function* stream() {
+            yield { tick: 0 };
+            throw Object.assign(new Error("upstream gone"), {
+                code: "UNAVAILABLE",
+                details: { upstream: "db", attempt: 3 },
+                retryable: true,
+                status: 503,
+            });
+        }
+    "#);
+    let r = dispatch(modules, "stream", "[]").unwrap();
+    // SSE buffered into a single body string by `dispatch`.
+    assert!(r.json.contains("event: yield"), "got: {}", r.json);
+    assert!(r.json.contains(r#"{"tick":0}"#), "got: {}", r.json);
+    assert!(r.json.contains("event: error"), "got: {}", r.json);
+
+    // Locate the error frame's data line and parse its payload.
+    let data_line = r.json
+        .split("event: error")
+        .nth(1)
+        .expect("error frame missing")
+        .lines()
+        .find_map(|l| l.strip_prefix("data: "))
+        .expect("error frame data line missing");
+    let payload: serde_json::Value = serde_json::from_str(data_line)
+        .unwrap_or_else(|e| panic!("error data not JSON: {} (line: {})", e, data_line));
+    assert_eq!(payload["message"], "upstream gone", "payload: {}", payload);
+    assert_eq!(payload["name"], "Error", "payload: {}", payload);
+    assert_eq!(payload["code"], "UNAVAILABLE", "payload: {}", payload);
+    assert_eq!(payload["retryable"], true, "payload: {}", payload);
+    assert_eq!(
+        payload["details"],
+        serde_json::json!({ "upstream": "db", "attempt": 3 }),
+        "payload: {}", payload
+    );
+}
+
+// ===========================================================================
+// Part B — vars / secrets / expose split (process.env hardening)
+// ===========================================================================
+//
+// These tests lock in the contract that `process.env` only carries `vars`
+// (plus secrets explicitly listed in the per-app `expose` opt-in), while
+// the `zeroship` module's `env` and `env.get()` see the full merged
+// `vars + secrets` map. The wire shape is:
+//
+//   { "vars": {...}, "secrets": {...}, "expose": [...] }
+//
+// See `EnvSnapshot::new` in fetch_outcome.rs.
+
+use std::collections::BTreeMap;
+
+fn vars(items: &[(&str, &str)]) -> BTreeMap<String, String> {
+    items.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+}
+
+#[test]
+fn var_appears_in_process_env() {
+    let modules = m(r#"
+        export default {
+            fetch(request, env, ctx) {
+                return Response.json({ K: globalThis.process.env.K });
+            }
+        };
+    "#);
+    let env = EnvSnapshot::new(vars(&[("K", "v")]), BTreeMap::new(), vec![]);
+    match dispatch_fetch_with_env(modules, TestRequest::get("http://localhost/"), env) {
+        FetchOutcome::Response { status, body, .. } => {
+            assert_eq!(status, 200, "body: {}", body);
+            assert!(body.contains(r#""K":"v""#), "body: {}", body);
+        }
+        _ => panic!("expected Response"),
+    }
+}
+
+#[test]
+fn secret_does_not_appear_in_process_env() {
+    let modules = m(r#"
+        export default {
+            fetch(request, env, ctx) {
+                return Response.json({
+                    type: typeof globalThis.process.env.SECRET_KEY,
+                });
+            }
+        };
+    "#);
+    let env = EnvSnapshot::new(
+        BTreeMap::new(),
+        vars(&[("SECRET_KEY", "topsecret")]),
+        vec![],
+    );
+    match dispatch_fetch_with_env(modules, TestRequest::get("http://localhost/"), env) {
+        FetchOutcome::Response { status, body, .. } => {
+            assert_eq!(status, 200, "body: {}", body);
+            assert!(body.contains(r#""type":"undefined""#), "body: {}", body);
+            // Belt-and-suspenders: the literal value must not appear anywhere.
+            assert!(!body.contains("topsecret"), "secret leaked into response: {}", body);
+        }
+        _ => panic!("expected Response"),
+    }
+}
+
+#[test]
+fn secret_visible_via_zeroship_env() {
+    let modules = m(r#"
+        import { env } from "zeroship";
+        export default {
+            fetch(request, _envArg, ctx) {
+                return Response.json({ value: env.SECRET_KEY ?? null });
+            }
+        };
+    "#);
+    let env = EnvSnapshot::new(
+        BTreeMap::new(),
+        vars(&[("SECRET_KEY", "topsecret")]),
+        vec![],
+    );
+    match dispatch_fetch_with_env(modules, TestRequest::get("http://localhost/"), env) {
+        FetchOutcome::Response { status, body, .. } => {
+            assert_eq!(status, 200, "body: {}", body);
+            assert!(body.contains(r#""value":"topsecret""#), "body: {}", body);
+        }
+        _ => panic!("expected Response"),
+    }
+}
+
+#[test]
+fn secret_visible_via_env_get() {
+    let modules = m(r#"
+        export default {
+            fetch(request, env, ctx) {
+                // `env.get(name)` is the lower-level primitive — the same
+                // accessor used by SDKs that need a name-keyed lookup.
+                const v = globalThis.env.get("SECRET_KEY");
+                return Response.json({ value: v ?? null });
+            }
+        };
+    "#);
+    let env = EnvSnapshot::new(
+        BTreeMap::new(),
+        vars(&[("SECRET_KEY", "topsecret")]),
+        vec![],
+    );
+    match dispatch_fetch_with_env(modules, TestRequest::get("http://localhost/"), env) {
+        FetchOutcome::Response { status, body, .. } => {
+            assert_eq!(status, 200, "body: {}", body);
+            assert!(body.contains(r#""value":"topsecret""#), "body: {}", body);
+        }
+        _ => panic!("expected Response"),
+    }
+}
+
+#[test]
+fn exposed_secret_appears_in_process_env() {
+    let modules = m(r#"
+        export default {
+            fetch(request, env, ctx) {
+                return Response.json({ K: globalThis.process.env.K ?? null });
+            }
+        };
+    "#);
+    // Secret is explicitly opted-in via `expose`.
+    let env = EnvSnapshot::new(
+        BTreeMap::new(),
+        vars(&[("K", "v")]),
+        vec!["K".to_string()],
+    );
+    match dispatch_fetch_with_env(modules, TestRequest::get("http://localhost/"), env) {
+        FetchOutcome::Response { status, body, .. } => {
+            assert_eq!(status, 200, "body: {}", body);
+            assert!(body.contains(r#""K":"v""#), "body: {}", body);
+        }
+        _ => panic!("expected Response"),
+    }
+}
+
+#[test]
+fn var_and_secret_same_key_var_wins_in_process_env() {
+    let modules = m(r#"
+        export default {
+            fetch(request, env, ctx) {
+                return Response.json({ K: globalThis.process.env.K ?? null });
+            }
+        };
+    "#);
+    // Even with K in expose, the var wins because vars are the
+    // explicit, non-sensitive surface; we don't shadow them with a
+    // collision-named secret.
+    let env = EnvSnapshot::new(
+        vars(&[("K", "var-value")]),
+        vars(&[("K", "secret-value")]),
+        vec!["K".to_string()],
+    );
+    match dispatch_fetch_with_env(modules, TestRequest::get("http://localhost/"), env) {
+        FetchOutcome::Response { status, body, .. } => {
+            assert_eq!(status, 200, "body: {}", body);
+            assert!(body.contains(r#""K":"var-value""#), "body: {}", body);
+        }
+        _ => panic!("expected Response"),
+    }
+}
+
+#[test]
+fn merged_env_in_zeroship_module_secret_wins() {
+    let modules = m(r#"
+        import { env } from "zeroship";
+        export default {
+            fetch(request, _envArg, ctx) {
+                return Response.json({ K: env.K ?? null });
+            }
+        };
+    "#);
+    // On the explicit, audited surface (`zeroship.env` / `env.get`),
+    // secrets win on collision because they are the authoritative
+    // value for sensitive lookups.
+    let env = EnvSnapshot::new(
+        vars(&[("K", "var-value")]),
+        vars(&[("K", "secret-value")]),
+        vec![],
+    );
+    match dispatch_fetch_with_env(modules, TestRequest::get("http://localhost/"), env) {
+        FetchOutcome::Response { status, body, .. } => {
+            assert_eq!(status, 200, "body: {}", body);
+            assert!(body.contains(r#""K":"secret-value""#), "body: {}", body);
+        }
+        _ => panic!("expected Response"),
+    }
 }
 
 // Plugin callback for `env_exposes_plugin_namespace` — returns the string

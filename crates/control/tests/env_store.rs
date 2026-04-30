@@ -349,6 +349,64 @@ async fn set_value_over_cap_rejected() {
 }
 
 #[compio::test]
+async fn merged_env_for_worker_emits_split_shape() {
+    let Some(url) = db_url() else { return; };
+    let registry = Registry::new(&url).await.expect("registry");
+    let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
+    let app = create_test_app(&registry).await;
+
+    // Mix of vars + secrets + an opt-in expose entry.
+    store.set_var(app, "NODE_ENV", "production").await.unwrap();
+    store.set_var(app, "API_URL", "https://api.example.com").await.unwrap();
+    store.set_secret(app, "OPENAI_API_KEY", "sk-secret-1").await.unwrap();
+    store.set_secret(app, "STRIPE_KEY", "sk_live_2").await.unwrap();
+    let new_expose = store.set_expose(app, &["OPENAI_API_KEY".to_string()]).await.unwrap();
+    assert_eq!(new_expose, vec!["OPENAI_API_KEY".to_string()]);
+
+    let payload = store.merged_env_for_worker(app).await.unwrap();
+    let obj = payload.as_object().expect("top-level object");
+
+    // Three keys exactly: vars, secrets, expose.
+    let mut top_keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+    top_keys.sort();
+    assert_eq!(top_keys, vec!["expose", "secrets", "vars"]);
+
+    let vars = obj.get("vars").and_then(|v| v.as_object()).expect("vars object");
+    assert_eq!(vars.get("NODE_ENV").and_then(|v| v.as_str()), Some("production"));
+    assert_eq!(vars.get("API_URL").and_then(|v| v.as_str()), Some("https://api.example.com"));
+
+    let secrets = obj.get("secrets").and_then(|v| v.as_object()).expect("secrets object");
+    assert_eq!(secrets.get("OPENAI_API_KEY").and_then(|v| v.as_str()), Some("sk-secret-1"));
+    assert_eq!(secrets.get("STRIPE_KEY").and_then(|v| v.as_str()), Some("sk_live_2"));
+
+    let expose = obj.get("expose").and_then(|v| v.as_array()).expect("expose array");
+    let names: Vec<&str> = expose.iter().filter_map(|v| v.as_str()).collect();
+    assert_eq!(names, vec!["OPENAI_API_KEY"]);
+
+    // Replacing the list overwrites — not appends.
+    store.set_expose(app, &["STRIPE_KEY".to_string()]).await.unwrap();
+    let payload = store.merged_env_for_worker(app).await.unwrap();
+    let names: Vec<&str> = payload["expose"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(names, vec!["STRIPE_KEY"]);
+
+    // Empty list clears.
+    store.set_expose(app, &[]).await.unwrap();
+    let payload = store.merged_env_for_worker(app).await.unwrap();
+    assert_eq!(payload["expose"].as_array().unwrap().len(), 0);
+
+    // Bad key rejected.
+    let err = store.set_expose(app, &["lowercase".to_string()]).await.unwrap_err();
+    assert!(matches!(err, zeroship_control::env_store::EnvError::BadKey(_)));
+
+    registry.delete_app(&app).await.ok();
+}
+
+#[compio::test]
 async fn long_value_roundtrip() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");

@@ -210,135 +210,334 @@ async fn handle_request(
 
     // CORS preflight short-circuit. The browser sends `OPTIONS` with
     // `Origin` and `Access-Control-Request-Method` *before* the actual
-    // request; we walk the rules using the *requested* method (carried
-    // in the header) to find a matching rule's CORS policy, and answer
-    // with a 204. If no CORS-bearing rule matches, fall through to
-    // normal dispatch (which will probably return 404 or hit an OPTIONS
-    // handler in the worker).
+    // request; we look up the resource-tree CORS policy for the
+    // requested path and answer with a 204. If no resource matches,
+    // fall through to normal dispatch (which will return 404).
     if req.method() == ntex::http::Method::OPTIONS && req.headers().contains_key("origin") {
-        let request_method = req
-            .headers()
-            .get("access-control-request-method")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("GET");
-        if let Some(cors) = compiled_route
-            .manifest
-            .cors_for(request_method, &dispatch_path)
-        {
-            let origin = req
-                .headers()
-                .get("origin")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("");
-            return build_preflight_response(&cors, origin, wall_start);
+        if let Some(policy) = compiled_route.manifest.lookup_resource(&dispatch_path) {
+            if let Some(cors) = &policy.cors {
+                let origin = req
+                    .headers()
+                    .get("origin")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                return build_preflight_response(cors, origin, wall_start);
+            }
         }
     }
 
-    // Manifest-driven dispatch. Every app has a manifest (synthesized
-    // passthrough for apps that haven't declared one), so dispatch is
-    // always defined. The pre-compiled form does the work — no per-request
-    // HashMap allocation, no per-call String::replace.
-    let (outcome, matched_cors) = compiled_route
-        .manifest
-        .dispatch(req.method().as_str(), &dispatch_path);
-    execute_outcome(
-        outcome,
-        matched_cors,
-        req,
-        state,
-        &app_id,
-        &compiled_route.entry,
-        tail,
-        body,
-        wall_start,
-    )
-    .await
+    // Resource-tree dispatch — resources is the only dispatch path.
+    // No match → 404 (the `*` catch-all in resources should always
+    // match if the user wants a fallback handler).
+    if compiled_route.manifest.lookup_resource(&dispatch_path).is_some() {
+        return execute_resource_tree(
+            req,
+            state,
+            &app_id,
+            &compiled_route,
+            &dispatch_path,
+            tail,
+            body,
+            wall_start,
+        )
+        .await;
+    }
+
+    HttpResponse::NotFound()
+        .json(&serde_json::json!({"error": "no resource matched"}))
 }
 
 // ---------------------------------------------------------------------------
-// Manifest-driven outcome execution
+// v3 resource-tree dispatch
 // ---------------------------------------------------------------------------
 
-/// Execute the [`Outcome`] produced by the manifest's rule walk.
-async fn execute_outcome(
-    outcome: crate::dispatch::Outcome,
-    matched_cors: Option<zeroship_core::types::Cors>,
+/// Run the v3 resource-tree dispatch for a request that resolved to a
+/// manifest with `resources` non-empty. Looks up the matching resource,
+/// enforces the precomputed `EffectivePolicy`, and executes the
+/// resolved action (worker forward / redirect / static).
+async fn execute_resource_tree(
     req: HttpRequest,
     state: web::types::State<Arc<GateState>>,
     app_id: &Uuid,
-    route: &zeroship_core::types::RouteEntry,
+    compiled_route: &crate::sync::CompiledRoute,
+    dispatch_path: &str,
     tail: &str,
     body: Bytes,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
-    use crate::dispatch::Outcome;
-    use zeroship_core::types::WorkerMode;
+    use crate::compiled::ResolvedAction;
+    use zeroship_core::types::ProcedureKind;
 
-    // Capture the request Origin once — used to decide whether to inject
-    // CORS response headers after the underlying handler builds the
-    // response. Empty when the client didn't send an `Origin` header
-    // (same-origin request); we leave headers off in that case.
+    // 1. Resolve the resource. No match → 404.
+    let Some(policy) = compiled_route.manifest.lookup_resource(dispatch_path) else {
+        return HttpResponse::NotFound()
+            .json(&serde_json::json!({"error": "no resource matched"}));
+    };
+
+    // Capture origin once for downstream CORS injection.
     let origin_value = req
         .headers()
         .get("origin")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    let mut response = match outcome {
-        Outcome::Worker { mode, cache: _, rate_limit, rule_idx } => {
-            // Per-rule rate limit fires FIRST — cheaper for high-rule-rate
-            // cases (early reject before the global per-app check inside
-            // `handle_dispatch`). The global limit is the platform-level
-            // DoS guard; per-rule is creator-defined business logic on top.
-            if let Some(rl) = rate_limit.as_ref() {
-                let bucket_id = compute_bucket_id(&req, rl.per);
-                if let Err(resp) = state.per_rule_rate_limits.check(
-                    app_id,
-                    rule_idx,
-                    rl.per,
-                    &bucket_id,
-                    rl,
-                ) {
-                    return resp;
-                }
+    // 2. Method-vs-kind gate (RPC procedures only).
+    //    Spec §7.1: `kind: "mutation"` cannot be served via GET.
+    //    Streams / subscriptions are out of scope for Phase 2 method
+    //    gating — they negotiate via SSE / WebSocket headers.
+    if let Some(kind) = policy.kind {
+        let method = req.method();
+        let allow = match kind {
+            ProcedureKind::Query => {
+                method == ntex::http::Method::GET
+                    || method == ntex::http::Method::POST
+                    || method == ntex::http::Method::HEAD
             }
-            // RPC requires the X-Api-Key check. SSR is open by default
-            // (the app's own pages can call it; gating is in user code).
-            if mode == WorkerMode::Rpc {
-                if let Err(resp) = auth::check_api_key(&req, route) {
-                    return resp;
-                }
-            }
-            handle_dispatch(req, &state, app_id, route, tail, body, wall_start).await
+            ProcedureKind::Mutation => method == ntex::http::Method::POST,
+            ProcedureKind::Stream | ProcedureKind::Subscription => true,
+        };
+        if !allow {
+            return HttpResponse::MethodNotAllowed()
+                .json(&serde_json::json!({"error": "method not allowed for this procedure kind"}));
         }
-        Outcome::Static(hit) => serve_static_hit(&state, &req, hit, wall_start).await,
-        Outcome::Redirect { to, status } => {
-            let st = ntex::http::StatusCode::from_u16(status)
+    }
+
+    // 3. Auth gate. `anon` always passes (subject to publicly_accessible
+    //    being set, which is enforced at validate-time). `user`/`admin`
+    //    require a session cookie — Phase 2 reuses the existing
+    //    `__zs_session` extraction; richer admin-vs-user role checks
+    //    will arrive when the auth tier ships.
+    if !auth_satisfied(&req, policy, &state.config.auth_secret, app_id) {
+        return HttpResponse::Unauthorized()
+            .json(&serde_json::json!({"error": "authentication required"}));
+    }
+
+    // 4. CSRF origin guard. Mutations with a declared csrf_origins list
+    //    require the request's `Origin` to match.
+    if matches!(policy.kind, Some(ProcedureKind::Mutation))
+        || req.method() == ntex::http::Method::POST
+        || req.method() == ntex::http::Method::PUT
+        || req.method() == ntex::http::Method::PATCH
+        || req.method() == ntex::http::Method::DELETE
+    {
+        if let Some(allowed) = &policy.csrf_origins {
+            let origin = origin_value.as_deref().unwrap_or("");
+            if !allowed.iter().any(|o| o == origin) {
+                return HttpResponse::Forbidden()
+                    .json(&serde_json::json!({"error": "origin not in csrf_origins allow list"}));
+            }
+        }
+    }
+
+    // 5. Max-input-bytes guard. Cheap when not set; cap the body size
+    //    before forwarding to the worker.
+    if let Some(cap) = policy.max_input_bytes {
+        if body.len() > cap as usize {
+            return HttpResponse::PayloadTooLarge()
+                .json(&serde_json::json!({"error": "input exceeds max_input_bytes"}));
+        }
+    }
+
+    // 6. Per-resource rate-limit (when declared).
+    //    Reuses the existing `PerRuleRateLimitRegistry` by hashing the
+    //    resource key into a stable `rule_idx`. Two distinct resource
+    //    keys with the same rate_limit shape get independent buckets.
+    if let Some(rl) = &policy.rate_limit {
+        let resource_key = compiled_route
+            .manifest
+            .lookup_resource_key(dispatch_path)
+            .unwrap_or_default();
+        let rule_idx = resource_key_hash(&resource_key);
+        let bucket_id = compute_bucket_id(&req, rl.per);
+        if let Err(resp) = state.per_rule_rate_limits.check(
+            app_id,
+            rule_idx,
+            rl.per,
+            &bucket_id,
+            rl,
+        ) {
+            return resp;
+        }
+    }
+
+    // 7. Execute the resolved action.
+    let mut response = match &policy.action {
+        ResolvedAction::WorkerRpc | ResolvedAction::WorkerSsr => {
+            handle_dispatch(
+                req,
+                &state,
+                app_id,
+                &compiled_route.entry,
+                tail,
+                body,
+                wall_start,
+            )
+            .await
+        }
+        ResolvedAction::Redirect { to, status } => {
+            let st = ntex::http::StatusCode::from_u16(*status)
                 .unwrap_or(ntex::http::StatusCode::FOUND);
             HttpResponse::build(st)
-                .header("location", to)
+                .header("location", to.clone())
                 .header(
                     "x-wall-time-ms",
                     format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
                 )
                 .finish()
         }
-        Outcome::NotFound => HttpResponse::NotFound()
-            .json(&serde_json::json!({"error": "no rule matched"})),
+        ResolvedAction::Rewrite { to } => {
+            // Phase 2: rewrite forwards under the new path; recursion
+            // not yet supported (would need to re-enter lookup_resource
+            // with hop-limiting). Pass-through to worker for now.
+            let _ = to;
+            handle_dispatch(
+                req,
+                &state,
+                app_id,
+                &compiled_route.entry,
+                tail,
+                body,
+                wall_start,
+            )
+            .await
+        }
+        ResolvedAction::Static { try_chain } => {
+            // For Phase 2 we resolve the first asset that exists in
+            // `assets` / `runtime_assets`. The legacy walker has more
+            // sophisticated `$path` / `[capture]` substitution; for the
+            // resource-tree path the build emits literal templates.
+            serve_resource_tree_static(
+                &state,
+                compiled_route,
+                &req,
+                dispatch_path,
+                try_chain,
+                wall_start,
+            )
+            .await
+        }
     };
 
-    // Inject CORS response headers when the matched rule had a `cors`
-    // policy AND the request carried an `Origin` allowed by it. The
-    // browser is the enforcer here — we only emit headers for allowed
-    // origins, and the lack of `Access-Control-Allow-Origin` causes the
-    // browser to block the response.
-    if let (Some(cors), Some(origin)) = (matched_cors.as_ref(), origin_value.as_deref()) {
+    // 8. CORS injection on the response (resource-tree's flattened
+    //    `cors`).
+    if let (Some(cors), Some(origin)) = (policy.cors.as_ref(), origin_value.as_deref()) {
         if !origin.is_empty() {
             inject_cors_response_headers(response.headers_mut(), cors, origin);
         }
     }
+
     response
 }
+
+/// Decide whether `req` satisfies `policy.auth`. `Anon` always passes
+/// (validate() enforces `publicly_accessible: true`). `User` and `Admin`
+/// require a verifiable `__zs_session` cookie. Phase 2 doesn't yet
+/// distinguish admin from user roles — that ships with the auth tier
+/// rework. For now both require a session.
+fn auth_satisfied(
+    req: &HttpRequest,
+    policy: &crate::compiled::EffectivePolicy,
+    auth_secret: &str,
+    app_id: &Uuid,
+) -> bool {
+    use zeroship_core::types::AuthLevel;
+    if matches!(policy.auth, AuthLevel::Anon) {
+        return true;
+    }
+    if auth_secret.is_empty() {
+        // Dev / test: when there's no auth secret configured the gateway
+        // can't verify a cookie. Allow the request through; the worker
+        // can still apply finer-grained checks. Matches the behavior of
+        // the legacy path where `auth_secret.is_empty()` skips user
+        // header injection.
+        return true;
+    }
+    let cookie = req
+        .headers()
+        .get("cookie")
+        .and_then(|v| v.to_str().ok());
+    let app_id_str = app_id.to_string();
+    user_auth::extract_user(cookie, auth_secret, &app_id_str).is_some()
+}
+
+/// Hash a resource key into a stable u32 for use as the
+/// `PerRuleRateLimitRegistry` rule_idx. xxh3 keeps the
+/// hash deterministic across processes; we truncate to u32 because the
+/// registry's bucket key only differentiates by `(app_id, rule_idx,
+/// bucket)` and a 32-bit space is plenty for the per-app resource set.
+fn resource_key_hash(key: &str) -> u32 {
+    xxhash_rust::xxh3::xxh3_64(key.as_bytes()) as u32
+}
+
+/// Resolve a static action's `try` chain against the manifest's asset
+/// maps. First entry that hits wins; returns 404 on full miss.
+async fn serve_resource_tree_static(
+    state: &GateState,
+    compiled_route: &crate::sync::CompiledRoute,
+    req: &HttpRequest,
+    request_path: &str,
+    try_chain: &[String],
+    wall_start: std::time::Instant,
+) -> HttpResponse {
+    // Phase 2: support the literal templates the build emits, plus the
+    // bare `$path` token (used by `/_assets/*` SPA fallback). Captures
+    // are deferred — the build emits literal paths for now.
+    for tpl in try_chain {
+        let resolved = if tpl == "$path" {
+            request_path.to_string()
+        } else {
+            tpl.clone()
+        };
+        if let Some(hit) = lookup_static_hit(compiled_route, &resolved) {
+            return serve_static_hit(state, req, hit, wall_start).await;
+        }
+    }
+    HttpResponse::NotFound().json(&serde_json::json!({"error": "asset not found"}))
+}
+
+/// Pull a [`StaticHit`] from either runtime_assets or assets via the
+/// compiled manifest, building cache directives the same way the legacy
+/// walker does.
+fn lookup_static_hit(
+    compiled_route: &crate::sync::CompiledRoute,
+    path: &str,
+) -> Option<crate::dispatch::StaticHit> {
+    use zeroship_core::types::CacheCtl;
+    let (entry, mutable) = compiled_route.manifest.lookup_asset_for_static(path)?;
+    let cache = entry.cache.clone().unwrap_or_else(|| {
+        if !mutable && path.starts_with("/_assets/") {
+            CacheCtl {
+                max_age: 31_536_000,
+                swr_window: None,
+                immutable: true,
+                background_refresh: false,
+                stale_on_error: false,
+            }
+        } else {
+            CacheCtl {
+                max_age: 60,
+                swr_window: None,
+                immutable: false,
+                background_refresh: false,
+                stale_on_error: false,
+            }
+        }
+    });
+    Some(crate::dispatch::StaticHit {
+        path: path.to_string(),
+        hash: entry.hash.clone(),
+        content_type: entry.content_type.clone(),
+        size: entry.size,
+        cache,
+        status: None,
+        mutable,
+        variants: entry.variants.clone(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Manifest-driven outcome execution
+// ---------------------------------------------------------------------------
 
 /// Build a 204 preflight response for a matching CORS rule. Called when
 /// the request is `OPTIONS` with an `Origin` header AND a CORS-bearing
@@ -1997,27 +2196,23 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use crate::compiled::CompiledManifest;
-    use zeroship_core::types::{
-        Action, Cors, HttpMethod, Manifest, Match, Rule, WorkerMode,
-    };
+    use zeroship_core::types::{Cors, HttpMethod, Manifest, ResourceEntry};
 
-    /// Single-rule manifest with a worker action carrying a CORS policy.
-    /// All preflight tests use this shape; the path/method narrowness
-    /// keeps the assertions specific.
+    /// Single-resource manifest with a CORS policy attached to `/api/*`.
+    /// All preflight tests use this shape; the path narrowness keeps
+    /// the assertions specific.
     fn manifest_with_cors(cors: Cors) -> Manifest {
-        Manifest {
-            rules: vec![Rule {
-                r#match: Match::Prefix {
-                    method: None,
-                    path: "/api/".into(),
-                },
-                action: Action::Worker {
-                    mode: WorkerMode::Ssr,
-                    cache: None,
-                    rate_limit: None,
-                },
+        let mut resources = std::collections::HashMap::new();
+        resources.insert(
+            "/api/*".into(),
+            ResourceEntry {
                 cors: Some(cors),
-            }],
+                ..Default::default()
+            },
+        );
+        Manifest {
+            version: 1,
+            resources,
             ..Manifest::default()
         }
     }
@@ -2038,12 +2233,15 @@ mod tests {
         };
         let m = manifest_with_cors(cors.clone());
         let c = CompiledManifest::compile(&m);
-        // Preflight asks "can I POST /api/users?" — POST matches the
-        // worker rule; the rule carries CORS so we answer 204.
-        let policy = c.cors_for("POST", "/api/users").expect("cors should match");
-        assert_eq!(policy.allow_origins, cors.allow_origins);
+        // Preflight asks "can I POST /api/users?" — the matched
+        // resource carries CORS so we answer 204.
+        let policy = c
+            .lookup_resource("/api/users")
+            .expect("matches /api/* resource");
+        let policy_cors = policy.cors.as_ref().expect("resource has cors policy");
+        assert_eq!(policy_cors.allow_origins, cors.allow_origins);
         let resp = build_preflight_response(
-            &policy,
+            policy_cors,
             "https://example.com",
             std::time::Instant::now(),
         );
@@ -2116,11 +2314,10 @@ mod tests {
     }
 
     #[test]
-    fn preflight_no_matching_rule_falls_through() {
-        // Manifest has a CORS rule on /api/, but the request targets
-        // /other. cors_for returns None → router falls through to
-        // normal dispatch. With no matching rule for /other, dispatch
-        // returns NotFound.
+    fn preflight_no_matching_resource_falls_through() {
+        // Manifest has a CORS resource at /api/*, but the request
+        // targets /other. lookup_resource returns None → router falls
+        // through to a 404 response.
         let cors = Cors {
             allow_origins: vec!["https://example.com".into()],
             allow_methods: vec![HttpMethod::Post],
@@ -2131,12 +2328,7 @@ mod tests {
         };
         let m = manifest_with_cors(cors);
         let c = CompiledManifest::compile(&m);
-        assert!(c.cors_for("POST", "/other").is_none());
-        // Confirm dispatch returns NotFound for the same path so the
-        // fall-through behaviour is end-to-end coherent.
-        let (outcome, matched) = c.dispatch("OPTIONS", "/other");
-        assert!(matches!(outcome, crate::dispatch::Outcome::NotFound));
-        assert!(matched.is_none());
+        assert!(c.lookup_resource("/other").is_none());
     }
 
     #[test]
@@ -3140,5 +3332,177 @@ mod tests {
             .check(&app_id, 0, rl.per, &bucket_a, &rl)
             .expect_err("user-a drained");
         assert_eq!(err.status(), ntex::http::StatusCode::TOO_MANY_REQUESTS);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Resource-tree request-level tests — exercise the per-resource policy
+// gates on synthetic requests built via ntex's `TestRequest`.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod resource_tree_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use crate::compiled::{CompiledManifest, EffectivePolicy};
+    use zeroship_core::types::{
+        AuthLevel, Manifest, ProcedureKind, RateLimit, RateLimitPer, ResourceEntry,
+    };
+
+    fn manifest_with_resources(resources: HashMap<String, ResourceEntry>) -> Manifest {
+        Manifest {
+            version: 1,
+            resources,
+            ..Manifest::default()
+        }
+    }
+
+    #[test]
+    fn lookup_finds_rpc_resource_after_strip_prefix() {
+        let mut resources = HashMap::new();
+        resources.insert(
+            "rpc:listTodos".into(),
+            ResourceEntry {
+                kind: Some(ProcedureKind::Query),
+                ..Default::default()
+            },
+        );
+        let m = manifest_with_resources(resources);
+        let c = CompiledManifest::compile(&m);
+        let p = c
+            .lookup_resource("/_zs/v1/listTodos")
+            .expect("matches rpc:listTodos");
+        assert_eq!(p.kind, Some(ProcedureKind::Query));
+        // Bare /_rpc/ paths are no longer dispatched — `/_zs/v1/` is
+        // the only RPC wire prefix.
+        assert!(c.lookup_resource("/_rpc/listTodos").is_none());
+    }
+
+    #[test]
+    fn auth_satisfied_passes_anon() {
+        let policy = EffectivePolicy {
+            auth: AuthLevel::Anon,
+            rate_limit: None,
+            cors: None,
+            cache: None,
+            csrf_origins: None,
+            idempotent: false,
+            max_input_bytes: None,
+            middleware: vec![],
+            publicly_accessible: true,
+            kind: Some(ProcedureKind::Query),
+            action: crate::compiled::ResolvedAction::WorkerRpc,
+            input_schema: None,
+            output_schema: None,
+        };
+        let req = ntex::web::test::TestRequest::default().to_http_request();
+        assert!(auth_satisfied(&req, &policy, "secret", &uuid::Uuid::nil()));
+    }
+
+    #[test]
+    fn auth_satisfied_user_blocks_unauthenticated() {
+        let policy = EffectivePolicy {
+            auth: AuthLevel::User,
+            rate_limit: None,
+            cors: None,
+            cache: None,
+            csrf_origins: None,
+            idempotent: false,
+            max_input_bytes: None,
+            middleware: vec![],
+            publicly_accessible: false,
+            kind: Some(ProcedureKind::Mutation),
+            action: crate::compiled::ResolvedAction::WorkerRpc,
+            input_schema: None,
+            output_schema: None,
+        };
+        // No __zs_session cookie → auth fails.
+        let req = ntex::web::test::TestRequest::default().to_http_request();
+        assert!(!auth_satisfied(&req, &policy, "secret", &uuid::Uuid::nil()));
+    }
+
+    #[test]
+    fn auth_satisfied_falls_open_when_secret_unset() {
+        // Dev / test mode: no auth_secret means the gateway can't verify
+        // cookies — pass through and let the worker enforce.
+        let policy = EffectivePolicy {
+            auth: AuthLevel::User,
+            rate_limit: None,
+            cors: None,
+            cache: None,
+            csrf_origins: None,
+            idempotent: false,
+            max_input_bytes: None,
+            middleware: vec![],
+            publicly_accessible: false,
+            kind: Some(ProcedureKind::Mutation),
+            action: crate::compiled::ResolvedAction::WorkerRpc,
+            input_schema: None,
+            output_schema: None,
+        };
+        let req = ntex::web::test::TestRequest::default().to_http_request();
+        assert!(auth_satisfied(&req, &policy, "", &uuid::Uuid::nil()));
+    }
+
+    #[test]
+    fn resource_key_hash_is_stable() {
+        let a = resource_key_hash("rpc:todos.list");
+        let b = resource_key_hash("rpc:todos.list");
+        assert_eq!(a, b, "deterministic across calls");
+        let c = resource_key_hash("rpc:todos.add");
+        assert_ne!(a, c, "different keys hash differently");
+    }
+
+    #[test]
+    fn rate_limit_resolution_min_wins_for_resource_tree() {
+        // End-to-end: build a manifest with a stricter child rate limit
+        // and verify the compiled policy reflects min(parent, child).
+        let mut resources = HashMap::new();
+        resources.insert(
+            "*".into(),
+            ResourceEntry {
+                auth: Some(AuthLevel::User),
+                rate_limit: Some(RateLimit { rpm: Some(600), rps: None, per: RateLimitPer::Ip }),
+                ..Default::default()
+            },
+        );
+        resources.insert(
+            "rpc:expensive".into(),
+            ResourceEntry {
+                kind: Some(ProcedureKind::Mutation),
+                rate_limit: Some(RateLimit { rpm: Some(10), rps: None, per: RateLimitPer::Ip }),
+                r#override: vec!["rate_limit".into()],
+                ..Default::default()
+            },
+        );
+        let m = manifest_with_resources(resources);
+        let c = CompiledManifest::compile(&m);
+        let p = c.lookup_resource("/_zs/v1/expensive").expect("matches");
+        assert_eq!(
+            p.rate_limit.as_ref().unwrap().rpm,
+            Some(10),
+            "child's stricter cap survives the merge"
+        );
+    }
+
+    #[test]
+    fn passthrough_manifest_has_only_root_default() {
+        // The synthesized passthrough manifest carries the `*` root
+        // default but no other resources. URL paths fall through to
+        // 404 in the gateway; the worker is never invoked.
+        let m = Manifest::passthrough();
+        let c = CompiledManifest::compile(&m);
+        assert!(
+            c.lookup_resource("/anything").is_none(),
+            "no per-path resource synthesized in passthrough"
+        );
+        assert!(
+            c.lookup_resource("/_zs/v1/anything").is_none(),
+            "no RPC resource synthesized in passthrough"
+        );
+        assert!(
+            c.lookup_resource("/_rpc/listTodos").is_none(),
+            "legacy /_rpc/ prefix is no longer routed"
+        );
     }
 }

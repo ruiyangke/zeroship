@@ -19,6 +19,10 @@ pub enum Action {
     DeleteVar,
     SetSecret,
     DeleteSecret,
+    /// Set the per-app `process.env` expose list — names of secrets the
+    /// creator has opted to surface in `process.env`. Audited so ops
+    /// can answer "when did we let X out of the secret namespace."
+    SetEnvExpose,
     LinkAccount,
     UnlinkAccount,
     RecordPayout,
@@ -31,6 +35,7 @@ impl Action {
             Self::DeleteVar => "delete_var",
             Self::SetSecret => "set_secret",
             Self::DeleteSecret => "delete_secret",
+            Self::SetEnvExpose => "set_env_expose",
             Self::LinkAccount => "link_account",
             Self::UnlinkAccount => "unlink_account",
             Self::RecordPayout => "record_payout",

@@ -1,0 +1,37 @@
+{
+  "name": "@zeroship/server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Server-side helpers for zeroship apps — defineApp, RpcError, ambient context",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit"
+  },
+  "license": "MIT",
+  "peerDependencies": {
+    "zod": "^3.22.0 || ^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "zod": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "zod": "^3.25.76"
+  }
+}

@@ -445,15 +445,11 @@ export function devServerPlugin(
         file.endsWith(".ts") || file.endsWith(".tsx") ||
         file.endsWith(".js") || file.endsWith(".jsx")
       ) {
-        // Clear transform-level caches so the next transform re-evaluates
-        // "use server" detection for this file.
-        // Exact path match only — substring matching (file.endsWith(key))
-        // would false-positive on unrelated files sharing a suffix.
-        state.serverModuleCache.delete(file);
-
-        // Queue for HMR delivery to the V8 runtime. The runtime polls
-        // /__zeroship_hmr_check and invalidates its ModuleRunner cache
-        // for each path returned. The next import() re-fetches from Vite.
+        // Server-module discovery is now path-based (no caches to
+        // invalidate). Queue the change for HMR delivery to the V8
+        // runtime — the runtime polls /__zeroship_hmr_check and
+        // invalidates its ModuleRunner cache for each path returned.
+        // The next import() re-fetches from Vite.
         pendingHmrChanges.add(file);
       }
     },

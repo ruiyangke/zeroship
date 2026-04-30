@@ -65,45 +65,6 @@ interface AssetEntry {
   variants?: Record<string, AssetVariant>;
 }
 
-type HttpMethod =
-  | "GET"
-  | "POST"
-  | "PUT"
-  | "PATCH"
-  | "DELETE"
-  | "HEAD"
-  | "OPTIONS"
-  | "*";
-
-type WorkerMode = "rpc" | "ssr";
-
-type Match =
-  | { kind: "exact"; method?: HttpMethod; path: string }
-  | { kind: "prefix"; method?: HttpMethod; path: string }
-  | { kind: "glob"; method?: HttpMethod; path: string }
-  | { kind: "any" };
-
-type Action =
-  | {
-      kind: "static";
-      try: string[];
-      cache?: CacheCtl;
-      status?: number;
-    }
-  | {
-      kind: "worker";
-      mode: WorkerMode;
-      cache?: CacheCtl;
-      rate_limit?: { rpm?: number; rps?: number; per?: "ip" | "session" | "app" };
-    }
-  | { kind: "redirect"; to: string; status: number }
-  | { kind: "rewrite"; to: string };
-
-interface Rule {
-  match: Match;
-  action: Action;
-}
-
 interface WorkerCode {
   entry: string;
   modules: Record<string, Sha256Hex>;
@@ -115,14 +76,18 @@ interface ManifestMetadata {
 }
 
 interface Manifest {
-  version: 2;
+  /** Manifest schema version. v1 is the initial published shape. */
+  version: 1;
   worker?: WorkerCode | null;
-  rules: Rule[];
   assets: Record<string, AssetEntry>;
   runtime_assets: Record<string, AssetEntry>;
   asset_version: 0;
   sourcemaps: Record<Sha256Hex, Sha256Hex>;
   metadata: ManifestMetadata;
+  /** Unified resource tree — see `docs/proposals/rpc-v2.md` §7. */
+  resources?: Record<string, Record<string, unknown>>;
+  /** Wire transformer: `"superjson"` (default) or `"json"`. */
+  transformer?: "superjson" | "json";
 }
 
 // ── Public configuration ───────────────────────────────────────────────────
@@ -170,17 +135,31 @@ export interface ZsappOptions {
   /**
    * Whether the user's SSR entry exports its own `default.fetch`.
    *
-   * Drives the catch-all rule choice:
-   *   - true  → `Match::Any → Worker(ssr)` (user owns routing)
-   *   - false → `Match::Any → Static{ try: ["$path", "/index.html"] }`
+   * Drives the catch-all resource choice:
+   *   - true  → `/[...rest]` resource without a routing action →
+   *             gateway forwards to the worker as SSR (user owns routing)
+   *   - false → `/[...rest]` static action serving `["$path", "/index.html"]`
    *             (RPC-only app; SPA shell handles unmatched URLs)
    *
-   * Default: `true` — conservative; an unwanted Worker(SSR) catch-all
-   * 404s, which is preferable to a stale shell on an intended SSR
-   * route. The vite-plugin sets this from a regex probe of the SSR
-   * entry source before Rollup runs (see `build.ts`).
+   * Default: `true` — conservative; an unwanted SSR catch-all 404s,
+   * which is preferable to a stale shell on an intended SSR route.
+   * The vite-plugin sets this from a regex probe of the SSR entry
+   * source before Rollup runs (see `build.ts`).
    */
   userHasDefaultFetch?: boolean;
+  /**
+   * Extra manifest fields (`resources`, `transformer`) computed by
+   * `src/manifest.ts`. Merged into the auto-derived URL resources;
+   * `rpcExtras.resources` wins on key collisions.
+   *
+   * Schemas (Zod) live on the procedures at runtime; the synthetic
+   * SSR entry validates with them. The manifest never carries
+   * JSONSchemas.
+   */
+  rpcExtras?: {
+    resources: Record<string, Record<string, unknown>>;
+    transformer: "superjson" | "json";
+  };
 }
 
 export interface ZsappResult {
@@ -370,8 +349,11 @@ export async function emitZsapp(
     worker = { entry, modules };
   }
 
-  // 7. Build manifest.rules — see (e) in the design.
-  const rules = buildRules({
+  // 7. Build manifest.resources — auto-derived URL entries
+  //    (asset prefix, common public files, prerendered HTML) plus the
+  //    SSR / SPA-fallback catch-all. RPC procedure entries come from
+  //    `rpcExtras` (via `manifest.ts`) and are merged on top.
+  const autoResources = buildAutoResources({
     assetPrefix,
     assets,
     hasWorker: worker != null,
@@ -383,9 +365,17 @@ export async function emitZsapp(
   //    entirely when there's no worker — this matches the spec's shape
   //    notes ("null/missing means SSG-only") and keeps the canonical
   //    JSON shorter.
+  const userResources = options.rpcExtras?.resources ?? {};
+  const mergedResources: Record<string, Record<string, unknown>> = {
+    ...autoResources,
+  };
+  for (const [key, value] of Object.entries(userResources)) {
+    mergedResources[key] = { ...(mergedResources[key] ?? {}), ...value };
+  }
+  const transformer = options.rpcExtras?.transformer ?? "superjson";
+
   const manifest: Manifest = {
-    version: 2,
-    rules,
+    version: 1,
     assets,
     runtime_assets: {},
     asset_version: 0,
@@ -395,6 +385,10 @@ export async function emitZsapp(
   if (worker != null) {
     manifest.worker = worker;
   }
+  if (Object.keys(mergedResources).length > 0) {
+    manifest.resources = mergedResources;
+  }
+  manifest.transformer = transformer;
 
   // 9. Validate cross-references. Catches bugs where a manifest hash
   //    doesn't have a matching tar entry (which would 400 on the server).
@@ -570,107 +564,85 @@ function pickWorkerEntry(workerFiles: CollectedFile[]): string {
   return specifiers[0];
 }
 
-function buildRules(opts: {
+/** Build the auto-derived URL-namespace resource entries. */
+function buildAutoResources(opts: {
   assetPrefix: string;
   assets: Record<string, AssetEntry>;
   hasWorker: boolean;
   userHasDefaultFetch: boolean;
-}): Rule[] {
-  const rules: Rule[] = [];
+}): Record<string, Record<string, unknown>> {
+  const out: Record<string, Record<string, unknown>> = {};
   const { assetPrefix, assets, hasWorker, userHasDefaultFetch } = opts;
 
   // Asset prefix → static, immutable cache (1y).
   if (Object.keys(assets).some((p) => p.startsWith(assetPrefix))) {
-    rules.push({
-      match: { kind: "prefix", path: assetPrefix },
-      action: {
-        kind: "static",
-        try: ["$path"],
-        cache: {
-          max_age: 31_536_000, // 1 year
-          immutable: true,
-        },
+    // Strip the trailing slash so the resource key matches a glob path
+    // shape that the gateway recognizes (single `*` consumes the rest).
+    const key = `${assetPrefix.replace(/\/$/, "")}/*`;
+    out[key] = {
+      static: { try: ["$path"] },
+      cache: {
+        max_age: 31_536_000, // 1 year
+        immutable: true,
       },
-    });
+    };
   }
 
-  // Common public files (favicon.ico, robots.txt, sitemap.xml). Each
-  // gets a per-path Match::Exact rule.
+  // Common public files (favicon.ico, robots.txt, sitemap.xml).
   for (const path of ["/favicon.ico", "/robots.txt", "/sitemap.xml"]) {
     if (assets[path]) {
-      rules.push({
-        match: { kind: "exact", path },
-        action: { kind: "static", try: [path] },
-      });
+      out[path] = { static: { try: [path] } };
     }
   }
 
-  // Prerendered HTML routes. Treat any `*.html` under dist/client/ as a
-  // route candidate, with `/index.html` reserved as the SPA fallback.
-  // Each HTML at `/foo.html` → Match::Exact /foo → Static{ try: ["/foo.html"] }.
-  // /index.html is handled by the SPA-fallback rule (below) for
-  // SSG-only builds; for SSR builds the worker handles routing.
+  // Prerendered HTML routes. Each `*.html` (except `/index.html`)
+  // becomes an exact resource key serving the rendered file.
   const htmlPaths = Object.keys(assets).filter(
     (p) => p.endsWith(".html") && p !== "/index.html"
   );
   for (const htmlPath of htmlPaths) {
-    // /foo.html → /foo, /a/b.html → /a/b
     const route = htmlPath.replace(/\.html$/, "");
-    rules.push({
-      match: { kind: "exact", path: route },
-      action: { kind: "static", try: [htmlPath] },
-    });
+    out[route] = { static: { try: [htmlPath] } };
   }
 
+  // Catch-all under `/[...rest]`. The shape depends on whether the
+  // app has a worker, whether the user exported `default.fetch`, and
+  // whether an SPA shell exists.
+  const catchAllKey = "/[...rest]";
   if (hasWorker) {
-    // RPC: POST /_rpc/* → Worker (rpc).
-    rules.push({
-      match: { kind: "prefix", method: "POST", path: "/_rpc/" },
-      action: { kind: "worker", mode: "rpc" },
-    });
     if (userHasDefaultFetch) {
-      // SSR: catch-all → Worker (ssr). The user's default.fetch decides.
-      rules.push({
-        match: { kind: "any" },
-        action: { kind: "worker", mode: "ssr" },
-      });
+      // SSR catch-all: forward to the worker. No explicit action — a
+      // URL-namespace resource without a routing action defaults to
+      // worker SSR dispatch. We mark it `anon` + publicly_accessible
+      // so the gateway's secure-by-default check doesn't reject it.
+      out[catchAllKey] = {
+        auth: "anon",
+        publicly_accessible: true,
+      };
     } else if (assets["/index.html"]) {
-      // RPC-only with SPA shell: catch-all serves index.html so the
-      // browser router can claim unknown URLs.
-      rules.push({
-        match: { kind: "any" },
-        action: {
-          kind: "static",
-          try: ["$path", "/index.html"],
-        },
-      });
+      // RPC-only app with SPA shell: catch-all serves index.html so
+      // the browser router can claim unknown URLs.
+      out[catchAllKey] = {
+        static: { try: ["$path", "/index.html"] },
+      };
     }
-    // RPC-only without /index.html: no catch-all — gateway 404s on
-    // anything outside /_rpc/. Matches the SSG-only-no-index branch.
+    // RPC-only without /index.html: no URL catch-all — gateway 404s
+    // on anything outside the declared RPC procedure resources.
   } else {
-    // SSG-only: serve index.html as SPA fallback if it exists, else 404.
+    // SSG-only build.
     if (assets["/index.html"]) {
-      rules.push({
-        match: { kind: "any" },
-        action: {
-          kind: "static",
-          try: ["$path", "/index.html"],
-        },
-      });
+      out[catchAllKey] = {
+        static: { try: ["$path", "/index.html"] },
+      };
     } else if (assets["/404.html"]) {
-      rules.push({
-        match: { kind: "any" },
-        action: {
-          kind: "static",
-          try: ["/404.html"],
-          status: 404,
-        },
-      });
+      out[catchAllKey] = {
+        static: { try: ["/404.html"] },
+      };
     }
-    // If neither exists, no catch-all rule — the gateway will 404 on no match.
+    // No SPA shell, no /404.html: no catch-all.
   }
 
-  return rules;
+  return out;
 }
 
 /** Throw if the manifest contains hash references that aren't in `blobsByHash`. */
@@ -749,17 +721,22 @@ function validateManifest(
       }
     }
   }
-  // Every rule's `try` chain (with no captures or $path) must point at
-  // a path that's a key in `assets`. We allow `$path` (resolved at
-  // request time) and any path containing `[name]` (glob captures).
-  for (let i = 0; i < m.rules.length; i++) {
-    const rule = m.rules[i];
-    if (rule.action.kind !== "static") continue;
-    for (const t of rule.action.try) {
+  // Every static-action `try` chain (with no captures or $path) must
+  // point at a path that's a key in `assets`. We allow `$path`
+  // (resolved at request time) and any path containing `[name]`
+  // (glob captures).
+  for (const [key, entry] of Object.entries(m.resources ?? {})) {
+    const staticAction = (entry as Record<string, unknown>).static as
+      | { try?: unknown }
+      | undefined;
+    if (!staticAction) continue;
+    const tryChain = Array.isArray(staticAction.try) ? staticAction.try : [];
+    for (const t of tryChain) {
+      if (typeof t !== "string") continue;
       if (t === "$path" || t.includes("[")) continue;
       if (!(t in m.assets)) {
         throw new Error(
-          `zsapp: rule ${i}: try chain references ${t} but it's not in assets`
+          `zsapp: resource ${JSON.stringify(key)}: static.try references ${t} but it's not in assets`
         );
       }
     }

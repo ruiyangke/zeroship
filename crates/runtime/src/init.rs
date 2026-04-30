@@ -116,6 +116,15 @@ pub const FORMDATA_JS: &str = include_str!("embed/formdata.js");
 /// Embedded WebSocket/WebSocketPair polyfill (depends on events.js for EventTarget).
 pub const WEBSOCKET_JS: &str = include_str!("embed/websocket.js");
 
+/// Node-shaped globals the runtime doesn't already install: a lazy
+/// `globalThis.Buffer` stub (configurable getter so unenv's
+/// `node:buffer` import can swap it out via `Object.defineProperty`)
+/// and `setImmediate` / `clearImmediate` mapped to `setTimeout(0)` /
+/// `clearTimeout`. Loaded BEFORE any user module evaluates, so npm
+/// packages that read these as bare globals (no `node:*` import) find
+/// them present.
+pub const NODE_GLOBALS_JS: &str = include_str!("embed/node-globals.js");
+
 /// The `zeroship` user-facing ESM module. Exposes the request-scoped helpers
 /// that SDK packages lean on:
 ///
@@ -208,11 +217,19 @@ function sseFromAsyncGen(gen) {
                     controller.enqueue(encoder.encode("event: yield\ndata: " + valJson + "\n\n"));
                 }
             } catch (e) {
-                const payload = JSON.stringify({
+                // Same envelope shape as errorResponse() — keeps the SSE
+                // error frame and HTTP error body field-compatible so a
+                // client decoding either can use a single parser. `code`
+                // and `retryable` are type-checked; `details` is forwarded
+                // as-is when present.
+                const payload = {
                     message: (e && e.message) || String(e),
                     name: (e && e.name) || "Error",
-                });
-                controller.enqueue(encoder.encode("event: error\ndata: " + payload + "\n\n"));
+                };
+                if (e && typeof e.code === "string") payload.code = e.code;
+                if (e && e.details !== undefined) payload.details = e.details;
+                if (e && typeof e.retryable === "boolean") payload.retryable = e.retryable;
+                controller.enqueue(encoder.encode("event: error\ndata: " + JSON.stringify(payload) + "\n\n"));
             } finally {
                 controller.close();
             }
@@ -231,11 +248,21 @@ function sseFromAsyncGen(gen) {
 function errorResponse(err) {
     const status = Number.isInteger(err && err.status) && err.status >= 400 && err.status < 600
         ? err.status : 500;
-    const body = JSON.stringify({
+    const envelope = {
         message: (err && err.message) ? err.message : String(err),
         name: (err && err.name) ? err.name : "Error",
-    });
-    return new Response(body, {
+    };
+    // Forward the structured-error envelope when the throw carries it.
+    // `code` is gRPC-style ("INVALID_ARGUMENT", "UNAUTHENTICATED", ...)
+    // and `retryable` is a hint for clients deciding whether to retry.
+    // `details` is any JSON value — the SDK validation paths (e.g. Zod)
+    // attach the issues array here. Only string codes / boolean
+    // retryable are forwarded; other types are dropped so the wire
+    // contract can't be stretched by accident.
+    if (err && typeof err.code === "string") envelope.code = err.code;
+    if (err && err.details !== undefined) envelope.details = err.details;
+    if (err && typeof err.retryable === "boolean") envelope.retryable = err.retryable;
+    return new Response(JSON.stringify(envelope), {
         status,
         headers: { "Content-Type": "application/json" },
     });
@@ -438,7 +465,7 @@ pub fn load_polyfills_and_modules(
     setup_globals(scope);
 
     // Load polyfills
-    for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS, STREAMS_POLYFILL_JS, EVENTS_JS, BLOB_JS, FORMDATA_JS, WEBSOCKET_JS] {
+    for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_JS, STREAMS_POLYFILL_JS, NODE_GLOBALS_JS, EVENTS_JS, BLOB_JS, FORMDATA_JS, WEBSOCKET_JS] {
         let code = v8::String::new(scope, polyfill).unwrap();
         let script = v8::Script::compile(scope, code, None).unwrap();
         script.run(scope).unwrap();
@@ -714,14 +741,22 @@ fn zs_env_callback(
             rv.set(env_local.into());
         }
         None => {
-            let json = state.borrow().env_json.clone();
-            match v8::String::new(scope, &json) {
-                Some(s) => match v8::json::parse(scope, s) {
-                    Some(val) => rv.set(val),
-                    None => rv.set(v8::Object::new(scope).into()),
-                },
-                None => rv.set(v8::Object::new(scope).into()),
+            // Degraded path — `ensure_initialized` hasn't yet built the
+            // composite object. Hand back a flat merged map of vars +
+            // secrets (secrets win on collision) so SDK code can still
+            // read scalar values; plugin namespaces will be missing
+            // until the next request triggers init.
+            let (vars, secrets) = {
+                let s = state.borrow();
+                (s.env_app_vars.clone(), s.env_app_secrets.clone())
+            };
+            let env_obj = v8::Object::new(scope);
+            for (k, v) in vars.iter().chain(secrets.iter()) {
+                let k_v8 = v8::String::new(scope, k).unwrap();
+                let v_v8 = v8::String::new(scope, v).unwrap();
+                env_obj.set(scope, k_v8.into(), v_v8.into());
             }
+            rv.set(env_obj.into());
         }
     }
 }
@@ -1290,45 +1325,65 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
     }
 
     // process.env polyfill — many npm packages (e.g. LangChain) read
-    // `process.env.OPENAI_API_KEY`. Populate from BOTH the per-app
-    // env_vars (cache.rs APP_ID + any worker-level state) AND the
-    // current EnvSnapshot JSON (vars + decrypted secrets fetched from
-    // the control plane). The snapshot is the canonical source for
-    // user-set env; env_vars layered on top covers worker-internal
-    // hand-injected keys.
+    // `process.env.OPENAI_API_KEY`. SECURITY: this object only carries
+    // the user-controlled `vars` (always-public) plus secrets the
+    // creator has explicitly opted-in via the per-app `expose` list.
+    // Bare `secrets` are NEVER copied here — that would let any
+    // third-party npm package walk `Object.keys(process.env)` and
+    // exfiltrate them.
     //
-    // SECURITY: an earlier revision used `std::env::vars()` which leaked
-    // every host-level secret (DATABASE_URL, WORKER_KEY, AWS credentials)
-    // to every app. Multi-tenant apps must only see their own env vars.
+    // Worker-internal `env_vars` (e.g. `APP_ID` injected by
+    // `crates/worker/src/cache.rs`) is layered on first as a base; user
+    // `vars` override on collision because user config is the
+    // authoritative surface. Exposed secrets are then layered last for
+    // any names in the per-app expose list — but we deliberately let
+    // `vars` take precedence even there: an explicit name set as a var
+    // shouldn't be silently shadowed by a secret of the same name (the
+    // creator can resolve the conflict by deleting one or the other).
+    //
+    // An earlier revision used `std::env::vars()` which leaked every
+    // host-level secret (DATABASE_URL, WORKER_KEY, AWS credentials) to
+    // every app. Multi-tenant apps must only see their own env vars.
     {
         let process = v8::Object::new(scope);
         let env_obj = v8::Object::new(scope);
 
-        // Read per-app env_vars from the RuntimeState slot.
         let state: crate::state::SharedState = scope
             .get_slot::<crate::state::SharedState>()
             .expect("RuntimeState not in isolate slot")
             .clone();
-        let app_env = state.borrow().env_vars.clone();
-        for (key, value) in &app_env {
+
+        // Layer 1: worker-internal env_vars (APP_ID, ...). Always last
+        // resort — any user-controlled var of the same name wins.
+        let worker_env = state.borrow().env_vars.clone();
+        for (key, value) in &worker_env {
             let k = v8::String::new(scope, key).unwrap();
             let v = v8::String::new(scope, value).unwrap();
             env_obj.set(scope, k.into(), v.into());
         }
-        // Layer the EnvSnapshot JSON over the env_vars: snapshot keys
-        // override worker-internal keys when they collide. The snapshot
-        // is `set_env_snapshot`'d at the start of every call_fetch_handler
-        // before this lazy init runs, so by the time setup_globals fires
-        // it carries the freshest control-plane state.
-        let env_json = state.borrow().env_json.clone();
-        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&env_json) {
-            for (key, value) in &map {
-                if let Some(s) = value.as_str() {
-                    let k = v8::String::new(scope, key).unwrap();
-                    let v = v8::String::new(scope, s).unwrap();
-                    env_obj.set(scope, k.into(), v.into());
-                }
+
+        // Layer 2: opt-in exposed secrets. Listed in `env_expose_keys`,
+        // looked up in `env_app_secrets`. Layered BEFORE vars so a var
+        // of the same name still wins (vars are the explicit non-sensitive
+        // surface; we don't shadow them with a secret).
+        let (app_vars, app_secrets, expose_keys) = {
+            let s = state.borrow();
+            (s.env_app_vars.clone(), s.env_app_secrets.clone(), s.env_expose_keys.clone())
+        };
+        for name in &expose_keys {
+            if let Some(value) = app_secrets.get(name) {
+                let k = v8::String::new(scope, name).unwrap();
+                let v = v8::String::new(scope, value).unwrap();
+                env_obj.set(scope, k.into(), v.into());
             }
+        }
+
+        // Layer 3: user-controlled vars — always in `process.env`.
+        // Wins over both worker-internal and exposed-secret layers.
+        for (key, value) in &app_vars {
+            let k = v8::String::new(scope, key).unwrap();
+            let v = v8::String::new(scope, value).unwrap();
+            env_obj.set(scope, k.into(), v.into());
         }
 
         let env_key = v8::String::new(scope, "env").unwrap();
@@ -1400,8 +1455,26 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
 
 /// `env.get(key) → string | null`
 ///
-/// Reads from the per-app environment variables injected at deploy time.
+/// The explicit, audited surface for env reads — user code uses this
+/// (or `import { env } from "zeroship"`) when it wants to read a value
+/// that may be a secret. Returns the merged `vars + secrets` map; on
+/// collision secrets win because they are the authoritative value for
+/// sensitive lookups.
+///
+/// Distinct from `process.env`, which only carries `vars` plus
+/// opt-in-exposed secrets. See `setup_globals` for that layer.
+///
+/// Worker-internal `env_vars` (APP_ID, …) are deliberately NOT in this
+/// surface — that map is for plugin-internal state, not user-readable
+/// configuration.
 #[zeroship_op(state)]
 fn env_get(state: SharedState, key: String) -> Option<String> {
-    state.borrow().env_vars.get(&key).cloned()
+    let s = state.borrow();
+    // Vars first, then secrets override on collision (more sensitive
+    // wins on the explicit surface).
+    s.env_app_vars
+        .get(&key)
+        .cloned()
+        .map(|v| s.env_app_secrets.get(&key).cloned().unwrap_or(v))
+        .or_else(|| s.env_app_secrets.get(&key).cloned())
 }

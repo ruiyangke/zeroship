@@ -230,6 +230,11 @@ async fn main() -> std::io::Result<()> {
                     .route(web::delete().to(env_handlers::delete_secret)),
             )
             .service(
+                web::resource("/api/apps/{id}/env/expose")
+                    .route(web::get().to(env_handlers::list_expose))
+                    .route(web::put().to(env_handlers::set_expose)),
+            )
+            .service(
                 web::resource("/api/apps/{id}/audit")
                     .route(web::get().to(env_handlers::list_audit)),
             )

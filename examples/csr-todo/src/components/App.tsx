@@ -1,14 +1,18 @@
 import { useEffect, useState } from "react";
-import { listTodos, type Todo } from "../server";
+import type { Todo } from "../server";
+import { rpc } from "../api";
 
 export function App({ navigate }: { navigate: (to: string) => void }) {
   const [todos, setTodos] = useState<Todo[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // `listTodos` is the build-time RPC stub — the actual function
-    // runs in the V8 worker, this resolves with the JSON response.
-    listTodos()
+    // `rpc.listTodos.query(...)` ships through @zeroship/rpc-client.
+    // The actual function still runs in the V8 worker; the client
+    // handles encoding (superjson), error parsing (RpcError), and the
+    // typed call surface keyed off the App type in src/api.ts.
+    rpc.listTodos
+      .query({ limit: 50 })
       .then((rows) => setTodos(rows))
       .finally(() => setLoading(false));
   }, []);

@@ -175,6 +175,76 @@ pub async fn set_secret(
 }
 
 // ------------------------------------------------------------------
+// Expose list (per-app `process.env` opt-in for secrets)
+// ------------------------------------------------------------------
+
+/// `GET /api/apps/:id/env/expose` — the current opt-in list of secret
+/// names that surface in `process.env`. Names only — values come from
+/// the underlying `app_secrets` table.
+pub async fn list_expose(
+    req: web::HttpRequest,
+    path: Path<String>,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
+    match state.env_store.list_expose(id).await {
+        Ok(keys) => web::HttpResponse::Ok().json(&serde_json::json!({"expose": keys})),
+        Err(e) => env_err_response(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetExposeBody {
+    /// Replacement list of secret names. Empty array clears the list.
+    /// Each name must match the `valid_key` regex (UPPER_SNAKE_CASE);
+    /// duplicates are deduplicated server-side.
+    pub keys: Vec<String>,
+}
+
+/// `PUT /api/apps/:id/env/expose` — replace the opt-in list of secret
+/// names that surface in `process.env`. Sticky across deploys (lives on
+/// the env config, not the manifest). Empty array clears the list.
+///
+/// Why a separate endpoint: this is per-app metadata orthogonal to
+/// any individual var/secret CRUD — extending POST /vars or
+/// POST /secrets would entangle two unrelated concerns. The list
+/// references secret names but doesn't store secret VALUES, so the
+/// authorization model is the same as listing secret names (admin
+/// auth, audited).
+pub async fn set_expose(
+    req: web::HttpRequest,
+    path: Path<String>,
+    body: Json<SetExposeBody>,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
+    match state.env_store.set_expose(id, &body.keys).await {
+        Ok(applied) => {
+            // Audit: log the new list (joined with commas) as the
+            // resource string. The full set is recoverable from
+            // `app_env_expose` if needed; this gives ops a one-glance
+            // record of what changed.
+            let resource = applied.join(",");
+            let ip = source_ip(&req, &state);
+            audit::log(&state.registry, AuditEntry {
+                app_id: Some(id),
+                creator_id: None,
+                actor: "admin",
+                action: Action::SetEnvExpose,
+                resource: Some(&resource),
+                source_ip: ip.as_deref(),
+            }).await;
+            web::HttpResponse::Ok().json(&serde_json::json!({"expose": applied}))
+        }
+        Err(e) => env_err_response(e),
+    }
+}
+
+// ------------------------------------------------------------------
 // Audit log read
 // ------------------------------------------------------------------
 
