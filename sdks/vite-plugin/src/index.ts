@@ -29,6 +29,18 @@ export interface ZeroshipOptions {
   serverEntry?: string;
   /** Port for the zeroship dev server (default: 3001) */
   devServerPort?: number;
+  /**
+   * Build mode.
+   *
+   * - `"full"` (default): client + SSR builds; emits `worker` in the manifest.
+   * - `"static"`: SSG-only deploy. Skips the SSR Rollup sub-build, and
+   *   tells Vite that an empty `rollupOptions.input` is OK so users don't
+   *   have to ship a placeholder `vite.empty.js`. The emitter walks `dist/`
+   *   for HTML / CSS / images / etc. and packs them as assets; manifest's
+   *   `worker` is omitted. Useful for static-site generators that copy
+   *   prerendered HTML into `dist/` themselves.
+   */
+  mode?: "full" | "static";
 }
 
 export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
@@ -46,7 +58,10 @@ export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
     zeroshipModulePlugin(),
     transformPlugin(rpcEndpoint, state),
     ...devServerPlugin(options, state),
-    buildPlugin(state, { serverEntry: options.serverEntry }),
+    buildPlugin(state, {
+      serverEntry: options.serverEntry,
+      mode: options.mode ?? "full",
+    }),
   ];
 }
 

@@ -19,14 +19,14 @@ Output:
 
 ```
 dist/
-├── _empty.js               (1 KB inert chunk — see "Why a placeholder JS file" below)
 ├── about.html
 ├── docs/
 │   └── intro.html
 ├── index.html
-├── assets/                 (likely missing — no real chunks to emit)
 └── app.zsapp               (the deploy artifact)
 ```
+
+`mode: "static"` in `vite.config.ts` skips the SSR sub-build entirely and injects a virtual stub Rollup input that gets deleted in `generateBundle`, so no `_empty-<hash>.js` placeholder ships in the artifact.
 
 ## Inspect the manifest
 
@@ -52,21 +52,11 @@ What you should see:
 
 `worker` is **absent** from the JSON entirely (the spec says `null`/missing means SSG-only, and the emitter omits the field rather than writing `null`).
 
-## Known limitations (gaps surfaced)
-
-### Gap — `/_assets/` rule isn't emitted when no JS chunks exist
-
-The vite-plugin's `buildRules()` in `zsapp.ts` only emits the `/_assets/` Static rule when at least one asset path starts with the configured prefix. For a pure-HTML SSG with zero JS chunks, the prefix rule is correctly skipped — but the demo has a `_empty.js` file living at the root of `dist/`, which gets mounted as `/index-<hash>.js` (or wherever Rollup put it) and isn't covered by any explicit rule. The catch-all `Any → Static{ try: ["$path", "/index.html"] }` happens to serve it (since `$path` resolves), but a stricter setup might want a per-asset rule.
-
-### Why a placeholder JS file
-
-Vite refuses to build with zero inputs — see `rollupOptions.input` in `vite.config.ts`. We feed it a one-line `vite.empty.js` so it has SOMETHING to emit. The chunk is never linked to and is dead weight (~30 bytes after compression), but it keeps the build from erroring out.
-
-A cleaner approach would be a dedicated "static-only" mode in the vite-plugin that disables Rollup entirely and just walks `content/` directly. That's a future addition.
+## Notes
 
 ### Trailing-slash matching is exact-only
 
-`Match::Exact` requires the path to be exactly equal. So `GET /about/` (with the trailing slash) won't match the rule for `/about`. The catch-all then resolves it via `$path` → `/about/`, which isn't an asset, then falls back to `/index.html`. Result: the home page renders for `/about/`. A future enhancement would emit two rules per route, or use `Match::Prefix` with normalization.
+`Match::Exact` requires the path to be exactly equal. So `GET /about/` (with the trailing slash) won't match the rule for `/about`. The catch-all then resolves it via `$path` → `/about/`, which isn't an asset, then falls back to `/index.html`. Result: the home page renders for `/about/`. This is a gateway-side limitation, not a vite-plugin bug — a future enhancement would emit two rules per route, or use `Match::Prefix` with normalization.
 
 ## Files
 
@@ -75,8 +65,7 @@ A cleaner approach would be a dedicated "static-only" mode in the vite-plugin th
 | `content/index.html` | Home — served at `/` |
 | `content/about.html` | About — served at `/about` |
 | `content/docs/intro.html` | Doc page — served at `/docs/intro` |
-| `vite.config.ts` | Custom `ssgContentPlugin` copies `content/**` into `dist/` |
-| `vite.empty.js` | One-line placeholder that satisfies Vite's `input` requirement |
+| `vite.config.ts` | `ssgContentPlugin` copies `content/**` into `dist/`; `zeroship({ mode: "static" })` packs the result |
 
 ## Deploy
 

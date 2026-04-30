@@ -24,6 +24,16 @@ export const CLIENT_MANIFEST_VIRTUAL_ID = "virtual:zeroship/client-manifest";
 export const CLIENT_MANIFEST_RESOLVED_ID = "\0" + CLIENT_MANIFEST_VIRTUAL_ID;
 
 /**
+ * Specifier for the static-mode stub entry. Injected via `rollupOptions.input`
+ * so Vite has something to chew on when the user has zero JS inputs (an
+ * SSG-only project, e.g.). The matching `resolveId` + `load` resolve it
+ * to an empty module, and `generateBundle` deletes the chunk before write.
+ */
+export const STATIC_STUB_VIRTUAL_ID = "virtual:zeroship/static-stub";
+/** Internal (\0-prefixed) id Vite uses for the static stub. */
+export const STATIC_STUB_RESOLVED_ID = "\0" + STATIC_STUB_VIRTUAL_ID;
+
+/**
  * Build the InlineConfig the plugin passes to `viteBuild()` for the
  * SSR sub-build.
  *
@@ -213,8 +223,16 @@ export function findServerEntry(root: string, explicit?: string): string | null 
   return null;
 }
 
-export function buildPlugin(state: TransformState, options: { serverEntry?: string } = {}): Plugin {
+export function buildPlugin(
+  state: TransformState,
+  options: {
+    serverEntry?: string;
+    /** "static" → skip the SSR sub-build entirely. */
+    mode?: "full" | "static";
+  } = {}
+): Plugin {
   const { serverFunctionMap } = state;
+  const mode = options.mode ?? "full";
   let root = "";
   let isDev = false;
   // The client build's `outDir` (resolved). Read in configResolved so the
@@ -235,6 +253,66 @@ export function buildPlugin(state: TransformState, options: { serverEntry?: stri
   return {
     name: "zeroship:build",
 
+    /**
+     * In static mode, satisfy Vite's "needs at least one input" check
+     * by injecting a virtual entry that resolves to an empty module.
+     * The matching `generateBundle` below deletes the empty chunk so
+     * the .zsapp emitter doesn't catalog a `_empty-<hash>.js` asset.
+     *
+     * Only runs when the user hasn't already configured an input; if
+     * they have an `index.html` or other entry, we leave it alone
+     * and the static-mode build still produces the JS chunks for it
+     * (see test `static_only_with_html_inputs_still_works`).
+     */
+    config(userConfig: any) {
+      if (mode !== "static") return;
+      const hasInput =
+        userConfig?.build?.rollupOptions?.input != null ||
+        // Vite auto-uses `index.html` in the project root if it exists.
+        // We can't check that here without the resolved root, so just
+        // err on the side of injecting our virtual entry only when the
+        // user explicitly has no rollupOptions.input. Vite falls back
+        // to its default for the index.html case.
+        false;
+      if (hasInput) return;
+      return {
+        build: {
+          rollupOptions: {
+            input: { __zeroship_static_stub: STATIC_STUB_VIRTUAL_ID },
+          },
+        },
+      };
+    },
+
+    /**
+     * Provide the virtual stub module the `config` hook injected above.
+     * Resolves to an empty ESM module — Rollup emits a chunk for it
+     * which `generateBundle` then deletes.
+     */
+    resolveId(id: string) {
+      if (mode !== "static") return null;
+      if (id === STATIC_STUB_VIRTUAL_ID) return STATIC_STUB_RESOLVED_ID;
+      return null;
+    },
+    load(id: string) {
+      if (mode !== "static") return null;
+      if (id !== STATIC_STUB_RESOLVED_ID) return null;
+      // Empty module — no exports, no side effects.
+      return "// zeroship static-mode stub\n";
+    },
+    /**
+     * After Rollup builds the (empty) stub chunk, delete its output so
+     * the .zsapp doesn't end up shipping a `_empty-<hash>.js`.
+     */
+    generateBundle(_options: unknown, bundle: Record<string, { name?: string }>) {
+      if (mode !== "static") return;
+      for (const [filename, chunk] of Object.entries(bundle)) {
+        if (chunk.name === "__zeroship_static_stub") {
+          delete bundle[filename];
+        }
+      }
+    },
+
     configResolved(config: any) {
       root = config.root;
       isDev = config.command === "serve";
@@ -247,6 +325,12 @@ export function buildPlugin(state: TransformState, options: { serverEntry?: stri
     async writeBundle() {
       if (isDev) return;
       if (serverBuilt) return;
+      // Static-mode: skip the SSR sub-build entirely. closeBundle still
+      // runs the emitter, which walks dist/ as-is.
+      if (mode === "static") {
+        serverBuilt = true;
+        return;
+      }
 
       const entry = findServerEntry(root, options.serverEntry);
       if (!entry) {

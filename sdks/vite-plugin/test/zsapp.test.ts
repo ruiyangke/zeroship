@@ -1054,6 +1054,121 @@ describe("buildSsrInlineConfig", () => {
     assert.equal(build.outDir, "dist/server");
   });
 
+  test("static_only_mode_skips_rollup", async () => {
+    // SSG-only fixture: no JS, only static HTML files. After build,
+    // the .zsapp should contain those HTML files as assets, no worker,
+    // and NO spurious `_empty-<hash>.js` chunk.
+    const fix = await makeFixture({
+      "dist/index.html": "<!doctype html><html><body>Home</body></html>",
+      "dist/about.html": "<!doctype html><html><body>About</body></html>",
+      "dist/docs/intro.html":
+        "<!doctype html><html><body>Intro</body></html>",
+    });
+    try {
+      const result = await emitZsapp({
+        root: fix.root,
+        builtAt: "2026-04-29T00:00:00Z",
+        silent: true,
+      });
+      const tarBytes = zstdDecompressSync(await fs.readFile(result.outputPath));
+      const manifest = JSON.parse(parseTar(tarBytes)[0].bytes.toString("utf8"));
+
+      // No worker (SSG-only).
+      assert.ok(
+        !("worker" in manifest) || manifest.worker == null,
+        "worker absent for SSG-only build"
+      );
+
+      // Each HTML page is in assets.
+      assert.ok(manifest.assets["/index.html"], "index.html in assets");
+      assert.ok(manifest.assets["/about.html"], "about.html in assets");
+      assert.ok(
+        manifest.assets["/docs/intro.html"],
+        "docs/intro.html in assets"
+      );
+
+      // No `_empty-<hash>.js` placeholder anywhere.
+      const jsBlobs = Object.keys(manifest.assets).filter((p) =>
+        /^\/.*\.js$/.test(p)
+      );
+      assert.equal(
+        jsBlobs.length,
+        0,
+        `no JS assets in SSG-only build (found ${JSON.stringify(jsBlobs)})`
+      );
+
+      // Per-route exact rules emitted for non-index HTML, plus SPA-style
+      // catch-all serving index.html.
+      const ruleSummary = manifest.rules.map(
+        (r: {
+          match: { kind: string; path?: string };
+          action: { kind: string; try?: string[] };
+        }) =>
+          `${r.match.kind}${r.match.path ? "(" + r.match.path + ")" : ""}/${r.action.kind}`
+      );
+      assert.ok(
+        ruleSummary.some((s: string) => s === "exact(/about)/static"),
+        "/about route emitted"
+      );
+      assert.ok(
+        ruleSummary.some((s: string) => s === "exact(/docs/intro)/static"),
+        "/docs/intro route emitted"
+      );
+      assert.ok(
+        ruleSummary.some((s: string) => s === "any/static"),
+        "SPA fallback emitted"
+      );
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
+  test("static_only_with_html_inputs_still_works", async () => {
+    // Mixed: an `index.html` entry produced by Vite (with hashed JS
+    // chunks) PLUS additional static `content/*.html` files copied
+    // into dist. Both should land as assets.
+    const fix = await makeFixture({
+      "dist/index.html":
+        '<!doctype html><html><head><script type="module" src="/assets/main-abc.js"></script></head></html>',
+      "dist/assets/main-abc.js": "console.log('app');",
+      "dist/about.html": "<!doctype html>About",
+    });
+    try {
+      const result = await emitZsapp({
+        root: fix.root,
+        builtAt: "2026-04-29T00:00:00Z",
+        silent: true,
+      });
+      const tarBytes = zstdDecompressSync(await fs.readFile(result.outputPath));
+      const manifest = JSON.parse(parseTar(tarBytes)[0].bytes.toString("utf8"));
+
+      assert.ok(manifest.assets["/index.html"]);
+      assert.ok(manifest.assets["/assets/main-abc.js"]);
+      assert.ok(manifest.assets["/about.html"]);
+      // /assets/ prefix rule emitted for the Vite-hashed JS.
+      const hasAssetsRule = manifest.rules.some(
+        (r: {
+          match: { kind: string; path?: string };
+          action: { kind: string };
+        }) =>
+          r.match.kind === "prefix" &&
+          r.match.path === "/assets/" &&
+          r.action.kind === "static"
+      );
+      assert.ok(hasAssetsRule, "/assets/ prefix rule emitted");
+      // /about route emitted.
+      const hasAboutRule = manifest.rules.some(
+        (r: {
+          match: { kind: string; path?: string };
+          action: { kind: string };
+        }) => r.match.kind === "exact" && r.match.path === "/about"
+      );
+      assert.ok(hasAboutRule, "/about route emitted");
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
   test("only_index_js_in_worker_modules_when_no_public_copy", async () => {
     // Walker sanity: when dist/server/ contains only `index.js` (which
     // is what the SSR build produces with `publicDir: false`), the

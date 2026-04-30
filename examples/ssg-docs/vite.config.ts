@@ -1,19 +1,23 @@
 // SSG demo vite config.
 //
 // We want three prerendered HTML pages (`/`, `/about`, `/docs/intro`)
-// emitted as plain assets. No worker, no SSR.
+// emitted as plain assets. No worker, no SSR, no JS at all.
 //
-// Approach: a tiny custom plugin walks `content/`, copies every `*.html`
-// file into `dist/` preserving the path layout. The `@zeroship/vite-plugin`
-// then sees them as plain assets, and `buildRules()` in `zsapp.ts` emits
-// per-route Match::Exact rules + the SPA-style fallback.
+// Approach: a tiny `ssgContentPlugin` walks `content/` and copies every
+// `*.html` file into `dist/`. The `@zeroship/vite-plugin` runs in
+// `mode: "static"`, which:
+//   - skips the SSR sub-build entirely;
+//   - injects a virtual stub `rollupOptions.input` so Vite still has an
+//     entry to chew on (otherwise it errors out with "no input");
+//   - deletes the stub chunk in `generateBundle` so no `_empty-<hash>.js`
+//     ships in the deploy artifact.
+//
+// Result: `dist/` ends up with just the copied HTML, and `app.zsapp` has
+// `worker: null` plus per-route static rules for every page.
 import { defineConfig, type Plugin } from "vite";
 import { promises as fs } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { zeroship } from "@zeroship/vite-plugin";
-
-const HERE = dirname(fileURLToPath(import.meta.url));
 
 /** Recursively walk a directory, returning every file path. */
 async function walk(dir: string, base = dir): Promise<string[]> {
@@ -34,6 +38,9 @@ function ssgContentPlugin(): Plugin {
   return {
     name: "ssg:copy-content",
     apply: "build",
+    // Run BEFORE zeroship's closeBundle so the copied content is on
+    // disk by the time the .zsapp emitter walks dist/.
+    enforce: "pre",
     configResolved(config) {
       root = config.root;
       outDir = config.build.outDir;
@@ -60,18 +67,10 @@ function ssgContentPlugin(): Plugin {
 export default defineConfig({
   plugins: [
     ssgContentPlugin(),
-    // The zeroship plugin discovers no `src/server.ts`, so it skips the
-    // server build, leaves `worker: null`, and emits per-route static
-    // rules for every `*.html` it finds in the dist tree.
-    zeroship(),
+    // mode: "static" tells the plugin to skip the SSR sub-build and
+    // inject the no-op stub input so Vite doesn't error on an empty
+    // build. The emitter then walks dist/ (after content copy) and
+    // packs the HTML files as assets.
+    zeroship({ mode: "static" }),
   ],
-  build: {
-    rollupOptions: {
-      // No JS/HTML entry — the SSG demo is pure static. The default
-      // input would be `index.html` in the project root, which we don't
-      // have. Point Rollup at an empty virtual entry so it produces an
-      // empty bundle and we ship only the copied content.
-      input: { _empty: resolve(HERE, "vite.empty.js") },
-    },
-  },
 });
