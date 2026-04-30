@@ -86,7 +86,26 @@ fn err(status: u16, msg: impl Into<String>) -> HttpResponse {
 /// failure reason is emitted (so alerting can distinguish a
 /// clock-skew operator mistake from an actual replay attack).
 /// Returns true iff every check passes.
+///
+/// **Query strings are rejected outright.** The signed canonical
+/// string covers `req.path()`, which excludes the query. A signed
+/// `/foo` would otherwise also be valid for `/foo?evil=1` — and a
+/// future handler that reads query params would silently accept the
+/// attacker-controlled bit. We refuse query strings until we
+/// explicitly extend the canonical to include them and bump
+/// `PROTOCOL_VERSION`.
 fn verify_signed(req: &HttpRequest, body: &[u8], state: &AppState) -> bool {
+    let method = req.method().as_str();
+    let path = req.path();
+
+    if req.uri().query().is_some() {
+        audit::record(
+            audit::events::AUTH_FAIL,
+            &format!("method={method} path={path} reason=query-not-allowed"),
+        );
+        return false;
+    }
+
     let h = req.headers();
     let ts_hdr = h
         .get("x-sbx-timestamp")
@@ -100,9 +119,6 @@ fn verify_signed(req: &HttpRequest, body: &[u8], state: &AppState) -> bool {
         .get("x-sbx-signature")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-
-    let method = req.method().as_str();
-    let path = req.path();
 
     match state
         .verifier
@@ -613,6 +629,27 @@ mod tests {
             .header("x-sbx-nonce", nonce)
             .header("x-sbx-signature", sig)
             .set_payload(body_sent)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[ntex::test]
+    async fn query_string_rejected_even_if_signed() {
+        // A signed request whose URI carries a `?query=...` is
+        // refused — the canonical only covers `path()`, so the
+        // query is unauthenticated. Forward-compat tripwire.
+        let (state, _d) = make_state("query");
+        let app = make_app!(state);
+        // Sign for the bare path "/tree" (no query). Then send
+        // the request to "/tree?evil=1" — our verify_signed sees
+        // a query and refuses regardless of the otherwise-valid sig.
+        let (ts, nonce, sig) = sign("GET", "/tree", &[]);
+        let req = test::TestRequest::get()
+            .uri("/tree?evil=1")
+            .header("x-sbx-timestamp", ts)
+            .header("x-sbx-nonce", nonce)
+            .header("x-sbx-signature", sig)
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);

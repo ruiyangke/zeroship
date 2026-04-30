@@ -32,6 +32,7 @@
 //! this direction. HMAC is faster, smaller code, fewer ways to
 //! misuse.
 
+use std::io::Read;
 use std::path::Path;
 
 use zeroize::Zeroizing;
@@ -45,10 +46,22 @@ pub const DEFAULT_TOKEN_PATH: &str = "/run/secrets/sandbox-agent-token";
 /// bytes that even base64 (43 chars) gives an unguessable secret.
 pub const MIN_TOKEN_BYTES: usize = 32;
 
+/// Maximum acceptable key length in bytes. Bounds the boot-time
+/// memory allocation so a misconfigured operator who mounts a
+/// gigantic file at the secrets path can't OOM the agent at
+/// startup. 1 KiB is more than enough for any reasonable HMAC key
+/// (HMAC-SHA256 is keyed by ≤ 64 bytes; longer keys get hashed
+/// down anyway).
+pub const MAX_TOKEN_BYTES: usize = 1024;
+
 /// Read the HMAC key from `path`, then immediately `unlink()` the
 /// file so a later `cat <path>` returns nothing. Bytes are trimmed
 /// of trailing whitespace/newlines (so `echo $K > file` works) and
-/// validated for minimum length.
+/// validated for length.
+///
+/// **Memory bound**: at most `MAX_TOKEN_BYTES + 1` bytes are read
+/// from the file, regardless of the file's true size. Anything
+/// longer is rejected without holding the full content in memory.
 ///
 /// On validation failure the file is **still unlinked** — by the
 /// time we know the bytes are bad, they're already in our memory,
@@ -58,7 +71,16 @@ pub const MIN_TOKEN_BYTES: usize = 32;
 /// Errors propagate the host path because they fire at boot only
 /// (operator-facing, never returned to a client).
 pub fn load_key_from_path(path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
-    let raw = std::fs::read(path)
+    // Bounded read: take(MAX_TOKEN_BYTES + 1). If we get exactly
+    // MAX_TOKEN_BYTES + 1 bytes, the file is over-cap and we reject
+    // without ever loading the rest into memory. If we get fewer,
+    // EOF reached and the whole content is in `raw`.
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mut raw = Vec::new();
+    let mut limited = file.take(MAX_TOKEN_BYTES as u64 + 1);
+    limited
+        .read_to_end(&mut raw)
         .map_err(|e| format!("read {}: {e}", path.display()))?;
     let raw = Zeroizing::new(raw);
 
@@ -72,6 +94,13 @@ pub fn load_key_from_path(path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
     }
 
     let trimmed = trim_trailing_whitespace(&raw);
+    if trimmed.len() > MAX_TOKEN_BYTES {
+        return Err(format!(
+            "key at {} is too large (>{} bytes after trim)",
+            path.display(),
+            MAX_TOKEN_BYTES,
+        ));
+    }
     if trimmed.len() < MIN_TOKEN_BYTES {
         return Err(format!(
             "key at {} is too short ({} bytes; need >= {})",
@@ -154,5 +183,38 @@ mod tests {
         let path = write_key(b"abcdefghijklmnopqrstuvwxyz012345");
         let bytes = load_key_from_path(&path).unwrap();
         let _: &Zeroizing<Vec<u8>> = &bytes;
+    }
+
+    #[test]
+    fn rejects_oversize_key() {
+        // Exactly MAX_TOKEN_BYTES + 1 bytes of key material — must
+        // be rejected and the file unlinked.
+        let huge = vec![b'x'; MAX_TOKEN_BYTES + 1];
+        let path = write_key(&huge);
+        let r = load_key_from_path(&path);
+        assert!(r.is_err());
+        assert!(!path.exists(), "file unlinked even on oversize");
+    }
+
+    #[test]
+    fn accepts_max_size_key() {
+        // Exactly MAX_TOKEN_BYTES — must succeed.
+        let max = vec![b'k'; MAX_TOKEN_BYTES];
+        let path = write_key(&max);
+        let r = load_key_from_path(&path);
+        assert!(r.is_ok());
+        assert_eq!(r.unwrap().len(), MAX_TOKEN_BYTES);
+    }
+
+    #[test]
+    fn does_not_oom_on_huge_file() {
+        // Write 5 MiB of bytes — load_key_from_path's bounded read
+        // must short-circuit at MAX_TOKEN_BYTES + 1 without
+        // allocating a 5 MiB Vec.
+        let path = unique_tmp("huge");
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(5 * 1024 * 1024).unwrap();
+        let r = load_key_from_path(&path);
+        assert!(r.is_err(), "oversize file must be rejected");
     }
 }
