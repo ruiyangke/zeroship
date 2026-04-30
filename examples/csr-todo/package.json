@@ -10,8 +10,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.96.1",
     "@vitejs/plugin-react": "^6.0.1",
     "@zeroship/rpc-client": "file:../../packages/zeroship-rpc-client",
+    "@zeroship/rpc-react": "file:../../packages/zeroship-rpc-react",
     "@zeroship/server": "file:../../packages/zeroship-server",
     "@zeroship/vite-plugin": "file:../../sdks/vite-plugin",
     "react": "^18.3.1",

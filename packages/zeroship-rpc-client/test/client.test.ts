@@ -186,12 +186,12 @@ describe("client — typed proxy surface", () => {
           headers: { "Content-Type": "application/json" },
         }),
     });
+    // Phase 3 stubbed `subscribe()` to throw UNIMPLEMENTED; Phase 7 ships
+    // the real WebSocket transport. Asserting the surface remains callable.
     const typed = rpc as unknown as {
-      x: { subscribe: () => Promise<unknown> };
+      x: { subscribe: (input?: unknown, opts?: unknown) => unknown };
     };
-    await assert.rejects(typed.x.subscribe(), (err: Error & { code?: string }) => {
-      return err.code === "UNIMPLEMENTED";
-    });
+    assert.equal(typeof typed.x.subscribe, "function");
   });
 });
 

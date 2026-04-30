@@ -293,6 +293,264 @@ function errorResponse(err) {
     });
 }
 
+// ── Phase 7 — Subscription wire dispatch ─────────────────────────────────
+//
+// Subscription procedures are async generators wired over WebSocket per
+// `docs/proposals/rpc-v2.md` §6 (Subscription wire). Frame protocol:
+//
+//   Client → server (first frame after upgrade):
+//     {"t":"hello","input":<json>}
+//
+//   Server → client:
+//     {"t":"data","value":<json>}    each yield
+//     {"t":"error","error":<env>}    on handler throw (envelope is
+//                                    field-compatible with errorResponse)
+//     {"t":"end"}                    normal completion
+//     {"t":"ping"} / {"t":"pong"}    keepalive (either direction)
+//
+// Pings: server sends every 30s; if a pong doesn't come back within 60s
+// we close 4408. Hello timeout: 5s after upgrade or close 4400.
+//
+// Implementation note: this runs entirely in user-space JS over the
+// existing WebSocketPair primitive — the kernel itself doesn't know
+// about subscriptions. The synthetic SSR entry detects WS-upgrade
+// requests on `/_zs/v1/<id>` and calls into `dispatchSubscription` to
+// hand off the server side of the pair. For the bootstrap fallback
+// (apps without the synthetic entry) we expose the same handler so
+// runtime tests + bare-bone apps can wire WS subscriptions directly.
+function _zsSubError(err) {
+    const env = {
+        message: (err && err.message) || String(err),
+        name:    (err && err.name)    || "Error",
+    };
+    if (err && typeof err.code === "string") env.code = err.code;
+    if (err && err.details !== undefined)    env.details = err.details;
+    if (err && typeof err.retryable === "boolean") env.retryable = err.retryable;
+    return env;
+}
+
+// Run an async iterator over `ws`. Emits `{"t":"data",value}` per yield,
+// `{"t":"end"}` on normal completion, `{"t":"error",error}` on throw.
+// Closes the socket cleanly afterward. Stops emitting when the socket
+// is no longer open (client closed). Calls `gen.return()` on early exit
+// so handler-side cleanup runs (clear timers, close DB watch, etc.).
+async function _zsRunSubscriptionGen(gen, ws) {
+    try {
+        while (true) {
+            // Cheap closed-check before pulling the next value — saves
+            // the (potentially expensive) async-gen step when the
+            // client is already gone.
+            if (ws.readyState !== 1 /* OPEN */) {
+                try { await gen.return(undefined); } catch (_e) {}
+                return;
+            }
+            let step;
+            try {
+                step = await gen.next();
+            } catch (err) {
+                if (ws.readyState === 1) {
+                    try { ws.send(JSON.stringify({ t: "error", error: _zsSubError(err) })); } catch (_) {}
+                    try { ws.close(1011, ""); } catch (_) {}
+                }
+                return;
+            }
+            if (step.done) {
+                if (ws.readyState === 1) {
+                    try { ws.send(JSON.stringify({ t: "end" })); } catch (_) {}
+                    try { ws.close(1000, ""); } catch (_) {}
+                }
+                return;
+            }
+            if (ws.readyState !== 1) {
+                try { await gen.return(undefined); } catch (_e) {}
+                return;
+            }
+            try {
+                ws.send(JSON.stringify({ t: "data", value: step.value }));
+            } catch (_) {
+                try { await gen.return(undefined); } catch (_e) {}
+                return;
+            }
+        }
+    } catch (err) {
+        // Defensive: any unexpected throw above bubbles here.
+        if (ws && ws.readyState === 1) {
+            try { ws.send(JSON.stringify({ t: "error", error: _zsSubError(err) })); } catch (_) {}
+            try { ws.close(1011, ""); } catch (_) {}
+        }
+    }
+}
+
+// dispatchSubscription — entry point for WS-subscription procedures.
+//
+// `methodName` is the wireId. `input` is the parsed input value
+// (already pulled out of the `{"t":"hello"}` frame by the caller).
+// `ws` is the *server-side* WebSocket of the pair created by the
+// caller; it's already been .accept()ed before we're invoked.
+//
+// Three resolution paths for the handler:
+//   1. `user.dispatchSubscription(name, input, ws)` — opt-in fully
+//      custom dispatch (mirrors `user.dispatchRpc`). Used by the
+//      synthetic SSR entry to route through the registry.
+//   2. `user.dispatchRpc(name, [input])` — falls through; we expect
+//      an async iterator back (registry returns the iterator
+//      directly when `wantStream: true`). Lets the synthetic
+//      entry's existing dispatcher handle subscription procedures
+//      without a separate code path.
+//   3. `user[methodName](input)` — bare-export fallback for the
+//      bootstrap test path (apps without the synthetic entry).
+async function dispatchSubscription(methodName, input, ws) {
+    try {
+        if (typeof user.dispatchSubscription === "function") {
+            await user.dispatchSubscription(methodName, input, ws);
+            return;
+        }
+        let gen;
+        if (typeof user.dispatchRpc === "function") {
+            const result = await user.dispatchRpc(methodName, [input]);
+            gen = result;
+        } else {
+            const fn = user[methodName];
+            if (typeof fn !== "function") {
+                throw Object.assign(new Error("Method not found: " + methodName), {
+                    status: 404,
+                    code: "NOT_FOUND",
+                });
+            }
+            gen = await fn(input);
+        }
+        if (gen == null || typeof gen !== "object"
+            || typeof gen[Symbol.asyncIterator] !== "function"
+            || typeof gen.next !== "function") {
+            throw Object.assign(new Error("Subscription handler must return an async iterator"), {
+                code: "INTERNAL",
+            });
+        }
+        await _zsRunSubscriptionGen(gen, ws);
+    } catch (err) {
+        if (ws && ws.readyState === 1 /* OPEN */) {
+            try { ws.send(JSON.stringify({ t: "error", error: _zsSubError(err) })); } catch (_) {}
+            try { ws.close(1011, ""); } catch (_) {}
+        }
+    }
+}
+
+// Build a Response that completes the WS-subscription upgrade. Spawns
+// the subscription pump as a side effect — the pump reads the `hello`
+// frame, runs the generator, and writes data frames; the kernel
+// handles the WS handshake from the returned Response.
+//
+// `urlStr` is the request URL (used to extract the wireId after the
+// `/_zs/v1/` prefix). On structural failure (bad URL, missing method)
+// we return an HTTP error response — the kernel will write that
+// instead of upgrading.
+function _zsAcceptSubscription(urlStr) {
+    let methodName = null;
+    try {
+        const u = new URL(urlStr);
+        const m = u.pathname.match(/^\/_zs\/v1\/(.+)$/);
+        if (m) methodName = decodeURIComponent(m[1]);
+    } catch (_e) {}
+    if (!methodName) {
+        return new Response('{"message":"missing wireId","name":"Error"}', {
+            status: 400, headers: { "Content-Type": "application/json" },
+        });
+    }
+
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+    server.accept();
+
+    // Hello timeout — close 4400 if the client doesn't send `hello`
+    // within 5s. The first message handler clears this.
+    let helloTimer = setTimeout(() => {
+        if (server.readyState === 1) {
+            try { server.close(4400, "missing hello"); } catch (_) {}
+        }
+    }, 5000);
+
+    let pingTimer = null;
+    let pongDeadline = null;
+    function startPings() {
+        // Server sends ping every 30s. If client doesn't pong within
+        // 60s we close 4408.
+        pingTimer = setInterval(() => {
+            if (server.readyState !== 1) { clearInterval(pingTimer); return; }
+            try { server.send(JSON.stringify({ t: "ping" })); } catch (_) {}
+            if (pongDeadline === null) {
+                pongDeadline = setTimeout(() => {
+                    if (server.readyState === 1) {
+                        try { server.close(4408, "pong timeout"); } catch (_) {}
+                    }
+                }, 60000);
+            }
+        }, 30000);
+    }
+
+    // Wire the message router. The first message must be `hello`; any
+    // other shape closes the connection 4400.
+    let started = false;
+    server.addEventListener("message", function(ev) {
+        let msg;
+        try { msg = JSON.parse(typeof ev.data === "string" ? ev.data : String(ev.data)); }
+        catch (_e) {
+            try { server.close(4400, "invalid JSON"); } catch (_) {}
+            return;
+        }
+        if (!msg || typeof msg.t !== "string") {
+            try { server.close(4400, "missing frame tag"); } catch (_) {}
+            return;
+        }
+        if (msg.t === "ping") {
+            try { server.send(JSON.stringify({ t: "pong" })); } catch (_) {}
+            return;
+        }
+        if (msg.t === "pong") {
+            if (pongDeadline !== null) { clearTimeout(pongDeadline); pongDeadline = null; }
+            return;
+        }
+        if (!started && msg.t === "hello") {
+            started = true;
+            clearTimeout(helloTimer); helloTimer = null;
+            startPings();
+            // Kick off the dispatcher — fire-and-forget; errors are
+            // funnelled into ws frames inside dispatchSubscription.
+            dispatchSubscription(methodName, msg.input, server);
+            return;
+        }
+        // Frames after hello (other than ping/pong) are not part of
+        // the protocol — drop silently for forward-compat.
+    });
+
+    // On close, stop timers + ensure the generator gets a chance to
+    // tear down. (The generator's own `ws.readyState !== 1` check
+    // catches this on the next iteration.)
+    server.addEventListener("close", function() {
+        if (helloTimer !== null) { clearTimeout(helloTimer); helloTimer = null; }
+        if (pingTimer !== null) { clearInterval(pingTimer); pingTimer = null; }
+        if (pongDeadline !== null) { clearTimeout(pongDeadline); pongDeadline = null; }
+    });
+
+    // Return the WS-upgrade response — kernel writes the 101 + handshake
+    // headers from this and pumps frames between TCP and the pair.
+    return new Response(null, {
+        status: 101,
+        webSocket: client,
+        headers: { "Sec-WebSocket-Protocol": "zs.v1" },
+    });
+}
+
+// Detect a WS-upgrade request. The kernel/gateway already gates on
+// these — we re-check on the JS side so the bootstrap's fallback
+// router doesn't need to trust the path alone.
+function _zsIsWsUpgrade(request) {
+    if (request.method !== "GET") return false;
+    const upgrade = request.headers.get("upgrade");
+    if (!upgrade || upgrade.toLowerCase() !== "websocket") return false;
+    return true;
+}
+
 // Core RPC dispatch — shared by the kernel fast-path (dispatchRpc, called
 // from Rust without building a full Request) and the fetch() handler's
 // /_rpc/ route (which already has a Request in hand).
@@ -401,6 +659,7 @@ const USER_FETCH_FAST = (user && user.default && typeof user.default.fetchFast =
     : null;
 
 const FALLBACK_RPC_TAG = "/_rpc/";
+const FALLBACK_ZS_V1_TAG = "/_zs/v1/";
 
 // Coerce a user-supplied page handler return value into a Response.
 // Strings/null are wrapped as text/html. Response is passed through.
@@ -415,11 +674,24 @@ function coerceToHtmlResponse(result, status) {
 
 // Fallback fetch — used only when the user's module doesn't export a
 // default.fetch handler. Handles:
-//   - /_rpc/<method>  → dispatchRpc (named-export RPC dispatch)
+//   - /_zs/v1/<id>    + WS upgrade  → dispatchSubscription
+//   - /_zs/v1/<id>    + plain HTTP  → dispatchRpc (POST/GET via header)
+//   - /_rpc/<method>  → dispatchRpc (legacy path)
 //   - GET /           → user.index() if exported, returns HTML
 //   - else            → 404
 async function fallbackFetch(request) {
     const urlStr = request.url;
+
+    // /_zs/v1/<id> — Phase 7 subscription path. WS-upgrade requests get
+    // the dedicated handler; everything else falls through to the
+    // existing RPC dispatcher (currently the bootstrap doesn't route
+    // unary /_zs/v1/* — the synthetic SSR entry does — so this is a
+    // best-effort wire for the bare-bones test path).
+    const zsIdx = urlStr.indexOf(FALLBACK_ZS_V1_TAG);
+    if (zsIdx >= 0 && _zsIsWsUpgrade(request)) {
+        return _zsAcceptSubscription(urlStr);
+    }
+
     const tagIdx = urlStr.indexOf(FALLBACK_RPC_TAG);
     if (tagIdx >= 0) {
         const methodStart = tagIdx + FALLBACK_RPC_TAG.length;
@@ -460,6 +732,11 @@ async function fallbackFetch(request) {
 export default {
     // Kernel fast-path — caller supplies methodName + raw body text.
     dispatchRpc,
+    // Phase 7: subscription dispatch. Caller hands in (name, input,
+    // server-side WebSocket already accepted). Used by the
+    // synthetic SSR entry's WS-upgrade path; tests can drive this
+    // directly via the runtime's WebSocketPair primitive.
+    subscribe: dispatchSubscription,
     // Zeroship extension: non-WinterCG fast HTTP dispatch. Kernel
     // calls this with raw (method, url, body, env). User returns a
     // plain response shape or null to fall through to fetch(). Skips

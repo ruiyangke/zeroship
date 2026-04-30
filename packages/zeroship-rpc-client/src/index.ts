@@ -29,6 +29,41 @@ export type { Transformer } from "./encoding.js";
 
 export { newUuidV7 } from "./idempotency.js";
 
+// Phase 5 — `__makeProcedure` and the closure-private hook registry.
+//
+// `__makeProcedure(call, meta)` wraps a raw HTTP-RPC closure in a
+// callable + hooks-on-function object. The vite-plugin's client
+// transform emits one per server export; user code imports them as
+// plain async functions:
+//
+//   import { list, add } from "../server/todos";
+//   const todos = await list({ limit: 50 });   // direct call
+//   list.useQuery({ limit: 50 });              // React (when @zeroship/rpc-react is loaded)
+//
+// Hooks are attached via getters that read from `_hookRegistry`, a
+// closure-private object populated as a side effect of importing
+// `@zeroship/rpc-react`. Frameworks other than React (Vue, Solid,
+// vanilla) use the same package — React Query never enters the bundle
+// until `@zeroship/rpc-react` is imported.
+//
+// The registry is also exposed on the public subpath
+// `@zeroship/rpc-client/_hooks` so the React adapter can populate it
+// without static-importing into core internals.
+export { __makeProcedure } from "./make-procedure.js";
+export type {
+  ProcedureKind,
+  ProcedureBuildMeta,
+  ProcedureCaller,
+  ProcedureFn,
+  QueryProcedure,
+  MutationProcedure,
+  StreamProcedure,
+  SubscriptionProcedure,
+} from "./make-procedure.js";
+
+export { _hookRegistry, HOOK_UNAVAILABLE_MESSAGE } from "./_hooks.js";
+export type { HookRegistry } from "./_hooks.js";
+
 /**
  * Phantom helper. Used purely to attach a function signature to a
  * procedure id when declaring an `App` type without runtime metadata.

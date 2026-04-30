@@ -11,6 +11,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./_hooks": {
+      "types": "./dist/_hooks.d.ts",
+      "import": "./dist/_hooks.js"
     }
   },
   "files": [

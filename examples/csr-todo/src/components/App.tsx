@@ -1,37 +1,41 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { Todo } from "../server";
-import { rpc } from "../api";
+import { listTodos } from "../api";
 
 export function App({ navigate }: { navigate: (to: string) => void }) {
-  const [todos, setTodos] = useState<Todo[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    // `rpc.listTodos.query(...)` ships through @zeroship/rpc-client.
-    // The actual function still runs in the V8 worker; the client
-    // handles encoding (superjson), error parsing (RpcError), and the
-    // typed call surface keyed off the App type in src/api.ts.
-    rpc.listTodos
-      .query({ limit: 50 })
-      .then((rows) => setTodos(rows))
-      .finally(() => setLoading(false));
-  }, []);
+  // Phase 5 — hooks-on-function pattern (§10):
+  //
+  //   import { listTodos } from "../api";
+  //   listTodos.useQuery({ limit: 50 })
+  //
+  // The same `listTodos` is callable directly (`await listTodos(...)`)
+  // for non-React contexts, but inside a component the `.useQuery`
+  // hook gives us caching, automatic retries on retryable errors, and
+  // SSR-friendly hydration once the SSR transform lands. No more
+  // manual `useEffect` + `useState` glue.
+  const { data: todos = [], isLoading } = listTodos.useQuery({ limit: 50 });
+  const [localTodos, setLocalTodos] = useState<Todo[]>([]);
 
   const addLocal = () => {
-    // Optimistic UI for the demo — no backing persistence.
-    setTodos((prev) => [
+    setLocalTodos((prev) => [
       ...prev,
-      { id: prev.length + 1, text: `Local todo ${prev.length + 1}`, done: false },
+      {
+        id: todos.length + prev.length + 1,
+        text: `Local todo ${todos.length + prev.length + 1}`,
+        done: false,
+      },
     ]);
   };
+  const allTodos: Todo[] = [...todos, ...localTodos];
+  const loading = isLoading;
 
   return (
     <main style={styles.wrap}>
       <h1>csr-todo</h1>
       <p style={styles.subtitle}>Client-side rendered SPA · 1 RPC endpoint</p>
-      <p>{loading ? "loading…" : `${todos.length} todos`}</p>
+      <p>{loading ? "loading…" : `${allTodos.length} todos`}</p>
       <ul style={styles.list}>
-        {todos.map((t) => (
+        {allTodos.map((t) => (
           <li key={t.id} style={styles.item}>
             <span style={t.done ? styles.done : undefined}>{t.text}</span>
           </li>

@@ -27,6 +27,26 @@ export {
   DEFINE_APP_MARKER,
 } from "./types.js";
 
+// Phase 5 — `__makeServerProcedure` SSR adapter.
+//
+// The vite-plugin's SSR-enabled-app variant wraps each user procedure
+// with `__makeServerProcedure(impl, meta)` so the same React component
+// code (`list.useQuery(...)`) works on both server and client. On the
+// server, hooks call the impl directly (no HTTP) and stash results in
+// a per-request QueryClient; the worker dehydrates that to JSON for
+// the client to hydrate.
+//
+// Symmetric with `__makeProcedure` from `@zeroship/rpc-client`.
+export { __makeServerProcedure } from "./make-server-procedure.js";
+export type {
+  ServerProcedureMeta,
+  ServerProcedureFn,
+  ServerQueryProcedure,
+  ServerMutationProcedure,
+  ServerStreamProcedure,
+  ServerSubscriptionProcedure,
+} from "./make-server-procedure.js";
+
 // ── Zod re-export (optional peer dep) ────────────────────────────────
 //
 // Procedures opt into runtime input/output validation by setting

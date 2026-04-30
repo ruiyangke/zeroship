@@ -11,7 +11,12 @@
 // `/_zs/v1/<id>` with the spec wire, the wrapper here disappears and
 // the demo just calls `client({ baseUrl })` directly.
 
-import { client, type ProcedureType } from "@zeroship/rpc-client";
+import {
+  client,
+  type ProcedureType,
+  __makeProcedure,
+  type ProcedureCaller,
+} from "@zeroship/rpc-client";
 import type { Todo } from "./server";
 
 // ── App type — describes the procedures the server exposes ───────────
@@ -128,3 +133,62 @@ export const rpc = client<App>({
   // lands, switch to "superjson".
   transformer: "superjson",
 });
+
+// ── Phase 5 — hooks-on-function pattern (§10) ───────────────────────
+//
+// Every procedure-shaped export is BOTH a callable and a hooks object:
+//
+//   await listTodos({ limit: 50 })            // direct call
+//   listTodos.useQuery({ limit: 50 })         // React Query hook
+//   listTodos.invalidate()                    // cache invalidation
+//
+// Once the vite-plugin's client transform emits `__makeProcedure(...)`
+// per server export, this lives in the auto-generated stub file. For
+// the demo we wrap manually — the SAME `rpc.listTodos.query(...)`
+// transport drives the underlying call.
+
+const listTodosCaller: ProcedureCaller<{ limit?: number }, Todo[]> = (input) =>
+  rpc.listTodos.query(input);
+
+export const listTodos = __makeProcedure(listTodosCaller, {
+  id: "listTodos",
+  kind: "query",
+}) as ((input: { limit?: number }) => Promise<Todo[]>) & {
+  id: string;
+  kind: "query";
+  queryKey: (input?: { limit?: number }) => [string, ...unknown[]];
+  useQuery: (
+    input: { limit?: number },
+    options?: Record<string, unknown>,
+  ) => { data?: Todo[]; isLoading: boolean; isError: boolean; error: unknown };
+  useSuspenseQuery: (
+    input: { limit?: number },
+    options?: Record<string, unknown>,
+  ) => { data: Todo[] };
+  invalidate: (input?: { limit?: number }) => Promise<void> | void;
+  prefetch: (
+    input: { limit?: number },
+    options?: Record<string, unknown>,
+  ) => Promise<unknown>;
+};
+
+const searchTodosCaller: ProcedureCaller<{ query: string }, Todo> = (input) =>
+  rpc.searchTodos.stream(input);
+
+export const searchTodos = __makeProcedure(searchTodosCaller, {
+  id: "searchTodos",
+  kind: "stream",
+}) as ((input: { query: string }) => AsyncIterable<Todo>) & {
+  id: string;
+  kind: "stream";
+  queryKey: (input?: { query: string }) => [string, ...unknown[]];
+  useStream: (
+    input: { query: string },
+    options?: Record<string, unknown>,
+  ) => {
+    chunks: Todo[];
+    isStreaming: boolean;
+    error: Error | null;
+    cancel: () => void;
+  };
+};

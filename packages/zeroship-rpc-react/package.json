@@ -1,8 +1,8 @@
 {
-  "name": "@zeroship/server",
+  "name": "@zeroship/rpc-react",
   "version": "0.1.0",
   "private": true,
-  "description": "Server-side helpers for zeroship apps — defineApp, RpcError, ambient context",
+  "description": "React adapter for @zeroship/rpc-client — TanStack Query hooks on every procedure",
   "type": "module",
   "main": "dist/index.js",
   "module": "dist/index.js",
@@ -20,35 +20,25 @@
   "scripts": {
     "build": "tsc",
     "check": "tsc --noEmit",
-    "test": "node --import tsx --test test/*.test.ts test/*.test.tsx"
+    "test": "node --import tsx --test test/*.test.tsx test/*.test.ts"
   },
   "license": "MIT",
   "peerDependencies": {
     "@tanstack/react-query": "^5.0.0",
+    "@zeroship/rpc-client": "*",
     "react": "^18.0.0 || ^19.0.0",
-    "zod": "^3.22.0 || ^4.0.0"
-  },
-  "peerDependenciesMeta": {
-    "@tanstack/react-query": {
-      "optional": true
-    },
-    "react": {
-      "optional": true
-    },
-    "zod": {
-      "optional": true
-    }
+    "react-dom": "^18.0.0 || ^19.0.0"
   },
   "devDependencies": {
     "@tanstack/react-query": "^5.96.1",
     "@types/node": "^22.0.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
+    "@zeroship/rpc-client": "file:../zeroship-rpc-client",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-test-renderer": "^18.3.1",
     "tsx": "^4.21.0",
-    "typescript": "^5.0.0",
-    "zod": "^3.25.76"
+    "typescript": "^5.0.0"
   }
 }

@@ -89,6 +89,32 @@ impl HashRing {
         (least, &self.workers[least])
     }
 
+    /// CHWBL routing with an extra affinity key — used by Phase 7
+    /// subscriptions (spec §16 #4). The hash is `app_id || affinity`
+    /// so reconnects from the same `(app, principal)` always pick the
+    /// same worker, but different principals on the same app spread
+    /// naturally across the fleet. The overload guard (`max_per_worker`)
+    /// is honored: when the affinity-preferred worker is saturated
+    /// we walk the ring forward to the next viable slot. This is a
+    /// "sticky bit" in CHWBL terminology — affinity steers the choice
+    /// but doesn't override capacity.
+    pub fn select_with_affinity(&self, app_id: &Uuid, affinity: &str) -> (usize, &str) {
+        let mut combined = Vec::with_capacity(16 + affinity.len() + 1);
+        combined.extend_from_slice(app_id.as_bytes());
+        combined.push(b':');
+        combined.extend_from_slice(affinity.as_bytes());
+        let hash = hash_bytes(&combined);
+        for (_, &idx) in self.ring.range(hash..).chain(self.ring.iter()) {
+            if self.active[idx].load(Ordering::Relaxed) < self.max_per_worker {
+                return (idx, &self.workers[idx]);
+            }
+        }
+        let least = self.active.iter().enumerate()
+            .min_by_key(|(_, a)| a.load(Ordering::Relaxed))
+            .map(|(i, _)| i).unwrap_or(0);
+        (least, &self.workers[least])
+    }
+
     pub fn acquire(&self, idx: usize) { self.active[idx].fetch_add(1, Ordering::Relaxed); }
     pub fn release(&self, idx: usize) { self.active[idx].fetch_sub(1, Ordering::Release); }
     pub fn num_workers(&self) -> usize { self.workers.len() }

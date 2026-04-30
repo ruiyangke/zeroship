@@ -27,8 +27,11 @@
 import {
   sendUnary,
   streamCall,
+  subscribeCall,
   buildStreamUrl,
   type CallKind,
+  type SubscribeOptions,
+  type SubscriptionHandle,
   type TransportConfig,
 } from "./transport.js";
 import { createBatchLink, type BatchLink } from "./batch.js";
@@ -139,8 +142,8 @@ export interface ProcedureType<
  * present — calling the wrong one throws at runtime via dispatchKind.
  * `stream` returns an async-iter consuming the AI-SDK Data Stream
  * Protocol response. `streamUrl` gives the URL form for handing to
- * ai-sdk's `useChat`. `subscribe` exists on the type to keep
- * ergonomics consistent and throws UNIMPLEMENTED until Phase 8 ships.
+ * ai-sdk's `useChat`. `subscribe` opens a WebSocket subscription
+ * and dispatches `{"t":"data"}` frames to `onData` (Phase 7).
  */
 export interface ProcedureHandle<TIn = unknown, TOut = unknown> {
   query(input?: TIn, opts?: CallOptions): Promise<TOut>;
@@ -156,7 +159,12 @@ export interface ProcedureHandle<TIn = unknown, TOut = unknown> {
    * input is undefined (no body, no query-string).
    */
   streamUrl(input?: TIn): string | Promise<string>;
-  subscribe(input?: TIn, opts?: CallOptions): Promise<never>;
+  /**
+   * Open a WebSocket-backed subscription. Auto-reconnects on abnormal
+   * closure (1006) with exponential backoff. Call `handle.unsubscribe()`
+   * (or abort the supplied `signal`) to close cleanly.
+   */
+  subscribe(input?: TIn, opts?: SubscribeOptions<TOut>): SubscriptionHandle;
 }
 
 /**
@@ -327,14 +335,8 @@ export function client<App = Record<string, never>>(
       streamUrl(input?: unknown): string | Promise<string> {
         return buildStreamUrl(procId, input, transportCfg);
       },
-      subscribe() {
-        return Promise.reject(
-          new RpcError({
-            code: "UNIMPLEMENTED",
-            message: `subscriptions are not supported in Phase 3 (proc: ${procId})`,
-            retryable: false,
-          }),
-        );
+      subscribe(input?: unknown, opts?: SubscribeOptions<unknown>): SubscriptionHandle {
+        return subscribeCall(procId, input, transportCfg, opts ?? {});
       },
     };
   }
