@@ -65,6 +65,7 @@ fn manifest_for(
                 size: 0,
                 cache: None,
                 updated_at: 0,
+                variants: HashMap::new(),
             },
         );
     }

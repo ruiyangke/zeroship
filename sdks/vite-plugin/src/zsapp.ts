@@ -17,9 +17,17 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, join, posix, relative, resolve, sep } from "node:path";
-import { zstdCompressSync } from "node:zlib";
+import {
+  brotliCompress,
+  constants as zlibConstants,
+  gzipSync,
+  zstdCompressSync,
+} from "node:zlib";
+import { promisify } from "node:util";
 import { create as tarCreate } from "tar";
 import mime from "mime";
+
+const brotliCompressAsync = promisify(brotliCompress);
 
 // ── Types matching crates/core/src/types.rs ────────────────────────────────
 
@@ -34,6 +42,13 @@ interface CacheCtl {
   stale_on_error?: boolean;
 }
 
+interface AssetVariant {
+  /** SHA-256 hex of the COMPRESSED bytes. */
+  hash: Sha256Hex;
+  /** Compressed byte count. */
+  size: number;
+}
+
 interface AssetEntry {
   hash: Sha256Hex;
   content_type: string;
@@ -41,6 +56,13 @@ interface AssetEntry {
   cache?: CacheCtl;
   /** Set on assets.put. Build-time emissions leave this at 0. */
   updated_at?: number;
+  /**
+   * Pre-compressed encoding variants, keyed by HTTP `Content-Encoding`
+   * token. v1: only `"br"` and `"gzip"` are accepted by the validator.
+   * Empty / omitted when no variants were emitted (e.g. the asset is
+   * already binary, or already-compressed).
+   */
+  variants?: Record<string, AssetVariant>;
 }
 
 type HttpMethod =
@@ -105,6 +127,21 @@ interface Manifest {
 
 // ── Public configuration ───────────────────────────────────────────────────
 
+/**
+ * Pre-compression toggles. Default: brotli on, gzip off.
+ *
+ * Brotli at quality 11 is slow (1–3 sec per MB) but the payoff is
+ * 15–25% smaller bytes on the wire vs. gzip at level 9. Gzip is kept
+ * around for ancient HTTP intermediaries that still don't speak `br`.
+ *
+ * Skip emission entirely on assets where compression doesn't reduce
+ * size (already-compressed binaries, fonts, small text).
+ */
+export interface PrecompressOptions {
+  brotli?: boolean;
+  gzip?: boolean;
+}
+
 export interface ZsappOptions {
   /** Project root (defaults to Vite's resolved root). */
   root: string;
@@ -122,6 +159,14 @@ export interface ZsappOptions {
   assetPrefix?: string;
   /** Quiet mode — suppress info logs. Default: false. */
   silent?: boolean;
+  /**
+   * Pre-compress text-like assets and emit `variants` entries the
+   * gateway can serve via `Accept-Encoding` negotiation.
+   *
+   * Default: `{ brotli: true, gzip: false }`. Brotli alone covers
+   * every browser made in the last decade; gzip is opt-in for legacy.
+   */
+  precompress?: PrecompressOptions;
 }
 
 export interface ZsappResult {
@@ -164,6 +209,10 @@ export async function emitZsapp(
   const assetPrefix = options.assetPrefix ?? DEFAULT_ASSET_PREFIX;
   const compiler = options.compiler ?? "@zeroship/vite-plugin";
   const builtAt = options.builtAt ?? new Date().toISOString();
+  const precompress: Required<PrecompressOptions> = {
+    brotli: options.precompress?.brotli ?? true,
+    gzip: options.precompress?.gzip ?? false,
+  };
   const log = options.silent
     ? () => {}
     : (msg: string) => console.log(`[zeroship:zsapp] ${msg}`);
@@ -218,6 +267,56 @@ export async function emitZsapp(
       content_type: detectContentType(f.relPath),
       size: f.size,
     };
+  }
+
+  // 4b. Pre-compress variants. For every asset whose content-type is
+  //     compressible (text/*, JS, JSON, XML, SVG), emit `br` and/or
+  //     `gzip` variants and record their compressed hashes alongside
+  //     the identity entry. The gateway picks one at request time
+  //     based on `Accept-Encoding`.
+  //
+  //     Variants smaller than identity get an entry; otherwise we
+  //     skip — adding bytes to ship is the opposite of what we want.
+  if (precompress.brotli || precompress.gzip) {
+    let variantBlobCount = 0;
+    let variantBytes = 0;
+    for (const f of assetFiles) {
+      const entry = assets[f.urlPath];
+      if (!isCompressibleType(entry.content_type)) continue;
+      const variants: Record<string, AssetVariant> = {};
+
+      if (precompress.brotli) {
+        const compressed = await compressBrotli(f.bytes);
+        if (compressed.length < f.size) {
+          const h = sha256Hex(compressed);
+          if (!blobsByHash.has(h)) blobsByHash.set(h, compressed);
+          variants["br"] = { hash: h, size: compressed.length };
+          variantBlobCount += 1;
+          variantBytes += compressed.length;
+        }
+      }
+      if (precompress.gzip) {
+        const compressed = compressGzip(f.bytes);
+        if (compressed.length < f.size) {
+          const h = sha256Hex(compressed);
+          if (!blobsByHash.has(h)) blobsByHash.set(h, compressed);
+          variants["gzip"] = { hash: h, size: compressed.length };
+          variantBlobCount += 1;
+          variantBytes += compressed.length;
+        }
+      }
+
+      if (Object.keys(variants).length > 0) {
+        entry.variants = variants;
+      }
+    }
+    if (variantBlobCount > 0) {
+      log(
+        `pre-compressed ${variantBlobCount} variant blobs ` +
+          `(${formatBytes(variantBytes)} compressed total; ` +
+          `brotli=${precompress.brotli}, gzip=${precompress.gzip})`
+      );
+    }
   }
 
   // 5. Build manifest.sourcemaps — assetHash → sourcemapHash.
@@ -558,6 +657,26 @@ function validateManifest(
         `zsapp: asset ${path} hash ${entry.hash} is not lowercase 64-char sha256 hex`
       );
     }
+    // Pre-compressed variants must also be valid + present.
+    if (entry.variants) {
+      for (const [enc, variant] of Object.entries(entry.variants)) {
+        if (enc !== "br" && enc !== "gzip") {
+          throw new Error(
+            `zsapp: asset ${path} variant key ${JSON.stringify(enc)} is not in the v1 allow list (br, gzip)`
+          );
+        }
+        if (!isSha256Hex(variant.hash)) {
+          throw new Error(
+            `zsapp: asset ${path} variant ${enc} hash ${variant.hash} is not lowercase 64-char sha256 hex`
+          );
+        }
+        if (!blobsByHash.has(variant.hash)) {
+          throw new Error(
+            `zsapp: asset ${path} variant ${enc} hash ${variant.hash} has no corresponding blob`
+          );
+        }
+      }
+    }
   }
   // Every sourcemap key/value must exist as a blob (and be sha256 hex).
   for (const [k, v] of Object.entries(m.sourcemaps)) {
@@ -628,6 +747,45 @@ function detectContentType(relPath: string): string {
   // mime@3 returns null for unknown extensions; fall back to the
   // generic byte stream type.
   return mime.getType(relPath) ?? "application/octet-stream";
+}
+
+/**
+ * Whether a given content-type benefits from text-style compression.
+ *
+ * Compressible:
+ *   * `text/*`  (HTML, CSS, plain, etc.)
+ *   * `application/javascript`, `application/json`, `application/xml`
+ *   * `image/svg+xml` (SVG is XML)
+ *
+ * Skipped on already-compressed binary formats (PNG, JPEG, WebP,
+ * AVIF, woff2, mp4, …) where re-compression wastes CPU and bytes.
+ *
+ * Strict prefix matching keeps the rule intentional — adding a new
+ * compressible type is a one-line edit, not a heuristic to debug.
+ */
+function isCompressibleType(contentType: string): boolean {
+  // Strip any charset / boundary / etc. parameters.
+  const ct = contentType.split(";")[0].trim().toLowerCase();
+  if (ct.startsWith("text/")) return true;
+  if (ct === "application/javascript") return true;
+  if (ct === "application/json") return true;
+  if (ct === "application/xml") return true;
+  if (ct === "image/svg+xml") return true;
+  return false;
+}
+
+/** Brotli at quality 11 — slow at build time, optimal on the wire. */
+async function compressBrotli(bytes: Buffer): Promise<Buffer> {
+  return brotliCompressAsync(bytes, {
+    params: {
+      [zlibConstants.BROTLI_PARAM_QUALITY]: zlibConstants.BROTLI_MAX_QUALITY,
+    },
+  });
+}
+
+/** Gzip at level 9 — same trade-off as brotli but for legacy clients. */
+function compressGzip(bytes: Buffer): Buffer {
+  return gzipSync(bytes, { level: zlibConstants.Z_BEST_COMPRESSION });
 }
 
 /** Path relative to a base, normalized to posix slashes (no leading '/'). */

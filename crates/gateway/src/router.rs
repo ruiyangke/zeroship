@@ -588,7 +588,156 @@ async fn chunk_stream_from_file_range<R>(
 //   * `Range:` parsing (single, suffix, open-end, multi, unsatisfiable)
 //   * `Cache-Control` extensions (`stale-if-error`)
 //   * `Accept-Ranges: bytes` advertised on every static response
+//
+// Plus Tier 4b — pre-compressed variants:
+//   * `pick_variant` for `Accept-Encoding` negotiation (br > gzip > identity)
+//   * ETag, Content-Length, Content-Range are all per-VARIANT
+//   * `Content-Encoding` + `Vary: Accept-Encoding` set when a variant fires
 // ---------------------------------------------------------------------------
+
+/// Result of `Accept-Encoding` negotiation against an asset's
+/// `variants` map. Three shapes:
+///
+/// * `(hash, size, None)`         — identity body. The caller emits no
+///                                  `Content-Encoding` and no `Vary`.
+/// * `(hash, size, Some(enc))`    — variant body. Caller sets
+///                                  `Content-Encoding: <enc>` and
+///                                  `Vary: Accept-Encoding`.
+#[derive(Debug, Clone)]
+struct ChosenVariant {
+    hash: String,
+    size: u64,
+    /// `None` → identity. `Some(enc)` → compressed variant.
+    encoding: Option<String>,
+}
+
+/// Pick the best encoding for the request's `Accept-Encoding` against
+/// the asset's available variants. Falls back to identity when no
+/// variant is offered or none of the offered encodings are accepted.
+///
+/// q-value handling: any encoding listed with `q=0` is treated as
+/// rejected (matches RFC 7231 §5.3.4); otherwise we walk the request's
+/// listed encodings in order and return the first one we have a
+/// variant for. Listed-encodings order is the client's preference
+/// signal — Chrome / Firefox put `br` before `gzip`, which is what
+/// we want, so a simple in-order walk does the right thing without a
+/// full q-value sort.
+///
+/// Special tokens:
+/// * `*` (any) — matches any variant we have. Picked only when no
+///   explicit variant was listed first.
+/// * `identity` — explicitly request identity; we honour it.
+fn pick_variant(hit: &crate::dispatch::StaticHit, accept_encoding: Option<&str>) -> ChosenVariant {
+    let identity = ChosenVariant {
+        hash: hit.hash.clone(),
+        size: hit.size,
+        encoding: None,
+    };
+
+    let header = match accept_encoding {
+        Some(h) => h,
+        None => return identity,
+    };
+    if hit.variants.is_empty() {
+        return identity;
+    }
+
+    // Parse `Accept-Encoding` into (token, accepted?) pairs, preserving
+    // request order (which captures client preference for the common
+    // browser case).
+    //
+    // Examples:
+    //   "br, gzip"            → [("br", true), ("gzip", true)]
+    //   "gzip;q=0.5, br;q=1"  → [("gzip", true), ("br", true)]  (q values >0 → accept)
+    //   "identity;q=0, *"     → [("identity", false), ("*", true)]
+    let mut accepted: Vec<&str> = Vec::with_capacity(4);
+    let mut wildcard = false;
+    let mut wildcard_rejected = false;
+    let mut identity_rejected = false;
+    for raw in header.split(',') {
+        let part = raw.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (token, q_zero) = parse_accept_encoding_part(part);
+        if token == "*" {
+            if q_zero {
+                wildcard_rejected = true;
+            } else {
+                wildcard = true;
+            }
+            continue;
+        }
+        if token.eq_ignore_ascii_case("identity") {
+            if q_zero {
+                identity_rejected = true;
+            }
+            // Identity isn't a variant — we don't push it onto the
+            // accepted list; we just track its rejection.
+            continue;
+        }
+        if !q_zero {
+            accepted.push(token);
+        }
+    }
+
+    // Walk the client's preferred order. First variant we have wins.
+    for token in &accepted {
+        if let Some(variant) = hit.variants.get(*token) {
+            return ChosenVariant {
+                hash: variant.hash.clone(),
+                size: variant.size,
+                encoding: Some((*token).to_string()),
+            };
+        }
+    }
+
+    // Wildcard: pick any variant we have. Prefer `br` then `gzip` for
+    // determinism (browsers don't typically send wildcard, but proxies
+    // and CLIs do).
+    if wildcard && !wildcard_rejected {
+        for enc in &["br", "gzip"] {
+            if let Some(variant) = hit.variants.get(*enc) {
+                return ChosenVariant {
+                    hash: variant.hash.clone(),
+                    size: variant.size,
+                    encoding: Some((*enc).to_string()),
+                };
+            }
+        }
+    }
+
+    // Identity rejected explicitly AND no variant matched? RFC 7231
+    // says we MAY return 406 here; in practice 99% of Accept-Encoding
+    // headers list `identity;q=0` only as a hint, not a hard demand,
+    // and serving identity is universally accepted by the actual
+    // client even when the header would technically forbid it. Match
+    // browsers' permissive behaviour.
+    let _ = identity_rejected;
+    identity
+}
+
+/// Parse one `Accept-Encoding` token segment and return its name and
+/// whether it carries `q=0`. Anything else (`q=0.5`, no q at all, …)
+/// → accepted.
+fn parse_accept_encoding_part(part: &str) -> (&str, bool) {
+    if let Some((name, params)) = part.split_once(';') {
+        let name = name.trim();
+        for p in params.split(';') {
+            let p = p.trim();
+            if let Some(qval) = p.strip_prefix("q=").or_else(|| p.strip_prefix("Q=")) {
+                if let Ok(q) = qval.parse::<f32>() {
+                    if q <= 0.0 {
+                        return (name, true);
+                    }
+                }
+            }
+        }
+        (name, false)
+    } else {
+        (part.trim(), false)
+    }
+}
 
 /// Match an `If-None-Match` request-header value against the asset's
 /// strong ETag. Accepts:
@@ -702,27 +851,6 @@ fn header_str_borrowed<'a>(req: &'a HttpRequest, name: &str) -> Option<&'a str> 
     req.headers().get(name).and_then(|v| v.to_str().ok())
 }
 
-/// Build a 304 Not Modified response carrying the headers that the
-/// client needs to reuse its cached copy. RFC 7232 §4.1: 304 must
-/// include any `Cache-Control`, `ETag`, `Vary`, `Content-Location`
-/// fields the corresponding 200 would have. We add `Accept-Ranges`
-/// so the client knows ranged requests still work.
-fn build_not_modified(
-    etag: &str,
-    cache_ctl: &str,
-    wall_start: std::time::Instant,
-) -> HttpResponse {
-    let mut resp = HttpResponse::NotModified();
-    resp.header("etag", etag);
-    resp.header("cache-control", cache_ctl);
-    resp.header("accept-ranges", "bytes");
-    resp.header(
-        "x-wall-time-ms",
-        format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
-    );
-    resp.finish()
-}
-
 /// Build a 416 Range Not Satisfiable response. Includes
 /// `Content-Range: bytes */<size>` per RFC 7233 §4.4.
 fn build_range_not_satisfiable(size: u64, etag: &str) -> HttpResponse {
@@ -744,33 +872,37 @@ async fn serve_static_streaming(
     state: &GateState,
     req: &HttpRequest,
     hit: &crate::dispatch::StaticHit,
+    chosen: &ChosenVariant,
     etag: &str,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
-    let path = match ensure_disk_path(&state.disk_cache, &*state.blob_store, &hit.hash).await {
+    let path = match ensure_disk_path(&state.disk_cache, &*state.blob_store, &chosen.hash).await {
         DiskAvailability::OnDisk(p) => p,
         DiskAvailability::InMemoryOnly(b) => {
             // Disk fill failed — fall back to buffered. Skip the
             // mem cache: a multi-MB blob would either evict
             // everything else or silently fail the budget check.
-            return build_buffered_response(req, hit, etag, &b, wall_start);
+            return build_buffered_response(req, hit, chosen, etag, &b, wall_start);
         }
         DiskAvailability::NotFound => {
             return HttpResponse::NotFound()
                 .json(&serde_json::json!({"error": "asset bytes missing"}));
         }
         DiskAvailability::Unavailable(err) => {
-            eprintln!("[gate] blob fetch error for {}: {err}", hit.hash);
+            eprintln!("[gate] blob fetch error for {}: {err}", chosen.hash);
             return HttpResponse::ServiceUnavailable()
                 .json(&serde_json::json!({"error": "blob store unavailable"}));
         }
     };
 
     // Range parsing — done after we know the file is available so a
-    // bad range on a missing blob still yields 404 first.
-    let range = parse_range(req.headers().get("range"), hit.size);
+    // bad range on a missing blob still yields 404 first. Range is
+    // computed against the VARIANT'S size — clients see the bytes
+    // we'll actually serve, not the identity bytes they'd get without
+    // Accept-Encoding.
+    let range = parse_range(req.headers().get("range"), chosen.size);
     match range {
-        Some(RangeSpec::Unsatisfiable) => return build_range_not_satisfiable(hit.size, etag),
+        Some(RangeSpec::Unsatisfiable) => return build_range_not_satisfiable(chosen.size, etag),
         Some(RangeSpec::Single(start, end)) => {
             let length = end - start + 1;
             let rx = chunk_stream_from_path_range(path, start, length, STREAM_CHUNK_BYTES);
@@ -780,9 +912,10 @@ async fn serve_static_streaming(
             resp.header("cache-control", cache_control_header(&hit.cache));
             resp.header(
                 "content-range",
-                format!("bytes {start}-{end}/{}", hit.size),
+                format!("bytes {start}-{end}/{}", chosen.size),
             );
             resp.header("accept-ranges", "bytes");
+            apply_variant_headers(&mut resp, chosen);
             resp.header(
                 "x-wall-time-ms",
                 format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
@@ -793,7 +926,7 @@ async fn serve_static_streaming(
         _ => {}
     }
 
-    let rx = chunk_stream_from_path(path, hit.size, STREAM_CHUNK_BYTES);
+    let rx = chunk_stream_from_path(path, chosen.size, STREAM_CHUNK_BYTES);
     let status = hit.status.unwrap_or(200);
     let st = ntex::http::StatusCode::from_u16(status).unwrap_or(ntex::http::StatusCode::OK);
     let mut resp = HttpResponse::build(st);
@@ -801,6 +934,7 @@ async fn serve_static_streaming(
     resp.header("etag", etag);
     resp.header("cache-control", cache_control_header(&hit.cache));
     resp.header("accept-ranges", "bytes");
+    apply_variant_headers(&mut resp, chosen);
     resp.header(
         "x-wall-time-ms",
         format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
@@ -808,7 +942,18 @@ async fn serve_static_streaming(
     // SizedStream sets Content-Length and uses identity transfer
     // encoding — better for browsers and intermediaries than the
     // chunked encoding `streaming()` would produce.
-    resp.body(SizedStream::new(hit.size, rx))
+    resp.body(SizedStream::new(chosen.size, rx))
+}
+
+/// Apply `Content-Encoding: <enc>` and `Vary: Accept-Encoding` to a
+/// response when a non-identity variant was picked. Browsers and
+/// proxies need the `Vary` so they don't cross-cache compressed and
+/// identity responses for clients with different `Accept-Encoding`.
+fn apply_variant_headers(resp: &mut ntex::web::HttpResponseBuilder, chosen: &ChosenVariant) {
+    if let Some(enc) = &chosen.encoding {
+        resp.header("content-encoding", enc.as_str());
+        resp.header("vary", "Accept-Encoding");
+    }
 }
 
 /// Serve a [`StaticHit`] from the gateway's blob cache, falling back to
@@ -847,27 +992,42 @@ async fn serve_static_hit(
     hit: crate::dispatch::StaticHit,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
-    let etag = format!("\"{}\"", hit.hash);
+    // 1. Pick the encoding variant first — ETag, Content-Length,
+    //    Content-Range all reflect the variant we're going to serve.
+    //    `If-None-Match` matches the per-variant ETag so a client
+    //    that's already seen the brotli body can short-circuit even
+    //    when the identity hash differs.
+    let chosen = pick_variant(&hit, header_str_borrowed(req, "accept-encoding"));
+    let etag = format!("\"{}\"", chosen.hash);
 
-    // 1. Conditional GET — short-circuit BEFORE any blob fetch.
+    // 2. Conditional GET — short-circuit BEFORE any blob fetch.
     //    The whole point of If-None-Match is to avoid the byte transfer.
     if let Some(if_none_match) = header_str_borrowed(req, "if-none-match") {
         if etag_matches(if_none_match, &etag) {
-            return build_not_modified(&etag, &cache_control_header(&hit.cache), wall_start);
+            return build_not_modified_with_variant(
+                &etag,
+                &cache_control_header(&hit.cache),
+                &chosen,
+                wall_start,
+            );
         }
     }
 
-    // 2. Streaming path for large blobs.
-    if hit.size >= STREAM_THRESHOLD_BYTES {
-        return serve_static_streaming(state, req, &hit, &etag, wall_start).await;
+    // 3. Streaming path for large blobs. Threshold check is on the
+    //    VARIANT'S size — a brotli'd 5 MiB JS bundle that compresses
+    //    to 800 KiB takes the buffered path, which is correct: the
+    //    whole point of variant compression is making the body small
+    //    enough to fit in memory cheaply.
+    if chosen.size >= STREAM_THRESHOLD_BYTES {
+        return serve_static_streaming(state, req, &hit, &chosen, &etag, wall_start).await;
     }
 
-    // 3. Buffered path — fetch bytes through the cache tiers.
+    // 4. Buffered path — fetch bytes through the cache tiers.
     let bytes = match fetch_static_bytes(
         &state.blob_cache,
         &state.disk_cache,
         &*state.blob_store,
-        &hit.hash,
+        &chosen.hash,
     )
     .await
     {
@@ -877,12 +1037,34 @@ async fn serve_static_hit(
                 .json(&serde_json::json!({"error": "asset bytes missing"}));
         }
         BlobFetch::Unavailable(err) => {
-            eprintln!("[gate] blob fetch error for {}: {err}", hit.hash);
+            eprintln!("[gate] blob fetch error for {}: {err}", chosen.hash);
             return HttpResponse::ServiceUnavailable()
                 .json(&serde_json::json!({"error": "blob store unavailable"}));
         }
     };
-    build_buffered_response(req, &hit, &etag, &bytes, wall_start)
+    build_buffered_response(req, &hit, &chosen, &etag, &bytes, wall_start)
+}
+
+/// 304-with-variant — same headers as `build_not_modified` plus
+/// `Content-Encoding` / `Vary: Accept-Encoding` when a variant was
+/// the negotiated body. Required by RFC 7232 §4.1: 304 must include
+/// any header the corresponding 200 would have, including Vary.
+fn build_not_modified_with_variant(
+    etag: &str,
+    cache_ctl: &str,
+    chosen: &ChosenVariant,
+    wall_start: std::time::Instant,
+) -> HttpResponse {
+    let mut resp = HttpResponse::NotModified();
+    resp.header("etag", etag);
+    resp.header("cache-control", cache_ctl);
+    resp.header("accept-ranges", "bytes");
+    apply_variant_headers(&mut resp, chosen);
+    resp.header(
+        "x-wall-time-ms",
+        format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
+    );
+    resp.finish()
 }
 
 /// Build a buffered (single-write) static response. Used by the small
@@ -892,18 +1074,24 @@ async fn serve_static_hit(
 /// Honours single `Range:` requests by slicing `bytes` (cheap — `Bytes`
 /// is refcounted, so a `slice()` is a view, not a copy). Multi-range
 /// degrades gracefully to a 200 + full body.
+///
+/// All sizes (Content-Length, Content-Range total) reflect the
+/// VARIANT being served, not identity. ETag is per-variant too —
+/// served bytes change with `Accept-Encoding`, so the cache identity
+/// must change too.
 fn build_buffered_response(
     req: &HttpRequest,
     hit: &crate::dispatch::StaticHit,
+    chosen: &ChosenVariant,
     etag: &str,
     bytes: &bytes::Bytes,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
     // Range handling — resolve before building the response so we set
     // the right status (200 vs 206 vs 416) and Content-Range header.
-    let range = parse_range(req.headers().get("range"), hit.size);
+    let range = parse_range(req.headers().get("range"), chosen.size);
     match range {
-        Some(RangeSpec::Unsatisfiable) => return build_range_not_satisfiable(hit.size, etag),
+        Some(RangeSpec::Unsatisfiable) => return build_range_not_satisfiable(chosen.size, etag),
         Some(RangeSpec::Single(start, end)) => {
             let slice = bytes.slice(start as usize..=end as usize);
             let mut resp = HttpResponse::PartialContent();
@@ -912,9 +1100,10 @@ fn build_buffered_response(
             resp.header("cache-control", cache_control_header(&hit.cache));
             resp.header(
                 "content-range",
-                format!("bytes {start}-{end}/{}", hit.size),
+                format!("bytes {start}-{end}/{}", chosen.size),
             );
             resp.header("accept-ranges", "bytes");
+            apply_variant_headers(&mut resp, chosen);
             resp.header(
                 "x-wall-time-ms",
                 format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
@@ -932,6 +1121,7 @@ fn build_buffered_response(
     resp.header("etag", etag);
     resp.header("cache-control", cache_control_header(&hit.cache));
     resp.header("accept-ranges", "bytes");
+    apply_variant_headers(&mut resp, chosen);
     resp.header(
         "x-wall-time-ms",
         format!("{:.2}", wall_start.elapsed().as_secs_f64() * 1000.0),
@@ -1344,6 +1534,7 @@ mod tests {
             },
             status: None,
             mutable: false,
+            variants: HashMap::new(),
         }
     }
 
@@ -2407,6 +2598,344 @@ mod tests {
         let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
         assert_eq!(resp.status(), ntex::http::StatusCode::OK);
         assert_eq!(hdr(&resp, "accept-ranges").as_deref(), Some("bytes"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Tier 4b — Accept-Encoding negotiation
+    // -----------------------------------------------------------------------
+
+    use zeroship_core::types::AssetVariant;
+
+    /// Build a static hit whose `variants` map carries `br` and `gzip`
+    /// entries pointing at the given hashes/sizes. Used by the
+    /// negotiation tests below.
+    fn static_hit_with_variants(
+        identity_byte: u8,
+        identity_size: u64,
+        variants: HashMap<String, AssetVariant>,
+    ) -> crate::dispatch::StaticHit {
+        let mut hit = hex_static_hit(identity_byte, identity_size);
+        hit.variants = variants;
+        hit
+    }
+
+    #[test]
+    fn pick_variant_no_header_returns_identity() {
+        let hit = static_hit_with_variants(
+            0x01,
+            1024,
+            HashMap::from([(
+                "br".into(),
+                AssetVariant { hash: hex_hash(0xBB), size: 256 },
+            )]),
+        );
+        let chosen = pick_variant(&hit, None);
+        assert!(chosen.encoding.is_none(), "no Accept-Encoding → identity");
+        assert_eq!(chosen.hash, hit.hash);
+        assert_eq!(chosen.size, hit.size);
+    }
+
+    #[test]
+    fn pick_variant_no_variants_map_returns_identity() {
+        let hit = hex_static_hit(0x02, 1024);
+        let chosen = pick_variant(&hit, Some("br, gzip"));
+        assert!(chosen.encoding.is_none());
+        assert_eq!(chosen.hash, hit.hash);
+    }
+
+    #[test]
+    fn pick_variant_brotli_preferred_over_gzip() {
+        let br_hash = hex_hash(0xBB);
+        let gz_hash = hex_hash(0x6F);
+        let hit = static_hit_with_variants(
+            0x03,
+            10000,
+            HashMap::from([
+                ("br".into(), AssetVariant { hash: br_hash.clone(), size: 1500 }),
+                ("gzip".into(), AssetVariant { hash: gz_hash.clone(), size: 2500 }),
+            ]),
+        );
+        // Client lists br first → server picks br.
+        let chosen = pick_variant(&hit, Some("br, gzip"));
+        assert_eq!(chosen.encoding.as_deref(), Some("br"));
+        assert_eq!(chosen.hash, br_hash);
+        assert_eq!(chosen.size, 1500);
+    }
+
+    #[test]
+    fn pick_variant_gzip_when_only_gzip_accepted() {
+        let gz_hash = hex_hash(0x6F);
+        let hit = static_hit_with_variants(
+            0x04,
+            10000,
+            HashMap::from([
+                ("br".into(), AssetVariant { hash: hex_hash(0xBB), size: 1500 }),
+                ("gzip".into(), AssetVariant { hash: gz_hash.clone(), size: 2500 }),
+            ]),
+        );
+        let chosen = pick_variant(&hit, Some("gzip"));
+        assert_eq!(chosen.encoding.as_deref(), Some("gzip"));
+        assert_eq!(chosen.hash, gz_hash);
+    }
+
+    #[test]
+    fn pick_variant_identity_explicit() {
+        let hit = static_hit_with_variants(
+            0x05,
+            1024,
+            HashMap::from([(
+                "br".into(),
+                AssetVariant { hash: hex_hash(0xBB), size: 256 },
+            )]),
+        );
+        let chosen = pick_variant(&hit, Some("identity"));
+        assert!(chosen.encoding.is_none(), "identity-only → identity served");
+    }
+
+    #[test]
+    fn pick_variant_q_zero_rejects() {
+        // gzip;q=0 means "do NOT send gzip". Server must fall back to
+        // brotli (still accepted) or identity (always available).
+        let hit = static_hit_with_variants(
+            0x06,
+            1024,
+            HashMap::from([
+                ("br".into(), AssetVariant { hash: hex_hash(0xBB), size: 256 }),
+                ("gzip".into(), AssetVariant { hash: hex_hash(0x6F), size: 384 }),
+            ]),
+        );
+        let chosen = pick_variant(&hit, Some("br, gzip;q=0"));
+        assert_eq!(chosen.encoding.as_deref(), Some("br"));
+    }
+
+    #[test]
+    fn pick_variant_unknown_encoding_falls_back_to_identity() {
+        let hit = static_hit_with_variants(
+            0x07,
+            1024,
+            HashMap::from([(
+                "br".into(),
+                AssetVariant { hash: hex_hash(0xBB), size: 256 },
+            )]),
+        );
+        // Client only accepts `lz4` which we don't have a variant for
+        // → identity falls through.
+        let chosen = pick_variant(&hit, Some("lz4"));
+        assert!(chosen.encoding.is_none());
+    }
+
+    // ── End-to-end serve path with variants ─────────────────────────────────
+
+    #[compio::test]
+    async fn accept_encoding_br_picks_brotli_variant() {
+        let (disk, root) = fresh_disk_cache("ae-br");
+        let mock = MockHandle::new();
+        let identity_hash = hex_hash(0x10);
+        let br_hash = hex_hash(0xB1);
+        let identity_payload = vec![0xAAu8; 4096];
+        let br_payload = vec![0xBBu8; 1024];
+        mock.put(&identity_hash, &identity_payload);
+        mock.put(&br_hash, &br_payload);
+
+        let state = make_state(mock.store(), disk);
+        let hit = static_hit_with_variants(
+            0x10,
+            identity_payload.len() as u64,
+            HashMap::from([(
+                "br".into(),
+                AssetVariant {
+                    hash: br_hash.clone(),
+                    size: br_payload.len() as u64,
+                },
+            )]),
+        );
+
+        let req = ntex::web::test::TestRequest::default()
+            .header("accept-encoding", "br, gzip")
+            .to_http_request();
+        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::OK);
+        assert_eq!(hdr(&resp, "content-encoding").as_deref(), Some("br"));
+        assert!(
+            hdr(&resp, "vary").as_deref().is_some_and(|v| v.contains("Accept-Encoding")),
+            "Vary header must mention Accept-Encoding: {:?}",
+            hdr(&resp, "vary")
+        );
+        // ETag is the variant hash, not identity.
+        assert_eq!(
+            hdr(&resp, "etag").as_deref(),
+            Some(format!("\"{}\"", br_hash).as_str())
+        );
+        // Body is the brotli bytes.
+        let got = collect_body(resp.take_body()).await;
+        assert_eq!(got, br_payload);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[compio::test]
+    async fn accept_encoding_identity_picks_no_variant() {
+        let (disk, root) = fresh_disk_cache("ae-identity");
+        let mock = MockHandle::new();
+        let identity_hash = hex_hash(0x11);
+        let identity_payload = vec![0xAAu8; 4096];
+        mock.put(&identity_hash, &identity_payload);
+
+        let state = make_state(mock.store(), disk);
+        let hit = static_hit_with_variants(
+            0x11,
+            identity_payload.len() as u64,
+            HashMap::from([(
+                "br".into(),
+                AssetVariant { hash: hex_hash(0xB2), size: 100 },
+            )]),
+        );
+
+        let req = ntex::web::test::TestRequest::default()
+            .header("accept-encoding", "identity")
+            .to_http_request();
+        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::OK);
+        assert!(
+            resp.headers().get("content-encoding").is_none(),
+            "no Content-Encoding when identity served"
+        );
+        // Body is the identity bytes.
+        let got = collect_body(resp.take_body()).await;
+        assert_eq!(got, identity_payload);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[compio::test]
+    async fn accept_encoding_missing_picks_identity() {
+        let (disk, root) = fresh_disk_cache("ae-missing");
+        let mock = MockHandle::new();
+        let identity_hash = hex_hash(0x12);
+        let identity_payload = vec![0xAAu8; 4096];
+        mock.put(&identity_hash, &identity_payload);
+
+        let state = make_state(mock.store(), disk);
+        let hit = static_hit_with_variants(
+            0x12,
+            identity_payload.len() as u64,
+            HashMap::from([(
+                "br".into(),
+                AssetVariant { hash: hex_hash(0xB3), size: 100 },
+            )]),
+        );
+
+        // No Accept-Encoding header → identity.
+        let req = bare_request();
+        let mut resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::OK);
+        assert!(resp.headers().get("content-encoding").is_none());
+        let got = collect_body(resp.take_body()).await;
+        assert_eq!(got, identity_payload);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[compio::test]
+    async fn vary_accept_encoding_present_when_variant_chosen() {
+        let (disk, root) = fresh_disk_cache("vary-ae");
+        let mock = MockHandle::new();
+        let br_hash = hex_hash(0xB4);
+        let identity_hash = hex_hash(0x13);
+        mock.put(&identity_hash, &vec![0xAAu8; 4096]);
+        mock.put(&br_hash, &vec![0xBBu8; 1024]);
+
+        let state = make_state(mock.store(), disk);
+        let hit = static_hit_with_variants(
+            0x13,
+            4096,
+            HashMap::from([(
+                "br".into(),
+                AssetVariant { hash: br_hash.clone(), size: 1024 },
+            )]),
+        );
+
+        let req = ntex::web::test::TestRequest::default()
+            .header("accept-encoding", "br")
+            .to_http_request();
+        let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        let vary = hdr(&resp, "vary").expect("vary header set when variant chosen");
+        assert!(vary.contains("Accept-Encoding"), "Vary contains Accept-Encoding: {vary}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[compio::test]
+    async fn if_none_match_per_variant_etag() {
+        // Client previously fetched the brotli variant; on revisit it
+        // sends `If-None-Match: "<br_hash>"` and we must 304 — even
+        // though the identity hash differs.
+        let (disk, root) = fresh_disk_cache("inm-variant");
+        let mock = MockHandle::new();
+        let br_hash = hex_hash(0xB5);
+        let state = make_state(mock.store(), disk);
+        let hit = static_hit_with_variants(
+            0x14,
+            4096,
+            HashMap::from([(
+                "br".into(),
+                AssetVariant { hash: br_hash.clone(), size: 1024 },
+            )]),
+        );
+
+        let req = ntex::web::test::TestRequest::default()
+            .header("accept-encoding", "br")
+            .header("if-none-match", format!("\"{}\"", br_hash))
+            .to_http_request();
+        let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::NOT_MODIFIED);
+        // 304 must carry Vary so caches don't conflate variants.
+        let vary = hdr(&resp, "vary").expect("vary on 304 with variant");
+        assert!(vary.contains("Accept-Encoding"));
+        // Backend was never called — pure ETag short-circuit.
+        assert_eq!(mock.calls_for(&br_hash), 0);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[compio::test]
+    async fn range_uses_variant_size() {
+        // Range against a variant uses the variant's compressed size in
+        // the Content-Range header total. A client that sees
+        // `Content-Encoding: br` and asks for `bytes=0-9` against the
+        // 1024-byte brotli body must get back `bytes 0-9/1024`, not
+        // `0-9/4096`.
+        let (disk, root) = fresh_disk_cache("range-variant");
+        let mock = MockHandle::new();
+        let br_hash = hex_hash(0xB6);
+        let br_size: u64 = 1024;
+        mock.put(&br_hash, &vec![0xBBu8; br_size as usize]);
+
+        let state = make_state(mock.store(), disk);
+        let hit = static_hit_with_variants(
+            0x15,
+            4096,
+            HashMap::from([(
+                "br".into(),
+                AssetVariant { hash: br_hash.clone(), size: br_size },
+            )]),
+        );
+
+        let req = ntex::web::test::TestRequest::default()
+            .header("accept-encoding", "br")
+            .header("range", "bytes=0-9")
+            .to_http_request();
+        let resp = serve_static_hit(&state, &req, hit, std::time::Instant::now()).await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            hdr(&resp, "content-range").as_deref(),
+            Some("bytes 0-9/1024"),
+            "range total uses variant size"
+        );
+        // Variant headers still apply to 206.
+        assert_eq!(hdr(&resp, "content-encoding").as_deref(), Some("br"));
 
         std::fs::remove_dir_all(&root).ok();
     }

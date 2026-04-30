@@ -43,7 +43,11 @@ JSON, schema version `2`. Fields and their semantics:
       "hash": "<sha256>",                                //   JS chunks, CSS, images, public files —
       "content_type": "text/html",                       //   every static file is just an asset
       "size": 2048,
-      "cache": null                                      // optional CacheCtl override
+      "cache": null,                                     // optional CacheCtl override
+      "variants": {                                      // optional; pre-compressed encodings
+        "br":   { "hash": "<sha256-of-brotli>",  "size": 480 },
+        "gzip": { "hash": "<sha256-of-gzip>",    "size": 620 }
+      }
     }
   },
   "runtime_assets": {},                                  // MUST be {} on fresh deploy; mutated post-deploy
@@ -154,6 +158,75 @@ v1 simplifications:
 
 - Origins are exact strings; the literal `"*"` matches any origin (when credentials disabled). No glob, no automatic header reflection.
 - Method/header lists are emitted verbatim as joined header values.
+
+### Asset variants — pre-compressed encodings
+
+Every `AssetEntry` MAY carry a `variants` map with pre-compressed bytes for the gateway to serve via `Accept-Encoding` negotiation:
+
+```jsonc
+"assets": {
+  "/assets/main-abc.js": {
+    "hash":         "<sha256-of-identity>",
+    "content_type": "application/javascript",
+    "size":         84203,                          // identity (uncompressed) size
+    "variants": {
+      "br":   { "hash": "<sha256-of-brotli>", "size": 12480 },
+      "gzip": { "hash": "<sha256-of-gzip>",   "size": 18720 }
+    }
+  }
+}
+```
+
+Rust type:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AssetVariant {
+    pub hash: String,   // sha256 hex of the COMPRESSED bytes
+    pub size: u64,      // compressed size
+}
+```
+
+Each variant is its own content-addressed blob (uploaded under `blobs/<hash>` exactly like the identity blob). The build pipeline compresses, hashes, uploads — the protocol stays uniform.
+
+#### Allowed variant keys (v1)
+
+Variant keys are HTTP `Content-Encoding` token names. v1 accepts exactly two:
+
+| Key | Algorithm | Build flag (vite-plugin) |
+| --- | --- | --- |
+| `br` | Brotli (RFC 7932) | `precompress: { brotli: true }` (default ON) |
+| `gzip` | Gzip (RFC 1952) | `precompress: { gzip: true }` (default OFF) |
+
+`identity` is intentionally NOT a key — it's the default served when no variant matches.
+
+`Manifest::validate()` rejects unknown encoding keys (`lz4`, `zstd`, `deflate`, …) so a typo can't silently disable a variant on the wire.
+
+#### Build-pipeline behavior
+
+The vite-plugin emits variants only when:
+- The asset's content-type is compressible — `text/*`, `application/javascript`, `application/json`, `application/xml`, `image/svg+xml`. Already-compressed types (PNG, JPEG, WebP, woff2) are skipped.
+- The compressed size is strictly LESS than identity. If brotli or gzip can't beat identity (tiny files, already-random bytes), the variant entry is dropped — adding overhead is the opposite of the goal.
+
+#### Gateway negotiation
+
+The gateway's `pick_variant` walks the request's `Accept-Encoding` listed encodings in client-preference order. The first encoding the asset has a variant for wins. Examples:
+
+- `Accept-Encoding: br, gzip` against `{ br, gzip }` variants → `br` wins.
+- `Accept-Encoding: gzip` against `{ br, gzip }` variants → `gzip` wins.
+- `Accept-Encoding: br` against `{ gzip }` variant only → identity (no `br` variant available).
+- `Accept-Encoding: identity` → identity (variant explicitly opted out).
+- No `Accept-Encoding` header → identity.
+
+`q=0` is honoured (RFC 7231 §5.3.4); other q-values are accepted as preference signals via list order.
+
+When a variant is served, the response carries:
+- `Content-Encoding: <key>` (`br` or `gzip`)
+- `Vary: Accept-Encoding` (so caches don't conflate variants)
+- An ETag tied to the VARIANT'S hash (not identity)
+- `Content-Length` and `Content-Range` totals reflect the VARIANT'S size
+
+This keeps `If-None-Match`, `Range:`, and conditional GETs all variant-correct: a client that's already cached the brotli body short-circuits with 304 even though the identity hash differs.
 
 ### Required vs optional
 

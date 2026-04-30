@@ -6,7 +6,9 @@
 //! module owns the [`Outcome`] / [`StaticHit`] surface that the router
 //! and the compiled dispatcher share.
 
-use zeroship_core::types::{CacheCtl, WorkerMode};
+use std::collections::HashMap;
+
+use zeroship_core::types::{AssetVariant, CacheCtl, WorkerMode};
 
 #[cfg(test)]
 use zeroship_core::types::Manifest;
@@ -40,8 +42,12 @@ pub struct StaticHit {
     /// The asset path that resolved (e.g. `/index.html`). Gateway
     /// uses this to fetch the bytes from the BundleStore.
     pub path: String,
+    /// Identity (uncompressed) hash. Gateway falls back to this when
+    /// no `Accept-Encoding` variant matches.
     pub hash: String,
     pub content_type: String,
+    /// Identity byte count. Compressed variants in `variants` carry
+    /// their own size.
     pub size: u64,
     /// Cache directives, resolved from (asset entry override) ∪ (rule
     /// cache config) ∪ (gateway defaults).
@@ -51,6 +57,11 @@ pub struct StaticHit {
     /// Whether this asset came from `runtime_assets` — the gateway
     /// honors stale-while-revalidate semantics for those.
     pub mutable: bool,
+    /// Pre-compressed encoding variants. Keys are HTTP
+    /// `Content-Encoding` tokens (`"br"`, `"gzip"`); values point at
+    /// the compressed blob and carry its compressed size. Empty when
+    /// the build pipeline didn't emit any variants.
+    pub variants: HashMap<String, AssetVariant>,
 }
 
 /// Test-only entry: compile + dispatch a [`Manifest`] in one shot.
@@ -83,6 +94,7 @@ mod tests {
             size: 0,
             cache: None,
             updated_at: 0,
+            variants: HashMap::new(),
         }
     }
 

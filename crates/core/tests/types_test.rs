@@ -1,6 +1,7 @@
 use zeroship_core::types::{
-    Action, AppRuntimeLimits, AppUsage, AppVersionInfo, AssetEntry, ControlEvent, Cors, HttpMethod,
-    Manifest, ManifestMetadata, Match, RouteEntry, Rule, UsageReport, WorkerCode, WorkerMode,
+    Action, AppRuntimeLimits, AppUsage, AppVersionInfo, AssetEntry, AssetVariant, ControlEvent,
+    Cors, HttpMethod, Manifest, ManifestMetadata, Match, RouteEntry, Rule, UsageReport, WorkerCode,
+    WorkerMode,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -450,6 +451,7 @@ fn manifest_roundtrip_json() {
                 size: 1024,
                 cache: None,
                 updated_at: 0,
+                variants: HashMap::new(),
             },
         )]),
         worker: Some(WorkerCode {
@@ -503,6 +505,7 @@ fn manifest_v2_round_trips_through_json() {
                 size: 42,
                 cache: None,
                 updated_at: 0,
+                variants: HashMap::new(),
             },
         )]),
         runtime_assets: HashMap::new(),
@@ -843,6 +846,139 @@ fn cors_omitted_round_trips() {
     }"#;
     let m2: Manifest = serde_json::from_str(legacy).unwrap();
     assert!(m2.rules[0].cors.is_none());
+}
+
+// -- AssetEntry variants (Tier 4b: pre-compressed encoding variants) -----
+
+const SHA_BR: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const SHA_GZ: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+fn entry_with_variants(variants: HashMap<String, AssetVariant>) -> AssetEntry {
+    AssetEntry {
+        hash: SHA_A.into(),
+        content_type: "text/javascript".into(),
+        size: 1024,
+        cache: None,
+        updated_at: 0,
+        variants,
+    }
+}
+
+#[test]
+fn asset_variants_round_trip() {
+    let mut variants = HashMap::new();
+    variants.insert(
+        "br".into(),
+        AssetVariant { hash: SHA_BR.into(), size: 256 },
+    );
+    variants.insert(
+        "gzip".into(),
+        AssetVariant { hash: SHA_GZ.into(), size: 384 },
+    );
+    let entry = entry_with_variants(variants);
+
+    let json = serde_json::to_string(&entry).unwrap();
+    assert!(json.contains("\"variants\""), "variants serialised: {json}");
+    assert!(json.contains(SHA_BR), "br hash present: {json}");
+    assert!(json.contains(SHA_GZ), "gzip hash present: {json}");
+
+    let decoded: AssetEntry = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded.variants.len(), 2);
+    assert_eq!(decoded.variants["br"].hash, SHA_BR);
+    assert_eq!(decoded.variants["br"].size, 256);
+    assert_eq!(decoded.variants["gzip"].hash, SHA_GZ);
+    assert_eq!(decoded.variants["gzip"].size, 384);
+}
+
+#[test]
+fn asset_variants_empty_omitted_from_json() {
+    // Empty variants map MUST NOT serialize — keeps legacy manifests
+    // and the wire-format clean (skip_serializing_if = HashMap::is_empty).
+    let entry = entry_with_variants(HashMap::new());
+    let json = serde_json::to_string(&entry).unwrap();
+    assert!(!json.contains("\"variants\""), "empty variants omitted: {json}");
+
+    // Backwards compat: payloads without `variants` deserialize cleanly
+    // with the field defaulting to an empty map.
+    let legacy = format!(
+        r#"{{"hash":"{}","content_type":"text/html","size":42,"updated_at":0}}"#,
+        SHA_A
+    );
+    let decoded: AssetEntry = serde_json::from_str(&legacy).unwrap();
+    assert!(decoded.variants.is_empty());
+}
+
+#[test]
+fn asset_variants_unknown_encoding_rejected() {
+    // Only "br" and "gzip" are supported for v1. An unknown key like
+    // "lz4" must be caught by Manifest::validate() — silent fallback
+    // would let typos disable a variant on the wire.
+    let mut variants = HashMap::new();
+    variants.insert(
+        "lz4".into(),
+        AssetVariant { hash: SHA_BR.into(), size: 100 },
+    );
+    let m = Manifest {
+        assets: HashMap::from([("/main.js".into(), entry_with_variants(variants))]),
+        ..Manifest::default()
+    };
+    let err = m.validate().unwrap_err();
+    assert!(
+        err.to_lowercase().contains("encoding") || err.contains("lz4"),
+        "error mentions encoding/lz4: {err}"
+    );
+}
+
+#[test]
+fn asset_variants_bad_hash_rejected() {
+    // Variant hash must be 64-char lowercase hex — same rule as
+    // any other content-addressed reference in the manifest.
+    let mut variants = HashMap::new();
+    variants.insert(
+        "br".into(),
+        AssetVariant {
+            hash: "not-a-real-hash".into(),
+            size: 100,
+        },
+    );
+    let m = Manifest {
+        assets: HashMap::from([("/main.js".into(), entry_with_variants(variants))]),
+        ..Manifest::default()
+    };
+    let err = m.validate().unwrap_err();
+    assert!(
+        err.contains("hash") || err.contains("hex"),
+        "error mentions hash format: {err}"
+    );
+
+    // Uppercase hex is also rejected (canonical form is lowercase).
+    let mut variants2 = HashMap::new();
+    variants2.insert(
+        "br".into(),
+        AssetVariant { hash: "A".repeat(64), size: 100 },
+    );
+    let m2 = Manifest {
+        assets: HashMap::from([("/main.js".into(), entry_with_variants(variants2))]),
+        ..Manifest::default()
+    };
+    assert!(m2.validate().is_err(), "uppercase variant hash rejected");
+}
+
+#[test]
+fn asset_variants_runtime_assets_validated_too() {
+    // The runtime_assets map (zeroship.assets.put) goes through the
+    // same validator — apps emitting variants at runtime must stay
+    // honest.
+    let mut variants = HashMap::new();
+    variants.insert(
+        "deflate".into(),
+        AssetVariant { hash: SHA_BR.into(), size: 100 },
+    );
+    let m = Manifest {
+        runtime_assets: HashMap::from([("/dyn.js".into(), entry_with_variants(variants))]),
+        ..Manifest::default()
+    };
+    assert!(m.validate().is_err(), "deflate is not in the v1 allow list");
 }
 
 #[test]

@@ -528,6 +528,7 @@ impl CompiledManifest {
                             cache: pick_cache(entry, cache.as_ref(), &resolved, mutable),
                             status: *status,
                             mutable,
+                            variants: entry.variants.clone(),
                         }));
                     }
                 }
@@ -621,6 +622,7 @@ mod tests {
             size: 0,
             cache: None,
             updated_at: 0,
+            variants: HashMap::new(),
         }
     }
 

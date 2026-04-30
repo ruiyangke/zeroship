@@ -158,6 +158,20 @@ Reproduces the pre-manifest behavior: POST `/_rpc/<method>` is RPC (gateway gate
 
 The streaming path's range support is wired through `chunk_stream_from_path_range`, which passes a starting offset to `compio::fs::File::read_at` — only the requested slice is read off disk, no overshoot.
 
+## Content-encoding variants
+
+The gateway negotiates pre-compressed asset variants emitted by the build pipeline (see `docs/reference/zsapp.md`'s "Asset variants" section). The `pick_variant` helper resolves the request's `Accept-Encoding` against the asset's `variants` map; the chosen variant's hash, size, and encoding token feed every downstream concern in `serve_static_hit` and `serve_static_streaming`:
+
+- **Body fetch** uses the variant's hash. The mem / disk LRUs key off `chosen.hash`, so requests for the same encoding share the same cached bytes.
+- **ETag** is `"<variant.hash>"`. A client that fetched the brotli body and re-requests it later with `If-None-Match: "<br_hash>"` short-circuits to 304 even though the identity hash differs.
+- **`Content-Length` / `Content-Range` totals** reflect the variant's size. A `Range: bytes=0-9` against a 1 KB brotli body returns `Content-Range: bytes 0-9/1024`, not `0-9/<identity-size>`.
+- **`Content-Encoding: <token>`** and **`Vary: Accept-Encoding`** are added when a non-identity variant fires. Without `Vary`, intermediaries would conflate compressed and identity responses for clients with different `Accept-Encoding`.
+- **Streaming-threshold check** runs against the variant's size — a 5 MB JS bundle that brotlies down to 800 KB takes the buffered path, which is correct: the whole point of compression is making bodies cheap to ship.
+
+`pick_variant`'s preference order is the request header's listed-encodings order — `Accept-Encoding: br, gzip` picks `br` over `gzip`. q-values are honoured for `q=0` rejections (RFC 7231 §5.3.4); other q-values are treated as accepted regardless of weight (the listed order already conveys preference for the common browser case). Unknown encoding tokens (`lz4`, `zstd`, …) and missing variants both fall through to identity — the gateway never serves bytes the client didn't ask for.
+
+v1 limits: only `br` and `gzip` are supported. `Manifest::validate()` rejects unknown variant keys at parse time so a typo can't silently disable negotiation on the wire.
+
 ## Common things to look up
 
 - "How does the gateway find an asset by path?" → `serve_static_hit` in `crates/gateway/src/router.rs` checks `state.blob_cache` (in-memory LRU keyed by hash); on miss it calls `state.blob_store.get_blob(hash)` and fills the cache. ETag = `hash`; Cache-Control composed from `CacheCtl` precedence (entry → rule → default).

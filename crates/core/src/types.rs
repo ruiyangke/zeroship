@@ -356,8 +356,48 @@ impl Manifest {
                 ));
             }
         }
+        // Validate per-asset compression variants. v1 supports `br`
+        // and `gzip`; unknown encoding tokens are rejected so a typo
+        // can't silently disable a variant on the wire.
+        for (path, entry) in &self.assets {
+            for (enc, variant) in &entry.variants {
+                if !is_supported_variant_encoding(enc) {
+                    return Err(format!(
+                        "assets[{path}].variants[{enc:?}]: unknown encoding (allowed: br, gzip)"
+                    ));
+                }
+                if !is_sha256_hex(&variant.hash) {
+                    return Err(format!(
+                        "assets[{path}].variants[{enc}].hash {hash:?} is not a lowercase 64-char sha256 hex",
+                        hash = variant.hash
+                    ));
+                }
+            }
+        }
+        for (path, entry) in &self.runtime_assets {
+            for (enc, variant) in &entry.variants {
+                if !is_supported_variant_encoding(enc) {
+                    return Err(format!(
+                        "runtime_assets[{path}].variants[{enc:?}]: unknown encoding (allowed: br, gzip)"
+                    ));
+                }
+                if !is_sha256_hex(&variant.hash) {
+                    return Err(format!(
+                        "runtime_assets[{path}].variants[{enc}].hash {hash:?} is not a lowercase 64-char sha256 hex",
+                        hash = variant.hash
+                    ));
+                }
+            }
+        }
         Ok(())
     }
+}
+
+/// Permitted `Content-Encoding` tokens for `AssetEntry::variants`.
+/// `identity` is intentionally NOT a variant — it's the default when
+/// no `Accept-Encoding` match is found.
+fn is_supported_variant_encoding(s: &str) -> bool {
+    matches!(s, "br" | "gzip")
 }
 
 fn is_sha256_hex(s: &str) -> bool {
@@ -608,11 +648,14 @@ pub enum RateLimitPer {
 /// keyed by `hash`; surfaced to the gateway via the manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetEntry {
-    /// SHA-256 (hex) of the raw bytes. Used as the object-store key
-    /// AND as the HTTP `ETag`.
+    /// SHA-256 (hex) of the raw (identity) bytes. Used as the
+    /// object-store key, the canonical ETag, and the default body when
+    /// no `Accept-Encoding` variant is selected.
     pub hash: String,
     pub content_type: String,
-    /// Total bytes (decoded). Used for `Content-Length` and quotas.
+    /// Identity (uncompressed) byte count. Used for `Content-Length`
+    /// and quotas. Compressed variants have their own `size` in
+    /// `variants[<encoding>].size`.
     pub size: u64,
     /// Per-asset cache override. If absent, the rule's `cache` field
     /// applies; if that's also absent, gateway picks a sensible default
@@ -624,6 +667,36 @@ pub struct AssetEntry {
     /// staleness from `now - updated_at` against the `cache` window.
     #[serde(default)]
     pub updated_at: i64,
+    /// Pre-compressed encoding variants. Keys are HTTP
+    /// `Content-Encoding` token names (`"br"`, `"gzip"`); values are
+    /// the COMPRESSED hash + compressed size. Identity is always
+    /// available via the parent `hash`/`size`; entries here are the
+    /// alternative encodings the build pipeline emitted.
+    ///
+    /// The gateway negotiates via `Accept-Encoding` and serves the
+    /// chosen variant's blob (with `Content-Encoding: <key>` and
+    /// `Vary: Accept-Encoding` set on the response). The ETag and
+    /// Content-Length reflect the variant, not the identity.
+    ///
+    /// Validation: variant keys MUST be one of the allowed encodings
+    /// (currently `"br"` and `"gzip"`); variant hashes MUST be
+    /// 64-char lowercase hex.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub variants: HashMap<String, AssetVariant>,
+}
+
+/// A pre-compressed encoding variant of an [`AssetEntry`].
+///
+/// Stored in `AssetEntry::variants` keyed by `Content-Encoding` token.
+/// Each variant is its own content-addressed blob — the build
+/// pipeline compresses the asset, hashes the compressed bytes, and
+/// uploads the variant blob alongside the identity blob.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AssetVariant {
+    /// SHA-256 (hex) of the compressed bytes.
+    pub hash: String,
+    /// Size of the compressed bytes (NOT the original).
+    pub size: u64,
 }
 
 // ---------------------------------------------------------------------------

@@ -14,7 +14,7 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { zstdDecompressSync } from "node:zlib";
+import { brotliDecompressSync, gunzipSync, zstdDecompressSync } from "node:zlib";
 
 import { emitZsapp } from "../src/zsapp.js";
 
@@ -528,6 +528,185 @@ describe("emitZsapp", () => {
         .then(() => true)
         .catch(() => false);
       assert.ok(!exists, "staging dir cleaned up");
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
+  // ── Pre-compressed variants (Tier 4b) ──────────────────────────────────
+
+  test("precompress_emits_brotli_variant", async () => {
+    // Big enough text asset that brotli is unambiguously smaller.
+    // Brotli at q=11 of "console.log(...)\n" repeated 200x compresses
+    // ~50:1.
+    const jsBody = "console.log('hello world');\n".repeat(200);
+    const fix = await makeFixture({
+      "dist/index.html": "<!doctype html>",
+      "dist/assets/app.js": jsBody,
+    });
+    try {
+      const result = await emitZsapp({
+        root: fix.root,
+        builtAt: "2026-04-29T00:00:00Z",
+        silent: true,
+        precompress: { brotli: true, gzip: false },
+      });
+      const tarBytes = zstdDecompressSync(await fs.readFile(result.outputPath));
+      const entries = parseTar(tarBytes);
+      const manifest = JSON.parse(entries[0].bytes.toString("utf8"));
+
+      const entry = manifest.assets["/assets/app.js"];
+      assert.ok(entry, "asset entry present");
+      assert.ok(entry.variants, "variants populated");
+      assert.ok(entry.variants.br, "brotli variant present");
+      // Compressed size beats identity (the whole point).
+      assert.ok(
+        entry.variants.br.size < entry.size,
+        `br ${entry.variants.br.size} < identity ${entry.size}`
+      );
+      // Brotli hash format check.
+      assert.match(entry.variants.br.hash, /^[0-9a-f]{64}$/);
+      // Variant blob is in the tar.
+      const blobNames = new Set(
+        entries
+          .filter((e) => e.name.startsWith("blobs/"))
+          .map((e) => e.name.slice("blobs/".length))
+      );
+      assert.ok(blobNames.has(entry.variants.br.hash), "br blob in tar");
+      // Decompressing the variant blob yields identity bytes.
+      const brBlob = entries.find(
+        (e) => e.name === `blobs/${entry.variants.br.hash}`
+      )!.bytes;
+      assert.equal(
+        brotliDecompressSync(brBlob).toString("utf8"),
+        jsBody,
+        "brotli round-trips to identity"
+      );
+      // Gzip was disabled — no gzip variant.
+      assert.ok(!entry.variants.gzip, "no gzip variant when disabled");
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
+  test("precompress_skips_already_small_variants", async () => {
+    // Tiny / random-looking text doesn't compress smaller than identity.
+    // For a 10-byte file brotli's framing overhead pushes the
+    // compressed size above the original — emitter must skip.
+    const tiny = "abc";
+    const fix = await makeFixture({
+      "dist/index.html": "<!doctype html>",
+      "dist/tiny.txt": tiny,
+    });
+    try {
+      const result = await emitZsapp({
+        root: fix.root,
+        builtAt: "2026-04-29T00:00:00Z",
+        silent: true,
+        precompress: { brotli: true, gzip: true },
+      });
+      const tarBytes = zstdDecompressSync(await fs.readFile(result.outputPath));
+      const manifest = JSON.parse(parseTar(tarBytes)[0].bytes.toString("utf8"));
+      const entry = manifest.assets["/tiny.txt"];
+      // No variants entry — both br and gzip overhead exceeded the
+      // 3-byte identity body.
+      assert.ok(
+        !entry.variants || Object.keys(entry.variants).length === 0,
+        `no variants emitted for tiny asset (got ${JSON.stringify(entry.variants)})`
+      );
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
+  test("precompress_skips_binary_types", async () => {
+    // PNG: synthetic file with the magic bytes so mime guesses image/png.
+    // Compression skipped entirely — no variants entry.
+    const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const pngBody = Buffer.concat([pngHeader, Buffer.alloc(2048, 0)]);
+    const fix = await makeFixture({
+      "dist/index.html": "<!doctype html>",
+      "dist/logo.png": pngBody,
+    });
+    try {
+      const result = await emitZsapp({
+        root: fix.root,
+        builtAt: "2026-04-29T00:00:00Z",
+        silent: true,
+        precompress: { brotli: true, gzip: true },
+      });
+      const tarBytes = zstdDecompressSync(await fs.readFile(result.outputPath));
+      const manifest = JSON.parse(parseTar(tarBytes)[0].bytes.toString("utf8"));
+      const entry = manifest.assets["/logo.png"];
+      assert.equal(entry.content_type, "image/png");
+      // Binary type → emitter never even tries to compress.
+      assert.ok(
+        !entry.variants || Object.keys(entry.variants).length === 0,
+        "PNG has no variants"
+      );
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
+  test("precompress_disabled_yields_no_variants", async () => {
+    // Default options enable brotli only. Explicitly turning everything
+    // off means the manifest has no variants anywhere, even on
+    // compressible types.
+    const jsBody = "console.log('hello world');\n".repeat(200);
+    const fix = await makeFixture({
+      "dist/index.html": "<!doctype html>",
+      "dist/assets/app.js": jsBody,
+    });
+    try {
+      const result = await emitZsapp({
+        root: fix.root,
+        builtAt: "2026-04-29T00:00:00Z",
+        silent: true,
+        precompress: { brotli: false, gzip: false },
+      });
+      const tarBytes = zstdDecompressSync(await fs.readFile(result.outputPath));
+      const manifest = JSON.parse(parseTar(tarBytes)[0].bytes.toString("utf8"));
+      const entry = manifest.assets["/assets/app.js"];
+      assert.ok(
+        !entry.variants || Object.keys(entry.variants).length === 0,
+        "no variants when precompress disabled"
+      );
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
+  test("precompress_emits_gzip_variant_when_opted_in", async () => {
+    // Sanity: gzip variant works when explicitly enabled.
+    const jsBody = "console.log('hello world');\n".repeat(200);
+    const fix = await makeFixture({
+      "dist/index.html": "<!doctype html>",
+      "dist/assets/app.js": jsBody,
+    });
+    try {
+      const result = await emitZsapp({
+        root: fix.root,
+        builtAt: "2026-04-29T00:00:00Z",
+        silent: true,
+        precompress: { brotli: false, gzip: true },
+      });
+      const tarBytes = zstdDecompressSync(await fs.readFile(result.outputPath));
+      const entries = parseTar(tarBytes);
+      const manifest = JSON.parse(entries[0].bytes.toString("utf8"));
+
+      const entry = manifest.assets["/assets/app.js"];
+      assert.ok(entry.variants?.gzip, "gzip variant present");
+      assert.ok(!entry.variants.br, "no brotli variant when disabled");
+      // Decompressing the gzip blob yields identity bytes.
+      const gzBlob = entries.find(
+        (e) => e.name === `blobs/${entry.variants.gzip.hash}`
+      )!.bytes;
+      assert.equal(
+        gunzipSync(gzBlob).toString("utf8"),
+        jsBody,
+        "gzip round-trips to identity"
+      );
     } finally {
       await fix.cleanup();
     }
