@@ -1,0 +1,61 @@
+[package]
+name = "zeroship-sandbox-agent"
+version = "0.1.0"
+edition = "2021"
+description = "In-VM agent (PID 1) for zeroship sandbox microVMs — exposes /exec, /files, /tree to the controller over HTTP."
+build = "build.rs"
+
+[lib]
+name = "zeroship_sandbox_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sandbox-agent"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace runtime: compio (io_uring) + ntex (HTTP). Same stack as
+# the controller so the project has one async story end-to-end.
+compio = { workspace = true }
+ntex = { workspace = true }
+
+# Serde
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+
+# Crypto. Ed25519 verifier holds the controller's PUBLIC key only —
+# the private key never enters the VM. `subtle`/`zeroize` are no
+# longer needed (no secret material on the agent side); body hash
+# still uses sha2 for the canonical-string body coverage.
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+lru = { workspace = true }
+
+# Observability — structured JSON logs + audit events.
+tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "env-filter", "json", "tracing-log"] }
+
+# Request ID generation (UUIDv7 — sortable, time-bearing).
+uuid = { workspace = true }
+
+# OS bits — signals (SIGCHLD reaper), waitpid, O_NOFOLLOW, killpg.
+nix = { version = "0.29", default-features = false, features = ["signal", "process", "fs", "dir"] }
+libc = { workspace = true }
+
+[lints]
+workspace = true
+
+# ──── e2e example only — not pulled into the production binary ────
+[dev-dependencies]
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+
+[[example]]
+name = "e2e_k3s"
+path = "examples/e2e_k3s.rs"
+
+[[example]]
+name = "exploit_k3s"
+path = "examples/exploit_k3s.rs"

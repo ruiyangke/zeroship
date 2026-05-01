@@ -3,35 +3,88 @@
 
 use std::path::PathBuf;
 
+use zeroize::Zeroizing;
+
+/// Wrapper around the bearer token string. Two properties:
+///   1. **`Debug`** prints `<redacted, len=N>` instead of the bytes,
+///      so any panic backtrace / debug log / error chain that
+///      formats `SandboxConfig` with `{:?}` doesn't dump the token
+///      to stderr.
+///   2. **`Zeroizing`** scrubs the heap allocation on drop, so a
+///      core dump or `/proc/<pid>/mem` read after process exit
+///      doesn't trivially recover the token. (Live-process memory
+///      reads are still a concern, but at least the post-mortem
+///      surface is closed.)
+#[derive(Clone)]
+pub struct ApiToken(Zeroizing<String>);
+
+impl ApiToken {
+    pub fn new<S: Into<String>>(s: S) -> Self {
+        Self(Zeroizing::new(s.into()))
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl std::fmt::Debug for ApiToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.is_empty() {
+            f.write_str("<unset>")
+        } else {
+            write!(f, "<redacted, len={}>", self.0.len())
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SandboxConfig {
     /// Port the HTTP API listens on. `SANDBOX_PORT` (default 9091).
     pub port: u16,
 
-    /// Bearer token for the HTTP API. `SANDBOX_TOKEN`. Empty disables auth
-    /// (dev only — main.rs prints a warning).
-    pub token: String,
+    /// Bearer token for the HTTP API. `SANDBOX_TOKEN`. Empty value
+    /// disables auth and is **rejected at startup** unless the
+    /// operator also set `SANDBOX_ALLOW_NO_AUTH=true` (dev opt-in).
+    /// Production deployments without a token simply refuse to
+    /// boot, so an unconfigured pod can't accidentally become a
+    /// public RCE.
+    ///
+    /// Wrapped in [`ApiToken`] so debug output is redacted and the
+    /// heap allocation is zeroed on drop.
+    pub token: ApiToken,
+
+    /// Backend selector. `SANDBOX_BACKEND=docker|k8s` (default docker).
+    pub backend: String,
 
     /// Docker image tag spawned for new sessions. `SANDBOX_IMAGE`
     /// (default `zeroship/sandbox-base:latest`).
+    /// Used by the **docker** backend.
     pub image: String,
 
     /// Host directory where per-project workspaces live. Each session's
     /// `/workspace` is bind-mounted from `{workspace_root}/{project_id}/`.
     /// `SANDBOX_WORKSPACE_ROOT` (default `/var/zeroship/projects`).
+    /// Used by the **docker** backend only — k8s sessions store their
+    /// workspace inside the Pod via emptyDir.
     pub workspace_root: PathBuf,
 
     /// Docker network the sandbox containers join. `SANDBOX_NETWORK`
     /// (default `zeroship-sandbox-net`). Must be created out-of-band
     /// (`docker network create zeroship-sandbox-net`).
+    /// Used by the **docker** backend only.
     pub network: String,
 
     /// Per-container memory limit in MiB. `SANDBOX_MEMORY_MB` (default
-    /// 1024). Passed to `docker run --memory={N}m`.
+    /// 1024).
     pub memory_mb: u32,
 
-    /// Per-container CPU quota. `SANDBOX_CPUS` (default 2.0). Passed
-    /// to `docker run --cpus={N}`.
+    /// Per-container CPU quota. `SANDBOX_CPUS` (default 2.0).
     pub cpus: f32,
 
     /// Idle session GC threshold. `SANDBOX_IDLE_TIMEOUT_SECS`
@@ -44,13 +97,112 @@ pub struct SandboxConfig {
 
     /// Pull the image at startup if missing. `SANDBOX_AUTO_PULL`
     /// (default false — admins should pre-pull for predictable boot).
+    /// Docker backend only.
     pub auto_pull: bool,
+
+    /// K8s-backend settings. Read from env even when `backend=docker`
+    /// (cheap; lets you switch backends without restart-time config
+    /// gymnastics).
+    pub k8s: K8sConfig,
+}
+
+#[derive(Clone, Debug)]
+pub struct K8sConfig {
+    /// Namespace where Pods are created. `SANDBOX_K8S_NAMESPACE`
+    /// (default `default`).
+    pub namespace: String,
+
+    /// Agent OCI image, including tag (or pinned digest in prod).
+    /// `SANDBOX_K8S_IMAGE` (default `docker.io/zeroship/sandbox-agent:dev`).
+    pub image: String,
+
+    /// `runtimeClassName` to apply to the Pod. Must point at the
+    /// crun+libkrun handler. `SANDBOX_K8S_RUNTIME_CLASS` (default
+    /// `kvm-sandbox`).
+    pub runtime_class: String,
+
+    /// `kubectl wait --for=condition=Ready` timeout in seconds.
+    /// `SANDBOX_K8S_READY_TIMEOUT_SECS` (default 120).
+    pub ready_timeout_secs: u64,
+
+    /// Use `kubectl port-forward` per session instead of dialing the
+    /// Pod IP directly. Required when the controller runs outside
+    /// the cluster (typical for local dev). In-cluster controllers
+    /// should set this to false. `SANDBOX_K8S_USE_PORT_FORWARD`
+    /// (default true — safe for local dev; switch off in cluster).
+    pub use_port_forward: bool,
+
+    /// Loopback port allocator base when `use_port_forward=true`.
+    /// `SANDBOX_K8S_PORT_FORWARD_START` (default 18000). Allocator
+    /// is monotonic per process; never reuses ports.
+    pub port_forward_start: u16,
+
+    /// PVC size for the per-user `/home/u` mount. Holds package
+    /// caches (pnpm, npm, pip, cargo), dotfiles, ssh config —
+    /// non-secret, deduplicated state that survives across every
+    /// sandbox the user opens. `SANDBOX_K8S_USER_HOME_SIZE`
+    /// (default `5Gi`). k8s parses this as a Quantity.
+    pub user_home_size: String,
+
+    /// StorageClass used for per-user PVCs. Empty / unset = use
+    /// the cluster default (`storageclass.kubernetes.io/is-default-class: "true"`).
+    /// In production pick one with snapshot+clone support
+    /// (Longhorn, Ceph RBD, EBS gp3, GCE PD) so the per-project
+    /// snapshot / fork features in the storage design are
+    /// buildable later. `SANDBOX_K8S_USER_HOME_STORAGE_CLASS`
+    /// (default empty).
+    pub user_home_storage_class: Option<String>,
+
+    /// On controller startup, delete every Pod + ConfigMap labeled
+    /// `app.kubernetes.io/name=sandbox-agent` in the namespace.
+    /// Useful for single-replica deployments to clean up after a
+    /// crash (per-sandbox signing keys live only in process
+    /// memory; orphan Pods would 401 every signed request from the
+    /// new controller forever).
+    ///
+    /// **Disable in HA / multi-replica deployments.** With more
+    /// than one controller replica running, the first one to come
+    /// up after a deploy nukes every other replica's active
+    /// sandboxes — fleet-wide outage on every rolling restart. For
+    /// HA, leave this off and run a separate prune job that
+    /// considers Pod age / heartbeat Lease.
+    ///
+    /// `SANDBOX_K8S_STARTUP_ORPHAN_CLEANUP` (default `false`).
+    pub startup_orphan_cleanup: bool,
 }
 
 impl SandboxConfig {
     pub fn from_env() -> Result<Self, String> {
         let port = parse_env("SANDBOX_PORT", 9091u16)?;
-        let token = std::env::var("SANDBOX_TOKEN").unwrap_or_default();
+        let token_raw = std::env::var("SANDBOX_TOKEN").unwrap_or_default();
+        // Fail-closed: an unset/empty token disables auth. We refuse
+        // to start in that state unless the operator opts in via
+        // SANDBOX_ALLOW_NO_AUTH=true. Tighten further: when a token
+        // is set, require ≥32 bytes — anything shorter is brute-
+        // forceable on a public endpoint.
+        let allow_no_auth = parse_env("SANDBOX_ALLOW_NO_AUTH", false)?;
+        if token_raw.is_empty() && !allow_no_auth {
+            return Err(
+                "SANDBOX_TOKEN is empty; refusing to start. \
+                 Set SANDBOX_TOKEN to a strong (≥32 byte) random value, \
+                 or set SANDBOX_ALLOW_NO_AUTH=true for explicit dev mode."
+                    .to_string(),
+            );
+        }
+        if !token_raw.is_empty() && token_raw.len() < 32 {
+            return Err(format!(
+                "SANDBOX_TOKEN is too short ({} bytes; need ≥ 32). \
+                 Generate with: head -c 32 /dev/urandom | base64",
+                token_raw.len()
+            ));
+        }
+        let token = ApiToken::new(token_raw);
+        let backend = std::env::var("SANDBOX_BACKEND").unwrap_or_else(|_| "docker".to_string());
+        if !matches!(backend.as_str(), "docker" | "k8s") {
+            return Err(format!(
+                "SANDBOX_BACKEND={backend:?}; expected \"docker\" or \"k8s\""
+            ));
+        }
         let image = std::env::var("SANDBOX_IMAGE")
             .unwrap_or_else(|_| "zeroship/sandbox-base:latest".to_string());
         let workspace_root = PathBuf::from(
@@ -72,9 +224,29 @@ impl SandboxConfig {
             return Err(format!("SANDBOX_MEMORY_MB too small: {memory_mb}"));
         }
 
+        let user_home_storage_class = std::env::var("SANDBOX_K8S_USER_HOME_STORAGE_CLASS")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let k8s = K8sConfig {
+            namespace: std::env::var("SANDBOX_K8S_NAMESPACE")
+                .unwrap_or_else(|_| "default".to_string()),
+            image: std::env::var("SANDBOX_K8S_IMAGE")
+                .unwrap_or_else(|_| "docker.io/zeroship/sandbox-agent:dev".to_string()),
+            runtime_class: std::env::var("SANDBOX_K8S_RUNTIME_CLASS")
+                .unwrap_or_else(|_| "kvm-sandbox".to_string()),
+            ready_timeout_secs: parse_env("SANDBOX_K8S_READY_TIMEOUT_SECS", 120u64)?,
+            use_port_forward: parse_env("SANDBOX_K8S_USE_PORT_FORWARD", true)?,
+            port_forward_start: parse_env("SANDBOX_K8S_PORT_FORWARD_START", 18000u16)?,
+            user_home_size: std::env::var("SANDBOX_K8S_USER_HOME_SIZE")
+                .unwrap_or_else(|_| "5Gi".to_string()),
+            user_home_storage_class,
+            startup_orphan_cleanup: parse_env("SANDBOX_K8S_STARTUP_ORPHAN_CLEANUP", false)?,
+        };
+
         Ok(Self {
-            port, token, image, workspace_root, network,
+            port, token, backend, image, workspace_root, network,
             memory_mb, cpus, idle_timeout_secs, max_lifetime_secs, auto_pull,
+            k8s,
         })
     }
 }
