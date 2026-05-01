@@ -453,21 +453,29 @@ impl NomadCHBackend {
         submit_nomad_job(&self.cfg.nomad_ch.nomad_addr, &job_json).await?;
         guard.job_submitted = true;
 
-        // 6. Poll until at least one alloc reaches running.
+        // 6. Poll until at least one alloc reaches running. Bounded
+        //    by the Nomad-scheduling budget (alloc_running_timeout_secs);
+        //    "running" here means the wrapper script started, NOT that
+        //    the VM is up — the agent /livez wait below covers the
+        //    in-VM boot path.
         wait_for_alloc_running(
             &self.cfg.nomad_ch.nomad_addr,
             job_id,
-            Duration::from_secs(self.cfg.nomad_ch.ready_timeout_secs),
+            Duration::from_secs(self.cfg.nomad_ch.alloc_running_timeout_secs),
         )
         .await?;
 
         // 7. Wait for the in-VM agent to come up. The wrapper boots
         //    CH; CH boots Linux; init.sh execs sandbox-agent. Bound
-        //    this independently of the alloc-running wait — `running`
-        //    only means the wrapper script started, not that the VM
-        //    finished booting.
+        //    this with its own budget (agent_livez_timeout_secs) so
+        //    operators can tell apart "Nomad slow to schedule" from
+        //    "VM/kernel/agent slow to boot".
         let agent_url = format!("http://10.99.{}.2:7777", 100u16 + vm_index);
-        wait_for_agent_livez(&agent_url, Duration::from_secs(30)).await?;
+        wait_for_agent_livez(
+            &agent_url,
+            Duration::from_secs(self.cfg.nomad_ch.agent_livez_timeout_secs),
+        )
+        .await?;
 
         // 8. Commit state.
         let sandbox = NomadChSandbox {
@@ -1329,7 +1337,8 @@ mod tests {
                 user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
                 vm_index_floor: 1,
                 vm_index_ceil: 155,
-                ready_timeout_secs: 60,
+                alloc_running_timeout_secs: 60,
+                agent_livez_timeout_secs: 30,
                 startup_orphan_cleanup: false,
             },
         };

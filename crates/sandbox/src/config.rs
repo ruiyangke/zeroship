@@ -257,12 +257,26 @@ pub struct NomadCHConfig {
     pub vm_index_ceil: u16,
 
     /// How long to wait for an alloc to reach `ClientStatus="running"`
-    /// after `POST /v1/jobs`. Past this we give up and the
-    /// `CreateGuard` tears the job down. `SANDBOX_NOMAD_CH_READY_TIMEOUT_SECS`
-    /// (default 60). Includes both Nomad scheduling latency and the
-    /// wrapper's CH boot time; should be a few × the typical CH boot
-    /// (~3-4 s on a healthy host).
-    pub ready_timeout_secs: u64,
+    /// after `POST /v1/jobs`. Bounds Nomad scheduling latency only —
+    /// "running" means the wrapper script started, NOT that the VM is
+    /// up. Past this we give up and the `CreateGuard` tears the job
+    /// down. `SANDBOX_NOMAD_CH_ALLOC_RUNNING_TIMEOUT_SECS` (default
+    /// 60). Should be enough to cover Nomad scheduling, plan-evaluate,
+    /// and `raw_exec` task launch on a healthy cluster (typically
+    /// well under 5s; 60s leaves room for a reschedule under load).
+    pub alloc_running_timeout_secs: u64,
+
+    /// Once the alloc is running, how long to wait for the in-VM
+    /// agent to start serving 200s on `/livez`. Bounds CH boot +
+    /// kernel + init.sh + agent startup. Separate budget from
+    /// `alloc_running_timeout_secs` because the failure mode is
+    /// different — slow Nomad means the cluster is unhealthy; slow
+    /// `/livez` means CH/kernel/agent inside the VM. Setting a
+    /// single combined timeout would conflate these and give
+    /// operators worse signal. `SANDBOX_NOMAD_CH_AGENT_LIVEZ_TIMEOUT_SECS`
+    /// (default 30). CH typically boots in ~3-4 s on a healthy host;
+    /// the agent comes up immediately after init.sh execs it.
+    pub agent_livez_timeout_secs: u64,
 
     /// On controller startup, list every Nomad job whose `ID` starts
     /// with the `zsbx-` prefix and stop+purge it. Same trade-off as
@@ -279,6 +293,16 @@ impl NomadCHConfig {
     /// [`SandboxConfig::from_env`] before the backend is instantiated
     /// so misconfig surfaces at startup, not on the first sandbox.
     pub fn validate(&self) -> Result<(), String> {
+        if self.vm_index_floor < 1 {
+            // floor=0 would set MAC `12:34:56:78:9b:00` and IP
+            // `10.99.100.2`, pre-empting the .100 subnet for what's
+            // effectively a sentinel index. Reject at config load so
+            // operators discover the misconfig before the first
+            // sandbox tries to boot on it.
+            return Err(
+                "SANDBOX_NOMAD_CH_VM_INDEX_FLOOR must be ≥ 1 (got 0)".to_string(),
+            );
+        }
         if self.vm_index_floor > self.vm_index_ceil {
             return Err(format!(
                 "SANDBOX_NOMAD_CH_VM_INDEX_FLOOR ({}) > _CEIL ({})",
@@ -296,6 +320,38 @@ impl NomadCHConfig {
                  third octet (10.99.{}.2). Max is 155.",
                 self.vm_index_ceil,
                 100 + self.vm_index_ceil as u32
+            ));
+        }
+        // SANDBOX_NOMAD_ADDR scheme: an empty / scheme-less value
+        // would silently fail at first sandbox create rather than at
+        // controller startup. Cheap to check now.
+        if !self.nomad_addr.starts_with("http://")
+            && !self.nomad_addr.starts_with("https://")
+        {
+            return Err(format!(
+                "SANDBOX_NOMAD_ADDR must start with http:// or https://; got {:?}",
+                self.nomad_addr,
+            ));
+        }
+        // host_state_dir / user_home_dir_root overlap: the canonical
+        // layout is `host_state_dir/users/<user>/home`, i.e.
+        // user_home_dir_root == host_state_dir.join("users"). Any
+        // *other* descendant relationship risks a future operator
+        // misconfig where a sandbox-id-named dir under host_state_dir
+        // collides with a user-id-named dir under user_home_dir_root.
+        // Sandbox IDs are 32-hex UUIDs today (collision-free in
+        // practice) but the invariant deserves to be explicit. Allow
+        // either the canonical layout or fully disjoint trees.
+        if self.user_home_dir_root != self.host_state_dir.join("users")
+            && self.user_home_dir_root.starts_with(&self.host_state_dir)
+        {
+            return Err(format!(
+                "SANDBOX_NOMAD_CH_USER_HOME_ROOT ({}) is a descendant of \
+                 SANDBOX_NOMAD_CH_HOST_STATE_DIR ({}) but not the canonical \
+                 `<host_state_dir>/users` layout — refusing to start to \
+                 avoid sandbox-id / user-id path collision.",
+                self.user_home_dir_root.display(),
+                self.host_state_dir.display(),
             ));
         }
         Ok(())
@@ -397,7 +453,14 @@ impl SandboxConfig {
             ),
             vm_index_floor: parse_env("SANDBOX_NOMAD_CH_VM_INDEX_FLOOR", 1u16)?,
             vm_index_ceil: parse_env("SANDBOX_NOMAD_CH_VM_INDEX_CEIL", 155u16)?,
-            ready_timeout_secs: parse_env("SANDBOX_NOMAD_CH_READY_TIMEOUT_SECS", 60u64)?,
+            alloc_running_timeout_secs: parse_env(
+                "SANDBOX_NOMAD_CH_ALLOC_RUNNING_TIMEOUT_SECS",
+                60u64,
+            )?,
+            agent_livez_timeout_secs: parse_env(
+                "SANDBOX_NOMAD_CH_AGENT_LIVEZ_TIMEOUT_SECS",
+                30u64,
+            )?,
             startup_orphan_cleanup: parse_env(
                 "SANDBOX_NOMAD_CH_STARTUP_ORPHAN_CLEANUP",
                 false,
@@ -438,7 +501,8 @@ mod tests {
             user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
             vm_index_floor: 1,
             vm_index_ceil: 155,
-            ready_timeout_secs: 60,
+            alloc_running_timeout_secs: 60,
+            agent_livez_timeout_secs: 30,
             startup_orphan_cleanup: false,
         }
     }
@@ -468,5 +532,47 @@ mod tests {
         cfg.vm_index_ceil = 50;
         let err = cfg.validate().expect_err("must reject");
         assert!(err.contains("FLOOR") && err.contains("CEIL"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_floor_zero() {
+        let mut cfg = base_nomad_cfg();
+        cfg.vm_index_floor = 0;
+        let err = cfg.validate().expect_err("must reject");
+        assert!(err.contains("FLOOR"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_bad_nomad_url() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "".into();
+        assert!(cfg.validate().is_err());
+        cfg.nomad_addr = "127.0.0.1:4646".into();
+        let err = cfg.validate().expect_err("must reject");
+        assert!(err.contains("NOMAD_ADDR"), "{err}");
+    }
+
+    #[test]
+    fn validate_accepts_canonical_user_home_layout() {
+        let cfg = base_nomad_cfg();
+        // `/var/zeroship/ch` + `users` == `/var/zeroship/ch/users`.
+        cfg.validate().expect("default layout must validate");
+    }
+
+    #[test]
+    fn validate_accepts_disjoint_user_home_root() {
+        let mut cfg = base_nomad_cfg();
+        cfg.user_home_dir_root = PathBuf::from("/srv/zeroship-homes");
+        cfg.validate()
+            .expect("disjoint user_home_dir_root must validate");
+    }
+
+    #[test]
+    fn validate_rejects_descendant_user_home_root() {
+        let mut cfg = base_nomad_cfg();
+        // Descendant of host_state_dir but not the canonical `users`.
+        cfg.user_home_dir_root = PathBuf::from("/var/zeroship/ch/homes");
+        let err = cfg.validate().expect_err("must reject");
+        assert!(err.contains("USER_HOME_ROOT"), "{err}");
     }
 }
