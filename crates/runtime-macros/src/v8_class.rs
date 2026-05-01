@@ -36,7 +36,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use syn::{
     parse_macro_input, Attribute, Expr, ExprLit, FnArg, ImplItem, ImplItemFn, ItemImpl, Lit, Meta,
     Receiver, ReturnType, Type,
@@ -125,6 +125,49 @@ fn extract_to_string_tag(attrs: &[Attribute]) -> Option<String> {
         }
     }
     None
+}
+
+/// Read `#[reject_shared(arg1, arg2, ...)]` from a method's attributes.
+/// Returns the set of parameter names that should reject SharedArrayBuffer-
+/// backed views. Empty set if the attribute is absent or malformed.
+///
+/// The list-form `#[reject_shared(name)]` is a method-level attribute
+/// rather than an attribute *on* the parameter itself, because Rust
+/// proc-macro attributes can't apply to function parameters. The
+/// outer `#[v8_class]` macro reads the list and emits a SAB check
+/// before extracting each named parameter's bytes.
+///
+/// Per WebIDL §3.2.21: BufferSource without `[AllowShared]` rejects
+/// SharedArrayBuffer-backed views with TypeError. The CompressionStream
+/// IDL omits `[AllowShared]`, so chunks must reject SAB. See the
+/// design `compression-streams-native.md` BLOCKER-5 / D-5.
+fn extract_reject_shared(attrs: &[Attribute]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for attr in attrs {
+        if !attr.path().is_ident("reject_shared") {
+            continue;
+        }
+        // List form: `#[reject_shared(a, b, c)]`. Parse via
+        // `Attribute::parse_args_with` + a simple comma-separated
+        // identifier list.
+        if let Ok(list) = attr.parse_args_with(|input: syn::parse::ParseStream| {
+            let mut acc: Vec<syn::Ident> = Vec::new();
+            while !input.is_empty() {
+                let id: syn::Ident = input.parse()?;
+                acc.push(id);
+                if input.is_empty() {
+                    break;
+                }
+                let _: syn::Token![,] = input.parse()?;
+            }
+            Ok(acc)
+        }) {
+            for id in list {
+                names.insert(id.to_string());
+            }
+        }
+    }
+    names
 }
 
 /// Read `#[v8_inherit_intrinsic = "IteratorPrototype"]` from impl-block
@@ -287,7 +330,8 @@ fn strip_marker_attrs(mut input: ItemImpl) -> ItemImpl {
                     || p.is_ident("v8_getter")
                     || p.is_ident("v8_setter")
                     || p.is_ident("v8_constructor")
-                    || p.is_ident("v8_name"))
+                    || p.is_ident("v8_name")
+                    || p.is_ident("reject_shared"))
             });
         }
     }
@@ -464,7 +508,8 @@ fn gen_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
 
     // Skip the receiver param when extracting JS args.
     let params = parse_params_skipping_self(m.func);
-    let extractions = gen_param_extractions(&params);
+    let reject_shared_names = extract_reject_shared(&m.func.attrs);
+    let extractions = gen_param_extractions(&params, &reject_shared_names);
 
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
     let receiver_ref = if m.mut_receiver {
@@ -530,7 +575,8 @@ fn gen_setter_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
 
     // Setters take exactly one logical param: the new value.
     let params = parse_params_skipping_self(m.func);
-    let extractions = gen_param_extractions(&params);
+    let reject_shared_names = extract_reject_shared(&m.func.attrs);
+    let extractions = gen_param_extractions(&params, &reject_shared_names);
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
     let receiver_ref = if m.mut_receiver {
         quote! { &mut *__instance }
@@ -578,7 +624,8 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
     // Constructors have no `self` receiver; the skipping-self helper
     // works uniformly here since it just collects typed args.
     let params = parse_params_skipping_self(c.func);
-    let extractions = gen_param_extractions(&params);
+    let reject_shared_names = extract_reject_shared(&c.func.attrs);
+    let extractions = gen_param_extractions(&params, &reject_shared_names);
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
 
     let is_result = matches!(
@@ -701,7 +748,16 @@ fn gen_box_and_install_finalizer(class_ty: &syn::Ident) -> TokenStream2 {
 ///
 /// Synthetic args are emitted FIRST so the reborrowed `scope` is
 /// available to subsequent JS-arg extractions.
-fn gen_param_extractions(params: &[crate::Param]) -> Vec<TokenStream2> {
+///
+/// `reject_shared_names` is the set of parameter names whose JS-side
+/// argument must reject SharedArrayBuffer-backed views with
+/// `TypeError` — emitted before the regular extraction so the SAB
+/// check fails before any byte copy. Per WebIDL §3.2.21 and the
+/// Compression spec's omission of `[AllowShared]`.
+fn gen_param_extractions(
+    params: &[crate::Param],
+    reject_shared_names: &HashSet<String>,
+) -> Vec<TokenStream2> {
     let mut out = Vec::with_capacity(params.len());
     let mut js_idx: usize = 0;
 
@@ -716,10 +772,46 @@ fn gen_param_extractions(params: &[crate::Param]) -> Vec<TokenStream2> {
     // Then emit JS-arg extractions in declared order, skipping
     // synthetics.
     for p in params.iter() {
-        if !is_pin_scope_ref(&p.ty) {
-            out.push(gen_extract(js_idx, &p.name, &p.ty));
-            js_idx += 1;
+        if is_pin_scope_ref(&p.ty) {
+            continue;
         }
+        // Optional SAB-rejection guard, emitted *before* the regular
+        // extraction so the TypeError fires before any byte copy. The
+        // guard checks both ArrayBufferView (Uint8Array etc.) and bare
+        // SharedArrayBuffer arguments, matching the IDL `BufferSource`
+        // union surface.
+        if reject_shared_names.contains(&p.name.to_string()) {
+            let idx_lit = js_idx as i32;
+            out.push(quote! {
+                {
+                    let __reject_arg = args.get(#idx_lit);
+                    let mut __is_shared = false;
+                    if let Ok(__view) =
+                        v8::Local::<v8::ArrayBufferView>::try_from(__reject_arg)
+                    {
+                        if let Some(__buf) = __view.buffer(scope) {
+                            if __buf.is_shared_array_buffer() {
+                                __is_shared = true;
+                            }
+                        }
+                    } else if v8::Local::<v8::SharedArrayBuffer>::try_from(__reject_arg).is_ok() {
+                        __is_shared = true;
+                    }
+                    if __is_shared {
+                        let __msg = v8::String::new(
+                            scope,
+                            "SharedArrayBuffer-backed buffer source is not allowed",
+                        )
+                        .unwrap();
+                        let __exc = v8::Exception::type_error(scope, __msg);
+                        scope.throw_exception(__exc);
+                        return;
+                    }
+                }
+            });
+        }
+        out.push(gen_extract(js_idx, &p.name, &p.ty));
+        js_idx += 1;
     }
 
     out

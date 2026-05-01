@@ -1204,3 +1204,122 @@ fn heavy_payload_instances_all_finalize() {
         drops.load(Ordering::SeqCst),
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 14: #[reject_shared] — SAB-backed views throw TypeError before
+//                            any user code runs (BLOCKER-5)
+// ---------------------------------------------------------------------------
+//
+// Per WebIDL §3.2.21 BufferSource handling: an `[AllowShared]` IDL
+// extended attribute opts in to SharedArrayBuffer-backed views;
+// without it, the binding rejects them with a TypeError. The
+// CompressionStream / DecompressionStream IDL does NOT use
+// `[AllowShared]`, so a SAB-backed Uint8Array passed to `transform`
+// must reject before the codec is touched.
+//
+// We test the macro extension by adding `#[reject_shared]` to a
+// `Vec<u8>` arg and verifying:
+//   - normal Uint8Array (over a regular ArrayBuffer) is accepted;
+//   - Uint8Array over a SharedArrayBuffer throws TypeError.
+
+#[allow(unused_imports)]
+use zeroship_runtime_macros::reject_shared;
+
+mod sab_rejection {
+    use super::*;
+
+    pub struct Sink {
+        pub last_len: u32,
+    }
+
+    impl Default for Sink {
+        fn default() -> Self {
+            Sink { last_len: 0 }
+        }
+    }
+
+    #[v8_class]
+    impl Sink {
+        #[v8_method]
+        #[reject_shared(chunk)]
+        fn accept(&mut self, chunk: Vec<u8>) -> u32 {
+            self.last_len = chunk.len() as u32;
+            self.last_len
+        }
+    }
+}
+
+#[test]
+fn reject_shared_passes_regular_uint8array() {
+    let s = run_in_v8(
+        |scope, global| install_class::<sab_rejection::Sink>(
+            sab_rejection::Sink::install, "Sink", scope, global,
+        ),
+        r#"
+        const s = new Sink();
+        const buf = new Uint8Array([1, 2, 3, 4, 5]);
+        s.accept(buf);  // should accept, no throw
+        "#,
+        |val, scope| val.uint32_value(scope).unwrap(),
+    );
+    assert_eq!(s, 5);
+}
+
+#[test]
+fn reject_shared_throws_for_sab_backed_view() {
+    // Note: our V8 init must enable shared array buffers. If it doesn't,
+    // `new SharedArrayBuffer(8)` throws ReferenceError — the test
+    // would still fail loudly. zeroship's init_v8 enables them
+    // (per `--harmony-sharedarraybuffer` semantics, on by default in
+    // modern V8).
+    let s = run_in_v8(
+        |scope, global| install_class::<sab_rejection::Sink>(
+            sab_rejection::Sink::install, "Sink", scope, global,
+        ),
+        r#"
+        const s = new Sink();
+        const sab = new SharedArrayBuffer(8);
+        const view = new Uint8Array(sab);
+        let kind, msg;
+        try { s.accept(view); }
+        catch (e) { kind = e.constructor.name; msg = e.message; }
+        JSON.stringify({ kind, msg });
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&s).expect("json");
+    assert_eq!(parsed["kind"].as_str(), Some("TypeError"),
+        "SAB-backed view must throw TypeError; got {parsed}");
+    let msg = parsed["msg"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("Shared") || msg.contains("shared"),
+        "TypeError message should mention SharedArrayBuffer, got: {msg}"
+    );
+}
+
+#[test]
+fn reject_shared_throws_for_bare_sab_arg() {
+    // Bare SharedArrayBuffer (not a view, just the buffer itself) is
+    // also a BufferSource type — must also reject. Our extraction
+    // handles both ArrayBufferView and ArrayBuffer paths.
+    let s = run_in_v8(
+        |scope, global| install_class::<sab_rejection::Sink>(
+            sab_rejection::Sink::install, "Sink", scope, global,
+        ),
+        r#"
+        const s = new Sink();
+        const sab = new SharedArrayBuffer(8);
+        let kind, msg;
+        try { s.accept(sab); }
+        catch (e) { kind = e.constructor.name; msg = e.message; }
+        JSON.stringify({ kind, msg });
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&s).expect("json");
+    assert_eq!(
+        parsed["kind"].as_str(),
+        Some("TypeError"),
+        "bare SAB arg must throw TypeError; got {parsed}"
+    );
+}

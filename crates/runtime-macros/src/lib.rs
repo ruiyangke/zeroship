@@ -113,6 +113,25 @@ pub fn v8_inherit_intrinsic(_attr: TokenStream, item: TokenStream) -> TokenStrea
     item
 }
 
+/// Argument-level marker attribute consumed by `#[v8_class]`: when
+/// applied to a `Vec<u8>` parameter, the macro emits a SAB-rejection
+/// guard *before* extracting the bytes. A SharedArrayBuffer-backed
+/// view (or a bare `SharedArrayBuffer`) throws `TypeError` and the
+/// method body never runs.
+///
+/// Per WebIDL §3.2.21: BufferSource arguments default to rejecting
+/// shared backing stores; only the `[AllowShared]` extended attribute
+/// opts in. We invert that for ergonomics — `Vec<u8>` extraction is
+/// permissive by default (matches how legacy ops use it for blobs and
+/// uploads), and the `#[reject_shared]` attribute pins down the spec-
+/// strict cases (CompressionStream chunks, etc.).
+///
+/// Outside a `#[v8_class]` method param this attribute is a no-op.
+#[proc_macro_attribute]
+pub fn reject_shared(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
 #[proc_macro_attribute]
 pub fn zeroship_op(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr_str = attr.to_string();
