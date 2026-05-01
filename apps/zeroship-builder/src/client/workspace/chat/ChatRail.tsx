@@ -12,18 +12,61 @@
 // Plan 02 will dispatch custom `data-*` parts (survey, diff,
 // critic-round) into the assistant message renderer.
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { rpc, chatTransport } from "../../api";
-import type { SurveyResponse } from "../../types/chat";
+import type { Brief, SurveyResponse } from "../../types/chat";
 import { ChatComposer } from "./ChatComposer";
 import { ChatMessages } from "./ChatMessages";
 
 export interface ChatRailProps {
   appName?: string;
+  /** Wizard hand-off: the brief stashed by WizardWorkspace.handleBegin
+   *  and consumed once by WorkspaceShell. ChatRail synthesises a first
+   *  user message from this on mount so Builder has full clarification
+   *  context. Run-once: the parent only passes this on the very first
+   *  render after navigation. */
+  seedBrief?: Brief;
 }
 
-export function ChatRail({ appName }: ChatRailProps) {
+/**
+ * Render an answer value for human-readable transport in the seeded
+ * first turn. Mirrors `_wizard.ts:wstringifyAnswer` and
+ * `BriefCard.tsx:stringifyAnswer` — kept inline here rather than DRYed
+ * into types/chat.ts because the helper is rendering policy (Builder-
+ * facing), not part of the wire shape.
+ */
+function stringifyAnswer(value: unknown): string {
+  if (value == null) return "(skipped)";
+  if (typeof value === "string") return value;
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function buildSeedMessage(brief: Brief): string {
+  const lines: string[] = [];
+  lines.push("Brief from the wizard:");
+  lines.push("");
+  lines.push(`Original idea: ${brief.idea}`);
+  lines.push("");
+  lines.push(`Refined summary: ${brief.summary}`);
+  if (brief.answers.length > 0) {
+    lines.push("");
+    lines.push("Survey answers:");
+    for (const a of brief.answers) {
+      lines.push(`- ${a.question}: ${stringifyAnswer(a.answer)}`);
+    }
+  }
+  lines.push("");
+  lines.push("Please start coding it.");
+  return lines.join("\n");
+}
+
+export function ChatRail({ appName, seedBrief }: ChatRailProps) {
   const [input, setInput] = useState("");
   // Tokens of surveys the user has already answered or skipped this
   // session. Prevents the SurveyCard from re-firing on re-render after
@@ -39,6 +82,25 @@ export function ChatRail({ appName }: ChatRailProps) {
   });
 
   const busy = status === "submitted" || status === "streaming";
+
+  // Wizard handoff: when WorkspaceShell consumed a pending brief and
+  // passed it as `seedBrief`, synthesise a first user message so
+  // Builder kicks off with full context. Empty-deps useEffect runs
+  // once on mount; the `seeded` ref guards against React 18 strict
+  // mode double-invocation in dev (and any hot-reload re-mount). The
+  // explicit `messages.length === 0 && !busy` check is belt-and-
+  // braces — by the time the rail mounts in production those are
+  // both true. We don't include `seedBrief` in deps because the
+  // parent only passes it on the very first render after navigation
+  // (sessionStorage one-shot consume in WorkspaceShell).
+  const seeded = useRef(false);
+  useEffect(() => {
+    if (!seedBrief || seeded.current) return;
+    if (messages.length !== 0 || busy) return;
+    seeded.current = true;
+    sendMessage({ text: buildSeedMessage(seedBrief) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function handleSubmit(text: string, _attachments: File[]) {
     if (!text.trim() || busy) return;
