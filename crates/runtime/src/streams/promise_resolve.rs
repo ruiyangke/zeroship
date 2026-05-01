@@ -90,7 +90,8 @@ fn microtask_callback(
 // upon_promise — spec uponPromise(p, onF, onR)
 // ---------------------------------------------------------------------------
 
-type PromiseCallback = Box<dyn FnOnce(&mut v8::PinScope, v8::Local<v8::Value>) + 'static>;
+type PromiseCallback =
+    Box<dyn for<'s> FnOnce(&mut v8::PinScope<'s, '_>, v8::Local<'s, v8::Value>) + 'static>;
 
 type PromiseCallbackHolder = RefCell<Option<PromiseCallback>>;
 
@@ -168,7 +169,10 @@ pub fn react_to_promise_with<'s>(
 /// machinery surfaces the error. Stream algorithms install this as the
 /// outer then's rejection handler so internal bugs aren't silently
 /// swallowed.
-fn rethrow_assertion_error_rejection(scope: &mut v8::PinScope, reason: v8::Local<v8::Value>) {
+fn rethrow_assertion_error_rejection<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    reason: v8::Local<'s, v8::Value>,
+) {
     // The simplest "rethrow" is to throw the value as a V8 exception;
     // the surrounding promise reaction job will mark this promise as
     // rejected with that value, which then propagates to V8's
@@ -262,10 +266,10 @@ fn build_oneshot_callback_void<'s>(
     tmpl.get_function(scope).unwrap()
 }
 
-fn promise_callback_void(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue,
+fn promise_callback_void<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    _rv: v8::ReturnValue<'s>,
 ) {
     let data = args.data();
     let Ok(ext) = v8::Local::<v8::External>::try_from(data) else {
@@ -289,7 +293,8 @@ fn promise_callback_void(
 /// `'static`. We require the closure to return a `v8::Global<v8::Value>`
 /// and re-localize it at the V8 reaction callsite.
 pub type PromiseValueCallback = Box<
-    dyn FnOnce(&mut v8::PinScope, v8::Local<v8::Value>) -> v8::Global<v8::Value> + 'static,
+    dyn for<'s> FnOnce(&mut v8::PinScope<'s, '_>, v8::Local<'s, v8::Value>) -> v8::Global<v8::Value>
+        + 'static,
 >;
 type PromiseValueCallbackHolder = RefCell<Option<PromiseValueCallback>>;
 
@@ -306,10 +311,10 @@ fn build_oneshot_callback_value<'s>(
     tmpl.get_function(scope).unwrap()
 }
 
-fn promise_callback_value(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
+fn promise_callback_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s>,
 ) {
     let data = args.data();
     let Ok(ext) = v8::Local::<v8::External>::try_from(data) else {

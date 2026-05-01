@@ -1,0 +1,647 @@
+//! `ReadableStreamDefaultReader` — spec §3.4.
+//!
+//! IDL (§3.4.1):
+//! ```webidl
+//! [Exposed=*]
+//! interface ReadableStreamDefaultReader {
+//!   constructor(ReadableStream stream);
+//!   Promise<ReadableStreamReadResult> read();
+//!   undefined releaseLock();
+//! };
+//! ReadableStreamDefaultReader includes ReadableStreamGenericReader;
+//!
+//! interface mixin ReadableStreamGenericReader {
+//!   readonly attribute Promise<undefined> closed;
+//!   Promise<undefined> cancel(optional any reason);
+//! };
+//! ```
+//!
+//! Storage (§XV per-class):
+//! - `[[stream]]`        → V8 priv sym `[[stream]]` on the reader wrapper
+//! - `[[closedPromise]]` + closedResolver → paired storage in the reader's RustState
+//!   (the closed-Promise getter reads the priv sym `[[closedPromise]]`; the
+//!   resolver lives in the Rust state for resolve/reject access).
+//! - `[[readRequests]]`  → Rust VecDeque on the reader's RustState (per
+//!   spec §3.4.5 the queue lives on the reader; we follow the spec
+//!   exactly. `algorithms.rs` reaches in via `with_state` helper.)
+
+use std::cell::RefCell;
+use std::collections::VecDeque;
+
+use crate::streams::algorithms;
+use crate::streams::readable::{is_readable_stream, StreamState};
+use crate::streams::slots::{self, CLOSED_PROMISE, READER, STORED_ERROR, STREAM};
+
+// ---------------------------------------------------------------------------
+// Reader state — Box<DefaultReaderState> in internal field 0
+// ---------------------------------------------------------------------------
+
+#[allow(missing_debug_implementations)]
+pub struct DefaultReaderState {
+    /// Outstanding read requests (FIFO).
+    pub read_requests: RefCell<VecDeque<ReadRequest>>,
+    /// Resolver for the reader's `[[closedPromise]]`. The Promise itself
+    /// is stored in the reader wrapper's V8 priv sym `[[closedPromise]]`.
+    pub closed_resolver: RefCell<Option<v8::Global<v8::PromiseResolver>>>,
+}
+
+impl DefaultReaderState {
+    fn new(closed_resolver: v8::Global<v8::PromiseResolver>) -> Self {
+        Self {
+            read_requests: RefCell::new(VecDeque::new()),
+            closed_resolver: RefCell::new(Some(closed_resolver)),
+        }
+    }
+}
+
+/// Read request — spec §3.4.4. The three step variants
+/// (`chunkSteps`/`closeSteps`/`errorSteps`) are encoded by the
+/// dispatch site (`algorithms.rs`) which calls one of three methods on
+/// the request.
+#[allow(missing_debug_implementations)]
+pub struct ReadRequest {
+    pub kind: ReadRequestKind,
+}
+
+pub enum ReadRequestKind {
+    /// User-facing `reader.read()` — resolve a promise resolver with
+    /// `{value, done}`.
+    Js {
+        resolver: v8::Global<v8::PromiseResolver>,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// V8 wrapper helpers
+// ---------------------------------------------------------------------------
+
+pub fn is_default_reader(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
+    obj.get_internal_field(scope, 0)
+        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
+        .map(|e| !e.value().is_null())
+        .unwrap_or(false)
+}
+
+pub fn with_state<R>(
+    scope: &mut v8::PinScope,
+    reader: v8::Local<v8::Object>,
+    f: impl FnOnce(&DefaultReaderState) -> R,
+) -> Option<R> {
+    let raw_v8_field = reader.get_internal_field(scope, 0)?;
+    let ext = v8::Local::<v8::External>::try_from(raw_v8_field).ok()?;
+    let ptr = ext.value() as *const DefaultReaderState;
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: External points at a Box<DefaultReaderState>; dropped only
+    // by the V8 weak finalizer.
+    let inst = unsafe { &*ptr };
+    Some(f(inst))
+}
+
+// ---------------------------------------------------------------------------
+// Class template
+// ---------------------------------------------------------------------------
+
+fn reader_class_template<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> v8::Local<'s, v8::FunctionTemplate> {
+    let ctor_tmpl = v8::FunctionTemplate::new(scope, constructor_callback);
+    let class_name = v8::String::new(scope, "ReadableStreamDefaultReader").unwrap();
+    ctor_tmpl.set_class_name(class_name);
+    ctor_tmpl
+        .instance_template(scope)
+        .set_internal_field_count(1);
+
+    let proto = ctor_tmpl.prototype_template(scope);
+
+    // closed getter (mixin §3.3)
+    {
+        let key = v8::String::new(scope, "closed").unwrap();
+        let getter_tmpl = v8::FunctionTemplate::new(scope, closed_getter_callback);
+        proto.set_accessor_property(
+            key.into(),
+            Some(getter_tmpl.into()),
+            None,
+            v8::PropertyAttribute::NONE,
+        );
+    }
+
+    install_proto_method(scope, proto, "read", read_method_callback);
+    install_proto_method(scope, proto, "releaseLock", release_lock_method_callback);
+    install_proto_method(scope, proto, "cancel", cancel_method_callback);
+
+    let tag_sym = v8::Symbol::get_to_string_tag(scope);
+    let tag_value = v8::String::new(scope, "ReadableStreamDefaultReader").unwrap();
+    proto.set_with_attr(
+        tag_sym.into(),
+        tag_value.into(),
+        v8::PropertyAttribute::READ_ONLY | v8::PropertyAttribute::DONT_ENUM,
+    );
+
+    ctor_tmpl
+}
+
+fn install_proto_method(
+    scope: &mut v8::PinScope,
+    proto: v8::Local<v8::ObjectTemplate>,
+    name: &str,
+    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+) {
+    let key = v8::String::new(scope, name).unwrap();
+    let tmpl = v8::FunctionTemplate::new(scope, cb);
+    proto.set(key.into(), tmpl.into());
+}
+
+// ---------------------------------------------------------------------------
+// Constructor — `new ReadableStreamDefaultReader(stream)`
+// ---------------------------------------------------------------------------
+
+fn constructor_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    if !args.is_construct_call() {
+        let msg = v8::String::new(scope, "ReadableStreamDefaultReader: must be called with 'new'").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    }
+    let reader_obj = args.this();
+    let stream_arg = args.get(0);
+    let Ok(stream) = v8::Local::<v8::Object>::try_from(stream_arg) else {
+        let msg = v8::String::new(
+            scope,
+            "ReadableStreamDefaultReader: argument must be a ReadableStream",
+        )
+        .unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    };
+    if !is_readable_stream(scope, stream) {
+        let msg = v8::String::new(
+            scope,
+            "ReadableStreamDefaultReader: argument must be a ReadableStream",
+        )
+        .unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    }
+    if algorithms::is_readable_stream_locked(scope, stream) {
+        let msg = v8::String::new(
+            scope,
+            "ReadableStreamDefaultReader: stream is already locked",
+        )
+        .unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    }
+    set_up_default_reader(scope, reader_obj, stream);
+}
+
+/// Build a fresh ReadableStreamDefaultReader wrapper bound to `stream`.
+/// This is the no-throw version called from `acquire_*` (which has
+/// already done the receiver/lock checks).
+pub fn acquire_readable_stream_default_reader<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    stream: v8::Local<v8::Object>,
+) -> Result<v8::Local<'s, v8::Object>, String> {
+    if algorithms::is_readable_stream_locked(scope, stream) {
+        return Err("ReadableStream.getReader: stream is already locked".to_string());
+    }
+    let tmpl = reader_class_template(scope);
+    let inst_tmpl = tmpl.instance_template(scope);
+    let reader_obj = inst_tmpl
+        .new_instance(scope)
+        .ok_or_else(|| "alloc reader instance".to_string())?;
+    // Wire prototype.
+    let class_fn = tmpl.get_function(scope).unwrap();
+    let proto_key = v8::String::new(scope, "prototype").unwrap();
+    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
+    reader_obj.set_prototype(scope, proto_v);
+
+    set_up_default_reader(scope, reader_obj, stream);
+    Ok(reader_obj)
+}
+
+/// `SetUpReadableStreamDefaultReader(reader, stream)` — §3.9.2 / §3.4.x.
+///
+/// 1. Run ReadableStreamReaderGenericInitialize(reader, stream).
+/// 2. Initialize reader.[[readRequests]] = [].
+fn set_up_default_reader(
+    scope: &mut v8::PinScope,
+    reader: v8::Local<v8::Object>,
+    stream: v8::Local<v8::Object>,
+) {
+    // Allocate closed-promise resolver pair.
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let closed_promise = resolver.get_promise(scope);
+    let resolver_g = v8::Global::new(scope, resolver);
+
+    // Build state.
+    let state = DefaultReaderState::new(resolver_g);
+    let boxed = Box::new(state);
+    let raw_ptr = Box::into_raw(boxed);
+    let raw_addr = raw_ptr as usize;
+    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
+    reader.set_internal_field(0, ext.into());
+    let weak = v8::Weak::with_guaranteed_finalizer(
+        scope,
+        reader,
+        Box::new(move || unsafe {
+            drop(Box::from_raw(raw_addr as *mut DefaultReaderState));
+        }),
+    );
+    std::mem::forget(weak);
+
+    // Run ReadableStreamReaderGenericInitialize.
+    readable_stream_reader_generic_initialize(scope, reader, stream, closed_promise);
+}
+
+// ---------------------------------------------------------------------------
+// ReadableStreamReaderGenericInitialize — §3.9.2
+// ---------------------------------------------------------------------------
+
+/// `ReadableStreamReaderGenericInitialize(reader, stream)` — §3.9.2 + §3.3.x.
+///
+/// 1. Set reader.[[stream]] = stream.
+/// 2. Set stream.[[reader]] = reader.
+/// 3. If stream.[[state]] is "readable":
+///    a. Set reader.[[closedPromise]] to a new pending Promise.
+/// 4. Else if stream.[[state]] is "closed":
+///    a. Set reader.[[closedPromise]] to a Promise resolved with undefined.
+/// 5. Else (errored):
+///    a. Set reader.[[closedPromise]] to a Promise rejected with stream.[[storedError]].
+///       (and PromiseIsHandled = true).
+fn readable_stream_reader_generic_initialize<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    reader: v8::Local<v8::Object>,
+    stream: v8::Local<v8::Object>,
+    closed_promise: v8::Local<'s, v8::Promise>,
+) {
+    slots::write_slot(scope, reader, STREAM, stream.into());
+    slots::write_slot(scope, stream, READER, reader.into());
+    slots::write_slot(scope, reader, CLOSED_PROMISE, closed_promise.into());
+
+    // Pre-resolve / pre-reject based on the stream's current state.
+    let st = match crate::streams::readable::with_rs_state(scope, stream, |s| s.state.get()) {
+        Some(s) => s,
+        None => return,
+    };
+    match st {
+        StreamState::Readable => {
+            // Pending — nothing to do.
+        }
+        StreamState::Closed => {
+            resolve_closed_promise(scope, reader);
+        }
+        StreamState::Errored => {
+            let stored = slots::read_slot(scope, stream, STORED_ERROR);
+            reject_closed_promise(scope, reader, stored);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Closed-promise helpers
+// ---------------------------------------------------------------------------
+
+/// Resolve the reader's closedPromise with undefined. Idempotent —
+/// subsequent calls are no-ops because the resolver is taken (`.take()`)
+/// after first use.
+pub fn resolve_closed_promise(scope: &mut v8::PinScope, reader: v8::Local<v8::Object>) {
+    let resolver_g = with_state(scope, reader, |s| s.closed_resolver.borrow_mut().take()).flatten();
+    if let Some(resolver_g) = resolver_g {
+        let resolver = v8::Local::new(scope, &resolver_g);
+        let undef = v8::undefined(scope);
+        resolver.resolve(scope, undef.into());
+    }
+}
+
+/// Reject the reader's closedPromise with the given error. Marks the
+/// promise as handled to suppress unhandled-rejection diagnostics
+/// (per spec; the user observes the rejection via the closed getter).
+pub fn reject_closed_promise<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    reader: v8::Local<v8::Object>,
+    error: v8::Local<'s, v8::Value>,
+) {
+    let resolver_g = with_state(scope, reader, |s| s.closed_resolver.borrow_mut().take()).flatten();
+    if let Some(resolver_g) = resolver_g {
+        let resolver = v8::Local::new(scope, &resolver_g);
+        resolver.reject(scope, error);
+        // Mark promise as handled. Spec §3.4.4 step says
+        // "Set reader.[[closedPromise]].[[PromiseIsHandled]] to true".
+        let cp_v = slots::read_slot(scope, reader, CLOSED_PROMISE);
+        if let Ok(cp) = v8::Local::<v8::Promise>::try_from(cp_v) {
+            crate::streams::promise_resolve::set_promise_is_handled_to_true(scope, cp);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IDL methods — closed / read / releaseLock / cancel
+// ---------------------------------------------------------------------------
+
+fn closed_getter_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let this = args.this();
+    if !is_default_reader(scope, this) {
+        // Reject Promise if receiver invalid.
+        let msg = v8::String::new(scope, "closed: receiver not a reader").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        let resolver = v8::PromiseResolver::new(scope).unwrap();
+        let p = resolver.get_promise(scope);
+        resolver.reject(scope, exc);
+        rv.set(p.into());
+        return;
+    }
+    let cp_v = slots::read_slot(scope, this, CLOSED_PROMISE);
+    rv.set(cp_v);
+}
+
+fn read_method_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let this = args.this();
+    if !is_default_reader(scope, this) {
+        let msg = v8::String::new(scope, "read: receiver not a reader").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        let resolver = v8::PromiseResolver::new(scope).unwrap();
+        let p = resolver.get_promise(scope);
+        resolver.reject(scope, exc);
+        rv.set(p.into());
+        return;
+    }
+    // If the reader is detached (`[[stream]]` undefined), reject TypeError.
+    let stream_v = slots::read_slot(scope, this, STREAM);
+    let Ok(stream) = v8::Local::<v8::Object>::try_from(stream_v) else {
+        let msg = v8::String::new(scope, "read: reader has no associated stream").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        let resolver = v8::PromiseResolver::new(scope).unwrap();
+        let p = resolver.get_promise(scope);
+        resolver.reject(scope, exc);
+        rv.set(p.into());
+        return;
+    };
+
+    // Allocate a Promise resolver for the result.
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let promise = resolver.get_promise(scope);
+    let resolver_g = v8::Global::new(scope, resolver);
+
+    let read_request = ReadRequest {
+        kind: ReadRequestKind::Js {
+            resolver: resolver_g,
+        },
+    };
+    readable_stream_default_reader_read(scope, this, stream, read_request);
+    rv.set(promise.into());
+}
+
+/// `ReadableStreamDefaultReaderRead(reader, readRequest)` — §3.9.2.
+///
+/// 1. Set [[disturbed]] on stream to true.
+/// 2. If stream state == "closed": readRequest.closeSteps().
+/// 3. Else if state == "errored": readRequest.errorSteps(storedError).
+/// 4. Else: pull_steps(stream, readRequest).
+pub fn readable_stream_default_reader_read(
+    scope: &mut v8::PinScope,
+    _reader: v8::Local<v8::Object>,
+    stream: v8::Local<v8::Object>,
+    request: ReadRequest,
+) {
+    crate::streams::readable::with_rs_state(scope, stream, |s| s.disturbed.set(true));
+    let st = match crate::streams::readable::with_rs_state(scope, stream, |s| s.state.get()) {
+        Some(s) => s,
+        None => return,
+    };
+    match st {
+        StreamState::Closed => {
+            // closeSteps() — fulfill with {value: undefined, done: true}.
+            fulfill_read_request_close(scope, request);
+        }
+        StreamState::Errored => {
+            let stored = slots::read_slot(scope, stream, STORED_ERROR);
+            fulfill_read_request_error(scope, request, stored);
+        }
+        StreamState::Readable => {
+            crate::streams::readable_default_controller::pull_steps(scope, stream, request);
+        }
+    }
+}
+
+/// Push a read request onto the reader's queue (called from the
+/// controller's PullSteps when the queue is empty).
+pub fn enqueue_read_request(
+    scope: &mut v8::PinScope,
+    stream: v8::Local<v8::Object>,
+    request: ReadRequest,
+) {
+    let reader_v = slots::read_slot(scope, stream, READER);
+    let Ok(reader) = v8::Local::<v8::Object>::try_from(reader_v) else {
+        return;
+    };
+    with_state(scope, reader, |s| s.read_requests.borrow_mut().push_back(request));
+}
+
+/// Fulfill a single read request with `{value: chunk, done: false}`.
+/// Used by `pull_steps` when the queue had a chunk.
+pub fn fulfill_read_request_chunk<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    request: ReadRequest,
+    chunk: v8::Local<'s, v8::Value>,
+) {
+    match request.kind {
+        ReadRequestKind::Js { resolver } => {
+            let resolver_l = v8::Local::new(scope, &resolver);
+            let result = v8::Object::new(scope);
+            let value_key = v8::String::new(scope, "value").unwrap();
+            let done_key = v8::String::new(scope, "done").unwrap();
+            result.set(scope, value_key.into(), chunk);
+            result.set(scope, done_key.into(), v8::Boolean::new(scope, false).into());
+            resolver_l.resolve(scope, result.into());
+        }
+    }
+}
+
+fn fulfill_read_request_close(scope: &mut v8::PinScope, request: ReadRequest) {
+    match request.kind {
+        ReadRequestKind::Js { resolver } => {
+            let resolver_l = v8::Local::new(scope, &resolver);
+            let result = v8::Object::new(scope);
+            let value_key = v8::String::new(scope, "value").unwrap();
+            let done_key = v8::String::new(scope, "done").unwrap();
+            result.set(scope, value_key.into(), v8::undefined(scope).into());
+            result.set(scope, done_key.into(), v8::Boolean::new(scope, true).into());
+            resolver_l.resolve(scope, result.into());
+        }
+    }
+}
+
+fn fulfill_read_request_error<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    request: ReadRequest,
+    error: v8::Local<'s, v8::Value>,
+) {
+    match request.kind {
+        ReadRequestKind::Js { resolver } => {
+            let resolver_l = v8::Local::new(scope, &resolver);
+            resolver_l.reject(scope, error);
+        }
+    }
+}
+
+fn release_lock_method_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let this = args.this();
+    if !is_default_reader(scope, this) {
+        let msg = v8::String::new(scope, "releaseLock: receiver not a reader").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    }
+    readable_stream_default_reader_release(scope, this);
+}
+
+/// `ReadableStreamDefaultReaderRelease(reader)` — §3.9.2.
+///
+/// 1. If reader.[[stream]] is undefined, return.
+/// 2. Run ReadableStreamReaderGenericRelease(reader).
+/// 3. Run ReadableStreamDefaultReaderErrorReadRequests(reader, ...) where
+///    the error is a TypeError("Reader released — read requests rejected").
+pub fn readable_stream_default_reader_release(
+    scope: &mut v8::PinScope,
+    reader: v8::Local<v8::Object>,
+) {
+    let stream_v = slots::read_slot(scope, reader, STREAM);
+    if stream_v.is_undefined() {
+        return;
+    }
+    readable_stream_reader_generic_release(scope, reader);
+    let msg = v8::String::new(scope, "Reader released; outstanding read() requests rejected").unwrap();
+    let exc = v8::Exception::type_error(scope, msg);
+    let exc_l = exc.into();
+    readable_stream_default_reader_error_read_requests(scope, reader, exc_l);
+}
+
+/// `ReadableStreamReaderGenericRelease(reader)` — §3.9.2.
+///
+/// 1. Assert reader.[[stream]] is not undefined.
+/// 2. If state == "readable": reject closedPromise with TypeError.
+///    Else: replace closedPromise with a rejected one.
+///    (Both: PromiseIsHandled = true).
+/// 3. Set stream.[[reader]] = undefined.
+/// 4. Set reader.[[stream]] = undefined.
+pub fn readable_stream_reader_generic_release(
+    scope: &mut v8::PinScope,
+    reader: v8::Local<v8::Object>,
+) {
+    let stream_v = slots::read_slot(scope, reader, STREAM);
+    let Ok(stream) = v8::Local::<v8::Object>::try_from(stream_v) else {
+        return;
+    };
+
+    let st = crate::streams::readable::with_rs_state(scope, stream, |s| s.state.get());
+    let msg = v8::String::new(scope, "Reader was released and can no longer be used to monitor the stream's state").unwrap();
+    let exc = v8::Exception::type_error(scope, msg);
+    match st {
+        Some(StreamState::Readable) => {
+            // Reject the EXISTING closedPromise — its resolver is still
+            // alive in the reader's state.
+            reject_closed_promise(scope, reader, exc);
+        }
+        _ => {
+            // Replace closedPromise with a fresh, already-rejected one.
+            let resolver = v8::PromiseResolver::new(scope).unwrap();
+            resolver.reject(scope, exc);
+            let p = resolver.get_promise(scope);
+            slots::write_slot(scope, reader, CLOSED_PROMISE, p.into());
+            crate::streams::promise_resolve::set_promise_is_handled_to_true(scope, p);
+        }
+    }
+
+    // Detach reader ↔ stream.
+    slots::delete_slot(scope, stream, READER);
+    slots::delete_slot(scope, reader, STREAM);
+}
+
+/// `ReadableStreamDefaultReaderErrorReadRequests(reader, e)` — §3.9.2.
+pub fn readable_stream_default_reader_error_read_requests<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    reader: v8::Local<v8::Object>,
+    error: v8::Local<'s, v8::Value>,
+) {
+    let drained: Vec<ReadRequest> = with_state(scope, reader, |state| {
+        state.read_requests.borrow_mut().drain(..).collect()
+    })
+    .unwrap_or_default();
+    for req in drained {
+        fulfill_read_request_error(scope, req, error);
+    }
+}
+
+fn cancel_method_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s>,
+) {
+    let this = args.this();
+    if !is_default_reader(scope, this) {
+        let msg = v8::String::new(scope, "cancel: receiver not a reader").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        let resolver = v8::PromiseResolver::new(scope).unwrap();
+        let p = resolver.get_promise(scope);
+        resolver.reject(scope, exc);
+        rv.set(p.into());
+        return;
+    }
+    let stream_v = slots::read_slot(scope, this, STREAM);
+    let Ok(stream) = v8::Local::<v8::Object>::try_from(stream_v) else {
+        // Spec §3.3.4.2: reject with TypeError if [[stream]] undefined.
+        let msg = v8::String::new(scope, "cancel: reader has no associated stream").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        let resolver = v8::PromiseResolver::new(scope).unwrap();
+        let p = resolver.get_promise(scope);
+        resolver.reject(scope, exc);
+        rv.set(p.into());
+        return;
+    };
+    let reason = args.get(0);
+    let promise = readable_stream_reader_generic_cancel(scope, this, stream, reason);
+    rv.set(promise.into());
+}
+
+/// `ReadableStreamReaderGenericCancel(reader, reason)` — §3.9.2.
+/// Returns ReadableStreamCancel(reader.[[stream]], reason).
+pub fn readable_stream_reader_generic_cancel<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    _reader: v8::Local<v8::Object>,
+    stream: v8::Local<v8::Object>,
+    reason: v8::Local<'s, v8::Value>,
+) -> v8::Local<'s, v8::Promise> {
+    algorithms::readable_stream_cancel(scope, stream, reason)
+}
+
+// ---------------------------------------------------------------------------
+// Public install
+// ---------------------------------------------------------------------------
+
+pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
+    let tmpl = reader_class_template(scope);
+    let class_fn = tmpl.get_function(scope).unwrap();
+    let key = v8::String::new(scope, "ReadableStreamDefaultReader").unwrap();
+    global.set(scope, key.into(), class_fn.into());
+}

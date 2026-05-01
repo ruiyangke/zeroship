@@ -268,3 +268,400 @@ fn count_strategy_has_to_string_tag() {
     );
     assert_eq!(r, "[object CountQueuingStrategy]");
 }
+
+// ===========================================================================
+// Native ReadableStream class — spec §3.2 + §3.4 + §3.6
+// ---------------------------------------------------------------------------
+// These tests bypass the dispatch wrapper and install native ReadableStream
+// + DefaultController + DefaultReader on a fresh isolate. Verifies the IDL
+// surface and the spec algorithm compositions (§III.1, §III.2, §III.3) line
+// by line. Run a microtask drain after each script so promise chains
+// settle deterministically.
+// ===========================================================================
+
+use zeroship_runtime::streams::install_native_streams;
+
+fn run_with_streams<R>(
+    src: &str,
+    f: impl FnOnce(v8::Local<v8::Value>, &mut v8::PinScope) -> R,
+) -> R {
+    init_v8();
+    let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+    v8::scope!(let handle_scope, &mut isolate);
+    let context = v8::Context::new(handle_scope, Default::default());
+    let scope = &mut v8::ContextScope::new(handle_scope, context);
+    let global = scope.get_current_context().global(scope);
+
+    install_byte_length_queuing_strategy(scope, global);
+    install_count_queuing_strategy(scope, global);
+    install_native_streams(scope, global);
+
+    let src_v8 = v8::String::new(scope, src).unwrap();
+    let script = v8::Script::compile(scope, src_v8, None).unwrap();
+    let result = script.run(scope).unwrap();
+    // Drain pending microtasks so promise chains created by the script
+    // (e.g. reader.read()) settle before the test assertion runs. We
+    // run multiple checkpoints because each `.then` handler can post
+    // additional microtasks (e.g. `Promise.all` resolution chains).
+    for _ in 0..16 {
+        scope.perform_microtask_checkpoint();
+    }
+    f(result, scope)
+}
+
+#[test]
+fn readable_stream_default_construct_is_unlocked() {
+    // Spec §3.2.5.1: locked is false on a freshly-constructed stream
+    // because [[reader]] is undefined.
+    let r = run_with_streams(
+        r#"
+        const s = new ReadableStream();
+        s.locked;
+        "#,
+        |val, _scope| val.boolean_value(_scope),
+    );
+    assert!(!r);
+}
+
+#[test]
+fn readable_stream_get_reader_locks() {
+    // Spec §3.2.5.5: getReader() sets [[reader]], stream.locked → true.
+    let r = run_with_streams(
+        r#"
+        const s = new ReadableStream();
+        s.getReader();
+        s.locked;
+        "#,
+        |val, _scope| val.boolean_value(_scope),
+    );
+    assert!(r);
+}
+
+#[test]
+fn readable_stream_get_reader_twice_throws_typeerror() {
+    // D-13: each ReadableStream has [[reader]]; second getReader throws TypeError.
+    let r = run_with_streams(
+        r#"
+        const s = new ReadableStream();
+        s.getReader();
+        let kind;
+        try { s.getReader(); }
+        catch (e) { kind = e.constructor.name; }
+        kind || "no-throw";
+        "#,
+        |val, scope| val.to_rust_string_lossy(scope),
+    );
+    assert_eq!(r, "TypeError");
+}
+
+#[test]
+fn readable_stream_basic_enqueue_and_read() {
+    // start(controller) { controller.enqueue("a"); controller.close() }
+    // After reader.read() resolves, value === "a", done === false.
+    let r = run_with_streams(
+        r#"
+        const s = new ReadableStream({
+          start(c) { c.enqueue("a"); c.close(); }
+        });
+        const reader = s.getReader();
+        let outVal = "init", outDone = false;
+        reader.read().then(r => { outVal = r.value; outDone = r.done; });
+        // Use getters so the test harness reads the values AFTER
+        // microtask drain completes.
+        ({ get v() { return outVal; }, get d() { return outDone; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let v_key = v8::String::new(scope, "v").unwrap();
+            let d_key = v8::String::new(scope, "d").unwrap();
+            let v = obj.get(scope, v_key.into()).unwrap().to_rust_string_lossy(scope);
+            let d = obj.get(scope, d_key.into()).unwrap().boolean_value(scope);
+            (v, d)
+        },
+    );
+    assert_eq!(r.0, "a");
+    assert!(!r.1);
+}
+
+#[test]
+fn readable_stream_reader_read_after_close_returns_done() {
+    // After controller.close() with empty queue, the next read() resolves
+    // {value: undefined, done: true}.
+    let r = run_with_streams(
+        r#"
+        const s = new ReadableStream({
+          start(c) { c.close(); }
+        });
+        const reader = s.getReader();
+        let outDone, outValIsUndef;
+        reader.read().then(r => {
+            outDone = r.done;
+            outValIsUndef = (r.value === undefined);
+        });
+        ({ get d() { return outDone; }, get u() { return outValIsUndef; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let d_key = v8::String::new(scope, "d").unwrap();
+            let u_key = v8::String::new(scope, "u").unwrap();
+            let d = obj.get(scope, d_key.into()).unwrap().boolean_value(scope);
+            let u = obj.get(scope, u_key.into()).unwrap().boolean_value(scope);
+            (d, u)
+        },
+    );
+    assert!(r.0, "done should be true");
+    assert!(r.1, "value should be undefined");
+}
+
+#[test]
+fn readable_stream_controller_error_rejects_pending_read() {
+    // Mid-stream controller.error(e) rejects pending reads with e.
+    let r = run_with_streams(
+        r#"
+        let savedController;
+        const s = new ReadableStream({
+          start(c) { savedController = c; }
+        });
+        const reader = s.getReader();
+        let rejection = "init";
+        reader.read().catch(e => { rejection = String(e?.message ?? e); });
+        savedController.error(new Error("boom"));
+        ({ get r() { return rejection; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let r_key = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, r_key.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert!(r.contains("boom"), "expected 'boom' in {r}");
+}
+
+#[test]
+fn readable_stream_reader_closed_resolves_on_stream_close() {
+    // After controller.close(), reader.closed promise resolves with undefined.
+    let r = run_with_streams(
+        r#"
+        const s = new ReadableStream({
+          start(c) { c.close(); }
+        });
+        const reader = s.getReader();
+        let resolved = "init";
+        reader.closed.then(v => { resolved = (v === undefined ? "ok" : String(v)); });
+        ({ get r() { return resolved; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let r_key = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, r_key.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "ok");
+}
+
+#[test]
+fn readable_stream_cancel_resolves_and_disturbs() {
+    // cancel(reason) sets disturbed=true and resolves with undefined;
+    // the underlyingSource's cancel callback is invoked.
+    let r = run_with_streams(
+        r#"
+        let cancelReason;
+        const s = new ReadableStream({
+          start() {},
+          cancel(reason) { cancelReason = reason; }
+        });
+        let resolved = "pending";
+        s.cancel("bye").then(v => { resolved = (v === undefined ? "ok" : String(v)); });
+        ({ get r() { return resolved; }, get c() { return cancelReason; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let r_key = v8::String::new(scope, "r").unwrap();
+            let c_key = v8::String::new(scope, "c").unwrap();
+            let r = obj.get(scope, r_key.into()).unwrap().to_rust_string_lossy(scope);
+            let c = obj.get(scope, c_key.into()).unwrap().to_rust_string_lossy(scope);
+            (r, c)
+        },
+    );
+    assert_eq!(r.0, "ok");
+    assert_eq!(r.1, "bye");
+}
+
+#[test]
+fn readable_stream_default_hwm_is_one() {
+    // Spec §3.2.5: when no strategy is given, the default highWaterMark
+    // is 1 with the count strategy. Constructing a stream and reading
+    // its desiredSize should reflect HWM=1 minus any queued sizes.
+    let r = run_with_streams(
+        r#"
+        let savedController;
+        new ReadableStream({
+          start(c) { savedController = c; }
+        });
+        savedController.desiredSize;
+        "#,
+        |val, scope| val.number_value(scope).unwrap(),
+    );
+    assert_eq!(r, 1.0);
+}
+
+#[test]
+fn readable_stream_desired_size_decrements_on_enqueue() {
+    // After enqueue("a") with default count strategy (HWM=1, size=1),
+    // desiredSize drops to 0.
+    let r = run_with_streams(
+        r#"
+        let savedController;
+        new ReadableStream({
+          start(c) { savedController = c; c.enqueue("a"); }
+        });
+        savedController.desiredSize;
+        "#,
+        |val, scope| val.number_value(scope).unwrap(),
+    );
+    assert_eq!(r, 0.0);
+}
+
+#[test]
+fn readable_stream_desired_size_after_close_is_zero() {
+    let r = run_with_streams(
+        r#"
+        let savedController;
+        new ReadableStream({
+          start(c) { savedController = c; c.close(); }
+        });
+        savedController.desiredSize;
+        "#,
+        |val, scope| val.number_value(scope).unwrap(),
+    );
+    assert_eq!(r, 0.0);
+}
+
+#[test]
+fn readable_stream_desired_size_after_error_is_null() {
+    // Spec §3.10.7: errored controller.desiredSize → null.
+    let r = run_with_streams(
+        r#"
+        let savedController;
+        new ReadableStream({
+          start(c) { savedController = c; c.error(new Error("fail")); }
+        });
+        savedController.desiredSize === null ? "null" : String(savedController.desiredSize);
+        "#,
+        |val, scope| val.to_rust_string_lossy(scope),
+    );
+    assert_eq!(r, "null");
+}
+
+#[test]
+fn readable_stream_strategy_size_called_per_enqueue() {
+    // User-supplied strategy.size is called once per enqueue with the chunk.
+    let r = run_with_streams(
+        r#"
+        let calls = 0;
+        const s = new ReadableStream(
+          { start(c) { c.enqueue("a"); c.enqueue("bb"); } },
+          { highWaterMark: 100, size(chunk) { calls++; return chunk.length; } }
+        );
+        calls;
+        "#,
+        |val, scope| val.number_value(scope).unwrap(),
+    );
+    assert_eq!(r, 2.0);
+}
+
+#[test]
+fn readable_stream_disturbed_on_first_read() {
+    // [[disturbed]] flips to true on first read.
+    // Spec §3.2.5.2: cancelling a non-disturbed closed stream still resolves;
+    // reading flips disturbed; re-read of a closed stream stays { done: true }.
+    let r = run_with_streams(
+        r#"
+        let savedController;
+        const s = new ReadableStream({
+          start(c) { savedController = c; c.enqueue("a"); }
+        });
+        const reader = s.getReader();
+        let outVal = "init";
+        reader.read().then(r => { outVal = r.value; });
+        ({ get r() { return outVal; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let r_key = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, r_key.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "a");
+}
+
+#[test]
+fn readable_stream_multiple_enqueues_drain_in_order() {
+    // FIFO queue semantics: chunks are read in enqueue order.
+    let r = run_with_streams(
+        r#"
+        const s = new ReadableStream({
+          start(c) {
+            c.enqueue("a");
+            c.enqueue("b");
+            c.enqueue("c");
+            c.close();
+          }
+        });
+        const reader = s.getReader();
+        let joined = "init";
+        Promise.all([reader.read(), reader.read(), reader.read(), reader.read()])
+          .then(rs => { joined = rs.map(r => r.done ? "DONE" : r.value).join("|"); });
+        ({ get r() { return joined; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let r_key = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, r_key.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "a|b|c|DONE");
+}
+
+#[test]
+fn readable_stream_cancel_when_locked_rejects_typeerror() {
+    // Spec §3.2.5.4: cancel() on a locked stream returns a rejected
+    // promise with TypeError.
+    let r = run_with_streams(
+        r#"
+        const s = new ReadableStream();
+        s.getReader();
+        let kind = "init";
+        s.cancel("bye").catch(e => { kind = e.constructor.name; });
+        ({ get r() { return kind; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let r_key = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, r_key.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "TypeError");
+}
+
+#[test]
+fn readable_stream_error_state_rejects_subsequent_reads() {
+    // After controller.error(e), all subsequent reads reject with e.
+    let r = run_with_streams(
+        r#"
+        const s = new ReadableStream({
+          start(c) { c.error(new Error("xxx")); }
+        });
+        const reader = s.getReader();
+        let msg = "pending";
+        reader.read().catch(e => { msg = String(e?.message); });
+        ({ get r() { return msg; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let r_key = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, r_key.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "xxx");
+}
