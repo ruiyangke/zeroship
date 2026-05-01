@@ -102,7 +102,7 @@ export function NewProject() {
 
   return (
     <PageFrame
-      crumb={[{ label: "studio", to: "/" }, { label: "templates", to: "/templates" }, { label: "begin" }]}
+      crumb={[{ label: "studio", to: "/home" }, { label: "templates", to: "/templates" }, { label: "begin" }]}
       maxWidth={960}
       showMarginalia={false}
     >

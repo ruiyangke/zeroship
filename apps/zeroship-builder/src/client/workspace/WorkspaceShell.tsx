@@ -83,7 +83,7 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
             We couldn't load that project. It may have been deleted or you don't have access.
           </p>
           <Link
-            to="/"
+            to="/home"
             data-testid="workspace-error-home"
             className="font-serif italic text-tomato hover:opacity-80"
           >

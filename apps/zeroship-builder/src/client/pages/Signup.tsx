@@ -136,8 +136,10 @@ function Field({
 }
 
 function sanitizeReturn(raw: string | null): string {
-  if (!raw) return "/";
-  if (raw.startsWith("//") || raw.includes("://") || !raw.startsWith("/")) return "/";
+  // Post-signup default lands in the authed gallery at /home — `/` is
+  // the public marketing page (per spec §5.1).
+  if (!raw) return "/home";
+  if (raw.startsWith("//") || raw.includes("://") || !raw.startsWith("/")) return "/home";
   return raw;
 }
 

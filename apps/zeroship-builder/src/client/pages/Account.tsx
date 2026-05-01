@@ -29,7 +29,7 @@ export function Account({ onLogout }: { onLogout?: () => void }) {
 
   return (
     <PageFrame
-      crumb={[{ label: "studio", to: "/" }, { label: "account" }]}
+      crumb={[{ label: "studio", to: "/home" }, { label: "account" }]}
       maxWidth={760}
       showMarginalia={false}
     >

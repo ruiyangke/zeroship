@@ -42,7 +42,10 @@ export function TopBar({ projectName, center, right, admin, crumb }: TopBarProps
             ADMIN
           </Link>
         ) : (
-          <Link to="/" className="font-serif italic text-[18px] font-medium text-ink hover:opacity-80" data-testid="topbar-logo">
+          // Authed wordmark routes to /home (the gallery). The public
+          // marketing page lives at `/` and is shown to unauthed
+          // visitors only.
+          <Link to="/home" className="font-serif italic text-[18px] font-medium text-ink hover:opacity-80" data-testid="topbar-logo">
             zeroship<span className="text-tomato">.</span>
           </Link>
         )}
