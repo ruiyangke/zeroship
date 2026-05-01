@@ -762,6 +762,17 @@ impl Drop for CreateGuard {
     }
 }
 
+/// Map fractional `SandboxConfig.cpus` (e.g. 2.0, 1.5) to the
+/// integer `boot=N` count Cloud Hypervisor needs at command-line.
+/// Round up — cfg.cpus is the *target* allocation; never starve the
+/// VM by rounding down a 1.5 to 1. Floor at 1 so a misconfigured
+/// cpus=0 still produces a bootable VM (the validate at config load
+/// rejects cpus≤0, but defense-in-depth).
+fn cpus_boot(cpus: f32) -> u32 {
+    let n = cpus.ceil() as i64;
+    if n < 1 { 1 } else { n as u32 }
+}
+
 // ─── Nomad job spec construction ────────────────────────────────
 
 /// Build the JSON body for `POST /v1/jobs`. Returns the `{"Job": ...}`
@@ -826,6 +837,14 @@ pub(crate) fn build_nomad_job_json(
                         "ZSBX_KEYS_DIR": keys_dir.display().to_string(),
                         "ZSBX_WORKSPACE_DIR": workspace_dir.display().to_string(),
                         "ZSBX_USER_HOME_DIR": user_home_dir.display().to_string(),
+                        // Memory / CPU. The wrapper substitutes these
+                        // into CH's `--memory size=${N}M,shared=on` and
+                        // `--cpus boot=${N}` flags. Without these the
+                        // wrapper would have no way to honour
+                        // SandboxConfig.{memory_mb,cpus} — the Resources
+                        // block is advisory-only on raw_exec.
+                        "ZSBX_VM_MEMORY_MB": cfg.memory_mb.to_string(),
+                        "ZSBX_VM_CPUS_BOOT": cpus_boot(cfg.cpus).to_string(),
                     },
                     "Resources": {
                         // CPU is in MHz units in the Nomad API.
@@ -1309,6 +1328,16 @@ mod tests {
     }
 
     #[test]
+    fn cpus_boot_rounds_up_and_floors_at_1() {
+        assert_eq!(cpus_boot(2.0), 2);
+        assert_eq!(cpus_boot(1.5), 2);
+        assert_eq!(cpus_boot(0.1), 1);
+        assert_eq!(cpus_boot(0.0), 1);
+        assert_eq!(cpus_boot(-1.0), 1);
+        assert_eq!(cpus_boot(8.0), 8);
+    }
+
+    #[test]
     fn nomad_job_json_basic_shape() {
         let cfg = make_cfg();
         let v = build_nomad_job_json(
@@ -1357,6 +1386,12 @@ mod tests {
             task["Env"]["ZSBX_USER_HOME_DIR"],
             "/var/zeroship/ch/users/alice/home"
         );
+        // The wrapper reads memory + cpu count from these two env vars.
+        // Resources.{CPU,MemoryMB} are advisory-only on raw_exec; the
+        // wrapper would otherwise hardcode 1024M/2vCPU and lie to
+        // bin-packing.
+        assert_eq!(task["Env"]["ZSBX_VM_MEMORY_MB"], "1024");
+        assert_eq!(task["Env"]["ZSBX_VM_CPUS_BOOT"], "2");
         // 2.0 vCPU advisory → 4000 MHz.
         assert_eq!(task["Resources"]["CPU"], 4000);
         assert_eq!(task["Resources"]["MemoryMB"], 1024);

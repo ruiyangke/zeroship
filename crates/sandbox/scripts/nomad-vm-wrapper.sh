@@ -19,6 +19,8 @@
 #   ZSBX_KEYS_DIR        host dir holding controller-pubkey  (virtiofs tag=keys)
 #   ZSBX_WORKSPACE_DIR   host dir for the project workspace  (virtiofs tag=workspace)
 #   ZSBX_USER_HOME_DIR   host dir for the per-user $HOME      (virtiofs tag=userhome)
+#   ZSBX_VM_MEMORY_MB    integer MiB → CH `--memory size=${N}M,shared=on`
+#   ZSBX_VM_CPUS_BOOT    integer vCPU count → CH `--cpus boot=${N}`
 #
 # The host operator is responsible for pre-provisioning:
 #   - tap device `zsbx-nm-$IDX` in the /30 subnet 10.99.$((100+IDX)).0/30
@@ -40,6 +42,8 @@ set -euo pipefail
 : "${ZSBX_KEYS_DIR:?missing ZSBX_KEYS_DIR}"
 : "${ZSBX_WORKSPACE_DIR:?missing ZSBX_WORKSPACE_DIR}"
 : "${ZSBX_USER_HOME_DIR:?missing ZSBX_USER_HOME_DIR}"
+: "${ZSBX_VM_MEMORY_MB:?missing ZSBX_VM_MEMORY_MB}"
+: "${ZSBX_VM_CPUS_BOOT:?missing ZSBX_VM_CPUS_BOOT}"
 
 cd "$ZSBX_HERE"
 
@@ -122,8 +126,8 @@ cloud-hypervisor \
   --disk      path="$DISK",readonly=off,direct=off,image_type=raw \
   --net       tap="$TAP",mac="$MAC" \
   --fs        tag=keys,socket="$VFS_KEYS_SOCK" tag=workspace,socket="$VFS_WS_SOCK" tag=userhome,socket="$VFS_HOME_SOCK" \
-  --memory    size=1024M,shared=on \
-  --cpus      boot=2 \
+  --memory    size=${ZSBX_VM_MEMORY_MB}M,shared=on \
+  --cpus      boot=${ZSBX_VM_CPUS_BOOT} \
   --console   off \
   --serial    file="$ZSBX_RUNTIME/serial.log" \
   > "$ZSBX_RUNTIME/ch.log" 2>&1 &
