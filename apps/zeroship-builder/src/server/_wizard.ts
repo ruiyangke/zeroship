@@ -359,7 +359,14 @@ export async function buildWizardStream(
         // forward intermediate events to the client (the nodes
         // already write data-* chunks via the writer); we just need
         // to await completion or the GraphInterrupt halt.
-        const events = graph.streamEvents(graphInput, {
+        // streamEvents accepts `UpdateType | CommandInstance | null`, but
+        // the Command<unknown, Record<string, unknown>, string> from
+        // `new Command({resume})` doesn't unify with the strongly-typed
+        // CommandInstance<...> that's narrowed to this graph's state
+        // channels — TS can't see that resume-mode Command doesn't update
+        // any channels. Cast through `any`, same escape hatch used in
+        // _translator.ts. Wire shape is verified at runtime via smoke.
+        const events = graph.streamEvents(graphInput as any, {
           version: "v2" as const,
           configurable: { thread_id: threadId },
           signal,

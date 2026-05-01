@@ -12,10 +12,29 @@ import { client, type ProcedureType } from "@zeroship/rpc-client";
 import { DefaultChatTransport } from "ai";
 import type { UIMessage } from "ai";
 
+// Compatibility shim for the orphan tree (auth pages, admin, old
+// project workspace). Vite resolves bare `from "../api"` to api.ts
+// rather than api/index.ts, so the old api/index.ts is dead code.
+// TopBar / AuthContext / Account / Login / Signup still reference
+// `isDevAutoAuth` via that import path; export the same shim here
+// so the module chain loads. Plan 03 cleans up the orphan tree.
+export function isDevAutoAuth(): boolean {
+  return import.meta.env.DEV;
+}
+
 // One procedure to start with — Plan 02 may add more (file CRUD, deploy,
 // etc.) and they go here as additional fields on `App`.
 type App = {
   chat: ProcedureType<"stream", { messages: UIMessage[] }, never>;
+  // Wizard: project-creation flow runtime, plain LangGraph (see
+  // §4.8.2b). Same wire envelope as chat, but the input is `{idea, id}`
+  // on a fresh turn (no message history — the wizard's checkpointer
+  // owns state) and `{resume, id}` on a SurveyCard submit.
+  wizard: ProcedureType<
+    "stream",
+    { idea?: string; id?: string; resume?: { token: string; value: unknown }; messages?: UIMessage[] },
+    never
+  >;
 };
 
 export const rpc = client<App>({ baseUrl: "" });
@@ -59,6 +78,51 @@ export function chatTransport<TIn>(handle: {
         return { body: { json: { resume, id } } };
       }
       return { body: { json: { messages, id } } };
+    },
+  });
+}
+
+/**
+ * AI SDK transport bound to the wizard streaming procedure. Same
+ * envelope as chatTransport, different input shape on a fresh turn:
+ * the wizard server expects `{ idea, id }` (no `messages`), so we
+ * extract the user's typed text from the first message rather than
+ * shipping the full UIMessage[] history.
+ *
+ *   Fresh:   `sendMessage({ text })`           → wire `{ idea, id }`
+ *   Resume:  `sendMessage(_, { body:{resume}})` → wire `{ resume, id }`
+ *
+ * The wizard's checkpointer (keyed by `id`) owns conversation state;
+ * messages don't need to round-trip on subsequent fresh turns. In
+ * practice "subsequent fresh turns" don't happen anyway — once the
+ * wizard halts on a survey, every continuation is a resume until the
+ * terminal data-brief arrives and the surface ends.
+ */
+export function wizardTransport<TIn>(handle: {
+  streamUrl: (input?: TIn) => string | Promise<string>;
+}) {
+  return new DefaultChatTransport({
+    api: handle.streamUrl() as string,
+    prepareSendMessagesRequest: ({ messages, id, body }) => {
+      const resume = (body as { resume?: { token: string; value: unknown } } | undefined)?.resume;
+      if (resume) {
+        return { body: { json: { resume, id } } };
+      }
+      // Extract the idea from the latest user message (typically the
+      // only user message — the wizard surface composer disables after
+      // the first send). Defensive: empty / missing falls through as
+      // empty string and the wizard's "decide" node will produce a
+      // generic survey or finalize.
+      const lastUser = [...(messages ?? [])]
+        .reverse()
+        .find((m) => m.role === "user");
+      const idea = lastUser
+        ? (lastUser.parts as Array<{ type: string; text?: string }>)
+            .filter((p) => p.type === "text")
+            .map((p) => p.text ?? "")
+            .join("")
+        : "";
+      return { body: { json: { idea, id } } };
     },
   });
 }

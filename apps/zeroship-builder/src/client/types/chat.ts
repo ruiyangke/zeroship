@@ -90,9 +90,28 @@ export const criticRoundSchema = z.object({
 });
 export type CriticRound = z.infer<typeof criticRoundSchema>;
 
+// --- Wizard brief (terminal chunk from the wizard runtime) ---
+
+// Mirrors the server-side `WizardBrief` in
+// apps/zeroship-builder/src/server/_wizard.ts. Wizard-only — Builder
+// doesn't emit data-brief; it consumes one as starting context for
+// its first turn.
+export const briefSchema = z.object({
+  idea: z.string(),
+  summary: z.string(),
+  answers: z.array(
+    z.object({
+      question: z.string(),
+      answer: z.unknown(),
+    }),
+  ),
+});
+export type Brief = z.infer<typeof briefSchema>;
+
 // --- Custom data part union (what the translator emits) ---
 
 export type CustomDataPart =
   | { kind: "survey";        payload: Survey }
   | { kind: "diff";          payload: Diff }
-  | { kind: "critic-round";  payload: CriticRound };
+  | { kind: "critic-round";  payload: CriticRound }
+  | { kind: "brief";         payload: Brief };

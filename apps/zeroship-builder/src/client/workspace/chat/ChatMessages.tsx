@@ -24,7 +24,8 @@ import { MessageAssistant } from "./MessageAssistant";
 import { Receipt } from "./Receipt";
 import { DiffCard } from "./DiffCard";
 import { SurveyCard } from "./SurveyCard";
-import type { Diff, Survey, SurveyResponse } from "../../types/chat";
+import { BriefCard } from "./BriefCard";
+import type { Brief, Diff, Survey, SurveyResponse } from "../../types/chat";
 
 export interface ChatMessagesProps {
   messages: UIMessage[];
@@ -39,9 +40,29 @@ export interface ChatMessagesProps {
   // id), so multiple surveys in the same conversation each manage
   // their own state.
   answeredSurveys?: ReadonlySet<string>;
+  // Wizard-only: called when the user clicks Begin on a BriefCard
+  // rendered from a `data-brief` part. WizardPage wires this to
+  // project creation + navigation. Builder surfaces never receive a
+  // data-brief chunk (it's a wizard-runtime-only output) so omitting
+  // this prop in ChatRail is fine.
+  onBeginBrief?: (brief: Brief) => void;
+  /** True once a Begin has been clicked. Renders all BriefCards in
+   *  committed state so a user who scrolls back doesn't think the
+   *  action is still pending. */
+  briefCommitted?: boolean;
+  /** Loading flag for the createApp mutation triggered by Begin. */
+  briefBusy?: boolean;
 }
 
-export function ChatMessages({ messages, busy, onSubmitSurvey, answeredSurveys }: ChatMessagesProps) {
+export function ChatMessages({
+  messages,
+  busy,
+  onSubmitSurvey,
+  answeredSurveys,
+  onBeginBrief,
+  briefCommitted,
+  briefBusy,
+}: ChatMessagesProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
 
@@ -85,6 +106,9 @@ export function ChatMessages({ messages, busy, onSubmitSurvey, answeredSurveys }
         const renderedParts = renderAssistantParts(m, {
           onSubmitSurvey,
           answeredSurveys,
+          onBeginBrief,
+          briefCommitted,
+          briefBusy,
         });
         return (
           <MessageAssistant
@@ -107,6 +131,9 @@ function renderAssistantParts(
   ctx: {
     onSubmitSurvey?: (token: string, response: SurveyResponse) => void;
     answeredSurveys?: ReadonlySet<string>;
+    onBeginBrief?: (brief: Brief) => void;
+    briefCommitted?: boolean;
+    briefBusy?: boolean;
   },
 ): ReactNode {
   const out: ReactNode[] = [];
@@ -198,6 +225,26 @@ function renderAssistantParts(
                 skipped: true,
               });
             }}
+          />,
+        );
+      }
+      continue;
+    }
+
+    if (type === "data-brief") {
+      // Wizard-only terminal chunk. Defensive: only render if onBeginBrief
+      // is wired — Builder surfaces (which never see data-brief) shouldn't
+      // accidentally render an action button with no handler. Brief shape
+      // mirrors the server's WizardBrief.
+      const brief = (part as { data?: Brief }).data;
+      if (brief && typeof brief.summary === "string" && ctx.onBeginBrief) {
+        out.push(
+          <BriefCard
+            key={`brief-${out.length}`}
+            brief={brief}
+            onBegin={() => ctx.onBeginBrief!(brief)}
+            busy={ctx.briefBusy}
+            committed={ctx.briefCommitted}
           />,
         );
       }
