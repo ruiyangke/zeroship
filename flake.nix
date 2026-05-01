@@ -29,6 +29,11 @@
             # Profiling
             linuxPackages.perf
             cargo-flamegraph
+            # Playwright — `playwright` CLI for e2e tests without
+            # polluting node_modules. Browsers come from
+            # PLAYWRIGHT_BROWSERS_PATH below; the version of the CLI
+            # must match the bundled chromium build (currently 1208).
+            playwright-test
           ];
 
           RUST_BACKTRACE = "1";
