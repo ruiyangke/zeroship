@@ -697,6 +697,12 @@ pub fn load_polyfills_and_modules(
     // construction.
     install_headers(scope);
 
+    // Native DOM (EventTarget / Event / AbortController / AbortSignal)
+    // gated on `ZEROSHIP_NATIVE_FETCH=1` (D-23 landing-1). MUST run
+    // AFTER fetch.js or the polyfill's unconditional re-assignment of
+    // AbortController/AbortSignal would clobber the native install.
+    install_dom(scope);
+
     // Wrap the user's module graph in the bootstrap entry.
     //
     // Layout after wrapping:
@@ -1707,20 +1713,6 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
     // `load_polyfills_and_modules` immediately after fetch.js runs.
     // The class itself lives in `crate::headers`; it replaces the JS
     // polyfill that used to ship in `embed/fetch.js`. WPT pass: 98/0/1.
-
-    // Native DOM primitives (EventTarget / Event / AbortController /
-    // AbortSignal) — gated by `ZEROSHIP_NATIVE_FETCH=1` per design
-    // landing-1 cadence (D-23). When set, the JS fetch.js polyfill's
-    // matching definitions are shadowed by the native classes; when
-    // unset, the polyfill remains in charge. The polyfill self-checks
-    // `globalThis.AbortController` and re-uses ours when present.
-    //
-    // We install BEFORE fetch.js runs so the polyfill's
-    // `if (!DOMException) { … }` and equivalent guards see the native
-    // classes already on globalThis.
-    if std::env::var_os("ZEROSHIP_NATIVE_FETCH").is_some() {
-        crate::dom::install_globals(scope, global);
-    }
 }
 
 /// Install native `Headers` on `globalThis`. Called from
@@ -1735,6 +1727,25 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
 pub fn install_headers(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
     crate::headers::install_global(scope, global);
+}
+
+/// Install native DOM primitives (EventTarget, Event, AbortController,
+/// AbortSignal) on `globalThis`. Gated by `ZEROSHIP_NATIVE_FETCH=1`
+/// per design landing-1 cadence (D-23). When the env var is set, the
+/// native classes shadow whatever fetch.js's polyfill installed
+/// earlier; when unset, this is a no-op and the polyfill remains in
+/// charge.
+///
+/// Called AFTER fetch.js runs so the polyfill's unconditional
+/// `globalThis.AbortController = AbortController` doesn't overwrite
+/// our native install. (The polyfill does no `if (!exists)` guard
+/// for these classes.) See `embed/fetch.js:644-649`.
+pub fn install_dom(scope: &mut v8::PinScope) {
+    if std::env::var_os("ZEROSHIP_NATIVE_FETCH").is_none() {
+        return;
+    }
+    let global = scope.get_current_context().global(scope);
+    crate::dom::install_globals(scope, global);
 }
 
 // ===========================================================================
