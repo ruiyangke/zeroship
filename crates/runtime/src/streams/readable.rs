@@ -266,14 +266,53 @@ fn constructor_callback(
     let underlying_source = args.get(0);
     let strategy = args.get(1);
 
-    // Reject byte streams in this dispatch.
+    // Per spec §3.2.1 step 1: if underlyingSource is null → TypeError.
+    // (undefined is allowed; null is not — caught by WebIDL's `object`
+    // type which doesn't accept null.)
+    if underlying_source.is_null() {
+        let msg = v8::String::new(scope, "ReadableStream: underlyingSource may not be null").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    }
+
+    // Per WebIDL — strategy + underlyingSource are converted in interleaved
+    // order: strategy is converted at the IDL layer (so its `size`/`highWaterMark`
+    // getters fire FIRST), then underlyingSource is converted in prose
+    // (start/pull/cancel/type accessors fire after). This means a throwing
+    // strategy.size getter wins over a throwing underlyingSource.start
+    // getter — see WPT constructor.any.js "underlyingSource argument should
+    // be converted after queuingStrategy argument".
+    //
+    // We probe strategy access first (parse_strategy reads highWaterMark
+    // and size), then underlyingSource. If either throws, the exception
+    // propagates via tc_scope set on call.
+
+    // Parse strategy first (per spec). On error, propagate.
+    let (hwm, size_algo) = match crate::streams::readable::parse_strategy_local(scope, strategy, 1.0) {
+        Ok(v) => v,
+        Err(()) => {
+            // parse_strategy already pushed an exception via the V8 try-catch
+            // mechanism (the getter throw propagates through `obj.get`).
+            return;
+        }
+    };
+
+    // Reject byte streams in this dispatch. Reading `type` on a non-null
+    // underlyingSource is also part of the spec's prose conversion.
     if let Ok(us) = v8::Local::<v8::Object>::try_from(underlying_source) {
         let type_key = v8::String::new(scope, "type").unwrap();
-        let type_v = us
-            .get(scope, type_key.into())
-            .unwrap_or_else(|| v8::undefined(scope).into());
+        // Get may throw via accessor — propagate.
+        let type_v = match us.get(scope, type_key.into()) {
+            Some(v) => v,
+            None => return,
+        };
         if !type_v.is_undefined() {
-            let s = type_v.to_rust_string_lossy(scope);
+            // Per spec: ToString(type) — null/'' coerce. Then compare to
+            // "bytes". Anything else → TypeError (not RangeError).
+            let s_opt = type_v.to_string(scope);
+            let Some(s_v) = s_opt else { return };
+            let s = s_v.to_rust_string_lossy(scope);
             if s == "bytes" {
                 let msg = v8::String::new(
                     scope,
@@ -285,7 +324,7 @@ fn constructor_callback(
                 return;
             }
             let msg = v8::String::new(scope, "ReadableStream: invalid underlyingSource.type").unwrap();
-            let exc = v8::Exception::range_error(scope, msg);
+            let exc = v8::Exception::type_error(scope, msg);
             scope.throw_exception(exc);
             return;
         }
@@ -319,11 +358,12 @@ fn constructor_callback(
     // Wire the controller (default-only in this dispatch). Errors are
     // surfaced as TypeError per spec; the boxed RSState is retained so the
     // weak finalizer can drop it on GC even if construction throws here.
-    if let Err(msg) = ctlr::set_up_readable_stream_default_controller_from_underlying_source(
+    if let Err(msg) = ctlr::set_up_readable_stream_default_controller_from_underlying_source_with_strategy(
         scope,
         stream_obj,
         underlying_source,
-        strategy,
+        hwm,
+        size_algo,
     ) {
         let v8_msg = v8::String::new(scope, &msg).unwrap();
         let exc = v8::Exception::type_error(scope, v8_msg);
@@ -538,6 +578,78 @@ pub fn parse_strategy(
         ctlr::SizeAlgorithm::Js(v8::Global::new(scope, fn_l))
     };
 
+    Ok((hwm, size))
+}
+
+/// Same as `parse_strategy` but on error pushes an exception via
+/// `scope.throw_exception` and returns `Err(())` so the V8 callback can
+/// `return` immediately. Used by the constructor where a throwing
+/// strategy getter must propagate as the construction failure (per WPT
+/// `constructor.any.js` "underlyingSource argument should be converted
+/// after queuingStrategy argument"). Reads `size` BEFORE `highWaterMark`
+/// to match the reference implementation's getter ordering.
+pub(crate) fn parse_strategy_local(
+    scope: &mut v8::PinScope,
+    strategy: v8::Local<v8::Value>,
+    default_hwm: f64,
+) -> Result<(f64, ctlr::SizeAlgorithm), ()> {
+    if strategy.is_undefined() {
+        return Ok((default_hwm, ctlr::SizeAlgorithm::DefaultCount));
+    }
+    let Ok(obj) = v8::Local::<v8::Object>::try_from(strategy) else {
+        let msg = v8::String::new(scope, "ReadableStream: strategy must be an object").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return Err(());
+    };
+    // Per WPT constructor.any.js: queuingStrategy is converted at the
+    // IDL layer before underlyingSource. Within the strategy dict, the
+    // ref impl reads `size` BEFORE `highWaterMark`, so a throwing
+    // size-getter wins over a throwing hwm-getter (and over a throwing
+    // underlyingSource start-getter).
+    let size_key = v8::String::new(scope, "size").unwrap();
+    let size_v = match obj.get(scope, size_key.into()) {
+        Some(v) => v,
+        None => return Err(()),
+    };
+    let hwm_key = v8::String::new(scope, "highWaterMark").unwrap();
+    let hwm_v = match obj.get(scope, hwm_key.into()) {
+        Some(v) => v,
+        None => return Err(()),
+    };
+
+    let hwm = if hwm_v.is_undefined() {
+        default_hwm
+    } else {
+        let Some(n) = hwm_v.number_value(scope) else {
+            return Err(());
+        };
+        if n.is_nan() {
+            let msg = v8::String::new(scope, "highWaterMark must not be NaN").unwrap();
+            let exc = v8::Exception::range_error(scope, msg);
+            scope.throw_exception(exc);
+            return Err(());
+        }
+        if n < 0.0 {
+            let msg = v8::String::new(scope, "highWaterMark must be non-negative").unwrap();
+            let exc = v8::Exception::range_error(scope, msg);
+            scope.throw_exception(exc);
+            return Err(());
+        }
+        n
+    };
+
+    let size = if size_v.is_undefined() {
+        ctlr::SizeAlgorithm::DefaultCount
+    } else {
+        let Ok(fn_l) = v8::Local::<v8::Function>::try_from(size_v) else {
+            let msg = v8::String::new(scope, "strategy.size must be a function").unwrap();
+            let exc = v8::Exception::type_error(scope, msg);
+            scope.throw_exception(exc);
+            return Err(());
+        };
+        ctlr::SizeAlgorithm::Js(v8::Global::new(scope, fn_l))
+    };
     Ok((hwm, size))
 }
 

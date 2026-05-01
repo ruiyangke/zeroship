@@ -1049,6 +1049,26 @@ pub fn set_up_readable_stream_default_controller_from_underlying_source(
 ) -> Result<(), String> {
     let (hwm, size_algo) = crate::streams::readable::parse_strategy(scope, strategy, 1.0)
         .map_err(|e| e.message)?;
+    set_up_readable_stream_default_controller_from_underlying_source_with_strategy(
+        scope,
+        stream,
+        underlying_source,
+        hwm,
+        size_algo,
+    )
+}
+
+/// Same as above but takes already-parsed `hwm` and `size_algo`. Used
+/// by the constructor where the spec mandates strategy be converted
+/// BEFORE underlyingSource (so a throwing strategy.size getter wins
+/// over a throwing underlyingSource.start getter).
+pub fn set_up_readable_stream_default_controller_from_underlying_source_with_strategy(
+    scope: &mut v8::PinScope,
+    stream: v8::Local<v8::Object>,
+    underlying_source: v8::Local<v8::Value>,
+    hwm: f64,
+    size_algo: SizeAlgorithm,
+) -> Result<(), String> {
 
     // Pull out start / pull / cancel callbacks.
     let mut start_alg = AlgorithmFn::Noop;
