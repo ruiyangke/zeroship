@@ -67,23 +67,6 @@ export function isServerModulePath(root: string, filePath: string): boolean {
   return false;
 }
 
-/**
- * Compute the URL-path method name for an export.
- *
- * Method names are rooted at the project root with the extension stripped:
- *   /abs/project/src/api/users.ts  →  "src/api/users"
- *
- * Per-export method is `<relPathNoExt>/<exportName>`. Paths keep forward
- * slashes so the wire (`POST /_rpc/src/api/users/getUser`) matches the
- * registry key `src/api/users/getUser` on both ends. No collisions
- * because file path is part of the key.
- */
-function moduleBaseName(root: string, id: string): string {
-  const rel = relative(root, id).replace(/\\/g, "/");
-  const ext = extname(rel);
-  return ext ? rel.slice(0, -ext.length) : rel;
-}
-
 /** Shared runtime: emitted once per client bundle. Speaks the spec wire
  *  (`/_zs/v1/<id>` with superjson `{ json, meta? }` envelope, AI-SDK Data
  *  Stream Protocol for streams). No npm deps; superjson revival is left
@@ -329,14 +312,21 @@ function collectConfig(astBody: any[]): {
   return { perFn, moduleConfig };
 }
 
-/** Client stub for a non-streaming export */
+/** Client stub for a non-streaming export.
+ *
+ * Single-input wire (per spec §RPC): the user's procedure takes one
+ * value, so the stub forwards `args[0]` (or `undefined` when called
+ * with no args). Procedures that conceptually take multiple values
+ * pass them as a single object.
+ */
 function clientUnaryStub(name: string, methodName: string): string {
-  return `export const ${name} = (...args) => __rpcUnary(${JSON.stringify(methodName)}, args);`;
+  return `export const ${name} = (input) => __rpcUnary(${JSON.stringify(methodName)}, input);`;
 }
 
-/** Client stub for a streaming (async generator) export */
+/** Client stub for a streaming (async generator) export. Same single-
+ *  input wire as unary. */
 function clientStreamStub(name: string, methodName: string): string {
-  return `export const ${name} = (...args) => __rpcStream(${JSON.stringify(methodName)}, args);`;
+  return `export const ${name} = (input) => __rpcStream(${JSON.stringify(methodName)}, input);`;
 }
 
 export function transformPlugin(_rpcEndpoint: string, state: TransformState): Plugin {
@@ -430,7 +420,6 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
         if (serverFns.length === 0) return null;
 
         const names = serverFns.map((f) => f.name);
-        const modPath = moduleBaseName(root, id);
 
         // 6. Track for build report + export signature tracking
         serverFunctionMap.set(relative(root, id), new Set(names));
@@ -539,9 +528,24 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
             `  } catch (_) { /* @zeroship/server not installed — SSR hooks unavailable. RPC dispatch still works. */ }\n` +
             `}\n`
           );
+          // Emit __register calls so the dev-bootstrap can build its
+          // dispatch table. dev-bootstrap.js is loaded by the Rust runtime
+          // in `pnpm vite` mode; its `default.rpc` looks the procedure up
+          // in a `globalThis.__register`-populated Map. Without these
+          // calls, /_zs/v1/<id> returns 404 in dev. No-ops in production
+          // (the synthetic SSR entry does static dispatch).
+          const registerCalls = serverFns
+            .map((fn) => {
+              const wid = wireIdFor(fn);
+              return `if (typeof globalThis.__register === "function") globalThis.__register(${JSON.stringify(wid)}, ${fn.name});`;
+            })
+            .join("\n");
+
           s.append(
             `\n\n// zeroship: SSR hooks\n` +
-            `${ssrPatches}\n`
+            `${ssrPatches}\n` +
+            `\n// zeroship: dev-bootstrap registry (harmless no-op outside dev)\n` +
+            `${registerCalls}\n`
           );
           return {
             code: s.toString(),

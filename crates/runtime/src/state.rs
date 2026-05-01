@@ -494,7 +494,15 @@ impl RuntimeState {
     /// from the control plane; the producer should already have
     /// validated.
     pub fn set_env_snapshot(&mut self, env: &crate::EnvSnapshot) {
-        self.env_json = env.as_json().to_string();
+        let new_json = env.as_json();
+        // The env JSON is per-app, not per-request. Same string → skip
+        // the JSON allocation + serde_json::from_str. The bench loop
+        // hits this path on every request; for typical apps env stays
+        // stable for the isolate's lifetime.
+        if self.env_json == new_json {
+            return;
+        }
+        self.env_json = new_json.to_string();
         let (vars, secrets, expose) = parse_env_snapshot(&self.env_json);
         self.env_app_vars = vars;
         self.env_app_secrets = secrets;
@@ -633,12 +641,18 @@ pub enum DispatchResult {
     HttpResponse(crate::http::ResponseInfo),
     /// Handler threw. All fields come from the JS exception. `status` is
     /// 500 by default, overridable by setting `err.status` to an integer
-    /// in 400-599.
+    /// in 400-599. `code`, `details_json`, `retryable` are zeroship's
+    /// structured-error extension — carried only when the thrown value
+    /// has them with the right type (string `code`, any-JSON `details`,
+    /// boolean `retryable`); otherwise they're omitted from the wire.
     ErrorValue {
         message: String,
         name: String,
         stack: Option<String>,
         status: u16,
+        code: Option<String>,
+        details_json: Option<String>,
+        retryable: Option<bool>,
     },
     /// Hard dispatch-layer error (Response inspection failed, Request
     /// object construction failed). Not a user-thrown value — no stack/name.

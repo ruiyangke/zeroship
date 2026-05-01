@@ -112,7 +112,10 @@ describe("synthetic-entry _zsRpc — output validation gating", () => {
     ]);
     try {
       await withNodeEnv("development", async () => {
-        await assert.rejects(rpc("f", null), (err: unknown) => {
+        // `async () =>` form — _zsRpc is sync, so output validation throws
+        // synchronously when the handler is sync. (For async handlers,
+        // the throw happens inside .then and rejects.)
+        await assert.rejects(async () => rpc("f", null), (err: unknown) => {
           const e = err as { status?: number; code?: string };
           assert.equal(e.status, 500);
           assert.equal(e.code, "INTERNAL");
@@ -192,7 +195,8 @@ describe("synthetic-entry _zsRpc — output validation gating", () => {
     ]);
     try {
       await withNodeEnv("production", async () => {
-        await assert.rejects(rpc("f", {}), (err: unknown) => {
+        // `async () =>` form — input validation throws sync from _zsRpc.
+        await assert.rejects(async () => rpc("f", {}), (err: unknown) => {
           const e = err as { status?: number; code?: string };
           assert.equal(e.status, 400);
           assert.equal(e.code, "INVALID_ARGUMENT");

@@ -353,13 +353,12 @@ async fn handle_connection(
 
             let total_len = total_input_consumed;
 
-            // `/health` is the only kernel-level route — it's a liveness
-            // probe for process managers, served without touching V8. Every
-            // other request, including `/_rpc/<method>`, flows through a
-            // single `handle_request` → `call_fetch_handler` call. Any
-            // URL-based routing (RPC vs HTTP vs static assets) lives in
-            // user-space (the bootstrap router from PR 2); the kernel is
-            // URL-agnostic.
+            // `/health` is the only kernel-level route — a liveness
+            // probe for process managers, served without touching V8.
+            // Every other request flows through `handle_request` →
+            // `call_fetch_handler`, which dispatches to default.rpc /
+            // default.fetchFast / default.fetch in that order. URL
+            // routing within those tiers is user-space.
             if method == "GET" && path == "/health" {
                 let BufResult(write_result, _) = stream.write_all(HEALTH_RESPONSE.to_vec()).await;
                 if write_result.is_err() { return; }

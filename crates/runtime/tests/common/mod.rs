@@ -10,11 +10,11 @@ use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
 /// Create a module list from a single JS source string.
 ///
 /// The caller writes `export function foo() {...}` style, and `m()` returns a
-/// single-entry `index.js` module. After the WinterCG-symmetric refactor, the
-/// runtime no longer auto-routes `POST /_rpc/<name>` to named exports — every
-/// HTTP request flows through `default.fetch`. Tests using [`dispatch`]
-/// synthesize a tiny `default.{fetch, rpc}` shim around the user code (see
-/// `dispatch` for the wrapping logic).
+/// single-entry `index.js` module. The runtime kernel only invokes
+/// `default.{fetch, rpc, fetchFast}` — bare named exports aren't auto-
+/// reachable on the wire. Tests using [`dispatch`] synthesize a tiny
+/// `default.{fetch, rpc}` shim around the user code (see `dispatch` for
+/// the wrapping logic).
 pub fn m(source: &str) -> Vec<ModuleEntry> {
     vec![ModuleEntry {
         specifier: "index.js".into(),

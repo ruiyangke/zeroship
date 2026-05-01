@@ -158,8 +158,13 @@ describe("synthetic-entry _zsRpc — Zod-direct validation", () => {
       },
     ]);
     try {
+      // `async () =>` form: assert.rejects expects its first arg to
+      // resolve to a Promise. The synthetic entry's `_zsRpc` is sync
+      // (avoids a per-request microtask), so input-validation failures
+      // throw synchronously. Wrapping in an async arrow turns the throw
+      // into a rejection.
       await assert.rejects(
-        rpc("listTodos", { limit: "not-a-number" }),
+        async () => rpc("listTodos", { limit: "not-a-number" }),
         (err: unknown) => {
           const e = err as {
             status?: number;
@@ -206,7 +211,9 @@ describe("synthetic-entry _zsRpc — Zod-direct validation", () => {
   test("missing procedure throws 404 NOT_FOUND", async () => {
     const { rpc, cleanup } = await loadEntry([]);
     try {
-      await assert.rejects(rpc("doesNotExist", null), (err: unknown) => {
+      // `async () =>` wrapping — see note above. Method-not-found is a
+      // sync throw from _zsRpc.
+      await assert.rejects(async () => rpc("doesNotExist", null), (err: unknown) => {
         const e = err as { status?: number; code?: string; message?: string };
         assert.equal(e.status, 404);
         assert.equal(e.code, "NOT_FOUND");

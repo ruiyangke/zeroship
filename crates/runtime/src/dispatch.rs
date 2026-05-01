@@ -1,33 +1,20 @@
-//! Free functions for V8 dispatch and resolution.
+//! Shared V8 dispatch helpers.
 //!
-//! These are free functions (NOT methods) that take `(scope, state, ...)` as
-//! separate parameters. This avoids borrow conflicts: when `enter_v8` creates a
-//! `HandleScope` borrowing `&mut isolate`, no methods on `&self` can be called.
-//! By making them free functions with disjoint `(scope, state)` params, Rust
-//! can verify the borrows don't overlap.
+//! Free functions (NOT methods) taking `(scope, state, ...)` as separate
+//! parameters. The shape avoids borrow conflicts: when `enter_v8!` creates
+//! a HandleScope borrowing `&mut isolate`, no methods on `&self` can be
+//! called. With disjoint `(scope, state)` params, Rust verifies the borrows
+//! don't overlap.
 //!
-//! ## Wire format
+//! Contents:
+//!   - error-envelope formatting (`build_error_body`, `escape_json_string`)
+//!   - V8 exception extraction (`v8_exception_to_{message,name,stack,status}`)
+//!   - native op resolve/reject (`resolve_op`, `reject_op`)
+//!   - timer callback firing (`fire_timer_callback`)
 //!
-//! The wire is URL-path-based (not JSON-RPC):
-//!   `POST /_rpc/<methodName>` with body = JSON array of positional args.
-//!
-//! Response:
-//!   - Success (plain value): HTTP 200 + `Content-Type: application/json`
-//!     + body = the raw return value JSON.
-//!   - Success (async generator): HTTP 200 `text/event-stream` with
-//!     `event: yield` / `event: return` / `event: error` frames. DISPATCH_JS
-//!     wraps the generator in a `Response(ReadableStream)`, so the streaming
-//!     HTTP dispatch path handles delivery exactly like user-constructed
-//!     `Response(ReadableStream)` (form B).
-//!   - Error: HTTP 500 (or `err.status` if numeric 400-599) + body
-//!     `{"message":"...","name":"...","stack":"..."}`.
-//!
-//! Callers of [`dispatch_request`] classify the result as sync / async /
-//! error. For the sync case they receive a `DispatchResult::Sync(ReturnInfo)`
-//! whose inner form distinguishes "plain JSON body" from "Response object"
-//! (the async-generator wrap path and user-returned `Response`s). The
-//! runtime then forwards complete buffered responses or streams them via
-//! the existing HTTP infrastructure — no separate SSE framing in Rust.
+//! Wire-level dispatch lives in `runtime.rs::call_fetch_handler` (the
+//! kernel's three-tier dispatcher: `default.rpc` → `default.fetchFast` →
+//! `default.fetch`). This module is the shared toolkit that path uses.
 
 use crate::state::{DispatchResult, SharedState};
 
@@ -35,22 +22,60 @@ use crate::state::{DispatchResult, SharedState};
 // Error envelope
 // ---------------------------------------------------------------------------
 
-/// Build an error body in the new wire format: `{"message","name","stack"}`.
-/// Quotes inside the strings are escaped per JSON rules; no `itoa` / status
-/// is embedded — the status is carried separately so streaming HTTP paths
-/// can emit the correct status line.
+/// Optional structured-error extras forwarded from a thrown JS error.
+/// `details_json` is pre-serialized so the splicer doesn't have to know
+/// the shape (it's any JSON value).
+#[derive(Default)]
+pub struct ErrorExtras<'a> {
+    pub stack: Option<&'a str>,
+    pub code: Option<&'a str>,
+    pub details_json: Option<&'a str>,
+    pub retryable: Option<bool>,
+}
+
+/// Build the JSON body for an error response.
+///
+/// Always emitted: `message`, `name`. Optionally appended in this order:
+/// `stack`, `code`, `details`, `retryable`. The wire shape matches the
+/// JS-side `errorResponse()` in `init.rs::BOOTSTRAP_JS` so a procedure
+/// throw produces the same body whether the kernel's RPC fast path
+/// caught the exception or the slow path's JS handler did.
+///
+/// Status is carried separately by the caller — streaming HTTP paths
+/// emit it on the status line.
 #[inline]
-pub fn build_error_body(message: &str, name: &str, stack: Option<&str>) -> String {
-    let mut out = String::with_capacity(40 + message.len() + name.len() + stack.map(str::len).unwrap_or(0));
+pub fn build_error_body(message: &str, name: &str, extras: ErrorExtras<'_>) -> String {
+    let cap = 40
+        + message.len()
+        + name.len()
+        + extras.stack.map(str::len).unwrap_or(0)
+        + extras.code.map(str::len).unwrap_or(0)
+        + extras.details_json.map(str::len).unwrap_or(0);
+    let mut out = String::with_capacity(cap);
     out.push_str(r#"{"message":""#);
     escape_json_string(message, &mut out);
     out.push_str(r#"","name":""#);
     escape_json_string(name, &mut out);
-    if let Some(s) = stack {
-        out.push_str(r#"","stack":""#);
+    out.push('"');
+    if let Some(s) = extras.stack {
+        out.push_str(r#","stack":""#);
         escape_json_string(s, &mut out);
+        out.push('"');
     }
-    out.push_str("\"}");
+    if let Some(c) = extras.code {
+        out.push_str(r#","code":""#);
+        escape_json_string(c, &mut out);
+        out.push('"');
+    }
+    if let Some(d) = extras.details_json {
+        // `details_json` is already valid JSON — splice verbatim.
+        out.push_str(r#","details":"#);
+        out.push_str(d);
+    }
+    if let Some(r) = extras.retryable {
+        out.push_str(if r { r#","retryable":true"# } else { r#","retryable":false"# });
+    }
+    out.push('}');
     out
 }
 
@@ -144,6 +169,63 @@ pub fn v8_exception_to_status(scope: &mut v8::PinScope, exception: v8::Local<v8:
     let val = obj.get(scope, key.into())?;
     let n = val.int32_value(scope)?;
     if (400..=599).contains(&n) { Some(n as u16) } else { None }
+}
+
+/// Read `.code` (gRPC-style structured error code). Strict — only
+/// strings forward; non-string `code` values are dropped to keep the
+/// wire contract from drifting.
+pub fn v8_exception_to_code(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> Option<String> {
+    let obj = exception.to_object(scope)?;
+    let key = v8::String::new(scope, "code").unwrap();
+    let val = obj.get(scope, key.into())?;
+    if !val.is_string() { return None; }
+    Some(val.to_rust_string_lossy(scope))
+}
+
+/// Read `.details` and JSON-stringify it. Any JSON value is allowed —
+/// SDKs (e.g. Zod) attach an issues array here. Returns the serialized
+/// JSON so callers can splice it into an error envelope without round-
+/// tripping through `serde_json::Value`.
+pub fn v8_exception_to_details_json(
+    scope: &mut v8::PinScope,
+    exception: v8::Local<v8::Value>,
+) -> Option<String> {
+    let obj = exception.to_object(scope)?;
+    let key = v8::String::new(scope, "details").unwrap();
+    let val = obj.get(scope, key.into())?;
+    if val.is_undefined() { return None; }
+    v8::json::stringify(scope, val).map(|s| s.to_rust_string_lossy(scope))
+}
+
+/// Read `.retryable` as a boolean hint. Strict — only true booleans
+/// forward; truthy non-booleans are dropped.
+pub fn v8_exception_to_retryable(
+    scope: &mut v8::PinScope,
+    exception: v8::Local<v8::Value>,
+) -> Option<bool> {
+    let obj = exception.to_object(scope)?;
+    let key = v8::String::new(scope, "retryable").unwrap();
+    let val = obj.get(scope, key.into())?;
+    if !val.is_boolean() { return None; }
+    Some(val.boolean_value(scope))
+}
+
+/// One-shot extractor for a thrown JS error → `DispatchResult::ErrorValue`.
+/// Reads message/name/stack/status (always) plus the structured-error
+/// extras (code, details, retryable) when the throw shape carries them.
+pub fn v8_exception_to_error_value(
+    scope: &mut v8::PinScope,
+    exception: v8::Local<v8::Value>,
+) -> DispatchResult {
+    DispatchResult::ErrorValue {
+        message: v8_exception_to_message(scope, exception),
+        name: v8_exception_to_name(scope, exception),
+        stack: v8_exception_to_stack(scope, exception),
+        status: v8_exception_to_status(scope, exception).unwrap_or(500),
+        code: v8_exception_to_code(scope, exception),
+        details_json: v8_exception_to_details_json(scope, exception),
+        retryable: v8_exception_to_retryable(scope, exception),
+    }
 }
 
 // ---------------------------------------------------------------------------
