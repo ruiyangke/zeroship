@@ -117,14 +117,15 @@ impl SandboxConfig {
         let token = std::env::var("SANDBOX_TOKEN").unwrap_or_default();
         // Fail-closed: an unset/empty token disables auth. We refuse
         // to start in that state unless the operator opts in via
-        // SANDBOX_ALLOW_NO_AUTH=1. Tighten further: when a token is
-        // set, require ≥32 bytes — anything shorter is brute-forceable.
+        // SANDBOX_ALLOW_NO_AUTH=true. Tighten further: when a token
+        // is set, require ≥32 bytes — anything shorter is brute-
+        // forceable on a public endpoint.
         let allow_no_auth = parse_env("SANDBOX_ALLOW_NO_AUTH", false)?;
         if token.is_empty() && !allow_no_auth {
             return Err(
                 "SANDBOX_TOKEN is empty; refusing to start. \
                  Set SANDBOX_TOKEN to a strong (≥32 byte) random value, \
-                 or set SANDBOX_ALLOW_NO_AUTH=1 for explicit dev mode."
+                 or set SANDBOX_ALLOW_NO_AUTH=true for explicit dev mode."
                     .to_string(),
             );
         }

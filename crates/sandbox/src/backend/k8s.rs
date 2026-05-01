@@ -36,10 +36,10 @@
 //! atomic counter picks unique loopback ports per sandbox. The
 //! port-forward is killed on `stop`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -60,12 +60,64 @@ pub struct K8sBackend {
     /// reads (every op) are at similar frequency and the contention
     /// is bounded.
     state: Arc<RwLock<HashMap<Uuid, K8sSandbox>>>,
-    /// Loopback port allocator for `kubectl port-forward`. We hand
-    /// out unique ports starting from `cfg.k8s.port_forward_start`
-    /// and never reuse — per-sandbox port-forward subprocesses are
-    /// short-lived enough that running out is improbable, and the
-    /// agent verifier rejects cross-sandbox replay anyway.
-    next_port: AtomicU16,
+    /// Loopback port allocator for `kubectl port-forward`. The port
+    /// space is small (47k usable: 18000..=65535 minus a buffer);
+    /// without a free-list we'd wrap and collide after enough churn.
+    /// `Mutex<Ports>` is fine — only `create`/`stop` touch it,
+    /// neither is a hot path.
+    ports: Arc<Mutex<PortAllocator>>,
+    /// Per-user serialization gate for `create` to prevent two
+    /// concurrent creates from racing the "one active sandbox per
+    /// user" check (which the RWO PVC also enforces, but slowly,
+    /// via Pending Pods — we want to fail fast at the controller).
+    creating_users: Arc<Mutex<HashSet<String>>>,
+    /// `/readyz`-style flag, flipped by [`probe`] at startup +
+    /// optionally by a background re-probe. `false` = backend not
+    /// usable; consumers can route around or page out.
+    healthy: Arc<AtomicBool>,
+}
+
+/// Free-list-backed port allocator for `kubectl port-forward`.
+/// Hands out the smallest free port ≥ `floor` (configurable via
+/// `SANDBOX_K8S_PORT_FORWARD_START`); reclaims released ports so
+/// we don't wrap around 65535 and collide.
+#[derive(Debug)]
+struct PortAllocator {
+    floor: u16,
+    /// Highest port we've ever allocated; new allocs prefer the
+    /// `freed` list, fall back to `next = max(floor, prev+1)`.
+    next: u16,
+    /// Returned ports, sorted; smallest one is reused first.
+    freed: BTreeSet<u16>,
+}
+
+impl PortAllocator {
+    fn new(floor: u16) -> Self {
+        Self {
+            floor,
+            next: floor,
+            freed: BTreeSet::new(),
+        }
+    }
+
+    fn alloc(&mut self) -> Result<u16, String> {
+        if let Some(&p) = self.freed.iter().next() {
+            self.freed.remove(&p);
+            return Ok(p);
+        }
+        if self.next == u16::MAX {
+            return Err("port-forward allocator exhausted (65535 cap)".into());
+        }
+        let p = self.next;
+        self.next = self.next.saturating_add(1);
+        Ok(p)
+    }
+
+    fn release(&mut self, p: u16) {
+        if p >= self.floor {
+            self.freed.insert(p);
+        }
+    }
 }
 
 struct K8sSandbox {
@@ -87,8 +139,13 @@ struct K8sSandbox {
     /// touches the cluster.
     signing_key: SigningKey,
     /// Background `kubectl port-forward` subprocess if enabled, kept
-    /// alive for the sandbox lifetime. Killed on stop.
-    port_forward: Option<Mutex<Child>>,
+    /// alive for the sandbox lifetime. Killed on stop. The local
+    /// port is recorded so `stop` can return it to the allocator.
+    /// `Child` owned exclusively by the HashMap entry — no `Mutex`
+    /// needed since `state.write().remove(...)` is the only access
+    /// point post-create (the watchdog uses a separate Arc handle).
+    port_forward: Option<Child>,
+    port_forward_local_port: Option<u16>,
 }
 
 impl std::fmt::Debug for K8sSandbox {
@@ -101,24 +158,35 @@ impl std::fmt::Debug for K8sSandbox {
             .field("namespace", &self.namespace)
             .field("agent_url", &self.agent_url)
             .field("port_forward", &self.port_forward.is_some())
+            .field("port_forward_local_port", &self.port_forward_local_port)
             .finish_non_exhaustive()
     }
 }
 
 impl K8sBackend {
     pub fn new(cfg: SandboxConfig) -> Result<Self, String> {
-        let next_port = AtomicU16::new(cfg.k8s.port_forward_start);
+        let ports = PortAllocator::new(cfg.k8s.port_forward_start);
         Ok(Self {
             cfg,
             state: Arc::new(RwLock::new(HashMap::new())),
-            next_port,
+            ports: Arc::new(Mutex::new(ports)),
+            creating_users: Arc::new(Mutex::new(HashSet::new())),
+            healthy: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Whether the backend looks healthy (kubectl reachable,
+    /// namespace exists). Set by [`probe`] at startup and refreshed
+    /// by an optional background loop. Read by handlers / `/readyz`.
+    pub fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Relaxed)
     }
 
     pub async fn probe(&self) -> Result<(), String> {
         // Make sure kubectl exists and the cluster is reachable.
         let out = run_kubectl(&["version", "--output=json"]).await?;
         if out.status != 0 {
+            self.healthy.store(false, Ordering::Relaxed);
             return Err(format!(
                 "kubectl version → status {}: {}",
                 out.status,
@@ -129,12 +197,57 @@ impl K8sBackend {
         let ns = self.cfg.k8s.namespace.clone();
         let out = run_kubectl(&["get", "namespace", &ns, "--no-headers"]).await?;
         if out.status != 0 {
+            self.healthy.store(false, Ordering::Relaxed);
             return Err(format!(
                 "kubectl get namespace {ns}: {}",
                 out.stderr.trim()
             ));
         }
+        self.healthy.store(true, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Best-effort cleanup of any agent Pods + ConfigMaps left over
+    /// from a previous controller process. Called once at startup —
+    /// the in-memory `state` is rebuilt from scratch each launch and
+    /// the per-sandbox signing keys live only in process memory, so
+    /// any orphan Pod's published pubkey is now a key the controller
+    /// no longer holds. Those Pods would 401 every signed request
+    /// forever; better to delete them and let the user re-create.
+    /// PVCs (per-user) are intentionally NOT deleted — they're
+    /// long-lived data.
+    pub async fn cleanup_orphans_at_startup(&self) -> Result<usize, String> {
+        let ns = self.cfg.k8s.namespace.clone();
+        // List all sandbox-agent Pods + ConfigMaps in the namespace.
+        let pods = run_kubectl(&[
+            "get", "pods", "-n", &ns, "-l", "app.kubernetes.io/name=sandbox-agent",
+            "-o", "name",
+        ])
+        .await?;
+        let cms = run_kubectl(&[
+            "get", "configmaps", "-n", &ns, "-l", "app.kubernetes.io/name=sandbox-agent",
+            "-o", "name",
+        ])
+        .await?;
+        let mut deleted = 0usize;
+        for line in pods.stdout.lines().filter(|l| !l.trim().is_empty()) {
+            let _ = run_kubectl(&[
+                "delete", line, "-n", &ns, "--ignore-not-found",
+                "--grace-period=0", "--force",
+            ])
+            .await;
+            deleted += 1;
+        }
+        for line in cms.stdout.lines().filter(|l| !l.trim().is_empty()) {
+            let _ = run_kubectl(&["delete", line, "-n", &ns, "--ignore-not-found"]).await;
+            deleted += 1;
+        }
+        if deleted > 0 {
+            eprintln!(
+                "[sandbox/k8s] cleanup_orphans_at_startup: deleted {deleted} orphaned object(s)"
+            );
+        }
+        Ok(deleted)
     }
 
     pub async fn create(
@@ -146,21 +259,105 @@ impl K8sBackend {
         validate_id(user_id, "user_id")?;
         validate_id(project_id, "project_id")?;
 
-        // 0. **One active sandbox per user.** The per-user PVC is
-        //    `ReadWriteOnce`; if this user already has a Pod
-        //    holding the lock, the new Pod would stay Pending
-        //    forever. Stop the existing sandbox first so the PVC
-        //    is free to attach here.
-        let existing = self.find_existing_for_user(user_id);
+        // **Per-user serialization.** Two concurrent creates for the
+        // same user racing the "one active sandbox per user" check
+        // would each see no existing → both apply Pods → second
+        // sticks Pending on the RWO PVC, registry forgets the
+        // first. Serialize with an in-flight set; non-blocking
+        // claim, fail-fast on collision so the caller can retry.
+        {
+            let mut creating = self.creating_users.lock().unwrap();
+            if !creating.insert(user_id.to_string()) {
+                return Err(format!(
+                    "concurrent sandbox create in progress for user {user_id:?}; retry"
+                ));
+            }
+        }
+        // Always release on exit, success or failure.
+        let release_creating =
+            ReleaseCreating::new(self.creating_users.clone(), user_id.to_string());
+
+        // **One active sandbox per user.** The per-user PVC is
+        // ReadWriteOnce; if this user already has a Pod holding
+        // the lock, the new Pod stays Pending. Stop the existing
+        // sandbox first.
+        let existing: Vec<Uuid> = self
+            .state
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(_, s)| s.user_id == user_id)
+            .map(|(id, _)| *id)
+            .collect();
         for old_id in existing {
             eprintln!(
-                "[sandbox/k8s] user {user_id} already has sandbox {old_id}; stopping before creating new"
+                "[sandbox/k8s] user {user_id} already has sandbox {old_id}; stopping first"
             );
             if let Err(e) = self.stop(old_id).await {
                 eprintln!("[sandbox/k8s] stop({old_id}) failed: {e}");
             }
         }
 
+        // Per-step bookkeeping for cleanup-on-error. Each successful
+        // step records what it created so the failure tail can tear
+        // it down. PVC is intentionally NOT tracked here — it's
+        // user-scoped + idempotent + persistent.
+        let pod_name = format!("zsbx-{}", sandbox_id.simple());
+        let configmap_name = format!("{pod_name}-trust");
+        let ns = self.cfg.k8s.namespace.clone();
+        let user_home_pvc = user_pvc_name(user_id);
+
+        let mut guard = CreateGuard::new(
+            self.ports.clone(),
+            ns.clone(),
+            pod_name.clone(),
+            configmap_name.clone(),
+        );
+
+        let result = self
+            .try_create(
+                sandbox_id,
+                user_id,
+                project_id,
+                &pod_name,
+                &configmap_name,
+                &ns,
+                &user_home_pvc,
+                &mut guard,
+            )
+            .await;
+
+        match result {
+            Ok(info) => {
+                guard.disarm();
+                drop(release_creating);
+                Ok(info)
+            }
+            Err(e) => {
+                drop(release_creating);
+                // `guard` runs on drop, doing best-effort cleanup
+                // of whatever steps did succeed (port-forward,
+                // Pod, ConfigMap). PVC is left alone.
+                Err(e)
+            }
+        }
+    }
+
+    /// The fallible portion of `create`, factored out so we can use
+    /// `?`-style early returns and have `CreateGuard::Drop` clean
+    /// up partial state on failure.
+    #[allow(clippy::too_many_arguments)]
+    async fn try_create(
+        &self,
+        sandbox_id: Uuid,
+        user_id: &str,
+        project_id: &str,
+        pod_name: &str,
+        configmap_name: &str,
+        ns: &str,
+        user_home_pvc: &str,
+        guard: &mut CreateGuard,
+    ) -> Result<SandboxInfo, String> {
         // 1. Mint Ed25519 keypair. Only the public key leaves this process.
         let sk_bytes = random_key32()?;
         let signing_key = SigningKey::from_bytes(&sk_bytes);
@@ -168,85 +365,71 @@ impl K8sBackend {
         let pubkey_b64 = B64.encode(pubkey.as_bytes());
         let key_fp = sig::pubkey_fingerprint(&pubkey);
 
-        let pod_name = format!("zsbx-{}", sandbox_id.simple());
-        let configmap_name = format!("{pod_name}-trust");
-        let ns = self.cfg.k8s.namespace.clone();
-        let user_home_pvc = user_pvc_name(user_id);
-
-        // 2. Ensure per-user PVC. Idempotent — only created the
-        //    first time we see this user. Persists across every
-        //    sandbox the user opens; deleted only on user deletion
-        //    (separate lifecycle, owned by the control plane).
+        // 2. Ensure per-user PVC. Idempotent.
         ensure_user_home_pvc(
-            &user_home_pvc,
-            &ns,
+            user_home_pvc,
+            ns,
             user_id,
             &self.cfg.k8s.user_home_size,
             self.cfg.k8s.user_home_storage_class.as_deref(),
         )
         .await?;
 
-        // 3. Apply ConfigMap (public key) — NOT a Secret.
-        apply_pubkey_configmap(&configmap_name, &ns, &pubkey_b64).await?;
+        // 3. Apply ConfigMap (public key).
+        apply_pubkey_configmap(configmap_name, ns, &pubkey_b64).await?;
+        guard.configmap_created = true;
 
-        // 4. Apply Pod with both the trust ConfigMap AND the
-        //    per-user PVC mounted at `/home/u`.
+        // 4. Apply Pod with trust ConfigMap + per-user PVC.
         apply_agent_pod(
-            &pod_name,
-            &ns,
+            pod_name,
+            ns,
             &self.cfg.k8s.image,
             &self.cfg.k8s.runtime_class,
             self.cfg.memory_mb,
             self.cfg.cpus,
-            &configmap_name,
-            &user_home_pvc,
+            configmap_name,
+            user_home_pvc,
             user_id,
             project_id,
             &sandbox_id.to_string(),
         )
         .await?;
+        guard.pod_created = true;
 
-        // 5. Wait for the Pod to be Ready. Wrap in a Result so we
-        //    clean up on failure (don't leak a half-spawned Pod).
-        //    The PVC stays — it's user-scoped, not sandbox-scoped,
-        //    and removing it would lose other sandboxes' caches.
-        let ready_res = wait_pod_ready(
-            &pod_name,
-            &ns,
-            self.cfg.k8s.ready_timeout_secs,
-        )
-        .await;
-        if let Err(e) = ready_res {
-            // Best-effort cleanup; ignore further errors.
-            let _ = delete_pod(&pod_name, &ns).await;
-            let _ = delete_configmap(&configmap_name, &ns).await;
-            return Err(e);
-        }
+        // 5. Wait for Pod Ready.
+        wait_pod_ready(pod_name, ns, self.cfg.k8s.ready_timeout_secs).await?;
 
-        // 6. Resolve agent URL.
-        let (agent_url, port_forward) = if self.cfg.k8s.use_port_forward {
-            let local_port = self.next_port.fetch_add(1, Ordering::Relaxed);
-            let pf = start_port_forward(&pod_name, &ns, local_port)?;
-            let url = format!("http://127.0.0.1:{local_port}");
+        // 6. Resolve agent URL — port-forward (dev) or pod IP (prod).
+        let (agent_url, pf, local_port) = if self.cfg.k8s.use_port_forward {
+            let port = self.ports.lock().unwrap().alloc()?;
+            let pf = start_port_forward(pod_name, ns, port)?;
+            // Track immediately so cleanup can kill it on later failure.
+            guard.port_forward_local_port = Some(port);
+            let url = format!("http://127.0.0.1:{port}");
             wait_for_agent_livez(&url, Duration::from_secs(20))?;
-            (url, Some(Mutex::new(pf)))
+            (url, Some(pf), Some(port))
         } else {
-            let pod_ip = pod_ip(&pod_name, &ns).await?;
-            let url = format!("http://{pod_ip}:7777");
+            let ip = pod_ip(pod_name, ns).await?;
+            let url = format!("http://{ip}:7777");
             wait_for_agent_livez(&url, Duration::from_secs(20))?;
-            (url, None)
+            (url, None, None)
         };
+        // Move the Child into the guard so cleanup-on-error can
+        // kill it; we'll take it back on success.
+        guard.port_forward = pf;
 
-        // 7. Stash internal state.
+        // 7. Commit. Take the port-forward back out of the guard.
+        let port_forward = guard.port_forward.take();
         let sandbox = K8sSandbox {
             user_id: user_id.to_string(),
-            pod_name: pod_name.clone(),
-            configmap_name: configmap_name.clone(),
-            user_home_pvc: user_home_pvc.clone(),
-            namespace: ns,
-            agent_url: agent_url.clone(),
+            pod_name: pod_name.to_string(),
+            configmap_name: configmap_name.to_string(),
+            user_home_pvc: user_home_pvc.to_string(),
+            namespace: ns.to_string(),
+            agent_url,
             signing_key,
             port_forward,
+            port_forward_local_port: local_port,
         };
         self.state.write().unwrap().insert(sandbox_id, sandbox);
 
@@ -256,35 +439,10 @@ impl K8sBackend {
             user_id: user_id.to_string(),
             project_id: project_id.to_string(),
             backend: "k8s".to_string(),
-            // The hint is **client-visible** via `GET /sandboxes/{id}`,
-            // so scrub anything that's an internal-only operational
-            // detail. Pod name + key fingerprint are useful for
-            // debugging an issue against a specific Pod and don't
-            // expose anything not already visible to anyone with
-            // cluster RBAC. The PVC name embeds the user_id (which
-            // the client already knows for its own user) but would
-            // leak it cross-tenant if list/get ever stops filtering;
-            // and `url=http://127.0.0.1:<port>` is purely an
-            // internal port-forward detail. Both omitted.
             backend_hint: format!("pod={pod_name} key_fp={key_fp}"),
             created_at_secs: now,
             last_used_at_secs: now,
         })
-    }
-
-    /// Find every sandbox id this user currently owns. Used by
-    /// `create` to enforce one-sandbox-per-user (RWO PVC requires
-    /// it). Returns a Vec because in a future multi-PVC world we
-    /// might allow N concurrent sandboxes per user; today there's
-    /// at most one.
-    fn find_existing_for_user(&self, user_id: &str) -> Vec<Uuid> {
-        self.state
-            .read()
-            .unwrap()
-            .iter()
-            .filter(|(_, s)| s.user_id == user_id)
-            .map(|(id, _)| *id)
-            .collect()
     }
 
     pub async fn stop(&self, sandbox_id: Uuid) -> Result<(), String> {
@@ -292,25 +450,64 @@ impl K8sBackend {
             Some(s) => s,
             None => return Ok(()), // idempotent
         };
-        // Kill the port-forward first so we don't keep a process
-        // talking to a Pod that's about to vanish.
-        if let Some(pf) = sandbox.port_forward {
-            if let Ok(mut child) = pf.lock() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
-        // Try a graceful shutdown via the agent first (flips drain),
-        // then delete the Pod + ConfigMap.
-        let _ = http_signed(
+        let pod_name = sandbox.pod_name.clone();
+        let cm_name = sandbox.configmap_name.clone();
+        let ns = sandbox.namespace.clone();
+        let mut errs: Vec<String> = Vec::new();
+
+        // 1. Drain the agent FIRST, while the port-forward is still
+        //    alive. /shutdown flips the agent's drain flag so the
+        //    Pod stops accepting new requests; existing in-flight
+        //    requests still complete (until ntex's shutdown_timeout
+        //    cuts them off). Best-effort — if this fails the Pod is
+        //    deleted in step 3 anyway.
+        if let Err(e) = http_signed_async(
             &sandbox.signing_key,
             "POST",
             &format!("{}/shutdown", sandbox.agent_url),
             &[],
-        );
-        let _ = delete_pod(&sandbox.pod_name, &sandbox.namespace).await;
-        let _ = delete_configmap(&sandbox.configmap_name, &sandbox.namespace).await;
-        Ok(())
+        )
+        .await
+        {
+            eprintln!("[sandbox/k8s] /shutdown to {pod_name} failed (continuing): {e}");
+        }
+
+        // 2. Kill the port-forward (after the drain RPC, before we
+        //    delete the Pod — the kubectl proxy would error out
+        //    once the Pod is gone, leaving an orphan process).
+        //    Child::wait blocks; off the ntex worker.
+        if let Some(mut child) = sandbox.port_forward {
+            let _ = compio::runtime::spawn_blocking(move || {
+                let _ = child.kill();
+                let _ = child.wait();
+            })
+            .await;
+        }
+        if let Some(p) = sandbox.port_forward_local_port {
+            self.ports.lock().unwrap().release(p);
+        }
+
+        // 3. Pod + ConfigMap deletion. Correctness-critical: leaking
+        //    either means cluster-side garbage that nothing else
+        //    cleans up. Surface failures.
+        if let Err(e) = delete_pod(&pod_name, &ns).await {
+            errs.push(format!("delete_pod({pod_name}): {e}"));
+        }
+        if let Err(e) = delete_configmap(&cm_name, &ns).await {
+            errs.push(format!("delete_configmap({cm_name}): {e}"));
+        }
+        // 4. Wait for kubelet to actually release the PVC before
+        //    returning; otherwise a follow-up create for the same
+        //    user races a Multi-Attach error. Best-effort: 30s.
+        if let Err(e) = wait_for_pod_gone(&pod_name, &ns, Duration::from_secs(30)).await {
+            errs.push(format!("wait_for_pod_gone({pod_name}): {e}"));
+        }
+
+        if errs.is_empty() {
+            Ok(())
+        } else {
+            Err(errs.join("; "))
+        }
     }
 
     pub async fn exec(
@@ -327,7 +524,7 @@ impl K8sBackend {
             "timeout_ms": timeout_ms,
         })
         .to_string();
-        let resp = http_signed(&sk, "POST", &format!("{url}/exec"), body.as_bytes())?;
+        let resp = http_signed_async(&sk, "POST", &format!("{url}/exec"), body.as_bytes()).await?;
         if resp.status != 200 {
             return Err(format!("agent /exec status {}: {}", resp.status, resp.body));
         }
@@ -344,7 +541,7 @@ impl K8sBackend {
     pub async fn read_file(&self, sandbox_id: Uuid, path: &str) -> Result<Vec<u8>, String> {
         let (sk, url) = self.sandbox_keys(sandbox_id)?;
         let p = sanitize_path(path)?;
-        let resp = http_signed(&sk, "GET", &format!("{url}/files/{p}"), &[])?;
+        let resp = http_signed_async(&sk, "GET", &format!("{url}/files/{p}"), &[]).await?;
         if resp.status == 404 {
             return Err(format!("file not found: {p}"));
         }
@@ -362,7 +559,7 @@ impl K8sBackend {
     ) -> Result<(), String> {
         let (sk, url) = self.sandbox_keys(sandbox_id)?;
         let p = sanitize_path(path)?;
-        let resp = http_signed(&sk, "PUT", &format!("{url}/files/{p}"), body)?;
+        let resp = http_signed_async(&sk, "PUT", &format!("{url}/files/{p}"), body).await?;
         if resp.status != 200 {
             return Err(format!("agent /files PUT status {}: {}", resp.status, resp.body));
         }
@@ -372,7 +569,7 @@ impl K8sBackend {
     pub async fn delete_file(&self, sandbox_id: Uuid, path: &str) -> Result<bool, String> {
         let (sk, url) = self.sandbox_keys(sandbox_id)?;
         let p = sanitize_path(path)?;
-        let resp = http_signed(&sk, "DELETE", &format!("{url}/files/{p}"), &[])?;
+        let resp = http_signed_async(&sk, "DELETE", &format!("{url}/files/{p}"), &[]).await?;
         match resp.status {
             200 => Ok(true),
             404 => Ok(false),
@@ -382,7 +579,7 @@ impl K8sBackend {
 
     pub async fn file_tree(&self, sandbox_id: Uuid) -> Result<Vec<TreeEntry>, String> {
         let (sk, url) = self.sandbox_keys(sandbox_id)?;
-        let resp = http_signed(&sk, "GET", &format!("{url}/tree"), &[])?;
+        let resp = http_signed_async(&sk, "GET", &format!("{url}/tree"), &[]).await?;
         if resp.status != 200 {
             return Err(format!("agent /tree status {}: {}", resp.status, resp.body));
         }
@@ -418,6 +615,116 @@ impl K8sBackend {
     }
 }
 
+// ─── create-time bookkeeping ────────────────────────────────────
+
+/// RAII for the `creating_users` set. Drops the user_id from the
+/// in-flight set on scope exit (success OR failure) so a future
+/// call for the same user isn't blocked forever after a panic /
+/// early-return.
+struct ReleaseCreating {
+    set: Arc<Mutex<HashSet<String>>>,
+    user_id: String,
+}
+
+impl ReleaseCreating {
+    fn new(set: Arc<Mutex<HashSet<String>>>, user_id: String) -> Self {
+        Self { set, user_id }
+    }
+}
+
+impl Drop for ReleaseCreating {
+    fn drop(&mut self) {
+        if let Ok(mut g) = self.set.lock() {
+            g.remove(&self.user_id);
+        }
+    }
+}
+
+/// Tracks partially-applied state during `create` so we can clean
+/// up on intermediate failure without leaking Pods, ConfigMaps, or
+/// port-forward subprocesses. Activate on each step that succeeds;
+/// `disarm()` only on full success. Cleanup on Drop is best-effort
+/// and synchronous (Drop can't be async, and these are local-only
+/// kubectl + Child::kill calls; the brief blocking is acceptable
+/// in the error path which is not hot).
+struct CreateGuard {
+    ports: Arc<Mutex<PortAllocator>>,
+    namespace: String,
+    pod_name: String,
+    configmap_name: String,
+    pub configmap_created: bool,
+    pub pod_created: bool,
+    pub port_forward: Option<Child>,
+    pub port_forward_local_port: Option<u16>,
+    armed: bool,
+}
+
+impl CreateGuard {
+    fn new(
+        ports: Arc<Mutex<PortAllocator>>,
+        namespace: String,
+        pod_name: String,
+        configmap_name: String,
+    ) -> Self {
+        Self {
+            ports,
+            namespace,
+            pod_name,
+            configmap_name,
+            configmap_created: false,
+            pod_created: false,
+            port_forward: None,
+            port_forward_local_port: None,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CreateGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Kill port-forward (sync — we're in Drop).
+        if let Some(mut child) = self.port_forward.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(p) = self.port_forward_local_port.take() {
+            if let Ok(mut alloc) = self.ports.lock() {
+                alloc.release(p);
+            }
+        }
+        // Pod + ConfigMap deletion via blocking kubectl. Not async,
+        // but the create-failure path runs at most once per failed
+        // request — acceptable to spend ~500ms sync here.
+        if self.pod_created {
+            let _ = std::process::Command::new("kubectl")
+                .args([
+                    "delete", "pod", &self.pod_name, "-n", &self.namespace,
+                    "--ignore-not-found", "--grace-period=0", "--force",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        if self.configmap_created {
+            let _ = std::process::Command::new("kubectl")
+                .args([
+                    "delete", "configmap", &self.configmap_name,
+                    "-n", &self.namespace, "--ignore-not-found",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
 // ─── HTTP signed call to the agent ───────────────────────────────
 
 #[derive(Debug)]
@@ -427,35 +734,44 @@ struct AgentResponse {
     bytes: Vec<u8>,
 }
 
-/// Sign + send a single HTTP request to the in-VM agent. Runs the
-/// blocking `ureq` call as-is on this thread; callers that want to
-/// avoid blocking the ntex worker should already be inside a
-/// `compio::runtime::spawn_blocking`. Most of our backend ops do
-/// kubectl shell-outs anyway, so adding another layer of blocking
-/// is fine.
-fn http_signed(
+/// Async wrapper that signs + sends to the in-VM agent **without
+/// blocking the ntex worker**. The signing itself is fast and stays
+/// on the calling thread; the actual ureq call is moved onto a
+/// `compio::runtime::spawn_blocking` thread.
+///
+/// Previously the call sites used the sync `http_signed` directly —
+/// every `ureq::call()` could block the ntex worker for up to 60s,
+/// and a single slow-network sandbox stalled all unrelated handlers
+/// on that worker. The stress test never caught it because port-
+/// forward to localhost is fast.
+async fn http_signed_async(
     signing_key: &SigningKey,
     method: &str,
     url: &str,
     body: &[u8],
 ) -> Result<AgentResponse, String> {
-    // Parse the path out of the URL for canonical-string
-    // construction. We only support `http://host:port/path` shapes.
     let path = url
         .splitn(4, '/')
         .nth(3)
         .map(|p| format!("/{p}"))
         .unwrap_or_else(|| "/".to_string());
-    // Strip query string — the agent rejects signed requests that
-    // carry them. We never set them, but defend against future drift.
     let path = path.split('?').next().unwrap_or("/").to_string();
 
     let ts = unix_now();
     let nonce = random_nonce()?;
     let signature = sig::sign(signing_key, method, &path, body, ts, &nonce);
 
-    let result = compio_blocking_call(method, url, body, ts, &nonce, &signature);
-    result
+    // Move all the request data into the closure: ureq is sync.
+    // SigningKey already used; not captured.
+    let method = method.to_string();
+    let url = url.to_string();
+    let body = body.to_vec();
+    let nonce = nonce.to_string();
+    compio::runtime::spawn_blocking(move || {
+        compio_blocking_call(&method, &url, &body, ts, &nonce, &signature)
+    })
+    .await
+    .map_err(|e| format!("blocking task panic: {e:?}"))?
 }
 
 /// Plain blocking ureq call. Caller is responsible for already
@@ -767,6 +1083,41 @@ async fn delete_configmap(name: &str, namespace: &str) -> Result<(), String> {
     .await?;
     if out.status != 0 {
         return Err(format!("kubectl delete configmap {name}: {}", out.stderr.trim()));
+    }
+    Ok(())
+}
+
+/// Block until the kubelet has actually torn down the Pod
+/// (terminated AND its volume mounts released). `kubectl delete
+/// --force` returns when the API has accepted the deletion, NOT
+/// when the kubelet has finished — on real CSI drivers (EBS,
+/// Longhorn, Ceph) the volume detach can take 10-30 s. If the
+/// next sandbox for the same user races a still-attaching PVC,
+/// the new Pod sticks Pending with a Multi-Attach error and
+/// `wait_pod_ready` times out — and we've already deleted the
+/// old Pod, so the user loses both.
+async fn wait_for_pod_gone(name: &str, namespace: &str, timeout: Duration) -> Result<(), String> {
+    let timeout_arg = format!("--timeout={}s", timeout.as_secs().max(1));
+    let pod = format!("pod/{name}");
+    let out = run_kubectl(&[
+        "wait",
+        "--for=delete",
+        &pod,
+        &timeout_arg,
+        "-n",
+        namespace,
+    ])
+    .await?;
+    // Pod-already-gone is success (the wait subcommand returns 0
+    // with stderr "no matching resources found" or similar).
+    if out.status != 0
+        && !out.stderr.contains("no matching resources")
+        && !out.stderr.contains("not found")
+    {
+        return Err(format!(
+            "kubectl wait --for=delete pod/{name}: {}",
+            out.stderr.trim()
+        ));
     }
     Ok(())
 }

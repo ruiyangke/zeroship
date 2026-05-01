@@ -31,10 +31,22 @@ pub struct AppState {
 
 impl AppState {
     /// Build a fresh state from config. Probes the chosen backend at
-    /// construction time so callers fail fast on misconfiguration.
+    /// construction time so callers fail fast on misconfiguration,
+    /// then cleans up any in-cluster runtime objects orphaned by a
+    /// previous controller process (the per-sandbox signing keys
+    /// only live in process memory; orphan Pods would 401 every
+    /// signed request from the new controller forever).
     pub async fn from_config(config: SandboxConfig) -> Result<Arc<Self>, String> {
         let backend = Backend::from_config(&config)?;
         backend.probe().await?;
+        // Clean up orphan Pods + ConfigMaps from a previous run.
+        // Errors here are non-fatal — operators may want to keep
+        // orphans around for forensics; we log and continue.
+        match backend.cleanup_orphans_at_startup().await {
+            Ok(0) => {}
+            Ok(n) => eprintln!("[sandbox] startup cleanup: removed {n} orphan(s)"),
+            Err(e) => eprintln!("[sandbox] startup cleanup failed (non-fatal): {e}"),
+        }
         Ok(Arc::new(Self {
             config,
             sandboxes: SandboxRegistry::new(),

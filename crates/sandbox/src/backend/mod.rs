@@ -136,6 +136,32 @@ impl Backend {
         }
     }
 
+    /// Whether the backend is currently healthy. Updated by
+    /// [`probe`] (synchronous one-shot) and by an optional
+    /// background loop. Read by `/readyz` and any handler that
+    /// wants to fast-fail rather than queue against a dead backend.
+    pub fn is_healthy(&self) -> bool {
+        match self {
+            // Docker has no separate health flag; assume healthy
+            // once the initial probe succeeded (no background
+            // monitor today).
+            Self::Docker(_) => true,
+            Self::K8s(b) => b.is_healthy(),
+        }
+    }
+
+    /// Best-effort cleanup of in-cluster runtime objects that the
+    /// controller no longer holds in-memory state for. Currently
+    /// only the K8s backend implements this (Docker containers
+    /// stop when the daemon is restarted, so no orphan story).
+    /// Called once at startup from [`crate::AppState::from_config`].
+    pub async fn cleanup_orphans_at_startup(&self) -> Result<usize, String> {
+        match self {
+            Self::Docker(_) => Ok(0),
+            Self::K8s(b) => b.cleanup_orphans_at_startup().await,
+        }
+    }
+
     pub async fn create(
         &self,
         sandbox_id: Uuid,

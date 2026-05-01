@@ -85,6 +85,7 @@ async fn run() -> Result<(), String> {
 
     set_default("SANDBOX_BACKEND", "k8s");
     set_default("SANDBOX_K8S_USE_PORT_FORWARD", "true");
+    set_default("SANDBOX_ALLOW_NO_AUTH", "true");
     if let Ok(ns) = env::var("SBX_STRESS_NAMESPACE") {
         unsafe { env::set_var("SANDBOX_K8S_NAMESPACE", ns); }
     }

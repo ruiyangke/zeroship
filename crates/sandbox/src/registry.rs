@@ -152,6 +152,14 @@ impl SandboxRegistry {
 /// Background task that sweeps expired sandboxes and stops their
 /// runtimes. Runs every minute; cheap (in-memory walk + at most
 /// one backend.stop per expired sandbox).
+///
+/// **Panic recovery.** A previous version held a single
+/// `compio::runtime::spawn(...).detach()` — any panic in the loop
+/// (RwLock poisoning, malformed UUID, weird backend error) killed
+/// the task forever, with no log saying GC died. Sandboxes
+/// accumulated indefinitely. We now wrap each iteration in
+/// `catch_unwind`; a single bad sweep is logged and we keep
+/// running.
 pub fn start_idle_gc(state: Arc<AppState>) {
     compio::runtime::spawn(async move {
         let interval = Duration::from_secs(60);
@@ -159,7 +167,20 @@ pub fn start_idle_gc(state: Arc<AppState>) {
         let max_life = Duration::from_secs(state.config.max_lifetime_secs);
         loop {
             compio::time::sleep(interval).await;
-            let to_kill = state.sandboxes.expired(idle, max_life);
+            // Sync portion (lock walk) wrapped for panic safety.
+            // The async `backend.stop` happens after, with its own
+            // best-effort error log.
+            let to_kill = match std::panic::catch_unwind(
+                std::panic::AssertUnwindSafe(|| state.sandboxes.expired(idle, max_life)),
+            ) {
+                Ok(ids) => ids,
+                Err(p) => {
+                    eprintln!(
+                        "[sandbox] gc: panic during expired-walk; continuing: {p:?}"
+                    );
+                    continue;
+                }
+            };
             for id in to_kill {
                 if let Some(info) = state.sandboxes.get(&id) {
                     eprintln!(
@@ -167,10 +188,16 @@ pub fn start_idle_gc(state: Arc<AppState>) {
                         info.sandbox_id, info.user_id, info.project_id, info.backend,
                     );
                 }
+                // Don't unwrap-or-panic — propagate the failure as a
+                // log line and move on. The registry remove below
+                // is also wrapped in case a poisoned lock would
+                // otherwise kill the loop.
                 if let Err(e) = state.backend.stop(id).await {
                     eprintln!("[sandbox] gc: backend.stop({id}) failed: {e}");
                 }
-                state.sandboxes.remove(&id);
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    state.sandboxes.remove(&id);
+                }));
             }
         }
     })

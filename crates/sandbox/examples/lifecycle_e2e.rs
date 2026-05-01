@@ -48,9 +48,14 @@ async fn run() -> Result<(), String> {
 
     // 1. Build a config pointed at the k8s backend. Force port-forward
     //    on (we're running on the host, not in-cluster).
+    //    The HTTP server isn't started in this example (we drive the
+    //    backend directly), so explicitly opt out of bearer-token
+    //    auth — `SandboxConfig::from_env` requires either
+    //    `SANDBOX_TOKEN` or `SANDBOX_ALLOW_NO_AUTH=1`.
     set_default("SANDBOX_BACKEND", "k8s");
     set_default("SANDBOX_K8S_USE_PORT_FORWARD", "true");
     set_default("SANDBOX_K8S_NAMESPACE", "default");
+    set_default("SANDBOX_ALLOW_NO_AUTH", "true");
     let config = SandboxConfig::from_env().map_err(|e| format!("config: {e}"))?;
     println!("backend:        {}", config.backend);
     println!("namespace:      {}", config.k8s.namespace);
