@@ -177,16 +177,34 @@ fn build_stream_wrapper<'s>(
     );
     std::mem::forget(weak);
 
-    // Wire the prototype to the class function's prototype so methods
-    // are visible. Our FunctionTemplate-built object already inherits
-    // from the template's prototype, so this is a no-op when called via
-    // `new_instance` — kept for clarity with hand-rolled paths.
-    let class_fn = tmpl.get_function(scope).unwrap();
-    let proto_key = v8::String::new(scope, "prototype").unwrap();
-    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
+    // Wire the prototype. Prefer `globalThis.ReadableStream.prototype`
+    // when available (so `branch instanceof ReadableStream` works for
+    // tee branches and TS halves). Fall back to the just-built template
+    // for tests that call this path before install_native_streams.
+    let proto_v = global_class_prototype(scope, "ReadableStream").unwrap_or_else(|| {
+        let class_fn = tmpl.get_function(scope).unwrap();
+        let proto_key = v8::String::new(scope, "prototype").unwrap();
+        class_fn.get(scope, proto_key.into()).unwrap()
+    });
     stream_obj.set_prototype(scope, proto_v);
 
     stream_obj
+}
+
+/// Return `globalThis[name].prototype` if globalThis has a `name`
+/// property and that property is a Function. Used to wire up
+/// internally-built stream wrappers so they share the user-visible
+/// class identity (instanceof works).
+fn global_class_prototype<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    name: &str,
+) -> Option<v8::Local<'s, v8::Value>> {
+    let global = scope.get_current_context().global(scope);
+    let key = v8::String::new(scope, name)?;
+    let class_v = global.get(scope, key.into())?;
+    let class_obj = v8::Local::<v8::Object>::try_from(class_v).ok()?;
+    let proto_key = v8::String::new(scope, "prototype")?;
+    class_obj.get(scope, proto_key.into())
 }
 
 // ---------------------------------------------------------------------------
@@ -229,10 +247,11 @@ fn stream_class_template<'s>(
     // getReader(options?) — §3.2.5.5
     install_method(scope, proto, "getReader", get_reader_method_callback);
 
-    // Stubs for the methods we don't implement in this dispatch.
-    install_method(scope, proto, "pipeTo", stub_pipe_to_callback);
-    install_method(scope, proto, "pipeThrough", stub_pipe_through_callback);
-    install_method(scope, proto, "tee", stub_tee_callback);
+    // pipeTo / pipeThrough / tee — implemented via crate::streams::pipe / tee.
+    install_method(scope, proto, "pipeTo", pipe_to_method_callback);
+    install_method(scope, proto, "pipeThrough", pipe_through_method_callback);
+    install_method(scope, proto, "tee", tee_method_callback);
+    // values / async-iteration is still deferred (next dispatch).
     install_method(scope, proto, "values", stub_values_callback);
 
     // Symbol.toStringTag → "ReadableStream" per WebIDL §3.7.4.
@@ -498,7 +517,8 @@ fn get_reader_method_callback(
 }
 
 // ---------------------------------------------------------------------------
-// Stubs — pipeTo / pipeThrough / tee / values
+// pipeTo / pipeThrough / tee — wired to crate::streams::{pipe, tee}.
+// values / asyncIterator — still stubbed (lands with the iteration support).
 // ---------------------------------------------------------------------------
 
 fn throw_not_implemented(scope: &mut v8::PinScope, name: &str) {
@@ -508,28 +528,227 @@ fn throw_not_implemented(scope: &mut v8::PinScope, name: &str) {
     scope.throw_exception(exc);
 }
 
-fn stub_pipe_to_callback(
-    scope: &mut v8::PinScope,
-    _args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue,
+/// `pipeTo(dest, options)` per spec §3.2.5.7.
+///
+/// Validation (spec):
+///   1. Receiver MUST be a ReadableStream.
+///   2. dest MUST be a WritableStream.
+///   3. signal (in options) MUST be undefined or an AbortSignal-like.
+///   4. If `this` is locked → reject with TypeError.
+///   5. If dest is locked → reject with TypeError.
+///   6. Else: return ReadableStreamPipeTo(this, dest, prevent…, signal).
+fn pipe_to_method_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s>,
 ) {
-    throw_not_implemented(scope, "pipeTo");
+    let this = args.this();
+    if !is_readable_stream(scope, this) {
+        let msg = v8::String::new(scope, "pipeTo: receiver is not a ReadableStream").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        let p = crate::streams::algorithms::rejected_with_promise(scope, exc.into());
+        rv.set(p.into());
+        return;
+    }
+    let dest_v = args.get(0);
+    let Ok(dest) = v8::Local::<v8::Object>::try_from(dest_v) else {
+        let msg = v8::String::new(scope, "pipeTo: argument 1 must be a WritableStream").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        let p = crate::streams::algorithms::rejected_with_promise(scope, exc.into());
+        rv.set(p.into());
+        return;
+    };
+    if !crate::streams::writable::is_writable_stream(scope, dest) {
+        let msg = v8::String::new(scope, "pipeTo: argument 1 must be a WritableStream").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        let p = crate::streams::algorithms::rejected_with_promise(scope, exc.into());
+        rv.set(p.into());
+        return;
+    }
+
+    let (prevent_close, prevent_abort, prevent_cancel, signal) =
+        match parse_pipe_options(scope, args.get(1)) {
+            Ok(v) => v,
+            Err(p) => {
+                rv.set(p.into());
+                return;
+            }
+        };
+
+    if crate::streams::algorithms::is_readable_stream_locked(scope, this) {
+        let msg = v8::String::new(scope, "pipeTo: source is locked").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        let p = crate::streams::algorithms::rejected_with_promise(scope, exc.into());
+        rv.set(p.into());
+        return;
+    }
+    if crate::streams::algorithms::is_writable_stream_locked(scope, dest) {
+        let msg = v8::String::new(scope, "pipeTo: destination is locked").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        let p = crate::streams::algorithms::rejected_with_promise(scope, exc.into());
+        rv.set(p.into());
+        return;
+    }
+
+    let p = crate::streams::pipe::readable_stream_pipe_to(
+        scope,
+        this,
+        dest,
+        prevent_close,
+        prevent_abort,
+        prevent_cancel,
+        signal,
+    );
+    rv.set(p.into());
 }
 
-fn stub_pipe_through_callback(
-    scope: &mut v8::PinScope,
-    _args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue,
+/// `pipeThrough(transform, options)` per spec §3.2.5.6.
+///
+/// 1. Receiver check.
+/// 2. `transform` must have `readable` (ReadableStream) + `writable`
+///    (WritableStream) properties — i.e. a TransformStream or duck-type.
+/// 3. Lock checks: this and transform.writable must be unlocked, else
+///    THROW (sync) — pipeThrough is the rare method where lock errors
+///    surface as synchronous throws, NOT promise rejections.
+/// 4. Spawn a pipeTo into transform.writable; setPromiseIsHandledToTrue
+///    on the result. Return transform.readable.
+fn pipe_through_method_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s>,
 ) {
-    throw_not_implemented(scope, "pipeThrough");
+    let this = args.this();
+    if !is_readable_stream(scope, this) {
+        let msg = v8::String::new(scope, "pipeThrough: receiver is not a ReadableStream").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    }
+    let transform_v = args.get(0);
+    let Ok(transform_obj) = v8::Local::<v8::Object>::try_from(transform_v) else {
+        let msg = v8::String::new(
+            scope,
+            "pipeThrough: argument 1 must be a { readable, writable } pair",
+        )
+        .unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    };
+    let readable_key = v8::String::new(scope, "readable").unwrap();
+    let writable_key = v8::String::new(scope, "writable").unwrap();
+    let readable_v = transform_obj
+        .get(scope, readable_key.into())
+        .unwrap_or_else(|| v8::undefined(scope).into());
+    let writable_v = transform_obj
+        .get(scope, writable_key.into())
+        .unwrap_or_else(|| v8::undefined(scope).into());
+    let Ok(readable_obj) = v8::Local::<v8::Object>::try_from(readable_v) else {
+        let msg = v8::String::new(
+            scope,
+            "pipeThrough: argument 1 has no ReadableStream readable side",
+        )
+        .unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    };
+    let Ok(writable_obj) = v8::Local::<v8::Object>::try_from(writable_v) else {
+        let msg = v8::String::new(
+            scope,
+            "pipeThrough: argument 1 has no WritableStream writable side",
+        )
+        .unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    };
+    if !is_readable_stream(scope, readable_obj) {
+        let msg = v8::String::new(
+            scope,
+            "pipeThrough: transform.readable is not a ReadableStream",
+        )
+        .unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    }
+    if !crate::streams::writable::is_writable_stream(scope, writable_obj) {
+        let msg = v8::String::new(
+            scope,
+            "pipeThrough: transform.writable is not a WritableStream",
+        )
+        .unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    }
+
+    let (prevent_close, prevent_abort, prevent_cancel, signal) =
+        match parse_pipe_options_throw(scope, args.get(1)) {
+            Ok(v) => v,
+            Err(()) => return, // already pushed exception
+        };
+
+    if crate::streams::algorithms::is_readable_stream_locked(scope, this) {
+        let msg = v8::String::new(scope, "pipeThrough: source is locked").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    }
+    if crate::streams::algorithms::is_writable_stream_locked(scope, writable_obj) {
+        let msg = v8::String::new(scope, "pipeThrough: transform.writable is locked").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    }
+
+    let pipe_promise = crate::streams::pipe::readable_stream_pipe_to(
+        scope,
+        this,
+        writable_obj,
+        prevent_close,
+        prevent_abort,
+        prevent_cancel,
+        signal,
+    );
+    crate::streams::promise_resolve::set_promise_is_handled_to_true(scope, pipe_promise);
+
+    rv.set(readable_obj.into());
 }
 
-fn stub_tee_callback(
-    scope: &mut v8::PinScope,
-    _args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue,
+/// `tee()` per spec §3.2.5.8 — return [branch1, branch2].
+fn tee_method_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s>,
 ) {
-    throw_not_implemented(scope, "tee");
+    let this = args.this();
+    if !is_readable_stream(scope, this) {
+        let msg = v8::String::new(scope, "tee: receiver is not a ReadableStream").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    }
+    if crate::streams::algorithms::is_readable_stream_locked(scope, this) {
+        let msg = v8::String::new(scope, "tee: stream is locked").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    }
+    match crate::streams::tee::readable_stream_default_tee(scope, this, false) {
+        Ok([b1, b2]) => {
+            let arr = v8::Array::new(scope, 2);
+            arr.set_index(scope, 0, b1.into());
+            arr.set_index(scope, 1, b2.into());
+            rv.set(arr.into());
+        }
+        Err(msg) => {
+            let v8_msg = v8::String::new(scope, &msg).unwrap();
+            let exc = v8::Exception::type_error(scope, v8_msg);
+            scope.throw_exception(exc);
+        }
+    }
 }
 
 fn stub_values_callback(
@@ -538,6 +757,77 @@ fn stub_values_callback(
     _rv: v8::ReturnValue,
 ) {
     throw_not_implemented(scope, "values");
+}
+
+// ---------------------------------------------------------------------------
+// pipe options parsing
+// ---------------------------------------------------------------------------
+
+/// Parse `{preventClose, preventAbort, preventCancel, signal}` from a
+/// JS value. Returns a rejected Promise if the options object is
+/// malformed (so pipeTo can `rv.set(p)` and bail).
+type PipeOptsParsed<'s> = (bool, bool, bool, Option<v8::Local<'s, v8::Object>>);
+
+fn parse_pipe_options<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    options: v8::Local<v8::Value>,
+) -> Result<PipeOptsParsed<'s>, v8::Local<'s, v8::Promise>> {
+    if options.is_undefined() {
+        return Ok((false, false, false, None));
+    }
+    let Ok(obj) = v8::Local::<v8::Object>::try_from(options) else {
+        let msg = v8::String::new(scope, "pipeTo: options must be an object").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        return Err(crate::streams::algorithms::rejected_with_promise(
+            scope,
+            exc.into(),
+        ));
+    };
+    let prevent_close = bool_field(scope, obj, "preventClose");
+    let prevent_abort = bool_field(scope, obj, "preventAbort");
+    let prevent_cancel = bool_field(scope, obj, "preventCancel");
+    let signal = signal_field(scope, obj);
+    Ok((prevent_close, prevent_abort, prevent_cancel, signal))
+}
+
+/// Same as `parse_pipe_options` but for pipeThrough — errors are
+/// thrown synchronously instead of returned as rejected promises.
+fn parse_pipe_options_throw<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    options: v8::Local<v8::Value>,
+) -> Result<PipeOptsParsed<'s>, ()> {
+    if options.is_undefined() {
+        return Ok((false, false, false, None));
+    }
+    let Ok(obj) = v8::Local::<v8::Object>::try_from(options) else {
+        let msg = v8::String::new(scope, "pipeThrough: options must be an object").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return Err(());
+    };
+    let prevent_close = bool_field(scope, obj, "preventClose");
+    let prevent_abort = bool_field(scope, obj, "preventAbort");
+    let prevent_cancel = bool_field(scope, obj, "preventCancel");
+    let signal = signal_field(scope, obj);
+    Ok((prevent_close, prevent_abort, prevent_cancel, signal))
+}
+
+fn bool_field(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, name: &str) -> bool {
+    let key = v8::String::new(scope, name).unwrap();
+    let v = obj.get(scope, key.into()).unwrap_or_else(|| v8::undefined(scope).into());
+    v.boolean_value(scope)
+}
+
+fn signal_field<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<v8::Object>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let key = v8::String::new(scope, "signal").unwrap();
+    let v = obj.get(scope, key.into()).unwrap_or_else(|| v8::undefined(scope).into());
+    if v.is_undefined() || v.is_null() {
+        return None;
+    }
+    v8::Local::<v8::Object>::try_from(v).ok()
 }
 
 // ---------------------------------------------------------------------------

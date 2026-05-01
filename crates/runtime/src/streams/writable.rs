@@ -221,12 +221,29 @@ fn build_stream_wrapper<'s>(
     );
     std::mem::forget(weak);
 
-    let class_fn = tmpl.get_function(scope).unwrap();
-    let proto_key = v8::String::new(scope, "prototype").unwrap();
-    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
+    // Prefer `globalThis.WritableStream.prototype` so internally-built
+    // wrappers share JS class identity. Fall back to the just-built
+    // template when install_native_writable_stream hasn't run yet.
+    let proto_v = global_class_prototype_ws(scope, "WritableStream").unwrap_or_else(|| {
+        let class_fn = tmpl.get_function(scope).unwrap();
+        let proto_key = v8::String::new(scope, "prototype").unwrap();
+        class_fn.get(scope, proto_key.into()).unwrap()
+    });
     stream_obj.set_prototype(scope, proto_v);
 
     stream_obj
+}
+
+fn global_class_prototype_ws<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    name: &str,
+) -> Option<v8::Local<'s, v8::Value>> {
+    let global = scope.get_current_context().global(scope);
+    let key = v8::String::new(scope, name)?;
+    let class_v = global.get(scope, key.into())?;
+    let class_obj = v8::Local::<v8::Object>::try_from(class_v).ok()?;
+    let proto_key = v8::String::new(scope, "prototype")?;
+    class_obj.get(scope, proto_key.into())
 }
 
 // ---------------------------------------------------------------------------

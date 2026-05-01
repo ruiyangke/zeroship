@@ -37,6 +37,7 @@ pub use legacy_bridge::{
 // Native classes & primitives — installed unconditionally per D-19.
 pub mod algorithms;
 pub mod budget;
+pub mod pipe;
 pub mod promise_resolve;
 pub mod queue;
 pub mod readable;
@@ -44,12 +45,14 @@ pub mod readable_default_controller;
 pub mod readable_default_reader;
 pub mod slots;
 pub mod strategies;
+pub mod tee;
 pub mod transform;
 pub mod transform_controller;
 pub mod writable;
 pub mod writable_controller;
 pub mod writable_writer;
 
+pub use pipe::{pipe_native_internal, PipeOptions};
 pub use readable::{
     from_native_source, NativeReadableController, NativeSource,
 };

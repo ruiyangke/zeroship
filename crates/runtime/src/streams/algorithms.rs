@@ -906,6 +906,45 @@ pub fn writable_stream_close<'s>(
 fn _unused_ws_state(_s: &WSStreamState) {}
 
 // ===========================================================================
+// Pipe + Tee — re-exports of the cross-class algorithms (§3.5)
+// ===========================================================================
+
+/// `ReadableStreamPipeTo(source, dest, preventClose, preventAbort,
+/// preventCancel, signal)` — spec §3.5.1. Re-exported here for the
+/// "abstract operation lives at top-level" naming convention (D-20).
+/// The implementation lives in `crate::streams::pipe`.
+pub fn readable_stream_pipe_to<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    source: v8::Local<v8::Object>,
+    dest: v8::Local<v8::Object>,
+    prevent_close: bool,
+    prevent_abort: bool,
+    prevent_cancel: bool,
+    signal: Option<v8::Local<v8::Object>>,
+) -> v8::Local<'s, v8::Promise> {
+    crate::streams::pipe::readable_stream_pipe_to(
+        scope,
+        source,
+        dest,
+        prevent_close,
+        prevent_abort,
+        prevent_cancel,
+        signal,
+    )
+}
+
+/// `ReadableStreamTee(stream, cloneForBranch2)` — spec §3.5.2. Public
+/// `tee()` always passes `cloneForBranch2 = false` (the default-tee
+/// path). The byte-tee path (§3.5.3) lands with BYOB byte streams.
+pub fn readable_stream_tee<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    stream: v8::Local<v8::Object>,
+    clone_for_branch2: bool,
+) -> Result<[v8::Local<'s, v8::Object>; 2], String> {
+    crate::streams::tee::readable_stream_default_tee(scope, stream, clone_for_branch2)
+}
+
+// ===========================================================================
 // TransformStream cross-class abstract operations (§5.4)
 // ===========================================================================
 //
