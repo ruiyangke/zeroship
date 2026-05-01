@@ -4817,3 +4817,54 @@ function streamBrandCheckException(name) {
     }
   }
 })();
+
+// =============================================================================
+// TextEncoderStream / TextDecoderStream
+// =============================================================================
+//
+// WHATWG transform streams wrapping TextEncoder / TextDecoder. The AI
+// SDK's `toUIMessageStreamResponse()` ends with
+// `.pipeThrough(new TextEncoderStream())`, so they need to be present
+// as TransformStream-shaped globals. Spec:
+//   https://encoding.spec.whatwg.org/#interface-textencoderstream
+//
+// Loaded from STREAMS_POLYFILL_JS so TransformStream is already defined
+// by the time we reference it (FETCH_JS comes earlier in the pipeline
+// and would see TransformStream still undefined).
+
+(function () {
+  if (typeof globalThis.TextEncoderStream === "undefined" &&
+      typeof globalThis.TransformStream !== "undefined") {
+    globalThis.TextEncoderStream = function TextEncoderStream() {
+      var enc = new TextEncoder();
+      var ts = new TransformStream({
+        transform: function (chunk, controller) {
+          controller.enqueue(enc.encode(String(chunk)));
+        },
+      });
+      this.readable = ts.readable;
+      this.writable = ts.writable;
+    };
+    Object.defineProperty(globalThis.TextEncoderStream.prototype, "encoding", {
+      get: function () { return "utf-8"; },
+    });
+  }
+
+  if (typeof globalThis.TextDecoderStream === "undefined" &&
+      typeof globalThis.TransformStream !== "undefined") {
+    globalThis.TextDecoderStream = function TextDecoderStream(label, options) {
+      var dec = new TextDecoder(label, options);
+      var ts = new TransformStream({
+        transform: function (chunk, controller) {
+          var s = dec.decode(chunk);
+          if (s) controller.enqueue(s);
+        },
+      });
+      this.readable = ts.readable;
+      this.writable = ts.writable;
+    };
+    Object.defineProperty(globalThis.TextDecoderStream.prototype, "encoding", {
+      get: function () { return "utf-8"; },
+    });
+  }
+})();

@@ -396,8 +396,12 @@ export function devServerPlugin(
       //
       // Returning a function from configureServer registers it as pre-middleware,
       // so it runs BEFORE Vite's built-in middleware (including the SPA fallback).
-      // This ensures /rpc, /_rpc, and /api/* are proxied to the runtime instead
-      // of being caught by Vite's index.html fallback.
+      // This ensures the runtime's RPC + API paths are proxied to it rather
+      // than being caught by Vite's index.html fallback. Forwarded path
+      // prefixes:
+      //   - /_zs/v1/<id>   ← spec wire (production + dev parity)
+      //   - /api/*         ← raw HTTP routes the user app exposes
+      //   - /rpc, /_rpc    ← legacy wires kept for in-flight migrations
       return () => {
         server.middlewares.use(
           (
@@ -407,6 +411,7 @@ export function devServerPlugin(
           ) => {
             const url = req.url ?? "";
             if (
+              !url.startsWith("/_zs/v1/") &&
               !url.startsWith("/_rpc") &&
               !url.startsWith("/rpc") &&
               !url.startsWith("/api/")
@@ -414,8 +419,9 @@ export function devServerPlugin(
               return next();
             }
 
-            // Forward path as-is — the bootstrap's onRequest handles both
-            // /rpc and /_rpc dispatch.
+            // Forward path as-is — the dev-bootstrap's `default.fetch`
+            // dispatches /_zs/v1/<id> through `default.rpc`, mirroring
+            // production.
             const proxyReq = http.request(
               `http://localhost:${devPort}${url}`,
               { method: req.method, headers: req.headers },

@@ -1658,6 +1658,17 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
 
         let process_key = v8::String::new(scope, "process").unwrap();
         global.set(scope, process_key.into(), process.into());
+
+        // unenv's `process` polyfill (loaded when a bundle imports
+        // `node:process` or anything depending on it) replaces our
+        // `process.env` with a Proxy that reads from
+        // `globalThis.__env__`. Mirror our env onto `__env__` so the
+        // polyfill's reads see the same vars as a direct
+        // `process.env.X` lookup. AI SDK's `loadAPIKey` is one consumer
+        // — without this, `OPENAI_API_KEY` reads as undefined inside
+        // the bundle even though we set process.env.
+        let env_alias_key = v8::String::new(scope, "__env__").unwrap();
+        global.set(scope, env_alias_key.into(), env_obj.into());
     }
 
 }

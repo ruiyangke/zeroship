@@ -448,6 +448,46 @@
       this._bodyBytes = null;
       this._bodyUsed = false;
       this._isStreamBody = true;
+    } else if (
+      // Polyfill ReadableStream — typically the result of
+      // `someStream.pipeThrough(transform)` since our ReadableStream's
+      // pipeTo/pipeThrough delegate to the web-streams-polyfill class.
+      // The AI SDK's `toUIMessageStreamResponse()` ends with
+      // `.pipeThrough(new TextEncoderStream())`, so its body is one of
+      // these. Bridge it through OUR ReadableStream so the kernel's
+      // stream forwarder (which reads `body._id`) sees byte chunks.
+      //
+      // Pumping happens in `start()` (not `pull()`): the kernel's HTTP
+      // forwarder doesn't read from our ReadableStream — it watches the
+      // native `__streams` slot for byte chunks pushed via
+      // `controller.enqueue(bytes)`. With `pull()`, the polyfill reader
+      // would never be consumed because nothing calls `read()` on the
+      // bridge. `start()` kicks off a self-driving loop instead.
+      typeof globalThis.__zsPolyfillReadableStream !== "undefined" &&
+      body instanceof globalThis.__zsPolyfillReadableStream
+    ) {
+      var polyfillReader = body.getReader();
+      var bridged = new ReadableStream({
+        start: function (controller) {
+          (function pump() {
+            polyfillReader.read().then(function (r) {
+              if (r.done) { controller.close(); return; }
+              controller.enqueue(r.value);
+              pump();
+            }, function (e) {
+              controller.error(e);
+            });
+          })();
+        },
+        cancel: function (reason) {
+          return polyfillReader.cancel(reason);
+        },
+      });
+      this.body = bridged;
+      this._bodyText = null;
+      this._bodyBytes = null;
+      this._bodyUsed = false;
+      this._isStreamBody = true;
     } else {
       this._isStreamBody = false;
       initBody(this, body);

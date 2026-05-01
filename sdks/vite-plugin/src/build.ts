@@ -77,6 +77,17 @@ export function buildSsrInlineConfig(opts: {
       noExternal: true,
       target: "webworker",
     },
+    // Preserve `process.env.X` and `process.env` references at runtime
+    // — the zeroship runtime injects a real `process.env` (populated
+    // from `worker_env` and the app's exposed-secrets list). Without
+    // these defines, the `target: "webworker"` SSR build statically
+    // rewrites `process.env` to `{}`, so libraries like `@ai-sdk/openai`
+    // that read `process.env.OPENAI_API_KEY` at runtime see undefined
+    // even when the var is set on the host.
+    define: {
+      "process.env": "process.env",
+      "process.env.NODE_ENV": '"production"',
+    },
     build: {
       // `true` (instead of a path string) tells Vite "this is an SSR
       // build" without specifying the entry — entry comes from
