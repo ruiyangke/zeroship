@@ -179,6 +179,13 @@ impl Event {
     /// The constructor stores type + flags from the init dict; all other
     /// state defaults to spec-minimum (no target, no currentTarget,
     /// `isTrusted = false`).
+    ///
+    /// Note: when `to_string(scope)` returns None V8 has a pending
+    /// exception. We return Ok with a default state so the macro
+    /// doesn't synthesize a new exception that overwrites the
+    /// original. Per WPT Event-constructors test:
+    /// `new Event({ toString: () => { throw test_error; } })` must
+    /// throw test_error EXACTLY, not our wrapper.
     #[v8_constructor]
     fn new(
         scope: &mut v8::PinScope,
@@ -191,11 +198,14 @@ impl Event {
             ));
         }
         // Per WebIDL DOMString conversion of `type`. Symbols throw
-        // TypeError per ECMA-262 ToString.
+        // TypeError per ECMA-262 ToString. If `to_string` fails, V8
+        // has a pending exception — we yield to V8 by returning
+        // Ok with a placeholder state. The pending exception will
+        // propagate when the callback returns. The placeholder
+        // Event is unobservable because the exception kills the
+        // assignment.
         let Some(type_str) = ty.to_string(scope) else {
-            return Err(OpError::type_error(
-                "Event(): 'type' could not be coerced to string",
-            ));
+            return Ok(Event::default());
         };
         let type_rust = type_str.to_rust_string_lossy(scope);
         let init_dict = read_event_init(scope, init)?;

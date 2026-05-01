@@ -86,6 +86,14 @@ pub struct AbortSignal {
     /// "Dependent" boolean flag (DOM §3.3.4) — true iff this signal
     /// was returned by AbortSignal.any().
     pub is_dependent: Cell<bool>,
+    /// `onabort` event-handler IDL attribute. Per WHATWG HTML §3.2.7,
+    /// EventHandler attributes are "event handler IDL attributes":
+    /// setting one (a) replaces any prior handler-via-this-attribute,
+    /// (b) installs an addEventListener-equivalent invocation. We
+    /// implement the simpler model: `onabort = fn` registers a
+    /// single internal listener that calls `fn` when "abort" fires;
+    /// reading `onabort` returns the stored function (or null).
+    pub onabort: RefCell<Option<v8::Global<v8::Function>>>,
     /// AbortSignal.timeout: the timer ID we can cancel on GC, plus
     /// the strong-self-ref for GC retention (CRITICAL-9). The Rc is
     /// held by SharedState's `timeout_pinned` map; the ID lets us
@@ -102,6 +110,7 @@ impl Default for AbortSignal {
             source_signals: RefCell::new(Vec::new()),
             dependent_signals: RefCell::new(Vec::new()),
             is_dependent: Cell::new(false),
+            onabort: RefCell::new(None),
             timer_id: Cell::new(None),
         }
     }
@@ -755,6 +764,25 @@ pub fn install_global<'s>(
     install_static(scope, class_fn, "timeout", timeout_static_callback);
     install_static(scope, class_fn, "any", any_static_callback);
 
+    // `onabort` is a WebIDL `attribute EventHandler` — an accessor
+    // pair on the prototype. The `#[v8_class]` macro doesn't support
+    // same-name getter+setter pairs (set_accessor_property calls
+    // each separately, which V8 rejects), so we install the pair
+    // via `Object.defineProperty` on the resolved prototype.
+    let proto_key = v8::String::new(scope, "prototype").unwrap();
+    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
+    let proto: v8::Local<v8::Object> = proto_v.try_into().unwrap();
+
+    let onabort_key = v8::String::new(scope, "onabort").unwrap();
+    let getter_tmpl = v8::FunctionTemplate::new(scope, onabort_getter_callback);
+    let setter_tmpl = v8::FunctionTemplate::new(scope, onabort_setter_callback);
+    let getter_fn = getter_tmpl.get_function(scope).unwrap();
+    let setter_fn = setter_tmpl.get_function(scope).unwrap();
+    let mut desc = v8::PropertyDescriptor::new_from_get_set(getter_fn.into(), setter_fn.into());
+    desc.set_configurable(true);
+    desc.set_enumerable(true);
+    proto.define_property(scope, onabort_key.into(), &desc);
+
     let key = v8::String::new(scope, "AbortSignal").unwrap();
     global.set(scope, key.into(), class_fn.into());
 }
@@ -769,6 +797,104 @@ fn install_static<'s>(
     let func = tmpl.get_function(scope).unwrap();
     let key = v8::String::new(scope, name).unwrap();
     ctor_fn.set(scope, key.into(), func.into());
+}
+
+// ---------------------------------------------------------------------------
+// onabort accessor pair
+// ---------------------------------------------------------------------------
+
+fn onabort_getter_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let this = args.this();
+    let Some(signal) = signal_from_obj(scope, this) else {
+        // Per WebIDL "the brand check", reading onabort on a non-
+        // AbortSignal should throw a TypeError. We follow.
+        let m = v8::String::new(scope, "Illegal invocation").unwrap();
+        let exc = v8::Exception::type_error(scope, m);
+        scope.throw_exception(exc);
+        return;
+    };
+    match signal.onabort.borrow().as_ref() {
+        Some(fn_global) => rv.set(v8::Local::new(scope, fn_global.clone()).into()),
+        None => rv.set(v8::null(scope).into()),
+    }
+}
+
+fn onabort_setter_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let this = args.this();
+    let Some(signal) = signal_from_obj(scope, this) else {
+        // Brand check.
+        let m = v8::String::new(scope, "Illegal invocation").unwrap();
+        let exc = v8::Exception::type_error(scope, m);
+        scope.throw_exception(exc);
+        return;
+    };
+
+    let value = args.get(0);
+
+    // First, remove the previous onabort listener (if any) from the
+    // EventTarget's listener list. We track the listener by holding
+    // the previous v8::Global in `signal.onabort`.
+    let prev = signal.onabort.borrow_mut().take();
+    if let Some(prev_global) = &prev {
+        // Remove from the listener list.
+        let listeners_rc = match super::event_target::listeners_of(scope, this) {
+            Some(l) => l,
+            None => super::event_target::attach_listeners(scope, this),
+        };
+        let mut map = listeners_rc.borrow_mut();
+        if let Some(list) = map.get_mut("abort") {
+            list.retain(|l| !(l.callback == *prev_global && !l.capture));
+        }
+    }
+
+    // Per WHATWG HTML §3.2.7 "event handler IDL attribute" setter:
+    // if the new value is callable, install it. If null/undefined,
+    // leave nothing (already done by the take above). If a non-
+    // callable value (object, etc.), the setter is a no-op (per
+    // HTML's "process the activation behavior" steps that ignore
+    // non-callable assignments).
+    let Ok(fn_local) = v8::Local::<v8::Function>::try_from(value) else {
+        return;
+    };
+
+    // Per spec, if the signal has already aborted, setting onabort
+    // doesn't fire it. Same as addEventListener("abort", fn) on an
+    // already-aborted signal — we go through the normal addListener
+    // path which short-circuits in DOM §2.7 step 3 (signal aborted
+    // → return).
+    let cb_global = v8::Global::new(scope, fn_local);
+    let listeners_rc = match super::event_target::listeners_of(scope, this) {
+        Some(l) => l,
+        None => super::event_target::attach_listeners(scope, this),
+    };
+
+    // If the signal is already aborted, addEventListener-equivalent
+    // is a no-op per DOM §2.7. We DO still store the function in
+    // `onabort` so the getter returns it (per HTML's "the function's
+    // value" rule).
+    if !signal.aborted.get() {
+        listeners_rc
+            .borrow_mut()
+            .entry("abort".to_string())
+            .or_default()
+            .push(super::event_target::RegisteredListener {
+                callback: cb_global.clone(),
+                capture: false,
+                once: false,
+                passive: false,
+                removed: false,
+            });
+    }
+
+    *signal.onabort.borrow_mut() = Some(cb_global);
 }
 
 // ---------------------------------------------------------------------------

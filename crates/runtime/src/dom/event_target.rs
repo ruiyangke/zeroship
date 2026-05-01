@@ -239,6 +239,8 @@ impl Default for ListenerOptions {
     }
 }
 
+/// Per DOM §2.7 "flatten more": addEventListener flattens `capture`,
+/// `once`, `passive`, AND `signal` from the options dict.
 fn read_listener_options(
     scope: &mut v8::PinScope,
     val: v8::Local<v8::Value>,
@@ -268,8 +270,14 @@ fn read_listener_options(
     let signal_v = obj
         .get(scope, signal_key.into())
         .ok_or_else(|| OpError::error("options.signal access threw"))?;
-    let signal = if signal_v.is_undefined() || signal_v.is_null() {
+    let signal = if signal_v.is_undefined() {
         None
+    } else if signal_v.is_null() {
+        // Per WPT AddEventListenerOptions-signal: `signal: null` is a
+        // TypeError.
+        return Err(OpError::type_error(
+            "addEventListener: 'signal' may not be null",
+        ));
     } else if let Ok(signal_obj) = v8::Local::<v8::Object>::try_from(signal_v) {
         Some(v8::Global::new(scope, signal_obj))
     } else {
@@ -284,6 +292,29 @@ fn read_listener_options(
         passive,
         signal,
     })
+}
+
+/// Per DOM §2.7 "flatten" (NOT "flatten more"): removeEventListener
+/// only reads `capture` from the options dict. WPT's
+/// AddEventListenerOptions-passive specifically asserts that the
+/// `passive` getter is NOT invoked by removeEventListener (since
+/// passive isn't a removal-key part).
+fn read_remove_options(
+    scope: &mut v8::PinScope,
+    val: v8::Local<v8::Value>,
+) -> Result<bool, OpError> {
+    if val.is_undefined() || val.is_null() {
+        return Ok(false);
+    }
+    if val.is_boolean() {
+        return Ok(val.boolean_value(scope));
+    }
+    let Ok(obj) = v8::Local::<v8::Object>::try_from(val) else {
+        return Err(OpError::type_error(
+            "removeEventListener: options must be an object or boolean",
+        ));
+    };
+    read_bool_prop(scope, obj, "capture")
 }
 
 fn read_bool_prop(
@@ -460,6 +491,23 @@ pub fn dispatch_event(
             continue;
         }
 
+        // Per DOM §2.7 invoke step 6: if `once`, remove the listener
+        // BEFORE invoking the callback. This way a re-entrant
+        // dispatchEvent from within the callback sees the listener
+        // as already removed (matches WPT's "once nested" test).
+        if once {
+            let mut map = listeners_rc.borrow_mut();
+            if let Some(list) = map.get_mut(&event_type) {
+                for l in list.iter_mut() {
+                    if !l.removed && l.callback == cb_global && l.capture == capture {
+                        l.removed = true;
+                        break;
+                    }
+                }
+                list.retain(|l| !l.removed);
+            }
+        }
+
         let prior_passive = ev.in_passive_listener.get();
         if passive {
             ev.in_passive_listener.set(true);
@@ -478,20 +526,6 @@ pub fn dispatch_event(
         }
 
         ev.in_passive_listener.set(prior_passive);
-
-        // Once: mark removed in the live list; eagerly compact.
-        if once {
-            let mut map = listeners_rc.borrow_mut();
-            if let Some(list) = map.get_mut(&event_type) {
-                for l in list.iter_mut() {
-                    if !l.removed && l.callback == cb_global && l.capture == capture {
-                        l.removed = true;
-                        break;
-                    }
-                }
-                list.retain(|l| !l.removed);
-            }
-        }
 
         if ev.stop_immediate_propagation.get() {
             break;
@@ -559,6 +593,18 @@ fn add_event_listener_callback(
     };
     let type_rust = type_str.to_rust_string_lossy(scope);
 
+    // Per DOM §2.7 the options dictionary is flattened FIRST (which
+    // invokes its getters — observable for feature-detection tests
+    // like AddEventListenerOptions-passive). The null-callback
+    // short-circuit comes AFTER.
+    let opts = match read_listener_options(scope, options) {
+        Ok(o) => o,
+        Err(e) => {
+            throw_op_error(scope, &e);
+            return;
+        }
+    };
+
     if callback.is_null() || callback.is_undefined() {
         return;
     }
@@ -568,14 +614,6 @@ fn add_event_listener_callback(
             "addEventListener: callback must be a function or null",
         );
         return;
-    };
-
-    let opts = match read_listener_options(scope, options) {
-        Ok(o) => o,
-        Err(e) => {
-            throw_op_error(scope, &e);
-            return;
-        }
     };
 
     if let Some(signal_global) = &opts.signal {
@@ -660,6 +698,20 @@ fn remove_event_listener_callback(
     };
     let type_rust = type_str.to_rust_string_lossy(scope);
 
+    // Per DOM §2.7 the "flatten" used by removeEventListener only
+    // reads `capture`. Reading happens BEFORE the callback null check
+    // so that side-effecting getters fire (matches WPT's
+    // AddEventListenerOptions-passive `removeEventListener should
+    // not support passive` test which checks the `passive` getter
+    // is NOT invoked — i.e. only `capture` is read).
+    let capture = match read_remove_options(scope, options) {
+        Ok(c) => c,
+        Err(e) => {
+            throw_op_error(scope, &e);
+            return;
+        }
+    };
+
     if callback.is_null() || callback.is_undefined() {
         return;
     }
@@ -667,18 +719,10 @@ fn remove_event_listener_callback(
         return;
     };
 
-    let opts = match read_listener_options(scope, options) {
-        Ok(o) => o,
-        Err(e) => {
-            throw_op_error(scope, &e);
-            return;
-        }
-    };
-
     let cb_global = v8::Global::new(scope, cb_fn);
     let mut map = listeners_rc.borrow_mut();
     if let Some(list) = map.get_mut(&type_rust) {
-        list.retain(|l| !(l.capture == opts.capture && l.callback == cb_global));
+        list.retain(|l| !(l.capture == capture && l.callback == cb_global));
     }
 }
 
