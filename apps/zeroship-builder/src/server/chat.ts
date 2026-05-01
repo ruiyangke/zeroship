@@ -6,8 +6,9 @@
 //
 // Wire (per AI SDK v6 spec, identical to examples/ai-chat):
 //   POST /_zs/v1/chat
-//     body:    { json: { messages: UIMessage[] } }      ← zeroship envelope
-//     response: text/event-stream                       ← UI Message Stream
+//     fresh body:   { json: { messages: UIMessage[], id: string } }
+//     resume body:  { json: { resume: { token, value }, id: string } }
+//     response:     text/event-stream                  ← UI Message Stream
 //                with header `x-vercel-ai-ui-message-stream: v1`
 //                and SSE frames carrying { type, ... } JSON objects.
 //
@@ -29,7 +30,16 @@ import { createUIMessageStreamResponse, type UIMessage } from "ai";
 // runtime change exposes `request.signal` on the RPC fast path, this
 // can be simplified to just plumb that signal through — no body
 // wrapping needed.
-export async function chat(input: { messages: UIMessage[]; id?: string }): Promise<Response> {
+export async function chat(
+  input: {
+    messages?: UIMessage[];
+    id?: string;
+    // G3: resume payload from a tool that halted via `interruptOn`.
+    // When present, the translator skips message replay and feeds the
+    // value into a `Command({resume})` against the same thread.
+    resume?: { token: string; value: unknown };
+  },
+): Promise<Response> {
   const { buildTranslatedStream } = await import("./_translator.js");
 
   const ac = new AbortController();

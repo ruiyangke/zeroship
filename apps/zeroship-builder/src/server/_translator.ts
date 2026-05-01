@@ -15,20 +15,59 @@
 // `node_modules/ai/dist/index.d.ts` at the time of writing), so this
 // translator is hand-rolled. If a future v6 release adds an official
 // adapter, prefer it over this module.
+//
+// G3 — Resume protocol (post-`interruptOn` halt). Wire shapes:
+//
+//   Normal turn body:
+//     { json: { messages: UIMessage[], id: string } }
+//
+//   Resume turn body (after a tool with `interruptOn` halted the run):
+//     { json: { resume: { token: string, value: unknown }, id: string } }
+//
+// On a resume request the server skips message conversion and feeds
+// `new Command({ resume: <value> })` into the same Pregel graph using
+// the same thread_id. The interrupted run picks up where it left off
+// (the deepagents middleware emits new chunks; the translator forwards
+// them as additional UI message parts on the same assistant turn).
+// `token` is opaque on the wire — Phase B.1 will mint it inside the
+// `ask_survey` interrupt handler so the client can echo it back, but
+// the server only needs `id` (= thread_id) to find the right thread to
+// resume.
 
 import { createUIMessageStream, type UIMessage } from "ai";
 
 export interface BuilderTurnInput {
-  messages: UIMessage[];
+  messages?: UIMessage[];
   /**
    * Conversation/session id from `useChat`. Becomes the LangGraph
    * `thread_id` so the checkpointer scopes middleware-managed state
    * (TodoListMiddleware todos, FilesystemMiddleware fs,
    * SummarizationMiddleware history) to this conversation. Without it
    * every turn gets a fresh thread and Builder forgets its work.
+   *
+   * Also doubles as the thread id the resume protocol targets — the
+   * server uses `id` to find which interrupted run to resume.
    */
   id?: string;
+  /**
+   * Resume payload — present iff the client is answering an
+   * `interruptOn`-emitted prompt (e.g. SurveyCard submit). When
+   * present, `messages` is ignored: the server passes
+   * `new Command({ resume: value })` into the same thread instead of
+   * replaying the message history.
+   */
+  resume?: { token: string; value: unknown };
 }
+
+/**
+ * Mode passed to `buildTranslatedStream`:
+ *  - "fresh"  → input has `messages`; we replay history into a new
+ *               (or continued) run on `thread_id`.
+ *  - "resume" → input has `resume.value`; we issue `Command({resume})`
+ *               into the existing thread, which restarts the
+ *               interrupted node from where it halted.
+ */
+export type BuilderTurnMode = "fresh" | "resume";
 
 // G1: process-local in-memory checkpointer. deepagents' middleware
 // state (todos, virtual fs, summarised history) lives outside the
@@ -75,6 +114,7 @@ export async function buildTranslatedStream(
   const { createDeepAgent } = await import("deepagents");
   const { ChatOpenAI } = await import("@langchain/openai");
   const { HumanMessage, AIMessage } = await import("@langchain/core/messages");
+  const { Command } = await import("@langchain/langgraph");
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
@@ -109,26 +149,44 @@ export async function buildTranslatedStream(
   });
 
   const threadId = input.id ?? DEFAULT_THREAD_ID;
+  const mode: BuilderTurnMode = input.resume ? "resume" : "fresh";
 
-  const langchainMessages = input.messages.map((m) => {
-    const text = (m.parts ?? [])
-      .filter((p: any) => p?.type === "text")
-      .map((p: any) => p.text ?? "")
-      .join("");
-    if (m.role === "user") return new HumanMessage(text);
-    if (m.role === "assistant") return new AIMessage(text);
-    // Skip unsupported roles (system, tool) for Phase A — the system prompt
-    // is set on the agent itself, and tool messages aren't in scope yet.
-    return new HumanMessage(text);
-  });
+  // Build the streamEvents input depending on mode. In "fresh" mode we
+  // feed the converted message history; in "resume" mode we feed a
+  // Command(resume=...) so the Pregel runtime continues the
+  // interrupted node with the user's answer. Both modes hit the same
+  // agent and same thread_id, so the checkpointer ties them together.
+  let streamInput: { messages: unknown[] } | InstanceType<typeof Command>;
+  if (mode === "resume") {
+    // Defensive: Phase B.0 has nothing emitting interruptOn yet, so
+    // hitting this branch with no live thread will throw inside
+    // streamEvents. We catch it inside the SSE writer so the client
+    // sees a structured error rather than a connection drop.
+    streamInput = new Command({ resume: input.resume!.value });
+  } else {
+    const langchainMessages = (input.messages ?? []).map((m) => {
+      const text = (m.parts ?? [])
+        .filter((p: any) => p?.type === "text")
+        .map((p: any) => p.text ?? "")
+        .join("");
+      if (m.role === "user") return new HumanMessage(text);
+      if (m.role === "assistant") return new AIMessage(text);
+      // Skip unsupported roles (system, tool) for Phase A — the system prompt
+      // is set on the agent itself, and tool messages aren't in scope yet.
+      return new HumanMessage(text);
+    });
+    streamInput = { messages: langchainMessages };
+  }
 
   return createUIMessageStream({
     async execute({ writer }) {
       const textId = crypto.randomUUID();
       let textStarted = false;
 
+      // streamEvents accepts InputType | Command — both modes use the
+      // same v2 protocol, signal plumbing, and thread_id.
       const events = agent.streamEvents(
-        { messages: langchainMessages },
+        streamInput as any,
         {
           version: "v2" as const,
           signal,
