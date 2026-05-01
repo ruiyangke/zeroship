@@ -1,0 +1,27 @@
+{
+  "name": "ai-chat",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "AI SDK v5 chat — useChat() hook on the client, streaming RPC procedure on the server. The procedure emits the AI-SDK UI Message Stream Protocol (SSE) so useChat parses it natively.",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@ai-sdk/react": "^2.0.0",
+    "@vitejs/plugin-react": "^6.0.1",
+    "@zeroship/server": "file:../../packages/zeroship-server",
+    "@zeroship/vite-plugin": "file:../../sdks/vite-plugin",
+    "ai": "^5.0.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "typescript": "~5.9.3",
+    "vite": "^8.0.0"
+  }
+}
