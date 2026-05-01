@@ -771,12 +771,36 @@ impl NomadCHBackend {
         //    same tap device the still-alive wrapper script is using.
         //    Leaking the index now and reclaiming it on next-boot
         //    orphan-prune is the safer trade-off.
+        //
+        //    FM-A belt-and-braces: even when Nomad reports the job
+        //    fully gone (alloc terminal + 404 on /v1/job/<id>), the
+        //    host-side process tree (CH + 3× virtiofsd, the bash
+        //    wrapper, the tap binding, virtiofsd unmounts) lags
+        //    Nomad's view by ~0.5-2 s. A fresh create() reusing
+        //    this vm_index immediately could race that residual
+        //    teardown for `tap=zsbx-nm-<idx>`. The 500 ms sleep
+        //    here is defense-in-depth — the primary FM-A fix is
+        //    the fingerprint check in wait_for_agent_livez above —
+        //    but it's cheap insurance for the operational tail
+        //    (network namespace teardown, virtiofsd unmounts).
+        //    500 ms keeps tail-latency visible to the user under
+        //    1 s; 2+ s would be too pessimistic for production.
         if job_confirmed_gone {
+            compio::time::sleep(Duration::from_millis(500)).await;
             self.vm_index_allocator
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .release(sandbox.vm_index);
+            eprintln!(
+                "[sandbox/nomad-ch] vm_index: release={} sandbox={sandbox_id}",
+                sandbox.vm_index,
+            );
         } else {
+            eprintln!(
+                "[sandbox/nomad-ch] vm_index: leak={} reason=wait_failed sandbox={sandbox_id} \
+                 job={}",
+                sandbox.vm_index, sandbox.job_id,
+            );
             eprintln!(
                 "[sandbox/nomad-ch] stop({}): wait_for_job_gone failed; \
                  leaking vm_index={} to avoid tap collision (orphan-prune \
