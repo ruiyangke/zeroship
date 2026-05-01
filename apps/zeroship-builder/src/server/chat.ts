@@ -1,50 +1,30 @@
-// Server entry — `chat` procedure that the AI SDK's `useChat` hook
-// talks to. The vite-plugin discovers this file and the synthetic SSR
-// entry exposes the export via `default.rpc("chat", input, ctx)`.
+"use server";
+// Builder chat — routed through deepagents (server-side agent runtime,
+// design §4.8 Foundation Decision #8) and translated to AI SDK v6 UI
+// Message Stream Protocol on the wire. The kernel forwards the Response's
+// SSE bytes verbatim to the v6 `useChat` client.
 //
-// Wire (per AI SDK v6 spec):
+// Wire (per AI SDK v6 spec, identical to examples/ai-chat):
 //   POST /_zs/v1/chat
 //     body:    { json: { messages: UIMessage[] } }      ← zeroship envelope
 //     response: text/event-stream                       ← UI Message Stream
 //                with header `x-vercel-ai-ui-message-stream: v1`
 //                and SSE frames carrying { type, ... } JSON objects.
 //
-// Plan 01.5 ships a TEXT-ONLY mock — we hand-construct a UI Message
-// Stream emitting a single text-start / text-delta* / text-end
-// sequence. Plan 02 replaces this body with the real Builder agent
-// (deepagents → translator) and adds custom data parts (survey, diff,
-// critic-round) on the same wire.
+// The deepagents/LangGraph dep tree is heavy (~MB of code paths). The
+// translator import is deferred to keep non-chat server functions in
+// the same module bundle from paying that weight (per design §4.8.5).
 
-import {
-  createUIMessageStream,
-  createUIMessageStreamResponse,
-  type UIMessage,
-} from "ai";
+import { createUIMessageStreamResponse, type UIMessage } from "ai";
 
 export async function chat(input: { messages: UIMessage[] }): Promise<Response> {
-  void input; // Plan 01.5 mock ignores the prompt — Plan 02 will read it.
-
-  const stream = createUIMessageStream({
-    async execute({ writer }) {
-      const id = crypto.randomUUID();
-      writer.write({ type: "text-start", id });
-
-      const reply =
-        "Got it — Plan 01.5 mock here. Plan 02 will wire the real Builder agent.";
-      for (const ch of reply) {
-        writer.write({ type: "text-delta", id, delta: ch });
-        await new Promise((r) => setTimeout(r, 18));
-      }
-
-      writer.write({ type: "text-end", id });
-    },
-  });
-
+  const { buildTranslatedStream } = await import("./_translator.js");
+  const stream = await buildTranslatedStream(input);
   return createUIMessageStreamResponse({ stream });
 }
 
-// Marked as `mutation` — the procedure has side-effects (a model call
-// in Plan 02) and returns a single Response that happens to stream.
-// The manifest emitter literalizes `.config` via the AST, so no
-// `as const`.
+// Marked as `mutation` — the procedure has side-effects (a model call)
+// and returns a single Response, even though that response happens to
+// stream. The manifest emitter literalizes `.config` via the AST, so
+// no `as const`.
 chat.config = { id: "chat", kind: "mutation" };
