@@ -326,10 +326,12 @@ impl NomadCHBackend {
         // RWO Ceph RBD — same-user double-attach would error there.
         // Keeping the same one-per-user invariant now means no
         // contract change later.)
+        // HashMap value is plain owned data; poison can't break
+        // invariants — recover.
         let existing: Vec<Uuid> = self
             .state
             .read()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .iter()
             .filter(|(_, s)| s.user_id == user_id)
             .map(|(id, _)| *id)
@@ -476,7 +478,10 @@ impl NomadCHBackend {
             agent_url: agent_url.clone(),
             signing_key,
         };
-        self.state.write().unwrap().insert(sandbox_id, sandbox);
+        self.state
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(sandbox_id, sandbox);
 
         let now = unix_now();
         Ok(SandboxInfo {
@@ -491,7 +496,12 @@ impl NomadCHBackend {
     }
 
     pub async fn stop(&self, sandbox_id: Uuid) -> Result<(), String> {
-        let sandbox = match self.state.write().unwrap().remove(&sandbox_id) {
+        let sandbox = match self
+            .state
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&sandbox_id)
+        {
             Some(s) => s,
             None => return Ok(()), // idempotent
         };
@@ -661,7 +671,7 @@ impl NomadCHBackend {
     }
 
     fn sandbox_keys(&self, id: Uuid) -> Result<(SigningKey, String), String> {
-        let guard = self.state.read().unwrap();
+        let guard = self.state.read().unwrap_or_else(|p| p.into_inner());
         let s = guard
             .get(&id)
             .ok_or_else(|| "sandbox not found in nomad-ch backend".to_string())?;
