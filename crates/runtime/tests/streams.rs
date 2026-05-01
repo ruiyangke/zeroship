@@ -985,3 +985,399 @@ fn writable_stream_undefined_chunk_passes_through_strategy() {
     );
     assert_eq!(r, "undef");
 }
+
+// ===========================================================================
+// Native TransformStream class — spec §5.2 + §5.3 + §5.4
+// ---------------------------------------------------------------------------
+// These tests bypass the dispatch wrapper and install native TransformStream
+// + DefaultController on a fresh isolate. Verifies the IDL surface and the
+// spec algorithm compositions (§III.8) line by line.
+// ===========================================================================
+
+#[test]
+fn transform_stream_construct_default_no_args() {
+    // Spec §5.2.4: `new TransformStream()` with no args is valid; readable
+    // and writable getters return ReadableStream / WritableStream instances.
+    let r = run_with_streams(
+        r#"
+        const ts = new TransformStream();
+        ({
+          rType: ts.readable[Symbol.toStringTag],
+          wType: ts.writable[Symbol.toStringTag],
+        });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let r_key = v8::String::new(scope, "rType").unwrap();
+            let w_key = v8::String::new(scope, "wType").unwrap();
+            let r_str = obj.get(scope, r_key.into()).unwrap().to_rust_string_lossy(scope);
+            let w_str = obj.get(scope, w_key.into()).unwrap().to_rust_string_lossy(scope);
+            (r_str, w_str)
+        },
+    );
+    assert_eq!(r.0, "ReadableStream");
+    assert_eq!(r.1, "WritableStream");
+}
+
+#[test]
+fn transform_stream_identity_transform() {
+    // Per spec: an empty transformer is the identity transform — chunks
+    // passed in via writable come out via readable unchanged.
+    let r = run_with_streams(
+        r#"
+        const ts = new TransformStream();
+        const writer = ts.writable.getWriter();
+        const reader = ts.readable.getReader();
+        let outVal = "init";
+        writer.write("hello");
+        reader.read().then(r => { outVal = r.value; });
+        ({ get r() { return outVal; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let k = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, k.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "hello");
+}
+
+#[test]
+fn transform_stream_uppercaser_sync() {
+    // Spec example: a sync transform that uppercases.
+    let r = run_with_streams(
+        r#"
+        const ts = new TransformStream({
+          transform(chunk, controller) {
+            controller.enqueue(chunk.toUpperCase());
+          }
+        });
+        const writer = ts.writable.getWriter();
+        const reader = ts.readable.getReader();
+        let outVal = "init";
+        writer.write("hello");
+        reader.read().then(r => { outVal = r.value; });
+        ({ get r() { return outVal; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let k = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, k.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "HELLO");
+}
+
+#[test]
+fn transform_stream_doubler_emits_two_chunks_per_input() {
+    // Transform calls enqueue twice per input → two output chunks per input.
+    let r = run_with_streams(
+        r#"
+        const ts = new TransformStream({
+          transform(chunk, c) { c.enqueue(chunk); c.enqueue(chunk); }
+        });
+        const writer = ts.writable.getWriter();
+        const reader = ts.readable.getReader();
+        let r1 = "init", r2 = "init";
+        writer.write("x");
+        reader.read().then(r => { r1 = r.value; return reader.read(); }).then(r => { r2 = r.value; });
+        ({ get r1() { return r1; }, get r2() { return r2; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let r1 = obj.get(scope, v8::String::new(scope, "r1").unwrap().into()).unwrap().to_rust_string_lossy(scope);
+            let r2 = obj.get(scope, v8::String::new(scope, "r2").unwrap().into()).unwrap().to_rust_string_lossy(scope);
+            (r1, r2)
+        },
+    );
+    assert_eq!(r.0, "x");
+    assert_eq!(r.1, "x");
+}
+
+#[test]
+fn transform_stream_flush_runs_after_close() {
+    // Per spec: writer.close() invokes the transformer's flush(controller).
+    // flush enqueues a sentinel chunk; reader.read() should see it.
+    let r = run_with_streams(
+        r#"
+        const ts = new TransformStream({
+          transform(chunk, c) { c.enqueue(chunk); },
+          flush(c) { c.enqueue("flushed"); }
+        });
+        const w = ts.writable.getWriter();
+        const reader = ts.readable.getReader();
+        let chunks = [];
+        w.write("a");
+        w.close();
+        function pump() {
+          return reader.read().then(r => {
+            if (r.done) return;
+            chunks.push(r.value);
+            return pump();
+          });
+        }
+        pump();
+        ({ get r() { return chunks.join(","); } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let k = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, k.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "a,flushed");
+}
+
+#[test]
+fn transform_stream_controller_terminate_errors_writable() {
+    // controller.terminate() closes readable + errors writable side. Subsequent
+    // writes reject with TypeError.
+    let r = run_with_streams(
+        r#"
+        let savedC;
+        const ts = new TransformStream({
+          start(c) { savedC = c; }
+        });
+        const w = ts.writable.getWriter();
+        savedC.terminate();
+        let kind = "init";
+        w.write("x").catch(e => { kind = e.constructor.name; });
+        ({ get r() { return kind; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let k = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, k.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "TypeError");
+}
+
+#[test]
+fn transform_stream_controller_error_rejects_pending_read() {
+    // controller.error(e) errors both halves. Pending reader.read() rejects
+    // with the error.
+    let r = run_with_streams(
+        r#"
+        let savedC;
+        const ts = new TransformStream({ start(c) { savedC = c; } });
+        const reader = ts.readable.getReader();
+        let msg = "init";
+        reader.read().catch(e => { msg = e.message; });
+        savedC.error(new Error("boom"));
+        ({ get r() { return msg; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let k = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, k.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "boom");
+}
+
+#[test]
+fn transform_stream_readable_get_reader_with_writable_active() {
+    // Simultaneous use: the readable and writable halves are independent
+    // streams — locking one should NOT lock the other.
+    let r = run_with_streams(
+        r#"
+        const ts = new TransformStream();
+        const w = ts.writable.getWriter();
+        const reader = ts.readable.getReader();
+        ({ writableLocked: ts.writable.locked, readableLocked: ts.readable.locked });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let wl = obj.get(scope, v8::String::new(scope, "writableLocked").unwrap().into()).unwrap().boolean_value(scope);
+            let rl = obj.get(scope, v8::String::new(scope, "readableLocked").unwrap().into()).unwrap().boolean_value(scope);
+            (wl, rl)
+        },
+    );
+    assert!(r.0);
+    assert!(r.1);
+}
+
+#[test]
+fn transform_stream_writer_desired_size_initially_one() {
+    // Per spec: writableStrategy default HWM = 1; first write fills the queue
+    // so desiredSize drops to 0 after write().
+    let r = run_with_streams(
+        r#"
+        const ts = new TransformStream();
+        const w = ts.writable.getWriter();
+        w.desiredSize;
+        "#,
+        |val, scope| val.number_value(scope).unwrap(),
+    );
+    assert_eq!(r, 1.0);
+}
+
+#[test]
+fn transform_stream_throw_in_transform_errors_stream() {
+    // transformer.transform() throwing errors the TS; subsequent reads
+    // reject with the thrown error.
+    let r = run_with_streams(
+        r#"
+        const ts = new TransformStream({
+          transform() { throw new Error("nope"); }
+        });
+        const w = ts.writable.getWriter();
+        const reader = ts.readable.getReader();
+        let msg = "init";
+        reader.read().catch(e => { msg = e.message; });
+        w.write("x");
+        ({ get r() { return msg; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let k = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, k.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "nope");
+}
+
+#[test]
+fn transform_stream_throw_in_flush_errors_stream() {
+    // flush() that throws should error the readable — subsequent reads reject.
+    let r = run_with_streams(
+        r#"
+        const ts = new TransformStream({
+          flush() { throw new Error("flushfail"); }
+        });
+        const w = ts.writable.getWriter();
+        const reader = ts.readable.getReader();
+        let msg = "init";
+        reader.read().catch(e => { msg = e.message; });
+        w.close();
+        ({ get r() { return msg; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let k = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, k.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "flushfail");
+}
+
+#[test]
+fn transform_stream_cancel_calls_transformer_cancel() {
+    // readable.cancel() on the readable side should propagate to the
+    // transformer's cancel() callback.
+    let r = run_with_streams(
+        r#"
+        let cancelReason = "init";
+        const ts = new TransformStream({
+          cancel(reason) { cancelReason = reason; }
+        });
+        ts.readable.cancel("bye");
+        ({ get r() { return cancelReason; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let k = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, k.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "bye");
+}
+
+#[test]
+fn transform_stream_high_hwm_admits_n_writes_without_reads() {
+    // Per spec §5.4 + the WPT recording-streams test: with readableStrategy
+    // hwm=9, writing 10 chunks should run transform exactly 9 times before
+    // backpressure stops further writes.
+    let r = run_with_streams(
+        r#"
+        const events = [];
+        const ts = new TransformStream({
+          transform(chunk, c) {
+            events.push("t:"+chunk);
+            c.enqueue(chunk);
+          }
+        }, undefined, { highWaterMark: 9 });
+        const w = ts.writable.getWriter();
+        for (let i = 0; i < 10; ++i) w.write(i);
+        ({ get r() { return events.join(","); } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let k = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, k.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    // Exactly 9 transforms — the 10th waits for a read to pull the queue.
+    assert_eq!(r, "t:0,t:1,t:2,t:3,t:4,t:5,t:6,t:7,t:8");
+}
+
+#[test]
+fn transform_stream_throw_in_start_propagates_synchronously() {
+    // Per spec §5.4.2: a synchronous throw in `start()` propagates out of
+    // the constructor (the constructor throws). WPT
+    // transform-streams/errors.any.js asserts this with assert_throws_js.
+    let r = run_with_streams(
+        r#"
+        let kind = "no-throw";
+        try {
+          new TransformStream({
+            start() { throw new Error("startfail"); }
+          });
+        } catch (e) {
+          kind = e.message || e.constructor.name;
+        }
+        kind;
+        "#,
+        |val, scope| val.to_rust_string_lossy(scope),
+    );
+    assert_eq!(r, "startfail");
+}
+
+#[test]
+fn transform_stream_async_transform_blocks_subsequent_writes() {
+    // Per spec §5.4.6: TransformStreamDefaultSinkWriteAlgorithm awaits
+    // backpressureChangePromise then performTransform. The WS controller
+    // serializes by waiting on each sink.write's Promise. So write_b's
+    // transform must NOT START until write_a's transform Promise settles.
+    //
+    // We verify by tracking transform start timestamps in chunks emitted
+    // to the readable side.
+    let r = run_with_streams(
+        r#"
+        const events = [];
+        const ts = new TransformStream({
+          transform(chunk, c) {
+            events.push("t-start:" + chunk);
+            return Promise.resolve().then(() => {
+              events.push("t-end:" + chunk);
+              c.enqueue(chunk);
+            });
+          }
+        });
+        const w = ts.writable.getWriter();
+        const reader = ts.readable.getReader();
+        // Read drives pulls so backpressure releases and writes proceed.
+        reader.read().then(() => reader.read());
+        w.write("a");
+        w.write("b");
+        ({ get r() { return events.join("|"); } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let k = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, k.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    // Spec invariant: t-end:a must come before t-start:b. The transform
+    // for "b" cannot start until "a"'s transform Promise has settled
+    // (this is enforced by WS serializing sink.write calls).
+    let pos_end_a = r.find("t-end:a").unwrap_or(usize::MAX);
+    let pos_start_b = r.find("t-start:b").unwrap_or(usize::MAX);
+    assert!(pos_end_a != usize::MAX, "got: '{r}'");
+    assert!(pos_start_b != usize::MAX, "got: '{r}'");
+    assert!(
+        pos_end_a < pos_start_b,
+        "second transform must NOT start before first transform's promise resolves; got: '{r}'"
+    );
+}

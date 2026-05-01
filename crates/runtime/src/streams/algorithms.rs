@@ -904,3 +904,207 @@ pub fn writable_stream_close<'s>(
 // Suppress unused warnings (the WSStreamState is used via with_ws_state).
 #[allow(dead_code)]
 fn _unused_ws_state(_s: &WSStreamState) {}
+
+// ===========================================================================
+// TransformStream cross-class abstract operations (§5.4)
+// ===========================================================================
+//
+// Per design §III.8 / §II.11, these operations span the TransformStream
+// container and its `[[readable]]` / `[[writable]]` halves. They live in
+// `algorithms.rs` because they coordinate state across both halves.
+
+// ---------------------------------------------------------------------------
+// TransformStreamSetBackpressure — §5.4.7
+// ---------------------------------------------------------------------------
+//
+// Per spec:
+// 1. Assert: stream.[[backpressure]] !== backpressure.
+// 2. If stream.[[backpressureChangePromise]] is not undefined, resolve it.
+// 3. Set stream.[[backpressureChangePromise]] to a new pending promise.
+// 4. Set stream.[[backpressure]] to backpressure.
+//
+// Per design §II.11 paired-storage rule + critic #52 fix: we resolve the
+// existing change-promise then create a fresh pre-pending one (Promise +
+// paired Resolver).
+
+pub fn transform_stream_set_backpressure(
+    scope: &mut v8::PinScope,
+    stream: v8::Local<v8::Object>,
+    backpressure: bool,
+) {
+    // Resolve the existing resolver, if any. (On the very first call from
+    // InitializeTransformStream, the resolver is freshly-created and we
+    // resolve it once below. The spec's Assert(prev !== backpressure) is
+    // upheld at every other callsite.)
+    let prev_resolver = crate::streams::transform::with_ts_state(scope, stream, |s| {
+        s.bp_change_resolver.borrow_mut().take()
+    })
+    .flatten();
+    if let Some(resolver_g) = prev_resolver {
+        let r_l = v8::Local::new(scope, &resolver_g);
+        let undef = v8::undefined(scope);
+        r_l.resolve(scope, undef.into());
+    }
+    // Create a fresh pending promise+resolver pair and store them.
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let promise = resolver.get_promise(scope);
+    let resolver_g = v8::Global::new(scope, resolver);
+    let promise_g = v8::Global::new(scope, promise);
+    crate::streams::transform::with_ts_state(scope, stream, |s| {
+        *s.bp_change_promise.borrow_mut() = Some(promise_g);
+        *s.bp_change_resolver.borrow_mut() = Some(resolver_g);
+        s.backpressure.set(backpressure);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// TransformStreamUnblockWrite — used by Erroring path
+// ---------------------------------------------------------------------------
+//
+// Per spec §5.4.4: TransformStreamErrorWritableAndUnblockWrite calls
+// "TransformStreamSetBackpressure(stream, false)" only if backpressure was
+// true. We expose this as a helper so transform_stream_error_writable_…
+// can dispatch it cleanly.
+
+pub fn transform_stream_unblock_write(
+    scope: &mut v8::PinScope,
+    stream: v8::Local<v8::Object>,
+) {
+    let bp = crate::streams::transform::with_ts_state(scope, stream, |s| s.backpressure.get())
+        .unwrap_or(false);
+    if bp {
+        transform_stream_set_backpressure(scope, stream, false);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TransformStreamError — §5.4.5
+// ---------------------------------------------------------------------------
+//
+// Per spec:
+// 1. ReadableStreamDefaultControllerError(stream.[[readable]].[[controller]], e).
+// 2. TransformStreamErrorWritableAndUnblockWrite(stream, e).
+
+pub fn transform_stream_error<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    stream: v8::Local<v8::Object>,
+    error: v8::Local<'s, v8::Value>,
+) {
+    let readable = crate::streams::transform::readable_slot_obj(scope, stream);
+    if let Some(readable) = readable {
+        let controller_v = slots::read_slot(scope, readable, slots::CONTROLLER);
+        if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
+            crate::streams::readable_default_controller::readable_stream_default_controller_error(
+                scope, controller, error,
+            );
+        }
+    }
+    transform_stream_error_writable_and_unblock_write(scope, stream, error);
+}
+
+// ---------------------------------------------------------------------------
+// TransformStreamErrorWritableAndUnblockWrite — §5.4.4
+// ---------------------------------------------------------------------------
+//
+// Per spec:
+// 1. TransformStreamDefaultControllerClearAlgorithms(stream.[[controller]]).
+// 2. WritableStreamDefaultControllerErrorIfNeeded(stream.[[writable]].[[controller]], e).
+// 3. TransformStreamUnblockWrite(stream).
+
+pub fn transform_stream_error_writable_and_unblock_write<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    stream: v8::Local<v8::Object>,
+    error: v8::Local<'s, v8::Value>,
+) {
+    // Clear TS controller algorithms.
+    let ts_ctrl_v = crate::streams::transform::ts_controller_slot(scope, stream);
+    if let Ok(ts_ctrl) = v8::Local::<v8::Object>::try_from(ts_ctrl_v) {
+        crate::streams::transform_controller::transform_stream_default_controller_clear_algorithms(
+            scope, ts_ctrl,
+        );
+    }
+
+    // Error WS controller (which errors the writable side).
+    let writable = crate::streams::transform::writable_slot_obj(scope, stream);
+    if let Some(writable) = writable {
+        let controller_v = slots::read_slot(scope, writable, slots::CONTROLLER);
+        if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
+            crate::streams::writable_controller::writable_stream_default_controller_error_if_needed(
+                scope, controller, error,
+            );
+        }
+    }
+
+    transform_stream_unblock_write(scope, stream);
+}
+
+// ---------------------------------------------------------------------------
+// InitializeTransformStream — §5.4.1
+// ---------------------------------------------------------------------------
+//
+// Per spec InitializeTransformStream(stream, startPromise, writableHWM,
+// writableSizeAlgorithm, readableHWM, readableSizeAlgorithm):
+//
+//  1. Build the writable side wrapping a "TransformStreamDefaultSink" that
+//     forwards write→transform, close→flush, abort→error.
+//  2. Build the readable side wrapping a "TransformStreamDefaultSource"
+//     that pulls via backpressureChangePromise.
+//  3. Set [[backpressure]] = undefined and [[backpressureChangePromise]]
+//     = undefined; then call TransformStreamSetBackpressure(stream, true)
+//     to initialize the pair.
+//  4. Wire the cross-class start so both sides observe `startPromise`.
+//
+// This function does NOT install the controller. SetUpTransformStreamDefault
+// ControllerFromTransformer (lives in transform_controller.rs) installs the
+// TS controller and then calls Initialize+SetBackpressure(true) per spec
+// ordering.
+//
+// Because the readable + writable halves are constructed via existing
+// `set_up_…_from_…` helpers that consume `AlgorithmFn`, we route the
+// sink's write/close/abort and the source's pull/cancel through the
+// "forwarder" closures registered on the TS state.
+
+pub fn initialize_transform_stream<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    stream: v8::Local<v8::Object>,
+    start_promise: v8::Local<'s, v8::Promise>,
+    writable_hwm: f64,
+    writable_size: crate::streams::readable_default_controller::SizeAlgorithm,
+    readable_hwm: f64,
+    readable_size: crate::streams::readable_default_controller::SizeAlgorithm,
+) {
+    use crate::streams::readable_default_controller::AlgorithmFn;
+
+    // Build the readable (read side of the TS) — pull = waits on
+    // backpressureChangePromise; cancel = TransformStreamSourceCancel.
+    let readable = crate::streams::transform::build_readable_for_ts(
+        scope,
+        stream,
+        start_promise,
+        readable_hwm,
+        readable_size,
+    );
+
+    // Build the writable (write side of the TS) — write = perform_transform;
+    // close = perform flush + close readable; abort = error TS.
+    let writable = crate::streams::transform::build_writable_for_ts(
+        scope,
+        stream,
+        start_promise,
+        writable_hwm,
+        writable_size,
+    );
+
+    // Stash both halves in priv-syms on the TS wrapper.
+    crate::streams::slots::write_slot(scope, stream, slots::READABLE, readable.into());
+    crate::streams::slots::write_slot(scope, stream, slots::WRITABLE, writable.into());
+
+    // Initialize backpressure pair — None initially; SetBackpressure(true)
+    // creates the first pair.
+    transform_stream_set_backpressure(scope, stream, true);
+
+    // Suppress unused warnings on the AlgorithmFn import — it's referenced
+    // by the helpers above.
+    #[allow(dead_code)]
+    fn _touch(_a: AlgorithmFn) {}
+}

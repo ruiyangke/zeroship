@@ -180,6 +180,16 @@ pub fn from_native_sink<'s, S: NativeSink + 'static>(
     stream
 }
 
+/// Public wrapper around `build_stream_wrapper` for internal use by
+/// `transform.rs` (TransformStream's writable half is a programmatically-
+/// constructed WritableStream).
+#[doc(hidden)]
+pub fn build_value_stream_wrapper_for_internal<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> v8::Local<'s, v8::Object> {
+    build_stream_wrapper(scope)
+}
+
 /// Construct the bare `WritableStream` JS wrapper — no controller wired.
 fn build_stream_wrapper<'s>(
     scope: &mut v8::PinScope<'s, '_>,

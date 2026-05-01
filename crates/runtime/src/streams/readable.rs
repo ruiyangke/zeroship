@@ -138,6 +138,19 @@ pub fn from_native_source<'s, S: NativeSource + 'static>(
     stream
 }
 
+/// Public wrapper around `build_stream_wrapper` for internal use by
+/// `transform.rs` (TransformStream's readable half is a programmatically-
+/// constructed ReadableStream that doesn't go through `new ReadableStream`).
+/// Equivalent to invoking the constructor with `undefined` source +
+/// strategy then skipping the type-check / strategy-parse — InitializeTransform
+/// Stream's caller already parsed the strategy.
+#[doc(hidden)]
+pub fn build_value_stream_wrapper_for_internal<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> v8::Local<'s, v8::Object> {
+    build_stream_wrapper(scope)
+}
+
 /// Construct the bare `ReadableStream` JS wrapper — no controller wired.
 /// Used by `from_native_source` and by the user-visible constructor.
 fn build_stream_wrapper<'s>(

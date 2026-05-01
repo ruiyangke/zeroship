@@ -44,12 +44,18 @@ pub mod readable_default_controller;
 pub mod readable_default_reader;
 pub mod slots;
 pub mod strategies;
+pub mod transform;
+pub mod transform_controller;
 pub mod writable;
 pub mod writable_controller;
 pub mod writable_writer;
 
 pub use readable::{
     from_native_source, NativeReadableController, NativeSource,
+};
+pub use transform::{
+    from_native_transformer, readable_slot, writable_slot, NativeTransformController,
+    NativeTransformer,
 };
 pub use writable::{from_native_sink, NativeSink, NativeWritableController};
 
@@ -63,4 +69,6 @@ pub fn install_native_streams(
     writable::install_native_writable_stream(scope, global);
     writable_controller::install(scope, global);
     writable_writer::install(scope, global);
+    transform::install_native_transform_stream(scope, global);
+    transform_controller::install(scope, global);
 }

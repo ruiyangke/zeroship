@@ -117,3 +117,12 @@ pub const BYOB_REQUEST: &str = "[[byobRequest]]";
 /// `ReadableStreamBYOBRequest.[[view]]` — the user-supplied view that
 /// the byte controller is currently filling.
 pub const VIEW: &str = "[[view]]";
+
+/// `TransformStreamDefaultController.[[stream]]` — back-ref to the parent
+/// TransformStream (separate from the readable/writable halves' streams).
+pub const TS_STREAM_OBJ: &str = "[[ts.ctrl.streamObj]]";
+
+/// `TransformStream.[[controller]]` priv sym — points at the
+/// TransformStreamDefaultController wrapper. Distinct from the per-half
+/// `[[controller]]` slots on the readable/writable halves.
+pub const TS_CONTROLLER: &str = "[[ts.controller]]";
