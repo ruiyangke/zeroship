@@ -1,16 +1,28 @@
 // Chat messages renderer for the workspace ChatRail.
 //
-// Plan 01.5 consumes the v6 UIMessage shape from `@ai-sdk/react`:
-//   { id, role, parts: [{ type: "text", text }, ...] }
-// and renders user / assistant turns. Custom data parts (survey, diff,
-// critic-round) and tool-invocation parts are not yet emitted by the
-// mock — Plan 02 will dispatch `data-*` parts into the SurveyCard /
-// DiffCard / CriticRoundCard components that still live in this folder.
+// Plan 02 Phase B.2 dispatches three families of v6 message parts:
+//   - text                       → MessageAssistant text (concatenated)
+//   - tool-<name> / dynamic-tool → <Receipt> (one per toolCallId)
+//   - data-diff                  → <DiffCard>
+//
+// The translator emits chunks of these types on the wire (see
+// apps/zeroship-builder/src/server/_translator.ts and _middleware.ts).
+// `useChat` from @ai-sdk/react reassembles them into UIMessage.parts[]
+// with stable discriminants — we just type-narrow and render.
+//
+// Tool-call lifecycle states (per node_modules/ai/dist/index.d.ts:1694)
+// arrive as a single part whose `state` cycles through input-streaming
+// → input-available → output-available (or terminal output-error /
+// output-denied). The Receipt component reads that lifecycle to render
+// running / done / error badges.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import type { UIMessage } from "ai";
 import { MessageUser } from "./MessageUser";
 import { MessageAssistant } from "./MessageAssistant";
+import { Receipt } from "./Receipt";
+import { DiffCard } from "./DiffCard";
+import type { Diff } from "../../types/chat";
 
 export interface ChatMessagesProps {
   messages: UIMessage[];
@@ -48,9 +60,9 @@ export function ChatMessages({ messages, busy }: ChatMessagesProps) {
       )}
 
       {messages.map((m, idx) => {
-        const text = m.parts
-          .filter((p): p is Extract<typeof p, { type: "text" }> => p.type === "text")
-          .map((p) => p.text)
+        const text = (m.parts as Array<{ type: string; text?: string }>)
+          .filter((p) => p.type === "text")
+          .map((p) => p.text ?? "")
           .join("");
 
         if (m.role === "user") {
@@ -58,17 +70,80 @@ export function ChatMessages({ messages, busy }: ChatMessagesProps) {
         }
 
         const isLast = idx === messages.length - 1;
-        // Plan 01.5: only text is rendered. Plan 02 dispatches data-*
-        // parts to SurveyCard / DiffCard / CriticRoundCard via `parts`.
+        const renderedParts = renderAssistantParts(m);
         return (
           <MessageAssistant
             key={m.id}
             text={text}
             streaming={isLast && busy}
-            parts={null}
+            parts={renderedParts}
           />
         );
       })}
     </div>
   );
+}
+
+// Render non-text assistant message parts (tool invocations, custom
+// data parts). Returns null if there's nothing to render so
+// MessageAssistant can avoid the wrapping <div>.
+function renderAssistantParts(m: UIMessage): ReactNode {
+  const out: ReactNode[] = [];
+
+  for (const part of m.parts as Array<Record<string, unknown>>) {
+    const type = typeof part.type === "string" ? part.type : "";
+
+    // Tool invocation parts: `tool-<name>` (static tools registered
+    // upfront) or `dynamic-tool` (everything else — including
+    // deepagents' built-in fs/exec tools, which aren't declared in
+    // `tools[]` at agent-construction time).
+    if (type.startsWith("tool-") || type === "dynamic-tool") {
+      const toolName =
+        type === "dynamic-tool"
+          ? String(part.toolName ?? "tool")
+          : type.slice("tool-".length);
+      // Suppress write_file / edit_file receipts — those flow through
+      // <DiffCard> as data-diff parts and we don't want both rendering.
+      if (toolName === "write_file" || toolName === "edit_file") continue;
+
+      const toolCallId = String(part.toolCallId ?? `${m.id}-${out.length}`);
+      const state = String(part.state ?? "");
+      const status: "running" | "done" | "error" =
+        state === "output-available"
+          ? "done"
+          : state === "output-error" || state === "output-denied"
+          ? "error"
+          : "running";
+      out.push(
+        <Receipt
+          key={toolCallId}
+          toolName={toolName}
+          status={status}
+          inputJson={part.input}
+          outputJson={
+            state === "output-available"
+              ? part.output
+              : state === "output-error"
+              ? part.errorText
+              : undefined
+          }
+        />,
+      );
+      continue;
+    }
+
+    // Custom data parts. The wire type is `data-<NAME>` with a `data`
+    // payload (per node_modules/ai/dist/index.d.ts:2055-2062).
+    if (type === "data-diff") {
+      const diff = (part as { data?: Diff }).data;
+      if (diff && typeof diff.path === "string") {
+        out.push(<DiffCard key={`diff-${out.length}`} diff={diff} />);
+      }
+      continue;
+    }
+
+    // data-survey, data-critic-round will land here in later phases.
+  }
+
+  return out.length > 0 ? <>{out}</> : null;
 }
