@@ -660,33 +660,10 @@ impl Headers {
         Ok(())
     }
 
-    /// `keys()` — new live iterator yielding header names (lowercase).
-    #[v8_method]
-    fn keys<'s>(
-        &mut self,
-        scope: &mut v8::PinScope<'s, '_>,
-    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        make_iterator(scope, IterKind::Key)
-    }
-
-    /// `values()` — new live iterator yielding header values (joined).
-    #[v8_method]
-    fn values<'s>(
-        &mut self,
-        scope: &mut v8::PinScope<'s, '_>,
-    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        make_iterator(scope, IterKind::Value)
-    }
-
-    /// `entries()` and the default `@@iterator` both materialise as a
-    /// new live iterator yielding [key, value] arrays.
-    #[v8_method]
-    fn entries<'s>(
-        &mut self,
-        scope: &mut v8::PinScope<'s, '_>,
-    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        make_iterator(scope, IterKind::KeyAndValue)
-    }
+    // keys() / values() / entries() / [@@iterator] aren't routed
+    // through the macro because they need access to the receiver
+    // `this` to wire as the iterator's parent. They are installed
+    // directly in `install_global` via `iter_factory_callback`.
 }
 
 // ---------------------------------------------------------------------------
@@ -850,53 +827,6 @@ fn iter_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Func
     })
 }
 
-/// Build a fresh HeadersIterator wrapping the FunctionCallbackArguments'
-/// `this` (the Headers instance) and the requested kind.
-fn make_iterator<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    kind: IterKind,
-) -> Result<v8::Local<'s, v8::Value>, OpError> {
-    // Snapshot the receiver from the V8 stack — we need to pass the
-    // current "this" as the iterator's parent. The macro doesn't expose
-    // FunctionCallbackArguments directly to user methods; the cleanest
-    // path is to look it up via Function.callee.this — but that's not
-    // available either. So we read it from the macro's `args.this()`
-    // by adding a `v8::Local<v8::Object>` synthetic arg shape — but
-    // the macro's arg handling treats Local<Value> as JS args.
-    //
-    // Workaround: we don't have direct access; instead, we walk the
-    // running function's receiver via `scope`'s current frame.
-    // V8 doesn't expose that. The pragmatic path: keep a thread-local
-    // "current this" pointer set by the method-callback shim, but
-    // that's invasive.
-    //
-    // Cleaner: change the macro's method-callback path so callers can
-    // accept `this: v8::Local<v8::Object>` as a special arg name. For
-    // v1, do it inline: take the `args.this()` view via a small
-    // re-entrant escape — but we don't have args here.
-    //
-    // The actual mechanism v1 ships: the keys/values/entries methods
-    // accept a hidden `this_obj: v8::Local<v8::Object>` arg via a
-    // synthetic-arg path. The macro doesn't (yet) emit that. Until
-    // it does, we instantiate the iterator with a Global<Object> we
-    // populate from a parent-passing helper.
-    //
-    // For the v1 implementation we DO have access to scope. We use
-    // V8's `current_function` API via PinScope's Isolate handle to
-    // grab the receiver. Actually V8 doesn't expose that here.
-    //
-    // PRAGMATIC v1: install keys/values/entries as raw FunctionCallbacks
-    // on the prototype rather than going through the macro. Done in
-    // `install_global` below — see Headers::install_global.
-    //
-    // Stub for the macro-routed path: error out.
-    let _ = scope;
-    let _ = kind;
-    Err(OpError::error(
-        "Headers.keys()/values()/entries() must be installed via install_global",
-    ))
-}
-
 // ---------------------------------------------------------------------------
 // Custom install: wrap macro's install + add the iterator methods
 // ---------------------------------------------------------------------------
@@ -918,7 +848,10 @@ pub fn install_global<'s>(
     let tmpl = Headers::install(scope);
     let class_fn = tmpl.get_function(scope).unwrap();
 
-    // Patch the prototype with parent-aware iterator factories.
+    // Patch the prototype with parent-aware iterator factories. The
+    // macro can't emit these because the user method body has no
+    // direct access to `args.this()` (the iterator's parent receiver
+    // — needed to wire as `parent: Global<Object>`).
     let proto_key = v8::String::new(scope, "prototype").unwrap();
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     let proto: v8::Local<v8::Object> = proto_v.try_into().unwrap();
@@ -927,7 +860,7 @@ pub fn install_global<'s>(
     install_iter_factory(scope, proto, "values", IterKind::Value);
     install_iter_factory(scope, proto, "entries", IterKind::KeyAndValue);
 
-    // [Symbol.iterator] aliases entries.
+    // [Symbol.iterator] aliases entries per WebIDL §3.7.10.
     let sym_iter = v8::Symbol::get_iterator(scope);
     let entries_key = v8::String::new(scope, "entries").unwrap();
     let entries_v = proto.get(scope, entries_key.into()).unwrap();

@@ -12,7 +12,7 @@
 //! result.
 #![allow(unsafe_code)]
 
-use zeroship_runtime::headers::Headers;
+use zeroship_runtime::headers;
 use zeroship_runtime::init_v8;
 
 fn run_in_v8<F, R>(src: &str, f: F) -> R
@@ -26,10 +26,7 @@ where
     let scope = &mut v8::ContextScope::new(handle_scope, context);
 
     let global = scope.get_current_context().global(scope);
-    let tmpl = Headers::install(scope);
-    let class_fn = tmpl.get_function(scope).unwrap();
-    let key = v8::String::new(scope, "Headers").unwrap();
-    global.set(scope, key.into(), class_fn.into());
+    headers::install_global(scope, global);
 
     let src_v8 = v8::String::new(scope, src).unwrap();
     let script = v8::Script::compile(scope, src_v8, None).unwrap();
