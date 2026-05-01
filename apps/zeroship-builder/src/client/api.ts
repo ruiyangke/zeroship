@@ -22,8 +22,17 @@ export const rpc = client<App>({ baseUrl: "" });
 
 /**
  * AI SDK transport bound to a streaming RPC procedure. Wraps the
- * `useChat` request shape (`{ messages, id }`) in zeroship's superjson
- * envelope (`{ json: ... }`) and points at the procedure's stream URL.
+ * `useChat` request shape in zeroship's superjson envelope
+ * (`{ json: ... }`) and points at the procedure's stream URL.
+ *
+ * Two send shapes flow through this transport:
+ *   1. Normal turn — `sendMessage({ text })` from a composer:
+ *      wire body = `{ json: { messages: UIMessage[], id } }`.
+ *   2. Resume turn — `sendMessage(_, { body: { resume: {token,value} }})`
+ *      after a SurveyCard submit (server tool halted via
+ *      `interrupt()`): wire body = `{ json: { resume, id } }`. Messages
+ *      are stripped because the server feeds `Command({resume})` into
+ *      the existing thread instead of replaying history.
  *
  * Usage:
  *   const { messages, sendMessage } = useChat({
@@ -39,8 +48,17 @@ export function chatTransport<TIn>(handle: {
     // client it would return a Promise — fine for `api`, which
     // DefaultChatTransport accepts as either form.
     api: handle.streamUrl() as string,
-    prepareSendMessagesRequest: ({ messages, id }) => ({
-      body: { json: { messages, id } },
-    }),
+    prepareSendMessagesRequest: ({ messages, id, body }) => {
+      // Resume payload from a SurveyCard (or any future interrupt).
+      // ChatRail attaches it via `sendMessage(_, { body: { resume } })`.
+      // The server's chat.ts treats `body.json.resume` as the cue to
+      // skip message replay and feed Command({resume}) into the same
+      // thread.
+      const resume = (body as { resume?: { token: string; value: unknown } } | undefined)?.resume;
+      if (resume) {
+        return { body: { json: { resume, id } } };
+      }
+      return { body: { json: { messages, id } } };
+    },
   });
 }

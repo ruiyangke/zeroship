@@ -20,6 +20,14 @@
 //                           emitting native tool-call chunks for these
 //                           same names so the wire shows one card, not
 //                           two.
+//   ask_survey            → emit `data-survey` (custom data part). The
+//                           tool body calls `interrupt()` from
+//                           langgraph, which halts the run. The
+//                           translator catches the resulting
+//                           GraphInterrupt and closes the SSE cleanly;
+//                           client renders the SurveyCard from the
+//                           data-survey chunk and submits via the
+//                           resume protocol (body.resume).
 //   ls, read_file, grep,
 //   glob, execute, …      → middleware passes through; native
 //                           tool-input-available / tool-output-available
@@ -37,13 +45,33 @@
 import type { AgentMiddleware } from "langchain";
 import type { UIMessageStreamWriter } from "ai";
 
+// emit helper is shared with the wizard runtime (per spec §4.8.2b /
+// §8.2.7). The wizard calls it directly from its node body; Builder
+// goes through this middleware. Same chunk shape on the wire.
+import { emitDataSurvey, type SurveyInput } from "./_survey_wire.js";
+
 /**
  * Build a middleware bound to a specific v6 stream writer. The middleware
  * is single-use per request — never share across turns.
+ *
+ * `isResume` toggles data-survey emission off on resumed runs. When
+ * langgraph resumes from an interrupt, it REPLAYS the interrupted node
+ * from scratch — so the ask_survey tool body re-enters and our
+ * `wrapToolCall` hook runs again. Emitting the data-survey a second
+ * time would re-render the SurveyCard on the client even though the
+ * user already answered. We suppress emission in resume mode; the
+ * client SurveyCard for that token is already collapsed (see
+ * ChatRail's answeredSurveys set), so even a stray emit would be
+ * filtered visually — but the wire stays clean if we don't emit at
+ * all. Other custom data parts (data-diff for write_file/edit_file)
+ * are idempotent at the visual layer (each write is a fresh diff with
+ * a fresh id) so they're safe to re-emit on resume.
  */
 export async function dataPartMiddleware(
   writer: UIMessageStreamWriter,
+  options: { isResume?: boolean } = {},
 ): Promise<AgentMiddleware> {
+  const { isResume = false } = options;
   // Lazy import to keep non-chat code paths free of the langchain
   // dep tree (matches the translator's lazy-import policy).
   const { createMiddleware } = await import("langchain");
@@ -101,6 +129,24 @@ export async function dataPartMiddleware(
           // see write_file branch
         }
         return result;
+      }
+
+      if (name === "ask_survey") {
+        // Args ARE the survey definition (validated upstream by the
+        // tool's surveyInputSchema). Emit the data-survey chunk
+        // BEFORE calling handler — the handler runs the tool body
+        // which calls interrupt() and throws GraphInterrupt; the
+        // pre-emit guarantees the client sees the survey before the
+        // SSE stream closes.
+        //
+        // Skip emission in resume mode — see the comment on isResume
+        // above. interrupt() inside the tool will return the resume
+        // value instead of throwing, so handler() resolves normally
+        // and the LLM gets the answer as a ToolMessage.
+        if (!isResume) {
+          emitDataSurvey(writer, args as SurveyInput);
+        }
+        return handler(request);
       }
 
       // All other tools fall through; the translator's streamEvents

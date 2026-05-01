@@ -1,9 +1,10 @@
 // Chat messages renderer for the workspace ChatRail.
 //
-// Plan 02 Phase B.2 dispatches three families of v6 message parts:
+// Plan 02 Phase B.2 dispatches four families of v6 message parts:
 //   - text                       → MessageAssistant text (concatenated)
 //   - tool-<name> / dynamic-tool → <Receipt> (one per toolCallId)
 //   - data-diff                  → <DiffCard>
+//   - data-survey                → <SurveyCard> (interrupt resume flow)
 //
 // The translator emits chunks of these types on the wire (see
 // apps/zeroship-builder/src/server/_translator.ts and _middleware.ts).
@@ -22,14 +23,25 @@ import { MessageUser } from "./MessageUser";
 import { MessageAssistant } from "./MessageAssistant";
 import { Receipt } from "./Receipt";
 import { DiffCard } from "./DiffCard";
-import type { Diff } from "../../types/chat";
+import { SurveyCard } from "./SurveyCard";
+import type { Diff, Survey, SurveyResponse } from "../../types/chat";
 
 export interface ChatMessagesProps {
   messages: UIMessage[];
   busy: boolean;
+  // Called when the user submits a SurveyCard rendered from a
+  // `data-survey` part. ChatRail wires this to the resume protocol —
+  // see api.ts `chatTransport` and server-side `chat.ts`.
+  onSubmitSurvey?: (token: string, response: SurveyResponse) => void;
+  // Set of survey tokens that have already been answered (or skipped).
+  // SurveyCard collapses to "Answered." once its token is in this set,
+  // and submit handlers no-op. Keyed by token (the `data-survey` chunk
+  // id), so multiple surveys in the same conversation each manage
+  // their own state.
+  answeredSurveys?: ReadonlySet<string>;
 }
 
-export function ChatMessages({ messages, busy }: ChatMessagesProps) {
+export function ChatMessages({ messages, busy, onSubmitSurvey, answeredSurveys }: ChatMessagesProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
 
@@ -70,7 +82,10 @@ export function ChatMessages({ messages, busy }: ChatMessagesProps) {
         }
 
         const isLast = idx === messages.length - 1;
-        const renderedParts = renderAssistantParts(m);
+        const renderedParts = renderAssistantParts(m, {
+          onSubmitSurvey,
+          answeredSurveys,
+        });
         return (
           <MessageAssistant
             key={m.id}
@@ -87,7 +102,13 @@ export function ChatMessages({ messages, busy }: ChatMessagesProps) {
 // Render non-text assistant message parts (tool invocations, custom
 // data parts). Returns null if there's nothing to render so
 // MessageAssistant can avoid the wrapping <div>.
-function renderAssistantParts(m: UIMessage): ReactNode {
+function renderAssistantParts(
+  m: UIMessage,
+  ctx: {
+    onSubmitSurvey?: (token: string, response: SurveyResponse) => void;
+    answeredSurveys?: ReadonlySet<string>;
+  },
+): ReactNode {
   const out: ReactNode[] = [];
 
   for (const part of m.parts as Array<Record<string, unknown>>) {
@@ -142,7 +163,48 @@ function renderAssistantParts(m: UIMessage): ReactNode {
       continue;
     }
 
-    // data-survey, data-critic-round will land here in later phases.
+    if (type === "data-survey") {
+      // Server emits `{ id: token, data: { token, survey } }`. The id
+      // and data.token are the same value — we use it both as the
+      // React key (stable across re-renders) and as the resume token
+      // submitted back to the server.
+      const surveyData = (part as { data?: { token?: unknown; survey?: unknown } }).data;
+      const token =
+        typeof surveyData?.token === "string"
+          ? surveyData.token
+          : String(part.id ?? "");
+      const survey = surveyData?.survey as Survey | undefined;
+      if (token && survey && Array.isArray(survey.questions)) {
+        const answered = ctx.answeredSurveys?.has(token) ?? false;
+        out.push(
+          <SurveyCard
+            key={`survey-${token}`}
+            survey={survey}
+            surveyId={token}
+            // When already-answered, suppress callbacks so the parent
+            // doesn't re-fire a stale resume on re-render. The card
+            // itself collapses internally on submit, but the parent
+            // also tracks answered tokens (see ChatRail) so a
+            // remounted card stays collapsed.
+            onSubmit={(response) => {
+              if (answered) return;
+              ctx.onSubmitSurvey?.(token, response);
+            }}
+            onSkip={() => {
+              if (answered) return;
+              ctx.onSubmitSurvey?.(token, {
+                survey_id: token,
+                answers: {},
+                skipped: true,
+              });
+            }}
+          />,
+        );
+      }
+      continue;
+    }
+
+    // data-critic-round will land here in Phase B.3+.
   }
 
   return out.length > 0 ? <>{out}</> : null;

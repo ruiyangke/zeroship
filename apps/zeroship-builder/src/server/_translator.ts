@@ -37,6 +37,7 @@
 import { createUIMessageStream, type UIMessage } from "ai";
 import { critic } from "./_critic.js";
 import { BUILDER_SYSTEM } from "./_prompts.js";
+import { askSurveyTool } from "./_tools.js";
 
 export interface BuilderTurnInput {
   messages?: UIMessage[];
@@ -118,7 +119,7 @@ export async function buildTranslatedStream(
   const { HumanMessage, AIMessage, ToolMessage } = await import(
     "@langchain/core/messages"
   );
-  const { Command } = await import("@langchain/langgraph");
+  const { Command, isGraphInterrupt } = await import("@langchain/langgraph");
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
@@ -188,21 +189,27 @@ export async function buildTranslatedStream(
 
   return createUIMessageStream({
     async execute({ writer }) {
-      // Phase B.2: tools array stays empty. With `backend:` configured,
-      // deepagents activates its built-in fs/exec tools (`ls`,
-      // `read_file`, `write_file`, `edit_file`, `grep`, `glob`,
-      // `execute`) automatically — they're rewritten on top of the
-      // backend's protocol methods.
+      // Phase B.2: deepagents activates its built-in fs/exec tools
+      // (`ls`, `read_file`, `write_file`, `edit_file`, `grep`, `glob`,
+      // `execute`) automatically when `backend:` is configured — they're
+      // rewritten on top of the backend's protocol methods.
+      //
+      // Custom tools registered here add to that built-in set:
+      //   - askSurveyTool: halts the run via interrupt() and emits a
+      //     data-survey chunk through the middleware below; resumes
+      //     when the client sends `body.resume` (see chat.ts).
       //
       // Middleware: the data-part emitter sits in `wrapToolCall` and
-      // turns `write_file` / `edit_file` invocations into v6
-      // `data-diff` chunks (per spec §4.8.3.3). The streamEvents loop
-      // below SKIPS native tool chunks for those same tools so the
-      // wire shows one card per write, not two.
-      const dataPartMw = await dataPartMiddleware(writer);
+      // turns `write_file` / `edit_file` / `ask_survey` invocations
+      // into v6 custom data chunks (`data-diff`, `data-survey`). The
+      // streamEvents loop below SKIPS native tool chunks for those
+      // same tools so the wire shows one card per call, not two.
+      const dataPartMw = await dataPartMiddleware(writer, {
+        isResume: mode === "resume",
+      });
       const agent = createDeepAgent({
         model,
-        tools: [],
+        tools: [askSurveyTool],
         backend,
         systemPrompt: BUILDER_SYSTEM,
         checkpointer,
@@ -213,10 +220,14 @@ export async function buildTranslatedStream(
       const textId = crypto.randomUUID();
       let textStarted = false;
 
-      // Tools whose visualisation goes via `data-diff` instead of the
-      // native v6 tool-call chunks. Keep in sync with the wrapToolCall
-      // hook in `_middleware.ts`.
-      const DIFF_TOOLS = new Set(["write_file", "edit_file"]);
+      // Tools whose visualisation goes via custom data parts instead
+      // of the native v6 tool-call chunks. Keep in sync with the
+      // wrapToolCall hooks in `_middleware.ts`.
+      //   write_file / edit_file → data-diff
+      //   ask_survey             → data-survey (also: tool halts via
+      //                            interrupt(), so on_tool_end may not
+      //                            even fire on the interrupted run)
+      const CUSTOM_DATA_TOOLS = new Set(["write_file", "edit_file", "ask_survey"]);
 
       // streamEvents accepts InputType | Command — both modes use the
       // same v2 protocol, signal plumbing, and thread_id.
@@ -229,7 +240,13 @@ export async function buildTranslatedStream(
         },
       );
 
-      for await (const event of events) {
+      // GraphInterrupt is thrown when an interrupt() inside a tool halts
+      // the run (e.g., ask_survey). The middleware has already emitted
+      // the data-survey chunk by the time the interrupt propagates, so
+      // we just need to swallow the error and let the stream close
+      // cleanly. Anything else is a real error and re-thrown.
+      try {
+       for await (const event of events) {
         switch (event.event) {
           case "on_chat_model_start":
             // Defer text-start until first non-empty delta — some providers
@@ -261,7 +278,7 @@ export async function buildTranslatedStream(
           // <Receipt>.
           case "on_tool_start": {
             const toolName = String(event.name ?? "");
-            if (!toolName || DIFF_TOOLS.has(toolName)) break;
+            if (!toolName || CUSTOM_DATA_TOOLS.has(toolName)) break;
             const toolCallId = String(event.run_id ?? crypto.randomUUID());
             // LangChain wraps the resolved input as
             // `event.data.input = { input: <stringified-args-or-raw> }`
@@ -287,7 +304,7 @@ export async function buildTranslatedStream(
 
           case "on_tool_end": {
             const toolName = String(event.name ?? "");
-            if (!toolName || DIFF_TOOLS.has(toolName)) break;
+            if (!toolName || CUSTOM_DATA_TOOLS.has(toolName)) break;
             const toolCallId = String(event.run_id ?? crypto.randomUUID());
             const rawOutput =
               (event as { data?: { output?: unknown } }).data?.output ?? null;
@@ -308,10 +325,20 @@ export async function buildTranslatedStream(
             break;
           }
         }
+       }
+      } catch (err) {
+        if (!isGraphInterrupt(err)) throw err;
+        // ask_survey (or any other interrupt-using tool) halted the run.
+        // The data-survey chunk has already been written via middleware
+        // — we just close the text part if one was open and let the SSE
+        // stream end. Client renders the SurveyCard; on submit it sends
+        // the resume body which re-enters this function in resume mode.
       }
 
       // Belt-and-braces: if a model run ended without an explicit end event
-      // (shouldn't happen with v2, but keeps the wire valid).
+      // (shouldn't happen with v2, but keeps the wire valid). Also fires on
+      // GraphInterrupt where the model run was mid-flight when the tool
+      // halted — the text part is still open from the model's prelude.
       if (textStarted) {
         writer.write({ type: "text-end", id: textId });
       }
