@@ -611,59 +611,12 @@ impl Headers {
             .collect()
     }
 
-    /// `forEach(callback, thisArg?)` per WebIDL §3.7.10.3. The
-    /// algorithm explicitly says "Set pairs to idlObject's CURRENT
-    /// list of value pairs to iterate over (it might have changed)" —
-    /// so we re-read the live "value pairs" between callback
-    /// invocations. Match that semantics exactly.
-    #[v8_method]
-    #[allow(non_snake_case)]
-    fn forEach(
-        &mut self,
-        scope: &mut v8::PinScope,
-        callback: v8::Local<v8::Value>,
-        this_arg: v8::Local<v8::Value>,
-    ) -> Result<(), OpError> {
-        let cb_fn: v8::Local<v8::Function> = callback
-            .try_into()
-            .map_err(|_| OpError::type_error("forEach callback is not callable"))?;
-
-        let mut idx = 0usize;
-        loop {
-            let pairs = self.value_pairs_to_iterate_over();
-            if idx >= pairs.len() {
-                break;
-            }
-            let (n, v) = pairs[idx].clone();
-            idx += 1;
-            // Build (value, key, this) per §3.7.10.3 — Headers callback
-            // signature is `(value, key, headers)`.
-            let value_v = v8::String::new_from_one_byte(
-                scope,
-                &v,
-                v8::NewStringType::Normal,
-            )
-            .unwrap();
-            let key_v = v8::String::new_from_one_byte(
-                scope,
-                &n,
-                v8::NewStringType::Normal,
-            )
-            .unwrap();
-            // The `this` for the callback is the third arg per WebIDL —
-            // we don't have a JS Headers handle here directly; pass
-            // undefined for now (forEach inner-this is rarely used).
-            let undef = v8::undefined(scope);
-            let args = [value_v.into(), key_v.into(), undef.into()];
-            let _ = cb_fn.call(scope, this_arg, &args);
-        }
-        Ok(())
-    }
-
-    // keys() / values() / entries() / [@@iterator] aren't routed
-    // through the macro because they need access to the receiver
-    // `this` to wire as the iterator's parent. They are installed
-    // directly in `install_global` via `iter_factory_callback`.
+    // forEach / keys() / values() / entries() / [@@iterator] aren't
+    // routed through the macro because they need direct access to
+    // `args.this()` (forEach: pass the Headers object as the third
+    // callback arg per WebIDL §3.7.10.3; iterator factories: wire
+    // `this` as the iterator's parent receiver). They are installed
+    // directly in `install_global` via raw FunctionTemplate callbacks.
 }
 
 // ---------------------------------------------------------------------------
@@ -806,25 +759,14 @@ fn iter_result_done<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::V
 // Iterator factory: keys/values/entries
 // ---------------------------------------------------------------------------
 
-/// Per-isolate cache for the HeadersIterator FunctionTemplate so we
-/// don't rebuild it on every `keys()`/`values()`/`entries()` call.
-/// V8 isolates are per-thread (AGENTS.md key invariant), so a thread-
-/// local works fine here. The Global lives until isolate teardown.
-thread_local! {
-    static ITER_TEMPLATE: std::cell::RefCell<Option<v8::Global<v8::FunctionTemplate>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
+/// Build a fresh HeadersIterator FunctionTemplate. We don't cache —
+/// (a) Globals can't safely outlive their isolate (a thread-local
+/// cache panics on the next isolate's reuse — V8 asserts the Handle
+/// host matches), and (b) template builds are cheap relative to the
+/// iteration cost. If profiling shows this as a hot path, switch to
+/// an isolate-slot cache (v8::Isolate::set_slot).
 fn iter_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::FunctionTemplate> {
-    ITER_TEMPLATE.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        if let Some(global) = slot.as_ref() {
-            return v8::Local::new(scope, global);
-        }
-        let tmpl = HeadersIterator::install(scope);
-        *slot = Some(v8::Global::new(scope, tmpl));
-        tmpl
-    })
+    HeadersIterator::install(scope)
 }
 
 // ---------------------------------------------------------------------------
@@ -860,6 +802,15 @@ pub fn install_global<'s>(
     install_iter_factory(scope, proto, "values", IterKind::Value);
     install_iter_factory(scope, proto, "entries", IterKind::KeyAndValue);
 
+    // forEach is hand-rolled too (the macro can't pass `this` as the
+    // third callback arg per WebIDL §3.7.10.3 forEach algorithm).
+    {
+        let tmpl = v8::FunctionTemplate::new(scope, for_each_callback);
+        let func = tmpl.get_function(scope).unwrap();
+        let key = v8::String::new(scope, "forEach").unwrap();
+        proto.set(scope, key.into(), func.into());
+    }
+
     // [Symbol.iterator] aliases entries per WebIDL §3.7.10.
     let sym_iter = v8::Symbol::get_iterator(scope);
     let entries_key = v8::String::new(scope, "entries").unwrap();
@@ -868,6 +819,73 @@ pub fn install_global<'s>(
 
     let key = v8::String::new(scope, "Headers").unwrap();
     global.set(scope, key.into(), class_fn.into());
+}
+
+/// Hand-rolled `Headers.prototype.forEach(callback, thisArg?)` per
+/// WebIDL §3.7.10.3 — the spec algorithm spells out "Set pairs to
+/// idlObject's CURRENT list of value pairs to iterate over (it might
+/// have changed)", so we re-read the live "value pairs" between
+/// callback invocations. Mutation during forEach is observable.
+///
+/// Why hand-rolled (not via macro): the callback's third arg is the
+/// Headers object itself — `args.this()` — and the macro doesn't
+/// thread that through to user method bodies.
+fn for_each_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let this_obj = args.this();
+    let headers: &mut Headers = match this_obj
+        .get_internal_field(scope, 0)
+        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
+    {
+        Some(e) => unsafe { &mut *(e.value() as *mut Headers) },
+        None => {
+            let msg = v8::String::new(scope, "Illegal invocation").unwrap();
+            let exc = v8::Exception::type_error(scope, msg);
+            scope.throw_exception(exc);
+            return;
+        }
+    };
+
+    let cb_arg = args.get(0);
+    let cb_fn: v8::Local<v8::Function> = match cb_arg.try_into() {
+        Ok(f) => f,
+        Err(_) => {
+            let msg = v8::String::new(scope, "forEach callback is not callable").unwrap();
+            let exc = v8::Exception::type_error(scope, msg);
+            scope.throw_exception(exc);
+            return;
+        }
+    };
+    let this_arg = args.get(1);
+
+    let mut idx = 0usize;
+    loop {
+        let pair = {
+            let pairs = headers.value_pairs_to_iterate_over();
+            if idx >= pairs.len() {
+                return;
+            }
+            pairs[idx].clone()
+        };
+        idx += 1;
+        let (n, v) = pair;
+
+        let value_v =
+            v8::String::new_from_one_byte(scope, &v, v8::NewStringType::Normal).unwrap();
+        let key_v =
+            v8::String::new_from_one_byte(scope, &n, v8::NewStringType::Normal).unwrap();
+        let cb_args = [value_v.into(), key_v.into(), this_obj.into()];
+
+        // call() returns None if the callback threw — V8 has the
+        // exception pending. Stop iteration; the throw propagates to
+        // the JS caller of forEach.
+        if cb_fn.call(scope, this_arg, &cb_args).is_none() {
+            return;
+        }
+    }
 }
 
 fn install_iter_factory<'s>(
