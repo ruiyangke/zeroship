@@ -125,6 +125,42 @@ fn encoder_with_no_arg_returns_empty() {
     assert_eq!(s, 0);
 }
 
+/// `encodeInto` source param is `USVString` per WebIDL § 3.2.10.
+/// USVString coercion is: ToString(V), then replace unpaired
+/// surrogates with U+FFFD. So `encodeInto(42, dest)` should encode
+/// the string "42", not throw TypeError.
+#[test]
+fn encode_into_coerces_non_string_source_via_tostring() {
+    let s = run_in_v8(
+        r#"
+        const dest = new Uint8Array(8);
+        const r = new TextEncoder().encodeInto(42, dest);
+        // "42" → 2 ASCII bytes → r.read=2, r.written=2, dest[0]='4'
+        JSON.stringify({ read: r.read, written: r.written, b0: dest[0], b1: dest[1] });
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, r#"{"read":2,"written":2,"b0":52,"b1":50}"#);
+}
+
+/// Symbol can't be ToString-coerced; spec says throw.
+#[test]
+fn encode_into_throws_on_symbol_source() {
+    let s = run_in_v8(
+        r#"
+        const dest = new Uint8Array(8);
+        let kind;
+        try { new TextEncoder().encodeInto(Symbol("x"), dest); }
+        catch (e) { kind = e.constructor.name; }
+        kind;
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    // V8's ToString(Symbol) throws TypeError natively; our
+    // `Value::to_string` returns None and we surface a TypeError too.
+    assert_eq!(s, "TypeError");
+}
+
 // ---------------------------------------------------------------------------
 // TextDecoder — basic + spec labels
 // ---------------------------------------------------------------------------

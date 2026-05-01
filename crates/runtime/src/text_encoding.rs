@@ -98,24 +98,25 @@ impl TextEncoder {
     /// (the partial sequence is not split). `read` reflects only
     /// codepoints whose UTF-8 bytes fully fit.
     #[v8_method]
+    #[allow(non_snake_case)]
     fn encodeInto<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
         source: v8::Local<v8::Value>,
         destination: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        // Source: USVString — V8's `to_rust_string_lossy` does the
-        // unpaired-surrogate → U+FFFD substitution (matching the spec
-        // for the encode algorithm, which operates on USVString).
-        // For encodeInto's `read` counter we need UTF-16 code-unit
-        // boundaries, so we extract source as raw UTF-16 instead.
-        let src_str = match v8::Local::<v8::String>::try_from(source) {
-            Ok(s) => s,
-            Err(_) => {
-                return Err(OpError::type_error(
-                    "TextEncoder.encodeInto: source must be a string",
-                ));
-            }
+        // Source is `USVString`. Per WebIDL §3.2.10, USVString
+        // conversion is: ToString(V), then replace unpaired
+        // surrogates with U+FFFD. So `encodeInto(42, dest)` should
+        // encode "42", not throw. V8's `Value::to_string` performs
+        // ToString — returns None only if the conversion threw
+        // (e.g., a Symbol). We propagate that rejection as a
+        // generic OpError; the V8-side pending exception will
+        // surface as the macro's error path runs.
+        let Some(src_str) = source.to_string(scope) else {
+            return Err(OpError::type_error(
+                "TextEncoder.encodeInto: source could not be converted to a string",
+            ));
         };
         let src_len = src_str.length();
         let mut src_utf16 = vec![0u16; src_len];
