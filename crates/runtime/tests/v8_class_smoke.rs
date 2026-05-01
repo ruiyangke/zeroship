@@ -538,14 +538,226 @@ fn finalizer_drops_boxed_instance_on_isolate_teardown() {
         );
         std::mem::forget(weak);
 
-        // No explicit GC trigger — `request_garbage_collection_for_testing`
-        // requires the V8 `--expose-gc` flag, which we don't set in the
-        // shared global isolate init. `with_guaranteed_finalizer`
+        // No explicit GC trigger needed — `with_guaranteed_finalizer`
         // promises the callback fires on isolate teardown even without
-        // a prior GC pass, so we let the scope guards drop naturally.
+        // a prior GC pass. Let the scope guards drop naturally.
     }
 
     // After the scope guards (and isolate) drop, the finalizer must
     // have fired exactly once.
     assert_eq!(drops.load(Ordering::SeqCst), 1, "finalizer did not run");
+}
+
+// ---------------------------------------------------------------------------
+// Test 11: bulk allocation — N instances all drop on teardown
+// ---------------------------------------------------------------------------
+
+/// Number of instances allocated in the bulk test. Deliberately large
+/// enough that a per-instance leak would show up in heap residency
+/// (10k × 1KB payload = 10 MB of trackable allocation) but small
+/// enough to keep test wall-time under a second.
+const BULK_N: usize = 10_000;
+
+#[test]
+fn bulk_allocation_all_finalizers_fire_on_teardown() {
+    use gc_test::DropTracker;
+    let drops = Arc::new(AtomicUsize::new(0));
+
+    {
+        init_v8();
+        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        v8::scope!(let handle_scope, &mut isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        let tmpl = DropTracker::install(scope);
+        let inst_tmpl = tmpl.instance_template(scope);
+
+        for _ in 0..BULK_N {
+            let instance = inst_tmpl.new_instance(scope).unwrap();
+            let boxed: Box<DropTracker> = Box::new(DropTracker::new_with_drops(drops.clone()));
+            let raw = Box::into_raw(boxed);
+            let raw_addr = raw as usize;
+            let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
+            instance.set_internal_field(0, ext.into());
+
+            let weak = v8::Weak::with_guaranteed_finalizer(
+                scope,
+                instance,
+                Box::new(move || unsafe {
+                    drop(Box::from_raw(raw_addr as *mut DropTracker));
+                }),
+            );
+            std::mem::forget(weak);
+            // Drop the JS-side `instance` Local immediately. The Weak's
+            // guaranteed finalizer is what keeps the registration alive.
+        }
+
+        // Don't trigger explicit GC — let teardown handle it. This is
+        // the lower-bound guarantee we depend on in production: even if
+        // V8 never reclaims an object before isolate destruction, the
+        // finalizer must still run.
+    }
+
+    assert_eq!(
+        drops.load(Ordering::SeqCst),
+        BULK_N,
+        "expected {BULK_N} finalizers to fire, only {} did",
+        drops.load(Ordering::SeqCst),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 12: explicit GC mid-run — finalizers fire incrementally
+// ---------------------------------------------------------------------------
+
+#[test]
+fn explicit_gc_reclaims_unreferenced_instances() {
+    use gc_test::DropTracker;
+    let drops = Arc::new(AtomicUsize::new(0));
+    let after_gc;
+
+    {
+        init_v8();
+        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        v8::scope!(let handle_scope, &mut isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        let tmpl = DropTracker::install(scope);
+        let inst_tmpl = tmpl.instance_template(scope);
+
+        // Allocate 1000 instances inside an inner scope, then drop the
+        // scope so V8 has no Local references to them.
+        {
+            v8::scope!(let inner, scope);
+            for _ in 0..1000 {
+                let instance = inst_tmpl.new_instance(inner).unwrap();
+                let boxed: Box<DropTracker> = Box::new(DropTracker::new_with_drops(drops.clone()));
+                let raw = Box::into_raw(boxed);
+                let raw_addr = raw as usize;
+                let ext = v8::External::new(inner, raw as *mut std::ffi::c_void);
+                instance.set_internal_field(0, ext.into());
+                let weak = v8::Weak::with_guaranteed_finalizer(
+                    inner,
+                    instance,
+                    Box::new(move || unsafe {
+                        drop(Box::from_raw(raw_addr as *mut DropTracker));
+                    }),
+                );
+                std::mem::forget(weak);
+            }
+        }
+
+        // Force a major GC and drain the finalizer queue. With
+        // `--expose-gc` set in init_v8, this is a real Mark-Compact.
+        scope.request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
+        scope.perform_microtask_checkpoint();
+
+        after_gc = drops.load(Ordering::SeqCst);
+
+        assert!(
+            after_gc > 0,
+            "explicit GC reclaimed nothing — finalizer may be misregistered"
+        );
+    }
+    // Scope guards drop here — flushes any remaining finalizers.
+
+    let final_count = drops.load(Ordering::SeqCst);
+    assert_eq!(
+        final_count, 1000,
+        "expected 1000 total drops; got {after_gc} mid-GC + remainder = {final_count}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 13: payload-heavy instances — confirms no per-instance leak
+// ---------------------------------------------------------------------------
+
+mod payload {
+    use super::*;
+
+    /// Each instance owns 4KB of heap allocation. A finalizer leak on
+    /// 1000 instances would leave 4 MB unreclaimed — easily detectable
+    /// in process RSS if we wanted to assert on it, but the simpler
+    /// signal (drops == N) covers the same defect.
+    pub struct Heavy {
+        pub _payload: Vec<u8>,
+        pub drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for Heavy {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl Default for Heavy {
+        fn default() -> Self {
+            Heavy {
+                _payload: vec![0; 4096],
+                drops: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl Heavy {
+        pub fn new_with(drops: Arc<AtomicUsize>) -> Self {
+            Heavy {
+                _payload: vec![0xab; 4096],
+                drops,
+            }
+        }
+    }
+
+    #[v8_class]
+    impl Heavy {
+        #[v8_method]
+        fn size(&self) -> u32 {
+            self._payload.len() as u32
+        }
+    }
+}
+
+#[test]
+fn heavy_payload_instances_all_finalize() {
+    use payload::Heavy;
+    let drops = Arc::new(AtomicUsize::new(0));
+    const N: usize = 5_000;
+
+    {
+        init_v8();
+        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        v8::scope!(let handle_scope, &mut isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        let tmpl = Heavy::install(scope);
+        let inst_tmpl = tmpl.instance_template(scope);
+
+        for _ in 0..N {
+            let instance = inst_tmpl.new_instance(scope).unwrap();
+            let boxed: Box<Heavy> = Box::new(Heavy::new_with(drops.clone()));
+            let raw = Box::into_raw(boxed);
+            let raw_addr = raw as usize;
+            let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
+            instance.set_internal_field(0, ext.into());
+
+            let weak = v8::Weak::with_guaranteed_finalizer(
+                scope,
+                instance,
+                Box::new(move || unsafe {
+                    drop(Box::from_raw(raw_addr as *mut Heavy));
+                }),
+            );
+            std::mem::forget(weak);
+        }
+    }
+
+    assert_eq!(
+        drops.load(Ordering::SeqCst),
+        N,
+        "heavy payload finalizer leak: {} of {N} dropped",
+        drops.load(Ordering::SeqCst),
+    );
 }

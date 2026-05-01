@@ -32,6 +32,13 @@ pub fn init_v8() {
         v8::icu::set_common_data_77(deno_core_icudata::ICU_DATA)
             .expect("failed to load ICU data");
 
+        // `--expose-gc` makes `request_garbage_collection_for_testing`
+        // available so memory-pressure tests can force a GC pass
+        // mid-run instead of waiting for isolate teardown. The flag
+        // only enables a test entry point — it doesn't affect
+        // production behavior.
+        v8::V8::set_flags_from_string("--expose-gc");
+
         let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform);
         v8::V8::initialize();
