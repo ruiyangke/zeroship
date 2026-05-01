@@ -556,10 +556,10 @@
   Response.json = function(data, init) {
     var body = JSON.stringify(data);
     // Fast path: plain `Response.json(x)` — no init, default status/headers.
-    // Skips Headers allocation, validateName/validateValue regex, and
-    // the Response constructor's init-branching. All subsequent property
-    // access works identically because we inherit from Response.prototype
-    // (bodyUsed getter, text/json/arrayBuffer methods).
+    // Skips validateName/validateValue regex and the Response constructor's
+    // init-branching. All subsequent property access works identically
+    // because we inherit from Response.prototype (bodyUsed getter,
+    // text/json/arrayBuffer methods).
     if (!init) {
       var resp = Object.create(Response.prototype);
       resp.status = 200;
@@ -572,11 +572,14 @@
       resp._bodyBytes = null;
       resp._bodyUsed = false;
       resp._isStreamBody = false;
-      var h = Object.create(Headers.prototype);
-      h._map = { "content-type": ["application/json"] };
-      resp.headers = h;
+      // Use the constructor — works identically against the JS polyfill
+      // and the native `Headers` (the latter rejects the
+      // `Object.create(prototype) + _map = …` shortcut because its
+      // internal field 0 holds a Box<HeaderList> only the constructor
+      // populates).
+      resp.headers = new Headers([["content-type", "application/json"]]);
       // Rust-side `extract_response_headers` reads this array directly
-      // and skips the `_map` walk (~5-10 V8 property ops per header).
+      // and skips the iterable walk (~5-10 V8 property ops per header).
       resp._zsHeadersArr = JSON_HEADERS_ARR;
       return resp;
     }
@@ -724,7 +727,11 @@
 
       var method = request.method;
       var url = request.url;
-      var headersJson = JSON.stringify(request.headers._toArray());
+      // Spread the headers iterable into [[name, value], ...]. Works
+      // against the polyfill (which exposes `[Symbol.iterator]` via
+      // `entries`) and the native `Headers` (per WHATWG Fetch §2.2
+      // `iterable<>` mixin).
+      var headersJson = JSON.stringify([...request.headers]);
       var body = request._bodyText || null;
 
       var abortHandler;

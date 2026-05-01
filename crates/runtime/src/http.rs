@@ -18,7 +18,6 @@ use crate::state::SharedState;
 // runs the same ~8 property accesses per response.
 static K_STATUS: v8::OneByteConst = v8::String::create_external_onebyte_const(b"status");
 static K_HEADERS: v8::OneByteConst = v8::String::create_external_onebyte_const(b"headers");
-static K_MAP: v8::OneByteConst = v8::String::create_external_onebyte_const(b"_map");
 static K_BODY: v8::OneByteConst = v8::String::create_external_onebyte_const(b"body");
 static K_BODY_TEXT: v8::OneByteConst = v8::String::create_external_onebyte_const(b"_bodyText");
 static K_IS_STREAM: v8::OneByteConst = v8::String::create_external_onebyte_const(b"_isStreamBody");
@@ -28,6 +27,9 @@ static K_LENGTH: v8::OneByteConst = v8::String::create_external_onebyte_const(b"
 static K_ZS_RESPONSE: v8::OneByteConst = v8::String::create_external_onebyte_const(b"__zsResponse");
 static K_MESSAGE: v8::OneByteConst = v8::String::create_external_onebyte_const(b"message");
 static K_ZS_HEADERS_ARR: v8::OneByteConst = v8::String::create_external_onebyte_const(b"_zsHeadersArr");
+static K_DONE: v8::OneByteConst = v8::String::create_external_onebyte_const(b"done");
+static K_VALUE: v8::OneByteConst = v8::String::create_external_onebyte_const(b"value");
+static K_NEXT: v8::OneByteConst = v8::String::create_external_onebyte_const(b"next");
 
 #[inline(always)]
 fn key<'s>(scope: &mut v8::PinScope<'s, '_>, k: &'static v8::OneByteConst) -> v8::Local<'s, v8::String> {
@@ -65,24 +67,27 @@ fn key<'s>(scope: &mut v8::PinScope<'s, '_>, k: &'static v8::OneByteConst) -> v8
 /// Fast paths still preserved:
 ///   - Skips `JSON.parse` when `headersJson` is empty or `"[]"`.
 ///   - Skips `_bodyText` copy when body is empty or method is GET/HEAD.
+///
+/// Note: headers go through `new Headers(arrayOfPairs)` rather than the
+/// previous `Object.create(Headers.prototype) + _map = ...` shortcut.
+/// Native Headers stores its list in a Box<HeaderList> behind an internal
+/// V8 field — `Object.create(prototype)` produces an instance with an
+/// empty internal field, and any subsequent method call throws "Illegal
+/// invocation". The constructor path is the only way to populate the
+/// internal field, and it works identically against the JS polyfill.
 pub const HTTP_CREATE_REQUEST_JS: &str = r#"(function(method, url, headersJson, body) {
     var req = Object.create(Request.prototype);
     req.url = url;
     req.method = method;
     if (body && method !== "GET" && method !== "HEAD") req._bodyText = body;
-    var hMap = Object.create(null);
     // "[]" is 2 chars; anything longer means at least one real header.
+    var pairs;
     if (headersJson && headersJson.length > 2) {
-        var arr = JSON.parse(headersJson);
-        for (var i = 0; i < arr.length; i++) {
-            var k = arr[i][0].toLowerCase();
-            if (hMap[k]) hMap[k].push(arr[i][1]);
-            else hMap[k] = [arr[i][1]];
-        }
+        pairs = JSON.parse(headersJson);
+    } else {
+        pairs = [];
     }
-    var h = Object.create(Headers.prototype);
-    h._map = hMap;
-    req.headers = h;
+    req.headers = new Headers(pairs);
     return req;
 })"#;
 
@@ -169,7 +174,7 @@ pub fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Va
         });
     }
 
-    // Extract headers from response.headers._map
+    // Extract headers from response.headers (native or polyfill)
     let headers = extract_response_headers(scope, obj);
 
     // WebSocket upgrade: status 101 with a `webSocket` property
@@ -244,11 +249,13 @@ pub fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Va
 /// Fast path: if the Response has a pre-built `_zsHeadersArr` property
 /// (populated by `Response.json` and the future Response constructor
 /// fast-path), read it directly — one property lookup + array iteration.
-/// Skips the Headers instance, the `_map` walk, `get_own_property_names`,
+/// Skips the Headers instance, the iterable walk, `get_own_property_names`,
 /// and the name/value iteration (~8-12 V8 ops per request).
 ///
-/// Slow path: fall back to `response.headers._map` walk for user-
-/// constructed Responses that don't use the fast path.
+/// Slow path: walk `response.headers` via `[Symbol.iterator]()`. This
+/// works against both the JS polyfill Headers (which stored a `_map`
+/// behind the curtain) and the native Headers IDL surface — both expose
+/// `entries()`-style iteration per WHATWG Fetch §2.2.
 pub fn extract_response_headers(scope: &mut v8::PinScope, response_obj: v8::Local<v8::Object>) -> Vec<(String, String)> {
     let mut result = Vec::new();
 
@@ -276,29 +283,42 @@ pub fn extract_response_headers(scope: &mut v8::PinScope, response_obj: v8::Loca
         }
     }
 
-    // --- Slow path: walk response.headers._map ---
+    // --- Slow path: iterate response.headers via Symbol.iterator ---
     let headers_key = key(scope, &K_HEADERS);
     let Some(headers_val) = response_obj.get(scope, headers_key.into()) else { return result };
     let Some(headers_obj) = headers_val.to_object(scope) else { return result };
-    let map_key = key(scope, &K_MAP);
-    let Some(map_val) = headers_obj.get(scope, map_key.into()) else { return result };
-    let Some(map_obj) = map_val.to_object(scope) else { return result };
 
-    let Some(names) = map_obj.get_own_property_names(scope, Default::default()) else { return result };
-    let len_key = key(scope, &K_LENGTH);
-    for i in 0..names.length() {
-        let Some(name_val) = names.get_index(scope, i) else { continue };
-        let name = name_val.to_rust_string_lossy(scope);
-        let Some(arr_val) = map_obj.get(scope, name_val) else { continue };
-        let Some(arr_obj) = arr_val.to_object(scope) else { continue };
-        let len = arr_obj.get(scope, len_key.into())
-            .and_then(|v| v.uint32_value(scope))
-            .unwrap_or(0);
-        for j in 0..len {
-            if let Some(val) = arr_obj.get_index(scope, j) {
-                result.push((name.clone(), val.to_rust_string_lossy(scope)));
-            }
-        }
+    // headers[Symbol.iterator]() — the WebIDL `iterable<>` mixin
+    // surface. Polyfill Headers also exposes this via
+    // `Headers.prototype[Symbol.iterator] = entries`, so the call site
+    // is identical for both implementations.
+    let sym_iter = v8::Symbol::get_iterator(scope);
+    let Some(iter_fn_val) = headers_obj.get(scope, sym_iter.into()) else { return result };
+    let Ok(iter_fn) = v8::Local::<v8::Function>::try_from(iter_fn_val) else { return result };
+    let Some(iter_v) = iter_fn.call(scope, headers_obj.into(), &[]) else { return result };
+    let Some(iter_obj) = iter_v.to_object(scope) else { return result };
+
+    let next_key = key(scope, &K_NEXT);
+    let done_key = key(scope, &K_DONE);
+    let value_key = key(scope, &K_VALUE);
+    let Some(next_fn_val) = iter_obj.get(scope, next_key.into()) else { return result };
+    let Ok(next_fn) = v8::Local::<v8::Function>::try_from(next_fn_val) else { return result };
+
+    loop {
+        let Some(step_v) = next_fn.call(scope, iter_obj.into(), &[]) else { break };
+        let Some(step_obj) = step_v.to_object(scope) else { break };
+        let done = step_obj.get(scope, done_key.into())
+            .map(|v| v.boolean_value(scope))
+            .unwrap_or(true);
+        if done { break; }
+        let Some(pair_val) = step_obj.get(scope, value_key.into()) else { break };
+        let Some(pair_obj) = pair_val.to_object(scope) else { continue };
+        let Some(name_val) = pair_obj.get_index(scope, 0) else { continue };
+        let Some(val_val) = pair_obj.get_index(scope, 1) else { continue };
+        result.push((
+            name_val.to_rust_string_lossy(scope),
+            val_val.to_rust_string_lossy(scope),
+        ));
     }
     result
 }
