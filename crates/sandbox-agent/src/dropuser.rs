@@ -68,6 +68,15 @@ use tracing::{info, warn};
 const DROP_USER: &str = "nobody";
 const DROP_GROUP: &str = "nogroup";
 
+/// Conventional `$HOME` for the dropped child. The path is fixed
+/// inside every sandbox VM regardless of which user owns the
+/// session — the Pod-level isolation comes from mounting **that
+/// user's** PVC at this path, not from the path being unique. Tools
+/// that respect XDG / `$HOME` (pnpm, npm, pip, cargo, ssh, git)
+/// land their caches and config here automatically and benefit from
+/// per-user persistence on the next sandbox.
+pub const USER_HOME: &str = "/home/u";
+
 /// Per-uid process count cap. Applied only when actually dropping to
 /// nobody (otherwise it would constrain the test runner's uid which
 /// may already exceed this). 256 is generous for AI-builder
@@ -158,6 +167,20 @@ fn getgrnam_gid(name: &str) -> Option<u32> {
 /// if chown fails the worst case is that /exec children can't write
 /// to the workspace, which surfaces in the user's command output.
 pub fn chown_workspace(path: &Path) {
+    chown_to_drop_user("chown_workspace", path);
+}
+
+/// Chown the per-user home directory (`/home/u`) to the drop user.
+/// Same shape as [`chown_workspace`] — top-level only, idempotent.
+/// Existing files inside the dir (cache contents from prior sessions,
+/// when this is mounted from a per-user PVC) are already owned by
+/// nobody, so a recursive chown isn't needed and would be slow on a
+/// big package cache.
+pub fn chown_user_home(path: &Path) {
+    chown_to_drop_user("chown_user_home", path);
+}
+
+fn chown_to_drop_user(label: &'static str, path: &Path) {
     let Some((uid, gid)) = child_creds() else {
         // Not running as root, or "nobody" doesn't resolve. Either
         // way, don't try to chown — we'd just fail with EPERM.
@@ -166,7 +189,7 @@ pub fn chown_workspace(path: &Path) {
     let c = match CString::new(path.as_os_str().as_bytes()) {
         Ok(c) => c,
         Err(_) => {
-            warn!(path = %path.display(), "chown_workspace: path contains NUL");
+            warn!(path = %path.display(), "{label}: path contains NUL");
             return;
         }
     };
@@ -174,9 +197,9 @@ pub fn chown_workspace(path: &Path) {
     let r = unsafe { libc::chown(c.as_ptr(), uid, gid) };
     if r != 0 {
         let e = std::io::Error::last_os_error();
-        warn!(path = %path.display(), error = %e, "chown_workspace failed");
+        warn!(path = %path.display(), error = %e, "{label} failed");
     } else {
-        info!(path = %path.display(), uid, gid, "chown_workspace ok");
+        info!(path = %path.display(), uid, gid, "{label} ok");
     }
 }
 

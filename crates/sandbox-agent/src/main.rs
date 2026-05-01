@@ -66,6 +66,20 @@ async fn run() -> Result<(), String> {
     // actually write into it. No-op when not running as root.
     dropuser::chown_workspace(&workspace);
 
+    // Per-user home dir — the conventional $HOME for /exec
+    // children. When the controller mounts a per-user PVC at
+    // this path the dir already exists (provisioned by k8s);
+    // we still ensure it's there + chown'd so first-time
+    // sessions without a PVC also work. Fresh-PVC root-owned
+    // mountpoint gets re-owned to nobody so caches are writable.
+    let user_home = std::path::Path::new(dropuser::USER_HOME);
+    if let Err(e) = std::fs::create_dir_all(user_home) {
+        // Don't fail boot — without a writable HOME the agent
+        // still works, just without the per-user cache benefit.
+        tracing::warn!(path = %user_home.display(), error = %e, "create user home failed");
+    }
+    dropuser::chown_user_home(user_home);
+
     // (Reaper installed at the very top of `main` so SIGCHLD is
     // already blocked process-wide by the time we reach this point.)
     let state = state_from_env(workspace.clone())?;

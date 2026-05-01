@@ -60,8 +60,16 @@ fn infer_content_type(path: &str) -> &'static str {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateSessionBody {
-    /// Stable per-project id. Re-using the same `project_id` returns
-    /// the existing session if one is alive.
+    /// Identifies the human creator. Drives per-user PVC mounting
+    /// in the K8s backend (caches survive across every sandbox the
+    /// user opens) and "one active session per user" scheduling.
+    /// Constrained to `[a-zA-Z0-9_-]{1,64}`.
+    pub user_id: String,
+    /// Stable per-project id. The session is keyed on
+    /// (`user_id`, `project_id`); re-opening with the same pair
+    /// returns the existing session if one is alive. A different
+    /// project_id from the same user implies a different sandbox
+    /// — the previous one will be stopped (per-user PVC is RWO).
     pub project_id: String,
 }
 
@@ -72,6 +80,14 @@ pub async fn create_session(
 ) -> HttpResponse {
     if !auth::check(&req, &state) { return unauthorized(); }
 
+    let user_id = body.user_id.trim().to_string();
+    if user_id.is_empty()
+        || user_id.len() > 64
+        || !user_id.chars().all(is_safe_id_char)
+    {
+        return err(400, "invalid user_id (alphanumeric / dash / underscore, max 64 chars)");
+    }
+
     let project_id = body.project_id.trim().to_string();
     if project_id.is_empty()
         || project_id.len() > 64
@@ -80,15 +96,17 @@ pub async fn create_session(
         return err(400, "invalid project_id (alphanumeric / dash / underscore, max 64 chars)");
     }
 
-    // Re-attach existing session if alive.
-    if let Some(id) = state.sessions.find_by_project(&project_id) {
+    // Re-attach existing session for THIS USER on this project.
+    // (Same project_id from a different user = a different
+    // sandbox; they each have their own clone of the project.)
+    if let Some(id) = state.sessions.find_by_user_project(&user_id, &project_id) {
         if let Some(info) = state.sessions.get(&id) {
             return HttpResponse::Ok().json(&info);
         }
     }
 
     let session_id = Uuid::new_v4();
-    let info = match state.backend.create(session_id, &project_id).await {
+    let info = match state.backend.create(session_id, &user_id, &project_id).await {
         Ok(i) => i,
         Err(e) => return err(500, format!("backend.create: {e}")),
     };

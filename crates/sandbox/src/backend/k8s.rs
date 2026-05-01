@@ -69,8 +69,15 @@ pub struct K8sBackend {
 }
 
 struct K8sSession {
+    user_id: String,
     pod_name: String,
     configmap_name: String,
+    /// Per-user PVC currently mounted at `/home/u`. Persists across
+    /// sessions for the same user — we record the name so we know
+    /// which PVC to expect in the cluster, but **never delete it**
+    /// on session stop. PVC lifecycle is tied to user lifecycle, not
+    /// session lifecycle.
+    user_home_pvc: String,
     namespace: String,
     /// Base URL the controller uses to reach the agent. Either
     /// `http://<pod-ip>:7777` (in-cluster) or
@@ -87,8 +94,10 @@ struct K8sSession {
 impl std::fmt::Debug for K8sSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("K8sSession")
+            .field("user_id", &self.user_id)
             .field("pod_name", &self.pod_name)
             .field("configmap_name", &self.configmap_name)
+            .field("user_home_pvc", &self.user_home_pvc)
             .field("namespace", &self.namespace)
             .field("agent_url", &self.agent_url)
             .field("port_forward", &self.port_forward.is_some())
@@ -131,8 +140,27 @@ impl K8sBackend {
     pub async fn create(
         &self,
         session_id: Uuid,
+        user_id: &str,
         project_id: &str,
     ) -> Result<SessionInfo, String> {
+        validate_id(user_id, "user_id")?;
+        validate_id(project_id, "project_id")?;
+
+        // 0. **One active session per user.** The per-user PVC is
+        //    `ReadWriteOnce`; if this user already has a Pod
+        //    holding the lock, the new Pod would stay Pending
+        //    forever. Stop the existing session first so the PVC
+        //    is free to attach here.
+        let existing = self.find_existing_for_user(user_id);
+        for old_id in existing {
+            eprintln!(
+                "[sandbox/k8s] user {user_id} already has session {old_id}; stopping before creating new"
+            );
+            if let Err(e) = self.stop(old_id).await {
+                eprintln!("[sandbox/k8s] stop({old_id}) failed: {e}");
+            }
+        }
+
         // 1. Mint Ed25519 keypair. Only the public key leaves this process.
         let sk_bytes = random_key32()?;
         let signing_key = SigningKey::from_bytes(&sk_bytes);
@@ -143,11 +171,26 @@ impl K8sBackend {
         let pod_name = format!("zsbx-{}", session_id.simple());
         let configmap_name = format!("{pod_name}-trust");
         let ns = self.cfg.k8s.namespace.clone();
+        let user_home_pvc = user_pvc_name(user_id);
 
-        // 2. Apply ConfigMap (public key) — NOT a Secret.
+        // 2. Ensure per-user PVC. Idempotent — only created the
+        //    first time we see this user. Persists across every
+        //    sandbox the user opens; deleted only on user deletion
+        //    (separate lifecycle, owned by the control plane).
+        ensure_user_home_pvc(
+            &user_home_pvc,
+            &ns,
+            user_id,
+            &self.cfg.k8s.user_home_size,
+            self.cfg.k8s.user_home_storage_class.as_deref(),
+        )
+        .await?;
+
+        // 3. Apply ConfigMap (public key) — NOT a Secret.
         apply_pubkey_configmap(&configmap_name, &ns, &pubkey_b64).await?;
 
-        // 3. Apply Pod.
+        // 4. Apply Pod with both the trust ConfigMap AND the
+        //    per-user PVC mounted at `/home/u`.
         apply_agent_pod(
             &pod_name,
             &ns,
@@ -156,13 +199,17 @@ impl K8sBackend {
             self.cfg.memory_mb,
             self.cfg.cpus,
             &configmap_name,
+            &user_home_pvc,
+            user_id,
             project_id,
             &session_id.to_string(),
         )
         .await?;
 
-        // 4. Wait for the Pod to be Ready. Wrap in a Result so we
+        // 5. Wait for the Pod to be Ready. Wrap in a Result so we
         //    clean up on failure (don't leak a half-spawned Pod).
+        //    The PVC stays — it's user-scoped, not session-scoped,
+        //    and removing it would lose other sessions' caches.
         let ready_res = wait_pod_ready(
             &pod_name,
             &ns,
@@ -176,7 +223,7 @@ impl K8sBackend {
             return Err(e);
         }
 
-        // 5. Resolve agent URL.
+        // 6. Resolve agent URL.
         let (agent_url, port_forward) = if self.cfg.k8s.use_port_forward {
             let local_port = self.next_port.fetch_add(1, Ordering::Relaxed);
             let pf = start_port_forward(&pod_name, &ns, local_port)?;
@@ -190,10 +237,12 @@ impl K8sBackend {
             (url, None)
         };
 
-        // 6. Stash internal state.
+        // 7. Stash internal state.
         let session = K8sSession {
+            user_id: user_id.to_string(),
             pod_name: pod_name.clone(),
             configmap_name: configmap_name.clone(),
+            user_home_pvc: user_home_pvc.clone(),
             namespace: ns,
             agent_url: agent_url.clone(),
             signing_key,
@@ -204,12 +253,30 @@ impl K8sBackend {
         let now = unix_now();
         Ok(SessionInfo {
             session_id: session_id.to_string(),
+            user_id: user_id.to_string(),
             project_id: project_id.to_string(),
             backend: "k8s".to_string(),
-            backend_hint: format!("pod={pod_name} key_fp={key_fp} url={agent_url}"),
+            backend_hint: format!(
+                "pod={pod_name} pvc={user_home_pvc} key_fp={key_fp} url={agent_url}"
+            ),
             created_at_secs: now,
             last_used_at_secs: now,
         })
+    }
+
+    /// Find every session id this user currently owns. Used by
+    /// `create` to enforce one-session-per-user (RWO PVC requires
+    /// it). Returns a Vec because in a future multi-PVC world we
+    /// might allow N concurrent sessions per user; today there's
+    /// at most one.
+    fn find_existing_for_user(&self, user_id: &str) -> Vec<Uuid> {
+        self.state
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(_, s)| s.user_id == user_id)
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     pub async fn stop(&self, session_id: Uuid) -> Result<(), String> {
@@ -498,6 +565,58 @@ data:
     kubectl_apply_stdin(yaml).await
 }
 
+/// Ensure a per-user PVC exists. Idempotent (`kubectl apply`
+/// handles the "already there" case as a no-op). The PVC is the
+/// home directory of the dropped /exec child inside every sandbox
+/// the user opens — package caches (pnpm, npm, pip, cargo),
+/// dotfiles, and SSH config land there and survive across
+/// sandboxes. The size + StorageClass are configurable; reclaim
+/// policy is whatever the StorageClass defaults to (typically
+/// `Delete`, which is fine — PVC deletion happens only on user
+/// deletion, controlled by the control plane).
+async fn ensure_user_home_pvc(
+    name: &str,
+    namespace: &str,
+    user_id: &str,
+    size: &str,
+    storage_class: Option<&str>,
+) -> Result<(), String> {
+    // YAML emitted only when the PVC doesn't already exist; we
+    // could `apply` unconditionally, but that re-validates / writes
+    // the spec each time. Cheap-but-not-free; check first.
+    let check = run_kubectl(&[
+        "get", "pvc", name, "-n", namespace, "--ignore-not-found",
+        "-o", "name",
+    ])
+    .await?;
+    if check.status == 0 && !check.stdout.trim().is_empty() {
+        return Ok(());
+    }
+
+    let storage_class_line = match storage_class {
+        Some(c) if !c.is_empty() => format!("  storageClassName: {c}\n"),
+        _ => String::new(),
+    };
+    let yaml = format!(
+        r#"apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {name}
+  namespace: {namespace}
+  labels:
+    app.kubernetes.io/name: sandbox-agent
+    zeroship.user: "{user_id}"
+spec:
+  accessModes:
+    - ReadWriteOnce
+{storage_class_line}  resources:
+    requests:
+      storage: {size}
+"#
+    );
+    kubectl_apply_stdin(yaml).await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn apply_agent_pod(
     name: &str,
@@ -507,6 +626,8 @@ async fn apply_agent_pod(
     memory_mb: u32,
     cpus: f32,
     configmap_name: &str,
+    user_home_pvc: &str,
+    user_id: &str,
     project_id: &str,
     session_id: &str,
 ) -> Result<(), String> {
@@ -520,6 +641,7 @@ metadata:
   namespace: {namespace}
   labels:
     app.kubernetes.io/name: sandbox-agent
+    zeroship.user: "{user_id}"
     zeroship.session: "{session_id}"
     zeroship.project: "{project_id}"
   annotations:
@@ -551,6 +673,8 @@ spec:
         - name: trust
           mountPath: /run/keys
           readOnly: true
+        - name: user-home
+          mountPath: /home/u
       resources:
         limits:
           memory: {mem}
@@ -563,6 +687,9 @@ spec:
           - key: controller-pubkey
             path: controller-pubkey
             mode: 0444
+    - name: user-home
+      persistentVolumeClaim:
+        claimName: {user_home_pvc}
 "#
     );
     kubectl_apply_stdin(yaml).await
@@ -703,9 +830,47 @@ fn sanitize_path(p: &str) -> Result<String, String> {
     Ok(p.to_string())
 }
 
+/// Validate a user_id / project_id at the backend boundary. Same
+/// charset the HTTP handler enforces (`[a-zA-Z0-9_-]`, ≤ 64 chars);
+/// the redundant check here defends against a future caller that
+/// bypasses the handler — we'd rather error than name a Pod with
+/// `kubectl`-incompatible characters.
+fn validate_id(id: &str, what: &'static str) -> Result<(), String> {
+    if id.is_empty() {
+        return Err(format!("{what} is empty"));
+    }
+    if id.len() > 64 {
+        return Err(format!("{what} too long (max 64 chars)"));
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!(
+            "{what} must match [a-zA-Z0-9_-]; got {id:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// Stable PVC name derived from `user_id`. Replaces `_` with `-`
+/// so the result is DNS-1123-compliant; lowercases for the same
+/// reason. `validate_id` already constrains the input charset, so
+/// this transformation is total and reversible enough for ops.
+fn user_pvc_name(user_id: &str) -> String {
+    let safe: String = user_id
+        .chars()
+        .map(|c| match c {
+            '_' => '-',
+            c => c.to_ascii_lowercase(),
+        })
+        .collect();
+    format!("zsbx-userhome-{safe}")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::sanitize_path;
+    use super::{sanitize_path, user_pvc_name, validate_id};
 
     #[test]
     fn sanitize_rejects_parent() {
@@ -727,5 +892,40 @@ mod tests {
     fn sanitize_accepts_relative() {
         assert_eq!(sanitize_path("src/main.rs").unwrap(), "src/main.rs");
         assert_eq!(sanitize_path("a.txt").unwrap(), "a.txt");
+    }
+
+    #[test]
+    fn validate_id_accepts_alnum_dash_underscore() {
+        assert!(validate_id("alice", "user_id").is_ok());
+        assert!(validate_id("alice-1", "user_id").is_ok());
+        assert!(validate_id("alice_1", "user_id").is_ok());
+        assert!(validate_id("ABC123-_abc", "user_id").is_ok());
+    }
+
+    #[test]
+    fn validate_id_rejects_bad_chars() {
+        assert!(validate_id("alice@example.com", "user_id").is_err());
+        assert!(validate_id("alice/bob", "user_id").is_err());
+        assert!(validate_id("alice bob", "user_id").is_err());
+        assert!(validate_id("", "user_id").is_err());
+        assert!(validate_id(&"a".repeat(65), "user_id").is_err());
+    }
+
+    #[test]
+    fn user_pvc_name_is_dns_1123_compliant() {
+        // DNS-1123: lowercase alphanumeric + dash only, ≤253 chars.
+        let cases = [
+            ("alice", "zsbx-userhome-alice"),
+            ("ALICE", "zsbx-userhome-alice"),
+            ("alice_1", "zsbx-userhome-alice-1"),
+            ("Alice-2", "zsbx-userhome-alice-2"),
+        ];
+        for (input, expected) in cases {
+            let got = user_pvc_name(input);
+            assert_eq!(got, expected, "user_pvc_name({input:?})");
+            assert!(got.len() <= 253, "{got} too long");
+            assert!(got.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                "{got} not DNS-1123: contains non-alphanum-or-dash");
+        }
     }
 }

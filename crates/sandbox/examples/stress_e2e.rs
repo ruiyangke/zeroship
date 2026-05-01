@@ -107,13 +107,17 @@ async fn run() -> Result<(), String> {
         let stats = stats.clone();
         let stop = stop.clone();
         let errs = worker_errors.clone();
-        let project_id = format!("stress-{}-{}", n, Uuid::new_v4().simple());
+        // One unique user per worker → one PVC per worker. Avoids
+        // RWO contention; also exercises the PVC-create path on
+        // every worker (probes parallel PVC provisioning).
+        let user_id = format!("stress-u{}-{}", n, Uuid::new_v4().simple());
+        let project_id = format!("stress-p{}-{}", n, Uuid::new_v4().simple());
         let cfg = WorkerConfig {
             ops_per_second: stress.ops_per_second,
             heavy_every: stress.heavy_every,
         };
         let handle = compio::runtime::spawn(async move {
-            if let Err(e) = run_worker(n, project_id, backend, stats, stop, cfg).await {
+            if let Err(e) = run_worker(n, user_id, project_id, backend, stats, stop, cfg).await {
                 errs.lock().unwrap().push(format!("worker {n}: {e}"));
             }
         });
@@ -219,6 +223,7 @@ struct WorkerConfig {
 
 async fn run_worker(
     worker_id: usize,
+    user_id: String,
     project_id: String,
     backend: Arc<Backend>,
     stats: Arc<Stats>,
@@ -230,7 +235,7 @@ async fn run_worker(
     // Create — this is the slow path; up to ~15s on a slow node.
     let create_started = Instant::now();
     let info = backend
-        .create(session_id, &project_id)
+        .create(session_id, &user_id, &project_id)
         .await
         .map_err(|e| format!("worker {worker_id}: create: {e}"))?;
     println!(

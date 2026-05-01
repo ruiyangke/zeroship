@@ -76,6 +76,12 @@ pub struct TreeEntry {
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionInfo {
     pub session_id: String,
+    /// Identifies which **creator** owns this session. Drives
+    /// per-user PVC mounting in the K8s backend (a freshly-mounted
+    /// PVC at `/home/u` carries this user's package caches across
+    /// every sandbox they open) and "one active session per user"
+    /// scheduling. Constrained to `[a-z0-9-_]{1,64}`.
+    pub user_id: String,
     pub project_id: String,
     /// `"docker"` or `"k8s"` — for debug / list output, NOT for
     /// dispatch (handlers always call through the Backend enum).
@@ -126,11 +132,12 @@ impl Backend {
     pub async fn create(
         &self,
         session_id: Uuid,
+        user_id: &str,
         project_id: &str,
     ) -> Result<SessionInfo, String> {
         match self {
-            Self::Docker(b) => b.create(session_id, project_id).await,
-            Self::K8s(b) => b.create(session_id, project_id).await,
+            Self::Docker(b) => b.create(session_id, user_id, project_id).await,
+            Self::K8s(b) => b.create(session_id, user_id, project_id).await,
         }
     }
 

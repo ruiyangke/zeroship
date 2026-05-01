@@ -77,8 +77,16 @@ impl DockerBackend {
     pub async fn create(
         &self,
         session_id: Uuid,
+        user_id: &str,
         project_id: &str,
     ) -> Result<SessionInfo, String> {
+        // The Docker backend keeps the existing per-project bind-mount
+        // model (workspace persists across sessions for the same
+        // project on this host). Per-user package caches aren't yet
+        // implemented for Docker; user_id is recorded on the session
+        // for parity with the K8s backend but doesn't currently
+        // change the spawn shape. (Future: per-user host directory
+        // bind-mounted at `/home/u`.)
         let container_name = format!("zsbx-{}", session_id.simple());
         let workspace = self.cfg.workspace_root.join(project_id);
         std::fs::create_dir_all(&workspace)
@@ -108,6 +116,7 @@ impl DockerBackend {
 
         Ok(SessionInfo {
             session_id: session_id.to_string(),
+            user_id: user_id.to_string(),
             project_id: project_id.to_string(),
             backend: "docker".to_string(),
             backend_hint: format!("container={container_name} id={}", short_id(&container_id)),

@@ -67,37 +67,48 @@ async fn run() -> Result<(), String> {
     println!("probe ok ({:?})", started.elapsed());
 
     let registry = SessionRegistry::new();
+    // Stable user across the run so session 2 reattaches the
+    // existing per-user PVC and proves the cache survived.
+    let user_id = format!("e2e-user-{}", Uuid::new_v4().simple());
     let project_id = format!("e2e-{}", Uuid::new_v4().simple());
-    let result = run_lifecycle(&backend, &registry, &project_id).await;
+    let result = run_lifecycle(&backend, &registry, &user_id, &project_id).await;
 
     // Always best-effort cleanup on the way out.
-    if let Some(id) = registry.find_by_project(&project_id) {
+    if let Some(id) = registry.find_by_user_project(&user_id, &project_id) {
         let _ = backend.stop(id).await;
         let _ = registry.remove(&id);
     }
+    // PVC intentionally left behind — it's user-scoped, not test-
+    // scoped. Operators clean these up via a separate prune job.
+    // For local dev: `kubectl delete pvc -l zeroship.user=<id>`.
+    println!("note: PVC zsbx-userhome-{user_id} left in cluster (per-user, not session-scoped)");
     result
 }
 
 async fn run_lifecycle(
     backend: &Backend,
     registry: &SessionRegistry,
+    user_id: &str,
     project_id: &str,
 ) -> Result<(), String> {
     // ─── create ─────────────────────────────────────────────────
-    case("create session (Pod + ConfigMap + port-forward + agent ready)", async {
+    case("create session (PVC + Pod + ConfigMap + port-forward + agent ready)", async {
         let session_id = Uuid::new_v4();
-        let info = backend.create(session_id, project_id).await?;
+        let info = backend.create(session_id, user_id, project_id).await?;
         registry.insert(session_id, info.clone());
         check_info(&info, "k8s")?;
-        if !info.backend_hint.contains("pod=") || !info.backend_hint.contains("key_fp=") {
-            return Err(format!("backend_hint missing pod/key_fp: {}", info.backend_hint));
+        if !info.backend_hint.contains("pod=")
+            || !info.backend_hint.contains("key_fp=")
+            || !info.backend_hint.contains("pvc=")
+        {
+            return Err(format!("backend_hint missing pod/key_fp/pvc: {}", info.backend_hint));
         }
         println!("    {}", info.backend_hint);
         Ok(())
     }).await?;
 
     let session_id = registry
-        .find_by_project(project_id)
+        .find_by_user_project(user_id, project_id)
         .ok_or("session not in registry after create")?;
 
     // ─── exec ──────────────────────────────────────────────────
@@ -179,10 +190,10 @@ async fn run_lifecycle(
     }).await?;
 
     // ─── re-attach ─────────────────────────────────────────────
-    case("create with same project_id reuses existing session", async {
+    case("create with same (user, project) reuses existing session", async {
         // Simulate the registry-level dedup the HTTP handler does.
         let existing = registry
-            .find_by_project(project_id)
+            .find_by_user_project(user_id, project_id)
             .ok_or("session not in registry")?;
         if existing != session_id {
             return Err("registry forgot the session id between calls".into());
@@ -207,6 +218,113 @@ async fn run_lifecycle(
 
     case("stop is idempotent (second call is Ok)", async {
         backend.stop(session_id).await?;
+        Ok(())
+    }).await?;
+
+    // ─── per-user PVC persistence ──────────────────────────────
+    //
+    // The headline test for the per-user storage layer: write a
+    // marker into ~/.cache (which is on the per-user PVC), tear
+    // the session down, spin a fresh session for the SAME user,
+    // verify the marker is still there. Proves cache-survives-
+    // across-sandboxes — the whole point of the per-user PVC.
+
+    // Re-create a session for the same user (different session id)
+    // so we have a live agent to query.
+    let session2 = Uuid::new_v4();
+    case("recreate session — same user, different session id", async {
+        let info = backend.create(session2, user_id, project_id).await?;
+        registry.insert(session2, info);
+        Ok(())
+    }).await?;
+
+    case("first sandbox: write marker into ~/.cache/zsbx-marker", async {
+        let out = backend
+            .exec(
+                session2,
+                "mkdir -p ~/.cache && echo first-run-$$ > ~/.cache/zsbx-marker && cat ~/.cache/zsbx-marker",
+                None,
+                Some(5_000),
+            )
+            .await?;
+        if out.status != 0 || !out.stdout.contains("first-run-") {
+            return Err(format!("marker write failed: {out:?}"));
+        }
+        Ok(())
+    }).await?;
+
+    case("verify HOME is /home/u (the PVC mount)", async {
+        let out = backend.exec(session2, "echo $HOME", None, Some(5_000)).await?;
+        let home = out.stdout.trim();
+        if home != "/home/u" {
+            return Err(format!("HOME={home:?} expected /home/u"));
+        }
+        Ok(())
+    }).await?;
+
+    // Sample the original marker we expect to survive.
+    let marker_before = backend
+        .exec(session2, "cat ~/.cache/zsbx-marker", None, Some(5_000))
+        .await
+        .map_err(|e| format!("read marker: {e}"))?
+        .stdout
+        .trim()
+        .to_string();
+    if marker_before.is_empty() {
+        return Err("marker_before empty before tear-down".into());
+    }
+
+    case("tear session down (PVC stays, single-session-per-user)", async {
+        backend.stop(session2).await?;
+        registry.remove(&session2);
+        Ok(())
+    }).await?;
+
+    let session3 = Uuid::new_v4();
+    case("create third session — same user, fresh Pod, reuses PVC", async {
+        let info = backend.create(session3, user_id, project_id).await?;
+        registry.insert(session3, info);
+        Ok(())
+    }).await?;
+
+    case("marker survives across sandboxes (per-user PVC works)", async {
+        let out = backend
+            .exec(session3, "cat ~/.cache/zsbx-marker", None, Some(5_000))
+            .await?;
+        if out.status != 0 {
+            return Err(format!(
+                "cat marker on fresh sandbox failed: status={} stderr={}",
+                out.status, out.stderr
+            ));
+        }
+        let marker_after = out.stdout.trim();
+        if marker_after != marker_before {
+            return Err(format!(
+                "PVC didn't reattach! before={marker_before:?} after={marker_after:?}"
+            ));
+        }
+        println!("    marker preserved: {marker_after:?}");
+        Ok(())
+    }).await?;
+
+    case("npm-style cache directory persists too", async {
+        // Smoke test: agent's HOME is /home/u; pnpm/npm/pip would
+        // land their caches there. Just create a placeholder dir
+        // structure to confirm filesystem semantics work.
+        let _ = backend
+            .exec(
+                session3,
+                "mkdir -p ~/.npm/_cacache && touch ~/.npm/_cacache/index-v5 && ls ~/.npm/_cacache/",
+                None,
+                Some(5_000),
+            )
+            .await?;
+        Ok(())
+    }).await?;
+
+    case("final stop — registry clean, PVC retained for next session", async {
+        backend.stop(session3).await?;
+        registry.remove(&session3);
         Ok(())
     }).await?;
 

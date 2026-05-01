@@ -89,6 +89,22 @@ pub struct K8sConfig {
     /// `SANDBOX_K8S_PORT_FORWARD_START` (default 18000). Allocator
     /// is monotonic per process; never reuses ports.
     pub port_forward_start: u16,
+
+    /// PVC size for the per-user `/home/u` mount. Holds package
+    /// caches (pnpm, npm, pip, cargo), dotfiles, ssh config —
+    /// non-secret, deduplicated state that survives across every
+    /// sandbox the user opens. `SANDBOX_K8S_USER_HOME_SIZE`
+    /// (default `5Gi`). k8s parses this as a Quantity.
+    pub user_home_size: String,
+
+    /// StorageClass used for per-user PVCs. Empty / unset = use
+    /// the cluster default (`storageclass.kubernetes.io/is-default-class: "true"`).
+    /// In production pick one with snapshot+clone support
+    /// (Longhorn, Ceph RBD, EBS gp3, GCE PD) so the per-project
+    /// snapshot / fork features in the storage design are
+    /// buildable later. `SANDBOX_K8S_USER_HOME_STORAGE_CLASS`
+    /// (default empty).
+    pub user_home_storage_class: Option<String>,
 }
 
 impl SandboxConfig {
@@ -122,6 +138,9 @@ impl SandboxConfig {
             return Err(format!("SANDBOX_MEMORY_MB too small: {memory_mb}"));
         }
 
+        let user_home_storage_class = std::env::var("SANDBOX_K8S_USER_HOME_STORAGE_CLASS")
+            .ok()
+            .filter(|s| !s.is_empty());
         let k8s = K8sConfig {
             namespace: std::env::var("SANDBOX_K8S_NAMESPACE")
                 .unwrap_or_else(|_| "default".to_string()),
@@ -132,6 +151,9 @@ impl SandboxConfig {
             ready_timeout_secs: parse_env("SANDBOX_K8S_READY_TIMEOUT_SECS", 120u64)?,
             use_port_forward: parse_env("SANDBOX_K8S_USE_PORT_FORWARD", true)?,
             port_forward_start: parse_env("SANDBOX_K8S_PORT_FORWARD_START", 18000u16)?,
+            user_home_size: std::env::var("SANDBOX_K8S_USER_HOME_SIZE")
+                .unwrap_or_else(|_| "5Gi".to_string()),
+            user_home_storage_class,
         };
 
         Ok(Self {

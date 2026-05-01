@@ -121,9 +121,12 @@ pub async fn run(cmd: &str, cwd: &str, timeout_ms: u64) -> Result<ExecOutput, St
         .envs(curated_env());
     let creds = crate::dropuser::child_creds();
     if creds.is_some() {
-        // HOME defaults to root's home otherwise — pick something
-        // the dropped uid can actually write to.
-        command.env("HOME", "/tmp");
+        // Point HOME at the per-user home dir. When the session is
+        // backed by a per-user PVC mounted at this path, npm/pnpm/
+        // pip/cargo caches survive across sandboxes for the same
+        // user. When there's no PVC the dir is just an empty
+        // chowned tmpfs/rootfs entry, also fine.
+        command.env("HOME", crate::dropuser::USER_HOME);
         command.env("USER", "nobody");
     }
     // SAFETY: `pre_exec_lockdown` is documented async-signal-safe;
@@ -604,20 +607,16 @@ mod tests {
     }
 
     /// **S5: HOME is never the agent's HOME.** When the dropped
-    /// child runs as nobody (production) we override HOME to /tmp.
-    /// When running as the developer in tests we keep the
-    /// developer's HOME (PASSTHROUGH_VARS includes HOME). Either
-    /// way the child must NOT see e.g. `/root` from a root agent.
+    /// child runs as nobody (production) we override HOME to
+    /// `/home/u` (where the per-user PVC mounts). When running as
+    /// the developer in tests we keep the developer's HOME
+    /// (`PASSTHROUGH_VARS` includes HOME). Either way the child
+    /// must NOT see e.g. `/root` from a root agent.
     #[compio::test]
     async fn child_home_is_not_root_home() {
         let out = run("echo \"$HOME\"", "/tmp", 5_000).await.unwrap();
         assert_eq!(out.status, 0);
         let home = out.stdout.trim();
-        // `/root` is the canonical root home dir on Debian/Ubuntu
-        // and most other distros. We assert the child does NOT see
-        // this. (A root agent in production overrides to /tmp; a
-        // non-root agent in tests passes through the developer's
-        // HOME, which is also not /root.)
         assert_ne!(home, "/root", "child sees /root as HOME");
         assert!(!home.is_empty(), "HOME unset in child");
     }

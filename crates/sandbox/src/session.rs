@@ -54,12 +54,14 @@ impl Session {
 }
 
 /// In-memory session registry. Indexed twice: once by `session_id`
-/// (the key the client holds), once by `project_id` (so re-opens
-/// from the same project find the existing session).
+/// (the key the client holds), once by (`user_id`, `project_id`)
+/// (so a user re-opening the same project finds their existing
+/// sandbox, while a *different* user on the same project gets their
+/// own).
 #[derive(Clone, Default)]
 pub struct SessionRegistry {
     by_session: Arc<RwLock<HashMap<Uuid, Session>>>,
-    by_project: Arc<RwLock<HashMap<String, Uuid>>>,
+    by_user_project: Arc<RwLock<HashMap<(String, String), Uuid>>>,
 }
 
 impl std::fmt::Debug for SessionRegistry {
@@ -81,10 +83,16 @@ impl SessionRegistry {
         Some(s.current_info())
     }
 
-    /// Find an existing session for a project (no touch — used only
-    /// by `get_or_create`).
-    pub fn find_by_project(&self, project_id: &str) -> Option<Uuid> {
-        self.by_project.read().unwrap().get(project_id).copied()
+    /// Find an existing session for a (user, project) pair (no
+    /// touch — used only by `get_or_create`). A session belongs to
+    /// exactly one user; multiple users on the same project each
+    /// get their own sandbox.
+    pub fn find_by_user_project(&self, user_id: &str, project_id: &str) -> Option<Uuid> {
+        self.by_user_project
+            .read()
+            .unwrap()
+            .get(&(user_id.to_string(), project_id.to_string()))
+            .copied()
     }
 
     /// Insert a freshly-spawned session.
@@ -95,9 +103,9 @@ impl SessionRegistry {
             created_at: now,
             last_used: Arc::new(RwLock::new(now)),
         };
-        let project = info.project_id.clone();
+        let key = (info.user_id.clone(), info.project_id.clone());
         self.by_session.write().unwrap().insert(session_id, session);
-        self.by_project.write().unwrap().insert(project, session_id);
+        self.by_user_project.write().unwrap().insert(key, session_id);
         info
     }
 
@@ -107,9 +115,10 @@ impl SessionRegistry {
         let mut sessions = self.by_session.write().unwrap();
         let session = sessions.remove(id)?;
         let info = session.current_info();
-        let mut by_project = self.by_project.write().unwrap();
-        if by_project.get(&session.info.project_id).copied() == Some(*id) {
-            by_project.remove(&session.info.project_id);
+        let key = (session.info.user_id.clone(), session.info.project_id.clone());
+        let mut by_up = self.by_user_project.write().unwrap();
+        if by_up.get(&key).copied() == Some(*id) {
+            by_up.remove(&key);
         }
         Some(info)
     }
@@ -152,8 +161,8 @@ pub fn start_idle_gc(state: Arc<AppState>) {
             for id in to_kill {
                 if let Some(info) = state.sessions.get(&id) {
                     eprintln!(
-                        "[sandbox] gc: stopping idle session {} (project={}, backend={})",
-                        info.session_id, info.project_id, info.backend,
+                        "[sandbox] gc: stopping idle session {} (user={}, project={}, backend={})",
+                        info.session_id, info.user_id, info.project_id, info.backend,
                     );
                 }
                 if let Err(e) = state.backend.stop(id).await {
