@@ -805,7 +805,17 @@ fn tee_method_callback<'s>(
         scope.throw_exception(exc);
         return;
     }
-    match crate::streams::tee::readable_stream_default_tee(scope, this, false) {
+    // Dispatch to byte-tee or default-tee based on the controller class.
+    let controller_v = slots::read_slot(scope, this, slots::CONTROLLER);
+    let is_byte = v8::Local::<v8::Object>::try_from(controller_v)
+        .map(|c| crate::streams::readable_byte_controller::is_byte_controller(scope, c))
+        .unwrap_or(false);
+    let res = if is_byte {
+        crate::streams::byte_tee::readable_byte_stream_tee(scope, this, false)
+    } else {
+        crate::streams::tee::readable_stream_default_tee(scope, this, false)
+    };
+    match res {
         Ok([b1, b2]) => {
             let arr = v8::Array::new(scope, 2);
             arr.set_index(scope, 0, b1.into());

@@ -2399,3 +2399,81 @@ fn byob_byte_stream_strategy_with_size_throws() {
     );
     assert_eq!(r, "RangeError");
 }
+
+#[test]
+fn byte_tee_both_branches_receive_chunks() {
+    let r = run_with_streams(
+        r#"
+        let result1 = "pending", result2 = "pending";
+        const rs = new ReadableStream({
+          type: "bytes",
+          start(c) {
+            c.enqueue(new Uint8Array([1, 2, 3]));
+            c.close();
+          }
+        });
+        const [b1, b2] = rs.tee();
+        const r1 = b1.getReader();
+        const r2 = b2.getReader();
+        async function pump(r) {
+          const out = [];
+          while (true) {
+            const x = await r.read();
+            if (x.done) break;
+            for (let i = 0; i < x.value.byteLength; i++) out.push(x.value[i]);
+          }
+          return out.join(",");
+        }
+        pump(r1).then(s => result1 = s);
+        pump(r2).then(s => result2 = s);
+        ({ get a() { return result1; }, get b() { return result2; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let a_k = v8::String::new(scope, "a").unwrap();
+            let b_k = v8::String::new(scope, "b").unwrap();
+            (
+                obj.get(scope, a_k.into()).unwrap().to_rust_string_lossy(scope),
+                obj.get(scope, b_k.into()).unwrap().to_rust_string_lossy(scope),
+            )
+        },
+    );
+    assert_eq!(r.0, "1,2,3", "branch1 got: {}", r.0);
+    assert_eq!(r.1, "1,2,3", "branch2 got: {}", r.1);
+}
+
+#[test]
+fn byte_tee_cancel_one_keeps_other() {
+    let r = run_with_streams(
+        r#"
+        let result2 = "pending";
+        const rs = new ReadableStream({
+          type: "bytes",
+          start(c) {
+            c.enqueue(new Uint8Array([7, 8, 9]));
+            c.close();
+          }
+        });
+        const [b1, b2] = rs.tee();
+        b1.cancel("nope");
+        const r2 = b2.getReader();
+        async function pump() {
+          const out = [];
+          while (true) {
+            const x = await r2.read();
+            if (x.done) break;
+            for (let i = 0; i < x.value.byteLength; i++) out.push(x.value[i]);
+          }
+          return out.join(",");
+        }
+        pump().then(s => result2 = s);
+        ({ get b() { return result2; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let b_k = v8::String::new(scope, "b").unwrap();
+            obj.get(scope, b_k.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "7,8,9", "cancelled branch1 should not stop branch2");
+}
