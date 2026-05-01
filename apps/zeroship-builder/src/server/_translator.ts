@@ -35,6 +35,7 @@
 // resume.
 
 import { createUIMessageStream, type UIMessage } from "ai";
+import { critic } from "./_critic.js";
 import { BUILDER_SYSTEM } from "./_prompts.js";
 
 export interface BuilderTurnInput {
@@ -171,6 +172,7 @@ export async function buildTranslatedStream(
     backend,
     systemPrompt: BUILDER_SYSTEM,
     checkpointer,
+    subagents: [critic],
   });
   const mode: BuilderTurnMode = input.resume ? "resume" : "fresh";
 
