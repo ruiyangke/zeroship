@@ -9,16 +9,9 @@
 //! sections are cited at every function so reviewers can grep for the WPT
 //! spec text.
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
-use crate::streams::queue::ValueQueueEntry;
-use crate::streams::readable::{StreamState, RSState};
-use crate::streams::readable_default_controller::DefaultControllerState;
-use crate::streams::readable_default_reader::{
-    DefaultReaderState, ReadRequest, ReadRequestKind,
-};
-use crate::streams::slots::{self, READER, STORED_ERROR, STREAM};
+use crate::streams::readable::StreamState;
+use crate::streams::readable_default_reader::{ReadRequest, ReadRequestKind};
+use crate::streams::slots::{self, READER, STORED_ERROR};
 
 // ---------------------------------------------------------------------------
 // IsReadableStreamLocked — §3.9.1.4

@@ -36,8 +36,8 @@ use std::rc::Rc;
 use crate::streams::algorithms;
 use crate::streams::promise_resolve;
 use crate::streams::queue::{is_non_negative_number, ValueQueue};
-use crate::streams::readable::{NativeReadableController, NativeSource, RSState, StreamState};
-use crate::streams::slots::{self, CONTROLLER, STORED_ERROR};
+use crate::streams::readable::{NativeReadableController, NativeSource, StreamState};
+use crate::streams::slots::{self, CONTROLLER};
 
 const STREAM_OBJ_SLOT: &str = "[[ctrl.streamObj]]";
 

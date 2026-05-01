@@ -33,12 +33,11 @@
 use std::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
 
 use crate::state::OpError;
 use crate::streams::budget::{try_alloc_stream, StreamBudgetGuard};
 use crate::streams::readable_default_controller as ctlr;
-use crate::streams::slots::{self, READER, STORED_ERROR};
+use crate::streams::slots::{self, READER};
 
 // ---------------------------------------------------------------------------
 // State
