@@ -454,13 +454,65 @@ const dataPartMiddleware = createMiddleware({
 
 The `writeUIPart` callback is plumbed through from the stream's `execute({ writer })` scope into the middleware via closure.
 
-> **See also §4.8.9** G10 — the `AnyBackendProtocol` shape used below was inferred from docs, not verified against `node_modules/deepagents/dist/*.d.ts`. Phase B preflight verifies the actual interface.
+> **G10 verified (Phase B.0 preflight)** — interface below is copied verbatim from `node_modules/deepagents/dist/index.d.ts` (deepagents@1.9.0), not inferred. Two protocol versions ship: V1 (deprecated, returns plain values + error strings) and V2 (current, returns structured `Result` types). New backends should target V2; both are accepted via `AnyBackendProtocol = BackendProtocolV1 | BackendProtocolV2`, and `adaptBackendProtocol(...)` normalises a V1 instance to V2 shape.
 
 ##### 4.8.3.4 Backend wiring (zeroship sandbox)
 
-Built-in fs tools (`read_file`, `write_file`, `edit_file`, `ls`) talk to deepagents' filesystem via the `backend` config. Default backend is in-memory (good for prototyping; bad for actual project files).
+Built-in fs tools (`read_file`, `write_file`, `edit_file`, `ls`) talk to deepagents' filesystem via the `backend` config. Default backend is in-memory (`StateBackend` — good for prototyping; bad for actual project files).
 
-For real Builder behaviour, we implement a backend that talks to `crates/sandbox/` over HTTP — operations route to the per-project Docker sandbox where Builder's code edits actually land. **This is the bulk of Plan 02 Phase B work**: implement the `AnyBackendProtocol` adapter and pass it as `backend:`.
+For real Builder behaviour, we implement a backend that talks to `crates/sandbox/` over HTTP — operations route to the per-project Docker sandbox where Builder's code edits actually land. **This is the bulk of Plan 02 Phase B work**: implement the `BackendProtocolV2` adapter (or `SandboxBackendProtocolV2` if we also expose `execute`) and pass it as `backend:`.
+
+###### Actual interface (verified against `node_modules/deepagents/dist/index.d.ts`)
+
+`AnyBackendProtocol = BackendProtocolV1 | BackendProtocolV2`. We target **V2**.
+
+```ts
+// dist/index.d.ts:149 — BackendProtocolV2
+interface BackendProtocolV2 {
+  // listing
+  ls(path: string): MaybePromise<LsResult>;
+  // reading
+  read(filePath: string, offset?: number, limit?: number): MaybePromise<ReadResult>;
+  readRaw(filePath: string): MaybePromise<ReadRawResult>;
+  // searching
+  grep(pattern: string, path?: string | null, glob?: string | null): MaybePromise<GrepResult>;
+  glob(pattern: string, path?: string): MaybePromise<GlobResult>;
+  // mutating
+  write(filePath: string, content: string): MaybePromise<WriteResult>;
+  edit(
+    filePath: string,
+    oldString: string,
+    newString: string,
+    replaceAll?: boolean,
+  ): MaybePromise<EditResult>;
+  // optional batch ops (omit if backend doesn't need them)
+  uploadFiles?(files: Array<[string, Uint8Array]>): MaybePromise<FileUploadResponse[]>;
+  downloadFiles?(paths: string[]): MaybePromise<FileDownloadResponse[]>;
+}
+
+// dist/index.d.ts:206 — sandbox extension (adds shell exec)
+interface SandboxBackendProtocolV2 extends BackendProtocolV2 {
+  execute(command: string): MaybePromise<ExecuteResponse>;
+  readonly id: string;   // unique sandbox instance id
+}
+
+// Result shapes — every method returns `{ error?: string, ...data }`:
+interface LsResult       { error?: string; files?: FileInfo[] }
+interface ReadResult     { error?: string; content?: string | Uint8Array; mimeType?: string }
+interface ReadRawResult  { error?: string; data?: FileData }
+interface GlobResult     { error?: string; files?: FileInfo[] }
+interface GrepResult     { error?: string; matches?: GrepMatch[] }
+interface WriteResult    { error?: string; path?: string; filesUpdate?: Record<string, FileData> | null; metadata?: Record<string, unknown> }
+interface EditResult     { error?: string; path?: string; filesUpdate?: Record<string, FileData> | null; occurrences?: number; metadata?: Record<string, unknown> }
+interface ExecuteResponse{ output: string; exitCode: number | null; truncated: boolean }
+```
+
+Notes:
+- **All methods can be sync or async** — `MaybePromise<T> = T | Promise<T>`. Our HTTP-backed sandbox adapter will be Promise-only; that's fine, the type accepts it.
+- **`filesUpdate` semantics.** Checkpoint-style backends (`StateBackend`) populate `filesUpdate` so LangGraph patches its persisted state from the tool result. External-storage backends (our case — the sandbox owns the bytes) set `filesUpdate: null`. Note the `@deprecated` comment in the V2 source: zero-arg backends now send state updates internally via `__pregel_send`; new code should `if (result.filesUpdate)` before using.
+- **`SandboxBackendProtocolV2.id`** is required and must be stable for the sandbox's lifetime. Maps cleanly onto our per-project sandbox id (e.g. `proj_<id>` from `crates/sandbox/`).
+- **Async-bridge implication.** The protocol is `MaybePromise`; deepagents' built-in tools `await` results uniformly. No special handling needed for our HTTP-backed methods — they just return Promises. The `execute` method's `output` field carries combined stdout+stderr as a single string (truncated flag separate), so the sandbox HTTP API needs to merge streams server-side, not stream them through.
+- **No `lsInfo` / `globInfo` / `grepRaw` in V2** — those were V1 names. The V2 method names are `ls` / `glob` / `grep`; the same operations exist but the V2 returns wrap data + error in a single Result object.
 
 ```ts
 import { createSandboxBackend } from "../_backends/sandbox";       // we write this
