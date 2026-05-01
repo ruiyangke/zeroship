@@ -190,24 +190,28 @@ fn extract_inherit_intrinsic(attrs: &[Attribute]) -> Option<String> {
 }
 
 /// Read `#[v8_inherit(BaseClass)]` from impl-block attributes. Returns
-/// the base class identifier — e.g. for AbortSignal inheriting EventTarget,
-/// this is `EventTarget`. Used to plumb spec-mandated DOM inheritance
-/// (DOM §3.3 AbortSignal : EventTarget) through the FunctionTemplate's
-/// `inherit` API.
+/// the base class path — e.g. for AbortSignal inheriting EventTarget,
+/// this is the parsed path `super::event_target::EventTarget`. Used
+/// to plumb spec-mandated DOM inheritance (DOM §3.3 AbortSignal :
+/// EventTarget) through the FunctionTemplate's `inherit` API.
 ///
-/// The argument is parsed as an `Ident` (path segment); the codegen
-/// emits `__ctor_tmpl.inherit(<BaseClass>::install(scope))`. The base
-/// class must itself be a `#[v8_class]`-decorated struct exporting an
-/// `install` fn (which every `#[v8_class]` impl block does by default).
-fn extract_inherit_base(attrs: &[Attribute]) -> Option<syn::Ident> {
+/// Accepts both bare identifiers (`#[v8_inherit(EventTarget)]`) and
+/// fully-qualified paths (`#[v8_inherit(super::event_target::EventTarget)]`)
+/// — the latter is what real cross-module usage emits.
+///
+/// The codegen emits `__ctor_tmpl.inherit(<BaseClass>::install(scope))`.
+/// The base class must itself be a `#[v8_class]`-decorated struct (or
+/// expose an equivalent `install` fn — EventTarget hand-rolls one) that
+/// returns a cached FunctionTemplate.
+fn extract_inherit_base(attrs: &[Attribute]) -> Option<syn::Path> {
     for attr in attrs {
         if !attr.path().is_ident("v8_inherit") {
             continue;
         }
-        // List form: `#[v8_inherit(EventTarget)]`. Parse the single
-        // identifier inside the parens.
-        if let Ok(ident) = attr.parse_args::<syn::Ident>() {
-            return Some(ident);
+        // List form: `#[v8_inherit(Path::To::Base)]`. Parse as a
+        // path so module-qualified bases work.
+        if let Ok(path) = attr.parse_args::<syn::Path>() {
+            return Some(path);
         }
     }
     None
@@ -393,7 +397,7 @@ fn gen_install(
     has_user_constructor: bool,
     to_string_tag_override: Option<&str>,
     inherit_intrinsic: Option<&str>,
-    inherit_base: Option<&syn::Ident>,
+    inherit_base: Option<&syn::Path>,
 ) -> TokenStream2 {
     let class_name_str = class_ty.to_string();
     let constructor_callback_ident = format_ident!("__{}_constructor_callback", class_ty);

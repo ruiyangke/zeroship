@@ -1707,6 +1707,20 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
     // `load_polyfills_and_modules` immediately after fetch.js runs.
     // The class itself lives in `crate::headers`; it replaces the JS
     // polyfill that used to ship in `embed/fetch.js`. WPT pass: 98/0/1.
+
+    // Native DOM primitives (EventTarget / Event / AbortController /
+    // AbortSignal) — gated by `ZEROSHIP_NATIVE_FETCH=1` per design
+    // landing-1 cadence (D-23). When set, the JS fetch.js polyfill's
+    // matching definitions are shadowed by the native classes; when
+    // unset, the polyfill remains in charge. The polyfill self-checks
+    // `globalThis.AbortController` and re-uses ours when present.
+    //
+    // We install BEFORE fetch.js runs so the polyfill's
+    // `if (!DOMException) { … }` and equivalent guards see the native
+    // classes already on globalThis.
+    if std::env::var_os("ZEROSHIP_NATIVE_FETCH").is_some() {
+        crate::dom::install_globals(scope, global);
+    }
 }
 
 /// Install native `Headers` on `globalThis`. Called from

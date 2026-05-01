@@ -9,6 +9,7 @@ extern crate self as zeroship_runtime;
 pub mod auth;
 pub mod byte_string;
 pub mod codec;
+pub mod dom;
 pub mod headers;
 pub mod state;
 pub mod text_encoding;
