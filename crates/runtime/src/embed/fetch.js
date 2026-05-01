@@ -19,182 +19,18 @@
   }
 
   // =========================================================================
-  // Headers
+  // Headers — provided natively by `crate::headers::install_global`. The
+  // native install runs immediately after this polyfill (see
+  // `init::load_polyfills_and_modules`), so `globalThis.Headers` is the
+  // WHATWG Fetch §2.2 implementation in Rust by the time any
+  // Request/Response constructor body runs (constructor bodies are
+  // defined here but only invoked once user code or fetch() runs).
+  //
+  // The hand-rolled JS shim that used to live here had several spec
+  // divergences (no ByteString validation, no Set-Cookie special cases,
+  // snapshot-style iteration); the native class fixes all of those.
+  // WPT pass: 98/0/1.
   // =========================================================================
-
-  var VALID_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
-
-  function validateName(name) {
-    name = String(name);
-    if (!VALID_TOKEN.test(name)) {
-      throw new TypeError("Invalid header name: " + name);
-    }
-    return name;
-  }
-
-  function validateValue(value) {
-    value = String(value);
-    for (var i = 0; i < value.length; i++) {
-      var c = value.charCodeAt(i);
-      if (c > 0xFF || c === 0x00 || c === 0x0A || c === 0x0D) {
-        throw new TypeError("Invalid header value");
-      }
-    }
-    return value.replace(/^[\t ]+|[\t ]+$/g, "");
-  }
-
-  function Headers(init) {
-    this._map = Object.create(null); // lowercase key -> [value, ...]
-
-    if (init === null || (init !== undefined && typeof init !== "object")) {
-      throw new TypeError("Failed to construct 'Headers': The provided value is not of type '(sequence<sequence<ByteString>> or record<ByteString, ByteString>)'");
-    }
-
-    if (init) {
-      if (init instanceof Headers) {
-        init.forEach(function(value, name) {
-          this.append(name, value);
-        }, this);
-      } else if (init !== null && typeof init === "object" && typeof init[Symbol.iterator] === "function") {
-        // Iterable (Array, custom iterators, etc.)
-        var iter = init[Symbol.iterator]();
-        var item;
-        while (!(item = iter.next()).done) {
-          var pair = item.value;
-          if (!pair || typeof pair !== "object" || typeof pair[Symbol.iterator] !== "function") {
-            throw new TypeError("Each header pair must be iterable");
-          }
-          var pairArr = Array.from ? Array.from(pair) : [].slice.call(pair);
-          if (pairArr.length !== 2) {
-            throw new TypeError("Each header pair must have exactly two elements");
-          }
-          this.append(pairArr[0], pairArr[1]);
-        }
-      } else if (typeof init === "object") {
-        // Record<string, string> — per spec, sort keys and skip Symbols.
-        // Inline the set so we don't double-validate via append().
-        var names = Object.keys(init).sort();
-        var map = this._map;
-        for (var j = 0; j < names.length; j++) {
-          var name = validateName(names[j]);
-          var val = validateValue(String(init[names[j]]));
-          var key = name.toLowerCase();
-          if (map[key]) map[key].push(val);
-          else map[key] = [val];
-        }
-      }
-    }
-  }
-
-  Headers.prototype.append = function(name, value) {
-    var key = validateName(name).toLowerCase();
-    value = validateValue(value);
-    if (this._map[key]) {
-      this._map[key].push(value);
-    } else {
-      this._map[key] = [value];
-    }
-  };
-
-  // Trusted fast-path: skip validation for headers from the HTTP stack.
-  // Like workerd's appendUnguarded — inbound headers are already validated by Hyper.
-  Headers._fromTrusted = function(map) {
-    var h = new Headers();
-    h._map = map;
-    return h;
-  };
-
-  Headers.prototype.delete = function(name) {
-    var key = validateName(name).toLowerCase();
-    delete this._map[key];
-  };
-
-  Headers.prototype.get = function(name) {
-    var key = validateName(name).toLowerCase();
-    var values = this._map[key];
-    return values ? values.join(", ") : null;
-  };
-
-  Headers.prototype.has = function(name) {
-    var key = validateName(name).toLowerCase();
-    return key in this._map;
-  };
-
-  Headers.prototype.set = function(name, value) {
-    var key = validateName(name).toLowerCase();
-    value = validateValue(value);
-    this._map[key] = [value];
-  };
-
-  Headers.prototype.forEach = function(callback, thisArg) {
-    var keys = Object.keys(this._map).sort();
-    for (var i = 0; i < keys.length; i++) {
-      var key = keys[i];
-      callback.call(thisArg, this._map[key].join(", "), key, this);
-    }
-  };
-
-  Headers.prototype.entries = function() {
-    var self = this;
-    var keys = Object.keys(this._map).sort(); // snapshot once
-    var index = 0;
-    var iter = {
-      next: function() {
-        if (index >= keys.length) return { done: true, value: undefined };
-        var key = keys[index++];
-        return { done: false, value: [key, self._map[key].join(", ")] };
-      },
-      [Symbol.iterator]: function() { return this; }
-    };
-    Object.defineProperty(iter, Symbol.toStringTag, { value: "Iterator" });
-    return iter;
-  };
-
-  Headers.prototype.keys = function() {
-    var keys = Object.keys(this._map).sort(); // snapshot once
-    var index = 0;
-    var iter = {
-      next: function() {
-        if (index >= keys.length) return { done: true, value: undefined };
-        return { done: false, value: keys[index++] };
-      },
-      [Symbol.iterator]: function() { return this; }
-    };
-    Object.defineProperty(iter, Symbol.toStringTag, { value: "Iterator" });
-    return iter;
-  };
-
-  Headers.prototype.values = function() {
-    var self = this;
-    var keys = Object.keys(this._map).sort(); // snapshot once
-    var index = 0;
-    var iter = {
-      next: function() {
-        if (index >= keys.length) return { done: true, value: undefined };
-        return { done: false, value: self._map[keys[index++]].join(", ") };
-      },
-      [Symbol.iterator]: function() { return this; }
-    };
-    Object.defineProperty(iter, Symbol.toStringTag, { value: "Iterator" });
-    return iter;
-  };
-
-  Headers.prototype[Symbol.iterator] = function() {
-    return this.entries();
-  };
-
-  Headers.prototype._toArray = function() {
-    var result = [];
-    var keys = Object.keys(this._map).sort();
-    for (var i = 0; i < keys.length; i++) {
-      var key = keys[i];
-      var values = this._map[key];
-      for (var j = 0; j < values.length; j++) {
-        result.push([key, values[j]]);
-      }
-    }
-    return result;
-  };
 
   // =========================================================================
   // Body mixin helpers
@@ -806,7 +642,7 @@
   // =========================================================================
 
   globalThis.fetch = fetch;
-  globalThis.Headers = Headers;
+  // Headers comes from the native install — see top of file.
   globalThis.Request = Request;
   globalThis.Response = Response;
   globalThis.AbortController = AbortController;

@@ -691,11 +691,11 @@ pub fn load_polyfills_and_modules(
         script.run(scope).unwrap();
     }
 
-    // Native-Headers cutover step 1: install AFTER fetch.js so the JS
-    // `globalThis.Headers = …` line doesn't overwrite us. Gated by
-    // ZEROSHIP_NATIVE_HEADERS=1. See install_native_headers_post for
-    // rationale.
-    install_native_headers_post(scope);
+    // Native Headers per WHATWG Fetch §2.2 — installed unconditionally
+    // after fetch.js so the polyfill (which no longer defines Headers
+    // itself) can lean on the native class for Request/Response
+    // construction.
+    install_headers(scope);
 
     // Wrap the user's module graph in the bootstrap entry.
     //
@@ -1703,52 +1703,22 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
         global.set(scope, key.into(), class_fn.into());
     }
 
-    // Native Headers per Fetch §2.2. Behind ZEROSHIP_NATIVE_HEADERS=1
-    // for the cutover phase: with the flag, native Headers replaces
-    // the JS polyfill that ships in `embed/fetch.js`. The polyfill
-    // sets `globalThis.Headers = Headers` AFTER setup_globals runs,
-    // so we patch the polyfill's tail at runtime by installing native
-    // Headers in a post-fetch.js step (see `install_native_headers_post`).
-    //
-    // Step 1 of the polyfill removal cadence (design "Polyfill removal"):
-    // feature flag native, default off. Tests run with the flag on.
-    // After production traffic confirms parity, step 2 flips the
-    // default; step 3 deletes the polyfill block.
-    //
-    // Why post-fetch.js rather than here: fetch.js has
-    //   globalThis.Headers = Headers;
-    // at line 802. If we install before fetch.js, the polyfill would
-    // overwrite us. Post-install ensures native wins.
+    // Native Headers per WHATWG Fetch §2.2 — wired in
+    // `load_polyfills_and_modules` immediately after fetch.js runs.
+    // The class itself lives in `crate::headers`; it replaces the JS
+    // polyfill that used to ship in `embed/fetch.js`. WPT pass: 98/0/1.
 }
 
-/// Step-1-of-cutover hook: install native Headers AFTER fetch.js has
-/// run, so its `globalThis.Headers = …` line doesn't shadow us.
-/// Behind `ZEROSHIP_NATIVE_HEADERS=1`. Default off for the v1 release.
+/// Install native `Headers` on `globalThis`. Called from
+/// `load_polyfills_and_modules` after fetch.js runs (the polyfill no
+/// longer defines its own Headers, but the install order keeps the
+/// dependency chain explicit: native primitives load before user
+/// modules).
 ///
-/// **Step 2 (cutover) is NOT yet wired** because the polyfill in
-/// `embed/fetch.js` and `crates/runtime/src/http.rs` reach into Headers
-/// internals (`_map`, `_fromTrusted`, `_toArray`, `_zsHeadersArr`) that
-/// don't exist on native Headers. With the flag on, those reach-ins
-/// throw "Illegal invocation" because native Headers' methods access
-/// internal field 0 (Box<Headers>) which is empty on
-/// `Object.create(Headers.prototype)`-style constructions.
-///
-/// The cutover (step 2) requires:
-/// 1. Refactor fetch.js to use the native iterable surface (e.g.
-///    `for (const [k, v] of headers)` instead of `headers._map`).
-/// 2. Refactor http.rs's `Object.create(Headers.prototype) + _map =`
-///    pattern to call `new Headers(arrayOfPairs)` via the native
-///    sequence path.
-/// 3. Remove `Headers._fromTrusted` callers; either reimplement as a
-///    real `new Headers([[name, value], ...])` or move the fast-path
-///    optimisation into the native struct.
-///
-/// Step 3 (delete the polyfill block in fetch.js) follows step 2.
-/// Both lap with the Request/Response native push.
-pub fn install_native_headers_post(scope: &mut v8::PinScope) {
-    if std::env::var("ZEROSHIP_NATIVE_HEADERS").as_deref() != Ok("1") {
-        return;
-    }
+/// The implementation lives in `crate::headers` (Headers struct,
+/// HeadersIterator, install_global). See `docs/proposals/headers-native.md`
+/// for the design.
+pub fn install_headers(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
     crate::headers::install_global(scope, global);
 }
