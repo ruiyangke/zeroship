@@ -1,10 +1,15 @@
 // Chat messages renderer for the workspace ChatRail.
 //
-// Plan 02 Phase B.2 dispatches four families of v6 message parts:
+// Plan 02 Phase B.2+ dispatches several families of v6 message parts:
 //   - text                       → MessageAssistant text (concatenated)
 //   - tool-<name> / dynamic-tool → <Receipt> (one per toolCallId)
 //   - data-diff                  → <DiffCard>
 //   - data-survey                → <SurveyCard> (interrupt resume flow)
+//   - data-critic-round          → <CriticRoundCard>
+//   - data-reviewer-round        → <ReviewerRoundCard>
+//   - data-pm-recommendation     → <PMRecommendationCard>
+//   - data-sre-finding           → <SREFindingCard>
+//   - data-brief                 → <BriefCard> (wizard-only)
 //
 // The translator emits chunks of these types on the wire (see
 // apps/zeroship-builder/src/server/_translator.ts and _middleware.ts).
@@ -26,10 +31,16 @@ import { DiffCard } from "./DiffCard";
 import { SurveyCard } from "./SurveyCard";
 import { BriefCard } from "./BriefCard";
 import { CriticRoundCard } from "./CriticRoundCard";
+import { ReviewerRoundCard } from "./ReviewerRoundCard";
+import { PMRecommendationCard } from "./PMRecommendationCard";
+import { SREFindingCard } from "./SREFindingCard";
 import type {
   Brief,
   CriticRound,
   Diff,
+  PMRecommendation,
+  ReviewerRound,
+  SREFinding,
   Survey,
   SurveyResponse,
 } from "../../types/chat";
@@ -246,6 +257,47 @@ function renderAssistantParts(
       if (round && typeof round.round === "number") {
         out.push(
           <CriticRoundCard key={`critic-${out.length}`} round={round} />,
+        );
+      }
+      continue;
+    }
+
+    if (type === "data-reviewer-round") {
+      // Pre-deploy hard-gate result. Builder calls task("reviewer", …)
+      // before any deploy; middleware emits this chunk. The card
+      // renders a compact badge when approved with no blockers, or an
+      // expanded list when there are blockers / approved=false.
+      const round = (part as { data?: ReviewerRound }).data;
+      if (round && typeof round.approved === "boolean") {
+        out.push(
+          <ReviewerRoundCard key={`reviewer-${out.length}`} round={round} />,
+        );
+      }
+      continue;
+    }
+
+    if (type === "data-pm-recommendation") {
+      // PM SubAgent's strategic recommendation. Builder calls
+      // task("pm", …) when the user asks "what should I build next?".
+      const rec = (part as { data?: PMRecommendation }).data;
+      if (rec && rec.recommendation && typeof rec.recommendation.title === "string") {
+        out.push(
+          <PMRecommendationCard
+            key={`pm-${out.length}`}
+            recommendation={rec}
+          />,
+        );
+      }
+      continue;
+    }
+
+    if (type === "data-sre-finding") {
+      // SRE SubAgent's diagnosis. Builder calls task("sre", …) when
+      // the user asks reliability questions.
+      const finding = (part as { data?: SREFinding }).data;
+      if (finding && typeof finding.diagnosis === "string") {
+        out.push(
+          <SREFindingCard key={`sre-${out.length}`} finding={finding} />,
         );
       }
       continue;
