@@ -8,15 +8,16 @@
     "build": "vite build",
     "dev": "vite",
     "preview": "vite preview",
-    "e2e": "node e2e/run.mjs"
+    "e2e": "node e2e/setup.mjs && node e2e/run.mjs"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^2.0.0",
-    "@ai-sdk/react": "^2.0.0",
+    "@ai-sdk/openai": "^3.0.55",
+    "@ai-sdk/react": "^3.0.174",
     "@vitejs/plugin-react": "^6.0.1",
+    "@zeroship/rpc-client": "file:../../packages/zeroship-rpc-client",
     "@zeroship/server": "file:../../packages/zeroship-server",
     "@zeroship/vite-plugin": "file:../../sdks/vite-plugin",
-    "ai": "^5.0.0",
+    "ai": "^6.0.172",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },

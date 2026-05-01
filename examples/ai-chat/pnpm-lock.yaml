@@ -9,14 +9,17 @@ importers:
   .:
     dependencies:
       '@ai-sdk/openai':
-        specifier: ^2.0.0
-        version: 2.0.105(zod@4.4.1)
+        specifier: ^3.0.55
+        version: 3.0.55(zod@4.4.1)
       '@ai-sdk/react':
-        specifier: ^2.0.0
-        version: 2.0.184(react@19.2.5)(zod@4.4.1)
+        specifier: ^3.0.174
+        version: 3.0.174(react@19.2.5)(zod@4.4.1)
       '@vitejs/plugin-react':
         specifier: ^6.0.1
         version: 6.0.1(vite@8.0.10)
+      '@zeroship/rpc-client':
+        specifier: file:../../packages/zeroship-rpc-client
+        version: file:../../packages/zeroship-rpc-client
       '@zeroship/server':
         specifier: file:../../packages/zeroship-server
         version: file:../../packages/zeroship-server(react@19.2.5)(zod@4.4.1)
@@ -24,8 +27,8 @@ importers:
         specifier: file:../../sdks/vite-plugin
         version: file:../../sdks/vite-plugin(vite@8.0.10)
       ai:
-        specifier: ^5.0.0
-        version: 5.0.182(zod@4.4.1)
+        specifier: ^6.0.172
+        version: 6.0.172(zod@4.4.1)
       react:
         specifier: ^19.2.0
         version: 19.2.5
@@ -48,37 +51,33 @@ importers:
 
 packages:
 
-  '@ai-sdk/gateway@2.0.85':
-    resolution: {integrity: sha512-BwWvKeglJBWPX27gIig624wjW7RKNqpxA8VxuYqvbqQz2ixjIeh4SBN+2C/nIsIl1VsJJaRljdAauBWDZ9D3Rg==}
+  '@ai-sdk/gateway@3.0.107':
+    resolution: {integrity: sha512-JwODLcuTe8rWXJwQcNPE5fiadjCOKHxNGtL5pHqEhFQSuWs6x47oVRkLs/Zw6eUhTsuXiZbyJ3QJHVIyLKX5hg==}
     engines: {node: '>=18'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
 
-  '@ai-sdk/openai@2.0.105':
-    resolution: {integrity: sha512-C+RLOWAdvZXebboGj6hx/cU8OufcBsFoCFvCqbnm66BQQN6N6pVZC77vHSjfJ62b3M2PfGI3hi0zUJg9HK7qNw==}
+  '@ai-sdk/openai@3.0.55':
+    resolution: {integrity: sha512-1pZPT/VEKbn/7ItAr5Hkhy41GxbjiJUhsgTFFIPTwYT7Ph/swuByl4YCXLSfuav27zSzQdscOoxCtDasseeQHA==}
     engines: {node: '>=18'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
 
-  '@ai-sdk/provider-utils@3.0.25':
-    resolution: {integrity: sha512-CvsRu+32Y8a167s+lrIBtsybvgTHp8j9y+6BeTvLeoW3Q+okw/b4CnNUFOLIXsRaKHQKAH+IHNJPYWywfpw0LA==}
+  '@ai-sdk/provider-utils@4.0.25':
+    resolution: {integrity: sha512-yjGPZPiJm79ZOYk0anXn2LkVqUFgStZqEOdyoynhkaAg+yOCuv6PJwf+1gUW0eSIUnYEboT2TPbPX/bxZpx4gw==}
     engines: {node: '>=18'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
 
-  '@ai-sdk/provider@2.0.3':
-    resolution: {integrity: sha512-h88OPkavHTiN9tMn2l5awAznGB0lXzjcLhgR1/rvjB2zlLprsNxbM2tt6OJsHUxduLC3klq0/eqaSf6fX5XVww==}
+  '@ai-sdk/provider@3.0.10':
+    resolution: {integrity: sha512-Q3BZ27qfpYqnCYGvE3vt+Qi6LGOF9R5Nmzn+9JoM1lCRsD9mYaIhfJLkSunN48nfGXJ6n+XNV0J/XVpqGQl7Dw==}
     engines: {node: '>=18'}
 
-  '@ai-sdk/react@2.0.184':
-    resolution: {integrity: sha512-oU5ZuQ4ukLhrjpV725Z8kZNZUbw+9FalhCwdBM/cbcgtwXFVzdFJsIobd5gMzORcFAH47hRgAqN4atCo1SdkvA==}
+  '@ai-sdk/react@3.0.174':
+    resolution: {integrity: sha512-fMtfM1EM4Ev0uU35ehDWf2IG8Dlq8Ax9w8H9nlZgk5dxRi7ktYUE7+czaXZJVc/GaAUSiB1VHV/HAJleKfQ4OQ==}
     engines: {node: '>=18'}
     peerDependencies:
       react: ^18 || ~19.0.1 || ~19.1.2 || ^19.2.1
-      zod: ^3.25.76 || ^4.1.8
-    peerDependenciesMeta:
-      zod:
-        optional: true
 
   '@electric-sql/pglite-socket@0.1.5':
     resolution: {integrity: sha512-/RAye+3EPKfO9nY4tljzxXmkT7yIpFDm0L3F+c28b+Z6uxPOjy/Zz/QEHYHXcrfuUC88/a9S72EO0+3E0j97wQ==}
@@ -227,8 +226,8 @@ packages:
   '@types/react@19.2.14':
     resolution: {integrity: sha512-ilcTH/UniCkMdtexkoCN0bI7pMcJDvmQFPvuPvmEaYA/NSfFTAgdUSLAoVjaRJm7+6PvcM+q1zYOwS4wTYMF9w==}
 
-  '@vercel/oidc@3.1.0':
-    resolution: {integrity: sha512-Fw28YZpRnA3cAHHDlkt7xQHiJ0fcL+NRcIqsocZQUSmbzeIKRpwttJjik5ZGanXP+vlA4SbTg+AbA3bP363l+w==}
+  '@vercel/oidc@3.2.0':
+    resolution: {integrity: sha512-UycprH3T6n3jH0k44NHMa7pnFHGu/N05MjojYr+Mc6I7obkoLIJujSWwin1pCvdy/eOxrI/l3uDLQsmcrOb4ug==}
     engines: {node: '>= 20'}
 
   '@vitejs/plugin-react@6.0.1':
@@ -243,6 +242,9 @@ packages:
         optional: true
       babel-plugin-react-compiler:
         optional: true
+
+  '@zeroship/rpc-client@file:../../packages/zeroship-rpc-client':
+    resolution: {directory: ../../packages/zeroship-rpc-client, type: directory}
 
   '@zeroship/server@file:../../packages/zeroship-server':
     resolution: {directory: ../../packages/zeroship-server, type: directory}
@@ -264,8 +266,8 @@ packages:
     peerDependencies:
       vite: '>=6.0.0'
 
-  ai@5.0.182:
-    resolution: {integrity: sha512-F9AcrbABcWicqV8k58twacusby1PQeeKPEZrm6Cj+u8lWvgAX3/SR8ALd85+j6yOaRY4SsJYgg1V460gNQ65tw==}
+  ai@6.0.172:
+    resolution: {integrity: sha512-o12q2SDlrN4btPU2FkFSVEeZiKfQuSbDFixXH8I7AE/zuCXMbN9ilaPThdoAc8mS9+QnhUGy8cSP0IgT3Q+p0A==}
     engines: {node: '>=18'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
@@ -277,6 +279,10 @@ packages:
   consola@3.4.2:
     resolution: {integrity: sha512-5IKcdX0nnYavi6G7TtOhwkYzyjfJlatbjMjuLSfE2kYT5pMDOilZ4OvMhi637CcDICTmz3wARPoyhqyX1Y+XvA==}
     engines: {node: ^14.18.0 || >=16.10.0}
+
+  copy-anything@4.0.5:
+    resolution: {integrity: sha512-7Vv6asjS4gMOuILabD3l739tsaxFQmC+a7pLZm02zyvs8p977bL3zEgq3yDk5rn9B0PbYgIv++jmHcuUab4RhA==}
+    engines: {node: '>=18'}
 
   csstype@3.2.3:
     resolution: {integrity: sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==}
@@ -309,6 +315,10 @@ packages:
     resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
+
+  is-what@5.5.0:
+    resolution: {integrity: sha512-oG7cgbmg5kLYae2N5IVd3jm2s+vldjxJzK1pcu9LfpGuQ93MQSzo0okvRna+7y5ifrD+20FE8FvjusyGaz14fw==}
+    engines: {node: '>=18'}
 
   json-schema@0.4.0:
     resolution: {integrity: sha512-es94M3nTIfsEPisRafak+HDLfHXnKBhV3vU5eqPcS3flIWqcxJWgXHXiey3YrpaNsanY5ei1VoYEbOzijuq9BA==}
@@ -442,6 +452,10 @@ packages:
     resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
     engines: {node: '>=0.10.0'}
 
+  superjson@2.2.6:
+    resolution: {integrity: sha512-H+ue8Zo4vJmV2nRjpx86P35lzwDT3nItnIsocgumgr0hHMQ+ZGq5vrERg9kJBo5AWGmxZDhzDo+WVIJqkB0cGA==}
+    engines: {node: '>=16'}
+
   swr@2.4.1:
     resolution: {integrity: sha512-2CC6CiKQtEwaEeNiqWTAw9PGykW8SR5zZX8MZk6TeAvEAnVS7Visz8WzphqgtQ8v2xz/4Q5K+j+SeMaKXeeQIA==}
     peerDependencies:
@@ -539,39 +553,39 @@ packages:
 
 snapshots:
 
-  '@ai-sdk/gateway@2.0.85(zod@4.4.1)':
+  '@ai-sdk/gateway@3.0.107(zod@4.4.1)':
     dependencies:
-      '@ai-sdk/provider': 2.0.3
-      '@ai-sdk/provider-utils': 3.0.25(zod@4.4.1)
-      '@vercel/oidc': 3.1.0
+      '@ai-sdk/provider': 3.0.10
+      '@ai-sdk/provider-utils': 4.0.25(zod@4.4.1)
+      '@vercel/oidc': 3.2.0
       zod: 4.4.1
 
-  '@ai-sdk/openai@2.0.105(zod@4.4.1)':
+  '@ai-sdk/openai@3.0.55(zod@4.4.1)':
     dependencies:
-      '@ai-sdk/provider': 2.0.3
-      '@ai-sdk/provider-utils': 3.0.25(zod@4.4.1)
+      '@ai-sdk/provider': 3.0.10
+      '@ai-sdk/provider-utils': 4.0.25(zod@4.4.1)
       zod: 4.4.1
 
-  '@ai-sdk/provider-utils@3.0.25(zod@4.4.1)':
+  '@ai-sdk/provider-utils@4.0.25(zod@4.4.1)':
     dependencies:
-      '@ai-sdk/provider': 2.0.3
+      '@ai-sdk/provider': 3.0.10
       '@standard-schema/spec': 1.1.0
       eventsource-parser: 3.0.8
       zod: 4.4.1
 
-  '@ai-sdk/provider@2.0.3':
+  '@ai-sdk/provider@3.0.10':
     dependencies:
       json-schema: 0.4.0
 
-  '@ai-sdk/react@2.0.184(react@19.2.5)(zod@4.4.1)':
+  '@ai-sdk/react@3.0.174(react@19.2.5)(zod@4.4.1)':
     dependencies:
-      '@ai-sdk/provider-utils': 3.0.25(zod@4.4.1)
-      ai: 5.0.182(zod@4.4.1)
+      '@ai-sdk/provider-utils': 4.0.25(zod@4.4.1)
+      ai: 6.0.172(zod@4.4.1)
       react: 19.2.5
       swr: 2.4.1(react@19.2.5)
       throttleit: 2.1.0
-    optionalDependencies:
-      zod: 4.4.1
+    transitivePeerDependencies:
+      - zod
 
   '@electric-sql/pglite-socket@0.1.5(@electric-sql/pglite@0.4.5)':
     dependencies:
@@ -680,12 +694,16 @@ snapshots:
     dependencies:
       csstype: 3.2.3
 
-  '@vercel/oidc@3.1.0': {}
+  '@vercel/oidc@3.2.0': {}
 
   '@vitejs/plugin-react@6.0.1(vite@8.0.10)':
     dependencies:
       '@rolldown/pluginutils': 1.0.0-rc.7
       vite: 8.0.10
+
+  '@zeroship/rpc-client@file:../../packages/zeroship-rpc-client':
+    optionalDependencies:
+      superjson: 2.2.6
 
   '@zeroship/server@file:../../packages/zeroship-server(react@19.2.5)(zod@4.4.1)':
     optionalDependencies:
@@ -706,17 +724,22 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  ai@5.0.182(zod@4.4.1):
+  ai@6.0.172(zod@4.4.1):
     dependencies:
-      '@ai-sdk/gateway': 2.0.85(zod@4.4.1)
-      '@ai-sdk/provider': 2.0.3
-      '@ai-sdk/provider-utils': 3.0.25(zod@4.4.1)
+      '@ai-sdk/gateway': 3.0.107(zod@4.4.1)
+      '@ai-sdk/provider': 3.0.10
+      '@ai-sdk/provider-utils': 4.0.25(zod@4.4.1)
       '@opentelemetry/api': 1.9.0
       zod: 4.4.1
 
   chownr@3.0.0: {}
 
   consola@3.4.2: {}
+
+  copy-anything@4.0.5:
+    dependencies:
+      is-what: 5.5.0
+    optional: true
 
   csstype@3.2.3: {}
 
@@ -733,6 +756,9 @@ snapshots:
       picomatch: 4.0.4
 
   fsevents@2.3.3:
+    optional: true
+
+  is-what@5.5.0:
     optional: true
 
   json-schema@0.4.0: {}
@@ -845,6 +871,11 @@ snapshots:
   scheduler@0.27.0: {}
 
   source-map-js@1.2.1: {}
+
+  superjson@2.2.6:
+    dependencies:
+      copy-anything: 4.0.5
+    optional: true
 
   swr@2.4.1(react@19.2.5):
     dependencies:
