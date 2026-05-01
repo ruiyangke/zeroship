@@ -134,7 +134,13 @@ struct NomadChSandbox {
     /// in this process. The corresponding **public** key is the only
     /// thing that ships into the VM (mounted via virtio-fs `keys`
     /// share at `/run/keys/controller-pubkey`).
-    signing_key: SigningKey,
+    ///
+    /// **Wrapped in Arc** so signed-RPC dispatch can clone a refcount
+    /// (cheap) instead of the 32-byte secret bytes (which would mean
+    /// two heap copies of the secret coexisting during every signed
+    /// request, since `ed25519_dalek::SigningKey` doesn't zeroize on
+    /// drop).
+    signing_key: Arc<SigningKey>,
 }
 
 impl std::fmt::Debug for NomadChSandbox {
@@ -484,7 +490,7 @@ impl NomadCHBackend {
             vm_index,
             host_dir: host_dir.to_path_buf(),
             agent_url: agent_url.clone(),
-            signing_key,
+            signing_key: Arc::new(signing_key),
         };
         self.state
             .write()
@@ -678,11 +684,16 @@ impl NomadCHBackend {
             .collect())
     }
 
-    fn sandbox_keys(&self, id: Uuid) -> Result<(SigningKey, String), String> {
+    fn sandbox_keys(&self, id: Uuid) -> Result<(Arc<SigningKey>, String), String> {
         let guard = self.state.read().unwrap_or_else(|p| p.into_inner());
         let s = guard
             .get(&id)
             .ok_or_else(|| "sandbox not found in nomad-ch backend".to_string())?;
+        // Arc clone is a refcount bump — cheap. Cloning the SigningKey
+        // by value would heap-copy the 32-byte secret on every signed
+        // RPC, doubling the in-memory key count for the duration of
+        // the request (ed25519-dalek::SigningKey doesn't zeroize on
+        // drop).
         Ok((s.signing_key.clone(), s.agent_url.clone()))
     }
 }
@@ -1096,7 +1107,7 @@ fn send_ureq(req: ureq::Request, body: &[u8]) -> Result<AgentResponse, String> {
 /// `crates/sandbox/src/backend/k8s.rs::http_signed_async` for the
 /// full rationale; this is a verbatim copy with the same semantics.
 async fn http_signed_async(
-    signing_key: &SigningKey,
+    signing_key: &Arc<SigningKey>,
     method: &str,
     url: &str,
     body: &[u8],
@@ -1108,7 +1119,8 @@ async fn http_signed_async(
         .unwrap_or_else(|| "/".to_string());
     let path = path.split('?').next().unwrap_or("/").to_string();
 
-    let signing_key = signing_key.clone();
+    // Arc clone — refcount bump, NOT a 32-byte secret copy.
+    let signing_key = Arc::clone(signing_key);
     let method = method.to_string();
     let url = url.to_string();
     let body = body.to_vec();

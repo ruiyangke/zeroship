@@ -137,7 +137,13 @@ struct K8sSandbox {
     agent_url: String,
     /// Per-sandbox signing key. Lives only in this process; never
     /// touches the cluster.
-    signing_key: SigningKey,
+    ///
+    /// **Wrapped in Arc** so signed-RPC dispatch can clone a refcount
+    /// (cheap) instead of the 32-byte secret bytes (which would mean
+    /// two heap copies of the secret coexisting during every signed
+    /// request, since `ed25519_dalek::SigningKey` doesn't zeroize on
+    /// drop).
+    signing_key: Arc<SigningKey>,
     /// Background `kubectl port-forward` subprocess if enabled, kept
     /// alive for the sandbox lifetime. Killed on stop. The local
     /// port is recorded so `stop` can return it to the allocator.
@@ -438,7 +444,7 @@ impl K8sBackend {
             user_home_pvc: user_home_pvc.to_string(),
             namespace: ns.to_string(),
             agent_url,
-            signing_key,
+            signing_key: Arc::new(signing_key),
             port_forward,
             port_forward_local_port: local_port,
         };
@@ -617,11 +623,16 @@ impl K8sBackend {
             .collect())
     }
 
-    fn sandbox_keys(&self, id: Uuid) -> Result<(SigningKey, String), String> {
+    fn sandbox_keys(&self, id: Uuid) -> Result<(Arc<SigningKey>, String), String> {
         let guard = self.state.read().unwrap();
         let s = guard
             .get(&id)
             .ok_or_else(|| "sandbox not found in k8s backend".to_string())?;
+        // Arc clone is a refcount bump — cheap. Cloning the SigningKey
+        // by value would heap-copy the 32-byte secret on every signed
+        // RPC, doubling the in-memory key count for the duration of
+        // the request (ed25519-dalek::SigningKey doesn't zeroize on
+        // drop).
         Ok((s.signing_key.clone(), s.agent_url.clone()))
     }
 }
@@ -770,7 +781,7 @@ struct AgentResponse {
 /// on that worker. The stress test never caught it because port-
 /// forward to localhost is fast.
 async fn http_signed_async(
-    signing_key: &SigningKey,
+    signing_key: &Arc<SigningKey>,
     method: &str,
     url: &str,
     body: &[u8],
@@ -782,10 +793,10 @@ async fn http_signed_async(
         .unwrap_or_else(|| "/".to_string());
     let path = path.split('?').next().unwrap_or("/").to_string();
 
-    // Move all the request data into the closure. SigningKey is
-    // Clone (32 bytes); cloning is cheap and avoids a lifetime
-    // dance with the pool's `'static` requirement.
-    let signing_key = signing_key.clone();
+    // Arc clone — refcount bump, NOT a 32-byte secret copy. Avoids
+    // having two heap copies of the secret coexisting during every
+    // signed RPC (ed25519-dalek::SigningKey doesn't zeroize on drop).
+    let signing_key = Arc::clone(signing_key);
     let method = method.to_string();
     let url = url.to_string();
     let body = body.to_vec();
