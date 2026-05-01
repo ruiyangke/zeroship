@@ -109,8 +109,27 @@ trap cleanup EXIT INT TERM
 
 # Wait for each virtiofsd UDS to appear before launching CH.
 # A few hundred ms is typical; bound to ~1 s.
+#
+# If a socket never shows up the corresponding virtiofsd died at
+# startup (bad config, missing share dir, permission error). Failing
+# loud HERE means Nomad reports the alloc as failed; the controller's
+# `wait_for_alloc_running` surfaces it within ~250 ms. Without this
+# guard the script proceeded into `cloud-hypervisor`, which would
+# fail to register the missing fs device and the controller would
+# only notice via the 30 s `/livez` timeout — much worse signal.
 for sock in "$VFS_KEYS_SOCK" "$VFS_WS_SOCK" "$VFS_HOME_SOCK"; do
   for _ in $(seq 1 50); do [ -S "$sock" ] && break; sleep 0.02; done
+  if [ ! -S "$sock" ]; then
+    echo "[wrapper] virtiofsd socket $sock did not appear within ~1s; aborting" >&2
+    # Try to surface what virtiofsd logged before we exit. The trap
+    # will then tear down whatever did manage to start.
+    case "$sock" in
+      "$VFS_KEYS_SOCK") tail -n 20 "$ZSBX_RUNTIME/vfs-keys.log" 2>/dev/null || true ;;
+      "$VFS_WS_SOCK")   tail -n 20 "$ZSBX_RUNTIME/vfs-ws.log"   2>/dev/null || true ;;
+      "$VFS_HOME_SOCK") tail -n 20 "$ZSBX_RUNTIME/vfs-home.log" 2>/dev/null || true ;;
+    esac
+    exit 1
+  fi
 done
 
 # Spawn cloud-hypervisor in the background so we can capture its PID
