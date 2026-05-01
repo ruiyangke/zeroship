@@ -175,3 +175,168 @@ abort signal as arguments.
   (the only thing standing between an internal helper and a public endpoint)
 - `apps/zeroship-builder/src/server/_*.ts` — the eight files that rely on
   the underscore-naming convention to stay private
+
+---
+
+## ISS-09 · `/auth/forgot-password` endpoint not exposed by control plane
+
+**Status:** open
+**Severity:** medium — password recovery is unavailable; users locked out
+of their account have no self-serve path back in.
+**First observed:** 2026-05-01, polishing the auth UI surfaces in
+`apps/zeroship-builder` (spec §6.3).
+**Component:** `crates/control` + gateway `/auth/*` proxy
+
+### Symptom
+
+The dashboard's `ForgotPassword` page (`src/client/pages/ForgotPassword.tsx`)
+posts an email and expects the control plane to (a) generate a one-shot
+reset token, (b) email it to the user, and (c) accept that token at a
+follow-up `/auth/reset-password` endpoint. None of that exists yet:
+
+- No `forgot_password` handler in `crates/control/src/auth_*.rs`.
+- No `password_reset_tokens` table in the auth schema.
+- No SMTP / email-provider wiring (and email templates) in the platform.
+
+### Workaround in use
+
+The page ships as a **UI stub** that always shows the standard
+no-enumeration confirmation reply:
+
+> "If an account exists for that email, we sent reset instructions."
+
+This keeps the visible UX correct (so we don't have to redo the page
+when the backend lands) and avoids the email-enumeration leak that a
+"user not found" response would create. When the endpoint ships,
+`submit()` should call it and ignore the status, preserving the same
+visible reply.
+
+### Fix path
+
+1. `crates/control/src/auth_password_reset.rs` — new handlers for
+   `POST /auth/forgot-password` (always-200) and `POST /auth/reset-password`
+   (validates token, rotates password, invalidates other sessions).
+2. New table `password_reset_tokens` (id, user_id, token_hash, expires_at,
+   used_at, ip).
+3. SMTP/email-provider wiring + a templated reset email.
+4. Update `ForgotPassword.tsx` to call `/auth/forgot-password` (still
+   ignoring status for no-enumeration).
+5. New page `ResetPassword.tsx` for the token-bearing landing URL.
+
+---
+
+## ISS-10 · `/auth/sessions` list/revoke endpoints not exposed
+
+**Status:** open
+**Severity:** low — power-user feature; not blocking sign-up/sign-in.
+**First observed:** 2026-05-01, building the Account page (spec §6.5).
+**Component:** `crates/control` + gateway `/auth/*` proxy
+
+### Symptom
+
+Spec §6.5 calls for an Account → Sessions card listing every active
+session for the current user (created_at, ip, user-agent) with a
+"sign out" button per row plus "sign out everywhere". The control
+plane stores sessions in the `auth_sessions` table but doesn't expose
+them via the API:
+
+- No `GET /auth/sessions` handler.
+- No `DELETE /auth/sessions/:id` handler.
+- No `POST /auth/sessions/revoke-all` handler.
+
+### Workaround in use
+
+The Account page renders a **deferred-section stub** for Sessions:
+
+> "Coming soon — see ISSUES.md ISS-10."
+
+The stub keeps the layout from collapsing and signposts the gap.
+
+### Fix path
+
+1. `crates/control/src/auth_sessions.rs` — list/revoke handlers, scoped
+   to the current user.
+2. Marker for "this session" in the list response so the UI can show
+   "current device".
+3. Wire into `src/server/auth.ts` as `listSessions` / `revokeSession` /
+   `revokeAllSessions` proxy procedures.
+4. Replace the stub in `Account.tsx` with a real table + per-row
+   action button.
+
+---
+
+## ISS-11 · Two-factor (TOTP) enrollment not wired
+
+**Status:** open
+**Severity:** low — security upgrade, not a blocker for V1.
+**First observed:** 2026-05-01, building the Account page (spec §6.5).
+**Component:** `crates/control` + gateway `/auth/*` proxy
+
+### Symptom
+
+Spec §6.5 calls for a TOTP enrollment flow on the Account page:
+QR-code scan → 6-digit confirm → backup-codes panel. None of that
+exists in the control plane yet:
+
+- No `totp_secrets` table.
+- No `POST /auth/2fa/enroll` (returns provisioning URI + QR data).
+- No `POST /auth/2fa/verify` (consumes the first 6-digit code, marks
+  enrollment as active).
+- No `POST /auth/2fa/disable`.
+- Login flow does not branch on a `requires_2fa` response.
+
+### Workaround in use
+
+The Account page renders a **deferred-section stub** for Two-factor:
+
+> "Coming soon — see ISSUES.md ISS-11."
+
+### Fix path
+
+1. `crates/control/src/auth_totp.rs` — enroll/verify/disable handlers,
+   secret stored encrypted at rest.
+2. `auth_sessions` augmented with `mfa_validated_at` so the session
+   carries the proof.
+3. Login response gains a `{requires_2fa: true, challenge_id}` branch
+   when 2FA is on; UI prompts for the code.
+4. Replace the Account stub with the QR enrollment card + backup-codes
+   reveal.
+
+---
+
+## ISS-12 · Account-deletion endpoint not exposed
+
+**Status:** open
+**Severity:** medium — GDPR/right-to-be-forgotten, but not in the
+critical path for V1 launch.
+**First observed:** 2026-05-01, building the Account page (spec §6.5).
+**Component:** `crates/control`
+
+### Symptom
+
+Spec §6.5 calls for a "Delete account" button that wipes the user's
+projects, sessions, OAuth connections, and identity. The control plane
+has no `DELETE /auth/me` (or equivalent) handler — there is no path for
+a user to remove themselves.
+
+Compliance angle: if zeroship is to onboard EU users, this can't stay
+deferred indefinitely; a request → grace-period → hard-delete flow is
+the standard shape.
+
+### Workaround in use
+
+The Account page renders a **deferred-section stub** styled with the
+tomato (danger) tone and points at this issue:
+
+> "Coming soon — see ISSUES.md ISS-12."
+
+### Fix path
+
+1. `crates/control/src/auth_delete.rs` — `POST /auth/delete` handler
+   that schedules deletion (status: `pending`, `scheduled_for`) and
+   sends a confirmation email with an "undo" link.
+2. Background job that hard-deletes after the grace period: removes
+   apps + bundles + blobs, sessions, oauth links, billing records
+   (per Stripe's data-retention rules), and finally the user row.
+3. UI flow: confirmation modal ("type your email to confirm"), then a
+   banner on the Account page showing the pending deletion + undo CTA.

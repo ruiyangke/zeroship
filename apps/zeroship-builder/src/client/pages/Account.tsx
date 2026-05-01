@@ -1,5 +1,14 @@
-// ─── Account — profile + plan + usage + sign out ───────────────
+// ─── Account — profile + plan + sessions + 2FA + sign out ──────
+//
+// Per spec §6.5. V1 sections:
+//   · Identity     — name + email (read-only; no edit endpoint yet).
+//   · Plan         — free plan + usage + upgrade CTA.
+//   · Sessions     — list of active sessions (deferred · ISS-10).
+//   · Two-factor   — TOTP enrollment (deferred · ISS-11).
+//   · Delete       — wipe the account (deferred · ISS-12).
+//   · Sign out     — calls AuthContext.logout, redirects to /login.
 
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { PageFrame } from "../components/PageFrame";
 import { GhostButton } from "../components/GhostButton";
@@ -7,9 +16,16 @@ import { StampButton } from "../components/StampButton";
 
 export function Account({ onLogout }: { onLogout?: () => void }) {
   const { user, logout } = useAuth();
+  const navigate = useNavigate();
   const display = user?.name || user?.email || "—";
   const firstWord = display.split(/\s+/)[0];
   const rest = display.split(/\s+/).slice(1).join(" ");
+
+  async function handleLogout() {
+    await logout();
+    onLogout?.();
+    navigate("/login", { replace: true });
+  }
 
   return (
     <PageFrame
@@ -17,7 +33,7 @@ export function Account({ onLogout }: { onLogout?: () => void }) {
       maxWidth={760}
       showMarginalia={false}
     >
-      <section className="reveal">
+      <section className="reveal" data-testid="account-page">
         <h1 className="font-serif font-medium text-[56px] leading-[0.98] -tracking-[0.02em] mb-1">
           {firstWord} {rest && <em className="italic text-tomato">{rest}</em>}
         </h1>
@@ -38,18 +54,35 @@ export function Account({ onLogout }: { onLogout?: () => void }) {
           </div>
         </div>
 
-        <Section title="Profile" helper="Public-ish — shown on your projects' about pages if you opt in.">
-          <Field label="Display name" defaultValue={user?.name ?? ""} />
-          <Field label="Email" defaultValue={user?.email ?? ""} readOnly />
+        <Section title="Identity" helper="Read-only for now — name + email come from your sign-up.">
+          <Field label="Display name" value={user?.name ?? ""} readOnly testId="account-name" />
+          <Field label="Email" value={user?.email ?? ""} readOnly testId="account-email" />
         </Section>
 
-        <Section title="Billing" helper="Cards, invoices, payouts to you (when your apps earn).">
-          <p className="font-serif italic text-ink-soft text-[14px] mb-2">No payment method yet.</p>
-          <GhostButton>Add a card</GhostButton>
-        </Section>
+        <DeferredSection
+          title="Sessions"
+          helper="Where you're signed in — log out remote devices anytime."
+          issue="ISS-10"
+          testId="account-sessions"
+        />
+
+        <DeferredSection
+          title="Two-factor auth"
+          helper="Add a second step (TOTP) to keep your projects safe."
+          issue="ISS-11"
+          testId="account-2fa"
+        />
+
+        <DeferredSection
+          title="Delete account"
+          helper="Wipe your projects, sessions, and identity for good."
+          issue="ISS-12"
+          testId="account-delete"
+          tone="danger"
+        />
 
         <Section title={<span className="text-tomato">Sign out</span>} helper="" lastSection>
-          <GhostButton danger onClick={() => { logout(); onLogout?.(); }} data-testid="account-logout">
+          <GhostButton danger onClick={handleLogout} data-testid="account-logout">
             Sign out of zeroship
           </GhostButton>
         </Section>
@@ -74,12 +107,35 @@ function Section({
   );
 }
 
-function Field({ label, ...rest }: { label: string } & React.InputHTMLAttributes<HTMLInputElement>) {
+function DeferredSection({
+  title, helper, issue, testId, tone,
+}: {
+  title: string; helper: string; issue: string; testId: string; tone?: "danger";
+}) {
+  return (
+    <Section
+      title={tone === "danger" ? <span className="text-tomato">{title}</span> : title}
+      helper={helper}
+    >
+      <div
+        className="border border-dashed border-rule bg-paper-2 px-4 py-3 font-serif italic text-[13.5px] text-ink-soft leading-[1.55]"
+        data-testid={testId}
+      >
+        Coming soon — see <code className="font-mono not-italic text-[12px]">ISSUES.md</code> {issue}.
+      </div>
+    </Section>
+  );
+}
+
+function Field({
+  label, testId, ...rest
+}: { label: string; testId?: string } & React.InputHTMLAttributes<HTMLInputElement>) {
   return (
     <label className="block mb-3.5">
       <span className="block label-uc mb-1">{label}</span>
       <input
         {...rest}
+        data-testid={testId}
         className="w-full px-3 py-2.5 border border-rule bg-white font-serif text-[15px] text-ink outline-none focus:border-ink read-only:bg-paper-2"
       />
     </label>
