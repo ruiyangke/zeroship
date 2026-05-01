@@ -34,7 +34,18 @@
 # This wrapper does NOT provision tap devices or kernels — that's
 # fleet-level setup, not per-sandbox.
 
-set -euo pipefail
+set -Eeuo pipefail
+
+# `set -E` makes the ERR trap inherit through functions and
+# subshells; combined with the trap below it gives us a single
+# "where did we die" log line, which is much easier to grep out
+# of the Nomad task log than a `set -e` exit with no context.
+err_trap() {
+  local rc=$?
+  local line=$1
+  echo "[wrapper] FATAL: command failed at line $line (exit=$rc)" >&2
+}
+trap 'err_trap $LINENO' ERR
 
 : "${ZSBX_VM_INDEX:?missing ZSBX_VM_INDEX}"
 : "${ZSBX_HERE:?missing ZSBX_HERE}"
@@ -44,6 +55,25 @@ set -euo pipefail
 : "${ZSBX_USER_HOME_DIR:?missing ZSBX_USER_HOME_DIR}"
 : "${ZSBX_VM_MEMORY_MB:?missing ZSBX_VM_MEMORY_MB}"
 : "${ZSBX_VM_CPUS_BOOT:?missing ZSBX_VM_CPUS_BOOT}"
+
+# Defensive bounds check on the VM index. The controller enforces
+# 1..=155 at config load (third octet of 10.99.{100+idx}.x must fit
+# a u8), but a hand-edited Nomad job spec or a misconfigured
+# operator override could slip a bad value through. A bad index here
+# would either collide with a sentinel subnet (idx=0 → 10.99.100.x,
+# the .100 reservation) or overflow the third octet (idx>155 →
+# `printf '%02x'` truncates, MAC duplication across VMs). Cheap to
+# check; surfaces in the Nomad task log immediately.
+case "$ZSBX_VM_INDEX" in
+  ''|*[!0-9]*)
+    echo "[wrapper] FATAL: ZSBX_VM_INDEX=$ZSBX_VM_INDEX is not a positive integer" >&2
+    exit 1
+    ;;
+esac
+if [ "$ZSBX_VM_INDEX" -lt 1 ] || [ "$ZSBX_VM_INDEX" -gt 155 ]; then
+  echo "[wrapper] FATAL: ZSBX_VM_INDEX=$ZSBX_VM_INDEX out of range [1,155]" >&2
+  exit 1
+fi
 
 cd "$ZSBX_HERE"
 
@@ -69,7 +99,20 @@ mkdir -p "$ZSBX_KEYS_DIR" "$ZSBX_WORKSPACE_DIR" "$ZSBX_USER_HOME_DIR"
 # state — each VM writes its own rootfs in /, which is r/w).
 # `--reflink=auto` is fast on btrfs/xfs; falls back to a normal copy
 # elsewhere.
-[ -f "$DISK" ] || cp --reflink=auto "$ZSBX_HERE/rootfs-slim.img" "$DISK"
+#
+# Doing this BEFORE virtiofsd spawn is intentional: a cp failure
+# (missing source, no disk space, FS read-only) used to manifest
+# downstream as "agent never returned 200 on /livez" — misleading,
+# because the agent never even got a chance to start. With cp first
+# AND the explicit error message below, the Nomad task log carries
+# "rootfs copy failed" within ~250 ms; the controller's
+# `wait_for_alloc_running` surfaces it immediately.
+if [ ! -f "$DISK" ]; then
+  if ! cp --reflink=auto "$ZSBX_HERE/rootfs-slim.img" "$DISK"; then
+    echo "[wrapper] FATAL: rootfs copy failed: $ZSBX_HERE/rootfs-slim.img → $DISK" >&2
+    exit 1
+  fi
+fi
 
 # Clean any stale sockets from a crashed prior run (Nomad gives us a
 # fresh NOMAD_TASK_DIR per alloc, so this should already be empty,

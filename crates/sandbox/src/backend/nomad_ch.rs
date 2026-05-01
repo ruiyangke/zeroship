@@ -144,6 +144,16 @@ struct NomadChSandbox {
     signing_key: Arc<SigningKey>,
 }
 
+// SECRET-HYGIENE: this Debug impl is **load-bearing**. The
+// `signing_key: Arc<SigningKey>` field MUST NEVER appear in any
+// debug output, even via the transitive chain
+//   Backend::Debug → state.read() → HashMap → NomadChSandbox::fmt
+// Adding `#[derive(Debug)]` to NomadChSandbox would dump the secret
+// into any panic backtrace / error log / `dbg!()` call. The
+// finish_non_exhaustive() below is what closes that hole — keep
+// that final clause and do NOT switch to a derive even when adding
+// a new field. ed25519-dalek::SigningKey doesn't have a redacting
+// Debug impl of its own.
 impl std::fmt::Debug for NomadChSandbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NomadChSandbox")
@@ -152,6 +162,7 @@ impl std::fmt::Debug for NomadChSandbox {
             .field("vm_index", &self.vm_index)
             .field("host_dir", &self.host_dir)
             .field("agent_url", &self.agent_url)
+            // signing_key intentionally omitted — see above.
             .finish_non_exhaustive()
     }
 }
@@ -284,14 +295,16 @@ impl NomadCHBackend {
             };
             let stop_url = format!("{base}/v1/job/{id}?purge=true");
             if let Err(e) = http_delete_unsigned(&stop_url, Duration::from_secs(10)).await {
-                eprintln!("[sandbox/nomad-ch] purge {id} failed: {e}");
+                eprintln!(
+                    "[sandbox/nomad-ch] orphan-cleanup: purge {id} failed: {e}"
+                );
                 continue;
             }
             deleted += 1;
         }
         if deleted > 0 {
             eprintln!(
-                "[sandbox/nomad-ch] cleanup_orphans_at_startup: purged {deleted} orphan job(s)"
+                "[sandbox/nomad-ch] orphan-cleanup: purged {deleted} orphan job(s)"
             );
         }
         Ok(deleted)
@@ -350,10 +363,12 @@ impl NomadCHBackend {
             .collect();
         for old_id in existing {
             eprintln!(
-                "[sandbox/nomad-ch] user {user_id} already has sandbox {old_id}; stopping first"
+                "[sandbox/nomad-ch] create: user {user_id} already has sandbox {old_id}; stopping first"
             );
             if let Err(e) = self.stop(old_id).await {
-                eprintln!("[sandbox/nomad-ch] stop({old_id}) failed: {e}");
+                eprintln!(
+                    "[sandbox/nomad-ch] create: stop({old_id}) failed: {e}"
+                );
             }
         }
 
@@ -417,7 +432,7 @@ impl NomadCHBackend {
         let pubkey_b64 = B64.encode(pubkey.as_bytes());
         let key_fp = sig::pubkey_fingerprint(&pubkey);
         eprintln!(
-            "[sandbox/nomad-ch] create sandbox={sandbox_id} user={user_id} \
+            "[sandbox/nomad-ch] create: sandbox={sandbox_id} user={user_id} \
              project={project_id} key_fp={key_fp}"
         );
 
@@ -1592,7 +1607,13 @@ fn validate_id(id: &str, what: &'static str) -> Result<(), String> {
         ));
     }
     let mut chars = id.chars();
-    let first = chars.next().unwrap();
+    // Defense-in-depth: the empty check above already guarantees
+    // chars.next() is Some, but using `?` propagates the empty-id
+    // error cleanly if a future refactor moves the length check
+    // around. Cheaper than `unwrap()` to reason about.
+    let first = chars
+        .next()
+        .ok_or_else(|| format!("{what} unexpectedly empty"))?;
     if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
         return Err(format!(
             "{what} must start with [a-z0-9]; got {id:?}"
@@ -1665,6 +1686,51 @@ mod tests {
         assert!(a.alloc().is_err());
         a.release(7);
         assert_eq!(a.alloc().unwrap(), 7);
+    }
+
+    #[test]
+    fn vm_alloc_single_element_at_boundaries() {
+        // M6: pool of size 1 at the floor (1,1) and ceil (155,155)
+        // boundaries — the same edge case at both ends of the
+        // controller-validated index range.
+        for boundary in [1u16, 155u16] {
+            let mut a = VmIndexAllocator::new(boundary, boundary);
+            assert_eq!(
+                a.alloc().unwrap(),
+                boundary,
+                "boundary={boundary} first alloc"
+            );
+            assert!(
+                a.alloc().is_err(),
+                "boundary={boundary} second alloc must fail"
+            );
+            a.release(boundary);
+            assert_eq!(
+                a.alloc().unwrap(),
+                boundary,
+                "boundary={boundary} reuse after release"
+            );
+        }
+    }
+
+    #[test]
+    fn vm_alloc_release_is_idempotent() {
+        // M8: releasing an index that's already in `freed` should
+        // not corrupt state — the same index must NOT be handed out
+        // twice on the next two allocs.
+        let mut a = VmIndexAllocator::new(1, 5);
+        let i = a.alloc().unwrap();
+        a.release(i);
+        a.release(i); // double-release: BTreeSet dedups, no panic
+        a.release(i); // triple, for good measure
+        let j1 = a.alloc().unwrap();
+        let j2 = a.alloc().unwrap();
+        assert_eq!(j1, i, "first realloc reuses the freed index");
+        assert_ne!(
+            j2, j1,
+            "second alloc must NOT hand back the same index — \
+             double-release must not double-insert"
+        );
     }
 
     // ─── wait_for_job_gone alloc-terminal predicate (I2) ─────
@@ -1749,7 +1815,7 @@ mod tests {
     // ─── Nomad job spec ──────────────────────────────────────
 
     fn make_cfg() -> SandboxConfig {
-        let mut cfg = SandboxConfig {
+        let cfg = SandboxConfig {
             port: 9091,
             token: crate::config::ApiToken::new("x"),
             backend: "nomad-ch".into(),
@@ -1786,7 +1852,6 @@ mod tests {
                 startup_orphan_cleanup: false,
             },
         };
-        cfg.cpus = 2.0;
         cfg
     }
 

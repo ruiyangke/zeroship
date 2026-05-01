@@ -292,7 +292,16 @@ impl NomadCHConfig {
     /// Validate the parsed config. Called from
     /// [`SandboxConfig::from_env`] before the backend is instantiated
     /// so misconfig surfaces at startup, not on the first sandbox.
-    pub fn validate(&self) -> Result<(), String> {
+    ///
+    /// Side-effect: trims a single trailing '/' from `nomad_addr` so
+    /// downstream callers can do `format!("{nomad_addr}/v1/...")`
+    /// without producing a malformed `//v1/...` URL when an operator
+    /// pastes a URL with a trailing slash. Idempotent; only one
+    /// slash is trimmed (we don't try to canonicalize beyond that).
+    pub fn validate(&mut self) -> Result<(), String> {
+        if self.nomad_addr.ends_with('/') {
+            self.nomad_addr.pop();
+        }
         if self.vm_index_floor < 1 {
             // floor=0 would set MAC `12:34:56:78:9b:00` and IP
             // `10.99.100.2`, pre-empting the .100 subnet for what's
@@ -314,12 +323,16 @@ impl NomadCHConfig {
         // so 100 + vm_index_ceil ≤ 255 → vm_index_ceil ≤ 155. Catch
         // misconfig at startup so we don't 500 with "garbage IP" on
         // the first late-pool sandbox.
-        if (100u32 + self.vm_index_ceil as u32) > 255 {
+        const SUBNET_BASE_OCTET: u32 = 100;
+        const MAX_OCTET: u32 = 255;
+        const MAX_CEIL: u32 = MAX_OCTET - SUBNET_BASE_OCTET;
+        if (SUBNET_BASE_OCTET + self.vm_index_ceil as u32) > MAX_OCTET {
             return Err(format!(
                 "SANDBOX_NOMAD_CH_VM_INDEX_CEIL ({}) would overflow IP \
-                 third octet (10.99.{}.2). Max is 155.",
+                 third octet (10.99.{}.2). Max is {}.",
                 self.vm_index_ceil,
-                100 + self.vm_index_ceil as u32
+                SUBNET_BASE_OCTET + self.vm_index_ceil as u32,
+                MAX_CEIL,
             ));
         }
         // SANDBOX_NOMAD_ADDR scheme: an empty / scheme-less value
@@ -467,6 +480,7 @@ impl SandboxConfig {
             )?,
         };
 
+        let mut nomad_ch = nomad_ch;
         nomad_ch.validate()?;
 
         Ok(Self {
@@ -554,9 +568,21 @@ mod tests {
 
     #[test]
     fn validate_accepts_canonical_user_home_layout() {
-        let cfg = base_nomad_cfg();
+        let mut cfg = base_nomad_cfg();
         // `/var/zeroship/ch` + `users` == `/var/zeroship/ch/users`.
         cfg.validate().expect("default layout must validate");
+    }
+
+    #[test]
+    fn validate_trims_trailing_slash_on_nomad_addr() {
+        // M2: a trailing slash on the env-supplied URL would produce
+        // `format!("{nomad_addr}/v1/...")` → `http://...//v1/...`,
+        // which Nomad's HTTP server returns 404 for. Trim a single
+        // trailing slash in `validate()`.
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "http://127.0.0.1:4646/".to_string();
+        cfg.validate().expect("trailing slash should be tolerated");
+        assert_eq!(cfg.nomad_addr, "http://127.0.0.1:4646");
     }
 
     #[test]
