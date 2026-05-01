@@ -43,3 +43,7 @@ workspace = true
 [[example]]
 name = "lifecycle_e2e"
 path = "examples/lifecycle_e2e.rs"
+
+[[example]]
+name = "stress_e2e"
+path = "examples/stress_e2e.rs"

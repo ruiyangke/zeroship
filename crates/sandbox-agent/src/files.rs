@@ -196,11 +196,22 @@ impl Workspace {
         let mut current_fd: RawFd = self.dirfd();
         let mut owned: Option<OwnedFd> = None;
         for component in relative.split('/').filter(|s| !s.is_empty()) {
-            // mkdirat: ignore EEXIST.
+            // mkdirat: ignore EEXIST. Mode 0o755 (rwxr-xr-x) so the
+            // /exec child — which runs as nobody after privilege
+            // drop — can traverse and read directories the agent
+            // (running as root) created. Without `o+x` here, any
+            // shell command operating on agent-created dirs fails
+            // with "Permission denied" the moment it tries to
+            // descend, because root and nobody share neither uid
+            // nor gid. The actual sandbox boundary is the libkrun
+            // kernel + openat2(RESOLVE_BENEATH); directory mode is
+            // not a security control.
             match nix::sys::stat::mkdirat(
                 Some(current_fd),
                 component,
-                Mode::S_IRWXU | Mode::S_IRGRP | Mode::S_IXGRP,
+                Mode::S_IRWXU
+                    | Mode::S_IRGRP | Mode::S_IXGRP
+                    | Mode::S_IROTH | Mode::S_IXOTH,
             ) {
                 Ok(()) => {}
                 Err(Errno::EEXIST) => {}
@@ -415,6 +426,31 @@ mod tests {
         let ws = unique_workspace("b");
         ws.write_file("src/server.ts", b"x").unwrap();
         assert!(ws.path().join("src/server.ts").exists());
+    }
+
+    /// **Regression: agent-created dirs must be world-traversable.**
+    /// The /exec child runs as nobody after privilege drop; if mkdirat
+    /// uses mode 0o750 (no o+x), any subsequent shell command that
+    /// tries to descend into an agent-created directory fails with
+    /// EACCES. Caught by the long-running stress test.
+    #[test]
+    fn created_dir_is_o_plus_x() {
+        use std::os::unix::fs::PermissionsExt;
+        let ws = unique_workspace("dirperm");
+        ws.write_file("a/b/c.txt", b"x").unwrap();
+        for sub in ["a", "a/b"] {
+            let meta = std::fs::metadata(ws.path().join(sub)).unwrap();
+            let mode = meta.permissions().mode() & 0o777;
+            assert!(
+                mode & 0o001 != 0,
+                "agent-created dir {sub:?} mode={mode:o} lacks o+x; \
+                 dropped /exec children would fail to traverse it"
+            );
+            assert!(
+                mode & 0o004 != 0,
+                "agent-created dir {sub:?} mode={mode:o} lacks o+r"
+            );
+        }
     }
 
     #[test]
