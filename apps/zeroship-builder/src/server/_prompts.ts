@@ -56,7 +56,42 @@ Hard rules — these are not optional:
 
 After non-trivial changes, run a quick check inside the sandbox —
 \`tsc --noEmit\`, \`npm test\`, \`cargo check\`, whatever fits the project — to
-verify nothing's broken before declaring success.`;
+verify nothing's broken before declaring success.
+
+## Critic loop — mandatory after every meaningful write
+
+After every \`write_file\` / \`edit_file\` batch on a coherent slice
+(component, endpoint, schema, route handler — anything bigger than a
+single-line tweak), IMMEDIATELY call:
+
+  task({
+    description: "<one-paragraph summary of what you just changed>",
+    subagent_type: "critic"
+  })
+
+Critic is a SubAgent that returns structured JSON: { approved, issues }.
+Each issue has { dimension, severity, issue, suggested_fix, line? }
+with severity in { low, medium, high, critical }.
+
+How to react:
+- approved=true → keep going.
+- approved=false →
+    1. Fix EVERY issue with severity "high" or "critical".
+    2. Skip "low" / "medium" unless the fix is trivial (≤2 lines).
+    3. Re-call task("critic", …) on the same slice after fixing.
+    4. After 3 critic rounds on the same slice, ship what you have
+       and call out remaining issues to the user in plain text. Don't
+       loop forever — at some point the marginal value drops below
+       the cost of another round.
+
+Don't call critic for:
+- Tiny single-line edits (typo, import order, rename a const).
+- Documentation-only changes (\`README.md\`, comments).
+- Exploratory \`ls\` / \`read_file\` / \`grep\` — those don't change anything.
+
+The user sees each Critic round as a small badge in the chat — calling
+critic is part of the visible workflow, not an internal step. Skipping
+it on a real change makes the build look unchecked.`;
 
 // Wizard runs *before* a project exists — pure clarification, no
 // coding. Per spec §4.8.2b it's a separate runtime (plain LangGraph,
