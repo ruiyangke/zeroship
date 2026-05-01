@@ -425,8 +425,23 @@ fn gen_scalar_set(ty: &Type, val: &TokenStream2) -> TokenStream2 {
     }
 }
 
-/// Generate code to convert an `Option<T>` inner value to V8.
+/// Generate code to convert an `Option<T>` inner value to V8. The
+/// emitted code expects `__inner` to be the unwrapped Some value.
 fn gen_option_some_set(ty: &Type) -> TokenStream2 {
+    if is_vec_u8(ty) {
+        // Option<Vec<u8>> for getters like `Headers.get(name) ->
+        // ByteString?`. Emit a Latin-1 one-byte string so byte fidelity
+        // is preserved (encoded session tokens, e.g. high-bit Set-Cookie
+        // values, must round-trip).
+        return quote! {
+            let __v = v8::String::new_from_one_byte(
+                scope,
+                __inner.as_slice(),
+                v8::NewStringType::Normal,
+            ).unwrap();
+            rv.set(__v.into());
+        };
+    }
     match type_ident(ty).as_deref() {
         Some("bool") => quote! { rv.set(v8::Boolean::new(scope, __inner).into()); },
         Some("u32") => quote! { rv.set(v8::Integer::new_from_unsigned(scope, __inner).into()); },
@@ -444,6 +459,25 @@ fn gen_vec_set() -> TokenStream2 {
         for (__i, __s) in __vec.iter().enumerate() {
             let __v = v8::String::new(scope, __s).unwrap();
             __arr.set_index(scope, __i as u32, __v.into());
+        }
+        rv.set(__arr.into());
+    }
+}
+
+/// Generate code to build a `v8::Array` from a `Vec<Vec<u8>>`. Each
+/// element is materialised as a Latin-1 one-byte string (a WebIDL
+/// ByteString round-trips faithfully — bytes 0x80–0xFF survive). Used
+/// by methods like `Headers.getSetCookie() -> sequence<ByteString>`.
+fn gen_vec_vec_u8_set() -> TokenStream2 {
+    quote! {
+        let __arr = v8::Array::new(scope, __vec.len() as i32);
+        for (__i, __bytes) in __vec.iter().enumerate() {
+            let __s = v8::String::new_from_one_byte(
+                scope,
+                __bytes.as_slice(),
+                v8::NewStringType::Normal,
+            ).unwrap();
+            __arr.set_index(scope, __i as u32, __s.into());
         }
         rv.set(__arr.into());
     }
@@ -503,6 +537,12 @@ pub(crate) fn gen_call_return(call: &TokenStream2, output: &ReturnType) -> Token
                                 if inner.map(is_vec_u8).unwrap_or(false) {
                                     let val = quote! { __ok };
                                     gen_vec_u8_set(&val)
+                                } else if inner.map(is_vec_vec_u8).unwrap_or(false) {
+                                    let vv_set = gen_vec_vec_u8_set();
+                                    quote! {
+                                        let __vec = __ok;
+                                        #vv_set
+                                    }
                                 } else {
                                     let vec_set = gen_vec_set();
                                     quote! {
@@ -550,6 +590,12 @@ pub(crate) fn gen_call_return(call: &TokenStream2, output: &ReturnType) -> Token
                         quote! {
                             let __vec = #call;
                             #ab_set
+                        }
+                    } else if is_vec_vec_u8(ty) {
+                        let vv_set = gen_vec_vec_u8_set();
+                        quote! {
+                            let __vec = #call;
+                            #vv_set
                         }
                     } else {
                         let vec_set = gen_vec_set();

@@ -641,6 +641,126 @@ fn bytestring_throws_on_code_unit_above_0xff() {
     assert!(s.contains(r#""kind":"TypeError""#), "got: {s}");
 }
 
+// ---------------------------------------------------------------------------
+// Test 7f: Vec<Vec<u8>> return → JS Array<ByteString>
+// ---------------------------------------------------------------------------
+//
+// Headers.getSetCookie() returns sequence<ByteString>. The macro must
+// marshal Vec<Vec<u8>> as a JS Array of one-byte strings (Latin-1).
+
+mod vec_vec_u8 {
+    use super::*;
+
+    pub struct Cookies;
+
+    #[v8_class]
+    impl Cookies {
+        #[v8_constructor]
+        fn new() -> Cookies {
+            Cookies
+        }
+
+        #[v8_method]
+        fn list(&self) -> Vec<Vec<u8>> {
+            vec![
+                b"a=1".to_vec(),
+                b"b=2".to_vec(),
+                vec![0xFF, 0x80, 0x10], // verify high bytes round-trip
+            ]
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 7g: Result<Option<Vec<u8>>> — Headers.get returns ByteString?
+// ---------------------------------------------------------------------------
+//
+// Headers.get(name) returns ByteString or null. The Rust shape is
+// Result<Option<Vec<u8>>, OpError>:
+//   - Ok(Some(bytes))  → ByteString (one-byte string)
+//   - Ok(None)         → null
+//   - Err(_)           → throws (validate failure)
+
+mod result_option_vec_u8 {
+    use super::*;
+
+    pub struct Lookup;
+
+    #[v8_class]
+    impl Lookup {
+        #[v8_constructor]
+        fn new() -> Lookup {
+            Lookup
+        }
+
+        #[v8_method]
+        fn get(&self, name: ::zeroship_runtime::byte_string::ByteString) -> Result<Option<Vec<u8>>, OpError> {
+            match name.as_slice() {
+                b"a" => Ok(Some(b"hello".to_vec())),
+                b"b" => Ok(Some(vec![0xFE, 0x80, 0x01])),
+                b"missing" => Ok(None),
+                _ => Err(OpError::type_error("invalid name")),
+            }
+        }
+    }
+}
+
+#[test]
+fn result_option_vec_u8_some_emits_bytestring() {
+    let s = run_in_v8(
+        |scope, global| install_class::<result_option_vec_u8::Lookup>(
+            result_option_vec_u8::Lookup::install, "Lookup", scope, global,
+        ),
+        r#"
+        const l = new Lookup();
+        const a = l.get("a");
+        const b = l.get("b");
+        const m = l.get("missing");
+        JSON.stringify({
+            a, ta: typeof a,
+            b0: b.charCodeAt(0), b1: b.charCodeAt(1), b2: b.charCodeAt(2),
+            m_is_null: m === null,
+        });
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(
+        s,
+        r#"{"a":"hello","ta":"string","b0":254,"b1":128,"b2":1,"m_is_null":true}"#
+    );
+}
+
+#[test]
+fn vec_vec_u8_emits_array_of_bytestring() {
+    let s = run_in_v8(
+        |scope, global| install_class::<vec_vec_u8::Cookies>(
+            vec_vec_u8::Cookies::install, "Cookies", scope, global,
+        ),
+        r#"
+        const c = new Cookies();
+        const arr = c.list();
+        JSON.stringify({
+            isArray: Array.isArray(arr),
+            len: arr.length,
+            t0: typeof arr[0],
+            v0: arr[0],
+            v1: arr[1],
+            // 3rd element bytes 0xFF, 0x80, 0x10 → Latin-1 string with
+            // those code units. Read via charCodeAt for byte fidelity.
+            c2_0: arr[2].charCodeAt(0),
+            c2_1: arr[2].charCodeAt(1),
+            c2_2: arr[2].charCodeAt(2),
+            c2_len: arr[2].length,
+        });
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(
+        s,
+        r#"{"isArray":true,"len":3,"t0":"string","v0":"a=1","v1":"b=2","c2_0":255,"c2_1":128,"c2_2":16,"c2_len":3}"#
+    );
+}
+
 #[test]
 fn bytestring_preserves_high_latin1_bytes() {
     // Latin-1 \u00FF is the maximum allowed code unit for ByteString.
