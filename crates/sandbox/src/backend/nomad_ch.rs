@@ -951,11 +951,27 @@ impl Drop for CreateGuard {
 /// integer `boot=N` count Cloud Hypervisor needs at command-line.
 /// Round up — cfg.cpus is the *target* allocation; never starve the
 /// VM by rounding down a 1.5 to 1. Floor at 1 so a misconfigured
-/// cpus=0 still produces a bootable VM (the validate at config load
-/// rejects cpus≤0, but defense-in-depth).
+/// cpus=0 (or NaN) still produces a bootable VM (the validate at
+/// config load rejects cpus≤0, but defense-in-depth).
 fn cpus_boot(cpus: f32) -> u32 {
+    if !cpus.is_finite() {
+        return 1;
+    }
     let n = cpus.ceil() as i64;
     if n < 1 { 1 } else { n as u32 }
+}
+
+/// Map `SandboxConfig.cpus` to the Nomad `Resources.CPU` advisory
+/// (MHz). Same floor philosophy as [`cpus_boot`]: we never want to
+/// emit `CPU=0` (rejected by some Nomad configs) when we're about
+/// to boot a real VM. Floor at 500 MHz (≈ 0.25 vCPU). NaN /
+/// negative → floor.
+pub(crate) fn resources_cpu_mhz(cpus: f32) -> u32 {
+    if !cpus.is_finite() {
+        return 500;
+    }
+    let mhz = cpus * 2000.0;
+    if mhz < 500.0 { 500 } else { mhz as u32 }
 }
 
 // ─── Nomad job spec construction ────────────────────────────────
@@ -1035,8 +1051,14 @@ pub(crate) fn build_nomad_job_json(
                         // CPU is in MHz units in the Nomad API.
                         // 1 vCPU ≈ 2000 MHz advisory; our
                         // SandboxConfig.cpus is fractional so
-                        // multiply.
-                        "CPU": (cfg.cpus * 2000.0) as u32,
+                        // multiply. Floor at 500 MHz (0.25 vCPU) for
+                        // the same reason cpus_boot floors at 1: a
+                        // misconfigured `cpus=0.0` (or a NaN slipping
+                        // past validation) would otherwise produce
+                        // CPU=0, which Nomad rejects on some configs
+                        // and is anyway nonsensical when we're about
+                        // to boot a VM with at least one vCPU.
+                        "CPU": resources_cpu_mhz(cfg.cpus),
                         "MemoryMB": cfg.memory_mb as u32,
                     },
                     "KillTimeout": 10_000_000_000u64,  // 10s, ns
@@ -1756,6 +1778,27 @@ mod tests {
         assert_eq!(cpus_boot(0.0), 1);
         assert_eq!(cpus_boot(-1.0), 1);
         assert_eq!(cpus_boot(8.0), 8);
+    }
+
+    #[test]
+    fn cpus_boot_handles_nan_and_inf() {
+        // M7: NaN / Inf must not produce 0 or saturating-cast garbage.
+        assert_eq!(cpus_boot(f32::NAN), 1);
+        assert_eq!(cpus_boot(f32::INFINITY), 1);
+        assert_eq!(cpus_boot(f32::NEG_INFINITY), 1);
+    }
+
+    #[test]
+    fn resources_cpu_mhz_floors_at_500() {
+        // I3: Resources.CPU floor matches cpus_boot's floor — no 0.
+        assert_eq!(resources_cpu_mhz(0.0), 500);
+        assert_eq!(resources_cpu_mhz(0.1), 500); // 200 MHz < 500 floor
+        assert_eq!(resources_cpu_mhz(0.25), 500);
+        assert_eq!(resources_cpu_mhz(0.5), 1000);
+        assert_eq!(resources_cpu_mhz(2.0), 4000);
+        assert_eq!(resources_cpu_mhz(-1.0), 500);
+        assert_eq!(resources_cpu_mhz(f32::NAN), 500);
+        assert_eq!(resources_cpu_mhz(f32::INFINITY), 500);
     }
 
     #[test]
