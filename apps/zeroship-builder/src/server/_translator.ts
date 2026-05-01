@@ -227,7 +227,21 @@ export async function buildTranslatedStream(
       //   ask_survey             → data-survey (also: tool halts via
       //                            interrupt(), so on_tool_end may not
       //                            even fire on the interrupted run)
-      const CUSTOM_DATA_TOOLS = new Set(["write_file", "edit_file", "ask_survey"]);
+      //   task                   → data-critic-round (when subagent_type
+      //                            is "critic"). Other subagent types
+      //                            also get suppressed here — we don't
+      //                            currently render generic task-tool
+      //                            receipts in the chat. If we add more
+      //                            subagents that should show as
+      //                            receipts, narrow this to inspect
+      //                            args.subagent_type at on_tool_start
+      //                            time.
+      const CUSTOM_DATA_TOOLS = new Set([
+        "write_file",
+        "edit_file",
+        "ask_survey",
+        "task",
+      ]);
 
       // streamEvents accepts InputType | Command — both modes use the
       // same v2 protocol, signal plumbing, and thread_id.

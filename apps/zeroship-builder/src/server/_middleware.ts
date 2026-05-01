@@ -28,6 +28,15 @@
 //                           client renders the SurveyCard from the
 //                           data-survey chunk and submits via the
 //                           resume protocol (body.resume).
+//   task (critic)         → emit `data-critic-round` after the SubAgent
+//                           returns. Builder is told (via BUILDER_SYSTEM)
+//                           to call task("critic", …) after every
+//                           meaningful write batch; we extract Critic's
+//                           structured response from the Command result
+//                           and surface it as a small badge per round.
+//                           Other subagent_types pass through silently
+//                           — extend the branch if more subagents need
+//                           dedicated UI.
 //   ls, read_file, grep,
 //   glob, execute, …      → middleware passes through; native
 //                           tool-input-available / tool-output-available
@@ -66,6 +75,13 @@ import { emitDataSurvey, type SurveyInput } from "./_survey_wire.js";
  * all. Other custom data parts (data-diff for write_file/edit_file)
  * are idempotent at the visual layer (each write is a fresh diff with
  * a fresh id) so they're safe to re-emit on resume.
+ *
+ * Per-turn critic-round counter: each Builder turn instantiates one
+ * `dataPartMiddleware(writer)` call, so the closure-captured counter
+ * is naturally turn-scoped. We increment on every `task("critic", …)`
+ * dispatch and emit `{round, total}` where `total` is the rolling
+ * count (the true total isn't known until the turn ends). Client
+ * renders whatever shows up.
  */
 export async function dataPartMiddleware(
   writer: UIMessageStreamWriter,
@@ -75,6 +91,11 @@ export async function dataPartMiddleware(
   // Lazy import to keep non-chat code paths free of the langchain
   // dep tree (matches the translator's lazy-import policy).
   const { createMiddleware } = await import("langchain");
+
+  // Per-turn critic round counter. Closure-scoped so it's reset
+  // automatically on the next chat turn (the translator constructs
+  // a fresh middleware per `execute({writer})`).
+  let criticRound = 0;
 
   return createMiddleware({
     name: "ZeroshipDataPartEmitter",
@@ -131,6 +152,42 @@ export async function dataPartMiddleware(
         return result;
       }
 
+      if (name === "task") {
+        // deepagents' built-in subagent dispatcher. Args shape is
+        //   { description: string, subagent_type: string }
+        // — see node_modules/deepagents/dist/index.js (createTaskTool).
+        // We pass-through to the handler then, IFF the dispatched
+        // subagent is "critic", parse the result and emit a
+        // data-critic-round chunk.
+        //
+        // Result shape (from returnCommandWithStateUpdate, same file):
+        //   Command({ update: { messages: [ToolMessage({
+        //     content: <JSON-stringified structuredResponse> | <text>
+        //   })] } })
+        // — when the subagent has a `responseFormat` (Critic does), the
+        // ToolMessage.content is the JSON-stringified Zod-validated
+        // response. Otherwise it's the last message's text content.
+        const result = await handler(request);
+        const subagentType =
+          typeof args.subagent_type === "string" ? args.subagent_type : "";
+        if (subagentType === "critic") {
+          const round = extractCriticRound(result, ++criticRound);
+          if (round) {
+            try {
+              writer.write({
+                type: "data-critic-round",
+                id: crypto.randomUUID(),
+                data: round,
+              } as Parameters<UIMessageStreamWriter["write"]>[0]);
+            } catch {
+              // Stream closed — drop. The Command still propagates back
+              // to the LLM as a ToolMessage so Builder can react.
+            }
+          }
+        }
+        return result;
+      }
+
       if (name === "ask_survey") {
         // Args ARE the survey definition (validated upstream by the
         // tool's surveyInputSchema). Emit the data-survey chunk
@@ -154,4 +211,85 @@ export async function dataPartMiddleware(
       return handler(request);
     },
   });
+}
+
+// Pull a critic-round payload out of the Command returned by the `task`
+// tool when it dispatches the Critic SubAgent. The Command carries an
+// update with a single ToolMessage whose content is the JSON-stringified
+// structured response (because Critic has `responseFormat` set). We pull
+// `{ approved, issues }`, normalise into the wire shape that
+// CriticRoundCard expects ({ round, total, approved, issues:[{dimension,
+// severity, note}] }), and stamp the round number from the per-turn
+// counter.
+//
+// Defensive: returns null on any shape mismatch. The caller no-ops on
+// null so a malformed critic response still lets the turn finish — the
+// LLM gets the raw ToolMessage either way and can decide what to do.
+function extractCriticRound(
+  result: unknown,
+  round: number,
+): {
+  round: number;
+  total: number;
+  approved: boolean;
+  issues: { dimension: string; severity: string; note: string }[];
+} | null {
+  // The handler returns either a ToolMessage or a Command. When Critic
+  // has a `responseFormat`, deepagents wraps in a Command via
+  // `returnCommandWithStateUpdate`. We probe both shapes.
+  let content: unknown = null;
+  if (result && typeof result === "object") {
+    const r = result as Record<string, unknown>;
+    // Command shape: r.update.messages[0].content
+    const update = r.update as Record<string, unknown> | undefined;
+    if (update && Array.isArray(update.messages) && update.messages.length > 0) {
+      const lastMsg = update.messages[update.messages.length - 1] as
+        | { content?: unknown; kwargs?: { content?: unknown } }
+        | undefined;
+      content = lastMsg?.content ?? lastMsg?.kwargs?.content ?? null;
+    }
+    // Fallback: ToolMessage shape (r.content) or serialised
+    // ({lc, type:"constructor", kwargs:{content}}).
+    if (content == null) {
+      content = r.content ?? null;
+      if (content == null && r.kwargs && typeof r.kwargs === "object") {
+        content = (r.kwargs as Record<string, unknown>).content ?? null;
+      }
+    }
+  }
+
+  if (typeof content !== "string" || content.length === 0) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    // Critic returned plain text (no responseFormat hit) — emit a
+    // best-effort "approved" round so the user still sees a checkmark.
+    return { round, total: round, approved: true, issues: [] };
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const p = parsed as Record<string, unknown>;
+  const approved = typeof p.approved === "boolean" ? p.approved : false;
+  const rawIssues = Array.isArray(p.issues) ? p.issues : [];
+  const issues = rawIssues
+    .map((iss): { dimension: string; severity: string; note: string } | null => {
+      if (!iss || typeof iss !== "object") return null;
+      const i = iss as Record<string, unknown>;
+      const dimension = typeof i.dimension === "string" ? i.dimension : "";
+      const severity = typeof i.severity === "string" ? i.severity : "low";
+      // Critic returns `issue` (description) and `suggested_fix` — fold
+      // both into a single `note` string so the badge renders something
+      // a human can act on.
+      const issueText = typeof i.issue === "string" ? i.issue : "";
+      const fixText =
+        typeof i.suggested_fix === "string" ? i.suggested_fix : "";
+      const note = fixText ? `${issueText} → ${fixText}` : issueText;
+      if (!dimension && !note) return null;
+      return { dimension, severity, note };
+    })
+    .filter(
+      (x): x is { dimension: string; severity: string; note: string } =>
+        x != null,
+    );
+  return { round, total: round, approved, issues };
 }
