@@ -3,23 +3,18 @@ import { defineConfig, devices } from "@playwright/test";
 
 // ─── e2e config ──────────────────────────────────────────────────
 //
-// Plan 01.5 tests run against the worktree's dev server on :5173.
-// The zeroship vite-plugin spins an in-process V8 runtime that
-// handles `/_zs/v1/chat` directly — no Node.js mock middleware.
-//
-// Other test files (workspace.spec.ts, etc.) were written against
-// the old architecture (real backend at :9090). They are left intact
-// but may fail when no backend is running; that is expected.
+// Plan 02 tests (chat-openai.spec.ts) run against the worktree's
+// dev server on :5173. The zeroship vite-plugin spins an in-process
+// V8 runtime that handles `/_zs/v1/chat` directly.
 //
 // `reuseExistingServer` means the runner uses your already-running
 // `npm run dev` if one exists on :5173, otherwise it starts one.
 export default defineConfig({
   testDir: "./e2e",
-  fullyParallel: false, // serial — tests share the real backend
+  fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
   workers: 1,
-  globalTeardown: "./e2e/global-teardown.ts",
   reporter: process.env.CI ? "line" : [["list"], ["html", { open: "never" }]],
   timeout: 30_000,
   expect: { timeout: 5_000 },
