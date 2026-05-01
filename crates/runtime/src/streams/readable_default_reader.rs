@@ -69,6 +69,32 @@ pub enum ReadRequestKind {
     Js {
         resolver: v8::Global<v8::PromiseResolver>,
     },
+    /// Internal Rust callback — used by pipeTo and tee. The chunk/close/
+    /// error steps run SYNCHRONOUSLY inside the controller's fulfill
+    /// path, matching the spec's ReadRequest object semantics. This
+    /// avoids the extra microtask hop that a resolver-based read
+    /// introduces, which the spec relies on for handler ordering
+    /// (per pipeStep "currentWrite must be set before the read
+    /// resolves" — see WPT close-propagation-forward
+    /// "shutdown must not occur until the final write completes;
+    /// preventClose = true").
+    Native(Box<dyn ReadRequestNative + 'static>),
+}
+
+/// Spec ReadRequest object: three step callbacks for chunk/close/error.
+/// Implementors run synchronously inside the controller's fulfill path.
+pub trait ReadRequestNative: 'static {
+    fn chunk_steps<'s>(
+        self: Box<Self>,
+        scope: &mut v8::PinScope<'s, '_>,
+        chunk: v8::Local<'s, v8::Value>,
+    );
+    fn close_steps(self: Box<Self>, scope: &mut v8::PinScope);
+    fn error_steps<'s>(
+        self: Box<Self>,
+        scope: &mut v8::PinScope<'s, '_>,
+        reason: v8::Local<'s, v8::Value>,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -471,6 +497,9 @@ pub fn fulfill_read_request_chunk<'s>(
             result.set(scope, done_key.into(), v8::Boolean::new(scope, false).into());
             resolver_l.resolve(scope, result.into());
         }
+        ReadRequestKind::Native(req) => {
+            req.chunk_steps(scope, chunk);
+        }
     }
 }
 
@@ -485,6 +514,9 @@ fn fulfill_read_request_close(scope: &mut v8::PinScope, request: ReadRequest) {
             result.set(scope, done_key.into(), v8::Boolean::new(scope, true).into());
             resolver_l.resolve(scope, result.into());
         }
+        ReadRequestKind::Native(req) => {
+            req.close_steps(scope);
+        }
     }
 }
 
@@ -497,6 +529,9 @@ fn fulfill_read_request_error<'s>(
         ReadRequestKind::Js { resolver } => {
             let resolver_l = v8::Local::new(scope, &resolver);
             resolver_l.reject(scope, error);
+        }
+        ReadRequestKind::Native(req) => {
+            req.error_steps(scope, error);
         }
     }
 }

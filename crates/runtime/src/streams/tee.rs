@@ -26,7 +26,7 @@ use crate::streams::readable_default_controller::{
     set_up_readable_stream_default_controller_from_underlying_source_with_strategy, SizeAlgorithm,
 };
 use crate::streams::readable_default_reader::{
-    acquire_readable_stream_default_reader, ReadRequest, ReadRequestKind,
+    acquire_readable_stream_default_reader, ReadRequest, ReadRequestKind, ReadRequestNative,
 };
 use crate::streams::slots::{self, CLOSED_PROMISE, CONTROLLER};
 
@@ -217,62 +217,51 @@ fn pull_algorithm(scope: &mut v8::PinScope, tee_state: &Rc<TeeState>) {
     }
     tee_state.reading.set(true);
 
-    // Issue a read on the source reader; the resolver kicks the chunk/
-    // close/error steps via its fulfillment/rejection.
+    // Issue a read using a Native ReadRequest so chunk/close/error
+    // steps run synchronously inside the controller's fulfill path.
+    // Per spec §3.5.2 chunkSteps is then delayed by exactly one
+    // microtask via `enqueue_microtask` (see chunk_steps body) so
+    // source-side synchronous errors reach branches before the
+    // synchronously-available chunk does.
     let reader_l = v8::Local::new(scope, &tee_state.reader);
     let source_l = v8::Local::new(scope, &tee_state.source);
 
-    let read_resolver = v8::PromiseResolver::new(scope).unwrap();
-    let read_promise = read_resolver.get_promise(scope);
-    let read_resolver_g = v8::Global::new(scope, read_resolver);
-
     let request = ReadRequest {
-        kind: ReadRequestKind::Js {
-            resolver: read_resolver_g,
-        },
+        kind: ReadRequestKind::Native(Box::new(TeeReadRequest {
+            tee_state: tee_state.clone(),
+        })),
     };
     crate::streams::readable_default_reader::readable_stream_default_reader_read(
         scope, reader_l, source_l, request,
     );
+}
 
-    // React to the read's resolution. We MUST insert a microtask delay
-    // here per spec — chunkSteps is delayed by exactly one microtask so
-    // that source-side synchronous errors (which fire on the reader's
-    // closedPromise rejection) reach the branches first. The
-    // promise-then chain we install does that automatically (then's
-    // callback runs as a microtask).
-    let tee_state_chunk = tee_state.clone();
-    let tee_state_close = tee_state.clone();
-    let tee_state_err = tee_state.clone();
+struct TeeReadRequest {
+    tee_state: Rc<TeeState>,
+}
 
-    promise_resolve::upon_promise(
-        scope,
-        read_promise,
-        Some(Box::new(move |scope, result| {
-            let Ok(obj) = v8::Local::<v8::Object>::try_from(result) else {
-                return;
-            };
-            let done_key = v8::String::new(scope, "done").unwrap();
-            let done_v = obj
-                .get(scope, done_key.into())
-                .unwrap_or_else(|| v8::undefined(scope).into());
-            let done = done_v.boolean_value(scope);
-            if done {
-                close_steps(scope, &tee_state_close);
-            } else {
-                let value_key = v8::String::new(scope, "value").unwrap();
-                let chunk = obj
-                    .get(scope, value_key.into())
-                    .unwrap_or_else(|| v8::undefined(scope).into());
-                chunk_steps(scope, &tee_state_chunk, chunk);
-            }
-        })),
-        Some(Box::new(move |scope, _reason| {
-            // errorSteps — set reading=false; reader.closedPromise rejects
-            // and chain_reader_closed_rejection errors both branches.
-            tee_state_err.reading.set(false);
-        })),
-    );
+impl ReadRequestNative for TeeReadRequest {
+    fn chunk_steps<'s>(
+        self: Box<Self>,
+        scope: &mut v8::PinScope<'s, '_>,
+        chunk: v8::Local<'s, v8::Value>,
+    ) {
+        chunk_steps(scope, &self.tee_state, chunk);
+    }
+
+    fn close_steps(self: Box<Self>, scope: &mut v8::PinScope) {
+        close_steps(scope, &self.tee_state);
+    }
+
+    fn error_steps<'s>(
+        self: Box<Self>,
+        _scope: &mut v8::PinScope<'s, '_>,
+        _reason: v8::Local<'s, v8::Value>,
+    ) {
+        // errorSteps — set reading=false; reader.closedPromise rejects
+        // and chain_reader_closed_rejection errors both branches.
+        self.tee_state.reading.set(false);
+    }
 }
 
 fn chunk_steps<'s>(

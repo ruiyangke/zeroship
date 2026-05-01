@@ -27,7 +27,7 @@ use crate::streams::promise_resolve;
 use crate::streams::readable::{is_readable_stream, with_rs_state, StreamState};
 use crate::streams::readable_default_reader::{
     acquire_readable_stream_default_reader, readable_stream_default_reader_release,
-    readable_stream_reader_generic_release, ReadRequest, ReadRequestKind,
+    readable_stream_reader_generic_release, ReadRequest, ReadRequestKind, ReadRequestNative,
 };
 use crate::streams::slots::{self, CLOSED_PROMISE, READY_PROMISE, STORED_ERROR};
 use crate::streams::writable::{is_writable_stream, with_ws_state, WSState};
@@ -630,74 +630,69 @@ fn issue_read(
     let reader_l = v8::Local::new(scope, &pipe_state.reader);
     let source_l = v8::Local::new(scope, &pipe_state.source);
 
-    // Build a one-shot Resolver. ReadableStreamDefaultReaderRead resolves
-    // it with `{value, done}` (or rejects with the stored error).
-    let read_resolver = v8::PromiseResolver::new(scope).unwrap();
-    let read_promise = read_resolver.get_promise(scope);
-    let read_resolver_g = v8::Global::new(scope, read_resolver);
-
+    // Use a Native ReadRequest so chunk/close/error steps run
+    // SYNCHRONOUSLY inside the controller's fulfill path. This matches
+    // the spec's pipeStep semantics — currentWrite must be captured
+    // before reactions to the source's closedPromise fire (which happens
+    // synchronously inside ReadableStreamClose during pull_steps).
     let request = ReadRequest {
-        kind: ReadRequestKind::Js {
-            resolver: read_resolver_g,
-        },
+        kind: ReadRequestKind::Native(Box::new(PipeReadRequest {
+            pipe_state,
+            loop_resolver,
+        })),
     };
 
     crate::streams::readable_default_reader::readable_stream_default_reader_read(
         scope, reader_l, source_l, request,
     );
+}
 
-    let ps_chunk = pipe_state.clone();
-    let lr_chunk = loop_resolver.clone();
-    let lr_err = loop_resolver;
+struct PipeReadRequest {
+    pipe_state: Rc<PipeState>,
+    loop_resolver: v8::Global<v8::PromiseResolver>,
+}
 
-    promise_resolve::upon_promise(
-        scope,
-        read_promise,
-        Some(Box::new(move |scope, result| {
-            let Ok(obj) = v8::Local::<v8::Object>::try_from(result) else {
-                let r = v8::Local::new(scope, &lr_chunk);
-                let und = v8::undefined(scope);
-                r.resolve(scope, und.into());
-                return;
-            };
-            let done_key = v8::String::new(scope, "done").unwrap();
-            let done_v = obj
-                .get(scope, done_key.into())
-                .unwrap_or_else(|| v8::undefined(scope).into());
-            let done = done_v.boolean_value(scope);
-            if done {
-                // closeSteps: source.closed handler (step 4) drives
-                // shutdown. Resolve the loop.
-                let r = v8::Local::new(scope, &lr_chunk);
-                let und = v8::undefined(scope);
-                r.resolve(scope, und.into());
-                return;
-            }
-            let value_key = v8::String::new(scope, "value").unwrap();
-            let chunk = obj
-                .get(scope, value_key.into())
-                .unwrap_or_else(|| v8::undefined(scope).into());
-            // Issue write on the writer; record currentWrite for
-            // waitForWritesToFinish.
-            let writer_l = v8::Local::new(scope, &ps_chunk.writer);
-            let write_p = writable_stream_default_writer_write(scope, writer_l, chunk);
-            *ps_chunk.current_write.borrow_mut() = v8::Global::new(scope, write_p);
-            // Per spec: transformPromiseWith(write, undefined, () => {})
-            // — swallow the write rejection. The dest.errored handler
-            // (step 3) drives shutdown.
-            promise_resolve::set_promise_is_handled_to_true(scope, write_p);
-            // Loop again. The next iteration goes through pipe_loop_step
-            // which awaits writer.ready.
-            pipe_loop_step(scope, ps_chunk, lr_chunk);
-        })),
-        Some(Box::new(move |scope, _reason| {
-            // errorSteps — source.errored handler (step 2) drives
-            // shutdown. Resolve the loop.
-            let r = v8::Local::new(scope, &lr_err);
-            let und = v8::undefined(scope);
-            r.resolve(scope, und.into());
-        })),
-    );
+impl ReadRequestNative for PipeReadRequest {
+    fn chunk_steps<'s>(
+        self: Box<Self>,
+        scope: &mut v8::PinScope<'s, '_>,
+        chunk: v8::Local<'s, v8::Value>,
+    ) {
+        let PipeReadRequest { pipe_state, loop_resolver } = *self;
+
+        // CRITICAL: capture currentWrite BEFORE recursing or yielding,
+        // so the source.closed handler — which fires AS A QUEUED
+        // MICROTASK after closedPromise resolved during pull_steps —
+        // sees the new write Promise when it runs `wait_for_writes_to_finish`.
+        let writer_l = v8::Local::new(scope, &pipe_state.writer);
+        let write_p = writable_stream_default_writer_write(scope, writer_l, chunk);
+        *pipe_state.current_write.borrow_mut() = v8::Global::new(scope, write_p);
+        promise_resolve::set_promise_is_handled_to_true(scope, write_p);
+
+        // Loop again. The next iteration goes through pipe_loop_step
+        // which awaits writer.ready.
+        pipe_loop_step(scope, pipe_state, loop_resolver);
+    }
+
+    fn close_steps(self: Box<Self>, scope: &mut v8::PinScope) {
+        // closeSteps: source.closed handler (step 4) drives shutdown.
+        // Resolve the loop.
+        let r = v8::Local::new(scope, &self.loop_resolver);
+        let und = v8::undefined(scope);
+        r.resolve(scope, und.into());
+    }
+
+    fn error_steps<'s>(
+        self: Box<Self>,
+        scope: &mut v8::PinScope<'s, '_>,
+        _reason: v8::Local<'s, v8::Value>,
+    ) {
+        // errorSteps — source.errored handler (step 2) drives shutdown.
+        // Resolve the loop.
+        let r = v8::Local::new(scope, &self.loop_resolver);
+        let und = v8::undefined(scope);
+        r.resolve(scope, und.into());
+    }
 }
 
 // ---------------------------------------------------------------------------

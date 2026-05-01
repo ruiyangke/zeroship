@@ -138,6 +138,9 @@ fn invoke_chunk_steps<'s>(
             result.set(scope, done_key.into(), v8::Boolean::new(scope, false).into());
             resolver_l.resolve(scope, result.into());
         }
+        ReadRequestKind::Native(req) => {
+            req.chunk_steps(scope, chunk);
+        }
     }
 }
 
@@ -152,6 +155,9 @@ fn invoke_close_steps(scope: &mut v8::PinScope, req: ReadRequest) {
             result.set(scope, done_key.into(), v8::Boolean::new(scope, true).into());
             resolver_l.resolve(scope, result.into());
         }
+        ReadRequestKind::Native(req) => {
+            req.close_steps(scope);
+        }
     }
 }
 
@@ -164,6 +170,9 @@ fn invoke_error_steps<'s>(
         ReadRequestKind::Js { resolver } => {
             let resolver_l = v8::Local::new(scope, &resolver);
             resolver_l.reject(scope, reason);
+        }
+        ReadRequestKind::Native(req) => {
+            req.error_steps(scope, reason);
         }
     }
 }

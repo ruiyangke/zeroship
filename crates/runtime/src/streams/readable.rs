@@ -772,7 +772,9 @@ fn parse_pipe_options<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     options: v8::Local<v8::Value>,
 ) -> Result<PipeOptsParsed<'s>, v8::Local<'s, v8::Promise>> {
-    if options.is_undefined() {
+    // Per WebIDL "optional dictionary" semantics: undefined/null/missing
+    // → empty dict.
+    if options.is_undefined() || options.is_null() {
         return Ok((false, false, false, None));
     }
     let Ok(obj) = v8::Local::<v8::Object>::try_from(options) else {
@@ -786,8 +788,34 @@ fn parse_pipe_options<'s>(
     let prevent_close = bool_field(scope, obj, "preventClose");
     let prevent_abort = bool_field(scope, obj, "preventAbort");
     let prevent_cancel = bool_field(scope, obj, "preventCancel");
-    let signal = signal_field(scope, obj);
-    Ok((prevent_close, prevent_abort, prevent_cancel, signal))
+    // `signal_field` pushes an exception via scope.throw on validation
+    // failure; pipeTo's IDL surface returns a rejected Promise instead
+    // of throwing. We catch the exception and convert it.
+    let exc_g_opt: Option<v8::Global<v8::Value>> = {
+        let mut captured: Option<v8::Global<v8::Value>> = None;
+        let signal_result = {
+            v8::tc_scope!(let tc, scope);
+            let r = signal_field(tc, obj);
+            if r.is_err() {
+                if let Some(exc) = tc.exception() {
+                    captured = Some(v8::Global::new(tc, exc));
+                }
+            }
+            r
+        };
+        match signal_result {
+            Ok(s) => return Ok((prevent_close, prevent_abort, prevent_cancel, s)),
+            Err(()) => captured.or_else(|| {
+                let msg = v8::String::new(scope, "options.signal").unwrap();
+                let exc = v8::Exception::type_error(scope, msg);
+                let exc_v: v8::Local<v8::Value> = exc;
+                Some(v8::Global::new(scope, exc_v))
+            }),
+        }
+    };
+    let exc_g = exc_g_opt.unwrap();
+    let exc = v8::Local::new(scope, &exc_g);
+    Err(crate::streams::algorithms::rejected_with_promise(scope, exc))
 }
 
 /// Same as `parse_pipe_options` but for pipeThrough — errors are
@@ -796,7 +824,7 @@ fn parse_pipe_options_throw<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     options: v8::Local<v8::Value>,
 ) -> Result<PipeOptsParsed<'s>, ()> {
-    if options.is_undefined() {
+    if options.is_undefined() || options.is_null() {
         return Ok((false, false, false, None));
     }
     let Ok(obj) = v8::Local::<v8::Object>::try_from(options) else {
@@ -808,7 +836,10 @@ fn parse_pipe_options_throw<'s>(
     let prevent_close = bool_field(scope, obj, "preventClose");
     let prevent_abort = bool_field(scope, obj, "preventAbort");
     let prevent_cancel = bool_field(scope, obj, "preventCancel");
-    let signal = signal_field(scope, obj);
+    let signal = match signal_field(scope, obj) {
+        Ok(s) => s,
+        Err(()) => return Err(()),
+    };
     Ok((prevent_close, prevent_abort, prevent_cancel, signal))
 }
 
@@ -818,16 +849,51 @@ fn bool_field(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, name: &str) 
     v.boolean_value(scope)
 }
 
+/// Read `options.signal`. Returns:
+///   - Ok(None) when signal is absent (undefined).
+///   - Ok(Some(obj)) when signal is an AbortSignal-like Object (duck-
+///     typed: must have an `aborted` property and `addEventListener`).
+///   - Err(()) when signal is supplied but isn't a valid AbortSignal —
+///     the caller pushes a TypeError exception via the scope.
+///
+/// Per WebIDL: dictionary member `signal: AbortSignal` (non-nullable)
+/// rejects null/non-AbortSignal supplied values with TypeError.
 fn signal_field<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     obj: v8::Local<v8::Object>,
-) -> Option<v8::Local<'s, v8::Object>> {
+) -> Result<Option<v8::Local<'s, v8::Object>>, ()> {
     let key = v8::String::new(scope, "signal").unwrap();
     let v = obj.get(scope, key.into()).unwrap_or_else(|| v8::undefined(scope).into());
-    if v.is_undefined() || v.is_null() {
-        return None;
+    if v.is_undefined() {
+        return Ok(None);
     }
-    v8::Local::<v8::Object>::try_from(v).ok()
+    let Ok(sig_obj) = v8::Local::<v8::Object>::try_from(v) else {
+        // Not even an Object (null counts as Value::null which fails
+        // try_from<Object>). TypeError per WebIDL.
+        let msg = v8::String::new(scope, "options.signal must be an AbortSignal").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return Err(());
+    };
+    // Duck-type check: must have `aborted` and `addEventListener`.
+    // The WPT tests pass `null` (Object null check rejects above), `true`
+    // (not an Object), `AbortSignal` itself (a function — try_from<Object>
+    // succeeds since Function ⊂ Object, but it has no `aborted` getter
+    // bound to an instance), `-1` (not an Object), etc.
+    let aborted_key = v8::String::new(scope, "aborted").unwrap();
+    let add_key = v8::String::new(scope, "addEventListener").unwrap();
+    let has_aborted = sig_obj.has(scope, aborted_key.into()).unwrap_or(false);
+    let has_add = sig_obj
+        .get(scope, add_key.into())
+        .map(|v| v.is_function())
+        .unwrap_or(false);
+    if !has_aborted || !has_add {
+        let msg = v8::String::new(scope, "options.signal must be an AbortSignal").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return Err(());
+    }
+    Ok(Some(sig_obj))
 }
 
 // ---------------------------------------------------------------------------
