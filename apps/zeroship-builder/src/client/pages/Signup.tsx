@@ -22,7 +22,13 @@ export default function Signup() {
     mutationFn: () => apiRegister({ email, password, name }),
     onSuccess: async () => {
       await refresh();
-      navigate(returnTo, { replace: true });
+      // First signup → run the onboarding intent flow per spec §7.1.
+      // If the caller wanted a deeper destination (`?return=…`), respect
+      // that — login flows and OAuth callbacks supply it. Bare /signup
+      // submissions land on `/home` by default; we redirect those to
+      // /onboarding/intent so the first-run survey fires.
+      const dest = returnTo === "/home" ? "/onboarding/intent" : returnTo;
+      navigate(dest, { replace: true });
     },
   });
 

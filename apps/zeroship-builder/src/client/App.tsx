@@ -14,6 +14,7 @@ import Login from "./pages/Login";
 import Signup from "./pages/Signup";
 import ForgotPassword from "./pages/ForgotPassword";
 import { Account } from "./pages/Account";
+import { OnboardingIntent } from "./pages/OnboardingIntent";
 import { AuthGuard } from "./auth/AuthGuard";
 
 export default function App() {
@@ -37,6 +38,11 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
+
+        {/* Onboarding intent picker — first run after signup (spec §7.1).
+            Public so the post-signup hand-off doesn't race with auth
+            propagation; the page itself doesn't need a session. */}
+        <Route path="/onboarding/intent" element={<OnboardingIntent />} />
 
         {/* Authed gallery — formerly `/`. */}
         <Route path="/home" element={<AuthGuard><Home /></AuthGuard>} />
