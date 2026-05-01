@@ -186,8 +186,8 @@ pub struct K8sConfig {
 /// pre-created.
 ///
 /// Network plumbing (tap devices, /30 subnets) is assumed to be
-/// pre-provisioned out-of-band — see `docs/sandbox/nomad-ch.md` for
-/// the host setup runbook.
+/// pre-provisioned out-of-band — see
+/// `docs/runbooks/sandbox-nomad-ch.md` for the host setup runbook.
 #[derive(Clone, Debug)]
 pub struct NomadCHConfig {
     /// Base URL for the Nomad HTTP API. We talk JSON over HTTP via
@@ -286,6 +286,17 @@ pub struct NomadCHConfig {
     /// rolling restart. Default off; opt-in for single-node operators.
     /// `SANDBOX_NOMAD_CH_STARTUP_ORPHAN_CLEANUP` (default `false`).
     pub startup_orphan_cleanup: bool,
+
+    /// Second octet of the per-VM /30 subnet. Default 99 keeps the
+    /// historical 10.99/16 layout. Operators on hosts with a corp
+    /// 10.99/16 collision can shift this — both controller (which
+    /// computes `agent_url = http://10.<base>.<100+idx>.2:7777`)
+    /// and the wrapper (which lays down the tap + IP) read the same
+    /// value. Validated to a non-multicast / non-loopback / non-
+    /// link-local prefix so a typo'd `127` or `169` doesn't quietly
+    /// produce unreachable IPs.
+    /// `SANDBOX_NOMAD_CH_SUBNET_BASE_OCTET` (default 99).
+    pub subnet_second_octet: u8,
 }
 
 impl NomadCHConfig {
@@ -345,6 +356,74 @@ impl NomadCHConfig {
                 "SANDBOX_NOMAD_ADDR must start with http:// or https://; got {:?}",
                 self.nomad_addr,
             ));
+        }
+        // m4: validate the wrapper script exists + is executable.
+        // **Caveat:** this only catches misconfig when the
+        // controller and the Nomad client share a filesystem
+        // (single-node deploys). On split deployments where the
+        // Nomad agent runs on different hosts, this check is
+        // best-effort — we can confirm the path is wrong, but a
+        // path that's correct on the controller may still be
+        // wrong on the Nomad client.
+        match std::fs::metadata(&self.wrapper_path) {
+            Ok(md) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = md.permissions().mode();
+                    if mode & 0o111 == 0 {
+                        return Err(format!(
+                            "SANDBOX_NOMAD_CH_WRAPPER_PATH ({}) is not \
+                             executable (mode={:o}); chmod +x or fix the \
+                             path.",
+                            self.wrapper_path.display(),
+                            mode
+                        ));
+                    }
+                }
+                let _ = md; // silence unused on non-unix
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Not fatal in split-deploy mode: the controller's
+                // FS may not be the Nomad client's FS. Log only.
+                eprintln!(
+                    "[sandbox/nomad-ch] config: wrapper_path {} not \
+                     present on controller fs (best-effort check; \
+                     irrelevant if Nomad client runs on a different \
+                     host).",
+                    self.wrapper_path.display()
+                );
+            }
+            Err(_) => {
+                // Permission denied / IO error reading metadata —
+                // also likely a split-deploy artefact. Don't block.
+            }
+        }
+        // M6: subnet second octet must be a private-range value.
+        // 10.0.0.0/8 is RFC1918 private, but the OPERATOR sets the
+        // second octet — a typo of `127` would land on loopback
+        // and `169` on link-local. Refuse those at startup so the
+        // misconfig surfaces here, not on the first sandbox boot.
+        match self.subnet_second_octet {
+            // Loopback (127.0.0.0/8) — pretty much guaranteed
+            // unreachable to the controller.
+            127 => return Err(format!(
+                "SANDBOX_NOMAD_CH_SUBNET_BASE_OCTET=127 lands on \
+                 the loopback /8; this is almost certainly a typo \
+                 (default is 99)."
+            )),
+            // Link-local 169.254.0.0/16 — DHCP failure prefix.
+            169 => return Err(format!(
+                "SANDBOX_NOMAD_CH_SUBNET_BASE_OCTET=169 lands on \
+                 link-local 169.254/16; refusing."
+            )),
+            // Multicast 224-239 / reserved 240-255.
+            224..=255 => return Err(format!(
+                "SANDBOX_NOMAD_CH_SUBNET_BASE_OCTET={} lands on \
+                 multicast/reserved; refusing.",
+                self.subnet_second_octet
+            )),
+            _ => {}
         }
         // host_state_dir / user_home_dir_root overlap: the canonical
         // layout is `host_state_dir/users/<user>/home`, i.e.
@@ -478,6 +557,10 @@ impl SandboxConfig {
                 "SANDBOX_NOMAD_CH_STARTUP_ORPHAN_CLEANUP",
                 false,
             )?,
+            subnet_second_octet: parse_env(
+                "SANDBOX_NOMAD_CH_SUBNET_BASE_OCTET",
+                99u8,
+            )?,
         };
 
         let mut nomad_ch = nomad_ch;
@@ -518,6 +601,7 @@ mod tests {
             alloc_running_timeout_secs: 60,
             agent_livez_timeout_secs: 30,
             startup_orphan_cleanup: false,
+            subnet_second_octet: 99,
         }
     }
 
@@ -591,6 +675,49 @@ mod tests {
         cfg.user_home_dir_root = PathBuf::from("/srv/zeroship-homes");
         cfg.validate()
             .expect("disjoint user_home_dir_root must validate");
+    }
+
+    #[test]
+    fn validate_rejects_loopback_subnet_octet() {
+        // M6: 127 lands on the loopback /8 — a typo'd second octet
+        // would otherwise give every sandbox a guaranteed-
+        // unreachable IP and the controller would only notice on
+        // the first agent /livez timeout.
+        let mut cfg = base_nomad_cfg();
+        cfg.subnet_second_octet = 127;
+        let err = cfg.validate().expect_err("must reject 127");
+        assert!(err.contains("loopback"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_link_local_subnet_octet() {
+        let mut cfg = base_nomad_cfg();
+        cfg.subnet_second_octet = 169;
+        let err = cfg.validate().expect_err("must reject 169");
+        assert!(err.contains("link-local"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_multicast_subnet_octet() {
+        let mut cfg = base_nomad_cfg();
+        cfg.subnet_second_octet = 230;
+        let err = cfg.validate().expect_err("must reject 230");
+        assert!(err.contains("multicast"), "{err}");
+    }
+
+    #[test]
+    fn validate_accepts_default_99_subnet_octet() {
+        let mut cfg = base_nomad_cfg();
+        cfg.subnet_second_octet = 99;
+        cfg.validate().expect("default 99 must validate");
+    }
+
+    #[test]
+    fn validate_accepts_alternate_private_subnet_octet() {
+        // E.g. operator with corp 10.99/16 collision wants 10.50/16.
+        let mut cfg = base_nomad_cfg();
+        cfg.subnet_second_octet = 50;
+        cfg.validate().expect("50 must validate");
     }
 
     #[test]

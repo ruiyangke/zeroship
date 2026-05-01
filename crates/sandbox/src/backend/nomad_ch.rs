@@ -121,11 +121,20 @@ use crate::config::SandboxConfig;
 pub struct NomadCHBackend {
     cfg: SandboxConfig,
     state: Arc<RwLock<HashMap<Uuid, NomadChSandbox>>>,
-    /// Per-VM-index pool, free-list backed.
-    vm_indices: Arc<Mutex<VmIndexAllocator>>,
+    /// Per-VM-index pool, free-list backed. Renamed from
+    /// `vm_indices` in round 3 (m1) — the new name reads as a
+    /// component (an allocator) rather than a plural noun
+    /// (a collection of indices).
+    vm_index_allocator: Arc<Mutex<VmIndexAllocator>>,
     /// Per-user serialization gate (one in-flight `create` per user).
     creating_users: Arc<Mutex<HashSet<String>>>,
     healthy: Arc<AtomicBool>,
+    /// M7 circuit-breaker: most recent probe error, captured by
+    /// [`probe`]. Read by [`create`] to assemble the operator-
+    /// readable "backend unhealthy" message. Mutex (not RwLock)
+    /// because the only writer is the periodic probe and reads are
+    /// rare; Mutex is simpler and the contention is irrelevant.
+    last_probe_err: Arc<Mutex<Option<String>>>,
 }
 
 /// Per-sandbox bookkeeping. Lives only in process memory; on
@@ -243,9 +252,10 @@ impl NomadCHBackend {
         Ok(Self {
             cfg,
             state: Arc::new(RwLock::new(HashMap::new())),
-            vm_indices: Arc::new(Mutex::new(alloc)),
+            vm_index_allocator: Arc::new(Mutex::new(alloc)),
             creating_users: Arc::new(Mutex::new(HashSet::new())),
             healthy: Arc::new(AtomicBool::new(false)),
+            last_probe_err: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -263,19 +273,26 @@ impl NomadCHBackend {
         match resp {
             Ok(r) if r.status == 200 => {
                 self.healthy.store(true, Ordering::Relaxed);
+                *self.last_probe_err.lock().unwrap_or_else(|p| p.into_inner()) = None;
                 Ok(())
             }
             Ok(r) => {
                 self.healthy.store(false, Ordering::Relaxed);
-                Err(format!(
+                let msg = format!(
                     "nomad /v1/status/leader → status {}: {}",
                     r.status,
                     r.body.trim()
-                ))
+                );
+                *self.last_probe_err.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some(msg.clone());
+                Err(msg)
             }
             Err(e) => {
                 self.healthy.store(false, Ordering::Relaxed);
-                Err(format!("nomad probe failed: {e}"))
+                let msg = format!("nomad probe failed: {e}");
+                *self.last_probe_err.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some(msg.clone());
+                Err(msg)
             }
         }
     }
@@ -332,6 +349,30 @@ impl NomadCHBackend {
     ) -> Result<SandboxInfo, String> {
         validate_id(user_id, "user_id")?;
         validate_id(project_id, "project_id")?;
+
+        // M7 circuit-breaker. Pool exhaustion under partial-failure
+        // storm: 50 concurrent stalled Nomad RPCs would saturate
+        // the spawn_blocking pool, queueing every other backend op
+        // controller-wide. The probe loop sets `healthy=false` on
+        // any 5xx / transport error from Nomad; bail BEFORE we
+        // submit the next RPC into a backend known to be down. A
+        // *terminal* error — by contract this is configuration /
+        // infra, not transient (the probe is what flips healthy
+        // back to true), so callers should not retry.
+        if !self.is_healthy() {
+            let last = self
+                .last_probe_err
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+                .unwrap_or_else(|| "<no probe error captured>".to_string());
+            return Err(format!(
+                "nomad-ch backend unhealthy; refusing new sandboxes \
+                 (most recent probe error: {last}). This is a config \
+                 or infra problem; the probe loop will flip the bit \
+                 back when Nomad recovers."
+            ));
+        }
 
         // Per-user serialization gate. Two concurrent creates for
         // the same user racing the "one active sandbox per user"
@@ -395,7 +436,7 @@ impl NomadCHBackend {
         let user_home_dir = self.cfg.nomad_ch.user_home_dir_root.join(user_id).join("home");
 
         let mut guard = CreateGuard::new(
-            self.vm_indices.clone(),
+            self.vm_index_allocator.clone(),
             self.cfg.nomad_ch.nomad_addr.clone(),
             job_id.clone(),
             host_dir.clone(),
@@ -426,6 +467,10 @@ impl NomadCHBackend {
         }
     }
 
+    /// Inner body of [`Self::create`] — split out so the
+    /// `CreateGuard` Drop runs on every error path without the
+    /// caller having to remember `?` discipline. Not part of the
+    /// public API; called only from `create()`.
     #[allow(clippy::too_many_arguments)]
     async fn try_create(
         &self,
@@ -453,7 +498,7 @@ impl NomadCHBackend {
         // 2. Allocate VM index from the pool. Track in the guard so
         //    cleanup-on-failure releases it.
         let vm_index = self
-            .vm_indices
+            .vm_index_allocator
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .alloc()?;
@@ -521,8 +566,17 @@ impl NomadCHBackend {
         //    this with its own budget (agent_livez_timeout_secs) so
         //    operators can tell apart "Nomad slow to schedule" from
         //    "VM/kernel/agent slow to boot".
-        let agent_url =
-            format!("http://10.99.{}.2:{AGENT_PORT}", 100u16 + vm_index);
+        // M6: second octet is configurable so an operator with a
+        // corp 10.99/16 collision can shift to a different private
+        // /16. Both the controller and the wrapper read the same
+        // value (controller from `cfg.nomad_ch.subnet_second_octet`,
+        // wrapper from `ZSBX_SUBNET_BASE_OCTET` env var passed by
+        // build_nomad_job_json).
+        let agent_url = format!(
+            "http://10.{}.{}.2:{AGENT_PORT}",
+            self.cfg.nomad_ch.subnet_second_octet,
+            100u16 + vm_index
+        );
         wait_for_agent_livez(
             &agent_url,
             Duration::from_secs(self.cfg.nomad_ch.agent_livez_timeout_secs),
@@ -608,6 +662,14 @@ impl NomadCHBackend {
             Some(s) => s,
             None => return Ok(()), // idempotent
         };
+        // Channel split: `errs` accumulates per-step failures the
+        // caller needs to see (joined into the returned Result) so
+        // the API surface lines up with the K8s backend; `eprintln`
+        // is reserved for operator-only diagnostics that don't
+        // belong in the API response (vm_index leak warnings,
+        // host_dir-skipped notices). Keeping these distinct means a
+        // 200 stop() with operator log noise is observable, and a
+        // 5xx stop() carries the actionable error text.
         let mut errs: Vec<String> = Vec::new();
 
         // 1. Drain the agent. Best-effort — if /shutdown 5xx-s the
@@ -662,7 +724,7 @@ impl NomadCHBackend {
         //    Leaking the index now and reclaiming it on next-boot
         //    orphan-prune is the safer trade-off.
         if job_confirmed_gone {
-            self.vm_indices
+            self.vm_index_allocator
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .release(sandbox.vm_index);
@@ -712,19 +774,24 @@ impl NomadCHBackend {
         timeout_ms: Option<u64>,
     ) -> Result<ExecOutput, String> {
         let (sk, url) = self.sandbox_keys(sandbox_id)?;
+        let ctx = self.sandbox_log_ctx(sandbox_id);
         let body = serde_json::json!({
             "cmd": cmd,
             "cwd": cwd,
             "timeout_ms": timeout_ms,
         })
         .to_string();
-        let resp =
-            http_signed_async(&sk, "POST", &format!("{url}/exec"), body.as_bytes()).await?;
+        let resp = http_signed_async(&sk, "POST", &format!("{url}/exec"), body.as_bytes())
+            .await
+            .map_err(|e| format!("{ctx} agent /exec: {e}"))?;
         if resp.status != 200 {
-            return Err(format!("agent /exec status {}: {}", resp.status, resp.body));
+            return Err(format!(
+                "{ctx} agent /exec status {}: {}",
+                resp.status, resp.body
+            ));
         }
         let v: serde_json::Value = serde_json::from_str(&resp.body)
-            .map_err(|e| format!("agent /exec response not JSON: {e}"))?;
+            .map_err(|e| format!("{ctx} agent /exec response not JSON: {e}"))?;
         Ok(ExecOutput {
             // try_into instead of `as i32` — a status outside i32
             // range is almost certainly garbage from a buggy agent;
@@ -743,14 +810,17 @@ impl NomadCHBackend {
 
     pub async fn read_file(&self, sandbox_id: Uuid, path: &str) -> Result<Vec<u8>, String> {
         let (sk, url) = self.sandbox_keys(sandbox_id)?;
+        let ctx = self.sandbox_log_ctx(sandbox_id);
         let p = sanitize_path(path)?;
-        let resp = http_signed_async(&sk, "GET", &format!("{url}/files/{p}"), &[]).await?;
+        let resp = http_signed_async(&sk, "GET", &format!("{url}/files/{p}"), &[])
+            .await
+            .map_err(|e| format!("{ctx} agent /files GET: {e}"))?;
         if resp.status == 404 {
-            return Err(format!("file not found: {p}"));
+            return Err(format!("{ctx} file not found: {p}"));
         }
         if resp.status != 200 {
             return Err(format!(
-                "agent /files GET status {}: {}",
+                "{ctx} agent /files GET status {}: {}",
                 resp.status, resp.body
             ));
         }
@@ -764,11 +834,14 @@ impl NomadCHBackend {
         body: &[u8],
     ) -> Result<(), String> {
         let (sk, url) = self.sandbox_keys(sandbox_id)?;
+        let ctx = self.sandbox_log_ctx(sandbox_id);
         let p = sanitize_path(path)?;
-        let resp = http_signed_async(&sk, "PUT", &format!("{url}/files/{p}"), body).await?;
+        let resp = http_signed_async(&sk, "PUT", &format!("{url}/files/{p}"), body)
+            .await
+            .map_err(|e| format!("{ctx} agent /files PUT: {e}"))?;
         if resp.status != 200 {
             return Err(format!(
-                "agent /files PUT status {}: {}",
+                "{ctx} agent /files PUT status {}: {}",
                 resp.status, resp.body
             ));
         }
@@ -777,27 +850,38 @@ impl NomadCHBackend {
 
     pub async fn delete_file(&self, sandbox_id: Uuid, path: &str) -> Result<bool, String> {
         let (sk, url) = self.sandbox_keys(sandbox_id)?;
+        let ctx = self.sandbox_log_ctx(sandbox_id);
         let p = sanitize_path(path)?;
-        let resp =
-            http_signed_async(&sk, "DELETE", &format!("{url}/files/{p}"), &[]).await?;
+        let resp = http_signed_async(&sk, "DELETE", &format!("{url}/files/{p}"), &[])
+            .await
+            .map_err(|e| format!("{ctx} agent /files DELETE: {e}"))?;
         match resp.status {
             200 => Ok(true),
             404 => Ok(false),
-            s => Err(format!("agent /files DELETE status {s}: {}", resp.body)),
+            s => Err(format!(
+                "{ctx} agent /files DELETE status {s}: {}",
+                resp.body
+            )),
         }
     }
 
     pub async fn file_tree(&self, sandbox_id: Uuid) -> Result<Vec<TreeEntry>, String> {
         let (sk, url) = self.sandbox_keys(sandbox_id)?;
-        let resp = http_signed_async(&sk, "GET", &format!("{url}/tree"), &[]).await?;
+        let ctx = self.sandbox_log_ctx(sandbox_id);
+        let resp = http_signed_async(&sk, "GET", &format!("{url}/tree"), &[])
+            .await
+            .map_err(|e| format!("{ctx} agent /tree: {e}"))?;
         if resp.status != 200 {
-            return Err(format!("agent /tree status {}: {}", resp.status, resp.body));
+            return Err(format!(
+                "{ctx} agent /tree status {}: {}",
+                resp.status, resp.body
+            ));
         }
         let v: serde_json::Value = serde_json::from_str(&resp.body)
-            .map_err(|e| format!("agent /tree response not JSON: {e}"))?;
+            .map_err(|e| format!("{ctx} agent /tree response not JSON: {e}"))?;
         let entries = v["entries"]
             .as_array()
-            .ok_or_else(|| "agent /tree: missing 'entries' array".to_string())?;
+            .ok_or_else(|| format!("{ctx} agent /tree: missing 'entries' array"))?;
         Ok(entries
             .iter()
             .filter_map(|e| {
@@ -824,6 +908,24 @@ impl NomadCHBackend {
         // the request (ed25519-dalek::SigningKey doesn't zeroize on
         // drop).
         Ok((s.signing_key.clone(), s.agent_url.clone()))
+    }
+
+    /// Build a short prefix for agent-error log lines so a fleet-
+    /// wide log search can pivot on sandbox / vm_index / job (M1).
+    /// Format: `[sandbox=<id> vm_index=<idx> job=<job>]`. Returns
+    /// just `[sandbox=<id>]` when the entry is missing — the
+    /// callers already handle "sandbox not found" via
+    /// `sandbox_keys`, so this only fires on the wide-window after
+    /// a stop() racing with an in-flight RPC.
+    fn sandbox_log_ctx(&self, id: Uuid) -> String {
+        let guard = self.state.read().unwrap_or_else(|p| p.into_inner());
+        match guard.get(&id) {
+            Some(s) => format!(
+                "[sandbox={} vm_index={} job={}]",
+                id, s.vm_index, s.job_id
+            ),
+            None => format!("[sandbox={id}]"),
+        }
     }
 }
 
@@ -884,7 +986,7 @@ impl Drop for ReleaseCreating {
 /// controller boot to mop up. This is the same best-effort contract
 /// the prior "blocking ureq in Drop" had.
 struct CreateGuard {
-    vm_indices: Arc<Mutex<VmIndexAllocator>>,
+    vm_index_allocator: Arc<Mutex<VmIndexAllocator>>,
     nomad_addr: String,
     job_id: String,
     host_dir: PathBuf,
@@ -896,13 +998,13 @@ struct CreateGuard {
 
 impl CreateGuard {
     fn new(
-        vm_indices: Arc<Mutex<VmIndexAllocator>>,
+        vm_index_allocator: Arc<Mutex<VmIndexAllocator>>,
         nomad_addr: String,
         job_id: String,
         host_dir: PathBuf,
     ) -> Self {
         Self {
-            vm_indices,
+            vm_index_allocator,
             nomad_addr,
             job_id,
             host_dir,
@@ -935,7 +1037,7 @@ impl Drop for CreateGuard {
         let job_id = std::mem::take(&mut self.job_id);
         let host_dir_created = self.host_dir_created;
         let host_dir = std::mem::take(&mut self.host_dir);
-        let vm_indices = self.vm_indices.clone();
+        let vm_index_allocator = self.vm_index_allocator.clone();
         let vm_index_opt = self.vm_index.take();
 
         // Captures for the runtime-down (no-spawn) fallback branch
@@ -944,7 +1046,7 @@ impl Drop for CreateGuard {
         // may run after this `drop` returns.
         let job_id_for_fallback = job_id.clone();
         let host_dir_for_fallback = host_dir.clone();
-        let vm_indices_for_fallback = vm_indices.clone();
+        let vm_index_allocator_for_fallback = vm_index_allocator.clone();
 
         // `compio::runtime::spawn` panics if there is no current
         // runtime (e.g., this Drop fires during process teardown
@@ -1000,7 +1102,7 @@ impl Drop for CreateGuard {
                     //    644-649 of the file's stable doc-comment).
                     if purge_ok {
                         if let Some(i) = vm_index_opt {
-                            vm_indices
+                            vm_index_allocator
                                 .lock()
                                 .unwrap_or_else(|p| p.into_inner())
                                 .release(i);
@@ -1070,7 +1172,7 @@ impl Drop for CreateGuard {
             // the runtime is gone, the controller is shutting down,
             // there can't be a concurrent retry-`create` racing us.
             if let Some(i) = vm_index_opt {
-                vm_indices_for_fallback
+                vm_index_allocator_for_fallback
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .release(i);
@@ -1200,7 +1302,19 @@ pub(crate) fn build_nomad_job_json(
                     },
                     "Env": {
                         "ZSBX_VM_INDEX": vm_index.to_string(),
-                        "ZSBX_HERE": cfg.nomad_ch.runtime_dir.display().to_string(),
+                        // Artifact directory holding kernel + rootfs.
+                        // Renamed from ZSBX_HERE in round 3 (M4) —
+                        // the previous name was meaningless on the
+                        // bash side; this matches the Rust struct
+                        // field `runtime_dir`'s intent.
+                        "ZSBX_ARTIFACT_DIR": cfg.nomad_ch.runtime_dir.display().to_string(),
+                        // ZSBX_RUNTIME is the per-allocation working
+                        // dir Nomad provisions per task; the literal
+                        // `${NOMAD_TASK_DIR}` here is a Nomad
+                        // template variable that the agent expands
+                        // before invoking the wrapper, NOT a bash
+                        // expansion at our level. See
+                        // https://developer.hashicorp.com/nomad/docs/runtime/environment
                         "ZSBX_RUNTIME": "${NOMAD_TASK_DIR}",
                         "ZSBX_KEYS_DIR": keys_dir.display().to_string(),
                         "ZSBX_WORKSPACE_DIR": workspace_dir.display().to_string(),
@@ -1213,6 +1327,13 @@ pub(crate) fn build_nomad_job_json(
                         // block is advisory-only on raw_exec.
                         "ZSBX_VM_MEMORY_MB": cfg.memory_mb.to_string(),
                         "ZSBX_VM_CPUS_BOOT": cpus_boot(cfg.cpus).to_string(),
+                        // M6: pair the second octet with the
+                        // controller-side computation of `agent_url`.
+                        // Both sides MUST read the same value so the
+                        // tap/IP the wrapper provisions matches the IP
+                        // the controller dials.
+                        "ZSBX_SUBNET_BASE_OCTET":
+                            cfg.nomad_ch.subnet_second_octet.to_string(),
                     },
                     "Resources": {
                         // CPU is in MHz units in the Nomad API.
@@ -2256,6 +2377,7 @@ mod tests {
                 alloc_running_timeout_secs: 60,
                 agent_livez_timeout_secs: 30,
                 startup_orphan_cleanup: false,
+                subnet_second_octet: 99,
             },
         };
         cfg
@@ -2327,7 +2449,18 @@ mod tests {
             "/etc/zeroship/nomad-vm-wrapper.sh"
         );
         assert_eq!(task["Env"]["ZSBX_VM_INDEX"], "7");
-        assert_eq!(task["Env"]["ZSBX_HERE"], "/var/lib/zeroship/ch");
+        // M4: ZSBX_HERE renamed to ZSBX_ARTIFACT_DIR; verify the
+        // new name is in the env block AND the legacy name is NOT
+        // (so a future ad-hoc deploy that references the old name
+        // fails fast instead of silently picking up nothing).
+        assert_eq!(
+            task["Env"]["ZSBX_ARTIFACT_DIR"],
+            "/var/lib/zeroship/ch"
+        );
+        assert!(
+            task["Env"]["ZSBX_HERE"].is_null(),
+            "ZSBX_HERE should be gone (renamed to ZSBX_ARTIFACT_DIR)"
+        );
         assert_eq!(task["Env"]["ZSBX_RUNTIME"], "${NOMAD_TASK_DIR}");
         assert_eq!(
             task["Env"]["ZSBX_KEYS_DIR"],
@@ -2347,11 +2480,34 @@ mod tests {
         // bin-packing.
         assert_eq!(task["Env"]["ZSBX_VM_MEMORY_MB"], "1024");
         assert_eq!(task["Env"]["ZSBX_VM_CPUS_BOOT"], "2");
+        // M6: subnet base octet is paired between Rust and bash.
+        // Default 99 keeps the historical 10.99/16 layout.
+        assert_eq!(task["Env"]["ZSBX_SUBNET_BASE_OCTET"], "99");
         // 2.0 vCPU advisory → 4000 MHz.
         assert_eq!(task["Resources"]["CPU"], 4000);
         assert_eq!(task["Resources"]["MemoryMB"], 1024);
         // KillTimeout is 10 seconds in nanoseconds.
         assert_eq!(task["KillTimeout"], 10_000_000_000u64);
+    }
+
+    #[test]
+    fn nomad_job_json_uses_configured_subnet_base_octet() {
+        // M6: changing the config's subnet_second_octet must flow
+        // into the env var the wrapper reads. The unit test for the
+        // controller-side IP computation lives in
+        // create_guard_uses_subnet_octet (further down) — these
+        // two together pin the pairing.
+        let mut cfg = make_cfg();
+        cfg.nomad_ch.subnet_second_octet = 50;
+        let v = build_nomad_job_json(
+            "zsbx-y", &cfg, 1,
+            Path::new("/k"), Path::new("/w"), Path::new("/u"),
+            "u", "p", "s",
+        );
+        assert_eq!(
+            v["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]["ZSBX_SUBNET_BASE_OCTET"],
+            "50"
+        );
     }
 
     #[test]
