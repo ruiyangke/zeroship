@@ -6317,6 +6317,7 @@ dependencies = [
  "compio",
  "cyper",
  "deno_core_icudata",
+ "encoding_rs",
  "futures",
  "http",
  "httparse",

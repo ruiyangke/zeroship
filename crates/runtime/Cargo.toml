@@ -16,6 +16,9 @@ serde_json = { workspace = true }
 aws-lc-rs = { workspace = true }
 base64 = { workspace = true }
 
+# Encoding (WHATWG-spec UTF-8 decoder backing TextDecoder)
+encoding_rs = { workspace = true }
+
 # TLS (for fetch HTTPS — need to install CryptoProvider at init)
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 

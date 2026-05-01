@@ -267,6 +267,18 @@ fn gen_install(
             let __proto = __ctor_tmpl.prototype_template(scope);
             #(#proto_sets)*
 
+            // Install Symbol.toStringTag so
+            // `Object.prototype.toString.call(new Foo())` → "[object Foo]".
+            // V8's `set_class_name` only affects the constructor's own
+            // `name`; the @@toStringTag default is overridden by the
+            // user's prototype unless we set it explicitly. Libraries
+            // (webidl-conversions, etc.) check this for type guards.
+            {
+                let __tag_sym = v8::Symbol::get_to_string_tag(scope);
+                let __tag_value = v8::String::new(scope, #class_name_str).unwrap();
+                __proto.set(__tag_sym.into(), __tag_value.into());
+            }
+
             __ctor_tmpl
         }
     }

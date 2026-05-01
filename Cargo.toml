@@ -70,6 +70,12 @@ ada-url = "3.4.4"
 v8 = "147"
 deno_core_icudata = "0.77"
 
+# WHATWG Encoding spec — Henri Sivonen's reference impl, also the
+# encoding library used by Firefox. Replaces hand-rolled UTF-8 decode
+# with a spec-correct state machine (matches WPT). 30+ encodings
+# available for free if we ever need them (currently UTF-8 only).
+encoding_rs = "0.8"
+
 # Proc macros
 proc-macro2 = "1"
 quote = "1"

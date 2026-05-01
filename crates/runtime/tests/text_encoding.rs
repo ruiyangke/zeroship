@@ -155,17 +155,18 @@ fn decoder_accepts_utf8_label_aliases() {
 fn decoder_rejects_unknown_encoding() {
     let s = run_in_v8(
         r#"
-        let kind, msg;
+        let kind;
         try { new TextDecoder("ascii"); }
-        catch (e) { kind = e.constructor.name; msg = e.message; }
-        JSON.stringify({ kind, msg });
+        catch (e) { kind = e.constructor.name; }
+        kind;
         "#,
         |val, scope| js_string(val, scope),
     );
-    // We accept only utf-8 for now; ascii is a real WHATWG encoding
-    // we don't implement. Spec says throw RangeError.
-    assert!(s.contains(r#""kind":"RangeError""#), "got: {s}");
-    assert!(s.contains("ascii"), "got: {s}");
+    // We accept only utf-8; ascii is a real WHATWG encoding we don't
+    // implement. Spec says throw RangeError. We deliberately don't
+    // echo the label string in the error message (low-risk log
+    // injection vector).
+    assert_eq!(s, "RangeError");
 }
 
 #[test]
@@ -374,6 +375,260 @@ fn decoder_only_strips_bom_on_first_call() {
 // ---------------------------------------------------------------------------
 // Round-trip
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Spec-compliance regression tests (from harsh review)
+// ---------------------------------------------------------------------------
+
+/// BOM split across two streaming chunks must still get stripped on
+/// the very first call's behalf — the BOM is part of the prefix of
+/// the byte stream, not the prefix of any one chunk. The previous
+/// hand-rolled implementation set `bom_consumed = true` on the first
+/// chunk regardless of whether it actually contained the BOM
+/// sequence, so a BOM split as `[EF] | [BB BF, ..]` left the BOM in
+/// the output.
+#[test]
+fn decoder_strips_bom_split_across_streaming_chunks() {
+    let s = run_in_v8(
+        r#"
+        const dec = new TextDecoder();
+        const a = dec.decode(new Uint8Array([0xEF]),       { stream: true });
+        const b = dec.decode(new Uint8Array([0xBB, 0xBF, 0x68, 0x69]));
+        const out = a + b;
+        JSON.stringify({ length: out.length, value: out });
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, r#"{"length":2,"value":"hi"}"#);
+}
+
+/// Empty `decode()` calls must NOT flip the BOM-seen flag. The
+/// previous impl set `bom_consumed = true` on every decode() entry,
+/// so a `dec.decode(new Uint8Array([]))` followed by a real BOM
+/// chunk left the BOM in output.
+#[test]
+fn decoder_empty_call_does_not_consume_bom_state() {
+    let s = run_in_v8(
+        r#"
+        const dec = new TextDecoder();
+        dec.decode(new Uint8Array([]));        // empty — must NOT mark BOM as seen
+        const out = dec.decode(new Uint8Array([0xEF, 0xBB, 0xBF, 0x68]));
+        JSON.stringify({ length: out.length, value: out });
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, r#"{"length":1,"value":"h"}"#);
+}
+
+/// Per WebIDL §3.2.20, passing a non-object non-undefined non-null
+/// to a method that expects a dictionary throws TypeError. The
+/// previous impl silently ignored such args and used defaults.
+#[test]
+fn decoder_constructor_rejects_non_object_options() {
+    let s = run_in_v8(
+        r#"
+        let kind;
+        try { new TextDecoder("utf-8", "fatal"); }
+        catch (e) { kind = e.constructor.name; }
+        kind;
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "TypeError");
+}
+
+#[test]
+fn decode_rejects_non_object_options() {
+    let s = run_in_v8(
+        r#"
+        const dec = new TextDecoder();
+        let kind;
+        try { dec.decode(new Uint8Array([0x68]), "stream"); }
+        catch (e) { kind = e.constructor.name; }
+        kind;
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "TypeError");
+}
+
+/// `decode()` only accepts `BufferSource` (ArrayBuffer or
+/// ArrayBufferView). Numbers, strings, or other types must throw
+/// TypeError per WebIDL union coercion. The previous impl silently
+/// returned an empty string.
+#[test]
+fn decode_rejects_non_buffer_input() {
+    let s = run_in_v8(
+        r#"
+        const dec = new TextDecoder();
+        let kind;
+        try { dec.decode(42); }
+        catch (e) { kind = e.constructor.name; }
+        kind;
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "TypeError");
+}
+
+/// `null` label coerces to the string `"null"` per WebIDL DOMString
+/// rules — that's not a valid encoding alias, so spec requires
+/// throwing RangeError. Previous impl mapped null to None and used
+/// the default "utf-8".
+#[test]
+fn decoder_constructor_rejects_null_label() {
+    let s = run_in_v8(
+        r#"
+        let kind;
+        try { new TextDecoder(null); }
+        catch (e) { kind = e.constructor.name; }
+        kind;
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "RangeError");
+}
+
+/// Label normalization is ASCII-only per WHATWG §4.2 — `str::trim()`
+/// would also strip Unicode whitespace like NBSP, and
+/// `str::to_lowercase()` is Unicode-lowercase, both of which can
+/// either accept invalid labels or reject valid ones.
+#[test]
+fn decoder_label_uses_ascii_only_normalization() {
+    // U+00A0 NBSP is not ASCII whitespace; should NOT be stripped,
+    // so the resulting label "\u00A0utf-8" is invalid.
+    let s = run_in_v8(
+        r#"
+        let kind;
+        try { new TextDecoder("\u00A0utf-8"); }
+        catch (e) { kind = e.constructor.name; }
+        kind;
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "RangeError");
+}
+
+#[test]
+fn decoder_accepts_full_utf8_label_table() {
+    // Per WHATWG encodings.json, the canonical UTF-8 aliases include
+    // these. The previous impl was missing `unicode20utf8` and
+    // `x-unicode20utf8`.
+    let s = run_in_v8(
+        r#"
+        const labels = [
+            "utf-8", "UTF-8", "utf8", "UTF8",
+            "unicode-1-1-utf-8", "unicode11utf8",
+            "unicode20utf8", "x-unicode20utf8",
+            "  utf-8  ",  // ASCII whitespace is allowed
+        ];
+        labels.map(l => new TextDecoder(l).encoding).join(",");
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "utf-8,utf-8,utf-8,utf-8,utf-8,utf-8,utf-8,utf-8,utf-8");
+}
+
+/// Per WHATWG, `Object.prototype.toString.call(new TextDecoder())`
+/// must be `"[object TextDecoder]"`. The class name on the
+/// FunctionTemplate makes this work via V8's default
+/// Symbol.toStringTag handling.
+#[test]
+fn decoder_has_correct_string_tag() {
+    let s = run_in_v8(
+        r#"
+        Object.prototype.toString.call(new TextDecoder());
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "[object TextDecoder]");
+}
+
+#[test]
+fn encoder_has_correct_string_tag() {
+    let s = run_in_v8(
+        r#"
+        Object.prototype.toString.call(new TextEncoder());
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "[object TextEncoder]");
+}
+
+/// WHATWG decoder algorithm: invalid bytes get U+FFFD per "error
+/// grouping" rules. Rust's `std::str::from_utf8` doesn't match these
+/// rules; switching to encoding_rs (which is the spec reference
+/// impl) does.
+///
+/// Test vector from web-platform-tests:
+/// `[0xF1, 0x80, 0x80, 0xE1, 0x80, 0xC0, 0x10]` per WHATWG decode:
+///   - `F1 80 80` is a 4-byte lead + 2 continuations; needs one more
+///     continuation. Next byte `E1` is NOT a continuation (it's a
+///     3-byte lead), so emit U+FFFD and back up to `E1`.
+///   - `E1 80` is a 3-byte lead + 1 continuation; needs one more.
+///     Next byte `C0` is NOT a continuation (lead bytes 0xC0/0xC1 are
+///     forbidden as overlong), so emit U+FFFD and back up to `C0`.
+///   - `C0` is invalid as a lead byte → emit U+FFFD.
+///   - `10` is ASCII → passthrough.
+/// Result: `"\uFFFD\uFFFD\uFFFD\u0010"` — 4 codepoints. Rust's
+/// `std::str::from_utf8` produces fewer FFFDs because its error
+/// grouping isn't the WHATWG state machine.
+#[test]
+fn decoder_ufffd_count_matches_whatwg_spec() {
+    let s = run_in_v8(
+        r#"
+        const dec = new TextDecoder();
+        const out = dec.decode(new Uint8Array([0xF1, 0x80, 0x80, 0xE1, 0x80, 0xC0, 0x10]));
+        JSON.stringify({
+            len: out.length,
+            cps: Array.from(out, c => c.codePointAt(0)),
+        });
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, r#"{"len":4,"cps":[65533,65533,65533,16]}"#);
+}
+
+/// Spec test: trailing 4-byte sequence prefixes of various lengths
+/// should produce one U+FFFD per chunk in non-streaming mode.
+#[test]
+fn decoder_trailing_partial_4byte_sequence() {
+    for (input, expected_len) in [
+        // 1-of-4 lead → 1 replacement
+        ("[0xF0]", 1u32),
+        // 2-of-4 → 1 replacement (the partial 2 bytes form one error)
+        ("[0xF0, 0x9F]", 1),
+        // 3-of-4 → 1 replacement
+        ("[0xF0, 0x9F, 0x98]", 1),
+    ] {
+        let src = format!(
+            r#"
+            const dec = new TextDecoder();
+            const out = dec.decode(new Uint8Array({input}));
+            JSON.stringify({{ len: out.length, cp0: out.codePointAt(0) }});
+            "#
+        );
+        let s = run_in_v8(&src, |val, scope| js_string(val, scope));
+        let expected = format!(r#"{{"len":{expected_len},"cp0":65533}}"#);
+        assert_eq!(s, expected, "input {input}");
+    }
+}
+
+/// Unpaired surrogate in TextEncoder input must encode as the UTF-8
+/// of U+FFFD (`EF BF BD`). V8's WTF-16→UTF-8 conversion via
+/// `to_rust_string_lossy` does this automatically — this test locks
+/// in that V8-side behavior so a future change doesn't drift.
+#[test]
+fn encoder_replaces_unpaired_surrogates() {
+    let s = run_in_v8(
+        r#"
+        const out = new TextEncoder().encode("\uD800");
+        Array.from(out).map(b => b.toString(16)).join(",");
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "ef,bf,bd");
+}
 
 #[test]
 fn encode_decode_round_trip_preserves_strings() {
