@@ -23,6 +23,15 @@ fn unauthorized() -> HttpResponse {
 
 fn err(status: u16, msg: impl Into<String>) -> HttpResponse {
     let s = msg.into();
+    // FM-B: every 5xx returned to a client gets a structured
+    // operator-visible log line. The N=8 stress test surfaced 14
+    // 5xx in c2's cycle — none of which appeared in the controller
+    // log because the only existing error path was the HTTP
+    // response body. eprintln to match the rest of the controller's
+    // logging style (no tracing wired in this crate yet).
+    if status >= 500 {
+        eprintln!("[sandbox/handlers] {status}: error={s}");
+    }
     let mut resp = match status {
         400 => HttpResponse::BadRequest(),
         404 => HttpResponse::NotFound(),

@@ -508,8 +508,18 @@ impl NomadCHBackend {
             .vm_index_allocator
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .alloc()?;
+            .alloc()
+            .map_err(|e| {
+                eprintln!(
+                    "[sandbox/nomad-ch] create: error sandbox={sandbox_id} \
+                     step=vm_index_alloc error={e}"
+                );
+                e
+            })?;
         guard.vm_index = Some(vm_index);
+        eprintln!(
+            "[sandbox/nomad-ch] vm_index: alloc={vm_index} sandbox={sandbox_id}"
+        );
 
         // 3. Materialize host dirs. The wrapper script + virtiofsd
         //    expect these to exist; per-sandbox dirs are unique
@@ -553,7 +563,15 @@ impl NomadCHBackend {
             project_id,
             &sandbox_id.to_string(),
         );
-        submit_nomad_job(&self.cfg.nomad_ch.nomad_addr, &job_json).await?;
+        submit_nomad_job(&self.cfg.nomad_ch.nomad_addr, &job_json)
+            .await
+            .map_err(|e| {
+                eprintln!(
+                    "[sandbox/nomad-ch] create: error sandbox={sandbox_id} \
+                     step=submit_nomad_job job={job_id} error={e}"
+                );
+                e
+            })?;
         guard.job_submitted = true;
 
         // 6. Poll until at least one alloc reaches running. Bounded
@@ -710,6 +728,12 @@ impl NomadCHBackend {
             Some(s) => s,
             None => return Ok(()), // idempotent
         };
+        let stop_started = Instant::now();
+        eprintln!(
+            "[sandbox/nomad-ch] stop: started sandbox={sandbox_id} \
+             vm_index={} job={}",
+            sandbox.vm_index, sandbox.job_id,
+        );
         // Channel split: `errs` accumulates per-step failures the
         // caller needs to see (joined into the returned Result) so
         // the API surface lines up with the K8s backend; `eprintln`
@@ -831,6 +855,15 @@ impl NomadCHBackend {
             );
         }
 
+        eprintln!(
+            "[sandbox/nomad-ch] stop: complete sandbox={sandbox_id} \
+             vm_index={} job={} errs={} job_confirmed_gone={job_confirmed_gone} \
+             elapsed_ms={}",
+            sandbox.vm_index,
+            sandbox.job_id,
+            errs.len(),
+            stop_started.elapsed().as_millis(),
+        );
         if errs.is_empty() {
             Ok(())
         } else {
@@ -857,6 +890,7 @@ impl NomadCHBackend {
             .await
             .map_err(|e| format!("{ctx} agent /exec: {e}"))?;
         if resp.status != 200 {
+            log_agent_error(sandbox_id, "exec", resp.status, &resp.body);
             return Err(format!(
                 "{ctx} agent /exec status {}: {}",
                 resp.status, resp.body
@@ -891,6 +925,7 @@ impl NomadCHBackend {
             return Err(format!("{ctx} file not found: {p}"));
         }
         if resp.status != 200 {
+            log_agent_error(sandbox_id, "files.get", resp.status, &resp.body);
             return Err(format!(
                 "{ctx} agent /files GET status {}: {}",
                 resp.status, resp.body
@@ -912,6 +947,7 @@ impl NomadCHBackend {
             .await
             .map_err(|e| format!("{ctx} agent /files PUT: {e}"))?;
         if resp.status != 200 {
+            log_agent_error(sandbox_id, "files.put", resp.status, &resp.body);
             return Err(format!(
                 "{ctx} agent /files PUT status {}: {}",
                 resp.status, resp.body
@@ -930,10 +966,13 @@ impl NomadCHBackend {
         match resp.status {
             200 => Ok(true),
             404 => Ok(false),
-            s => Err(format!(
-                "{ctx} agent /files DELETE status {s}: {}",
-                resp.body
-            )),
+            s => {
+                log_agent_error(sandbox_id, "files.delete", s, &resp.body);
+                Err(format!(
+                    "{ctx} agent /files DELETE status {s}: {}",
+                    resp.body
+                ))
+            }
         }
     }
 
@@ -944,6 +983,7 @@ impl NomadCHBackend {
             .await
             .map_err(|e| format!("{ctx} agent /tree: {e}"))?;
         if resp.status != 200 {
+            log_agent_error(sandbox_id, "tree", resp.status, &resp.body);
             return Err(format!(
                 "{ctx} agent /tree status {}: {}",
                 resp.status, resp.body
@@ -1936,6 +1976,25 @@ fn signed_blocking_call(
     // "POST http://...: connection refused: POST http://...:" log
     // lines. Propagate `send_ureq` directly.
     send_ureq(req, body)
+}
+
+/// FM-B: structured operator-visible log line for non-2xx agent
+/// responses. The error already propagates to the HTTP response,
+/// but during the N=8 stress run the controller logged ZERO error
+/// lines despite 14 5xx-to-client across the c2 cycle — every
+/// failure was buried inside the returned `Result`. Logging at the
+/// agent boundary closes that observability gap without growing
+/// the public error surface.
+///
+/// Body excerpt is capped to 256 bytes; trailing newline / bulk
+/// HTML interstitials would otherwise wreck the per-line grep
+/// shape that operators rely on.
+fn log_agent_error(sandbox_id: Uuid, op: &str, status: u16, body: &str) {
+    let excerpt: String = body.chars().take(256).collect();
+    eprintln!(
+        "[sandbox/nomad-ch] agent: error sandbox={sandbox_id} op={op} \
+         status={status} body={excerpt:?}"
+    );
 }
 
 /// Poll `/livez` until 200 AND the agent's `/version` reports the
