@@ -256,9 +256,17 @@ impl K8sBackend {
             user_id: user_id.to_string(),
             project_id: project_id.to_string(),
             backend: "k8s".to_string(),
-            backend_hint: format!(
-                "pod={pod_name} pvc={user_home_pvc} key_fp={key_fp} url={agent_url}"
-            ),
+            // The hint is **client-visible** via `GET /sandboxes/{id}`,
+            // so scrub anything that's an internal-only operational
+            // detail. Pod name + key fingerprint are useful for
+            // debugging an issue against a specific Pod and don't
+            // expose anything not already visible to anyone with
+            // cluster RBAC. The PVC name embeds the user_id (which
+            // the client already knows for its own user) but would
+            // leak it cross-tenant if list/get ever stops filtering;
+            // and `url=http://127.0.0.1:<port>` is purely an
+            // internal port-forward detail. Both omitted.
+            backend_hint: format!("pod={pod_name} key_fp={key_fp}"),
             created_at_secs: now,
             last_used_at_secs: now,
         })
@@ -830,42 +838,47 @@ fn sanitize_path(p: &str) -> Result<String, String> {
     Ok(p.to_string())
 }
 
-/// Validate a user_id / project_id at the backend boundary. Same
-/// charset the HTTP handler enforces (`[a-zA-Z0-9_-]`, ≤ 64 chars);
-/// the redundant check here defends against a future caller that
-/// bypasses the handler — we'd rather error than name a Pod with
-/// `kubectl`-incompatible characters.
+/// Validate a user_id / project_id at the backend boundary.
+///
+/// The HTTP handler (`is_safe_id`) is the primary gate; this
+/// repeats the rule **identically** as defense-in-depth for any
+/// future caller that bypasses the handler (programmatic backend
+/// use, integration tests, a mistakenly-added admin endpoint).
+///
+/// **Charset (mirrored, do not relax):** `[a-z0-9-]{1,50}` with
+/// the first char in `[a-z0-9]`. Underscore is intentionally
+/// excluded — previous versions accepted both `_` and uppercase
+/// and rewrote them in `user_pvc_name`, which collapsed distinct
+/// user_ids to the same PVC name and produced cross-user data
+/// bleed. After this, `user_id` and PVC name are 1:1.
 fn validate_id(id: &str, what: &'static str) -> Result<(), String> {
-    if id.is_empty() {
-        return Err(format!("{what} is empty"));
-    }
-    if id.len() > 64 {
-        return Err(format!("{what} too long (max 64 chars)"));
-    }
-    if !id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+    if id.is_empty() || id.len() > 50 {
         return Err(format!(
-            "{what} must match [a-zA-Z0-9_-]; got {id:?}"
+            "{what} must be 1..=50 chars; got {} chars",
+            id.len()
+        ));
+    }
+    let mut chars = id.chars();
+    let first = chars.next().unwrap();
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        return Err(format!(
+            "{what} must start with [a-z0-9]; got {id:?}"
+        ));
+    }
+    if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+        return Err(format!(
+            "{what} must match [a-z0-9-]+ after first char; got {id:?}"
         ));
     }
     Ok(())
 }
 
-/// Stable PVC name derived from `user_id`. Replaces `_` with `-`
-/// so the result is DNS-1123-compliant; lowercases for the same
-/// reason. `validate_id` already constrains the input charset, so
-/// this transformation is total and reversible enough for ops.
+/// Stable PVC name derived from `user_id`. Because `validate_id`
+/// already restricts the input to `[a-z0-9-]`, this is now an
+/// identity-prefix function — no rewriting, no collisions.
 fn user_pvc_name(user_id: &str) -> String {
-    let safe: String = user_id
-        .chars()
-        .map(|c| match c {
-            '_' => '-',
-            c => c.to_ascii_lowercase(),
-        })
-        .collect();
-    format!("zsbx-userhome-{safe}")
+    debug_assert!(validate_id(user_id, "user_id").is_ok());
+    format!("zsbx-userhome-{user_id}")
 }
 
 #[cfg(test)]
@@ -895,37 +908,59 @@ mod tests {
     }
 
     #[test]
-    fn validate_id_accepts_alnum_dash_underscore() {
+    fn validate_id_accepts_lowercase_dns_1123_subset() {
         assert!(validate_id("alice", "user_id").is_ok());
         assert!(validate_id("alice-1", "user_id").is_ok());
-        assert!(validate_id("alice_1", "user_id").is_ok());
-        assert!(validate_id("ABC123-_abc", "user_id").is_ok());
+        assert!(validate_id("u123", "user_id").is_ok());
+        assert!(validate_id("0alice", "user_id").is_ok());
     }
 
     #[test]
     fn validate_id_rejects_bad_chars() {
+        // Underscore is intentionally rejected — see history note
+        // in `validate_id` doc.
+        assert!(validate_id("alice_1", "user_id").is_err());
+        // Uppercase rejected for the same reason.
+        assert!(validate_id("Alice", "user_id").is_err());
+        assert!(validate_id("ALICE", "user_id").is_err());
+        // Standard "obviously bad" cases.
         assert!(validate_id("alice@example.com", "user_id").is_err());
         assert!(validate_id("alice/bob", "user_id").is_err());
         assert!(validate_id("alice bob", "user_id").is_err());
         assert!(validate_id("", "user_id").is_err());
-        assert!(validate_id(&"a".repeat(65), "user_id").is_err());
+        assert!(validate_id(&"a".repeat(51), "user_id").is_err());
+        // Leading dash / digit rule: dash-leading rejected.
+        assert!(validate_id("-alice", "user_id").is_err());
     }
 
+    /// Regression: `validate_id` and `user_pvc_name` together must
+    /// guarantee a 1:1 between user_id and PVC name. Distinct
+    /// user_ids that pass validation must produce distinct PVC
+    /// names. Previously `Alice` and `alice` (and `alice_1` /
+    /// `alice-1`) collapsed to the same PVC — cross-user data bleed.
     #[test]
-    fn user_pvc_name_is_dns_1123_compliant() {
-        // DNS-1123: lowercase alphanumeric + dash only, ≤253 chars.
+    fn user_pvc_name_is_one_to_one() {
         let cases = [
             ("alice", "zsbx-userhome-alice"),
-            ("ALICE", "zsbx-userhome-alice"),
-            ("alice_1", "zsbx-userhome-alice-1"),
-            ("Alice-2", "zsbx-userhome-alice-2"),
+            ("alice-1", "zsbx-userhome-alice-1"),
+            ("u123", "zsbx-userhome-u123"),
+            ("0a", "zsbx-userhome-0a"),
         ];
         for (input, expected) in cases {
+            assert!(validate_id(input, "user_id").is_ok());
             let got = user_pvc_name(input);
             assert_eq!(got, expected, "user_pvc_name({input:?})");
             assert!(got.len() <= 253, "{got} too long");
-            assert!(got.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
-                "{got} not DNS-1123: contains non-alphanum-or-dash");
+            assert!(
+                got.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                "{got} not DNS-1123: contains non-alphanum-or-dash"
+            );
         }
+        // No two distinct valid inputs map to the same PVC name.
+        let inputs = ["alice", "alice-1", "alice-2", "u1", "u2"];
+        let names: std::collections::HashSet<String> =
+            inputs.iter().map(|s| user_pvc_name(s)).collect();
+        assert_eq!(names.len(), inputs.len(), "PVC name collision: {names:?}");
     }
 }

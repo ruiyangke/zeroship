@@ -97,11 +97,13 @@ async fn run_lifecycle(
         let info = backend.create(sandbox_id, user_id, project_id).await?;
         registry.insert(sandbox_id, info.clone());
         check_info(&info, "k8s")?;
+        // backend_hint is intentionally minimal (pod + key fp) so
+        // that GET /sandboxes/{id} doesn't leak internal PVC name
+        // or local port-forward URL to clients.
         if !info.backend_hint.contains("pod=")
             || !info.backend_hint.contains("key_fp=")
-            || !info.backend_hint.contains("pvc=")
         {
-            return Err(format!("backend_hint missing pod/key_fp/pvc: {}", info.backend_hint));
+            return Err(format!("backend_hint missing pod/key_fp: {}", info.backend_hint));
         }
         println!("    {}", info.backend_hint);
         Ok(())

@@ -8,8 +8,12 @@ pub struct SandboxConfig {
     /// Port the HTTP API listens on. `SANDBOX_PORT` (default 9091).
     pub port: u16,
 
-    /// Bearer token for the HTTP API. `SANDBOX_TOKEN`. Empty disables auth
-    /// (dev only — main.rs prints a warning).
+    /// Bearer token for the HTTP API. `SANDBOX_TOKEN`. Empty value
+    /// disables auth and is **rejected at startup** unless the
+    /// operator also set `SANDBOX_ALLOW_NO_AUTH=1` (dev opt-in).
+    /// Production deployments without a token simply refuse to
+    /// boot, so an unconfigured pod can't accidentally become a
+    /// public RCE.
     pub token: String,
 
     /// Backend selector. `SANDBOX_BACKEND=docker|k8s` (default docker).
@@ -111,6 +115,26 @@ impl SandboxConfig {
     pub fn from_env() -> Result<Self, String> {
         let port = parse_env("SANDBOX_PORT", 9091u16)?;
         let token = std::env::var("SANDBOX_TOKEN").unwrap_or_default();
+        // Fail-closed: an unset/empty token disables auth. We refuse
+        // to start in that state unless the operator opts in via
+        // SANDBOX_ALLOW_NO_AUTH=1. Tighten further: when a token is
+        // set, require ≥32 bytes — anything shorter is brute-forceable.
+        let allow_no_auth = parse_env("SANDBOX_ALLOW_NO_AUTH", false)?;
+        if token.is_empty() && !allow_no_auth {
+            return Err(
+                "SANDBOX_TOKEN is empty; refusing to start. \
+                 Set SANDBOX_TOKEN to a strong (≥32 byte) random value, \
+                 or set SANDBOX_ALLOW_NO_AUTH=1 for explicit dev mode."
+                    .to_string(),
+            );
+        }
+        if !token.is_empty() && token.len() < 32 {
+            return Err(format!(
+                "SANDBOX_TOKEN is too short ({} bytes; need ≥ 32). \
+                 Generate with: head -c 32 /dev/urandom | base64",
+                token.len()
+            ));
+        }
         let backend = std::env::var("SANDBOX_BACKEND").unwrap_or_else(|_| "docker".to_string());
         if !matches!(backend.as_str(), "docker" | "k8s") {
             return Err(format!(
