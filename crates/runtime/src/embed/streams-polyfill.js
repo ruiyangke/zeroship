@@ -4853,10 +4853,29 @@ function streamBrandCheckException(name) {
   if (typeof globalThis.TextDecoderStream === "undefined" &&
       typeof globalThis.TransformStream !== "undefined") {
     globalThis.TextDecoderStream = function TextDecoderStream(label, options) {
-      var dec = new TextDecoder(label, options);
+      // `{ stream: true }` keeps the decoder's partial-byte state
+      // across chunk boundaries — critical for SSE parsers that pipe
+      // network chunks straight through (e.g. AI SDK v6's
+      // `parseJsonEventStream` does
+      // `body.pipeThrough(new TextDecoderStream()).pipeThrough(new EventSourceParserStream())`).
+      // Without streaming mode, a multi-byte UTF-8 char split across
+      // packets gets replaced with U+FFFD and the SSE parser sees
+      // garbage like `dat<U+FFFD>:...` — surfaces as
+      // "Unexpected non-whitespace character at position 3".
+      var dec;
+      try {
+        dec = new TextDecoder(label, options);
+      } catch (_e) {
+        dec = new TextDecoder();
+      }
       var ts = new TransformStream({
         transform: function (chunk, controller) {
-          var s = dec.decode(chunk);
+          var s = dec.decode(chunk, { stream: true });
+          if (s) controller.enqueue(s);
+        },
+        flush: function (controller) {
+          // Drain the decoder's tail buffer when the input stream ends.
+          var s = dec.decode();
           if (s) controller.enqueue(s);
         },
       });
