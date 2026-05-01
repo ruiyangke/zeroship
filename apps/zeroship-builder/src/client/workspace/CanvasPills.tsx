@@ -2,14 +2,14 @@ import { Pill } from "../components/Pill";
 
 const ALL_PILLS = [
   "preview",
+  "files",
   "logs",
+  "env",
   "plan",
   "health",
   "settings",
   // +Data tier (hidden in maker, revealed by toggle in later plans):
   // "data", "media",
-  // +Code tier:
-  // "files", "env",
 ] as const;
 
 export type CanvasPillId = (typeof ALL_PILLS)[number];

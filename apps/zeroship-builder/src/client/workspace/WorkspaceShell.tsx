@@ -5,6 +5,10 @@ import { getApp } from "../api";
 import { TopBar } from "./TopBar";
 import { CanvasPills, type CanvasPillId } from "./CanvasPills";
 import { PreviewCanvasStub } from "./PreviewCanvasStub";
+import { FilesCanvas } from "./canvases/FilesCanvas";
+import { LogsCanvas } from "./canvases/LogsCanvas";
+import { EnvCanvas } from "./canvases/EnvCanvas";
+import { SettingsCanvas } from "./canvases/SettingsCanvas";
 import { ChatRail } from "./chat/ChatRail";
 import { briefSchema, type Brief } from "../types/chat";
 
@@ -120,12 +124,27 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
         style={{ gridTemplateColumns: "1fr 320px" }}
       >
         <main data-testid="canvas-area" className="min-h-0 min-w-0 overflow-hidden flex flex-col">
-          {/* Plan 01 only renders preview; pill switching is wired but other
-              canvases are placeholders. Plans 03–06 fill them in. */}
+          {/* Files / Logs / Env / Settings ship in Plan 01.6 (this commit).
+              Plan / Health / Data / Media land in later tasks; we keep
+              the placeholder for them so the pill remains clickable. */}
           {active === "preview" && <PreviewCanvasStub />}
-          {active !== "preview" && (
+          {active === "files" && appId && <FilesCanvas appId={appId} />}
+          {active === "logs" && appId && <LogsCanvas appId={appId} />}
+          {active === "env" && appId && <EnvCanvas appId={appId} />}
+          {active === "settings" && appId && (
+            <SettingsCanvas appId={appId} app={appQuery.data} />
+          )}
+          {/* Catch-all for canvases not yet wired (plan, health). Also
+              renders when the catch-all route lands here without an
+              appId — the canvases above all need one. */}
+          {(active === "plan" || active === "health") && (
             <div className="h-full flex items-center justify-center text-ink-soft font-serif italic">
               "{active}" canvas — coming in a later plan.
+            </div>
+          )}
+          {!appId && active !== "preview" && (
+            <div className="h-full flex items-center justify-center text-ink-soft font-serif italic">
+              No project selected.
             </div>
           )}
         </main>
