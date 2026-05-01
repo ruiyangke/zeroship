@@ -6,9 +6,25 @@
 // RPC stubs on the client side, so this `postChatServer(input)` call hits
 // the wire automatically. No `fetch` plumbing leaks into customer code.
 
-import { postChat as postChatServer, type ChatTurnInput } from "../../server/chat";
-import type { AIStreamChunk } from "../../server/_shared/stream";
 import type { AgentEvent, ChatMessage } from "./types";
+
+// NOTE: This file is an orphan from the pre-redesign builder UI. The
+// active chat surface is in `client/workspace/chat/ChatRail.tsx` and
+// uses `@ai-sdk/react`'s useChat against `rpc.chat` directly. We keep
+// this around so `useBuilderChat.ts` (also orphan) still typechecks
+// while we incrementally tear down the dead branches.
+type AIStreamChunk =
+  | { type: "text-delta"; delta: string }
+  | { type: "tool-call"; toolCallId: string; toolName: string; args: unknown }
+  | { type: "tool-result"; toolCallId: string; result: unknown }
+  | { type: "data-part"; partName: string; payload: unknown }
+  | { type: "error"; message: string }
+  | { type: "finish"; usage?: { inputTokens?: number; outputTokens?: number } };
+
+interface ChatTurnInput {
+  text: string;
+  images?: Array<{ name: string; mediaType: string; bytes: Uint8Array }>;
+}
 
 export interface AgentContext {
   app_id?: string;
@@ -36,11 +52,14 @@ export async function streamAgent(
     return;
   }
 
+  // NOTE: orphan code path — the live chat surface (workspace/chat/
+  // ChatRail.tsx) uses `useChat({ transport: chatTransport(rpc.chat) })`
+  // and never reaches this. We keep the function compilable but inert.
   const input: ChatTurnInput = {
     text: lastUserMessage.content,
   };
-
-  const response = await postChatServer(input);
+  void input;
+  const response = new Response("", { status: 204 });
   const reader = response.body?.getReader();
 
   if (!reader) {
