@@ -403,6 +403,8 @@ This mapping is grounded in the official deepagents JS docs (https://docs.langch
 
 **String-based model spec**: `model: "openai:gpt-5.4"` or `"claude-sonnet-4-6"` — deepagents resolves the provider. We don't have to instantiate `ChatOpenAI` / `ChatAnthropic` ourselves.
 
+> **See also §4.8.9** for known gaps that affect this section: G1 (`checkpointer`), G5 (`responseFormat` for Critic), G6 (per-SubAgent model selection).
+
 ##### 4.8.3.2 Revised agent-fleet mapping
 
 | Our agent | deepagents primitive | Implementation |
@@ -415,6 +417,8 @@ This mapping is grounded in the official deepagents JS docs (https://docs.langch
 | **ask_survey** | `interruptOn` config | The agent halts when emitting a `survey` payload; the UI renders the SurveyCard; user submits → agent resumes with answers in state. *Cleaner than a tool call.* |
 | **propose_diff** | wrapping built-in `write_file` with custom middleware | The `wrapToolCall` hook intercepts `write_file` calls, emits a `data-diff` UI part to the stream, then runs the actual write. Single seam. |
 | **file_issue** | wrapping `write_todos` with middleware | Same pattern: `wrapToolCall` on `write_todos` fans the new todo into a `data-issue` part. |
+
+> **See also §4.8.9** G4 — not all tools become data parts. `execute` / `read_file` / generic HTTP-fetch / SQL tools wire as native AI SDK `tool-call` / `tool-result` chunks; only tools whose UI shape ≠ I/O shape (write_file → DiffCard, write_todos → IssueCard) become data parts.
 
 ##### 4.8.3.3 Custom middleware as the data-part seam (replaces §4.8.4b's translator role)
 
@@ -449,6 +453,8 @@ const dataPartMiddleware = createMiddleware({
 ```
 
 The `writeUIPart` callback is plumbed through from the stream's `execute({ writer })` scope into the middleware via closure.
+
+> **See also §4.8.9** G10 — the `AnyBackendProtocol` shape used below was inferred from docs, not verified against `node_modules/deepagents/dist/*.d.ts`. Phase B preflight verifies the actual interface.
 
 ##### 4.8.3.4 Backend wiring (zeroship sandbox)
 
@@ -509,6 +515,8 @@ What the server does NOT use AI SDK for:
 #### 4.8.4b Server-side translator (deepagents → AI SDK protocol)
 
 > **Revised after Plan 02 Phase A + deepagents docs review.** The translator is now narrower than originally planned — text events only. Data parts (Survey, Diff, CriticRound, Issue) flow through custom middleware (§4.8.3.3), not through the translator's switch statement.
+>
+> **Outstanding gaps** before this section is implementation-ready (see §4.8.9): **G2** plumb `AbortSignal` through `streamEvents`; **G3** add resume-after-interrupt handling for `ask_survey`; **G7** extend `convertUIMessagesToLangChain` to preserve `tool-call` / `tool-result` parts.
 
 A focused module (`apps/zeroship-builder/src/server/_translator.ts`, **~110 LOC**, landed in Plan 02 Phase A) lives at the chat-procedure boundary. Its single job: drain the agent's LangGraph stream-events and emit AI-SDK v6 UI Message Stream chunks for the **text** path. Tool args, tool results, and our custom data-part shapes all enter the stream from middleware (§4.8.3.3), which has cleaner access to args/results than `streamEvents` does.
 
@@ -595,6 +603,8 @@ export async function buildTranslatedStream(input: BuilderTurnInput) {
 
 Client-side, the `useChat` hook surfaces data parts via its `data` callback or custom message-part renderers. Each type has a dedicated React component.
 
+> **See also §4.8.9** G8 (per-request `createDeepAgent` cost — measure, cache by config hash if material) and G9 (lazy-import is per-isolate-boot, not per-call — wording in this section is misleading and needs correction).
+
 #### 4.8.5 Bundle weight mitigation
 
 Server: deepagents + LangGraph + LangChain models is ~1 MB compiled.
@@ -648,6 +658,191 @@ Remove (unused or replaced by our component library):
 | deepagents + LangGraph + LangChain, custom client | Rejected — reimplements `useChat`-grade UX; bug surface |
 | **deepagents + LangGraph + LangChain on server, AI SDK on client, translator at the seam** | **Chosen.** Best-of-both: pre-built agent patterns + battle-tested chat UX; V8 + node-compat makes server stack viable; translator (~200 LOC) is the only glue |
 | LangChain alone (no agent framework) | Rejected — too low-level |
+
+#### 4.8.9 Known gaps and follow-ups (post Plan 02 Phase A review)
+
+After landing Plan 02 Phase A (real OpenAI streaming through the deepagents → translator → useChat path) and re-reading the official deepagents JS docs, these are the gaps and corrections that must land before Phase B. They're organised by severity. Each item names where in this spec the fix belongs, plus the design direction.
+
+##### Critical — block correctness for multi-turn
+
+###### G1 · Conversation memory across turns (`checkpointer`)
+
+**Problem.** Plan 02 Phase A's `buildTranslatedStream` calls `createDeepAgent(...)` *inside* the chat handler. Every turn instantiates a fresh agent. Without a `checkpointer`, the deepagents middleware-managed state — todos (`TodoListMiddleware`), virtual fs entries (`FilesystemMiddleware`), summarisation state — is **discarded after each turn**. Builder forgets what it was doing. `useChat` sends full message history so the LLM sees prior text, but middleware state lives outside `messages`.
+
+**Fix.** Add `checkpointer: BaseCheckpointSaver` to `createDeepAgent`. Persist by `chat_session_id` (provided by useChat as the `id` field on each request body). Initial implementation can use deepagents' in-memory checkpointer for dev; production swaps in a Postgres-backed saver writing to the control plane DB.
+
+**Lives in.** §4.8.3.2 (extend the `createDeepAgent` example), §4.8.3.6 *new* "Conversation memory model".
+
+###### G2 · `AbortSignal` propagation through to the LLM
+
+**Problem.** `useChat`'s Stop button closes the SSE on the client. The translator's `for await` loop sees the writer error and exits — but the underlying LangChain HTTP call to OpenAI isn't aborted. We keep paying for tokens after the user cancelled.
+
+**Fix.** The zeroship runtime exposes a `Request` to server functions with a native `signal: AbortSignal`. Plumb it: `chat(input, ctx)` → `buildTranslatedStream(input, signal)` → `agent.streamEvents(input, { version: "v2", signal })`. LangChain respects `AbortSignal` natively.
+
+**Lives in.** §4.8.4b (translator signature change), Plan 02 Phase B.0 work item.
+
+###### G3 · Resume protocol after `interruptOn`
+
+**Problem.** Spec §8.2.7 says `ask_survey` ⇒ `interruptOn`. Agent halts → UI renders SurveyCard → user submits. But `useChat` doesn't have a "resume" verb — only `sendMessage`. Without a defined resume contract:
+- The user's submit becomes a normal new turn
+- The agent has no way to know the new turn is "the answer to the interrupt I just emitted"
+- The interrupted run's state is lost
+
+The deepagents API for resume is `agent.invoke({}, { configurable: { thread_id }, resume: { value } })`. Wiring this through `useChat` needs explicit protocol design.
+
+**Fix.** New subsection §8.2.7.x "Resume protocol":
+
+```
+1. When middleware emits `data-survey`, also include an opaque `resume_token`
+   in the part payload (same as `thread_id` for the checkpointer + the
+   interrupt's run id).
+
+2. SurveyCard's submit handler calls `sendMessage` with a custom body shape:
+     {
+       json: {
+         resume: {
+           token: <resume_token>,
+           value: { answers, skipped }
+         }
+       }
+     }
+   instead of the normal { messages } body.
+
+3. Server-side chat handler detects `body.resume`. If present, calls
+   `agent.invoke({}, { configurable: { thread_id }, resume: ... })` instead
+   of `agent.streamEvents({ messages })`.
+
+4. Agent resumes from the interrupt; middleware emits new chunks; client
+   renders them as the assistant message continues.
+```
+
+This is real protocol work. Plan B.0 includes it.
+
+**Lives in.** §8.2.7 + §4.8.4b (handler shape).
+
+##### Important — bad architecture without a fix
+
+###### G4 · Tool-call rendering: data parts ≠ everything
+
+**Problem.** §4.8.3.3 collapses all tool I/O onto custom `data-*` parts. Overcorrection. AI SDK v6 has typed `tool-call` / `tool-result` message parts with built-in renderer affordances. They're the right shape when the args / result *are* what the user sees.
+
+**Fix.** Two-track rule:
+
+| Tool | UI shape | Wire as |
+|------|----------|---------|
+| `write_file` (creator cares about before/after) | DiffCard | **`data-diff`** custom part |
+| `write_todos` (creator cares about issue tracking) | IssueCard | **`data-issue`** custom part |
+| `task("critic", ...)` (multi-dim feedback) | CriticRoundCard | **`data-critic-round`** custom part |
+| `execute` (shell — npm install / running tests) | streaming text/lines | **native `tool-call` + `tool-result`** chunks |
+| `read_file` (creator wants to see the request) | "Read X" line + content | **native `tool-call` + `tool-result`** chunks |
+| Future raw HTTP / SQL / etc. | generic Receipt | **native `tool-call` + `tool-result`** chunks |
+
+Rule of thumb: **if the UI's natural rendering shape differs from the tool's I/O shape, custom data part. Otherwise native.** The translator (§4.8.4b) handles native chunks; middleware handles data parts.
+
+**Lives in.** §4.8.3.3 (revise), §10 (Receipt + DiffCard component spec).
+
+###### G5 · Critic needs `responseFormat` (structured output)
+
+**Problem.** §11.1 says Critic returns `[{dimension, severity, issue, suggested_fix, line?}]`. Without `responseFormat: z.object(...)` on the Critic SubAgent, deepagents returns prose; we'd parse free-form text. Fragile.
+
+**Fix.** Critic SubAgent config:
+
+```ts
+const critic: SubAgent = {
+  name: "critic",
+  description: "Reviews Builder output across quality dimensions.",
+  systemPrompt: CRITIC_PROMPT,
+  model: "openai:gpt-4o-mini",                  // cheap; see G6
+  responseFormat: z.object({
+    approved: z.boolean(),
+    issues: z.array(z.object({
+      dimension: z.enum(["correctness","security","performance",
+                          "accessibility","ux_completeness","responsive",
+                          "code_health"]),
+      severity: z.enum(["low","medium","high","critical"]),
+      issue: z.string(),
+      suggested_fix: z.string(),
+      line: z.number().int().optional(),
+    })),
+  }),
+};
+```
+
+**Lives in.** §4.8.3.2 (extend the example), §11.1 (note).
+
+###### G6 · Per-SubAgent model selection
+
+**Problem.** Spec lacks guidance on per-SubAgent model choice. Critic running at `gpt-5.4-mini` 3× per turn is overkill for a structured-output task. Token cost matters.
+
+**Fix.** Add to §4.8.3.2: each SubAgent picks the cheapest model that meets its quality bar. Initial choices:
+
+| SubAgent | Model | Why |
+|----------|-------|-----|
+| Builder (top-level) | `openai:gpt-5.4-mini` | Quality matters most; the user sees it |
+| Critic | `openai:gpt-4o-mini` | Structured output via `responseFormat`; cheap and fast |
+| Reviewer (CI gate) | `openai:gpt-4o-mini` | Pass/fail per check, no creativity |
+| PM (chat-mode) | `openai:gpt-4o-mini` | Mostly summarisation / lookup |
+| SRE (chat-mode) | `openai:gpt-4o-mini` | Same |
+
+These are starting points; dial up as needed. The "fast / balanced / thorough" project setting (§11) controls *iteration count* of Critic loop, not the model.
+
+**Lives in.** §4.8.3.2 (table), §11 (cost-tier note).
+
+###### G7 · UI-message → LangChain conversion drops tool history
+
+**Problem.** Plan 02 Phase A's `convertUIMessagesToLangChain` filters non-text parts. Once we emit native `tool-call` / `tool-result` (per G4), the next turn's converter loses them — Builder's history of "what tools did I just call and what did they return" disappears. Builder will repeat tool calls or get confused.
+
+**Fix.** Extend the converter:
+- v6 `{type: "tool-call", toolCallId, toolName, args}` part on assistant message → LangChain `AIMessage({ tool_calls: [{id, name, args}] })`
+- v6 `{type: "tool-result", toolCallId, result}` part → LangChain `ToolMessage({ tool_call_id, content })`
+- Custom `data-*` parts: not sent back to the model (they're UI-only)
+
+**Lives in.** §4.8.4b ("convertUIMessagesToLangChain" subsection).
+
+##### Concerns — worth noting in the spec
+
+###### G8 · Per-request `createDeepAgent` cost
+
+Compiling a LangGraph + registering middleware happens per chat request. Cost not yet measured. If material, cache the compiled graph by `(model, tools-hash, subagents-hash, middleware-hash)` and clone state per request. Note in §4.8.5 as a deferred optimisation.
+
+###### G9 · "Lazy import" mitigation is per-isolate, not per-call
+
+§4.8.5 implies lazy import keeps non-chat fns off the deepagents bundle cost. True only on cold V8 isolates. After the first chat request, the isolate's module cache holds deepagents forever — `apps.ts`'s `listApps` running on the same isolate after a chat call still pays the loaded cost. The win is per-isolate-boot, not per-call. **Wording fix in §4.8.5.**
+
+###### G10 · `AnyBackendProtocol` shape unverified
+
+§4.8.3.4 references `backend: AnyBackendProtocol` as the wire from built-in fs tools to `crates/sandbox`. Method signatures (`readFile`, `writeFile`, `ls`, `execute`) and shape were inferred from the docs, not from `node_modules/deepagents/dist/*.d.ts`. **Phase B preflight: verify the actual exported type before implementing the sandbox adapter.**
+
+###### G11 · AI SDK v6 stream-protocol choice unjustified
+
+We use `createUIMessageStreamResponse` (v6 UI Message Stream / SSE flavour). Right for `useChat` — but spec doesn't justify it over `createDataStreamResponse` or `streamText().toTextStreamResponse()`. **Add a 1-paragraph justification in §4.8.4.**
+
+##### Minor — polish
+
+###### G12 · System prompts inline
+
+Plan 02 Phase A has `BUILDER_SYSTEM` inline in `_translator.ts`. With Critic / Reviewer / PM / SRE SubAgents coming, prompts move to `apps/zeroship-builder/src/server/_prompts.ts` (or per-agent files under `_agents/`).
+
+###### G13 · LangSmith / observability not wired
+
+§4.8.6 mentions LangSmith as a benefit. Phase B should set the env vars (`LANGSMITH_API_KEY`, `LANGSMITH_TRACING=true`) and route traces. Debugging the Critic loop without LangSmith will be miserable.
+
+###### G14 · `zod` vs `z` from `@zeroship/server`
+
+Examples use `z` from `@zeroship/server`. Our `chat.ts` uses raw `zod`. Standardise on `@zeroship/server`'s `z` (it's a re-export of the same lib but consistent across the workspace).
+
+##### Phase B preflight (B.0) work order
+
+Before adding tools or surveys, land these in order:
+
+1. **G2** plumbing — `AbortSignal` from request → translator → agent. Easy, immediate win.
+2. **G1** checkpointer — pick in-memory for dev, design Postgres-backed shape for prod. Without this, multi-turn is broken.
+3. **G3** resume protocol — design + implement client / server contract for surveys. Required for Phase B's first feature.
+4. **G7** converter extension — handle tool-call / tool-result history. Required as soon as we emit native tool-call chunks.
+5. **G10** verify `AnyBackendProtocol` shape — read the deepagents source, document the actual interface in §4.8.3.4.
+6. **G12 / G14** code hygiene — extract prompts, standardise zod import. Two-line change.
+
+Then Phase B.1 adds tools (write_file via backend + ask_survey via interruptOn), Phase B.2 adds Critic SubAgent with `responseFormat` and cheap model.
 
 ---
 
@@ -1085,6 +1280,8 @@ zeroship.builder.ask_survey(survey: Survey): Promise<SurveyResponse>
 Operationally identical to existing `sandbox_*` and `deploy_*` tools — same receipt mechanic, same streaming pause, same audit trail. Tool calls are persisted in `chat_messages.tools_jsonb`, so survey + response live in conversation history naturally.
 
 > **Implementation note (post-deepagents review).** `ask_survey` is best implemented as a deepagents `interruptOn` configuration, not a generic tool. When the agent emits a survey payload it halts (interrupt state carries the `Survey` shape); custom middleware writes the `data-survey` UI part; the user submits → the conversation re-runs with answers injected into the agent's state. This is the canonical deepagents pattern for human-in-the-loop and matches our shape exactly. Other tools' outputs (Diff, CriticRound, Issue) flow through `wrapToolCall` middleware as data parts. See §4.8.3.3 + §4.8.3.5.
+>
+> **Open gap — G3 in §4.8.9**: how the user's `SurveyResponse` actually gets back into the agent's interrupted state via `useChat`. The current handwave ("user submits → agent resumes") needs a concrete client/server protocol (custom request body shape: `{json: {resume: {token, value}}}`; server detects `body.resume` and calls `agent.invoke({}, {configurable: {thread_id}, resume: ...})`). Plan 02 Phase B.0 lands this before any survey emission.
 
 ##### Three-layer constraint enforcement
 
@@ -1677,6 +1874,8 @@ Builder writes code  ──────┐
 - If max reached without approval: change ships (unless creator opted into hard-block on Critic), with remaining concerns surfaced as soft-warning issues filed by Critic.
 
 > **Implementation (post-deepagents review).** Critic is a `SubAgent` config on `createDeepAgent`, not a separate runtime. Builder calls `task("critic", { changes })` after each commit; the SubAgent runs with its own system prompt + (smaller) model and returns `{ approved: bool, issues: [...] }`. Builder's planning loop checks the result; if not approved and iteration count < N, Builder revises and calls `task("critic")` again. The "loop" is a plain JS `while` inside Builder's planning — *not* a custom LangGraph cycle. A custom middleware wraps the `task("critic", ...)` invocation to emit `data-critic-round` UI parts (round / total / approved / issues). See §4.8.3.2.
+>
+> **Required gaps to close** (per §4.8.9): **G5** Critic SubAgent must declare `responseFormat: z.object(...)` for structured output (not free-form text parsing); **G6** Critic uses a cheaper model (`gpt-4o-mini`) than Builder.
 
 ### 11.2 Pre-deploy gate matrix
 
