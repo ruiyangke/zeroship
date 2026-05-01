@@ -9,6 +9,7 @@ extern crate self as zeroship_runtime;
 pub mod auth;
 pub mod byte_string;
 pub mod codec;
+pub mod enforce_range;
 pub mod headers;
 pub mod state;
 pub mod text_encoding;
@@ -33,6 +34,7 @@ pub(crate) mod panic_util;
 pub mod cpu_timer;
 
 // Convenience re-exports
+pub use enforce_range::{EnforceRangeU64, read_enforce_range_u64};
 pub use init::{init_v8, RequestResult, HttpResult};
 pub use modules::ModuleEntry;
 pub use state::{SharedState, RuntimeState, OpResult, FetchRequest, StreamState, SpawnedTimer, WebSocketState, WsMessage};

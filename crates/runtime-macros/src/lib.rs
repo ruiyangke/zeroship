@@ -200,6 +200,14 @@ pub(crate) fn is_byte_string(ty: &Type) -> bool {
     type_ident(ty).as_deref() == Some("ByteString")
 }
 
+/// Check if type is the `EnforceRangeU64` newtype from
+/// `zeroship_runtime::enforce_range`. Used for WebIDL `[EnforceRange]
+/// unsigned long long` args (BYOBReader.read min, BYOBRequest.respond
+/// bytesWritten). Detection by last segment ident, like ByteString.
+pub(crate) fn is_enforce_range_u64(ty: &Type) -> bool {
+    type_ident(ty).as_deref() == Some("EnforceRangeU64")
+}
+
 /// Extract the first generic type argument (e.g. `String` from `Option<String>`).
 pub(crate) fn first_generic_arg(ty: &Type) -> Option<&Type> {
     if let Type::Path(TypePath { path, .. }) = ty {
@@ -274,6 +282,30 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
                 args.get(#idx),
             ) {
                 Ok(__bytes) => ::zeroship_runtime::byte_string::ByteString::from_bytes(__bytes),
+                Err(__err) => {
+                    let __msg = v8::String::new(scope, &__err.message).unwrap();
+                    let __exc = match __err.kind {
+                        ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
+                        ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+                        _ => v8::Exception::error(scope, __msg),
+                    };
+                    scope.throw_exception(__exc);
+                    return;
+                }
+            };
+        };
+    }
+
+    // EnforceRangeU64 → WebIDL [EnforceRange] unsigned long long. Throws
+    // TypeError for NaN, ±∞, negative, and values > 2^53-1 (Number
+    // precision limit) — see streams design §XIV.8.
+    if is_enforce_range_u64(ty) {
+        return quote! {
+            let #name = match ::zeroship_runtime::enforce_range::read_enforce_range_u64(
+                scope,
+                args.get(#idx),
+            ) {
+                Ok(__v) => __v,
                 Err(__err) => {
                     let __msg = v8::String::new(scope, &__err.message).unwrap();
                     let __exc = match __err.kind {
