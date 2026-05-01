@@ -397,3 +397,232 @@ roadmap, not vapor) and unblocks signup-funnel work.
    modal (or — when invoked from inside a workspace — an inline
    confirm) calling `installSkill`.
 
+---
+
+## ISS-14 · Issues table missing — PlanCanvas reads from in-memory stub
+
+**Status:** open
+**Severity:** medium — every issue (filed by the user, the PM agent,
+the Critic, or the SRE agent) lives only in the worker's V8 isolate
+and disappears when the process restarts. Roadmap and Deployments are
+adjacent symptoms.
+**First observed:** 2026-05-01, building the Plan canvas
+(`apps/zeroship-builder/src/client/workspace/canvases/PlanCanvas.tsx`,
+spec §9.8).
+**Component:** `crates/control` + `apps/zeroship-builder/src/server/agents.ts`
+
+### Symptom
+
+Spec §9.8 calls for an Issues list per project — open / in-progress /
+done buckets, status icons, source attribution (PM / SRE / you /
+Builder), comments, and a "+ New issue" composer. The control plane
+has no `issues` (nor `milestones`) table and no API surface for
+reading or writing them:
+
+- No `GET /api/apps/:id/issues` handler.
+- No `POST /api/apps/:id/issues`, `PATCH /api/apps/:id/issues/:issue`,
+  or comment endpoints.
+- No tables: `issues`, `issue_comments`, `milestones`,
+  `milestone_issues`.
+- No agent-attribution column / event stream so the PM agent's writes
+  show up in the same list as the user's.
+
+### Workaround in use
+
+`apps/zeroship-builder/src/server/agents.ts` exposes a module-level
+`Map<appId, Issue[]>` lazily seeded with three sample issues per
+project. `listIssues({appId})` reads the map; `addIssue({appId,
+title, description})` prepends to it. The map evicts on V8 isolate
+eviction (worker LRU) so the data is best described as "ephemeral".
+
+The PlanCanvas Roadmap section attributes every issue to the first
+milestone (`v0.1`) because there's no milestone-association data.
+v0.2 / v0.3 render with empty progress bars.
+
+### Fix path
+
+1. `crates/control/src/issues.rs` — `issues`, `issue_comments`,
+   `milestones`, `milestone_issues` tables + REST handlers
+   (list/create/update/comment).
+2. Per-project `agent_attribution` enum (`pm`, `sre`, `critic`,
+   `builder`, `user`) so the PlanCanvas can render the right source
+   chip.
+3. `apps/zeroship-builder/src/server/agents.ts` — replace the in-
+   memory Map with proxy calls to the new endpoints. Same wire shape
+   (single-input objects).
+4. Wire the PM agent's tool calls (file-issue, transition-status,
+   comment) to those endpoints so its writes flow into the same list.
+
+---
+
+## ISS-15 · Deploy-history table missing — PlanCanvas shows current deploy only
+
+**Status:** open
+**Severity:** medium — rollback is impossible without history; a
+multi-environment release narrative (v0.11 → v0.12) is the entire
+point of spec §9.8 Deployments.
+**First observed:** 2026-05-01, building the Plan canvas.
+**Component:** `crates/control` (deploy lifecycle)
+
+### Symptom
+
+The control plane stores a single `deploy_hash` field on the `apps`
+row — the most recent successful deploy. There is no `deploys` table,
+so:
+
+- No way to list past deploys with timestamp + author + scorecard +
+  changelog (spec §9.8 mock).
+- No `POST /api/apps/:id/deploys/:hash/rollback` handler.
+- No diff-vs-prior view, no per-deploy linked issues.
+
+### Workaround in use
+
+`PlanCanvas` Deployments section renders a single "current deploy"
+row when `app.deploy_hash` is set. The hash is shown short (12 chars).
+A trailing italic note points at this issue. Empty state ("No deploys
+yet — ship something first.") fires when `deploy_hash` is null.
+
+### Fix path
+
+1. `crates/control/src/deploys.rs` — `deploys` table (id, app_id,
+   hash, author, message, scorecard_snapshot, created_at,
+   superseded_at, status), with `GET /api/apps/:id/deploys` and
+   `POST /api/apps/:id/deploys/:hash/rollback`.
+2. Wire `deployApp` (control plane) to insert a row on success and
+   set `superseded_at` on the previous live row.
+3. `apps/zeroship-builder/src/server/agents.ts` — `listDeploys
+   ({appId})` proxy + replace the single-row UI with a list.
+
+---
+
+## ISS-16 · Critic → quality scoreboard wiring missing
+
+**Status:** open
+**Severity:** medium — HealthCanvas's quality grid ships with hardcoded
+scores. Spec §11.1 promises a live scorecard updated by the Critic
+loop; that wire doesn't exist yet.
+**First observed:** 2026-05-01, building the Health canvas
+(`apps/zeroship-builder/src/client/workspace/canvases/HealthCanvas.tsx`,
+spec §9.9 + §11.1).
+**Component:** `apps/zeroship-builder/src/server/_critic.ts` →
+`apps/zeroship-builder/src/server/agents.ts`
+
+### Symptom
+
+Spec §11.1 names seven dimensions (correctness, security,
+performance, accessibility, ux_completeness, responsive, code_health)
+that the Critic should grade on every Builder turn. The Critic
+implementation in `_critic.ts` returns an internal verdict
+(`approved` / `needs_revision` / `comments`) but does **not**:
+
+- Emit a per-dimension grade.
+- Persist a per-app "latest scorecard" anywhere readable from the
+  client.
+- Stream a `quality-update` chunk that the HealthCanvas could
+  subscribe to in real time.
+
+### Workaround in use
+
+`apps/zeroship-builder/src/server/agents.ts` exposes
+`getQualityScores({appId})` returning a hardcoded snapshot
+(per-dimension grade + rationale + null `last_run_at`). HealthCanvas
+renders that snapshot with overall + per-dimension cards. Grades are
+the same for every app for now.
+
+### Fix path
+
+1. Extend `_critic.ts` verdict shape with a `dimensions` array that
+   matches `QualityDimension`.
+2. Persist the most recent scorecard alongside the deploy row (see
+   ISS-15) so HealthCanvas can read it as part of the deploy detail.
+3. Stream a `quality-update` chunk on the chat wire after every
+   Critic round, with the live grade snapshot. HealthCanvas
+   subscribes via the same SSE path as ChatRail.
+4. Replace the hardcoded `defaultScores()` with a query against the
+   persisted scorecard.
+
+---
+
+## ISS-17 · Incidents table missing — HealthCanvas shows empty state only
+
+**Status:** open
+**Severity:** medium — spec §9.9 promises a timeline of incidents
+(detection → mitigated → resolved) with a root-cause analysis from
+the SRE agent. Without a backing table the SRE agent has nowhere to
+file its findings.
+**First observed:** 2026-05-01, building the Health canvas.
+**Component:** `crates/control` + SRE agent harness
+
+### Symptom
+
+The HealthCanvas Incidents section is supposed to render a timeline
+of past incidents per app: detection time, root cause, fix applied,
+downtime, scorecard delta. There's no `incidents` table, no SRE
+agent yet (the agent shape is sketched in the spec but isn't
+implemented), and no event source to derive incidents from
+(uptime probes, error-rate threshold breaches).
+
+### Workaround in use
+
+HealthCanvas Incidents section ships as a static empty state styled
+with the editorial "all quiet" copy:
+
+> "All quiet — no incidents on record."
+
+A trailing italic line points readers at this issue.
+
+### Fix path
+
+1. `crates/control/src/incidents.rs` — `incidents` table (id, app_id,
+   detected_at, mitigated_at, resolved_at, root_cause, fix_applied,
+   scorecard_delta, severity, agent_id) + REST handlers.
+2. SRE agent harness (separate sub-agent in
+   `apps/zeroship-builder/src/server/`) that watches the metering
+   stream + uptime probes and files incident records.
+3. `getIncidents({appId})` proxy in `agents.ts` and a real timeline
+   UI in HealthCanvas (replace the empty state).
+
+---
+
+## ISS-18 · Performance metering pipeline missing — HealthCanvas shows placeholders
+
+**Status:** open
+**Severity:** medium — the HealthCanvas Performance section is fully
+gated on metering data that doesn't flow from the worker yet.
+**First observed:** 2026-05-01, building the Health canvas.
+**Component:** `crates/runtime` (instrumentation) + `crates/control`
+(aggregation API)
+
+### Symptom
+
+Spec §9.9 calls for live charts: requests/sec, p50/p95/p99 latency,
+error rate, over 24h / 7d / 30d, filterable by route. The platform
+has the `zeroship.meter.*` primitive in `crates/plugin-*` but:
+
+- The runtime doesn't auto-emit per-request latency / status counters.
+- There's no aggregation endpoint
+  (`GET /api/apps/:id/perf?window=24h&route=/api/login`).
+- There's no time-series store wired up (Prometheus / VictoriaMetrics /
+  ClickHouse — choice deferred).
+
+### Workaround in use
+
+HealthCanvas Performance section renders three placeholder tiles
+(p95 latency · error rate · requests, all 24h) with em-dashes and
+the hint "Connect a deploy to see live performance." A trailing
+italic line points at this issue.
+
+### Fix path
+
+1. Auto-instrument the worker request handler to emit per-request
+   `latency_ms`, `status_class`, `route` counters via
+   `zeroship.meter.*`.
+2. Pick the time-series backend and wire writes from the metering
+   pipe.
+3. `crates/control/src/perf.rs` — query handler returning bucketed
+   latency percentiles + error rate + RPS for the window.
+4. `apps/zeroship-builder/src/server/agents.ts` —
+   `getPerformance({appId, window})` proxy.
+5. Replace the placeholder tiles with real charts (lightweight SVG
+   sparkline, no chart-lib dependency).
+
