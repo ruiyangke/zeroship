@@ -216,7 +216,18 @@ impl K8sBackend {
     /// forever; better to delete them and let the user re-create.
     /// PVCs (per-user) are intentionally NOT deleted — they're
     /// long-lived data.
+    ///
+    /// **Gated behind `SANDBOX_K8S_STARTUP_ORPHAN_CLEANUP`.** This
+    /// label-selector deletes every sandbox-agent Pod in the
+    /// namespace; with multiple controller replicas (HA), the first
+    /// to start nukes every other replica's active sandboxes. The
+    /// flag defaults to `false` so HA is safe by default; single-
+    /// replica operators must opt in. For HA, run a separate prune
+    /// job that uses Pod age + a per-controller-instance Lease.
     pub async fn cleanup_orphans_at_startup(&self) -> Result<usize, String> {
+        if !self.cfg.k8s.startup_orphan_cleanup {
+            return Ok(0);
+        }
         let ns = self.cfg.k8s.namespace.clone();
         // List all sandbox-agent Pods + ConfigMaps in the namespace.
         let pods = run_kubectl(&[
@@ -406,12 +417,12 @@ impl K8sBackend {
             // Track immediately so cleanup can kill it on later failure.
             guard.port_forward_local_port = Some(port);
             let url = format!("http://127.0.0.1:{port}");
-            wait_for_agent_livez(&url, Duration::from_secs(20))?;
+            wait_for_agent_livez(&url, Duration::from_secs(20)).await?;
             (url, Some(pf), Some(port))
         } else {
             let ip = pod_ip(pod_name, ns).await?;
             let url = format!("http://{ip}:7777");
-            wait_for_agent_livez(&url, Duration::from_secs(20))?;
+            wait_for_agent_livez(&url, Duration::from_secs(20)).await?;
             (url, None, None)
         };
         // Move the Child into the guard so cleanup-on-error can
@@ -634,9 +645,15 @@ impl ReleaseCreating {
 
 impl Drop for ReleaseCreating {
     fn drop(&mut self) {
-        if let Ok(mut g) = self.set.lock() {
-            g.remove(&self.user_id);
-        }
+        // Recover from poison: a panic while another thread held
+        // the lock would otherwise lock this user out **forever**
+        // (every `lock()` returns Err once poisoned; the user_id
+        // stays in the set; every future `create` for that user
+        // fails with "concurrent create in progress"). The set is
+        // a HashSet of strings — no invariant can be broken — so
+        // `into_inner()` recovery is always safe.
+        let mut g = self.set.lock().unwrap_or_else(|p| p.into_inner());
+        g.remove(&self.user_id);
     }
 }
 
@@ -735,9 +752,17 @@ struct AgentResponse {
 }
 
 /// Async wrapper that signs + sends to the in-VM agent **without
-/// blocking the ntex worker**. The signing itself is fast and stays
-/// on the calling thread; the actual ureq call is moved onto a
-/// `compio::runtime::spawn_blocking` thread.
+/// blocking the ntex worker**. ureq is sync; the call is moved onto
+/// a `compio::runtime::spawn_blocking` thread.
+///
+/// **Signing happens INSIDE the closure**, not on the calling
+/// thread. This matters because the agent's verifier rejects
+/// signatures whose timestamp is more than 5s skewed from now.
+/// If we signed on the caller and the spawn_blocking pool was
+/// saturated (every worker busy on a 60s ureq), the signed
+/// request would sit in the queue past the 5s skew window and
+/// 401 on arrival. Generating `ts`/`nonce`/`signature` after
+/// the queue drains preserves freshness.
 ///
 /// Previously the call sites used the sync `http_signed` directly —
 /// every `ureq::call()` could block the ntex worker for up to 60s,
@@ -757,17 +782,20 @@ async fn http_signed_async(
         .unwrap_or_else(|| "/".to_string());
     let path = path.split('?').next().unwrap_or("/").to_string();
 
-    let ts = unix_now();
-    let nonce = random_nonce()?;
-    let signature = sig::sign(signing_key, method, &path, body, ts, &nonce);
-
-    // Move all the request data into the closure: ureq is sync.
-    // SigningKey already used; not captured.
+    // Move all the request data into the closure. SigningKey is
+    // Clone (32 bytes); cloning is cheap and avoids a lifetime
+    // dance with the pool's `'static` requirement.
+    let signing_key = signing_key.clone();
     let method = method.to_string();
     let url = url.to_string();
     let body = body.to_vec();
-    let nonce = nonce.to_string();
     compio::runtime::spawn_blocking(move || {
+        // Generate ts/nonce/signature **here**, after the queue has
+        // drained, so the signature is fresh against the agent's 5s
+        // skew window.
+        let ts = unix_now();
+        let nonce = random_nonce()?;
+        let signature = sig::sign(&signing_key, &method, &path, &body, ts, &nonce);
         compio_blocking_call(&method, &url, &body, ts, &nonce, &signature)
     })
     .await
@@ -1133,16 +1161,35 @@ fn start_port_forward(pod: &str, namespace: &str, local_port: u16) -> Result<Chi
         .map_err(|e| format!("spawn port-forward: {e}"))
 }
 
-fn wait_for_agent_livez(base_url: &str, timeout: Duration) -> Result<(), String> {
+/// Poll the agent's `/livez` until it returns 200, or until the
+/// deadline expires.
+///
+/// **Async** — uses `compio::time::sleep` between polls and
+/// `compio::runtime::spawn_blocking` for each ureq call. The
+/// previous version used `std::thread::sleep` and `ureq::call()`
+/// directly from this `async fn` running on an ntex worker, which
+/// blocked the worker for up to `timeout` seconds during every Pod
+/// create. With multiple concurrent creates that's an O(N×timeout)
+/// stall on the entire ntex pool.
+async fn wait_for_agent_livez(base_url: &str, timeout: Duration) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
     let url = format!("{base_url}/livez");
     while Instant::now() < deadline {
-        if let Ok(resp) = ureq::get(&url).timeout(Duration::from_millis(500)).call() {
-            if resp.status() == 200 {
-                return Ok(());
-            }
+        let probe_url = url.clone();
+        let status = compio::runtime::spawn_blocking(move || {
+            ureq::get(&probe_url)
+                .timeout(Duration::from_millis(500))
+                .call()
+                .map(|r| r.status())
+                .ok()
+        })
+        .await
+        .ok()
+        .flatten();
+        if status == Some(200) {
+            return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(150));
+        compio::time::sleep(Duration::from_millis(150)).await;
     }
     Err(format!("agent at {base_url} never returned 200 on /livez"))
 }

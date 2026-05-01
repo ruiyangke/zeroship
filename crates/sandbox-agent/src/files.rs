@@ -368,16 +368,15 @@ impl Workspace {
                 let mtime_unix: u64 = st.st_mtime.try_into().unwrap_or(0);
 
                 if kind == "dir" {
-                    out.push(FileEntry {
-                        path: rel.clone(),
-                        kind: "dir",
-                        size: 0,
-                        mtime_unix,
-                    });
-                    // Open the child dir relative to the parent
-                    // dirfd with sandbox_open_how. RESOLVE_BENEATH
-                    // + RESOLVE_NO_SYMLINKS + O_NOFOLLOW + O_DIRECTORY
-                    // makes this atomic w.r.t. type-swap attacks.
+                    // Open the child dir FIRST. If openat2 fails the
+                    // entry was deleted (or swapped to a symlink)
+                    // between getdents64 and now — skip it entirely
+                    // rather than report a `dir` entry that can't
+                    // be entered. The previous order (push, then
+                    // open) left stale dir entries with size:0 in
+                    // the response when the dir vanished mid-walk;
+                    // callers using the response to mirror state
+                    // would see a present-but-empty directory.
                     let how = sandbox_open_how(
                         OFlag::O_RDONLY
                             | OFlag::O_DIRECTORY
@@ -386,10 +385,16 @@ impl Workspace {
                     );
                     let raw = match openat2(parent_raw, name, how) {
                         Ok(r) => r,
-                        Err(_) => continue, // can't enter; skip
+                        Err(_) => continue, // gone or swapped; skip cleanly
                     };
                     // SAFETY: fresh fd from openat2.
                     let child = unsafe { OwnedFd::from_raw_fd(raw) };
+                    out.push(FileEntry {
+                        path: rel.clone(),
+                        kind: "dir",
+                        size: 0,
+                        mtime_unix,
+                    });
                     stack.push((child, rel));
                 } else {
                     out.push(FileEntry {

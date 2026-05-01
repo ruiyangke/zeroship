@@ -97,6 +97,23 @@ fn infer_content_type(path: &str) -> &'static str {
     }
 }
 
+// ─── GET /readyz ──────────────────────────────────────────────────
+//
+// 200 when the backend is healthy (last probe succeeded), 503
+// otherwise. Unauthenticated — kubelet probes don't have the
+// bearer token, and the response carries no sensitive info beyond
+// "backend reachable / not reachable" which can be inferred from
+// 5xx response patterns anyway.
+
+pub async fn readyz(state: State) -> HttpResponse {
+    if state.backend.is_healthy() {
+        HttpResponse::Ok().json(&serde_json::json!({"status": "ready"}))
+    } else {
+        HttpResponse::ServiceUnavailable()
+            .json(&serde_json::json!({"status": "backend-unhealthy"}))
+    }
+}
+
 // ─── POST /sandboxes ──────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]

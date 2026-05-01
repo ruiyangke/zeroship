@@ -158,14 +158,28 @@ pub async fn run(cmd: &str, cwd: &str, timeout_ms: u64) -> Result<ExecOutput, St
     // the reaper picks it up, which is exactly what we want.
     drop(child);
 
-    // Reader buffers (shared with the spawn_blocking tasks).
+    // Reader buffers (shared with the spawn_blocking tasks). The
+    // `should_stop` flags are how this function tells the reader
+    // tasks to abandon their pipes — `compio::Task` doesn't cancel
+    // on drop (the OS thread keeps reading), so we instead let the
+    // reader exit its loop on the next iteration after the flag is
+    // set. The kernel `read()` is still blocked, but no more bytes
+    // are appended to the buffer; `take_buf` below moves the data
+    // out and the reader's subsequent appends (when `read` finally
+    // returns) hit a `should_stop` check and bail.
     let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let stdout_trunc: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let stderr_trunc: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let stdout_stop: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let stderr_stop: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
-    let stdout_task = spawn_stdout_reader(stdout, stdout_buf.clone(), stdout_trunc.clone());
-    let stderr_task = spawn_stderr_reader(stderr, stderr_buf.clone(), stderr_trunc.clone());
+    let stdout_task = spawn_stdout_reader(
+        stdout, stdout_buf.clone(), stdout_trunc.clone(), stdout_stop.clone(),
+    );
+    let stderr_task = spawn_stderr_reader(
+        stderr, stderr_buf.clone(), stderr_trunc.clone(), stderr_stop.clone(),
+    );
 
     // Block on the reaper-routed exit channel inside spawn_blocking.
     // The reaper sends the exit code (or `-(sig as i32)` for
@@ -187,13 +201,22 @@ pub async fn run(cmd: &str, cwd: &str, timeout_ms: u64) -> Result<ExecOutput, St
     // Reader threads should see EOF promptly now that the pgroup is
     // dead. Bound the wait so a leaked-fd grandchild that survived
     // SIGKILL (e.g. uninterruptible sleep on NFS) can't pin the
-    // request indefinitely. After the deadline we abandon the
-    // readers — `take_buf` below recovers whatever they've buffered.
+    // request indefinitely. If the deadline fires, set the
+    // `should_stop` flag so the reader task — which compio's
+    // `spawn_blocking` does NOT cancel on Task drop — bounds its
+    // memory growth: it will keep reading the pipe (kernel-blocked,
+    // can't help), but `drain_into` checks the flag before
+    // appending and silently drops bytes once set. The buffer
+    // we've already accumulated is moved out by `take_buf` below.
     if let Some(t) = stdout_task {
-        let _ = race_with_deadline(t, Duration::from_secs(2)).await;
+        if race_with_deadline(t, Duration::from_secs(2)).await.is_none() {
+            stdout_stop.store(true, Ordering::Relaxed);
+        }
     }
     if let Some(t) = stderr_task {
-        let _ = race_with_deadline(t, Duration::from_secs(2)).await;
+        if race_with_deadline(t, Duration::from_secs(2)).await.is_none() {
+            stderr_stop.store(true, Ordering::Relaxed);
+        }
     }
 
     // Snapshot buffers. Tolerate a poisoned mutex (reader thread
@@ -322,9 +345,10 @@ fn spawn_stdout_reader(
     pipe: Option<ChildStdout>,
     buf: Arc<Mutex<Vec<u8>>>,
     trunc: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
 ) -> Option<compio::runtime::Task<Result<(), Box<dyn std::any::Any + Send>>>> {
     pipe.map(|p| {
-        compio::runtime::spawn_blocking(move || drain_into(p, &buf, &trunc))
+        compio::runtime::spawn_blocking(move || drain_into(p, &buf, &trunc, &stop))
     })
 }
 
@@ -332,9 +356,10 @@ fn spawn_stderr_reader(
     pipe: Option<ChildStderr>,
     buf: Arc<Mutex<Vec<u8>>>,
     trunc: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
 ) -> Option<compio::runtime::Task<Result<(), Box<dyn std::any::Any + Send>>>> {
     pipe.map(|p| {
-        compio::runtime::spawn_blocking(move || drain_into(p, &buf, &trunc))
+        compio::runtime::spawn_blocking(move || drain_into(p, &buf, &trunc, &stop))
     })
 }
 
@@ -342,17 +367,41 @@ fn spawn_stderr_reader(
 /// the cap is hit we keep reading (so the writer doesn't block on a
 /// full pipe) but stop appending; `trunc` is flipped.
 ///
+/// **`stop` is the deadline-cancellation signal.** compio's
+/// `spawn_blocking` does NOT cancel the OS thread on Task drop —
+/// the kernel `read()` syscall keeps the thread blocked until the
+/// pipe closes. The parent `run()` flips `stop` when the post-kill
+/// reader-join deadline fires; subsequent loop iterations bail
+/// without writing into the parent-owned buffer (which has by then
+/// been drained via `take_buf`). The blocked `read()` itself we
+/// can't cancel, but at least we stop growing the per-stalled
+/// reader's heap allocation forever.
+///
 /// Tolerates a poisoned Mutex by recovering the inner Vec — important
-/// because the parent task uses `take_buf` which itself recovers. If
+/// because the parent uses `take_buf` which itself recovers. If
 /// THIS function panicked on poison, the reader thread would die and
 /// the pipe might fill up, blocking the child.
-fn drain_into<R: Read>(mut stream: R, buf: &Mutex<Vec<u8>>, trunc: &AtomicBool) {
+fn drain_into<R: Read>(
+    mut stream: R,
+    buf: &Mutex<Vec<u8>>,
+    trunc: &AtomicBool,
+    stop: &AtomicBool,
+) {
     let mut chunk = [0u8; CHUNK_SIZE];
     let mut capped = false;
     loop {
+        // Cheap check on every iteration — if the parent has
+        // abandoned us (deadline-fired post-kill), bail before
+        // touching the (potentially-already-taken) buffer.
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
         match stream.read(&mut chunk) {
             Ok(0) => return, // EOF
             Ok(n) => {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
                 if !capped {
                     let mut b = match buf.lock() {
                         Ok(g) => g,

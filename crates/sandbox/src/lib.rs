@@ -16,6 +16,7 @@ pub mod handlers;
 pub mod registry;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::backend::Backend;
 use crate::config::SandboxConfig;
@@ -47,10 +48,37 @@ impl AppState {
             Ok(n) => eprintln!("[sandbox] startup cleanup: removed {n} orphan(s)"),
             Err(e) => eprintln!("[sandbox] startup cleanup failed (non-fatal): {e}"),
         }
-        Ok(Arc::new(Self {
+        let state = Arc::new(Self {
             config,
             sandboxes: SandboxRegistry::new(),
             backend,
-        }))
+        });
+        // Background re-probe so /readyz reflects current backend
+        // state. Without this, the `is_healthy()` flag is set once
+        // at boot and stays true even if kubectl auth expires or
+        // the cluster goes unreachable.
+        start_health_loop(state.clone());
+        Ok(state)
     }
+}
+
+/// Periodic backend probe. `probe()` updates the `healthy` flag
+/// that `/readyz` exposes; without this loop the flag is set once
+/// at boot and stays stale forever (e.g. true after kubectl auth
+/// has expired). Re-probes every 30s on a detached compio task.
+///
+/// We don't wrap async calls in `catch_unwind` — `probe` is
+/// designed to return `Result`, not panic. If it does panic the
+/// task dies and re-probes stop; that's a real bug worth crashing
+/// loudly rather than papering over.
+fn start_health_loop(state: Arc<AppState>) {
+    compio::runtime::spawn(async move {
+        loop {
+            compio::time::sleep(Duration::from_secs(30)).await;
+            if let Err(e) = state.backend.probe().await {
+                eprintln!("[sandbox] health re-probe failed: {e}");
+            }
+        }
+    })
+    .detach();
 }

@@ -3,6 +3,46 @@
 
 use std::path::PathBuf;
 
+use zeroize::Zeroizing;
+
+/// Wrapper around the bearer token string. Two properties:
+///   1. **`Debug`** prints `<redacted, len=N>` instead of the bytes,
+///      so any panic backtrace / debug log / error chain that
+///      formats `SandboxConfig` with `{:?}` doesn't dump the token
+///      to stderr.
+///   2. **`Zeroizing`** scrubs the heap allocation on drop, so a
+///      core dump or `/proc/<pid>/mem` read after process exit
+///      doesn't trivially recover the token. (Live-process memory
+///      reads are still a concern, but at least the post-mortem
+///      surface is closed.)
+#[derive(Clone)]
+pub struct ApiToken(Zeroizing<String>);
+
+impl ApiToken {
+    pub fn new<S: Into<String>>(s: S) -> Self {
+        Self(Zeroizing::new(s.into()))
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl std::fmt::Debug for ApiToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.is_empty() {
+            f.write_str("<unset>")
+        } else {
+            write!(f, "<redacted, len={}>", self.0.len())
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SandboxConfig {
     /// Port the HTTP API listens on. `SANDBOX_PORT` (default 9091).
@@ -10,11 +50,14 @@ pub struct SandboxConfig {
 
     /// Bearer token for the HTTP API. `SANDBOX_TOKEN`. Empty value
     /// disables auth and is **rejected at startup** unless the
-    /// operator also set `SANDBOX_ALLOW_NO_AUTH=1` (dev opt-in).
+    /// operator also set `SANDBOX_ALLOW_NO_AUTH=true` (dev opt-in).
     /// Production deployments without a token simply refuse to
     /// boot, so an unconfigured pod can't accidentally become a
     /// public RCE.
-    pub token: String,
+    ///
+    /// Wrapped in [`ApiToken`] so debug output is redacted and the
+    /// heap allocation is zeroed on drop.
+    pub token: ApiToken,
 
     /// Backend selector. `SANDBOX_BACKEND=docker|k8s` (default docker).
     pub backend: String,
@@ -109,19 +152,36 @@ pub struct K8sConfig {
     /// buildable later. `SANDBOX_K8S_USER_HOME_STORAGE_CLASS`
     /// (default empty).
     pub user_home_storage_class: Option<String>,
+
+    /// On controller startup, delete every Pod + ConfigMap labeled
+    /// `app.kubernetes.io/name=sandbox-agent` in the namespace.
+    /// Useful for single-replica deployments to clean up after a
+    /// crash (per-sandbox signing keys live only in process
+    /// memory; orphan Pods would 401 every signed request from the
+    /// new controller forever).
+    ///
+    /// **Disable in HA / multi-replica deployments.** With more
+    /// than one controller replica running, the first one to come
+    /// up after a deploy nukes every other replica's active
+    /// sandboxes — fleet-wide outage on every rolling restart. For
+    /// HA, leave this off and run a separate prune job that
+    /// considers Pod age / heartbeat Lease.
+    ///
+    /// `SANDBOX_K8S_STARTUP_ORPHAN_CLEANUP` (default `false`).
+    pub startup_orphan_cleanup: bool,
 }
 
 impl SandboxConfig {
     pub fn from_env() -> Result<Self, String> {
         let port = parse_env("SANDBOX_PORT", 9091u16)?;
-        let token = std::env::var("SANDBOX_TOKEN").unwrap_or_default();
+        let token_raw = std::env::var("SANDBOX_TOKEN").unwrap_or_default();
         // Fail-closed: an unset/empty token disables auth. We refuse
         // to start in that state unless the operator opts in via
         // SANDBOX_ALLOW_NO_AUTH=true. Tighten further: when a token
         // is set, require ≥32 bytes — anything shorter is brute-
         // forceable on a public endpoint.
         let allow_no_auth = parse_env("SANDBOX_ALLOW_NO_AUTH", false)?;
-        if token.is_empty() && !allow_no_auth {
+        if token_raw.is_empty() && !allow_no_auth {
             return Err(
                 "SANDBOX_TOKEN is empty; refusing to start. \
                  Set SANDBOX_TOKEN to a strong (≥32 byte) random value, \
@@ -129,13 +189,14 @@ impl SandboxConfig {
                     .to_string(),
             );
         }
-        if !token.is_empty() && token.len() < 32 {
+        if !token_raw.is_empty() && token_raw.len() < 32 {
             return Err(format!(
                 "SANDBOX_TOKEN is too short ({} bytes; need ≥ 32). \
                  Generate with: head -c 32 /dev/urandom | base64",
-                token.len()
+                token_raw.len()
             ));
         }
+        let token = ApiToken::new(token_raw);
         let backend = std::env::var("SANDBOX_BACKEND").unwrap_or_else(|_| "docker".to_string());
         if !matches!(backend.as_str(), "docker" | "k8s") {
             return Err(format!(
@@ -179,6 +240,7 @@ impl SandboxConfig {
             user_home_size: std::env::var("SANDBOX_K8S_USER_HOME_SIZE")
                 .unwrap_or_else(|_| "5Gi".to_string()),
             user_home_storage_class,
+            startup_orphan_cleanup: parse_env("SANDBOX_K8S_STARTUP_ORPHAN_CLEANUP", false)?,
         };
 
         Ok(Self {

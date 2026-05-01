@@ -208,13 +208,28 @@ pub async fn metrics(state: State) -> HttpResponse {
         .body(body)
 }
 
-pub async fn version_info(state: State) -> HttpResponse {
+/// `GET /version` — agent version + protocol + capabilities.
+/// **Auth-gated.** Previous versions were unauthenticated, which
+/// leaked `git_commit` (CVE-matchable build identifier),
+/// `capabilities` (API surface enumeration), and
+/// `started_at_unix` (process-age correlation) to anything that
+/// reached :7777. Cluster NetworkPolicy is the primary gate, but
+/// adding the agent-level Ed25519 check is free and closes the
+/// information-disclosure surface as defense-in-depth.
+///
+/// The controller calls this once per session and has the key, so
+/// the user-facing impact is zero. `pubkey_fingerprint` is also
+/// included now so operators can confirm the agent is verifying
+/// with the expected trust anchor.
+pub async fn version_info(req: HttpRequest, state: State) -> HttpResponse {
+    if !verify_signed(&req, &[], &state) { return unauthorized(); }
     HttpResponse::Ok().json(&json!({
         "agent_version": version::AGENT_VERSION,
         "git_commit": version::GIT_COMMIT,
         "protocol_version": version::PROTOCOL_VERSION,
         "capabilities": version::CAPABILITIES,
         "started_at_unix": state.started_at_unix,
+        "pubkey_fingerprint": crate::sig::pubkey_fingerprint(state.verifier.pubkey()),
     }))
 }
 
@@ -299,6 +314,10 @@ pub async fn exec_cmd(
 
 pub async fn file_tree(req: HttpRequest, state: State) -> HttpResponse {
     if !verify_signed(&req, &[], &state) { return unauthorized(); }
+    // Read paths drain too: a 50,000-entry tree walk eats real CPU
+    // and serialization budget; refusing during shutdown lets ntex's
+    // 30s drain window actually drain.
+    if state.is_draining() { return draining(); }
 
     match state.workspace.file_tree() {
         Ok(tree) => HttpResponse::Ok().json(&tree),
@@ -345,6 +364,7 @@ pub async fn read_file(
     path: web::types::Path<String>,
 ) -> HttpResponse {
     if !verify_signed(&req, &[], &state) { return unauthorized(); }
+    if state.is_draining() { return draining(); }
 
     let p = path.into_inner();
     match state.workspace.read_file(&p) {
@@ -582,10 +602,21 @@ mod tests {
     }
 
     #[ntex::test]
+    async fn version_info_requires_auth() {
+        let (state, _d) = make_state("ver_unauth");
+        let app = make_app!(state);
+        // Unsigned GET is now rejected (the previous behavior leaked
+        // git_commit + capabilities to anything that reached :7777).
+        let req = test::TestRequest::get().uri("/version").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[ntex::test]
     async fn version_info_has_required_fields() {
         let (state, _d) = make_state("ver");
         let app = make_app!(state);
-        let req = test::TestRequest::get().uri("/version").to_request();
+        let req = signed("GET", "/version").to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
@@ -596,6 +627,11 @@ mod tests {
         let cap_strs: Vec<&str> = caps.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(cap_strs.contains(&"auth.ed25519-v1"));
         assert_eq!(body["started_at_unix"], 1234);
+        // pubkey_fingerprint is included for ops verification —
+        // 16 hex chars (8 bytes of SHA-256(pubkey)).
+        let fp = body["pubkey_fingerprint"].as_str().unwrap();
+        assert_eq!(fp.len(), 16);
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     // ─── Auth: 401 on missing / replayed / tampered ───────────

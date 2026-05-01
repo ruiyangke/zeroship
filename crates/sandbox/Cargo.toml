@@ -24,6 +24,10 @@ hex = { workspace = true }
 sha2 = { workspace = true }
 mimalloc = { workspace = true }
 subtle = "2"
+# Wraps `SandboxConfig.token` so debug output is redacted and the
+# heap allocation is zeroed on drop (defense vs core-dump /
+# /proc/<pid>/mem post-mortem reads).
+zeroize = { version = "1", features = ["alloc"] }
 bytes = { workspace = true }
 # Ed25519 keypair generation for the K8s backend (controller-side
 # private key; only the public half ships to the Pod).

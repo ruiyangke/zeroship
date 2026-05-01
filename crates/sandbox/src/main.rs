@@ -66,6 +66,21 @@ async fn main() -> std::io::Result<()> {
                         web::HttpResponse::Ok().body(r#"{"status":"ok"}"#)
                     })),
             )
+            // Liveness — process is up. Always 200; load balancers
+            // should restart on repeated 5xx, not on /readyz=503.
+            .service(
+                web::resource("/livez")
+                    .route(web::get().to(|| async {
+                        web::HttpResponse::Ok().body(r#"{"status":"ok"}"#)
+                    })),
+            )
+            // Readiness — backend is reachable. Returns 503 when
+            // the backend probe most recently failed (kubectl auth
+            // expired, cluster unreachable, etc.). LBs / orchestrators
+            // route around the controller until the backend recovers.
+            .service(
+                web::resource("/readyz").route(web::get().to(handlers::readyz)),
+            )
             .service(
                 web::resource("/sandboxes")
                     .route(web::post().to(handlers::create_sandbox))
