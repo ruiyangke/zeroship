@@ -159,9 +159,53 @@ encoder hand-off, WPT regression for the streams suite.
 
 ### Status
 
-Draft v2. Post-implementation: file as a date-prefixed ADR
-under `docs/decisions/`. The Decisions table below is the
-immutable contract; everything else is illustrative.
+Draft v2 — **partial implementation in progress** on
+`feature/streams-native`. Foundation landed (commits below); the
+14 IDL classes are in scope but only the two QueuingStrategy
+classes are shipped so far.
+
+**Landed (feature/streams-native):**
+
+| Commit | Scope |
+|--------|-------|
+| `37504ad4` | runtime-macros: `EnforceRangeU64` newtype + extraction (§XIV.8) |
+| `98d9b369` | runtime: `OpResult::JsValue` + `ResolveValue` (D-3 / §VII.5) |
+| `c4537d1a` | streams: queue + slots + budget primitives (§V.3, §VI.1, §XII / D-18) |
+| `2b0047c7` | streams: `enqueue_microtask` + `upon_promise` + `set_promise_is_handled_to_true` (D-12 / §VII.3-§VII.4) |
+| `5a0bee5d` | streams: `ByteLengthQueuingStrategy` + `CountQueuingStrategy` (§6.2, §6.3, D-17) |
+
+**Test count this branch:** 86 passing across 5 test files
+(33 v8_class_smoke + 24 codec + 1 wpt_headers + 12 streams_native +
+16 streams). 9 unit tests inside the streams module
+(queue + budget). All previous baseline tests remain green.
+
+**Not yet shipped** — the bulk of the design:
+- `ReadableStream`, `WritableStream`, `TransformStream` and
+  associated controllers/readers/writers (II.1–II.12) — pending.
+  All foundation primitives they need (slots, queues, microtasks,
+  promise reactions, OpResult::JsValue) are already in place.
+- `pipeTo` / `pipeThrough` / `tee` / async iterator (§IX, §X, §IV)
+  — pending; depends on the public stream classes.
+- Byte streams / BYOB (§3.7-§3.8, D-6, D-15) — pending.
+- WPT vendor + runner (§XVI, §XXI) — pending.
+- Polyfill cutover (D-19) — pending; native and polyfill coexist
+  while the implementation lands.
+
+**Macro deviation:** §XIV.1's `#[v8_async_method]` extension is
+deferred. Per §XIV.6, plain methods returning `v8::Local<v8::Promise>`
+already work through the existing `Local` arm of `gen_call_return`.
+Rather than build a full async-fn-to-Promise wrapper, stream methods
+will allocate a `v8::PromiseResolver` synchronously, push a future
+to `state.spawned_ops`, and the runtime loop drives the promise via
+`OpResult::JsValue` (D-3, already wired). This matches the spec's
+"either store-and-resolve-synchronously or route through compio"
+pattern from §VII.5 and avoids the borrow-across-await machinery
+in §XIV.1. If a future stream method genuinely needs `&mut self`
+across `.await`, the macro can grow then.
+
+Post-completion: file as a date-prefixed ADR under
+`docs/decisions/`. The Decisions table below is the immutable
+contract; everything else is illustrative.
 
 ### Decisions (settled)
 
