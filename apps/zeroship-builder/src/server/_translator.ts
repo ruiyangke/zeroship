@@ -137,9 +137,30 @@ export async function buildTranslatedStream(
     apiKey,
   });
 
-  // Phase A: empty tools array. Phase B will inject write_file / propose_diff
-  // / ask_survey tools and the translator's switch below will gain
-  // `on_tool_*` handling that emits tool-input-* / tool-output-* chunks.
+  const threadId = input.id ?? DEFAULT_THREAD_ID;
+
+  // Phase B.1: acquire a sandbox for this Builder thread BEFORE
+  // constructing the agent so the backend instance can be wired into
+  // `createDeepAgent`. The lookup is idempotent at the wire (the
+  // controller dedups on (user_id, project_id)) and cached
+  // process-locally.
+  //
+  // Note: we don't acquire the sandbox in "resume" mode either —
+  // resuming an interrupted run on the same thread should also use
+  // the same sandbox (the in-flight tool that interrupted may need
+  // sandbox access on the resumed half).
+  const { ZeroshipSandboxBackend, getOrCreateSandboxFor } = await import(
+    "./_sandbox_backend.js"
+  );
+  const sandbox = await getOrCreateSandboxFor(threadId);
+  const backend = new ZeroshipSandboxBackend({ id: sandbox.id });
+
+  // Phase B.1: tools array stays empty. With `backend:` configured,
+  // deepagents activates its built-in fs/exec tools (`ls`,
+  // `read_file`, `write_file`, `edit_file`, `grep`, `glob`,
+  // `execute`) automatically — they're rewritten on top of the
+  // backend's protocol methods. Phase B.2 will add custom tools
+  // (`propose_diff`, `ask_survey`) on top of these.
   //
   // G1: pass a process-local MemorySaver as the checkpointer so
   // middleware state survives across turns scoped by thread_id.
@@ -147,11 +168,10 @@ export async function buildTranslatedStream(
   const agent = createDeepAgent({
     model,
     tools: [],
+    backend,
     systemPrompt: BUILDER_SYSTEM,
     checkpointer,
   });
-
-  const threadId = input.id ?? DEFAULT_THREAD_ID;
   const mode: BuilderTurnMode = input.resume ? "resume" : "fresh";
 
   // Build the streamEvents input depending on mode. In "fresh" mode we
