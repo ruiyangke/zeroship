@@ -1468,7 +1468,12 @@ fn signed_blocking_call(
         .set("x-sbx-timestamp", &ts.to_string())
         .set("x-sbx-nonce", nonce)
         .set("x-sbx-signature", signature);
-    send_ureq(req, body).map_err(|e| format!("{method} {url}: {e}"))
+    // `send_ureq`'s error already carries the URL via the underlying
+    // `ureq::Error: Display` impl; prefixing the method+url again
+    // here just produced doubled-up
+    // "POST http://...: connection refused: POST http://...:" log
+    // lines. Propagate `send_ureq` directly.
+    send_ureq(req, body)
 }
 
 /// Poll `/livez` until 200 or the deadline expires. Async wrapper
