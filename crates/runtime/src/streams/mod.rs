@@ -39,3 +39,4 @@ pub mod budget;
 pub mod promise_resolve;
 pub mod queue;
 pub mod slots;
+pub mod strategies;
