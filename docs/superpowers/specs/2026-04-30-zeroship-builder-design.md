@@ -363,6 +363,29 @@ Client uses Vercel AI SDK for the chat hook. Server uses LangChain ecosystem for
 - **LangChain ecosystem**: provider routing, observability via LangSmith, model selection, prompt management all available.
 - **Node-compat works**: per `docs/reference/node-compat.md`, the V8 runtime polyfills the Node modules LangChain/LangGraph/deepagents need.
 
+#### 4.8.2b Two runtimes: wizard (plain LangGraph) vs Builder (deepagents)
+
+Not every agent surface needs deepagents. Two server-side agent runtimes ship in this product:
+
+| Runtime | Used by | Stack | Why this stack |
+|---------|---------|-------|----------------|
+| **Wizard** (`/_zs/v1/wizard`) | Project creation flow (§8.2.1, §8.2.2) — runs *before* a project exists | Plain LangGraph `StateGraph` + LangChain `ChatOpenAI`, hand-rolled in ~80 LOC | No fs/exec/sandbox; no SubAgents; no todos. The whole job is one LLM-driven survey loop that produces a structured brief. Loading deepagents' middleware stack and provisioning a sandbox per visitor would be pure overhead. |
+| **Builder** (`/_zs/v1/chat`) | In-workspace coding agent — runs *after* the brief is finalised | `createDeepAgent({...})` with backend = sandbox, SubAgents = Critic (later: Reviewer/PM/SRE), middleware = data-part emitter | Builder needs the full stack: real fs (write_file/edit_file in a container), exec (npm install / tsc / tests), SubAgent dispatch via `task("critic", ...)`, todo tracking via `write_todos`, summarisation across long sessions. deepagents bundles all of that. |
+
+**Both runtimes share** the AI-SDK-v6 wire format on the way out. They emit identical `data-survey` chunks; the same `<SurveyCard>` renders in both surfaces; the same resume protocol (`body.resume` → `Command({resume})`) flows through both. Runtime divergence is invisible to the client.
+
+**Cost test for "is this a deepagents agent?"** — answer the following five about the agent in question, and only adopt deepagents if the answer is yes to **at least three**:
+
+1. Does it write or modify files inside a project sandbox?
+2. Does it spawn other subagents (Critic, Reviewer, PM, SRE)?
+3. Does it manage a todo list / backlog?
+4. Does it run shell commands (npm install, tests, builds)?
+5. Does it benefit from cross-turn summarisation of a long history?
+
+The wizard scores 0 → plain LangGraph. Builder scores 5 → deepagents. A future "doc QA" agent that just answers questions with citations probably scores 0–1 → plain LangGraph. A "deploy assistant" that runs migrations and confirms with the user might score 2 (sandbox exec + interruptOn) → could go either way; pick by team familiarity.
+
+The `data-survey` / resume wire protocol is **runtime-agnostic** — it's an AI-SDK-v6 contract, not a deepagents one. Both wizard and Builder use it. Adding a third runtime later inherits this for free.
+
 #### 4.8.3 Mapping deepagents to our agent fleet
 
 This mapping is grounded in the official deepagents JS docs (https://docs.langchain.com/oss/javascript/deepagents/). Most of what we'd otherwise build by hand is already provided as built-in middleware, tools, or first-class config options.
@@ -414,7 +437,7 @@ This mapping is grounded in the official deepagents JS docs (https://docs.langch
 | **Reviewer** | `SubAgent` (one-shot, like Critic but cheaper) + `interruptOn` for hard gates | Builder calls `task("reviewer", ...)` before merge. For human-in-the-loop hard gates (security, destructive prod migrations), `interruptOn: { deploy: { reviewerNotApproved: true } }` halts until creator confirms. |
 | **PM** | dual: `SubAgent` for in-conversation queries (`@pm what's next?`) + a *separate scheduled worker* for background digests | The conversational PM is a SubAgent. The background polling PM is a worker process that reads project state and POSTs to a chat thread. |
 | **SRE** | same dual: `SubAgent` for `@sre why is the app slow?` + scheduled worker for monitoring | Same pattern. The SubAgent variant runs in Builder's chat. The worker runs on a cron, files issues via the same `write_todos` interface. |
-| **ask_survey** | `interruptOn` config | The agent halts when emitting a `survey` payload; the UI renders the SurveyCard; user submits → agent resumes with answers in state. *Cleaner than a tool call.* |
+| **ask_survey** (Builder-only) | custom tool calling `interrupt()` directly | Builder uses an in-tree `askSurveyTool` whose body calls `interrupt({survey})` from `@langchain/langgraph`. On resume the value (`{answers}` or `{skipped:true}`) is the tool's return → flows back to the LLM as a structured `ToolMessage`. *Why not deepagents `interruptOn`?* That config wires `humanInTheLoopMiddleware`, whose resume shape is constrained to `{type: "approve"\|"edit"\|"reject"}` — wrong fit for a survey answer. Raw `interrupt()` lets the resume value be any object. **Wizard does not use this tool** — it implements the same survey loop on plain LangGraph (see §4.8.2b). |
 | **propose_diff** | wrapping built-in `write_file` with custom middleware | The `wrapToolCall` hook intercepts `write_file` calls, emits a `data-diff` UI part to the stream, then runs the actual write. Single seam. |
 | **file_issue** | wrapping `write_todos` with middleware | Same pattern: `wrapToolCall` on `write_todos` fans the new todo into a `data-issue` part. |
 
@@ -516,14 +539,21 @@ Notes:
 
 ```ts
 import { createSandboxBackend } from "../_backends/sandbox";       // we write this
+import { askSurveyTool } from "./_tools";                          // see §8.2.7 / §4.8.3.2
 
 const agent = createDeepAgent({
   model: "openai:gpt-5.4-mini",
   systemPrompt: BUILDER_SYSTEM,
   backend: createSandboxBackend({ sandboxUrl, sandboxToken, projectId }),
+  // ask_survey is a normal tool whose body calls langgraph's interrupt()
+  // directly — see §4.8.3.2 for why we don't use deepagents' `interruptOn`
+  // config for this.
+  tools: [askSurveyTool],
   middleware: [dataPartMiddleware],
   subagents: [criticSubagent, reviewerSubagent],
-  interruptOn: { ask_survey: true },
+  // `interruptOn` reserved for true approve/edit/reject gates (e.g.,
+  // pre-deploy destructive migrations) where humanInTheLoopMiddleware's
+  // shape is the right fit.
 });
 ```
 
@@ -532,8 +562,10 @@ const agent = createDeepAgent({
 After the deepagents docs review, almost nothing remains custom:
 - The data-part emission seam is `wrapToolCall` middleware — clean.
 - The Critic loop is `task("critic")` in a Builder-local while-loop — natural.
-- `ask_survey` is `interruptOn` — first-class.
+- `ask_survey` is a normal tool that calls langgraph's `interrupt()` directly (one line in the tool body); the data-part emission piggy-backs on the same `wrapToolCall` middleware.
 - File ops are built-in tools + a custom backend — straightforward adapter work.
+
+**The wizard runtime is intentionally outside this section.** The wizard is plain LangGraph (no deepagents) — see §4.8.2b for the runtime split and §8.2.7 for how the same `data-survey` wire is reused by both runtimes.
 
 **One thing still bespoke**: when middleware writes UI parts, it needs the `writer` from `createUIMessageStream({ execute })`. That writer is local to each request's stream scope, so middleware can't be a module-level singleton — we instantiate the agent (and its middleware chain) fresh per chat request, with the writer bound via closure. Not hard, just worth flagging.
 
@@ -733,44 +765,31 @@ After landing Plan 02 Phase A (real OpenAI streaming through the deepagents → 
 
 **Lives in.** §4.8.4b (translator signature change), Plan 02 Phase B.0 work item.
 
-###### G3 · Resume protocol after `interruptOn`
+###### G3 · Resume protocol after `interrupt()` — RESOLVED (Plan 02 Phase B.2)
 
-**Problem.** Spec §8.2.7 says `ask_survey` ⇒ `interruptOn`. Agent halts → UI renders SurveyCard → user submits. But `useChat` doesn't have a "resume" verb — only `sendMessage`. Without a defined resume contract:
-- The user's submit becomes a normal new turn
-- The agent has no way to know the new turn is "the answer to the interrupt I just emitted"
-- The interrupted run's state is lost
+**Status.** Shipped. Both runtimes (wizard plain LangGraph, Builder deepagents) share one resume contract.
 
-The deepagents API for resume is `agent.invoke({}, { configurable: { thread_id }, resume: { value } })`. Wiring this through `useChat` needs explicit protocol design.
-
-**Fix.** New subsection §8.2.7.x "Resume protocol":
+**Wire (final).**
 
 ```
-1. When middleware emits `data-survey`, also include an opaque `resume_token`
-   in the part payload (same as `thread_id` for the checkpointer + the
-   interrupt's run id).
+Normal turn:
+  POST /_zs/v1/<chat|wizard>
+    body: { json: { messages: UIMessage[], id: string } }
 
-2. SurveyCard's submit handler calls `sendMessage` with a custom body shape:
-     {
-       json: {
-         resume: {
-           token: <resume_token>,
-           value: { answers, skipped }
-         }
-       }
-     }
-   instead of the normal { messages } body.
-
-3. Server-side chat handler detects `body.resume`. If present, calls
-   `agent.invoke({}, { configurable: { thread_id }, resume: ... })` instead
-   of `agent.streamEvents({ messages })`.
-
-4. Agent resumes from the interrupt; middleware emits new chunks; client
-   renders them as the assistant message continues.
+Resume turn:
+  POST /_zs/v1/<chat|wizard>
+    body: { json: { resume: { token: string, value: unknown }, id: string } }
 ```
 
-This is real protocol work. Plan B.0 includes it.
+Implementation:
 
-**Lives in.** §8.2.7 + §4.8.4b (handler shape).
+1. The agent calls `interrupt({survey})` from `@langchain/langgraph`. For Builder this happens inside the `askSurveyTool` body; for wizard it happens inside the clarifier node body. Either way the run halts and the checkpointer persists the interrupted state, keyed by the request's `id` (= LangGraph `thread_id`).
+2. The data-emitting middleware (Builder) or the node (wizard) writes a `data-survey` chunk to the v6 stream **before** the `interrupt()` call. Token = the chunk's `id`.
+3. Client `<SurveyCard>` submits → `useChat.sendMessage(undefined, { body: { resume: { token, value } } })`. Transport's `prepareSendMessagesRequest` detects `body.resume` and ships only `{json: {resume, id}}` (messages stripped).
+4. Server detects `body.resume` and feeds `new Command({ resume: input.resume.value })` into the same agent's `streamEvents` call with `configurable: { thread_id: id }`. The interrupted node resumes; `interrupt(...)` returns the value; tool/node continues; LLM gets answers as a `ToolMessage` (Builder) or as the next state-update input (wizard).
+5. The middleware/node SUPPRESSES re-emitting `data-survey` on resumed runs (langgraph replays the interrupted node from scratch). Tracked via an `isResume` flag passed into the middleware factory.
+
+**Lives in.** §4.8.2b (runtime split) + §8.2.7 (per-runtime emission) + this G3 (wire). Implementation: `apps/zeroship-builder/src/server/{_translator.ts, _middleware.ts, _tools.ts, chat.ts}` + `src/client/{api.ts, workspace/chat/ChatRail.tsx, workspace/chat/ChatMessages.tsx}`.
 
 ##### Important — bad architecture without a fix
 
@@ -1226,7 +1245,7 @@ For all three flows, "Begin" runs:
 5. For each selected skill / feature set: load into project's active list, run skill's installer step
 6. Create initial PM milestone: "v0.1 — first ship", target = today + 1d
 7. Create initial PM issue: "Set up the project per the creator's prompt"
-8. Stash full prompt + skill/theme context for Builder's first turn
+8. Stash full prompt + wizard brief + skill/theme context for Builder's first turn
 9. Insert audit_log entry: { actor: human, action: project.created, payload: {...} }
 10. Navigate to /p/:appId/preview
 11. Workspace auto-sends the prompt as the first chat turn
@@ -1234,6 +1253,35 @@ For all three flows, "Begin" runs:
 ```
 
 Steps 2–9 happen in one DB transaction. Step 10 is a client-side navigation. Step 11–12 happen as soon as the workspace mounts and the chat hook reads the stashed prompt.
+
+**Runtime handoff at "Begin"**:
+
+```
+[/new or home prompt]
+       │
+       ▼
+Wizard runtime — plain LangGraph, no sandbox, no project record yet.
+   - Receives the user's free-text idea
+   - Loops survey ⇄ answer until brief is complete (or user submits early)
+   - Final state: a structured `brief` object + the chat history
+       │
+       ▼  user clicks Begin
+Steps 1–9 above — synchronous DB transaction.
+   - Sandbox is provisioned here (idempotent on user_id+project_id), not before
+   - Wizard's brief is stashed for Builder
+       │
+       ▼
+[/p/:appId/preview]
+       │
+       ▼
+Builder runtime — deepagents + sandbox + Critic SubAgent.
+   - Reads brief from stash on first turn
+   - Codes against the sandbox
+```
+
+The wizard is thrown away after Begin. Its history isn't part of the project's persistent chat (the brief carries the substance forward). If the user navigates away mid-wizard, no DB rows or sandboxes leak.
+
+For the §8.2.1 default flow (chat-is-the-wizard), the "wizard runtime" stretch is degenerate: zero survey rounds, the user's prompt is the whole brief, Begin fires immediately. Same code path; just a one-shot version of the same loop.
 
 #### 8.2.5 Mobile / tablet wizard
 
@@ -1322,20 +1370,45 @@ type SurveyResponse = {
 }
 ```
 
-##### Builder native tool: `ask_survey`
+##### Survey runtime is shared, not the agent
 
-Exposed as `zeroship.builder.ask_survey(survey)` returning `Promise<SurveyResponse>`. Tool-call mechanic: pauses Builder mid-stream, surfaces the survey to the chat rail, resumes when the user submits.
+The survey *wire* is a single contract: `data-survey` chunk on the SSE stream + `body.resume` payload on the way back. The same `<SurveyCard>` renders in both surfaces. **What differs is which agent is asking** — and that's a runtime split (per §4.8.2b):
+
+| Surface | Agent runtime | How surveys are emitted |
+|---------|---------------|-------------------------|
+| **Wizard** (project creation, pre-coding) | Plain LangGraph `StateGraph` with one node — no deepagents, no sandbox | Node body calls `interrupt({survey})` directly. On resume the `Command({resume: {answers}})` value is the node's continuation input. The graph's only state is `{brief, history}`; loops back to the LLM with the answer until the brief is complete, then emits a `data-brief` chunk and ends. |
+| **Builder** (in-workspace coding agent) | `createDeepAgent({...})` with the `askSurveyTool` registered | The LLM calls `ask_survey({preamble, questions})`; the tool body calls `interrupt({survey})`; on resume the value is returned as the tool's result and flows back to the LLM as a structured `ToolMessage`. The `wrapToolCall` middleware emits the `data-survey` chunk before the tool body runs. |
+
+Both share:
+- `Survey` / `Question` / `QuestionKind` / `SurveyResponse` types (above).
+- `data-survey` chunk shape: `{ type: "data-survey", id: <token>, data: { token, survey } }`.
+- Resume protocol (G3): client `sendMessage(_, { body: { resume: { token, value } } })` → transport rewrites to `{json: {resume, id}}` → server feeds `Command({resume: value})` into the same thread.
+- `<SurveyCard>` renderer (§4.5).
+
+**Why the runtime split.** Builder needs deepagents (sandbox, fs/exec, SubAgents, todos). The wizard runs *before* a sandbox exists — it's pure dialogue producing structured output. Loading deepagents and provisioning a sandbox per visitor for the wizard would be wasteful. See §4.8.2b for the cost test that decides which runtime fits.
+
+**Why `interrupt()` and not deepagents `interruptOn`.** `interruptOn` is wired to `humanInTheLoopMiddleware`, whose resume value is constrained to `{type: "approve"|"edit"|"reject"}`. Survey answers don't fit that shape. Calling `interrupt(value)` directly inside the tool/node body lets the resume value be any object, which becomes the call's return value — clean structured `ToolMessage` content for Builder, clean state-update input for the wizard.
 
 ```typescript
-// Builder-facing signature
-zeroship.builder.ask_survey(survey: Survey): Promise<SurveyResponse>
+// Builder side (deepagents tool — apps/zeroship-builder/src/server/_tools.ts)
+export const askSurveyTool = tool(
+  async (survey) => {
+    const answers = interrupt({ kind: "ask_survey", survey });
+    return JSON.stringify({ answers });
+  },
+  { name: "ask_survey", description: "...", schema: surveyInputSchema },
+);
+
+// Wizard side (plain LangGraph node — apps/zeroship-builder/src/server/_wizard.ts, see §8.2.x)
+async function clarifierNode(state, config) {
+  const next = await model.invoke([...state.history, askForNextSurveyPrompt(state.brief)]);
+  if (briefIsComplete(state.brief, next)) return { brief: state.brief, done: true };
+  const answers = interrupt({ kind: "ask_survey", survey: parseSurvey(next) });
+  return { brief: mergeAnswersIntoBrief(state.brief, answers), history: [...] };
+}
 ```
 
-Operationally identical to existing `sandbox_*` and `deploy_*` tools — same receipt mechanic, same streaming pause, same audit trail. Tool calls are persisted in `chat_messages.tools_jsonb`, so survey + response live in conversation history naturally.
-
-> **Implementation note (post-deepagents review).** `ask_survey` is best implemented as a deepagents `interruptOn` configuration, not a generic tool. When the agent emits a survey payload it halts (interrupt state carries the `Survey` shape); custom middleware writes the `data-survey` UI part; the user submits → the conversation re-runs with answers injected into the agent's state. This is the canonical deepagents pattern for human-in-the-loop and matches our shape exactly. Other tools' outputs (Diff, CriticRound, Issue) flow through `wrapToolCall` middleware as data parts. See §4.8.3.3 + §4.8.3.5.
->
-> **Open gap — G3 in §4.8.9**: how the user's `SurveyResponse` actually gets back into the agent's interrupted state via `useChat`. The current handwave ("user submits → agent resumes") needs a concrete client/server protocol (custom request body shape: `{json: {resume: {token, value}}}`; server detects `body.resume` and calls `agent.invoke({}, {configurable: {thread_id}, resume: ...})`). Plan 02 Phase B.0 lands this before any survey emission.
+The interrupt mechanism is langgraph-native because it's the right primitive for both contracts. deepagents simply happens to use langgraph under the hood, so Builder's tool body is calling the same function — just from inside a deepagents-built graph rather than a hand-built one.
 
 ##### Three-layer constraint enforcement
 
@@ -1396,19 +1469,19 @@ When the user submits, two things happen:
 
 This dual representation means: the chat reads naturally to a human, the agent has structured access to answers, and surveys are first-class conversation content rather than out-of-band metadata.
 
-##### Reuse beyond the wizard
+##### Reuse across surfaces
 
-The same `ask_survey` is invoked across the product:
+The same wire is reused across the product. Where it's emitted from depends on the surface's runtime (per the table above):
 
-| Where | Example |
-|-------|---------|
-| Wizard / first turn | "Got it — who can use it? cozy/warm/playful?" |
-| Mid-build clarification | "I see two valid auth approaches — magic-link or password? `[magic link]` `[password]`" |
-| Pre-deploy destructive confirm | "This migration drops a column from prod. Confirm?  `[yes, drop it]` `[no, cancel]`" (single_choice with `required: true`) |
-| Feature-set configuration | When the creator says "add Stripe", Builder surveys for tier shape: subs / one-time / both, free trial yes/no, currency |
-| SRE post-incident review | "I rolled back v0.12 because errors spiked. Was the rollback right? `[yes — keep it rolled back]` `[no — re-deploy and I'll watch]`" |
+| Where | Runtime | Example |
+|-------|---------|---------|
+| Wizard / first turn | Wizard (plain LangGraph) | "Got it — who can use it? cozy/warm/playful?" |
+| Mid-build clarification | Builder (deepagents `askSurveyTool`) | "I see two valid auth approaches — magic-link or password? `[magic link]` `[password]`" |
+| Pre-deploy destructive confirm | Builder (`interruptOn` with humanInTheLoopMiddleware — *different* mechanism, same SurveyCard renderer for the chip choice) | "This migration drops a column from prod. Confirm?  `[yes, drop it]` `[no, cancel]`" (single_choice with `required: true`) |
+| Feature-set configuration | Builder (`askSurveyTool`) | When the creator says "add Stripe", Builder surveys for tier shape: subs / one-time / both, free trial yes/no, currency |
+| SRE post-incident review | SRE chat surface (Builder runtime — SRE is a SubAgent) | "I rolled back v0.12 because errors spiked. Was the rollback right? `[yes — keep it rolled back]` `[no — re-deploy and I'll watch]`" |
 
-Same renderer, same contract, same constraints. Different content per moment.
+Same renderer, same wire contract. The runtime decision per surface follows §4.8.2b's cost test.
 
 ##### Constraints recap
 
