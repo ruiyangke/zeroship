@@ -7,19 +7,40 @@
 //
 // On Begin: per spec §8.2.4, this is where project creation +
 // sandbox provisioning happen synchronously and we navigate to
-// /p/<id>/preview where the WORKSPACE Builder takes over. Plan 01
-// hasn't wired the project-creation API yet (the orphan-tree
-// `createApp` import in the old NewProject.tsx is broken) — Begin
-// here is a placeholder that surfaces the brief to the user so we
-// can prove the wire end-to-end. Plan 03 picks up the real handoff.
+// /p/<id>/preview where the WORKSPACE Builder takes over. We:
+//   1. derive a project name from the brief idea (first 3 words),
+//   2. POST createApp(name) to the control plane,
+//   3. stash the brief in sessionStorage under `zeroship_pending_brief`,
+//   4. navigate to /p/<app.id>/preview where WorkspaceShell consumes
+//      the stash and seeds ChatRail with a synthesised first message.
 
 import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useChat } from "@ai-sdk/react";
-import { rpc, wizardTransport } from "../api";
+import { useMutation } from "@tanstack/react-query";
+import { createApp, rpc, wizardTransport } from "../api";
 import { NotebookPrompt, CmdEnterHint } from "../components/NotebookPrompt";
 import { Button } from "../components/Button";
 import { ChatMessages } from "../workspace/chat/ChatMessages";
 import type { Brief, SurveyResponse } from "../types/chat";
+
+const PENDING_BRIEF_KEY = "zeroship_pending_brief";
+
+/**
+ * Derive a deterministic project name from a free-text idea. Take the
+ * first three whitespace-separated words and Title-Case them; falls
+ * back to "Untitled" when the idea is empty/whitespace. Matches the
+ * shape control-plane `name` accepts (server-side validation lives in
+ * the control plane, not here — if it rejects, the mutation surfaces
+ * the error inline).
+ */
+function deriveProjectName(idea: string): string {
+  const words = idea.trim().split(/\s+/).filter(Boolean).slice(0, 3);
+  if (words.length === 0) return "Untitled";
+  return words
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(" ");
+}
 
 // Inline minimal frame instead of PageFrame because the latter pulls
 // in TopBar → useAuth → AuthProvider, which lives in the orphan tree
@@ -34,6 +55,7 @@ export function WizardWorkspace() {
   // mount — refresh = clean wizard. The id is also threaded through
   // the resume protocol (server uses it as LangGraph thread_id).
   const sessionId = useMemo(() => crypto.randomUUID(), []);
+  const navigate = useNavigate();
 
   const [draft, setDraft] = useState("");
   const [committedBrief, setCommittedBrief] = useState<Brief | null>(null);
@@ -43,6 +65,25 @@ export function WizardWorkspace() {
     id: sessionId,
     transport: wizardTransport(rpc.wizard),
     onError: (err) => console.error("[wizard]", err),
+  });
+
+  // createApp mutation — `useMutation` gives us isPending + error
+  // without manual state. On success we stash the brief and navigate;
+  // on failure the error band at the bottom of the page renders it.
+  const createMutation = useMutation({
+    mutationFn: async (vars: { name: string; brief: Brief }) => {
+      const app = await createApp(vars.name);
+      return { app, brief: vars.brief };
+    },
+    onSuccess: ({ app, brief }) => {
+      try {
+        sessionStorage.setItem(PENDING_BRIEF_KEY, JSON.stringify(brief));
+      } catch {
+        // Quota / disabled storage — workspace still loads, the chat
+        // rail just won't auto-seed. User can paste it manually.
+      }
+      navigate(`/p/${app.id}/preview`);
+    },
   });
 
   const busy = status === "submitted" || status === "streaming";
@@ -71,21 +112,10 @@ export function WizardWorkspace() {
   }
 
   function handleBegin(brief: Brief) {
-    if (committedBrief) return;
+    if (committedBrief || createMutation.isPending) return;
     setCommittedBrief(brief);
-    // Plan 01 placeholder. Plan 03 wires this to:
-    //   1. POST createApp({ name, slug, plan }) — derive name/slug
-    //      from brief.summary or prompt the user via inferred fields
-    //   2. sessionStorage.setItem("zeroship_pending_brief", JSON.stringify(brief))
-    //   3. navigate(`/p/${app.id}/preview`)
-    //
-    // For now: surface the brief so we can verify the wire visually.
-    console.info("[wizard] begin", brief);
-    if (typeof window !== "undefined") {
-      window.alert(
-        `Brief committed (Plan 01 stub).\n\nSummary:\n${brief.summary}\n\nPlan 03 will create the project and hand off to Builder.`,
-      );
-    }
+    const name = deriveProjectName(brief.idea);
+    createMutation.mutate({ name, brief });
   }
 
   return (
@@ -150,6 +180,7 @@ export function WizardWorkspace() {
             answeredSurveys={answeredSurveys}
             onBeginBrief={handleBegin}
             briefCommitted={committedBrief != null}
+            briefBusy={createMutation.isPending}
           />
         </div>
       )}
@@ -157,6 +188,14 @@ export function WizardWorkspace() {
         {error && (
           <div className="mt-4 px-4 py-3 border border-blood/30 bg-blood/5 font-sans text-[12px] text-blood rounded-md">
             {error.message}
+          </div>
+        )}
+        {createMutation.error && (
+          <div
+            data-testid="wizard-create-error"
+            className="mt-4 px-4 py-3 border border-blood/30 bg-blood/5 font-sans text-[12px] text-blood rounded-md"
+          >
+            Couldn't create project: {createMutation.error instanceof Error ? createMutation.error.message : String(createMutation.error)}
           </div>
         )}
       </div>
