@@ -36,8 +36,10 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
+use std::collections::HashMap;
 use syn::{
-    parse_macro_input, FnArg, ImplItem, ImplItemFn, ItemImpl, Receiver, ReturnType, Type,
+    parse_macro_input, Attribute, Expr, ExprLit, FnArg, ImplItem, ImplItemFn, ItemImpl, Lit, Meta,
+    Receiver, ReturnType, Type,
 };
 
 use crate::{gen_call_return, gen_extract};
@@ -60,6 +62,10 @@ struct ClassMethod<'a> {
     /// Whether the receiver is `&mut self` (vs `&self`). Constructors
     /// have no receiver — we set this to false; it's unused for them.
     mut_receiver: bool,
+    /// JS-visible name. Defaults to the Rust identifier; overridden by
+    /// `#[v8_name = "..."]` on the method. Lets us install
+    /// `delete_(&mut self)` under the JS name `delete`, etc.
+    js_name: String,
 }
 
 fn classify(func: &ImplItemFn) -> Option<MethodKind> {
@@ -76,6 +82,65 @@ fn classify(func: &ImplItemFn) -> Option<MethodKind> {
         }
         if path.is_ident("v8_constructor") {
             return Some(MethodKind::Constructor);
+        }
+    }
+    None
+}
+
+/// Read `#[v8_name = "literal"]` from a method's attributes. Returns
+/// `Some(name)` if present, `None` otherwise. Invalid shapes (non-string
+/// literal, list form, etc.) silently fall back to None — the macro
+/// then uses the Rust identifier as the JS name.
+fn extract_v8_name(attrs: &[Attribute]) -> Option<String> {
+    for attr in attrs {
+        if !attr.path().is_ident("v8_name") {
+            continue;
+        }
+        if let Meta::NameValue(nv) = &attr.meta {
+            if let Expr::Lit(ExprLit {
+                lit: Lit::Str(s), ..
+            }) = &nv.value
+            {
+                return Some(s.value());
+            }
+        }
+    }
+    None
+}
+
+/// Read `#[v8_to_string_tag = "literal"]` from impl-block attributes
+/// (the `#[…]` placed directly above the `impl` block).
+fn extract_to_string_tag(attrs: &[Attribute]) -> Option<String> {
+    for attr in attrs {
+        if !attr.path().is_ident("v8_to_string_tag") {
+            continue;
+        }
+        if let Meta::NameValue(nv) = &attr.meta {
+            if let Expr::Lit(ExprLit {
+                lit: Lit::Str(s), ..
+            }) = &nv.value
+            {
+                return Some(s.value());
+            }
+        }
+    }
+    None
+}
+
+/// Read `#[v8_inherit_intrinsic = "IteratorPrototype"]` from impl-block
+/// attributes. Currently only `"IteratorPrototype"` is recognised.
+fn extract_inherit_intrinsic(attrs: &[Attribute]) -> Option<String> {
+    for attr in attrs {
+        if !attr.path().is_ident("v8_inherit_intrinsic") {
+            continue;
+        }
+        if let Meta::NameValue(nv) = &attr.meta {
+            if let Expr::Lit(ExprLit {
+                lit: Lit::Str(s), ..
+            }) = &nv.value
+            {
+                return Some(s.value());
+            }
         }
     }
     None
@@ -117,12 +182,37 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
     for item in &input.items {
         if let ImplItem::Fn(func) = item {
             if let Some(kind) = classify(func) {
+                let js_name = extract_v8_name(&func.attrs)
+                    .unwrap_or_else(|| func.sig.ident.to_string());
                 methods.push(ClassMethod {
                     kind,
                     func,
                     mut_receiver: has_mut_self(func),
+                    js_name,
                 });
             }
+        }
+    }
+
+    // Conflict-detect duplicate JS-visible names. The macro's self-doc
+    // (lines 28–34) calls this out: a `#[v8_name = "x"]` rename
+    // colliding with another method literally named `x` would silently
+    // double-install on the prototype. Catch it at compile time.
+    let mut seen: HashMap<String, &ClassMethod> = HashMap::new();
+    for m in &methods {
+        if m.kind == MethodKind::Constructor {
+            continue;
+        }
+        if seen.insert(m.js_name.clone(), m).is_some() {
+            return syn::Error::new_spanned(
+                &m.func.sig.ident,
+                format!(
+                    "#[v8_class]: duplicate JS-visible method name `{}` (rename one with #[v8_name])",
+                    m.js_name,
+                ),
+            )
+            .to_compile_error()
+            .into();
         }
     }
 
@@ -143,8 +233,18 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
         None => gen_default_constructor_callback(class_ty),
     };
 
+    // Impl-block-level overrides for class-wide install behaviour.
+    let to_string_tag_override = extract_to_string_tag(&input.attrs);
+    let inherit_intrinsic = extract_inherit_intrinsic(&input.attrs);
+
     // `Self::install(scope) -> v8::Local<v8::FunctionTemplate>`
-    let install = gen_install(class_ty, &regular, constructor.is_some());
+    let install = gen_install(
+        class_ty,
+        &regular,
+        constructor.is_some(),
+        to_string_tag_override.as_deref(),
+        inherit_intrinsic.as_deref(),
+    );
 
     // Strip our marker attributes from the impl items so rustc doesn't
     // see unknown attributes after expansion. Keep everything else.
@@ -173,6 +273,12 @@ fn extract_class_ident(ty: &Type) -> Option<&syn::Ident> {
 }
 
 fn strip_marker_attrs(mut input: ItemImpl) -> ItemImpl {
+    // Strip impl-block-level marker attributes (consumed by the macro,
+    // not a real Rust feature).
+    input.attrs.retain(|attr| {
+        let p = attr.path();
+        !(p.is_ident("v8_to_string_tag") || p.is_ident("v8_inherit_intrinsic"))
+    });
     for item in &mut input.items {
         if let ImplItem::Fn(func) = item {
             func.attrs.retain(|attr| {
@@ -180,7 +286,8 @@ fn strip_marker_attrs(mut input: ItemImpl) -> ItemImpl {
                 !(p.is_ident("v8_method")
                     || p.is_ident("v8_getter")
                     || p.is_ident("v8_setter")
-                    || p.is_ident("v8_constructor"))
+                    || p.is_ident("v8_constructor")
+                    || p.is_ident("v8_name"))
             });
         }
     }
@@ -195,6 +302,8 @@ fn gen_install(
     class_ty: &syn::Ident,
     methods: &[&ClassMethod],
     has_user_constructor: bool,
+    to_string_tag_override: Option<&str>,
+    inherit_intrinsic: Option<&str>,
 ) -> TokenStream2 {
     let class_name_str = class_ty.to_string();
     let constructor_callback_ident = format_ident!("__{}_constructor_callback", class_ty);
@@ -205,7 +314,7 @@ fn gen_install(
         .map(|m| {
             let name = &m.func.sig.ident;
             let cb = method_callback_ident(class_ty, name);
-            let js_name = name.to_string();
+            let js_name = m.js_name.clone();
             match m.kind {
                 MethodKind::Method => quote! {
                     {
@@ -247,6 +356,55 @@ fn gen_install(
     // default-constructs `Self`. Requires `Self: Default`.
     let _user_ctor_marker = has_user_constructor;
 
+    // The literal that goes into Symbol.toStringTag. Defaults to the
+    // Rust struct name; overridden by `#[v8_to_string_tag = "..."]`.
+    let to_string_tag_str = to_string_tag_override
+        .map(str::to_string)
+        .unwrap_or_else(|| class_name_str.clone());
+
+    // Optional prototype-chain link to a V8 built-in intrinsic.
+    // Currently only `"IteratorPrototype"` is wired. Implementation
+    // strategy: after build-time, the install call has access to an
+    // active context (downstream test/setup_globals already operate
+    // inside one). We compile and run a tiny JS snippet that grabs
+    // `%Iterator.prototype%` (the prototype-of-prototype of any
+    // built-in iterator like `[][Symbol.iterator]()`) and applies it
+    // to our prototype via `Object.setPrototypeOf`.
+    //
+    // This is the minimal correct implementation per WebIDL §3.7.10.2
+    // (default iterator [[Prototype]] = %Iterator.prototype%). V8
+    // exposes `Intrinsic::IteratorPrototype` only through
+    // `Template::set_intrinsic_data_property`, which would install
+    // it AS a named property — wrong shape. Direct prototype-set via
+    // JS is the documented Deno/Cloudflare workaround.
+    let inherit_block = match inherit_intrinsic {
+        None => quote! {},
+        Some("IteratorPrototype") => quote! {
+            // After get_function() the prototype object exists in the
+            // current context. Walk to %Iterator.prototype% and chain.
+            {
+                let __ctor_fn = __ctor_tmpl.get_function(scope).unwrap();
+                let __proto_key = v8::String::new(scope, "prototype").unwrap();
+                let __ctor_proto_v = __ctor_fn.get(scope, __proto_key.into()).unwrap();
+                let __ctor_proto: v8::Local<v8::Object> = __ctor_proto_v.try_into().unwrap();
+                // %IteratorPrototype% via getPrototypeOf(getPrototypeOf([][Symbol.iterator]())).
+                let __js = v8::String::new(
+                    scope,
+                    "Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))",
+                ).unwrap();
+                let __script = v8::Script::compile(scope, __js, None).unwrap();
+                let __iter_proto = __script.run(scope).unwrap();
+                __ctor_proto.set_prototype(scope, __iter_proto);
+            }
+        },
+        Some(other) => {
+            let msg = format!(
+                "#[v8_inherit_intrinsic]: unrecognised value `{other}` (expected \"IteratorPrototype\")"
+            );
+            quote! { compile_error!(#msg); }
+        }
+    };
+
     quote! {
         /// Install this class on the given V8 scope, returning the
         /// FunctionTemplate. The runtime calls this from
@@ -273,15 +431,19 @@ fn gen_install(
             //   { writable: false, enumerable: false, configurable: true }.
             // PropertyAttribute flags: READ_ONLY = !writable, DONT_ENUM
             // = !enumerable. Configurable is the absence of DONT_DELETE.
+            // Default is the Rust struct name; `#[v8_to_string_tag = "…"]`
+            // overrides it (e.g. "Headers Iterator" for default iterators).
             {
                 let __tag_sym = v8::Symbol::get_to_string_tag(scope);
-                let __tag_value = v8::String::new(scope, #class_name_str).unwrap();
+                let __tag_value = v8::String::new(scope, #to_string_tag_str).unwrap();
                 __proto.set_with_attr(
                     __tag_sym.into(),
                     __tag_value.into(),
                     v8::PropertyAttribute::READ_ONLY | v8::PropertyAttribute::DONT_ENUM,
                 );
             }
+
+            #inherit_block
 
             __ctor_tmpl
         }

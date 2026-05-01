@@ -84,6 +84,35 @@ pub fn v8_constructor(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Marker attribute consumed by `#[v8_class]`: rename a method on the
+/// JS-visible surface. `#[v8_name = "delete"]` lets a Rust `fn delete_`
+/// be installed as `Foo.prototype.delete`. Outside of a `#[v8_class]`
+/// impl block this is a no-op.
+#[proc_macro_attribute]
+pub fn v8_name(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+/// Impl-block-level marker attribute consumed by `#[v8_class]`:
+/// override the default `Symbol.toStringTag` value. Without this, the
+/// install codegen uses the Rust struct name (e.g.
+/// `"HeadersIterator"`); with `#[v8_to_string_tag = "Headers Iterator"]`
+/// it installs that literal instead. Used for WebIDL default iterator
+/// objects whose spec tag is "<InterfaceName> Iterator".
+#[proc_macro_attribute]
+pub fn v8_to_string_tag(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+/// Impl-block-level marker attribute: chain the class's prototype to a
+/// V8 built-in intrinsic. Currently the only recognised value is
+/// `"IteratorPrototype"`, which sets the prototype's `[[Prototype]]`
+/// to `%Iterator.prototype%` per WebIDL §3.7.10.2.
+#[proc_macro_attribute]
+pub fn v8_inherit_intrinsic(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
 #[proc_macro_attribute]
 pub fn zeroship_op(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr_str = attr.to_string();

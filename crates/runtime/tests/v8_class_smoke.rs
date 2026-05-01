@@ -434,6 +434,155 @@ fn option_none_returns_null() {
 // there's a real consumer.
 
 // ---------------------------------------------------------------------------
+// Test 7b: #[v8_name = "..."] — JS-side method rename
+// ---------------------------------------------------------------------------
+//
+// Headers needs `delete(name)` on the JS surface, but `delete` is a Rust
+// keyword. The macro must accept `#[v8_name = "delete"]` on a method
+// like `delete_` and install it under the JS-visible name "delete".
+
+#[allow(unused_imports)]
+use zeroship_runtime_macros::v8_name;
+
+mod renamed_method {
+    use super::*;
+
+    pub struct CounterBox {
+        pub items: u32,
+    }
+
+    #[v8_class]
+    impl CounterBox {
+        #[v8_constructor]
+        fn new() -> CounterBox {
+            CounterBox { items: 0 }
+        }
+
+        #[v8_method]
+        #[v8_name = "delete"]
+        fn delete_(&mut self) -> u32 {
+            self.items += 1;
+            self.items
+        }
+
+        #[v8_getter]
+        fn count(&self) -> u32 {
+            self.items
+        }
+    }
+}
+
+#[test]
+fn v8_name_renames_method_on_js_surface() {
+    let s = run_in_v8(
+        |scope, global| install_class::<renamed_method::CounterBox>(
+            renamed_method::CounterBox::install, "CounterBox", scope, global,
+        ),
+        r#"
+        const b = new CounterBox();
+        b.delete();
+        b.delete();
+        const r = b.delete();
+        const has_delete_ = typeof b.delete_;
+        JSON.stringify({ r, count: b.count, has_delete_ });
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, r#"{"r":3,"count":3,"has_delete_":"undefined"}"#);
+}
+
+// ---------------------------------------------------------------------------
+// Test 7c: #[v8_to_string_tag = "..."] — override Symbol.toStringTag
+// ---------------------------------------------------------------------------
+//
+// The default install installs the Rust struct name as the @@toStringTag
+// value (e.g. "CounterBox"). For WebIDL default iterator objects the
+// spec wants the parent interface name + " Iterator" — e.g. "Headers
+// Iterator". Verify the impl-level attribute overrides the default.
+
+#[allow(unused_imports)]
+use zeroship_runtime_macros::v8_to_string_tag;
+
+mod string_tag_override {
+    use super::*;
+
+    pub struct Foo;
+
+    #[v8_class]
+    #[v8_to_string_tag = "Custom Tag"]
+    impl Foo {
+        #[v8_constructor]
+        fn new() -> Foo {
+            Foo
+        }
+
+        #[v8_method]
+        fn touch(&self) -> u32 {
+            1
+        }
+    }
+}
+
+#[test]
+fn v8_to_string_tag_override_changes_default() {
+    let s = run_in_v8(
+        |scope, global| install_class::<string_tag_override::Foo>(
+            string_tag_override::Foo::install, "Foo", scope, global,
+        ),
+        r#"
+        const f = new Foo();
+        Object.prototype.toString.call(f);
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "[object Custom Tag]");
+}
+
+// ---------------------------------------------------------------------------
+// Test 7d: #[v8_inherit_intrinsic = "IteratorPrototype"] —
+// chain prototype to %Iterator.prototype% per WebIDL §3.7.10.2
+// ---------------------------------------------------------------------------
+
+#[allow(unused_imports)]
+use zeroship_runtime_macros::v8_inherit_intrinsic;
+
+mod intrinsic_iter {
+    use super::*;
+
+    pub struct StubIter;
+
+    #[v8_class]
+    #[v8_inherit_intrinsic = "IteratorPrototype"]
+    impl StubIter {
+        #[v8_constructor]
+        fn new() -> StubIter {
+            StubIter
+        }
+    }
+}
+
+#[test]
+fn v8_inherit_intrinsic_chains_to_iterator_prototype() {
+    let s = run_in_v8(
+        |scope, global| install_class::<intrinsic_iter::StubIter>(
+            intrinsic_iter::StubIter::install, "StubIter", scope, global,
+        ),
+        r#"
+        const it = new StubIter();
+        const ourProto = Object.getPrototypeOf(it);
+        const next = Object.getPrototypeOf(ourProto);
+        // %Iterator.prototype% is the parent of any built-in iterator
+        // result's prototype:
+        const iterProto = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+        const same = next === iterProto;
+        JSON.stringify({ same });
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, r#"{"same":true}"#);
+}
+
+// ---------------------------------------------------------------------------
 // Test 8: illegal invocation — calling method on non-instance throws
 // ---------------------------------------------------------------------------
 
