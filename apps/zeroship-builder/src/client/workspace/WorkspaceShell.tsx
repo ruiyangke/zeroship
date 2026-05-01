@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { getApp } from "../api";
@@ -13,8 +13,13 @@ import { PlanCanvas } from "./canvases/PlanCanvas";
 import { HealthCanvas } from "./canvases/HealthCanvas";
 import { ChatRail } from "./chat/ChatRail";
 import { briefSchema, type Brief } from "../types/chat";
+import { LiveBanner } from "../components/LiveBanner";
+import { ProductTour } from "../components/ProductTour";
+import { lsGet, lsSet } from "../lib/storage";
+import { track } from "../lib/analytics";
 
 const PENDING_BRIEF_KEY = "zeroship_pending_brief";
+const FIRST_DEPLOY_PREFIX = "zeroship_first_deploy_celebrated_";
 
 export interface WorkspaceShellProps {
   /** When set, overrides the URL param. The router doesn't need this
@@ -50,6 +55,8 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
   const params = useParams<{ appId: string }>();
   const appId = appIdProp ?? params.appId;
   const [active, setActive] = useState<CanvasPillId>("preview");
+  const [tourOpen, setTourOpen] = useState(false);
+  const [showLiveBanner, setShowLiveBanner] = useState(false);
 
   // One-shot brief consume on mount. We keep the value in state so
   // re-renders during the chat's first turn don't re-trigger the seed
@@ -62,6 +69,22 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
     queryFn: () => getApp(appId!),
     enabled: !!appId,
   });
+
+  // First-deploy celebration (spec §7.4). Fires when:
+  //   - we have an app id,
+  //   - the app's deploy_hash transitions from missing to present,
+  //   - and we haven't celebrated this app before on this browser.
+  // We persist the per-app flag so a refresh after celebrating doesn't
+  // re-fire the banner. The user can also dismiss it explicitly.
+  useEffect(() => {
+    if (!appId || !appQuery.data) return;
+    if (!appQuery.data.deploy_hash) return;
+    const flagKey = `${FIRST_DEPLOY_PREFIX}${appId}`;
+    if (lsGet(flagKey) === "true") return;
+    lsSet(flagKey, "true");
+    setShowLiveBanner(true);
+    track("project.first_deploy", { app_id: appId });
+  }, [appId, appQuery.data]);
 
   // Loading / error gates only fire when we have an appId. The
   // catch-all route (no appId) bypasses them and renders the legacy
@@ -108,15 +131,27 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
           </div>
         }
         right={
-          <a
-            href="#"
-            data-testid="topbar-url"
-            className="inline-flex items-center gap-2 px-3 py-1.5 border border-rule rounded-full bg-paper-2 font-mono text-[11px] text-ink-soft hover:border-ink hover:text-ink"
-            style={{ textDecoration: "none" }}
-          >
-            <span className="size-[5px] rounded-full bg-ivy pulse-dot" aria-hidden="true" />
-            {projectName}.zeroship.app
-          </a>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setTourOpen(true)}
+              data-testid="topbar-tour"
+              aria-label="Take the tour"
+              title="Take the tour"
+              className="inline-flex items-center justify-center size-7 border border-rule rounded-full bg-paper-2 font-serif italic text-[13px] text-ink-soft hover:border-ink hover:text-ink cursor-pointer"
+            >
+              ?
+            </button>
+            <a
+              href="#"
+              data-testid="topbar-url"
+              className="inline-flex items-center gap-2 px-3 py-1.5 border border-rule rounded-full bg-paper-2 font-mono text-[11px] text-ink-soft hover:border-ink hover:text-ink"
+              style={{ textDecoration: "none" }}
+            >
+              <span className="size-[5px] rounded-full bg-ivy pulse-dot" aria-hidden="true" />
+              {projectName}.zeroship.app
+            </a>
+          </div>
         }
         accountInitials="ZS"
       />
@@ -125,7 +160,15 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
         className="flex-1 grid min-h-0"
         style={{ gridTemplateColumns: "1fr 320px" }}
       >
-        <main data-testid="canvas-area" className="min-h-0 min-w-0 overflow-hidden flex flex-col">
+        <main data-testid="canvas-area" className="min-h-0 min-w-0 overflow-y-auto flex flex-col">
+          {showLiveBanner && appId && appQuery.data && (
+            <LiveBanner
+              appName={appQuery.data.name}
+              appUrl={`${appQuery.data.name}.zeroship.app`}
+              shippedAgo="just now"
+              onDismiss={() => setShowLiveBanner(false)}
+            />
+          )}
           {/* Files / Logs / Env / Settings ship in Plan 01.6.
               Plan / Health ship in Plan 01.7 (this commit). Data /
               Media land later; the catch-all below keeps the pill
@@ -153,6 +196,7 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
           <ChatRail appName={projectName} seedBrief={seedBrief ?? undefined} />
         </aside>
       </div>
+      <ProductTour open={tourOpen} onClose={() => setTourOpen(false)} />
     </div>
   );
 }
