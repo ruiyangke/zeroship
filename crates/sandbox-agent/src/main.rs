@@ -14,7 +14,7 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use zeroship_sandbox_agent::{
-    handlers, reap, state_from_env, version, DEFAULT_PORT, DEFAULT_WORKSPACE,
+    dropuser, handlers, reap, state_from_env, version, DEFAULT_PORT, DEFAULT_WORKSPACE,
 };
 
 #[ntex::main]
@@ -61,6 +61,11 @@ async fn run() -> Result<(), String> {
     std::fs::create_dir_all(&workspace)
         .map_err(|e| format!("create workspace {}: {e}", workspace.display()))?;
 
+    // Chown the workspace to the drop user so /exec children
+    // (which run as nobody:nogroup when we're PID 1 root) can
+    // actually write into it. No-op when not running as root.
+    dropuser::chown_workspace(&workspace);
+
     // (Reaper installed at the very top of `main` so SIGCHLD is
     // already blocked process-wide by the time we reach this point.)
     let state = state_from_env(workspace.clone())?;
@@ -92,6 +97,9 @@ async fn run() -> Result<(), String> {
             .service(web::resource("/livez").route(web::get().to(handlers::livez)))
             .service(web::resource("/readyz").route(web::get().to(handlers::readyz)))
             .service(web::resource("/version").route(web::get().to(handlers::version_info)))
+            // Prometheus scrape — unauthenticated; cluster NetworkPolicy
+            // governs who can reach :7777 to scrape.
+            .service(web::resource("/metrics").route(web::get().to(handlers::metrics)))
             // /healthz preserved as an alias for /livez (back-compat).
             .service(web::resource("/healthz").route(web::get().to(handlers::livez)))
             // Auth-gated endpoints

@@ -41,7 +41,7 @@ pub const CAPABILITIES: &[&str] = &[
     "files.tree",            // GET /tree
     "files.tree-truncated",  // /tree response includes `truncated: bool`
     "fs.no-symlink-escape",  // openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)
-    "auth.hmac-v1",          // X-Sbx-{Timestamp,Nonce,Signature} HMAC-SHA256
+    "auth.ed25519-v1",       // X-Sbx-{Timestamp,Nonce,Signature} Ed25519
 ];
 
 /// Agent crate version (`Cargo.toml`).
@@ -116,7 +116,7 @@ mod tests {
             "files.crud",
             "files.tree",
             "fs.no-symlink-escape",
-            "auth.hmac-v1",
+            "auth.ed25519-v1",
         ];
         for e in expected {
             assert!(

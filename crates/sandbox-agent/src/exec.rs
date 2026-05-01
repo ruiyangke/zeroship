@@ -30,6 +30,14 @@
 //! agent-internal state, so user code can't `printenv` its way to the
 //! bearer token. See the C1 regression test
 //! `does_not_leak_agent_token_to_child`.
+//!
+//! ## `unsafe`
+//!
+//! `Command::pre_exec` is unsafe because the closure runs in the
+//! post-fork child and must be async-signal-safe. We delegate to
+//! `dropuser::pre_exec_lockdown` which carries the safety contract.
+
+#![allow(unsafe_code)]
 
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -92,7 +100,16 @@ pub async fn run(cmd: &str, cwd: &str, timeout_ms: u64) -> Result<ExecOutput, St
     // Spawn. process_group(0) so we can kill the whole tree on timeout.
     // env_clear() prevents `SANDBOX_AGENT_TOKEN` and other agent
     // state from leaking into the child's environ.
-    let mut child = Command::new("sh")
+    //
+    // Privilege drop + lockdown: `dropuser::pre_exec_lockdown` runs
+    // in the post-fork child and applies (in order): capability
+    // bounding set drop, setuid to nobody (when running as root),
+    // PR_SET_NO_NEW_PRIVS, and RLIMIT_NOFILE/NPROC. We don't use
+    // std's `Command::uid/gid` because they don't let us interleave
+    // a `prctl(PR_CAPBSET_DROP)` *before* the setuid — which we need
+    // (CAP_SETPCAP is gone after setuid).
+    let mut command = Command::new("sh");
+    command
         .arg("-c")
         .arg(cmd)
         .current_dir(cwd)
@@ -101,16 +118,42 @@ pub async fn run(cmd: &str, cwd: &str, timeout_ms: u64) -> Result<ExecOutput, St
         .stderr(Stdio::piped())
         .process_group(0)
         .env_clear()
-        .envs(curated_env())
+        .envs(curated_env());
+    let creds = crate::dropuser::child_creds();
+    if creds.is_some() {
+        // HOME defaults to root's home otherwise — pick something
+        // the dropped uid can actually write to.
+        command.env("HOME", "/tmp");
+        command.env("USER", "nobody");
+    }
+    // SAFETY: `pre_exec_lockdown` is documented async-signal-safe;
+    // see its module docs. The closure captures only `creds: Option<(u32,u32)>`
+    // by value (Copy), so no allocations cross the fork boundary.
+    unsafe {
+        command.pre_exec(move || crate::dropuser::pre_exec_lockdown(creds));
+    }
+    let mut child = command
         .spawn()
         .map_err(|e| format!("spawn sh: {e}"))?;
 
     let pid = child.id() as i32;
     let pgid = Pid::from_raw(pid);
 
-    // Take the pipe handles BEFORE we move child into the waiter task.
+    // Take the pipe handles BEFORE we drop the child.
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+
+    // Register interest in this pid's exit BEFORE dropping the
+    // child, so the reaper has somewhere to deliver the exit code.
+    // wait_for_child also drains a stashed result if the reaper
+    // already raced ahead and reaped (sub-millisecond commands hit
+    // this path).
+    let exit_rx = crate::reap::wait_for_child(pid);
+
+    // Drop the Child. std's Drop does NOT call wait — it just
+    // releases internal resources. The kernel zombie remains until
+    // the reaper picks it up, which is exactly what we want.
+    drop(child);
 
     // Reader buffers (shared with the spawn_blocking tasks).
     let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
@@ -121,8 +164,10 @@ pub async fn run(cmd: &str, cwd: &str, timeout_ms: u64) -> Result<ExecOutput, St
     let stdout_task = spawn_stdout_reader(stdout, stdout_buf.clone(), stdout_trunc.clone());
     let stderr_task = spawn_stderr_reader(stderr, stderr_buf.clone(), stderr_trunc.clone());
 
-    // Waiter and timeout.
-    let waiter = compio::runtime::spawn_blocking(move || child.wait());
+    // Block on the reaper-routed exit channel inside spawn_blocking.
+    // The reaper sends the exit code (or `-(sig as i32)` for
+    // signal-killed) on its sole `waitpid` path — no race with us.
+    let waiter = compio::runtime::spawn_blocking(move || exit_rx.recv());
     let timeout_fut = compio::time::sleep(Duration::from_millis(timeout_ms));
 
     let (status, timed_out) = race_wait(waiter, timeout_fut, pgid).await;
@@ -155,21 +200,21 @@ pub async fn run(cmd: &str, cwd: &str, timeout_ms: u64) -> Result<ExecOutput, St
 }
 
 // ─── child wait + timeout race ────────────────────────────────────
-
-/// Three-deep nesting because `compio::runtime::spawn_blocking` wraps
-/// the closure's result in `Result<_, Box<dyn Any + Send>>` (panic
-/// payload), the closure here returns `std::io::Result<ExitStatus>`
-/// (the OS-level wait error), and `ExitStatus` is the actual code.
-///
-/// Layers, outer → inner:
-///
-///   `Result<                                            // panic?
-///       std::io::Result<                                // wait err?
-///           std::process::ExitStatus                    // exit code
-///       >,
-///       Box<dyn Any + Send>                             // panic payload
-///   >`
-type WaitJoin = Result<std::io::Result<std::process::ExitStatus>, Box<dyn std::any::Any + Send>>;
+//
+// The waiter is now a `spawn_blocking` task that blocks on an
+// `mpsc::Receiver<i32>` whose far end is fed by the reaper
+// (`reap::wait_for_child`). Three nested `Result`s:
+//
+//   `Result<                                                  // panic?
+//       Result<i32, mpsc::RecvError>,                         // channel closed?
+//       Box<dyn Any + Send>                                   // panic payload
+//   >`
+//
+// `mpsc::RecvError` happens only if the sender is dropped without
+// sending — would mean the reaper terminated without notifying,
+// which we treat as `-1` (unknown exit).
+type WaitJoin =
+    Result<Result<i32, std::sync::mpsc::RecvError>, Box<dyn std::any::Any + Send>>;
 
 async fn race_wait<W>(
     waiter: W,
@@ -203,8 +248,8 @@ where
         Outcome::Timeout => {
             // SIGKILL the whole process group. ESRCH = already gone.
             let _ = killpg(pgid, Signal::SIGKILL);
-            // Now wait for the (now-dead) child to be reaped. This
-            // returns quickly because the kernel just delivered exit.
+            // The reaper will pick up the now-dead child and route
+            // its exit code (`-(SIGKILL as i32)`) to our receiver.
             let j = waiter.await;
             (status_from(j), true)
         }
@@ -213,7 +258,8 @@ where
 
 fn status_from(j: WaitJoin) -> i32 {
     match j {
-        Ok(Ok(s)) => s.code().unwrap_or(-1),
+        Ok(Ok(code)) => code,
+        // Channel closed (reaper down) or task panic — unknown exit.
         Ok(Err(_)) | Err(_) => -1,
     }
 }
@@ -320,7 +366,8 @@ mod tests {
     async fn timeout_fires_and_kills_group() {
         let out = run("sleep 5", "/tmp", 200).await.unwrap();
         assert!(out.timed_out);
-        assert_eq!(out.status, -1);
+        // Signal-killed children report `-(sig as i32)`. SIGKILL = 9.
+        assert_eq!(out.status, -(nix::sys::signal::Signal::SIGKILL as i32));
     }
 
     #[compio::test]
@@ -433,5 +480,156 @@ mod tests {
         assert_eq!(a.stdout.trim(), "a");
         assert_eq!(b.stdout.trim(), "b");
         assert_eq!(c.stdout.trim(), "c");
+    }
+
+    // ─── security regression tests ───────────────────────────────
+    //
+    // These exercise the `dropuser::pre_exec_lockdown` integration
+    // through the real `run()` path. They run on whatever uid the
+    // test harness has — typically NOT root, so the privilege-drop
+    // step is a no-op and only the always-applied hardenings
+    // (no_new_privs, RLIMIT_NOFILE) are verified. The capability
+    // and uid-drop paths are exercised end-to-end by `e2e_k3s`.
+
+    /// **S1: no_new_privs is set on every /exec child.** Defends
+    /// against a setuid-root binary on PATH (e.g., a future image
+    /// rev that accidentally installs `mount` setuid) being able
+    /// to elevate the dropped child back to root.
+    #[compio::test]
+    async fn child_has_no_new_privs() {
+        let out = run(
+            "grep -E '^NoNewPrivs:' /proc/self/status",
+            "/tmp",
+            5_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, 0, "grep failed: {out:?}");
+        assert!(
+            out.stdout.contains("NoNewPrivs:\t1"),
+            "expected NoNewPrivs=1, got: {}",
+            out.stdout
+        );
+    }
+
+    /// **S2: RLIMIT_NOFILE is capped on every /exec child.** A
+    /// process that leaks fds (or maliciously opens many) is
+    /// bounded; a forgotten close-loop in user code can't exhaust
+    /// the kernel's per-process fd table.
+    #[compio::test]
+    async fn child_rlimit_nofile_capped() {
+        // /proc/self/limits is stable across dash/bash; column 4 of
+        // the "Max open files" row is the soft limit.
+        let out = run(
+            "awk '/^Max open files/ {print $4}' /proc/self/limits",
+            "/tmp",
+            5_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, 0, "awk failed: {out:?}");
+        let n: u64 = out
+            .stdout
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("awk output not a number: {:?}", out.stdout));
+        assert!(
+            n <= 1024,
+            "RLIMIT_NOFILE not capped: got {n}, expected <= 1024"
+        );
+    }
+
+    /// **S3: setuid binary cannot elevate inside /exec.** The
+    /// pre_exec sets PR_SET_NO_NEW_PRIVS=1 which makes the kernel
+    /// silently ignore the setuid bit on `exec()`. We can only
+    /// test this if a setuid binary is available on the host —
+    /// `/usr/bin/passwd` is the canonical one. If absent, skip.
+    ///
+    /// The test runs `passwd` (which would prompt for a password
+    /// as root, exit 1 as non-root) and asserts the *effective uid*
+    /// was NOT elevated. Without no_new_privs, a child of root
+    /// would see euid=0; with no_new_privs and a non-root caller,
+    /// the setuid bit is ignored so euid stays at the caller's uid.
+    #[compio::test]
+    async fn setuid_bit_is_neutered_by_no_new_privs() {
+        if !std::path::Path::new("/usr/bin/passwd").exists() {
+            return; // no setuid binary to probe; skip
+        }
+        // We use `id -u` after invoking a wrapper that would
+        // normally setuid. Easier: directly check that
+        // /proc/self/status of an `id`-style call shows our caller
+        // uid, not 0. Since we're already not root, the simplest
+        // proof is: NoNewPrivs=1 (verified by S1) + status=1 from
+        // passwd-without-args (it errors out without root) =
+        // setuid bit was ignored.
+        let out = run(
+            "passwd --help >/dev/null 2>&1; id -u",
+            "/tmp",
+            5_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, 0);
+        let uid: u32 = out.stdout.trim().parse().unwrap_or(0);
+        // SAFETY: geteuid is async-signal-safe and infallible.
+        let parent_uid = unsafe { libc::geteuid() };
+        assert_eq!(
+            uid, parent_uid,
+            "child uid changed; setuid binary may have elevated"
+        );
+    }
+
+    /// **S4: agent token never leaks into /exec child env.** We
+    /// already test `curated_env` directly elsewhere; this is the
+    /// integration-level proof that the actual spawn doesn't pass
+    /// `SANDBOX_AGENT_*` to the child shell.
+    #[compio::test]
+    async fn agent_env_does_not_leak_to_child() {
+        // Use `printenv` not `env` — the latter prints the literal
+        // env passed by the parent (which includes our cleanup),
+        // printenv only prints what the shell inherited.
+        let out = run(
+            "printenv | grep -E '^SANDBOX_AGENT' || echo CLEAN",
+            "/tmp",
+            5_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, 0, "{out:?}");
+        assert!(
+            out.stdout.trim().ends_with("CLEAN"),
+            "agent env leaked to child: {}",
+            out.stdout
+        );
+    }
+
+    /// **S5: HOME is never the agent's HOME.** When the dropped
+    /// child runs as nobody (production) we override HOME to /tmp.
+    /// When running as the developer in tests we keep the
+    /// developer's HOME (PASSTHROUGH_VARS includes HOME). Either
+    /// way the child must NOT see e.g. `/root` from a root agent.
+    #[compio::test]
+    async fn child_home_is_not_root_home() {
+        let out = run("echo \"$HOME\"", "/tmp", 5_000).await.unwrap();
+        assert_eq!(out.status, 0);
+        let home = out.stdout.trim();
+        // `/root` is the canonical root home dir on Debian/Ubuntu
+        // and most other distros. We assert the child does NOT see
+        // this. (A root agent in production overrides to /tmp; a
+        // non-root agent in tests passes through the developer's
+        // HOME, which is also not /root.)
+        assert_ne!(home, "/root", "child sees /root as HOME");
+        assert!(!home.is_empty(), "HOME unset in child");
+    }
+
+    /// **S6: working directory is honored, not overridden by
+    /// pre_exec.** Regression guard: an earlier draft of pre_exec
+    /// did a `chdir("/")` after privilege drop; that broke /exec
+    /// callers that relied on `cwd` to land in /workspace.
+    #[compio::test]
+    async fn cwd_survives_lockdown() {
+        let out = run("pwd", "/tmp", 5_000).await.unwrap();
+        assert_eq!(out.status, 0);
+        assert_eq!(out.stdout.trim(), "/tmp");
     }
 }

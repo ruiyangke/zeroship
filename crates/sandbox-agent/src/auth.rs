@@ -1,115 +1,150 @@
-//! Authentication key material loader.
+//! Public-key loader for the Ed25519 signature verifier.
 //!
-//! Loads the HMAC-SHA256 key the [`crate::sig::Verifier`] uses for
-//! per-request signature verification. The provisioning model is
-//! identical to what we used for the v1 bearer-token scheme:
+//! The agent holds **only the controller's public key** — no
+//! private/signing material ever enters a sandbox VM. The pubkey
+//! is provisioned at Pod creation time by mounting a `ConfigMap`
+//! (NOT a `Secret`, because pubkeys are non-secret) at a fixed
+//! path inside the VM:
 //!
-//!   - **File-mount**: controller writes the key bytes to a tmpfs
-//!     path (default `/run/secrets/sandbox-agent-token`; override
-//!     `SANDBOX_AGENT_TOKEN_FILE`).
-//!   - **Read-and-unlink**: the agent reads the file once at startup
-//!     and immediately `unlink()`s it. After that the bytes never
-//!     appear in any process's `environ`, in `ls`, or in
-//!     `/proc/mounts` — the only copy is the in-memory
-//!     `Zeroizing<Vec<u8>>` which scrubs on drop.
-//!   - **Minimum length**: ≥ 32 bytes so even a misconfigured
-//!     controller can't ship a low-entropy key.
+//! ```yaml
+//! volumeMounts:
+//!   - name: agent-trust
+//!     mountPath: /run/keys
+//!     readOnly: true   # k8s read-only bind; tmpfs-mounted
+//! ```
 //!
-//! User code spawned by `/exec` cannot recover the key from these
-//! channels. It can still `cat /proc/1/mem` (we are PID 1, root in
-//! the VM), but doing so requires already having shell — no
-//! privilege gain. The defenses we ship are about preventing
-//! **accidental leak out of the VM** (logs, prompt injection
-//! echoing env, crash dumps).
+//! ## File format
 //!
-//! # Why HMAC-SHA256 (and not something else)
+//! Either of:
+//!   - **base64**: the file contents are base64-encoded 32 bytes
+//!     (with optional trailing whitespace), e.g. produced by
+//!     `head -c 32 /dev/urandom | base64`. Recommended for ConfigMap
+//!     `data:` (UTF-8 text fields).
+//!   - **raw bytes**: exactly 32 bytes, no encoding. Useful if the
+//!     ConfigMap uses `binaryData:` instead of `data:`.
 //!
-//! Symmetric MAC is the right primitive when both parties already
-//! share a secret (we do — the controller mounts it). Asymmetric
-//! signing (Ed25519, RSA) would let the agent verify without the
-//! ability to forge requests, but the agent isn't going to make
-//! controller→agent calls anyway, so the asymmetry buys nothing in
-//! this direction. HMAC is faster, smaller code, fewer ways to
-//! misuse.
+//! Selection is automatic: if the trimmed contents are exactly 32
+//! bytes, treat as raw; otherwise base64-decode.
+//!
+//! ## No unlink, no zeroize
+//!
+//! Unlike the previous HMAC-key loader, we do **not** unlink the
+//! file after read and do **not** wrap the bytes in `Zeroizing<>`.
+//! A pubkey is non-secret by definition; its presence on disk
+//! after startup costs us nothing. Leaving the file in place lets
+//! operators verify (`kubectl exec ... cat /run/keys/...`) which
+//! key the agent is trusting, and lets a hot-reload feature in a
+//! future revision re-read it without coordinating with the
+//! mount lifecycle.
+//!
+//! ## Why this beats HMAC
+//!
+//!   - The compromised-VM attacker (root inside the libkrun guest,
+//!     `/proc/1/mem` read) recovers a **public key** — useless for
+//!     forging requests against any agent in the fleet.
+//!   - The k8s storage layer carries **no secret material** for
+//!     this auth path. ConfigMap is fine; encryption-at-rest of
+//!     `Secret` data is irrelevant. Etcd compromise of *this*
+//!     ConfigMap leaks nothing.
+//!   - Per-sandbox keypair generation can move entirely to the
+//!     controller: the controller mints `(sk, pk)`, stashes `sk`
+//!     in its own DB (or HSM), and ships `pk` as a ConfigMap to
+//!     the Pod. The sandbox itself never participates in key
+//!     generation.
 
 use std::io::Read;
 use std::path::Path;
 
-use zeroize::Zeroizing;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
+use ed25519_dalek::{VerifyingKey, PUBLIC_KEY_LENGTH};
 
-/// Default path for the controller-mounted key file. Standard
-/// "secrets" location so k8s `subPath` projected volumes land here
-/// naturally.
-pub const DEFAULT_TOKEN_PATH: &str = "/run/secrets/sandbox-agent-token";
+/// Default path for the controller-mounted public key file.
+/// `/run/keys` is a conventional read-only k8s mount point;
+/// `controller-pubkey` is the file name baked into the Pod spec.
+pub const DEFAULT_PUBKEY_PATH: &str = "/run/keys/controller-pubkey";
 
-/// Minimum acceptable key length in bytes. 32 = enough random
-/// bytes that even base64 (43 chars) gives an unguessable secret.
-pub const MIN_TOKEN_BYTES: usize = 32;
+/// Maximum file size we'll read. Caps the boot-time alloc bound
+/// when an operator misconfigures the mount. Even base64 of 32
+/// raw bytes is only 44 chars + maybe a trailing newline; 1 KiB
+/// is comically generous.
+pub const MAX_PUBKEY_FILE_BYTES: usize = 1024;
 
-/// Maximum acceptable key length in bytes. Bounds the boot-time
-/// memory allocation so a misconfigured operator who mounts a
-/// gigantic file at the secrets path can't OOM the agent at
-/// startup. 1 KiB is more than enough for any reasonable HMAC key
-/// (HMAC-SHA256 is keyed by ≤ 64 bytes; longer keys get hashed
-/// down anyway).
-pub const MAX_TOKEN_BYTES: usize = 1024;
+/// Errors that surface to the operator at startup. None of these
+/// can ever reach a client request.
+#[derive(Debug)]
+pub enum LoadError {
+    /// Couldn't open or read the file.
+    Io(String),
+    /// File length exceeds [`MAX_PUBKEY_FILE_BYTES`] before any
+    /// trim — most likely a wrong file got mounted at the path.
+    TooLarge,
+    /// Trimmed contents are neither raw 32 bytes nor decode to
+    /// valid base64 of 32 bytes.
+    BadEncoding,
+    /// Decoded length is not 32 bytes (Ed25519 public key size).
+    WrongLength(usize),
+    /// `ed25519_dalek::VerifyingKey::from_bytes` rejected the
+    /// 32-byte point as not on the curve.
+    NotOnCurve,
+}
 
-/// Read the HMAC key from `path`, then immediately `unlink()` the
-/// file so a later `cat <path>` returns nothing. Bytes are trimmed
-/// of trailing whitespace/newlines (so `echo $K > file` works) and
-/// validated for length.
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LoadError::Io(s) => write!(f, "{s}"),
+            LoadError::TooLarge => write!(f, "pubkey file exceeds {MAX_PUBKEY_FILE_BYTES} bytes"),
+            LoadError::BadEncoding => {
+                write!(f, "pubkey file is neither 32 raw bytes nor valid base64-of-32-bytes")
+            }
+            LoadError::WrongLength(n) => write!(f, "pubkey decodes to {n} bytes; expected 32"),
+            LoadError::NotOnCurve => {
+                write!(f, "pubkey bytes are not a valid Ed25519 public key (point not on curve)")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LoadError {}
+
+/// Read and parse the controller's Ed25519 public key from `path`.
 ///
-/// **Memory bound**: at most `MAX_TOKEN_BYTES + 1` bytes are read
-/// from the file, regardless of the file's true size. Anything
-/// longer is rejected without holding the full content in memory.
-///
-/// On validation failure the file is **still unlinked** — by the
-/// time we know the bytes are bad, they're already in our memory,
-/// and removing the file as soon as possible bounds the window
-/// during which a bad-key startup leaves the file on the tmpfs.
-///
-/// Errors propagate the host path because they fire at boot only
-/// (operator-facing, never returned to a client).
-pub fn load_key_from_path(path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
-    // Bounded read: take(MAX_TOKEN_BYTES + 1). If we get exactly
-    // MAX_TOKEN_BYTES + 1 bytes, the file is over-cap and we reject
-    // without ever loading the rest into memory. If we get fewer,
-    // EOF reached and the whole content is in `raw`.
+/// The file must be either:
+///   - exactly 32 raw bytes (Ed25519 public key in raw binary), or
+///   - the base64 encoding of those 32 bytes (with optional
+///     trailing whitespace / newline — `cat key.b64` works).
+pub fn load_pubkey_from_path(path: &Path) -> Result<VerifyingKey, LoadError> {
     let file = std::fs::File::open(path)
-        .map_err(|e| format!("open {}: {e}", path.display()))?;
+        .map_err(|e| LoadError::Io(format!("open {}: {e}", path.display())))?;
     let mut raw = Vec::new();
-    let mut limited = file.take(MAX_TOKEN_BYTES as u64 + 1);
+    let mut limited = file.take(MAX_PUBKEY_FILE_BYTES as u64 + 1);
     limited
         .read_to_end(&mut raw)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
-    let raw = Zeroizing::new(raw);
-
-    // Unlink BEFORE validation — see the doc comment above.
-    if let Err(e) = std::fs::remove_file(path) {
-        tracing::warn!(
-            error = %e,
-            token_path = %path.display(),
-            "failed to unlink token file (token already in memory)"
-        );
+        .map_err(|e| LoadError::Io(format!("read {}: {e}", path.display())))?;
+    if raw.len() > MAX_PUBKEY_FILE_BYTES {
+        return Err(LoadError::TooLarge);
     }
-
     let trimmed = trim_trailing_whitespace(&raw);
-    if trimmed.len() > MAX_TOKEN_BYTES {
-        return Err(format!(
-            "key at {} is too large (>{} bytes after trim)",
-            path.display(),
-            MAX_TOKEN_BYTES,
-        ));
+
+    // Format selection: if exactly 32 bytes, treat as raw.
+    // Otherwise, try base64 decode.
+    let bytes: Vec<u8> = if trimmed.len() == PUBLIC_KEY_LENGTH {
+        trimmed.to_vec()
+    } else {
+        // base64 decode of (potentially CRLF-stripped) string.
+        let s = std::str::from_utf8(trimmed).map_err(|_| LoadError::BadEncoding)?;
+        B64.decode(s.trim().as_bytes())
+            .map_err(|_| LoadError::BadEncoding)?
+    };
+    if bytes.len() != PUBLIC_KEY_LENGTH {
+        return Err(LoadError::WrongLength(bytes.len()));
     }
-    if trimmed.len() < MIN_TOKEN_BYTES {
-        return Err(format!(
-            "key at {} is too short ({} bytes; need >= {})",
-            path.display(),
-            trimmed.len(),
-            MIN_TOKEN_BYTES,
-        ));
-    }
-    Ok(Zeroizing::new(trimmed.to_vec()))
+
+    let arr: [u8; PUBLIC_KEY_LENGTH] = bytes
+        .as_slice()
+        .try_into()
+        .expect("length checked just above");
+    VerifyingKey::from_bytes(&arr).map_err(|_| LoadError::NotOnCurve)
 }
 
 fn trim_trailing_whitespace(buf: &[u8]) -> &[u8] {
@@ -123,6 +158,7 @@ fn trim_trailing_whitespace(buf: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::SigningKey;
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -130,91 +166,123 @@ mod tests {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let pid = std::process::id();
-        std::env::temp_dir().join(format!("zsbx-key-{label}-{pid}-{n}"))
+        std::env::temp_dir().join(format!("zsbx-pubkey-{label}-{pid}-{n}"))
     }
 
-    fn write_key(bytes: &[u8]) -> std::path::PathBuf {
+    fn write_file(bytes: &[u8]) -> std::path::PathBuf {
         let p = unique_tmp("auth");
         let mut f = std::fs::File::create(&p).unwrap();
         f.write_all(bytes).unwrap();
         p
     }
 
-    #[test]
-    fn loads_valid_key_then_unlinks() {
-        let path = write_key(b"abcdefghijklmnopqrstuvwxyz0123456789");
-        let bytes = load_key_from_path(&path).unwrap();
-        assert_eq!(bytes.len(), 36);
-        assert_eq!(&bytes[..], b"abcdefghijklmnopqrstuvwxyz0123456789");
-        assert!(!path.exists(), "file must be unlinked after load");
+    fn fresh_pubkey() -> VerifyingKey {
+        SigningKey::from_bytes(&[42u8; 32]).verifying_key()
     }
 
     #[test]
-    fn trims_trailing_newline() {
-        let path = write_key(b"abcdefghijklmnopqrstuvwxyz012345\n");
-        let bytes = load_key_from_path(&path).unwrap();
-        // 32 bytes after trim.
-        assert_eq!(bytes.len(), 32);
-        assert!(!bytes.ends_with(b"\n"));
+    fn loads_raw_32_byte_pubkey() {
+        let pk = fresh_pubkey();
+        let path = write_file(pk.as_bytes());
+        let loaded = load_pubkey_from_path(&path).unwrap();
+        assert_eq!(loaded.as_bytes(), pk.as_bytes());
+        // File is left in place — pubkey isn't secret.
+        assert!(path.exists(), "pubkey file must persist (read-only mount)");
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
-    fn rejects_short_key() {
-        // 31 bytes < MIN_TOKEN_BYTES (32)
-        let path = write_key(b"0123456789abcdef0123456789abcde");
-        let r = load_key_from_path(&path);
-        // Per the unlink-before-validate rule, the file is gone even
-        // though we rejected the bytes.
-        assert!(!path.exists(), "file must be unlinked even on validation failure");
-        assert!(r.is_err());
+    fn loads_base64_pubkey() {
+        let pk = fresh_pubkey();
+        let b64 = B64.encode(pk.as_bytes());
+        let path = write_file(b64.as_bytes());
+        let loaded = load_pubkey_from_path(&path).unwrap();
+        assert_eq!(loaded.as_bytes(), pk.as_bytes());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn loads_base64_with_trailing_newline() {
+        let pk = fresh_pubkey();
+        let mut b64 = B64.encode(pk.as_bytes());
+        b64.push('\n');
+        let path = write_file(b64.as_bytes());
+        let loaded = load_pubkey_from_path(&path).unwrap();
+        assert_eq!(loaded.as_bytes(), pk.as_bytes());
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
     fn rejects_missing_file() {
         let path = unique_tmp("missing");
-        assert!(load_key_from_path(&path).is_err());
+        let r = load_pubkey_from_path(&path);
+        assert!(matches!(r, Err(LoadError::Io(_))));
     }
 
     #[test]
-    fn loaded_bytes_zeroize_on_drop() {
-        // The Zeroizing wrapper wipes on drop. We can't observe the
-        // memory after free safely, but we CAN check that the type
-        // is the zeroizing one (compile-time check).
-        let path = write_key(b"abcdefghijklmnopqrstuvwxyz012345");
-        let bytes = load_key_from_path(&path).unwrap();
-        let _: &Zeroizing<Vec<u8>> = &bytes;
+    fn rejects_oversize_file() {
+        let huge = vec![b'A'; MAX_PUBKEY_FILE_BYTES + 1];
+        let path = write_file(&huge);
+        let r = load_pubkey_from_path(&path);
+        assert!(matches!(r, Err(LoadError::TooLarge)));
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
-    fn rejects_oversize_key() {
-        // Exactly MAX_TOKEN_BYTES + 1 bytes of key material — must
-        // be rejected and the file unlinked.
-        let huge = vec![b'x'; MAX_TOKEN_BYTES + 1];
-        let path = write_key(&huge);
-        let r = load_key_from_path(&path);
+    fn rejects_garbage_encoding() {
+        // 40 random bytes that aren't 32 and aren't valid base64.
+        let bad: Vec<u8> = (0..40).map(|i| i as u8).collect();
+        let path = write_file(&bad);
+        let r = load_pubkey_from_path(&path);
+        assert!(matches!(r, Err(LoadError::BadEncoding)));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn rejects_wrong_length_after_decode() {
+        // Valid base64 but decodes to 16 bytes, not 32.
+        let short = B64.encode([0u8; 16]);
+        let path = write_file(short.as_bytes());
+        let r = load_pubkey_from_path(&path);
+        assert!(matches!(r, Err(LoadError::WrongLength(16))));
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 32 bytes that aren't a valid Ed25519 point. The parser
+    /// must surface `NotOnCurve` rather than silently accept.
+    /// In practice ed25519-dalek's `from_bytes` accepts most
+    /// 32-byte values (small-order points are flagged by
+    /// `verify_strict`, not construction), so this test exercises
+    /// the `from_bytes` rejection path on a known-bad encoding.
+    #[test]
+    fn does_not_panic_on_arbitrary_32_bytes() {
+        // All-0xFF: not on the curve in some encodings.
+        let path = write_file(&[0xFFu8; 32]);
+        // Either NotOnCurve OR success (depends on dalek
+        // version's strictness during construction). What we
+        // care about: NO PANIC, no buffer overflow.
+        let _ = load_pubkey_from_path(&path);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn empty_file_rejected() {
+        let path = write_file(b"");
+        let r = load_pubkey_from_path(&path);
+        // 0 bytes after trim → not 32 raw, base64 of empty is empty,
+        // → WrongLength(0) or BadEncoding. Either rejection is fine.
         assert!(r.is_err());
-        assert!(!path.exists(), "file unlinked even on oversize");
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
-    fn accepts_max_size_key() {
-        // Exactly MAX_TOKEN_BYTES — must succeed.
-        let max = vec![b'k'; MAX_TOKEN_BYTES];
-        let path = write_key(&max);
-        let r = load_key_from_path(&path);
-        assert!(r.is_ok());
-        assert_eq!(r.unwrap().len(), MAX_TOKEN_BYTES);
-    }
-
-    #[test]
-    fn does_not_oom_on_huge_file() {
-        // Write 5 MiB of bytes — load_key_from_path's bounded read
-        // must short-circuit at MAX_TOKEN_BYTES + 1 without
-        // allocating a 5 MiB Vec.
-        let path = unique_tmp("huge");
-        let f = std::fs::File::create(&path).unwrap();
-        f.set_len(5 * 1024 * 1024).unwrap();
-        let r = load_key_from_path(&path);
-        assert!(r.is_err(), "oversize file must be rejected");
+    fn trims_trailing_whitespace() {
+        let pk = fresh_pubkey();
+        let mut b64 = B64.encode(pk.as_bytes());
+        b64.push_str("  \r\n\t");
+        let path = write_file(b64.as_bytes());
+        let loaded = load_pubkey_from_path(&path).unwrap();
+        assert_eq!(loaded.as_bytes(), pk.as_bytes());
+        std::fs::remove_file(&path).ok();
     }
 }

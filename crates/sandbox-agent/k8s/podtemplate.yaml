@@ -1,0 +1,111 @@
+# Reference Pod template the controller can fill in for a new sandbox.
+#
+# The controller MUST stamp:
+#   - metadata.name                (per-sandbox)
+#   - metadata.labels.sandbox-id   (per-sandbox)
+#   - spec.containers[0].image     (pinned digest, not :dev)
+#   - spec.volumes[trust].configMap.name (per-sandbox public key map)
+#
+# The auth key material is an Ed25519 PUBLIC key, mounted from a
+# ConfigMap (NOT a Secret) at a read-only path. Compromising the
+# sandbox VM yields zero forgery capability — the corresponding
+# private key lives only on the controller and never enters any
+# sandbox in any form.
+#
+# Required cluster prerequisites:
+#   - RuntimeClass `kvm-sandbox` exists, mapped to the crun+libkrun
+#     handler. Without this the Pod is rejected.
+#   - The image is present in the node-local containerd image store
+#     (the agent OCI image is mounted into the libkrun rootfs).
+#   - The `sandboxes` namespace exists with the NetworkPolicy from
+#     `networkpolicy.yaml` applied.
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: TEMPLATE-FILL-IN
+  namespace: sandboxes
+  labels:
+    app.kubernetes.io/name: sandbox-agent
+    sandbox-id: TEMPLATE-FILL-IN
+  annotations:
+    # libkrun runtime selector (consumed by crun-krun handler).
+    run.oci.handler: krun
+spec:
+  runtimeClassName: kvm-sandbox
+  restartPolicy: Never
+  # Drop everything we possibly can from the Pod-level perspective.
+  # The libkrun kernel is the strong boundary; these are defense-in-
+  # depth.
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  hostNetwork: false
+  hostPID: false
+  hostIPC: false
+
+  containers:
+    - name: agent
+      image: docker.io/zeroship/sandbox-agent@sha256:TEMPLATE-PIN-DIGEST
+      imagePullPolicy: IfNotPresent
+      ports:
+        - containerPort: 7777
+          name: agent
+          protocol: TCP
+      env:
+        - name: SANDBOX_AGENT_LOG
+          value: "info"
+        - name: SANDBOX_AGENT_PUBKEY_FILE
+          value: /run/keys/controller-pubkey
+      volumeMounts:
+        - name: trust
+          mountPath: /run/keys
+          readOnly: true
+        - name: workspace
+          mountPath: /workspace
+      resources:
+        # Default sandbox shape — the controller may override per-tier.
+        requests:
+          cpu: "250m"
+          memory: "512Mi"
+        limits:
+          cpu: "2"
+          memory: "2Gi"
+      readinessProbe:
+        httpGet:
+          path: /readyz
+          port: 7777
+        initialDelaySeconds: 1
+        periodSeconds: 2
+        failureThreshold: 30
+      livenessProbe:
+        httpGet:
+          path: /livez
+          port: 7777
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        failureThreshold: 3
+      lifecycle:
+        preStop:
+          # Best-effort drain: flip /readyz to 503 so traffic stops
+          # before the SIGTERM lands. This handler is HTTP-signed by
+          # the controller in the real path; the wget-shaped fallback
+          # below is just a placeholder and won't actually pass HMAC,
+          # so the controller should override this preStop with a
+          # signed call from a sidecar in production.
+          exec:
+            command: ["/bin/sh", "-c", "sleep 1"]
+
+  volumes:
+    - name: trust
+      # ConfigMap, not Secret — the file holds the controller's
+      # Ed25519 PUBLIC key, which is non-secret. mode 0444 is
+      # world-readable; that's fine, the value isn't confidential.
+      configMap:
+        name: TEMPLATE-FILL-IN
+        items:
+          - key: controller-pubkey
+            path: controller-pubkey
+            mode: 0444
+    - name: workspace
+      emptyDir:
+        sizeLimit: 2Gi

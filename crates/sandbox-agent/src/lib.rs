@@ -10,9 +10,11 @@
 
 pub mod audit;
 pub mod auth;
+pub mod dropuser;
 pub mod exec;
 pub mod files;
 pub mod handlers;
+pub mod metrics;
 pub mod reap;
 pub mod sig;
 pub mod version;
@@ -34,14 +36,15 @@ pub const DEFAULT_WORKSPACE: &str = "/workspace";
 pub const DEFAULT_PORT: u16 = 7777;
 
 /// Build [`AppState`] from explicit paths. Tests use this directly
-/// to avoid mutating `SANDBOX_AGENT_TOKEN_FILE` (which races with
+/// to avoid mutating `SANDBOX_AGENT_PUBKEY_FILE` (which races with
 /// other parallel tests).
 pub fn state_with_paths(
-    token_path: &std::path::Path,
+    pubkey_path: &std::path::Path,
     workspace_path: &std::path::Path,
 ) -> Result<AppState, String> {
-    let key = auth::load_key_from_path(token_path)?;
-    let verifier = sig::Verifier::new(key);
+    let pubkey = auth::load_pubkey_from_path(pubkey_path)
+        .map_err(|e| format!("load pubkey {}: {e}", pubkey_path.display()))?;
+    let verifier = sig::Verifier::new(pubkey);
     let workspace = files::Workspace::open(workspace_path)?;
     let started_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -56,12 +59,13 @@ pub fn state_with_paths(
 }
 
 /// Convenience: build the default state from env + the given workspace.
-/// Reads the token from `SANDBOX_AGENT_TOKEN_FILE` (default
-/// [`auth::DEFAULT_TOKEN_PATH`]); the file is unlinked after read.
+/// Reads the public key from `SANDBOX_AGENT_PUBKEY_FILE` (default
+/// [`auth::DEFAULT_PUBKEY_PATH`]). The file persists after read —
+/// the pubkey is non-secret and the mount is read-only anyway.
 pub fn state_from_env(workspace_path: PathBuf) -> Result<AppState, String> {
-    let token_path = std::env::var("SANDBOX_AGENT_TOKEN_FILE")
-        .unwrap_or_else(|_| auth::DEFAULT_TOKEN_PATH.to_string());
-    state_with_paths(std::path::Path::new(&token_path), &workspace_path)
+    let pubkey_path = std::env::var("SANDBOX_AGENT_PUBKEY_FILE")
+        .unwrap_or_else(|_| auth::DEFAULT_PUBKEY_PATH.to_string());
+    state_with_paths(std::path::Path::new(&pubkey_path), &workspace_path)
 }
 
 #[cfg(test)]
@@ -80,21 +84,26 @@ mod tests {
         p
     }
 
-    fn write_token_in(dir: &std::path::Path) -> PathBuf {
-        let p = dir.join("token");
+    fn write_pubkey_in(dir: &std::path::Path) -> PathBuf {
+        // Deterministic Ed25519 keypair for tests. The agent only
+        // sees the public side; nothing in the agent code path
+        // ever touches a SigningKey.
+        use ed25519_dalek::SigningKey;
+        let pk = SigningKey::from_bytes(&[42u8; 32]).verifying_key();
+        let p = dir.join("controller-pubkey");
         let mut f = std::fs::File::create(&p).unwrap();
-        f.write_all(b"abcdefghijklmnopqrstuvwxyz0123456789").unwrap();
+        f.write_all(pk.as_bytes()).unwrap();
         p
     }
 
     #[test]
     fn state_with_paths_succeeds_with_valid_inputs() {
         let dir = unique_dir("ok");
-        let token_path = write_token_in(&dir);
+        let pubkey_path = write_pubkey_in(&dir);
         let ws_path = dir.join("ws");
-        let state = state_with_paths(&token_path, &ws_path).unwrap();
-        // The token file should have been unlinked.
-        assert!(!token_path.exists());
+        let state = state_with_paths(&pubkey_path, &ws_path).unwrap();
+        // Pubkey file persists — read-only mount, non-secret.
+        assert!(pubkey_path.exists());
         // Workspace dir should have been created.
         assert!(ws_path.exists() && ws_path.is_dir());
         // Default state values.
@@ -103,34 +112,34 @@ mod tests {
     }
 
     #[test]
-    fn state_with_paths_errors_on_missing_token() {
+    fn state_with_paths_errors_on_missing_pubkey() {
         let dir = unique_dir("missing");
-        let token_path = dir.join("nope");
+        let pubkey_path = dir.join("nope");
         let ws_path = dir.join("ws");
-        let r = state_with_paths(&token_path, &ws_path);
+        let r = state_with_paths(&pubkey_path, &ws_path);
         assert!(r.is_err());
     }
 
     #[test]
-    fn state_with_paths_errors_on_short_token() {
-        let dir = unique_dir("short");
-        let token_path = dir.join("token");
-        std::fs::write(&token_path, b"too-short").unwrap();
-        let r = state_with_paths(&token_path, &dir.join("ws"));
+    fn state_with_paths_errors_on_garbage_pubkey() {
+        let dir = unique_dir("garbage");
+        let pubkey_path = dir.join("controller-pubkey");
+        // 40 bytes that aren't 32-raw and aren't valid base64.
+        let bad: Vec<u8> = (0..40).map(|i| i as u8).collect();
+        std::fs::write(&pubkey_path, bad).unwrap();
+        let r = state_with_paths(&pubkey_path, &dir.join("ws"));
         assert!(r.is_err());
-        // Per Round 4 fix: file unlinked even on validation failure.
-        assert!(!token_path.exists());
     }
 
     #[test]
     fn state_with_paths_started_at_is_recent() {
         let dir = unique_dir("ts");
-        let token_path = write_token_in(&dir);
+        let pubkey_path = write_pubkey_in(&dir);
         let before = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let state = state_with_paths(&token_path, &dir.join("ws")).unwrap();
+        let state = state_with_paths(&pubkey_path, &dir.join("ws")).unwrap();
         let after = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -142,8 +151,8 @@ mod tests {
     #[test]
     fn app_state_draining_helpers() {
         let dir = unique_dir("draining");
-        let token_path = write_token_in(&dir);
-        let state = state_with_paths(&token_path, &dir.join("ws")).unwrap();
+        let pubkey_path = write_pubkey_in(&dir);
+        let state = state_with_paths(&pubkey_path, &dir.join("ws")).unwrap();
         assert!(!state.is_draining());
         state.mark_draining();
         assert!(state.is_draining());

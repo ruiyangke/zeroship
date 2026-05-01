@@ -103,6 +103,7 @@ fn verify_signed(req: &HttpRequest, body: &[u8], state: &AppState) -> bool {
             audit::events::AUTH_FAIL,
             &format!("method={method} path={path} reason=query-not-allowed"),
         );
+        crate::metrics::inc_auth_fail("query-not-allowed");
         return false;
     }
 
@@ -131,13 +132,12 @@ fn verify_signed(req: &HttpRequest, body: &[u8], state: &AppState) -> bool {
                 AuthFail::ReplayedNonce => audit::events::AUTH_REPLAY,
                 _ => audit::events::AUTH_FAIL,
             };
+            let r = reason.as_str();
             audit::record(
                 event,
-                &format!(
-                    "method={method} path={path} reason={}",
-                    reason.as_str()
-                ),
+                &format!("method={method} path={path} reason={r}"),
             );
+            crate::metrics::inc_auth_fail(r);
             false
         }
     }
@@ -190,6 +190,15 @@ pub async fn readyz(state: State) -> HttpResponse {
     HttpResponse::Ok().json(&json!({"status": "ready"}))
 }
 
+/// `GET /metrics` — Prometheus text exposition. **Unauthenticated**;
+/// see the metrics module-level docs for the rationale.
+pub async fn metrics(state: State) -> HttpResponse {
+    let body = crate::metrics::render(state.started_at_unix);
+    HttpResponse::Ok()
+        .content_type("text/plain; version=0.0.4; charset=utf-8")
+        .body(body)
+}
+
 pub async fn version_info(state: State) -> HttpResponse {
     HttpResponse::Ok().json(&json!({
         "agent_version": version::AGENT_VERSION,
@@ -237,6 +246,8 @@ pub async fn exec_cmd(
     // the HMAC check before serde_json sees it.
     if !verify_signed(&req, &body, &state) { return unauthorized(); }
 
+    crate::metrics::inc_exec_request();
+
     let parsed: ExecBody = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(e) => return err(400, format!("invalid JSON body: {e}")),
@@ -251,6 +262,10 @@ pub async fn exec_cmd(
         Ok(out) => {
             if out.timed_out {
                 audit::record(audit::events::EXEC_TIMEOUT, &format!("timeout_ms={timeout}"));
+                crate::metrics::inc_exec_timeout();
+            }
+            if out.status != 0 {
+                crate::metrics::inc_exec_nonzero();
             }
             if out.stdout_truncated || out.stderr_truncated {
                 audit::record(
@@ -320,9 +335,12 @@ pub async fn read_file(
 
     let p = path.into_inner();
     match state.workspace.read_file(&p) {
-        Ok(bytes) => HttpResponse::Ok()
-            .content_type(content_type(&p))
-            .body(bytes),
+        Ok(bytes) => {
+            crate::metrics::add_files_bytes_read(bytes.len() as u64);
+            HttpResponse::Ok()
+                .content_type(content_type(&p))
+                .body(bytes)
+        }
         Err(e) => fs_error_response("read", &p, e, None),
     }
 }
@@ -338,7 +356,10 @@ pub async fn write_file(
     let p = path.into_inner();
     let n = body.len();
     match state.workspace.write_file(&p, &body) {
-        Ok(()) => HttpResponse::Ok().json(&json!({"written": p, "size": n})),
+        Ok(()) => {
+            crate::metrics::add_files_bytes_written(n as u64);
+            HttpResponse::Ok().json(&json!({"written": p, "size": n}))
+        }
         Err(e) => fs_error_response("write", &p, e, Some(n)),
     }
 }
@@ -372,7 +393,15 @@ mod tests {
     use ntex::web::test;
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
-    const TEST_TOKEN: &str = "test-token-must-be-at-least-32-chars-long-32";
+    /// Deterministic 32-byte Ed25519 signing key for tests.
+    /// **Test-only.** The agent never holds a SigningKey in
+    /// production — only the controller does, and only the
+    /// VerifyingKey is exposed to the agent.
+    const TEST_SK_BYTES: [u8; 32] = [42u8; 32];
+
+    fn test_signing_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&TEST_SK_BYTES)
+    }
 
     /// Serializes tests that mutate the global `reap::REAPER_HEALTHY`
     /// flag. Shared with `reap::tests` so a reap test and a handler
@@ -389,11 +418,14 @@ mod tests {
 
     fn make_state(label: &str) -> (AppState, std::path::PathBuf) {
         let dir = unique_dir(label);
-        let token_path = dir.join("token");
-        let mut f = std::fs::File::create(&token_path).unwrap();
-        f.write_all(TEST_TOKEN.as_bytes()).unwrap();
-        let key = crate::auth::load_key_from_path(&token_path).unwrap();
-        let verifier = crate::sig::Verifier::new(key);
+        let pubkey_path = dir.join("controller-pubkey");
+        let pk = test_signing_key().verifying_key();
+        std::fs::File::create(&pubkey_path)
+            .unwrap()
+            .write_all(pk.as_bytes())
+            .unwrap();
+        let pubkey = crate::auth::load_pubkey_from_path(&pubkey_path).unwrap();
+        let verifier = crate::sig::Verifier::new(pubkey);
         let workspace = crate::files::Workspace::open(&dir.join("ws")).unwrap();
         let state = AppState {
             verifier: Arc::new(verifier),
@@ -404,8 +436,8 @@ mod tests {
         (state, dir)
     }
 
-    /// Sign a request with the test key. Returns the three header
-    /// values `(timestamp, nonce, signature)` to attach.
+    /// Sign a request with the test signing key. Returns the three
+    /// header values `(timestamp, nonce, signature)` to attach.
     fn sign(method: &str, path: &str, body: &[u8]) -> (String, String, String) {
         use std::sync::atomic::AtomicU64;
         static NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -415,14 +447,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let sig = crate::sig::sign_for_test(
-            TEST_TOKEN.as_bytes(),
-            method,
-            path,
-            body,
-            ts,
-            &nonce,
-        );
+        let sig = crate::sig::sign(&test_signing_key(), method, path, body, ts, &nonce);
         (ts.to_string(), nonce, sig)
     }
 
@@ -554,7 +579,7 @@ mod tests {
         assert_eq!(body["protocol_version"], 1);
         let caps = body["capabilities"].as_array().unwrap();
         let cap_strs: Vec<&str> = caps.iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(cap_strs.contains(&"auth.hmac-v1"));
+        assert!(cap_strs.contains(&"auth.ed25519-v1"));
         assert_eq!(body["started_at_unix"], 1234);
     }
 
@@ -668,8 +693,8 @@ mod tests {
             - 60;
         let nonce = "skew-nonce";
         let body = r#"{"cmd": "echo hi"}"#;
-        let sig = crate::sig::sign_for_test(
-            TEST_TOKEN.as_bytes(),
+        let sig = crate::sig::sign(
+            &test_signing_key(),
             "POST",
             "/exec",
             body.as_bytes(),
