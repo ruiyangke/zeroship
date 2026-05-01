@@ -36,5 +36,6 @@ pub use legacy_bridge::{
 
 // Native classes & primitives — installed unconditionally per D-19.
 pub mod budget;
+pub mod promise_resolve;
 pub mod queue;
 pub mod slots;
