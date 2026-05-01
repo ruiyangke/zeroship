@@ -33,13 +33,14 @@ A graduated middle tier (**+Data**) sits between them.
 | 5 | Mode model | Three tiers: Maker / +Data / +Code |
 | 6 | Product shape | Multi-agent: Builder + Critic + Reviewer + PM + SRE |
 | 7 | Quality | Critic ⇄ Builder loop in generation; pre-deploy gates; scorecard tracked over time |
-| 8 | Implementation libraries | **deepagents + LangGraph + LangChain models on server**; **Vercel AI SDK (`@ai-sdk/react`) on client**; thin translator at the seam (~200 LOC). Per §4.8. Viable because zeroship V8 runtime ships node-compat. |
+| 8 | Implementation libraries | **deepagents + LangGraph + LangChain models on server**; **Vercel AI SDK (`@ai-sdk/react`) on client**; thin translator at the seam (~110 LOC after Plan 02 Phase A — narrower than originally planned). Per §4.8. Viable because zeroship V8 runtime ships node-compat. |
+| 9 | Agent fleet implementation | **deepagents-native** (post-docs review): Critic / Reviewer / PM / SRE = `SubAgent[]` configs; built-in `TodoListMiddleware` + `FilesystemMiddleware` + `SubAgentMiddleware` cover much of the planned custom code; `interruptOn` implements `ask_survey`; custom `wrapToolCall` middleware emits `data-*` UI parts; `backend` adapter wires built-in fs tools to `crates/sandbox`. Per §4.8.3. |
 
 ---
 
 ## 2 · Multi-agent architecture
 
-> Implementation note: the multi-agent fleet is built on **deepagents + LangGraph + LangChain models**. See §4.8 for library stack and rationale; this section describes the agent semantics independent of implementation.
+> **Implementation note** (post-deepagents-docs review). The multi-agent fleet is built on **deepagents + LangGraph + LangChain models**. Critic / Reviewer / PM / SRE map directly onto deepagents' `SubAgent` config (the ones invoked from chat) — no custom orchestration runtime. PM and SRE *also* run as standalone scheduled workers for background polling work that doesn't sit inside a chat turn. `ask_survey` maps onto `interruptOn`. Custom `wrapToolCall` middleware emits `data-*` UI parts (Survey / Diff / CriticRound / Issue). See §4.8.3 for the concrete mapping; this section describes agent *semantics* independent of implementation.
 
 ### 2.1 The fleet
 
@@ -364,16 +365,119 @@ Client uses Vercel AI SDK for the chat hook. Server uses LangChain ecosystem for
 
 #### 4.8.3 Mapping deepagents to our agent fleet
 
-| Our agent | deepagents primitive | Notes |
-|-----------|----------------------|-------|
-| **Builder** | planner agent | The top-level orchestrator that decides what to build, plans steps, dispatches sub-agents |
-| **Critic** | sub-agent invoked in a *loop* | Non-standard usage of deepagents — typically sub-agents are one-shot. We invoke Critic repeatedly inside Builder's planning loop until approval or max iterations. Modeled as a LangGraph cycle inside the planner's graph. |
-| **Reviewer** | sub-agent invoked *once per commit* | Standard deepagents shape: one-shot pre-merge gate. |
-| **PM** | not a deepagents agent — runs as a *separate scheduled worker process* | PM is background / event-driven, not invoked by Builder. Maintains the todos that deepagents primitives can read. |
-| **SRE** | not a deepagents agent — runs as a *separate scheduled worker process* | Same pattern as PM. Polls metrics, files issues, proposes fixes by *invoking* a Builder agent task (which then runs through the deepagents pipeline). |
-| **ask_survey** / **propose_diff** / **file_issue** | LangChain `tool()` definitions, Zod-typed | Surfaced to Builder via the standard deepagents tool registry. |
+This mapping is grounded in the official deepagents JS docs (https://docs.langchain.com/oss/javascript/deepagents/). Most of what we'd otherwise build by hand is already provided as built-in middleware, tools, or first-class config options.
 
-The Critic loop is the only non-trivial bend in deepagents' shape. We get clean expression of the rest.
+##### 4.8.3.1 What deepagents already gives us (built-in)
+
+**Built-in middleware** (always-on, in `createDeepAgent`'s default chain):
+
+| Middleware | What it does | What we get for free |
+|------------|--------------|----------------------|
+| `TodoListMiddleware` | tracks/manages a per-conversation todo list | PM agent's planning + backlog primitive |
+| `FilesystemMiddleware` | virtual fs operations | foundation for project-codebase-as-memory (§12.4) |
+| `SubAgentMiddleware` | spawns and coordinates subagents | Critic / Reviewer / PM / SRE delegation |
+| `SummarizationMiddleware` | condenses message history | context-window mgmt for long sessions |
+| `AnthropicPromptCachingMiddleware` | reduces redundant Anthropic tokens | cost optimisation when we add Anthropic (§4.8.6) |
+| `PatchToolCallsMiddleware` | auto-fixes interrupted tool calls | resilience to partial failures |
+
+**Built-in tools** (registered automatically; no `.tool()` definition needed):
+
+| Tool | Replaces our planned | Notes |
+|------|----------------------|-------|
+| `write_todos` | PM agent's "create issue / feature" | already wires into the TodoList middleware |
+| `ls` / `read_file` / `write_file` / `edit_file` | our `propose_diff` write path | needs a `backend` to point at the zeroship sandbox (see §4.8.3.4) |
+| `execute` | shell access in sandbox | activates only when `backend` supports it |
+| `task` | "Builder spawns Critic" | the canonical subagent-invocation tool |
+
+**First-class config options** that map directly onto our spec:
+
+| `createDeepAgent` option | Spec section it implements |
+|--------------------------|----------------------------|
+| `subagents: SubAgent[]` | §2.1 fleet (Critic / Reviewer / PM / SRE) |
+| `middleware: Middleware[]` | §4.8.4b translator (data-part emission seam) |
+| `interruptOn: { tool: …}` | §8.2.7 `ask_survey` (the survey IS the interrupt) |
+| `skills: string[]` | §BB skill registry |
+| `backend: AnyBackendProtocol` | wires built-in fs/exec tools to `crates/sandbox` |
+| `checkpointer` | multi-turn conversation memory |
+| `interruptOn` (other tools) | "review before deploy" gates (§11.4 auto-rollback approval) |
+
+**String-based model spec**: `model: "openai:gpt-5.4"` or `"claude-sonnet-4-6"` — deepagents resolves the provider. We don't have to instantiate `ChatOpenAI` / `ChatAnthropic` ourselves.
+
+##### 4.8.3.2 Revised agent-fleet mapping
+
+| Our agent | deepagents primitive | Implementation |
+|-----------|----------------------|----------------|
+| **Builder** | the top-level agent (`createDeepAgent({...})`) | runs the planning loop, calls tools, emits `task` for subagents |
+| **Critic** | `SubAgent` config | `{ name: "critic", description: "Reviews Builder output...", systemPrompt: CRITIC_PROMPT, model: "..." }`. Builder's loop calls `task("critic", { changes })` after each commit; Critic returns approved/issues; Builder revises. The "loop" is just Builder calling `task` repeatedly until approved or N iterations — natural deepagents shape, not a LangGraph cycle. |
+| **Reviewer** | `SubAgent` (one-shot, like Critic but cheaper) + `interruptOn` for hard gates | Builder calls `task("reviewer", ...)` before merge. For human-in-the-loop hard gates (security, destructive prod migrations), `interruptOn: { deploy: { reviewerNotApproved: true } }` halts until creator confirms. |
+| **PM** | dual: `SubAgent` for in-conversation queries (`@pm what's next?`) + a *separate scheduled worker* for background digests | The conversational PM is a SubAgent. The background polling PM is a worker process that reads project state and POSTs to a chat thread. |
+| **SRE** | same dual: `SubAgent` for `@sre why is the app slow?` + scheduled worker for monitoring | Same pattern. The SubAgent variant runs in Builder's chat. The worker runs on a cron, files issues via the same `write_todos` interface. |
+| **ask_survey** | `interruptOn` config | The agent halts when emitting a `survey` payload; the UI renders the SurveyCard; user submits → agent resumes with answers in state. *Cleaner than a tool call.* |
+| **propose_diff** | wrapping built-in `write_file` with custom middleware | The `wrapToolCall` hook intercepts `write_file` calls, emits a `data-diff` UI part to the stream, then runs the actual write. Single seam. |
+| **file_issue** | wrapping `write_todos` with middleware | Same pattern: `wrapToolCall` on `write_todos` fans the new todo into a `data-issue` part. |
+
+##### 4.8.3.3 Custom middleware as the data-part seam (replaces §4.8.4b's translator role)
+
+The original §4.8.4b plan was: translator subscribes to `streamEvents` and emits AI SDK chunks for both text and custom data parts. Plan 02 Phase A landed the text-only half of that. **For data parts, use custom middleware instead.**
+
+`createMiddleware({ wrapToolCall })` runs *around* every tool call. From inside the wrapper we have access to:
+- the tool call args (before it runs)
+- the tool result (after)
+- a writer/state mechanism shared with `createUIMessageStream`
+
+So `data-survey` / `data-diff` / `data-critic-round` / `data-issue` parts come from middleware, not from the translator's switch statement. The translator stays narrow: text events → text-* chunks, plus a `finish` at the end.
+
+```ts
+// Sketch — concrete code in Plan 02 Phase B
+const dataPartMiddleware = createMiddleware({
+  name: "DataPartEmitter",
+  wrapToolCall: async (req, handler) => {
+    if (req.toolCall.name === "write_file") {
+      const before = await readBeforeContent(req.toolCall.args.path);
+      const result = await handler(req);
+      writeUIPart({ type: "data-diff", diff: { path, before, after: req.toolCall.args.content } });
+      return result;
+    }
+    if (req.toolCall.name === "write_todos") {
+      const result = await handler(req);
+      for (const todo of result.added) writeUIPart({ type: "data-issue", issue: todo });
+      return result;
+    }
+    return handler(req);
+  },
+});
+```
+
+The `writeUIPart` callback is plumbed through from the stream's `execute({ writer })` scope into the middleware via closure.
+
+##### 4.8.3.4 Backend wiring (zeroship sandbox)
+
+Built-in fs tools (`read_file`, `write_file`, `edit_file`, `ls`) talk to deepagents' filesystem via the `backend` config. Default backend is in-memory (good for prototyping; bad for actual project files).
+
+For real Builder behaviour, we implement a backend that talks to `crates/sandbox/` over HTTP — operations route to the per-project Docker sandbox where Builder's code edits actually land. **This is the bulk of Plan 02 Phase B work**: implement the `AnyBackendProtocol` adapter and pass it as `backend:`.
+
+```ts
+import { createSandboxBackend } from "../_backends/sandbox";       // we write this
+
+const agent = createDeepAgent({
+  model: "openai:gpt-5.4-mini",
+  systemPrompt: BUILDER_SYSTEM,
+  backend: createSandboxBackend({ sandboxUrl, sandboxToken, projectId }),
+  middleware: [dataPartMiddleware],
+  subagents: [criticSubagent, reviewerSubagent],
+  interruptOn: { ask_survey: true },
+});
+```
+
+##### 4.8.3.5 What stays "non-trivial bend"
+
+After the deepagents docs review, almost nothing remains custom:
+- The data-part emission seam is `wrapToolCall` middleware — clean.
+- The Critic loop is `task("critic")` in a Builder-local while-loop — natural.
+- `ask_survey` is `interruptOn` — first-class.
+- File ops are built-in tools + a custom backend — straightforward adapter work.
+
+**One thing still bespoke**: when middleware writes UI parts, it needs the `writer` from `createUIMessageStream({ execute })`. That writer is local to each request's stream scope, so middleware can't be a module-level singleton — we instantiate the agent (and its middleware chain) fresh per chat request, with the writer bound via closure. Not hard, just worth flagging.
 
 #### 4.8.4 Client side
 
@@ -404,66 +508,79 @@ What the server does NOT use AI SDK for:
 
 #### 4.8.4b Server-side translator (deepagents → AI SDK protocol)
 
-A focused module (`crates/control/src/agents/stream_translator.ts`, ~200 LOC) sits at the chat tool function boundary. Its job: subscribe to deepagents' LangGraph stream events and emit AI SDK stream chunks.
+> **Revised after Plan 02 Phase A + deepagents docs review.** The translator is now narrower than originally planned — text events only. Data parts (Survey, Diff, CriticRound, Issue) flow through custom middleware (§4.8.3.3), not through the translator's switch statement.
+
+A focused module (`apps/zeroship-builder/src/server/_translator.ts`, **~110 LOC**, landed in Plan 02 Phase A) lives at the chat-procedure boundary. Its single job: drain the agent's LangGraph stream-events and emit AI-SDK v6 UI Message Stream chunks for the **text** path. Tool args, tool results, and our custom data-part shapes all enter the stream from middleware (§4.8.3.3), which has cleaner access to args/results than `streamEvents` does.
+
+##### What the translator handles (text only)
 
 ```typescript
-// pseudo
-import { LangChainAdapter } from "ai";
-import type { StreamEvent } from "@langchain/core/dist/tracers/event_stream";
+// concrete code — see apps/zeroship-builder/src/server/_translator.ts on the redesign branch
+export async function buildTranslatedStream(input: BuilderTurnInput) {
+  const { createDeepAgent } = await import("deepagents");
+  const { ChatOpenAI } = await import("@langchain/openai");
 
-export async function* translate(
-  langGraphStream: AsyncIterable<StreamEvent>,
-): AsyncIterable<AISDKStreamChunk> {
-  for await (const ev of langGraphStream) {
-    switch (ev.event) {
-      case "on_chat_model_stream": {
-        // text token → AI SDK text-delta
-        const delta = ev.data.chunk.content;
-        yield { type: "text-delta", delta };
-        break;
-      }
-      case "on_tool_start": {
-        // tool call start
-        yield {
-          type: "tool-call-streaming-start",
-          toolCallId: ev.run_id,
-          toolName: ev.name,
-        };
-        // ...incremental args via tool-call-delta
-        break;
-      }
-      case "on_tool_end": {
-        if (ev.name === "ask_survey") {
-          // Survey is a data part, not a regular tool result
-          yield {
-            type: "data-part",
-            partName: "survey",
-            payload: ev.data.output as Survey,
-          };
-        } else if (ev.name === "propose_diff") {
-          yield { type: "data-part", partName: "diff", payload: ev.data.output };
-        } else {
-          yield { type: "tool-result", toolCallId: ev.run_id, result: ev.data.output };
+  const agent = createDeepAgent({
+    model: "openai:gpt-5.4-mini",                  // string-based provider spec
+    systemPrompt: BUILDER_SYSTEM,
+    backend: sandboxBackend(...),                   // Phase B
+    middleware: [dataPartMiddleware(writer)],       // §4.8.3.3 emits data parts
+    subagents: [critic, reviewer],                  // §4.8.3.2 fleet
+    interruptOn: { ask_survey: true },              // §8.2.7 → first-class
+  });
+
+  return createUIMessageStream({
+    async execute({ writer }) {
+      const textId = crypto.randomUUID();
+      let textStarted = false;
+
+      for await (const ev of agent.streamEvents(
+        { messages: convertUIMessagesToLangChain(input.messages) },
+        { version: "v2" as const },
+      )) {
+        switch (ev.event) {
+          case "on_chat_model_stream": {
+            const delta = extractTextDelta(ev);
+            if (delta) {
+              if (!textStarted) {
+                writer.write({ type: "text-start", id: textId });
+                textStarted = true;
+              }
+              writer.write({ type: "text-delta", id: textId, delta });
+            }
+            break;
+          }
+          case "on_chat_model_end":
+            if (textStarted) {
+              writer.write({ type: "text-end", id: textId });
+              textStarted = false;
+            }
+            break;
+          // Tool/data events: handled by middleware, not here.
         }
-        break;
       }
-      case "on_chain_end": {
-        if (ev.name === "critic_loop_iteration") {
-          yield {
-            type: "data-part",
-            partName: "critic-round",
-            payload: { round: ev.data.round, issues: ev.data.issues },
-          };
-        }
-        break;
-      }
-      // ...
-    }
-  }
+    },
+  });
 }
 ```
 
-The translator is the only place that knows about both ecosystems. It's the seam — keep it thin, keep it tested.
+##### What does NOT belong here (anymore)
+
+| Was planned in v1 of this section | Now lives in |
+|------------------------------------|--------------|
+| `case "on_tool_start"` → `tool-call-streaming-start` chunk | not emitted; AI SDK v6 doesn't need streaming-input-start when the tool result is a data part |
+| `case "on_tool_end"` → tool-result chunk | not emitted for our custom tools (write_file/ask_survey/etc.); their outputs become data parts via middleware |
+| `case "on_chain_end"` → `critic-round` data part | replaced by middleware that wraps the `task("critic")` invocation and writes a `data-critic-round` part |
+| Survey output as `data-part` from tool-end | replaced by `interruptOn: { ask_survey: true }` — the agent's interrupt state directly carries the Survey shape; middleware writes it as `data-survey` when the interrupt fires |
+
+**Reason for the narrowing**: `streamEvents` doesn't give middleware-level access to before/after tool args, and parsing tool args from generic LangGraph events is brittle across model providers. `wrapToolCall` middleware sees the typed args and result directly, so emitting data parts from there is cleaner and provider-agnostic.
+
+##### What still belongs in the translator (and only here)
+
+- `on_chat_model_start/stream/end` → `text-start` / `text-delta` / `text-end` chunks. Provider-specific delta shape handled in `extractTextDelta()`.
+- The lazy import of `deepagents` (per §4.8.5 bundle weight mitigation).
+- The `convertUIMessagesToLangChain()` adapter (UI shape `parts: [{ type: "text", text }]` → LangChain `HumanMessage` / `AIMessage`).
+- The `createUIMessageStream` boilerplate that owns the `writer` lifecycle (and passes it to middleware via closure).
 
 ##### Custom data-part types
 
@@ -966,6 +1083,8 @@ zeroship.builder.ask_survey(survey: Survey): Promise<SurveyResponse>
 ```
 
 Operationally identical to existing `sandbox_*` and `deploy_*` tools — same receipt mechanic, same streaming pause, same audit trail. Tool calls are persisted in `chat_messages.tools_jsonb`, so survey + response live in conversation history naturally.
+
+> **Implementation note (post-deepagents review).** `ask_survey` is best implemented as a deepagents `interruptOn` configuration, not a generic tool. When the agent emits a survey payload it halts (interrupt state carries the `Survey` shape); custom middleware writes the `data-survey` UI part; the user submits → the conversation re-runs with answers injected into the agent's state. This is the canonical deepagents pattern for human-in-the-loop and matches our shape exactly. Other tools' outputs (Diff, CriticRound, Issue) flow through `wrapToolCall` middleware as data parts. See §4.8.3.3 + §4.8.3.5.
 
 ##### Three-layer constraint enforcement
 
@@ -1556,6 +1675,8 @@ Builder writes code  ──────┐
 - Builder receives feedback as additional context; revises in same turn.
 - Max iterations per project: 1 (fast) / 3 (balanced, default) / 5+ (thorough).
 - If max reached without approval: change ships (unless creator opted into hard-block on Critic), with remaining concerns surfaced as soft-warning issues filed by Critic.
+
+> **Implementation (post-deepagents review).** Critic is a `SubAgent` config on `createDeepAgent`, not a separate runtime. Builder calls `task("critic", { changes })` after each commit; the SubAgent runs with its own system prompt + (smaller) model and returns `{ approved: bool, issues: [...] }`. Builder's planning loop checks the result; if not approved and iteration count < N, Builder revises and calls `task("critic")` again. The "loop" is a plain JS `while` inside Builder's planning — *not* a custom LangGraph cycle. A custom middleware wraps the `task("critic", ...)` invocation to emit `data-critic-round` UI parts (round / total / approved / issues). See §4.8.3.2.
 
 ### 11.2 Pre-deploy gate matrix
 
