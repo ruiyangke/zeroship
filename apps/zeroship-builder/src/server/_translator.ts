@@ -127,10 +127,9 @@ export async function buildTranslatedStream(
     );
   }
 
-  // gpt-5-nano matches the canonical v6 wire example at examples/ai-chat —
-  // proven to stream cleanly through the runtime. The model is parameterized
-  // here so Phase B can swap in Anthropic via @langchain/anthropic without
-  // changing the translator.
+  // gpt-5.4-mini — V1 standard across all SubAgents per spec §4.8.9 G6.
+  // The model is parameterised here so a future phase can swap providers
+  // (Anthropic via @langchain/anthropic) without touching the translator.
   const model = new ChatOpenAI({
     model: "gpt-5.4-mini",
     temperature: 0.2,
@@ -156,24 +155,10 @@ export async function buildTranslatedStream(
   const sandbox = await getOrCreateSandboxFor(threadId);
   const backend = new ZeroshipSandboxBackend({ id: sandbox.id });
 
-  // Phase B.1: tools array stays empty. With `backend:` configured,
-  // deepagents activates its built-in fs/exec tools (`ls`,
-  // `read_file`, `write_file`, `edit_file`, `grep`, `glob`,
-  // `execute`) automatically — they're rewritten on top of the
-  // backend's protocol methods. Phase B.2 will add custom tools
-  // (`propose_diff`, `ask_survey`) on top of these.
-  //
   // G1: pass a process-local MemorySaver as the checkpointer so
   // middleware state survives across turns scoped by thread_id.
   const checkpointer = await getCheckpointer();
-  const agent = createDeepAgent({
-    model,
-    tools: [],
-    backend,
-    systemPrompt: BUILDER_SYSTEM,
-    checkpointer,
-    subagents: [critic],
-  });
+
   const mode: BuilderTurnMode = input.resume ? "resume" : "fresh";
 
   // Build the streamEvents input depending on mode. In "fresh" mode we
@@ -196,10 +181,42 @@ export async function buildTranslatedStream(
     streamInput = { messages: langchainMessages };
   }
 
+  // Phase B.2: import the data-part emitter middleware factory. The
+  // middleware itself needs the per-request v6 writer, so we
+  // instantiate it inside `execute({writer})` below.
+  const { dataPartMiddleware } = await import("./_middleware.js");
+
   return createUIMessageStream({
     async execute({ writer }) {
+      // Phase B.2: tools array stays empty. With `backend:` configured,
+      // deepagents activates its built-in fs/exec tools (`ls`,
+      // `read_file`, `write_file`, `edit_file`, `grep`, `glob`,
+      // `execute`) automatically — they're rewritten on top of the
+      // backend's protocol methods.
+      //
+      // Middleware: the data-part emitter sits in `wrapToolCall` and
+      // turns `write_file` / `edit_file` invocations into v6
+      // `data-diff` chunks (per spec §4.8.3.3). The streamEvents loop
+      // below SKIPS native tool chunks for those same tools so the
+      // wire shows one card per write, not two.
+      const dataPartMw = await dataPartMiddleware(writer);
+      const agent = createDeepAgent({
+        model,
+        tools: [],
+        backend,
+        systemPrompt: BUILDER_SYSTEM,
+        checkpointer,
+        middleware: [dataPartMw] as const,
+        subagents: [critic],
+      });
+
       const textId = crypto.randomUUID();
       let textStarted = false;
+
+      // Tools whose visualisation goes via `data-diff` instead of the
+      // native v6 tool-call chunks. Keep in sync with the wrapToolCall
+      // hook in `_middleware.ts`.
+      const DIFF_TOOLS = new Set(["write_file", "edit_file"]);
 
       // streamEvents accepts InputType | Command — both modes use the
       // same v2 protocol, signal plumbing, and thread_id.
@@ -236,9 +253,60 @@ export async function buildTranslatedStream(
               textStarted = false;
             }
             break;
-          // TODO Phase B: case "on_tool_start" → tool-input-available chunk
-          // TODO Phase B: case "on_tool_end"   → tool-output-available chunk
-          // TODO Phase B: agent custom events  → data-survey/data-diff/etc.
+
+          // Phase B.2: native tool-call chunks. AI SDK v6 names these
+          // `tool-input-available` and `tool-output-available` (see
+          // node_modules/ai/dist/index.d.ts:2093-2122). The client's
+          // ChatMessages dispatcher pairs them by toolCallId into a
+          // <Receipt>.
+          case "on_tool_start": {
+            const toolName = String(event.name ?? "");
+            if (!toolName || DIFF_TOOLS.has(toolName)) break;
+            const toolCallId = String(event.run_id ?? crypto.randomUUID());
+            // LangChain wraps the resolved input as
+            // `event.data.input = { input: <stringified-args-or-raw> }`
+            // — see the canonical event shape in
+            // node_modules/@langchain/core/dist/tracers/event_stream.cjs.
+            // Unwrap to the actual args object (best-effort JSON parse
+            // when it's a stringified object) so the v6 chunk's
+            // `input` is the structured args, not an envelope.
+            const inputRaw = (event as { data?: { input?: unknown } }).data?.input;
+            const input = unwrapToolInput(inputRaw);
+            try {
+              writer.write({
+                type: "tool-input-available",
+                toolCallId,
+                toolName,
+                input,
+              });
+            } catch {
+              // stream closed — drop
+            }
+            break;
+          }
+
+          case "on_tool_end": {
+            const toolName = String(event.name ?? "");
+            if (!toolName || DIFF_TOOLS.has(toolName)) break;
+            const toolCallId = String(event.run_id ?? crypto.randomUUID());
+            const rawOutput =
+              (event as { data?: { output?: unknown } }).data?.output ?? null;
+            // LangChain hands us the full ToolMessage object as `output`
+            // (with `kwargs.content` carrying the actual tool result).
+            // The v6 chunk's `output` is meant to be the tool's result
+            // value, not a serialized message envelope, so unwrap.
+            const output = unwrapToolOutput(rawOutput);
+            try {
+              writer.write({
+                type: "tool-output-available",
+                toolCallId,
+                output,
+              });
+            } catch {
+              // stream closed — drop
+            }
+            break;
+          }
         }
       }
 
@@ -416,6 +484,49 @@ function stringifyToolResult(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+// Unwrap a LangChain on_tool_start input envelope into the structured
+// args. LangChain emits `data.input = { input: <args-or-string> }`.
+// `<args-or-string>` is usually the raw structured args object, but for
+// some tool wrappers it's a JSON-stringified object. Best-effort parse.
+function unwrapToolInput(value: unknown): unknown {
+  if (!value || typeof value !== "object") return value;
+  const v = value as Record<string, unknown>;
+  if (Object.keys(v).length === 1 && "input" in v) {
+    const inner = v.input;
+    if (typeof inner === "string") {
+      try {
+        return JSON.parse(inner);
+      } catch {
+        return inner;
+      }
+    }
+    return inner;
+  }
+  return value;
+}
+
+// Unwrap a LangChain ToolMessage (or ToolMessageChunk) coming through
+// the `on_tool_end` event so the v6 `tool-output-available` chunk
+// carries the tool's actual return value, not a serialized message
+// envelope. LangChain serializes ToolMessages as
+//   { lc, type: "constructor", id, kwargs: { content, status, ... } }
+// — we want `kwargs.content` (and fall back to the raw value when the
+// shape isn't a ToolMessage, e.g., raw strings or Command objects).
+function unwrapToolOutput(value: unknown): unknown {
+  if (!value || typeof value !== "object") return value;
+  const v = value as Record<string, unknown>;
+  if (v.type === "constructor" && v.kwargs && typeof v.kwargs === "object") {
+    const kw = v.kwargs as Record<string, unknown>;
+    if ("content" in kw) return kw.content;
+  }
+  // Some tools return a ToolMessage instance directly (not a serialized
+  // form). Those have a `.content` property.
+  if ("content" in v && (typeof v.content === "string" || Array.isArray(v.content))) {
+    return v.content;
+  }
+  return value;
 }
 
 function extractTextDelta(event: {

@@ -804,7 +804,7 @@ const critic: SubAgent = {
   name: "critic",
   description: "Reviews Builder output across quality dimensions.",
   systemPrompt: CRITIC_PROMPT,
-  model: "openai:gpt-4o-mini",                  // cheap; see G6
+  model: "openai:gpt-5.4-mini",                  // cheap; see G6
   responseFormat: z.object({
     approved: z.boolean(),
     issues: z.array(z.object({
@@ -824,19 +824,21 @@ const critic: SubAgent = {
 
 ###### G6 · Per-SubAgent model selection
 
-**Problem.** Spec lacks guidance on per-SubAgent model choice. Critic running at `gpt-5.4-mini` 3× per turn is overkill for a structured-output task. Token cost matters.
-
-**Fix.** Add to §4.8.3.2: each SubAgent picks the cheapest model that meets its quality bar. Initial choices:
+**Decision (2026-05-01).** Standardise all agents on **`openai:gpt-5.4-mini`** for V1. The model is `gpt-5.4`-family — fast, cheap-enough, and the same quality bar across Builder + SubAgents avoids regressions where a smaller-model Critic mis-grades a larger-model Builder's output. Per-SubAgent model differentiation deferred until cost data justifies it.
 
 | SubAgent | Model | Why |
 |----------|-------|-----|
-| Builder (top-level) | `openai:gpt-5.4-mini` | Quality matters most; the user sees it |
-| Critic | `openai:gpt-4o-mini` | Structured output via `responseFormat`; cheap and fast |
-| Reviewer (CI gate) | `openai:gpt-4o-mini` | Pass/fail per check, no creativity |
-| PM (chat-mode) | `openai:gpt-4o-mini` | Mostly summarisation / lookup |
-| SRE (chat-mode) | `openai:gpt-4o-mini` | Same |
+| Builder (top-level) | `openai:gpt-5.4-mini` | Default; user sees its output |
+| Critic | `openai:gpt-5.4-mini` | Structured via `responseFormat`; same family as Builder for grading parity |
+| Reviewer (CI gate) | `openai:gpt-5.4-mini` | Same |
+| PM (chat-mode) | `openai:gpt-5.4-mini` | Same |
+| SRE (chat-mode) | `openai:gpt-5.4-mini` | Same |
 
-These are starting points; dial up as needed. The "fast / balanced / thorough" project setting (§11) controls *iteration count* of Critic loop, not the model.
+**Future tuning (deferred).** Once we have token-cost telemetry per agent, revisit:
+- Critic running 3× per turn is the heaviest spend → may benefit from a smaller model **iff** parity stays acceptable. Keep `responseFormat` Zod schema as the constraint that lets us drop quality without losing structure.
+- PM / SRE on smaller models is plausible; they're mostly summarisation.
+
+The "fast / balanced / thorough" project setting (§11) controls *iteration count* of the Critic loop, not the model.
 
 **Lives in.** §4.8.3.2 (table), §11 (cost-tier note).
 
@@ -1927,7 +1929,7 @@ Builder writes code  ──────┐
 
 > **Implementation (post-deepagents review).** Critic is a `SubAgent` config on `createDeepAgent`, not a separate runtime. Builder calls `task("critic", { changes })` after each commit; the SubAgent runs with its own system prompt + (smaller) model and returns `{ approved: bool, issues: [...] }`. Builder's planning loop checks the result; if not approved and iteration count < N, Builder revises and calls `task("critic")` again. The "loop" is a plain JS `while` inside Builder's planning — *not* a custom LangGraph cycle. A custom middleware wraps the `task("critic", ...)` invocation to emit `data-critic-round` UI parts (round / total / approved / issues). See §4.8.3.2.
 >
-> **Required gaps to close** (per §4.8.9): **G5** Critic SubAgent must declare `responseFormat: z.object(...)` for structured output (not free-form text parsing); **G6** Critic uses a cheaper model (`gpt-4o-mini`) than Builder.
+> **Required gaps to close** (per §4.8.9): **G5** Critic SubAgent must declare `responseFormat: z.object(...)` for structured output (not free-form text parsing); **G6** all SubAgents (Critic / Reviewer / PM / SRE) standardised on `openai:gpt-5.4-mini` for V1 — same family as Builder; per-agent model tuning deferred until cost telemetry justifies divergence.
 
 ### 11.2 Pre-deploy gate matrix
 
