@@ -52,6 +52,16 @@ export {
   type EnvVar,
 } from "../server/apps";
 
+// Sandbox file procs used by the FilesCanvas. Both take object input
+// so the single-input RPC wire delivers every field — see
+// server/sandbox.ts for the comment on why the legacy positional-arg
+// `readFile` is kept around but not used.
+export {
+  listSandboxFiles,
+  readSandboxFile,
+  type FileEntry,
+} from "../server/sandbox";
+
 export { appPreviewUrl } from "./lib/preview-url";
 
 // One procedure to start with — Plan 02 may add more (file CRUD, deploy,

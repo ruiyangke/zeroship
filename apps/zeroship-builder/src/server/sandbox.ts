@@ -1,8 +1,28 @@
 "use server";
 // Sandbox server functions — proxy to zeroship-sandbox HTTP API.
-// We hold the sandbox token here; the browser never sees it.
+//
+// Two flavours live in this file:
+//
+//  1. Legacy `/sessions/...` procedures (openSession, listFiles,
+//     readFile, writeFile, deleteFile, execCommand). These targeted
+//     an earlier controller revision. They take positional args and
+//     therefore don't survive the single-input RPC wire (the vite-
+//     plugin transform forwards `args[0]` only). The orphan
+//     workspace/tabs/FilesTab still imports them via api/files.ts;
+//     once the canvas migration deletes that tree, these can be
+//     dropped too.
+//
+//  2. New `/sandboxes/:id/...` procedures (listSandboxFiles,
+//     readSandboxFile). These are the ones the FilesCanvas calls and
+//     they take object input so the RPC wire forwards everything.
+//     They reuse `getOrCreateSandboxFor` from `_sandbox_backend.ts`
+//     so the FilesCanvas attaches to the same sandbox Builder writes
+//     into — readers see writers' bytes immediately.
 
 import { SANDBOX_URL, SANDBOX_TOKEN } from "./env";
+import { getOrCreateSandboxFor } from "./_sandbox_backend";
+
+// ─── shared types / helpers ──────────────────────────────────────
 
 export interface SessionInfo {
   session_id: string;
@@ -32,6 +52,54 @@ async function jsonOrThrow<T>(res: Response, op: string): Promise<T> {
   if (res.status === 204) return undefined as T;
   return res.json();
 }
+
+function encodePath(p: string): string {
+  const trimmed = p.startsWith("/") ? p.slice(1) : p;
+  return trimmed.split("/").map(encodeURIComponent).join("/");
+}
+
+// ─── new `/sandboxes/:id/...` procs (canvas-facing) ──────────────
+//
+// Both take an object input so the single-input RPC wire delivers
+// every field intact. `appId` is forwarded straight to
+// `getOrCreateSandboxFor` — the same key Builder uses for its own
+// sandbox lookup, so reads from the canvas hit the same workspace
+// the agent is writing into.
+
+export interface ListSandboxFilesInput { appId: string }
+
+export async function listSandboxFiles(
+  input: ListSandboxFilesInput,
+): Promise<FileEntry[]> {
+  const { id } = await getOrCreateSandboxFor(input.appId);
+  const res = await fetch(
+    `${SANDBOX_URL()}/sandboxes/${id}/file-tree`,
+    { headers: authHeaders() },
+  );
+  const data = await jsonOrThrow<{ entries: FileEntry[] }>(res, "list files");
+  return data.entries ?? [];
+}
+listSandboxFiles.config = { id: "sandbox.listSandboxFiles" };
+
+export interface ReadSandboxFileInput { appId: string; path: string }
+
+export async function readSandboxFile(
+  input: ReadSandboxFileInput,
+): Promise<string> {
+  const { id } = await getOrCreateSandboxFor(input.appId);
+  const res = await fetch(
+    `${SANDBOX_URL()}/sandboxes/${id}/files/${encodePath(input.path)}`,
+    { headers: authHeaders() },
+  );
+  if (!res.ok) {
+    throw new Error(`read ${input.path} → ${res.status}: ${await res.text()}`);
+  }
+  return res.text();
+}
+readSandboxFile.config = { id: "sandbox.readSandboxFile" };
+
+// ─── legacy `/sessions/...` procs (kept for orphan tree, scheduled
+// for deletion alongside workspace/tabs) ────────────────────────
 
 export async function openSession(projectId: string): Promise<SessionInfo> {
   const res = await fetch(`${SANDBOX_URL()}/sessions`, {
@@ -108,7 +176,3 @@ export async function execCommand(
   return jsonOrThrow(res, "exec");
 }
 execCommand.config = { id: "sandbox.execCommand" };
-
-function encodePath(p: string): string {
-  return p.split("/").map(encodeURIComponent).join("/");
-}
