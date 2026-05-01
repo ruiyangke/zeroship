@@ -160,9 +160,9 @@ encoder hand-off, WPT regression for the streams suite.
 ### Status
 
 Draft v2 — **partial implementation in progress** on
-`feature/streams-native`. Foundation landed (commits below); the
-14 IDL classes are in scope but only the two QueuingStrategy
-classes are shipped so far.
+`feature/streams-native`. Foundation + ReadableStream value-path
+landed; pipeTo/pipeThrough/tee/values, byte streams, WritableStream,
+TransformStream still pending.
 
 **Landed (feature/streams-native):**
 
@@ -173,23 +173,29 @@ classes are shipped so far.
 | `c4537d1a` | streams: queue + slots + budget primitives (§V.3, §VI.1, §XII / D-18) |
 | `2b0047c7` | streams: `enqueue_microtask` + `upon_promise` + `set_promise_is_handled_to_true` (D-12 / §VII.3-§VII.4) |
 | `5a0bee5d` | streams: `ByteLengthQueuingStrategy` + `CountQueuingStrategy` (§6.2, §6.3, D-17) |
+| `20b47470` | streams: `ReadableStream` + `ReadableStreamDefaultController` + `ReadableStreamDefaultReader` (§II.1, §II.3, §II.5, §III.1-§III.3) plus `NativeSource` trait + `from_native_source` (D-9) |
+| `af1d7a84` | streams: WPT runner for `streams/readable-streams/` (constructor, general, default-reader) — 68/68 pass + spec-faithful constructor argument-conversion ordering |
+| `747be412` | streams: clean up unused imports (no behavior change) |
 
-**Test count this branch:** 86 passing across 5 test files
-(33 v8_class_smoke + 24 codec + 1 wpt_headers + 12 streams_native +
-16 streams). 9 unit tests inside the streams module
-(queue + budget). All previous baseline tests remain green.
+**Test count this branch:** 322 passing across cargo `#[test]`s
+(58 lib unit + 264 integration). The WPT runner is 1 cargo test
+internally containing 68 WPT subtests (constructor + general +
+default-reader).
 
-**Not yet shipped** — the bulk of the design:
-- `ReadableStream`, `WritableStream`, `TransformStream` and
-  associated controllers/readers/writers (II.1–II.12) — pending.
-  All foundation primitives they need (slots, queues, microtasks,
-  promise reactions, OpResult::JsValue) are already in place.
+**Not yet shipped** — pending dispatches:
+- `WritableStream` + `WritableStreamDefaultController` +
+  `WritableStreamDefaultWriter` (§II.8-§II.10). RSState's V8 priv
+  sym infrastructure is in place; the writer pattern mirrors
+  reader.
+- `TransformStream` + controller (§II.11-§II.12).
 - `pipeTo` / `pipeThrough` / `tee` / async iterator (§IX, §X, §IV)
-  — pending; depends on the public stream classes.
-- Byte streams / BYOB (§3.7-§3.8, D-6, D-15) — pending.
-- WPT vendor + runner (§XVI, §XXI) — pending.
-- Polyfill cutover (D-19) — pending; native and polyfill coexist
-  while the implementation lands.
+  — depend on Writable + Transform.
+- Byte streams / BYOB (§3.7-§3.8, D-6, D-15).
+- Native runtime-loop driver for `AlgorithmFn::Native` — currently
+  the type surface is in place but the future is not driven (next
+  dispatch wires it via `OpResult::JsValue` per §VII.5).
+- Polyfill cutover (D-19) — native and polyfill coexist while the
+  implementation lands.
 
 **Macro deviation:** §XIV.1's `#[v8_async_method]` extension is
 deferred. Per §XIV.6, plain methods returning `v8::Local<v8::Promise>`
