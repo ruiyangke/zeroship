@@ -1,6 +1,6 @@
 //! Pluggable sandbox backend.
 //!
-//! The service abstracts "what runs the user's code" behind two
+//! The service abstracts "what runs the user's code" behind three
 //! implementations:
 //!
 //!   - **`docker`** — local Docker daemon. The controller `docker
@@ -18,13 +18,23 @@
 //!     process. Best for fleet deployments where each sandbox needs
 //!     its own kernel.
 //!
+//!   - **`nomad-ch`** — Nomad `raw_exec` job per sandbox; the job
+//!     invokes a wrapper script that spawns 3 × `virtiofsd` plus a
+//!     `cloud-hypervisor` microVM. The same in-VM
+//!     `zeroship-sandbox-agent` runs as PID 1 (signed-request
+//!     contract identical to `k8s`). No Kubernetes — no kubelet,
+//!     no CNI, no CSI — just `nomad agent` + a shell wrapper.
+//!     Best for single-node / small-cluster operators who already
+//!     run Nomad and want libkrun-equivalent isolation without the
+//!     k8s control-plane overhead.
+//!
 //! ## Why an enum, not a `dyn Trait`
 //!
-//! Two backends, both static-known at compile time, both used from
+//! Three backends, all static-known at compile time, all used from
 //! handler hot paths. Enum dispatch is cheaper, simpler, and lets
-//! us avoid `async-trait`'s heap-boxed futures. Adding a third
-//! backend (e.g. Firecracker, gVisor) is a couple of variants and
-//! match arms.
+//! us avoid `async-trait`'s heap-boxed futures. Adding a fourth
+//! backend (e.g. raw Firecracker, gVisor on a serverless host) is
+//! a couple of variants and match arms.
 //!
 //! ## What the trait surface promises
 //!

@@ -276,6 +276,21 @@ impl K8sBackend {
         validate_id(user_id, "user_id")?;
         validate_id(project_id, "project_id")?;
 
+        // M7 parity with NomadCHBackend. Refuse new sandboxes if
+        // the most recent probe failed — kubectl/apiserver outages
+        // would otherwise queue every concurrent create on the
+        // spawn_blocking pool. Terminal: probe loop is what flips
+        // healthy back, callers should not retry.
+        if !self.is_healthy() {
+            return Err(
+                "k8s backend unhealthy; refusing new sandboxes \
+                 (probe failed — kubectl unreachable or namespace \
+                 missing). The probe loop will flip the bit back \
+                 when the cluster recovers."
+                    .to_string(),
+            );
+        }
+
         // **Per-user serialization.** Two concurrent creates for the
         // same user racing the "one active sandbox per user" check
         // would each see no existing → both apply Pods → second
