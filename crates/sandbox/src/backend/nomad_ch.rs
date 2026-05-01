@@ -559,6 +559,16 @@ impl NomadCHBackend {
     /// Callers that need strict "fully gone" semantics (e.g. wait
     /// until the tap device is freed) should poll [`list`] or
     /// equivalent until the sandbox no longer appears.
+    ///
+    /// **vm_index leak on Nomad failure:** if `wait_for_job_gone`
+    /// errors (Nomad API down, timeout, etc.) we do NOT release the
+    /// vm_index back to the pool — a follow-up `create` for the same
+    /// user could otherwise grab the same index and bind a tap device
+    /// that the still-alive previous job is using. Better a slowly-
+    /// shrinking pool than a tap collision; orphan-prune at next
+    /// controller boot reclaims indices indirectly (by deleting the
+    /// jobs that were holding them). The host_dir is left in place
+    /// for the same reason — virtiofsd may still hold its socket open.
     pub async fn stop(&self, sandbox_id: Uuid) -> Result<(), String> {
         let sandbox = match self
             .state
@@ -598,25 +608,46 @@ impl NomadCHBackend {
         //    vm_index back to the pool. Otherwise a follow-up
         //    `create` for the same user races a still-running
         //    wrapper script binding the same tap device + IP.
-        if let Err(e) = wait_for_job_gone(
+        let job_gone = wait_for_job_gone(
             &self.cfg.nomad_ch.nomad_addr,
             &sandbox.job_id,
             Duration::from_secs(30),
         )
-        .await
-        {
-            errs.push(format!("wait_for_job_gone({}): {e}", sandbox.job_id));
+        .await;
+        let job_confirmed_gone = match job_gone {
+            Ok(()) => true,
+            Err(e) => {
+                errs.push(format!("wait_for_job_gone({}): {e}", sandbox.job_id));
+                false
+            }
+        };
+
+        // 4. Release the VM index ONLY if the job is confirmed gone.
+        //    If the Nomad API is down or the alloc is still reaping,
+        //    a fresh `create` reusing this index could land on the
+        //    same tap device the still-alive wrapper script is using.
+        //    Leaking the index now and reclaiming it on next-boot
+        //    orphan-prune is the safer trade-off.
+        if job_confirmed_gone {
+            self.vm_indices
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .release(sandbox.vm_index);
+        } else {
+            eprintln!(
+                "[sandbox/nomad-ch] stop({}): wait_for_job_gone failed; \
+                 leaking vm_index={} to avoid tap collision (orphan-prune \
+                 will reclaim on next boot)",
+                sandbox.job_id, sandbox.vm_index,
+            );
         }
 
-        // 4. Release the VM index now that nothing is using it.
-        self.vm_indices
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .release(sandbox.vm_index);
-
         // 5. Remove per-sandbox host dir. Per-user home dir is
-        //    intentionally **not** touched.
-        if sandbox.host_dir.exists() {
+        //    intentionally **not** touched. Skip the rm if the job
+        //    teardown didn't confirm — virtiofsd may still hold the
+        //    socket / share open, and pulling the dir from under it
+        //    would just produce confusing logs.
+        if job_confirmed_gone && sandbox.host_dir.exists() {
             if let Err(e) = std::fs::remove_dir_all(&sandbox.host_dir) {
                 errs.push(format!(
                     "rm -rf {}: {}",
@@ -624,6 +655,13 @@ impl NomadCHBackend {
                     e
                 ));
             }
+        } else if !job_confirmed_gone && sandbox.host_dir.exists() {
+            eprintln!(
+                "[sandbox/nomad-ch] stop({}): leaking host_dir {} (job not \
+                 confirmed gone)",
+                sandbox.job_id,
+                sandbox.host_dir.display(),
+            );
         }
 
         if errs.is_empty() {
