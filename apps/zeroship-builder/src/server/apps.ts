@@ -7,6 +7,15 @@
 import { CONTROL_URL, CONTROL_KEY } from "./env";
 import { getRequest } from "./request-context";
 
+// ─── archive: in-memory stub (ISS-19) ────────────────────────────
+//
+// The control plane has no `archived` column / endpoint yet. Until
+// then, archive state lives in this module-level Set for the dev
+// process. It's lost on restart and not shared across nodes — fine
+// for V1 UI, documented in ISSUES.md as ISS-19. Persistence + filter
+// support land with the spec §8.3 follow-up.
+const archivedApps = new Set<string>();
+
 export interface AppRecord {
   id: string;
   name: string;
@@ -16,6 +25,8 @@ export interface AppRecord {
   created_at: string;
   updated_at: string;
   server_js?: string;
+  /** Soft-delete flag (ISS-19 stub — module-level Set, dev only). */
+  archived?: boolean;
 }
 
 async function proxy<T>(
@@ -46,14 +57,34 @@ async function proxy<T>(
 }
 
 export async function listApps(): Promise<AppRecord[]> {
-  return proxy("/api/apps");
+  const apps = await proxy<AppRecord[]>("/api/apps");
+  return apps.map((a) => ({ ...a, archived: archivedApps.has(a.id) }));
 }
 listApps.config = { id: "apps.listApps" };
 
 export async function getApp(id: string): Promise<AppRecord> {
-  return proxy(`/api/apps/${encodeURIComponent(id)}`);
+  const app = await proxy<AppRecord>(`/api/apps/${encodeURIComponent(id)}`);
+  return { ...app, archived: archivedApps.has(app.id) };
 }
 getApp.config = { id: "apps.getApp" };
+
+/**
+ * Soft-delete an app. Tracked in the module-level Set above (ISS-19);
+ * the control plane has no `archived` column yet, so this is a UI-only
+ * filter for now. Returns the new state so the client can update its
+ * cache without a refetch round-trip.
+ */
+export async function archiveApp(input: { appId: string }): Promise<{ archived: boolean }> {
+  archivedApps.add(input.appId);
+  return { archived: true };
+}
+archiveApp.config = { id: "apps.archiveApp" };
+
+export async function unarchiveApp(input: { appId: string }): Promise<{ archived: boolean }> {
+  archivedApps.delete(input.appId);
+  return { archived: false };
+}
+unarchiveApp.config = { id: "apps.unarchiveApp" };
 
 export async function createApp(name: string, plan_id: string = "free"): Promise<AppRecord> {
   return proxy("/api/apps", {

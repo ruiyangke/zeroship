@@ -48,6 +48,8 @@ export {
   listSecrets,
   setSecret,
   deleteSecret,
+  archiveApp,
+  unarchiveApp,
   type AppRecord,
   type EnvVar,
 } from "../server/apps";

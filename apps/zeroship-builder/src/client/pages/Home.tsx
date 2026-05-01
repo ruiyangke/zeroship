@@ -5,25 +5,48 @@
 // wizard's free-form path — submit shortcuts straight to /new with
 // the prompt prefilled.
 
-import { useState, type FormEvent } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { listApps } from "../api";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { listApps, unarchiveApp } from "../api";
 import { PageFrame } from "../components/PageFrame";
 import { NotebookPrompt, CmdEnterHint } from "../components/NotebookPrompt";
 import { StampButton } from "../components/StampButton";
 import { ProjectCard } from "../components/ProjectCard";
+import { FilterPill } from "../components/FilterPill";
 
 const STORAGE_KEY = "zeroship_pending_prompt";
 
+type GalleryFilter = "active" | "archived";
+
 export function Home() {
   const navigate = useNavigate();
+  const qc = useQueryClient();
   const [prompt, setPrompt] = useState("");
+  const [filter, setFilter] = useState<GalleryFilter>("active");
 
   const { data: apps, isLoading } = useQuery({
     queryKey: ["apps"],
     queryFn: listApps,
   });
+
+  const restore = useMutation({
+    mutationFn: (id: string) => unarchiveApp({ appId: id }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["apps"] }),
+  });
+
+  // Split active vs archived once. The gallery list below renders one
+  // or the other based on the active filter pill.
+  const { active, archived } = useMemo(() => {
+    const a: typeof apps = [];
+    const arc: typeof apps = [];
+    for (const x of apps ?? []) {
+      (x.archived ? arc : a).push(x);
+    }
+    return { active: a ?? [], archived: arc ?? [] };
+  }, [apps]);
+
+  const visible = filter === "active" ? active : archived;
 
   function submit(e?: FormEvent) {
     e?.preventDefault();
@@ -95,14 +118,35 @@ export function Home() {
 
       <section className="reveal d-1" data-testid="home-gallery">
         <div className="flex items-baseline justify-between mb-3">
-          <h2 className="font-serif italic font-medium text-[26px] -tracking-[0.01em] m-0">Recent work</h2>
+          <h2 className="font-serif italic font-medium text-[26px] -tracking-[0.01em] m-0">
+            {filter === "archived" ? "Archived" : "Recent work"}
+          </h2>
           <span className="font-sans text-[10.5px] uppercase tracking-[0.18em] text-pencil">
-            {apps?.length ?? 0} projects
+            {visible.length} {visible.length === 1 ? "project" : "projects"}
           </span>
         </div>
         <hr className="hairline mb-5" />
 
-        <div className="flex items-baseline justify-between mb-5">
+        <div className="flex items-center justify-between mb-5 gap-3 flex-wrap">
+          <div className="flex items-center gap-2" data-testid="home-filters">
+            <FilterPill
+              active={filter === "active"}
+              onClick={() => setFilter("active")}
+              data-testid="home-filter-active"
+            >
+              Active
+            </FilterPill>
+            <FilterPill
+              active={filter === "archived"}
+              onClick={() => setFilter("archived")}
+              data-testid="home-filter-archived"
+            >
+              Archived
+              {archived.length > 0 && (
+                <span className="ml-2 opacity-70">{archived.length}</span>
+              )}
+            </FilterPill>
+          </div>
           <Link to="/templates" className="font-serif italic text-[14px] text-tomato hover:opacity-80" style={{ textDecoration: "none" }}>
             Browse templates →
           </Link>
@@ -110,20 +154,46 @@ export function Home() {
 
         {isLoading ? (
           <div className="font-serif italic text-ink-soft text-[14px]">loading…</div>
-        ) : !apps || apps.length === 0 ? (
-          <div className="border border-dashed border-rule p-8 text-center">
-            <p className="font-serif italic text-ink-soft">No projects yet — start one above.</p>
+        ) : visible.length === 0 ? (
+          <div className="border border-dashed border-rule p-8 text-center" data-testid="home-empty">
+            <p className="font-serif italic text-ink-soft">
+              {filter === "archived"
+                ? "Nothing in the archive — projects you tuck away will land here."
+                : "No projects yet — start one above."}
+            </p>
           </div>
         ) : (
-          <div className="grid gap-5" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}>
-            {[...apps]
+          <div
+            data-testid={filter === "archived" ? "home-archived-list" : "home-active-list"}
+            className="grid gap-5"
+            style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}
+          >
+            {[...visible]
               .sort((a, b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""))
               .map((app, i) => (
-                <ProjectCard
-                  key={app.id}
-                  app={app}
-                  num={String(apps.length - i).padStart(2, "0")}
-                />
+                <div key={app.id} className="relative">
+                  <ProjectCard
+                    app={app}
+                    num={String(visible.length - i).padStart(2, "0")}
+                  />
+                  {filter === "archived" && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        restore.mutate(app.id);
+                      }}
+                      data-testid={`home-restore:${app.id}`}
+                      disabled={restore.isPending && restore.variables === app.id}
+                      className="absolute top-3 right-3 font-sans text-[10px] uppercase tracking-[0.18em] px-2.5 py-1 border border-rule bg-paper text-ink-soft hover:border-ink hover:text-ink cursor-pointer"
+                    >
+                      {restore.isPending && restore.variables === app.id
+                        ? "restoring…"
+                        : "restore"}
+                    </button>
+                  )}
+                </div>
               ))}
           </div>
         )}

@@ -11,7 +11,13 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { deleteApp, updatePlan, type AppRecord } from "../../api";
+import {
+  archiveApp,
+  deleteApp,
+  unarchiveApp,
+  updatePlan,
+  type AppRecord,
+} from "../../api";
 import { Modal } from "../../components/Modal";
 import { StampButton } from "../../components/StampButton";
 import { GhostButton } from "../../components/GhostButton";
@@ -44,8 +50,24 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
     mutationFn: () => deleteApp(appId),
     onSuccess: () => navigate("/", { replace: true }),
   });
+  const archive = useMutation({
+    mutationFn: () => archiveApp({ appId }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["apps"] });
+      qc.invalidateQueries({ queryKey: ["app", appId] });
+      navigate("/home", { replace: true });
+    },
+  });
+  const unarchive = useMutation({
+    mutationFn: () => unarchiveApp({ appId }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["apps"] });
+      qc.invalidateQueries({ queryKey: ["app", appId] });
+    },
+  });
 
   const currentPlan = app?.plan_id ?? "free";
+  const isArchived = app?.archived === true;
 
   return (
     <div data-testid="settings-canvas" className="h-full overflow-auto bg-paper">
@@ -114,6 +136,42 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
                 </div>
               );
             })}
+          </div>
+        </Section>
+
+        <Section
+          title="Archive"
+          helper="Tuck a project away without losing it. Reversible — restore any time from the Archived view on Home."
+        >
+          <div
+            data-testid="settings-archive"
+            className="border border-rule bg-paper-2 p-5 rounded-sm"
+          >
+            <div className="font-serif italic font-medium text-[16px] mb-1.5 text-ink">
+              {isArchived ? "This project is archived" : "Archive this project"}
+            </div>
+            <p className="font-serif text-[13.5px] text-ink-soft leading-[1.55] mb-4">
+              {isArchived
+                ? "It's hidden from the default Home view but everything's intact. Restore to bring it back."
+                : "Hide it from the default Home view. Code, data, and deploys stay put. You can restore it later."}
+            </p>
+            {isArchived ? (
+              <GhostButton
+                onClick={() => unarchive.mutate()}
+                disabled={unarchive.isPending}
+                data-testid="settings-unarchive"
+              >
+                {unarchive.isPending ? "Restoring…" : "Restore project"}
+              </GhostButton>
+            ) : (
+              <GhostButton
+                onClick={() => archive.mutate()}
+                disabled={archive.isPending}
+                data-testid="settings-archive-btn"
+              >
+                {archive.isPending ? "Archiving…" : "Archive project"}
+              </GhostButton>
+            )}
           </div>
         </Section>
 

@@ -626,3 +626,54 @@ italic line points at this issue.
 5. Replace the placeholder tiles with real charts (lightweight SVG
    sparkline, no chart-lib dependency).
 
+---
+
+## ISS-19 · Project archive — control-plane backing missing
+
+**Status:** open
+**Severity:** low-medium — archive is a reversible UI affordance and
+the spec (§8.3) explicitly frames it as a soft alternative to delete.
+The current stub gives users the affordance without losing data, but
+state doesn't survive a server restart and isn't shared across
+control-plane nodes.
+**First observed:** 2026-05-01, building the project lifecycle polish.
+**Component:** `crates/control` + `apps/zeroship-builder/src/server/apps.ts`
+
+### Symptom
+
+Spec §8.3 calls for archive / delete / transfer in the Settings
+canvas. Delete is wired (control plane has DELETE /api/apps/:id).
+Archive has no backing column or endpoint:
+
+- `AppRecord` has no `archived_at` / `archived` field.
+- There's no `PUT /api/apps/:id/archive` or equivalent.
+- No filter on `GET /api/apps?archived=true|false`.
+
+### Workaround in use
+
+`apps/zeroship-builder/src/server/apps.ts` ships a module-level
+`Set<string>` (`archivedApps`) that tracks which app ids are flagged
+archived. `listApps` / `getApp` decorate the proxied control-plane
+records with `archived: bool` from this Set; `archiveApp({appId})`
+and `unarchiveApp({appId})` mutate it. The Set is local to the
+zeroship-builder dev server process — it's lost on restart and not
+shared across multi-node deployments.
+
+The Home gallery and SettingsCanvas read `app.archived` and render
+the Archive section / filter pill accordingly. From the user's
+perspective the affordance behaves correctly within a single
+session.
+
+### Fix path
+
+1. `crates/control` — add `archived_at TIMESTAMPTZ NULL` column to
+   `apps` (migration). Index on `(creator_id, archived_at IS NULL)`
+   so the active-projects list stays fast.
+2. REST: `PUT /api/apps/:id/archive` and
+   `PUT /api/apps/:id/unarchive` (or a single
+   `PATCH /api/apps/:id { archived: bool }`).
+3. `GET /api/apps?include_archived=true` for the archived view;
+   default lists active only.
+4. Replace the in-memory Set in
+   `apps/zeroship-builder/src/server/apps.ts` with proxied calls.
+
