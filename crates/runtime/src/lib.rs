@@ -1,8 +1,17 @@
 #![allow(unsafe_code)]
 #![allow(missing_debug_implementations)]
 
+// Self-rename for use by `#[zeroship_op]` and `#[v8_class]` proc macros.
+// They emit `::zeroship_runtime::state::OpErrorKind` so the path resolves
+// from both downstream crates AND from inside the runtime itself.
+extern crate self as zeroship_runtime;
+
 pub mod auth;
+pub mod byte_string;
+pub mod codec;
+pub mod headers;
 pub mod state;
+pub mod text_encoding;
 pub mod dispatch;
 pub mod init;
 pub mod http;

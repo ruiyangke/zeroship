@@ -33,6 +33,7 @@ serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.10"
 sha1 = "0.10"
 hmac = "0.12"
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "fast", "zeroize"] }
 aws-lc-rs = "1"
 base64 = "0.22"
 bcrypt = "0.17"
@@ -51,6 +52,14 @@ uuid = { version = "1", features = ["v4", "v7", "serde"] }
 # Compression
 zstd = "0.13"
 tar = { version = "0.4", default-features = false }
+# WHATWG CompressionStream / DecompressionStream codec backends.
+# flate2 default features = miniz_oxide (pure Rust); revisit zlib-rs
+# (pure-Rust zlib-ng port) when it stabilises — see compression design D-11.
+flate2 = "1"
+# Brotli — Dropbox's pure-Rust port (rust-brotli). No-default-features
+# off keeps the alloc-stdlib + std features without dragging the C
+# benchmark code or the validation/sha2 path. RFC 7932 wire format.
+brotli = { version = "8", default-features = false, features = ["std"] }
 
 # Error handling
 thiserror = "2"
@@ -69,6 +78,12 @@ ada-url = "3.4.4"
 # V8
 v8 = "147"
 deno_core_icudata = "0.77"
+
+# WHATWG Encoding spec — Henri Sivonen's reference impl, also the
+# encoding library used by Firefox. Replaces hand-rolled UTF-8 decode
+# with a spec-correct state machine (matches WPT). 30+ encodings
+# available for free if we ever need them (currently UTF-8 only).
+encoding_rs = "0.8"
 
 # Proc macros
 proc-macro2 = "1"

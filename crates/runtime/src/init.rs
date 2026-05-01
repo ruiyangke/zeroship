@@ -32,6 +32,13 @@ pub fn init_v8() {
         v8::icu::set_common_data_77(deno_core_icudata::ICU_DATA)
             .expect("failed to load ICU data");
 
+        // `--expose-gc` makes `request_garbage_collection_for_testing`
+        // available so memory-pressure tests can force a GC pass
+        // mid-run instead of waiting for isolate teardown. The flag
+        // only enables a test entry point — it doesn't affect
+        // production behavior.
+        v8::V8::set_flags_from_string("--expose-gc");
+
         let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform);
         v8::V8::initialize();
@@ -683,6 +690,12 @@ pub fn load_polyfills_and_modules(
         let script = v8::Script::compile(scope, code, None).unwrap();
         script.run(scope).unwrap();
     }
+
+    // Native-Headers cutover step 1: install AFTER fetch.js so the JS
+    // `globalThis.Headers = …` line doesn't overwrite us. Gated by
+    // ZEROSHIP_NATIVE_HEADERS=1. See install_native_headers_post for
+    // rationale.
+    install_native_headers_post(scope);
 
     // Wrap the user's module graph in the bootstrap entry.
     //
@@ -1671,6 +1684,73 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
         global.set(scope, env_alias_key.into(), env_obj.into());
     }
 
+    // Native TextEncoder / TextDecoder. Replace the buggy hand-written
+    // JS polyfills that lived in fetch.js — those ignored the
+    // `{ stream: true }` option and corrupted multi-byte UTF-8 split
+    // across chunk boundaries (the AI SDK / SSE bug). Native
+    // implementations live in `text_encoding.rs` and are wired here
+    // via the `#[v8_class]` macro's `install` fn.
+    {
+        let tmpl = crate::text_encoding::TextEncoder::install(scope);
+        let class_fn = tmpl.get_function(scope).unwrap();
+        let key = v8::String::new(scope, "TextEncoder").unwrap();
+        global.set(scope, key.into(), class_fn.into());
+    }
+    {
+        let tmpl = crate::text_encoding::TextDecoder::install(scope);
+        let class_fn = tmpl.get_function(scope).unwrap();
+        let key = v8::String::new(scope, "TextDecoder").unwrap();
+        global.set(scope, key.into(), class_fn.into());
+    }
+
+    // Native Headers per Fetch §2.2. Behind ZEROSHIP_NATIVE_HEADERS=1
+    // for the cutover phase: with the flag, native Headers replaces
+    // the JS polyfill that ships in `embed/fetch.js`. The polyfill
+    // sets `globalThis.Headers = Headers` AFTER setup_globals runs,
+    // so we patch the polyfill's tail at runtime by installing native
+    // Headers in a post-fetch.js step (see `install_native_headers_post`).
+    //
+    // Step 1 of the polyfill removal cadence (design "Polyfill removal"):
+    // feature flag native, default off. Tests run with the flag on.
+    // After production traffic confirms parity, step 2 flips the
+    // default; step 3 deletes the polyfill block.
+    //
+    // Why post-fetch.js rather than here: fetch.js has
+    //   globalThis.Headers = Headers;
+    // at line 802. If we install before fetch.js, the polyfill would
+    // overwrite us. Post-install ensures native wins.
+}
+
+/// Step-1-of-cutover hook: install native Headers AFTER fetch.js has
+/// run, so its `globalThis.Headers = …` line doesn't shadow us.
+/// Behind `ZEROSHIP_NATIVE_HEADERS=1`. Default off for the v1 release.
+///
+/// **Step 2 (cutover) is NOT yet wired** because the polyfill in
+/// `embed/fetch.js` and `crates/runtime/src/http.rs` reach into Headers
+/// internals (`_map`, `_fromTrusted`, `_toArray`, `_zsHeadersArr`) that
+/// don't exist on native Headers. With the flag on, those reach-ins
+/// throw "Illegal invocation" because native Headers' methods access
+/// internal field 0 (Box<Headers>) which is empty on
+/// `Object.create(Headers.prototype)`-style constructions.
+///
+/// The cutover (step 2) requires:
+/// 1. Refactor fetch.js to use the native iterable surface (e.g.
+///    `for (const [k, v] of headers)` instead of `headers._map`).
+/// 2. Refactor http.rs's `Object.create(Headers.prototype) + _map =`
+///    pattern to call `new Headers(arrayOfPairs)` via the native
+///    sequence path.
+/// 3. Remove `Headers._fromTrusted` callers; either reimplement as a
+///    real `new Headers([[name, value], ...])` or move the fast-path
+///    optimisation into the native struct.
+///
+/// Step 3 (delete the polyfill block in fetch.js) follows step 2.
+/// Both lap with the Request/Response native push.
+pub fn install_native_headers_post(scope: &mut v8::PinScope) {
+    if std::env::var("ZEROSHIP_NATIVE_HEADERS").as_deref() != Ok("1") {
+        return;
+    }
+    let global = scope.get_current_context().global(scope);
+    crate::headers::install_global(scope, global);
 }
 
 // ===========================================================================

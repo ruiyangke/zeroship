@@ -5,24 +5,20 @@ use std::time::Duration;
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, RequestCtx, Runtime, SettledFetch};
 
-// Regression test: the runtime installs `globalThis.Buffer` (lazy stub)
-// and `globalThis.setImmediate` / `clearImmediate` on every isolate at
-// boot — before any user module evaluates. This replaces the old
-// `runtime-prelude.js` that the vite-plugin used to prepend to every
-// server bundle. Many isomorphic npm packages reach for these globals
-// without first importing `node:buffer` / `node:timers`, so they MUST
-// be present on the bare globalThis.
+// Regression test: the runtime installs `globalThis.setImmediate` and
+// `clearImmediate` on every isolate at boot. These two are the
+// remaining bare globals owned by `node-globals.js` after Buffer
+// moved out — Buffer now comes from `@rollup/plugin-inject`'s
+// rewrite of bare references into `import { Buffer } from
+// "node:buffer"`, so it's a build-time concern, not a runtime one.
+// This test exercises the runtime in isolation (no vite-plugin), so
+// only setImmediate/clearImmediate are visible bare.
 #[test]
-fn node_globals_buffer_and_set_immediate_present() {
+fn node_globals_set_immediate_present() {
     let modules = m(r#"
         export default {
             fetch(request, env, ctx) {
                 return Response.json({
-                    bufferIsFn: typeof globalThis.Buffer === "function",
-                    bufferFromIsFn: typeof globalThis.Buffer.from === "function",
-                    bufferAllocIsFn: typeof globalThis.Buffer.alloc === "function",
-                    bufferConcatIsFn: typeof globalThis.Buffer.concat === "function",
-                    bufferIsBufferIsFn: typeof globalThis.Buffer.isBuffer === "function",
                     setImmediateIsFn: typeof globalThis.setImmediate === "function",
                     clearImmediateIsFn: typeof globalThis.clearImmediate === "function",
                 });
@@ -32,11 +28,6 @@ fn node_globals_buffer_and_set_immediate_present() {
     match dispatch_fetch(modules, TestRequest::get("http://localhost/")) {
         FetchOutcome::Response { status, body, .. } => {
             assert_eq!(status, 200, "body: {}", body);
-            assert!(body.contains(r#""bufferIsFn":true"#), "body: {}", body);
-            assert!(body.contains(r#""bufferFromIsFn":true"#), "body: {}", body);
-            assert!(body.contains(r#""bufferAllocIsFn":true"#), "body: {}", body);
-            assert!(body.contains(r#""bufferConcatIsFn":true"#), "body: {}", body);
-            assert!(body.contains(r#""bufferIsBufferIsFn":true"#), "body: {}", body);
             assert!(body.contains(r#""setImmediateIsFn":true"#), "body: {}", body);
             assert!(body.contains(r#""clearImmediateIsFn":true"#), "body: {}", body);
         }

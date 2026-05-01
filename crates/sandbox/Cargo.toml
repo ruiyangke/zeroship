@@ -2,14 +2,19 @@
 name = "zeroship-sandbox"
 version = "0.1.0"
 edition = "2021"
-description = "zeroship sandbox service — Docker-backed dev containers for the AI builder"
+description = "zeroship sandbox service — pluggable backends (docker, k8s+libkrun) for AI builder sessions"
 
 [[bin]]
 name = "zeroship-sandbox"
 path = "src/main.rs"
 
+[lib]
+name = "zeroship_sandbox"
+path = "src/lib.rs"
+
 [dependencies]
 zeroship-core = { workspace = true }
+zeroship-sandbox-agent = { path = "../sandbox-agent" }
 compio = { workspace = true }
 ntex = { workspace = true }
 serde = { workspace = true }
@@ -19,7 +24,30 @@ hex = { workspace = true }
 sha2 = { workspace = true }
 mimalloc = { workspace = true }
 subtle = "2"
+# Wraps `SandboxConfig.token` so debug output is redacted and the
+# heap allocation is zeroed on drop (defense vs core-dump /
+# /proc/<pid>/mem post-mortem reads).
+zeroize = { version = "1", features = ["alloc"] }
 bytes = { workspace = true }
+# Ed25519 keypair generation for the K8s backend (controller-side
+# private key; only the public half ships to the Pod).
+ed25519-dalek = { workspace = true }
+base64 = { workspace = true }
+# Sync HTTP client (blocking) for talking to the in-VM agent. Run
+# inside `compio::runtime::spawn_blocking` so the ntex runtime
+# never blocks on it.
+ureq = { version = "2", default-features = false, features = ["json"] }
+
+[dev-dependencies]
+ureq = { version = "2", default-features = false, features = ["json"] }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "lifecycle_e2e"
+path = "examples/lifecycle_e2e.rs"
+
+[[example]]
+name = "stress_e2e"
+path = "examples/stress_e2e.rs"

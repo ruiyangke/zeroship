@@ -1,26 +1,38 @@
-//! Proc macro for generating V8 callback wrappers from plain Rust functions.
+//! Proc macros for the zeroship runtime.
 //!
-//! Eliminates the per-op boilerplate of argument extraction, state access,
-//! return value conversion, and error handling.
+//! Two macros live here:
 //!
-//! # Usage
+//! - [`zeroship_op`] — wraps a plain Rust function as a V8 free-function
+//!   callback. Handles argument extraction, state access, return value
+//!   marshaling, error throwing, and async-Promise plumbing.
+//! - [`v8_class`] — wraps an `impl` block as a V8 ObjectTemplate-backed
+//!   class. Methods, getters, setters, and constructors get auto-generated
+//!   callbacks; instance state lives in V8 internal fields.
 //!
 //! ```ignore
-//! // Sync, no state:
+//! // Free-function op:
 //! #[zeroship_op]
 //! fn url_can_parse(input: String, base: Option<String>) -> bool { ... }
 //!
-//! // Sync, with shared state:
-//! #[zeroship_op(state)]
-//! fn kv_get(state: SharedState, key: String) -> Option<String> { ... }
+//! // Class:
+//! struct Headers { /* ... */ }
 //!
-//! // Async (returns Promise, state plumbing is auto-generated):
-//! #[zeroship_op(async)]
-//! async fn op_fetch(method: String, url: String) -> String { ... }
+//! #[v8_class]
+//! impl Headers {
+//!     #[v8_constructor]
+//!     fn new() -> Result<Self, OpError> { ... }
+//!
+//!     #[v8_method]
+//!     fn get(&self, name: String) -> Option<String> { ... }
+//!
+//!     #[v8_method]
+//!     fn set(&mut self, name: String, value: String) -> Result<(), OpError> { ... }
+//! }
 //! ```
 //!
-//! Each macro invocation keeps the original function and generates a
-//! `{name}_callback` function with the V8 callback signature.
+//! The class macro generates `Headers::install(scope) -> v8::Local<v8::FunctionTemplate>`
+//! that the runtime calls during `setup_globals` to wire the class onto
+//! `globalThis`.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -30,9 +42,95 @@ use syn::{
     Type, TypePath,
 };
 
+mod v8_class;
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
+
+/// Wrap an `impl` block as a V8 ObjectTemplate-backed class.
+///
+/// See module docs for usage. Methods marked with `#[v8_method]`,
+/// `#[v8_getter]`, `#[v8_setter]`, and `#[v8_constructor]` get
+/// auto-generated callbacks; the macro emits `Self::install(scope) ->
+/// v8::Local<v8::FunctionTemplate>` for the runtime to register on the
+/// global object.
+#[proc_macro_attribute]
+pub fn v8_class(attr: TokenStream, item: TokenStream) -> TokenStream {
+    v8_class::expand(attr, item)
+}
+
+#[proc_macro_attribute]
+pub fn v8_method(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    // Marker attribute consumed by `#[v8_class]`. When applied to a method
+    // outside a `#[v8_class]` impl block this is a no-op (the method stays
+    // as written) — the macro doesn't error so editor tooling that
+    // pre-expands attribute macros doesn't surface a false positive.
+    item
+}
+
+#[proc_macro_attribute]
+pub fn v8_getter(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+#[proc_macro_attribute]
+pub fn v8_setter(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+#[proc_macro_attribute]
+pub fn v8_constructor(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+/// Marker attribute consumed by `#[v8_class]`: rename a method on the
+/// JS-visible surface. `#[v8_name = "delete"]` lets a Rust `fn delete_`
+/// be installed as `Foo.prototype.delete`. Outside of a `#[v8_class]`
+/// impl block this is a no-op.
+#[proc_macro_attribute]
+pub fn v8_name(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+/// Impl-block-level marker attribute consumed by `#[v8_class]`:
+/// override the default `Symbol.toStringTag` value. Without this, the
+/// install codegen uses the Rust struct name (e.g.
+/// `"HeadersIterator"`); with `#[v8_to_string_tag = "Headers Iterator"]`
+/// it installs that literal instead. Used for WebIDL default iterator
+/// objects whose spec tag is "<InterfaceName> Iterator".
+#[proc_macro_attribute]
+pub fn v8_to_string_tag(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+/// Impl-block-level marker attribute: chain the class's prototype to a
+/// V8 built-in intrinsic. Currently the only recognised value is
+/// `"IteratorPrototype"`, which sets the prototype's `[[Prototype]]`
+/// to `%Iterator.prototype%` per WebIDL §3.7.10.2.
+#[proc_macro_attribute]
+pub fn v8_inherit_intrinsic(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+/// Argument-level marker attribute consumed by `#[v8_class]`: when
+/// applied to a `Vec<u8>` parameter, the macro emits a SAB-rejection
+/// guard *before* extracting the bytes. A SharedArrayBuffer-backed
+/// view (or a bare `SharedArrayBuffer`) throws `TypeError` and the
+/// method body never runs.
+///
+/// Per WebIDL §3.2.21: BufferSource arguments default to rejecting
+/// shared backing stores; only the `[AllowShared]` extended attribute
+/// opts in. We invert that for ergonomics — `Vec<u8>` extraction is
+/// permissive by default (matches how legacy ops use it for blobs and
+/// uploads), and the `#[reject_shared]` attribute pins down the spec-
+/// strict cases (CompressionStream chunks, etc.).
+///
+/// Outside a `#[v8_class]` method param this attribute is a no-op.
+#[proc_macro_attribute]
+pub fn reject_shared(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
 
 #[proc_macro_attribute]
 pub fn zeroship_op(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -58,8 +156,15 @@ pub fn zeroship_op(attr: TokenStream, item: TokenStream) -> TokenStream {
 // Type helpers
 // ---------------------------------------------------------------------------
 
+/// True for the unit type `()`. Returned by mutator-style methods
+/// like `Result<(), OpError>` that have nothing to set on `rv` —
+/// they want the JS-visible call to evaluate to `undefined`.
+pub(crate) fn is_unit_type(ty: &Type) -> bool {
+    matches!(ty, Type::Tuple(t) if t.elems.is_empty())
+}
+
 /// Extract the last segment identifier from a type path (e.g. `String`, `Option`, `Result`).
-fn type_ident(ty: &Type) -> Option<String> {
+pub(crate) fn type_ident(ty: &Type) -> Option<String> {
     if let Type::Path(TypePath { path, .. }) = ty {
         path.segments.last().map(|s| s.ident.to_string())
     } else {
@@ -68,7 +173,7 @@ fn type_ident(ty: &Type) -> Option<String> {
 }
 
 /// Check if type is `Vec<u8>` — used for binary data args (reads from ArrayBufferView).
-fn is_vec_u8(ty: &Type) -> bool {
+pub(crate) fn is_vec_u8(ty: &Type) -> bool {
     type_ident(ty).as_deref() == Some("Vec")
         && first_generic_arg(ty)
             .and_then(type_ident)
@@ -76,8 +181,27 @@ fn is_vec_u8(ty: &Type) -> bool {
             == Some("u8")
 }
 
+/// Check if type is `Vec<Vec<u8>>` — used by IDL methods like
+/// `getSetCookie() -> sequence<ByteString>`. Marshalled as a JS Array
+/// of ByteString (each element is a Latin-1 one-byte string).
+pub(crate) fn is_vec_vec_u8(ty: &Type) -> bool {
+    type_ident(ty).as_deref() == Some("Vec")
+        && first_generic_arg(ty)
+            .map(is_vec_u8)
+            .unwrap_or(false)
+}
+
+/// Check if type is the `ByteString` newtype from
+/// `zeroship_runtime::byte_string`. Used for WebIDL ByteString args
+/// (Headers names/values etc.). Detection is by last segment ident; we
+/// don't enforce the full path since users typically `use
+/// ::zeroship_runtime::byte_string::ByteString` or alias the type.
+pub(crate) fn is_byte_string(ty: &Type) -> bool {
+    type_ident(ty).as_deref() == Some("ByteString")
+}
+
 /// Extract the first generic type argument (e.g. `String` from `Option<String>`).
-fn first_generic_arg(ty: &Type) -> Option<&Type> {
+pub(crate) fn first_generic_arg(ty: &Type) -> Option<&Type> {
     if let Type::Path(TypePath { path, .. }) = ty {
         if let Some(seg) = path.segments.last() {
             if let PathArguments::AngleBracketed(ref ab) = seg.arguments {
@@ -96,12 +220,12 @@ fn first_generic_arg(ty: &Type) -> Option<&Type> {
 // Parameter parsing
 // ---------------------------------------------------------------------------
 
-struct Param {
-    name: Ident,
-    ty: Type,
+pub(crate) struct Param {
+    pub(crate) name: Ident,
+    pub(crate) ty: Type,
 }
 
-fn parse_params(f: &ItemFn) -> Vec<Param> {
+pub(crate) fn parse_params(f: &ItemFn) -> Vec<Param> {
     f.sig
         .inputs
         .iter()
@@ -123,9 +247,46 @@ fn parse_params(f: &ItemFn) -> Vec<Param> {
 // Argument extraction codegen (JS value → Rust type)
 // ---------------------------------------------------------------------------
 
-fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2 {
+pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2 {
     let idx = index as i32;
     let ident = type_ident(ty);
+
+    // v8::Local<v8::Value> (or any v8::Local<v8::T>) — pass the raw
+    // arg through unchanged. Lets handlers accept union types
+    // (Request body, Headers init, etc.) and dispatch on the V8
+    // value's actual shape themselves.
+    if ident.as_deref() == Some("Local") {
+        return quote! {
+            let #name = args.get(#idx);
+        };
+    }
+
+    // ByteString → WebIDL ByteString conversion. On any code unit
+    // > 0xFF, sets a pending TypeError and returns from the callback
+    // (so the JS caller observes the throw). The match-and-return
+    // shape works in callbacks that return `()` (the V8 ABI shape) —
+    // we don't need the user method to return Result. After the throw
+    // is set, JS execution unwinds normally.
+    if is_byte_string(ty) {
+        return quote! {
+            let #name = match ::zeroship_runtime::byte_string::read_byte_string(
+                scope,
+                args.get(#idx),
+            ) {
+                Ok(__bytes) => ::zeroship_runtime::byte_string::ByteString::from_bytes(__bytes),
+                Err(__err) => {
+                    let __msg = v8::String::new(scope, &__err.message).unwrap();
+                    let __exc = match __err.kind {
+                        ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
+                        ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+                        _ => v8::Exception::error(scope, __msg),
+                    };
+                    scope.throw_exception(__exc);
+                    return;
+                }
+            };
+        };
+    }
 
     // Vec<u8> → read from ArrayBufferView backing store (zero-serialization binary transfer)
     if is_vec_u8(ty) {
@@ -152,7 +313,36 @@ fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2 {
 
     match ident.as_deref() {
         Some("Option") => {
-            let inner = first_generic_arg(ty).and_then(type_ident);
+            let inner_ty = first_generic_arg(ty);
+            let inner = inner_ty.and_then(type_ident);
+            // Option<Vec<u8>> needs the same ArrayBuffer/View
+            // extraction the bare Vec<u8> path uses, just lifted
+            // through Option to handle missing/null/undefined args.
+            if inner_ty.map(is_vec_u8).unwrap_or(false) {
+                return quote! {
+                    let #name: Option<Vec<u8>> = if args.length() > #idx
+                        && !args.get(#idx).is_null_or_undefined()
+                    {
+                        let __arg = args.get(#idx);
+                        if let Ok(__view) = v8::Local::<v8::ArrayBufferView>::try_from(__arg) {
+                            let mut __buf = vec![0u8; __view.byte_length()];
+                            __view.copy_contents(&mut __buf);
+                            Some(__buf)
+                        } else if let Ok(__ab) = v8::Local::<v8::ArrayBuffer>::try_from(__arg) {
+                            let __store = __ab.get_backing_store();
+                            let mut __buf = vec![0u8; __ab.byte_length()];
+                            for __i in 0..__buf.len() {
+                                __buf[__i] = __store[__i].get();
+                            }
+                            Some(__buf)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                };
+            }
             match inner.as_deref() {
                 Some("u32") => quote! {
                     let #name: Option<u32> = if args.length() > #idx
@@ -207,16 +397,25 @@ fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2 {
 // Return value codegen (Rust value → V8 value)
 // ---------------------------------------------------------------------------
 
-/// Generate code to write Vec<u8> as a V8 ArrayBuffer.
+/// Generate code to write Vec<u8> as a V8 Uint8Array.
+///
+/// Returning a plain ArrayBuffer was easier but spec-wrong for every
+/// real consumer: WHATWG TextEncoder.encode and WebCrypto digest both
+/// return Uint8Array, and downstream JS code (streams, fetch body
+/// coercion) typically branches on `instanceof Uint8Array` to decide
+/// whether to wrap. Returning Uint8Array matches the spec contract
+/// without forcing every caller to do `new Uint8Array(arrayBuffer)`.
 fn gen_vec_u8_set(val: &TokenStream2) -> TokenStream2 {
     quote! {
         let __bytes = #val;
-        let __ab = v8::ArrayBuffer::new(scope, __bytes.len());
+        let __len = __bytes.len();
+        let __ab = v8::ArrayBuffer::new(scope, __len);
         let __store = __ab.get_backing_store();
         for (__i, &__b) in __bytes.iter().enumerate() {
             __store[__i].set(__b);
         }
-        rv.set(__ab.into());
+        let __u8 = v8::Uint8Array::new(scope, __ab, 0, __len).unwrap();
+        rv.set(__u8.into());
     }
 }
 
@@ -224,6 +423,13 @@ fn gen_vec_u8_set(val: &TokenStream2) -> TokenStream2 {
 fn gen_scalar_set(ty: &Type, val: &TokenStream2) -> TokenStream2 {
     if is_vec_u8(ty) {
         return gen_vec_u8_set(val);
+    }
+    // `v8::Local<v8::Value>` (or any v8::Local<v8::T>): pass straight
+    // to `rv.set`. Used by methods that build their own JS object,
+    // typed array, etc. — e.g. TextEncoder.encodeInto returning
+    // `{ read, written }`.
+    if type_ident(ty).as_deref() == Some("Local") {
+        return quote! { rv.set(#val.into()); };
     }
     match type_ident(ty).as_deref() {
         Some("bool") => quote! { rv.set(v8::Boolean::new(scope, #val).into()); },
@@ -238,8 +444,23 @@ fn gen_scalar_set(ty: &Type, val: &TokenStream2) -> TokenStream2 {
     }
 }
 
-/// Generate code to convert an `Option<T>` inner value to V8.
+/// Generate code to convert an `Option<T>` inner value to V8. The
+/// emitted code expects `__inner` to be the unwrapped Some value.
 fn gen_option_some_set(ty: &Type) -> TokenStream2 {
+    if is_vec_u8(ty) {
+        // Option<Vec<u8>> for getters like `Headers.get(name) ->
+        // ByteString?`. Emit a Latin-1 one-byte string so byte fidelity
+        // is preserved (encoded session tokens, e.g. high-bit Set-Cookie
+        // values, must round-trip).
+        return quote! {
+            let __v = v8::String::new_from_one_byte(
+                scope,
+                __inner.as_slice(),
+                v8::NewStringType::Normal,
+            ).unwrap();
+            rv.set(__v.into());
+        };
+    }
     match type_ident(ty).as_deref() {
         Some("bool") => quote! { rv.set(v8::Boolean::new(scope, __inner).into()); },
         Some("u32") => quote! { rv.set(v8::Integer::new_from_unsigned(scope, __inner).into()); },
@@ -262,13 +483,32 @@ fn gen_vec_set() -> TokenStream2 {
     }
 }
 
+/// Generate code to build a `v8::Array` from a `Vec<Vec<u8>>`. Each
+/// element is materialised as a Latin-1 one-byte string (a WebIDL
+/// ByteString round-trips faithfully — bytes 0x80–0xFF survive). Used
+/// by methods like `Headers.getSetCookie() -> sequence<ByteString>`.
+fn gen_vec_vec_u8_set() -> TokenStream2 {
+    quote! {
+        let __arr = v8::Array::new(scope, __vec.len() as i32);
+        for (__i, __bytes) in __vec.iter().enumerate() {
+            let __s = v8::String::new_from_one_byte(
+                scope,
+                __bytes.as_slice(),
+                v8::NewStringType::Normal,
+            ).unwrap();
+            __arr.set_index(scope, __i as u32, __s.into());
+        }
+        rv.set(__arr.into());
+    }
+}
+
 /// Generate error throw from `OpError`.
 fn gen_throw_error() -> TokenStream2 {
     quote! {
         let __msg = v8::String::new(scope, &__err.message).unwrap();
         let __exc = match __err.kind {
-            crate::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-            crate::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+            ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
+            ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
             _ => v8::Exception::error(scope, __msg),
         };
         scope.throw_exception(__exc);
@@ -276,9 +516,12 @@ fn gen_throw_error() -> TokenStream2 {
 }
 
 /// Generate the function call + return value handling.
-fn gen_call_return(fn_name: &Ident, call_args: &[&Ident], output: &ReturnType) -> TokenStream2 {
-    let call = quote! { #fn_name(#(#call_args),*) };
-
+///
+/// `call` is the pre-built call expression (e.g. `my_fn(a, b)` or
+/// `__instance.method(a, b)`). Splitting this out lets both the
+/// `#[zeroship_op]` and `#[v8_class]` macros reuse the return-value
+/// marshaling logic with their respective call shapes.
+pub(crate) fn gen_call_return(call: &TokenStream2, output: &ReturnType) -> TokenStream2 {
     match output {
         ReturnType::Default => quote! { #call; },
         ReturnType::Type(_, ty) => {
@@ -288,36 +531,51 @@ fn gen_call_return(fn_name: &Ident, call_args: &[&Ident], output: &ReturnType) -
                 Some("Result") => {
                     let inner = first_generic_arg(ty);
                     let inner_ident = inner.and_then(type_ident);
-                    let ok_handling = match inner_ident.as_deref() {
-                        Some("Option") => {
-                            let inner2 = inner.and_then(first_generic_arg);
-                            let some_set = inner2
-                                .map(gen_option_some_set)
-                                .unwrap_or_else(|| gen_option_some_set(&syn::parse_quote!(String)));
-                            quote! {
-                                match __ok {
-                                    Some(__inner) => { #some_set }
-                                    None => rv.set(v8::null(scope).into()),
-                                }
-                            }
-                        }
-                        Some("Vec") => {
-                            if inner.map(is_vec_u8).unwrap_or(false) {
-                                let val = quote! { __ok };
-                                gen_vec_u8_set(&val)
-                            } else {
-                                let vec_set = gen_vec_set();
+                    let ok_handling = if inner.map(is_unit_type).unwrap_or(false) {
+                        // `Result<(), OpError>` — Ok variant has no value
+                        // to surface. Bind it to `_` so the unused-let
+                        // lint doesn't fire, and leave `rv` untouched
+                        // (defaults to `undefined`). Used by mutator
+                        // methods like Headers.append.
+                        quote! { let _ = __ok; }
+                    } else {
+                        match inner_ident.as_deref() {
+                            Some("Option") => {
+                                let inner2 = inner.and_then(first_generic_arg);
+                                let some_set = inner2
+                                    .map(gen_option_some_set)
+                                    .unwrap_or_else(|| gen_option_some_set(&syn::parse_quote!(String)));
                                 quote! {
-                                    let __vec = __ok;
-                                    #vec_set
+                                    match __ok {
+                                        Some(__inner) => { #some_set }
+                                        None => rv.set(v8::null(scope).into()),
+                                    }
                                 }
                             }
-                        }
-                        _ => {
-                            let val = quote! { __ok };
-                            inner
-                                .map(|t| gen_scalar_set(t, &val))
-                                .unwrap_or_else(|| gen_scalar_set(&syn::parse_quote!(String), &val))
+                            Some("Vec") => {
+                                if inner.map(is_vec_u8).unwrap_or(false) {
+                                    let val = quote! { __ok };
+                                    gen_vec_u8_set(&val)
+                                } else if inner.map(is_vec_vec_u8).unwrap_or(false) {
+                                    let vv_set = gen_vec_vec_u8_set();
+                                    quote! {
+                                        let __vec = __ok;
+                                        #vv_set
+                                    }
+                                } else {
+                                    let vec_set = gen_vec_set();
+                                    quote! {
+                                        let __vec = __ok;
+                                        #vec_set
+                                    }
+                                }
+                            }
+                            _ => {
+                                let val = quote! { __ok };
+                                inner
+                                    .map(|t| gen_scalar_set(t, &val))
+                                    .unwrap_or_else(|| gen_scalar_set(&syn::parse_quote!(String), &val))
+                            }
                         }
                     };
                     let throw = gen_throw_error();
@@ -352,6 +610,12 @@ fn gen_call_return(fn_name: &Ident, call_args: &[&Ident], output: &ReturnType) -
                             let __vec = #call;
                             #ab_set
                         }
+                    } else if is_vec_vec_u8(ty) {
+                        let vv_set = gen_vec_vec_u8_set();
+                        quote! {
+                            let __vec = #call;
+                            #vv_set
+                        }
                     } else {
                         let vec_set = gen_vec_set();
                         quote! {
@@ -373,6 +637,11 @@ fn gen_call_return(fn_name: &Ident, call_args: &[&Ident], output: &ReturnType) -
                     let __v = v8::String::new(scope, &__r).unwrap();
                     rv.set(__v.into());
                 },
+
+                // --- Direct V8 value (Local<Value>, Local<Object>, etc.) ---
+                // Used by methods that build a custom JS shape (e.g.
+                // TextEncoder.encodeInto returning `{ read, written }`).
+                Some("Local") => quote! { rv.set(#call.into()); },
 
                 _ => quote! { #call; },
             }
@@ -412,8 +681,9 @@ fn generate_sync(needs_state: bool, input_fn: &ItemFn) -> syn::Result<TokenStrea
 
     // Call args (all params, including state)
     let call_args: Vec<&Ident> = params.iter().map(|p| &p.name).collect();
+    let call = quote! { #fn_name(#(#call_args),*) };
 
-    let call_return = gen_call_return(fn_name, &call_args, &input_fn.sig.output);
+    let call_return = gen_call_return(&call, &input_fn.sig.output);
 
     Ok(quote! {
         #input_fn

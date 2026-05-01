@@ -805,104 +805,13 @@
   globalThis.AbortController = AbortController;
   globalThis.AbortSignal = AbortSignal;
 
-  // =========================================================================
-  // TextEncoder / TextDecoder polyfill
-  // =========================================================================
-
-  if (typeof TextEncoder === "undefined") {
-    globalThis.TextEncoder = function TextEncoder() {};
-    TextEncoder.prototype.encode = function(str) {
-      str = String(str);
-      var buf = new Uint8Array(str.length * 3); // UTF-8 worst case
-      var pos = 0;
-      for (var i = 0; i < str.length; i++) {
-        var c = str.charCodeAt(i);
-        if (c < 0x80) {
-          buf[pos++] = c;
-        } else if (c < 0x800) {
-          buf[pos++] = 0xc0 | (c >> 6);
-          buf[pos++] = 0x80 | (c & 0x3f);
-        } else if (c >= 0xd800 && c <= 0xdbff) {
-          var next = str.charCodeAt(++i);
-          var cp = ((c - 0xd800) << 10) + (next - 0xdc00) + 0x10000;
-          buf[pos++] = 0xf0 | (cp >> 18);
-          buf[pos++] = 0x80 | ((cp >> 12) & 0x3f);
-          buf[pos++] = 0x80 | ((cp >> 6) & 0x3f);
-          buf[pos++] = 0x80 | (cp & 0x3f);
-        } else {
-          buf[pos++] = 0xe0 | (c >> 12);
-          buf[pos++] = 0x80 | ((c >> 6) & 0x3f);
-          buf[pos++] = 0x80 | (c & 0x3f);
-        }
-      }
-      return buf.subarray(0, pos);
-    };
-    TextEncoder.prototype.encodeInto = function(str, dest) {
-      var encoded = this.encode(str);
-      var len = Math.min(encoded.length, dest.length);
-      dest.set(encoded.subarray(0, len));
-      // Count how many source chars were consumed
-      var read = 0, written = 0, i = 0;
-      while (written < len && i < str.length) {
-        var c = str.charCodeAt(i);
-        var bytes;
-        if (c < 0x80) bytes = 1;
-        else if (c < 0x800) bytes = 2;
-        else if (c >= 0xd800 && c <= 0xdbff) { bytes = 4; i++; read++; }
-        else bytes = 3;
-        if (written + bytes > len) break;
-        written += bytes;
-        read++;
-        i++;
-      }
-      return { read: read, written: len };
-    };
-    TextEncoder.prototype.encoding = "utf-8";
-  }
-
-  if (typeof TextDecoder === "undefined") {
-    globalThis.TextDecoder = function TextDecoder() {};
-    // `decode(buf)` must respect the view's byteOffset + byteLength when buf is
-    // a typed-array view. Previously we did `new Uint8Array(buf.buffer || buf)`,
-    // which silently widened any subarray view back to the entire backing
-    // ArrayBuffer — e.g. `new TextDecoder().decode(u8.subarray(0, 4))` would
-    // decode all of `u8`, not just the first four bytes. That broke consumers
-    // that rely on slice-based line parsing (OpenAI's LineDecoder, any code
-    // that does `buf.subarray(0, patternIndex)` before decoding).
-    TextDecoder.prototype.decode = function(buf) {
-      if (!buf) return "";
-      var bytes;
-      if (buf instanceof Uint8Array) {
-        bytes = buf;
-      } else if (ArrayBuffer.isView && ArrayBuffer.isView(buf)) {
-        // Any other view: construct a Uint8Array that mirrors the same window.
-        bytes = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
-      } else if (buf instanceof ArrayBuffer) {
-        bytes = new Uint8Array(buf);
-      } else {
-        // Fall back: accept array-likes (e.g. number[])
-        bytes = new Uint8Array(buf);
-      }
-      var result = "";
-      for (var i = 0; i < bytes.length;) {
-        var b = bytes[i];
-        if (b < 0x80) { result += String.fromCharCode(b); i++; }
-        else if ((b & 0xe0) === 0xc0) {
-          result += String.fromCharCode(((b & 0x1f) << 6) | (bytes[i+1] & 0x3f));
-          i += 2;
-        } else if ((b & 0xf0) === 0xe0) {
-          result += String.fromCharCode(((b & 0x0f) << 12) | ((bytes[i+1] & 0x3f) << 6) | (bytes[i+2] & 0x3f));
-          i += 3;
-        } else {
-          var cp = ((b & 0x07) << 18) | ((bytes[i+1] & 0x3f) << 12) | ((bytes[i+2] & 0x3f) << 6) | (bytes[i+3] & 0x3f);
-          cp -= 0x10000;
-          result += String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff));
-          i += 4;
-        }
-      }
-      return result;
-    };
-  }
+  // TextEncoder / TextDecoder are now installed natively from
+  // crates/runtime/src/text_encoding.rs (via #[v8_class]). The
+  // hand-rolled JS polyfill that lived here ignored decode()'s
+  // { stream: true } option, corrupting multi-byte UTF-8 split
+  // across chunks (the AI SDK / SSE bug). Removed entirely — if
+  // setup_globals didn't run, the class is missing rather than
+  // silently wrong.
 
   // =========================================================================
   // atob / btoa polyfill (Base64)
