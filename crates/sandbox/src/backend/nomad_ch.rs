@@ -582,7 +582,11 @@ impl NomadCHBackend {
         let mut errs: Vec<String> = Vec::new();
 
         // 1. Drain the agent. Best-effort — if /shutdown 5xx-s the
-        //    Nomad purge in step 2 still tears the VM down.
+        //    Nomad purge in step 2 still tears the VM down. We feed
+        //    the error into `errs` (rather than just eprintln) so
+        //    the caller sees it; symmetric with steps 2/3/5 below.
+        //    The aggregate error is non-fatal — we keep going through
+        //    the cleanup tail regardless.
         if let Err(e) = http_signed_async(
             &sandbox.signing_key,
             "POST",
@@ -591,10 +595,10 @@ impl NomadCHBackend {
         )
         .await
         {
-            eprintln!(
-                "[sandbox/nomad-ch] /shutdown to {} failed (continuing): {e}",
+            errs.push(format!(
+                "/shutdown to {}: {e} (continuing with Nomad purge)",
                 sandbox.job_id
-            );
+            ));
         }
 
         // 2. Stop + purge the Nomad job.
