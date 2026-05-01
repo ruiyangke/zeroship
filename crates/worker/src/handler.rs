@@ -80,12 +80,13 @@ fn wall_limit(runtime: &Runtime) -> std::time::Duration {
 // Unified dispatch — the worker's single entry point
 // ---------------------------------------------------------------------------
 
-/// JSON envelope the gateway sends. The kernel no longer distinguishes RPC
-/// from HTTP; the full HTTP request (method, URL, headers, body) flows in
-/// via this envelope and `call_fetch_handler` invokes the app's
-/// `default.fetch` handler. When the bootstrap router lands (PR 2), it
-/// inspects the URL inside the envelope to dispatch to `_rpc/<method>`,
-/// static assets, or the app's own fetch — all from user-space JS.
+/// JSON envelope the gateway sends. The full HTTP request (method, URL,
+/// headers, body) flows in here and `Runtime::call_fetch_handler`
+/// dispatches it through the kernel's three-tier path:
+///   1. `default.rpc(name, input, ctx)` for `/_zs/v1/<id>` URLs.
+///   2. `default.fetchFast(method, url, body, env)` for non-RPC traffic.
+///   3. `default.fetch(request, env, ctx)` (WinterCG slow path) for
+///      everything else, including fall-through from (1) and (2).
 #[derive(serde::Deserialize)]
 struct HttpEnvelope {
     method: String,

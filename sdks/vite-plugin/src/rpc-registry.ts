@@ -17,17 +17,22 @@
 //                          requests dispatch through `rpc`; everything
 //                          else falls through to the user's own
 //                          `default.fetch` (when present), or 404s.
-//   rpc(name, input, ctx)  RPC dispatcher. Looks up the wireId in the
-//                          static `_procedures` map populated at build
-//                          time, validates `fn.config.input` (Zod), runs
-//                          the handler, optionally validates
-//                          `fn.config.output` (dev only, when
-//                          NODE_ENV === "development"). Returns either
-//                          the handler's value (unary) or its
+//   rpc(name, input, ctx)  Standalone kernel entry point — symmetric
+//                          to `default.fetch`. Looks up the wireId in
+//                          the dispatch table built from the user
+//                          module's namespace exports at module-init
+//                          time, validates `fn.config.input` (Zod),
+//                          runs the handler, optionally validates
+//                          `fn.config.output` (dev only). The kernel
+//                          calls this directly when the URL matches
+//                          /_zs/v1/<id>, bypassing Request/URL
+//                          construction entirely. Returns either the
+//                          handler's sync value, a Promise, or an
 //                          AsyncIterator (stream — tagged with
 //                          `__zsOutputIsString` when output schema is a
 //                          Zod string so the wire encoder picks the `0:`
-//                          lane).
+//                          lane). NOT `async` — sync handlers stay sync
+//                          to avoid the per-request microtask tax.
 //
 // No virtual registry module, no `_zsRegister`, no side effects in user
 // modules — the dispatch table is statically built by the plugin from
@@ -65,10 +70,9 @@ export function pickEntryWireId(p: {
  *
  * The dispatch table (`_procedures`) is populated at module-init time
  * by iterating the user module's namespace exports — every callable
- * non-`default`, non-`dispatchRpc`, non-`dispatchSubscription` export
- * is registered under `fn.config.id` (when explicit) or its export
- * name. There are no per-procedure static imports; the user module's
- * namespace is the source of truth.
+ * non-`default` export is registered under `fn.config.id` (when
+ * explicit) or its export name. There are no per-procedure static
+ * imports; the user module's namespace is the source of truth.
  *
  * Emits `default.{fetch, rpc}` — symmetric to WinterCG's
  * `default.fetch`. No runtime registration, no virtual registry
@@ -94,7 +98,7 @@ import * as _zsUser from ${userImport};
 
 const _procedures = {};
 for (const _k of Object.keys(_zsUser)) {
-  if (_k === "default" || _k === "dispatchRpc" || _k === "dispatchSubscription") continue;
+  if (_k === "default") continue;
   const _v = _zsUser[_k];
   if (typeof _v !== "function") continue;
   const _id = (_v.config && typeof _v.config.id === "string" && _v.config.id) || _k;
@@ -145,11 +149,17 @@ function _isZodStringSchema(s) {
 }
 
 // _zsRpc(name, input, ctx) — the RPC dispatcher. Symmetric to fetch:
-// callers (the WS subscription path, the kernel's HTTP handler via
-// fetch, tests) hand in (wireId, input, ctx) and get the handler's
-// return value. Validation runs against fn.config.input (always) and
-// fn.config.output (dev only).
-async function _zsRpc(name, input, ctx) {
+// the kernel's HTTP fast path (default.rpc dispatch) calls this with
+// (wireId, input, ctx); the slow-path fall-through (_zsFetch →
+// _zsRpcAndRespond) calls it with the same shape; WS subscriptions
+// and tests do the same.
+//
+// NOT \`async\`: an async function would always return a Promise and
+// always cost one microtask, even for sync handlers. We keep this sync
+// and only attach \`.then\` when the user handler returns a thenable.
+// On the bench (sync ping/fib), this saves the per-request microtask
+// checkpoint.
+function _zsRpc(name, input, ctx) {
   const fn = _procedures[name];
   if (typeof fn !== "function") {
     throw Object.assign(new Error("Method not found: " + name), {
@@ -172,8 +182,16 @@ async function _zsRpc(name, input, ctx) {
     }
   }
 
-  const result = await fn(validated, ctx);
+  const out = fn(validated, ctx);
+  if (out && typeof out.then === "function") {
+    return out.then((v) => _zsRpcPost(v, cfg));
+  }
+  return _zsRpcPost(out, cfg);
+}
 
+// Output-validation + stream-tag tail. Runs after either sync return
+// or Promise resolve. Kept tiny — output validation is dev-only.
+function _zsRpcPost(result, cfg) {
   // Async iterator → tag for stream encoding when output schema is a
   // Zod string. The encoder (slow path here, runtime fast path
   // elsewhere) reads __zsOutputIsString to decide between AI-SDK \`0:\`
@@ -207,57 +225,63 @@ async function _zsRpc(name, input, ctx) {
   return result;
 }
 
-// _zsFetch(request) — WinterCG-symmetric HTTP handler. Owns the
-// /_zs/v1/<id> wire (superjson \`{ json }\` envelope, AI-SDK Data Stream
-// Protocol for streams). Non-/_zs/v1/* paths fall through to the user's
-// own default.fetch (when present), or 404.
-async function _zsFetch(request) {
+// _zsFetch(request, env, ctx) — WinterCG-symmetric HTTP handler.
+//
+// In the common case the kernel routes /_zs/v1/<id> directly through
+// \`default.rpc\` and never invokes us. We're called here for two paths:
+//   1. Non-/_zs/v1/* requests → forward to the user's own default.fetch
+//      (when present), or 404.
+//   2. RPC requests where the kernel fast path returned FallThrough
+//      (the procedure resolved to an AsyncIterator) → re-dispatch
+//      through _zsRpcAndRespond, which encodes the iterator as SSE.
+async function _zsFetch(request, env, ctx) {
   const url = new URL(request.url);
 
   if (url.pathname.startsWith("/_zs/v1/")) {
-    const id = decodeURIComponent(url.pathname.slice("/_zs/v1/".length));
+    // Path-slice only — the wireId is byte-identical between the
+    // kernel's fast path and our slow path. No percent-decoding, no
+    // method override (the kernel restricts /_zs/v1/ to POST/GET, and
+    // anything else 405s here).
+    const id = url.pathname.slice("/_zs/v1/".length);
     if (!id) return _zsErrResponse(400, "INVALID_ARGUMENT", "missing wireId");
 
     let input = undefined;
-    const xMethod = request.headers.get("x-method");
-    const effectiveMethod = xMethod ? xMethod.toUpperCase() : request.method;
-
-    if (effectiveMethod === "GET") {
+    if (request.method === "GET") {
       const param = url.searchParams.get("input");
       if (param) {
         try {
           const b64 = param.replace(/-/g, "+").replace(/_/g, "/");
           const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
-          const env = JSON.parse(atob(padded));
-          input = env && typeof env === "object" && "json" in env ? env.json : env;
+          const e = JSON.parse(atob(padded));
+          input = e && typeof e === "object" && "json" in e ? e.json : e;
         } catch (e) {
           return _zsErrResponse(400, "INVALID_ARGUMENT", \`invalid base64url input: \${e?.message ?? e}\`);
         }
       }
-    } else if (effectiveMethod === "POST") {
+    } else if (request.method === "POST") {
       const text = await request.text();
       if (text) {
         try {
-          const env = JSON.parse(text);
-          input = env && typeof env === "object" && "json" in env ? env.json : env;
+          const e = JSON.parse(text);
+          input = e && typeof e === "object" && "json" in e ? e.json : e;
         } catch (e) {
           return _zsErrResponse(400, "INVALID_ARGUMENT", \`invalid JSON body: \${e?.message ?? e}\`);
         }
       }
     } else {
-      return _zsErrResponse(405, "FAILED_PRECONDITION", \`method \${effectiveMethod} not allowed on /_zs/v1/\`);
+      return _zsErrResponse(405, "FAILED_PRECONDITION", \`method \${request.method} not allowed on /_zs/v1/\`);
     }
 
-    return await _zsRpcAndRespond(id, input);
+    return await _zsRpcAndRespond(id, input, ctx);
   }
 
-  if (_userFetch) return _userFetch.call(_userDefault, request);
+  if (_userFetch) return _userFetch.call(_userDefault, request, env, ctx);
   return new Response("Not Found", { status: 404 });
 }
 
-async function _zsRpcAndRespond(name, input) {
+async function _zsRpcAndRespond(name, input, ctx) {
   try {
-    const result = await _zsRpc(name, input);
+    const result = await _zsRpc(name, input, ctx);
 
     if (_isAsyncIterator(result)) {
       // Vercel AI-SDK Data Stream Protocol — line-prefixed framing:

@@ -184,10 +184,15 @@ export function __bindRequest(ctx, request) {
 /// Runtime-injected bootstrap module. Becomes the new entry (`index.js`),
 /// wrapping the user's original entry (renamed internally to `__user__.js`).
 ///
-/// The kernel always invokes `user.default.fetch(request)` — the synthetic
-/// SSR entry (emitted by `@zeroship/vite-plugin`) provides the
-/// WinterCG-symmetric `default.{fetch, rpc}` shape and owns the
-/// `/_zs/v1/<id>` wire dispatch.
+/// The kernel invokes one of three entry points per request:
+///   - `user.default.rpc(name, input, ctx)`  for `/_zs/v1/<id>` (when set)
+///   - `user.default.fetchFast(method, url, body, env)`  for non-RPC paths (when set)
+///   - `user.default.fetch(request, env, ctx)`  WinterCG slow path (always)
+///
+/// The synthetic SSR entry (emitted by `@zeroship/vite-plugin`) provides
+/// `default.{fetch, rpc}` and owns the `/_zs/v1/<id>` wire dispatch. Raw
+/// user code (no plugin) can export any subset; the bootstrap forwards
+/// whichever are present.
 ///
 /// This module exists to:
 ///   1. **WS-subscription dispatch**: WebSocket upgrades on `/_zs/v1/<id>`
@@ -202,10 +207,11 @@ export function __bindRequest(ctx, request) {
 ///      kernel stashes the ctx + Request so nested modules can call
 ///      `getRequest()` without threading the request everywhere.
 ///
-/// The `default` export shape is `{ fetch, fetchFast, subscribe }` —
-/// `fetchFast` is the optional zeroship-extension fast path, `subscribe`
-/// is the WS-subscription dispatcher. There is NO `dispatchRpc` export
-/// any more; the kernel routes all HTTP through `default.fetch`.
+/// The `default` export shape is `{ fetch, rpc, fetchFast, subscribe }`
+/// — `rpc` is the standalone RPC entry (kernel calls it directly when
+/// the URL matches /_zs/v1/<id>; symmetric to `default.fetch`),
+/// `fetchFast` is the optional zeroship-extension HTTP fast path for
+/// non-RPC traffic, and `subscribe` is the WS-subscription dispatcher.
 pub(crate) const BOOTSTRAP_JS: &str = r##"
 import * as user from "./__user__.js";
 import { __bindRequest } from "zeroship/internal";
@@ -558,11 +564,20 @@ const USER_FETCH = (user && user.default && typeof user.default.fetch === "funct
 //   - { status, headers, body } plain object → HTTP response
 //   - string / Uint8Array → 200 OK + that body
 //   - null → kernel falls back to the slow `fetch(request, env, ctx)` path
-// Kernel dispatches to this BEFORE constructing a Request — every HTTP
-// request, including /_zs/v1/<id> RPC dispatch, goes through fetchFast
-// first (when present), then fetch. There is no separate /_rpc fast path.
+// Kernel dispatches to this for non-/_zs/v1/<id> traffic when the user
+// module exports it. /_zs/v1/<id> requests go through `default.rpc`
+// instead — fetchFast and rpc are siblings, not layered.
 const USER_FETCH_FAST = (user && user.default && typeof user.default.fetchFast === "function")
     ? user.default.fetchFast
+    : null;
+
+// Standalone RPC entry — the kernel calls this directly when the URL
+// matches /_zs/v1/<id>, bypassing Request/URL construction. Symmetric
+// to fetch — independent kernel entry point. Returned values get
+// envelope-wrapped on the wire by the kernel; promises get awaited;
+// async iterators fall through to the slow path's stream encoder.
+const USER_RPC = (user && user.default && typeof user.default.rpc === "function")
+    ? user.default.rpc
     : null;
 
 const FALLBACK_ZS_V1_TAG = "/_zs/v1/";
@@ -623,14 +638,18 @@ export default {
     // WS-upgrade path; tests can drive this directly via the
     // runtime's WebSocketPair primitive.
     subscribe: dispatchSubscription,
-    // Zeroship extension: non-WinterCG fast HTTP dispatch. Kernel
-    // calls this with raw (method, url, body, env). User returns a
-    // plain response shape or null to fall through to fetch(). Skips
-    // Request/Response construction entirely — hot-path-only win.
+    // Standalone RPC entry. When set, the kernel calls this directly
+    // for /_zs/v1/<id> requests and never builds a Request object.
+    // Symmetric to fetch — independent kernel entry, not layered.
+    rpc: USER_RPC,
+    // Zeroship extension: non-WinterCG fast HTTP dispatch for non-RPC
+    // traffic. Kernel calls this with raw (method, url, body, env).
+    // User returns a plain response shape or null to fall through to
+    // fetch(). Skips Request/Response construction — hot-path-only win.
     fetchFast: USER_FETCH_FAST,
     // Standard WinterCG fetch handler — the user's default.fetch
-    // directly (no bootstrap wrapper). Every HTTP request, including
-    // /_zs/v1/<id> RPC dispatch, flows through here.
+    // directly (no bootstrap wrapper). Catches everything not handled
+    // by `rpc` or `fetchFast`.
     fetch: USER_FETCH || fallbackFetch,
 };
 "##;

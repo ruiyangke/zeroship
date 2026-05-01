@@ -164,8 +164,8 @@ function getCompilerId(): string {
  * The directive itself is just a string expression at the top of the
  * module; if we leave it in place, it is a no-op but pollutes the
  * output. The synthetic server entry (loaded via
- * `virtual:zeroship/_server-entry`) handles `default.fetch` and
- * `dispatchRpc`.
+ * `virtual:zeroship/_server-entry`) emits `default.{fetch, rpc}` — the
+ * runtime kernel dispatches to those directly.
  */
 export function stripUseServer(bundle: string): string {
   return bundle.replace(/^"use server"\s*;\s*/, "");
@@ -363,12 +363,11 @@ export function buildPlugin(
 
       // Build via the synthetic server entry (`virtual:zeroship/_server-entry`)
       // — that virtual module imports the user's entry, re-exports its
-      // bindings, and provides our own `default.fetch` + `dispatchRpc`.
-      // Rolldown collapses everything into a single ESM file at `dist/server/index.js`.
-      // The closure-private RPC registry virtual module is also pulled
-      // into the same flat scope; the registration calls the transform
-      // emitted (`__zsRegister("name", fn)`) run as plain function calls
-      // on a top-level mangled `const` Map — no global leak.
+      // bindings, and provides our own `default.{ fetch, rpc }`.
+      // Rolldown collapses everything into a single ESM file at
+      // `dist/server/index.js`. The synthetic entry's `_procedures`
+      // dispatch table is built at module-init time by iterating the
+      // user namespace's exports — no global registry, no side effects.
       //
       // Use the user's absolute entry path as the synthetic entry's
       // import specifier — virtual modules have no parent path, so

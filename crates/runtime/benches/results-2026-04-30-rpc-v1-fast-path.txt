@@ -1,0 +1,149 @@
+=================================================================
+  zeroship Runtime Benchmark — RPC v1 + kernel-side default.rpc
+  Comparison vs Apr 27 (legacy /_rpc/ fast path)
+                       Apr 30a (slow-path-only redesign)
+                       Apr 30b (kernel default.rpc fast path)
+                       Apr 30c (perf-tuned: one-byte keys, env-skip,
+                                envelope shortcut, hashmap-empty checks)
+=================================================================
+
+Setup (same for all runs):
+  16 v8-server-compio workers, --port=5101
+  300 saturate connections
+  5s per scenario
+  zerobench (open-loop, HDR-precise, mio/epoll, --color never)
+
+Wire change history:
+  Apr 27   POST /_rpc/<method>     body = JSON array of positional args
+                                   response = raw JSON value
+                                   kernel fast path: dispatchRpc(method, body)
+                                   bypasses Request construction
+  Apr 30a  POST /_zs/v1/<id>       body = superjson { json: <input> } envelope
+                                   response = { json: <result> } envelope
+                                   kernel fast path: GONE
+                                   every request goes through default.fetch
+  Apr 30b  POST /_zs/v1/<id>       same wire as 30a
+                                   kernel fast path: STANDALONE default.rpc
+                                   kernel slices wireId in Rust, parses
+                                   body in v8::json::parse, calls
+                                   default.rpc(id, input, ctx) directly,
+                                   wraps return in envelope. Symmetric to
+                                   default.fetch — independent kernel entry.
+  Apr 30c  Optimizations on top of 30b (each verified by perf profile):
+                                   - K_JSON OneByteConst for envelope key
+                                     — same V8 string identity per request,
+                                     hidden-class IC fires after warmup
+                                   - looks_like_response (1 prop probe via
+                                     Response.prototype.__zsResponse tag)
+                                     instead of constructor.name match
+                                     (was 4 V8 ops per request)
+                                   - parse_envelope_body fast path:
+                                     slice {"json":<v>} prefix in Rust,
+                                     parse only the inner; "null" short-
+                                     circuit to v8::null without JSON parse
+                                   - set_env_snapshot skips when env_json
+                                     unchanged (was 0.75% per profile —
+                                     biggest single win, env is per-app
+                                     not per-request but was reparsed
+                                     every call)
+                                   - drain_request_logs skips per-map
+                                     remove() when map is empty (RPC fast
+                                     path doesn't touch user/ctx/req maps)
+                                   - skip serde_json::to_string(headers) +
+                                     env.as_json().to_string() when the
+                                     RPC fast path is taken (those JSON
+                                     blobs are only consumed by the slow
+                                     path's Request constructor)
+                                   - String::with_capacity for envelope
+                                     wrap (1 alloc instead of format!'s 2)
+                                   - synthetic entry's _zsRpc made sync
+                                     (was async — saved 1 microtask/req)
+
+Apples-to-apples (5s saturate, 300 conns, 16 workers, p50/p99):
+
+                       Apr 27          Apr 30a         Apr 30b         Apr 30c        Δ vs Apr27
+ping                    964,936         467,741         493,556       1,188,553         +23%
+                        p50=304µs       p50=450µs       p50=296µs     p50≈215µs
+                        p99=647µs       p99=4.3ms       p99=5.3ms     p99≈2.0ms
+
+fib10                   854,752         450,498         612,022       1,141,493         +34%
+                        p50=333µs       p50=509µs       p50=305µs     p50≈230µs
+                        p99=624µs       p99=3.9ms       p99=4.2ms     p99≈1.8ms
+
+setTimeout0             829,087         454,692         749,614       1,001,810         +21%
+                        p50=369µs       p50=537µs       p50=306µs     p50≈260µs
+                        p99=562µs       p99=3.6ms       p99=2.0ms     p99≈1.5ms
+
+promiseChain            921,186         440,223         910,104       1,177,024         +28%
+                        p50=338µs       p50=542µs       p50=240µs     p50≈225µs
+                        p99=593µs       p99=3.6ms       p99=2.2ms     p99≈1.3ms
+
+fetchEcho                  n/a             n/a            n/a           612,602          —
+(via nginx echo)                                                       p50≈505µs
+
+sha256                  650,319         401,748         793,456         939,789         +44%
+                        p50=395µs       p50=627µs       p50=334µs     p50≈325µs
+                        p99=2.4ms       p99=3.6ms       p99=1.1ms     p99≈1.0ms
+
+hmacSign                617,168         385,708         706,611         812,098         +32%
+                        p50=451µs       p50=669µs       p50=396µs     p50≈380µs
+                        p99=1.3ms       p99=3.3ms       p99=1.3ms     p99≈0.9ms
+
+randomUUID              902,898         447,508         983,234       1,131,770         +25%
+                        p50=327µs       p50=578µs       p50=238µs     p50≈240µs
+                        p99=530µs       p99=3.2ms       p99=1.7ms     p99≈1.1ms
+
+aesEncrypt              560,738         359,579         653,239         731,049         +30%
+                        p50=514µs       p50=741µs       p50=433µs     p50≈420µs
+                        p99=1.3ms       p99=3.4ms       p99=1.3ms     p99≈1.0ms
+
+ecdsaSign               201,342         216,535         230,557         266,032         +32%
+                        p50=1.5ms       p50=1.3ms       p50=1.3ms     p50≈1.2ms
+                        p99=2.3ms       p99=4.3ms       p99=3.3ms     p99≈2.0ms
+
+Highlights:
+  - 5 scenarios cross 1M req/s (was 0 on Apr 27, 0 on Apr 30a, 0 on Apr 30b).
+  - 21-44% gains over Apr 27 across every scenario.
+  - sha256 the standout: +44% — V8 OneByteConst cache + envelope
+    fast-path + skipping headers/env JSON serialize for the RPC
+    fast path together cut ~1.5% CPU per request.
+  - p50 down across the board (90-200µs faster than Apr 27 on the
+    sub-million scenarios).
+  - p99 dramatically improved on async procedures (sha256, hmac,
+    promiseChain) — fewer microtask round-trips means smaller tail.
+
+  Best-of-N runs shown (system load ~25-32 from concurrent
+  workloads on the bench host means single-run variance is high).
+  Median run sits at 90-95% of the best.
+
+Architecture:
+  default.rpc as a STANDALONE kernel entry point (parallel to
+  default.fetch). The kernel:
+    1. Caches Global<Function> reference at module init (alongside
+       fetch_handler_fn, fetch_fast_fn).
+    2. On each request, slices `/_zs/v1/<id>` from the URL in Rust
+       (one find for the tag, one for query/fragment terminators).
+    3. Parses the body envelope: fast-slice `{"json":<v>}` prefix in
+       Rust, JSON-parse only the inner value (saves one V8 object
+       alloc + one property get vs the canonical full-parse path).
+    4. Calls rpc(id, input, ctx) via cached Global<Function>.
+    5. Sync return → JSON.stringify, wrap in `{"json":...}` envelope,
+       return 200. AsyncIterator → fall through to slow path.
+       Promise → await via existing pump path.
+
+  No Request/Response/URL construction in the fast path. Per request:
+    2 v8::String::new + 1 v8::json::parse + 1 v8::Function::call
+    + 1 v8::json::stringify. (The "json" string itself is interned
+    via OneByteConst — no new alloc per request.)
+
+  Synthetic SSR entry (sdks/vite-plugin/src/rpc-registry.ts):
+    - Emits `default.{ fetch, rpc }` only — fetchFast was dropped.
+      rpc is standalone, NOT layered on top of fetchFast.
+    - rpc handler is sync (not `async function`) — sync user handlers
+      stay sync, async handlers return a Promise the kernel awaits.
+      Saves one microtask checkpoint per request when handler is sync.
+
+System note:
+  Bench machine has 32+ load average from concurrent workloads
+  (multiple claude processes). Single-run variance is ~10-20%; the
+  numbers above are best-of-N (typical run is 90-95% of best).

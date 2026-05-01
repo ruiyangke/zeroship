@@ -2,14 +2,19 @@
  * Dev bootstrap — entry module for zeroship V8 runtime in dev mode.
  * Bundled into dist/dev-bootstrap.js by esbuild.
  *
- * Dispatch wire (v2):
- *   POST /_rpc/<modulePath>/<exportName>   → path-based RPC with JSON args array
- *   *                                       → user's onRequest or default export
+ * Wire shape — `default`:
+ *   fetch(request, env, ctx)  WinterCG handler. /_zs/v1/<id> requests
+ *                             dispatch through `rpc`; everything else
+ *                             falls through to the user's own
+ *                             `default.fetch` (when present), or 404s.
+ *   rpc(name, input, ctx)     Standalone kernel entry. The runtime calls
+ *                             this directly when the URL matches
+ *                             /_zs/v1/<id>. Looks up `name` in the
+ *                             registry populated by the transform's
+ *                             `__register(wireId, fn)` side-effects.
  *
- * The registry is populated on the server side by `__register(name, fn)`
- * side-effects that the vite-plugin transform appends to each path-based
- * server module (anything under `src/server/**` or `src/server.{ts,js}`).
- * Importing the user entry runs those side-effects.
+ * Mirrors production's `sdks/vite-plugin/src/rpc-registry.ts` so
+ * `pnpm vite` (dev) and `pnpm build` (prod) speak the same protocol.
  */
 import { createRunner } from "./transport";
 import type { ModuleRunner } from "vite/module-runner";
@@ -20,9 +25,8 @@ let runner: ModuleRunner | null = null;
 let runnerPromise: Promise<ModuleRunner> | null = null;
 
 // Registry of server functions. Populated by `__register(name, fn)` calls
-// that the transform appends to server modules. Exposed as a global so
-// every transformed module can push into it (ModuleRunner shares the
-// runner's own global scope with the V8 isolate).
+// that the transform appends to server modules. Importing the user
+// module triggers those side-effects.
 const registry: Map<string, Function> = new Map();
 (globalThis as any).__register = (name: string, fn: Function) => {
   // Last-write-wins so HMR replacements land cleanly.
@@ -117,196 +121,34 @@ function startHmrPoll(runner: ModuleRunner) {
   }, 500);
 }
 
-/**
- * HTTP request handler — called by the Rust runtime for every request.
- *
- * POST /_rpc/<methodName>   → registry lookup + invoke
- * *                          → user's onRequest or default export
- */
-export async function onRequest(req: any): Promise<any> {
-  if (!ENTRY) {
-    return errorResponse("ZEROSHIP_ENTRY not set", 500);
-  }
+// ── Helpers ────────────────────────────────────────────────────────────────
 
-  const url = new URL(req.url);
-
-  // ── URL-path RPC ────────────────────────────────────────────────────
-  if (url.pathname.startsWith("/_rpc/") && req.method === "POST") {
-    return handleRpcPath(url.pathname.slice("/_rpc/".length), req);
-  }
-
-  // Legacy /_rpc and /rpc (JSON-RPC envelope) — surface migration error.
-  if ((url.pathname === "/_rpc" || url.pathname === "/rpc") && req.method === "POST") {
-    return errorResponse(
-      "The JSON-RPC envelope is gone. Use POST /_rpc/<methodName> with a JSON array body.",
-      410,
-    );
-  }
-
-  // ── HTTP dispatch ──────────────────────────────────────────────────
-  const mod = await getUserModule();
-
-  if (typeof mod.onRequest === "function") {
-    return mod.onRequest(req);
-  }
-  if (typeof mod.default === "function") {
-    return mod.default(req);
-  }
-
-  return errorResponse(`No handler in ${ENTRY}`, 404);
+function isAsyncIterator(x: any): boolean {
+  return (
+    x != null &&
+    typeof x === "object" &&
+    typeof x[Symbol.asyncIterator] === "function" &&
+    typeof x.next === "function"
+  );
 }
 
-/**
- * Kernel-level RPC dispatch override. The Rust bootstrap calls this BEFORE
- * constructing a Request, so we avoid the Request/Response allocation tax
- * on the dev RPC path too.
- *
- * `args` is a pre-parsed JS array (the kernel has already handled body-
- * text parsing). We just need to populate the registry via
- * `getUserModule()` and invoke the stored function.
- */
-export async function dispatchRpc(methodName: string, args: any[]): Promise<any> {
-  try {
-    await getUserModule();
-  } catch (importErr: any) {
-    const e: any = new Error(`Module import failed: ${importErr.message ?? String(importErr)}`);
-    e.status = 500;
-    throw e;
-  }
-  const fn = registry.get(methodName);
-  if (typeof fn !== "function") {
-    const e: any = new Error(`Method not found: ${methodName}`);
-    e.status = 404;
-    throw e;
-  }
-  return await fn.apply(null, Array.isArray(args) ? args : []);
+function isParseable(s: any): boolean {
+  return s != null && typeof s === "object" && typeof s.parse === "function";
 }
 
-/**
- * Dispatch a URL-path RPC call. Loads the user module (which populates
- * the registry as a side effect), looks up the method, parses args, invokes.
- *
- * Return shapes:
- *   - unary: Response(JSON.stringify(value), 200, application/json)
- *   - stream (async generator): Response(ReadableStream) with SSE frames
- *   - throw: Response(JSON error body, status from err.status or 500)
- *   - user-returned Response: passthrough
- */
-async function handleRpcPath(methodName: string, req: any): Promise<any> {
-  // Touch the user module so its __register side-effects populate the
-  // registry. We do this every request — getUserModule() hits the
-  // ModuleRunner's evaluated cache, so after warmup it's effectively
-  // free; on HMR invalidation the registry is repopulated with the
-  // fresh function references.
-  try {
-    await getUserModule();
-  } catch (importErr: any) {
-    return errorResponse(`Module import failed: ${importErr.message}`, 500, importErr);
-  }
-
-  const fn = registry.get(methodName);
-  if (typeof fn !== "function") {
-    return errorResponse(`Method not found: ${methodName}`, 404);
-  }
-
-  let args: any[] = [];
-  try {
-    const body = typeof req.text === "function" ? await req.text() : String(req.body ?? "");
-    if (body) {
-      const parsed = JSON.parse(body);
-      if (parsed != null) {
-        if (!Array.isArray(parsed)) {
-          return errorResponse("RPC args body must be a JSON array", 400);
-        }
-        args = parsed;
-      }
-    }
-  } catch (e: any) {
-    return errorResponse(`Invalid args JSON: ${e.message ?? String(e)}`, 400);
-  }
-
-  let result: any;
-  try {
-    result = fn.apply(null, args);
-  } catch (e: any) {
-    return errorResponse(e?.message ?? String(e), statusFromError(e), e);
-  }
-
-  // Async generator → SSE stream
-  if (
-    result != null && typeof result === "object" &&
-    typeof result[Symbol.asyncIterator] === "function" &&
-    typeof result.next === "function" &&
-    typeof result.return === "function"
-  ) {
-    return wrapAsyncGenerator(result);
-  }
-
-  // Promise path
-  if (result && typeof result.then === "function") {
-    try {
-      result = await result;
-    } catch (e: any) {
-      return errorResponse(e?.message ?? String(e), statusFromError(e), e);
-    }
-
-    // Resolved to an async generator (rare — unwrap)
-    if (
-      result != null && typeof result === "object" &&
-      typeof result[Symbol.asyncIterator] === "function" &&
-      typeof result.next === "function" &&
-      typeof result.return === "function"
-    ) {
-      return wrapAsyncGenerator(result);
-    }
-  }
-
-  // User-returned Response (e.g. form B streaming): passthrough
-  if (result instanceof Response) {
-    return result;
-  }
-
-  // Plain value → JSON body
-  return new Response(JSON.stringify(result === undefined ? null : result), {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
-  });
+function zodIssues(err: any): unknown[] {
+  if (err && Array.isArray(err.issues)) return err.issues;
+  if (err && Array.isArray(err.errors)) return err.errors;
+  return [];
 }
 
-function wrapAsyncGenerator(gen: any): any {
-  const encoder = new TextEncoder();
-  const body = new ReadableStream({
-    async start(controller) {
-      try {
-        while (true) {
-          const step = await gen.next();
-          if (step.done) {
-            const retJson = JSON.stringify(step.value === undefined ? null : step.value);
-            controller.enqueue(encoder.encode(`event: return\ndata: ${retJson}\n\n`));
-            break;
-          }
-          const valJson = JSON.stringify(step.value === undefined ? null : step.value);
-          controller.enqueue(encoder.encode(`event: yield\ndata: ${valJson}\n\n`));
-        }
-      } catch (e: any) {
-        const payload = JSON.stringify({
-          message: e?.message ?? String(e),
-          name: e?.name ?? "Error",
-        });
-        controller.enqueue(encoder.encode(`event: error\ndata: ${payload}\n\n`));
-      } finally {
-        controller.close();
-      }
-    },
-  });
-  return new Response(body, {
-    status: 200,
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache, no-transform",
-      "X-Accel-Buffering": "no",
-    },
-  });
+function isZodStringSchema(s: any): boolean {
+  if (!s || typeof s !== "object") return false;
+  const def = s._def || s.def;
+  if (!def) return false;
+  if (def.typeName === "ZodString") return true;
+  if (def.type === "string") return true;
+  return false;
 }
 
 function statusFromError(e: any): number {
@@ -315,11 +157,211 @@ function statusFromError(e: any): number {
   return 500;
 }
 
-function errorResponse(message: string, status: number, err?: any): any {
-  const body: Record<string, unknown> = { message, name: err?.name ?? "Error" };
-  if (err?.stack) body.stack = err.stack;
+function errResponse(status: number, code: string, message: string, details?: unknown) {
+  const body: Record<string, unknown> = { message, name: "Error", code };
+  if (details !== undefined) body.details = details;
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { "content-type": "application/json" },
   });
 }
+
+// ── default.rpc ────────────────────────────────────────────────────────────
+
+/**
+ * Mirrors production's `_zsRpc`: looks up the procedure in the registry
+ * (populated by the transform's `__register` side-effects when the user
+ * module is imported), validates input, runs the handler.
+ *
+ * Returns a Promise (the user-module import is async) — the kernel
+ * routes pending RPC promises through the pump's `settle_rpc_promise`
+ * which envelope-wraps the resolved value. Sync-throwing variants
+ * become Promise rejections via the `async` wrapper.
+ */
+async function dispatchRpc(name: string, input: unknown, ctx: unknown): Promise<unknown> {
+  await getUserModule();  // populates registry as a side-effect
+  const fn = registry.get(name);
+  if (typeof fn !== "function") {
+    throw Object.assign(new Error(`Method not found: ${name}`), {
+      status: 404,
+      code: "NOT_FOUND",
+    });
+  }
+
+  let validated = input;
+  const cfg: any = (fn as any).config;
+  if (cfg && isParseable(cfg.input)) {
+    try {
+      validated = cfg.input.parse(input);
+    } catch (e) {
+      throw Object.assign(new Error("Invalid input"), {
+        status: 400,
+        code: "INVALID_ARGUMENT",
+        details: { issues: zodIssues(e) },
+      });
+    }
+  }
+
+  const out: any = (fn as any).call(null, validated, ctx);
+  const result = (out && typeof out.then === "function") ? await out : out;
+
+  // Tag async-iterator with output-schema hint for the SSE encoder.
+  if (isAsyncIterator(result)) {
+    if (cfg && isZodStringSchema(cfg.output)) {
+      try { (result as any).__zsOutputIsString = true; } catch (_e) { /* frozen */ }
+    }
+    return result;
+  }
+
+  // Output validation runs in dev only — and dev IS this bootstrap.
+  if (cfg && isParseable(cfg.output)) {
+    try {
+      cfg.output.parse(result);
+    } catch (e) {
+      throw Object.assign(new Error("Invalid handler output"), {
+        status: 500,
+        code: "INTERNAL",
+        details: { issues: zodIssues(e) },
+      });
+    }
+  }
+
+  return result;
+}
+
+// ── default.fetch ──────────────────────────────────────────────────────────
+
+/**
+ * WinterCG handler. Owns the /_zs/v1/<id> wire as a fall-through for
+ * cases where the kernel's RPC fast path returned an AsyncIterator
+ * (the kernel can't encode those inline, so it re-dispatches here for
+ * SSE wrapping). Non-/_zs/v1/ paths forward to the user's own
+ * `default.fetch` (when present), or 404.
+ */
+async function dispatchFetch(request: Request, env: unknown, ctx: unknown): Promise<Response> {
+  const url = new URL(request.url);
+
+  if (url.pathname.startsWith("/_zs/v1/")) {
+    const id = url.pathname.slice("/_zs/v1/".length);
+    if (!id) return errResponse(400, "INVALID_ARGUMENT", "missing wireId");
+
+    let input: unknown = undefined;
+    if (request.method === "GET") {
+      const param = url.searchParams.get("input");
+      if (param) {
+        try {
+          const b64 = param.replace(/-/g, "+").replace(/_/g, "/");
+          const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+          const e = JSON.parse(atob(padded));
+          input = (e && typeof e === "object" && "json" in e) ? e.json : e;
+        } catch (e: any) {
+          return errResponse(400, "INVALID_ARGUMENT", `invalid base64url input: ${e?.message ?? e}`);
+        }
+      }
+    } else if (request.method === "POST") {
+      const text = await request.text();
+      if (text) {
+        try {
+          const e = JSON.parse(text);
+          input = (e && typeof e === "object" && "json" in e) ? e.json : e;
+        } catch (e: any) {
+          return errResponse(400, "INVALID_ARGUMENT", `invalid JSON body: ${e?.message ?? e}`);
+        }
+      }
+    } else {
+      return errResponse(405, "FAILED_PRECONDITION", `method ${request.method} not allowed on /_zs/v1/`);
+    }
+
+    return rpcAndRespond(id, input, ctx);
+  }
+
+  // Fall through to user's own default.fetch (when present).
+  let mod: any;
+  try {
+    mod = await getUserModule();
+  } catch (e: any) {
+    return errResponse(500, "INTERNAL", `Module import failed: ${e?.message ?? e}`);
+  }
+  const userDefault = (mod && mod.default && typeof mod.default === "object") ? mod.default : null;
+  const userFetch = (userDefault && typeof userDefault.fetch === "function") ? userDefault.fetch : null;
+  if (userFetch) return userFetch.call(userDefault, request, env, ctx);
+  return new Response("Not Found", { status: 404 });
+}
+
+async function rpcAndRespond(name: string, input: unknown, ctx: unknown): Promise<Response> {
+  try {
+    const result = await dispatchRpc(name, input, ctx);
+
+    if (isAsyncIterator(result)) {
+      // AI-SDK Data Stream Protocol — same shape as production.
+      const outputIsString = !!(result as any).__zsOutputIsString;
+      const encoder = new TextEncoder();
+      const body = new ReadableStream({
+        async start(controller) {
+          try {
+            while (true) {
+              const step = await (result as AsyncIterator<unknown>).next();
+              if (step.done) {
+                controller.enqueue(encoder.encode("d:{}\n"));
+                break;
+              }
+              const v = step.value;
+              if (outputIsString || typeof v === "string") {
+                controller.enqueue(encoder.encode("0:" + JSON.stringify(String(v)) + "\n"));
+              } else {
+                controller.enqueue(encoder.encode("2:[" + JSON.stringify(v) + "]\n"));
+              }
+            }
+          } catch (e: any) {
+            const env: Record<string, unknown> = {
+              message: e?.message ?? String(e),
+              name: e?.name ?? "Error",
+            };
+            if (typeof e?.code === "string") env.code = e.code;
+            if (e?.details !== undefined) env.details = e.details;
+            if (typeof e?.retryable === "boolean") env.retryable = e.retryable;
+            controller.enqueue(encoder.encode("e:" + JSON.stringify(env) + "\n"));
+            controller.enqueue(encoder.encode("d:{}\n"));
+          } finally {
+            controller.close();
+          }
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache, no-transform",
+          "x-accel-buffering": "no",
+        },
+      });
+    }
+
+    if (result instanceof Response) return result;
+
+    return new Response(
+      JSON.stringify({ json: result === undefined ? null : result }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  } catch (err: any) {
+    const status = statusFromError(err);
+    const body: Record<string, unknown> = {
+      message: err?.message ?? String(err),
+      name: err?.name ?? "Error",
+    };
+    if (typeof err?.code === "string") body.code = err.code;
+    if (err?.details !== undefined) body.details = err.details;
+    if (typeof err?.retryable === "boolean") body.retryable = err.retryable;
+    return new Response(
+      JSON.stringify(body),
+      { status, headers: { "content-type": "application/json" } },
+    );
+  }
+}
+
+// ── Module entry ──────────────────────────────────────────────────────────
+
+// Same shape the production synthetic entry exports — lets the kernel
+// dispatch through default.rpc / default.fetch unchanged across dev vs
+// prod.
+export default { fetch: dispatchFetch, rpc: dispatchRpc };

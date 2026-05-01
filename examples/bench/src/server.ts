@@ -14,62 +14,62 @@
 export function ping() {
   return "pong";
 }
-ping.config = { id: "ping", kind: "query" } as const;
+ping.config = { id: "ping", kind: "query" };
 
 export function fib(n: number) {
   function go(k: number): number { return k <= 1 ? k : go(k - 1) + go(k - 2); }
   return go(n);
 }
-fib.config = { id: "fib", kind: "query" } as const;
+fib.config = { id: "fib", kind: "query" };
 
 // ── Async — timers, promises, external fetch ─────────────────────────
 
 export function timeout0() {
   return new Promise((resolve) => setTimeout(() => resolve("done"), 0));
 }
-timeout0.config = { id: "timeout0", kind: "query" } as const;
+timeout0.config = { id: "timeout0", kind: "query" };
 
 export function promiseChain() {
   return Promise.resolve(1)
     .then((v) => v + 10)
     .then((v) => v * 2);
 }
-promiseChain.config = { id: "promiseChain", kind: "query" } as const;
+promiseChain.config = { id: "promiseChain", kind: "query" };
 
 export function promiseChainTimeout() {
   return new Promise<number>((resolve) => setTimeout(() => resolve(1), 100))
     .then((v) => v + 10)
     .then((v) => v * 2);
 }
-promiseChainTimeout.config = { id: "promiseChainTimeout", kind: "query" } as const;
+promiseChainTimeout.config = { id: "promiseChainTimeout", kind: "query" };
 
 export async function fetchExternal(url: string) {
   const resp = await fetch(url);
   await resp.json();
   return { status: resp.status, url: resp.url };
 }
-fetchExternal.config = { id: "fetchExternal", kind: "query" } as const;
+fetchExternal.config = { id: "fetchExternal", kind: "query" };
 
 // ── Crypto — Web Crypto API ──────────────────────────────────────────
 
 export function uuid() {
   return crypto.randomUUID();
 }
-uuid.config = { id: "uuid", kind: "query" } as const;
+uuid.config = { id: "uuid", kind: "query" };
 
 export function randomBytes() {
   const buf = new Uint8Array(32);
   crypto.getRandomValues(buf);
   return buf.length;
 }
-randomBytes.config = { id: "randomBytes", kind: "query" } as const;
+randomBytes.config = { id: "randomBytes", kind: "query" };
 
 export async function sha256() {
   const data = new TextEncoder().encode("hello world benchmark data for hashing");
   const hash = await crypto.subtle.digest("SHA-256", data);
   return new Uint8Array(hash).length;
 }
-sha256.config = { id: "sha256", kind: "query" } as const;
+sha256.config = { id: "sha256", kind: "query" };
 
 // HMAC key cached across requests (realistic — apps import key once).
 let _hmacKey: CryptoKey | null = null;
@@ -95,7 +95,7 @@ export async function hmacSign() {
   );
   return new Uint8Array(sig).length;
 }
-hmacSign.config = { id: "hmacSign", kind: "query" } as const;
+hmacSign.config = { id: "hmacSign", kind: "query" };
 
 export async function hmacVerify() {
   const key = await getHmacKey();
@@ -103,7 +103,7 @@ export async function hmacVerify() {
   const sig = await crypto.subtle.sign("HMAC", key, data);
   return await crypto.subtle.verify("HMAC", key, sig, data);
 }
-hmacVerify.config = { id: "hmacVerify", kind: "query" } as const;
+hmacVerify.config = { id: "hmacVerify", kind: "query" };
 
 let _aesKey: CryptoKey | null = null;
 let _aesIv: Uint8Array | null = null;
@@ -127,7 +127,7 @@ export async function aesEncrypt() {
   );
   return new Uint8Array(ct).length;
 }
-aesEncrypt.config = { id: "aesEncrypt", kind: "query" } as const;
+aesEncrypt.config = { id: "aesEncrypt", kind: "query" };
 
 let _ecKp: CryptoKeyPair | null = null;
 export async function ecdsaSign() {
@@ -145,7 +145,7 @@ export async function ecdsaSign() {
   );
   return new Uint8Array(sig).length;
 }
-ecdsaSign.config = { id: "ecdsaSign", kind: "query" } as const;
+ecdsaSign.config = { id: "ecdsaSign", kind: "query" };
 
 // ── Streaming ────────────────────────────────────────────────────────
 //
@@ -157,7 +157,7 @@ export async function* drip() {
     yield { i, t: Date.now() };
   }
 }
-drip.config = { id: "drip", kind: "stream" } as const;
+drip.config = { id: "drip", kind: "stream" };
 
 // ── HTTP fall-through ────────────────────────────────────────────────
 //
