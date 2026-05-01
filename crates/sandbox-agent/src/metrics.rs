@@ -74,15 +74,22 @@ pub fn add_files_bytes_read(n: u64) {
 /// one of four counters. We don't expose the raw string as a label
 /// to keep cardinality bounded — Prometheus treats every distinct
 /// label set as a new series.
+///
+/// **The reason strings are produced by [`crate::sig::AuthFail::as_str`]**
+/// (kebab-case, e.g. `"bad-signature"`) plus a small set of
+/// handler-emitted ones (e.g. `"query-not-allowed"`). Keep these
+/// branches in sync with `AuthFail::as_str` — and yes, this is why
+/// [`tests::auth_fail_reason_buckets_correctly`] now drives every
+/// `AuthFail` variant through `as_str()` instead of typing the
+/// constants by hand. The previous (PascalCase) match arms silently
+/// dumped every failure into `OTHER` and made the alert design
+/// invisible in Prometheus.
 pub fn inc_auth_fail(reason: &str) {
-    let counter = if reason.contains("BadSignature") || reason.contains("BadSignatureEncoding") {
-        &AUTH_FAIL_BAD_SIG
-    } else if reason.contains("ReplayedNonce") {
-        &AUTH_FAIL_REPLAY
-    } else if reason.contains("SkewTooLarge") || reason.contains("BadTimestamp") {
-        &AUTH_FAIL_SKEW
-    } else {
-        &AUTH_FAIL_OTHER
+    let counter = match reason {
+        "bad-signature" | "bad-signature-encoding" => &AUTH_FAIL_BAD_SIG,
+        "replayed-nonce" => &AUTH_FAIL_REPLAY,
+        "skew-too-large" | "bad-timestamp" => &AUTH_FAIL_SKEW,
+        _ => &AUTH_FAIL_OTHER,
     };
     counter.fetch_add(1, Ordering::Relaxed);
 }
@@ -294,34 +301,35 @@ mod tests {
         assert!(v >= 100, "uptime should be >= 100, got {v}");
     }
 
+    /// Regression: bucketing must match `AuthFail::as_str()` (kebab-
+    /// case), not the variant names. A previous version matched
+    /// PascalCase ("BadSignature", ...) and quietly routed every
+    /// failure to `OTHER`, defeating the per-reason alerting story.
     #[test]
     fn auth_fail_reason_buckets_correctly() {
-        let before = AUTH_FAIL_BAD_SIG.load(Ordering::Relaxed);
-        inc_auth_fail("BadSignature");
-        assert_eq!(
-            AUTH_FAIL_BAD_SIG.load(Ordering::Relaxed),
-            before + 1
-        );
+        use crate::sig::AuthFail;
 
-        let before_replay = AUTH_FAIL_REPLAY.load(Ordering::Relaxed);
-        inc_auth_fail("ReplayedNonce");
-        assert_eq!(
-            AUTH_FAIL_REPLAY.load(Ordering::Relaxed),
-            before_replay + 1
-        );
-
-        let before_skew = AUTH_FAIL_SKEW.load(Ordering::Relaxed);
-        inc_auth_fail("SkewTooLarge");
-        assert_eq!(
-            AUTH_FAIL_SKEW.load(Ordering::Relaxed),
-            before_skew + 1
-        );
-
-        let before_other = AUTH_FAIL_OTHER.load(Ordering::Relaxed);
-        inc_auth_fail("query-not-allowed");
-        assert_eq!(
-            AUTH_FAIL_OTHER.load(Ordering::Relaxed),
-            before_other + 1
-        );
+        // Drive each variant through the **production** stringifier
+        // — this is what `handlers::verify_signed` actually passes.
+        let cases = [
+            (AuthFail::BadSignature.as_str(), &AUTH_FAIL_BAD_SIG),
+            (AuthFail::BadSignatureEncoding.as_str(), &AUTH_FAIL_BAD_SIG),
+            (AuthFail::ReplayedNonce.as_str(), &AUTH_FAIL_REPLAY),
+            (AuthFail::SkewTooLarge.as_str(), &AUTH_FAIL_SKEW),
+            (AuthFail::BadTimestamp.as_str(), &AUTH_FAIL_SKEW),
+            // Non-AuthFail reasons (handler-emitted) → OTHER.
+            ("query-not-allowed", &AUTH_FAIL_OTHER),
+            (AuthFail::BadNonce.as_str(), &AUTH_FAIL_OTHER),
+        ];
+        for (reason, expected_counter) in cases {
+            let before = expected_counter.load(Ordering::Relaxed);
+            inc_auth_fail(reason);
+            let after = expected_counter.load(Ordering::Relaxed);
+            assert_eq!(
+                after,
+                before + 1,
+                "reason {reason:?} did not increment the expected counter"
+            );
+        }
     }
 }

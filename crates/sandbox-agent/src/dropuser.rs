@@ -77,12 +77,23 @@ const DROP_GROUP: &str = "nogroup";
 /// per-user persistence on the next sandbox.
 pub const USER_HOME: &str = "/home/u";
 
-/// Per-uid process count cap. Applied only when actually dropping to
-/// nobody (otherwise it would constrain the test runner's uid which
-/// may already exceed this). 256 is generous for AI-builder
-/// workloads (npm/pnpm/pip rarely exceed ~50 concurrent processes)
-/// while still bounding a runaway fork loop.
-const RLIMIT_NPROC_CAP: u64 = 256;
+/// Per-uid process count cap. **Note:** RLIMIT_NPROC is per-real-uid,
+/// not per-process. Every /exec child runs as the same `nobody` uid,
+/// so this limit is shared across **every concurrent /exec in the
+/// VM**. Setting it too tight starves later sessions; setting it too
+/// loose defeats the fork-bomb defense.
+///
+/// 1024 is a deliberate compromise: a real AI-builder workload
+/// (pnpm install + tsc-watch + jest workers + vite dev) can easily
+/// hit 100-200 simultaneous processes for a single editor session,
+/// and once a few sessions overlap inside one VM we'd otherwise
+/// EAGAIN every fresh `sh -c` fork. The proper fix is per-sandbox
+/// cgroup `pids.max`; until then, 1024 is the headroom we give.
+///
+/// Applied only when actually dropping to nobody (otherwise it
+/// would constrain the test runner's uid which may already exceed
+/// this).
+const RLIMIT_NPROC_CAP: u64 = 1024;
 
 /// Per-process fd cap. Applied unconditionally. 1024 matches the
 /// historical default soft limit on most distros — high enough that

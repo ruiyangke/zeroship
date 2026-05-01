@@ -65,6 +65,15 @@ fn unauthorized() -> HttpResponse {
     HttpResponse::Unauthorized().json(&json!({"error": "unauthorized"}))
 }
 
+/// 503 Service Unavailable — used for auth-gated endpoints once
+/// `/shutdown` flips the drain flag. We return this BEFORE doing
+/// any expensive work so a slow controller retry-loop can't pile
+/// up new long-running execs while ntex's shutdown timeout
+/// approaches.
+fn draining() -> HttpResponse {
+    HttpResponse::ServiceUnavailable().json(&json!({"error": "draining"}))
+}
+
 fn err(status: u16, msg: impl Into<String>) -> HttpResponse {
     let s = msg.into();
     let mut resp = match status {
@@ -245,6 +254,10 @@ pub async fn exec_cmd(
     // covered by the canonical hash, so any tampered payload fails
     // the HMAC check before serde_json sees it.
     if !verify_signed(&req, &body, &state) { return unauthorized(); }
+    // Reject new commands while the agent is draining. Existing
+    // in-flight execs continue; new ones would only race ntex's
+    // shutdown timeout and leave the workspace in a half-state.
+    if state.is_draining() { return draining(); }
 
     crate::metrics::inc_exec_request();
 
@@ -352,6 +365,7 @@ pub async fn write_file(
     body: Bytes,
 ) -> HttpResponse {
     if !verify_signed(&req, &body, &state) { return unauthorized(); }
+    if state.is_draining() { return draining(); }
 
     let p = path.into_inner();
     let n = body.len();
@@ -370,6 +384,7 @@ pub async fn delete_file(
     path: web::types::Path<String>,
 ) -> HttpResponse {
     if !verify_signed(&req, &[], &state) { return unauthorized(); }
+    if state.is_draining() { return draining(); }
 
     let p = path.into_inner();
     match state.workspace.delete_file(&p) {

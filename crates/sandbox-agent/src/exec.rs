@@ -175,15 +175,25 @@ pub async fn run(cmd: &str, cwd: &str, timeout_ms: u64) -> Result<ExecOutput, St
 
     let (status, timed_out) = race_wait(waiter, timeout_fut, pgid).await;
 
-    // Child exit closes the child's end of each pipe; readers see
-    // EOF and finish (which then drops our end of the pipe via the
-    // ChildStdout/ChildStderr's Drop). Joining is best-effort — if
-    // a reader panicked, take_buf below recovers via PoisonError.
+    // **Always** SIGKILL the whole process group, even on clean exit.
+    // The shell can `cmd &`-fork a daemonized grandchild that
+    // outlives `sh -c` and inherits stdout/stderr fds. If we don't
+    // kill the group, the grandchild keeps the pipe write-end open,
+    // the reader threads never see EOF, and this whole `run()` hangs
+    // until ntex's shutdown timeout — a trivial DoS for any caller
+    // who can submit `/exec`. ESRCH means the group is already gone.
+    let _ = killpg(pgid, Signal::SIGKILL);
+
+    // Reader threads should see EOF promptly now that the pgroup is
+    // dead. Bound the wait so a leaked-fd grandchild that survived
+    // SIGKILL (e.g. uninterruptible sleep on NFS) can't pin the
+    // request indefinitely. After the deadline we abandon the
+    // readers — `take_buf` below recovers whatever they've buffered.
     if let Some(t) = stdout_task {
-        let _ = t.await;
+        let _ = race_with_deadline(t, Duration::from_secs(2)).await;
     }
     if let Some(t) = stderr_task {
-        let _ = t.await;
+        let _ = race_with_deadline(t, Duration::from_secs(2)).await;
     }
 
     // Snapshot buffers. Tolerate a poisoned mutex (reader thread
@@ -200,6 +210,32 @@ pub async fn run(cmd: &str, cwd: &str, timeout_ms: u64) -> Result<ExecOutput, St
         stdout_truncated: stdout_trunc.load(Ordering::Relaxed),
         stderr_truncated: stderr_trunc.load(Ordering::Relaxed),
     })
+}
+
+/// Race a future against a wall-clock deadline. On the deadline
+/// firing first, the future is dropped (cancelled) and we return
+/// `None`. Used to bound reader-task joins so a daemonized
+/// grandchild holding a pipe can't stall `/exec`.
+async fn race_with_deadline<F: std::future::Future>(
+    fut: F,
+    deadline: Duration,
+) -> Option<F::Output> {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::Poll;
+
+    let mut fut = pin!(fut);
+    let mut sleep = pin!(compio::time::sleep(deadline));
+    std::future::poll_fn(|cx| {
+        if let Poll::Ready(out) = fut.as_mut().poll(cx) {
+            return Poll::Ready(Some(out));
+        }
+        if sleep.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 // ─── child wait + timeout race ────────────────────────────────────
@@ -249,7 +285,9 @@ where
     match outcome {
         Outcome::Wait(j) => (status_from(j), false),
         Outcome::Timeout => {
-            // SIGKILL the whole process group. ESRCH = already gone.
+            // Kill the whole process group so the waiter unblocks.
+            // The caller will issue another `killpg` after we
+            // return; double-killing is fine (ESRCH = already gone).
             let _ = killpg(pgid, Signal::SIGKILL);
             // The reaper will pick up the now-dead child and route
             // its exit code (`-(SIGKILL as i32)`) to our receiver.
@@ -630,5 +668,38 @@ mod tests {
         let out = run("pwd", "/tmp", 5_000).await.unwrap();
         assert_eq!(out.status, 0);
         assert_eq!(out.stdout.trim(), "/tmp");
+    }
+
+    /// **S7: daemonized grandchild can't pin /exec.** A `cmd &` in
+    /// sh forks a process that survives the `sh` exit and inherits
+    /// the stdout/stderr pipe write-ends. Without an unconditional
+    /// `killpg`, the reader threads never see EOF and `/exec` hangs
+    /// for ~30s waiting for them. After the fix, the call returns
+    /// promptly because we kill the whole process group on every
+    /// exit path. Bound the test wall-clock at 5s so a regression
+    /// surfaces clearly instead of timing out at the test runner's
+    /// per-test deadline.
+    #[compio::test]
+    async fn daemonized_child_does_not_stall_exec() {
+        let started = std::time::Instant::now();
+        // sleep 30 in a daemonized child; sh exits immediately.
+        let out = run(
+            "(sleep 30 &) ; echo done",
+            "/tmp",
+            10_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, 0);
+        assert_eq!(out.stdout.trim(), "done");
+        // Without the killpg-on-every-exit fix this takes ~2s for
+        // the reader-deadline to expire (still much better than
+        // the 30s grandchild lifetime). With pgroup-kill the
+        // grandchild dies promptly and EOF arrives in <100ms.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "daemonized-grandchild stalled /exec for {:?}",
+            started.elapsed()
+        );
     }
 }

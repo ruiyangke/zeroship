@@ -86,12 +86,25 @@ async fn run() -> Result<(), String> {
     let bind = format!("0.0.0.0:{port}");
     info!(bind = %bind, workspace = %workspace.display(), "agent listening");
 
-    // Hard cap on PUT /files request bodies, enforced at the ntex
-    // payload extractor (rejects oversize *before* the handler runs,
-    // so we never buffer 10 GiB into memory just to reject in
-    // files::write_file). 1 MiB headroom over the file cap covers
-    // serialization overhead.
-    let body_limit = zeroship_sandbox_agent::files::MAX_BYTES + 1024 * 1024;
+    // Per-route payload caps — applied at the ntex extractor so
+    // oversize bodies are rejected before handlers run (no
+    // buffering huge requests just to fail). The previous global
+    // cap of `MAX_BYTES + 1 MiB` applied to /exec too, which let
+    // an authenticated-or-not client send ~6 MiB of body per
+    // /exec request and burn agent CPU on SHA-256 + signature
+    // verify before rejecting. /exec only needs a JSON envelope
+    // (cmd + cwd + timeout_ms); 64 KiB is generous.
+    //
+    // The `/files/{path}*` write path is the only legitimate
+    // bulk-upload route; it gets the full file-size budget plus
+    // serialization slack.
+    let exec_limit: usize = 64 * 1024;
+    let files_limit: usize =
+        zeroship_sandbox_agent::files::MAX_BYTES + 1024 * 1024;
+    // /shutdown takes no body; everything else is GET. A small
+    // generic cap protects miscellaneous unsigned probe routes
+    // from being abused as a CPU sink.
+    let small_limit: usize = 4 * 1024;
 
     let proto = version::PROTOCOL_VERSION.to_string();
     // AppState is already cheap-clone (`Arc<Token>`, `Arc<Workspace>`,
@@ -102,8 +115,9 @@ async fn run() -> Result<(), String> {
         let proto = proto.clone();
         web::App::new()
             .state(state)
-            // Bytes extractor used by PUT /files
-            .state(web::types::PayloadConfig::default().limit(body_limit))
+            // Default payload cap covers any route that doesn't set its
+            // own. We override per-resource below for /exec and PUT /files.
+            .state(web::types::PayloadConfig::default().limit(small_limit))
             // X-Sbx-Protocol on every response — controller checks
             // this to verify it's talking to a supported agent version.
             .middleware(DefaultHeaders::new().header("X-Sbx-Protocol", &proto))
@@ -116,12 +130,18 @@ async fn run() -> Result<(), String> {
             .service(web::resource("/metrics").route(web::get().to(handlers::metrics)))
             // /healthz preserved as an alias for /livez (back-compat).
             .service(web::resource("/healthz").route(web::get().to(handlers::livez)))
-            // Auth-gated endpoints
-            .service(web::resource("/exec").route(web::post().to(handlers::exec_cmd)))
+            // Auth-gated endpoints — per-resource state overrides the
+            // app-level default. Bytes/Json extractors look this up.
+            .service(
+                web::resource("/exec")
+                    .state(web::types::PayloadConfig::default().limit(exec_limit))
+                    .route(web::post().to(handlers::exec_cmd)),
+            )
             .service(web::resource("/tree").route(web::get().to(handlers::file_tree)))
             .service(web::resource("/shutdown").route(web::post().to(handlers::shutdown)))
             .service(
                 web::resource("/files/{path}*")
+                    .state(web::types::PayloadConfig::default().limit(files_limit))
                     .route(web::get().to(handlers::read_file))
                     .route(web::put().to(handlers::write_file))
                     .route(web::delete().to(handlers::delete_file)),
