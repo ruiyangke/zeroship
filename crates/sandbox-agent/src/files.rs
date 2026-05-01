@@ -253,66 +253,154 @@ impl Workspace {
     /// Walk the workspace and list every regular file or dir. Skips
     /// noise dirs (`node_modules`, `.git`, …) and any symlinks.
     /// Capped at [`MAX_TREE_ENTRIES`].
+    /// Recursively list the workspace.
+    ///
+    /// **Walks the tree by file-descriptor**, never by path: each
+    /// recursion step `openat2`'s the next dir relative to the
+    /// previous dirfd with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`
+    /// + `O_NOFOLLOW`. A previous version used `std::fs::read_dir`
+    /// on `entry.path()`, which follows symlinks at the path
+    /// argument — a hostile /exec child could swap a regular
+    /// subdirectory for a symlink to `/etc` between the parent's
+    /// `read_dir` and our recursion into the child, leaking
+    /// outside-workspace metadata (size + mtime + name) into the
+    /// response. The fd-based walk is immune: if the inode
+    /// changes type underneath us, the next `openat2` either
+    /// follows the **original** fd we already hold or fails
+    /// loudly with `ELOOP`/`ENOTDIR`.
+    ///
+    /// Output is capped at [`MAX_TREE_ENTRIES`]; on overflow we
+    /// stop walking and set `truncated = true`. Symlinks are
+    /// skipped in the listing (the kind discrimination uses
+    /// `getdents64`'s `d_type` which is reported by the kernel
+    /// without dereferencing).
     pub fn file_tree(&self) -> Result<FileTree, String> {
+        use nix::dir::{Dir, Type};
+        use nix::sys::stat::fstatat;
+
         let mut out = Vec::new();
-        let mut stack: Vec<(PathBuf, String)> = vec![(self.path.clone(), String::new())];
         let mut truncated = false;
 
-        'outer: while let Some((dir, prefix)) = stack.pop() {
-            let entries = match std::fs::read_dir(&dir) {
-                Ok(e) => e,
-                Err(_) => continue, // dir might have been swapped; skip
+        // Stack of (open dirfd, relative-path-prefix). Pops drain
+        // a dir; pushes add subdirs to walk later. The root is
+        // the workspace dirfd itself, dup'd so we can hand it to
+        // `Dir::from` (which takes ownership and closes on drop).
+        let root_raw = nix::unistd::dup(self.dirfd())
+            .map_err(|e| format!("dup workspace dirfd: {e}"))?;
+        // SAFETY: dup just returned a fresh fd we own.
+        let root_owned = unsafe { OwnedFd::from_raw_fd(root_raw) };
+        let mut stack: Vec<(OwnedFd, String)> = vec![(root_owned, String::new())];
+
+        'outer: while let Some((dir_fd, prefix)) = stack.pop() {
+            // Convert the OwnedFd into a `Dir` (libc opendir). This
+            // moves ownership; `dir` will close on drop. We need
+            // the raw fd later for openat2 / fstatat — extract
+            // before consuming. (`as_raw_fd` on Dir works.)
+            let mut dir = match Dir::from(dir_fd) {
+                Ok(d) => d,
+                Err(_) => continue, // bad fd (shouldn't happen); skip
             };
-            for entry in entries.flatten() {
+            let parent_raw = dir.as_raw_fd();
+            for entry_result in dir.iter() {
                 if out.len() >= MAX_TREE_ENTRIES {
                     truncated = true;
                     break 'outer;
                 }
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy().to_string();
+                let entry = match entry_result {
+                    Ok(e) => e,
+                    Err(_) => continue, // getdents64 hiccup; skip the entry
+                };
+                let cstr = entry.file_name();
+                let name = match cstr.to_str() {
+                    Ok(n) => n,
+                    Err(_) => continue, // non-UTF-8 file name; skip
+                };
+                if name == "." || name == ".." {
+                    continue;
+                }
+                // Skip noise — never useful to the agent and would
+                // bloat the response (and the cap limit).
                 if matches!(
-                    name_str.as_str(),
+                    name,
                     "node_modules" | ".git" | "dist" | ".next" | ".turbo" | ".cache",
                 ) {
                     continue;
                 }
                 let rel = if prefix.is_empty() {
-                    name_str.clone()
+                    name.to_string()
                 } else {
-                    format!("{prefix}/{name_str}")
+                    format!("{prefix}/{name}")
                 };
-                // symlink_metadata sees the link itself, not its target.
-                let meta = match entry.metadata() {
-                    Ok(m) => m,
+
+                // `d_type` from getdents64 — reports symlink as
+                // Symlink without dereferencing, so we can safely
+                // skip without an extra stat.
+                let kind = match entry.file_type() {
+                    Some(Type::Directory) => "dir",
+                    Some(Type::File) => "file",
+                    Some(Type::Symlink) | _ => continue,
+                };
+
+                // fstatat with NOFOLLOW for size + mtime. Even if
+                // someone swapped this entry to a symlink between
+                // getdents64 and now, NOFOLLOW returns the link
+                // itself (and we'd already have skipped it via
+                // d_type). The `dirfd` arg pins the lookup to the
+                // current dir's inode — no path-walk involved.
+                let st = match fstatat(
+                    Some(parent_raw),
+                    name,
+                    nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+                ) {
+                    Ok(s) => s,
                     Err(_) => continue,
                 };
-                let ft = meta.file_type();
-                if ft.is_symlink() {
+                // Race-detect: d_type said dir/file, fstatat says
+                // something else (i.e., it WAS swapped between the
+                // two syscalls). Skip rather than report wrong type.
+                let mode = nix::sys::stat::SFlag::from_bits_truncate(st.st_mode);
+                let stat_is_dir = mode.contains(nix::sys::stat::SFlag::S_IFDIR);
+                let stat_is_file = mode.contains(nix::sys::stat::SFlag::S_IFREG);
+                if (kind == "dir" && !stat_is_dir) || (kind == "file" && !stat_is_file) {
                     continue;
                 }
-                let mtime = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                if ft.is_dir() {
+
+                let mtime_unix: u64 = st.st_mtime.try_into().unwrap_or(0);
+
+                if kind == "dir" {
                     out.push(FileEntry {
                         path: rel.clone(),
                         kind: "dir",
                         size: 0,
-                        mtime_unix: mtime,
+                        mtime_unix,
                     });
-                    stack.push((entry.path(), rel));
-                } else if ft.is_file() {
+                    // Open the child dir relative to the parent
+                    // dirfd with sandbox_open_how. RESOLVE_BENEATH
+                    // + RESOLVE_NO_SYMLINKS + O_NOFOLLOW + O_DIRECTORY
+                    // makes this atomic w.r.t. type-swap attacks.
+                    let how = sandbox_open_how(
+                        OFlag::O_RDONLY
+                            | OFlag::O_DIRECTORY
+                            | OFlag::O_NOFOLLOW
+                            | OFlag::O_CLOEXEC,
+                    );
+                    let raw = match openat2(parent_raw, name, how) {
+                        Ok(r) => r,
+                        Err(_) => continue, // can't enter; skip
+                    };
+                    // SAFETY: fresh fd from openat2.
+                    let child = unsafe { OwnedFd::from_raw_fd(raw) };
+                    stack.push((child, rel));
+                } else {
                     out.push(FileEntry {
                         path: rel,
                         kind: "file",
-                        size: meta.len(),
-                        mtime_unix: mtime,
+                        size: st.st_size as u64,
+                        mtime_unix,
                     });
                 }
             }
+            // `dir` drops here, closing its fd.
         }
 
         out.sort_by(|a, b| a.path.cmp(&b.path));
@@ -670,6 +758,50 @@ mod tests {
         let paths: Vec<String> = t.entries.into_iter().map(|e| e.path).collect();
         assert!(paths.iter().any(|p| p == "real.txt"));
         assert!(!paths.iter().any(|p| p == "link"));
+    }
+
+    /// **C17 TOCTOU regression: directory-swap escape via file_tree.**
+    /// The previous (path-based) implementation called
+    /// `std::fs::read_dir(entry.path())` to recurse, which follows
+    /// symlinks at the path argument. A hostile /exec child could
+    /// swap a regular subdirectory for a symlink to `/etc` between
+    /// the parent's read_dir and the recursion into the child,
+    /// leaking outside-workspace metadata into the response. The
+    /// fd-based walk in this commit recurses via `openat2(dirfd,
+    /// name, O_NOFOLLOW)` so a swap-to-symlink is rejected.
+    ///
+    /// This test simulates the swap statically: we create a
+    /// directory `subdir` with one inner file, then replace it with
+    /// a symlink to `/etc`. After the swap, file_tree must NOT
+    /// list anything under `/etc` (no `passwd`, no `hostname`, no
+    /// `subdir/` itself).
+    #[test]
+    fn file_tree_rejects_dir_to_symlink_swap() {
+        let ws = unique_workspace("treeswap");
+        // Build a regular subdir with a file (so the entry exists
+        // in the parent's getdents64).
+        ws.write_file("subdir/inner.txt", b"x").unwrap();
+        // Now swap: rm -rf the dir, replace with a symlink to /etc.
+        std::fs::remove_dir_all(ws.path().join("subdir")).unwrap();
+        symlink("/etc", ws.path().join("subdir")).unwrap();
+
+        let t = ws.file_tree().unwrap();
+        let paths: Vec<String> = t.entries.into_iter().map(|e| e.path).collect();
+
+        // The swap target is a symlink — d_type sees Symlink and
+        // we skip it entirely. So `subdir` itself isn't listed
+        // either, which is fine: callers see "the dir is gone."
+        assert!(
+            !paths.iter().any(|p| p == "subdir" || p.starts_with("subdir/")),
+            "dir-swap leaked outside-workspace entries: {paths:?}"
+        );
+        // Specifically: nothing from /etc — passwd, hostname, etc.
+        for canary in ["subdir/passwd", "subdir/hostname", "subdir/hosts"] {
+            assert!(
+                !paths.iter().any(|p| p == canary),
+                "dir-swap leaked /etc/{canary} into the listing"
+            );
+        }
     }
 
     /// **C2 TOCTOU regression: parent-symlink swap during operation.**
