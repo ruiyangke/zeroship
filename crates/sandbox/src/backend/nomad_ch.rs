@@ -482,11 +482,18 @@ impl NomadCHBackend {
         user_home_dir: &Path,
         guard: &mut CreateGuard,
     ) -> Result<SandboxInfo, String> {
+        let create_started = Instant::now();
         // 1. Mint Ed25519 keypair. Public half is the only thing
         //    that leaves this process; the private half stays in
         //    `signing_key` for the lifetime of the sandbox.
+        //
+        //    Wrap in Arc immediately so step 7's livez+fingerprint
+        //    probe can sign /version without taking ownership; we
+        //    take a fresh `Arc::clone` (cheap refcount bump) at the
+        //    commit step so the in-state-map sandbox owns its own
+        //    handle.
         let sk_bytes = random_key32()?;
-        let signing_key = SigningKey::from_bytes(&sk_bytes);
+        let signing_key = Arc::new(SigningKey::from_bytes(&sk_bytes));
         let pubkey = signing_key.verifying_key();
         let pubkey_b64 = B64.encode(pubkey.as_bytes());
         let key_fp = sig::pubkey_fingerprint(&pubkey);
@@ -559,7 +566,20 @@ impl NomadCHBackend {
             job_id,
             Duration::from_secs(self.cfg.nomad_ch.alloc_running_timeout_secs),
         )
-        .await?;
+        .await
+        .map_err(|e| {
+            eprintln!(
+                "[sandbox/nomad-ch] create: error sandbox={sandbox_id} \
+                 step=wait_for_alloc_running error={e}"
+            );
+            e
+        })?;
+        eprintln!(
+            "[sandbox/nomad-ch] create: alloc=running sandbox={sandbox_id} \
+             vm_index={vm_index} job={job_id} \
+             elapsed_ms={}",
+            create_started.elapsed().as_millis()
+        );
 
         // 7. Wait for the in-VM agent to come up. The wrapper boots
         //    CH; CH boots Linux; init.sh execs sandbox-agent. Bound
@@ -572,16 +592,40 @@ impl NomadCHBackend {
         // value (controller from `cfg.nomad_ch.subnet_second_octet`,
         // wrapper from `ZSBX_SUBNET_BASE_OCTET` env var passed by
         // build_nomad_job_json).
+        //
+        // FM-A: also pass `key_fp` + signing_key so wait_for_agent_livez
+        // verifies the agent answering /livez is OUR agent (verifies
+        // our pubkey on /version), not a stale tenant whose CH is
+        // still alive after Nomad already reported the prior alloc
+        // terminal. Without this, a fresh create() racing the prior
+        // wrapper's process tree returns 201 in 0.25 s pointing at
+        // an agent that dies seconds later → "No route to host" on
+        // every subsequent /exec.
         let agent_url = format!(
             "http://10.{}.{}.2:{AGENT_PORT}",
             self.cfg.nomad_ch.subnet_second_octet,
             100u16 + vm_index
         );
+        let livez_started = Instant::now();
         wait_for_agent_livez(
             &agent_url,
+            &key_fp,
+            &signing_key,
             Duration::from_secs(self.cfg.nomad_ch.agent_livez_timeout_secs),
         )
-        .await?;
+        .await
+        .map_err(|e| {
+            eprintln!(
+                "[sandbox/nomad-ch] create: error sandbox={sandbox_id} \
+                 step=wait_for_agent_livez agent_url={agent_url} error={e}"
+            );
+            e
+        })?;
+        eprintln!(
+            "[sandbox/nomad-ch] create: agent_ready sandbox={sandbox_id} \
+             vm_index={vm_index} key_fp={key_fp} elapsed_ms={}",
+            livez_started.elapsed().as_millis()
+        );
 
         // 8. Commit state. Refuse to overwrite an existing entry —
         //    a duplicate sandbox_id is a controller-bug or caller-bug,
@@ -605,7 +649,11 @@ impl NomadCHBackend {
                         vm_index,
                         host_dir: host_dir.to_path_buf(),
                         agent_url: agent_url.clone(),
-                        signing_key: Arc::new(signing_key),
+                        // signing_key is already Arc<SigningKey> at
+                        // step 1 (so wait_for_agent_livez can borrow
+                        // it for its /version probe); move into the
+                        // state map verbatim.
+                        signing_key,
                     });
                 }
                 Entry::Occupied(_) => {
@@ -1866,14 +1914,58 @@ fn signed_blocking_call(
     send_ureq(req, body)
 }
 
-/// Poll `/livez` until 200 or the deadline expires. Async wrapper
-/// over a blocking ureq call (mirrors the K8s helper of the same name).
-async fn wait_for_agent_livez(base_url: &str, timeout: Duration) -> Result<(), String> {
+/// Poll `/livez` until 200 AND the agent's `/version` reports the
+/// **expected pubkey fingerprint**, or the deadline expires.
+///
+/// **Why both checks?** During N=8 rapid-recycle stress testing the
+/// host-side process tree (cloud-hypervisor + 3× virtiofsd + the
+/// bash wrapper + the tap binding) was observed to lag Nomad's view
+/// of alloc-terminal by 0.5–2 s. A fresh `create()` for the same VM
+/// index could land while a *previous* tenant's agent was still
+/// answering `/livez=200` on the same IP — the controller would
+/// return 201 in 0.25 s (vs the ~6 s healthy baseline), then every
+/// subsequent `/exec` would 502 with "No route to host" once the old
+/// VM finally died.
+///
+/// The fingerprint is the kernel of "is this OUR agent?" — the
+/// controller mints a fresh Ed25519 keypair per sandbox; the agent
+/// publishes the pubkey-SHA256[..8] under `pubkey_fingerprint` on
+/// `/version`. A stale-tenant agent has a *different* fingerprint
+/// (different keypair → different pubkey → different hash), so we
+/// keep polling until either:
+///   1. `/version.pubkey_fingerprint` matches `expected_fp` → ready, OR
+///   2. Deadline expires → "stale agent at <ip>: expected <fp>, got <fp>"
+///      — operator gets actionable text instead of a silent racy 201.
+///
+/// The `/version` endpoint is **auth-gated**, so we sign the probe
+/// with the controller-side `signing_key` we just minted. That
+/// reinforces the same-tenant guarantee: an agent that doesn't have
+/// our pubkey at `/run/keys/controller-pubkey` 401s the probe; we
+/// retry until either the right agent comes up or we time out.
+///
+/// **Backward compatibility:** older agents (pre-`pubkey_fingerprint`
+/// in `/version`) will return JSON without the field. We treat a
+/// missing/empty fingerprint as "this agent is too old to attest";
+/// emit a one-shot warning and fall back to /livez-only behaviour.
+/// Removing this fallback once the agent fleet is fully upgraded is
+/// a one-line change.
+async fn wait_for_agent_livez(
+    base_url: &str,
+    expected_fp: &str,
+    signing_key: &Arc<SigningKey>,
+    timeout: Duration,
+) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
-    let url = format!("{base_url}/livez");
+    let livez_url = format!("{base_url}/livez");
+    let mut last_fp: Option<String> = None;
+    let mut last_version_status: Option<u16> = None;
     while Instant::now() < deadline {
-        let probe_url = url.clone();
-        let status = compio::runtime::spawn_blocking(move || {
+        // 1. Cheap unsigned /livez probe — gates the more expensive
+        //    signed /version call. An agent that's not yet listening
+        //    won't even answer /livez, so we save a sign+RPC round
+        //    on every poll where the agent simply hasn't booted yet.
+        let probe_url = livez_url.clone();
+        let livez_status = compio::runtime::spawn_blocking(move || {
             ureq::get(&probe_url)
                 .timeout(Duration::from_millis(500))
                 .call()
@@ -1883,13 +1975,81 @@ async fn wait_for_agent_livez(base_url: &str, timeout: Duration) -> Result<(), S
         .await
         .ok()
         .flatten();
-        if status == Some(200) {
-            return Ok(());
+        if livez_status == Some(200) {
+            // 2. Agent is answering. Now confirm it's OUR agent by
+            //    asking /version for its pubkey fingerprint.
+            let version_url = format!("{base_url}/version");
+            match http_signed_async(signing_key, "GET", &version_url, &[]).await {
+                Ok(resp) => {
+                    last_version_status = Some(resp.status);
+                    if resp.status == 200 {
+                        let fp_opt = serde_json::from_str::<serde_json::Value>(&resp.body)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("pubkey_fingerprint")
+                                    .and_then(|s| s.as_str())
+                                    .map(|s| s.to_string())
+                            });
+                        match fp_opt {
+                            Some(fp) if fp == expected_fp => {
+                                return Ok(());
+                            }
+                            Some(fp) => {
+                                last_fp = Some(fp);
+                                // Stale tenant. Keep polling — either
+                                // it dies and our agent comes up, or
+                                // the deadline expires and we surface
+                                // the mismatch.
+                            }
+                            None => {
+                                // Backward-compat: legacy agent without
+                                // pubkey_fingerprint in /version. The
+                                // /version call already passed our
+                                // signed-auth check, so the agent IS
+                                // verifying with our pubkey → it's
+                                // ours. Warn and accept.
+                                eprintln!(
+                                    "[sandbox/nomad-ch] wait_for_agent: legacy agent at \
+                                     {base_url} returned no pubkey_fingerprint on /version; \
+                                     falling back to signed-auth-only attestation \
+                                     (upgrade the agent to close the stale-tenant race \
+                                     on /livez=200 before /version is signed-auth gated)"
+                                );
+                                return Ok(());
+                            }
+                        }
+                    }
+                    // 401 means a stale-tenant agent that's verifying
+                    // a *different* pubkey. Keep polling; same
+                    // rationale as the fp-mismatch branch.
+                }
+                Err(_e) => {
+                    // Transport error on /version — agent just came
+                    // up answering /livez but isn't fully ready, or
+                    // the connection raced a tear-down. Retry.
+                }
+            }
         }
         // 150 ms livez poll cadence — matches k8s.rs.
         compio::time::sleep(Duration::from_millis(150)).await;
     }
-    Err(format!("agent at {base_url} never returned 200 on /livez"))
+    // Timeout. Distinguish:
+    //   - never saw /livez=200 → "agent at <url> never returned 200"
+    //   - saw /livez=200 but fingerprint mismatched → stale-tenant
+    //   - saw /livez=200 but /version 401'd → wrong-pubkey agent
+    if let Some(actual_fp) = last_fp {
+        Err(format!(
+            "stale agent at {base_url}: expected pubkey_fingerprint={expected_fp}, \
+             got {actual_fp}; previous tenant's wrapper still owns the IP"
+        ))
+    } else if last_version_status == Some(401) {
+        Err(format!(
+            "stale agent at {base_url}: /version returned 401 (agent is verifying with a \
+             different controller pubkey); expected fp={expected_fp}"
+        ))
+    } else {
+        Err(format!("agent at {base_url} never returned 200 on /livez (expected fp={expected_fp})"))
+    }
 }
 
 // ─── small utilities (mirrored from k8s.rs) ─────────────────────
@@ -2567,5 +2727,232 @@ mod tests {
         assert!(validate_id("", "user_id").is_err());
         assert!(validate_id(&"a".repeat(51), "user_id").is_err());
         assert!(validate_id("-alice", "user_id").is_err());
+    }
+
+    // ─── FM-A: stale-tenant fingerprint check in wait_for_agent_livez ────
+    //
+    // Stress finding (N=8 rapid recycle): a fresh `create()` for the
+    // same vm_index / VM IP returned 201 in 0.25 s while pointing at
+    // the *previous* tenant's still-alive agent — Nomad's view said
+    // alloc=terminal, but the host-side cloud-hypervisor process tree
+    // hadn't reaped yet. /livez=200 was the wrong attestation; the
+    // controller needs to verify the agent is signing with OUR
+    // pubkey before declaring the sandbox ready.
+    //
+    // The mock here is a stdlib TcpListener that speaks just enough
+    // HTTP to mimic the agent's /livez and /version handlers. It
+    // deliberately doesn't verify the request signature (we're not
+    // testing the agent; we're testing the controller's behaviour
+    // when the agent reports a particular fingerprint).
+
+    /// Spin up a tiny `std::net::TcpListener`-backed mock that
+    /// answers /livez=200 and /version=`version_body` (raw bytes,
+    /// caller controls the JSON).
+    ///
+    /// Returns the bound port + a shutdown flag. The thread exits
+    /// when the flag is flipped (caller does this in Drop, or the
+    /// test ends and we leak the thread — fine for unit tests).
+    fn spawn_mock_agent(
+        version_body: String,
+        version_status: u16,
+    ) -> (u16, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
+        let port = listener.local_addr().expect("addr").port();
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let stop2 = stop.clone();
+        std::thread::spawn(move || {
+            while !stop2.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(200)))
+                            .ok();
+                        stream
+                            .set_write_timeout(Some(Duration::from_millis(200)))
+                            .ok();
+                        // Read the request line + headers (don't bother
+                        // with the body; we only switch on path).
+                        let mut buf = [0u8; 1024];
+                        let n = stream.read(&mut buf).unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        let path = req
+                            .lines()
+                            .next()
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .unwrap_or("");
+                        let resp = if path == "/livez" {
+                            "HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\n{\"status\":\"ok\"}"
+                                .to_string()
+                        } else if path == "/version" {
+                            let status_text = match version_status {
+                                200 => "200 OK",
+                                401 => "401 Unauthorized",
+                                _ => "500 Internal Server Error",
+                            };
+                            format!(
+                                "HTTP/1.1 {}\r\nContent-Type: application/json\r\n\
+                                 Content-Length: {}\r\n\r\n{}",
+                                status_text,
+                                version_body.len(),
+                                version_body,
+                            )
+                        } else {
+                            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+                        };
+                        let _ = stream.write_all(resp.as_bytes());
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (port, stop)
+    }
+
+    fn make_sk() -> Arc<SigningKey> {
+        let mut bytes = [0u8; 32];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        Arc::new(SigningKey::from_bytes(&bytes))
+    }
+
+    #[compio::test]
+    async fn wait_for_agent_livez_returns_ok_when_fp_matches() {
+        let sk = make_sk();
+        let our_fp = sig::pubkey_fingerprint(&sk.verifying_key());
+        let body = format!(
+            r#"{{"agent_version":"x","pubkey_fingerprint":"{our_fp}"}}"#
+        );
+        let (port, stop) = spawn_mock_agent(body, 200);
+        let url = format!("http://127.0.0.1:{port}");
+        let res = wait_for_agent_livez(
+            &url,
+            &our_fp,
+            &sk,
+            Duration::from_secs(2),
+        )
+        .await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(res.is_ok(), "expected Ok on fp match, got {res:?}");
+    }
+
+    #[compio::test]
+    async fn wait_for_agent_livez_times_out_on_fp_mismatch() {
+        let sk = make_sk();
+        let our_fp = sig::pubkey_fingerprint(&sk.verifying_key());
+        // Mock returns a DIFFERENT fingerprint — simulates stale
+        // tenant whose CH is still alive on the same IP.
+        let stale_fp = "deadbeef00112233";
+        assert_ne!(our_fp, stale_fp);
+        let body = format!(
+            r#"{{"agent_version":"x","pubkey_fingerprint":"{stale_fp}"}}"#
+        );
+        let (port, stop) = spawn_mock_agent(body, 200);
+        let url = format!("http://127.0.0.1:{port}");
+        // Short timeout — we want to verify the function gives up
+        // and surfaces the "stale agent" error, not just hangs.
+        let res = wait_for_agent_livez(
+            &url,
+            &our_fp,
+            &sk,
+            Duration::from_millis(800),
+        )
+        .await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let err = res.expect_err("must surface stale-agent error");
+        assert!(
+            err.contains("stale agent"),
+            "FM-A regression: error did not surface stale-agent text; got {err:?}"
+        );
+        assert!(
+            err.contains(stale_fp) && err.contains(&our_fp),
+            "error must include both expected and actual fp for triage; got {err:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn wait_for_agent_livez_legacy_agent_no_fp_field_accepted() {
+        // Backward-compat: a /version response without the
+        // pubkey_fingerprint field falls back to "signed-auth-only"
+        // attestation. The /version request was signed with the
+        // controller's key; if the agent answered 200 it's verifying
+        // with our pubkey (i.e. it IS our agent). This branch keeps
+        // a gradual rollout path open — old agents still work.
+        let sk = make_sk();
+        let our_fp = sig::pubkey_fingerprint(&sk.verifying_key());
+        let body = r#"{"agent_version":"legacy"}"#.to_string();
+        let (port, stop) = spawn_mock_agent(body, 200);
+        let url = format!("http://127.0.0.1:{port}");
+        let res = wait_for_agent_livez(
+            &url,
+            &our_fp,
+            &sk,
+            Duration::from_secs(2),
+        )
+        .await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            res.is_ok(),
+            "legacy /version (no fp field) must fall back to ok; got {res:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn wait_for_agent_livez_times_out_when_unreachable() {
+        // No mock — point at an unbound port. /livez never returns
+        // 200 → timeout path with "never returned 200" message.
+        let sk = make_sk();
+        let our_fp = sig::pubkey_fingerprint(&sk.verifying_key());
+        let res = wait_for_agent_livez(
+            "http://127.0.0.1:1",
+            &our_fp,
+            &sk,
+            Duration::from_millis(400),
+        )
+        .await;
+        let err = res.expect_err("must time out");
+        assert!(
+            err.contains("never returned 200"),
+            "expected /livez-unreachable timeout text; got {err:?}"
+        );
+        assert!(
+            err.contains(&our_fp),
+            "timeout error must include expected fp for triage; got {err:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn wait_for_agent_livez_times_out_on_persistent_401() {
+        // /livez=200 but /version=401 — agent is verifying with a
+        // *different* pubkey (stale tenant whose key file at
+        // /run/keys/controller-pubkey predates our create()).
+        // Polling never resolves; deadline expires.
+        let sk = make_sk();
+        let our_fp = sig::pubkey_fingerprint(&sk.verifying_key());
+        let (port, stop) = spawn_mock_agent("{\"error\":\"unauthorized\"}".to_string(), 401);
+        let url = format!("http://127.0.0.1:{port}");
+        let res = wait_for_agent_livez(
+            &url,
+            &our_fp,
+            &sk,
+            Duration::from_millis(600),
+        )
+        .await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let err = res.expect_err("must time out");
+        assert!(
+            err.contains("401") || err.contains("different controller pubkey"),
+            "FM-A regression: persistent-401 timeout did not surface \
+             'verifying with a different controller pubkey'; got {err:?}"
+        );
     }
 }
