@@ -113,7 +113,9 @@ export async function buildTranslatedStream(
   // dep tree (per design §4.8.5: server bundle weight mitigation).
   const { createDeepAgent } = await import("deepagents");
   const { ChatOpenAI } = await import("@langchain/openai");
-  const { HumanMessage, AIMessage } = await import("@langchain/core/messages");
+  const { HumanMessage, AIMessage, ToolMessage } = await import(
+    "@langchain/core/messages"
+  );
   const { Command } = await import("@langchain/langgraph");
 
   const apiKey = process.env.OPENAI_API_KEY;
@@ -164,17 +166,10 @@ export async function buildTranslatedStream(
     // sees a structured error rather than a connection drop.
     streamInput = new Command({ resume: input.resume!.value });
   } else {
-    const langchainMessages = (input.messages ?? []).map((m) => {
-      const text = (m.parts ?? [])
-        .filter((p: any) => p?.type === "text")
-        .map((p: any) => p.text ?? "")
-        .join("");
-      if (m.role === "user") return new HumanMessage(text);
-      if (m.role === "assistant") return new AIMessage(text);
-      // Skip unsupported roles (system, tool) for Phase A — the system prompt
-      // is set on the agent itself, and tool messages aren't in scope yet.
-      return new HumanMessage(text);
-    });
+    const langchainMessages = convertUIMessagesToLangChain(
+      input.messages ?? [],
+      { HumanMessage, AIMessage, ToolMessage },
+    );
     streamInput = { messages: langchainMessages };
   }
 
@@ -234,6 +229,171 @@ export async function buildTranslatedStream(
 }
 
 // --- helpers --------------------------------------------------------------
+
+// G7: convert AI SDK v6 UIMessage[] → LangChain BaseMessage[]. The
+// converter must round-trip not only text but also the model's
+// tool-call history, otherwise the next turn's LLM doesn't see "what
+// tools did I just call and what did they return", and the agent
+// will repeat or get confused.
+//
+// AI SDK v6 part discriminants we handle:
+//   - { type: "text", text }                             → text content
+//   - { type: "tool-<name>", toolCallId, state, input,
+//       output? }                                        → AIMessage.tool_calls + ToolMessage
+//   - { type: "dynamic-tool", toolName, toolCallId,
+//       state, input, output? }                          → same shape, name from `toolName`
+//   - { type: "data-*", ... }                            → UI-only; stripped here
+//   - { type: "reasoning", ... }                         → not surfaced to model (Phase B may revisit)
+//
+// Tool-call lifecycle states (from `UIToolInvocation` in
+// node_modules/ai/dist/index.d.ts:1694):
+//   "input-streaming" | "input-available" → call exists but no result yet
+//   "output-available"                    → result ready (emits ToolMessage)
+//   "output-error" / "output-denied"      → terminal but with error/denied
+//
+// For each assistant message, tool-call parts in any input-/output-
+// state become entries in the AIMessage's `tool_calls` array. Then,
+// for parts in `output-available` (or terminal error/denied) state,
+// we append a follow-up ToolMessage carrying the result. This matches
+// LangChain's expected shape: AIMessage with tool_calls → ToolMessage(s)
+// keyed by `tool_call_id`.
+//
+// Phase B.0 has no tools emitting these parts yet, so the tool-call
+// branch is exercise-only at type level. Phase B.1's `write_file` /
+// `ask_survey` will be the first to populate it.
+function convertUIMessagesToLangChain(
+  messages: UIMessage[],
+  ctors: {
+    HumanMessage: typeof import("@langchain/core/messages").HumanMessage;
+    AIMessage: typeof import("@langchain/core/messages").AIMessage;
+    ToolMessage: typeof import("@langchain/core/messages").ToolMessage;
+  },
+): import("@langchain/core/messages").BaseMessage[] {
+  const { HumanMessage, AIMessage, ToolMessage } = ctors;
+  const out: import("@langchain/core/messages").BaseMessage[] = [];
+
+  for (const m of messages) {
+    const parts = (m.parts ?? []) as any[];
+
+    // --- user messages: collapse text parts only (no tool-call shape) ---
+    if (m.role === "user") {
+      const text = parts
+        .filter((p) => p?.type === "text")
+        .map((p) => p.text ?? "")
+        .join("");
+      out.push(new HumanMessage(text));
+      continue;
+    }
+
+    if (m.role === "assistant") {
+      // Aggregate all text into a single content string and collect
+      // any tool-call parts. v6 emits one part per tool invocation;
+      // the same toolCallId may appear in multiple lifecycle states
+      // across the part stream, but inside the persisted UIMessage
+      // we expect one terminal-state part per call.
+      const text = parts
+        .filter((p) => p?.type === "text")
+        .map((p) => p.text ?? "")
+        .join("");
+
+      const toolCalls: {
+        id: string;
+        name: string;
+        args: Record<string, any>;
+        type?: "tool_call";
+      }[] = [];
+      const toolResults: {
+        tool_call_id: string;
+        content: string;
+        status: "success" | "error";
+      }[] = [];
+
+      for (const p of parts) {
+        if (!p || typeof p.type !== "string") continue;
+        // Match `tool-<name>` (static tools) or `dynamic-tool`.
+        let toolName: string | null = null;
+        if (p.type === "dynamic-tool") {
+          toolName = typeof p.toolName === "string" ? p.toolName : null;
+        } else if (p.type.startsWith("tool-")) {
+          toolName = p.type.slice("tool-".length);
+        }
+        if (!toolName || typeof p.toolCallId !== "string") continue;
+
+        // Always record the call (so the model sees what it asked
+        // for) — `args` can be the partial input on streaming states.
+        // Coerce `input` into a Record (LangChain's ToolCall.args is
+        // typed `Record<string, any>`); a non-object input is wrapped
+        // under `{ value }` rather than dropped.
+        const inputAsArgs: Record<string, any> =
+          p.input && typeof p.input === "object" && !Array.isArray(p.input)
+            ? (p.input as Record<string, any>)
+            : { value: p.input };
+        toolCalls.push({
+          id: p.toolCallId,
+          name: toolName,
+          args: inputAsArgs,
+          type: "tool_call",
+        });
+
+        // Only emit a ToolMessage when there's a terminal result.
+        if (p.state === "output-available") {
+          toolResults.push({
+            tool_call_id: p.toolCallId,
+            content: stringifyToolResult(p.output),
+            status: "success",
+          });
+        } else if (p.state === "output-error") {
+          toolResults.push({
+            tool_call_id: p.toolCallId,
+            content: typeof p.errorText === "string" ? p.errorText : "error",
+            status: "error",
+          });
+        }
+        // input-streaming / input-available / approval-* / output-denied:
+        // no ToolMessage. The AIMessage carries the call; the model
+        // can see it was made but never resolved.
+      }
+
+      // data-* parts are intentionally dropped — they're UI-only
+      // (DiffCard, IssueCard, CriticRoundCard etc., per spec §4.8.3.3
+      // / G4) and would only confuse the LLM if echoed back.
+
+      out.push(
+        new AIMessage({
+          content: text,
+          tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+        }),
+      );
+
+      for (const r of toolResults) {
+        out.push(
+          new ToolMessage({
+            content: r.content,
+            tool_call_id: r.tool_call_id,
+            status: r.status,
+          }),
+        );
+      }
+      continue;
+    }
+
+    // Other roles (system, tool) — skip. System prompt is on the
+    // agent; loose ToolMessages without a parent AIMessage's tool_call
+    // would be malformed history.
+  }
+
+  return out;
+}
+
+function stringifyToolResult(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
 
 function extractTextDelta(event: {
   data?: { chunk?: { content?: unknown } };
