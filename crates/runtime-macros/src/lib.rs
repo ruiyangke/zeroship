@@ -212,7 +212,36 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
 
     match ident.as_deref() {
         Some("Option") => {
-            let inner = first_generic_arg(ty).and_then(type_ident);
+            let inner_ty = first_generic_arg(ty);
+            let inner = inner_ty.and_then(type_ident);
+            // Option<Vec<u8>> needs the same ArrayBuffer/View
+            // extraction the bare Vec<u8> path uses, just lifted
+            // through Option to handle missing/null/undefined args.
+            if inner_ty.map(is_vec_u8).unwrap_or(false) {
+                return quote! {
+                    let #name: Option<Vec<u8>> = if args.length() > #idx
+                        && !args.get(#idx).is_null_or_undefined()
+                    {
+                        let __arg = args.get(#idx);
+                        if let Ok(__view) = v8::Local::<v8::ArrayBufferView>::try_from(__arg) {
+                            let mut __buf = vec![0u8; __view.byte_length()];
+                            __view.copy_contents(&mut __buf);
+                            Some(__buf)
+                        } else if let Ok(__ab) = v8::Local::<v8::ArrayBuffer>::try_from(__arg) {
+                            let __store = __ab.get_backing_store();
+                            let mut __buf = vec![0u8; __ab.byte_length()];
+                            for __i in 0..__buf.len() {
+                                __buf[__i] = __store[__i].get();
+                            }
+                            Some(__buf)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                };
+            }
             match inner.as_deref() {
                 Some("u32") => quote! {
                     let #name: Option<u32> = if args.length() > #idx
@@ -267,16 +296,25 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
 // Return value codegen (Rust value → V8 value)
 // ---------------------------------------------------------------------------
 
-/// Generate code to write Vec<u8> as a V8 ArrayBuffer.
+/// Generate code to write Vec<u8> as a V8 Uint8Array.
+///
+/// Returning a plain ArrayBuffer was easier but spec-wrong for every
+/// real consumer: WHATWG TextEncoder.encode and WebCrypto digest both
+/// return Uint8Array, and downstream JS code (streams, fetch body
+/// coercion) typically branches on `instanceof Uint8Array` to decide
+/// whether to wrap. Returning Uint8Array matches the spec contract
+/// without forcing every caller to do `new Uint8Array(arrayBuffer)`.
 fn gen_vec_u8_set(val: &TokenStream2) -> TokenStream2 {
     quote! {
         let __bytes = #val;
-        let __ab = v8::ArrayBuffer::new(scope, __bytes.len());
+        let __len = __bytes.len();
+        let __ab = v8::ArrayBuffer::new(scope, __len);
         let __store = __ab.get_backing_store();
         for (__i, &__b) in __bytes.iter().enumerate() {
             __store[__i].set(__b);
         }
-        rv.set(__ab.into());
+        let __u8 = v8::Uint8Array::new(scope, __ab, 0, __len).unwrap();
+        rv.set(__u8.into());
     }
 }
 

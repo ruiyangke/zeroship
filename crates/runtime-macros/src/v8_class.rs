@@ -286,11 +286,7 @@ fn gen_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
 
     // Skip the receiver param when extracting JS args.
     let params = parse_params_skipping_self(m.func);
-    let extractions: Vec<TokenStream2> = params
-        .iter()
-        .enumerate()
-        .map(|(i, p)| gen_extract(i, &p.name, &p.ty))
-        .collect();
+    let extractions = gen_param_extractions(&params);
 
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
     let receiver_ref = if m.mut_receiver {
@@ -356,11 +352,7 @@ fn gen_setter_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
 
     // Setters take exactly one logical param: the new value.
     let params = parse_params_skipping_self(m.func);
-    let extractions: Vec<TokenStream2> = params
-        .iter()
-        .enumerate()
-        .map(|(i, p)| gen_extract(i, &p.name, &p.ty))
-        .collect();
+    let extractions = gen_param_extractions(&params);
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
     let receiver_ref = if m.mut_receiver {
         quote! { &mut *__instance }
@@ -408,11 +400,7 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
     // Constructors have no `self` receiver; the skipping-self helper
     // works uniformly here since it just collects typed args.
     let params = parse_params_skipping_self(c.func);
-    let extractions: Vec<TokenStream2> = params
-        .iter()
-        .enumerate()
-        .map(|(i, p)| gen_extract(i, &p.name, &p.ty))
-        .collect();
+    let extractions = gen_param_extractions(&params);
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
 
     let is_result = matches!(
@@ -521,6 +509,66 @@ fn gen_box_and_install_finalizer(class_ty: &syn::Ident) -> TokenStream2 {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Build the per-arg extraction code, treating `&mut v8::PinScope` (or
+/// any `PinScope`-typed reference) as a "synthetic" arg that consumes
+/// no JS index. The synthetic arg is reborrowed from the callback's
+/// own `scope` so user methods can pass it on to v8 ops without
+/// fighting the borrow checker.
+///
+/// Concrete output for `fn decode(&mut self, scope: &mut PinScope, n:
+/// u32)` is:
+///   let scope = &mut *scope;        // reborrow, shadows callback param
+///   let n: u32 = args.get(0).uint32_value(scope).unwrap_or(0);
+///
+/// Synthetic args are emitted FIRST so the reborrowed `scope` is
+/// available to subsequent JS-arg extractions.
+fn gen_param_extractions(params: &[crate::Param]) -> Vec<TokenStream2> {
+    let mut out = Vec::with_capacity(params.len());
+    let mut js_idx: usize = 0;
+
+    // Emit reborrows for synthetic params first (they don't consume
+    // JS indices and they need to be in scope before extractions).
+    for p in params.iter() {
+        if is_pin_scope_ref(&p.ty) {
+            let name = &p.name;
+            out.push(quote! { let #name = &mut *scope; });
+        }
+    }
+    // Then emit JS-arg extractions in declared order, skipping
+    // synthetics.
+    for p in params.iter() {
+        if !is_pin_scope_ref(&p.ty) {
+            out.push(gen_extract(js_idx, &p.name, &p.ty));
+            js_idx += 1;
+        }
+    }
+
+    out
+}
+
+/// True for `&mut v8::PinScope<'_, '_>` and similar reference forms.
+/// We don't bother distinguishing `&` vs `&mut` — V8 ops universally
+/// require `&mut`, and the type alias system means PinScope appears
+/// in many shapes (with/without lifetime params, with/without the v8::
+/// prefix).
+fn is_pin_scope_ref(ty: &Type) -> bool {
+    if let Type::Reference(r) = ty {
+        return type_path_contains_segment(&r.elem, "PinScope");
+    }
+    false
+}
+
+fn type_path_contains_segment(ty: &Type, target: &str) -> bool {
+    if let Type::Path(tp) = ty {
+        return tp
+            .path
+            .segments
+            .iter()
+            .any(|s| s.ident == target);
+    }
+    false
+}
 
 fn parse_params_skipping_self(f: &ImplItemFn) -> Vec<crate::Param> {
     f.sig

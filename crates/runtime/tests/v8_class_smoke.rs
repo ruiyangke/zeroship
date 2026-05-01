@@ -246,7 +246,7 @@ fn result_err_throws_typed_exception() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: Vec<u8> return → ArrayBuffer
+// Test 5: Vec<u8> return → Uint8Array (spec-correct)
 // ---------------------------------------------------------------------------
 
 mod vec_return {
@@ -269,20 +269,28 @@ mod vec_return {
 }
 
 #[test]
-fn vec_u8_returns_arraybuffer() {
+fn vec_u8_returns_uint8array() {
     let s = run_in_v8(
         |scope, global| install_class::<vec_return::Builder>(
             vec_return::Builder::install, "Builder", scope, global,
         ),
         r#"
         const b = new Builder();
-        const ab = b.make_bytes();
-        const view = new Uint8Array(ab);
-        JSON.stringify({ kind: ab.constructor.name, len: ab.byteLength, b0: view[0], b4: view[4] });
+        const u8 = b.make_bytes();
+        JSON.stringify({
+            kind: u8.constructor.name,
+            len: u8.byteLength,
+            isView: ArrayBuffer.isView(u8),
+            b0: u8[0],
+            b4: u8[4],
+        });
         "#,
         |val, scope| js_string(val, scope),
     );
-    assert_eq!(s, r#"{"kind":"ArrayBuffer","len":5,"b0":1,"b4":5}"#);
+    assert_eq!(
+        s,
+        r#"{"kind":"Uint8Array","len":5,"isView":true,"b0":1,"b4":5}"#
+    );
 }
 
 // ---------------------------------------------------------------------------

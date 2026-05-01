@@ -1678,6 +1678,24 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
         global.set(scope, env_alias_key.into(), env_obj.into());
     }
 
+    // Native TextEncoder / TextDecoder. Replace the buggy hand-written
+    // JS polyfills that lived in fetch.js — those ignored the
+    // `{ stream: true }` option and corrupted multi-byte UTF-8 split
+    // across chunk boundaries (the AI SDK / SSE bug). Native
+    // implementations live in `text_encoding.rs` and are wired here
+    // via the `#[v8_class]` macro's `install` fn.
+    {
+        let tmpl = crate::text_encoding::TextEncoder::install(scope);
+        let class_fn = tmpl.get_function(scope).unwrap();
+        let key = v8::String::new(scope, "TextEncoder").unwrap();
+        global.set(scope, key.into(), class_fn.into());
+    }
+    {
+        let tmpl = crate::text_encoding::TextDecoder::install(scope);
+        let class_fn = tmpl.get_function(scope).unwrap();
+        let key = v8::String::new(scope, "TextDecoder").unwrap();
+        global.set(scope, key.into(), class_fn.into());
+    }
 }
 
 // ===========================================================================
