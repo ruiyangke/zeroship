@@ -29,6 +29,7 @@ git sparse-checkout set \
     "/compression/" \
     "/dom/abort/" \
     "/dom/events/" \
+    "/xhr/formdata/" \
     "/resources/" \
     "/common/"
 
