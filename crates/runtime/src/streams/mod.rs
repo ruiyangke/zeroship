@@ -44,5 +44,23 @@ pub mod readable_default_controller;
 pub mod readable_default_reader;
 pub mod slots;
 pub mod strategies;
+pub mod writable;
+pub mod writable_controller;
+pub mod writable_writer;
 
-pub use readable::{from_native_source, install_native_streams, NativeReadableController, NativeSource};
+pub use readable::{
+    from_native_source, NativeReadableController, NativeSource,
+};
+pub use writable::{from_native_sink, NativeSink, NativeWritableController};
+
+/// Install all native stream classes onto `globalThis`. Entry point used
+/// by the runtime's `setup_globals` and by test harnesses.
+pub fn install_native_streams(
+    scope: &mut v8::PinScope,
+    global: v8::Local<v8::Object>,
+) {
+    readable::install_native_streams(scope, global);
+    writable::install_native_writable_stream(scope, global);
+    writable_controller::install(scope, global);
+    writable_writer::install(scope, global);
+}

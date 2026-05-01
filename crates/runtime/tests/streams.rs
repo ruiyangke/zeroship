@@ -665,3 +665,323 @@ fn readable_stream_error_state_rejects_subsequent_reads() {
     );
     assert_eq!(r, "xxx");
 }
+
+// ===========================================================================
+// Native WritableStream class — spec §4.2 + §4.3 + §4.4
+// ---------------------------------------------------------------------------
+// These tests bypass the dispatch wrapper and install the native classes
+// directly on a fresh isolate. Verify the IDL surface and the spec algorithm
+// compositions (§III.5, §III.6, §III.7) line by line. Multiple microtask
+// drains run after each script so promise chains settle deterministically.
+// ===========================================================================
+
+#[test]
+fn writable_stream_default_construct_is_unlocked() {
+    // Spec §4.2.5.1: locked is false on a fresh stream — [[writer]] undefined.
+    let r = run_with_streams(
+        r#"
+        const s = new WritableStream();
+        s.locked;
+        "#,
+        |val, _scope| val.boolean_value(_scope),
+    );
+    assert!(!r);
+}
+
+#[test]
+fn writable_stream_get_writer_locks() {
+    // Spec §4.2.5.5: getWriter() sets [[writer]], stream.locked → true.
+    let r = run_with_streams(
+        r#"
+        const s = new WritableStream();
+        s.getWriter();
+        s.locked;
+        "#,
+        |val, _scope| val.boolean_value(_scope),
+    );
+    assert!(r);
+}
+
+#[test]
+fn writable_stream_get_writer_twice_throws_typeerror() {
+    // D-13: each WritableStream has [[writer]]; second getWriter throws TypeError.
+    let r = run_with_streams(
+        r#"
+        const s = new WritableStream();
+        s.getWriter();
+        let kind = "no-throw";
+        try { s.getWriter(); }
+        catch (e) { kind = e.constructor.name; }
+        kind;
+        "#,
+        |val, scope| val.to_rust_string_lossy(scope),
+    );
+    assert_eq!(r, "TypeError");
+}
+
+#[test]
+fn writable_stream_constructor_calls_start_synchronously() {
+    // Per spec §4.3.4 SetUpWritableStreamDefaultControllerFromUnderlyingSink:
+    // start() is invoked once on construction; we check via a side-effect counter.
+    let r = run_with_streams(
+        r#"
+        let started = 0;
+        new WritableStream({
+          start(c) { started++; }
+        });
+        started;
+        "#,
+        |val, scope| val.number_value(scope).unwrap(),
+    );
+    assert_eq!(r, 1.0);
+}
+
+#[test]
+fn writable_stream_writer_write_returns_promise() {
+    // Per spec §4.4: writer.write(chunk) returns a Promise<undefined>.
+    let r = run_with_streams(
+        r#"
+        const ws = new WritableStream({});
+        const w = ws.getWriter();
+        const p = w.write("hello");
+        (p instanceof Promise) ? "promise" : typeof p;
+        "#,
+        |val, scope| val.to_rust_string_lossy(scope),
+    );
+    assert_eq!(r, "promise");
+}
+
+#[test]
+fn writable_stream_writer_desired_size_default_hwm_one() {
+    // Spec §4.4: writer.desiredSize == HWM - queueTotalSize. Default HWM=1.
+    let r = run_with_streams(
+        r#"
+        const ws = new WritableStream();
+        ws.getWriter().desiredSize;
+        "#,
+        |val, scope| val.number_value(scope).unwrap(),
+    );
+    assert_eq!(r, 1.0);
+}
+
+#[test]
+fn writable_stream_writer_desired_size_after_close_is_zero() {
+    // Spec §4.6 GetDesiredSize: state == "closed" → 0.
+    let r = run_with_streams(
+        r#"
+        const ws = new WritableStream();
+        const w = ws.getWriter();
+        let out = "init";
+        w.close().then(() => { out = w.desiredSize; });
+        ({ get r() { return out; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let k = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, k.into()).unwrap().number_value(scope).unwrap()
+        },
+    );
+    assert_eq!(r, 0.0);
+}
+
+#[test]
+fn writable_stream_writer_desired_size_on_errored_is_null() {
+    // Spec §4.6 GetDesiredSize: state == "errored" or "erroring" → null.
+    let r = run_with_streams(
+        r#"
+        const ws = new WritableStream({
+          start(c) { c.error(new Error("bad")); }
+        });
+        const w = ws.getWriter();
+        w.desiredSize === null ? "null" : String(w.desiredSize);
+        "#,
+        |val, scope| val.to_rust_string_lossy(scope),
+    );
+    assert_eq!(r, "null");
+}
+
+#[test]
+fn writable_stream_close_rejects_subsequent_writes() {
+    // Per spec §4.6 WriterWrite step 4: if CloseQueuedOrInFlight or state ==
+    // "closed", reject with TypeError.
+    let r = run_with_streams(
+        r#"
+        const ws = new WritableStream();
+        const w = ws.getWriter();
+        w.close();
+        let kind = "init";
+        w.write("x").catch(e => { kind = e.constructor.name; });
+        ({ get r() { return kind; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let k = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, k.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "TypeError");
+}
+
+#[test]
+fn writable_stream_abort_rejects_pending_write() {
+    // Aborting the stream rejects any pending write() promises.
+    let r = run_with_streams(
+        r#"
+        const ws = new WritableStream({
+          // Block writes from completing — start a never-resolving promise.
+          write(chunk) { return new Promise(() => {}); }
+        });
+        const w = ws.getWriter();
+        let kind = "init";
+        const p = w.write("first");
+        const q = w.write("queued");
+        q.catch(e => { kind = (e && e.message) || String(e); });
+        w.abort("bye");
+        ({ get r() { return kind; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let k = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, k.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "bye");
+}
+
+#[test]
+fn writable_stream_controller_error_rejects_writes() {
+    // controller.error(e) errors the stream; subsequent and queued writes reject with e.
+    let r = run_with_streams(
+        r#"
+        let savedController;
+        const ws = new WritableStream({
+          start(c) { savedController = c; }
+        });
+        const w = ws.getWriter();
+        savedController.error(new Error("boom"));
+        let msg = "init";
+        w.write("x").catch(e => { msg = e.message; });
+        ({ get r() { return msg; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let k = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, k.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "boom");
+}
+
+#[test]
+fn writable_stream_release_lock_rejects_writer_methods() {
+    // After releaseLock(), writer.write rejects with TypeError.
+    let r = run_with_streams(
+        r#"
+        const ws = new WritableStream();
+        const w = ws.getWriter();
+        w.releaseLock();
+        let kind = "init";
+        w.write("x").catch(e => { kind = e.constructor.name; });
+        ({ get r() { return kind; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let k = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, k.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "TypeError");
+}
+
+#[test]
+fn writable_stream_strategy_size_called_per_write() {
+    // User-supplied strategy.size is called once per write().
+    let r = run_with_streams(
+        r#"
+        let calls = 0;
+        const ws = new WritableStream(
+          { write(chunk) { return Promise.resolve(); } },
+          { highWaterMark: 100, size(chunk) { calls++; return 1; } }
+        );
+        const w = ws.getWriter();
+        w.write("a");
+        w.write("b");
+        ({ get r() { return calls; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let k = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, k.into()).unwrap().number_value(scope).unwrap()
+        },
+    );
+    assert_eq!(r, 2.0);
+}
+
+#[test]
+fn writable_stream_writer_closed_resolves_on_close() {
+    // After writer.close() succeeds, writer.closed resolves with undefined.
+    let r = run_with_streams(
+        r#"
+        const ws = new WritableStream();
+        const w = ws.getWriter();
+        let out = "init";
+        w.close().then(() => {
+          w.closed.then(v => { out = (v === undefined ? "ok" : String(v)); });
+        });
+        ({ get r() { return out; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let k = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, k.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "ok");
+}
+
+#[test]
+fn writable_stream_synchronous_construction_throw_in_start() {
+    // start() that throws synchronously errors the stream during construction.
+    // Reading writer.desiredSize after should give null (state=errored).
+    let r = run_with_streams(
+        r#"
+        const ws = new WritableStream({
+          start() { throw new Error("nope"); }
+        });
+        const w = ws.getWriter();
+        let outMsg = "init";
+        w.closed.catch(e => { outMsg = e?.message; });
+        ({ get r() { return outMsg; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let k = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, k.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "nope");
+}
+
+#[test]
+fn writable_stream_undefined_chunk_passes_through_strategy() {
+    // Per spec: writer.write() passes undefined as the chunk; strategy.size is
+    // still called with that undefined (no special-case).
+    let r = run_with_streams(
+        r#"
+        let chunkSeen = "init";
+        const ws = new WritableStream(
+          { write(chunk) { chunkSeen = (chunk === undefined ? "undef" : String(chunk)); } },
+          { highWaterMark: 1, size(chunk) { return 1; } }
+        );
+        const w = ws.getWriter();
+        w.write();
+        ({ get r() { return chunkSeen; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let k = v8::String::new(scope, "r").unwrap();
+            obj.get(scope, k.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "undef");
+}
