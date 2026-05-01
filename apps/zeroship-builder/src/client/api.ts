@@ -22,6 +22,38 @@ export function isDevAutoAuth(): boolean {
   return import.meta.env.DEV;
 }
 
+// ─── Project lifecycle procedures (Plan 03.1) ────────────────────
+// Re-export server functions as plain async functions. The vite-plugin
+// transforms each server-module export into an RPC stub on the client
+// side (see sdks/vite-plugin/src/transform.ts:317-329 — single-input
+// wire). Callers `import { createApp } from "../api"` and call them
+// like normal async functions; the wire is `/_zs/v1/apps.<name>`.
+//
+// Note on positional args: the wire forwards `args[0]` only. For
+// `createApp(name, plan_id?)` the second arg defaults server-side, so
+// `createApp(name)` works. Procedures that need multiple inputs would
+// need an object input shape, but for Plan 03.1's spine we only call
+// listApps / getApp / createApp.
+export {
+  listApps,
+  getApp,
+  createApp,
+  deleteApp,
+  deployApp,
+  updatePlan,
+  getAppLogs,
+  listVars,
+  setVar,
+  deleteVar,
+  listSecrets,
+  setSecret,
+  deleteSecret,
+  type AppRecord,
+  type EnvVar,
+} from "../server/apps";
+
+export { appPreviewUrl } from "./lib/preview-url";
+
 // One procedure to start with — Plan 02 may add more (file CRUD, deploy,
 // etc.) and they go here as additional fields on `App`.
 type App = {
