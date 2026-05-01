@@ -786,11 +786,20 @@ impl Drop for ReleaseCreating {
 /// their respective cleanup branches so we don't, e.g., DELETE a
 /// job that was never submitted.
 ///
-/// **Drop is sync**, so the Nomad purge here uses a blocking ureq
-/// call directly — no spawn_blocking on a runtime that may itself
-/// be tearing down. The create-failure path runs at most once per
-/// failed request; ~500 ms blocking in a tail of an error path is
-/// acceptable.
+/// **Drop is sync, but Drop must NOT block the compio worker.** When
+/// a panic during `wait_for_alloc_running` (mid-`.await`) triggers
+/// stack unwind, this `drop` runs *on the compio worker thread* —
+/// blocking it on a 10-second `ureq::delete().call()` is the exact
+/// stall the codebase is allergic to. Instead we hand the cleanup
+/// I/O off to a detached compio task: it owns its own data, runs
+/// best-effort, and the worker thread is freed immediately.
+///
+/// **Limitation:** if the runtime is already shutting down (process
+/// exit, panic in main), `compio::runtime::spawn` may panic — we
+/// catch that so a tearing-down process doesn't abort, and rely on
+/// `cleanup_orphans_at_startup` (or a periodic prune) on the next
+/// controller boot to mop up. This is the same best-effort contract
+/// the prior "blocking ureq in Drop" had.
 struct CreateGuard {
     vm_indices: Arc<Mutex<VmIndexAllocator>>,
     nomad_addr: String,
@@ -831,20 +840,71 @@ impl Drop for CreateGuard {
         if !self.armed {
             return;
         }
-        // 1. Purge the Nomad job (sync ureq; we're in Drop).
-        if self.job_submitted {
-            let url = format!("{}/v1/job/{}?purge=true", self.nomad_addr, self.job_id);
-            let _ = ureq::delete(&url).timeout(Duration::from_secs(10)).call();
-        }
-        // 2. rm -rf host_dir (per-sandbox; never touch user_home).
-        if self.host_dir_created && self.host_dir.exists() {
-            let _ = std::fs::remove_dir_all(&self.host_dir);
-        }
-        // 3. Release the VM index back to the pool.
+        // Step 3 (vm_index release) is cheap + sync — finish it on
+        // this thread so the index is back in the pool before any
+        // observer might re-allocate. Use the same poison-recovery
+        // pattern as the rest of the file (unwrap_or_else into_inner)
+        // so a poisoned mutex doesn't fail the cleanup tail.
         if let Some(i) = self.vm_index.take() {
-            if let Ok(mut alloc) = self.vm_indices.lock() {
-                alloc.release(i);
-            }
+            self.vm_indices
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .release(i);
+        }
+
+        // Steps 1 + 2 (Nomad purge + host_dir rm -rf) are blocking
+        // I/O. Detach them to a fire-and-forget compio task so this
+        // Drop never blocks the worker thread. See the type-level
+        // doc-comment for the runtime-shutdown caveat.
+        let job_submitted = self.job_submitted;
+        let nomad_addr = std::mem::take(&mut self.nomad_addr);
+        let job_id = std::mem::take(&mut self.job_id);
+        let host_dir_created = self.host_dir_created;
+        let host_dir = std::mem::take(&mut self.host_dir);
+
+        // Capture for the log line in the no-runtime branch — we just
+        // moved the originals into the task closure.
+        let job_id_log = job_id.clone();
+        let host_dir_log = host_dir.clone();
+
+        // `compio::runtime::spawn` panics if there is no current
+        // runtime (e.g., this Drop fires during process teardown
+        // *after* the runtime has already stopped). Catch that so we
+        // don't turn a teardown into an abort. The work is best-
+        // effort by contract — `cleanup_orphans_at_startup` (or a
+        // periodic prune) covers leaked Nomad jobs on next boot.
+        let spawn_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            compio::runtime::spawn(async move {
+                if job_submitted {
+                    let url = format!("{nomad_addr}/v1/job/{job_id}?purge=true");
+                    if let Err(e) =
+                        http_delete_unsigned(&url, Duration::from_secs(10)).await
+                    {
+                        eprintln!(
+                            "[sandbox/nomad-ch] guard cleanup: purge {job_id} \
+                             failed (best-effort): {e}"
+                        );
+                    }
+                }
+                if host_dir_created && host_dir.exists() {
+                    if let Err(e) = std::fs::remove_dir_all(&host_dir) {
+                        eprintln!(
+                            "[sandbox/nomad-ch] guard cleanup: rm -rf {} \
+                             failed (best-effort): {e}",
+                            host_dir.display()
+                        );
+                    }
+                }
+            })
+            .detach();
+        }));
+        if spawn_res.is_err() {
+            eprintln!(
+                "[sandbox/nomad-ch] guard cleanup: compio::spawn failed (no \
+                 current runtime?); job {job_id_log} and dir {} left for \
+                 next-boot orphan prune",
+                host_dir_log.display(),
+            );
         }
     }
 }
