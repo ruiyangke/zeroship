@@ -1,26 +1,38 @@
-//! Proc macro for generating V8 callback wrappers from plain Rust functions.
+//! Proc macros for the zeroship runtime.
 //!
-//! Eliminates the per-op boilerplate of argument extraction, state access,
-//! return value conversion, and error handling.
+//! Two macros live here:
 //!
-//! # Usage
+//! - [`zeroship_op`] — wraps a plain Rust function as a V8 free-function
+//!   callback. Handles argument extraction, state access, return value
+//!   marshaling, error throwing, and async-Promise plumbing.
+//! - [`v8_class`] — wraps an `impl` block as a V8 ObjectTemplate-backed
+//!   class. Methods, getters, setters, and constructors get auto-generated
+//!   callbacks; instance state lives in V8 internal fields.
 //!
 //! ```ignore
-//! // Sync, no state:
+//! // Free-function op:
 //! #[zeroship_op]
 //! fn url_can_parse(input: String, base: Option<String>) -> bool { ... }
 //!
-//! // Sync, with shared state:
-//! #[zeroship_op(state)]
-//! fn kv_get(state: SharedState, key: String) -> Option<String> { ... }
+//! // Class:
+//! struct Headers { /* ... */ }
 //!
-//! // Async (returns Promise, state plumbing is auto-generated):
-//! #[zeroship_op(async)]
-//! async fn op_fetch(method: String, url: String) -> String { ... }
+//! #[v8_class]
+//! impl Headers {
+//!     #[v8_constructor]
+//!     fn new() -> Result<Self, OpError> { ... }
+//!
+//!     #[v8_method]
+//!     fn get(&self, name: String) -> Option<String> { ... }
+//!
+//!     #[v8_method]
+//!     fn set(&mut self, name: String, value: String) -> Result<(), OpError> { ... }
+//! }
 //! ```
 //!
-//! Each macro invocation keeps the original function and generates a
-//! `{name}_callback` function with the V8 callback signature.
+//! The class macro generates `Headers::install(scope) -> v8::Local<v8::FunctionTemplate>`
+//! that the runtime calls during `setup_globals` to wire the class onto
+//! `globalThis`.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -30,9 +42,47 @@ use syn::{
     Type, TypePath,
 };
 
+mod v8_class;
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
+
+/// Wrap an `impl` block as a V8 ObjectTemplate-backed class.
+///
+/// See module docs for usage. Methods marked with `#[v8_method]`,
+/// `#[v8_getter]`, `#[v8_setter]`, and `#[v8_constructor]` get
+/// auto-generated callbacks; the macro emits `Self::install(scope) ->
+/// v8::Local<v8::FunctionTemplate>` for the runtime to register on the
+/// global object.
+#[proc_macro_attribute]
+pub fn v8_class(attr: TokenStream, item: TokenStream) -> TokenStream {
+    v8_class::expand(attr, item)
+}
+
+#[proc_macro_attribute]
+pub fn v8_method(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    // Marker attribute consumed by `#[v8_class]`. When applied to a method
+    // outside a `#[v8_class]` impl block this is a no-op (the method stays
+    // as written) — the macro doesn't error so editor tooling that
+    // pre-expands attribute macros doesn't surface a false positive.
+    item
+}
+
+#[proc_macro_attribute]
+pub fn v8_getter(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+#[proc_macro_attribute]
+pub fn v8_setter(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+#[proc_macro_attribute]
+pub fn v8_constructor(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
 
 #[proc_macro_attribute]
 pub fn zeroship_op(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -59,7 +109,7 @@ pub fn zeroship_op(attr: TokenStream, item: TokenStream) -> TokenStream {
 // ---------------------------------------------------------------------------
 
 /// Extract the last segment identifier from a type path (e.g. `String`, `Option`, `Result`).
-fn type_ident(ty: &Type) -> Option<String> {
+pub(crate) fn type_ident(ty: &Type) -> Option<String> {
     if let Type::Path(TypePath { path, .. }) = ty {
         path.segments.last().map(|s| s.ident.to_string())
     } else {
@@ -68,7 +118,7 @@ fn type_ident(ty: &Type) -> Option<String> {
 }
 
 /// Check if type is `Vec<u8>` — used for binary data args (reads from ArrayBufferView).
-fn is_vec_u8(ty: &Type) -> bool {
+pub(crate) fn is_vec_u8(ty: &Type) -> bool {
     type_ident(ty).as_deref() == Some("Vec")
         && first_generic_arg(ty)
             .and_then(type_ident)
@@ -77,7 +127,7 @@ fn is_vec_u8(ty: &Type) -> bool {
 }
 
 /// Extract the first generic type argument (e.g. `String` from `Option<String>`).
-fn first_generic_arg(ty: &Type) -> Option<&Type> {
+pub(crate) fn first_generic_arg(ty: &Type) -> Option<&Type> {
     if let Type::Path(TypePath { path, .. }) = ty {
         if let Some(seg) = path.segments.last() {
             if let PathArguments::AngleBracketed(ref ab) = seg.arguments {
@@ -96,12 +146,12 @@ fn first_generic_arg(ty: &Type) -> Option<&Type> {
 // Parameter parsing
 // ---------------------------------------------------------------------------
 
-struct Param {
-    name: Ident,
-    ty: Type,
+pub(crate) struct Param {
+    pub(crate) name: Ident,
+    pub(crate) ty: Type,
 }
 
-fn parse_params(f: &ItemFn) -> Vec<Param> {
+pub(crate) fn parse_params(f: &ItemFn) -> Vec<Param> {
     f.sig
         .inputs
         .iter()
@@ -123,7 +173,7 @@ fn parse_params(f: &ItemFn) -> Vec<Param> {
 // Argument extraction codegen (JS value → Rust type)
 // ---------------------------------------------------------------------------
 
-fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2 {
+pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2 {
     let idx = index as i32;
     let ident = type_ident(ty);
 
@@ -276,9 +326,12 @@ fn gen_throw_error() -> TokenStream2 {
 }
 
 /// Generate the function call + return value handling.
-fn gen_call_return(fn_name: &Ident, call_args: &[&Ident], output: &ReturnType) -> TokenStream2 {
-    let call = quote! { #fn_name(#(#call_args),*) };
-
+///
+/// `call` is the pre-built call expression (e.g. `my_fn(a, b)` or
+/// `__instance.method(a, b)`). Splitting this out lets both the
+/// `#[zeroship_op]` and `#[v8_class]` macros reuse the return-value
+/// marshaling logic with their respective call shapes.
+pub(crate) fn gen_call_return(call: &TokenStream2, output: &ReturnType) -> TokenStream2 {
     match output {
         ReturnType::Default => quote! { #call; },
         ReturnType::Type(_, ty) => {
@@ -412,8 +465,9 @@ fn generate_sync(needs_state: bool, input_fn: &ItemFn) -> syn::Result<TokenStrea
 
     // Call args (all params, including state)
     let call_args: Vec<&Ident> = params.iter().map(|p| &p.name).collect();
+    let call = quote! { #fn_name(#(#call_args),*) };
 
-    let call_return = gen_call_return(fn_name, &call_args, &input_fn.sig.output);
+    let call_return = gen_call_return(&call, &input_fn.sig.output);
 
     Ok(quote! {
         #input_fn
