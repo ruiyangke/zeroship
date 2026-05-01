@@ -28,15 +28,24 @@
 //                           client renders the SurveyCard from the
 //                           data-survey chunk and submits via the
 //                           resume protocol (body.resume).
-//   task (critic)         → emit `data-critic-round` after the SubAgent
-//                           returns. Builder is told (via BUILDER_SYSTEM)
-//                           to call task("critic", …) after every
-//                           meaningful write batch; we extract Critic's
-//                           structured response from the Command result
-//                           and surface it as a small badge per round.
-//                           Other subagent_types pass through silently
-//                           — extend the branch if more subagents need
-//                           dedicated UI.
+//   task (subagent)       → emit per-subagent_type custom data parts
+//                           after the SubAgent returns. Builder is
+//                           told (via BUILDER_SYSTEM) when to call
+//                           which subagent; we route on
+//                           `args.subagent_type` to the matching
+//                           wire shape:
+//                             critic   → data-critic-round
+//                             reviewer → data-reviewer-round
+//                             pm       → data-pm-recommendation
+//                             sre      → data-sre-finding
+//                           Each extracts the structured response from
+//                           the Command result the SubAgent returns
+//                           (it's JSON-stringified on the ToolMessage
+//                           because each SubAgent has `responseFormat`
+//                           set). Unknown subagent types pass through
+//                           silently — the LLM still gets the raw
+//                           ToolMessage so the conversation isn't
+//                           broken, just no card.
 //   ls, read_file, grep,
 //   glob, execute, …      → middleware passes through; native
 //                           tool-input-available / tool-output-available
@@ -156,22 +165,33 @@ export async function dataPartMiddleware(
         // deepagents' built-in subagent dispatcher. Args shape is
         //   { description: string, subagent_type: string }
         // — see node_modules/deepagents/dist/index.js (createTaskTool).
-        // We pass-through to the handler then, IFF the dispatched
-        // subagent is "critic", parse the result and emit a
-        // data-critic-round chunk.
+        // We pass-through to the handler then route on subagent_type
+        // to the matching custom data part.
         //
         // Result shape (from returnCommandWithStateUpdate, same file):
         //   Command({ update: { messages: [ToolMessage({
         //     content: <JSON-stringified structuredResponse> | <text>
         //   })] } })
-        // — when the subagent has a `responseFormat` (Critic does), the
-        // ToolMessage.content is the JSON-stringified Zod-validated
+        // — when the subagent has a `responseFormat` (all four do),
+        // the ToolMessage.content is the JSON-stringified Zod-validated
         // response. Otherwise it's the last message's text content.
         const result = await handler(request);
         const subagentType =
           typeof args.subagent_type === "string" ? args.subagent_type : "";
+        const parsed = extractSubagentJson(result);
+
         if (subagentType === "critic") {
-          const round = extractCriticRound(result, ++criticRound);
+          // Always increment the round counter so the sequence is
+          // contiguous even if a Critic call returned malformed JSON.
+          const n = ++criticRound;
+          const round = parsed
+            ? normaliseCriticRound(parsed, n)
+            : {
+                round: n,
+                total: n,
+                approved: true,
+                issues: [] as { dimension: string; severity: string; note: string }[],
+              };
           if (round) {
             try {
               writer.write({
@@ -184,7 +204,49 @@ export async function dataPartMiddleware(
               // to the LLM as a ToolMessage so Builder can react.
             }
           }
+        } else if (subagentType === "reviewer") {
+          const data = parsed ? normaliseReviewerRound(parsed) : null;
+          if (data) {
+            try {
+              writer.write({
+                type: "data-reviewer-round",
+                id: crypto.randomUUID(),
+                data,
+              } as Parameters<UIMessageStreamWriter["write"]>[0]);
+            } catch {
+              // Stream closed — drop.
+            }
+          }
+        } else if (subagentType === "pm") {
+          const data = parsed ? normalisePMRecommendation(parsed) : null;
+          if (data) {
+            try {
+              writer.write({
+                type: "data-pm-recommendation",
+                id: crypto.randomUUID(),
+                data,
+              } as Parameters<UIMessageStreamWriter["write"]>[0]);
+            } catch {
+              // Stream closed — drop.
+            }
+          }
+        } else if (subagentType === "sre") {
+          const data = parsed ? normaliseSREFinding(parsed) : null;
+          if (data) {
+            try {
+              writer.write({
+                type: "data-sre-finding",
+                id: crypto.randomUUID(),
+                data,
+              } as Parameters<UIMessageStreamWriter["write"]>[0]);
+            } catch {
+              // Stream closed — drop.
+            }
+          }
         }
+        // Unknown subagent_type → no card. The Command still propagates
+        // back to the LLM as a ToolMessage so the conversation isn't
+        // broken; we just skip the visual receipt.
         return result;
       }
 
@@ -213,34 +275,22 @@ export async function dataPartMiddleware(
   });
 }
 
-// Pull a critic-round payload out of the Command returned by the `task`
-// tool when it dispatches the Critic SubAgent. The Command carries an
-// update with a single ToolMessage whose content is the JSON-stringified
-// structured response (because Critic has `responseFormat` set). We pull
-// `{ approved, issues }`, normalise into the wire shape that
-// CriticRoundCard expects ({ round, total, approved, issues:[{dimension,
-// severity, note}] }), and stamp the round number from the per-turn
-// counter.
+// Extract the JSON-decoded subagent response from the Command the
+// `task` tool returns. Each SubAgent in the fleet has a `responseFormat`
+// set, so deepagents wraps the structured result in a ToolMessage whose
+// `.content` is a JSON-stringified Zod-validated object. We probe the
+// Command-with-state-update shape AND the bare ToolMessage shape so a
+// future deepagents change doesn't silently break us.
 //
-// Defensive: returns null on any shape mismatch. The caller no-ops on
-// null so a malformed critic response still lets the turn finish — the
-// LLM gets the raw ToolMessage either way and can decide what to do.
-function extractCriticRound(
-  result: unknown,
-  round: number,
-): {
-  round: number;
-  total: number;
-  approved: boolean;
-  issues: { dimension: string; severity: string; note: string }[];
-} | null {
-  // The handler returns either a ToolMessage or a Command. When Critic
-  // has a `responseFormat`, deepagents wraps in a Command via
-  // `returnCommandWithStateUpdate`. We probe both shapes.
+// Returns null on any decode failure. Per-agent normalisers below
+// decide what "best-effort" means when the shape doesn't match — for
+// Critic that's a synthesised "approved" round, for the others it's
+// "no card".
+function extractSubagentJson(result: unknown): Record<string, unknown> | null {
   let content: unknown = null;
   if (result && typeof result === "object") {
     const r = result as Record<string, unknown>;
-    // Command shape: r.update.messages[0].content
+    // Command shape: r.update.messages[last].content
     const update = r.update as Record<string, unknown> | undefined;
     if (update && Array.isArray(update.messages) && update.messages.length > 0) {
       const lastMsg = update.messages[update.messages.length - 1] as
@@ -248,7 +298,7 @@ function extractCriticRound(
         | undefined;
       content = lastMsg?.content ?? lastMsg?.kwargs?.content ?? null;
     }
-    // Fallback: ToolMessage shape (r.content) or serialised
+    // Fallback: bare ToolMessage (r.content) or serialised
     // ({lc, type:"constructor", kwargs:{content}}).
     if (content == null) {
       content = r.content ?? null;
@@ -263,12 +313,28 @@ function extractCriticRound(
   try {
     parsed = JSON.parse(content);
   } catch {
-    // Critic returned plain text (no responseFormat hit) — emit a
-    // best-effort "approved" round so the user still sees a checkmark.
-    return { round, total: round, approved: true, issues: [] };
+    return null;
   }
-  if (!parsed || typeof parsed !== "object") return null;
-  const p = parsed as Record<string, unknown>;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  return parsed as Record<string, unknown>;
+}
+
+// Critic's wire shape: { round, total, approved, issues: [{dimension,
+// severity, note}] }. The round counter is provided by the caller (the
+// per-turn closure variable in `dataPartMiddleware`) so we don't need
+// to track it here. Folds Critic's `issue` + `suggested_fix` into a
+// single `note` string for the badge.
+function normaliseCriticRound(
+  p: Record<string, unknown>,
+  round: number,
+): {
+  round: number;
+  total: number;
+  approved: boolean;
+  issues: { dimension: string; severity: string; note: string }[];
+} {
   const approved = typeof p.approved === "boolean" ? p.approved : false;
   const rawIssues = Array.isArray(p.issues) ? p.issues : [];
   const issues = rawIssues
@@ -277,9 +343,6 @@ function extractCriticRound(
       const i = iss as Record<string, unknown>;
       const dimension = typeof i.dimension === "string" ? i.dimension : "";
       const severity = typeof i.severity === "string" ? i.severity : "low";
-      // Critic returns `issue` (description) and `suggested_fix` — fold
-      // both into a single `note` string so the badge renders something
-      // a human can act on.
       const issueText = typeof i.issue === "string" ? i.issue : "";
       const fixText =
         typeof i.suggested_fix === "string" ? i.suggested_fix : "";
@@ -292,4 +355,114 @@ function extractCriticRound(
         x != null,
     );
   return { round, total: round, approved, issues };
+}
+
+// Reviewer's wire shape: { approved, blockers: [{kind, severity, why,
+// fix?}] }. Maps 1:1 onto the SubAgent's responseFormat (apart from
+// dropping unknown blockers).
+function normaliseReviewerRound(
+  p: Record<string, unknown>,
+): {
+  approved: boolean;
+  blockers: { kind: string; severity: string; why: string; fix?: string }[];
+} | null {
+  const approved = typeof p.approved === "boolean" ? p.approved : false;
+  const rawBlockers = Array.isArray(p.blockers) ? p.blockers : [];
+  const blockers = rawBlockers
+    .map(
+      (
+        b,
+      ): { kind: string; severity: string; why: string; fix?: string } | null => {
+        if (!b || typeof b !== "object") return null;
+        const o = b as Record<string, unknown>;
+        const kind = typeof o.kind === "string" ? o.kind : "";
+        const severity = typeof o.severity === "string" ? o.severity : "low";
+        const why = typeof o.why === "string" ? o.why : "";
+        const fix = typeof o.fix === "string" ? o.fix : undefined;
+        if (!kind && !why) return null;
+        return fix ? { kind, severity, why, fix } : { kind, severity, why };
+      },
+    )
+    .filter(
+      (x): x is { kind: string; severity: string; why: string; fix?: string } =>
+        x != null,
+    );
+  // approved=false with no blockers is still a valid render — the card
+  // just shows the headline. approved=true with blockers is also OK
+  // (Reviewer flagged low-severity stuff but didn't block).
+  return { approved, blockers };
+}
+
+// PM's wire shape: { recommendation, alternatives }. Each recommendation
+// is { issueId?, title, why, urgency }.
+function normalisePMRecommendation(
+  p: Record<string, unknown>,
+): {
+  recommendation: { issueId?: string; title: string; why: string; urgency: string };
+  alternatives: { issueId?: string; title: string; why: string; urgency: string }[];
+} | null {
+  const rec = normaliseRecommendation(p.recommendation);
+  if (!rec) return null;
+  const rawAlts = Array.isArray(p.alternatives) ? p.alternatives : [];
+  const alternatives = rawAlts
+    .map(normaliseRecommendation)
+    .filter(
+      (
+        x,
+      ): x is { issueId?: string; title: string; why: string; urgency: string } =>
+        x != null,
+    )
+    .slice(0, 2);
+  return { recommendation: rec, alternatives };
+}
+
+function normaliseRecommendation(
+  v: unknown,
+):
+  | { issueId?: string; title: string; why: string; urgency: string }
+  | null {
+  if (!v || typeof v !== "object") return null;
+  const r = v as Record<string, unknown>;
+  const title = typeof r.title === "string" ? r.title : "";
+  const why = typeof r.why === "string" ? r.why : "";
+  const urgency = typeof r.urgency === "string" ? r.urgency : "medium";
+  const issueId = typeof r.issueId === "string" ? r.issueId : undefined;
+  if (!title && !why) return null;
+  return issueId ? { issueId, title, why, urgency } : { title, why, urgency };
+}
+
+// SRE's wire shape: { diagnosis, severity, recommendation, related_logs? }.
+function normaliseSREFinding(
+  p: Record<string, unknown>,
+): {
+  diagnosis: string;
+  severity: string;
+  recommendation: string;
+  related_logs?: { source: string; excerpt: string }[];
+} | null {
+  const diagnosis = typeof p.diagnosis === "string" ? p.diagnosis : "";
+  const severity = typeof p.severity === "string" ? p.severity : "info";
+  const recommendation =
+    typeof p.recommendation === "string" ? p.recommendation : "";
+  if (!diagnosis && !recommendation) return null;
+  let related_logs: { source: string; excerpt: string }[] | undefined;
+  if (Array.isArray(p.related_logs)) {
+    related_logs = p.related_logs
+      .map((l): { source: string; excerpt: string } | null => {
+        if (!l || typeof l !== "object") return null;
+        const o = l as Record<string, unknown>;
+        const source = typeof o.source === "string" ? o.source : "";
+        const excerpt = typeof o.excerpt === "string" ? o.excerpt : "";
+        if (!source && !excerpt) return null;
+        return { source, excerpt };
+      })
+      .filter(
+        (x): x is { source: string; excerpt: string } => x != null,
+      )
+      .slice(0, 5);
+    if (related_logs.length === 0) related_logs = undefined;
+  }
+  return related_logs
+    ? { diagnosis, severity, recommendation, related_logs }
+    : { diagnosis, severity, recommendation };
 }

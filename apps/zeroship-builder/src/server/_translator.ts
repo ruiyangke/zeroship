@@ -36,6 +36,9 @@
 
 import { createUIMessageStream, type UIMessage } from "ai";
 import { critic } from "./_critic.js";
+import { reviewer } from "./_reviewer.js";
+import { pm } from "./_pm.js";
+import { sre } from "./_sre.js";
 import { BUILDER_SYSTEM } from "./_prompts.js";
 import { askSurveyTool } from "./_tools.js";
 
@@ -214,7 +217,7 @@ export async function buildTranslatedStream(
         systemPrompt: BUILDER_SYSTEM,
         checkpointer,
         middleware: [dataPartMw] as const,
-        subagents: [critic],
+        subagents: [critic, reviewer, pm, sre],
       });
 
       const textId = crypto.randomUUID();
@@ -227,15 +230,16 @@ export async function buildTranslatedStream(
       //   ask_survey             → data-survey (also: tool halts via
       //                            interrupt(), so on_tool_end may not
       //                            even fire on the interrupted run)
-      //   task                   → data-critic-round (when subagent_type
-      //                            is "critic"). Other subagent types
-      //                            also get suppressed here — we don't
-      //                            currently render generic task-tool
-      //                            receipts in the chat. If we add more
-      //                            subagents that should show as
-      //                            receipts, narrow this to inspect
-      //                            args.subagent_type at on_tool_start
-      //                            time.
+      //   task                   → routed by subagent_type in the
+      //                            middleware:
+      //                              "critic"   → data-critic-round
+      //                              "reviewer" → data-reviewer-round
+      //                              "pm"       → data-pm-recommendation
+      //                              "sre"      → data-sre-finding
+      //                            All four types are suppressed from
+      //                            native tool-call chunks here so the
+      //                            wire shows one card per dispatch,
+      //                            not a duplicate receipt + card.
       const CUSTOM_DATA_TOOLS = new Set([
         "write_file",
         "edit_file",
