@@ -41,7 +41,7 @@ export async function buildTranslatedStream(input: BuilderTurnInput) {
   // here so Phase B can swap in Anthropic via @langchain/anthropic without
   // changing the translator.
   const model = new ChatOpenAI({
-    model: "gpt-5-nano",
+    model: "gpt-5.4-mini",
     temperature: 0.2,
     streaming: true,
     apiKey,
