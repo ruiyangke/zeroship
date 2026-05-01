@@ -219,13 +219,6 @@ struct TestResult {
     outcome: Outcome,
 }
 
-/// All WPT encoding tests run against our impl. Empty by default;
-/// kept as a hook for future selective skips if a specific
-/// parameterization needs one.
-fn should_skip_by_name(_name: &str) -> bool {
-    false
-}
-
 // ---------------------------------------------------------------------------
 // Source preparation
 // ---------------------------------------------------------------------------
@@ -392,13 +385,6 @@ fn wpt_text_encoding_utf8_compliance() {
         let results = run_wpt(name, source);
         let mut t = Totals::default();
         for r in results {
-            // First-pass: skip by test-name heuristic (utf-16, SAB,
-            // encodeInto). Only after that do we treat a "fail"
-            // outcome as a real failure.
-            if should_skip_by_name(&r.name) {
-                t.skip += 1;
-                continue;
-            }
             match &r.outcome {
                 Outcome::Pass => t.pass += 1,
                 Outcome::Skip(_) => t.skip += 1,
