@@ -176,17 +176,15 @@ TransformStream still pending.
 | `20b47470` | streams: `ReadableStream` + `ReadableStreamDefaultController` + `ReadableStreamDefaultReader` (§II.1, §II.3, §II.5, §III.1-§III.3) plus `NativeSource` trait + `from_native_source` (D-9) |
 | `af1d7a84` | streams: WPT runner for `streams/readable-streams/` (constructor, general, default-reader) — 68/68 pass + spec-faithful constructor argument-conversion ordering |
 | `747be412` | streams: clean up unused imports (no behavior change) |
+| `5e05f5b8` | streams: `WritableStream` + `WritableStreamDefaultController` + `WritableStreamDefaultWriter` (§II.8-§II.10, §III.5-§III.7) plus `NativeSink` trait + `from_native_sink` (D-9). 16 hand-written tests. |
+| (this commit) | streams: WPT runner for `streams/writable-streams/` (constructor, general, close, aborting) — 110/120 pass, 10 skip (AbortSignal-dependent — explicit reasons) |
 
-**Test count this branch:** 322 passing across cargo `#[test]`s
-(58 lib unit + 264 integration). The WPT runner is 1 cargo test
-internally containing 68 WPT subtests (constructor + general +
-default-reader).
+**Test count this branch:** 339 passing across cargo `#[test]`s
+(58 lib unit + 281 integration, including the new 16 hand-written
+WS tests). WPT runners are 2 cargo tests: readable (68/68 pass) and
+writable (110 pass / 0 fail / 10 skip).
 
 **Not yet shipped** — pending dispatches:
-- `WritableStream` + `WritableStreamDefaultController` +
-  `WritableStreamDefaultWriter` (§II.8-§II.10). RSState's V8 priv
-  sym infrastructure is in place; the writer pattern mirrors
-  reader.
 - `TransformStream` + controller (§II.11-§II.12).
 - `pipeTo` / `pipeThrough` / `tee` / async iterator (§IX, §X, §IV)
   — depend on Writable + Transform.

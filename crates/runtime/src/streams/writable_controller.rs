@@ -44,7 +44,7 @@ use crate::streams::algorithms;
 use crate::streams::promise_resolve;
 use crate::streams::queue::{is_non_negative_number, ValueQueue, ValueQueueEntry};
 use crate::streams::readable_default_controller::{AlgorithmFn, SizeAlgorithm};
-use crate::streams::writable::{NativeSink, NativeWritableController, WSState};
+use crate::streams::writable::{NativeSink, WSState};
 
 const STREAM_OBJ_SLOT: &str = "[[ws.ctrl.streamObj]]";
 const ABORT_CONTROLLER_SLOT: &str = "[[ws.ctrl.abortController]]";
@@ -663,9 +663,11 @@ enum AlgorithmSnapshot {
         function: v8::Global<v8::Function>,
         this_obj: v8::Global<v8::Value>,
     },
-    /// Native one-shot: a closure that returns a Promise<undefined>. Pre-built
-    /// at controller setup so we don't need to keep `&mut self` across the
-    /// invoke boundary. Boxed because we move it out of the snapshot to call.
+    /// Native one-shot: reserved for the next dispatch when AlgorithmFn::Native
+    /// becomes drivable. Closure shape preserved for type-checking; actual
+    /// invocation defers to AlgorithmSnapshot::Noop until the runtime-loop
+    /// driver lands (§VII.5).
+    #[allow(dead_code)]
     Native(
         Rc<RefCell<Option<Box<dyn FnOnce(NativeWritableArg, v8::Global<v8::Object>) -> Pin<Box<dyn Future<Output = Result<(), v8::Global<v8::Value>>>>>>>>>,
     ),

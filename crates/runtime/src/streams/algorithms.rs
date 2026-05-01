@@ -796,16 +796,10 @@ pub fn writable_stream_abort<'s>(
         return resolved_undefined_promise(scope);
     }
 
-    // If pendingAbortRequest is set, return its promise.
-    let existing_promise = crate::streams::writable::with_ws_state(scope, stream, |s| {
-        s.pending_abort_request.borrow().as_ref().map(|p| {
-            // We don't hold the promise (only the resolver); to allow
-            // returning the same promise to subsequent callers, we keep a
-            // priv-sym mirror "[[ws.pendingAbortPromise]]" set at create
-            // time. Read it here.
-        });
-    });
-    let _ = existing_promise; // suppress unused
+    // If pendingAbortRequest is set, return its existing promise. We keep
+    // the Promise mirrored on a priv-sym so subsequent abort() callers see
+    // the same Promise (the spec says abort() returns the same Promise as
+    // the original pending abort).
     let abort_promise_v = slots::read_slot(scope, stream, "[[ws.pendingAbortPromise]]");
     if !abort_promise_v.is_undefined() {
         if let Ok(p) = v8::Local::<v8::Promise>::try_from(abort_promise_v) {
