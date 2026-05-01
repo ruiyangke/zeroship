@@ -246,6 +246,74 @@ fn result_err_throws_typed_exception() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 4b: Result<(), OpError> — nothing on Ok, throws on Err
+// ---------------------------------------------------------------------------
+//
+// Mutator-style methods (Headers.append, Headers.set, etc.) return
+// nothing on success and throw on validation failure. The macro
+// must handle `Result<(), OpError>` cleanly: emit no-op on Ok,
+// throw the typed exception on Err. Previously this hit the
+// scalar-set fallback and tried `v8::String::new(scope, &())` —
+// compile failure.
+
+mod result_unit {
+    use super::*;
+
+    pub struct Validator;
+
+    #[v8_class]
+    impl Validator {
+        #[v8_constructor]
+        fn new() -> Validator {
+            Validator
+        }
+
+        #[v8_method]
+        fn check(&self, n: u32) -> Result<(), OpError> {
+            if n > 100 {
+                Err(OpError::range_error("too big"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+#[test]
+fn result_unit_ok_returns_undefined() {
+    let s = run_in_v8(
+        |scope, global| install_class::<result_unit::Validator>(
+            result_unit::Validator::install, "Validator", scope, global,
+        ),
+        r#"
+        const v = new Validator();
+        const r = v.check(42);
+        r === undefined ? "undefined" : `not-undefined:${r}`;
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "undefined");
+}
+
+#[test]
+fn result_unit_err_throws_typed_exception() {
+    let s = run_in_v8(
+        |scope, global| install_class::<result_unit::Validator>(
+            result_unit::Validator::install, "Validator", scope, global,
+        ),
+        r#"
+        const v = new Validator();
+        let kind, msg;
+        try { v.check(200); }
+        catch (e) { kind = e.constructor.name; msg = e.message; }
+        JSON.stringify({ kind, msg });
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, r#"{"kind":"RangeError","msg":"too big"}"#);
+}
+
+// ---------------------------------------------------------------------------
 // Test 5: Vec<u8> return → Uint8Array (spec-correct)
 // ---------------------------------------------------------------------------
 

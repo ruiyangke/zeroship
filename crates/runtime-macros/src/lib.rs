@@ -108,6 +108,13 @@ pub fn zeroship_op(attr: TokenStream, item: TokenStream) -> TokenStream {
 // Type helpers
 // ---------------------------------------------------------------------------
 
+/// True for the unit type `()`. Returned by mutator-style methods
+/// like `Result<(), OpError>` that have nothing to set on `rv` —
+/// they want the JS-visible call to evaluate to `undefined`.
+pub(crate) fn is_unit_type(ty: &Type) -> bool {
+    matches!(ty, Type::Tuple(t) if t.elems.is_empty())
+}
+
 /// Extract the last segment identifier from a type path (e.g. `String`, `Option`, `Result`).
 pub(crate) fn type_ident(ty: &Type) -> Option<String> {
     if let Type::Path(TypePath { path, .. }) = ty {
@@ -396,36 +403,45 @@ pub(crate) fn gen_call_return(call: &TokenStream2, output: &ReturnType) -> Token
                 Some("Result") => {
                     let inner = first_generic_arg(ty);
                     let inner_ident = inner.and_then(type_ident);
-                    let ok_handling = match inner_ident.as_deref() {
-                        Some("Option") => {
-                            let inner2 = inner.and_then(first_generic_arg);
-                            let some_set = inner2
-                                .map(gen_option_some_set)
-                                .unwrap_or_else(|| gen_option_some_set(&syn::parse_quote!(String)));
-                            quote! {
-                                match __ok {
-                                    Some(__inner) => { #some_set }
-                                    None => rv.set(v8::null(scope).into()),
-                                }
-                            }
-                        }
-                        Some("Vec") => {
-                            if inner.map(is_vec_u8).unwrap_or(false) {
-                                let val = quote! { __ok };
-                                gen_vec_u8_set(&val)
-                            } else {
-                                let vec_set = gen_vec_set();
+                    let ok_handling = if inner.map(is_unit_type).unwrap_or(false) {
+                        // `Result<(), OpError>` — Ok variant has no value
+                        // to surface. Bind it to `_` so the unused-let
+                        // lint doesn't fire, and leave `rv` untouched
+                        // (defaults to `undefined`). Used by mutator
+                        // methods like Headers.append.
+                        quote! { let _ = __ok; }
+                    } else {
+                        match inner_ident.as_deref() {
+                            Some("Option") => {
+                                let inner2 = inner.and_then(first_generic_arg);
+                                let some_set = inner2
+                                    .map(gen_option_some_set)
+                                    .unwrap_or_else(|| gen_option_some_set(&syn::parse_quote!(String)));
                                 quote! {
-                                    let __vec = __ok;
-                                    #vec_set
+                                    match __ok {
+                                        Some(__inner) => { #some_set }
+                                        None => rv.set(v8::null(scope).into()),
+                                    }
                                 }
                             }
-                        }
-                        _ => {
-                            let val = quote! { __ok };
-                            inner
-                                .map(|t| gen_scalar_set(t, &val))
-                                .unwrap_or_else(|| gen_scalar_set(&syn::parse_quote!(String), &val))
+                            Some("Vec") => {
+                                if inner.map(is_vec_u8).unwrap_or(false) {
+                                    let val = quote! { __ok };
+                                    gen_vec_u8_set(&val)
+                                } else {
+                                    let vec_set = gen_vec_set();
+                                    quote! {
+                                        let __vec = __ok;
+                                        #vec_set
+                                    }
+                                }
+                            }
+                            _ => {
+                                let val = quote! { __ok };
+                                inner
+                                    .map(|t| gen_scalar_set(t, &val))
+                                    .unwrap_or_else(|| gen_scalar_set(&syn::parse_quote!(String), &val))
+                            }
                         }
                     };
                     let throw = gen_throw_error();
