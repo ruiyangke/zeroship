@@ -1724,6 +1724,27 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
 /// Step-1-of-cutover hook: install native Headers AFTER fetch.js has
 /// run, so its `globalThis.Headers = …` line doesn't shadow us.
 /// Behind `ZEROSHIP_NATIVE_HEADERS=1`. Default off for the v1 release.
+///
+/// **Step 2 (cutover) is NOT yet wired** because the polyfill in
+/// `embed/fetch.js` and `crates/runtime/src/http.rs` reach into Headers
+/// internals (`_map`, `_fromTrusted`, `_toArray`, `_zsHeadersArr`) that
+/// don't exist on native Headers. With the flag on, those reach-ins
+/// throw "Illegal invocation" because native Headers' methods access
+/// internal field 0 (Box<Headers>) which is empty on
+/// `Object.create(Headers.prototype)`-style constructions.
+///
+/// The cutover (step 2) requires:
+/// 1. Refactor fetch.js to use the native iterable surface (e.g.
+///    `for (const [k, v] of headers)` instead of `headers._map`).
+/// 2. Refactor http.rs's `Object.create(Headers.prototype) + _map =`
+///    pattern to call `new Headers(arrayOfPairs)` via the native
+///    sequence path.
+/// 3. Remove `Headers._fromTrusted` callers; either reimplement as a
+///    real `new Headers([[name, value], ...])` or move the fast-path
+///    optimisation into the native struct.
+///
+/// Step 3 (delete the polyfill block in fetch.js) follows step 2.
+/// Both lap with the Request/Response native push.
 pub fn install_native_headers_post(scope: &mut v8::PinScope) {
     if std::env::var("ZEROSHIP_NATIVE_HEADERS").as_deref() != Ok("1") {
         return;
