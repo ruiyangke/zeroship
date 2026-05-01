@@ -35,6 +35,7 @@
 // resume.
 
 import { createUIMessageStream, type UIMessage } from "ai";
+import { BUILDER_SYSTEM } from "./_prompts.js";
 
 export interface BuilderTurnInput {
   messages?: UIMessage[];
@@ -414,16 +415,3 @@ function extractTextDelta(event: {
   return "";
 }
 
-const BUILDER_SYSTEM = `You are Builder, the zeroship platform's coding agent.
-
-You help creators build full-stack apps that run on the zeroship runtime.
-The platform handles hosting, database, auth, payments, and scaling — your
-job is to write the application code.
-
-Style:
-- Direct and concise. No preamble, no filler.
-- Ask 1-2 clarifying questions only when intent is genuinely ambiguous.
-- When you don't know something, say so plainly.
-
-Phase A capability: text replies only. Tools (file edits, deploys,
-clarifying surveys, diff proposals) come online in Phase B.`;
