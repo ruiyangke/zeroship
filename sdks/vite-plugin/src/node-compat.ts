@@ -113,7 +113,22 @@ Object.assign(__vite_ssr_exports__, { setTimeout: _setTimeout, setImmediate: _se
   // via fs-bundler internals that don't actually invoke require at
   // runtime.
   "node:module": `
-const _noop = function() { return new Proxy(function(){}, { get: () => _noop, apply: () => undefined, construct: () => ({}) }); };
+// The proxy is reached via createRequire(...)("os") etc. — npm chunks then
+// do (0, mod.fn)() and template-literal the result. So get-traps must return
+// the same proxy (chainable), apply must return the proxy too (call result),
+// and Symbol.toPrimitive must return "" so template literals don't throw
+// "Cannot convert object to primitive value".
+const _noopProxy = new Proxy(function(){}, {
+  get(_t, prop) {
+    if (prop === Symbol.toPrimitive) return () => "";
+    if (prop === "toString" || prop === "valueOf") return () => "";
+    if (prop === Symbol.iterator) return function*(){};
+    return _noopProxy;
+  },
+  apply: () => _noopProxy,
+  construct: () => ({}),
+});
+const _noop = function() { return _noopProxy; };
 function createRequire() { return _noop; }
 function builtinModules() { return []; }
 function isBuiltin() { return false; }
