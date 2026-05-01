@@ -500,19 +500,40 @@ impl NomadCHBackend {
         )
         .await?;
 
-        // 8. Commit state.
-        let sandbox = NomadChSandbox {
-            user_id: user_id.to_string(),
-            job_id: job_id.to_string(),
-            vm_index,
-            host_dir: host_dir.to_path_buf(),
-            agent_url: agent_url.clone(),
-            signing_key: Arc::new(signing_key),
-        };
-        self.state
-            .write()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(sandbox_id, sandbox);
+        // 8. Commit state. Refuse to overwrite an existing entry —
+        //    a duplicate sandbox_id is a controller-bug or caller-bug,
+        //    and silently overwriting would leak the prior entry's
+        //    vm_index, host_dir, and Nomad job (the values still
+        //    referenced by the old NomadChSandbox would never run
+        //    through stop()). Bail with an error and let
+        //    CreateGuard's Drop tear down the partial state we
+        //    just built. DO NOT disarm the guard on this branch.
+        {
+            use std::collections::hash_map::Entry;
+            let mut guard_state = self
+                .state
+                .write()
+                .unwrap_or_else(|p| p.into_inner());
+            match guard_state.entry(sandbox_id) {
+                Entry::Vacant(slot) => {
+                    slot.insert(NomadChSandbox {
+                        user_id: user_id.to_string(),
+                        job_id: job_id.to_string(),
+                        vm_index,
+                        host_dir: host_dir.to_path_buf(),
+                        agent_url: agent_url.clone(),
+                        signing_key: Arc::new(signing_key),
+                    });
+                }
+                Entry::Occupied(_) => {
+                    return Err(format!(
+                        "[sandbox/nomad-ch] commit: sandbox_id {sandbox_id} \
+                         already present in state map; refusing to overwrite \
+                         (CreateGuard will tear down the just-built partial state)"
+                    ));
+                }
+            }
+        }
 
         let now = unix_now();
         Ok(SandboxInfo {
@@ -1432,6 +1453,45 @@ mod tests {
         assert!(a.alloc().is_err());
         a.release(7);
         assert_eq!(a.alloc().unwrap(), 7);
+    }
+
+    // ─── State-map collision (C1) ────────────────────────────
+    //
+    // The fix in `try_create` step 8 uses `HashMap::entry` to refuse
+    // overwriting an existing sandbox_id. We can't drive the full
+    // `try_create` path from a unit test (no Nomad), but we can
+    // verify the entry-API contract directly: a duplicate insert
+    // must NOT overwrite the prior value.
+    #[test]
+    fn state_map_entry_api_refuses_overwrite() {
+        use std::collections::hash_map::Entry;
+        let mut m: HashMap<Uuid, &'static str> = HashMap::new();
+        let id = Uuid::nil();
+        // First insert: vacant → take.
+        match m.entry(id) {
+            Entry::Vacant(slot) => {
+                slot.insert("first");
+            }
+            Entry::Occupied(_) => panic!("first insert should be vacant"),
+        }
+        // Second insert with same id: occupied → must NOT overwrite.
+        let mut would_overwrite = false;
+        match m.entry(id) {
+            Entry::Vacant(_) => {
+                would_overwrite = true;
+            }
+            Entry::Occupied(o) => {
+                // Existing entry is preserved unchanged.
+                assert_eq!(*o.get(), "first");
+            }
+        }
+        assert!(
+            !would_overwrite,
+            "entry-API must report Occupied on duplicate id"
+        );
+        // Final state is the original — proves no leak of prior
+        // bookkeeping (vm_index/host_dir/job_id in the real type).
+        assert_eq!(m.get(&id), Some(&"first"));
     }
 
     // ─── Nomad job spec ──────────────────────────────────────
