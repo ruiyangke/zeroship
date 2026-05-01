@@ -1289,10 +1289,13 @@ async fn stop_nomad_job(
 /// Poll the job's allocations until at least one has
 /// `ClientStatus == "running"`, or the deadline expires.
 ///
-/// JSON parse errors are tracked + log-rate-limited (~once per 5s)
-/// and surfaced in the timeout message, so an HTML proxy interstitial
-/// or a 200-with-garbage from a misconfigured Nomad doesn't disappear
-/// into a silent retry loop.
+/// JSON parse errors **and HTTP transport errors** are tracked +
+/// log-rate-limited (~once per 5s) and surfaced in the timeout
+/// message. Without the HTTP-error track, a Nomad-unreachable
+/// outage and an alloc-never-scheduled outage produce the same
+/// "alloc never reached running ... last status=<no allocs>"
+/// message — completely different triage paths collapsed into one
+/// (C3 fix).
 async fn wait_for_alloc_running(
     nomad_addr: &str,
     job_id: &str,
@@ -1303,10 +1306,12 @@ async fn wait_for_alloc_running(
     let mut last_status: Option<String> = None;
     let mut last_parse_err: Option<String> = None;
     let mut last_parse_log_at: Option<Instant> = None;
+    let mut last_http_err: Option<String> = None;
+    let mut last_http_log_at: Option<Instant> = None;
     while Instant::now() < deadline {
         let resp = http_get_unsigned(&url, Duration::from_secs(5)).await;
-        if let Ok(r) = resp {
-            if r.status == 200 {
+        match resp {
+            Ok(r) if r.status == 200 => {
                 let allocs = match serde_json::from_str::<serde_json::Value>(&r.body) {
                     Ok(v) => v,
                     Err(e) => {
@@ -1351,6 +1356,48 @@ async fn wait_for_alloc_running(
                 }
                 last_status = latest.or(last_status);
             }
+            Ok(r) => {
+                // 200 is the only happy status; 4xx/5xx surface as
+                // an HTTP error track too — operators need to see
+                // 401/403 (auth misconfig) and 5xx separately from
+                // "no allocs yet".
+                let msg = format!(
+                    "status {} body={}",
+                    r.status,
+                    r.body.trim()
+                );
+                let now = Instant::now();
+                let stale = last_http_log_at
+                    .map(|t| now.duration_since(t) > Duration::from_secs(5))
+                    .unwrap_or(true);
+                if stale {
+                    eprintln!(
+                        "[sandbox/nomad-ch] alloc poll: HTTP non-200 \
+                         (will retry): {msg}"
+                    );
+                    last_http_log_at = Some(now);
+                }
+                last_http_err = Some(msg);
+            }
+            Err(e) => {
+                // Transport-level failure (connection refused,
+                // DNS, TLS, timeout). Track this distinctly so
+                // the timeout message can say "Nomad unreachable"
+                // rather than the misleading "alloc never reached
+                // running, last status=<no allocs>".
+                let now = Instant::now();
+                let stale = last_http_log_at
+                    .map(|t| now.duration_since(t) > Duration::from_secs(5))
+                    .unwrap_or(true);
+                if stale {
+                    eprintln!(
+                        "[sandbox/nomad-ch] alloc poll: HTTP transport \
+                         error (will retry): {e}"
+                    );
+                    last_http_log_at = Some(now);
+                }
+                last_http_err = Some(e);
+            }
         }
         compio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -1358,6 +1405,11 @@ async fn wait_for_alloc_running(
         "nomad alloc never reached running for job {job_id} (last status={:?})",
         last_status.unwrap_or_else(|| "<no allocs>".to_string())
     );
+    if let Some(e) = last_http_err {
+        msg.push_str(&format!(
+            "; last HTTP error (Nomad reachability): {e}"
+        ));
+    }
     if let Some(e) = last_parse_err {
         msg.push_str(&format!("; last parse error: {e}"));
     }
@@ -1415,6 +1467,11 @@ async fn wait_for_job_gone(
     let mut last_parse_err: Option<String> = None;
     let mut last_parse_log_at: Option<Instant> = None;
     let mut last_status: Option<String> = None;
+    // C3: track HTTP transport / non-2xx errors distinctly so a
+    // Nomad-unreachable outage doesn't masquerade as "alloc still
+    // reaping" in the timeout message.
+    let mut last_http_err: Option<String> = None;
+    let mut last_http_log_at: Option<Instant> = None;
 
     fn note_parse_err(
         last_parse_err: &mut Option<String>,
@@ -1437,13 +1494,46 @@ async fn wait_for_job_gone(
         *last_parse_err = Some(msg);
     }
 
+    fn note_http_err(
+        last_http_err: &mut Option<String>,
+        last_http_log_at: &mut Option<Instant>,
+        scope: &str,
+        msg: String,
+    ) {
+        let now = Instant::now();
+        let stale = last_http_log_at
+            .map(|t| now.duration_since(t) > Duration::from_secs(5))
+            .unwrap_or(true);
+        if stale {
+            eprintln!(
+                "[sandbox/nomad-ch] job-gone poll {scope}: HTTP error \
+                 (will retry): {msg}"
+            );
+            *last_http_log_at = Some(now);
+        }
+        *last_http_err = Some(msg);
+    }
+
     while Instant::now() < deadline {
         // First check if the job record is gone entirely.
         let job_resp = http_get_unsigned(&job_url, Duration::from_secs(5)).await;
-        if let Ok(r) = &job_resp {
-            if r.status == 404 {
-                return Ok(());
+        match &job_resp {
+            Ok(r) if r.status == 404 => return Ok(()),
+            Ok(r) if r.status == 200 => {
+                // Job still present; fall through to alloc poll.
             }
+            Ok(r) => note_http_err(
+                &mut last_http_err,
+                &mut last_http_log_at,
+                "job",
+                format!("status {} body={}", r.status, r.body.trim()),
+            ),
+            Err(e) => note_http_err(
+                &mut last_http_err,
+                &mut last_http_log_at,
+                "job",
+                e.clone(),
+            ),
         }
 
         // Otherwise look at the allocations: a job in Status=dead
@@ -1479,7 +1569,18 @@ async fn wait_for_job_gone(
                     }
                 }
             }
-            _ => {}
+            Ok(r) => note_http_err(
+                &mut last_http_err,
+                &mut last_http_log_at,
+                "allocations",
+                format!("status {} body={}", r.status, r.body.trim()),
+            ),
+            Err(e) => note_http_err(
+                &mut last_http_err,
+                &mut last_http_log_at,
+                "allocations",
+                e,
+            ),
         }
         compio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -1488,6 +1589,11 @@ async fn wait_for_job_gone(
          (last alloc client_status={:?})",
         last_status.unwrap_or_else(|| "<unknown>".to_string())
     );
+    if let Some(e) = last_http_err {
+        msg.push_str(&format!(
+            "; last HTTP error (Nomad reachability): {e}"
+        ));
+    }
     if let Some(e) = last_parse_err {
         msg.push_str(&format!("; last parse error: {e}"));
     }
@@ -1861,6 +1967,111 @@ mod tests {
         }
     }
 
+    // ─── CreateGuard cleanup ordering (C1) ──────────────────
+    //
+    // The fix for C1 moves vm_index release into the detached
+    // cleanup task and gates it on Nomad-purge confirmation. We
+    // can exercise the no-Nomad-call branch (job_submitted=false ⇒
+    // purge_ok=true ⇒ release fires) end-to-end inside a compio
+    // runtime — which proves the index makes it back to the pool
+    // after Drop runs the detached task.
+    #[compio::test]
+    async fn create_guard_releases_vm_index_when_no_job_submitted() {
+        // Pool of a single index — easiest way to detect leak
+        // (next alloc would fail) vs. correct release (next alloc
+        // succeeds). Pre-allocate so the pool is empty at the
+        // start of the test, then assert the detached cleanup
+        // refills it.
+        let pool = Arc::new(Mutex::new(VmIndexAllocator::new(7, 7)));
+        let allocated =
+            pool.lock().unwrap().alloc().expect("first alloc");
+        assert_eq!(allocated, 7);
+        // Pool is now empty — alloc would fail.
+        assert!(pool.lock().unwrap().alloc().is_err());
+
+        {
+            let mut g = CreateGuard::new(
+                pool.clone(),
+                "http://127.0.0.1:1".to_string(), // unreachable
+                "zsbx-test-no-purge".to_string(),
+                PathBuf::from("/tmp/zsbx-c1-test"),
+            );
+            g.vm_index = Some(allocated);
+            g.job_submitted = false; // skip http_delete entirely
+            g.host_dir_created = false; // skip rm -rf entirely
+            // Drop here triggers the detached cleanup task.
+        }
+        // The detached task may not have run yet — yield until
+        // the index reappears in the pool. Bound by a generous
+        // timeout so a regression of "release happens, but on the
+        // wrong path" still fails the test rather than hanging.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut released = false;
+        while Instant::now() < deadline {
+            // Try to alloc; if we get the index back, release was
+            // performed by the detached cleanup.
+            if let Ok(i) = pool.lock().unwrap().alloc() {
+                assert_eq!(i, 7);
+                released = true;
+                break;
+            }
+            compio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            released,
+            "CreateGuard did not release vm_index back to the pool — \
+             C1 regression: a retry-create() for the same user would \
+             see a phantom-exhausted pool until orphan-prune"
+        );
+    }
+
+    #[compio::test]
+    async fn create_guard_leaks_vm_index_on_purge_failure() {
+        // Pool of a single index. Job submitted but Nomad addr is
+        // a guaranteed-unroutable port — the http_delete will fail
+        // within the per-call 10s timeout. We assert the index is
+        // NOT released within the first ~250ms (the detached task
+        // is still mid-http_delete). C1 policy: leak on purge
+        // failure rather than risk a tap collision on the retry
+        // path. Orphan-prune at next boot reclaims it indirectly.
+        //
+        // We don't wait for the full failure path — the
+        // observable distinction from the no-purge branch is
+        // exactly that the index does NOT come back immediately.
+        let pool = Arc::new(Mutex::new(VmIndexAllocator::new(13, 13)));
+        let allocated =
+            pool.lock().unwrap().alloc().expect("first alloc");
+        assert_eq!(allocated, 13);
+        assert!(pool.lock().unwrap().alloc().is_err());
+
+        {
+            let mut g = CreateGuard::new(
+                pool.clone(),
+                // Non-routable: port 1, no listener.
+                "http://127.0.0.1:1".to_string(),
+                "zsbx-test-leak".to_string(),
+                PathBuf::from("/tmp/zsbx-c1-leak"),
+            );
+            g.vm_index = Some(allocated);
+            g.job_submitted = true;
+            g.host_dir_created = false;
+            // Drop fires; the detached cleanup will spend up to
+            // 10s on the http_delete before deciding to leak.
+        }
+        // Yield once so the detached task actually starts running.
+        compio::time::sleep(Duration::from_millis(50)).await;
+        // The cleanup task is mid-http_delete with a 10s timeout
+        // → the index is still allocated (pool empty). That's the
+        // C1 invariant: don't release until the Nomad side
+        // confirms the job is gone.
+        let immediate = pool.lock().unwrap().alloc();
+        assert!(
+            immediate.is_err(),
+            "CreateGuard released vm_index BEFORE the Nomad purge \
+             completed — that's the exact race C1 is guarding against"
+        );
+    }
+
     #[test]
     fn vm_alloc_release_is_idempotent() {
         // M8: releasing an index that's already in `freed` should
@@ -1919,6 +2130,53 @@ mod tests {
         // additions).
         let v = vec![alloc("future-status-we-dont-know")];
         assert!(!allocs_all_terminal(Some(&v)));
+    }
+
+    // ─── C3: HTTP error tracked in poll-loop timeout messages ──
+    //
+    // Without these the timeout message lies: a Nomad-unreachable
+    // outage produces the same "alloc never reached running …
+    // last status=<no allocs>" message as a real scheduling
+    // problem, collapsing two completely different triage paths
+    // into one. The fix tracks `last_http_err` distinctly and
+    // appends it to the timeout text.
+
+    #[compio::test]
+    async fn wait_for_alloc_running_surfaces_unreachability() {
+        // 127.0.0.1:1 is reserved/unbound on standard hosts → ureq
+        // returns a transport error within the per-call 5s budget.
+        // Use a tiny outer timeout so the test finishes fast.
+        let err = wait_for_alloc_running(
+            "http://127.0.0.1:1",
+            "zsbx-c3-test",
+            Duration::from_millis(400),
+        )
+        .await
+        .expect_err("must time out");
+        // The error MUST mention reachability so an operator
+        // doesn't go hunting for an alloc-scheduling bug when the
+        // real problem is that Nomad is down.
+        assert!(
+            err.contains("reachability") || err.contains("HTTP error"),
+            "C3 regression: timeout error did not surface HTTP \
+             reachability hint; got {err:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn wait_for_job_gone_surfaces_unreachability() {
+        let err = wait_for_job_gone(
+            "http://127.0.0.1:1",
+            "zsbx-c3-jg-test",
+            Duration::from_millis(400),
+        )
+        .await
+        .expect_err("must time out");
+        assert!(
+            err.contains("reachability") || err.contains("HTTP error"),
+            "C3 regression: wait_for_job_gone timeout error did not \
+             surface HTTP reachability hint; got {err:?}"
+        );
     }
 
     // ─── State-map collision (C1) ────────────────────────────
