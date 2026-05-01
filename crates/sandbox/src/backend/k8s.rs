@@ -1229,11 +1229,19 @@ fn random_nonce() -> Result<String, String> {
     Ok(bytes.iter().take(16).map(|b| format!("{b:02x}")).collect())
 }
 
+/// Wall-clock seconds since UNIX_EPOCH.
+///
+/// Crash-loud on clock-before-epoch instead of silently returning 0:
+/// the silent fallback would put signed-RPC timestamps 56 years in
+/// the past (agent 401s forever), make the idle reaper cull every
+/// sandbox immediately, and lie in the UI's "created_at" field.
+/// Better to panic and let orchestration surface the broken host
+/// clock. Mirrors `nomad_ch.rs::unix_now` and `sandbox-agent::sig::unix_now`.
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .expect("system clock before UNIX_EPOCH")
+        .as_secs()
 }
 
 /// Sanitize a request-supplied relative path before forwarding to

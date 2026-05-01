@@ -1535,11 +1535,22 @@ fn random_nonce() -> Result<String, String> {
     Ok(bytes.iter().take(16).map(|b| format!("{b:02x}")).collect())
 }
 
+/// Wall-clock seconds since UNIX_EPOCH.
+///
+/// Crash-loud on clock-before-epoch instead of silently falling back
+/// to 0 — a `ts=0` would put every signed RPC's timestamp 56 years
+/// in the past, the agent's 5-second skew window would 401
+/// permanently, the idle reaper would believe every sandbox was
+/// born at the dawn of UNIX and cull them all, and operators would
+/// be staring at a UI that says "your sandbox was last used 56
+/// years ago." The right behaviour for a clock that's gone backwards
+/// to before 1970 is to panic and let the orchestrator surface the
+/// problem; the silent-zero fallback hides catastrophic state.
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .expect("system clock before UNIX_EPOCH")
+        .as_secs()
 }
 
 /// Pre-validate request paths before forwarding to the agent. The
