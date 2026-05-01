@@ -177,6 +177,16 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
     let idx = index as i32;
     let ident = type_ident(ty);
 
+    // v8::Local<v8::Value> (or any v8::Local<v8::T>) — pass the raw
+    // arg through unchanged. Lets handlers accept union types
+    // (Request body, Headers init, etc.) and dispatch on the V8
+    // value's actual shape themselves.
+    if ident.as_deref() == Some("Local") {
+        return quote! {
+            let #name = args.get(#idx);
+        };
+    }
+
     // Vec<u8> → read from ArrayBufferView backing store (zero-serialization binary transfer)
     if is_vec_u8(ty) {
         return quote! {
@@ -317,8 +327,8 @@ fn gen_throw_error() -> TokenStream2 {
     quote! {
         let __msg = v8::String::new(scope, &__err.message).unwrap();
         let __exc = match __err.kind {
-            crate::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-            crate::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+            ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
+            ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
             _ => v8::Exception::error(scope, __msg),
         };
         scope.throw_exception(__exc);

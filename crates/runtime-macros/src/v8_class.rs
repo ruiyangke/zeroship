@@ -7,13 +7,31 @@
 //! plus per-method callbacks.
 //!
 //! Instance state lives in the V8 object's internal field (slot 0): a
-//! `Box<Self>` is leaked into the slot at construction and dropped via
-//! a finalizer when V8 GCs the object.
+//! `Box<Self>` is stored as `External` and reclaimed via a guaranteed
+//! V8 weak-finalizer when the wrapper is GC'd.
 //!
 //! Reuses `gen_extract` + `gen_call_return` from the parent crate for
 //! argument and return marshaling, so the supported types match
 //! `#[zeroship_op]` (String, bool, u32, i32, f64, Vec<u8>, Option<T>,
-//! Result<T, OpError>).
+//! Result<T, OpError>, plus `v8::Local<v8::Value>` passthrough for
+//! union-typed args).
+//!
+//! ## Known gaps (deferred until a real consumer needs them)
+//!
+//! - **Async methods.** `async fn foo(&self, ...) -> T` would need to
+//!   spawn the future via SharedState and return a Promise. The
+//!   existing `#[zeroship_op(async)]` does this for free functions;
+//!   port that pattern when fetch grows methods that await.
+//! - **Inheritance.** No `#[v8_inherit(BaseClass)]` yet — needed for
+//!   the `EventTarget` chain (WebSocket / EventSource extend it).
+//!   `FunctionTemplate::inherit` is the underlying primitive.
+//! - **Same-name getter+setter pairing.** Defining `#[v8_getter]
+//!   value(&self)` and `#[v8_setter] value(&mut self, v)` at once is
+//!   illegal in Rust (duplicate method names) and the install code
+//!   calls `set_accessor_property` separately for each, which V8
+//!   rejects. Fix needs a `#[v8_name = "value"]` rename plus pairing
+//!   in install codegen. Body's `body`/`bodyUsed` are read-only so
+//!   not blocking fetch.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -409,8 +427,8 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
                 Err(__err) => {
                     let __msg = v8::String::new(scope, &__err.message).unwrap();
                     let __exc = match __err.kind {
-                        crate::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-                        crate::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+                        ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
+                        ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
                         _ => v8::Exception::error(scope, __msg),
                     };
                     scope.throw_exception(__exc);
@@ -424,6 +442,8 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
         }
     };
 
+    let store = gen_box_and_install_finalizer(class_ty);
+
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
         pub(crate) fn #callback_ident(
@@ -436,20 +456,14 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
             #(#extractions)*
             #make_instance
 
-            // Box and leak the instance, store the raw pointer as
-            // External in internal field 0. `__class_finalizer`
-            // (registered when the global is installed) runs on V8 GC
-            // and reclaims the Box.
-            let __boxed = Box::new(__instance);
-            let __raw = Box::into_raw(__boxed);
-            let __ext = v8::External::new(scope, __raw as *mut std::ffi::c_void);
-            __this.set_internal_field(0, __ext.into());
+            #store
         }
     }
 }
 
 fn gen_default_constructor_callback(class_ty: &syn::Ident) -> TokenStream2 {
     let callback_ident = format_ident!("__{}_constructor_callback", class_ty);
+    let store = gen_box_and_install_finalizer(class_ty);
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -459,13 +473,48 @@ fn gen_default_constructor_callback(class_ty: &syn::Ident) -> TokenStream2 {
             _rv: v8::ReturnValue,
         ) {
             let __this = args.this();
-            // Default-construct via Default trait.
             let __instance: #class_ty = <#class_ty as ::core::default::Default>::default();
-            let __boxed = Box::new(__instance);
-            let __raw = Box::into_raw(__boxed);
-            let __ext = v8::External::new(scope, __raw as *mut std::ffi::c_void);
-            __this.set_internal_field(0, __ext.into());
+
+            #store
         }
+    }
+}
+
+/// Box the instance, store the raw pointer in internal field 0, and
+/// register a guaranteed finalizer on the JS wrapper to reclaim the
+/// Box when V8 GCs the object.
+///
+/// The pointer is captured as `usize` in the closure so we don't have
+/// to assert `Send` on a `*mut Self`; we cast back inside the closure
+/// where the type is statically known. The Weak handle is forgotten
+/// (via `mem::forget`) because dropping it would deregister the
+/// finalizer — `with_guaranteed_finalizer` ensures the closure runs
+/// on GC or isolate teardown regardless.
+fn gen_box_and_install_finalizer(class_ty: &syn::Ident) -> TokenStream2 {
+    quote! {
+        let __boxed = Box::new(__instance);
+        let __raw_ptr = Box::into_raw(__boxed);
+        let __raw_addr = __raw_ptr as usize;
+
+        let __ext = v8::External::new(scope, __raw_ptr as *mut ::std::ffi::c_void);
+        __this.set_internal_field(0, __ext.into());
+
+        // SAFETY: __raw_addr was Box::into_raw'd from Box<#class_ty>;
+        // the finalizer closure casts back to the same type and drops
+        // the Box exactly once when V8 reclaims the JS wrapper.
+        let __weak = v8::Weak::with_guaranteed_finalizer(
+            scope,
+            __this,
+            Box::new(move || {
+                unsafe {
+                    drop(Box::from_raw(__raw_addr as *mut #class_ty));
+                }
+            }),
+        );
+        // Dropping the Weak removes the finalizer. The "guaranteed"
+        // variant fires on GC or isolate teardown anyway, so we leak
+        // the per-instance WeakData (~32 bytes) to keep the registration.
+        ::std::mem::forget(__weak);
     }
 }
 
