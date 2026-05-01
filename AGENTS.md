@@ -204,6 +204,12 @@ cargo test -p zeroship-gateway
 cargo test -p zeroship-runtime --lib
 cargo test -p compio-postgres -- --test-threads=1   # needs DB
 
+# Web Platform Tests (WPT) — vendored as a sparse, shallow git submodule
+# at tests/wpt for spec-conformance runners (Headers, encoding, streams,
+# fetch, compression). After cloning the repo:
+git submodule update --init --depth=1
+./tests/setup-wpt.sh                                # ~9MB sparse checkout
+
 # E2E + benchmarks
 ./tests/e2e_platform.sh
 ./tests/bench_platform.sh
