@@ -25,7 +25,14 @@ import { Receipt } from "./Receipt";
 import { DiffCard } from "./DiffCard";
 import { SurveyCard } from "./SurveyCard";
 import { BriefCard } from "./BriefCard";
-import type { Brief, Diff, Survey, SurveyResponse } from "../../types/chat";
+import { CriticRoundCard } from "./CriticRoundCard";
+import type {
+  Brief,
+  CriticRound,
+  Diff,
+  Survey,
+  SurveyResponse,
+} from "../../types/chat";
 
 export interface ChatMessagesProps {
   messages: UIMessage[];
@@ -231,6 +238,19 @@ function renderAssistantParts(
       continue;
     }
 
+    if (type === "data-critic-round") {
+      // Builder dispatches Critic via task("critic", …) after a write
+      // batch. Middleware extracts the structured response and emits
+      // this chunk; we render a small badge per round.
+      const round = (part as { data?: CriticRound }).data;
+      if (round && typeof round.round === "number") {
+        out.push(
+          <CriticRoundCard key={`critic-${out.length}`} round={round} />,
+        );
+      }
+      continue;
+    }
+
     if (type === "data-brief") {
       // Wizard-only terminal chunk. Defensive: only render if onBeginBrief
       // is wired — Builder surfaces (which never see data-brief) shouldn't
@@ -251,7 +271,6 @@ function renderAssistantParts(
       continue;
     }
 
-    // data-critic-round will land here in Phase B.3+.
   }
 
   return out.length > 0 ? <>{out}</> : null;
