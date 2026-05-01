@@ -187,12 +187,15 @@ const TESTHARNESS_SHIM: &str = r#"
     fail(msg || "unreached");
   };
 
-  // resources/sab.js export — we don't ship SharedArrayBuffer.
+  // resources/sab.js export. SharedArrayBuffer is an ECMAScript
+  // built-in shipped by V8 since ES2017 — no extra setup needed at
+  // the runtime layer; the global is already there. Without
+  // Workers it's behaviorally identical to ArrayBuffer (no other
+  // agent to share with), but the class itself, BufferSource union
+  // membership, and the [AllowShared] IDL attribute all work.
   globalThis.createBuffer = function (kind, length) {
     if (kind === "SharedArrayBuffer") {
-      const e = new Error("SharedArrayBuffer not supported");
-      e.__wpt_skip = true;
-      throw e;
+      return new SharedArrayBuffer(length);
     }
     return new ArrayBuffer(length);
   };
@@ -216,11 +219,11 @@ struct TestResult {
     outcome: Outcome,
 }
 
-/// We don't ship SharedArrayBuffer. Tests whose names include
-/// "SharedArrayBuffer" / "shared" parameterizations are reported as
-/// SKIP rather than FAIL. Everything else runs.
-fn should_skip_by_name(name: &str) -> bool {
-    name.to_lowercase().contains("shared")
+/// All WPT encoding tests run against our impl. Empty by default;
+/// kept as a hook for future selective skips if a specific
+/// parameterization needs one.
+fn should_skip_by_name(_name: &str) -> bool {
+    false
 }
 
 // ---------------------------------------------------------------------------
