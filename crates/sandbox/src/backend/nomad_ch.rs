@@ -943,6 +943,11 @@ async fn stop_nomad_job(
 
 /// Poll the job's allocations until at least one has
 /// `ClientStatus == "running"`, or the deadline expires.
+///
+/// JSON parse errors are tracked + log-rate-limited (~once per 5s)
+/// and surfaced in the timeout message, so an HTML proxy interstitial
+/// or a 200-with-garbage from a misconfigured Nomad doesn't disappear
+/// into a silent retry loop.
 async fn wait_for_alloc_running(
     nomad_addr: &str,
     job_id: &str,
@@ -951,12 +956,34 @@ async fn wait_for_alloc_running(
     let deadline = Instant::now() + timeout;
     let url = format!("{nomad_addr}/v1/job/{job_id}/allocations");
     let mut last_status: Option<String> = None;
+    let mut last_parse_err: Option<String> = None;
+    let mut last_parse_log_at: Option<Instant> = None;
     while Instant::now() < deadline {
         let resp = http_get_unsigned(&url, Duration::from_secs(5)).await;
         if let Ok(r) = resp {
             if r.status == 200 {
-                let allocs: serde_json::Value =
-                    serde_json::from_str(&r.body).unwrap_or(serde_json::Value::Null);
+                let allocs = match serde_json::from_str::<serde_json::Value>(&r.body) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let msg = format!("{e}");
+                        // Rate-limit the eprintln so a sustained
+                        // garbage stream doesn't flood the log.
+                        let now = Instant::now();
+                        let stale = last_parse_log_at
+                            .map(|t| now.duration_since(t) > Duration::from_secs(5))
+                            .unwrap_or(true);
+                        if stale {
+                            eprintln!(
+                                "[sandbox/nomad-ch] alloc poll: JSON parse \
+                                 error (will retry): {msg}"
+                            );
+                            last_parse_log_at = Some(now);
+                        }
+                        last_parse_err = Some(msg);
+                        compio::time::sleep(Duration::from_millis(250)).await;
+                        continue;
+                    }
+                };
                 let mut latest: Option<String> = None;
                 for a in allocs.as_array().into_iter().flatten() {
                     let cs = a["ClientStatus"].as_str().unwrap_or("").to_string();
@@ -982,15 +1009,20 @@ async fn wait_for_alloc_running(
         }
         compio::time::sleep(Duration::from_millis(250)).await;
     }
-    Err(format!(
+    let mut msg = format!(
         "nomad alloc never reached running for job {job_id} (last status={:?})",
         last_status.unwrap_or_else(|| "<no allocs>".to_string())
-    ))
+    );
+    if let Some(e) = last_parse_err {
+        msg.push_str(&format!("; last parse error: {e}"));
+    }
+    Err(msg)
 }
 
 /// Block until `GET /v1/job/<id>` returns 404 (or the job is in a
 /// terminal Status like `dead` with `Stop=true`). Bounded; surfaces
-/// the Nomad status on timeout so operators can investigate.
+/// the Nomad status (and any sustained JSON parse errors) on timeout
+/// so operators can investigate.
 async fn wait_for_job_gone(
     nomad_addr: &str,
     job_id: &str,
@@ -998,27 +1030,51 @@ async fn wait_for_job_gone(
 ) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
     let url = format!("{nomad_addr}/v1/job/{job_id}");
+    let mut last_parse_err: Option<String> = None;
+    let mut last_parse_log_at: Option<Instant> = None;
     while Instant::now() < deadline {
         let resp = http_get_unsigned(&url, Duration::from_secs(5)).await;
         match resp {
             Ok(r) if r.status == 404 => return Ok(()),
             Ok(r) if r.status == 200 => {
-                let v: serde_json::Value =
-                    serde_json::from_str(&r.body).unwrap_or(serde_json::Value::Null);
-                let status = v["Status"].as_str().unwrap_or("");
-                let stop = v["Stop"].as_bool().unwrap_or(false);
-                if status == "dead" && stop {
-                    // After purge=true, Nomad GC takes a beat to
-                    // remove the record entirely — but the job is
-                    // already terminated; vm_index is safe to release.
-                    return Ok(());
+                match serde_json::from_str::<serde_json::Value>(&r.body) {
+                    Ok(v) => {
+                        let status = v["Status"].as_str().unwrap_or("");
+                        let stop = v["Stop"].as_bool().unwrap_or(false);
+                        if status == "dead" && stop {
+                            // After purge=true, Nomad GC takes a beat
+                            // to remove the record entirely — but the
+                            // job is already terminated; vm_index is
+                            // safe to release.
+                            return Ok(());
+                        }
+                    }
+                    Err(e) => {
+                        let msg = format!("{e}");
+                        let now = Instant::now();
+                        let stale = last_parse_log_at
+                            .map(|t| now.duration_since(t) > Duration::from_secs(5))
+                            .unwrap_or(true);
+                        if stale {
+                            eprintln!(
+                                "[sandbox/nomad-ch] job-gone poll: JSON parse \
+                                 error (will retry): {msg}"
+                            );
+                            last_parse_log_at = Some(now);
+                        }
+                        last_parse_err = Some(msg);
+                    }
                 }
             }
             _ => {}
         }
         compio::time::sleep(Duration::from_millis(250)).await;
     }
-    Err(format!("job {job_id} did not disappear within timeout"))
+    let mut msg = format!("job {job_id} did not disappear within timeout");
+    if let Some(e) = last_parse_err {
+        msg.push_str(&format!("; last parse error: {e}"));
+    }
+    Err(msg)
 }
 
 // ─── Generic HTTP (unsigned — Nomad API) ─────────────────────────
