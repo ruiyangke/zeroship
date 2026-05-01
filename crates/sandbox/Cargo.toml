@@ -37,6 +37,12 @@ base64 = { workspace = true }
 # inside `compio::runtime::spawn_blocking` so the ntex runtime
 # never blocks on it.
 ureq = { version = "2", default-features = false, features = ["json"] }
+# `futures::FutureExt::catch_unwind` for the detached-cleanup task
+# instrumentation (M3) — local re-implementation of the runtime
+# crate's `panic_util::guard` helper, kept inside this crate so we
+# don't take a heavy crate-graph edge on `zeroship-runtime` just for
+# panic logging.
+futures = { workspace = true }
 
 [dev-dependencies]
 ureq = { version = "2", default-features = false, features = ["json"] }

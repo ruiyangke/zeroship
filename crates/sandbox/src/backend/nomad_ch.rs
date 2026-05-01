@@ -62,14 +62,28 @@
 //!
 //! ## Cleanup contract
 //!
-//! - `create` is wrapped in a `CreateGuard` (RAII Drop) that tears
-//!   down the partial state — Nomad job, host_dir, vm_index — on any
-//!   failure mid-flight.
+//! - `create` is wrapped in a `CreateGuard` whose Drop spawns a
+//!   detached compio task that tears down partial state. The task:
+//!   (a) purges the Nomad job, (b) on confirmed-purge releases the
+//!   vm_index back to the pool, (c) on confirmed-purge `rm -rf`s the
+//!   host_dir. **The vm_index is intentionally NOT released until
+//!   the Nomad purge confirms** — releasing it earlier risks a
+//!   retry-`create` for the same user grabbing the same index and
+//!   racing the still-alive prior wrapper for `tap=zsbx-nm-<idx>`.
+//!   Same policy as the `stop` path: "release on confirmed purge;
+//!   leak otherwise; orphan-prune mops up later."
+//! - On controller crash or runtime-shutdown the cleanup task may
+//!   not run; any leaked Nomad jobs persist until
+//!   [`NomadCHBackend::cleanup_orphans_at_startup`] reclaims them at
+//!   next boot. **That cleanup defaults OFF and is opt-in via
+//!   `SANDBOX_NOMAD_CH_STARTUP_ORPHAN_CLEANUP=true`** — single-
+//!   replica operators should turn it on. host_dir cleanup is best-
+//!   effort.
 //! - `stop` is idempotent (returns Ok if the sandbox isn't in the
 //!   in-memory map). The Nomad job is purged, vm_index returned to
-//!   the pool, and the per-sandbox host_dir is `rm -rf`'d. The
-//!   per-user home dir is **never** deleted by `stop` — it's user-
-//!   scoped state.
+//!   the pool **only on confirmed purge** (else leaked), and the
+//!   per-sandbox host_dir is `rm -rf`'d. The per-user home dir is
+//!   **never** deleted by `stop` — it's user-scoped state.
 //!
 //! ## Note on rootfs init.sh
 //!
@@ -851,6 +865,18 @@ impl Drop for ReleaseCreating {
 /// I/O off to a detached compio task: it owns its own data, runs
 /// best-effort, and the worker thread is freed immediately.
 ///
+/// **vm_index ordering (C1).** The vm_index is released ONLY after
+/// the Nomad purge HTTP call confirms (status 200/404). Mirrors the
+/// `stop` path's policy: a follow-up `create` for the same user
+/// could otherwise reuse the index and race the still-alive prior
+/// `raw_exec` wrapper for `tap=zsbx-nm-<idx>`. Up to ~10s elapse
+/// between "Drop fires" and "purge confirms"; releasing the index
+/// inline (as a previous revision did) reopened the same window the
+/// `stop`-path I1 fix was guarding against. On purge failure (5xx,
+/// timeout) the index is leaked; `cleanup_orphans_at_startup` (or
+/// the next-boot orphan prune) reclaims it indirectly by deleting
+/// the surviving job.
+///
 /// **Limitation:** if the runtime is already shutting down (process
 /// exit, panic in main), `compio::runtime::spawn` may panic — we
 /// catch that so a tearing-down process doesn't abort, and rely on
@@ -897,32 +923,28 @@ impl Drop for CreateGuard {
         if !self.armed {
             return;
         }
-        // Step 3 (vm_index release) is cheap + sync — finish it on
-        // this thread so the index is back in the pool before any
-        // observer might re-allocate. Use the same poison-recovery
-        // pattern as the rest of the file (unwrap_or_else into_inner)
-        // so a poisoned mutex doesn't fail the cleanup tail.
-        if let Some(i) = self.vm_index.take() {
-            self.vm_indices
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .release(i);
-        }
-
-        // Steps 1 + 2 (Nomad purge + host_dir rm -rf) are blocking
-        // I/O. Detach them to a fire-and-forget compio task so this
-        // Drop never blocks the worker thread. See the type-level
-        // doc-comment for the runtime-shutdown caveat.
+        // Move ALL cleanup state into the detached task. The
+        // vm_index release is intentionally part of the detached
+        // task too — see the C1 note on the type. Releasing the
+        // index inline (before the Nomad purge confirms) is a race
+        // window: a retry-`create` for the same user could grab the
+        // same index and bind a tap device the still-alive prior
+        // wrapper is using.
         let job_submitted = self.job_submitted;
         let nomad_addr = std::mem::take(&mut self.nomad_addr);
         let job_id = std::mem::take(&mut self.job_id);
         let host_dir_created = self.host_dir_created;
         let host_dir = std::mem::take(&mut self.host_dir);
+        let vm_indices = self.vm_indices.clone();
+        let vm_index_opt = self.vm_index.take();
 
-        // Capture for the log line in the no-runtime branch — we just
-        // moved the originals into the task closure.
-        let job_id_log = job_id.clone();
-        let host_dir_log = host_dir.clone();
+        // Captures for the runtime-down (no-spawn) fallback branch
+        // below. The clones inside the spawn closure are separate
+        // from these — the closure may run on another thread and
+        // may run after this `drop` returns.
+        let job_id_for_fallback = job_id.clone();
+        let host_dir_for_fallback = host_dir.clone();
+        let vm_indices_for_fallback = vm_indices.clone();
 
         // `compio::runtime::spawn` panics if there is no current
         // runtime (e.g., this Drop fires during process teardown
@@ -932,36 +954,162 @@ impl Drop for CreateGuard {
         // periodic prune) covers leaked Nomad jobs on next boot.
         let spawn_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             compio::runtime::spawn(async move {
-                if job_submitted {
-                    let url = format!("{nomad_addr}/v1/job/{job_id}?purge=true");
-                    if let Err(e) =
-                        http_delete_unsigned(&url, Duration::from_secs(10)).await
-                    {
+                // Local equivalent of the runtime crate's
+                // `panic_util::guard` (which is pub(crate) to
+                // `zeroship-runtime` and not reachable from here
+                // without taking a heavy crate-graph edge). Wraps
+                // the body in `catch_unwind` so a panic inside the
+                // detached task doesn't get swallowed silently.
+                guard_detached("nomad_ch_create_guard_cleanup", async move {
+                    // 1. Nomad purge — gates the vm_index release.
+                    let purge_ok = if job_submitted {
+                        let url =
+                            format!("{nomad_addr}/v1/job/{job_id}?purge=true");
+                        match http_delete_unsigned(&url, Duration::from_secs(10))
+                            .await
+                        {
+                            Ok(r) if r.status == 200 || r.status == 404 => true,
+                            Ok(r) => {
+                                eprintln!(
+                                    "[sandbox/nomad-ch] guard cleanup: purge \
+                                     {job_id} non-2xx status={} body={} \
+                                     (best-effort; vm_index will be leaked)",
+                                    r.status,
+                                    r.body.trim()
+                                );
+                                false
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[sandbox/nomad-ch] guard cleanup: purge \
+                                     {job_id} failed: {e} (best-effort; \
+                                     vm_index will be leaked)"
+                                );
+                                false
+                            }
+                        }
+                    } else {
+                        // Job was never submitted, so there's
+                        // nothing on the Nomad side to race; the
+                        // vm_index is safe to release immediately.
+                        true
+                    };
+
+                    // 2. vm_index release — only on confirmed purge.
+                    //    Same policy as the `stop` path (lines
+                    //    644-649 of the file's stable doc-comment).
+                    if purge_ok {
+                        if let Some(i) = vm_index_opt {
+                            vm_indices
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .release(i);
+                        }
+                    } else if let Some(i) = vm_index_opt {
                         eprintln!(
-                            "[sandbox/nomad-ch] guard cleanup: purge {job_id} \
-                             failed (best-effort): {e}"
+                            "[sandbox/nomad-ch] guard cleanup: leaking \
+                             vm_index={i} for job {job_id} (Nomad purge \
+                             not confirmed; orphan-prune will reclaim on \
+                             next boot)"
                         );
                     }
-                }
-                if host_dir_created && host_dir.exists() {
-                    if let Err(e) = std::fs::remove_dir_all(&host_dir) {
+
+                    // 3. host_dir rm -rf — wrapped in spawn_blocking
+                    //    because std::fs::remove_dir_all on an
+                    //    active workspace tree (think 100k+
+                    //    node_modules inodes) is uncomfortable on
+                    //    the compio worker; at 50 concurrent
+                    //    CreateGuard drops it would serialize
+                    //    against every other compio task. Skip on
+                    //    purge-failure for the same reason `stop`
+                    //    skips: virtiofsd may still hold the share
+                    //    open, and pulling the dir from under it
+                    //    just produces confusing logs.
+                    if purge_ok && host_dir_created {
+                        let host_dir_clone = host_dir.clone();
+                        let blocking = compio::runtime::spawn_blocking(move || {
+                            if host_dir_clone.exists() {
+                                std::fs::remove_dir_all(&host_dir_clone)
+                                    .map_err(|e| {
+                                        format!(
+                                            "rm -rf {}: {e}",
+                                            host_dir_clone.display()
+                                        )
+                                    })
+                            } else {
+                                Ok(())
+                            }
+                        })
+                        .await;
+                        match blocking {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => eprintln!(
+                                "[sandbox/nomad-ch] guard cleanup: {e} \
+                                 (best-effort)"
+                            ),
+                            Err(e) => eprintln!(
+                                "[sandbox/nomad-ch] guard cleanup: \
+                                 host_dir spawn_blocking panic: {e:?}"
+                            ),
+                        }
+                    } else if !purge_ok && host_dir_created {
                         eprintln!(
-                            "[sandbox/nomad-ch] guard cleanup: rm -rf {} \
-                             failed (best-effort): {e}",
+                            "[sandbox/nomad-ch] guard cleanup: leaking \
+                             host_dir {} (Nomad purge not confirmed)",
                             host_dir.display()
                         );
                     }
-                }
+                })
+                .await;
             })
             .detach();
         }));
         if spawn_res.is_err() {
+            // Best-effort sync vm_index reclaim on the runtime-down
+            // path. There's no Nomad call to gate against here —
+            // the runtime is gone, the controller is shutting down,
+            // there can't be a concurrent retry-`create` racing us.
+            if let Some(i) = vm_index_opt {
+                vm_indices_for_fallback
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .release(i);
+            }
             eprintln!(
                 "[sandbox/nomad-ch] guard cleanup: compio::spawn failed (no \
-                 current runtime?); job {job_id_log} and dir {} left for \
-                 next-boot orphan prune",
-                host_dir_log.display(),
+                 current runtime?); job {job_id_for_fallback} and dir {} left \
+                 for next-boot orphan prune",
+                host_dir_for_fallback.display(),
             );
+        }
+    }
+}
+
+/// Local equivalent of `zeroship-runtime`'s `panic_util::guard` —
+/// runs `fut` under `catch_unwind` so a panic inside a `.detach()`-ed
+/// compio task gets a stderr log line instead of being silently
+/// swallowed. The runtime crate's helper is `pub(crate)` to that
+/// crate; rather than expose it cross-crate (which would force
+/// `zeroship-sandbox` to take an edge on `zeroship-runtime` for one
+/// helper) we keep a tiny local copy here.
+async fn guard_detached<F, T>(site: &'static str, fut: F) -> Option<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    use futures::FutureExt as _;
+    use std::panic::AssertUnwindSafe;
+    match AssertUnwindSafe(fut).catch_unwind().await {
+        Ok(v) => Some(v),
+        Err(p) => {
+            let msg = p
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "<non-string panic>".to_string());
+            eprintln!(
+                "[sandbox/nomad-ch] panic in detached task ({site}): {msg}"
+            );
+            None
         }
     }
 }
