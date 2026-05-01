@@ -1730,16 +1730,16 @@ pub fn install_headers(scope: &mut v8::PinScope) {
 }
 
 /// Install native DOM primitives (EventTarget, Event, AbortController,
-/// AbortSignal) on `globalThis`. Gated by `ZEROSHIP_NATIVE_FETCH=1`
-/// per design landing-1 cadence (D-23). When the env var is set, the
-/// native classes shadow whatever fetch.js's polyfill installed
-/// earlier; when unset, this is a no-op and the polyfill remains in
-/// charge.
+/// AbortSignal, FormData) on `globalThis`. Gated by
+/// `ZEROSHIP_NATIVE_FETCH=1` per design landing-1 cadence (D-23). When
+/// the env var is set, the native classes shadow whatever the JS
+/// polyfills (fetch.js / formdata.js) installed earlier; when unset,
+/// this is a no-op and the polyfills remain in charge.
 ///
-/// Called AFTER fetch.js runs so the polyfill's unconditional
-/// `globalThis.AbortController = AbortController` doesn't overwrite
-/// our native install. (The polyfill does no `if (!exists)` guard
-/// for these classes.) See `embed/fetch.js:644-649`.
+/// Called AFTER fetch.js / formdata.js run so the polyfills'
+/// unconditional `globalThis.X = X` assignments don't overwrite our
+/// native install. (The polyfills do no `if (!exists)` guard.)
+/// See `embed/fetch.js:644-649` and `embed/formdata.js`.
 pub fn install_dom(scope: &mut v8::PinScope) {
     if std::env::var_os("ZEROSHIP_NATIVE_FETCH").is_none() {
         return;

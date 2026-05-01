@@ -34,9 +34,13 @@ pub mod abort_controller;
 pub mod abort_signal;
 pub mod event;
 pub mod event_target;
+pub mod form_data;
 
 /// Install the DOM primitives on `globalThis` in the spec-mandated
-/// order: EventTarget → Event → AbortSignal → AbortController.
+/// order: EventTarget → Event → AbortSignal → AbortController →
+/// FormData. FormData is order-independent (no inheritance, no
+/// dependency on the others) but lives here because it's a
+/// DOM-adjacent primitive shared by fetch and XHR.
 pub fn install_globals<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     global: v8::Local<v8::Object>,
@@ -45,6 +49,7 @@ pub fn install_globals<'s>(
     install_class(scope, global, "Event", event::Event::install);
     abort_signal::install_global(scope, global);
     abort_controller::install_global(scope, global);
+    form_data::install_global(scope, global);
 }
 
 fn install_class<'s>(
