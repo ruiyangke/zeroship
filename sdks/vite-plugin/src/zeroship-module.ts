@@ -22,21 +22,6 @@ import type { Plugin } from "vite";
 const VIRTUAL_ID = "zeroship";
 const RESOLVED_ID = "\0virtual:zeroship-runtime";
 
-// @zeroship/server is the npm package that provides server-side SDK hooks
-// (useQuery, useStream, etc.). It may not yet be installed. We intercept the
-// import and provide a stub that returns an empty hook set so the static
-// `import` injected by the SSR transform doesn't fail the module load.
-const ZS_SERVER_VIRTUAL_ID = "@zeroship/server";
-const ZS_SERVER_RESOLVED_ID = "\0virtual:zeroship-server-stub";
-const ZS_SERVER_STUB = `
-// Stub for @zeroship/server — injected by @zeroship/vite-plugin when the
-// real package is not installed. Provides a no-op __makeServerProcedure
-// so SSR transforms can import it safely.
-export function __makeServerProcedure(fn, meta) {
-  return {};
-}
-`;
-
 const MODULE_CODE = `
 // Virtual "zeroship" module — injected by @zeroship/vite-plugin when the
 // user imports "zeroship" from server code. Mirrors the kernel's own
@@ -78,21 +63,12 @@ export function zeroshipModulePlugin(): Plugin {
       if (id === VIRTUAL_ID) {
         return RESOLVED_ID;
       }
-      // Provide a stub for @zeroship/server when the real package isn't
-      // installed. The SSR transform emits a static `import` of this module
-      // so the module MUST resolve or the load fails before __register runs.
-      if (id === ZS_SERVER_VIRTUAL_ID) {
-        return ZS_SERVER_RESOLVED_ID;
-      }
       return null;
     },
 
     load(id: string) {
       if (id === RESOLVED_ID) {
         return MODULE_CODE;
-      }
-      if (id === ZS_SERVER_RESOLVED_ID) {
-        return ZS_SERVER_STUB;
       }
       return null;
     },
