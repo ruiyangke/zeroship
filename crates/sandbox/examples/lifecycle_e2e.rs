@@ -1,0 +1,258 @@
+//! End-to-end lifecycle test for `zeroship-sandbox` against the
+//! **k8s + libkrun** backend.
+//!
+//! What this exercises (in order):
+//!
+//!   1. **probe** — backend reachable (kubectl works, namespace exists).
+//!   2. **create** — Pod + ConfigMap appear; agent /readyz returns 200.
+//!   3. **exec** — `uname -r` proves we hit the libkrun kernel.
+//!   4. **write_file** + **read_file** roundtrip via the agent.
+//!   5. **file_tree** — the file we just wrote is listed.
+//!   6. **delete_file** — and then 404 on read.
+//!   7. **re-attach** — calling create again with the same project_id
+//!      yields the existing session (registry dedup).
+//!   8. **stop** — Pod + ConfigMap deleted; subsequent ops 404.
+//!
+//! Usage:
+//!     cargo run --release -p zeroship-sandbox --example lifecycle_e2e
+//!
+//! Pre-reqs: KUBECONFIG, the agent image preloaded into the cluster's
+//! containerd, RuntimeClass `kvm-sandbox` present. See
+//! `docs/runbooks/sandbox-agent.md`.
+
+#![allow(unsafe_code)]
+
+use std::env;
+use std::time::Instant;
+
+use uuid::Uuid;
+use zeroship_sandbox::backend::{Backend, SessionInfo};
+use zeroship_sandbox::config::SandboxConfig;
+use zeroship_sandbox::session::SessionRegistry;
+
+const G: &str = "\x1b[32m";
+const R: &str = "\x1b[31m";
+const Y: &str = "\x1b[33m";
+const Z: &str = "\x1b[0m";
+
+#[compio::main]
+async fn main() {
+    if let Err(e) = run().await {
+        eprintln!("{R}LIFECYCLE E2E FAILED: {e}{Z}");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<(), String> {
+    println!("{Y}== zeroship-sandbox lifecycle e2e (k8s + libkrun) =={Z}");
+
+    // 1. Build a config pointed at the k8s backend. Force port-forward
+    //    on (we're running on the host, not in-cluster).
+    set_default("SANDBOX_BACKEND", "k8s");
+    set_default("SANDBOX_K8S_USE_PORT_FORWARD", "true");
+    set_default("SANDBOX_K8S_NAMESPACE", "default");
+    let config = SandboxConfig::from_env().map_err(|e| format!("config: {e}"))?;
+    println!("backend:        {}", config.backend);
+    println!("namespace:      {}", config.k8s.namespace);
+    println!("agent image:    {}", config.k8s.image);
+    println!("port-forward:   {}", config.k8s.use_port_forward);
+    println!();
+
+    // 2. Build backend + registry directly (skip the HTTP layer for a
+    //    pure-Rust lifecycle test).
+    let backend = Backend::from_config(&config)?;
+    println!("{G}-- probe backend --{Z}");
+    let started = Instant::now();
+    backend.probe().await?;
+    println!("probe ok ({:?})", started.elapsed());
+
+    let registry = SessionRegistry::new();
+    let project_id = format!("e2e-{}", Uuid::new_v4().simple());
+    let result = run_lifecycle(&backend, &registry, &project_id).await;
+
+    // Always best-effort cleanup on the way out.
+    if let Some(id) = registry.find_by_project(&project_id) {
+        let _ = backend.stop(id).await;
+        let _ = registry.remove(&id);
+    }
+    result
+}
+
+async fn run_lifecycle(
+    backend: &Backend,
+    registry: &SessionRegistry,
+    project_id: &str,
+) -> Result<(), String> {
+    // ─── create ─────────────────────────────────────────────────
+    case("create session (Pod + ConfigMap + port-forward + agent ready)", async {
+        let session_id = Uuid::new_v4();
+        let info = backend.create(session_id, project_id).await?;
+        registry.insert(session_id, info.clone());
+        check_info(&info, "k8s")?;
+        if !info.backend_hint.contains("pod=") || !info.backend_hint.contains("key_fp=") {
+            return Err(format!("backend_hint missing pod/key_fp: {}", info.backend_hint));
+        }
+        println!("    {}", info.backend_hint);
+        Ok(())
+    }).await?;
+
+    let session_id = registry
+        .find_by_project(project_id)
+        .ok_or("session not in registry after create")?;
+
+    // ─── exec ──────────────────────────────────────────────────
+    case("exec uname -r — proves microVM kernel via signed /exec", async {
+        let out = backend.exec(session_id, "uname -r", None, Some(5_000)).await?;
+        if out.status != 0 {
+            return Err(format!("uname status={} stderr={}", out.status, out.stderr));
+        }
+        let kernel = out.stdout.trim();
+        if kernel.is_empty() {
+            return Err("empty kernel string".into());
+        }
+        println!("    pod kernel: {kernel}");
+        Ok(())
+    }).await?;
+
+    case("exec id -u — privilege drop landed (uid != 0)", async {
+        let out = backend.exec(session_id, "id -u", None, Some(5_000)).await?;
+        let uid = out.stdout.trim();
+        if uid == "0" {
+            return Err("/exec child still root — privilege drop bypassed".into());
+        }
+        println!("    pod uid: {uid}");
+        Ok(())
+    }).await?;
+
+    // ─── file CRUD ─────────────────────────────────────────────
+    case("write_file then read_file roundtrip", async {
+        backend.write_file(session_id, "hello.txt", b"world").await?;
+        let bytes = backend.read_file(session_id, "hello.txt").await?;
+        if bytes != b"world" {
+            return Err(format!("roundtrip mismatch: {:?}", String::from_utf8_lossy(&bytes)));
+        }
+        Ok(())
+    }).await?;
+
+    case("write_file with nested path creates parents", async {
+        backend.write_file(session_id, "src/server.ts", b"export {};").await?;
+        let bytes = backend.read_file(session_id, "src/server.ts").await?;
+        if bytes != b"export {};" {
+            return Err("nested write/read mismatch".into());
+        }
+        Ok(())
+    }).await?;
+
+    case("file_tree lists the files we wrote", async {
+        let entries = backend.file_tree(session_id).await?;
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        for required in ["hello.txt", "src/server.ts"] {
+            if !paths.contains(&required) {
+                return Err(format!("missing {required} in {paths:?}"));
+            }
+        }
+        Ok(())
+    }).await?;
+
+    case("delete_file then read_file → not found", async {
+        let removed = backend.delete_file(session_id, "hello.txt").await?;
+        if !removed {
+            return Err("delete reported not-found on a file that should exist".into());
+        }
+        let r = backend.read_file(session_id, "hello.txt").await;
+        match r {
+            Err(e) if e.contains("not found") || e.contains("No such file") => Ok(()),
+            Ok(_) => Err("file still readable after delete".into()),
+            Err(e) => Err(format!("unexpected error after delete: {e}")),
+        }
+    }).await?;
+
+    // ─── path traversal defense (handled by the agent's openat2) ─
+    case("write to ../etc/passwd is rejected", async {
+        match backend.write_file(session_id, "../etc/passwd", b"pwn").await {
+            Err(e) => {
+                println!("    rejected: {e}");
+                Ok(())
+            }
+            Ok(()) => Err("agent accepted a workspace-escaping write".into()),
+        }
+    }).await?;
+
+    // ─── re-attach ─────────────────────────────────────────────
+    case("create with same project_id reuses existing session", async {
+        // Simulate the registry-level dedup the HTTP handler does.
+        let existing = registry
+            .find_by_project(project_id)
+            .ok_or("session not in registry")?;
+        if existing != session_id {
+            return Err("registry forgot the session id between calls".into());
+        }
+        let info = registry.get(&existing).ok_or("session vanished")?;
+        if info.session_id != session_id.to_string() {
+            return Err("registry returned a different session_id".into());
+        }
+        Ok(())
+    }).await?;
+
+    // ─── stop ──────────────────────────────────────────────────
+    case("stop session — Pod + ConfigMap deleted, ops fail", async {
+        backend.stop(session_id).await?;
+        // A stopped session is gone from the backend; any op should
+        // surface an error.
+        match backend.exec(session_id, "true", None, Some(2000)).await {
+            Err(_) => Ok(()),
+            Ok(out) => Err(format!("post-stop exec succeeded: {out:?}")),
+        }
+    }).await?;
+
+    case("stop is idempotent (second call is Ok)", async {
+        backend.stop(session_id).await?;
+        Ok(())
+    }).await?;
+
+    println!();
+    println!("{G}== ALL LIFECYCLE STEPS PASSED =={Z}");
+    Ok(())
+}
+
+// ─── small reporting helpers ────────────────────────────────────
+
+fn check_info(info: &SessionInfo, expected_backend: &str) -> Result<(), String> {
+    if info.backend != expected_backend {
+        return Err(format!("backend={} expected {expected_backend}", info.backend));
+    }
+    if info.session_id.is_empty() || info.project_id.is_empty() {
+        return Err("blank session_id or project_id".into());
+    }
+    Ok(())
+}
+
+fn set_default(key: &str, value: &str) {
+    if env::var_os(key).is_none() {
+        // SAFETY: env mutation is process-global. Examples are
+        // single-threaded at this point (no other tasks racing).
+        unsafe {
+            env::set_var(key, value);
+        }
+    }
+}
+
+async fn case<F>(name: &str, f: F) -> Result<(), String>
+where
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    print!("  {name} ... ");
+    use std::io::Write;
+    std::io::stdout().flush().ok();
+    let started = Instant::now();
+    match f.await {
+        Ok(()) => {
+            println!("{G}OK{Z} ({:?})", started.elapsed());
+            Ok(())
+        }
+        Err(e) => {
+            println!("{R}FAIL{Z}");
+            Err(format!("{name}: {e}"))
+        }
+    }
+}

@@ -1,36 +1,20 @@
-//! `zeroship-sandbox` — Docker-backed dev containers for the AI builder.
+//! `zeroship-sandbox` — pluggable backends (docker, k8s) for AI builder
+//! sessions.
 //!
-//! Each editor session gets its own container with a persistent
-//! workspace bind-mounted in. The agent (running inside the editor
-//! app) calls this service over HTTP to read/write files and run
-//! shell commands inside the container.
+//! Each editor session gets its own runtime — a Docker container or a
+//! libkrun-microVM Pod, depending on `SANDBOX_BACKEND`. Files and
+//! commands are driven through the [`zeroship_sandbox::backend::Backend`]
+//! abstraction.
 //!
 //! See `docs/superpowers/specs/2026-04-27-zeroship-editor-design.md`
 //! for the full architecture.
 
-mod auth;
-mod config;
-mod docker;
-mod files;
-mod handlers;
-mod session;
-
-use std::sync::Arc;
-
 use ntex::web;
-
-use crate::config::SandboxConfig;
-use crate::session::SessionRegistry;
+use zeroship_sandbox::{handlers, session, AppState};
+use zeroship_sandbox::config::SandboxConfig;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-/// Shared application state passed to every handler.
-#[allow(missing_debug_implementations)]
-pub struct AppState {
-    pub config: SandboxConfig,
-    pub sessions: SessionRegistry,
-}
 
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
@@ -42,43 +26,32 @@ async fn main() -> std::io::Result<()> {
         }
     };
 
-    eprintln!("[sandbox] image: {}", config.image);
-    eprintln!("[sandbox] workspace root: {}", config.workspace_root.display());
-    eprintln!("[sandbox] idle timeout: {}s", config.idle_timeout_secs);
+    eprintln!("[sandbox] backend:        {}", config.backend);
+    if config.backend == "docker" {
+        eprintln!("[sandbox] image:          {}", config.image);
+        eprintln!("[sandbox] workspace root: {}", config.workspace_root.display());
+    } else {
+        eprintln!("[sandbox] k8s namespace:  {}", config.k8s.namespace);
+        eprintln!("[sandbox] agent image:    {}", config.k8s.image);
+        eprintln!("[sandbox] runtime class:  {}", config.k8s.runtime_class);
+        eprintln!("[sandbox] port-forward:   {}", config.k8s.use_port_forward);
+    }
+    eprintln!("[sandbox] idle timeout:   {}s", config.idle_timeout_secs);
 
     if config.token.is_empty() {
         eprintln!("[sandbox] WARNING: SANDBOX_TOKEN not set — endpoints are unauthenticated");
     }
 
-    // Probe Docker once at startup so we fail fast instead of on the first
-    // session-create call. The user can fix permission issues before
-    // anyone tries to use the service.
-    if let Err(e) = docker::probe_docker().await {
-        eprintln!("[sandbox] docker probe failed: {e}");
-        eprintln!("[sandbox] is the docker daemon running and is the user in the docker group?");
-        std::process::exit(1);
-    }
-
-    if config.auto_pull {
-        eprintln!("[sandbox] pulling {}...", config.image);
-        if let Err(e) = docker::pull_image(&config.image).await {
-            eprintln!("[sandbox] pull failed (continuing — image may be local): {e}");
+    // Build state (probes the backend at startup).
+    let state = match AppState::from_config(config.clone()).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[sandbox] backend probe failed: {e}");
+            std::process::exit(1);
         }
-    }
+    };
 
-    // Ensure the workspace root exists.
-    if let Err(e) = std::fs::create_dir_all(&config.workspace_root) {
-        eprintln!("[sandbox] failed to create workspace root: {e}");
-        std::process::exit(1);
-    }
-
-    let registry = SessionRegistry::new();
-    let state = Arc::new(AppState {
-        config: config.clone(),
-        sessions: registry.clone(),
-    });
-
-    // Idle GC sweep — kills containers idle longer than `idle_timeout_secs`.
+    // Idle GC sweep — kills runtimes idle longer than `idle_timeout_secs`.
     session::start_idle_gc(state.clone());
 
     let bind = format!("0.0.0.0:{}", config.port);
@@ -89,7 +62,9 @@ async fn main() -> std::io::Result<()> {
             .state(state.clone())
             .service(
                 web::resource("/health")
-                    .route(web::get().to(|| async { web::HttpResponse::Ok().body(r#"{"status":"ok"}"#) })),
+                    .route(web::get().to(|| async {
+                        web::HttpResponse::Ok().body(r#"{"status":"ok"}"#)
+                    })),
             )
             .service(
                 web::resource("/sessions")
@@ -109,8 +84,6 @@ async fn main() -> std::io::Result<()> {
                 web::resource("/sessions/{id}/file-tree")
                     .route(web::get().to(handlers::file_tree)),
             )
-            // {path}* is ntex's tail-match syntax (matches across slashes).
-            // {path:.*} only matches single segments — would 404 on src/App.tsx.
             .service(
                 web::resource("/sessions/{id}/files/{path}*")
                     .route(web::get().to(handlers::read_file))

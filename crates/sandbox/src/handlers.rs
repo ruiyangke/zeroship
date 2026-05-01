@@ -1,8 +1,8 @@
 //! HTTP handlers for the sandbox service.
 //!
-//! All handlers share the same shape: bearer-token check, parse the
-//! path/body, dispatch to the docker / files / session module, and
-//! map results to JSON responses with the right status code.
+//! Backend-agnostic — every op routes through
+//! [`crate::backend::Backend`], so the same handlers serve docker
+//! containers and k8s+libkrun Pods.
 
 use std::sync::Arc;
 
@@ -11,11 +11,11 @@ use ntex::web::{self, HttpRequest, HttpResponse};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::{auth, docker, files, session, AppState};
+use crate::{auth, AppState};
 
 type State = web::types::State<Arc<AppState>>;
 
-// ─── Auth wrapper ────────────────────────────────────────────────
+// ─── helpers ─────────────────────────────────────────────────────
 
 fn unauthorized() -> HttpResponse {
     HttpResponse::Unauthorized().json(&serde_json::json!({"error": "unauthorized"}))
@@ -37,9 +37,28 @@ fn parse_uuid(s: &str) -> Result<Uuid, HttpResponse> {
     s.parse::<Uuid>().map_err(|_| err(400, "invalid session id (not a uuid)"))
 }
 
+fn is_safe_id_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+}
+
+fn infer_content_type(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("");
+    match ext.to_ascii_lowercase().as_str() {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" | "ts" | "tsx" | "jsx" => "application/javascript; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "md" | "txt" => "text/plain; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        _ => "application/octet-stream",
+    }
+}
+
 // ─── POST /sessions ──────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct CreateSessionBody {
     /// Stable per-project id. Re-using the same `project_id` returns
     /// the existing session if one is alive.
@@ -54,7 +73,10 @@ pub async fn create_session(
     if !auth::check(&req, &state) { return unauthorized(); }
 
     let project_id = body.project_id.trim().to_string();
-    if project_id.is_empty() || project_id.len() > 64 || !project_id.chars().all(is_safe_id_char) {
+    if project_id.is_empty()
+        || project_id.len() > 64
+        || !project_id.chars().all(is_safe_id_char)
+    {
         return err(400, "invalid project_id (alphanumeric / dash / underscore, max 64 chars)");
     }
 
@@ -66,40 +88,12 @@ pub async fn create_session(
     }
 
     let session_id = Uuid::new_v4();
-    let container_name = format!("zsbx-{}", session_id.simple());
-
-    // Per-project workspace (NOT per-session — survives container churn).
-    let workspace = state.config.workspace_root.join(&project_id);
-    if let Err(e) = std::fs::create_dir_all(&workspace) {
-        return err(500, format!("create workspace: {e}"));
-    }
-
-    // Spawn the container.
-    let container_id = match docker::run_container(
-        &state.config.image,
-        &container_name,
-        &state.config.network,
-        &workspace,
-        state.config.memory_mb,
-        state.config.cpus,
-        &project_id,
-        &session_id.to_string(),
-    ).await {
-        Ok(id) => id,
-        Err(e) => return err(500, format!("docker run: {e}")),
+    let info = match state.backend.create(session_id, &project_id).await {
+        Ok(i) => i,
+        Err(e) => return err(500, format!("backend.create: {e}")),
     };
-
-    // Get its IP on the sandbox network.
-    let container_ip = docker::container_ip(&container_id, &state.config.network)
-        .await
-        .unwrap_or_default();
-
-    let info = state.sessions.insert(
-        session_id, project_id, container_id, container_name,
-        container_ip, workspace,
-    );
-
-    HttpResponse::Created().json(&info)
+    let stored = state.sessions.insert(session_id, info);
+    HttpResponse::Created().json(&stored)
 }
 
 // ─── GET /sessions ───────────────────────────────────────────────
@@ -134,14 +128,13 @@ pub async fn stop_session(
     if !auth::check(&req, &state) { return unauthorized(); }
     let id = match parse_uuid(&path) { Ok(u) => u, Err(r) => return r };
 
-    let info = match state.sessions.get(&id) {
-        Some(i) => i,
-        None => return err(404, "session not found"),
-    };
+    if state.sessions.get(&id).is_none() {
+        return err(404, "session not found");
+    }
 
-    if let Err(e) = docker::stop_container(&info.container_name).await {
-        eprintln!("[sandbox] stop {}: {e}", info.container_name);
-        // continue — we still want the registry entry gone
+    if let Err(e) = state.backend.stop(id).await {
+        eprintln!("[sandbox] backend.stop({id}) failed: {e}");
+        // Continue — we still want the registry entry gone.
     }
     state.sessions.remove(&id);
 
@@ -150,7 +143,7 @@ pub async fn stop_session(
 
 // ─── POST /sessions/:id/exec ─────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ExecBody {
     pub cmd: String,
     pub cwd: Option<String>,
@@ -166,21 +159,21 @@ pub async fn exec(
     if !auth::check(&req, &state) { return unauthorized(); }
     let id = match parse_uuid(&path) { Ok(u) => u, Err(r) => return r };
 
-    let info = match state.sessions.get(&id) {
-        Some(i) => i,
-        None => return err(404, "session not found"),
-    };
+    if state.sessions.get(&id).is_none() {
+        return err(404, "session not found");
+    }
 
-    let timeout_ms = body.timeout_ms.unwrap_or(60_000).min(600_000); // cap 10 min
+    let timeout_ms = body.timeout_ms.unwrap_or(60_000).min(600_000);
     let cwd = body.cwd.as_deref();
 
-    match docker::exec_in_container(&info.container_name, &body.cmd, cwd, Some(timeout_ms)).await {
+    match state.backend.exec(id, &body.cmd, cwd, Some(timeout_ms)).await {
         Ok(out) => HttpResponse::Ok().json(&serde_json::json!({
             "status": out.status,
             "stdout": out.stdout,
             "stderr": out.stderr,
+            "timed_out": out.timed_out,
         })),
-        Err(e) => err(500, format!("docker exec: {e}")),
+        Err(e) => err(500, format!("backend.exec: {e}")),
     }
 }
 
@@ -194,15 +187,13 @@ pub async fn file_tree(
     if !auth::check(&req, &state) { return unauthorized(); }
     let id = match parse_uuid(&path) { Ok(u) => u, Err(r) => return r };
 
-    let info = match state.sessions.get(&id) {
-        Some(i) => i,
-        None => return err(404, "session not found"),
-    };
+    if state.sessions.get(&id).is_none() {
+        return err(404, "session not found");
+    }
 
-    let workspace = std::path::PathBuf::from(&info.workspace_path);
-    match files::file_tree(&workspace) {
+    match state.backend.file_tree(id).await {
         Ok(entries) => HttpResponse::Ok().json(&serde_json::json!({"entries": entries})),
-        Err(e) => err(500, format!("walk: {e}")),
+        Err(e) => err(500, format!("backend.file_tree: {e}")),
     }
 }
 
@@ -217,17 +208,17 @@ pub async fn read_file(
     let (id_s, file_path) = path.into_inner();
     let id = match parse_uuid(&id_s) { Ok(u) => u, Err(r) => return r };
 
-    let info = match state.sessions.get(&id) {
-        Some(i) => i,
-        None => return err(404, "session not found"),
-    };
+    if state.sessions.get(&id).is_none() {
+        return err(404, "session not found");
+    }
 
-    let workspace = std::path::PathBuf::from(&info.workspace_path);
-    match files::read_file(&workspace, &file_path) {
+    match state.backend.read_file(id, &file_path).await {
         Ok(bytes) => HttpResponse::Ok()
             .content_type(infer_content_type(&file_path))
             .body(bytes),
-        Err(e) if e.contains("No such file") || e.starts_with("read") => err(404, e),
+        Err(e) if e.contains("No such file") || e.contains("file not found") || e.starts_with("read") => {
+            err(404, e)
+        }
         Err(e) => err(400, e),
     }
 }
@@ -244,13 +235,11 @@ pub async fn write_file(
     let (id_s, file_path) = path.into_inner();
     let id = match parse_uuid(&id_s) { Ok(u) => u, Err(r) => return r };
 
-    let info = match state.sessions.get(&id) {
-        Some(i) => i,
-        None => return err(404, "session not found"),
-    };
+    if state.sessions.get(&id).is_none() {
+        return err(404, "session not found");
+    }
 
-    let workspace = std::path::PathBuf::from(&info.workspace_path);
-    match files::write_file(&workspace, &file_path, &body) {
+    match state.backend.write_file(id, &file_path, &body).await {
         Ok(()) => HttpResponse::Ok().json(&serde_json::json!({
             "written": file_path,
             "size": body.len(),
@@ -270,42 +259,13 @@ pub async fn delete_file(
     let (id_s, file_path) = path.into_inner();
     let id = match parse_uuid(&id_s) { Ok(u) => u, Err(r) => return r };
 
-    let info = match state.sessions.get(&id) {
-        Some(i) => i,
-        None => return err(404, "session not found"),
-    };
+    if state.sessions.get(&id).is_none() {
+        return err(404, "session not found");
+    }
 
-    let workspace = std::path::PathBuf::from(&info.workspace_path);
-    match files::delete_file(&workspace, &file_path) {
+    match state.backend.delete_file(id, &file_path).await {
         Ok(true) => HttpResponse::Ok().json(&serde_json::json!({"deleted": file_path})),
         Ok(false) => err(404, "file not found"),
         Err(e) => err(400, e),
     }
 }
-
-// ─── helpers ─────────────────────────────────────────────────────
-
-fn is_safe_id_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '-' || c == '_'
-}
-
-fn infer_content_type(path: &str) -> &'static str {
-    let ext = path.rsplit('.').next().unwrap_or("");
-    match ext.to_ascii_lowercase().as_str() {
-        "html" | "htm" => "text/html; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "js" | "mjs" | "ts" | "tsx" | "jsx" => "application/javascript; charset=utf-8",
-        "json" => "application/json; charset=utf-8",
-        "md" | "txt" => "text/plain; charset=utf-8",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        _ => "application/octet-stream",
-    }
-}
-
-// Re-export for the unused-warning guard.
-#[allow(dead_code)]
-const _USES_SESSION: fn() = || {
-    let _ = session::start_idle_gc;
-};

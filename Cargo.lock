@@ -6407,8 +6407,10 @@ dependencies = [
 name = "zeroship-sandbox"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "compio",
+ "ed25519-dalek",
  "hex",
  "mimalloc",
  "ntex",
@@ -6416,8 +6418,10 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "subtle",
+ "ureq",
  "uuid",
  "zeroship-core",
+ "zeroship-sandbox-agent",
 ]
 
 [[package]]

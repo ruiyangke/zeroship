@@ -1,46 +1,28 @@
-//! Session registry: tracks live sandbox containers, schedules
-//! teardown when idle.
+//! Session registry: tracks live sandbox sessions, schedules teardown
+//! when idle. Backend-agnostic — the registry holds public-facing
+//! [`SessionInfo`]; the active runtime (Docker container, k8s Pod, etc.)
+//! lives inside the [`crate::backend::Backend`] enum and is keyed by
+//! `session_id`.
 //!
-//! A session is the unit of "one project being edited right now":
-//! exactly one Docker container, exactly one bind-mounted workspace
-//! under `{workspace_root}/{project_id}/`. Multiple editor tabs on
-//! the same project reuse the same session (the registry dedups by
-//! `project_id`).
+//! A session is the unit of "one project being edited right now".
+//! Multiple editor tabs on the same project reuse the same session
+//! (the registry dedups by `project_id`).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use serde::Serialize;
 use uuid::Uuid;
 
+use crate::backend::SessionInfo;
 use crate::AppState;
 
-#[derive(Clone, Debug, Serialize)]
-pub struct SessionInfo {
-    pub session_id: String,
-    pub project_id: String,
-    pub container_id: String,
-    pub container_name: String,
-    pub container_ip: String,
-    pub workspace_path: String,
-    pub created_at_secs: u64,
-    pub last_used_at_secs: u64,
-}
-
-/// Internal session record. `last_used` is updated on every API call
-/// so the GC knows whether the session is active.
+/// Internal session record. Holds the public `SessionInfo` plus
+/// timing data for the GC.
 #[derive(Clone)]
 struct Session {
-    session_id: Uuid,
-    project_id: String,
-    container_id: String,
-    container_name: String,
-    container_ip: String,
-    workspace_path: PathBuf,
+    info: SessionInfo,
     created_at: Instant,
-    created_at_unix: u64,
     last_used: Arc<RwLock<Instant>>,
 }
 
@@ -60,25 +42,19 @@ impl Session {
         Instant::now().saturating_duration_since(self.created_at)
     }
 
-    fn to_info(&self) -> SessionInfo {
+    fn current_info(&self) -> SessionInfo {
         let last = *self.last_used.read().unwrap();
-        let last_unix = self.created_at_unix
+        let bumped = self.info.created_at_secs
             + last.saturating_duration_since(self.created_at).as_secs();
         SessionInfo {
-            session_id: self.session_id.to_string(),
-            project_id: self.project_id.clone(),
-            container_id: self.container_id.clone(),
-            container_name: self.container_name.clone(),
-            container_ip: self.container_ip.clone(),
-            workspace_path: self.workspace_path.to_string_lossy().into_owned(),
-            created_at_secs: self.created_at_unix,
-            last_used_at_secs: last_unix,
+            last_used_at_secs: bumped,
+            ..self.info.clone()
         }
     }
 }
 
 /// In-memory session registry. Indexed twice: once by `session_id`
-/// (the key the editor app holds), once by `project_id` (so re-opens
+/// (the key the client holds), once by `project_id` (so re-opens
 /// from the same project find the existing session).
 #[derive(Clone, Default)]
 pub struct SessionRegistry {
@@ -102,7 +78,7 @@ impl SessionRegistry {
         let guard = self.by_session.read().unwrap();
         let s = guard.get(id)?;
         s.touch();
-        Some(s.to_info())
+        Some(s.current_info())
     }
 
     /// Find an existing session for a project (no touch — used only
@@ -112,64 +88,44 @@ impl SessionRegistry {
     }
 
     /// Insert a freshly-spawned session.
-    pub fn insert(
-        &self,
-        session_id: Uuid,
-        project_id: String,
-        container_id: String,
-        container_name: String,
-        container_ip: String,
-        workspace_path: PathBuf,
-    ) -> SessionInfo {
+    pub fn insert(&self, session_id: Uuid, info: SessionInfo) -> SessionInfo {
         let now = Instant::now();
-        let now_unix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
         let session = Session {
-            session_id,
-            project_id: project_id.clone(),
-            container_id,
-            container_name,
-            container_ip,
-            workspace_path,
+            info: info.clone(),
             created_at: now,
-            created_at_unix: now_unix,
             last_used: Arc::new(RwLock::new(now)),
         };
-
-        let info = session.to_info();
+        let project = info.project_id.clone();
         self.by_session.write().unwrap().insert(session_id, session);
-        self.by_project.write().unwrap().insert(project_id, session_id);
+        self.by_project.write().unwrap().insert(project, session_id);
         info
     }
 
-    /// Drop a session from the registry (does NOT stop the container —
-    /// caller must do that first).
+    /// Drop a session from the registry. Caller should already have
+    /// stopped the underlying runtime via the backend.
     pub fn remove(&self, id: &Uuid) -> Option<SessionInfo> {
         let mut sessions = self.by_session.write().unwrap();
         let session = sessions.remove(id)?;
-        let info = session.to_info();
+        let info = session.current_info();
         let mut by_project = self.by_project.write().unwrap();
-        if by_project.get(&session.project_id).copied() == Some(*id) {
-            by_project.remove(&session.project_id);
+        if by_project.get(&session.info.project_id).copied() == Some(*id) {
+            by_project.remove(&session.info.project_id);
         }
         Some(info)
     }
 
-    /// Snapshot of all current sessions (for the GC and the list endpoint).
+    /// Snapshot of all current sessions.
     pub fn list(&self) -> Vec<SessionInfo> {
         self.by_session
             .read()
             .unwrap()
             .values()
-            .map(Session::to_info)
+            .map(Session::current_info)
             .collect()
     }
 
-    /// IDs of sessions exceeding either limit. Read-only — caller
-    /// stops the container then calls `remove`.
+    /// IDs exceeding either limit. Read-only — caller stops the
+    /// runtime via the backend, then calls `remove`.
     fn expired(&self, idle_threshold: Duration, max_lifetime: Duration) -> Vec<Uuid> {
         let mut out = Vec::new();
         let guard = self.by_session.read().unwrap();
@@ -183,7 +139,8 @@ impl SessionRegistry {
 }
 
 /// Background task that sweeps expired sessions and stops their
-/// containers. Runs every minute; cheap (just an in-memory walk).
+/// runtimes. Runs every minute; cheap (in-memory walk + at most
+/// one backend.stop per expired session).
 pub fn start_idle_gc(state: Arc<AppState>) {
     compio::runtime::spawn(async move {
         let interval = Duration::from_secs(60);
@@ -193,16 +150,14 @@ pub fn start_idle_gc(state: Arc<AppState>) {
             compio::time::sleep(interval).await;
             let to_kill = state.sessions.expired(idle, max_life);
             for id in to_kill {
-                let info = match state.sessions.get(&id) {
-                    Some(i) => i,
-                    None => continue,
-                };
-                eprintln!(
-                    "[sandbox] gc: stopping idle session {} (project={})",
-                    info.session_id, info.project_id,
-                );
-                if let Err(e) = crate::docker::stop_container(&info.container_name).await {
-                    eprintln!("[sandbox] gc: stop {} failed: {e}", info.container_name);
+                if let Some(info) = state.sessions.get(&id) {
+                    eprintln!(
+                        "[sandbox] gc: stopping idle session {} (project={}, backend={})",
+                        info.session_id, info.project_id, info.backend,
+                    );
+                }
+                if let Err(e) = state.backend.stop(id).await {
+                    eprintln!("[sandbox] gc: backend.stop({id}) failed: {e}");
                 }
                 state.sessions.remove(&id);
             }

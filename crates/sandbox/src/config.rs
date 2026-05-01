@@ -12,26 +12,32 @@ pub struct SandboxConfig {
     /// (dev only — main.rs prints a warning).
     pub token: String,
 
+    /// Backend selector. `SANDBOX_BACKEND=docker|k8s` (default docker).
+    pub backend: String,
+
     /// Docker image tag spawned for new sessions. `SANDBOX_IMAGE`
     /// (default `zeroship/sandbox-base:latest`).
+    /// Used by the **docker** backend.
     pub image: String,
 
     /// Host directory where per-project workspaces live. Each session's
     /// `/workspace` is bind-mounted from `{workspace_root}/{project_id}/`.
     /// `SANDBOX_WORKSPACE_ROOT` (default `/var/zeroship/projects`).
+    /// Used by the **docker** backend only — k8s sessions store their
+    /// workspace inside the Pod via emptyDir.
     pub workspace_root: PathBuf,
 
     /// Docker network the sandbox containers join. `SANDBOX_NETWORK`
     /// (default `zeroship-sandbox-net`). Must be created out-of-band
     /// (`docker network create zeroship-sandbox-net`).
+    /// Used by the **docker** backend only.
     pub network: String,
 
     /// Per-container memory limit in MiB. `SANDBOX_MEMORY_MB` (default
-    /// 1024). Passed to `docker run --memory={N}m`.
+    /// 1024).
     pub memory_mb: u32,
 
-    /// Per-container CPU quota. `SANDBOX_CPUS` (default 2.0). Passed
-    /// to `docker run --cpus={N}`.
+    /// Per-container CPU quota. `SANDBOX_CPUS` (default 2.0).
     pub cpus: f32,
 
     /// Idle session GC threshold. `SANDBOX_IDLE_TIMEOUT_SECS`
@@ -44,13 +50,57 @@ pub struct SandboxConfig {
 
     /// Pull the image at startup if missing. `SANDBOX_AUTO_PULL`
     /// (default false — admins should pre-pull for predictable boot).
+    /// Docker backend only.
     pub auto_pull: bool,
+
+    /// K8s-backend settings. Read from env even when `backend=docker`
+    /// (cheap; lets you switch backends without restart-time config
+    /// gymnastics).
+    pub k8s: K8sConfig,
+}
+
+#[derive(Clone, Debug)]
+pub struct K8sConfig {
+    /// Namespace where Pods are created. `SANDBOX_K8S_NAMESPACE`
+    /// (default `default`).
+    pub namespace: String,
+
+    /// Agent OCI image, including tag (or pinned digest in prod).
+    /// `SANDBOX_K8S_IMAGE` (default `docker.io/zeroship/sandbox-agent:dev`).
+    pub image: String,
+
+    /// `runtimeClassName` to apply to the Pod. Must point at the
+    /// crun+libkrun handler. `SANDBOX_K8S_RUNTIME_CLASS` (default
+    /// `kvm-sandbox`).
+    pub runtime_class: String,
+
+    /// `kubectl wait --for=condition=Ready` timeout in seconds.
+    /// `SANDBOX_K8S_READY_TIMEOUT_SECS` (default 120).
+    pub ready_timeout_secs: u64,
+
+    /// Use `kubectl port-forward` per session instead of dialing the
+    /// Pod IP directly. Required when the controller runs outside
+    /// the cluster (typical for local dev). In-cluster controllers
+    /// should set this to false. `SANDBOX_K8S_USE_PORT_FORWARD`
+    /// (default true — safe for local dev; switch off in cluster).
+    pub use_port_forward: bool,
+
+    /// Loopback port allocator base when `use_port_forward=true`.
+    /// `SANDBOX_K8S_PORT_FORWARD_START` (default 18000). Allocator
+    /// is monotonic per process; never reuses ports.
+    pub port_forward_start: u16,
 }
 
 impl SandboxConfig {
     pub fn from_env() -> Result<Self, String> {
         let port = parse_env("SANDBOX_PORT", 9091u16)?;
         let token = std::env::var("SANDBOX_TOKEN").unwrap_or_default();
+        let backend = std::env::var("SANDBOX_BACKEND").unwrap_or_else(|_| "docker".to_string());
+        if !matches!(backend.as_str(), "docker" | "k8s") {
+            return Err(format!(
+                "SANDBOX_BACKEND={backend:?}; expected \"docker\" or \"k8s\""
+            ));
+        }
         let image = std::env::var("SANDBOX_IMAGE")
             .unwrap_or_else(|_| "zeroship/sandbox-base:latest".to_string());
         let workspace_root = PathBuf::from(
@@ -72,9 +122,22 @@ impl SandboxConfig {
             return Err(format!("SANDBOX_MEMORY_MB too small: {memory_mb}"));
         }
 
+        let k8s = K8sConfig {
+            namespace: std::env::var("SANDBOX_K8S_NAMESPACE")
+                .unwrap_or_else(|_| "default".to_string()),
+            image: std::env::var("SANDBOX_K8S_IMAGE")
+                .unwrap_or_else(|_| "docker.io/zeroship/sandbox-agent:dev".to_string()),
+            runtime_class: std::env::var("SANDBOX_K8S_RUNTIME_CLASS")
+                .unwrap_or_else(|_| "kvm-sandbox".to_string()),
+            ready_timeout_secs: parse_env("SANDBOX_K8S_READY_TIMEOUT_SECS", 120u64)?,
+            use_port_forward: parse_env("SANDBOX_K8S_USE_PORT_FORWARD", true)?,
+            port_forward_start: parse_env("SANDBOX_K8S_PORT_FORWARD_START", 18000u16)?,
+        };
+
         Ok(Self {
-            port, token, image, workspace_root, network,
+            port, token, backend, image, workspace_root, network,
             memory_mb, cpus, idle_timeout_secs, max_lifetime_secs, auto_pull,
+            k8s,
         })
     }
 }
