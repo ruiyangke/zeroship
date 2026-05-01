@@ -340,3 +340,60 @@ tomato (danger) tone and points at this issue:
    (per Stripe's data-retention rules), and finally the user row.
 3. UI flow: confirmation modal ("type your email to confirm"), then a
    banner on the Account page showing the pending deletion + undo CTA.
+
+---
+
+## ISS-13 · Skill registry not implemented (catalogue-only)
+
+**Status:** open
+**Severity:** medium — blocks the "Add to project" CTA on `/skills`;
+the public catalogue ships as a static list until the registry lands.
+**First observed:** 2026-05-01, building the public skill catalogue
+(spec §5.3) for `apps/zeroship-builder`.
+**Component:** `crates/control` (registry endpoints) + builder skill
+manifest + agent prompt-fragment loader
+
+### Symptom
+
+Spec §5.3 calls for a Skill catalogue at `/skills` where each item
+can be added to a project — installing it wires up the relevant
+SDK (`@zeroship/auth`, `@zeroship/payments`, etc.), seeds env vars,
+adds an agent prompt fragment so Builder/Critic know about the
+capability, and updates a per-project `skills.json` manifest.
+Today none of that exists:
+
+- No `skills` table or registry API in the control plane.
+- No "install" RPC procedure (`POST /apps/:id/skills`).
+- No per-project `skills.json` manifest read by Builder or Critic.
+- No agent prompt fragments in `apps/zeroship-builder/src/server/_prompts.ts`
+  keyed by skill slug.
+
+### Workaround in use
+
+The `/skills` page renders a **static catalogue** sourced from
+`apps/zeroship-builder/src/client/lib/skills.ts` (8 starter skills:
+Auth, Email, Realtime, Payments, Photos, Search, AI, Analytics).
+Each card shows the skill metadata and a disabled "Add to project →"
+button captioned "Coming soon". A note at the bottom of the page
+points readers at this issue.
+
+This keeps the marketing surface honest (we ship what's on the
+roadmap, not vapor) and unblocks signup-funnel work.
+
+### Fix path
+
+1. `crates/control/src/skills.rs` — registry table + `GET /skills`
+   (catalogue) and `POST /apps/:id/skills` (install) handlers.
+2. `apps/zeroship-builder/src/server/skills.ts` — RPC procedures
+   wrapping the control-plane endpoints; per-project `skills.json`
+   read/write helpers.
+3. `apps/zeroship-builder/src/server/_prompts.ts` — keyed prompt
+   fragments injected into Builder + Critic system prompts when a
+   skill is active.
+4. Replace the static `lib/skills.ts` catalogue with a TanStack
+   Query against `GET /skills` so the catalogue stays in sync with
+   what the platform actually supports.
+5. Wire the per-card "Add to project" button to a project picker
+   modal (or — when invoked from inside a workspace — an inline
+   confirm) calling `installSkill`.
+
