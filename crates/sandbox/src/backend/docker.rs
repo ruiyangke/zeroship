@@ -1,16 +1,16 @@
 //! Docker backend.
 //!
-//! Spawns a long-lived container per session with the project's
+//! Spawns a long-lived container per sandbox with the project's
 //! workspace bind-mounted from the host. Shells out to the `docker`
 //! CLI for lifecycle ops; performs file CRUD directly against the
 //! host bind-mount path (no `docker exec` round-trip needed for
 //! files — the workspace is the same file on both sides).
 //!
-//! State per session:
-//!   - `container_name` (deterministic from session id)
+//! State per sandbox:
+//!   - `container_name` (deterministic from sandbox id)
 //!   - `container_id`   (returned by `docker run`)
 //!   - `workspace_path` (host bind-mount, persists across container
-//!     churn — keyed on `project_id`, so multiple session re-opens
+//!     churn — keyed on `project_id`, so multiple sandbox re-opens
 //!     reuse the same files)
 //!
 //! See `crates/sandbox/src/backend/mod.rs` for the contract.
@@ -23,22 +23,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
 
-use super::{ExecOutput, SessionInfo, TreeEntry};
+use super::{ExecOutput, SandboxInfo, TreeEntry};
 use crate::config::SandboxConfig;
 
 #[derive(Debug)]
 pub struct DockerBackend {
     cfg: SandboxConfig,
-    /// Per-session bookkeeping. Keyed by session_id; populated on
+    /// Per-sandbox bookkeeping. Keyed by sandbox_id; populated on
     /// `create`, dropped on `stop`.
-    state: Arc<RwLock<HashMap<Uuid, DockerSession>>>,
+    state: Arc<RwLock<HashMap<Uuid, DockerSandbox>>>,
 }
 
 #[derive(Debug, Clone)]
-struct DockerSession {
+struct DockerSandbox {
     /// Full container ID returned by `docker run -d`. Stashed for
     /// audit / debug; reads always go through `container_name`,
-    /// which is deterministic from the session UUID.
+    /// which is deterministic from the sandbox UUID.
     #[allow(dead_code)]
     container_id: String,
     container_name: String,
@@ -76,18 +76,18 @@ impl DockerBackend {
 
     pub async fn create(
         &self,
-        session_id: Uuid,
+        sandbox_id: Uuid,
         user_id: &str,
         project_id: &str,
-    ) -> Result<SessionInfo, String> {
+    ) -> Result<SandboxInfo, String> {
         // The Docker backend keeps the existing per-project bind-mount
-        // model (workspace persists across sessions for the same
+        // model (workspace persists across sandboxes for the same
         // project on this host). Per-user package caches aren't yet
-        // implemented for Docker; user_id is recorded on the session
+        // implemented for Docker; user_id is recorded on the sandbox
         // for parity with the K8s backend but doesn't currently
         // change the spawn shape. (Future: per-user host directory
         // bind-mounted at `/home/u`.)
-        let container_name = format!("zsbx-{}", session_id.simple());
+        let container_name = format!("zsbx-{}", sandbox_id.simple());
         let workspace = self.cfg.workspace_root.join(project_id);
         std::fs::create_dir_all(&workspace)
             .map_err(|e| format!("create workspace: {e}"))?;
@@ -100,22 +100,22 @@ impl DockerBackend {
             self.cfg.memory_mb,
             self.cfg.cpus,
             project_id,
-            &session_id.to_string(),
+            &sandbox_id.to_string(),
         )
         .await?;
 
         let now = unix_now();
         self.state.write().unwrap().insert(
-            session_id,
-            DockerSession {
+            sandbox_id,
+            DockerSandbox {
                 container_id: container_id.clone(),
                 container_name: container_name.clone(),
                 workspace_path: workspace.clone(),
             },
         );
 
-        Ok(SessionInfo {
-            session_id: session_id.to_string(),
+        Ok(SandboxInfo {
+            sandbox_id: sandbox_id.to_string(),
             user_id: user_id.to_string(),
             project_id: project_id.to_string(),
             backend: "docker".to_string(),
@@ -125,47 +125,47 @@ impl DockerBackend {
         })
     }
 
-    pub async fn stop(&self, session_id: Uuid) -> Result<(), String> {
-        let session = match self.state.write().unwrap().remove(&session_id) {
+    pub async fn stop(&self, sandbox_id: Uuid) -> Result<(), String> {
+        let sandbox = match self.state.write().unwrap().remove(&sandbox_id) {
             Some(s) => s,
             None => return Ok(()), // idempotent
         };
-        stop_container(&session.container_name).await
+        stop_container(&sandbox.container_name).await
     }
 
     pub async fn exec(
         &self,
-        session_id: Uuid,
+        sandbox_id: Uuid,
         cmd: &str,
         cwd: Option<&str>,
         timeout_ms: Option<u64>,
     ) -> Result<ExecOutput, String> {
-        let name = self.container_name(session_id)?;
+        let name = self.container_name(sandbox_id)?;
         exec_in_container(&name, cmd, cwd, timeout_ms).await
     }
 
-    pub async fn read_file(&self, session_id: Uuid, path: &str) -> Result<Vec<u8>, String> {
-        let ws = self.workspace(session_id)?;
+    pub async fn read_file(&self, sandbox_id: Uuid, path: &str) -> Result<Vec<u8>, String> {
+        let ws = self.workspace(sandbox_id)?;
         crate::files::read_file(&ws, path)
     }
 
     pub async fn write_file(
         &self,
-        session_id: Uuid,
+        sandbox_id: Uuid,
         path: &str,
         body: &[u8],
     ) -> Result<(), String> {
-        let ws = self.workspace(session_id)?;
+        let ws = self.workspace(sandbox_id)?;
         crate::files::write_file(&ws, path, body)
     }
 
-    pub async fn delete_file(&self, session_id: Uuid, path: &str) -> Result<bool, String> {
-        let ws = self.workspace(session_id)?;
+    pub async fn delete_file(&self, sandbox_id: Uuid, path: &str) -> Result<bool, String> {
+        let ws = self.workspace(sandbox_id)?;
         crate::files::delete_file(&ws, path)
     }
 
-    pub async fn file_tree(&self, session_id: Uuid) -> Result<Vec<TreeEntry>, String> {
-        let ws = self.workspace(session_id)?;
+    pub async fn file_tree(&self, sandbox_id: Uuid) -> Result<Vec<TreeEntry>, String> {
+        let ws = self.workspace(sandbox_id)?;
         let entries = crate::files::file_tree(&ws)?;
         Ok(entries
             .into_iter()
@@ -185,7 +185,7 @@ impl DockerBackend {
             .unwrap()
             .get(&id)
             .map(|s| s.container_name.clone())
-            .ok_or_else(|| "session not found in docker backend".to_string())
+            .ok_or_else(|| "sandbox not found in docker backend".to_string())
     }
 
     fn workspace(&self, id: Uuid) -> Result<PathBuf, String> {
@@ -194,7 +194,7 @@ impl DockerBackend {
             .unwrap()
             .get(&id)
             .map(|s| s.workspace_path.clone())
-            .ok_or_else(|| "session not found in docker backend".to_string())
+            .ok_or_else(|| "sandbox not found in docker backend".to_string())
     }
 }
 
@@ -219,7 +219,7 @@ async fn run_container(
     memory_mb: u32,
     cpus: f32,
     project_id: &str,
-    session_id: &str,
+    sandbox_id: &str,
 ) -> Result<String, String> {
     let memory = format!("{memory_mb}m");
     let cpus_s = format!("{cpus}");
@@ -229,7 +229,7 @@ async fn run_container(
             .to_str()
             .ok_or_else(|| "workspace path not utf-8".to_string())?,
     );
-    let label_session = format!("zeroship.session={session_id}");
+    let label_sandbox = format!("zeroship.sandbox={sandbox_id}");
     let label_project = format!("zeroship.project={project_id}");
 
     let args: Vec<&str> = vec![
@@ -243,7 +243,7 @@ async fn run_container(
         "--tmpfs", "/tmp:size=128m",
         "--tmpfs", "/root/.npm:size=256m",
         "--volume", &workspace_arg,
-        "--label", &label_session,
+        "--label", &label_sandbox,
         "--label", &label_project,
         "--workdir", "/workspace",
         image,

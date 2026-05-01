@@ -1,7 +1,7 @@
 //! `zeroship-sandbox` — pluggable backends (docker, k8s) for AI builder
-//! sessions.
+//! sandboxes.
 //!
-//! Each editor session gets its own runtime — a Docker container or a
+//! Each editor sandbox gets its own runtime — a Docker container or a
 //! libkrun-microVM Pod, depending on `SANDBOX_BACKEND`. Files and
 //! commands are driven through the [`zeroship_sandbox::backend::Backend`]
 //! abstraction.
@@ -10,7 +10,7 @@
 //! for the full architecture.
 
 use ntex::web;
-use zeroship_sandbox::{handlers, session, AppState};
+use zeroship_sandbox::{handlers, registry, AppState};
 use zeroship_sandbox::config::SandboxConfig;
 
 #[global_allocator]
@@ -52,7 +52,7 @@ async fn main() -> std::io::Result<()> {
     };
 
     // Idle GC sweep — kills runtimes idle longer than `idle_timeout_secs`.
-    session::start_idle_gc(state.clone());
+    registry::start_idle_gc(state.clone());
 
     let bind = format!("0.0.0.0:{}", config.port);
     eprintln!("[sandbox] http://{bind}");
@@ -67,25 +67,25 @@ async fn main() -> std::io::Result<()> {
                     })),
             )
             .service(
-                web::resource("/sessions")
-                    .route(web::post().to(handlers::create_session))
-                    .route(web::get().to(handlers::list_sessions)),
+                web::resource("/sandboxes")
+                    .route(web::post().to(handlers::create_sandbox))
+                    .route(web::get().to(handlers::list_sandboxes)),
             )
             .service(
-                web::resource("/sessions/{id}")
-                    .route(web::get().to(handlers::get_session))
-                    .route(web::delete().to(handlers::stop_session)),
+                web::resource("/sandboxes/{id}")
+                    .route(web::get().to(handlers::get_sandbox))
+                    .route(web::delete().to(handlers::stop_sandbox)),
             )
             .service(
-                web::resource("/sessions/{id}/exec")
+                web::resource("/sandboxes/{id}/exec")
                     .route(web::post().to(handlers::exec)),
             )
             .service(
-                web::resource("/sessions/{id}/file-tree")
+                web::resource("/sandboxes/{id}/file-tree")
                     .route(web::get().to(handlers::file_tree)),
             )
             .service(
-                web::resource("/sessions/{id}/files/{path}*")
+                web::resource("/sandboxes/{id}/files/{path}*")
                     .route(web::get().to(handlers::read_file))
                     .route(web::put().to(handlers::write_file))
                     .route(web::delete().to(handlers::delete_file)),

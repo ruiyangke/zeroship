@@ -230,12 +230,12 @@ async fn run_worker(
     stop: Arc<AtomicBool>,
     cfg: WorkerConfig,
 ) -> Result<(), String> {
-    let session_id = Uuid::new_v4();
+    let sandbox_id = Uuid::new_v4();
 
     // Create — this is the slow path; up to ~15s on a slow node.
     let create_started = Instant::now();
     let info = backend
-        .create(session_id, &user_id, &project_id)
+        .create(sandbox_id, &user_id, &project_id)
         .await
         .map_err(|e| format!("worker {worker_id}: create: {e}"))?;
     println!(
@@ -255,9 +255,9 @@ async fn run_worker(
 
         let op_started = Instant::now();
         let result: Result<(), String> = if heavy {
-            run_heavy_op(&backend, session_id, op_n).await
+            run_heavy_op(&backend, sandbox_id, op_n).await
         } else {
-            run_light_op(&backend, session_id, op_n, &mut written, &stats).await
+            run_light_op(&backend, sandbox_id, op_n, &mut written, &stats).await
         };
 
         let dt = op_started.elapsed().as_millis() as u64;
@@ -276,7 +276,7 @@ async fn run_worker(
     }
 
     // Stop — best-effort; report if it fails but don't fail the worker.
-    if let Err(e) = backend.stop(session_id).await {
+    if let Err(e) = backend.stop(sandbox_id).await {
         eprintln!("  worker {worker_id}: stop failed: {e}");
     }
     Ok(())
@@ -287,7 +287,7 @@ async fn run_worker(
 /// shell command, occasional list).
 async fn run_light_op(
     backend: &Arc<Backend>,
-    session_id: Uuid,
+    sandbox_id: Uuid,
     op_n: u64,
     written: &mut Vec<String>,
     stats: &Arc<Stats>,
@@ -301,7 +301,7 @@ async fn run_light_op(
             // 50% writes
             let path = format!("src/file_{op_n}.txt");
             let body = format!("op_n={op_n} ts={}", unix_now());
-            backend.write_file(session_id, &path, body.as_bytes()).await?;
+            backend.write_file(sandbox_id, &path, body.as_bytes()).await?;
             stats.write.fetch_add(1, Ordering::Relaxed);
             stats.write_lat.lock().unwrap().push(started.elapsed().as_millis() as u64);
             written.push(path);
@@ -313,7 +313,7 @@ async fn run_light_op(
         5..=6 => {
             // 20% reads (only if we have something to read)
             if let Some(p) = written.last().cloned() {
-                let _ = backend.read_file(session_id, &p).await?;
+                let _ = backend.read_file(sandbox_id, &p).await?;
                 stats.read.fetch_add(1, Ordering::Relaxed);
                 stats.read_lat.lock().unwrap().push(started.elapsed().as_millis() as u64);
             }
@@ -323,20 +323,20 @@ async fn run_light_op(
             if written.len() > 5 {
                 let idx = (op_n as usize) % (written.len() - 1);
                 let p = written.remove(idx);
-                let _ = backend.delete_file(session_id, &p).await?;
+                let _ = backend.delete_file(sandbox_id, &p).await?;
                 stats.delete.fetch_add(1, Ordering::Relaxed);
             }
         }
         8 => {
             // 10% tree
-            let _ = backend.file_tree(session_id).await?;
+            let _ = backend.file_tree(sandbox_id).await?;
             stats.tree.fetch_add(1, Ordering::Relaxed);
             stats.tree_lat.lock().unwrap().push(started.elapsed().as_millis() as u64);
         }
         _ => {
             // 10% exec — quick shell
             let out = backend
-                .exec(session_id, "echo ok && date +%s", None, Some(5_000))
+                .exec(sandbox_id, "echo ok && date +%s", None, Some(5_000))
                 .await?;
             if out.status != 0 {
                 return Err(format!("exec exited {} stderr={}", out.status, out.stderr));
@@ -353,7 +353,7 @@ async fn run_light_op(
 /// interpreters, larger output.
 async fn run_heavy_op(
     backend: &Arc<Backend>,
-    session_id: Uuid,
+    sandbox_id: Uuid,
     op_n: u64,
 ) -> Result<(), String> {
     let kind = (op_n / 13) % 5;
@@ -364,8 +364,8 @@ async fn run_heavy_op(
             // kubectl-port-forward proxy.
             let path = format!("blobs/blob_{op_n}.bin");
             let body = vec![b'A'; 100 * 1024];
-            backend.write_file(session_id, &path, &body).await?;
-            let read = backend.read_file(session_id, &path).await?;
+            backend.write_file(sandbox_id, &path, &body).await?;
+            let read = backend.read_file(sandbox_id, &path).await?;
             if read.len() != body.len() {
                 return Err(format!(
                     "blob roundtrip size mismatch: wrote {} got {}",
@@ -373,14 +373,14 @@ async fn run_heavy_op(
                     read.len()
                 ));
             }
-            backend.delete_file(session_id, &path).await?;
+            backend.delete_file(sandbox_id, &path).await?;
         }
         1 => {
             // Node startup. Confirms the in-VM image has Node and
             // the privilege-dropped child can fork+exec it.
             let out = backend
                 .exec(
-                    session_id,
+                    sandbox_id,
                     "node -e 'console.log(\"node-ok-\"+process.pid)'",
                     None,
                     Some(15_000),
@@ -397,7 +397,7 @@ async fn run_heavy_op(
             // Python startup.
             let out = backend
                 .exec(
-                    session_id,
+                    sandbox_id,
                     "python3 -c 'import os; print(\"py-ok-\"+str(os.getpid()))'",
                     None,
                     Some(15_000),
@@ -418,12 +418,12 @@ async fn run_heavy_op(
             for i in 0..n {
                 let p = format!("modules/m_{op_n}/file_{i}.txt");
                 backend
-                    .write_file(session_id, &p, format!("file_{i}").as_bytes())
+                    .write_file(sandbox_id, &p, format!("file_{i}").as_bytes())
                     .await?;
             }
             let out = backend
                 .exec(
-                    session_id,
+                    sandbox_id,
                     &format!("find modules/m_{op_n} -type f | wc -l"),
                     None,
                     Some(10_000),
@@ -442,7 +442,7 @@ async fn run_heavy_op(
             // and the agent doesn't OOM under a big response body.
             let out = backend
                 .exec(
-                    session_id,
+                    sandbox_id,
                     "yes | head -c 200000",
                     None,
                     Some(15_000),

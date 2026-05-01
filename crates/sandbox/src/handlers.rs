@@ -34,7 +34,7 @@ fn err(status: u16, msg: impl Into<String>) -> HttpResponse {
 }
 
 fn parse_uuid(s: &str) -> Result<Uuid, HttpResponse> {
-    s.parse::<Uuid>().map_err(|_| err(400, "invalid session id (not a uuid)"))
+    s.parse::<Uuid>().map_err(|_| err(400, "invalid sandbox id (not a uuid)"))
 }
 
 fn is_safe_id_char(c: char) -> bool {
@@ -56,27 +56,27 @@ fn infer_content_type(path: &str) -> &'static str {
     }
 }
 
-// ─── POST /sessions ──────────────────────────────────────────────
+// ─── POST /sandboxes ──────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-pub struct CreateSessionBody {
+pub struct CreateSandboxBody {
     /// Identifies the human creator. Drives per-user PVC mounting
     /// in the K8s backend (caches survive across every sandbox the
-    /// user opens) and "one active session per user" scheduling.
+    /// user opens) and "one active sandbox per user" scheduling.
     /// Constrained to `[a-zA-Z0-9_-]{1,64}`.
     pub user_id: String,
-    /// Stable per-project id. The session is keyed on
+    /// Stable per-project id. The sandbox is keyed on
     /// (`user_id`, `project_id`); re-opening with the same pair
-    /// returns the existing session if one is alive. A different
+    /// returns the existing sandbox if one is alive. A different
     /// project_id from the same user implies a different sandbox
     /// — the previous one will be stopped (per-user PVC is RWO).
     pub project_id: String,
 }
 
-pub async fn create_session(
+pub async fn create_sandbox(
     req: HttpRequest,
     state: State,
-    body: web::types::Json<CreateSessionBody>,
+    body: web::types::Json<CreateSandboxBody>,
 ) -> HttpResponse {
     if !auth::check(&req, &state) { return unauthorized(); }
 
@@ -96,49 +96,49 @@ pub async fn create_session(
         return err(400, "invalid project_id (alphanumeric / dash / underscore, max 64 chars)");
     }
 
-    // Re-attach existing session for THIS USER on this project.
+    // Re-attach existing sandbox for THIS USER on this project.
     // (Same project_id from a different user = a different
     // sandbox; they each have their own clone of the project.)
-    if let Some(id) = state.sessions.find_by_user_project(&user_id, &project_id) {
-        if let Some(info) = state.sessions.get(&id) {
+    if let Some(id) = state.sandboxes.find_by_user_project(&user_id, &project_id) {
+        if let Some(info) = state.sandboxes.get(&id) {
             return HttpResponse::Ok().json(&info);
         }
     }
 
-    let session_id = Uuid::new_v4();
-    let info = match state.backend.create(session_id, &user_id, &project_id).await {
+    let sandbox_id = Uuid::new_v4();
+    let info = match state.backend.create(sandbox_id, &user_id, &project_id).await {
         Ok(i) => i,
         Err(e) => return err(500, format!("backend.create: {e}")),
     };
-    let stored = state.sessions.insert(session_id, info);
+    let stored = state.sandboxes.insert(sandbox_id, info);
     HttpResponse::Created().json(&stored)
 }
 
-// ─── GET /sessions ───────────────────────────────────────────────
+// ─── GET /sandboxes ───────────────────────────────────────────────
 
-pub async fn list_sessions(req: HttpRequest, state: State) -> HttpResponse {
+pub async fn list_sandboxes(req: HttpRequest, state: State) -> HttpResponse {
     if !auth::check(&req, &state) { return unauthorized(); }
-    HttpResponse::Ok().json(&state.sessions.list())
+    HttpResponse::Ok().json(&state.sandboxes.list())
 }
 
-// ─── GET /sessions/:id ───────────────────────────────────────────
+// ─── GET /sandboxes/:id ───────────────────────────────────────────
 
-pub async fn get_session(
+pub async fn get_sandbox(
     req: HttpRequest,
     state: State,
     path: web::types::Path<String>,
 ) -> HttpResponse {
     if !auth::check(&req, &state) { return unauthorized(); }
     let id = match parse_uuid(&path) { Ok(u) => u, Err(r) => return r };
-    match state.sessions.get(&id) {
+    match state.sandboxes.get(&id) {
         Some(info) => HttpResponse::Ok().json(&info),
-        None => err(404, "session not found"),
+        None => err(404, "sandbox not found"),
     }
 }
 
-// ─── DELETE /sessions/:id ────────────────────────────────────────
+// ─── DELETE /sandboxes/:id ────────────────────────────────────────
 
-pub async fn stop_session(
+pub async fn stop_sandbox(
     req: HttpRequest,
     state: State,
     path: web::types::Path<String>,
@@ -146,20 +146,20 @@ pub async fn stop_session(
     if !auth::check(&req, &state) { return unauthorized(); }
     let id = match parse_uuid(&path) { Ok(u) => u, Err(r) => return r };
 
-    if state.sessions.get(&id).is_none() {
-        return err(404, "session not found");
+    if state.sandboxes.get(&id).is_none() {
+        return err(404, "sandbox not found");
     }
 
     if let Err(e) = state.backend.stop(id).await {
         eprintln!("[sandbox] backend.stop({id}) failed: {e}");
         // Continue — we still want the registry entry gone.
     }
-    state.sessions.remove(&id);
+    state.sandboxes.remove(&id);
 
-    HttpResponse::Ok().json(&serde_json::json!({"stopped": true, "session_id": id.to_string()}))
+    HttpResponse::Ok().json(&serde_json::json!({"stopped": true, "sandbox_id": id.to_string()}))
 }
 
-// ─── POST /sessions/:id/exec ─────────────────────────────────────
+// ─── POST /sandboxes/:id/exec ─────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct ExecBody {
@@ -177,8 +177,8 @@ pub async fn exec(
     if !auth::check(&req, &state) { return unauthorized(); }
     let id = match parse_uuid(&path) { Ok(u) => u, Err(r) => return r };
 
-    if state.sessions.get(&id).is_none() {
-        return err(404, "session not found");
+    if state.sandboxes.get(&id).is_none() {
+        return err(404, "sandbox not found");
     }
 
     let timeout_ms = body.timeout_ms.unwrap_or(60_000).min(600_000);
@@ -195,7 +195,7 @@ pub async fn exec(
     }
 }
 
-// ─── GET /sessions/:id/file-tree ─────────────────────────────────
+// ─── GET /sandboxes/:id/file-tree ─────────────────────────────────
 
 pub async fn file_tree(
     req: HttpRequest,
@@ -205,8 +205,8 @@ pub async fn file_tree(
     if !auth::check(&req, &state) { return unauthorized(); }
     let id = match parse_uuid(&path) { Ok(u) => u, Err(r) => return r };
 
-    if state.sessions.get(&id).is_none() {
-        return err(404, "session not found");
+    if state.sandboxes.get(&id).is_none() {
+        return err(404, "sandbox not found");
     }
 
     match state.backend.file_tree(id).await {
@@ -215,7 +215,7 @@ pub async fn file_tree(
     }
 }
 
-// ─── GET /sessions/:id/files/{path} ──────────────────────────────
+// ─── GET /sandboxes/:id/files/{path} ──────────────────────────────
 
 pub async fn read_file(
     req: HttpRequest,
@@ -226,8 +226,8 @@ pub async fn read_file(
     let (id_s, file_path) = path.into_inner();
     let id = match parse_uuid(&id_s) { Ok(u) => u, Err(r) => return r };
 
-    if state.sessions.get(&id).is_none() {
-        return err(404, "session not found");
+    if state.sandboxes.get(&id).is_none() {
+        return err(404, "sandbox not found");
     }
 
     match state.backend.read_file(id, &file_path).await {
@@ -241,7 +241,7 @@ pub async fn read_file(
     }
 }
 
-// ─── PUT /sessions/:id/files/{path} ──────────────────────────────
+// ─── PUT /sandboxes/:id/files/{path} ──────────────────────────────
 
 pub async fn write_file(
     req: HttpRequest,
@@ -253,8 +253,8 @@ pub async fn write_file(
     let (id_s, file_path) = path.into_inner();
     let id = match parse_uuid(&id_s) { Ok(u) => u, Err(r) => return r };
 
-    if state.sessions.get(&id).is_none() {
-        return err(404, "session not found");
+    if state.sandboxes.get(&id).is_none() {
+        return err(404, "sandbox not found");
     }
 
     match state.backend.write_file(id, &file_path, &body).await {
@@ -266,7 +266,7 @@ pub async fn write_file(
     }
 }
 
-// ─── DELETE /sessions/:id/files/{path} ───────────────────────────
+// ─── DELETE /sandboxes/:id/files/{path} ───────────────────────────
 
 pub async fn delete_file(
     req: HttpRequest,
@@ -277,8 +277,8 @@ pub async fn delete_file(
     let (id_s, file_path) = path.into_inner();
     let id = match parse_uuid(&id_s) { Ok(u) => u, Err(r) => return r };
 
-    if state.sessions.get(&id).is_none() {
-        return err(404, "session not found");
+    if state.sandboxes.get(&id).is_none() {
+        return err(404, "sandbox not found");
     }
 
     match state.backend.delete_file(id, &file_path).await {

@@ -13,19 +13,19 @@ pub mod backend;
 pub mod config;
 pub mod files;
 pub mod handlers;
-pub mod session;
+pub mod registry;
 
 use std::sync::Arc;
 
 use crate::backend::Backend;
 use crate::config::SandboxConfig;
-use crate::session::SessionRegistry;
+use crate::registry::SandboxRegistry;
 
 /// Shared application state passed to every handler.
 #[allow(missing_debug_implementations)]
 pub struct AppState {
     pub config: SandboxConfig,
-    pub sessions: SessionRegistry,
+    pub sandboxes: SandboxRegistry,
     pub backend: Backend,
 }
 
@@ -37,7 +37,7 @@ impl AppState {
         backend.probe().await?;
         Ok(Arc::new(Self {
             config,
-            sessions: SessionRegistry::new(),
+            sandboxes: SandboxRegistry::new(),
             backend,
         }))
     }

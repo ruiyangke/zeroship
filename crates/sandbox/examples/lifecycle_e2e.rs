@@ -26,9 +26,9 @@ use std::env;
 use std::time::Instant;
 
 use uuid::Uuid;
-use zeroship_sandbox::backend::{Backend, SessionInfo};
+use zeroship_sandbox::backend::{Backend, SandboxInfo};
 use zeroship_sandbox::config::SandboxConfig;
-use zeroship_sandbox::session::SessionRegistry;
+use zeroship_sandbox::registry::SandboxRegistry;
 
 const G: &str = "\x1b[32m";
 const R: &str = "\x1b[31m";
@@ -66,8 +66,8 @@ async fn run() -> Result<(), String> {
     backend.probe().await?;
     println!("probe ok ({:?})", started.elapsed());
 
-    let registry = SessionRegistry::new();
-    // Stable user across the run so session 2 reattaches the
+    let registry = SandboxRegistry::new();
+    // Stable user across the run so sandbox 2 reattaches the
     // existing per-user PVC and proves the cache survived.
     let user_id = format!("e2e-user-{}", Uuid::new_v4().simple());
     let project_id = format!("e2e-{}", Uuid::new_v4().simple());
@@ -81,21 +81,21 @@ async fn run() -> Result<(), String> {
     // PVC intentionally left behind — it's user-scoped, not test-
     // scoped. Operators clean these up via a separate prune job.
     // For local dev: `kubectl delete pvc -l zeroship.user=<id>`.
-    println!("note: PVC zsbx-userhome-{user_id} left in cluster (per-user, not session-scoped)");
+    println!("note: PVC zsbx-userhome-{user_id} left in cluster (per-user, not sandbox-scoped)");
     result
 }
 
 async fn run_lifecycle(
     backend: &Backend,
-    registry: &SessionRegistry,
+    registry: &SandboxRegistry,
     user_id: &str,
     project_id: &str,
 ) -> Result<(), String> {
     // ─── create ─────────────────────────────────────────────────
-    case("create session (PVC + Pod + ConfigMap + port-forward + agent ready)", async {
-        let session_id = Uuid::new_v4();
-        let info = backend.create(session_id, user_id, project_id).await?;
-        registry.insert(session_id, info.clone());
+    case("create sandbox (PVC + Pod + ConfigMap + port-forward + agent ready)", async {
+        let sandbox_id = Uuid::new_v4();
+        let info = backend.create(sandbox_id, user_id, project_id).await?;
+        registry.insert(sandbox_id, info.clone());
         check_info(&info, "k8s")?;
         if !info.backend_hint.contains("pod=")
             || !info.backend_hint.contains("key_fp=")
@@ -107,13 +107,13 @@ async fn run_lifecycle(
         Ok(())
     }).await?;
 
-    let session_id = registry
+    let sandbox_id = registry
         .find_by_user_project(user_id, project_id)
-        .ok_or("session not in registry after create")?;
+        .ok_or("sandbox not in registry after create")?;
 
     // ─── exec ──────────────────────────────────────────────────
     case("exec uname -r — proves microVM kernel via signed /exec", async {
-        let out = backend.exec(session_id, "uname -r", None, Some(5_000)).await?;
+        let out = backend.exec(sandbox_id, "uname -r", None, Some(5_000)).await?;
         if out.status != 0 {
             return Err(format!("uname status={} stderr={}", out.status, out.stderr));
         }
@@ -126,7 +126,7 @@ async fn run_lifecycle(
     }).await?;
 
     case("exec id -u — privilege drop landed (uid != 0)", async {
-        let out = backend.exec(session_id, "id -u", None, Some(5_000)).await?;
+        let out = backend.exec(sandbox_id, "id -u", None, Some(5_000)).await?;
         let uid = out.stdout.trim();
         if uid == "0" {
             return Err("/exec child still root — privilege drop bypassed".into());
@@ -137,8 +137,8 @@ async fn run_lifecycle(
 
     // ─── file CRUD ─────────────────────────────────────────────
     case("write_file then read_file roundtrip", async {
-        backend.write_file(session_id, "hello.txt", b"world").await?;
-        let bytes = backend.read_file(session_id, "hello.txt").await?;
+        backend.write_file(sandbox_id, "hello.txt", b"world").await?;
+        let bytes = backend.read_file(sandbox_id, "hello.txt").await?;
         if bytes != b"world" {
             return Err(format!("roundtrip mismatch: {:?}", String::from_utf8_lossy(&bytes)));
         }
@@ -146,8 +146,8 @@ async fn run_lifecycle(
     }).await?;
 
     case("write_file with nested path creates parents", async {
-        backend.write_file(session_id, "src/server.ts", b"export {};").await?;
-        let bytes = backend.read_file(session_id, "src/server.ts").await?;
+        backend.write_file(sandbox_id, "src/server.ts", b"export {};").await?;
+        let bytes = backend.read_file(sandbox_id, "src/server.ts").await?;
         if bytes != b"export {};" {
             return Err("nested write/read mismatch".into());
         }
@@ -155,7 +155,7 @@ async fn run_lifecycle(
     }).await?;
 
     case("file_tree lists the files we wrote", async {
-        let entries = backend.file_tree(session_id).await?;
+        let entries = backend.file_tree(sandbox_id).await?;
         let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
         for required in ["hello.txt", "src/server.ts"] {
             if !paths.contains(&required) {
@@ -166,11 +166,11 @@ async fn run_lifecycle(
     }).await?;
 
     case("delete_file then read_file → not found", async {
-        let removed = backend.delete_file(session_id, "hello.txt").await?;
+        let removed = backend.delete_file(sandbox_id, "hello.txt").await?;
         if !removed {
             return Err("delete reported not-found on a file that should exist".into());
         }
-        let r = backend.read_file(session_id, "hello.txt").await;
+        let r = backend.read_file(sandbox_id, "hello.txt").await;
         match r {
             Err(e) if e.contains("not found") || e.contains("No such file") => Ok(()),
             Ok(_) => Err("file still readable after delete".into()),
@@ -180,7 +180,7 @@ async fn run_lifecycle(
 
     // ─── path traversal defense (handled by the agent's openat2) ─
     case("write to ../etc/passwd is rejected", async {
-        match backend.write_file(session_id, "../etc/passwd", b"pwn").await {
+        match backend.write_file(sandbox_id, "../etc/passwd", b"pwn").await {
             Err(e) => {
                 println!("    rejected: {e}");
                 Ok(())
@@ -190,34 +190,34 @@ async fn run_lifecycle(
     }).await?;
 
     // ─── re-attach ─────────────────────────────────────────────
-    case("create with same (user, project) reuses existing session", async {
+    case("create with same (user, project) reuses existing sandbox", async {
         // Simulate the registry-level dedup the HTTP handler does.
         let existing = registry
             .find_by_user_project(user_id, project_id)
-            .ok_or("session not in registry")?;
-        if existing != session_id {
-            return Err("registry forgot the session id between calls".into());
+            .ok_or("sandbox not in registry")?;
+        if existing != sandbox_id {
+            return Err("registry forgot the sandbox id between calls".into());
         }
-        let info = registry.get(&existing).ok_or("session vanished")?;
-        if info.session_id != session_id.to_string() {
-            return Err("registry returned a different session_id".into());
+        let info = registry.get(&existing).ok_or("sandbox vanished")?;
+        if info.sandbox_id != sandbox_id.to_string() {
+            return Err("registry returned a different sandbox_id".into());
         }
         Ok(())
     }).await?;
 
     // ─── stop ──────────────────────────────────────────────────
-    case("stop session — Pod + ConfigMap deleted, ops fail", async {
-        backend.stop(session_id).await?;
+    case("stop sandbox — Pod + ConfigMap deleted, ops fail", async {
+        backend.stop(sandbox_id).await?;
         // A stopped session is gone from the backend; any op should
         // surface an error.
-        match backend.exec(session_id, "true", None, Some(2000)).await {
+        match backend.exec(sandbox_id, "true", None, Some(2000)).await {
             Err(_) => Ok(()),
             Ok(out) => Err(format!("post-stop exec succeeded: {out:?}")),
         }
     }).await?;
 
     case("stop is idempotent (second call is Ok)", async {
-        backend.stop(session_id).await?;
+        backend.stop(sandbox_id).await?;
         Ok(())
     }).await?;
 
@@ -229,19 +229,19 @@ async fn run_lifecycle(
     // verify the marker is still there. Proves cache-survives-
     // across-sandboxes — the whole point of the per-user PVC.
 
-    // Re-create a session for the same user (different session id)
+    // Re-create a session for the same user (different sandbox id)
     // so we have a live agent to query.
-    let session2 = Uuid::new_v4();
-    case("recreate session — same user, different session id", async {
-        let info = backend.create(session2, user_id, project_id).await?;
-        registry.insert(session2, info);
+    let sandbox2 = Uuid::new_v4();
+    case("recreate session — same user, different sandbox id", async {
+        let info = backend.create(sandbox2, user_id, project_id).await?;
+        registry.insert(sandbox2, info);
         Ok(())
     }).await?;
 
     case("first sandbox: write marker into ~/.cache/zsbx-marker", async {
         let out = backend
             .exec(
-                session2,
+                sandbox2,
                 "mkdir -p ~/.cache && echo first-run-$$ > ~/.cache/zsbx-marker && cat ~/.cache/zsbx-marker",
                 None,
                 Some(5_000),
@@ -254,7 +254,7 @@ async fn run_lifecycle(
     }).await?;
 
     case("verify HOME is /home/u (the PVC mount)", async {
-        let out = backend.exec(session2, "echo $HOME", None, Some(5_000)).await?;
+        let out = backend.exec(sandbox2, "echo $HOME", None, Some(5_000)).await?;
         let home = out.stdout.trim();
         if home != "/home/u" {
             return Err(format!("HOME={home:?} expected /home/u"));
@@ -264,7 +264,7 @@ async fn run_lifecycle(
 
     // Sample the original marker we expect to survive.
     let marker_before = backend
-        .exec(session2, "cat ~/.cache/zsbx-marker", None, Some(5_000))
+        .exec(sandbox2, "cat ~/.cache/zsbx-marker", None, Some(5_000))
         .await
         .map_err(|e| format!("read marker: {e}"))?
         .stdout
@@ -275,21 +275,21 @@ async fn run_lifecycle(
     }
 
     case("tear session down (PVC stays, single-session-per-user)", async {
-        backend.stop(session2).await?;
-        registry.remove(&session2);
+        backend.stop(sandbox2).await?;
+        registry.remove(&sandbox2);
         Ok(())
     }).await?;
 
-    let session3 = Uuid::new_v4();
+    let sandbox3 = Uuid::new_v4();
     case("create third session — same user, fresh Pod, reuses PVC", async {
-        let info = backend.create(session3, user_id, project_id).await?;
-        registry.insert(session3, info);
+        let info = backend.create(sandbox3, user_id, project_id).await?;
+        registry.insert(sandbox3, info);
         Ok(())
     }).await?;
 
     case("marker survives across sandboxes (per-user PVC works)", async {
         let out = backend
-            .exec(session3, "cat ~/.cache/zsbx-marker", None, Some(5_000))
+            .exec(sandbox3, "cat ~/.cache/zsbx-marker", None, Some(5_000))
             .await?;
         if out.status != 0 {
             return Err(format!(
@@ -313,7 +313,7 @@ async fn run_lifecycle(
         // structure to confirm filesystem semantics work.
         let _ = backend
             .exec(
-                session3,
+                sandbox3,
                 "mkdir -p ~/.npm/_cacache && touch ~/.npm/_cacache/index-v5 && ls ~/.npm/_cacache/",
                 None,
                 Some(5_000),
@@ -323,8 +323,8 @@ async fn run_lifecycle(
     }).await?;
 
     case("final stop — registry clean, PVC retained for next session", async {
-        backend.stop(session3).await?;
-        registry.remove(&session3);
+        backend.stop(sandbox3).await?;
+        registry.remove(&sandbox3);
         Ok(())
     }).await?;
 
@@ -335,12 +335,12 @@ async fn run_lifecycle(
 
 // ─── small reporting helpers ────────────────────────────────────
 
-fn check_info(info: &SessionInfo, expected_backend: &str) -> Result<(), String> {
+fn check_info(info: &SandboxInfo, expected_backend: &str) -> Result<(), String> {
     if info.backend != expected_backend {
         return Err(format!("backend={} expected {expected_backend}", info.backend));
     }
-    if info.session_id.is_empty() || info.project_id.is_empty() {
-        return Err("blank session_id or project_id".into());
+    if info.sandbox_id.is_empty() || info.project_id.is_empty() {
+        return Err("blank sandbox_id or project_id".into());
     }
     Ok(())
 }

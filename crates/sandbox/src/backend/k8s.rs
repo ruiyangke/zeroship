@@ -1,7 +1,7 @@
 //! Kubernetes + libkrun backend.
 //!
 //! Drives `zeroship-sandbox-agent` Pods running under the
-//! `kvm-sandbox` RuntimeClass (crun + libkrun microVM). Each session
+//! `kvm-sandbox` RuntimeClass (crun + libkrun microVM). Each sandbox
 //! gets:
 //!
 //!   - A fresh **Ed25519 keypair** minted by the controller. The
@@ -13,11 +13,11 @@
 //!     as PID 1.
 //!   - A reachable `agent_url` that routes to the in-VM agent's
 //!     port 7777. In-cluster: the Pod IP. Local-dev (controller on
-//!     host): a per-session `kubectl port-forward` subprocess on a
+//!     host): a per-sandbox `kubectl port-forward` subprocess on a
 //!     loopback port.
 //!
 //! Lifecycle ops then talk to the agent over HTTP, signed with the
-//! session's signing key. File operations go via `/files/*`,
+//! sandbox's signing key. File operations go via `/files/*`,
 //! commands via `/exec`, file tree via `/tree`. The agent's verifier
 //! enforces HMAC-style replay protection (5 s skew + 30 s nonce LRU).
 //!
@@ -31,9 +31,9 @@
 //! ## Network access for local dev
 //!
 //! When `cfg.k8s.use_port_forward = true` (default for dev), each
-//! session spawns a `kubectl port-forward pod/<pod> <local>:7777`
+//! sandbox spawns a `kubectl port-forward pod/<pod> <local>:7777`
 //! background process and routes traffic through it. A simple
-//! atomic counter picks unique loopback ports per session. The
+//! atomic counter picks unique loopback ports per sandbox. The
 //! port-forward is killed on `stop`.
 
 use std::collections::HashMap;
@@ -49,51 +49,51 @@ use ed25519_dalek::SigningKey;
 use uuid::Uuid;
 use zeroship_sandbox_agent::sig;
 
-use super::{ExecOutput, SessionInfo, TreeEntry};
+use super::{ExecOutput, SandboxInfo, TreeEntry};
 use crate::config::SandboxConfig;
 
 #[derive(Debug)]
 pub struct K8sBackend {
     cfg: SandboxConfig,
-    /// Per-session bookkeeping. Populated on `create`, cleared on
+    /// Per-sandbox bookkeeping. Populated on `create`, cleared on
     /// `stop`. Mutex-not-RwLock because writes (create/stop) and
     /// reads (every op) are at similar frequency and the contention
     /// is bounded.
-    state: Arc<RwLock<HashMap<Uuid, K8sSession>>>,
+    state: Arc<RwLock<HashMap<Uuid, K8sSandbox>>>,
     /// Loopback port allocator for `kubectl port-forward`. We hand
     /// out unique ports starting from `cfg.k8s.port_forward_start`
-    /// and never reuse — per-session port-forward subprocesses are
+    /// and never reuse — per-sandbox port-forward subprocesses are
     /// short-lived enough that running out is improbable, and the
-    /// agent verifier rejects cross-session replay anyway.
+    /// agent verifier rejects cross-sandbox replay anyway.
     next_port: AtomicU16,
 }
 
-struct K8sSession {
+struct K8sSandbox {
     user_id: String,
     pod_name: String,
     configmap_name: String,
     /// Per-user PVC currently mounted at `/home/u`. Persists across
-    /// sessions for the same user — we record the name so we know
+    /// sandboxes for the same user — we record the name so we know
     /// which PVC to expect in the cluster, but **never delete it**
-    /// on session stop. PVC lifecycle is tied to user lifecycle, not
-    /// session lifecycle.
+    /// on sandbox stop. PVC lifecycle is tied to user lifecycle, not
+    /// sandbox lifecycle.
     user_home_pvc: String,
     namespace: String,
     /// Base URL the controller uses to reach the agent. Either
     /// `http://<pod-ip>:7777` (in-cluster) or
     /// `http://127.0.0.1:<local>` (port-forward).
     agent_url: String,
-    /// Per-session signing key. Lives only in this process; never
+    /// Per-sandbox signing key. Lives only in this process; never
     /// touches the cluster.
     signing_key: SigningKey,
     /// Background `kubectl port-forward` subprocess if enabled, kept
-    /// alive for the session lifetime. Killed on stop.
+    /// alive for the sandbox lifetime. Killed on stop.
     port_forward: Option<Mutex<Child>>,
 }
 
-impl std::fmt::Debug for K8sSession {
+impl std::fmt::Debug for K8sSandbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("K8sSession")
+        f.debug_struct("K8sSandbox")
             .field("user_id", &self.user_id)
             .field("pod_name", &self.pod_name)
             .field("configmap_name", &self.configmap_name)
@@ -139,22 +139,22 @@ impl K8sBackend {
 
     pub async fn create(
         &self,
-        session_id: Uuid,
+        sandbox_id: Uuid,
         user_id: &str,
         project_id: &str,
-    ) -> Result<SessionInfo, String> {
+    ) -> Result<SandboxInfo, String> {
         validate_id(user_id, "user_id")?;
         validate_id(project_id, "project_id")?;
 
-        // 0. **One active session per user.** The per-user PVC is
+        // 0. **One active sandbox per user.** The per-user PVC is
         //    `ReadWriteOnce`; if this user already has a Pod
         //    holding the lock, the new Pod would stay Pending
-        //    forever. Stop the existing session first so the PVC
+        //    forever. Stop the existing sandbox first so the PVC
         //    is free to attach here.
         let existing = self.find_existing_for_user(user_id);
         for old_id in existing {
             eprintln!(
-                "[sandbox/k8s] user {user_id} already has session {old_id}; stopping before creating new"
+                "[sandbox/k8s] user {user_id} already has sandbox {old_id}; stopping before creating new"
             );
             if let Err(e) = self.stop(old_id).await {
                 eprintln!("[sandbox/k8s] stop({old_id}) failed: {e}");
@@ -168,7 +168,7 @@ impl K8sBackend {
         let pubkey_b64 = B64.encode(pubkey.as_bytes());
         let key_fp = sig::pubkey_fingerprint(&pubkey);
 
-        let pod_name = format!("zsbx-{}", session_id.simple());
+        let pod_name = format!("zsbx-{}", sandbox_id.simple());
         let configmap_name = format!("{pod_name}-trust");
         let ns = self.cfg.k8s.namespace.clone();
         let user_home_pvc = user_pvc_name(user_id);
@@ -202,14 +202,14 @@ impl K8sBackend {
             &user_home_pvc,
             user_id,
             project_id,
-            &session_id.to_string(),
+            &sandbox_id.to_string(),
         )
         .await?;
 
         // 5. Wait for the Pod to be Ready. Wrap in a Result so we
         //    clean up on failure (don't leak a half-spawned Pod).
-        //    The PVC stays — it's user-scoped, not session-scoped,
-        //    and removing it would lose other sessions' caches.
+        //    The PVC stays — it's user-scoped, not sandbox-scoped,
+        //    and removing it would lose other sandboxes' caches.
         let ready_res = wait_pod_ready(
             &pod_name,
             &ns,
@@ -238,7 +238,7 @@ impl K8sBackend {
         };
 
         // 7. Stash internal state.
-        let session = K8sSession {
+        let sandbox = K8sSandbox {
             user_id: user_id.to_string(),
             pod_name: pod_name.clone(),
             configmap_name: configmap_name.clone(),
@@ -248,11 +248,11 @@ impl K8sBackend {
             signing_key,
             port_forward,
         };
-        self.state.write().unwrap().insert(session_id, session);
+        self.state.write().unwrap().insert(sandbox_id, sandbox);
 
         let now = unix_now();
-        Ok(SessionInfo {
-            session_id: session_id.to_string(),
+        Ok(SandboxInfo {
+            sandbox_id: sandbox_id.to_string(),
             user_id: user_id.to_string(),
             project_id: project_id.to_string(),
             backend: "k8s".to_string(),
@@ -264,10 +264,10 @@ impl K8sBackend {
         })
     }
 
-    /// Find every session id this user currently owns. Used by
-    /// `create` to enforce one-session-per-user (RWO PVC requires
+    /// Find every sandbox id this user currently owns. Used by
+    /// `create` to enforce one-sandbox-per-user (RWO PVC requires
     /// it). Returns a Vec because in a future multi-PVC world we
-    /// might allow N concurrent sessions per user; today there's
+    /// might allow N concurrent sandboxes per user; today there's
     /// at most one.
     fn find_existing_for_user(&self, user_id: &str) -> Vec<Uuid> {
         self.state
@@ -279,14 +279,14 @@ impl K8sBackend {
             .collect()
     }
 
-    pub async fn stop(&self, session_id: Uuid) -> Result<(), String> {
-        let session = match self.state.write().unwrap().remove(&session_id) {
+    pub async fn stop(&self, sandbox_id: Uuid) -> Result<(), String> {
+        let sandbox = match self.state.write().unwrap().remove(&sandbox_id) {
             Some(s) => s,
             None => return Ok(()), // idempotent
         };
         // Kill the port-forward first so we don't keep a process
         // talking to a Pod that's about to vanish.
-        if let Some(pf) = session.port_forward {
+        if let Some(pf) = sandbox.port_forward {
             if let Ok(mut child) = pf.lock() {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -295,24 +295,24 @@ impl K8sBackend {
         // Try a graceful shutdown via the agent first (flips drain),
         // then delete the Pod + ConfigMap.
         let _ = http_signed(
-            &session.signing_key,
+            &sandbox.signing_key,
             "POST",
-            &format!("{}/shutdown", session.agent_url),
+            &format!("{}/shutdown", sandbox.agent_url),
             &[],
         );
-        let _ = delete_pod(&session.pod_name, &session.namespace).await;
-        let _ = delete_configmap(&session.configmap_name, &session.namespace).await;
+        let _ = delete_pod(&sandbox.pod_name, &sandbox.namespace).await;
+        let _ = delete_configmap(&sandbox.configmap_name, &sandbox.namespace).await;
         Ok(())
     }
 
     pub async fn exec(
         &self,
-        session_id: Uuid,
+        sandbox_id: Uuid,
         cmd: &str,
         cwd: Option<&str>,
         timeout_ms: Option<u64>,
     ) -> Result<ExecOutput, String> {
-        let (sk, url) = self.session_keys(session_id)?;
+        let (sk, url) = self.sandbox_keys(sandbox_id)?;
         let body = serde_json::json!({
             "cmd": cmd,
             "cwd": cwd,
@@ -333,8 +333,8 @@ impl K8sBackend {
         })
     }
 
-    pub async fn read_file(&self, session_id: Uuid, path: &str) -> Result<Vec<u8>, String> {
-        let (sk, url) = self.session_keys(session_id)?;
+    pub async fn read_file(&self, sandbox_id: Uuid, path: &str) -> Result<Vec<u8>, String> {
+        let (sk, url) = self.sandbox_keys(sandbox_id)?;
         let p = sanitize_path(path)?;
         let resp = http_signed(&sk, "GET", &format!("{url}/files/{p}"), &[])?;
         if resp.status == 404 {
@@ -348,11 +348,11 @@ impl K8sBackend {
 
     pub async fn write_file(
         &self,
-        session_id: Uuid,
+        sandbox_id: Uuid,
         path: &str,
         body: &[u8],
     ) -> Result<(), String> {
-        let (sk, url) = self.session_keys(session_id)?;
+        let (sk, url) = self.sandbox_keys(sandbox_id)?;
         let p = sanitize_path(path)?;
         let resp = http_signed(&sk, "PUT", &format!("{url}/files/{p}"), body)?;
         if resp.status != 200 {
@@ -361,8 +361,8 @@ impl K8sBackend {
         Ok(())
     }
 
-    pub async fn delete_file(&self, session_id: Uuid, path: &str) -> Result<bool, String> {
-        let (sk, url) = self.session_keys(session_id)?;
+    pub async fn delete_file(&self, sandbox_id: Uuid, path: &str) -> Result<bool, String> {
+        let (sk, url) = self.sandbox_keys(sandbox_id)?;
         let p = sanitize_path(path)?;
         let resp = http_signed(&sk, "DELETE", &format!("{url}/files/{p}"), &[])?;
         match resp.status {
@@ -372,8 +372,8 @@ impl K8sBackend {
         }
     }
 
-    pub async fn file_tree(&self, session_id: Uuid) -> Result<Vec<TreeEntry>, String> {
-        let (sk, url) = self.session_keys(session_id)?;
+    pub async fn file_tree(&self, sandbox_id: Uuid) -> Result<Vec<TreeEntry>, String> {
+        let (sk, url) = self.sandbox_keys(sandbox_id)?;
         let resp = http_signed(&sk, "GET", &format!("{url}/tree"), &[])?;
         if resp.status != 200 {
             return Err(format!("agent /tree status {}: {}", resp.status, resp.body));
@@ -401,11 +401,11 @@ impl K8sBackend {
             .collect())
     }
 
-    fn session_keys(&self, id: Uuid) -> Result<(SigningKey, String), String> {
+    fn sandbox_keys(&self, id: Uuid) -> Result<(SigningKey, String), String> {
         let guard = self.state.read().unwrap();
         let s = guard
             .get(&id)
-            .ok_or_else(|| "session not found in k8s backend".to_string())?;
+            .ok_or_else(|| "sandbox not found in k8s backend".to_string())?;
         Ok((s.signing_key.clone(), s.agent_url.clone()))
     }
 }
@@ -629,7 +629,7 @@ async fn apply_agent_pod(
     user_home_pvc: &str,
     user_id: &str,
     project_id: &str,
-    session_id: &str,
+    sandbox_id: &str,
 ) -> Result<(), String> {
     let mem = format!("{memory_mb}Mi");
     let cpu_limit = format!("{cpus}");
@@ -642,7 +642,7 @@ metadata:
   labels:
     app.kubernetes.io/name: sandbox-agent
     zeroship.user: "{user_id}"
-    zeroship.session: "{session_id}"
+    zeroship.sandbox: "{sandbox_id}"
     zeroship.project: "{project_id}"
   annotations:
     run.oci.handler: krun
