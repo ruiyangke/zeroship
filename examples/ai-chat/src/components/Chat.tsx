@@ -7,24 +7,17 @@
 //     last assistant message in real time.
 import { useState } from "react";
 import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
+import { rpc, chatTransport } from "../api";
 
 export function Chat() {
   // Local input state — useChat in v5 no longer manages this for you.
   const [input, setInput] = useState("");
 
   const { messages, sendMessage, status, error, stop } = useChat({
-    transport: new DefaultChatTransport({
-      // Hit our streaming RPC procedure directly.
-      api: "/_zs/v1/chat",
-
-      // The kernel's RPC fast path expects `{ json: <input> }` — wrap
-      // the SDK's default `{ messages, ... }` shape in our envelope.
-      // `prepareSendMessagesRequest` is the v5 hook for exactly this.
-      prepareSendMessagesRequest: ({ messages, id }) => ({
-        body: { json: { messages, id } },
-      }),
-    }),
+    // Typed transport bound to `rpc.chat`. The wire URL + envelope
+    // wrapping live in `src/api.ts` so the component doesn't repeat
+    // protocol details.
+    transport: chatTransport(rpc.chat),
 
     // Surface streaming/network errors in the console for debugging.
     onError: (err) => console.error("[chat]", err),

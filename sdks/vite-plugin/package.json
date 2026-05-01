@@ -44,10 +44,11 @@
   "dependencies": {
     "@electric-sql/pglite": "^0.4.4",
     "@electric-sql/pglite-socket": "^0.1.4",
+    "@rollup/plugin-inject": "^5.0.5",
     "magic-string": "^0.30.21",
     "mime": "^3.0.0",
     "tar": "^7.5.13",
-    "unenv": "^1.10.0",
+    "unenv": "2.0.0-rc.24",
     "ws": "^8.20.0"
   }
 }
