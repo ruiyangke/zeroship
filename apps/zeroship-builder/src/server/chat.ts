@@ -17,10 +17,56 @@
 
 import { createUIMessageStreamResponse, type UIMessage } from "ai";
 
+// G2 (Plan 02 Phase B.0): the chat handler runs through the RPC fast
+// path, which does NOT construct a Request — so we can't read
+// `request.signal`. Instead we mint our own AbortController and abort
+// it when the response body's ReadableStream is cancelled (which the
+// V8 runtime does when the SSE consumer disconnects). The signal is
+// threaded into `streamEvents`, where LangChain forwards it to the
+// underlying OpenAI HTTP call.
+//
+// We wrap the body stream so we observe `cancel()`. If a future
+// runtime change exposes `request.signal` on the RPC fast path, this
+// can be simplified to just plumb that signal through — no body
+// wrapping needed.
 export async function chat(input: { messages: UIMessage[] }): Promise<Response> {
   const { buildTranslatedStream } = await import("./_translator.js");
-  const stream = await buildTranslatedStream(input);
-  return createUIMessageStreamResponse({ stream });
+
+  const ac = new AbortController();
+  const stream = await buildTranslatedStream(input, ac.signal);
+
+  // Wrap the SSE Response's body to abort the in-flight LLM call when
+  // the client disconnects. The default `createUIMessageStreamResponse`
+  // body is a ReadableStream; we passthrough chunks but intercept
+  // `cancel()` to fire the AbortController.
+  const baseResponse = createUIMessageStreamResponse({ stream });
+  if (!baseResponse.body) return baseResponse;
+
+  const wrapped = new ReadableStream({
+    async start(controller) {
+      const reader = baseResponse.body!.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          controller.enqueue(value);
+        }
+        controller.close();
+      } catch (err) {
+        controller.error(err);
+      }
+    },
+    cancel(reason) {
+      // Client disconnected mid-stream — abort the OpenAI request.
+      ac.abort(reason);
+    },
+  });
+
+  return new Response(wrapped, {
+    status: baseResponse.status,
+    statusText: baseResponse.statusText,
+    headers: baseResponse.headers,
+  });
 }
 
 // Marked as `mutation` — the procedure has side-effects (a model call)

@@ -22,7 +22,16 @@ export interface BuilderTurnInput {
   messages: UIMessage[];
 }
 
-export async function buildTranslatedStream(input: BuilderTurnInput) {
+// G2: An optional AbortSignal lets the chat handler tear down the LLM
+// HTTP call when the SSE consumer disconnects. The signal threads
+// through `agent.streamEvents({ signal })` — LangChain respects it
+// natively (RunnableConfig.signal). Without this plumbing the OpenAI
+// request kept running after `useChat`'s Stop button, billing tokens
+// the user never saw.
+export async function buildTranslatedStream(
+  input: BuilderTurnInput,
+  signal?: AbortSignal,
+) {
   // Lazy imports — keep non-chat server functions free of the deepagents
   // dep tree (per design §4.8.5: server bundle weight mitigation).
   const { createDeepAgent } = await import("deepagents");
@@ -75,7 +84,7 @@ export async function buildTranslatedStream(input: BuilderTurnInput) {
 
       const events = agent.streamEvents(
         { messages: langchainMessages },
-        { version: "v2" as const },
+        { version: "v2" as const, signal },
       );
 
       for await (const event of events) {
