@@ -20,7 +20,45 @@ import { createUIMessageStream, type UIMessage } from "ai";
 
 export interface BuilderTurnInput {
   messages: UIMessage[];
+  /**
+   * Conversation/session id from `useChat`. Becomes the LangGraph
+   * `thread_id` so the checkpointer scopes middleware-managed state
+   * (TodoListMiddleware todos, FilesystemMiddleware fs,
+   * SummarizationMiddleware history) to this conversation. Without it
+   * every turn gets a fresh thread and Builder forgets its work.
+   */
+  id?: string;
 }
+
+// G1: process-local in-memory checkpointer. deepagents' middleware
+// state (todos, virtual fs, summarised history) lives outside the
+// LangChain `messages` array, so without a checkpointer it's
+// discarded between turns and Builder loses context. Module-level
+// singleton — one instance per worker, persists for the worker's
+// lifetime.
+//
+// DEV-ONLY. The MemorySaver maps thread_id → state in-memory; data
+// vanishes on worker restart and isn't shared across workers.
+// Production needs a Postgres-backed BaseCheckpointSaver writing to
+// the control plane DB (deferred to Plan 03+ — see spec §4.8.9 G1).
+//
+// Lazy-loaded at first chat call so non-chat server functions don't
+// pay the @langchain/langgraph dep cost on cold isolates.
+let _checkpointer: import("@langchain/langgraph-checkpoint").BaseCheckpointSaver | null = null;
+async function getCheckpointer(): Promise<
+  import("@langchain/langgraph-checkpoint").BaseCheckpointSaver
+> {
+  if (_checkpointer) return _checkpointer;
+  const { MemorySaver } = await import("@langchain/langgraph");
+  _checkpointer = new MemorySaver();
+  return _checkpointer;
+}
+
+// Default thread id used when `useChat` doesn't supply one. Should be
+// rare (the React hook generates one per Chat instance), but falling
+// back to a single shared thread is better than minting a new one
+// per call (which would drop state every turn).
+const DEFAULT_THREAD_ID = "builder-default";
 
 // G2: An optional AbortSignal lets the chat handler tear down the LLM
 // HTTP call when the SSE consumer disconnects. The signal threads
@@ -59,11 +97,18 @@ export async function buildTranslatedStream(
   // Phase A: empty tools array. Phase B will inject write_file / propose_diff
   // / ask_survey tools and the translator's switch below will gain
   // `on_tool_*` handling that emits tool-input-* / tool-output-* chunks.
+  //
+  // G1: pass a process-local MemorySaver as the checkpointer so
+  // middleware state survives across turns scoped by thread_id.
+  const checkpointer = await getCheckpointer();
   const agent = createDeepAgent({
     model,
     tools: [],
     systemPrompt: BUILDER_SYSTEM,
+    checkpointer,
   });
+
+  const threadId = input.id ?? DEFAULT_THREAD_ID;
 
   const langchainMessages = input.messages.map((m) => {
     const text = (m.parts ?? [])
@@ -84,7 +129,11 @@ export async function buildTranslatedStream(
 
       const events = agent.streamEvents(
         { messages: langchainMessages },
-        { version: "v2" as const, signal },
+        {
+          version: "v2" as const,
+          signal,
+          configurable: { thread_id: threadId },
+        },
       );
 
       for await (const event of events) {

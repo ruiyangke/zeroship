@@ -29,7 +29,7 @@ import { createUIMessageStreamResponse, type UIMessage } from "ai";
 // runtime change exposes `request.signal` on the RPC fast path, this
 // can be simplified to just plumb that signal through — no body
 // wrapping needed.
-export async function chat(input: { messages: UIMessage[] }): Promise<Response> {
+export async function chat(input: { messages: UIMessage[]; id?: string }): Promise<Response> {
   const { buildTranslatedStream } = await import("./_translator.js");
 
   const ac = new AbortController();
