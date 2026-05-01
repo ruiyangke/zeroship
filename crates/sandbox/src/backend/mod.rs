@@ -46,6 +46,7 @@ use crate::config::SandboxConfig;
 
 pub mod docker;
 pub mod k8s;
+pub mod nomad_ch;
 
 /// Unified exec result — same shape regardless of backend so handlers
 /// don't branch.
@@ -90,12 +91,14 @@ pub struct SandboxInfo {
     /// scheduling. Constrained to `[a-z0-9-_]{1,64}`.
     pub user_id: String,
     pub project_id: String,
-    /// `"docker"` or `"k8s"` — for debug / list output, NOT for
-    /// dispatch (handlers always call through the Backend enum).
+    /// `"docker"`, `"k8s"`, or `"nomad-ch"` — for debug / list
+    /// output, NOT for dispatch (handlers always call through the
+    /// Backend enum).
     pub backend: String,
     /// Human-readable hint identifying the backing runtime. Format
     /// depends on the backend (`container=zsbx-...` for Docker,
-    /// `pod=agent-...` for K8s). Opaque to clients.
+    /// `pod=agent-...` for K8s, `job=zsbx-... vm_index=N key_fp=...`
+    /// for Nomad-CH). Opaque to clients.
     pub backend_hint: String,
     pub created_at_secs: u64,
     pub last_used_at_secs: u64,
@@ -106,6 +109,7 @@ pub struct SandboxInfo {
 pub enum Backend {
     Docker(docker::DockerBackend),
     K8s(k8s::K8sBackend),
+    NomadCh(nomad_ch::NomadCHBackend),
 }
 
 impl Backend {
@@ -113,8 +117,9 @@ impl Backend {
         match cfg.backend.as_str() {
             "docker" => Ok(Self::Docker(docker::DockerBackend::new(cfg.clone()))),
             "k8s" => Ok(Self::K8s(k8s::K8sBackend::new(cfg.clone())?)),
+            "nomad-ch" => Ok(Self::NomadCh(nomad_ch::NomadCHBackend::new(cfg.clone())?)),
             other => Err(format!(
-                "unknown SANDBOX_BACKEND={other:?}; expected \"docker\" or \"k8s\""
+                "unknown SANDBOX_BACKEND={other:?}; expected \"docker\", \"k8s\", or \"nomad-ch\""
             )),
         }
     }
@@ -124,6 +129,7 @@ impl Backend {
         match self {
             Self::Docker(_) => "docker",
             Self::K8s(_) => "k8s",
+            Self::NomadCh(_) => "nomad-ch",
         }
     }
 
@@ -133,6 +139,7 @@ impl Backend {
         match self {
             Self::Docker(b) => b.probe().await,
             Self::K8s(b) => b.probe().await,
+            Self::NomadCh(b) => b.probe().await,
         }
     }
 
@@ -147,18 +154,20 @@ impl Backend {
             // monitor today).
             Self::Docker(_) => true,
             Self::K8s(b) => b.is_healthy(),
+            Self::NomadCh(b) => b.is_healthy(),
         }
     }
 
-    /// Best-effort cleanup of in-cluster runtime objects that the
-    /// controller no longer holds in-memory state for. Currently
-    /// only the K8s backend implements this (Docker containers
-    /// stop when the daemon is restarted, so no orphan story).
-    /// Called once at startup from [`crate::AppState::from_config`].
+    /// Best-effort cleanup of runtime objects (Pods, Nomad jobs)
+    /// that the controller no longer holds in-memory state for.
+    /// Docker containers stop when the daemon restarts; the K8s
+    /// and Nomad-CH backends optionally prune by label / job
+    /// prefix at startup. Called once from [`crate::AppState::from_config`].
     pub async fn cleanup_orphans_at_startup(&self) -> Result<usize, String> {
         match self {
             Self::Docker(_) => Ok(0),
             Self::K8s(b) => b.cleanup_orphans_at_startup().await,
+            Self::NomadCh(b) => b.cleanup_orphans_at_startup().await,
         }
     }
 
@@ -171,6 +180,7 @@ impl Backend {
         match self {
             Self::Docker(b) => b.create(sandbox_id, user_id, project_id).await,
             Self::K8s(b) => b.create(sandbox_id, user_id, project_id).await,
+            Self::NomadCh(b) => b.create(sandbox_id, user_id, project_id).await,
         }
     }
 
@@ -178,6 +188,7 @@ impl Backend {
         match self {
             Self::Docker(b) => b.stop(session_id).await,
             Self::K8s(b) => b.stop(session_id).await,
+            Self::NomadCh(b) => b.stop(session_id).await,
         }
     }
 
@@ -191,6 +202,7 @@ impl Backend {
         match self {
             Self::Docker(b) => b.exec(sandbox_id, cmd, cwd, timeout_ms).await,
             Self::K8s(b) => b.exec(sandbox_id, cmd, cwd, timeout_ms).await,
+            Self::NomadCh(b) => b.exec(sandbox_id, cmd, cwd, timeout_ms).await,
         }
     }
 
@@ -198,6 +210,7 @@ impl Backend {
         match self {
             Self::Docker(b) => b.read_file(sandbox_id, path).await,
             Self::K8s(b) => b.read_file(sandbox_id, path).await,
+            Self::NomadCh(b) => b.read_file(sandbox_id, path).await,
         }
     }
 
@@ -210,6 +223,7 @@ impl Backend {
         match self {
             Self::Docker(b) => b.write_file(sandbox_id, path, body).await,
             Self::K8s(b) => b.write_file(sandbox_id, path, body).await,
+            Self::NomadCh(b) => b.write_file(sandbox_id, path, body).await,
         }
     }
 
@@ -217,6 +231,7 @@ impl Backend {
         match self {
             Self::Docker(b) => b.delete_file(sandbox_id, path).await,
             Self::K8s(b) => b.delete_file(sandbox_id, path).await,
+            Self::NomadCh(b) => b.delete_file(sandbox_id, path).await,
         }
     }
 
@@ -224,6 +239,7 @@ impl Backend {
         match self {
             Self::Docker(b) => b.file_tree(session_id).await,
             Self::K8s(b) => b.file_tree(session_id).await,
+            Self::NomadCh(b) => b.file_tree(session_id).await,
         }
     }
 }

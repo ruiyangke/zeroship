@@ -104,6 +104,11 @@ pub struct SandboxConfig {
     /// (cheap; lets you switch backends without restart-time config
     /// gymnastics).
     pub k8s: K8sConfig,
+
+    /// Nomad + Cloud Hypervisor backend settings. Same loose-loading
+    /// rationale as `k8s`: parsed unconditionally so the operator can
+    /// flip `SANDBOX_BACKEND=nomad-ch` without re-templating env.
+    pub nomad_ch: NomadCHConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -171,6 +176,92 @@ pub struct K8sConfig {
     pub startup_orphan_cleanup: bool,
 }
 
+/// Configuration for the **Nomad + Cloud Hypervisor** backend.
+///
+/// In this mode the controller submits a `raw_exec` Nomad job per
+/// sandbox; the job spec invokes a wrapper script (shipped alongside
+/// the controller, configured via `wrapper_path`) which spawns a CH
+/// microVM with three virtio-fs shares (`keys`, `workspace`,
+/// `userhome`) bound to host directories the controller has
+/// pre-created.
+///
+/// Network plumbing (tap devices, /30 subnets) is assumed to be
+/// pre-provisioned out-of-band — see `docs/sandbox/nomad-ch.md` for
+/// the host setup runbook.
+#[derive(Clone, Debug)]
+pub struct NomadCHConfig {
+    /// Base URL for the Nomad HTTP API. We talk JSON over HTTP via
+    /// `ureq` (inside `compio::runtime::spawn_blocking`); the `nomad`
+    /// CLI is intentionally **not** used so the controller has no
+    /// runtime dependency on the binary.
+    /// `SANDBOX_NOMAD_ADDR` (default `http://127.0.0.1:4646`).
+    pub nomad_addr: String,
+
+    /// Datacenter name used in the submitted job spec's
+    /// `Datacenters: [...]` field. Must match a datacenter the Nomad
+    /// agent advertises. `SANDBOX_NOMAD_DATACENTER` (default `dc1`).
+    pub datacenter: String,
+
+    /// Absolute path to the wrapper script the `raw_exec` task
+    /// invokes. The script is shipped at
+    /// `crates/sandbox/scripts/nomad-vm-wrapper.sh`; operators copy
+    /// it to a stable system path. `SANDBOX_NOMAD_CH_WRAPPER_PATH`
+    /// (default `/etc/zeroship/nomad-vm-wrapper.sh`).
+    pub wrapper_path: PathBuf,
+
+    /// Host directory holding the kernel image (`vmlinuz`) and the
+    /// rootfs template (`rootfs-slim.img`). Equivalent to the
+    /// `ZSBX_HERE` env var in the demo wrapper. The wrapper `cd`s to
+    /// this dir at startup. `SANDBOX_NOMAD_CH_RUNTIME_DIR` (default
+    /// `/var/lib/zeroship/ch`).
+    pub runtime_dir: PathBuf,
+
+    /// Root directory for per-sandbox host state. Each sandbox gets
+    /// `<host_state_dir>/<sandbox-id>/{keys,workspace}/`; the dirs are
+    /// virtio-fs-shared into the VM. `SANDBOX_NOMAD_CH_HOST_STATE_DIR`
+    /// (default `/var/zeroship/ch`).
+    pub host_state_dir: PathBuf,
+
+    /// Root for per-user persistent home directories — each user
+    /// gets `<user_home_dir_root>/<user_id>/home/` shared into the
+    /// VM as virtiofs tag `userhome` and mounted at `/home/u`. This
+    /// directory persists across sandbox lifetimes (package caches,
+    /// dotfiles). The next milestone replaces this with
+    /// Ceph-RBD-backed volumes via a CSI plugin; for the single-node
+    /// demo it's a host bind-mount.
+    /// `SANDBOX_NOMAD_CH_USER_HOME_ROOT` (default `/var/zeroship/ch/users`).
+    pub user_home_dir_root: PathBuf,
+
+    /// Inclusive lower bound of the per-VM index pool. Each sandbox
+    /// gets a unique index; the wrapper computes `tap=zsbx-nm-<idx>`,
+    /// host IP `10.99.<100+idx>.1` and VM IP `10.99.<100+idx>.2`. The
+    /// host operator is responsible for pre-creating tap devices in
+    /// this range. `SANDBOX_NOMAD_CH_VM_INDEX_FLOOR` (default 1).
+    pub vm_index_floor: u16,
+
+    /// Inclusive upper bound of the index pool. Allocator hands out
+    /// indices in `[floor, ceil]`; `alloc()` returns an error past
+    /// `ceil`. `SANDBOX_NOMAD_CH_VM_INDEX_CEIL` (default 250).
+    pub vm_index_ceil: u16,
+
+    /// How long to wait for an alloc to reach `ClientStatus="running"`
+    /// after `POST /v1/jobs`. Past this we give up and the
+    /// `CreateGuard` tears the job down. `SANDBOX_NOMAD_CH_READY_TIMEOUT_SECS`
+    /// (default 60). Includes both Nomad scheduling latency and the
+    /// wrapper's CH boot time; should be a few × the typical CH boot
+    /// (~3-4 s on a healthy host).
+    pub ready_timeout_secs: u64,
+
+    /// On controller startup, list every Nomad job whose `ID` starts
+    /// with the `zsbx-` prefix and stop+purge it. Same trade-off as
+    /// the K8s flag: useful for single-replica deployments to
+    /// recover after a crash; **dangerous in HA** because the first
+    /// replica nukes every other replica's active sandboxes on
+    /// rolling restart. Default off; opt-in for single-node operators.
+    /// `SANDBOX_NOMAD_CH_STARTUP_ORPHAN_CLEANUP` (default `false`).
+    pub startup_orphan_cleanup: bool,
+}
+
 impl SandboxConfig {
     pub fn from_env() -> Result<Self, String> {
         let port = parse_env("SANDBOX_PORT", 9091u16)?;
@@ -198,9 +289,9 @@ impl SandboxConfig {
         }
         let token = ApiToken::new(token_raw);
         let backend = std::env::var("SANDBOX_BACKEND").unwrap_or_else(|_| "docker".to_string());
-        if !matches!(backend.as_str(), "docker" | "k8s") {
+        if !matches!(backend.as_str(), "docker" | "k8s" | "nomad-ch") {
             return Err(format!(
-                "SANDBOX_BACKEND={backend:?}; expected \"docker\" or \"k8s\""
+                "SANDBOX_BACKEND={backend:?}; expected \"docker\", \"k8s\", or \"nomad-ch\""
             ));
         }
         let image = std::env::var("SANDBOX_IMAGE")
@@ -243,10 +334,47 @@ impl SandboxConfig {
             startup_orphan_cleanup: parse_env("SANDBOX_K8S_STARTUP_ORPHAN_CLEANUP", false)?,
         };
 
+        let nomad_ch = NomadCHConfig {
+            nomad_addr: std::env::var("SANDBOX_NOMAD_ADDR")
+                .unwrap_or_else(|_| "http://127.0.0.1:4646".to_string()),
+            datacenter: std::env::var("SANDBOX_NOMAD_DATACENTER")
+                .unwrap_or_else(|_| "dc1".to_string()),
+            wrapper_path: PathBuf::from(
+                std::env::var("SANDBOX_NOMAD_CH_WRAPPER_PATH")
+                    .unwrap_or_else(|_| "/etc/zeroship/nomad-vm-wrapper.sh".to_string()),
+            ),
+            runtime_dir: PathBuf::from(
+                std::env::var("SANDBOX_NOMAD_CH_RUNTIME_DIR")
+                    .unwrap_or_else(|_| "/var/lib/zeroship/ch".to_string()),
+            ),
+            host_state_dir: PathBuf::from(
+                std::env::var("SANDBOX_NOMAD_CH_HOST_STATE_DIR")
+                    .unwrap_or_else(|_| "/var/zeroship/ch".to_string()),
+            ),
+            user_home_dir_root: PathBuf::from(
+                std::env::var("SANDBOX_NOMAD_CH_USER_HOME_ROOT")
+                    .unwrap_or_else(|_| "/var/zeroship/ch/users".to_string()),
+            ),
+            vm_index_floor: parse_env("SANDBOX_NOMAD_CH_VM_INDEX_FLOOR", 1u16)?,
+            vm_index_ceil: parse_env("SANDBOX_NOMAD_CH_VM_INDEX_CEIL", 250u16)?,
+            ready_timeout_secs: parse_env("SANDBOX_NOMAD_CH_READY_TIMEOUT_SECS", 60u64)?,
+            startup_orphan_cleanup: parse_env(
+                "SANDBOX_NOMAD_CH_STARTUP_ORPHAN_CLEANUP",
+                false,
+            )?,
+        };
+
+        if nomad_ch.vm_index_floor > nomad_ch.vm_index_ceil {
+            return Err(format!(
+                "SANDBOX_NOMAD_CH_VM_INDEX_FLOOR ({}) > _CEIL ({})",
+                nomad_ch.vm_index_floor, nomad_ch.vm_index_ceil
+            ));
+        }
+
         Ok(Self {
             port, token, backend, image, workspace_root, network,
             memory_mb, cpus, idle_timeout_secs, max_lifetime_secs, auto_pull,
-            k8s,
+            k8s, nomad_ch,
         })
     }
 }
