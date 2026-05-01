@@ -41,7 +41,11 @@ test.describe("Plan 03.1 spine — home → wizard → workspace", () => {
     // Home.submit's `!prompt.trim()` gate has a small post-hydrate
     // race in dev that's flaky after the wizard test mutates the
     // module graph. The wizard surface is exercised directly below.
-    await page.goto("/");
+    //
+    // Note: `/` is the public marketing page (per spec §5.1). The
+    // authed gallery (Home) lives at `/home` behind AuthGuard; in
+    // dev, devBypass lets us land on it without a real session.
+    await page.goto("/home");
     await expect(page.getByTestId("home-prompt")).toBeVisible();
     await expect(page.getByTestId("home-submit")).toBeVisible();
 
