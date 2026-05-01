@@ -156,16 +156,51 @@ fn decoder_rejects_unknown_encoding() {
     let s = run_in_v8(
         r#"
         let kind;
-        try { new TextDecoder("ascii"); }
+        // "fakeenc" is not a valid WHATWG encoding label.
+        try { new TextDecoder("fakeenc"); }
         catch (e) { kind = e.constructor.name; }
         kind;
         "#,
         |val, scope| js_string(val, scope),
     );
-    // We accept only utf-8; ascii is a real WHATWG encoding we don't
-    // implement. Spec says throw RangeError. We deliberately don't
-    // echo the label string in the error message (low-risk log
-    // injection vector).
+    assert_eq!(s, "RangeError");
+}
+
+#[test]
+fn decoder_accepts_legacy_encodings() {
+    // We support the full WHATWG encoding set via encoding_rs.
+    // ascii / latin1 / Windows-1252 / Big5 / Shift_JIS / GB18030 /
+    // UTF-16LE etc. all work.
+    let s = run_in_v8(
+        r#"
+        const labels = ["ascii", "latin1", "windows-1252", "Big5",
+                        "shift_jis", "gb18030", "utf-16le", "utf-16be"];
+        labels.map(l => new TextDecoder(l).encoding).join(",");
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    // ASCII-canonical names per WHATWG; encoding_rs returns
+    // canonical-but-mixed-case for some, then we lowercase.
+    assert_eq!(
+        s,
+        "windows-1252,windows-1252,windows-1252,big5,shift_jis,gb18030,utf-16le,utf-16be"
+    );
+}
+
+#[test]
+fn decoder_rejects_replacement_encoding_label() {
+    // Per WHATWG §4.2 step 4, the `replacement` encoding can't be
+    // constructed via new TextDecoder() — it's used only for
+    // labels like ISO-2022-CN that don't have a real decoder.
+    let s = run_in_v8(
+        r#"
+        let kind;
+        try { new TextDecoder("iso-2022-cn"); }
+        catch (e) { kind = e.constructor.name; }
+        kind;
+        "#,
+        |val, scope| js_string(val, scope),
+    );
     assert_eq!(s, "RangeError");
 }
 
@@ -354,22 +389,24 @@ fn decoder_keeps_bom_when_ignoreBOM_set() {
 }
 
 #[test]
-fn decoder_only_strips_bom_on_first_call() {
+fn decoder_strips_bom_on_every_non_streaming_call() {
+    // Per WPT textdecoder-byte-order-marks: BOM is stripped on every
+    // non-streaming call's first byte, not just the first call's
+    // for the lifetime of the TextDecoder. (My initial impl had a
+    // sticky `bom_seen` flag — wrong. Correct behavior: each
+    // non-streaming `decode()` is its own session; BOM-removal
+    // state resets between sessions.)
     let s = run_in_v8(
         r#"
         const dec = new TextDecoder();
         const bom = new Uint8Array([0xEF, 0xBB, 0xBF]);
-        const a = dec.decode(bom);            // first call → BOM stripped → ""
-        const b = dec.decode(bom);            // second call → BOM kept
-        JSON.stringify({
-            aLen: a.length,
-            bLen: b.length,
-            bCp: b.length > 0 ? b.codePointAt(0) : null,
-        });
+        const a = dec.decode(bom);  // first call → BOM stripped → ""
+        const b = dec.decode(bom);  // second call → ALSO stripped
+        JSON.stringify({ aLen: a.length, bLen: b.length });
         "#,
         |val, scope| js_string(val, scope),
     );
-    assert_eq!(s, r#"{"aLen":0,"bLen":1,"bCp":65279}"#);
+    assert_eq!(s, r#"{"aLen":0,"bLen":0}"#);
 }
 
 // ---------------------------------------------------------------------------
@@ -473,8 +510,7 @@ fn decode_rejects_non_buffer_input() {
 
 /// `null` label coerces to the string `"null"` per WebIDL DOMString
 /// rules — that's not a valid encoding alias, so spec requires
-/// throwing RangeError. Previous impl mapped null to None and used
-/// the default "utf-8".
+/// throwing RangeError.
 #[test]
 fn decoder_constructor_rejects_null_label() {
     let s = run_in_v8(
@@ -489,14 +525,13 @@ fn decoder_constructor_rejects_null_label() {
     assert_eq!(s, "RangeError");
 }
 
-/// Label normalization is ASCII-only per WHATWG §4.2 — `str::trim()`
-/// would also strip Unicode whitespace like NBSP, and
-/// `str::to_lowercase()` is Unicode-lowercase, both of which can
-/// either accept invalid labels or reject valid ones.
+/// Label normalization is ASCII-only per WHATWG §4.2. encoding_rs's
+/// `Encoding::for_label` implements this directly (strips ASCII
+/// whitespace HT/LF/FF/CR/SP, ASCII-case-insensitive comparison).
 #[test]
 fn decoder_label_uses_ascii_only_normalization() {
-    // U+00A0 NBSP is not ASCII whitespace; should NOT be stripped,
-    // so the resulting label "\u00A0utf-8" is invalid.
+    // U+00A0 NBSP is not ASCII whitespace; not stripped → invalid
+    // label.
     let s = run_in_v8(
         r#"
         let kind;

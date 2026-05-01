@@ -4,39 +4,46 @@
 //!
 //! Implementation notes:
 //!
-//! - **UTF-8 decoder is `encoding_rs`'s** — Henri Sivonen's reference
-//!   implementation of the WHATWG decoder algorithm, also used by
-//!   Firefox. Matches Web Platform Tests for U+FFFD substitution
-//!   counts on adversarial / malformed inputs (Rust's
-//!   `std::str::from_utf8` does NOT match the WHATWG state-machine
-//!   grouping rules — that was a real divergence in the previous
-//!   draft of this file).
+//! - **All WHATWG encodings supported** via `encoding_rs` — Henri
+//!   Sivonen's reference implementation, also Firefox's encoding
+//!   library. Covers UTF-8, UTF-16LE, UTF-16BE, the eight ISO-8859-*
+//!   variants, Windows-125x, the CJK multi-byte encodings (Big5,
+//!   GB18030, Shift_JIS, EUC-JP, EUC-KR, ISO-2022-JP), Macintosh,
+//!   IBM866, KOI8-{R,U}, and the `replacement` encoding. Matches WPT
+//!   for U+FFFD substitution counts and stream-state behavior.
 //!
-//! - **BOM handling** uses `encoding_rs`'s built-in BOM-stripping
-//!   variant (`new_decoder` vs `new_decoder_without_bom_handling`),
-//!   so BOM detection is correct across streamed chunk boundaries
-//!   (BOM split into 1+2 or 2+1 bytes works) without us tracking
-//!   `bom_consumed` state by hand.
+//! - **TextEncoder is UTF-8 only** by spec — the legacy
+//!   `new TextEncoder("utf-16")` constructor was removed years ago.
+//!   `new TextEncoder()` is the only valid form.
+//!
+//! - **BOM handling** uses `encoding_rs::Encoding::new_decoder` (BOM
+//!   sniffing on) by default; `ignoreBOM: true` switches to
+//!   `new_decoder_without_bom_handling`. BOM detection is correct
+//!   across streamed chunk boundaries (BOM split 1+2 or 2+1 bytes
+//!   works) without manual partial-byte tracking.
+//!
+//! - **BOM-removal state resets per non-streaming session**, matching
+//!   WPT's `textdecoder-byte-order-marks`: `dec.decode(bom)` strips on
+//!   every call, not just the first. We achieve this by dropping the
+//!   internal `encoding_rs::Decoder` after each non-streaming flush
+//!   (also avoiding encoding_rs's "Must not use a decoder that has
+//!   finished" panic on reuse).
 //!
 //! - **Argument validation** follows WebIDL coercion strictly:
-//!   - `new TextDecoder(null)` → throws `RangeError` (`null` coerces
-//!     to the string `"null"`, which isn't a UTF-8 alias).
-//!   - `new TextDecoder("utf-8", "fatal")` → throws `TypeError`
-//!     (non-object non-null non-undefined as dictionary).
-//!   - `decode(42)` → throws `TypeError` (not a `BufferSource`).
-//!   - `decode(bytes, "stream")` → throws `TypeError`.
+//!   - `new TextDecoder(null)` → `null` coerces to the string
+//!     `"null"`; rejected as an unknown label → `RangeError`.
+//!   - `new TextDecoder("utf-8", "fatal")` → non-object as dictionary
+//!     → `TypeError`.
+//!   - `decode(42)` → not a `BufferSource` → `TypeError`.
+//!   - `decode(bytes, "stream")` → non-object as options → `TypeError`.
 //!
-//! - **Symbol.toStringTag** is set so
-//!   `Object.prototype.toString.call(new TextDecoder()) === "[object
-//!   TextDecoder]"` (libraries like webidl-conversions check this).
-//!
-//! - Scope is intentionally UTF-8 only at the moment. The full
-//!   WHATWG encoding set (utf-16le/be, latin1, the legacy single-
-//!   byte encodings) is a one-line change to use
-//!   `encoding_rs::Encoding::for_label` instead of the hardcoded
-//!   UTF-8 path. Deferred until a real consumer needs it.
+//! - **Symbol.toStringTag** is set on the prototype by the
+//!   `#[v8_class]` macro's install codegen, so
+//!   `Object.prototype.toString.call(new TextDecoder())` returns
+//!   `"[object TextDecoder]"` (libraries like webidl-conversions
+//!   check this).
 
-use encoding_rs::{DecoderResult, UTF_8};
+use encoding_rs::{DecoderResult, Encoding};
 // `v8_class` is the only attribute consumed at the impl-block level.
 // The marker attributes (`v8_method`/`v8_getter`/`v8_constructor`) are
 // no-op procedural macros that the user puts on individual methods —
@@ -87,18 +94,19 @@ impl TextEncoder {
 // ---------------------------------------------------------------------------
 
 pub struct TextDecoder {
+    /// The encoding this decoder was constructed with. We keep a
+    /// `&'static Encoding` reference (encoding_rs returns these as
+    /// statics) and use it to spin up fresh `Decoder` instances per
+    /// session.
+    encoding: &'static Encoding,
     /// Lazily-instantiated `encoding_rs::Decoder`. Recreated after
-    /// every non-streaming flush because encoding_rs panics with
-    /// `"Must not use a decoder that has finished"` if you pass
-    /// `last: true` and then try to reuse it. WHATWG spec allows
-    /// multiple `decode(bytes)` calls on the same TextDecoder, so
-    /// we drop-and-recreate to bridge the gap.
+    /// every non-streaming flush because (a) encoding_rs panics on
+    /// reuse-after-finalize, and (b) WPT byte-order-marks tests
+    /// confirm WHATWG semantics: BOM is stripped on EVERY
+    /// non-streaming call's first byte, not just the first call's
+    /// for the lifetime of the TextDecoder. Recreating the decoder
+    /// per session naturally resets BOM-removal state too.
     decoder: Option<encoding_rs::Decoder>,
-    /// Set true after the first decode call that consumed any
-    /// bytes. Subsequent calls won't request BOM-removal — matches
-    /// the WHATWG "BOM seen flag" which persists across calls for
-    /// the lifetime of the TextDecoder.
-    bom_seen: bool,
     fatal_flag: bool,
     ignore_bom_flag: bool,
 }
@@ -106,8 +114,8 @@ pub struct TextDecoder {
 impl Default for TextDecoder {
     fn default() -> Self {
         TextDecoder {
+            encoding: encoding_rs::UTF_8,
             decoder: None,
-            bom_seen: false,
             fatal_flag: false,
             ignore_bom_flag: false,
         }
@@ -118,10 +126,13 @@ impl Default for TextDecoder {
 impl TextDecoder {
     /// `new TextDecoder(label?: DOMString, options?: TextDecoderOptions)`
     ///
-    /// `label` defaults to `"utf-8"` per spec. We currently only
-    /// support UTF-8 — other labels throw `RangeError`. `options`
-    /// must be `undefined`, `null`, or a plain object; anything else
-    /// throws `TypeError` per WebIDL §3.2.20.
+    /// `label` defaults to `"utf-8"` per spec. Resolved via WHATWG's
+    /// "get an encoding" algorithm (`encoding_rs::Encoding::for_label`),
+    /// which strips ASCII whitespace and applies ASCII-case-insensitive
+    /// comparison against the encoding label table. Unknown labels and
+    /// the `replacement` encoding throw `RangeError` per spec.
+    /// `options` must be `undefined`, `null`, or a plain object;
+    /// anything else throws `TypeError` per WebIDL §3.2.20.
     #[v8_constructor]
     fn new(
         scope: &mut v8::PinScope,
@@ -129,25 +140,38 @@ impl TextDecoder {
         options: v8::Local<v8::Value>,
     ) -> Result<Self, OpError> {
         // Per spec: label defaults to "utf-8" only when undefined.
-        // null coerces to the string "null" — which is not a valid
-        // encoding alias and must throw RangeError.
+        // null coerces to the string "null" via WebIDL DOMString,
+        // which `Encoding::for_label` will reject as unknown.
         let label_str = if label.is_undefined() {
             "utf-8".to_string()
         } else {
             label.to_rust_string_lossy(scope)
         };
 
-        if !is_utf8_label(&label_str) {
+        let encoding = match Encoding::for_label(label_str.as_bytes()) {
+            Some(enc) => enc,
+            None => {
+                return Err(OpError::range_error(
+                    "TextDecoder: unsupported encoding label",
+                ));
+            }
+        };
+
+        // Per WHATWG §4.2 step 4: if the encoding is the
+        // `replacement` encoding, throw RangeError. encoding_rs
+        // exposes it as `REPLACEMENT`; the spec disallows
+        // constructing a TextDecoder for it.
+        if encoding == encoding_rs::REPLACEMENT {
             return Err(OpError::range_error(
-                "TextDecoder: unsupported encoding label; only utf-8 is implemented",
+                "TextDecoder: replacement encoding is not a valid label for TextDecoder",
             ));
         }
 
         let (fatal_flag, ignore_bom_flag) = read_decoder_options(scope, options)?;
 
         Ok(TextDecoder {
+            encoding,
             decoder: None,
-            bom_seen: false,
             fatal_flag,
             ignore_bom_flag,
         })
@@ -166,20 +190,27 @@ impl TextDecoder {
         input: v8::Local<v8::Value>,
         options: v8::Local<v8::Value>,
     ) -> Result<String, OpError> {
-        let bytes = read_buffer_source(input)?;
+        // Order matters per WebIDL: process `options` first because
+        // its getters may have side effects (the WPT test
+        // `textdecoder-arguments.any.js` detaches the input buffer
+        // inside the `stream` getter). Only after options coerces
+        // do we read the buffer's bytes; if it was detached during
+        // options, we get an empty input.
         let stream = read_stream_option(scope, options)?;
+        let bytes = read_buffer_source(input)?;
 
-        // Lazy-init or re-init the decoder. After the previous
-        // non-streaming call we set `decoder = None`, so this branch
-        // also handles "post-flush, fresh state" reconstruction.
+        // Lazy-init or re-init the decoder. We drop it after every
+        // non-streaming `decode()` (see the bottom of this method),
+        // so each new "decode session" starts with a fresh decoder
+        // — and thus fresh BOM-removal state. WPT's
+        // textdecoder-byte-order-marks asserts BOM stripping on
+        // every non-streaming call's input, which only works if
+        // BOM detection resets per session.
         if self.decoder.is_none() {
-            // BOM-removal kicks in only on the very first chunk that
-            // could contain a BOM. After we've seen any input bytes,
-            // future decoders skip BOM detection.
-            let dec = if self.ignore_bom_flag || self.bom_seen {
-                UTF_8.new_decoder_without_bom_handling()
+            let dec = if self.ignore_bom_flag {
+                self.encoding.new_decoder_without_bom_handling()
             } else {
-                UTF_8.new_decoder_with_bom_removal()
+                self.encoding.new_decoder_with_bom_removal()
             };
             self.decoder = Some(dec);
         }
@@ -222,19 +253,6 @@ impl TextDecoder {
             }
         };
 
-        // Any input that reached the decoder's internal state means
-        // BOM detection has had its chance. encoding_rs commits the
-        // BOM/no-BOM decision after the first byte that disambiguates
-        // (i.e., as soon as the second-byte mismatch with the BOM
-        // sequence is observed) — but for the spec, we conservatively
-        // mark BOM as seen once any non-empty chunk has been
-        // processed, even if it doesn't contain bytes that confirm
-        // the absence of a BOM. This matches what Chrome and Firefox
-        // do on partial chunks.
-        if !bytes.is_empty() {
-            self.bom_seen = true;
-        }
-
         // Non-streaming call → discard the decoder so the next
         // `decode()` call starts fresh, per WHATWG semantics.
         // encoding_rs would otherwise panic on reuse-after-finalize.
@@ -253,11 +271,13 @@ impl TextDecoder {
 
     #[v8_getter]
     fn encoding(&self) -> String {
-        // We're hardcoded to UTF-8 currently. Once we accept other
-        // labels via `Encoding::for_label`, this should read from the
-        // (still-allocated) decoder, or from a stored Encoding ref
-        // on the struct.
-        "utf-8".into()
+        // Per WHATWG §4.2 step 5, the canonical name is the
+        // lowercase form. encoding_rs's `name()` returns the
+        // canonical name in title case (e.g. `"UTF-8"`,
+        // `"windows-1252"`); the spec wants lowercase
+        // (`"utf-8"`, `"windows-1252"`). For ASCII-only names this
+        // is just `to_ascii_lowercase`.
+        self.encoding.name().to_ascii_lowercase()
     }
 
     #[v8_getter]
@@ -278,44 +298,6 @@ impl TextDecoder {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// True iff the given label normalizes to UTF-8 per WHATWG §4.2
-/// "get an encoding." Strips ASCII whitespace (HT, LF, FF, CR, SP)
-/// only — NOT Unicode whitespace, which `str::trim` would do —
-/// and uses ASCII-case-insensitive comparison.
-fn is_utf8_label(label: &str) -> bool {
-    let trimmed = trim_ascii_whitespace(label);
-    matches!(
-        trimmed.to_ascii_lowercase().as_str(),
-        "utf-8"
-            | "utf8"
-            | "unicode-1-1-utf-8"
-            | "unicode11utf8"
-            | "unicode20utf8"
-            | "x-unicode20utf8"
-    )
-}
-
-/// ASCII-whitespace trim per WHATWG infra spec: strip leading/trailing
-/// HT (U+0009), LF (U+000A), FF (U+000C), CR (U+000D), SPACE (U+0020).
-/// Unlike `str::trim`, does NOT strip non-ASCII whitespace like
-/// U+00A0 NBSP — those characters are part of the label and should
-/// trigger a label-mismatch.
-fn trim_ascii_whitespace(s: &str) -> &str {
-    let bytes = s.as_bytes();
-    let start = bytes.iter().position(|&b| !is_ascii_ws(b)).unwrap_or(bytes.len());
-    let end = bytes
-        .iter()
-        .rposition(|&b| !is_ascii_ws(b))
-        .map_or(start, |i| i + 1);
-    // SAFETY: ASCII whitespace bytes are all < 0x80, so trimming on
-    // byte boundaries can't split a multi-byte char.
-    &s[start..end]
-}
-
-fn is_ascii_ws(b: u8) -> bool {
-    matches!(b, 0x09 | 0x0A | 0x0C | 0x0D | 0x20)
-}
 
 /// Read `(fatal, ignoreBOM)` from a decoder constructor's options
 /// arg. Per WebIDL §3.2.20 dictionary coercion:
