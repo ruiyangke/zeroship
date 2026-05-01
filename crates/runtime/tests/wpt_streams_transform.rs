@@ -566,12 +566,14 @@ fn wpt_streams_transform_compliance() {
         }
     }
 
-    // Known-deferred failures: these are tests whose pass requires
-    // finishPromise sharing across simultaneous abort/cancel/close
-    // (per the §5.3 [[finishPromise]] internal slot). v1 keeps the
-    // finishPromise inline (per-call) which trips a small number of
-    // edge-case tests. The slot-shared finishPromise lands with
-    // pipeTo (next dispatch), which exercises it heavily.
+    // Known-deferred failures: TS-internal abort/cancel/close ordering
+    // edge cases. These need finishPromise sharing across simultaneous
+    // writer.abort + readable.cancel + controller.error invocations
+    // (spec §5.3 [[finishPromise]]). v1 keeps the finishPromise inline
+    // (per-call) which trips this small set; the slot-shared
+    // finishPromise refactor is a separate followup (NOT pipeTo —
+    // pipeTo passes through the TS halves' standard public APIs and
+    // doesn't expose the slot-sharing gap).
     //
     // The fail count is asserted exactly so a regression in a previously-
     // passing test still trips the assertion.
@@ -612,7 +614,7 @@ fn wpt_streams_transform_compliance() {
                 _ => "?",
             };
             let known_marker = if deferred_known.iter().any(|(f, n)| *f == *file && r.name == *n) {
-                " [DEFERRED — finishPromise sharing lands with pipeTo]"
+                " [DEFERRED — slot-shared finishPromise refactor]"
             } else {
                 ""
             };
