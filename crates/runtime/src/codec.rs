@@ -223,8 +223,8 @@ pub fn make_codec(format: CompressionFormat, mode: CodecMode) -> Box<dyn Codec> 
         (CompressionFormat::Deflate, CodecMode::Decompress) => Box::new(zlib_deflate_decoder()),
         (CompressionFormat::DeflateRaw, CodecMode::Compress) => Box::new(RawDeflateEncoder::new()),
         (CompressionFormat::DeflateRaw, CodecMode::Decompress) => Box::new(raw_deflate_decoder()),
-        (CompressionFormat::Brotli, CodecMode::Compress) => Box::new(BrotliEnc::new()),
-        (CompressionFormat::Brotli, CodecMode::Decompress) => Box::new(BrotliDec::new()),
+        (CompressionFormat::Brotli, CodecMode::Compress) => Box::new(BrotliEncoder::new()),
+        (CompressionFormat::Brotli, CodecMode::Decompress) => Box::new(BrotliDecoder::new()),
     }
 }
 
@@ -662,12 +662,12 @@ fn raw_deflate_decoder() -> InflateDecoder {
 /// ratio for ~3x throughput vs quality=6, while still beating gzip's
 /// default quality. Buffer size 4096 is the rust-brotli example
 /// default; larger buffers don't help at our typical chunk sizes.
-struct BrotliEnc {
+struct BrotliEncoder {
     inner: Option<brotli::CompressorWriter<Vec<u8>>>,
     finished: bool,
 }
 
-impl BrotliEnc {
+impl BrotliEncoder {
     fn new() -> Self {
         Self {
             inner: Some(brotli::CompressorWriter::new(Vec::new(), 4096, 4, 22)),
@@ -676,7 +676,7 @@ impl BrotliEnc {
     }
 }
 
-impl Codec for BrotliEnc {
+impl Codec for BrotliEncoder {
     fn write(&mut self, chunk: &[u8]) -> Result<(Vec<u8>, usize), CodecError> {
         if self.finished {
             return Ok((Vec::new(), 0));
@@ -719,13 +719,13 @@ impl Codec for BrotliEnc {
 /// the consumed-offset directly (per
 /// `brotli-decompressor/src/writer.rs:337-368`), so the trailing-byte
 /// detection naturally surfaces as `consumed < chunk.len()`.
-struct BrotliDec {
+struct BrotliDecoder {
     inner: Option<brotli::DecompressorWriter<Vec<u8>>>,
     reached_end: bool,
     finished: bool,
 }
 
-impl BrotliDec {
+impl BrotliDecoder {
     fn new() -> Self {
         Self {
             inner: Some(brotli::DecompressorWriter::new(Vec::new(), 4096)),
@@ -735,7 +735,7 @@ impl BrotliDec {
     }
 }
 
-impl Codec for BrotliDec {
+impl Codec for BrotliDecoder {
     fn write(&mut self, chunk: &[u8]) -> Result<(Vec<u8>, usize), CodecError> {
         if self.finished || chunk.is_empty() {
             return Ok((Vec::new(), 0));
