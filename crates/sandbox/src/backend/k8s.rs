@@ -548,7 +548,15 @@ impl K8sBackend {
         let v: serde_json::Value = serde_json::from_str(&resp.body)
             .map_err(|e| format!("agent /exec response not JSON: {e}"))?;
         Ok(ExecOutput {
-            status: v["status"].as_i64().unwrap_or(-1) as i32,
+            // try_into instead of `as i32` — a status outside i32
+            // range is almost certainly garbage from a buggy agent;
+            // falling back to -1 is no worse than the previous
+            // wrap-on-cast and avoids signed-overflow surprises.
+            status: v["status"]
+                .as_i64()
+                .unwrap_or(-1)
+                .try_into()
+                .unwrap_or(-1),
             stdout: v["stdout"].as_str().unwrap_or("").to_string(),
             stderr: v["stderr"].as_str().unwrap_or("").to_string(),
             timed_out: v["timed_out"].as_bool().unwrap_or(false),

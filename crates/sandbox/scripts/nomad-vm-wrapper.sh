@@ -134,6 +134,8 @@ cloud-hypervisor \
 CH_PID=$!
 
 echo "[wrapper] cloud-hypervisor pid=$CH_PID, vfs keys=$VFS_KEYS_PID ws=$VFS_WS_PID home=$VFS_HOME_PID"
+# Port 7777 mirrors `zeroship_sandbox_agent::AGENT_PORT` — keep them
+# in sync if either side ever needs a different port.
 echo "[wrapper] agent reachable at http://${VM_IP}:7777/"
 
 # Block on CH; if it exits the trap fires and tears down virtiofsd.

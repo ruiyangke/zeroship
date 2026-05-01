@@ -98,6 +98,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use ed25519_dalek::SigningKey;
 use uuid::Uuid;
 use zeroship_sandbox_agent::sig;
+use zeroship_sandbox_agent::AGENT_PORT;
 
 use super::{ExecOutput, SandboxInfo, TreeEntry};
 use crate::config::SandboxConfig;
@@ -334,6 +335,11 @@ impl NomadCHBackend {
         // contract change later.)
         // HashMap value is plain owned data; poison can't break
         // invariants — recover.
+        //
+        // MUST collect into Vec; do not iterate while holding the read
+        // lock — stop() takes write, and a future refactor that drops
+        // the .collect() and iterates lazily would deadlock the
+        // first time a user has > 0 active sandboxes.
         let existing: Vec<Uuid> = self
             .state
             .read()
@@ -410,6 +416,10 @@ impl NomadCHBackend {
         let pubkey = signing_key.verifying_key();
         let pubkey_b64 = B64.encode(pubkey.as_bytes());
         let key_fp = sig::pubkey_fingerprint(&pubkey);
+        eprintln!(
+            "[sandbox/nomad-ch] create sandbox={sandbox_id} user={user_id} \
+             project={project_id} key_fp={key_fp}"
+        );
 
         // 2. Allocate VM index from the pool. Track in the guard so
         //    cleanup-on-failure releases it.
@@ -437,11 +447,17 @@ impl NomadCHBackend {
 
         // 4. Write public key. The agent's verifier loads this from
         //    /run/keys/controller-pubkey at boot — which is the
-        //    virtiofs-mounted view of `keys_dir`. Permissions are
-        //    permissive for the demo; in production we'd want 0444
-        //    + a non-root virtiofsd uid.
+        //    virtiofs-mounted view of `keys_dir`.
+        //
+        //    create + write_all + chmod 0444 + fsync, in that order:
+        //    - 0444 because the file is a non-secret read-only
+        //      attestation; we'd rather not let a buggy in-VM uid
+        //      truncate it.
+        //    - fsync so a host crash between the write and CH boot
+        //      doesn't serve a 0-byte pubkey to the agent (which
+        //      would 401 every signed request forever).
         let pubkey_path = keys_dir.join("controller-pubkey");
-        std::fs::write(&pubkey_path, pubkey_b64.as_bytes())
+        write_pubkey_file(&pubkey_path, pubkey_b64.as_bytes())
             .map_err(|e| format!("write {}: {}", pubkey_path.display(), e))?;
 
         // 5. Build + submit the Nomad job spec.
@@ -476,7 +492,8 @@ impl NomadCHBackend {
         //    this with its own budget (agent_livez_timeout_secs) so
         //    operators can tell apart "Nomad slow to schedule" from
         //    "VM/kernel/agent slow to boot".
-        let agent_url = format!("http://10.99.{}.2:7777", 100u16 + vm_index);
+        let agent_url =
+            format!("http://10.99.{}.2:{AGENT_PORT}", 100u16 + vm_index);
         wait_for_agent_livez(
             &agent_url,
             Duration::from_secs(self.cfg.nomad_ch.agent_livez_timeout_secs),
@@ -509,6 +526,18 @@ impl NomadCHBackend {
         })
     }
 
+    /// Stop the sandbox.
+    ///
+    /// **Concurrent-stop semantics:** when two callers race `stop` on
+    /// the same sandbox_id, the first one removes the entry from the
+    /// in-memory state map and proceeds with Nomad-job-purge +
+    /// vm_index release; the second one finds nothing in the map and
+    /// returns `Ok(())` immediately, even though the underlying Nomad
+    /// job teardown is still in flight from the first caller. This is
+    /// intentional — `stop` is a "best-effort, idempotent" contract.
+    /// Callers that need strict "fully gone" semantics (e.g. wait
+    /// until the tap device is freed) should poll [`list`] or
+    /// equivalent until the sandbox no longer appears.
     pub async fn stop(&self, sandbox_id: Uuid) -> Result<(), String> {
         let sandbox = match self
             .state
@@ -605,7 +634,15 @@ impl NomadCHBackend {
         let v: serde_json::Value = serde_json::from_str(&resp.body)
             .map_err(|e| format!("agent /exec response not JSON: {e}"))?;
         Ok(ExecOutput {
-            status: v["status"].as_i64().unwrap_or(-1) as i32,
+            // try_into instead of `as i32` — a status outside i32
+            // range is almost certainly garbage from a buggy agent;
+            // falling back to -1 is no worse than the previous
+            // wrap-on-cast and avoids signed-overflow surprises.
+            status: v["status"]
+                .as_i64()
+                .unwrap_or(-1)
+                .try_into()
+                .unwrap_or(-1),
             stdout: v["stdout"].as_str().unwrap_or("").to_string(),
             stderr: v["stderr"].as_str().unwrap_or("").to_string(),
             timed_out: v["timed_out"].as_bool().unwrap_or(false),
@@ -1141,8 +1178,12 @@ fn send_ureq(req: ureq::Request, body: &[u8]) -> Result<AgentResponse, String> {
             })
         }
         Err(ureq::Error::Status(code, resp)) => {
+            // 8 KiB cap on error bodies — matches k8s.rs. Nomad +
+            // agent error responses are tiny JSON; anything larger
+            // is almost certainly an HTML interstitial we don't want
+            // copied verbatim into our log lines.
             let mut bytes = Vec::new();
-            let _ = resp.into_reader().take(64 * 1024).read_to_end(&mut bytes);
+            let _ = resp.into_reader().take(8 * 1024).read_to_end(&mut bytes);
             let body = String::from_utf8_lossy(&bytes).into_owned();
             Ok(AgentResponse {
                 status: code,
@@ -1233,12 +1274,35 @@ async fn wait_for_agent_livez(base_url: &str, timeout: Duration) -> Result<(), S
         if status == Some(200) {
             return Ok(());
         }
-        compio::time::sleep(Duration::from_millis(250)).await;
+        // 150 ms livez poll cadence — matches k8s.rs.
+        compio::time::sleep(Duration::from_millis(150)).await;
     }
     Err(format!("agent at {base_url} never returned 200 on /livez"))
 }
 
 // ─── small utilities (mirrored from k8s.rs) ─────────────────────
+
+/// Write `controller-pubkey`: create + write_all + chmod 0444 +
+/// sync_all. fsync so a host crash between write and CH boot doesn't
+/// serve a 0-byte pubkey to the agent.
+fn write_pubkey_file(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(body)?;
+    let mut perms = f.metadata()?.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o444);
+    }
+    #[cfg(not(unix))]
+    {
+        perms.set_readonly(true);
+    }
+    std::fs::set_permissions(path, perms)?;
+    f.sync_all()?;
+    Ok(())
+}
 
 fn random_key32() -> Result<[u8; 32], String> {
     let mut buf = [0u8; 32];
