@@ -158,4 +158,13 @@ echo "[wrapper] cloud-hypervisor pid=$CH_PID, vfs keys=$VFS_KEYS_PID ws=$VFS_WS_
 echo "[wrapper] agent reachable at http://${VM_IP}:7777/"
 
 # Block on CH; if it exits the trap fires and tears down virtiofsd.
+# Capture the exit code so we can propagate it (the EXIT trap will
+# still fire afterwards for virtiofsd cleanup).
 wait "$CH_PID"
+ch_rc=$?
+# Clear CH_PID so the cleanup trap doesn't `kill -TERM` a *reused*
+# PID. Linux can recycle PIDs aggressively under load; without this,
+# the trap could TERM/KILL an unrelated process that happened to
+# inherit CH's PID between `wait` returning and `cleanup` running.
+CH_PID=""
+exit "$ch_rc"
