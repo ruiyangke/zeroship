@@ -9,6 +9,8 @@ import { FilesCanvas } from "./canvases/FilesCanvas";
 import { LogsCanvas } from "./canvases/LogsCanvas";
 import { EnvCanvas } from "./canvases/EnvCanvas";
 import { SettingsCanvas } from "./canvases/SettingsCanvas";
+import { PlanCanvas } from "./canvases/PlanCanvas";
+import { HealthCanvas } from "./canvases/HealthCanvas";
 import { ChatRail } from "./chat/ChatRail";
 import { briefSchema, type Brief } from "../types/chat";
 
@@ -124,23 +126,22 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
         style={{ gridTemplateColumns: "1fr 320px" }}
       >
         <main data-testid="canvas-area" className="min-h-0 min-w-0 overflow-hidden flex flex-col">
-          {/* Files / Logs / Env / Settings ship in Plan 01.6 (this commit).
-              Plan / Health / Data / Media land in later tasks; we keep
-              the placeholder for them so the pill remains clickable. */}
+          {/* Files / Logs / Env / Settings ship in Plan 01.6.
+              Plan / Health ship in Plan 01.7 (this commit). Data /
+              Media land later; the catch-all below keeps the pill
+              clickable when an appId isn't available. */}
           {active === "preview" && <PreviewCanvasStub />}
           {active === "files" && appId && <FilesCanvas appId={appId} />}
           {active === "logs" && appId && <LogsCanvas appId={appId} />}
           {active === "env" && appId && <EnvCanvas appId={appId} />}
+          {active === "plan" && appId && (
+            <PlanCanvas appId={appId} app={appQuery.data} />
+          )}
+          {active === "health" && appId && (
+            <HealthCanvas appId={appId} app={appQuery.data} />
+          )}
           {active === "settings" && appId && (
             <SettingsCanvas appId={appId} app={appQuery.data} />
-          )}
-          {/* Catch-all for canvases not yet wired (plan, health). Also
-              renders when the catch-all route lands here without an
-              appId — the canvases above all need one. */}
-          {(active === "plan" || active === "health") && (
-            <div className="h-full flex items-center justify-center text-ink-soft font-serif italic">
-              "{active}" canvas — coming in a later plan.
-            </div>
           )}
           {!appId && active !== "preview" && (
             <div className="h-full flex items-center justify-center text-ink-soft font-serif italic">

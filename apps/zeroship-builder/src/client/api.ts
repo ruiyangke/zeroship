@@ -62,6 +62,21 @@ export {
   type FileEntry,
 } from "../server/sandbox";
 
+// Plan / Health canvas stubs (Plan 01.7). Every export takes ONE
+// object input — see `server/agents.ts` header for the wire-shape
+// rationale. V1 is in-memory; persistence lands with ISS-14/16/etc.
+export {
+  listIssues,
+  addIssue,
+  getQualityScores,
+  type Issue,
+  type IssueStatus,
+  type IssueSource,
+  type QualityScores,
+  type QualityDimension,
+  type QualityGrade,
+} from "../server/agents";
+
 export { appPreviewUrl } from "./lib/preview-url";
 
 // One procedure to start with — Plan 02 may add more (file CRUD, deploy,

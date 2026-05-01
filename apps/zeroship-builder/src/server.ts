@@ -9,3 +9,4 @@ export * from "./server/apps";
 export * from "./server/sandbox";
 export * from "./server/chat";
 export * from "./server/wizard";
+export * from "./server/agents";
