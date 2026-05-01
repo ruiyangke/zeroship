@@ -1299,7 +1299,7 @@ mod tests {
                 host_state_dir: PathBuf::from("/var/zeroship/ch"),
                 user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
                 vm_index_floor: 1,
-                vm_index_ceil: 250,
+                vm_index_ceil: 155,
                 ready_timeout_secs: 60,
                 startup_orphan_cleanup: false,
             },

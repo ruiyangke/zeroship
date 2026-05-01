@@ -11,7 +11,9 @@
 # (env vars + virtiofs tags + IP plumbing) is visible in source.
 #
 # Inputs (all required, set by zeroship-sandbox in the Nomad job env):
-#   ZSBX_VM_INDEX        small int → tap zsbx-nm-$IDX, IP 10.99.$((100+IDX)).2
+#   ZSBX_VM_INDEX        small int in [1,155] → tap zsbx-nm-$IDX, IP 10.99.$((100+IDX)).2
+#                        (controller-side ceiling enforced at config load —
+#                        100+IDX must fit a u8 octet, hence ≤ 255 → IDX ≤ 155.)
 #   ZSBX_HERE            artifact dir; must contain vmlinuz + rootfs-slim.img
 #   ZSBX_RUNTIME         per-allocation working dir (Nomad sets NOMAD_TASK_DIR)
 #   ZSBX_KEYS_DIR        host dir holding controller-pubkey  (virtiofs tag=keys)

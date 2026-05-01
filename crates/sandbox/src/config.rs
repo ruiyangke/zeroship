@@ -236,12 +236,24 @@ pub struct NomadCHConfig {
     /// gets a unique index; the wrapper computes `tap=zsbx-nm-<idx>`,
     /// host IP `10.99.<100+idx>.1` and VM IP `10.99.<100+idx>.2`. The
     /// host operator is responsible for pre-creating tap devices in
-    /// this range. `SANDBOX_NOMAD_CH_VM_INDEX_FLOOR` (default 1).
+    /// this range. Must be ≥ 1 (an index of 0 reserves the .100
+    /// subnet for what's effectively a sentinel — confusing on
+    /// inspection, no upside). `SANDBOX_NOMAD_CH_VM_INDEX_FLOOR`
+    /// (default 1).
     pub vm_index_floor: u16,
 
     /// Inclusive upper bound of the index pool. Allocator hands out
     /// indices in `[floor, ceil]`; `alloc()` returns an error past
-    /// `ceil`. `SANDBOX_NOMAD_CH_VM_INDEX_CEIL` (default 250).
+    /// `ceil`. Must be ≤ 155 — the IP arithmetic in the wrapper +
+    /// controller is `10.99.{100+idx}.2`, and the third octet
+    /// overflows past index 155. The cleaner alternative (stretching
+    /// the subnet across two octets) costs us a bigger blast radius
+    /// for off-by-one bugs and a less readable IP layout; the
+    /// 155-VM ceiling is plenty for single-host operators (Cloud
+    /// Hypervisor + 4 GiB/VM × 155 = 620 GiB RAM, well past any
+    /// realistic single-box deploy). HA operators run multiple
+    /// controller hosts. `SANDBOX_NOMAD_CH_VM_INDEX_CEIL` (default
+    /// 155).
     pub vm_index_ceil: u16,
 
     /// How long to wait for an alloc to reach `ClientStatus="running"`
@@ -260,6 +272,34 @@ pub struct NomadCHConfig {
     /// rolling restart. Default off; opt-in for single-node operators.
     /// `SANDBOX_NOMAD_CH_STARTUP_ORPHAN_CLEANUP` (default `false`).
     pub startup_orphan_cleanup: bool,
+}
+
+impl NomadCHConfig {
+    /// Validate the parsed config. Called from
+    /// [`SandboxConfig::from_env`] before the backend is instantiated
+    /// so misconfig surfaces at startup, not on the first sandbox.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.vm_index_floor > self.vm_index_ceil {
+            return Err(format!(
+                "SANDBOX_NOMAD_CH_VM_INDEX_FLOOR ({}) > _CEIL ({})",
+                self.vm_index_floor, self.vm_index_ceil
+            ));
+        }
+        // IP-safety: the controller derives the agent IP as
+        // 10.99.{100+vm_index}.2. The third octet must fit in a u8,
+        // so 100 + vm_index_ceil ≤ 255 → vm_index_ceil ≤ 155. Catch
+        // misconfig at startup so we don't 500 with "garbage IP" on
+        // the first late-pool sandbox.
+        if (100u32 + self.vm_index_ceil as u32) > 255 {
+            return Err(format!(
+                "SANDBOX_NOMAD_CH_VM_INDEX_CEIL ({}) would overflow IP \
+                 third octet (10.99.{}.2). Max is 155.",
+                self.vm_index_ceil,
+                100 + self.vm_index_ceil as u32
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl SandboxConfig {
@@ -356,7 +396,7 @@ impl SandboxConfig {
                     .unwrap_or_else(|_| "/var/zeroship/ch/users".to_string()),
             ),
             vm_index_floor: parse_env("SANDBOX_NOMAD_CH_VM_INDEX_FLOOR", 1u16)?,
-            vm_index_ceil: parse_env("SANDBOX_NOMAD_CH_VM_INDEX_CEIL", 250u16)?,
+            vm_index_ceil: parse_env("SANDBOX_NOMAD_CH_VM_INDEX_CEIL", 155u16)?,
             ready_timeout_secs: parse_env("SANDBOX_NOMAD_CH_READY_TIMEOUT_SECS", 60u64)?,
             startup_orphan_cleanup: parse_env(
                 "SANDBOX_NOMAD_CH_STARTUP_ORPHAN_CLEANUP",
@@ -364,12 +404,7 @@ impl SandboxConfig {
             )?,
         };
 
-        if nomad_ch.vm_index_floor > nomad_ch.vm_index_ceil {
-            return Err(format!(
-                "SANDBOX_NOMAD_CH_VM_INDEX_FLOOR ({}) > _CEIL ({})",
-                nomad_ch.vm_index_floor, nomad_ch.vm_index_ceil
-            ));
-        }
+        nomad_ch.validate()?;
 
         Ok(Self {
             port, token, backend, image, workspace_root, network,
@@ -386,5 +421,52 @@ where
     match std::env::var(key) {
         Ok(v) => v.parse().map_err(|e| format!("{key}: {e}")),
         Err(_) => Ok(default),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_nomad_cfg() -> NomadCHConfig {
+        NomadCHConfig {
+            nomad_addr: "http://127.0.0.1:4646".into(),
+            datacenter: "dc1".into(),
+            wrapper_path: PathBuf::from("/etc/zeroship/nomad-vm-wrapper.sh"),
+            runtime_dir: PathBuf::from("/var/lib/zeroship/ch"),
+            host_state_dir: PathBuf::from("/var/zeroship/ch"),
+            user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
+            vm_index_floor: 1,
+            vm_index_ceil: 155,
+            ready_timeout_secs: 60,
+            startup_orphan_cleanup: false,
+        }
+    }
+
+    #[test]
+    fn vm_index_ceil_validation_rejects_overflow() {
+        let mut cfg = base_nomad_cfg();
+        cfg.vm_index_ceil = 200; // 100+200=300, overflows u8
+        let err = cfg.validate().expect_err("must reject");
+        assert!(
+            err.contains("VM_INDEX_CEIL") && err.contains("overflow"),
+            "{err}",
+        );
+    }
+
+    #[test]
+    fn vm_index_ceil_validation_accepts_max_safe() {
+        let mut cfg = base_nomad_cfg();
+        cfg.vm_index_ceil = 155;
+        cfg.validate().expect("155 must be accepted");
+    }
+
+    #[test]
+    fn vm_index_ceil_validation_rejects_floor_above_ceil() {
+        let mut cfg = base_nomad_cfg();
+        cfg.vm_index_floor = 100;
+        cfg.vm_index_ceil = 50;
+        let err = cfg.validate().expect_err("must reject");
+        assert!(err.contains("FLOOR") && err.contains("CEIL"), "{err}");
     }
 }
