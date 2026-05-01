@@ -37,10 +37,15 @@ pub use legacy_bridge::{
 // Native classes & primitives — installed unconditionally per D-19.
 pub mod algorithms;
 pub mod budget;
+pub mod byob_request;
+pub mod byte_tee;
 pub mod pipe;
 pub mod promise_resolve;
+pub mod pull_into;
 pub mod queue;
 pub mod readable;
+pub mod readable_byob_reader;
+pub mod readable_byte_controller;
 pub mod readable_default_controller;
 pub mod readable_default_reader;
 pub mod slots;
