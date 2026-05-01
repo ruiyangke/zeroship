@@ -1175,50 +1175,118 @@ async fn wait_for_alloc_running(
     Err(msg)
 }
 
-/// Block until `GET /v1/job/<id>` returns 404 (or the job is in a
-/// terminal Status like `dead` with `Stop=true`). Bounded; surfaces
-/// the Nomad status (and any sustained JSON parse errors) on timeout
-/// so operators can investigate.
+/// True when every alloc in the array has a terminal client status.
+/// An empty / missing array is treated as terminal (no allocs to
+/// wait on). Pulled out as a free helper for unit testing —
+/// [`wait_for_job_gone`] is HTTP-bound and not unit-testable end to
+/// end without a fake.
+fn allocs_all_terminal(allocs: Option<&Vec<serde_json::Value>>) -> bool {
+    let arr = match allocs {
+        Some(a) => a,
+        None => return true,
+    };
+    if arr.is_empty() {
+        return true;
+    }
+    arr.iter().all(|a| {
+        matches!(
+            a["ClientStatus"].as_str().unwrap_or(""),
+            "complete" | "failed" | "lost",
+        )
+    })
+}
+
+/// Block until the job's allocations are all in a terminal client
+/// state (the wrapper script has exited → tap device + IP + virtiofsd
+/// sockets released). Returns Ok on:
+///
+///   - `GET /v1/job/<id>` → 404 (Nomad GC removed the record), OR
+///   - `GET /v1/job/<id>/allocations` → every alloc has
+///     `ClientStatus ∈ {complete, failed, lost}` (or the array is
+///     empty / 404).
+///
+/// We previously short-circuited on `Status == "dead" && Stop == true`
+/// at the *job* level, but that races the wrapper-script teardown:
+/// the job record is dead while individual alloc tasks (the
+/// `raw_exec` wrapper, virtiofsd children) are still reaping. A
+/// follow-up `create` reusing the released vm_index can collide on
+/// the still-bound tap device. Polling the allocation client-status
+/// instead catches the actual underlying-process termination.
+///
+/// Surfaces the Nomad status + any sustained JSON parse errors on
+/// timeout so operators can investigate.
 async fn wait_for_job_gone(
     nomad_addr: &str,
     job_id: &str,
     timeout: Duration,
 ) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
-    let url = format!("{nomad_addr}/v1/job/{job_id}");
+    let job_url = format!("{nomad_addr}/v1/job/{job_id}");
+    let allocs_url = format!("{nomad_addr}/v1/job/{job_id}/allocations");
     let mut last_parse_err: Option<String> = None;
     let mut last_parse_log_at: Option<Instant> = None;
+    let mut last_status: Option<String> = None;
+
+    fn note_parse_err(
+        last_parse_err: &mut Option<String>,
+        last_parse_log_at: &mut Option<Instant>,
+        scope: &str,
+        e: serde_json::Error,
+    ) {
+        let msg = format!("{e}");
+        let now = Instant::now();
+        let stale = last_parse_log_at
+            .map(|t| now.duration_since(t) > Duration::from_secs(5))
+            .unwrap_or(true);
+        if stale {
+            eprintln!(
+                "[sandbox/nomad-ch] job-gone poll {scope}: JSON parse \
+                 error (will retry): {msg}"
+            );
+            *last_parse_log_at = Some(now);
+        }
+        *last_parse_err = Some(msg);
+    }
+
     while Instant::now() < deadline {
-        let resp = http_get_unsigned(&url, Duration::from_secs(5)).await;
-        match resp {
+        // First check if the job record is gone entirely.
+        let job_resp = http_get_unsigned(&job_url, Duration::from_secs(5)).await;
+        if let Ok(r) = &job_resp {
+            if r.status == 404 {
+                return Ok(());
+            }
+        }
+
+        // Otherwise look at the allocations: a job in Status=dead
+        // can still have allocations whose underlying processes are
+        // mid-reap. We require every alloc be in a terminal client
+        // state before declaring the job "gone".
+        let allocs_resp =
+            http_get_unsigned(&allocs_url, Duration::from_secs(5)).await;
+        match allocs_resp {
             Ok(r) if r.status == 404 => return Ok(()),
             Ok(r) if r.status == 200 => {
                 match serde_json::from_str::<serde_json::Value>(&r.body) {
                     Ok(v) => {
-                        let status = v["Status"].as_str().unwrap_or("");
-                        let stop = v["Stop"].as_bool().unwrap_or(false);
-                        if status == "dead" && stop {
-                            // After purge=true, Nomad GC takes a beat
-                            // to remove the record entirely — but the
-                            // job is already terminated; vm_index is
-                            // safe to release.
+                        let arr = v.as_array();
+                        if allocs_all_terminal(arr) {
                             return Ok(());
+                        }
+                        // Surface the latest non-terminal status for
+                        // the timeout error message.
+                        if let Some(a) = arr.and_then(|a| a.last()) {
+                            last_status = a["ClientStatus"]
+                                .as_str()
+                                .map(str::to_string);
                         }
                     }
                     Err(e) => {
-                        let msg = format!("{e}");
-                        let now = Instant::now();
-                        let stale = last_parse_log_at
-                            .map(|t| now.duration_since(t) > Duration::from_secs(5))
-                            .unwrap_or(true);
-                        if stale {
-                            eprintln!(
-                                "[sandbox/nomad-ch] job-gone poll: JSON parse \
-                                 error (will retry): {msg}"
-                            );
-                            last_parse_log_at = Some(now);
-                        }
-                        last_parse_err = Some(msg);
+                        note_parse_err(
+                            &mut last_parse_err,
+                            &mut last_parse_log_at,
+                            "allocations",
+                            e,
+                        );
                     }
                 }
             }
@@ -1226,7 +1294,11 @@ async fn wait_for_job_gone(
         }
         compio::time::sleep(Duration::from_millis(250)).await;
     }
-    let mut msg = format!("job {job_id} did not disappear within timeout");
+    let mut msg = format!(
+        "job {job_id} allocs did not reach terminal state within timeout \
+         (last alloc client_status={:?})",
+        last_status.unwrap_or_else(|| "<unknown>".to_string())
+    );
     if let Some(e) = last_parse_err {
         msg.push_str(&format!("; last parse error: {e}"));
     }
@@ -1551,6 +1623,46 @@ mod tests {
         assert!(a.alloc().is_err());
         a.release(7);
         assert_eq!(a.alloc().unwrap(), 7);
+    }
+
+    // ─── wait_for_job_gone alloc-terminal predicate (I2) ─────
+
+    fn alloc(status: &str) -> serde_json::Value {
+        serde_json::json!({"ClientStatus": status})
+    }
+
+    #[test]
+    fn allocs_terminal_empty_or_none_is_ok() {
+        assert!(allocs_all_terminal(None));
+        let empty: Vec<serde_json::Value> = Vec::new();
+        assert!(allocs_all_terminal(Some(&empty)));
+    }
+
+    #[test]
+    fn allocs_terminal_all_terminal_states_pass() {
+        let all = vec![alloc("complete"), alloc("failed"), alloc("lost")];
+        assert!(allocs_all_terminal(Some(&all)));
+    }
+
+    #[test]
+    fn allocs_terminal_running_blocks() {
+        let mixed = vec![alloc("complete"), alloc("running")];
+        assert!(!allocs_all_terminal(Some(&mixed)));
+    }
+
+    #[test]
+    fn allocs_terminal_pending_blocks() {
+        let v = vec![alloc("pending")];
+        assert!(!allocs_all_terminal(Some(&v)));
+    }
+
+    #[test]
+    fn allocs_terminal_unknown_status_blocks() {
+        // Defensive: an unrecognised string is not treated as
+        // terminal (avoids races on future Nomad alloc-status
+        // additions).
+        let v = vec![alloc("future-status-we-dont-know")];
+        assert!(!allocs_all_terminal(Some(&v)));
     }
 
     // ─── State-map collision (C1) ────────────────────────────
