@@ -30,26 +30,93 @@ const TESTHARNESS_SHIM: &str = r#"
 (function () {
   globalThis.__wpt_results = [];
 
+  // Browsers and Web Workers expose `self` as an alias for the
+  // global object. WPT tests use it freely (e.g. `self.DataView`,
+  // `self.MessageChannel`). Mirror the pattern so tests don't
+  // throw "self is not defined" looking up otherwise-existing
+  // built-ins on globalThis.
+  globalThis.self = globalThis;
+
+  // Minimal `MessageChannel` stub: the only thing WPT encoding tests
+  // use it for is detaching an ArrayBuffer via the transferable
+  // list (`new MessageChannel().port1.postMessage(buf, [buf])`).
+  // V8 ships `ArrayBuffer.prototype.transfer()` natively, which is
+  // semantically equivalent to the postMessage-transfer detach.
+  // We don't ship the real postMessage / cross-realm channel —
+  // this is just enough for the detach side-effect.
+  if (typeof globalThis.MessageChannel === "undefined") {
+    function _MessagePort() {}
+    _MessagePort.prototype.postMessage = function (_msg, transfers) {
+      if (transfers) {
+        for (let i = 0; i < transfers.length; i++) {
+          const t = transfers[i];
+          if (t instanceof ArrayBuffer && typeof t.transfer === "function") {
+            // transfer(0) detaches and yields a 0-length new buffer.
+            t.transfer(0);
+          }
+        }
+      }
+    };
+    _MessagePort.prototype.close = function () {};
+    _MessagePort.prototype.start = function () {};
+    function _MessageChannel() {
+      this.port1 = new _MessagePort();
+      this.port2 = new _MessagePort();
+    }
+    globalThis.MessageChannel = _MessageChannel;
+  }
+
   function fmt(v) {
     if (typeof v === "string") return JSON.stringify(v);
     if (Array.isArray(v)) return "[" + v.join(",") + "]";
     try { return String(v); } catch (_) { return "<unstringable>"; }
   }
 
+  // WPT test names sometimes embed test-data strings that contain
+  // unpaired surrogates (e.g. encodeInto.any.js iterates over
+  // `"\uD834A\uDF06A¥Hi"` and templates it into the test name).
+  // Older JSON.stringify implementations emit these as raw lone
+  // surrogates in the output, breaking strict JSON parsers
+  // (serde_json rejects). Replace any unpaired surrogate with
+  // U+FFFD before serialization — the test outcome is unchanged,
+  // only the name string is sanitized.
+  function sanitize(s) {
+    if (typeof s !== "string") return s;
+    let out = "";
+    for (let i = 0; i < s.length; i++) {
+      const cu = s.charCodeAt(i);
+      if (cu >= 0xD800 && cu <= 0xDBFF) {
+        // High surrogate — must be followed by a low surrogate.
+        const next = i + 1 < s.length ? s.charCodeAt(i + 1) : 0;
+        if (next >= 0xDC00 && next <= 0xDFFF) {
+          out += s[i] + s[i + 1];
+          i++;
+        } else {
+          out += "\uFFFD";
+        }
+      } else if (cu >= 0xDC00 && cu <= 0xDFFF) {
+        out += "\uFFFD";
+      } else {
+        out += s[i];
+      }
+    }
+    return out;
+  }
+
   globalThis.test = function (fn, name) {
-    name = name || fn.name || "<anonymous>";
+    name = sanitize(name || fn.name || "<anonymous>");
     try {
       fn();
       __wpt_results.push({ name, status: "pass" });
     } catch (e) {
       if (e && e.__wpt_skip) {
-        __wpt_results.push({ name, status: "skip", reason: e.message });
+        __wpt_results.push({ name, status: "skip", reason: sanitize(e.message) });
         return;
       }
       __wpt_results.push({
         name,
         status: "fail",
-        error: e && e.message ? e.message : String(e),
+        error: sanitize(e && e.message ? e.message : String(e)),
       });
     }
   };
@@ -149,13 +216,11 @@ struct TestResult {
     outcome: Outcome,
 }
 
-/// We don't ship SharedArrayBuffer or `encodeInto`. Tests whose
-/// names mention either are reported as SKIP rather than FAIL.
-/// Encoding-specific tests (utf-16, Big5, etc.) DO run — we
-/// implement them all via encoding_rs.
+/// We don't ship SharedArrayBuffer. Tests whose names include
+/// "SharedArrayBuffer" / "shared" parameterizations are reported as
+/// SKIP rather than FAIL. Everything else runs.
 fn should_skip_by_name(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    lower.contains("shared") || lower.contains("encodeinto")
+    name.to_lowercase().contains("shared")
 }
 
 // ---------------------------------------------------------------------------
@@ -296,12 +361,7 @@ const WPT_FILES: &[(&str, &str)] = &[
     ("textdecoder-fatal", include_str!("wpt/textdecoder-fatal.any.js")),
     ("textdecoder-streaming", include_str!("wpt/textdecoder-streaming.any.js")),
     ("textdecoder-utf16-surrogates", include_str!("wpt/textdecoder-utf16-surrogates.any.js")),
-    // NB: encodeInto.any.js is NOT included — we don't implement
-    // TextEncoder.prototype.encodeInto. Every test in that file
-    // fails with "encoder.encodeInto is not a function", and the
-    // file's test data contains unpaired surrogates that break
-    // JSON serialization of the result list. When we add
-    // encodeInto, drop this comment and add the file back.
+    ("encodeInto", include_str!("wpt/encodeInto.any.js")),
 ];
 
 #[derive(Default, Debug)]

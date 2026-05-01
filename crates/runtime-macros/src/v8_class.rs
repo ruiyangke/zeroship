@@ -269,14 +269,18 @@ fn gen_install(
 
             // Install Symbol.toStringTag so
             // `Object.prototype.toString.call(new Foo())` → "[object Foo]".
-            // V8's `set_class_name` only affects the constructor's own
-            // `name`; the @@toStringTag default is overridden by the
-            // user's prototype unless we set it explicitly. Libraries
-            // (webidl-conversions, etc.) check this for type guards.
+            // Per WebIDL §3.7.4 the descriptor must be
+            //   { writable: false, enumerable: false, configurable: true }.
+            // PropertyAttribute flags: READ_ONLY = !writable, DONT_ENUM
+            // = !enumerable. Configurable is the absence of DONT_DELETE.
             {
                 let __tag_sym = v8::Symbol::get_to_string_tag(scope);
                 let __tag_value = v8::String::new(scope, #class_name_str).unwrap();
-                __proto.set(__tag_sym.into(), __tag_value.into());
+                __proto.set_with_attr(
+                    __tag_sym.into(),
+                    __tag_value.into(),
+                    v8::PropertyAttribute::READ_ONLY | v8::PropertyAttribute::DONT_ENUM,
+                );
             }
 
             __ctor_tmpl

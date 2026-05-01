@@ -83,6 +83,87 @@ impl TextEncoder {
         input.unwrap_or_default().into_bytes()
     }
 
+    /// `encodeInto(source: USVString, destination: Uint8Array) ->
+    /// TextEncoderEncodeIntoResult`
+    ///
+    /// Writes UTF-8 bytes for `source` into `destination`. Returns
+    /// `{ read, written }` where:
+    /// - `read` is the number of UTF-16 code units consumed from
+    ///   `source` (an unpaired surrogate counts as 1 code unit;
+    ///   a surrogate pair counts as 2).
+    /// - `written` is the number of bytes written to `destination`.
+    ///
+    /// If a multi-byte UTF-8 sequence wouldn't fit in the remaining
+    /// destination space, no bytes are written for that codepoint
+    /// (the partial sequence is not split). `read` reflects only
+    /// codepoints whose UTF-8 bytes fully fit.
+    #[v8_method]
+    fn encodeInto<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        source: v8::Local<v8::Value>,
+        destination: v8::Local<v8::Value>,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        // Source: USVString — V8's `to_rust_string_lossy` does the
+        // unpaired-surrogate → U+FFFD substitution (matching the spec
+        // for the encode algorithm, which operates on USVString).
+        // For encodeInto's `read` counter we need UTF-16 code-unit
+        // boundaries, so we extract source as raw UTF-16 instead.
+        let src_str = match v8::Local::<v8::String>::try_from(source) {
+            Ok(s) => s,
+            Err(_) => {
+                return Err(OpError::type_error(
+                    "TextEncoder.encodeInto: source must be a string",
+                ));
+            }
+        };
+        let src_len = src_str.length();
+        let mut src_utf16 = vec![0u16; src_len];
+        src_str.write_v2(scope, 0, &mut src_utf16, v8::WriteFlags::empty());
+
+        // Destination must be a Uint8Array (per the WebIDL signature
+        // `[AllowShared] Uint8Array destination`). Other ArrayBufferViews
+        // throw TypeError.
+        let Ok(dest_view) = v8::Local::<v8::Uint8Array>::try_from(destination) else {
+            return Err(OpError::type_error(
+                "TextEncoder.encodeInto: destination must be a Uint8Array",
+            ));
+        };
+
+        let dest_len = dest_view.byte_length();
+        let mut tmp = vec![0u8; dest_len];
+
+        let mut encoder = encoding_rs::UTF_8.new_encoder();
+        let (_result, read_u16, written, _had_replacements) =
+            encoder.encode_from_utf16(&src_utf16, &mut tmp, true);
+
+        // Copy `tmp[..written]` into the destination Uint8Array's
+        // backing store. We can't hand encoding_rs a `&mut [u8]` view
+        // of the V8 typed array directly (V8 requires Cell<u8>
+        // access via the SharedRef<BackingStore>), so a small
+        // intermediate buffer is unavoidable here.
+        if written > 0 {
+            let ab = dest_view
+                .buffer(scope)
+                .ok_or_else(|| OpError::error("TextEncoder.encodeInto: destination has no backing buffer"))?;
+            let offset = dest_view.byte_offset();
+            let store = ab.get_backing_store();
+            for i in 0..written {
+                store[offset + i].set(tmp[i]);
+            }
+        }
+
+        // Build the result object: `{ read: u32, written: u32 }`.
+        let result = v8::Object::new(scope);
+        let read_key = v8::String::new(scope, "read").unwrap();
+        let read_val = v8::Number::new(scope, read_u16 as f64);
+        result.set(scope, read_key.into(), read_val.into());
+        let written_key = v8::String::new(scope, "written").unwrap();
+        let written_val = v8::Number::new(scope, written as f64);
+        result.set(scope, written_key.into(), written_val.into());
+        Ok(result.into())
+    }
+
     #[v8_getter]
     fn encoding(&self) -> String {
         "utf-8".into()
@@ -346,6 +427,17 @@ fn read_bool_prop(
 ) -> Result<bool, OpError> {
     let key_v8 = v8::String::new(scope, key)
         .ok_or_else(|| OpError::error("TextDecoder: out of memory allocating property key"))?;
+    // KNOWN GAP: if `obj.get()` triggers a user-supplied Proxy or
+    // accessor that throws, V8 sets a pending exception and
+    // returns None. Per WebIDL §3.2.20 the original exception
+    // should propagate to the caller; instead we surface a
+    // generic OpError here, which the macro re-throws as our own
+    // Error with a less helpful message. Properly preserving the
+    // V8 exception requires either a sentinel OpError variant
+    // that the macro recognizes as "exception already pending,
+    // don't overwrite," or scope-aware Result type. Tracked as a
+    // future macro feature; the encoding tests don't exercise
+    // this path.
     let val = obj
         .get(scope, key_v8.into())
         .ok_or_else(|| OpError::error("TextDecoder: property access threw"))?;

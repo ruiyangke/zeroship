@@ -323,6 +323,13 @@ fn gen_scalar_set(ty: &Type, val: &TokenStream2) -> TokenStream2 {
     if is_vec_u8(ty) {
         return gen_vec_u8_set(val);
     }
+    // `v8::Local<v8::Value>` (or any v8::Local<v8::T>): pass straight
+    // to `rv.set`. Used by methods that build their own JS object,
+    // typed array, etc. — e.g. TextEncoder.encodeInto returning
+    // `{ read, written }`.
+    if type_ident(ty).as_deref() == Some("Local") {
+        return quote! { rv.set(#val.into()); };
+    }
     match type_ident(ty).as_deref() {
         Some("bool") => quote! { rv.set(v8::Boolean::new(scope, #val).into()); },
         Some("u32") => quote! { rv.set(v8::Integer::new_from_unsigned(scope, #val).into()); },
@@ -474,6 +481,11 @@ pub(crate) fn gen_call_return(call: &TokenStream2, output: &ReturnType) -> Token
                     let __v = v8::String::new(scope, &__r).unwrap();
                     rv.set(__v.into());
                 },
+
+                // --- Direct V8 value (Local<Value>, Local<Object>, etc.) ---
+                // Used by methods that build a custom JS shape (e.g.
+                // TextEncoder.encodeInto returning `{ read, written }`).
+                Some("Local") => quote! { rv.set(#call.into()); },
 
                 _ => quote! { #call; },
             }
