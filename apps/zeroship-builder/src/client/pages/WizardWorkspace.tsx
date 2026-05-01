@@ -14,7 +14,7 @@
 //   4. navigate to /p/<app.id>/preview where WorkspaceShell consumes
 //      the stash and seeds ChatRail with a synthesised first message.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useChat } from "@ai-sdk/react";
 import { useMutation } from "@tanstack/react-query";
@@ -22,9 +22,17 @@ import { createApp, rpc, wizardTransport } from "../api";
 import { NotebookPrompt, CmdEnterHint } from "../components/NotebookPrompt";
 import { Button } from "../components/Button";
 import { ChatMessages } from "../workspace/chat/ChatMessages";
-import type { Brief, SurveyResponse } from "../types/chat";
+import type { Brief, Survey, SurveyResponse } from "../types/chat";
+import { lsGet, lsSet } from "../lib/storage";
+import { track } from "../lib/analytics";
 
 const PENDING_BRIEF_KEY = "zeroship_pending_brief";
+const FIRST_RUN_KEY = "zeroship_first_run";
+
+// Wall budget after which we surface a "stuck?" retry. Generous so
+// healthy long survey/structured-output round-trips don't trip it —
+// the wizard's normal cadence is well under 30s per turn.
+const STUCK_TIMEOUT_MS = 60_000;
 
 /**
  * Derive a deterministic project name from a free-text idea. Take the
@@ -60,8 +68,29 @@ export function WizardWorkspace() {
   const [draft, setDraft] = useState("");
   const [committedBrief, setCommittedBrief] = useState<Brief | null>(null);
   const [answeredSurveys, setAnsweredSurveys] = useState<Set<string>>(() => new Set());
+  const [validationHint, setValidationHint] = useState<string | null>(null);
 
-  const { messages, sendMessage, status, error } = useChat({
+  // First-run hint card — visible only the very first time a user
+  // hits /new on this browser. Once they submit an idea (or the flag
+  // is already set), it's hidden forever. Reads localStorage once on
+  // mount via lazy initializer so the value is stable across renders.
+  const [showFirstRunHint, setShowFirstRunHint] = useState<boolean>(() => {
+    return lsGet(FIRST_RUN_KEY) === null;
+  });
+
+  // Track when the wizard might be "stuck" — streaming for too long
+  // with no fresh content. We approximate freshness by watching status
+  // transitions; on every status change we reset the timer.
+  const [stuck, setStuck] = useState(false);
+
+  // Latency timer for `project.creation_completed` analytics. Stamped
+  // on the first sendMessage; consumed on createApp success.
+  const firstSendAt = useRef<number | null>(null);
+  const beginClicked = useRef(false);
+  const surveysShown = useRef<Set<string>>(new Set());
+  const creationStartedAt = useRef<number | null>(null);
+
+  const { messages, sendMessage, status, error, stop, regenerate } = useChat({
     id: sessionId,
     transport: wizardTransport(rpc.wizard),
     onError: (err) => console.error("[wizard]", err),
@@ -82,7 +111,19 @@ export function WizardWorkspace() {
         // Quota / disabled storage — workspace still loads, the chat
         // rail just won't auto-seed. User can paste it manually.
       }
+      const elapsed = firstSendAt.current
+        ? Date.now() - firstSendAt.current
+        : null;
+      track("project.creation_completed", {
+        app_id: app.id,
+        latency_ms: elapsed,
+      });
       navigate(`/p/${app.id}/preview`);
+    },
+    onError: (err) => {
+      track("project.creation_failed", {
+        message: err instanceof Error ? err.message : String(err),
+      });
     },
   });
 
@@ -92,9 +133,79 @@ export function WizardWorkspace() {
   // refresh or navigate away.
   const wizardStarted = messages.length > 0;
 
+  // Watch for newly-arrived data-survey parts and emit `survey.shown`
+  // exactly once per token. We re-derive the set of currently-visible
+  // survey tokens on every render and diff against the ref so the
+  // event fires even when the parent re-renders for unrelated state.
+  useEffect(() => {
+    for (const m of messages) {
+      if (m.role !== "assistant") continue;
+      for (const part of m.parts) {
+        if (part.type !== "data-survey") continue;
+        const data = (part as { data?: { token?: unknown; survey?: unknown } }).data;
+        const token = typeof data?.token === "string" ? data.token : null;
+        const survey = data?.survey as Survey | undefined;
+        if (!token || surveysShown.current.has(token)) continue;
+        if (!survey || !Array.isArray(survey.questions)) continue;
+        surveysShown.current.add(token);
+        track("survey.shown", {
+          token,
+          question_count: survey.questions.length,
+          kinds: survey.questions.map((q) => q.kind?.type ?? "unknown"),
+          source: "wizard",
+        });
+      }
+    }
+  }, [messages]);
+
+  // Stuck-detector. Whenever streaming starts, arm a one-shot timer.
+  // Status transitions (any change) cancel/reset it — useChat updates
+  // status on every chunk arrival, so as long as data is flowing the
+  // timer keeps resetting and never fires.
+  useEffect(() => {
+    if (status !== "streaming" && status !== "submitted") {
+      setStuck(false);
+      return;
+    }
+    setStuck(false);
+    const id = window.setTimeout(() => setStuck(true), STUCK_TIMEOUT_MS);
+    return () => window.clearTimeout(id);
+  }, [status, messages.length]);
+
+  // Abandonment analytics: if the user mounts the wizard, never clicks
+  // Begin (creationStartedAt unset OR no commit), and unmounts — log
+  // it. Useful signal for "people bounce off the wizard" diagnostics.
+  useEffect(() => {
+    return () => {
+      if (creationStartedAt.current && !beginClicked.current) {
+        track("project.creation_abandoned", {
+          turns: 0, // we don't have the messages array in cleanup; placeholder
+        });
+      }
+    };
+  }, []);
+
   function handleSendIdea() {
     const text = draft.trim();
-    if (!text || busy || wizardStarted) return;
+    if (!text) {
+      setValidationHint("Describe your idea — even one sentence is enough.");
+      return;
+    }
+    if (busy || wizardStarted) return;
+    setValidationHint(null);
+    if (showFirstRunHint) {
+      lsSet(FIRST_RUN_KEY, "completed");
+      setShowFirstRunHint(false);
+    }
+    if (firstSendAt.current === null) {
+      firstSendAt.current = Date.now();
+      creationStartedAt.current = Date.now();
+      track("project.creation_started", {
+        flow: "default",
+        prompt_length: text.length,
+        has_image: false,
+      });
+    }
     sendMessage({ text });
   }
 
@@ -105,6 +216,17 @@ export function WizardWorkspace() {
       next.add(token);
       return next;
     });
+    if (response.skipped) {
+      track("survey.skipped", { token, source: "wizard" });
+    } else {
+      const answered = Object.keys(response.answers).length;
+      track("survey.answered", {
+        token,
+        answered_count: answered,
+        skipped: false,
+        source: "wizard",
+      });
+    }
     const value = response.skipped
       ? { skipped: true }
       : { skipped: false, answers: response.answers };
@@ -113,9 +235,25 @@ export function WizardWorkspace() {
 
   function handleBegin(brief: Brief) {
     if (committedBrief || createMutation.isPending) return;
+    beginClicked.current = true;
     setCommittedBrief(brief);
     const name = deriveProjectName(brief.idea);
     createMutation.mutate({ name, brief });
+  }
+
+  // Stuck-recovery: try regenerate (re-run the last turn against the
+  // server). If the SDK doesn't expose regenerate (older version), fall
+  // back to stop + a fresh sendMessage with the same idea text.
+  function handleRetryStuck() {
+    setStuck(false);
+    track("wizard.retry_stuck");
+    try {
+      // regenerate is the canonical re-run; documented on AbstractChat.
+      regenerate();
+    } catch {
+      // Best-effort fallback — abort and let the user resend manually.
+      stop();
+    }
   }
 
   return (
@@ -137,6 +275,22 @@ export function WizardWorkspace() {
           </p>
         </header>
 
+        {showFirstRunHint && !wizardStarted && (
+          <aside
+            data-testid="wizard-first-run-hint"
+            className="mb-6 px-5 py-4 bg-paper-2 border border-rule rounded-md"
+          >
+            <div className="font-sans text-[10px] uppercase tracking-[0.22em] text-tomato mb-1.5">
+              first project? here's what to expect
+            </div>
+            <p className="font-serif text-[14px] text-ink-soft leading-[1.55] m-0">
+              Type your idea below in plain English. I'll ask a couple of
+              quick questions to make sure we're on the same page, then I'll
+              start coding. Most projects ship in under a minute.
+            </p>
+          </aside>
+        )}
+
       {!wizardStarted && (
         <form
           onSubmit={(e) => {
@@ -148,7 +302,10 @@ export function WizardWorkspace() {
           <NotebookPrompt
             label="Idea"
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              if (validationHint) setValidationHint(null);
+            }}
             onCmdEnter={handleSendIdea}
             rows={4}
             placeholder="A recipe sharing space for my supper club where guests can sign in, post photos, and vote on who hosts next…"
@@ -165,6 +322,14 @@ export function WizardWorkspace() {
             }
             data-testid="wizard-prompt"
           />
+          {validationHint && (
+            <div
+              data-testid="wizard-validation-hint"
+              className="mt-2 font-serif italic text-[13px] text-pencil"
+            >
+              {validationHint}
+            </div>
+          )}
         </form>
       )}
 
@@ -185,6 +350,25 @@ export function WizardWorkspace() {
         </div>
       )}
 
+      {stuck && busy && (
+        <div
+          data-testid="wizard-stuck"
+          className="mt-4 px-4 py-3 border border-rule bg-paper-2 rounded-md flex items-center justify-between"
+        >
+          <span className="font-serif italic text-[13.5px] text-ink-soft">
+            Builder seems stuck. Want to try again?
+          </span>
+          <button
+            type="button"
+            onClick={handleRetryStuck}
+            data-testid="wizard-retry"
+            className="font-sans text-[10.5px] uppercase tracking-[0.18em] px-3 py-1.5 border border-ink bg-transparent text-ink hover:bg-ink hover:text-paper transition-colors cursor-pointer"
+          >
+            retry
+          </button>
+        </div>
+      )}
+
         {error && (
           <div className="mt-4 px-4 py-3 border border-blood/30 bg-blood/5 font-sans text-[12px] text-blood rounded-md">
             {error.message}
@@ -195,7 +379,11 @@ export function WizardWorkspace() {
             data-testid="wizard-create-error"
             className="mt-4 px-4 py-3 border border-blood/30 bg-blood/5 font-sans text-[12px] text-blood rounded-md"
           >
-            Couldn't create project: {createMutation.error instanceof Error ? createMutation.error.message : String(createMutation.error)}
+            Couldn't create the project — please try again. (
+            {createMutation.error instanceof Error
+              ? createMutation.error.message
+              : String(createMutation.error)}
+            )
           </div>
         )}
       </div>
