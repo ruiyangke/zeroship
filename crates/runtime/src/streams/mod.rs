@@ -74,6 +74,9 @@ pub fn install_native_streams(
     global: v8::Local<v8::Object>,
 ) {
     readable::install_native_streams(scope, global);
+    readable_byte_controller::install(scope, global);
+    readable_byob_reader::install(scope, global);
+    byob_request::install(scope, global);
     writable::install_native_writable_stream(scope, global);
     writable_controller::install(scope, global);
     writable_writer::install(scope, global);

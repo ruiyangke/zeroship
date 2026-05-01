@@ -329,11 +329,10 @@ fn constructor_callback(
         }
     };
 
-    // Reject byte streams in this dispatch. Reading `type` on a non-null
-    // underlyingSource is also part of the spec's prose conversion.
+    // Read `type` field on underlyingSource for the bytes/default branch.
+    let mut is_byte_stream = false;
     if let Ok(us) = v8::Local::<v8::Object>::try_from(underlying_source) {
         let type_key = v8::String::new(scope, "type").unwrap();
-        // Get may throw via accessor — propagate.
         let type_v = match us.get(scope, type_key.into()) {
             Some(v) => v,
             None => return,
@@ -345,20 +344,80 @@ fn constructor_callback(
             let Some(s_v) = s_opt else { return };
             let s = s_v.to_rust_string_lossy(scope);
             if s == "bytes" {
-                let msg = v8::String::new(
-                    scope,
-                    "ReadableStream(type=\"bytes\"): byte streams not implemented in this landing — see next dispatch",
-                )
-                .unwrap();
-                let exc = v8::Exception::error(scope, msg);
+                is_byte_stream = true;
+            } else {
+                let msg = v8::String::new(scope, "ReadableStream: invalid underlyingSource.type")
+                    .unwrap();
+                let exc = v8::Exception::type_error(scope, msg);
                 scope.throw_exception(exc);
                 return;
             }
-            let msg = v8::String::new(scope, "ReadableStream: invalid underlyingSource.type").unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
+        }
+    }
+    // Per spec §3.2.4: byte streams default HWM = 0. The default-stream
+    // path used 1.0 above; if the stream is byte-typed, override the
+    // default. Also: byte streams forbid a custom `size` callback in the
+    // strategy.
+    if is_byte_stream {
+        if !matches!(size_algo, ctlr::SizeAlgorithm::DefaultCount) {
+            let msg = v8::String::new(
+                scope,
+                "ReadableStream(type=\"bytes\"): strategy.size cannot be specified",
+            )
+            .unwrap();
+            let exc = v8::Exception::range_error(scope, msg);
             scope.throw_exception(exc);
             return;
         }
+        // Default HWM=0 for byte streams unless explicitly set. Distinguish
+        // user-supplied vs. defaulted: parse_strategy_local returned the
+        // default 1.0; if strategy was undefined OR strategy.highWaterMark
+        // was undefined, override. We can't tell easily here, so re-parse
+        // with default 0 instead.
+        let (hwm0, _) = match crate::streams::readable::parse_strategy_local(scope, strategy, 0.0) {
+            Ok(v) => v,
+            Err(()) => return,
+        };
+        // Use hwm0 below.
+        let _ = hwm; // suppress unused warning
+        let hwm = hwm0;
+
+        // Allocate budget + Box<RSState>.
+        let budget = match try_alloc_stream() {
+            Ok(g) => g,
+            Err(m) => {
+                let msg = v8::String::new(scope, m).unwrap();
+                let exc = v8::Exception::range_error(scope, msg);
+                scope.throw_exception(exc);
+                return;
+            }
+        };
+        let inst = RSState::new(budget);
+        let boxed = Box::new(inst);
+        let raw_ptr = Box::into_raw(boxed);
+        let raw_addr = raw_ptr as usize;
+        let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
+        stream_obj.set_internal_field(0, ext.into());
+        let weak = v8::Weak::with_guaranteed_finalizer(
+            scope,
+            stream_obj,
+            Box::new(move || unsafe {
+                drop(Box::from_raw(raw_addr as *mut RSState));
+            }),
+        );
+        std::mem::forget(weak);
+
+        if let Err(msg) = crate::streams::readable_byte_controller::set_up_readable_byte_stream_controller_from_underlying_source(
+            scope,
+            stream_obj,
+            underlying_source,
+            hwm,
+        ) {
+            let v8_msg = v8::String::new(scope, &msg).unwrap();
+            let exc = v8::Exception::type_error(scope, v8_msg);
+            scope.throw_exception(exc);
+        }
+        return;
     }
 
     // Allocate budget + Box<RSState>.
@@ -469,8 +528,9 @@ fn get_reader_method_callback(
         scope.throw_exception(exc);
         return;
     }
-    // Parse options. mode === "byob" not in this dispatch.
+    // Parse options.
     let options = args.get(0);
+    let mut mode_byob = false;
     if !options.is_undefined() {
         let Ok(options_obj) = v8::Local::<v8::Object>::try_from(options) else {
             let msg = v8::String::new(scope, "getReader: options must be an object").unwrap();
@@ -485,21 +545,30 @@ fn get_reader_method_callback(
         if !mode_v.is_undefined() {
             let s = mode_v.to_rust_string_lossy(scope);
             if s == "byob" {
-                let msg = v8::String::new(
-                    scope,
-                    "BYOB readers not implemented in this landing — see next dispatch",
-                )
-                .unwrap();
-                let exc = v8::Exception::error(scope, msg);
+                mode_byob = true;
+            } else {
+                // Anything else → TypeError per spec.
+                let msg = v8::String::new(scope, "getReader: invalid mode").unwrap();
+                let exc = v8::Exception::type_error(scope, msg);
                 scope.throw_exception(exc);
                 return;
             }
-            // Anything else → TypeError per spec.
-            let msg = v8::String::new(scope, "getReader: invalid mode").unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
-            return;
         }
+    }
+    if mode_byob {
+        let reader = match crate::streams::readable_byob_reader::acquire_readable_stream_byob_reader(
+            scope, this,
+        ) {
+            Ok(r) => r,
+            Err(err) => {
+                let msg = v8::String::new(scope, &err).unwrap();
+                let exc = v8::Exception::type_error(scope, msg);
+                scope.throw_exception(exc);
+                return;
+            }
+        };
+        rv.set(reader.into());
+        return;
     }
 
     let reader = match crate::streams::readable_default_reader::acquire_readable_stream_default_reader(

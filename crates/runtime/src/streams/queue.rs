@@ -222,6 +222,21 @@ impl ByteQueue {
         }
         self.total_size.set(0.0);
     }
+
+    /// Pop the front entry. Same as `dequeue_byte_entry` but named to
+    /// match the byte-controller's helper naming.
+    pub fn drain_into_first(&self) -> Option<ByteQueueEntry> {
+        self.dequeue_byte_entry()
+    }
+
+    /// Push an entry to the front (used when an enqueue is partially
+    /// consumed to fill a pending pull-into and the remainder needs to
+    /// stay at the head of the queue for the next descriptor).
+    pub fn push_front_byte_entry(&self, entry: ByteQueueEntry) {
+        let len = entry.byte_length as f64;
+        self.queue.borrow_mut().push_front(entry);
+        self.total_size.set(self.total_size.get() + len);
+    }
 }
 
 // ---------------------------------------------------------------------------

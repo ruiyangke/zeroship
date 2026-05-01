@@ -461,6 +461,16 @@ pub fn readable_stream_default_reader_read(
             fulfill_read_request_error(scope, request, stored);
         }
         StreamState::Readable => {
+            // Dispatch on the controller's class. Byte controllers have
+            // their own pull_steps that handles auto-allocate-chunk-size
+            // and queue-fill paths.
+            let controller_v = slots::read_slot(scope, stream, crate::streams::slots::CONTROLLER);
+            if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
+                if crate::streams::readable_byte_controller::is_byte_controller(scope, controller) {
+                    crate::streams::readable_byte_controller::pull_steps(scope, stream, request);
+                    return;
+                }
+            }
             crate::streams::readable_default_controller::pull_steps(scope, stream, request);
         }
     }
@@ -478,6 +488,34 @@ pub fn enqueue_read_request(
         return;
     };
     with_state(scope, reader, |s| s.read_requests.borrow_mut().push_back(request));
+}
+
+/// Pop the front read request from the (default) reader on `stream`.
+/// Returns `None` if no default reader or no requests pending. Used by
+/// the byte controller's `ProcessReadRequestsUsingQueue`.
+pub fn pop_front_read_request(
+    scope: &mut v8::PinScope,
+    stream: v8::Local<v8::Object>,
+) -> Option<ReadRequest> {
+    let reader_v = slots::read_slot(scope, stream, READER);
+    let reader = v8::Local::<v8::Object>::try_from(reader_v).ok()?;
+    if !is_default_reader(scope, reader) {
+        return None;
+    }
+    with_state(scope, reader, |s| s.read_requests.borrow_mut().pop_front()).flatten()
+}
+
+/// True iff `stream` has an attached default reader. Convenience for
+/// debug_assert sites in the byte controller.
+pub fn is_default_reader_attached(
+    scope: &mut v8::PinScope,
+    stream: v8::Local<v8::Object>,
+) -> bool {
+    let reader_v = slots::read_slot(scope, stream, READER);
+    let Ok(reader) = v8::Local::<v8::Object>::try_from(reader_v) else {
+        return false;
+    };
+    is_default_reader(scope, reader)
 }
 
 /// Fulfill a single read request with `{value: chunk, done: false}`.

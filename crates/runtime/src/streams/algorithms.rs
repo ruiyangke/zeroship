@@ -51,14 +51,13 @@ pub fn readable_stream_has_default_reader(
     crate::streams::readable_default_reader::is_default_reader(scope, reader_obj)
 }
 
-/// `ReadableStreamHasBYOBReader(stream)` — §3.9.1.14. BYOB readers are
-/// not implemented in this dispatch; always returns false. (When the byte
-/// path lands, this branches on the reader's class.)
+/// `ReadableStreamHasBYOBReader(stream)` — §3.9.1.14. Routes through
+/// `crate::streams::readable_byob_reader::readable_stream_has_byob_reader`.
 pub fn readable_stream_has_byob_reader(
-    _scope: &mut v8::PinScope,
-    _stream: v8::Local<v8::Object>,
+    scope: &mut v8::PinScope,
+    stream: v8::Local<v8::Object>,
 ) -> bool {
-    false
+    crate::streams::readable_byob_reader::readable_stream_has_byob_reader(scope, stream)
 }
 
 // ---------------------------------------------------------------------------
@@ -296,7 +295,18 @@ pub fn readable_stream_cancel<'s>(
     readable_stream_close(scope, stream);
 
     // controller [[CancelSteps]] returns a Promise<undefined>.
-    let source_cancel = crate::streams::readable_default_controller::cancel_steps(scope, stream, reason);
+    // Dispatch on the controller's class — byte controllers route through
+    // their own cancel_steps; default controllers through theirs.
+    let controller_v = slots::read_slot(scope, stream, slots::CONTROLLER);
+    let source_cancel = if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
+        if crate::streams::readable_byte_controller::is_byte_controller(scope, controller) {
+            crate::streams::readable_byte_controller::cancel_steps(scope, stream, reason)
+        } else {
+            crate::streams::readable_default_controller::cancel_steps(scope, stream, reason)
+        }
+    } else {
+        resolved_undefined_promise(scope)
+    };
 
     crate::streams::promise_resolve::react_to_promise_with(
         scope,
