@@ -162,6 +162,25 @@ pub(crate) fn is_vec_u8(ty: &Type) -> bool {
             == Some("u8")
 }
 
+/// Check if type is `Vec<Vec<u8>>` — used by IDL methods like
+/// `getSetCookie() -> sequence<ByteString>`. Marshalled as a JS Array
+/// of ByteString (each element is a Latin-1 one-byte string).
+pub(crate) fn is_vec_vec_u8(ty: &Type) -> bool {
+    type_ident(ty).as_deref() == Some("Vec")
+        && first_generic_arg(ty)
+            .map(is_vec_u8)
+            .unwrap_or(false)
+}
+
+/// Check if type is the `ByteString` newtype from
+/// `zeroship_runtime::byte_string`. Used for WebIDL ByteString args
+/// (Headers names/values etc.). Detection is by last segment ident; we
+/// don't enforce the full path since users typically `use
+/// ::zeroship_runtime::byte_string::ByteString` or alias the type.
+pub(crate) fn is_byte_string(ty: &Type) -> bool {
+    type_ident(ty).as_deref() == Some("ByteString")
+}
+
 /// Extract the first generic type argument (e.g. `String` from `Option<String>`).
 pub(crate) fn first_generic_arg(ty: &Type) -> Option<&Type> {
     if let Type::Path(TypePath { path, .. }) = ty {
@@ -220,6 +239,33 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
     if ident.as_deref() == Some("Local") {
         return quote! {
             let #name = args.get(#idx);
+        };
+    }
+
+    // ByteString → WebIDL ByteString conversion. On any code unit
+    // > 0xFF, sets a pending TypeError and returns from the callback
+    // (so the JS caller observes the throw). The match-and-return
+    // shape works in callbacks that return `()` (the V8 ABI shape) —
+    // we don't need the user method to return Result. After the throw
+    // is set, JS execution unwinds normally.
+    if is_byte_string(ty) {
+        return quote! {
+            let #name = match ::zeroship_runtime::byte_string::read_byte_string(
+                scope,
+                args.get(#idx),
+            ) {
+                Ok(__bytes) => ::zeroship_runtime::byte_string::ByteString::from_bytes(__bytes),
+                Err(__err) => {
+                    let __msg = v8::String::new(scope, &__err.message).unwrap();
+                    let __exc = match __err.kind {
+                        ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
+                        ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+                        _ => v8::Exception::error(scope, __msg),
+                    };
+                    scope.throw_exception(__exc);
+                    return;
+                }
+            };
         };
     }
 

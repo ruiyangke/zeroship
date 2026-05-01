@@ -561,6 +561,104 @@ mod intrinsic_iter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Test 7e: ByteString newtype extraction
+// ---------------------------------------------------------------------------
+//
+// WebIDL ByteString boundary: per https://webidl.spec.whatwg.org/#js-to-ByteString
+// step 2, any code unit > 0xFF MUST throw TypeError. The macro extends
+// `gen_extract` to recognise the `ByteString` newtype and emit a call to
+// `read_byte_string` (defined in zeroship_runtime::byte_string), which
+// performs the precheck via String::contains_only_onebyte() and returns
+// Result<Vec<u8>, OpError>.
+//
+// Until a real consumer (Headers) lands, we drive the path through a
+// stub class that takes a ByteString and echoes it back as a Vec<u8>
+// return (which the macro marshals as Uint8Array).
+
+mod bytestring_extract {
+    use super::*;
+
+    pub struct Echo;
+
+    #[v8_class]
+    impl Echo {
+        #[v8_constructor]
+        fn new() -> Echo {
+            Echo
+        }
+
+        /// Round-trip a ByteString as raw bytes. Throws TypeError on
+        /// inputs containing code units > 0xFF.
+        #[v8_method]
+        fn echo(
+            &self,
+            input: ::zeroship_runtime::byte_string::ByteString,
+        ) -> Result<Vec<u8>, OpError> {
+            Ok(input.into_bytes())
+        }
+    }
+}
+
+#[test]
+fn bytestring_round_trip_passes_low_bytes() {
+    let s = run_in_v8(
+        |scope, global| install_class::<bytestring_extract::Echo>(
+            bytestring_extract::Echo::install, "Echo", scope, global,
+        ),
+        r#"
+        const e = new Echo();
+        const out = e.echo("hello");
+        JSON.stringify({
+            len: out.byteLength,
+            kind: out.constructor.name,
+            b0: out[0], b4: out[4],
+        });
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(
+        s,
+        r#"{"len":5,"kind":"Uint8Array","b0":104,"b4":111}"#
+    );
+}
+
+#[test]
+fn bytestring_throws_on_code_unit_above_0xff() {
+    let s = run_in_v8(
+        |scope, global| install_class::<bytestring_extract::Echo>(
+            bytestring_extract::Echo::install, "Echo", scope, global,
+        ),
+        r#"
+        const e = new Echo();
+        let kind, msg;
+        try { e.echo("\u0100"); }
+        catch (err) { kind = err.constructor.name; msg = err.message; }
+        JSON.stringify({ kind, msg });
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert!(s.contains(r#""kind":"TypeError""#), "got: {s}");
+}
+
+#[test]
+fn bytestring_preserves_high_latin1_bytes() {
+    // Latin-1 \u00FF is the maximum allowed code unit for ByteString.
+    // It must round-trip as byte 0xFF.
+    let s = run_in_v8(
+        |scope, global| install_class::<bytestring_extract::Echo>(
+            bytestring_extract::Echo::install, "Echo", scope, global,
+        ),
+        r#"
+        const e = new Echo();
+        const out = e.echo("\u0080\u00FF");
+        JSON.stringify({ len: out.byteLength, b0: out[0], b1: out[1] });
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, r#"{"len":2,"b0":128,"b1":255}"#);
+}
+
 #[test]
 fn v8_inherit_intrinsic_chains_to_iterator_prototype() {
     let s = run_in_v8(
