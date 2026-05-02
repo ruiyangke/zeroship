@@ -202,11 +202,3 @@ export function Home() {
   );
 }
 
-/** Used by /new to consume the home-page prompt when navigating. */
-export function consumePendingPrompt(): string | null {
-  try {
-    const v = sessionStorage.getItem(STORAGE_KEY);
-    if (v) sessionStorage.removeItem(STORAGE_KEY);
-    return v;
-  } catch { return null; }
-}
