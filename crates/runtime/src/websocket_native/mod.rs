@@ -396,12 +396,20 @@ impl WebSocketImpl {
             let ws_id = network::alloc_native_ws_id(&state);
             impl_.ws_id.set(ws_id);
 
-            // Cache the wrapper Global for the dispatch arm.
+            // Cache the wrapper Global for the dispatch arm AND for
+            // the EventHandler IDL setters — both consult
+            // `cached_handles.ws_obj` to bind listeners. We must seed
+            // `ws_obj` here at construction time; otherwise
+            // `ws.onopen = handler` runs BEFORE any event is dispatched
+            // and stores the function only into `cached_handles.on_open`,
+            // never installing the listener that dispatchEvent looks
+            // up — the open event then dispatches with no listeners.
             let wrapper_global = v8::Global::new(scope, _wrapper);
             state
                 .borrow_mut()
                 .native_ws_wrappers
-                .insert(ws_id, wrapper_global);
+                .insert(ws_id, wrapper_global.clone());
+            impl_.cached_handles.borrow_mut().ws_obj = Some(wrapper_global);
 
             // Wire the per-WS NativeWsState's buffered_amount/full
             // counters to share the WebSocketImpl's counters by Rc

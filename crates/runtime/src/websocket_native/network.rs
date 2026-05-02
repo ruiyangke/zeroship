@@ -391,11 +391,8 @@ async fn run_socket_loop_inner<S>(
     ws_id: u32,
     mut stream: compio_ws::WebSocketStream<S>,
 ) where
-    S: compio::io::AsyncRead + compio::io::AsyncWrite,
+    S: compio::io::AsyncRead + compio::io::AsyncWrite + 'static,
 {
-    use std::future::poll_fn;
-
-    // Helper to await "send queue has work" or "task cancelled".
     let ws_state = match lookup_native_ws_state(&state, ws_id) {
         Some(w) => w,
         None => return,
@@ -403,227 +400,38 @@ async fn run_socket_loop_inner<S>(
     let mut sent_close = false;
     let mut peer_closed = false;
 
-    enum Branch {
-        Read(Result<Message, tungstenite::Error>),
-        Send(bool),
-    }
-
+    // The single-task design avoids the compio-io "buffer was submitted
+    // for io and never returned" panic that fires if we drop a partially-
+    // polled `stream.read()` future. tungstenite over compio is
+    // serialise-only at the future level: once a read or send future is
+    // started, it MUST run to completion.
+    //
+    // To allow sends without blocking on reads, we use a small drain
+    // step per iteration:
+    //   1. Drain everything in `send_queue` synchronously (each send
+    //      is one `stream.send().await` — never cancellable but
+    //      always run to completion).
+    //   2. Run ONE `stream.read().await` to completion and dispatch.
+    //   3. After a read returns, loop back to step 1 in case sends
+    //      arrived while we were blocked on the read.
+    //
+    // The cost: a send queued WHILE a read is blocked waits until
+    // that read returns. For low-latency request/response apps this
+    // is fine — the peer's response wakes the read; for one-way
+    // streaming sends this could starve. Future improvement: spawn a
+    // periodic "wakeup ping" the user can disable, OR adopt a true
+    // splittable framer (out of scope).
     loop {
         // Bail out if the queue is paused for backpressure.
         await_recv_drain(&ws_state).await;
-
-        // If we already sent Close and the peer closed, drop the socket.
         if sent_close && peer_closed {
             break;
         }
 
-        // Hand-rolled select. Borrow `stream` as `&mut` ONLY across
-        // this poll-fn block — when poll_fn returns, the borrow is
-        // released so the match arms can call stream.send / close
-        // without conflict (no multiple-mutable-borrow E0499).
-        let branch = {
-            let send_ready = poll_fn(|cx| {
-                let mut s = ws_state.borrow_mut();
-                if !s.send_queue.is_empty() {
-                    std::task::Poll::Ready(true)
-                } else if s.cancel || s.close_initiated {
-                    std::task::Poll::Ready(false)
-                } else {
-                    s.send_waker = Some(cx.waker().clone());
-                    std::task::Poll::Pending
-                }
-            });
-            let read_fut = stream.read();
-            futures::pin_mut!(send_ready, read_fut);
-
-            poll_fn(|cx| {
-                // Polling order: read first so peer Close is visible
-                // before we drain another outgoing frame after a
-                // graceful close. select! picks randomly; this is
-                // deterministic.
-                if let std::task::Poll::Ready(r) = read_fut.as_mut().poll(cx) {
-                    return std::task::Poll::Ready(Branch::Read(r));
-                }
-                if let std::task::Poll::Ready(b) = send_ready.as_mut().poll(cx) {
-                    return std::task::Poll::Ready(Branch::Send(b));
-                }
-                std::task::Poll::Pending
-            })
-            .await
-        };
-
-        match branch {
-            Branch::Read(Ok(msg)) => match msg {
-                Message::Text(s) => {
-                    push_event(&state, ws_id, WsEvent::MessageText(s.to_string()));
-                }
-                Message::Binary(b) => {
-                    push_event(&state, ws_id, WsEvent::MessageBinary(b.to_vec()));
-                }
-                // Ping/Pong: tungstenite auto-replies to Ping; we drop
-                // both kinds (RFC 6455 §5.5; design §VII.2).
-                Message::Ping(_) | Message::Pong(_) => {}
-                Message::Close(frame) => {
-                    let (code, reason) = match frame {
-                        Some(f) => (u16::from(f.code), f.reason.to_string()),
-                        // Per RFC 6455 §7.4.1: empty-payload Close
-                        // surfaces as 1005 ("No Status Rcvd") on the
-                        // JS-observable code. 1005 is internal-only;
-                        // never appears on the wire.
-                        None => (1005, String::new()),
-                    };
-                    push_event(
-                        &state,
-                        ws_id,
-                        WsEvent::Close {
-                            code,
-                            reason,
-                            was_clean: true,
-                        },
-                    );
-                    peer_closed = true;
-                    if sent_close {
-                        // Both sides have echoed Close — drop socket.
-                        break;
-                    }
-                    // Peer initiated; we should send our Close ACK.
-                    // Tungstenite has already written a queued Close
-                    // for us in response — but we still need to flush
-                    // and exit. Mark close_initiated so the send loop
-                    // doesn't try to enqueue user frames.
-                    ws_state.borrow_mut().close_initiated = true;
-                    let _ = compio::time::timeout(CLOSE_TIMEOUT, stream.close(None)).await;
-                    break;
-                }
-                Message::Frame(_) => {
-                    // Raw frame surface — never produced by
-                    // tungstenite's read(); ignore.
-                }
-            },
-            Branch::Read(Err(e)) => {
-                // Protocol / I/O error: connection-failed.
-                push_event(
-                    &state,
-                    ws_id,
-                    WsEvent::Error {
-                        reason: format!("{e}"),
-                    },
-                );
-                push_event(
-                    &state,
-                    ws_id,
-                    WsEvent::Close {
-                        code: 1006,
-                        reason: String::new(),
-                        was_clean: false,
-                    },
-                );
-                break;
-            }
-            Branch::Send(true) => {
-                // Drain ONE frame; loop continues for more.
-                let frame_opt = ws_state.borrow_mut().send_queue.pop_front();
-                let Some(frame) = frame_opt else { continue };
-                match frame {
-                    WsFrame::Text(s) => {
-                        let bytes_len = s.len() as u64;
-                        if let Err(e) = stream.send(Message::Text(s.into())).await {
-                            send_failure(&state, ws_id, e.to_string());
-                            break;
-                        }
-                        decrement_buffered_amount(&state, ws_id, bytes_len);
-                    }
-                    WsFrame::Binary(b) => {
-                        let bytes_len = b.len() as u64;
-                        if let Err(e) = stream.send(Message::Binary(b.into())).await {
-                            send_failure(&state, ws_id, e.to_string());
-                            break;
-                        }
-                        decrement_buffered_amount(&state, ws_id, bytes_len);
-                    }
-                    WsFrame::Blob { handle: _, size } => {
-                        // Blob byte extraction needs a V8 scope — v1
-                        // ships text/Binary fast paths only. The
-                        // bufferedAmount was bumped at queue time;
-                        // decrement here to release the budget.
-                        // (Blob send for client sockets is rare in
-                        // practice — `socket.send(blob)` is handled
-                        // synchronously by the polyfill via toString.
-                        // Re-introducing async Blob extraction is
-                        // tracked under design §V.4.)
-                        decrement_buffered_amount(&state, ws_id, size);
-                    }
-                    WsFrame::Close { code, reason } => {
-                        // Close frame. Per RFC 6455 §7.4.1, code 1005
-                        // is RESERVED — never serialised. The IDL
-                        // surface (`close()`) accepts None for "no
-                        // code" and a `Some(c)` payload otherwise.
-                        let payload = code.map(|c| CloseFrame {
-                            code: CloseCode::from(c),
-                            reason: reason.into(),
-                        });
-                        let _ = stream.send(Message::Close(payload)).await;
-                        sent_close = true;
-                        ws_state.borrow_mut().close_initiated = true;
-
-                        // Wait for peer's Close echo, up to 5s. After
-                        // that, drop the socket regardless. Subsequent
-                        // iterations of the loop will see peer_closed.
-                        let close_done = compio::time::timeout(
-                            CLOSE_TIMEOUT,
-                            wait_for_peer_close(&mut stream),
-                        )
-                        .await;
-                        match close_done {
-                            Ok(Ok((code, reason))) => {
-                                push_event(
-                                    &state,
-                                    ws_id,
-                                    WsEvent::Close {
-                                        code,
-                                        reason,
-                                        was_clean: true,
-                                    },
-                                );
-                            }
-                            Ok(Err(e)) => {
-                                push_event(
-                                    &state,
-                                    ws_id,
-                                    WsEvent::Error {
-                                        reason: format!("{e}"),
-                                    },
-                                );
-                                push_event(
-                                    &state,
-                                    ws_id,
-                                    WsEvent::Close {
-                                        code: 1006,
-                                        reason: String::new(),
-                                        was_clean: false,
-                                    },
-                                );
-                            }
-                            Err(_) => {
-                                // Timeout — drop the socket; emit
-                                // 1006 since we never saw the ACK.
-                                push_event(
-                                    &state,
-                                    ws_id,
-                                    WsEvent::Close {
-                                        code: 1006,
-                                        reason: String::new(),
-                                        was_clean: false,
-                                    },
-                                );
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-            Branch::Send(false) => {
-                // Cancelled — emit error+close{1006} if not already.
+        // STEP 1: drain pending sends.
+        loop {
+            let cancelled = ws_state.borrow().cancel;
+            if cancelled {
                 let reason = ws_state.borrow().cancel_reason.clone();
                 push_event(
                     &state,
@@ -638,6 +446,162 @@ async fn run_socket_loop_inner<S>(
                     WsEvent::Close {
                         code: 1006,
                         reason,
+                        was_clean: false,
+                    },
+                );
+                return;
+            }
+
+            let frame_opt = ws_state.borrow_mut().send_queue.pop_front();
+            let Some(frame) = frame_opt else { break };
+            let mut sent_close_now = false;
+            let send_result: Result<u64, String> = match frame {
+                WsFrame::Text(s) => {
+                    let bytes_len = s.len() as u64;
+                    match stream.send(Message::Text(s.into())).await {
+                        Ok(()) => Ok(bytes_len),
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
+                WsFrame::Binary(b) => {
+                    let bytes_len = b.len() as u64;
+                    match stream.send(Message::Binary(b.into())).await {
+                        Ok(()) => Ok(bytes_len),
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
+                WsFrame::Blob { handle: _, size } => {
+                    // v1 ships text/Binary fast paths only. The
+                    // bufferedAmount was bumped at queue time;
+                    // release the budget.
+                    Ok(size)
+                }
+                WsFrame::Close { code, reason } => {
+                    let payload = code.map(|c| CloseFrame {
+                        code: CloseCode::from(c),
+                        reason: reason.into(),
+                    });
+                    sent_close_now = true;
+                    match stream.send(Message::Close(payload)).await {
+                        Ok(()) => Ok(0),
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
+            };
+            match send_result {
+                Ok(n) if n > 0 => decrement_buffered_amount(&state, ws_id, n),
+                Ok(_) => {}
+                Err(e) => {
+                    send_failure(&state, ws_id, e);
+                    return;
+                }
+            }
+            if sent_close_now {
+                sent_close = true;
+                ws_state.borrow_mut().close_initiated = true;
+                // Wait for peer's Close echo, up to 5s. Then drop.
+                let close_done = compio::time::timeout(
+                    CLOSE_TIMEOUT,
+                    wait_for_peer_close(&mut stream),
+                )
+                .await;
+                match close_done {
+                    Ok(Ok((code, reason))) => {
+                        push_event(
+                            &state,
+                            ws_id,
+                            WsEvent::Close {
+                                code,
+                                reason,
+                                was_clean: true,
+                            },
+                        );
+                    }
+                    Ok(Err(e)) => {
+                        push_event(
+                            &state,
+                            ws_id,
+                            WsEvent::Error {
+                                reason: format!("{e}"),
+                            },
+                        );
+                        push_event(
+                            &state,
+                            ws_id,
+                            WsEvent::Close {
+                                code: 1006,
+                                reason: String::new(),
+                                was_clean: false,
+                            },
+                        );
+                    }
+                    Err(_) => {
+                        push_event(
+                            &state,
+                            ws_id,
+                            WsEvent::Close {
+                                code: 1006,
+                                reason: String::new(),
+                                was_clean: false,
+                            },
+                        );
+                    }
+                }
+                return;
+            }
+        }
+
+        // STEP 2: read ONE message. This await is non-cancellable
+        // (compio-io panic if we drop). We rely on the peer / TCP
+        // RST to wake us; for true cancel, the cancel flag has
+        // already returned the loop above.
+        match stream.read().await {
+            Ok(msg) => match msg {
+                Message::Text(s) => {
+                    push_event(&state, ws_id, WsEvent::MessageText(s.to_string()));
+                }
+                Message::Binary(b) => {
+                    push_event(&state, ws_id, WsEvent::MessageBinary(b.to_vec()));
+                }
+                Message::Ping(_) | Message::Pong(_) => {}
+                Message::Close(frame) => {
+                    let (code, reason) = match frame {
+                        Some(f) => (u16::from(f.code), f.reason.to_string()),
+                        None => (1005, String::new()),
+                    };
+                    push_event(
+                        &state,
+                        ws_id,
+                        WsEvent::Close {
+                            code,
+                            reason,
+                            was_clean: true,
+                        },
+                    );
+                    peer_closed = true;
+                    if sent_close {
+                        break;
+                    }
+                    ws_state.borrow_mut().close_initiated = true;
+                    let _ = compio::time::timeout(CLOSE_TIMEOUT, stream.close(None)).await;
+                    break;
+                }
+                Message::Frame(_) => {}
+            },
+            Err(e) => {
+                push_event(
+                    &state,
+                    ws_id,
+                    WsEvent::Error {
+                        reason: format!("{e}"),
+                    },
+                );
+                push_event(
+                    &state,
+                    ws_id,
+                    WsEvent::Close {
+                        code: 1006,
+                        reason: String::new(),
                         was_clean: false,
                     },
                 );

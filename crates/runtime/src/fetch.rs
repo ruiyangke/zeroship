@@ -78,9 +78,10 @@ pub fn is_blocked_ip(addr: IpAddr) -> bool {
 pub fn validate_url(url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
 
-    // Only allow http and https schemes
+    // Allow http(s) and the WebSocket schemes ws/wss. The block list
+    // (private/loopback/etc.) below applies uniformly to all four.
     match parsed.scheme() {
-        "http" | "https" => {}
+        "http" | "https" | "ws" | "wss" => {}
         scheme => return Err(format!("Blocked URL scheme: {scheme}")),
     }
 
