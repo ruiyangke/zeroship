@@ -481,6 +481,156 @@ pub struct UnsealedRecord {
     pub result: Result<SealedAuth, String>,
 }
 
+/// Best-effort sealed-record facility shared across backends.
+///
+/// Phase-0 lifecycle wiring (preview-URL § II.0 §4): each backend's
+/// `create()` calls [`Persistence::seal`] after the sandbox is live;
+/// each `stop()` calls [`Persistence::delete`] before returning. The
+/// boot-path's restore loop reads the same files back via
+/// [`Persistence::list`].
+///
+/// **Best-effort by contract.** Seal/delete failures NEVER propagate
+/// up to fail `create`/`stop`. The sandbox is live in memory regardless;
+/// persistence is for restart resilience, not for live operation.
+/// Callers log loudly so operators see when persistence is degraded.
+///
+/// **One handle, many backends.** `from_env` returns a single
+/// `Arc<Persistence>` that all three backends share — the file I/O
+/// state (dir + AEAD key) is identical regardless of which backend is
+/// minting the sandbox. Cloning the `Arc` is the per-backend cost.
+///
+/// **I/O on `spawn_blocking`.** All sync `std::fs` calls land inside a
+/// `compio::runtime::spawn_blocking` so the ntex worker stays
+/// responsive. Matches the rest of the crate's pattern (no tokio).
+pub struct Persistence {
+    /// Subdir under `persist_dir` we read+write — kept as the absolute
+    /// `<persist_dir>/sealed-records` so callers can pass either to
+    /// `restore_at_startup` (which expects the parent) and the
+    /// internal sealers (which want the subdir).
+    sealed_records_dir: PathBuf,
+    key: Arc<AeadKey>,
+}
+
+impl std::fmt::Debug for Persistence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Persistence")
+            .field("sealed_records_dir", &self.sealed_records_dir)
+            // key intentionally omitted (AeadKey already redacts; this
+            // is belt-and-suspenders so a future field addition can't
+            // unintentionally widen the Debug surface).
+            .finish_non_exhaustive()
+    }
+}
+
+impl Persistence {
+    /// Construct from the same env vars [`crate::AppState::from_config`]
+    /// reads at boot:
+    ///
+    /// - `SANDBOX_PERSIST_AUTH=1` — feature flag (any other value or
+    ///   unset returns `Ok(None)`; matches `persist_auth_enabled` in
+    ///   `lib.rs`).
+    /// - `SANDBOX_PERSIST_DIR` — parent dir; default
+    ///   `/var/lib/zeroship/sandbox`.
+    /// - `SANDBOX_AEAD_KEY_PATH` — file-mount only (round-6 H8;
+    ///   env-var sourcing intentionally not supported because procfs
+    ///   leaks).
+    ///
+    /// `Ok(None)` is the disabled/no-op shape — backends store the
+    /// `Option<Arc<Persistence>>` they receive and skip the seal/delete
+    /// calls entirely when it's `None`.
+    pub fn from_env() -> Result<Option<Self>, String> {
+        if !matches!(std::env::var("SANDBOX_PERSIST_AUTH").as_deref(), Ok("1")) {
+            return Ok(None);
+        }
+        let key_path = std::env::var("SANDBOX_AEAD_KEY_PATH").map_err(|_| {
+            "SANDBOX_AEAD_KEY_PATH not set (file-mount only — see preview-URL § IX.a)"
+                .to_string()
+        })?;
+        let key = AeadKey::from_path(&key_path)?;
+        let dir = std::env::var("SANDBOX_PERSIST_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/var/lib/zeroship/sandbox"));
+        Ok(Some(Self::new(dir, key)))
+    }
+
+    /// Build directly. Tests use this; production goes through
+    /// [`Persistence::from_env`]. `persist_dir` is the parent
+    /// (e.g. `/var/lib/zeroship/sandbox`); the `sealed-records/`
+    /// subdir is appended internally to match the layout
+    /// [`crate::restore::restore_at_startup`] reads.
+    pub fn new(persist_dir: PathBuf, key: AeadKey) -> Self {
+        Self {
+            sealed_records_dir: persist_dir.join("sealed-records"),
+            key: Arc::new(key),
+        }
+    }
+
+    /// Seal `record` to disk. Best-effort: errors surface as `Err` for
+    /// the caller to log, but the caller MUST NOT fail the surrounding
+    /// `create()` on this. File I/O runs on `spawn_blocking`.
+    pub async fn seal(
+        &self,
+        sandbox_id: Uuid,
+        record: &SealedAuth,
+    ) -> std::io::Result<()> {
+        // Clone what we need into the blocking closure. The AEAD key
+        // is already in an `Arc`; `record` is small enough to clone
+        // (a Vec of strings + 32 bytes of key material).
+        let dir = self.sealed_records_dir.clone();
+        let key = self.key.clone();
+        let record = record.clone();
+        compio::runtime::spawn_blocking(move || seal(sandbox_id, &record, &dir, &key).map(|_| ()))
+            .await
+            .unwrap_or_else(|p| {
+                Err(std::io::Error::other(format!(
+                    "spawn_blocking panic: {p:?}"
+                )))
+            })
+    }
+
+    /// Remove the sealed record for `sandbox_id`. Best-effort: a
+    /// missing file is treated as success (idempotent — matches the
+    /// `stop()` contract). Other I/O errors propagate as `Err` for the
+    /// caller to log.
+    pub async fn delete(&self, sandbox_id: Uuid) -> std::io::Result<()> {
+        let path = self.sealed_records_dir.join(seal_filename_for(sandbox_id));
+        compio::runtime::spawn_blocking(move || match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        })
+        .await
+        .unwrap_or_else(|p| {
+            Err(std::io::Error::other(format!(
+                "spawn_blocking panic: {p:?}"
+            )))
+        })
+    }
+
+    /// List + unseal every record in the sealed-records dir. Returns
+    /// the same shape [`unseal_dir`] does (per-file `Ok`/`Err`
+    /// results) so callers can quarantine corrupt files individually
+    /// without failing the whole list. A missing dir is `Ok(vec![])`.
+    pub async fn list(&self) -> std::io::Result<Vec<UnsealedRecord>> {
+        let dir = self.sealed_records_dir.clone();
+        let key = self.key.clone();
+        compio::runtime::spawn_blocking(move || unseal_dir(&dir, &key))
+            .await
+            .unwrap_or_else(|p| {
+                Err(std::io::Error::other(format!(
+                    "spawn_blocking panic: {p:?}"
+                )))
+            })
+    }
+
+    /// Absolute path of the sealed-records dir. Used by tests; the
+    /// boot path uses `restore::restore_at_startup` which takes the
+    /// parent.
+    pub fn sealed_records_dir(&self) -> &Path {
+        &self.sealed_records_dir
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,4 +892,79 @@ mod tests {
         assert_eq!(by_uuid, by_str);
         assert_eq!(by_uuid, by_simple);
     }
+
+    /// `Persistence` end-to-end: seal → list → delete → list. Covers
+    /// the surface backends call from their `create`/`stop` paths.
+    #[compio::test]
+    async fn persistence_seal_list_delete_round_trip() {
+        let dir = fresh_dir("persist-rt");
+        let key = fresh_key(0xab);
+        let p = Persistence::new(dir.clone(), key);
+        let id = Uuid::now_v7();
+        let (sealed, _) = make_auth(id);
+
+        // Empty start.
+        let listed = p.list().await.expect("list empty");
+        assert!(listed.is_empty(), "fresh dir must list zero records");
+
+        // Seal one.
+        p.seal(id, &sealed).await.expect("seal");
+        // On-disk filename matches the documented hash format.
+        let expected = dir.join("sealed-records").join(seal_filename_for(id));
+        assert!(expected.exists(), "sealed file at expected path");
+
+        // List sees it.
+        let listed = p.list().await.expect("list one");
+        assert_eq!(listed.len(), 1, "one record after seal");
+        let rec = listed[0].result.as_ref().expect("ok");
+        assert_eq!(rec.sandbox_id, id.to_string());
+
+        // Delete by id.
+        p.delete(id).await.expect("delete");
+        assert!(!expected.exists(), "delete must remove the file");
+
+        // List is back to empty.
+        let listed = p.list().await.expect("list after delete");
+        assert!(listed.is_empty(), "post-delete list must be empty");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Delete is idempotent: removing a record that was never sealed
+    /// is `Ok(())`. Mirrors the `stop()` contract — controller crashed
+    /// between `create` and `seal`, then `stop` fires; we must not
+    /// fail-stop on a missing on-disk record.
+    #[compio::test]
+    async fn persistence_delete_missing_is_ok() {
+        let dir = fresh_dir("persist-del-missing");
+        let key = fresh_key(0xcd);
+        let p = Persistence::new(dir.clone(), key);
+        let id = Uuid::now_v7();
+        p.delete(id).await.expect("delete missing must be ok");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Filename invariant — the on-disk filename matches
+    /// `seal_filename_for`, and lives under `<persist_dir>/sealed-records/`.
+    #[compio::test]
+    async fn persistence_seal_uses_documented_filename_format() {
+        let dir = fresh_dir("persist-fname");
+        let key = fresh_key(0x07);
+        let p = Persistence::new(dir.clone(), key);
+        let id = Uuid::now_v7();
+        let (sealed, _) = make_auth(id);
+        p.seal(id, &sealed).await.expect("seal");
+
+        let expected_name = seal_filename_for(id);
+        let expected_path = dir.join("sealed-records").join(&expected_name);
+        assert!(expected_path.exists(), "filename matches seal_filename_for");
+        // 32 hex chars + ".sealed".
+        assert_eq!(expected_name.len(), 32 + ".sealed".len());
+        assert!(expected_name.ends_with(".sealed"));
+        let stem = &expected_name[..32];
+        assert!(stem.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }
