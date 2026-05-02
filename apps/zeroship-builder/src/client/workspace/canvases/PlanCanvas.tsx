@@ -17,12 +17,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   addIssue,
   listIssues,
+  pmDigest,
   type AppRecord,
   type Issue,
   type IssueStatus,
+  type PMDigest,
 } from "../../api";
 import { Modal } from "../../components/Modal";
 import { StampButton } from "../../components/StampButton";
+import { GhostButton } from "../../components/GhostButton";
 
 export interface PlanCanvasProps {
   appId: string;
@@ -33,6 +36,8 @@ export function PlanCanvas({ appId, app }: PlanCanvasProps) {
   return (
     <div data-testid="plan-canvas" className="h-full overflow-auto bg-paper">
       <div className="max-w-[860px] mx-auto px-4 sm:px-8 lg:px-12 py-6 sm:py-10">
+        <DigestSection appId={appId} />
+        <div className="h-12" />
         <IssuesSection appId={appId} />
         <div className="h-12" />
         <RoadmapSection appId={appId} />
@@ -40,6 +45,92 @@ export function PlanCanvas({ appId, app }: PlanCanvasProps) {
         <DeploymentsSection app={app} />
       </div>
     </div>
+  );
+}
+
+// ─── 1pre · PM digest panel ─────────────────────────────────────
+//
+// Spec §13: PM agent has a digest mode that produces a 1-3 sentence
+// project narrative + 1-3 ranked next moves. The scheduled-worker
+// shape (cron) lives behind ISS-28, but the proc itself works on
+// demand — this surfaces a button so creators can pull the digest
+// without waiting for the cron to land. The panel renders the
+// last-fetched digest inline so a refresh (or revisit) keeps the
+// signal visible.
+
+function DigestSection({ appId }: { appId: string }) {
+  const [digest, setDigest] = useState<PMDigest | null>(null);
+  const run = useMutation({
+    mutationFn: () => pmDigest({ appId }),
+    onSuccess: (d) => setDigest(d),
+  });
+  return (
+    <section data-testid="plan-digest-section">
+      <header className="flex items-baseline justify-between mb-4">
+        <div>
+          <h2 className="font-serif italic font-medium text-[24px] m-0 mb-1">
+            PM digest
+          </h2>
+          <p className="font-serif text-[14px] text-ink-soft leading-[1.55]">
+            What shipped, what's next. Run this whenever — the PM agent
+            reads the project and produces a short narrative.
+          </p>
+        </div>
+        <GhostButton
+          onClick={() => run.mutate()}
+          disabled={run.isPending}
+          data-testid="plan-run-digest"
+        >
+          {run.isPending ? "running…" : digest ? "Run again" : "Run digest"}
+        </GhostButton>
+      </header>
+      {run.error && (
+        <div
+          data-testid="plan-digest-error"
+          className="border border-tomato/40 bg-tomato/5 px-4 py-3 font-serif italic text-[13.5px] text-tomato"
+        >
+          {(run.error as Error).message || "Digest failed."}
+        </div>
+      )}
+      {!digest && !run.isPending && !run.error && (
+        <div
+          data-testid="plan-digest-empty"
+          className="border border-dashed border-rule bg-paper-2/40 py-6 text-center font-serif italic text-[13.5px] text-pencil"
+        >
+          No digest yet — run one to get a snapshot of project momentum.
+        </div>
+      )}
+      {digest && (
+        <div
+          data-testid="plan-digest-result"
+          className="border border-rule bg-paper-2/40 px-5 py-4"
+        >
+          <p className="font-serif text-[14.5px] text-ink leading-[1.6] m-0 mb-3">
+            {digest.summary}
+          </p>
+          <div className="label-uc mb-2">Recommendations</div>
+          <ol className="list-decimal pl-5 m-0 space-y-1.5">
+            {digest.recommendations.map((r, i) => (
+              <li
+                key={i}
+                data-testid="plan-digest-rec"
+                className="font-serif text-[13.5px] text-ink leading-[1.55]"
+              >
+                <span className="font-medium">{r.title}</span>
+                {r.urgency && (
+                  <span className="ml-2 font-sans text-[10px] uppercase tracking-[0.18em] text-ink-soft border border-rule rounded-full px-2 py-0.5">
+                    {r.urgency}
+                  </span>
+                )}
+                <div className="font-serif italic text-[13px] text-ink-soft mt-0.5">
+                  {r.why}
+                </div>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+    </section>
   );
 }
 
