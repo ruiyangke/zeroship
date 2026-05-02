@@ -121,6 +121,70 @@ Then: single dispatch, single PR, one big commit.
 - `state.rs` has `OpResult::StreamChunk` + `pending_fetches` etc. — some may be
   dead post-cleanup-rawfetch. Audit during reorg.
 
+## Memory footprint
+
+The runtime's per-isolate working set sits around 125 MB after warmup
+(V8 baseline ~50 MB + native class init ~20 MB + scenarios bytecode
+~20 MB + transient request state ~30 MB). At 16 workers per process,
+that's ~2 GB resident. Three levers, listed by effort × impact:
+
+### 1. Per-isolate `--max-old-space-size` cap
+
+V8 has no heap cap today; it grows to multi-GB before GC pressure
+kicks in. Capping old-gen forces earlier GC and bounds the worst
+case.
+
+- API: `v8::Isolate::CreateParams::heap_limits(initial, max)` —
+  pass `max = 64 * 1024 * 1024` (or whatever the cap is).
+- Wire via `RuntimeBuilder` so deployers can set it per-app.
+- Risk: too low causes thrashing or OOM. Default off; opt-in via
+  `RuntimeLimits::heap_limit_mb`. Document the trade-off in
+  `docs/reference/runtime-limits.md` (file doesn't exist yet —
+  create as part of this).
+- Cuts total RSS from ~2 GB → ~1 GB at 16 workers.
+
+### 2. Boot snapshot — `StartupData`
+
+V8 supports startup snapshots: freeze the post-init heap (after
+all native classes installed, after `scenarios.js`-equivalent
+boot-time JS evaluated) into a binary blob. Each isolate boots
+from the snapshot instead of re-running init.
+
+- API: `v8::SnapshotCreator` build-time, `v8::Isolate::CreateParams::snapshot_blob`
+  per-isolate boot.
+- Two snapshots: (a) base — native classes + Web API surface;
+  (b) per-app — base + the user's `default.fetch` + module
+  graph evaluated. (b) is the bigger win for cold-start.
+- Risk: snapshot must be re-built on every native API change.
+  Add a build-time step in `crates/runtime/build.rs` that produces
+  `target/zeroship-runtime-snapshot.bin`, included via `include_bytes!`.
+- Cuts per-isolate boot from ~50–200 ms → ~5–10 ms. Saves
+  ~20–30 MB per isolate (no init artifacts retained — already
+  compiled into the snapshot).
+- Cloudflare Workers technique. The biggest perf lever for
+  multi-tenant cold starts.
+
+### 4. Idle GC trigger
+
+V8 only GCs under heap pressure or when the allocator hits a
+threshold. During low-traffic windows the heap retains its
+high-water-mark working set indefinitely — unfree-able from the
+OS's point of view.
+
+- API: `v8::Isolate::idle_notification_deadline(deadline_in_seconds)`
+  hints V8 to spend up to N ms running incremental GC. Returns
+  `true` when GC has caught up.
+- Wire into the compio event loop as a "no requests for K seconds
+  → fire idle GC" trigger. Per-isolate timer.
+- Effort: ~30 LOC in `runtime.rs` — track `last_request_ts` per
+  isolate, schedule idle ticks via `compio::time::interval`.
+- Saves: depends on traffic profile. For per-app isolates that
+  see bursty traffic, can free ~50–100 MB per isolate during
+  idle windows.
+
+(Note: original "drop --workers=16 to --workers=4" alternative
+isn't a runtime concern — it's a deploy-time config.)
+
 ## Test infrastructure
 
 - Hand tests + WPT runners are scattered across `tests/` flat. After reorg, mirror

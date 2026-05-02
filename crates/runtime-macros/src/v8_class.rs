@@ -79,6 +79,14 @@ struct ClassMethod<'a> {
     /// `#[v8_name = "..."]` on the method. Lets us install
     /// `delete_(&mut self)` under the JS name `delete`, etc.
     js_name: String,
+    /// `#[v8_getter(same_object)]` — WebIDL `[SameObject]` semantics:
+    /// the getter must return THE SAME JS object across reads on the
+    /// same wrapper instance. The macro caches via a V8 private symbol
+    /// keyed by `__zs_same_object_<ClassTy>_<getter>`. User method
+    /// returns `v8::Global<v8::Object>` (minted on first call); macro
+    /// stashes it on the wrapper instance and returns the cached Local
+    /// thereafter. Only meaningful for `MethodKind::Getter`.
+    same_object: bool,
 }
 
 fn classify(func: &ImplItemFn) -> Option<MethodKind> {
@@ -101,6 +109,40 @@ fn classify(func: &ImplItemFn) -> Option<MethodKind> {
         }
     }
     None
+}
+
+/// Read `#[v8_getter(same_object)]` from a method's attributes.
+/// Returns true if the bare-identifier `same_object` appears in the
+/// list form. Used to opt the getter into WebIDL `[SameObject]`
+/// caching semantics — see `gen_same_object_getter_callback`.
+///
+/// The list form is `#[v8_getter(same_object)]`. `#[v8_getter]`
+/// (no list) is the default, no caching.
+fn extract_same_object(attrs: &[Attribute]) -> bool {
+    for attr in attrs {
+        if !attr.path().is_ident("v8_getter") {
+            continue;
+        }
+        if let Ok(idents) = attr.parse_args_with(|input: syn::parse::ParseStream| {
+            let mut acc: Vec<syn::Ident> = Vec::new();
+            while !input.is_empty() {
+                let id: syn::Ident = input.parse()?;
+                acc.push(id);
+                if input.is_empty() {
+                    break;
+                }
+                let _: syn::Token![,] = input.parse()?;
+            }
+            Ok(acc)
+        }) {
+            for id in idents {
+                if id == "same_object" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Read `#[v8_name = "literal"]` from a method's attributes. Returns
@@ -308,11 +350,15 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     .into();
                 }
 
+                let same_object_flag =
+                    matches!(kind, MethodKind::Getter) && extract_same_object(&func.attrs);
+
                 methods.push(ClassMethod {
                     kind,
                     func,
                     mut_receiver: mut_recv,
                     js_name,
+                    same_object: same_object_flag,
                 });
             }
         }
@@ -362,11 +408,13 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // Per-method callback fns. Async methods take a different codegen
     // path (spawn a future via `state.spawned_ops` and return a Promise
     // immediately) but install on the prototype identically — async vs
-    // sync is opaque to V8.
+    // sync is opaque to V8. SameObject getters have their own codegen
+    // path that wraps the user method with private-symbol caching.
     let callbacks: Vec<TokenStream2> = regular
         .iter()
         .map(|m| match m.kind {
             MethodKind::AsyncMethod => gen_async_method_callback(class_ty, m),
+            MethodKind::Getter if m.same_object => gen_same_object_getter_callback(class_ty, m),
             _ => gen_method_callback(class_ty, m),
         })
         .collect();
@@ -401,6 +449,8 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // type so repeated calls return the same FunctionTemplate (see
     // `gen_install`'s comment).
     let install_slot_ty = format_ident!("__InstallSlot_{}", class_ty);
+    let brand_slot_ty = format_ident!("__BrandSlot_{}", class_ty);
+    let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
 
     let expanded = quote! {
         #stripped_impl
@@ -414,6 +464,133 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #[doc(hidden)]
         #[allow(non_camel_case_types)]
         pub struct #install_slot_ty(::v8::Global<::v8::FunctionTemplate>);
+
+        /// Per-class isolate-slot marker holding `Foo.prototype` for
+        /// WebIDL §3.7 brand checks. Captured eagerly during `install`
+        /// (after `get_function`) and consulted by every method,
+        /// getter, and setter callback before the unsafe internal-field
+        /// deref.
+        ///
+        /// Without this, the only "brand check" in the prologue is "is
+        /// internal field 0 an External" — which any `#[v8_class]`
+        /// instance with one internal field passes, allowing
+        /// `Headers.prototype.append.call(blob)` to reinterpret the
+        /// Blob's box as a Headers and write Vec<u8> internals into
+        /// arbitrary memory (UB).
+        #[doc(hidden)]
+        #[allow(non_camel_case_types)]
+        pub struct #brand_slot_ty(::v8::Global<::v8::Object>);
+
+        /// Brand-check helper: walks the prototype chain of `this`
+        /// looking for the cached `Foo.prototype`. Returns true on
+        /// match (the receiver IS a Foo, or a subclass via
+        /// `#[v8_inherit]`), false otherwise.
+        ///
+        /// Walks at most 32 prototype links (deep chains are typically
+        /// 1–3 hops; the cap protects against pathologically deep
+        /// chains a malicious caller could craft with
+        /// `Object.setPrototypeOf` loops). The cost is dwarfed by the
+        /// ~100ns V8 callback overhead — the brand check itself is
+        /// O(depth) Local pointer comparisons.
+        ///
+        /// The cached prototype is populated lazily on first call —
+        /// NOT in `install` — because eager `get_function(scope)` at
+        /// install time would freeze the FunctionTemplate's instance
+        /// shape and silently no-op any subsequent
+        /// `prototype_template().set_accessor_property(...)` calls.
+        /// Several classes (URL.searchParams, etc.) install accessors
+        /// on the prototype_template AFTER `Self::install` returns; we
+        /// must not break those.
+        ///
+        /// First-call cost (one-time per isolate): one `get_function`
+        /// + one `.get(prototype)`. Steady state: an isolate-slot read
+        /// (Rc-clone-shaped) plus the chain walk.
+        ///
+        /// Lifetimes are elided here on purpose. An explicit `<'s>`
+        /// would tie the `Local<Object>` argument's lifetime to the
+        /// `&mut PinScope` lifetime in an invariant way (mutable
+        /// references are invariant over their type param), which
+        /// then conflicts with `args.this()`'s callsite-derived
+        /// lifetime. Elision lets each Local pick its own appropriate
+        /// (and shorter) lifetime — the helper body never returns a
+        /// `Local` so there's no need to relate them outside the
+        /// function.
+        #[doc(hidden)]
+        #[allow(non_snake_case, dead_code)]
+        fn #brand_check_fn(
+            scope: &mut v8::PinScope,
+            obj: v8::Local<v8::Object>,
+        ) -> bool {
+            // Resolve the cached prototype, lazily populating the
+            // brand slot on first call. We can't hold the slot's
+            // borrow across `set_slot` (mutable borrow) so we drop
+            // it (via `.cloned()` of the Global) before any `set_slot`
+            // call.
+            let cached_global: v8::Global<v8::Object> =
+                if let Some(slot) = scope.get_slot::<#brand_slot_ty>() {
+                    slot.0.clone()
+                } else {
+                    // Lazy fetch from the install slot. If that slot
+                    // is missing too, the class wasn't installed in
+                    // this isolate — fall through to false.
+                    let tmpl_global = match scope.get_slot::<#install_slot_ty>() {
+                        Some(s) => s.0.clone(),
+                        None => return false,
+                    };
+                    let tmpl_local = v8::Local::new(scope, &tmpl_global);
+                    let func = match tmpl_local.get_function(scope) {
+                        Some(f) => f,
+                        None => return false,
+                    };
+                    let proto_key = match v8::String::new(scope, "prototype") {
+                        Some(s) => s,
+                        None => return false,
+                    };
+                    let proto_v = match func.get(scope, proto_key.into()) {
+                        Some(v) => v,
+                        None => return false,
+                    };
+                    let proto: v8::Local<v8::Object> = match proto_v.try_into() {
+                        Ok(o) => o,
+                        Err(_) => return false,
+                    };
+                    let g = v8::Global::new(scope, proto);
+                    let g_clone = g.clone();
+                    scope.set_slot(#brand_slot_ty(g));
+                    g_clone
+                };
+            let expected_proto: v8::Local<v8::Object> = v8::Local::new(scope, &cached_global);
+            // Walk the [[Prototype]] chain. Each `get_prototype` call
+            // can return null (chain root) or a Value (potentially an
+            // Object). Bail at depth 32 to bound worst-case cost.
+            let mut current: v8::Local<v8::Value> = match obj.get_prototype(scope) {
+                Some(v) => v,
+                None => return false,
+            };
+            for _ in 0..32 {
+                if current.is_null_or_undefined() {
+                    return false;
+                }
+                let cur_obj: v8::Local<v8::Object> = match current.try_into() {
+                    Ok(o) => o,
+                    Err(_) => return false,
+                };
+                // V8 Locals compare by handle equality, which matches
+                // pointer identity for Persistent-derived Locals. The
+                // cached prototype is the exact Object the install
+                // captured at first-install time; any genuine `new
+                // Foo()` (or instance of a class inheriting Foo) has
+                // that Object on its chain.
+                if cur_obj == expected_proto {
+                    return true;
+                }
+                current = match cur_obj.get_prototype(scope) {
+                    Some(v) => v,
+                    None => return false,
+                };
+            }
+            false
+        }
 
         #[allow(non_snake_case, dead_code)]
         impl #class_ty {
@@ -720,9 +897,20 @@ fn gen_install(
 
             #inherit_block
 
-            // Cache the template for this isolate. Future `install`
-            // calls return the same Local — required for `#[v8_inherit]`
-            // to chain derived classes onto the same prototype.
+            // Cache the FunctionTemplate for this isolate. Future
+            // `install` calls return the same Local — required for
+            // `#[v8_inherit]` to chain derived classes onto the same
+            // prototype.
+            //
+            // The brand-check prototype is captured LAZILY on first
+            // brand check (see `__brand_check_<ClassTy>`) rather than
+            // here, because eagerly calling `get_function(scope)` at
+            // install time freezes the FunctionTemplate's instance
+            // shape — any subsequent `prototype_template()
+            // .set_accessor_property(...)` from outside `install`
+            // would silently no-op. URL hand-installs `searchParams`
+            // on the prototype_template right after `URL::install`
+            // returns; we must not break that.
             let __global = ::v8::Global::new(scope, __ctor_tmpl);
             let __local = ::v8::Local::new(scope, __global.clone());
             scope.set_slot(#install_slot_ty(__global));
@@ -737,6 +925,107 @@ fn gen_install(
 
 fn method_callback_ident(class_ty: &syn::Ident, method: &syn::Ident) -> syn::Ident {
     format_ident!("__{}_{}_callback", class_ty, method)
+}
+
+/// Re-entry guard for `&mut self` methods.
+///
+/// **Problem.** A `&mut self` method recovers `&mut Self` from the
+/// External pointer in internal field 0. If the user body calls back
+/// into JS (e.g. `Local<Function>::call`, fired-event handler) and the
+/// callback synchronously re-enters the SAME instance via the prototype,
+/// the macro materialises ANOTHER `&mut Self` pointing at the same Box.
+/// That's aliased mutable references — UB. Pre-fix, the symptom was a
+/// cryptic `RefCell already mutably borrowed` panic from deep inside V8
+/// when the user's body wrapped state in an inner `RefCell`; classes
+/// without an inner cell silently corrupted memory.
+///
+/// **Fix.** A per-method, thread-local `RefCell<HashSet<usize>>` keyed
+/// by the External pointer's address (`__ext.value() as usize` ==
+/// the Box raw addr). The prologue inserts the addr on entry; if it
+/// was already present, throws a V8 TypeError with a clear, per-method
+/// message and returns from the callback BEFORE the unsafe `&mut Self`
+/// materialisation. A RAII drop guard removes the addr on scope exit so
+/// even a panic in the user body releases the entry.
+///
+/// We throw a V8 TypeError (not a Rust panic) because Rust's panic
+/// runtime can't unwind through V8's C++ frames cleanly — the
+/// experimental result on Linux is "fatal runtime error: failed to
+/// initiate panic, error 5" + SIGABRT. A V8 exception propagates the
+/// way every other macro-emitted error already does (see brand check
+/// "Illegal invocation"), so the user code observes a JS-side
+/// `TypeError` with the diagnostic message. That's still WAY clearer
+/// than a cryptic RefCell-borrow panic from inside V8.
+///
+/// Per-method (one set per `Foo::method`) AND per-instance (key on the
+/// Box addr) — no false positives across distinct instances or
+/// distinct methods. Thread-local — no cross-thread cost.
+///
+/// Cost: one HashSet `insert` + one `remove` per `&mut self` call.
+/// The set has 0 or 1 entries in the steady state (re-entry is
+/// pathological, not common).
+///
+/// Emitted ONLY for `&mut self` methods. `&self` callbacks are sound
+/// to nest (multiple aliased shared references are fine) and skip the
+/// guard entirely.
+///
+/// Returns a token stream that:
+///   1. Computes `__inflight_addr = __ext.value() as usize`.
+///   2. Tries to insert into the per-method thread-local set; throws
+///      a V8 TypeError + `return`s if already present.
+///   3. Defines a `Drop`-impl shim that removes the addr.
+///   4. Binds the shim instance to a let so it lives until scope end.
+///
+/// The caller must run this AFTER the External recovery and BEFORE
+/// the unsafe `&mut Self` materialisation.
+fn gen_reentry_guard(
+    class_ty: &syn::Ident,
+    method_name: &syn::Ident,
+    is_mut_self: bool,
+) -> TokenStream2 {
+    if !is_mut_self {
+        return quote! {};
+    }
+    let err_msg = format!(
+        "re-entered method `{}::{}` on instance — concurrent &mut self callback",
+        class_ty, method_name,
+    );
+    // Use ONE thread_local per method per class. The static names are
+    // local to the callback function so they don't pollute the impl
+    // block's namespace and don't collide across methods.
+    quote! {
+        let __inflight_addr = __ext.value() as usize;
+        ::std::thread_local! {
+            static __INFLIGHT: ::std::cell::RefCell<::std::collections::HashSet<usize>> =
+                ::std::cell::RefCell::new(::std::collections::HashSet::new());
+        }
+        let __already_inflight = __INFLIGHT.with(|__s| !__s.borrow_mut().insert(__inflight_addr));
+        if __already_inflight {
+            // Throw a V8 TypeError with the diagnostic message. We
+            // can't `panic!` here because Rust panic can't unwind
+            // through V8's C++ frames (SIGABRT on Linux). A V8
+            // exception propagates correctly and surfaces in user JS
+            // as a TypeError, which is way clearer than the pre-fix
+            // cryptic RefCell-already-mutably-borrowed panic.
+            let __msg = v8::String::new(scope, #err_msg).unwrap();
+            let __exc = v8::Exception::type_error(scope, __msg);
+            scope.throw_exception(__exc);
+            return;
+        }
+        // RAII guard: remove the addr on scope exit so any path out
+        // (normal return, V8 exception thrown by user code, …)
+        // releases the entry. Without this, a single throw would
+        // leave the set "occupied" and every subsequent call would
+        // incorrectly trigger the guard.
+        struct __ReentryGuard(usize);
+        impl ::std::ops::Drop for __ReentryGuard {
+            fn drop(&mut self) {
+                __INFLIGHT.with(|__s| {
+                    __s.borrow_mut().remove(&self.0);
+                });
+            }
+        }
+        let __reentry_guard = __ReentryGuard(__inflight_addr);
+    }
 }
 
 fn gen_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
@@ -778,6 +1067,9 @@ fn gen_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
 
     let _ = getter_args;
 
+    let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
+    let reentry_guard = gen_reentry_guard(class_ty, method_name, m.mut_receiver);
+
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
         pub(crate) fn #callback_name(
@@ -785,8 +1077,22 @@ fn gen_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
             args: v8::FunctionCallbackArguments,
             mut rv: v8::ReturnValue,
         ) {
-            // Extract the boxed instance from internal field 0 of `this`.
+            // WebIDL §3.7 brand check: walk the prototype chain
+            // looking for the cached `Foo.prototype`. If absent, the
+            // receiver isn't a Foo (or a Foo subclass) — throwing
+            // "Illegal invocation" is mandatory before the unsafe
+            // internal-field deref. See `__brand_check_<ClassTy>`'s
+            // doc-comment for the soundness rationale.
             let __this = args.this();
+            if !#brand_check_fn(scope, __this) {
+                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                let __exc = v8::Exception::type_error(scope, __msg);
+                scope.throw_exception(__exc);
+                return;
+            }
+            // Brand check passed: internal field 0 is guaranteed to
+            // hold a `Box<#class_ty>` raw pointer (set in
+            // `gen_box_and_install_finalizer`). Recover the External.
             let __ext = match __this.get_internal_field(scope, 0)
                 .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
             {
@@ -798,10 +1104,172 @@ fn gen_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
                     return;
                 }
             };
+            // Re-entry guard for `&mut self` (no-op for `&self`). MUST
+            // run AFTER External recovery (we need the addr) and BEFORE
+            // the unsafe `&mut Self` materialisation (or we'd UB through
+            // an aliased pointer before the guard could fire).
+            #reentry_guard
             let __instance = unsafe { &mut *(__ext.value() as *mut #class_ty) };
 
             #(#extractions)*
             #call_return
+        }
+    }
+}
+
+/// Codegen for `#[v8_getter(same_object)]` — WebIDL `[SameObject]`
+/// semantics.
+///
+/// `Request.headers`, `Response.headers`, `URL.searchParams`, and
+/// several other WebIDL accessors must return THE SAME JS object across
+/// reads on the same instance:
+///
+/// ```js
+/// const h = req.headers;
+/// h === req.headers;   // true
+/// h === req.headers;   // still true (no fresh object minted)
+/// ```
+///
+/// Without caching, each access would mint a fresh wrapper, breaking
+/// userland code that uses `===` identity (e.g. comparing iterators,
+/// caching the headers reference, etc.).
+///
+/// Implementation strategy:
+///
+/// - Cache on a per-instance V8 Private symbol named
+///   `__zs_same_object_<ClassTy>_<getter>`. The symbol is class-scoped
+///   so two classes with `headers` getters don't collide on a single
+///   shared name (interning of Privates by name across the isolate is
+///   irrelevant since reads/writes are per-Object — but the explicit
+///   class-prefix is self-documenting).
+///
+/// - On callback entry: brand check; recover the boxed instance; look
+///   up the private symbol on `args.this()`. If present and not
+///   `undefined`, return it as the rv and short-circuit (no user
+///   method called).
+///
+/// - On cache miss: invoke the user's `&self`/`&mut self` method,
+///   which returns a `v8::Global<v8::Object>`. Convert to Local,
+///   stash on the wrapper instance via `set_private`, return the
+///   Local as rv.
+///
+/// User method shape:
+/// ```ignore
+/// #[v8_getter(same_object)]
+/// fn headers(&self, scope: &mut v8::PinScope) -> v8::Global<v8::Object> {
+///     // mint and return — invoked at most ONCE per instance lifetime.
+/// }
+/// ```
+///
+/// The user method receives a synthetic `&mut PinScope` (so it can
+/// build the Object) and returns `Global<Object>`. The macro doesn't
+/// pass any positional JS args (getters take none) — the user method
+/// can have only `&self` (or `&mut self`) and the optional `scope`
+/// param.
+///
+/// We don't migrate existing classes to this attribute in this PR
+/// (Request.headers, Response.headers, URL.searchParams continue to
+/// hand-roll their own private-symbol stash for now). The smoke test
+/// in `tests/v8_same_object_smoke.rs` proves the macro wiring works.
+fn gen_same_object_getter_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
+    let method_name = &m.func.sig.ident;
+    let callback_name = method_callback_ident(class_ty, method_name);
+
+    // Skip the receiver param when extracting JS args. Getters take
+    // no positional args; the only param shape we expect is `&self`
+    // (+ optional synthetic `scope`). Extractions are emitted but
+    // typically empty.
+    let params = parse_params_skipping_self(m.func);
+    let reject_shared_names = extract_reject_shared(&m.func.attrs);
+    let extractions = gen_param_extractions(&params, &reject_shared_names);
+    let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
+    let receiver_ref = if m.mut_receiver {
+        quote! { &mut *__instance }
+    } else {
+        quote! { &*__instance }
+    };
+
+    let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
+    let private_name = format!("__zs_same_object_{}_{}", class_ty, method_name);
+    let reentry_guard = gen_reentry_guard(class_ty, method_name, m.mut_receiver);
+
+    quote! {
+        #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
+        pub(crate) fn #callback_name(
+            scope: &mut v8::PinScope,
+            args: v8::FunctionCallbackArguments,
+            mut rv: v8::ReturnValue,
+        ) {
+            // 1. Brand check before touching internal fields. Same
+            //    contract as every other generated callback — see
+            //    `__brand_check_<ClassTy>`'s doc-comment.
+            let __this = args.this();
+            if !#brand_check_fn(scope, __this) {
+                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                let __exc = v8::Exception::type_error(scope, __msg);
+                scope.throw_exception(__exc);
+                return;
+            }
+
+            // 2. Resolve the per-instance Private symbol for this
+            //    getter. `Private::for_api` is interned by name across
+            //    the isolate, so the lookup is O(1) after the first
+            //    call — V8 returns the same symbol object on repeat
+            //    reads with the same name.
+            let __key_str = v8::String::new(scope, #private_name).unwrap();
+            let __priv = v8::Private::for_api(scope, Some(__key_str));
+
+            // 3. Cache hit short-circuit: if the wrapper has already
+            //    minted a Same-Object value, return it without calling
+            //    user code. `get_private` returns Some(undefined) when
+            //    the slot was never written, so we filter both None
+            //    and undefined paths.
+            if let Some(__cached) = __this.get_private(scope, __priv) {
+                if !__cached.is_undefined() {
+                    rv.set(__cached);
+                    return;
+                }
+            }
+
+            // 4. Cache miss: recover Box<Self>, mint the value, stash,
+            //    return.
+            let __ext = match __this.get_internal_field(scope, 0)
+                .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
+            {
+                Some(e) => e,
+                None => {
+                    let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                    let __exc = v8::Exception::type_error(scope, __msg);
+                    scope.throw_exception(__exc);
+                    return;
+                }
+            };
+            // Re-entry guard for `&mut self` SameObject getters. The
+            // miss path runs the user method exactly once; if that body
+            // re-enters the same instance (e.g. through a JS callback
+            // it triggers), the second call would alias `&mut Self`.
+            // No-op for the `&self` case (the common shape).
+            #reentry_guard
+            let __instance = unsafe { &mut *(__ext.value() as *mut #class_ty) };
+
+            #(#extractions)*
+
+            // The user method returns a `v8::Global<v8::Object>` — we
+            // own it after the call returns, so we can both stash it
+            // (by re-Localising) and use the same Local for the rv.
+            let __value: ::v8::Global<::v8::Object> =
+                <#class_ty>::#method_name(#receiver_ref, #(#call_args),*);
+            let __local: ::v8::Local<::v8::Object> = ::v8::Local::new(scope, &__value);
+
+            // Stash on the wrapper. `set_private` is fallible (returns
+            // None on context teardown); we ignore the result — the
+            // worst case is the cache stays empty and the user method
+            // runs again, which is observable but not unsound. The
+            // user method should be idempotent on its own state for
+            // the same reason.
+            let _ = __this.set_private(scope, __priv, __local.into());
+
+            rv.set(__local.into());
         }
     }
 }
@@ -873,6 +1341,7 @@ fn gen_async_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStr
     let extractions = gen_param_extractions(&params, &reject_shared_names);
 
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
+    let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -884,8 +1353,18 @@ fn gen_async_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStr
             // 1. Recover the `Box<Self>` pointer from internal field 0.
             //    On illegal invocation (receiver is not a wrapper), fail
             //    *synchronously* with a TypeError — same contract as the
-            //    sync method path. The user code never runs.
+            //    sync method path. The user code never runs. The brand
+            //    check (WebIDL §3.7) walks the prototype chain rather
+            //    than just verifying internal-field 0 is an External,
+            //    so cross-class calls (`Foo.prototype.method.call(bar)`)
+            //    fail before the unsafe deref.
             let __this = args.this();
+            if !#brand_check_fn(scope, __this) {
+                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                let __exc = v8::Exception::type_error(scope, __msg);
+                scope.throw_exception(__exc);
+                return;
+            }
             let __ext = match __this.get_internal_field(scope, 0)
                 .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
             {
@@ -990,6 +1469,8 @@ fn gen_setter_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
     } else {
         quote! { &*__instance }
     };
+    let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
+    let reentry_guard = gen_reentry_guard(class_ty, method_name, m.mut_receiver);
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -998,7 +1479,15 @@ fn gen_setter_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
             args: v8::FunctionCallbackArguments,
             mut rv: v8::ReturnValue,
         ) {
+            // WebIDL §3.7 brand check — see method-callback prologue
+            // for the soundness rationale.
             let __this = args.this();
+            if !#brand_check_fn(scope, __this) {
+                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                let __exc = v8::Exception::type_error(scope, __msg);
+                scope.throw_exception(__exc);
+                return;
+            }
             let __ext = match __this.get_internal_field(scope, 0)
                 .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
             {
@@ -1010,6 +1499,9 @@ fn gen_setter_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
                     return;
                 }
             };
+            // Re-entry guard for `&mut self` setters. See
+            // `gen_reentry_guard` doc-comment for the contract.
+            #reentry_guard
             let __instance = unsafe { &mut *(__ext.value() as *mut #class_ty) };
 
             #(#extractions)*
@@ -1023,6 +1515,66 @@ fn gen_setter_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
 // ---------------------------------------------------------------------------
 // Constructor callback codegen
 // ---------------------------------------------------------------------------
+
+/// `#[v8_constructor(...)]` opt-out for the must-new check — currently
+/// unused (no class today wants `Foo()` without `new` to succeed), but
+/// retained as a hook for future legacy-callable shapes (a few WebIDL
+/// interfaces are spec'd with `[LegacyFactoryFunction]`, e.g.
+/// `Image()`). When `callable_no_new` is present the macro skips the
+/// `is_construct_call` guard.
+fn extract_callable_no_new(attrs: &[Attribute]) -> bool {
+    for attr in attrs {
+        if !attr.path().is_ident("v8_constructor") {
+            continue;
+        }
+        if let Ok(idents) = attr.parse_args_with(|input: syn::parse::ParseStream| {
+            let mut acc: Vec<syn::Ident> = Vec::new();
+            while !input.is_empty() {
+                let id: syn::Ident = input.parse()?;
+                acc.push(id);
+                if input.is_empty() {
+                    break;
+                }
+                let _: syn::Token![,] = input.parse()?;
+            }
+            Ok(acc)
+        }) {
+            for id in idents {
+                if id == "callable_no_new" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// WebIDL §3.7.1: every interface constructor MUST be called with `new`.
+/// Returns the `if !args.is_construct_call() { throw TypeError; return; }`
+/// prologue unless the class opts out via `#[v8_constructor(callable_no_new)]`.
+///
+/// Class-name interpolation in the message (e.g. `"Constructor Headers
+/// requires 'new'"`) lets WPT diagnose mistakes per-class. The
+/// `is_construct_call` flag is V8-native — it differentiates `new Foo()`
+/// (true) from `Foo()` and `Foo.call(...)` (false) without a runtime
+/// thunk in the user code.
+fn gen_must_new_prologue(class_ty: &syn::Ident, opt_out: bool) -> TokenStream2 {
+    if opt_out {
+        return quote! {};
+    }
+    let class_name_str = class_ty.to_string();
+    let msg = format!(
+        "Failed to construct '{class_name_str}': Please use the 'new' operator, this DOM object constructor cannot be called as a function."
+    );
+    quote! {
+        if !args.is_construct_call() {
+            let __msg = v8::String::new(scope, #msg).unwrap();
+            let __exc = v8::Exception::type_error(scope, __msg);
+            scope.throw_exception(__exc);
+            return;
+        }
+    }
+}
 
 fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStream2 {
     let ctor_name = &c.func.sig.ident;
@@ -1046,9 +1598,12 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
                 Ok(__v) => __v,
                 Err(__err) => {
                     let __msg = v8::String::new(scope, &__err.message).unwrap();
-                    let __exc = match __err.kind {
+                    let __exc: v8::Local<v8::Value> = match __err.kind {
                         ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
                         ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+                        ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
+                            ::zeroship_runtime::dom::exception::build(scope, &__err.message, __name).into()
+                        }
                         _ => v8::Exception::error(scope, __msg),
                     };
                     scope.throw_exception(__exc);
@@ -1063,6 +1618,7 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
     };
 
     let store = gen_box_and_install_finalizer(class_ty);
+    let must_new = gen_must_new_prologue(class_ty, extract_callable_no_new(&c.func.attrs));
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -1071,6 +1627,7 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
             args: v8::FunctionCallbackArguments,
             _rv: v8::ReturnValue,
         ) {
+            #must_new
             let __this = args.this();
 
             #(#extractions)*
@@ -1084,6 +1641,10 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
 fn gen_default_constructor_callback(class_ty: &syn::Ident) -> TokenStream2 {
     let callback_ident = format_ident!("__{}_constructor_callback", class_ty);
     let store = gen_box_and_install_finalizer(class_ty);
+    // No method-level attrs to read — the Default-derived constructor
+    // is always must-new. The opt-out attribute requires a user-written
+    // `#[v8_constructor]`, by definition.
+    let must_new = gen_must_new_prologue(class_ty, false);
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -1092,6 +1653,7 @@ fn gen_default_constructor_callback(class_ty: &syn::Ident) -> TokenStream2 {
             args: v8::FunctionCallbackArguments,
             _rv: v8::ReturnValue,
         ) {
+            #must_new
             let __this = args.this();
             let __instance: #class_ty = <#class_ty as ::core::default::Default>::default();
 

@@ -276,6 +276,33 @@ pub(crate) fn is_enforce_range_u64(ty: &Type) -> bool {
     type_ident(ty).as_deref() == Some("EnforceRangeU64")
 }
 
+/// Check if type is the `EnforceRangeU32` newtype — companion to
+/// `EnforceRangeU64` for WebIDL `[EnforceRange] unsigned long`.
+/// Used by the WebCrypto IDL surface (Pbkdf2Params.iterations,
+/// RsaKeyGenParams.modulusLength, deriveBits.length, etc.).
+/// See `docs/proposals/webcrypto-native.md` D-20.
+pub(crate) fn is_enforce_range_u32(ty: &Type) -> bool {
+    type_ident(ty).as_deref() == Some("EnforceRangeU32")
+}
+
+/// Check if type is one of the `Clamp{U16,U32,I32,U64,I64}` newtypes from
+/// `zeroship_runtime::clamp`. Used for WebIDL `[Clamp]` integer coercion
+/// — clamps to the integer range and round-half-even rounds, instead of
+/// throwing TypeError like `[EnforceRange]`. Returns the suffix
+/// (`"u16"`, `"u32"`, `"i32"`, `"u64"`, `"i64"`) so the codegen can
+/// dispatch on the target integer type, or `None` if the param isn't a
+/// Clamp newtype.
+pub(crate) fn clamp_kind(ty: &Type) -> Option<&'static str> {
+    match type_ident(ty).as_deref() {
+        Some("ClampU16") => Some("u16"),
+        Some("ClampU32") => Some("u32"),
+        Some("ClampI32") => Some("i32"),
+        Some("ClampU64") => Some("u64"),
+        Some("ClampI64") => Some("i64"),
+        _ => None,
+    }
+}
+
 /// Check if type is the `USVString` newtype from
 /// `zeroship_runtime::url_native::helpers`. Used for WebIDL USVString
 /// args (URL.* setters, URLSearchParams names/values). Conversion
@@ -431,12 +458,72 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
         };
     }
 
+    // Clamp{U16,U32,I32,U64,I64} → WebIDL [Clamp] integer coercion.
+    // Unlike [EnforceRange], [Clamp] never throws: NaN → 0, < min → min,
+    // > max → max, otherwise round-half-even. The reader fns in
+    // `zeroship_runtime::clamp` implement the algorithm; this match
+    // dispatches on the target integer type and wraps in the right
+    // newtype constructor.
+    if let Some(kind) = clamp_kind(ty) {
+        let (reader, ctor) = match kind {
+            "u16" => (
+                quote! { ::zeroship_runtime::clamp::read_clamp_u16 },
+                quote! { ::zeroship_runtime::clamp::ClampU16 },
+            ),
+            "u32" => (
+                quote! { ::zeroship_runtime::clamp::read_clamp_u32 },
+                quote! { ::zeroship_runtime::clamp::ClampU32 },
+            ),
+            "i32" => (
+                quote! { ::zeroship_runtime::clamp::read_clamp_i32 },
+                quote! { ::zeroship_runtime::clamp::ClampI32 },
+            ),
+            "u64" => (
+                quote! { ::zeroship_runtime::clamp::read_clamp_u64 },
+                quote! { ::zeroship_runtime::clamp::ClampU64 },
+            ),
+            "i64" => (
+                quote! { ::zeroship_runtime::clamp::read_clamp_i64 },
+                quote! { ::zeroship_runtime::clamp::ClampI64 },
+            ),
+            _ => unreachable!("clamp_kind returned an unrecognised suffix"),
+        };
+        return quote! {
+            let #name = #ctor(#reader(scope, args.get(#idx)));
+        };
+    }
+
     // EnforceRangeU64 → WebIDL [EnforceRange] unsigned long long. Throws
     // TypeError for NaN, ±∞, negative, and values > 2^53-1 (Number
     // precision limit) — see streams design §XIV.8.
     if is_enforce_range_u64(ty) {
         return quote! {
             let #name = match ::zeroship_runtime::enforce_range::read_enforce_range_u64(
+                scope,
+                args.get(#idx),
+            ) {
+                Ok(__v) => __v,
+                Err(__err) => {
+                    let __msg = v8::String::new(scope, &__err.message).unwrap();
+                    let __exc = match __err.kind {
+                        ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
+                        ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+                        _ => v8::Exception::error(scope, __msg),
+                    };
+                    scope.throw_exception(__exc);
+                    return;
+                }
+            };
+        };
+    }
+
+    // EnforceRangeU32 → WebIDL [EnforceRange] unsigned long. Throws
+    // TypeError for NaN, ±∞, negative, non-integer, and values > 2^32-1.
+    // Used by the WebCrypto IDL surface (Pbkdf2Params.iterations etc.) —
+    // see `docs/proposals/webcrypto-native.md` D-20.
+    if is_enforce_range_u32(ty) {
+        return quote! {
+            let #name = match ::zeroship_runtime::enforce_range::read_enforce_range_u32(
                 scope,
                 args.get(#idx),
             ) {
@@ -670,12 +757,23 @@ fn gen_vec_vec_u8_set() -> TokenStream2 {
 }
 
 /// Generate error throw from `OpError`.
+///
+/// `OpErrorKind::DomException(name)` constructs a real DOMException
+/// instance via `new globalThis.DOMException(message, name)`. The
+/// native DOMException class is installed during `setup_globals` (see
+/// `crates/runtime/src/dom/exception.rs`); the constructor lookup is
+/// per-throw because callers of this codegen don't always have the
+/// active class function in scope. Per `docs/proposals/webcrypto-native.md`
+/// D-6.
 fn gen_throw_error() -> TokenStream2 {
     quote! {
         let __msg = v8::String::new(scope, &__err.message).unwrap();
-        let __exc = match __err.kind {
+        let __exc: v8::Local<v8::Value> = match __err.kind {
             ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
             ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+            ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
+                ::zeroship_runtime::dom::exception::build(scope, &__err.message, __name).into()
+            }
             _ => v8::Exception::error(scope, __msg),
         };
         scope.throw_exception(__exc);
