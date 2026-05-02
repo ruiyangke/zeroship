@@ -81,12 +81,22 @@ pub fn v8_method(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// `OpResult::JsValue` and resolves (or rejects) the bound promise. The
 /// user's `async fn` body can `.await` freely.
 ///
-/// Constraints (rejected at compile time):
-///   - `&mut self` is not allowed — borrow across `.await` is unsound
-///     under V8 re-entry. Use `&self` with interior mutability (Cell /
-///     RefCell) for state that needs to mutate inside the body.
-///   - Return type must be one of: `()`, `T`, or `Result<T, OpError>`
-///     where `T ∈ { (), bool, u32, i32, f64, String, Vec<u8> }`.
+/// # Rejected at compile time
+///
+/// `&mut self` async methods are rejected — borrow across `.await` is
+/// unsound under V8 re-entry. The macro emits a `compile_error!` with
+/// the suggested fix (use `&self` + `Cell` / `RefCell`). See
+/// `crates/runtime/tests/v8_async_method_smoke.rs` for the positive
+/// shapes and the runtime-level doctests for the rejection rules.
+///
+/// Non-`async` methods marked with the attribute are also rejected for
+/// the same reason — the call-site emits `.await`, which doesn't
+/// type-check on a non-Future return.
+///
+/// # Allowed return shapes
+///
+/// `()`, `T`, or `Result<T, OpError>` where
+/// `T ∈ { (), bool, u32, i32, f64, String, Vec<u8>, v8::Global<v8::Value> }`.
 ///
 /// Outside a `#[v8_class]` impl block this attribute is a no-op (the
 /// fn stays as written) so editor tooling that pre-expands attribute
