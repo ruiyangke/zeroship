@@ -789,28 +789,78 @@ impl NomadCHBackend {
             }
         };
 
-        // 4. Release the VM index ONLY if the job is confirmed gone.
-        //    If the Nomad API is down or the alloc is still reaping,
-        //    a fresh `create` reusing this index could land on the
-        //    same tap device the still-alive wrapper script is using.
-        //    Leaking the index now and reclaiming it on next-boot
-        //    orphan-prune is the safer trade-off.
+        // 4. Release the VM index ONLY if the job is confirmed gone
+        //    AND the host-side `/livez` fence (FM-F) confirms the
+        //    previous tenant's agent has stopped answering.
         //
-        //    FM-A belt-and-braces: even when Nomad reports the job
-        //    fully gone (alloc terminal + 404 on /v1/job/<id>), the
-        //    host-side process tree (CH + 3× virtiofsd, the bash
-        //    wrapper, the tap binding, virtiofsd unmounts) lags
-        //    Nomad's view by ~0.5-2 s. A fresh create() reusing
-        //    this vm_index immediately could race that residual
-        //    teardown for `tap=zsbx-nm-<idx>`. The 500 ms sleep
-        //    here is defense-in-depth — the primary FM-A fix is
-        //    the fingerprint check in wait_for_agent_livez above —
-        //    but it's cheap insurance for the operational tail
-        //    (network namespace teardown, virtiofsd unmounts).
-        //    500 ms keeps tail-latency visible to the user under
-        //    1 s; 2+ s would be too pessimistic for production.
+        //    FM-F: Nomad's "alloc terminal" lags the host-process
+        //    tree by 0.5–60 s under N=8 stress; releasing the
+        //    vm_index inside that window hands a still-live IP to a
+        //    new tenant whose subsequent /livez probe succeeds
+        //    against the previous tenant's agent (the FM-A race the
+        //    fingerprint check defends against). The fence here is
+        //    the *primary* fix; the fingerprint check becomes pure
+        //    defense-in-depth.
+        //
+        //    Fence policy: poll /livez for up to
+        //    `host_fence_timeout_secs` (default 30s). Two
+        //    consecutive failures (connect-refused, timeout, or 5xx)
+        //    → "no agent listening" → release. If the fence times
+        //    out, **leak** the vm_index — handing out a live IP is
+        //    strictly worse than shrinking the pool. Orphan-prune at
+        //    next controller boot reclaims it.
+        //
+        //    `host_fence_timeout_secs == 0` disables the fence
+        //    entirely (legacy behaviour pre-FM-F; NOT recommended).
+        let mut fence_passed = false;
+        let mut fence_err: Option<String> = None;
         if job_confirmed_gone {
-            compio::time::sleep(Duration::from_millis(500)).await;
+            let fence_secs = self.cfg.nomad_ch.host_fence_timeout_secs;
+            if fence_secs == 0 {
+                // Operator opted out. Preserve the legacy 500 ms
+                // grace-sleep so the cleanup tail (virtiofsd
+                // unmounts, network namespace teardown) gets at
+                // least *some* breathing room before reuse.
+                compio::time::sleep(Duration::from_millis(500)).await;
+                fence_passed = true;
+            } else {
+                let fence_started = Instant::now();
+                match wait_for_agent_silent(
+                    &sandbox.agent_url,
+                    Duration::from_secs(fence_secs),
+                )
+                .await
+                {
+                    Ok(()) => {
+                        fence_passed = true;
+                        eprintln!(
+                            "[sandbox/nomad-ch] host_fence: cleared sandbox={sandbox_id} \
+                             agent_url={} elapsed_ms={}",
+                            sandbox.agent_url,
+                            fence_started.elapsed().as_millis(),
+                        );
+                    }
+                    Err(e) => {
+                        // Fence timed out — agent still answering.
+                        // Leak the index loudly. The errs accumulator
+                        // surfaces this to the API caller too — a
+                        // failed fence on stop() means the platform
+                        // is mid-pathology and the operator wants to
+                        // know.
+                        eprintln!(
+                            "[sandbox/nomad-ch] host_fence: timeout sandbox={sandbox_id} \
+                             agent_url={} elapsed_ms={} err={e}",
+                            sandbox.agent_url,
+                            fence_started.elapsed().as_millis(),
+                        );
+                        errs.push(format!("host_fence({}): {e}", sandbox.agent_url));
+                        fence_err = Some(e);
+                    }
+                }
+            }
+        }
+
+        if fence_passed {
             self.vm_index_allocator
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -819,7 +869,7 @@ impl NomadCHBackend {
                 "[sandbox/nomad-ch] vm_index: release={} sandbox={sandbox_id}",
                 sandbox.vm_index,
             );
-        } else {
+        } else if !job_confirmed_gone {
             eprintln!(
                 "[sandbox/nomad-ch] vm_index: leak={} reason=wait_failed sandbox={sandbox_id} \
                  job={}",
@@ -831,14 +881,31 @@ impl NomadCHBackend {
                  will reclaim on next boot)",
                 sandbox.job_id, sandbox.vm_index,
             );
+        } else {
+            // job_confirmed_gone but fence_err is Some.
+            eprintln!(
+                "[sandbox/nomad-ch] vm_index: leak={} reason=host_fence_timeout \
+                 sandbox={sandbox_id} job={}",
+                sandbox.vm_index, sandbox.job_id,
+            );
+            eprintln!(
+                "[sandbox/nomad-ch] stop({}): host_fence timeout; leaking \
+                 vm_index={} to avoid handing out a live IP (orphan-prune \
+                 will reclaim on next boot): {}",
+                sandbox.job_id,
+                sandbox.vm_index,
+                fence_err.as_deref().unwrap_or("<unknown>"),
+            );
         }
 
         // 5. Remove per-sandbox host dir. Per-user home dir is
         //    intentionally **not** touched. Skip the rm if the job
-        //    teardown didn't confirm — virtiofsd may still hold the
-        //    socket / share open, and pulling the dir from under it
-        //    would just produce confusing logs.
-        if job_confirmed_gone && sandbox.host_dir.exists() {
+        //    teardown didn't confirm OR the host fence failed —
+        //    virtiofsd may still hold the socket / share open, and
+        //    pulling the dir from under it would just produce
+        //    confusing logs.
+        let host_dir_safe_to_rm = job_confirmed_gone && fence_passed;
+        if host_dir_safe_to_rm && sandbox.host_dir.exists() {
             if let Err(e) = std::fs::remove_dir_all(&sandbox.host_dir) {
                 errs.push(format!(
                     "rm -rf {}: {}",
@@ -846,10 +913,18 @@ impl NomadCHBackend {
                     e
                 ));
             }
-        } else if !job_confirmed_gone && sandbox.host_dir.exists() {
+        } else if sandbox.host_dir.exists() {
+            // Either the Nomad purge didn't confirm or the host
+            // fence failed. Either way virtiofsd may still hold the
+            // share; leaking the dir for orphan-prune is the safer
+            // choice.
+            let reason = if !job_confirmed_gone {
+                "job not confirmed gone"
+            } else {
+                "host_fence timeout"
+            };
             eprintln!(
-                "[sandbox/nomad-ch] stop({}): leaking host_dir {} (job not \
-                 confirmed gone)",
+                "[sandbox/nomad-ch] stop({}): leaking host_dir {} ({reason})",
                 sandbox.job_id,
                 sandbox.host_dir.display(),
             );
@@ -858,7 +933,7 @@ impl NomadCHBackend {
         eprintln!(
             "[sandbox/nomad-ch] stop: complete sandbox={sandbox_id} \
              vm_index={} job={} errs={} job_confirmed_gone={job_confirmed_gone} \
-             elapsed_ms={}",
+             fence_passed={fence_passed} elapsed_ms={}",
             sandbox.vm_index,
             sandbox.job_id,
             errs.len(),
@@ -2135,6 +2210,108 @@ async fn wait_for_agent_livez(
     }
 }
 
+/// FM-F: host-side fence — verify the agent on `base_url/livez` has
+/// **stopped answering** before releasing the vm_index.
+///
+/// `wait_for_job_gone` returns Ok when Nomad reports the alloc
+/// terminal + job purged, but that lags the host process tree
+/// (cloud-hypervisor + 3× virtiofsd + the bash wrapper) by 0.5–60 s
+/// under N=8 concurrent stop+create cycles. Releasing the vm_index
+/// inside that window hands the same `10.99.<100+idx>.2:7777` IP to
+/// a fresh tenant whose `/livez=200` probe succeeds — but against
+/// the *previous* tenant's still-alive agent. This is the FM-F race
+/// that produced 6/8 30 s timeouts in cycle 2 of the stress test.
+///
+/// The fence requires **two consecutive failures** within the
+/// timeout window. A single failure is too easy: a transient TCP
+/// reset during graceful shutdown can flap. Two-in-a-row inside the
+/// 100 ms cadence is overwhelmingly indicative of "no listener" —
+/// the agent process is gone.
+///
+/// Failure here means any of:
+///   - connection refused
+///   - timeout
+///   - 5xx (agent process panicked mid-shutdown)
+///
+/// 200 OR any 1xx/2xx/3xx/4xx counts as "agent still answering" and
+/// resets the consecutive-failure counter — a stale 401 from the
+/// previous tenant means the *socket* is still alive.
+///
+/// Returns:
+///   - Ok(()) — fence passed (two consecutive misses); safe to
+///     release vm_index.
+///   - Err(timeout text) — agent still answering at deadline; the
+///     caller MUST leak the vm_index.
+async fn wait_for_agent_silent(
+    base_url: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    let livez_url = format!("{base_url}/livez");
+    let mut consecutive_misses = 0u32;
+    // Keep enough state to produce a useful timeout error.
+    let mut last_status: Option<u16> = None;
+    let mut probe_count: u32 = 0;
+    loop {
+        if Instant::now() >= deadline {
+            break;
+        }
+        let probe_url = livez_url.clone();
+        // Same compio::spawn_blocking + ureq pattern the rest of the
+        // file uses (see `wait_for_agent_livez`); blocking the runtime
+        // worker on a TCP probe would tank concurrent stop()s.
+        let outcome = compio::runtime::spawn_blocking(move || {
+            ureq::get(&probe_url)
+                .timeout(Duration::from_millis(500))
+                .call()
+        })
+        .await;
+        probe_count += 1;
+        // Classify: "answer" (any non-5xx HTTP response or a status
+        // we got a number from) vs "miss" (connection refused,
+        // timeout, transport error, or 5xx). Bare ureq::Error::Status
+        // means an HTTP response did come back — the socket is alive.
+        let is_miss = match outcome {
+            Ok(Ok(resp)) => {
+                let s = resp.status();
+                last_status = Some(s);
+                // 5xx = agent process is mid-crash, count as miss.
+                s >= 500
+            }
+            Ok(Err(ureq::Error::Status(code, _))) => {
+                last_status = Some(code);
+                // 5xx counts as miss; 4xx (e.g. 401 from a stale
+                // tenant whose agent has our pubkey-not-yet) means
+                // the socket IS alive — NOT a miss.
+                code >= 500
+            }
+            Ok(Err(_)) => true, // transport error: connect refused, timeout, etc.
+            Err(_) => true,     // spawn_blocking panic — count as miss
+        };
+        if is_miss {
+            consecutive_misses += 1;
+            if consecutive_misses >= 2 {
+                return Ok(());
+            }
+        } else {
+            consecutive_misses = 0;
+        }
+        // 100 ms cadence — tight enough that a 0.5 s tail is caught
+        // in ~5 polls; loose enough that a 30 s budget on a stuck
+        // agent doesn't burn 300+ blocking tasks. (Compare against
+        // wait_for_agent_livez at 150 ms — slightly faster here
+        // because we're polling for ABSENCE; we want to release the
+        // index as fast as is safe.)
+        compio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err(format!(
+        "agent at {base_url} still answering at fence deadline \
+         (probes={probe_count}, last_http_status={:?}, consecutive_misses={consecutive_misses}); \
+         leaking vm_index to avoid handing out a live IP",
+        last_status,
+    ))
+}
+
 // ─── small utilities (mirrored from k8s.rs) ─────────────────────
 
 /// Write `controller-pubkey`: create + write_all + chmod 0444 +
@@ -2619,9 +2796,12 @@ mod tests {
                 vm_index_ceil: 155,
                 alloc_running_timeout_secs: 60,
                 agent_livez_timeout_secs: 30,
+                host_fence_timeout_secs: 30,
                 startup_orphan_cleanup: false,
                 subnet_second_octet: 99,
             },
+            create_retry_max: 2,
+            create_retry_total_timeout_secs: 90,
         };
         cfg
     }
@@ -3010,6 +3190,74 @@ mod tests {
         assert!(
             err.contains(&our_fp),
             "timeout error must include expected fp for triage; got {err:?}"
+        );
+    }
+
+    // ─── FM-F: host-side fence in stop() before vm_index release ──
+    //
+    // The fence verifies the previous tenant's agent has stopped
+    // answering /livez before we hand the IP back to the pool.
+    // Two consecutive misses (connect-refused / timeout / 5xx) →
+    // OK; deadline before two-in-a-row → Err (caller must leak).
+
+    #[compio::test]
+    async fn host_fence_returns_ok_when_no_agent_listens() {
+        // No mock — a port that refuses connections turns into two
+        // consecutive misses well inside the budget.
+        let res =
+            wait_for_agent_silent("http://127.0.0.1:1", Duration::from_secs(2))
+                .await;
+        assert!(
+            res.is_ok(),
+            "FM-F regression: fence must clear when /livez never answers; \
+             got {res:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn host_fence_times_out_when_agent_keeps_answering() {
+        // Spin up the same /livez=200 mock the FM-A tests use. The
+        // fence must NEVER pass while the socket is alive — it has
+        // to time out and surface "still answering at fence deadline"
+        // so the caller leaks the index instead of handing out a
+        // live IP.
+        let body = r#"{"agent_version":"x","pubkey_fingerprint":"deadbeef00112233"}"#
+            .to_string();
+        let (port, stop) = spawn_mock_agent(body, 200);
+        let url = format!("http://127.0.0.1:{port}");
+        let res = wait_for_agent_silent(&url, Duration::from_millis(700)).await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let err = res.expect_err("must time out while agent answers");
+        assert!(
+            err.contains("still answering"),
+            "FM-F regression: fence-timeout error did not surface \
+             'still answering' text; got {err:?}"
+        );
+        assert!(
+            err.contains("leaking vm_index"),
+            "FM-F regression: fence-timeout error did not signal \
+             leak intent to operator; got {err:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn host_fence_clears_quickly_after_two_consecutive_misses() {
+        // Cadence sanity: at 100 ms intervals two consecutive misses
+        // ≈ ~200 ms of wall time. Confirm the fence doesn't burn the
+        // full budget when the agent is already gone — we want fast
+        // index turnaround on the happy path.
+        let started = Instant::now();
+        let res = wait_for_agent_silent(
+            "http://127.0.0.1:1",
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(res.is_ok());
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "FM-F: fence took {elapsed:?} for two-in-a-row misses on a \
+             refused port; expected well under 800ms — cadence regression?"
         );
     }
 

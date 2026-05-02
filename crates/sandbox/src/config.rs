@@ -109,6 +109,23 @@ pub struct SandboxConfig {
     /// rationale as `k8s`: parsed unconditionally so the operator can
     /// flip `SANDBOX_BACKEND=nomad-ch` without re-templating env.
     pub nomad_ch: NomadCHConfig,
+
+    /// FM-E: how many extra `backend.create()` attempts the create
+    /// handler will make on a stale-tenant or `/livez`-timeout error.
+    /// 0 disables retry; default 2 (= up to 3 attempts total). With
+    /// FM-F's host-fence in place a stale-tenant error should be
+    /// rare — the retry is one layer of defense-in-depth for a truly
+    /// broken host. `SANDBOX_CREATE_RETRY_MAX` (default 2).
+    pub create_retry_max: u32,
+
+    /// FM-E: hard wall-time budget for the entire create + retry
+    /// chain. A pathologically broken backend that consumes the full
+    /// 30 s `agent_livez_timeout_secs` per attempt × `retry_max+1`
+    /// would otherwise tie up an ntex worker for ~90 s+; this caps
+    /// it. Past this budget the handler bails with 503 even if
+    /// retries remain. `SANDBOX_CREATE_RETRY_TOTAL_TIMEOUT_SECS`
+    /// (default 90).
+    pub create_retry_total_timeout_secs: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -286,6 +303,27 @@ pub struct NomadCHConfig {
     /// rolling restart. Default off; opt-in for single-node operators.
     /// `SANDBOX_NOMAD_CH_STARTUP_ORPHAN_CLEANUP` (default `false`).
     pub startup_orphan_cleanup: bool,
+
+    /// FM-F: After Nomad reports the alloc terminal we run a
+    /// **host-side fence** on the agent IP — poll `/livez` until we
+    /// see two consecutive failures (connection refused, timeout, or
+    /// 5xx) before releasing `vm_index`. Why: Nomad's "alloc
+    /// terminal" lags the host-process tree (cloud-hypervisor + 3×
+    /// virtiofsd + the bash wrapper) by 0.5–60 s under N=8 stress.
+    /// Releasing the index while the previous tenant's agent is
+    /// still listening on `10.99.<100+idx>.2:7777` is the exact
+    /// race FM-A's fingerprint check papers over; this is the
+    /// **primary** fix.
+    ///
+    /// If the fence times out (the prior tenant's agent keeps
+    /// answering past this budget) we **leak** the vm_index — safer
+    /// to shrink the pool than hand out an IP whose agent is still
+    /// alive. Operator log will say `vm_index: leak=<n> reason=
+    /// host_fence_timeout`. Orphan-prune at next controller boot
+    /// reclaims it indirectly. `SANDBOX_NOMAD_CH_HOST_FENCE_TIMEOUT_SECS`
+    /// (default 30). Set to 0 to disable the fence entirely (NOT
+    /// recommended in production — restores the FM-F race).
+    pub host_fence_timeout_secs: u64,
 
     /// Second octet of the per-VM /30 subnet. Default 99 keeps the
     /// historical 10.99/16 layout. Operators on hosts with a corp
@@ -553,6 +591,10 @@ impl SandboxConfig {
                 "SANDBOX_NOMAD_CH_AGENT_LIVEZ_TIMEOUT_SECS",
                 30u64,
             )?,
+            host_fence_timeout_secs: parse_env(
+                "SANDBOX_NOMAD_CH_HOST_FENCE_TIMEOUT_SECS",
+                30u64,
+            )?,
             startup_orphan_cleanup: parse_env(
                 "SANDBOX_NOMAD_CH_STARTUP_ORPHAN_CLEANUP",
                 false,
@@ -566,10 +608,16 @@ impl SandboxConfig {
         let mut nomad_ch = nomad_ch;
         nomad_ch.validate()?;
 
+        let create_retry_max = parse_env("SANDBOX_CREATE_RETRY_MAX", 2u32)?;
+        let create_retry_total_timeout_secs =
+            parse_env("SANDBOX_CREATE_RETRY_TOTAL_TIMEOUT_SECS", 90u64)?;
+
         Ok(Self {
             port, token, backend, image, workspace_root, network,
             memory_mb, cpus, idle_timeout_secs, max_lifetime_secs, auto_pull,
             k8s, nomad_ch,
+            create_retry_max,
+            create_retry_total_timeout_secs,
         })
     }
 }
@@ -600,6 +648,7 @@ mod tests {
             vm_index_ceil: 155,
             alloc_running_timeout_secs: 60,
             agent_livez_timeout_secs: 30,
+            host_fence_timeout_secs: 30,
             startup_orphan_cleanup: false,
             subnet_second_octet: 99,
         }
