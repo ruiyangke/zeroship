@@ -71,7 +71,7 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
 
   return (
     <div data-testid="settings-canvas" className="h-full overflow-auto bg-paper">
-      <div className="max-w-[860px] mx-auto px-12 py-10">
+      <div className="max-w-[860px] mx-auto px-4 sm:px-8 lg:px-12 py-6 sm:py-10">
         <Section
           title="Identity"
           helper="The name and address your project lives at."

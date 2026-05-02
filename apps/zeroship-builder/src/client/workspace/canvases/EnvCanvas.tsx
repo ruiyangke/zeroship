@@ -32,7 +32,7 @@ export interface EnvCanvasProps {
 export function EnvCanvas({ appId }: EnvCanvasProps) {
   return (
     <div data-testid="env-canvas" className="h-full overflow-auto bg-paper">
-      <div className="max-w-[860px] mx-auto px-12 py-10">
+      <div className="max-w-[860px] mx-auto px-4 sm:px-8 lg:px-12 py-6 sm:py-10">
         <Variables appId={appId} />
         <div className="h-12" />
         <Secrets appId={appId} />
@@ -250,13 +250,14 @@ function Row({
 }) {
   return (
     <div
-      className="grid items-center gap-4 py-3 border-b border-rule-2"
-      style={{ gridTemplateColumns: "200px 1fr 60px" }}
+      // Phone: name on top, value below, action right-aligned in
+      // a third row. Tablet+: original 200px/1fr/60px layout returns.
+      className="grid items-center gap-2 sm:gap-4 py-3 border-b border-rule-2 grid-cols-[1fr_auto] sm:grid-cols-[200px_1fr_60px]"
     >
       <span className="font-mono text-[13px] text-ink truncate">{name}</span>
       <span
         className={
-          "text-[13px] truncate " +
+          "text-[13px] truncate col-span-2 sm:col-auto sm:order-none order-3 " +
           (secret
             ? "font-mono text-pencil tracking-[0.2em]"
             : "font-mono text-ink-soft")
@@ -268,7 +269,8 @@ function Row({
         <button
           type="button"
           onClick={onDelete}
-          className="font-serif italic text-[12.5px] text-ink-soft hover:text-tomato bg-transparent border-0 cursor-pointer"
+          aria-label={`${actionLabel} ${name}`}
+          className="font-serif italic text-[12.5px] text-ink-soft hover:text-tomato bg-transparent border-0 cursor-pointer focus:outline-2 focus:outline-tomato focus:outline-offset-2 px-1"
         >
           {actionLabel}
         </button>

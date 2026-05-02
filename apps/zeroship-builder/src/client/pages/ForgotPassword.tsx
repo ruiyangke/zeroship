@@ -25,8 +25,8 @@ export default function ForgotPassword() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-5">
-      <div className="w-[440px] max-w-full bg-white border border-rule px-10 py-10 reveal" data-testid="forgot-password-page">
+    <div className="min-h-screen flex items-center justify-center px-4 sm:px-5">
+      <div className="w-[440px] max-w-full bg-white border border-rule px-6 sm:px-10 py-8 sm:py-10 reveal" data-testid="forgot-password-page">
         <Link to="/" className="font-serif italic text-[20px] font-medium text-ink hover:opacity-80 mb-8 inline-block" style={{ textDecoration: "none" }}>
           zeroship<span className="text-tomato">.</span>
         </Link>

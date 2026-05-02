@@ -28,8 +28,9 @@ export function TopBar({ projectName, center, right, admin, crumb }: TopBarProps
 
   return (
     <header
-      className="grid items-center gap-4 border-b border-rule bg-paper px-6 py-3"
-      style={{ gridTemplateColumns: "minmax(280px, auto) 1fr auto" }}
+      // Tablet+ keeps the original 280px brand column; phones drop to
+      // an auto-sized brand so the title doesn't get crowded out.
+      className="grid items-center gap-2 sm:gap-4 border-b border-rule bg-paper px-3 sm:px-6 py-3 grid-cols-[auto_1fr_auto] md:grid-cols-[minmax(280px,auto)_1fr_auto]"
       data-testid="topbar"
     >
       <div className="flex items-baseline gap-3 min-w-0">
@@ -45,7 +46,7 @@ export function TopBar({ projectName, center, right, admin, crumb }: TopBarProps
           // Authed wordmark routes to /home (the gallery). The public
           // marketing page lives at `/` and is shown to unauthed
           // visitors only.
-          <Link to="/home" className="font-serif italic text-[18px] font-medium text-ink hover:opacity-80" data-testid="topbar-logo">
+          <Link to="/home" aria-label="zeroship home" className="font-serif italic text-[18px] font-medium text-ink hover:opacity-80 focus:outline-2 focus:outline-tomato focus:outline-offset-2 rounded-sm" data-testid="topbar-logo">
             zeroship<span className="text-tomato">.</span>
           </Link>
         )}
@@ -82,9 +83,10 @@ export function TopBar({ projectName, center, right, admin, crumb }: TopBarProps
         <Link
           to="/account"
           title={user?.email ?? "account"}
+          aria-label="Account"
           data-testid="topbar-account"
           className={cn(
-            "inline-flex h-7 w-7 items-center justify-center rounded-full font-sans text-[10.5px] font-semibold leading-none",
+            "inline-flex h-7 w-7 items-center justify-center rounded-full font-sans text-[10.5px] font-semibold leading-none focus:outline-2 focus:outline-tomato focus:outline-offset-2",
             admin ? "bg-tomato text-paper" : "bg-ink text-paper"
           )}
         >

@@ -77,7 +77,7 @@ export function LogsCanvas({ appId }: LogsCanvasProps) {
       data-testid="logs-canvas"
       className="h-full flex flex-col bg-paper"
     >
-      <div className="px-8 pt-6 pb-3 border-b border-rule flex flex-wrap items-center gap-3">
+      <div className="px-4 sm:px-8 pt-4 sm:pt-6 pb-3 border-b border-rule flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-2">
           <FilterPill active={filter === "all"} onClick={() => setFilter("all")}>
             all
@@ -116,7 +116,7 @@ export function LogsCanvas({ appId }: LogsCanvasProps) {
       <div
         ref={scrollRef}
         onScroll={onScroll}
-        className="flex-1 overflow-auto px-8 py-4 min-h-0"
+        className="flex-1 overflow-auto px-4 sm:px-8 py-4 min-h-0"
       >
         {error && (
           <div className="font-serif italic text-tomato">

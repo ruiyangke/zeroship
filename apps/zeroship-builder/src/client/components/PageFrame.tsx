@@ -30,19 +30,26 @@ export function PageFrame({
       <TopBar {...topbar} />
       <main className="flex-1 overflow-auto">
         {centered ? (
-          <div className="mx-auto px-6 py-12" style={{ maxWidth }}>
+          <div className="mx-auto px-4 sm:px-6 py-8 sm:py-12" style={{ maxWidth }}>
             {children}
           </div>
         ) : (
+          // Marginalia stacks above the content column on phones, then
+          // moves to a left rail at lg+ where there's room for it.
+          // px-4 on phone keeps the eyeline tight; px-12 lands on
+          // tablet/desktop. Grid template falls back to single-column
+          // below the lg breakpoint via the `lg:` modifier.
           <div
-            className={cn("mx-auto px-12 py-12 grid gap-12", showMarginalia && "lg:gap-12")}
+            className={cn(
+              "mx-auto px-4 sm:px-6 lg:px-12 py-8 sm:py-12 grid gap-8 lg:gap-12",
+              showMarginalia ? "grid-cols-1 lg:grid-cols-[200px_1fr]" : "grid-cols-1",
+            )}
             style={{
-              gridTemplateColumns: showMarginalia ? "200px 1fr" : "1fr",
               maxWidth: showMarginalia ? maxWidth + 220 : maxWidth,
             }}
           >
             {showMarginalia && <Marginalia />}
-            <div>{children}</div>
+            <div className="min-w-0">{children}</div>
           </div>
         )}
       </main>

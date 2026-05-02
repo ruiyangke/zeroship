@@ -71,8 +71,10 @@ export function FilesCanvas({ appId }: FilesCanvasProps) {
   return (
     <div
       data-testid="files-canvas"
-      className="h-full grid min-h-0 bg-paper"
-      style={{ gridTemplateColumns: "260px 1fr 200px" }}
+      // Phone: stack tree on top of viewer, hide meta rail (the same
+      // info is visible in the file's first lines + footer copy).
+      // Tablet+: 2-col tree + viewer. Desktop (lg+): full 3-col with meta.
+      className="h-full grid min-h-0 bg-paper grid-cols-1 md:grid-cols-[220px_1fr] lg:grid-cols-[260px_1fr_200px]"
     >
       <FileTree
         entries={tree.data ?? []}
@@ -86,7 +88,9 @@ export function FilesCanvas({ appId }: FilesCanvasProps) {
         loading={file.isLoading}
         error={file.error}
       />
-      <FileMeta path={selected} content={file.data} />
+      <div className="hidden lg:block">
+        <FileMeta path={selected} content={file.data} />
+      </div>
     </div>
   );
 }

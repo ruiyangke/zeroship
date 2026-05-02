@@ -32,7 +32,7 @@ export interface PlanCanvasProps {
 export function PlanCanvas({ appId, app }: PlanCanvasProps) {
   return (
     <div data-testid="plan-canvas" className="h-full overflow-auto bg-paper">
-      <div className="max-w-[860px] mx-auto px-12 py-10">
+      <div className="max-w-[860px] mx-auto px-4 sm:px-8 lg:px-12 py-6 sm:py-10">
         <IssuesSection appId={appId} />
         <div className="h-12" />
         <RoadmapSection appId={appId} />
@@ -340,10 +340,7 @@ function RoadmapSection({ appId }: { appId: string }) {
           you're ready to commit.
         </p>
       </header>
-      <div
-        className="grid gap-4"
-        style={{ gridTemplateColumns: `repeat(${MILESTONES.length}, 1fr)` }}
-      >
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-3">
         {MILESTONES.map((m, i) => {
           const current = i === 0;
           // V1: we attribute every issue to v0.1 (the only milestone

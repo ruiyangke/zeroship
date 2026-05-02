@@ -50,7 +50,7 @@ export function DataCanvas({ appId }: DataCanvasProps) {
 
   return (
     <div data-testid="data-canvas" className="h-full overflow-auto bg-paper">
-      <div className="max-w-[960px] mx-auto px-12 py-10">
+      <div className="max-w-[960px] mx-auto px-4 sm:px-8 lg:px-12 py-6 sm:py-10">
         <header className="mb-6">
           <h1 className="font-serif italic font-medium text-[28px] m-0 mb-1">
             Data

@@ -23,23 +23,27 @@ export function TopBar({
   return (
     <header
       data-testid="topbar"
-      className="grid items-center gap-4 border-b border-rule bg-paper px-6 h-12"
-      style={{ gridTemplateColumns: "minmax(280px, auto) 1fr auto" }}
+      // Three slots: brand, center (canvas pills / status), right
+      // (actions). On phones we collapse the brand column and let the
+      // center slot scroll horizontally if it overflows. On desktop
+      // the original 280px brand column returns.
+      className="grid items-center gap-2 sm:gap-4 border-b border-rule bg-paper px-3 sm:px-6 h-12 grid-cols-[auto_1fr_auto] md:grid-cols-[minmax(280px,auto)_1fr_auto]"
     >
-      <div className="flex items-baseline gap-3 min-w-0">
+      <div className="flex items-baseline gap-2 sm:gap-3 min-w-0">
         <Link
           to={homeHref}
           data-testid="topbar-logo"
-          className="font-display italic text-lg font-medium text-ink hover:opacity-80"
+          aria-label="zeroship home"
+          className="font-display italic text-lg font-medium text-ink hover:opacity-80 focus:outline-2 focus:outline-tomato focus:outline-offset-2 rounded-sm"
         >
           zeroship<span className="text-tomato">.</span>
         </Link>
         {projectName && (
           <>
-            <span className="text-rule">/</span>
+            <span className="text-rule hidden sm:inline">/</span>
             <span
               data-testid="topbar-project"
-              className="font-sans text-sm font-medium text-ink truncate"
+              className="font-sans text-sm font-medium text-ink truncate hidden sm:inline"
             >
               {projectName}
             </span>
@@ -47,15 +51,15 @@ export function TopBar({
         )}
       </div>
 
-      <div className="flex items-center justify-center min-w-0">{center}</div>
+      <div className="flex items-center justify-center min-w-0 overflow-x-auto">{center}</div>
 
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-2 sm:gap-3">
         {right}
         <Link
           to="/account"
           data-testid="topbar-account"
           aria-label="Account"
-          className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-ink text-paper font-sans text-xs font-semibold leading-none"
+          className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-ink text-paper font-sans text-xs font-semibold leading-none focus:outline-2 focus:outline-tomato focus:outline-offset-2"
         >
           {accountInitials}
         </Link>

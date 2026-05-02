@@ -41,7 +41,7 @@ export function Account({ onLogout }: { onLogout?: () => void }) {
           <em className="italic">{user?.email ?? "—"}</em>
         </div>
 
-        <div className="bg-paper-2 border border-rule px-7 py-6 grid items-center gap-6 mb-8" style={{ gridTemplateColumns: "2fr 1fr" }}>
+        <div className="bg-paper-2 border border-rule px-5 sm:px-7 py-6 grid items-center gap-6 mb-8 grid-cols-1 sm:grid-cols-[2fr_1fr]">
           <div>
             <div className="font-serif italic text-[24px]"><em className="italic text-tomato">Free</em> plan</div>
             <div className="font-mono text-[12px] text-ink-soft mt-1.5">412 requests this week · 2 of 3 apps deployed</div>
@@ -97,12 +97,12 @@ function Section({
   title: React.ReactNode; helper: React.ReactNode; children: React.ReactNode; lastSection?: boolean;
 }) {
   return (
-    <div className={"grid gap-12 py-6 " + (lastSection ? "" : "border-b border-rule")} style={{ gridTemplateColumns: "280px 1fr" }}>
+    <div className={"grid gap-6 sm:gap-12 py-6 grid-cols-1 sm:grid-cols-[280px_1fr] " + (lastSection ? "" : "border-b border-rule")}>
       <div>
         <h3 className="font-serif italic font-medium text-[22px] mb-1.5">{title}</h3>
         {helper && <p className="font-serif text-[13.5px] text-ink-soft leading-[1.5]">{helper}</p>}
       </div>
-      <div>{children}</div>
+      <div className="min-w-0">{children}</div>
     </div>
   );
 }

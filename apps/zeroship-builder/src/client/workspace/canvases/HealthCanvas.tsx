@@ -25,7 +25,7 @@ export interface HealthCanvasProps {
 export function HealthCanvas({ appId, app }: HealthCanvasProps) {
   return (
     <div data-testid="health-canvas" className="h-full overflow-auto bg-paper">
-      <div className="max-w-[860px] mx-auto px-12 py-10">
+      <div className="max-w-[860px] mx-auto px-4 sm:px-8 lg:px-12 py-6 sm:py-10">
         <StatusPulse app={app} />
         <div className="h-12" />
         <QualityScorecard appId={appId} />
@@ -228,7 +228,7 @@ function Performance() {
           to see real numbers — metering wiring is on the way.
         </p>
       </header>
-      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
+      <div className="grid gap-3 grid-cols-1 sm:grid-cols-3">
         <PerfTile label="p95 latency · 24h" testid="health-perf-latency" />
         <PerfTile label="error rate · 24h" testid="health-perf-errors" />
         <PerfTile label="requests · 24h" testid="health-perf-rps" />
