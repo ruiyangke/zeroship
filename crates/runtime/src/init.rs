@@ -98,12 +98,6 @@ pub const FETCH_JS: &str = include_str!("embed/fetch.js");
 /// Embedded crypto polyfill (getRandomValues, SubtleCrypto.digest, base64 helpers).
 pub const CRYPTO_JS: &str = include_str!("embed/crypto.js");
 
-/// `TextEncoderStream` / `TextDecoderStream` — WHATWG Encoding §7.1/§7.2.
-/// Thin TransformStream wrappers around TextEncoder/TextDecoder; ~50 LOC of
-/// JS rather than a separate native class. Loaded AFTER native streams +
-/// the encoding classes are installed.
-pub const TEXT_STREAMS_JS: &str = include_str!("embed/text-streams.js");
-
 /// Embedded WebSocket/WebSocketPair polyfill (depends on the native
 /// EventTarget installed by `install_dom`).
 pub const WEBSOCKET_JS: &str = include_str!("embed/websocket.js");
