@@ -973,6 +973,49 @@ pub fn build_kernel_headers<'s>(
         headers.list_append_unchecked(n.as_bytes().to_vec(), v.as_bytes().to_vec());
     }
 
+    install_headers_state(scope, obj, headers);
+    Some(obj)
+}
+
+/// Variant of `build_kernel_headers` that takes ownership of the pair list.
+///
+/// Saves 2N byte-vec allocations per call vs the `&[(String, String)]`
+/// variant — the (name, value) Strings are reused directly as the
+/// internal `Vec<u8>` storage. Used by `fetch_response::build_kernel_response`
+/// where the (name, value) list is freshly constructed from the HTTP
+/// response and discarded after the wrapper is built.
+pub fn build_kernel_headers_owned<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    pairs: Vec<(String, String)>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let (class_tmpl_g, proto_g) = {
+        let slot = scope.get_slot::<HeadersTemplateSlot>()?;
+        (slot.class_tmpl.clone(), slot.prototype.clone())
+    };
+    let class_tmpl = v8::Local::new(scope, class_tmpl_g);
+    let inst_tmpl = class_tmpl.instance_template(scope);
+    let obj = inst_tmpl.new_instance(scope)?;
+    let proto = v8::Local::new(scope, proto_g);
+    obj.set_prototype(scope, proto.into());
+
+    let mut headers = Headers::default();
+    for (n, v) in pairs {
+        // String -> Vec<u8> is a zero-copy buffer transfer (String wraps
+        // a Vec<u8> internally; into_bytes consumes the String).
+        headers.list_append_unchecked(n.into_bytes(), v.into_bytes());
+    }
+
+    install_headers_state(scope, obj, headers);
+    Some(obj)
+}
+
+/// Common tail: box the `Headers` state, install it as internal field 0,
+/// and register the GC finalizer that drops it.
+fn install_headers_state(
+    scope: &mut v8::PinScope,
+    obj: v8::Local<v8::Object>,
+    headers: Headers,
+) {
     let boxed = Box::new(headers);
     let raw = Box::into_raw(boxed);
     let raw_addr = raw as usize;
@@ -987,7 +1030,6 @@ pub fn build_kernel_headers<'s>(
         }),
     );
     std::mem::forget(weak);
-    Some(obj)
 }
 
 /// Hand-rolled `Headers.prototype.forEach(callback, thisArg?)` per

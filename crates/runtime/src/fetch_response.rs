@@ -223,6 +223,17 @@ pub fn try_native_response_websocket(
 // install_global — hand-rolled (no macro), same pattern as Request.
 // ---------------------------------------------------------------------------
 
+/// Per-isolate cache of the Response FunctionTemplate + prototype.
+///
+/// Set from `install_global`; consumed by `build_kernel_response` so the
+/// fetch-success path can allocate a Response wrapper without resolving
+/// `globalThis.Response` and without invoking the spec constructor (which
+/// rebuilds Headers from an init array, runs `extract_body`, etc).
+pub struct ResponseTemplateSlot {
+    pub class_tmpl: v8::Global<v8::FunctionTemplate>,
+    pub prototype: v8::Global<v8::Object>,
+}
+
 pub fn install_global(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     let class_tmpl = v8::FunctionTemplate::new(scope, response_constructor_callback);
     let class_name = v8::String::new(scope, "Response").unwrap();
@@ -256,6 +267,103 @@ pub fn install_global(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
 
     let key = v8::String::new(scope, "Response").unwrap();
     global.set(scope, key.into(), class_fn.into());
+
+    // Stash the template + prototype for the kernel-side fast-path
+    // Response builder. See `ResponseTemplateSlot`.
+    let class_tmpl_g = v8::Global::new(scope, class_tmpl);
+    let proto_g = v8::Global::new(scope, our_proto);
+    scope.set_slot(ResponseTemplateSlot {
+        class_tmpl: class_tmpl_g,
+        prototype: proto_g,
+    });
+}
+
+/// Build a Response wrapper directly from a (status, headers, body) tuple
+/// — the success path of the algorithm chain. Skips:
+///   - the `globalThis.Response` lookup,
+///   - the JS Response constructor's WebIDL init walk,
+///   - the per-init-pair JS Array materialization (one 2-elem JS Array per
+///     header) that `build_response_object` previously used,
+///   - the inner `new Headers(seq)` invocation (which iterates that
+///     array and per-pair-validates each header),
+///   - `extract_body` (the response bytes already exist as `Vec<u8>` —
+///     just install them as `BodySource::Bytes`).
+///
+/// Body is installed as `BodySource::Bytes(Rc<...>)` with `stream: None` so
+/// the body getter materializes the JS ReadableStream lazily on first
+/// access (cheap fast path for benchmarks; correct for streaming code that
+/// reads `.body`).
+pub fn build_kernel_response<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    status: u16,
+    status_text: String,
+    url: String,
+    redirected: bool,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    // 1. Allocate the Response wrapper via the cached instance template.
+    let (resp_tmpl_g, resp_proto_g) = {
+        let slot = scope.get_slot::<ResponseTemplateSlot>()?;
+        (slot.class_tmpl.clone(), slot.prototype.clone())
+    };
+    let resp_tmpl = v8::Local::new(scope, resp_tmpl_g);
+    let inst_tmpl = resp_tmpl.instance_template(scope);
+    let this_obj = inst_tmpl.new_instance(scope)?;
+    let resp_proto = v8::Local::new(scope, resp_proto_g);
+    this_obj.set_prototype(scope, resp_proto.into());
+
+    // 2. Build the Headers wrapper directly, consuming the (name, value)
+    // list — the bytes become the internal storage zero-copy. The wire
+    // layer already validated the names + values when parsing the
+    // response.
+    let headers_obj = crate::headers::build_kernel_headers_owned(scope, headers)?;
+    let headers_g = v8::Global::new(scope, headers_obj);
+
+    // 3. Build the body. Null-body status responses (101, 103, 204, 205,
+    // 304) keep BodyImpl::null even if `body` is non-empty (defensive —
+    // the algorithm chain shouldn't supply a body for these but if it
+    // does, we ignore it to match the constructor's behavior).
+    let body_impl = if is_null_body_status(status) || body.is_empty() {
+        BodyImpl::null()
+    } else {
+        let len = body.len() as u64;
+        let body_rc = std::rc::Rc::new(body);
+        BodyImpl {
+            stream: RefCell::new(None),
+            source: Some(BodySource::Bytes(body_rc)),
+            length: Some(len),
+        }
+    };
+
+    // 4. Build the ResponseState directly.
+    let state = ResponseState {
+        body: RefCell::new(body_impl),
+        status: RefCell::new(status),
+        status_text: RefCell::new(status_text),
+        url: RefCell::new(url),
+        redirected: RefCell::new(redirected),
+        headers: RefCell::new(Some(headers_g)),
+        ..ResponseState::default()
+    };
+
+    // 5. Box, install in internal field 0, register finalizer.
+    let boxed = Box::new(state);
+    let raw = Box::into_raw(boxed);
+    let raw_addr = raw as usize;
+    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
+    this_obj.set_internal_field(0, ext.into());
+
+    let weak = v8::Weak::with_guaranteed_finalizer(
+        scope,
+        this_obj,
+        Box::new(move || unsafe {
+            drop(Box::from_raw(raw_addr as *mut ResponseState));
+        }),
+    );
+    std::mem::forget(weak);
+
+    Some(this_obj)
 }
 
 fn install_method(

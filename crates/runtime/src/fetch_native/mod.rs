@@ -588,39 +588,82 @@ pub fn materialise_pending<'s>(
 
 /// Build a JS Response object directly from algorithm output.
 ///
-/// FIX B (perf): instead of running `new Response(body, init)` which
-/// re-extracts the body bytes (Uint8Array → Vec<u8> ptr::copy →
-/// Rc<Vec<u8>> + builds a JS ReadableStream wrapping the bytes), we:
+/// FIX F (perf): use `build_kernel_response`, which allocates the Response
+/// wrapper from the cached FunctionTemplate's `instance_template().new_instance()`,
+/// builds Headers via `build_kernel_headers` (skipping the JS Headers
+/// constructor's WebIDL sequence walk + per-pair validation), and installs
+/// the body bytes as `BodySource::Bytes(Rc<...>)` directly. Replaces the
+/// previous path that:
 ///
-///   1. Construct the Response wrapper with `null` body so the JS
-///      constructor takes the cheap null-body path (no extract_body
-///      run, no stream wrapper alloc).
-///   2. Move the bytes from `alg.body` into a fresh BodyImpl with
-///      `BodySource::Bytes(rc)` and `stream: None`. The body() getter
-///      and consumer fast paths (FIX C) read source directly.
-///   3. Patch url + redirected as before.
+///   - resolved `globalThis.Response` per fetch,
+///   - allocated 1 init JS Object + 1 JS Array of N 2-element pair Arrays
+///     (one alloc per response header) for `init.headers`,
+///   - invoked the JS Response constructor (which read `init.headers` and
+///     called `new Headers(seq)` — re-allocating Headers and walking the
+///     pair list with @@iterator dispatch + per-pair validation),
+///   - then patched the result's url/redirected/body via internal field 0.
 ///
-/// Lazy stream materialization: when the user code reads
-/// `response.body` (rare in benchmarks; common for streaming),
-/// the body getter (added below) lazily builds the JS stream
-/// wrapper on first access.
+/// Together with prior FIXes A-E, the success path now hits zero JS
+/// constructor invocations: only one `instance_template().new_instance()`
+/// for Response, one for Headers, one Box::into_raw + finalizer wiring per
+/// each.
 ///
-/// Eliminates per-fetch:
-///   - 1 ArrayBuffer + Uint8Array alloc (the body argument)
-///   - 1 v8::Function::new_instance JS->JS hop (Response ctor)
-///   - 1 extract_body run (read_buffer_source_bytes copy of body
-///     bytes, build_byte_stream wrapper alloc)
-///   - 1 ReadableStream constructor invocation
+/// Falls back to the legacy `globalThis.Response` constructor invocation
+/// if the `ResponseTemplateSlot` isn't present (shouldn't happen at
+/// runtime — `install_global` always sets it — but the fallback keeps the
+/// path correct in tests that bypass install_global).
 fn build_response_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     alg: AlgorithmResponse,
 ) -> v8::Local<'s, v8::Object> {
+    // Fast path: kernel-side direct build. We need a copy of `alg` for the
+    // slow-path fallback in the unlikely case the slot isn't present, but
+    // `try_kernel_build` consumes the fields zero-copy. Decompose first.
+    let AlgorithmResponse {
+        status,
+        status_text,
+        headers,
+        body,
+        url,
+        redirected,
+    } = alg;
+
+    if let Some(slot_check) = scope.get_slot::<crate::fetch_response::ResponseTemplateSlot>() {
+        let _ = slot_check; // confirm slot exists; build_kernel_response re-fetches.
+        if let Some(obj) = crate::fetch_response::build_kernel_response(
+            scope,
+            status,
+            status_text,
+            url,
+            redirected,
+            headers,
+            body,
+        ) {
+            return obj;
+        }
+        // build_kernel_response only returns None if `new_instance` fails
+        // (OOM in V8). That's not recoverable via the JS-constructor fallback
+        // either, so return a sentinel: an empty object. The caller will
+        // observe the missing internal field and reject the promise.
+        return v8::Object::new(scope);
+    }
+
+    // Slow path (no template slot — only hit in tests that bypass
+    // install_global): fall back to the JS constructor invocation.
+    // Reconstitute the alg so the original code path keeps working.
+    let alg = AlgorithmResponse {
+        status,
+        status_text,
+        headers,
+        body,
+        url,
+        redirected,
+    };
     let global = scope.get_current_context().global(scope);
     let class_key = v8::String::new(scope, "Response").unwrap();
     let class_v = global.get(scope, class_key.into()).unwrap();
     let class_fn: v8::Local<v8::Function> = class_v.try_into().unwrap();
 
-    // Build init.
     let init = v8::Object::new(scope);
     {
         let key = v8::String::new(scope, "status").unwrap();
@@ -646,29 +689,20 @@ fn build_response_object<'s>(
         init.set(scope, key.into(), arr.into());
     }
 
-    // Step 1: construct with null body so the constructor takes
-    // the cheap null-body path. We patch the body in step 2.
     let null_body = v8::null(scope);
     let result = class_fn
         .new_instance(scope, &[null_body.into(), init.into()])
         .unwrap();
 
-    // Step 2: install the Rust-side body directly. Skips
-    // extract_body's bytes copy + ReadableStream construction.
     if let Some(raw) = response_state_ptr_mut(scope, result) {
-        // SAFETY: pointer stable for the lifetime of the wrapper.
         let state: &crate::fetch_response::ResponseState = unsafe { &*raw };
         *state.url.borrow_mut() = alg.url;
         *state.redirected.borrow_mut() = alg.redirected;
 
-        // Null-body status set: leave the body as null per spec.
         if !matches!(alg.status, 101 | 103 | 204 | 205 | 304) {
             let len = alg.body.len() as u64;
             let body_rc = std::rc::Rc::new(alg.body);
             *state.body.borrow_mut() = crate::fetch_body::body::BodyImpl {
-                // Stream stays None until first observation; the body
-                // getter materializes a ReadableStream from `source`
-                // on demand. Keeps the fast path zero-stream-alloc.
                 stream: std::cell::RefCell::new(None),
                 source: Some(crate::fetch_body::body::BodySource::Bytes(body_rc)),
                 length: Some(len),
