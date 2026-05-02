@@ -11,6 +11,8 @@ import { EnvCanvas } from "./canvases/EnvCanvas";
 import { SettingsCanvas } from "./canvases/SettingsCanvas";
 import { PlanCanvas } from "./canvases/PlanCanvas";
 import { HealthCanvas } from "./canvases/HealthCanvas";
+import { DataCanvas } from "./canvases/DataCanvas";
+import { MediaCanvas } from "./canvases/MediaCanvas";
 import { ChatRail } from "./chat/ChatRail";
 import { briefSchema, type Brief } from "../types/chat";
 import { LiveBanner } from "../components/LiveBanner";
@@ -170,11 +172,14 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
             />
           )}
           {/* Files / Logs / Env / Settings ship in Plan 01.6.
-              Plan / Health ship in Plan 01.7 (this commit). Data /
-              Media land later; the catch-all below keeps the pill
-              clickable when an appId isn't available. */}
+              Plan / Health ship in Plan 01.7. Data / Media ship in
+              Plan 01.8 (this commit) over in-memory stubs (ISS-20 →
+              ISS-26). The catch-all below keeps each pill clickable
+              when an appId isn't available. */}
           {active === "preview" && <PreviewCanvasStub />}
           {active === "files" && appId && <FilesCanvas appId={appId} />}
+          {active === "data" && appId && <DataCanvas appId={appId} />}
+          {active === "media" && appId && <MediaCanvas appId={appId} />}
           {active === "logs" && appId && <LogsCanvas appId={appId} />}
           {active === "env" && appId && <EnvCanvas appId={appId} />}
           {active === "plan" && appId && (
