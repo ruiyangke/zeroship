@@ -331,7 +331,7 @@ is illustrative.
 | **D-16** | Backpressure on receive: NO. The runtime delivers MessageEvents eagerly; user code that doesn't drain its message queue causes events to pile up in the JS handler's microtask queue, NOT in our Rust queue. This matches the polyfill's behaviour and undici's default (no auto-pause). workerd does pause the read loop on `pendingAutoResponseTimestamp` accumulation but only in the hibernation path. v2 may add a "max in-flight events" cap if AI-builder apps demonstrate a need. | The TCP backpressure is sufficient — V8's microtask queue is the natural buffer. Adding receive-side pause adds complexity for no observable spec benefit. | §VII.2 |
 | **D-17** | UTF-8 validation on text frames: enforced. Per RFC 6455 §8.1, a text frame whose payload is not valid UTF-8 MUST cause the connection to fail with code 1007 ("Invalid frame payload data"). `compio-ws` / tungstenite handle this internally (tungstenite returns `WebSocketError::Utf8` and yields a Close frame with code 1007 on the next poll); the receive task converts that into a `Close { code: 1007, reason: "Invalid UTF-8", was_clean: false }` event. JS observers see `error` event followed by `close` event with `wasClean: false`. | Spec §3.2 step 2.1 ("If the bytes are not a valid UTF-8 sequence: fail the WebSocket connection"); WPT covers this via the autobahn fuzzers in `websockets/autobahn/` (which we are NOT yet running in CI but may add as a separate job). | §V.4, §VII.2 |
 | **D-18** | `binaryType="blob"` builds a Blob via `crates/runtime/src/blob.rs::Blob::from_bytes` (already shipped). The MessageEvent's `data` is a `v8::Global<v8::Object>` pointing to the Blob wrapper. `binaryType="arraybuffer"` builds an ArrayBuffer via `v8::ArrayBuffer::new_backing_store_from_vec` (zero-copy where possible — same pattern as fetch's `Body.arrayBuffer()`). The choice is read at MessageEvent-construction time, NOT at frame-arrival time, so a JS user can flip `binaryType` between two binary frames and the SECOND frame uses the new value. | Spec §3.1 attribute `binaryType` ("on getting, must return the value to which it was last set"); the read-at-dispatch-time semantics is observable (and tested by WPT — `Send-binary-blob.any.js` and `Send-binary-arraybuffer.any.js`). | §V.4 |
-| **D-19** | `send(data)` dispatch order matches the spec EXACTLY: first test `is_array_buffer(data)`, then `is_array_buffer_view(data)`, then `is_blob(data)`, then string. Spec §3.1 send method: "If data is a string", "If data is a Blob object", "If data is an ArrayBuffer object", "If data is an ArrayBufferView object". Order matters because `is_array_buffer_view(blob)` is false but a malicious `blob.toString` could pass an `is_string` check first and corrupt binary. The spec dispatch has string LAST in the test order; we replicate. (The `String(data)` coercion in the polyfill — `embed/websocket.js:77` — silently corrupts every binary path.) | Spec §3.1; WPT `Send-binary-blob.any.js`, `Send-binary-arraybuffer.any.js`, `Send-binary-arraybufferview-*.any.js` (one file per typed-array variant — ~12 files), `Send-data.any.js`, `Send-unicode-data.any.js`. | §V.5 |
+| **D-19** | `send(data)` dispatch order matches the spec EXACTLY: **String first**, then Blob, then ArrayBuffer, then ArrayBufferView. Per WHATWG §3.1 send algorithm steps 3-6 (https://websockets.spec.whatwg.org/#dom-websocket-send), the spec literally tests `if data is a string`, `if data is a Blob object`, `if data is an ArrayBuffer object`, `if data is an ArrayBufferView object` in that order. (v1 inverted this and claimed string went last; v2 corrects.) Type-test predicates are by branding (`v8::Local::<v8::ArrayBuffer>::try_from`, `is_blob` via internal-field tag), NOT by `data.toString` — so the "Blob with custom toString" hazard the v1 rationale invoked is a non-issue: `is_blob(blob)` is true regardless of any user-defined `toString`. (The real polyfill bug — `String(data)` coercion at `embed/websocket.js:77` that silently corrupts binary — is fixed by branding-based dispatch in any order; v2 picks spec order for clarity.) Mirrors undici (`undici/lib/web/websocket/websocket.js`, String first) and workerd (`workerd/api/web-socket.c++`, String first). (addresses critic CRITICAL #1) | Spec §3.1; WPT `Send-data.any.js`, `Send-unicode-data.any.js`, `Send-binary-blob.any.js`, `Send-binary-arraybuffer.any.js`, `Send-binary-arraybufferview-*.any.js` (one file per typed-array variant — ~12 files). | §V.4 |
 | **D-20** | `WebSocketPair` (workerd extension) is preserved — same JS surface, same gateway dispatch path. Internally, both halves of a `WebSocketPair` are `WebSocket` instances with a `peer_id: Option<u32>` slot set on each (the existing `WebSocketState::peer_id` carries forward verbatim). When `send()` is called on one half, the message is enqueued on BOTH the local outgoing queue (for the gateway pump) AND the peer's incoming queue (for the in-process JS-side delivery). The polyfill's existing logic at `crates/runtime/src/websocket.rs:140-148` is the model. | Backwards compatibility with the existing gateway WebSocket flow. The same `#[v8_class] WebSocket` covers both modes; the union of slot semantics fits naturally. | §VI |
 | **D-21** | `accept()` method — workerd extension preserved. Required by `WebSocketPair[1].accept()` to begin local message delivery on the server-side half. For client-side WebSockets created via `new WebSocket(url)`, `accept()` throws TypeError (matches workerd `web-socket.c++:406-407`). The accept transition is read-only: once `accepted=true`, subsequent `accept()` calls are silent no-ops (matches workerd `web-socket.c++:417`). | Backwards compatibility. The IDL surface is `accept(): undefined` — no return value, no options dictionary in v1 (workerd's `AllowHalfOpen` option is a workerd-Durable-Object detail). | §V.7, §VI |
 | **D-22** | Spec algorithm naming in Rust: every named spec algorithm gets a Rust function with the same name in `snake_case`. Lives in `crates/runtime/src/websocket/algorithms.rs` for cross-class operations (`establish_a_websocket_connection`, `feedback_the_establish_algorithm`, `make_disappear`, `fail_the_websocket_connection`, `close_the_websocket_connection`, `validate_close_code_and_reason`) and in `websocket/websocket.rs` for class-local methods. Same rule as streams-native D-20 and fetch-native D-20. | Reduces cognitive load when cross-referencing the spec. | §V, §IX |
@@ -733,7 +733,24 @@ pub struct WsCachedHandles {
 pub enum WsFrame {
     Text(String),
     Binary(Vec<u8>),
-    Close { code: u16, reason: String },
+    /// Spec §3.1 step 4 — Blob byte-extraction is async; bufferedAmount
+    /// jumps by `size` synchronously and the bytes are resolved in the
+    /// send pump. Holds a `Global<Object>` to the Blob and the cached
+    /// size (so a `pop_front()`-induced decrement uses the right number
+    /// even if Blob.size changes mid-transit, which it cannot per IDL).
+    /// Mirrors undici's per-frame Blob deferral (`sender.js`).
+    /// (addresses critic MAJOR #6 + #19 — covers the "WsFrame::Blob
+    /// referenced by §V.4 prose but missing from the §II type list" gap.)
+    Blob { handle: v8::Global<v8::Object>, size: u64 },
+    /// Close frame. `code: None` means "send Close with empty payload"
+    /// per RFC 6455 §5.5.1
+    /// (https://datatracker.ietf.org/doc/html/rfc6455#section-5.5.1):
+    /// the close frame is sent without a status code field. Code 1005
+    /// is RESERVED as an internal sentinel and MUST NOT appear on the
+    /// wire (RFC 6455 §7.4.1
+    /// https://datatracker.ietf.org/doc/html/rfc6455#section-7.4.1).
+    /// (addresses critic CRITICAL #6)
+    Close { code: Option<u16>, reason: String },
 }
 ```
 
@@ -1410,37 +1427,58 @@ fn send(
         return Ok(());
     }
 
-    // Dispatch order per spec §3.1: ArrayBuffer → ArrayBufferView → Blob → string.
-    // (Spec lists them in this order; type-test predicates run in the
-    // same order. Critically: string is LAST so a Blob with a custom
-    // toString isn't silently coerced.)
-    if let Some(ab) = v8::Local::<v8::ArrayBuffer>::try_from(data).ok() {
-        // ArrayBuffer
+    // Dispatch order per WHATWG §3.1 send algorithm steps 3-6
+    // (https://websockets.spec.whatwg.org/#dom-websocket-send):
+    //   step 3: "If data is a string, ..."
+    //   step 4: "If data is a Blob object, ..."
+    //   step 5: "If data is an ArrayBuffer object, ..."
+    //   step 6: "If data is an ArrayBufferView object, ..."
+    // Type-test predicates are by branding (V8 internal slots / IsBlob),
+    // NOT by `data.toString` — so the "Blob.toString hazard" that the
+    // v1 rationale invented is not a real concern.
+    // (addresses critic CRITICAL #1)
+    if data.is_string() {
+        let str_v8 = data.to_string(scope)
+            .ok_or_else(|| OpError::error("send: string conversion failed"))?;
+        // USVString conversion: V8 strings can contain unpaired
+        // surrogates; per WebIDL USVString
+        // (https://webidl.spec.whatwg.org/#es-USVString) the spec replaces
+        // them with U+FFFD before transmission. `to_rust_string_lossy`
+        // performs the same replacement.
+        let s = str_v8.to_rust_string_lossy(scope);
+        self.queue_text(s);
+        return Ok(());
+    }
+    // Blob — duck-type via has-internal-field-0-and-Blob-tag.
+    if crate::blob::is_blob(scope, data) {
+        // Per spec step 4: enqueue a "send placeholder" with the Blob's
+        // size so bufferedAmount reflects the byte count synchronously,
+        // and resolve the actual bytes in the send pump. Matches undici
+        // (`sender.js`).
+        let blob_size = crate::blob::size_sync(scope, data);
+        self.queue_blob(scope, data, blob_size);
+        return Ok(());
+    }
+    if let Ok(ab) = v8::Local::<v8::ArrayBuffer>::try_from(data) {
         let bs = ab.get_backing_store(scope);
         let bytes = bs.iter().map(|c| c.get()).collect::<Vec<u8>>();
         self.queue_binary(bytes);
         return Ok(());
     }
-    if let Some(view) = v8::Local::<v8::ArrayBufferView>::try_from(data).ok() {
-        // ArrayBufferView (Uint8Array, Float32Array, DataView, …)
-        // Per spec: send the underlying buffer's bytes from view.byteOffset,
-        // view.byteLength.
+    if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(data) {
+        // ArrayBufferView (Uint8Array, Float32Array, DataView, …) —
+        // per spec, send the underlying buffer's bytes from
+        // view.byteOffset, view.byteLength.
         let mut buf = vec![0u8; view.byte_length()];
         let copied = view.copy_contents(&mut buf);
         debug_assert_eq!(copied, buf.len());
         self.queue_binary(buf);
         return Ok(());
     }
-    // Blob — duck-type via has-internal-field-0-and-Blob-tag.
-    if crate::blob::is_blob(scope, data) {
-        let blob_bytes = crate::blob::extract_bytes_sync(scope, data)?;
-        self.queue_binary(blob_bytes);
-        return Ok(());
-    }
-    // String — fallthrough.
-    let Some(str_v8) = data.to_string(scope) else {
-        return Err(OpError::error("send: data could not be coerced"));
-    };
+    // Per WHATWG §3.1: if data matches none of the above, the WebIDL
+    // union conversion algorithm coerces to USVString.
+    let str_v8 = data.to_string(scope)
+        .ok_or_else(|| OpError::error("send: data could not be coerced"))?;
     let s = str_v8.to_rust_string_lossy(scope);
     self.queue_text(s);
     Ok(())
@@ -1468,15 +1506,21 @@ fn notify_send_pump(&self) {
 }
 ```
 
-The `queue_binary` path for Blob: in the v1 we extract bytes synchronously
-because `Blob.bytes()` is async per IDL. The simplest spec-compliant
-path is "send the Blob's bytes" — but the spec is silent on whether
-this is sync or async. undici's path (`undici/lib/web/websocket/sender.js`)
-queues a sentinel and resolves the bytes asynchronously, making
-`bufferedAmount` jump immediately by the Blob's `.size` and the actual
-bytes wired at frame time. v1 takes the same approach — a `WsFrame::Blob`
-variant is added that defers byte extraction until the send pump
-processes it.
+The Blob path defers byte extraction: `Blob.bytes()` is async per IDL,
+and the spec is silent on whether the WebSocket send is sync or async at
+the byte level. v2 follows undici (`undici/lib/web/websocket/sender.js`):
+`bufferedAmount` jumps by `blob.size` synchronously, and the send pump
+extracts bytes when it pops the frame. The `WsFrame::Blob { handle, size }`
+variant in §II.1 carries the Global<Object> + cached size; the pump
+calls `crate::blob::extract_bytes(scope, handle).await` and then writes
+a Binary message. (addresses critic MAJOR #6 timing-discussion gap and
+#19 missing-WsFrame-variant gap.)
+
+`queue_blob` increments `bufferedAmount` by `size` and pushes the
+deferred frame onto the queue, so `socket.send(blob); socket.bufferedAmount`
+read on the next line returns the right value. The synchronous-increment-
+async-drain split matches undici's observable shape and passes WPT
+`Send-binary-blob.any.js`'s bufferedAmount-after-send assertion.
 
 ### V.5. close(code, reason) — validation + state transition
 
