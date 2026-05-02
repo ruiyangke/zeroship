@@ -98,6 +98,47 @@ const MAX_NONCE_LEN: usize = 64;
 const EMPTY_BODY_SHA256_HEX: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
+/// Domain-separator tag for canonical v1.1. Prepended to every v1.1
+/// canonical-string so a captured v1 signature (no tag) cannot be
+/// replayed as a v1.1 request and vice-versa. ASCII; no embedded
+/// newlines (the `\n` separator inside the canonical is the field
+/// delimiter, not part of this tag).
+const V1_1_DOMAIN_TAG: &str = "ED25519-V1.1";
+
+/// Canonical-string version. Picked by the dispatcher (the agent uses
+/// the path prefix `/proxy/` to choose v1.1; everything else stays on
+/// v1). Wire-stable; new variants append, never reorder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanonicalKind {
+    /// Original wire-protocol-v1: `method\npath\nts\nnonce\nsha256_hex(body)`.
+    /// Query strings are NOT covered (and rejected outright by the
+    /// /exec, /files, /tree handlers). Used by every endpoint that
+    /// pre-dates the preview proxy.
+    V1,
+    /// `auth.ed25519-v1.1` — adds a domain-separator tag and folds
+    /// the URL query into the canonical so the proxy endpoints
+    /// (`/proxy/{port}/{path*}?...`) can carry Vite cache-busters
+    /// (`?t=…`) without breaking the signature. Used by `/proxy/...`.
+    ///
+    /// ```text
+    /// canonical_v1.1 = "ED25519-V1.1\n"
+    ///                + method + "\n"
+    ///                + path  // raw bytes; if URL had `?`, the
+    ///                + canonical_query  //   `?` is INCLUDED literally
+    ///                + "\n" + ts + "\n" + nonce + "\n"
+    ///                + sha256_hex(body)
+    /// ```
+    ///
+    /// Empty-vs-absent query (round-6 I2 corner-case table):
+    /// - URL bytes contain `?` → the literal `?` AND the bytes between
+    ///   `?` and `#` (or end) are included. `/foo?` → `…/foo?\n…`.
+    /// - URL bytes do NOT contain `?` → the canonical does NOT include
+    ///   the literal `?` separator. `/foo` → `…/foo\n…`.
+    /// Both signer and verifier MUST hash the same bytes per these
+    /// rules; the helper [`v1_1_path_query`] enforces them.
+    V1_1,
+}
+
 /// Reasons a signature fails. Each maps to a distinct audit event so
 /// alerting can distinguish a clock-skew operator mistake from an
 /// actual replay attack from a wrong-key controller.
@@ -116,6 +157,13 @@ pub enum AuthFail {
     /// Ed25519 verification failed — wrong key, tampered
     /// body/path/method, malformed signature scalar, etc.
     BadSignature,
+    /// The canonical-version selected by the dispatcher (e.g. v1.1
+    /// for `/proxy/...`) doesn't match what the controller signed.
+    /// Distinct from `BadSignature` so audit + alerting can spot a
+    /// controller misconfigured to sign v1 against the proxy path
+    /// (or vice-versa) without lighting up the same dashboard tile
+    /// as an actual signature-tamper attempt.
+    WrongCanonicalVersion,
 }
 
 impl AuthFail {
@@ -128,6 +176,7 @@ impl AuthFail {
             AuthFail::ReplayedNonce => "replayed-nonce",
             AuthFail::BadSignatureEncoding => "bad-signature-encoding",
             AuthFail::BadSignature => "bad-signature",
+            AuthFail::WrongCanonicalVersion => "wrong-canonical-version",
         }
     }
 }
@@ -163,10 +212,10 @@ impl Verifier {
         &self.pubkey
     }
 
-    /// Verify a request. Returns `Ok(())` on a valid signature, an
-    /// [`AuthFail`] otherwise. Side effect on success: the nonce is
-    /// recorded so a subsequent identical request is rejected as
-    /// `ReplayedNonce`.
+    /// Verify a v1-canonical request. Equivalent to
+    /// [`Verifier::verify_kind`] with [`CanonicalKind::V1`] and
+    /// `path_query` set to the bare path (no query). Kept as the
+    /// short-form for the existing (non-proxy) handlers.
     ///
     /// Caller passes the request method (`"GET"`, `"POST"`, ...),
     /// the URL path (no query string), the **raw** body bytes (or
@@ -176,6 +225,40 @@ impl Verifier {
         &self,
         method: &str,
         path: &str,
+        body: &[u8],
+        ts_hdr: &str,
+        nonce_hdr: &str,
+        sig_hdr: &str,
+    ) -> Result<(), AuthFail> {
+        self.verify_kind(
+            CanonicalKind::V1,
+            method,
+            path,
+            body,
+            ts_hdr,
+            nonce_hdr,
+            sig_hdr,
+        )
+    }
+
+    /// Verify a request under a specific [`CanonicalKind`].
+    ///
+    /// For [`CanonicalKind::V1`] the `path_query` argument MUST be
+    /// the bare path with no query (callers pass `req.path()` and
+    /// gate on "no query string" themselves; the verifier doesn't
+    /// re-check that).
+    ///
+    /// For [`CanonicalKind::V1_1`] the `path_query` argument MUST be
+    /// the v1.1 path-and-query string per [`v1_1_path_query`]
+    /// (path bytes, then if the URL had a `?`, the literal `?`
+    /// followed by everything up to a `#` or end-of-URL). The signer
+    /// and verifier MUST agree byte-exact; the helper centralises
+    /// the rule.
+    pub fn verify_kind(
+        &self,
+        kind: CanonicalKind,
+        method: &str,
+        path_query: &str,
         body: &[u8],
         ts_hdr: &str,
         nonce_hdr: &str,
@@ -216,8 +299,14 @@ impl Verifier {
         } else {
             hex::encode(Sha256::digest(body))
         };
-        let canonical =
-            format!("{method}\n{path}\n{ts}\n{nonce_hdr}\n{body_hash_hex}");
+        let canonical = build_canonical(
+            kind,
+            method,
+            path_query,
+            ts,
+            nonce_hdr,
+            &body_hash_hex,
+        );
 
         // 5. Verify under the controller's public key.
         //    `verify_strict` rejects malleable / non-canonical sigs
@@ -241,6 +330,62 @@ impl Verifier {
     }
 }
 
+/// Build the canonical-string for a given [`CanonicalKind`].
+///
+/// Centralises the format so signer and verifier are guaranteed
+/// byte-identical. Anyone reading this should remember: every byte
+/// that lands in the returned string MUST land in the controller's
+/// signer too. Don't add headers, don't normalise whitespace, don't
+/// uppercase — the canonical is the contract.
+fn build_canonical(
+    kind: CanonicalKind,
+    method: &str,
+    path_query: &str,
+    ts: u64,
+    nonce: &str,
+    body_hash_hex: &str,
+) -> String {
+    match kind {
+        CanonicalKind::V1 => {
+            format!("{method}\n{path_query}\n{ts}\n{nonce}\n{body_hash_hex}")
+        }
+        CanonicalKind::V1_1 => {
+            format!(
+                "{V1_1_DOMAIN_TAG}\n{method}\n{path_query}\n{ts}\n{nonce}\n{body_hash_hex}"
+            )
+        }
+    }
+}
+
+/// Compose the v1.1 path-and-query slot from a raw request URI.
+///
+/// **Rules (round-6 § II.1 I2):**
+///
+/// - If `raw_uri` contains `?`, the result is `path` followed by `?`
+///   and everything between the first `?` and the first `#` (or end).
+///   Empty params are preserved (`/foo?` → `/foo?`).
+/// - If `raw_uri` does NOT contain `?`, the result is the bare path
+///   bytes — NO trailing `?` is appended. (Same path that a v1
+///   canonical would use, but bound under a different domain-separator
+///   so the two canonicals can never collide.)
+/// - The fragment (`#…`) is stripped — it never reaches a server in
+///   HTTP/1.1 anyway.
+/// - The path bytes are passed through raw — no decode, no reencode,
+///   no `..` collapsing. The signer (controller) and verifier (agent)
+///   MUST receive the same `raw_uri` bytes from ntex; round-6's
+///   "dispatcher byte-equality" invariant lives at the call site.
+///
+/// Returns a borrow of `raw_uri` so the caller doesn't allocate when
+/// the URI is the canonical bytes already.
+pub fn v1_1_path_query(raw_uri: &str) -> &str {
+    // Trim a fragment first if any.
+    let no_frag = match raw_uri.find('#') {
+        Some(i) => &raw_uri[..i],
+        None => raw_uri,
+    };
+    no_frag
+}
+
 impl std::fmt::Debug for Verifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Pubkey is non-secret; emit a short fingerprint so logs
@@ -261,7 +406,9 @@ pub fn pubkey_fingerprint(pk: &VerifyingKey) -> String {
     hex::encode(&digest[..8])
 }
 
-/// Sign a request, producing the `X-Sbx-Signature` header value.
+/// Sign a v1-canonical request, producing the `X-Sbx-Signature`
+/// header value. Equivalent to [`sign_kind`] with
+/// [`CanonicalKind::V1`].
 ///
 /// **Controller-side helper.** The agent never imports
 /// `SigningKey` and never calls this function — it's compiled in
@@ -280,13 +427,45 @@ pub fn sign(
     ts: u64,
     nonce: &str,
 ) -> String {
+    sign_kind(
+        CanonicalKind::V1,
+        signing_key,
+        method,
+        path,
+        body,
+        ts,
+        nonce,
+    )
+}
+
+/// Sign a request under a specific [`CanonicalKind`].
+///
+/// `path_query` carries the bare path for [`CanonicalKind::V1`] and
+/// the v1.1 path-and-query string for [`CanonicalKind::V1_1`] —
+/// see [`v1_1_path_query`] for the byte-exact format.
+pub fn sign_kind(
+    kind: CanonicalKind,
+    signing_key: &ed25519_dalek::SigningKey,
+    method: &str,
+    path_query: &str,
+    body: &[u8],
+    ts: u64,
+    nonce: &str,
+) -> String {
     use ed25519_dalek::Signer;
     let body_hash_hex: String = if body.is_empty() {
         EMPTY_BODY_SHA256_HEX.to_string()
     } else {
         hex::encode(Sha256::digest(body))
     };
-    let canonical = format!("{method}\n{path}\n{ts}\n{nonce}\n{body_hash_hex}");
+    let canonical = build_canonical(
+        kind,
+        method,
+        path_query,
+        ts,
+        nonce,
+        &body_hash_hex,
+    );
     let sig: Signature = signing_key.sign(canonical.as_bytes());
     B64.encode(sig.to_bytes())
 }
@@ -563,5 +742,268 @@ mod tests {
         assert_eq!(fp.len(), 16, "fingerprint should be 8 bytes hex");
         // Stable for the deterministic test key.
         assert_eq!(fp, pubkey_fingerprint(&keypair().1));
+    }
+
+    // ─── canonical v1.1 ───────────────────────────────────────────
+
+    #[test]
+    fn v1_1_path_query_drops_fragment() {
+        // Fragments never reach the server in HTTP/1.1; the helper
+        // strips them so signer and verifier see the same bytes.
+        assert_eq!(v1_1_path_query("/proxy/5173/foo"), "/proxy/5173/foo");
+        assert_eq!(v1_1_path_query("/proxy/5173/foo#frag"), "/proxy/5173/foo");
+        assert_eq!(
+            v1_1_path_query("/proxy/5173/foo?a=1#frag"),
+            "/proxy/5173/foo?a=1"
+        );
+    }
+
+    /// Round-6 § II.1 I2 — the 6-row corner-case table. Every row
+    /// pins the byte-exact canonical fragment for v1.1 path-query.
+    #[test]
+    fn v1_1_path_query_corner_cases() {
+        // Row 1: no `?` → bare path, no trailing `?` appended.
+        assert_eq!(v1_1_path_query("/proxy/5173/foo"), "/proxy/5173/foo");
+        // Row 2: literal `?` with empty params → preserved as-is.
+        assert_eq!(v1_1_path_query("/proxy/5173/foo?"), "/proxy/5173/foo?");
+        // Row 3: single param.
+        assert_eq!(v1_1_path_query("/proxy/5173/foo?a=1"), "/proxy/5173/foo?a=1");
+        // Row 4: multiple params (NOT sorted — we pass through raw
+        // bytes; the controller MUST emit the same order it signs).
+        assert_eq!(
+            v1_1_path_query("/proxy/5173/foo?a=1&b=2"),
+            "/proxy/5173/foo?a=1&b=2"
+        );
+        // Row 5: fragment without query.
+        assert_eq!(v1_1_path_query("/proxy/5173/foo#frag"), "/proxy/5173/foo");
+        // Row 6: fragment after query.
+        assert_eq!(
+            v1_1_path_query("/proxy/5173/foo?a=1#frag"),
+            "/proxy/5173/foo?a=1"
+        );
+    }
+
+    #[test]
+    fn v1_1_canonical_includes_domain_tag() {
+        // A v1.1-signed request MUST start with the ED25519-V1.1 tag.
+        // This is the property that closes cross-version replay (a v1
+        // canonical has no leading tag and therefore can't pass v1.1
+        // verification regardless of the underlying signature).
+        let (sk, pk) = keypair();
+        let v = Verifier::new(pk);
+        let ts = ts_now();
+        let nonce = "v1-1-tag";
+        let path_query = "/proxy/5173/foo";
+        let sig = sign_kind(CanonicalKind::V1_1, &sk, "GET", path_query, b"", ts, nonce);
+        assert!(v
+            .verify_kind(
+                CanonicalKind::V1_1,
+                "GET",
+                path_query,
+                b"",
+                &ts.to_string(),
+                nonce,
+                &sig,
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn v1_1_query_is_covered() {
+        // Tampering with the query bytes after signing must invalidate.
+        let (sk, pk) = keypair();
+        let v = Verifier::new(pk);
+        let ts = ts_now();
+        let nonce = "v1-1-q";
+        let signed = "/proxy/5173/foo?a=1";
+        let sent = "/proxy/5173/foo?a=2";
+        let sig = sign_kind(CanonicalKind::V1_1, &sk, "GET", signed, b"", ts, nonce);
+        assert_eq!(
+            v.verify_kind(
+                CanonicalKind::V1_1,
+                "GET",
+                sent,
+                b"",
+                &ts.to_string(),
+                nonce,
+                &sig,
+            ),
+            Err(AuthFail::BadSignature)
+        );
+    }
+
+    #[test]
+    fn v1_canonical_does_not_validate_under_v1_1() {
+        // CRITICAL-4 negative: a v1 canonical (no domain-separator)
+        // sent against a v1.1 verifier MUST fail with BadSignature.
+        // The verifier does NOT translate; the dispatcher chooses one
+        // kind and that's the kind we evaluate.
+        let (sk, pk) = keypair();
+        let v = Verifier::new(pk);
+        let ts = ts_now();
+        let nonce = "v1-as-v11";
+        let path = "/proxy/5173/foo";
+        let v1_sig = sign_kind(CanonicalKind::V1, &sk, "GET", path, b"", ts, nonce);
+        // Verifier picks v1.1; v1's canonical (no leading tag) won't match.
+        assert_eq!(
+            v.verify_kind(
+                CanonicalKind::V1_1,
+                "GET",
+                path,
+                b"",
+                &ts.to_string(),
+                nonce,
+                &v1_sig,
+            ),
+            Err(AuthFail::BadSignature)
+        );
+    }
+
+    #[test]
+    fn v1_1_canonical_does_not_validate_under_v1() {
+        // Symmetric: a v1.1 signature includes the domain tag, so v1's
+        // tag-less canonical computation produces a different message
+        // and verification fails.
+        let (sk, pk) = keypair();
+        let v = Verifier::new(pk);
+        let ts = ts_now();
+        let nonce = "v11-as-v1";
+        let path = "/exec";
+        let v11_sig = sign_kind(CanonicalKind::V1_1, &sk, "POST", path, b"x", ts, nonce);
+        assert_eq!(
+            v.verify_kind(
+                CanonicalKind::V1,
+                "POST",
+                path,
+                b"x",
+                &ts.to_string(),
+                nonce,
+                &v11_sig,
+            ),
+            Err(AuthFail::BadSignature)
+        );
+    }
+
+    #[test]
+    fn v1_1_empty_query_is_distinct_from_absent_query() {
+        // Round-6 I2 invariant: `?` with empty params and no `?` are
+        // signed differently. A controller that signed `/foo?` and a
+        // verifier asked to validate `/foo` (or vice-versa) MUST 401.
+        let (sk, pk) = keypair();
+        let v = Verifier::new(pk);
+        let ts = ts_now();
+        let nonce_a = "empty-q-a";
+        let nonce_b = "empty-q-b";
+        // Sign for `/foo?` (literal `?`, empty query).
+        let sig = sign_kind(CanonicalKind::V1_1, &sk, "GET", "/proxy/5173/foo?", b"", ts, nonce_a);
+        // Verifying against `/foo` (no `?`) MUST fail.
+        assert_eq!(
+            v.verify_kind(
+                CanonicalKind::V1_1,
+                "GET",
+                "/proxy/5173/foo",
+                b"",
+                &ts.to_string(),
+                nonce_a,
+                &sig,
+            ),
+            Err(AuthFail::BadSignature)
+        );
+        // And sign-for-`/foo` does not validate at `/foo?`.
+        let sig2 = sign_kind(CanonicalKind::V1_1, &sk, "GET", "/proxy/5173/foo", b"", ts, nonce_b);
+        assert_eq!(
+            v.verify_kind(
+                CanonicalKind::V1_1,
+                "GET",
+                "/proxy/5173/foo?",
+                b"",
+                &ts.to_string(),
+                nonce_b,
+                &sig2,
+            ),
+            Err(AuthFail::BadSignature)
+        );
+    }
+
+    #[test]
+    fn v1_1_body_hash_covered() {
+        // Bodies bind into the canonical the same way as v1.
+        let (sk, pk) = keypair();
+        let v = Verifier::new(pk);
+        let ts = ts_now();
+        let nonce = "v1-1-body";
+        let sig = sign_kind(
+            CanonicalKind::V1_1,
+            &sk,
+            "POST",
+            "/proxy/3000/api",
+            b"hello",
+            ts,
+            nonce,
+        );
+        assert_eq!(
+            v.verify_kind(
+                CanonicalKind::V1_1,
+                "POST",
+                "/proxy/3000/api",
+                b"world",
+                &ts.to_string(),
+                nonce,
+                &sig,
+            ),
+            Err(AuthFail::BadSignature)
+        );
+    }
+
+    #[test]
+    fn auth_fail_wrong_canonical_version_string_stable() {
+        // Wire-stable identifier; renaming would break audit pipelines.
+        assert_eq!(
+            AuthFail::WrongCanonicalVersion.as_str(),
+            "wrong-canonical-version"
+        );
+    }
+
+    #[test]
+    fn v1_1_path_traversal_signature_binds_percent_encoded_bytes() {
+        // CRITICAL-4: the percent-encoded bytes MUST be in the canonical
+        // verbatim. A captured signature for `/proxy/5173/%2e%2e%2fexec`
+        // must NOT validate `/proxy/5173/../exec` and vice-versa — they
+        // are different byte strings to the canonical, regardless of how
+        // the upstream interprets them.
+        let (sk, pk) = keypair();
+        let v = Verifier::new(pk);
+        let ts = ts_now();
+        let nonce = "trav";
+        let raw = "/proxy/5173/%2e%2e%2fexec";
+        let decoded = "/proxy/5173/../exec";
+        let sig = sign_kind(CanonicalKind::V1_1, &sk, "GET", raw, b"", ts, nonce);
+        // The percent-encoded form validates.
+        assert!(v
+            .verify_kind(
+                CanonicalKind::V1_1,
+                "GET",
+                raw,
+                b"",
+                &ts.to_string(),
+                nonce,
+                &sig
+            )
+            .is_ok());
+        // The decoded form does not — different bytes, different canonical.
+        let nonce2 = "trav2";
+        let sig2 = sign_kind(CanonicalKind::V1_1, &sk, "GET", raw, b"", ts, nonce2);
+        assert_eq!(
+            v.verify_kind(
+                CanonicalKind::V1_1,
+                "GET",
+                decoded,
+                b"",
+                &ts.to_string(),
+                nonce2,
+                &sig2,
+            ),
+            Err(AuthFail::BadSignature)
+        );
     }
 }

@@ -32,7 +32,7 @@ use serde_json::json;
 use crate::audit;
 use crate::exec;
 use crate::files::Workspace;
-use crate::sig::{AuthFail, Verifier};
+use crate::sig::{self, AuthFail, CanonicalKind, Verifier};
 use crate::version;
 
 /// State shared by every handler. Cheap to clone (`Arc` inside).
@@ -86,35 +86,81 @@ fn err(status: u16, msg: impl Into<String>) -> HttpResponse {
     resp.json(&json!({"error": s}))
 }
 
+/// Pick the canonical-string version for a request based on the path.
+///
+/// **Round-6 § II.1 CRITICAL-4 dispatcher byte-equality invariant.**
+/// The byte string we test (`req.path()`) is identical to the byte
+/// string ntex's route matcher uses to dispatch the handler, with NO
+/// normalization between them. A request whose URL is
+/// `/proxy/5173/%2e%2e%2fexec` therefore lands on the proxy handler
+/// AND on the v1.1 chooser; ntex never decodes the percent-escapes
+/// before route matching, so the dispatcher and matcher agree.
+///
+/// Paths under `/proxy/` use [`CanonicalKind::V1_1`] (queries are
+/// covered, with a domain-separator tag). Everything else stays on
+/// [`CanonicalKind::V1`] (legacy `/exec`, `/files`, `/tree`, etc.).
+pub(crate) fn canonical_kind_for(path: &str) -> CanonicalKind {
+    if path.starts_with("/proxy/") {
+        CanonicalKind::V1_1
+    } else {
+        CanonicalKind::V1
+    }
+}
+
 /// HMAC verification for an auth-gated request. Reads the three
-/// `X-Sbx-*` headers, recomputes the canonical-string HMAC over the
-/// request method, path, timestamp, nonce, and **body**, and rejects
-/// anything that doesn't match in constant time.
+/// `X-Sbx-*` headers, recomputes the canonical-string signature over
+/// the request method, path (+ query, for v1.1), timestamp, nonce,
+/// and **body**, and rejects anything that doesn't match.
 ///
 /// On any failure path, an audit event tagged with the specific
 /// failure reason is emitted (so alerting can distinguish a
 /// clock-skew operator mistake from an actual replay attack).
 /// Returns true iff every check passes.
 ///
-/// **Query strings are rejected outright.** The signed canonical
-/// string covers `req.path()`, which excludes the query. A signed
-/// `/foo` would otherwise also be valid for `/foo?evil=1` — and a
-/// future handler that reads query params would silently accept the
-/// attacker-controlled bit. We refuse query strings until we
-/// explicitly extend the canonical to include them and bump
-/// `PROTOCOL_VERSION`.
+/// ## Canonical-version dispatch
+///
+/// Paths starting with `/proxy/` are verified under
+/// [`CanonicalKind::V1_1`] — the canonical includes the URL query
+/// and a `ED25519-V1.1` domain-separator tag. Every other path is
+/// verified under [`CanonicalKind::V1`]; for those, query strings are
+/// REJECTED outright (the same defense the original handler
+/// implemented).
+///
+/// ## Why the path-prefix dispatch is byte-equal with the route matcher
+///
+/// `req.path()` here is the same byte slice ntex used to choose this
+/// handler. We do not normalize, decode, or collapse — same input,
+/// same dispatch. See [`canonical_kind_for`] for the full invariant.
 fn verify_signed(req: &HttpRequest, body: &[u8], state: &AppState) -> bool {
     let method = req.method().as_str();
     let path = req.path();
+    let kind = canonical_kind_for(path);
 
-    if req.uri().query().is_some() {
-        audit::record(
-            audit::events::AUTH_FAIL,
-            &format!("method={method} path={path} reason=query-not-allowed"),
-        );
-        crate::metrics::inc_auth_fail("query-not-allowed");
-        return false;
-    }
+    // For v1: query strings are not in the canonical; refuse outright.
+    // For v1.1: the helper folds the query into the canonical bytes.
+    let path_query: String = match kind {
+        CanonicalKind::V1 => {
+            if req.uri().query().is_some() {
+                audit::record(
+                    audit::events::AUTH_FAIL,
+                    &format!("method={method} path={path} reason=query-not-allowed"),
+                );
+                crate::metrics::inc_auth_fail("query-not-allowed");
+                return false;
+            }
+            path.to_string()
+        }
+        CanonicalKind::V1_1 => {
+            // Reconstruct path-and-query from the request URI's
+            // path_and_query() so the bytes match what the controller
+            // signed. ntex's `uri()` returns a `http::Uri`; its
+            // `path_and_query()` gives "/path?query" (no fragment).
+            match req.uri().path_and_query() {
+                Some(pq) => sig::v1_1_path_query(pq.as_str()).to_string(),
+                None => path.to_string(),
+            }
+        }
+    };
 
     let h = req.headers();
     let ts_hdr = h
@@ -130,10 +176,15 @@ fn verify_signed(req: &HttpRequest, body: &[u8], state: &AppState) -> bool {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    match state
-        .verifier
-        .verify(method, path, body, ts_hdr, nonce_hdr, sig_hdr)
-    {
+    match state.verifier.verify_kind(
+        kind,
+        method,
+        &path_query,
+        body,
+        ts_hdr,
+        nonce_hdr,
+        sig_hdr,
+    ) {
         Ok(()) => true,
         Err(reason) => {
             let event = match reason {
@@ -150,6 +201,14 @@ fn verify_signed(req: &HttpRequest, body: &[u8], state: &AppState) -> bool {
             false
         }
     }
+}
+
+/// Re-export of [`verify_signed`] for the proxy module, which lives
+/// in a sibling file but needs to call the same auth machinery.
+/// Kept module-private (the function is already tested via the
+/// existing handler tests; the proxy module re-uses it 1:1).
+pub(crate) fn verify_signed_pub(req: &HttpRequest, body: &[u8], state: &AppState) -> bool {
+    verify_signed(req, body, state)
 }
 
 fn content_type(path: &str) -> &'static str {
