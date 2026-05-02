@@ -42,6 +42,8 @@ pub const CAPABILITIES: &[&str] = &[
     "files.tree-truncated",  // /tree response includes `truncated: bool`
     "fs.no-symlink-escape",  // openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)
     "auth.ed25519-v1",       // X-Sbx-{Timestamp,Nonce,Signature} Ed25519
+    "auth.ed25519-v1.1",     // v1.1 canonical (path+query, ED25519-V1.1 tag) for /proxy/...
+    "proxy.http-v1",         // ANY /proxy/{port}/{path*} HTTP forward (Phase 1)
 ];
 
 /// Agent crate version (`Cargo.toml`).

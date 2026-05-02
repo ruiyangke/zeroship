@@ -15,6 +15,7 @@ pub mod exec;
 pub mod files;
 pub mod handlers;
 pub mod metrics;
+pub mod proxy;
 pub mod reap;
 pub mod sig;
 pub mod version;

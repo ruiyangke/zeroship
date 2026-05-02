@@ -6522,6 +6522,7 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "uuid",
+ "zeroship-core",
 ]
 
 [[package]]
