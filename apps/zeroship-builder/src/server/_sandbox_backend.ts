@@ -159,6 +159,7 @@ export async function getOrCreateSandboxFor(threadId: string): Promise<{ id: str
   _inFlight.set(threadId, promise);
   return { id: await promise };
 }
+getOrCreateSandboxFor.config = { id: "_internal.getOrCreateSandboxFor" };
 
 // ─── path encoding ────────────────────────────────────────────────────
 //

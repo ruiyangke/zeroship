@@ -206,6 +206,32 @@ This is fragile — one accidental `export * from "./server/_wizard"` would
 publish `buildWizardStream` as an RPC endpoint that takes a writer and an
 abort signal as arguments.
 
+### Current mitigation (2026-05-01)
+
+The vite-plugin's manifest emitter refuses production builds when any
+exported procedure lacks an explicit `.config.id`. To unblock prod builds
+without changing the discovery loop, every internal helper that the
+manifest emitter sees ships with an `_internal.<name>` id:
+
+```ts
+export async function persistGet<T>(key: string, fallback: T): Promise<T> { /* … */ }
+persistGet.config = { id: "_internal.persistGet" };
+```
+
+Tagged helpers (10 total, all in underscore-prefixed files):
+- `_persist.ts`: `persistGet`, `persistSet`, `persistDelete`
+- `_wizard.ts`: `buildWizardStream`
+- `_translator.ts`: `buildTranslatedStream`
+- `_sandbox_backend.ts`: `getOrCreateSandboxFor`
+- `_survey_wire.ts`: `emitDataSurvey`
+- `_middleware.ts`: `dataPartMiddleware`
+- `_agent_writes.ts`: `gradeFromIssues`, `setQualityFromCritic`
+
+The `_internal.` prefix lets reviewers and a future kernel-side filter
+spot these. The underlying problem (no opt-out marker, no automated
+"don't publish underscore-prefixed module exports" guardrail in the
+plugin) remains; the right fix is still in the vite-plugin.
+
 ### Related references
 
 - `sdks/vite-plugin/src/rpc-registry.ts:90-110` — the discovery loop that

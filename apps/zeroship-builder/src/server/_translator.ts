@@ -385,6 +385,7 @@ export async function buildTranslatedStream(
     },
   });
 }
+buildTranslatedStream.config = { id: "_internal.buildTranslatedStream" };
 
 // --- helpers --------------------------------------------------------------
 

@@ -80,6 +80,7 @@ export function gradeFromIssues(issues: CriticIssue[]): QualityGrade {
   if (low === 1) return "A-";
   return "A";
 }
+gradeFromIssues.config = { id: "_internal.gradeFromIssues" };
 
 const GRADE_RANK: Record<QualityGrade, number> = {
   "A+": 12, A: 11, "A-": 10,
@@ -143,3 +144,4 @@ export async function setQualityFromCritic(
   };
   await persistSet(qualityKey(appId), scores);
 }
+setQualityFromCritic.config = { id: "_internal.setQualityFromCritic" };

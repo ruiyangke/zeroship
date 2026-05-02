@@ -107,3 +107,4 @@ export function emitDataSurvey(
   }
   return token;
 }
+emitDataSurvey.config = { id: "_internal.emitDataSurvey" };

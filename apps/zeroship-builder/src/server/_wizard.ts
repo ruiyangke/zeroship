@@ -383,6 +383,7 @@ export async function buildWizardStream(
     },
   });
 }
+buildWizardStream.config = { id: "_internal.buildWizardStream" };
 
 // --- helpers ------------------------------------------------------------
 
