@@ -44,6 +44,7 @@ for arg in "$@"; do
         --workers=*)  WORKERS="${arg#*=}" ;;
         --rate=*)     RATE="${arg#*=}"; MODE=rate ;;
         --saturate)   MODE=saturate ;;
+        --scenario=*) SCENARIO="${arg#*=}" ;;
     esac
 done
 
@@ -183,13 +184,12 @@ echo "================================================================="
 RESULTS_DIR="$(mktemp -d)"
 
 bench_target() {
-    local label=$1 port=$2 include_streaming=${3:-0}
-    local slot=$4
+    local label=$1 port=$2 slot=$3
     local out_file="$RESULTS_DIR/$slot.raw"
     printf "  [%d/4] %-30s" "$slot" "$label"
     local env_vars=(BENCH_HOST=127.0.0.1 BENCH_PORT="$port" BENCH_ECHO_PORT="$PORT_ECHO")
-    if [ "$include_streaming" = "0" ]; then
-        env_vars+=(BENCH_SKIP_STREAMING=1 BENCH_HTTP_GET=0)
+    if [ -n "${SCENARIO:-}" ]; then
+        env_vars+=(BENCH_SCENARIO="$SCENARIO")
     fi
     local start=$(date +%s)
     # zerobench's exit policy now gates on hard transport errors only
@@ -210,10 +210,10 @@ bench_target() {
 
 echo
 echo "=== Benchmarking targets ==="
-bench_target "v8-compio (1w)"           $PORT_V8_1         0  1
-bench_target "v8-compio (${WORKERS}w)"  $PORT_V8_N         1  2
-bench_target "node single"              $PORT_NODE         0  3
-bench_target "node cluster (${WORKERS}w)" $PORT_NODE_CLUSTER 0  4
+bench_target "v8-compio (1w)"           $PORT_V8_1         1
+bench_target "v8-compio (${WORKERS}w)"  $PORT_V8_N         2
+bench_target "node single"              $PORT_NODE         3
+bench_target "node cluster (${WORKERS}w)" $PORT_NODE_CLUSTER 4
 
 # ---------------------------------------------------------------------------
 # Pass 2: parse each result file into per-(target,scenario) pairs.
