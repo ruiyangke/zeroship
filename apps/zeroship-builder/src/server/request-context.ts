@@ -20,11 +20,14 @@ const KEY = "__zs_builder_req_ctx__";
 export function setContext(ctx: ReqCtx | undefined): void {
   (globalThis as any)[KEY] = ctx;
 }
+setContext.config = { id: "request-context.setContext" };
 
 export function getRequest(): Request | undefined {
   return ((globalThis as any)[KEY] as ReqCtx | undefined)?.request;
 }
+getRequest.config = { id: "request-context.getRequest" };
 
 export function getResponseHeaders(): Headers | undefined {
   return ((globalThis as any)[KEY] as ReqCtx | undefined)?.responseHeaders;
 }
+getResponseHeaders.config = { id: "request-context.getResponseHeaders" };

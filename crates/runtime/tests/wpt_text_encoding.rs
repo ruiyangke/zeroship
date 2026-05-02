@@ -1,6 +1,6 @@
 //! Run the W3C Web Platform Tests for TextEncoder/TextDecoder against
 //! our native impl. Source: https://github.com/web-platform-tests/wpt
-//! (encoding/ subdirectory). Files are vendored under `tests/wpt/`.
+//! (encoding/ subdirectory). Files are vendored under `crates/runtime/tests/wpt/`.
 //!
 //! Each WPT file uses the testharness.js framework — `test(fn, name)`,
 //! `assert_equals`, `assert_array_equals`, etc. We provide a minimal
@@ -349,15 +349,15 @@ fn parse_results(json: &str) -> Vec<TestResult> {
 // ---------------------------------------------------------------------------
 
 const WPT_FILES: &[(&str, &str)] = &[
-    ("api-basics", include_str!("wpt/api-basics.any.js")),
-    ("api-surrogates-utf8", include_str!("wpt/api-surrogates-utf8.any.js")),
-    ("textdecoder-arguments", include_str!("wpt/textdecoder-arguments.any.js")),
-    ("textdecoder-byte-order-marks", include_str!("wpt/textdecoder-byte-order-marks.any.js")),
-    ("textdecoder-eof", include_str!("wpt/textdecoder-eof.any.js")),
-    ("textdecoder-fatal", include_str!("wpt/textdecoder-fatal.any.js")),
-    ("textdecoder-streaming", include_str!("wpt/textdecoder-streaming.any.js")),
-    ("textdecoder-utf16-surrogates", include_str!("wpt/textdecoder-utf16-surrogates.any.js")),
-    ("encodeInto", include_str!("wpt/encodeInto.any.js")),
+    ("api-basics", include_str!("wpt/encoding/api-basics.any.js")),
+    ("api-surrogates-utf8", include_str!("wpt/encoding/api-surrogates-utf8.any.js")),
+    ("textdecoder-arguments", include_str!("wpt/encoding/textdecoder-arguments.any.js")),
+    ("textdecoder-byte-order-marks", include_str!("wpt/encoding/textdecoder-byte-order-marks.any.js")),
+    ("textdecoder-eof", include_str!("wpt/encoding/textdecoder-eof.any.js")),
+    ("textdecoder-fatal", include_str!("wpt/encoding/textdecoder-fatal.any.js")),
+    ("textdecoder-streaming", include_str!("wpt/encoding/textdecoder-streaming.any.js")),
+    ("textdecoder-utf16-surrogates", include_str!("wpt/encoding/textdecoder-utf16-surrogates.any.js")),
+    ("encodeInto", include_str!("wpt/encoding/encodeInto.any.js")),
 ];
 
 #[derive(Default, Debug)]

@@ -72,6 +72,7 @@ export async function register(input: {
 }): Promise<{ user: AuthUser }> {
   return proxy("/auth/register", { method: "POST", body: input });
 }
+register.config = { id: "auth.register" };
 
 export async function login(input: {
   email: string;
@@ -79,10 +80,12 @@ export async function login(input: {
 }): Promise<{ user: AuthUser }> {
   return proxy("/auth/login", { method: "POST", body: input });
 }
+login.config = { id: "auth.login" };
 
 export async function logout(): Promise<{ logged_out: boolean }> {
   return proxy("/auth/logout", { method: "POST" });
 }
+logout.config = { id: "auth.logout" };
 
 export async function userinfo(): Promise<UserInfo | null> {
   try {
@@ -92,4 +95,5 @@ export async function userinfo(): Promise<UserInfo | null> {
     throw e;
   }
 }
+userinfo.config = { id: "auth.userinfo" };
 

@@ -205,11 +205,14 @@ cargo test -p zeroship-gateway
 cargo test -p zeroship-runtime --lib
 cargo test -p compio-postgres -- --test-threads=1   # needs DB
 
-# Web Platform Tests (WPT) — vendored as a sparse, shallow git submodule
-# at tests/wpt for spec-conformance runners (Headers, encoding, streams,
-# fetch, compression). After cloning the repo:
+# Web Platform Tests (WPT) — pulled directly from a sparse, shallow
+# git submodule at crates/runtime/tests/wpt/ (co-located with the
+# runners that consume it). The `crates/runtime/tests/wpt_*.rs`
+# runners `include_str!` upstream files verbatim (test files stay
+# pristine — any shims/skips/sentinels live in the Rust runner code).
+# After cloning the repo:
 git submodule update --init --depth=1
-./tests/setup-wpt.sh                                # ~9MB sparse checkout
+./crates/runtime/tests/setup-wpt.sh                 # ~12MB sparse checkout
 
 # E2E + benchmarks
 ./tests/e2e_platform.sh

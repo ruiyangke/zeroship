@@ -1,0 +1,2348 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>zeroship — atelier · all pages</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..800;1,9..144,300..800&family=Public+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+  rel="stylesheet"
+/>
+<style>
+  /* ─── system ────────────────────────────────────────────────── */
+  :root {
+    --paper:   oklch(0.97 0.012 89);
+    --paper-2: oklch(0.94 0.014 86);
+    --paper-3: oklch(0.91 0.014 84);
+    --ink:     oklch(0.18 0.013 60);
+    --ink-soft:oklch(0.36 0.013 65);
+    --pencil:  oklch(0.55 0.012 70);
+    --rule:    oklch(0.78 0.014 75);
+    --rule-2:  oklch(0.85 0.014 78);
+    --tomato:  oklch(0.61 0.21 27);
+    --tomato-2:oklch(0.55 0.21 25);
+    --clay:    oklch(0.84 0.04 60);
+    --serif:   "Fraunces", "Times New Roman", serif;
+    --sans:    "Public Sans", system-ui, sans-serif;
+    --mono:    "JetBrains Mono", ui-monospace, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 16px;
+    line-height: 1.55;
+    font-feature-settings: "ss01" 1, "onum" 1;
+    -webkit-font-smoothing: antialiased;
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+    opacity: 0.45; mix-blend-mode: multiply;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.18 0 0 0 0 0.13 0 0 0 0 0.10 0 0 0 0.06 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  }
+  ::selection { background: var(--tomato); color: var(--paper); }
+
+  /* ─── side nav ───────────────────────────────────────────── */
+  nav.toc {
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    width: 220px;
+    padding: 28px 20px 28px 28px;
+    border-right: 1px solid var(--rule);
+    background: var(--paper-2);
+    z-index: 10;
+    overflow-y: auto;
+    font-family: var(--sans);
+  }
+  nav.toc h1 {
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 22px;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+    margin: 0 0 4px 0;
+  }
+  nav.toc h1 .dot { color: var(--tomato); }
+  nav.toc .sub {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--pencil);
+    margin-bottom: 22px;
+  }
+  nav.toc h2 {
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--pencil);
+    margin: 18px 0 6px 0;
+    letter-spacing: 0;
+  }
+  nav.toc a {
+    display: block;
+    text-decoration: none;
+    color: var(--ink-soft);
+    font-size: 12px;
+    line-height: 1.9;
+    padding: 0 0 0 4px;
+    border-left: 1px solid transparent;
+    transition: color 200ms, border-color 200ms;
+  }
+  nav.toc a:hover { color: var(--ink); border-color: var(--tomato); }
+  nav.toc a .num {
+    display: inline-block;
+    width: 24px;
+    color: var(--tomato);
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 11px;
+  }
+
+  /* ─── pages ─────────────────────────────────────────────── */
+  main.book { margin-left: 220px; }
+
+  section.page {
+    position: relative;
+    min-height: 100vh;
+    padding: 48px 64px 96px 64px;
+    border-bottom: 1px solid var(--rule);
+    overflow: hidden;
+  }
+  section.page > .corner {
+    position: absolute;
+    top: 28px; right: 32px;
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 13px;
+    color: var(--pencil);
+  }
+  section.page > .corner .num {
+    color: var(--tomato);
+    font-feature-settings: "lnum" 1;
+    margin-right: 6px;
+  }
+  section.page > h2.label {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 36px;
+    line-height: 1.04;
+    letter-spacing: -0.02em;
+    margin: 0 0 8px 0;
+    max-width: 760px;
+  }
+  section.page > h2.label em { font-style: italic; color: var(--tomato); }
+  section.page > p.desc {
+    font-family: var(--serif);
+    font-size: 16px;
+    color: var(--ink-soft);
+    max-width: 660px;
+    margin: 0 0 32px 0;
+  }
+
+  /* surface — represents a "screen" within a page */
+  .surface {
+    background: #fff;
+    border: 1px solid var(--rule);
+    box-shadow:
+      0 1px 0 0 #fff,
+      0 28px 36px -22px rgba(34,22,12,0.16),
+      0 8px 16px -10px rgba(34,22,12,0.08);
+    padding: 0;
+    overflow: hidden;
+    margin-bottom: 16px;
+  }
+  .surface .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 18px;
+    border-bottom: 1px solid var(--rule);
+    background: var(--paper);
+    font-family: var(--serif);
+    font-size: 13px;
+  }
+  .surface .topbar .left {
+    display: inline-flex; align-items: baseline; gap: 12px;
+  }
+  .surface .topbar .left .wm {
+    font-style: italic; font-weight: 500; font-size: 17px;
+  }
+  .surface .topbar .left .wm .dot { color: var(--tomato); }
+  .surface .topbar .left .crumb a {
+    color: var(--ink-soft); text-decoration: none;
+    font-style: italic; font-size: 13px;
+  }
+  .surface .topbar .left .crumb .sep { color: var(--rule); margin: 0 4px; }
+  .surface .topbar .center {
+    display: inline-flex; align-items: baseline; gap: 10px;
+    font-family: var(--serif); font-size: 12.5px; color: var(--ink-soft);
+    font-style: italic;
+  }
+  .surface .topbar .right {
+    display: inline-flex; align-items: center; gap: 12px;
+  }
+  .surface .topbar .nav-link {
+    text-decoration: none;
+    color: var(--ink-soft);
+    font-family: var(--sans);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    padding: 4px 0;
+    border-bottom: 1px solid transparent;
+  }
+  .surface .topbar .nav-link:hover { color: var(--ink); border-color: var(--ink); }
+  .surface .topbar .acct {
+    width: 26px; height: 26px; border-radius: 50%;
+    background: var(--ink); color: var(--paper);
+    display: inline-flex; align-items: center; justify-content: center;
+    font-family: var(--sans); font-weight: 600; font-size: 10.5px;
+  }
+  .surface .topbar .pulse {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--tomato);
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%,100% { box-shadow: 0 0 0 0 rgba(220,75,50,0.5); }
+    50%     { box-shadow: 0 0 0 6px rgba(220,75,50,0); }
+  }
+  .surface .topbar .url-chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 5px 11px; border: 1px solid var(--rule); border-radius: 999px;
+    background: var(--paper-2); font-family: var(--mono); font-size: 11px;
+    color: var(--ink-soft); text-decoration: none;
+  }
+  .surface .topbar .url-chip .live-dot {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: var(--tomato); box-shadow: 0 0 0 2.5px rgba(220,75,50,0.18);
+  }
+  .surface .body {
+    padding: 36px 56px;
+  }
+  .surface .body.tight { padding: 22px 28px; }
+  .surface .body.flush { padding: 0; }
+
+  /* common atoms */
+  .label-uc {
+    font-family: var(--sans);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--pencil);
+  }
+  h3.serif {
+    font-family: var(--serif); font-weight: 500;
+    font-size: 28px; line-height: 1.05;
+    margin: 0 0 6px 0; letter-spacing: -0.015em;
+  }
+  h3.serif em { font-style: italic; color: var(--tomato); }
+  p.serif { font-family: var(--serif); font-size: 16px; line-height: 1.55; }
+  .rule-h { height: 1px; background: var(--rule); border: 0; margin: 0; }
+
+  /* stamp button */
+  .stamp-btn {
+    appearance: none; border: 0;
+    background: var(--tomato); color: var(--paper);
+    font-family: var(--sans); font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.18em;
+    font-size: 11.5px;
+    padding: 12px 22px 10px 22px;
+    cursor: pointer;
+    box-shadow:
+      inset 0 0 0 1px rgba(255,255,255,0.18),
+      0 1px 0 0 var(--tomato-2),
+      0 5px 0 -2px rgba(60,12,0,0.18);
+    transition: transform 80ms ease, box-shadow 80ms ease;
+    transform: rotate(-0.5deg);
+    border-radius: 1px;
+  }
+  .stamp-btn:hover { transform: rotate(-0.2deg) translateY(-1px); }
+  .stamp-btn::after {
+    content: " →"; font-family: var(--serif); font-style: italic;
+    font-weight: 400; font-size: 14px;
+    text-transform: none; letter-spacing: 0;
+    margin-left: 4px;
+  }
+  .ghost-btn {
+    appearance: none;
+    background: transparent;
+    border: 1px solid var(--rule);
+    color: var(--ink-soft);
+    padding: 10px 18px 8px 18px;
+    font-family: var(--sans); font-weight: 500;
+    text-transform: uppercase; letter-spacing: 0.18em;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 200ms;
+  }
+  .ghost-btn:hover { border-color: var(--ink); color: var(--ink); }
+
+  /* notebook prompt */
+  .notebook {
+    position: relative;
+    background: #fff;
+    border: 1px solid var(--rule);
+    padding: 26px 32px 18px 38px;
+    box-shadow:
+      0 22px 28px -16px rgba(34,22,12,0.10),
+      0 4px 8px -4px rgba(34,22,12,0.06);
+  }
+  .notebook::before {
+    content: ""; position: absolute;
+    top: 0; bottom: 0; left: 22px;
+    width: 1px; background: var(--tomato); opacity: 0.35;
+  }
+  .notebook .label-uc { margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+  .notebook .label-uc::before {
+    content: ""; width: 14px; height: 1px; background: var(--ink);
+  }
+  .notebook textarea {
+    width: 100%; border: 0; resize: none;
+    font-family: var(--serif); font-size: 20px; line-height: 1.4;
+    background: transparent; color: var(--ink);
+    outline: none;
+    min-height: 60px;
+  }
+  .notebook textarea::placeholder {
+    color: var(--pencil); font-style: italic;
+  }
+  .notebook .underline {
+    height: 2px; background: var(--ink); transform-origin: 0 50%;
+    transform: scaleX(0); transition: transform 480ms cubic-bezier(.2,.7,.2,1);
+  }
+  .notebook:focus-within .underline { transform: scaleX(1); }
+  .notebook .row {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-top: 12px; gap: 12px;
+  }
+  .hint { font-family: var(--sans); font-size: 11px; color: var(--pencil); letter-spacing: 0.04em; }
+  .hint kbd {
+    font-size: 10px; padding: 1px 5px;
+    border: 1px solid var(--rule); border-radius: 3px;
+    background: var(--paper-2); margin: 0 1px;
+  }
+
+  /* ─── page styles per section ───────────────────────────── */
+
+  /* 00 cover */
+  .cover-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 36px;
+  }
+  .swatch {
+    height: 140px; padding: 14px;
+    display: flex; flex-direction: column; justify-content: space-between;
+  }
+  .swatch .nm { font-family: var(--serif); font-style: italic; font-size: 14px; }
+  .swatch .hex { font-family: var(--mono); font-size: 11px; opacity: 0.75; }
+  .specimen { font-family: var(--serif); font-size: 92px; line-height: 1; letter-spacing: -0.025em; }
+  .specimen em { font-style: italic; color: var(--tomato); }
+  .specimen-sub { font-family: var(--serif); font-size: 22px; color: var(--ink-soft); margin-top: 12px; }
+  .typespec { display: flex; flex-direction: column; gap: 8px; }
+  .typespec .row {
+    display: flex; align-items: baseline; gap: 18px;
+    border-top: 1px solid var(--rule); padding-top: 6px;
+  }
+  .typespec .row .name {
+    font-family: var(--sans); font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.18em; color: var(--pencil); width: 130px; flex-shrink: 0;
+  }
+
+  /* 01 home */
+  .home-frame { display: grid; grid-template-columns: 200px 1fr; gap: 40px; }
+  .home-frame .marg { color: var(--ink-soft); font-family: var(--sans); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.18em; line-height: 1.8; padding-top: 32px; }
+  .home-frame .marg .vol { font-family: var(--serif); font-style: italic; font-size: 18px; color: var(--ink); margin-bottom: 4px; text-transform: none; letter-spacing: 0; }
+  .home-frame .marg .stamp {
+    margin-top: 36px; width: 92px; height: 92px;
+    border: 1.2px solid var(--tomato); color: var(--tomato);
+    border-radius: 50%; transform: rotate(-7deg);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-size: 9px; letter-spacing: 0.2em; line-height: 1.2; font-weight: 700;
+    font-family: var(--sans);
+  }
+  .home-frame .marg .stamp em {
+    font-style: italic; font-family: var(--serif); font-size: 17px;
+    text-transform: none; letter-spacing: 0; font-weight: 500;
+  }
+  .home-frame h1 {
+    font-family: var(--serif); font-weight: 500;
+    font-size: clamp(48px, 6vw, 80px); line-height: 0.98;
+    letter-spacing: -0.02em; margin: 0 0 16px 0;
+    font-variation-settings: "opsz" 144;
+  }
+  .home-frame h1 em { font-style: italic; color: var(--tomato); position: relative; }
+  .home-frame h1 em::after {
+    content: ""; position: absolute; left: 0; right: -3%; bottom: 4%;
+    height: 6px; background: var(--tomato); opacity: 0.18; border-radius: 2px;
+    transform: rotate(-1.5deg);
+  }
+  .home-frame .lede { font-family: var(--serif); font-size: 18px; line-height: 1.55; color: var(--ink-soft); max-width: 540px; margin: 0 0 28px 0; }
+  .home-frame .lede strong { color: var(--ink); font-weight: 500; }
+
+  /* suggestion chips */
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; margin: 12px 0 28px 0; }
+  .chip {
+    background: transparent; border: 1px solid var(--rule);
+    border-radius: 999px; padding: 6px 12px;
+    font-family: var(--serif); font-style: italic; font-size: 13px;
+    color: var(--ink); cursor: pointer; transition: all 200ms;
+  }
+  .chip::before { content: "“"; color: var(--pencil); margin-right: 3px; font-size: 16px; line-height: 0; vertical-align: middle; }
+  .chip::after { content: "”"; color: var(--pencil); margin-left: 3px; font-size: 16px; line-height: 0; vertical-align: middle; }
+  .chip:hover { border-color: var(--ink); background: var(--paper-2); }
+
+  .section-head { display: flex; justify-content: space-between; align-items: baseline; margin: 12px 0 18px 0; }
+  .section-head h3 { font-family: var(--serif); font-weight: 500; font-style: italic; font-size: 26px; margin: 0; }
+  .section-head .count { font-family: var(--sans); font-size: 10.5px; color: var(--pencil); text-transform: uppercase; letter-spacing: 0.18em; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 18px; }
+  .pcard {
+    position: relative; background: #fff; border: 1px solid var(--rule);
+    padding: 24px 22px 16px 22px; text-decoration: none; color: var(--ink);
+    transition: transform 360ms cubic-bezier(.2,.7,.2,1), box-shadow 360ms;
+    overflow: hidden;
+  }
+  .pcard::after {
+    content: ""; position: absolute; top: 0; right: 0;
+    width: 22px; height: 22px;
+    background: linear-gradient(225deg, var(--paper) 50%, transparent 50%);
+    border-left: 1px solid var(--rule); border-bottom: 1px solid var(--rule);
+    transition: width 320ms ease, height 320ms ease;
+  }
+  .pcard:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 28px 32px -20px rgba(34,22,12,0.18), 0 6px 12px -8px rgba(34,22,12,0.08);
+  }
+  .pcard:hover::after { width: 32px; height: 32px; }
+  .pcard .num {
+    font-family: var(--serif); font-style: italic; font-size: 12px;
+    color: var(--tomato); margin-bottom: 12px; letter-spacing: 0.04em;
+    font-feature-settings: "lnum" 1, "ss02" 1;
+  }
+  .pcard h4 {
+    font-family: var(--serif); font-weight: 500; font-size: 22px;
+    line-height: 1.05; margin: 0 0 8px 0; letter-spacing: -0.015em;
+  }
+  .pcard .tagline {
+    font-family: var(--serif); font-style: italic; font-size: 14px;
+    color: var(--ink-soft); margin-bottom: 22px; line-height: 1.45;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+  }
+  .pcard .footing {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding-top: 12px; border-top: 1px dashed var(--rule);
+    font-family: var(--sans); font-size: 10.5px; color: var(--pencil);
+    text-transform: uppercase; letter-spacing: 0.16em;
+  }
+  .pcard .live { color: var(--tomato); font-weight: 600; }
+  .pcard .live::before {
+    content: ""; display: inline-block; width: 5px; height: 5px; border-radius: 50%;
+    background: var(--tomato); margin-right: 5px; transform: translateY(-1px);
+    box-shadow: 0 0 0 2.5px rgba(220,75,50,0.18);
+  }
+
+  /* live banner */
+  .banner {
+    background: var(--ink); color: var(--paper); position: relative;
+    padding: 36px 38px 30px 38px; overflow: hidden;
+  }
+  .banner::before {
+    content: ""; position: absolute; top: -20px; right: -20px;
+    width: 200px; height: 200px;
+    border: 22px solid var(--tomato); border-radius: 50%; opacity: 0.10;
+  }
+  .banner .eyebrow {
+    font-family: var(--sans); font-size: 10.5px;
+    text-transform: uppercase; letter-spacing: 0.22em;
+    color: var(--tomato); margin-bottom: 12px;
+  }
+  .banner h4 {
+    font-family: var(--serif); font-weight: 400; font-size: 38px;
+    line-height: 1.04; margin: 0 0 18px 0; letter-spacing: -0.015em;
+  }
+  .banner h4 em { font-style: italic; color: var(--tomato); }
+  .url-pill {
+    display: inline-flex; align-items: center; gap: 10px; padding: 9px 13px;
+    background: var(--paper); color: var(--ink); border-radius: 999px;
+    font-family: var(--mono); font-size: 12.5px; font-weight: 500;
+    box-shadow: 0 0 0 1px var(--tomato); margin-right: 8px;
+  }
+  .url-pill .copy {
+    font-family: var(--sans); font-size: 9.5px; text-transform: uppercase;
+    letter-spacing: 0.18em; color: var(--ink-soft);
+    border-left: 1px solid var(--rule); padding-left: 8px; cursor: pointer;
+  }
+  .banner .actions { margin-top: 16px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .banner .actions a {
+    color: var(--paper); text-decoration: none;
+    font-family: var(--sans); font-size: 11px; text-transform: uppercase; letter-spacing: 0.18em;
+    border-bottom: 1px solid var(--tomato); padding-bottom: 2px;
+  }
+  .banner .actions a:hover { border-color: var(--paper); }
+
+  /* 02 templates */
+  .filter-row { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0 24px 0; }
+  .filter-pill {
+    padding: 6px 14px; border: 1px solid var(--rule);
+    font-family: var(--sans); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.18em;
+    color: var(--ink-soft); cursor: pointer; transition: all 200ms;
+    background: transparent;
+  }
+  .filter-pill:hover { color: var(--ink); border-color: var(--ink); }
+  .filter-pill.active { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+
+  .tpl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 22px; }
+  .tpl {
+    position: relative;
+    background: #fff;
+    border: 1px solid var(--rule);
+    padding: 20px 22px 16px 22px;
+    transition: transform 320ms, box-shadow 320ms;
+    cursor: pointer;
+  }
+  .tpl:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 24px 28px -20px rgba(34,22,12,0.16);
+  }
+  .tpl .preview {
+    background: var(--paper-2); height: 96px; margin-bottom: 14px; padding: 8px;
+    display: flex; flex-direction: column; gap: 4px;
+    border: 1px solid var(--rule-2);
+  }
+  .tpl .preview .ph { background: var(--ink); height: 5px; opacity: 0.18; }
+  .tpl .preview .ph.short { width: 35%; }
+  .tpl .preview .ph.med   { width: 70%; }
+  .tpl .preview .ph.cap   { background: var(--tomato); opacity: 0.7; }
+  .tpl .preview .row { display: flex; gap: 4px; margin-top: auto; }
+  .tpl .preview .row .ph { flex: 1; height: 18px; }
+
+  .tpl .num {
+    font-family: var(--serif); font-style: italic; font-size: 11.5px;
+    color: var(--tomato); letter-spacing: 0.04em; margin-bottom: 4px;
+  }
+  .tpl h4 {
+    font-family: var(--serif); font-weight: 500; font-size: 21px;
+    line-height: 1.05; margin: 0 0 4px 0; letter-spacing: -0.015em;
+  }
+  .tpl .tagline {
+    font-family: var(--serif); font-style: italic; font-size: 13px;
+    color: var(--ink-soft); margin-bottom: 14px;
+  }
+  .tpl ul.bullets {
+    list-style: none; padding: 0; margin: 0 0 14px 0;
+    font-family: var(--serif); font-size: 13px; color: var(--ink-soft);
+  }
+  .tpl ul.bullets li { padding: 1px 0; }
+  .tpl ul.bullets li::before {
+    content: "·"; color: var(--tomato); font-weight: 700;
+    margin-right: 8px;
+  }
+  .tpl .footer {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding-top: 10px; border-top: 1px dashed var(--rule);
+  }
+  .tpl .footer .est {
+    font-family: var(--sans); font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.16em; color: var(--pencil);
+  }
+  .tpl .footer .use {
+    font-family: var(--serif); font-style: italic; font-size: 13px;
+    color: var(--tomato);
+  }
+
+  .blank-link {
+    display: inline-block; padding: 18px 0; margin-top: 8px;
+    font-family: var(--serif); font-style: italic; font-size: 16px;
+    color: var(--ink); border-bottom: 1px solid var(--rule);
+  }
+  .blank-link:hover { color: var(--tomato); border-color: var(--tomato); }
+
+  /* 03 wizard */
+  .wiz-steps {
+    display: flex; align-items: center; gap: 14px;
+    font-family: var(--sans); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.2em;
+    color: var(--pencil); margin-bottom: 28px;
+  }
+  .wiz-steps .s {
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .wiz-steps .s.done { color: var(--tomato); }
+  .wiz-steps .s.active { color: var(--ink); font-weight: 600; }
+  .wiz-steps .s::before {
+    content: ""; width: 10px; height: 10px; border-radius: 50%;
+    border: 1px solid var(--pencil);
+  }
+  .wiz-steps .s.done::before { background: var(--tomato); border-color: var(--tomato); }
+  .wiz-steps .s.active::before { background: var(--ink); border-color: var(--ink); }
+  .wiz-steps .gap {
+    flex: 0 0 36px; height: 1px; background: var(--rule);
+  }
+
+  .wiz-card {
+    background: #fff;
+    border: 1px solid var(--rule);
+    padding: 32px 36px;
+    margin-bottom: 18px;
+    box-shadow: 0 18px 24px -16px rgba(34,22,12,0.1);
+  }
+  .wiz-card h3 {
+    font-family: var(--serif); font-weight: 500; font-size: 24px;
+    margin: 0 0 8px 0; letter-spacing: -0.015em;
+  }
+  .wiz-card h3 em { font-style: italic; color: var(--tomato); }
+  .wiz-card .sub {
+    font-family: var(--serif); color: var(--ink-soft); margin-bottom: 22px;
+    font-size: 15px; line-height: 1.55;
+  }
+
+  .wiz-summary {
+    border: 1px solid var(--rule);
+    background: var(--paper-2);
+    padding: 22px 26px;
+    margin: 18px 0 28px 0;
+  }
+  .wiz-summary .label-uc { margin-bottom: 12px; }
+  .wiz-summary ul {
+    margin: 0; padding: 0; list-style: none;
+    font-family: var(--serif); font-size: 16px;
+    line-height: 1.85;
+  }
+  .wiz-summary ul li::before {
+    content: "·"; color: var(--tomato); font-weight: 700; margin-right: 10px;
+  }
+  .wiz-summary ul em { font-style: italic; }
+
+  .wiz-input-row { display: grid; grid-template-columns: 2fr 3fr; gap: 24px; margin-bottom: 12px; }
+  .wiz-input-row label.field { display: block; }
+  .wiz-input-row label.field .lbl {
+    display: block; margin-bottom: 5px;
+    font-family: var(--sans); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.18em; color: var(--pencil);
+  }
+  .wiz-input-row label.field input {
+    width: 100%; padding: 10px 12px;
+    border: 1px solid var(--rule); background: #fff;
+    font-family: var(--serif); font-size: 16px; color: var(--ink);
+    outline: none; transition: border-color 200ms;
+  }
+  .wiz-input-row label.field input:focus { border-color: var(--ink); }
+  .wiz-input-row label.field .help {
+    display: block; margin-top: 5px;
+    font-family: var(--mono); font-size: 11.5px; color: var(--ink-soft);
+  }
+  .wiz-input-row label.field .help em { font-style: italic; font-family: var(--serif); color: var(--pencil); }
+
+  .wiz-actions {
+    display: flex; justify-content: space-between; align-items: center; margin-top: 8px;
+  }
+
+  /* 04 workspace + 05 files + 06 logs + 07 env + 08 settings — lighter recreations */
+  .ws-shell {
+    display: grid; grid-template-columns: 1fr 380px; min-height: 540px;
+    border-top: 1px solid var(--rule);
+  }
+  .ws-preview { padding: 24px 24px 0 32px; display: flex; flex-direction: column; }
+  .ws-plate {
+    flex: 1; background: #fff; border: 1px solid var(--rule);
+    box-shadow: 0 22px 28px -18px rgba(34,22,12,0.14);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .ws-plate .pbar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 12px; background: var(--paper-2); border-bottom: 1px solid var(--rule);
+    font-family: var(--sans); font-size: 10.5px; color: var(--ink-soft);
+  }
+  .ws-plate .pbar .dots { display: inline-flex; gap: 4px; }
+  .ws-plate .pbar .dots span { width: 8px; height: 8px; border-radius: 50%; background: var(--rule); }
+  .ws-plate .pbar .dots span:first-child { background: var(--tomato); opacity: 0.7; }
+  .ws-plate .pbar .url {
+    flex: 1; text-align: center; font-family: var(--mono); font-size: 11px;
+  }
+  .ws-plate .pbar .url strong { color: var(--ink); }
+  .ws-plate .pbody {
+    flex: 1; padding: 36px 44px; background: #fff; overflow: auto;
+  }
+  .ws-plate .pbody h2 { font-family: var(--serif); font-weight: 500; font-size: 36px; margin: 0 0 6px 0; }
+  .ws-plate .pbody h2 em { font-style: italic; color: var(--tomato); }
+  .ws-plate .pbody p { font-family: var(--serif); font-size: 14.5px; color: var(--ink-soft); }
+  .ws-plate .pbody .demo-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 18px;
+  }
+  .ws-plate .pbody .demo-card { border: 1px solid var(--rule-2); padding: 12px; background: var(--paper); }
+  .ws-plate .pbody .demo-card h4 { font-family: var(--serif); font-weight: 500; font-size: 15px; margin: 0 0 2px 0; }
+  .ws-plate .pbody .demo-card p { font-style: italic; font-size: 11.5px; margin: 0 0 6px 0; }
+  .ws-plate .pbody .demo-card .meta { font-family: var(--sans); font-size: 9px; text-transform: uppercase; letter-spacing: 0.16em; color: var(--pencil); }
+
+  .ws-drawer {
+    border-top: 1px solid var(--rule); background: var(--paper);
+    padding: 7px 24px; display: flex; align-items: center; gap: 6px;
+    font-family: var(--sans); font-size: 10px; text-transform: uppercase; letter-spacing: 0.18em; color: var(--pencil);
+  }
+  .ws-drawer .lbl { font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--pencil); text-transform: none; letter-spacing: 0; margin-right: 8px; }
+  .ws-drawer .pill { padding: 3px 9px; border: 1px solid transparent; cursor: pointer; transition: all 200ms; }
+  .ws-drawer .pill:hover { color: var(--ink); }
+  .ws-drawer .pill.active { color: var(--ink); border-color: var(--rule); background: var(--paper-2); }
+  .ws-drawer .right { margin-left: auto; font-family: var(--serif); font-style: italic; font-size: 11px; color: var(--ink-soft); text-transform: none; letter-spacing: 0; }
+
+  .ws-desk {
+    border-left: 1px solid var(--rule); background: var(--paper-2);
+    display: flex; flex-direction: column;
+  }
+  .ws-desk .head {
+    padding: 16px 22px 12px 24px; border-bottom: 1px dashed var(--rule);
+    display: flex; justify-content: space-between; align-items: baseline;
+  }
+  .ws-desk .head h4 { font-family: var(--serif); font-style: italic; font-weight: 500; font-size: 18px; margin: 0; }
+  .ws-desk .head .meta { font-family: var(--sans); font-size: 10px; text-transform: uppercase; letter-spacing: 0.18em; color: var(--pencil); }
+  .ws-desk .turns { padding: 18px 24px; flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 22px; }
+  .turn-user .who { font-family: var(--serif); font-style: italic; font-size: 12px; color: var(--tomato); margin-bottom: 4px; font-weight: 500; }
+  .turn-user .body { font-family: var(--serif); font-size: 15px; line-height: 1.45; border-left: 2px solid var(--tomato); padding-left: 12px; }
+  .turn-bot .who { font-family: var(--sans); font-size: 10px; text-transform: uppercase; letter-spacing: 0.2em; color: var(--ink-soft); margin-bottom: 5px; }
+  .turn-bot .body { font-family: var(--serif); font-size: 14px; line-height: 1.5; }
+  .receipt {
+    margin-top: 8px; background: #fff; border: 1px solid var(--rule-2);
+    padding: 9px 12px; display: flex; align-items: flex-start; gap: 10px;
+  }
+  .receipt .glyph {
+    width: 18px; height: 18px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-family: var(--sans); font-size: 10px; font-weight: 600; flex-shrink: 0;
+    margin-top: 1px;
+  }
+  .receipt .glyph.done { background: var(--tomato); color: var(--paper); }
+  .receipt .glyph.run {
+    background: var(--paper-3); position: relative;
+  }
+  .receipt .glyph.run::before {
+    content: ""; position: absolute; inset: 3px; border-radius: 50%;
+    border: 1.5px solid var(--ink-soft); border-top-color: transparent;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .receipt .what { flex: 1; font-family: var(--serif); font-size: 13px; line-height: 1.45; }
+  .receipt .what em { font-style: italic; color: var(--ink-soft); }
+  .receipt .what .path { font-family: var(--mono); font-size: 11px; background: var(--paper-2); padding: 0 4px; border-radius: 2px; }
+  .receipt .when {
+    font-family: var(--sans); font-size: 9.5px; text-transform: uppercase;
+    letter-spacing: 0.16em; color: var(--pencil); margin-top: 2px; display: block;
+  }
+
+  .ws-comp { border-top: 1px solid var(--rule); padding: 12px 20px 14px 24px; background: var(--paper); }
+  .ws-comp .pad { background: #fff; border: 1px solid var(--rule); padding: 11px 14px 6px 16px; position: relative; }
+  .ws-comp .pad::before { content: ""; position: absolute; top: 0; bottom: 0; left: 6px; width: 1px; background: var(--tomato); opacity: 0.3; }
+  .ws-comp textarea { width: 100%; resize: none; border: 0; font-family: var(--serif); font-size: 14px; line-height: 1.5; background: transparent; outline: none; min-height: 40px; }
+  .ws-comp textarea::placeholder { color: var(--pencil); font-style: italic; }
+  .ws-comp .row { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
+  .ws-comp .send {
+    background: var(--tomato); color: var(--paper); border: 0;
+    padding: 7px 14px 5px 14px;
+    font-family: var(--sans); font-weight: 600; font-size: 10.5px;
+    text-transform: uppercase; letter-spacing: 0.18em;
+    cursor: pointer; box-shadow: 0 2px 0 -1px var(--tomato-2);
+  }
+
+  /* 05 files */
+  .files-shell { display: grid; grid-template-columns: 220px 1fr 200px; min-height: 540px; }
+  .files-tree { border-right: 1px solid var(--rule); background: var(--paper-2); padding: 16px 14px; font-family: var(--serif); font-size: 14px; }
+  .files-tree .folder { font-weight: 500; cursor: pointer; padding: 2px 0; }
+  .files-tree .folder::before { content: "▸ "; color: var(--ink-soft); }
+  .files-tree .folder.open::before { content: "▾ "; color: var(--tomato); }
+  .files-tree .file { padding: 2px 0 2px 18px; color: var(--ink-soft); cursor: pointer; }
+  .files-tree .file.active { color: var(--ink); font-weight: 500; }
+  .files-tree .file.active::before { content: "● "; color: var(--tomato); margin-left: -16px; }
+  .files-editor { background: #fff; padding: 18px 22px; font-family: var(--mono); font-size: 13px; line-height: 1.65; overflow: auto; position: relative; }
+  .files-editor .lineno {
+    display: inline-block; width: 28px;
+    color: var(--tomato); opacity: 0.55; user-select: none;
+    text-align: right; padding-right: 12px;
+    font-family: var(--mono); font-size: 12px;
+  }
+  .files-editor .line { white-space: pre; }
+  .files-editor .kw { color: var(--tomato); }
+  .files-editor .str { color: var(--ink-soft); font-style: italic; }
+  .files-editor .com { color: var(--pencil); font-style: italic; font-family: var(--serif); }
+  .files-margin {
+    border-left: 1px solid var(--rule); padding: 18px 18px;
+    background: var(--paper); font-family: var(--sans); font-size: 11px;
+    color: var(--ink-soft);
+  }
+  .files-margin .label-uc { margin-bottom: 4px; }
+  .files-margin dl { margin: 0 0 16px 0; padding: 0; }
+  .files-margin dt {
+    font-family: var(--sans); font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.16em; color: var(--pencil); margin-top: 12px;
+  }
+  .files-margin dd {
+    margin: 2px 0 0 0; font-family: var(--mono); font-size: 11.5px; color: var(--ink);
+  }
+  .files-margin dd.serif { font-family: var(--serif); font-style: italic; font-size: 13px; }
+
+  /* 06 logs ledger */
+  .ledger { font-family: var(--serif); font-size: 14.5px; }
+  .ledger .row {
+    display: grid; grid-template-columns: 60px 90px 80px 1fr;
+    gap: 16px; padding: 8px 0;
+    border-bottom: 1px solid var(--rule-2);
+    align-items: baseline;
+  }
+  .ledger .row .num { font-style: italic; color: var(--tomato); font-feature-settings: "lnum" 1; font-size: 12.5px; }
+  .ledger .row .ts { font-family: var(--mono); font-size: 12px; color: var(--ink-soft); font-style: normal; }
+  .ledger .row .lvl {
+    font-family: var(--sans); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.18em;
+    align-self: center;
+  }
+  .ledger .lvl.info { color: var(--ink-soft); }
+  .ledger .lvl.warn { color: var(--tomato); font-weight: 600; }
+  .ledger .lvl.error { color: var(--tomato); font-weight: 700; }
+  .ledger .row .msg { font-family: var(--serif); }
+  .ledger .row .msg code { font-family: var(--mono); font-size: 12px; background: var(--paper-2); padding: 0 4px; border-radius: 2px; }
+
+  /* 07 env */
+  .env-section { margin-bottom: 32px; }
+  .env-section h4 {
+    font-family: var(--serif); font-weight: 500; font-size: 22px; font-style: italic;
+    margin: 0 0 4px 0;
+  }
+  .env-section .lede {
+    font-family: var(--serif); font-size: 14px; color: var(--ink-soft);
+    margin: 0 0 14px 0;
+  }
+  .env-row {
+    display: grid; grid-template-columns: 200px 1fr 90px 60px;
+    gap: 18px; padding: 12px 0; border-bottom: 1px solid var(--rule-2);
+    align-items: center;
+    font-family: var(--mono); font-size: 13px;
+  }
+  .env-row .name { color: var(--ink); }
+  .env-row .val { color: var(--ink-soft); }
+  .env-row .secret-val { font-family: var(--mono); color: var(--pencil); letter-spacing: 0.2em; }
+  .env-row .updated { font-family: var(--sans); font-size: 10px; text-transform: uppercase; letter-spacing: 0.16em; color: var(--pencil); }
+  .env-row .actions a {
+    font-family: var(--serif); font-style: italic; font-size: 12.5px;
+    color: var(--ink-soft); text-decoration: none; margin-left: 8px;
+  }
+  .env-row .actions a:hover { color: var(--tomato); }
+
+  /* 08 settings */
+  .settings-section {
+    display: grid; grid-template-columns: 280px 1fr; gap: 48px;
+    padding: 24px 0; border-bottom: 1px solid var(--rule);
+  }
+  .settings-section h4 {
+    font-family: var(--serif); font-weight: 500; font-style: italic; font-size: 22px;
+    margin: 0 0 6px 0;
+  }
+  .settings-section .helper {
+    font-family: var(--serif); font-size: 13.5px; color: var(--ink-soft); line-height: 1.5;
+  }
+  .settings-section .controls .field {
+    margin-bottom: 14px;
+  }
+  .settings-section .controls .lbl {
+    display: block; font-family: var(--sans); font-size: 10.5px;
+    text-transform: uppercase; letter-spacing: 0.18em; color: var(--pencil);
+    margin-bottom: 4px;
+  }
+  .settings-section .controls input,
+  .settings-section .controls select {
+    width: 100%; padding: 9px 11px;
+    border: 1px solid var(--rule); background: #fff;
+    font-family: var(--serif); font-size: 15px; color: var(--ink);
+    outline: none;
+  }
+
+  /* 09 account */
+  .account-h1 {
+    font-family: var(--serif); font-weight: 500; font-size: 56px; line-height: 0.98;
+    margin: 0 0 4px 0; letter-spacing: -0.02em;
+  }
+  .account-h1 em { font-style: italic; color: var(--tomato); }
+  .account-meta { font-family: var(--serif); font-size: 16px; color: var(--ink-soft); margin-bottom: 36px; }
+  .plan-card {
+    background: var(--paper-2); border: 1px solid var(--rule);
+    padding: 24px 28px; display: grid; grid-template-columns: 2fr 1fr; gap: 24px;
+    margin-bottom: 26px; align-items: center;
+  }
+  .plan-card .nm { font-family: var(--serif); font-style: italic; font-size: 24px; }
+  .plan-card .nm em { color: var(--tomato); }
+  .plan-card .usage { font-family: var(--mono); font-size: 12px; color: var(--ink-soft); }
+  .usage-bar { height: 6px; background: var(--paper-3); border-radius: 999px; overflow: hidden; margin-top: 6px; }
+  .usage-bar .fill { background: var(--tomato); height: 100%; width: 32%; }
+  .plan-card .right { text-align: right; }
+
+  /* 10 auth */
+  .auth-shell {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 36px; align-items: start;
+  }
+  .auth-side {
+    background: #fff; border: 1px solid var(--rule); padding: 36px 38px;
+  }
+  .auth-side h3 {
+    font-family: var(--serif); font-weight: 500; font-size: 32px;
+    margin: 0 0 4px 0; letter-spacing: -0.015em;
+  }
+  .auth-side h3 em { font-style: italic; color: var(--tomato); }
+  .auth-side .sub {
+    font-family: var(--serif); color: var(--ink-soft); font-size: 14.5px; margin-bottom: 22px;
+  }
+  .auth-side .field { margin-bottom: 14px; }
+  .auth-side .field .lbl {
+    display: block; font-family: var(--sans); font-size: 10.5px;
+    text-transform: uppercase; letter-spacing: 0.18em; color: var(--pencil);
+    margin-bottom: 4px;
+  }
+  .auth-side .field input {
+    width: 100%; padding: 10px 12px;
+    border: 1px solid var(--rule); background: #fff;
+    font-family: var(--serif); font-size: 15px; color: var(--ink);
+    outline: none;
+  }
+  .auth-side .field input:focus { border-color: var(--ink); }
+  .auth-side .or {
+    display: flex; align-items: center; gap: 12px; margin: 18px 0;
+    font-family: var(--sans); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.2em; color: var(--pencil);
+  }
+  .auth-side .or .line { flex: 1; height: 1px; background: var(--rule); }
+  .auth-side .google {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    width: 100%; padding: 10px;
+    border: 1px solid var(--rule); background: #fff; cursor: pointer;
+    font-family: var(--sans); font-size: 11px; text-transform: uppercase; letter-spacing: 0.18em;
+    color: var(--ink);
+  }
+  .auth-side .google:hover { border-color: var(--ink); }
+  .auth-side .switch { font-family: var(--serif); font-size: 13.5px; color: var(--ink-soft); margin-top: 18px; text-align: center; }
+  .auth-side .switch a { color: var(--tomato); text-decoration: none; }
+
+  /* 12-17 admin */
+  .kpi-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; margin-bottom: 32px;
+  }
+  .kpi {
+    border: 1px solid var(--rule); padding: 22px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .kpi .label-uc { letter-spacing: 0.2em; }
+  .kpi .val {
+    font-family: var(--serif); font-size: 36px; font-weight: 500;
+    line-height: 1.0; letter-spacing: -0.02em;
+    font-variation-settings: "opsz" 96;
+  }
+  .kpi .delta {
+    font-family: var(--serif); font-style: italic; font-size: 13px;
+    color: var(--tomato);
+  }
+  .kpi .delta.flat { color: var(--pencil); }
+
+  .table {
+    width: 100%; border-collapse: collapse; font-family: var(--serif); font-size: 14.5px;
+  }
+  .table thead th {
+    text-align: left; padding: 10px 12px;
+    font-family: var(--sans); font-size: 10px; text-transform: uppercase; letter-spacing: 0.18em;
+    color: var(--pencil); font-weight: 600;
+    border-bottom: 1px solid var(--rule);
+  }
+  .table tbody td {
+    padding: 12px 12px; border-bottom: 1px solid var(--rule-2);
+    vertical-align: baseline;
+  }
+  .table tbody tr:hover td { background: var(--paper-2); }
+  .table .num { color: var(--tomato); font-style: italic; font-feature-settings: "lnum" 1; font-size: 12.5px; }
+  .table .nm { font-family: var(--serif); font-weight: 500; }
+  .table .id { font-family: var(--mono); font-size: 11.5px; color: var(--pencil); }
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 8px; font-family: var(--sans); font-size: 9.5px;
+    text-transform: uppercase; letter-spacing: 0.16em;
+    border-radius: 999px;
+  }
+  .pill::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; opacity: 0.7; }
+  .pill.live { color: var(--tomato); background: oklch(0.9 0.06 27); }
+  .pill.draft { color: var(--ink-soft); background: var(--paper-3); }
+  .pill.suspended { color: var(--ink-soft); background: var(--paper-3); text-decoration: line-through; }
+
+  /* simple bar chart */
+  .chart {
+    display: flex; align-items: flex-end; gap: 6px; height: 140px; padding: 0 0 0 0;
+    border-bottom: 1px solid var(--rule); position: relative;
+  }
+  .chart .bar {
+    flex: 1; background: var(--ink); opacity: 0.85;
+  }
+  .chart .bar.peak { background: var(--tomato); opacity: 1; }
+  .chart-axis {
+    display: flex; justify-content: space-between;
+    font-family: var(--sans); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.2em;
+    color: var(--pencil); padding-top: 8px;
+  }
+
+  /* footer */
+  footer.colophon {
+    padding: 36px 64px 80px 64px;
+    border-top: 1px solid var(--rule);
+    display: flex; justify-content: space-between;
+    font-family: var(--sans); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.18em;
+    color: var(--pencil);
+  }
+  footer.colophon em { font-style: italic; font-family: var(--serif); text-transform: none; color: var(--ink-soft); letter-spacing: 0; }
+</style>
+</head>
+<body>
+
+<!-- ─── side nav ─── -->
+<nav class="toc">
+  <h1>zeroship<span class="dot">.</span></h1>
+  <div class="sub">Atelier · all pages</div>
+
+  <h2>Creator</h2>
+  <a href="#cover"><span class="num">00</span>cover</a>
+  <a href="#home"><span class="num">01</span>home</a>
+  <a href="#templates"><span class="num">02</span>templates</a>
+  <a href="#wizard"><span class="num">03</span>wizard</a>
+  <a href="#workspace"><span class="num">04</span>workspace</a>
+  <a href="#files"><span class="num">05</span>files</a>
+  <a href="#logs"><span class="num">06</span>logs</a>
+  <a href="#env"><span class="num">07</span>env</a>
+  <a href="#settings"><span class="num">08</span>settings</a>
+  <a href="#account"><span class="num">09</span>account</a>
+  <a href="#auth"><span class="num">10</span>auth</a>
+  <a href="#celebration"><span class="num">11</span>celebration</a>
+
+  <h2>Admin</h2>
+  <a href="#admin-overview"><span class="num">12</span>library</a>
+  <a href="#admin-apps"><span class="num">13</span>apps</a>
+  <a href="#admin-app-detail"><span class="num">14</span>app detail</a>
+  <a href="#admin-users"><span class="num">15</span>users</a>
+  <a href="#admin-revenue"><span class="num">16</span>revenue</a>
+  <a href="#admin-logs"><span class="num">17</span>logs</a>
+</nav>
+
+<main class="book">
+
+<!-- ─────────────────────────────────────────── 00 COVER ─── -->
+<section class="page" id="cover">
+  <div class="corner"><span class="num">№ 00</span><em>cover</em></div>
+
+  <div class="specimen" style="margin-top: 40px;">An <em>atelier</em></div>
+  <div class="specimen" style="font-size: 48px; line-height: 1.1; margin-top: 6px;">for makers, not coders.</div>
+  <p class="specimen-sub">A redesign of zeroship.<br/>Set in <em>Fraunces</em> &amp; <em>Public Sans</em>, on warm cream paper, with a single tomato accent.</p>
+
+  <div class="cover-grid" style="margin-top: 64px;">
+    <div>
+      <div class="label-uc" style="margin-bottom: 10px;">Palette</div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+        <div class="swatch" style="background: var(--paper); border: 1px solid var(--rule);">
+          <span class="nm">paper</span><span class="hex">oklch(0.97 0.012 89)</span>
+        </div>
+        <div class="swatch" style="background: var(--ink); color: var(--paper);">
+          <span class="nm">ink</span><span class="hex">oklch(0.18 0.013 60)</span>
+        </div>
+        <div class="swatch" style="background: var(--tomato); color: var(--paper);">
+          <span class="nm">tomato</span><span class="hex">oklch(0.61 0.21 27)</span>
+        </div>
+        <div class="swatch" style="background: var(--clay); color: var(--ink);">
+          <span class="nm">clay</span><span class="hex">oklch(0.84 0.04 60)</span>
+        </div>
+        <div class="swatch" style="background: var(--paper-2); color: var(--ink);">
+          <span class="nm">paper-2</span><span class="hex">oklch(0.94 0.014 86)</span>
+        </div>
+        <div class="swatch" style="background: var(--paper-3); color: var(--ink);">
+          <span class="nm">paper-3</span><span class="hex">oklch(0.91 0.014 84)</span>
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="label-uc" style="margin-bottom: 10px;">Type</div>
+      <div class="typespec">
+        <div class="row"><div class="name">Display 96</div><div style="font-family: var(--serif); font-size: 60px; line-height: 1; font-weight: 500;">Make <em style="color: var(--tomato); font-style: italic;">it</em></div></div>
+        <div class="row"><div class="name">Display 56</div><div style="font-family: var(--serif); font-size: 36px; line-height: 1.05;">Recent work</div></div>
+        <div class="row"><div class="name">Title 28</div><div style="font-family: var(--serif); font-size: 22px; font-style: italic;">A small, careful place</div></div>
+        <div class="row"><div class="name">Body 16</div><div style="font-family: var(--serif); font-size: 14px;">The agent reads, drafts, builds and ships it.</div></div>
+        <div class="row"><div class="name">UI 11</div><div style="font-family: var(--sans); font-size: 11px; text-transform: uppercase; letter-spacing: 0.18em;">04 PROJECTS · LIVE</div></div>
+        <div class="row"><div class="name">Mono 12</div><div style="font-family: var(--mono); font-size: 11.5px;">supper-society.zeroship.app</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div style="margin-top: 60px;">
+    <div class="label-uc" style="margin-bottom: 14px;">Motifs</div>
+    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 24px;">
+      <div style="background: #fff; border: 1px solid var(--rule); padding: 20px; position: relative;">
+        <div style="position: absolute; top: 0; right: 0; width: 22px; height: 22px; background: linear-gradient(225deg, var(--paper) 50%, transparent 50%); border-left: 1px solid var(--rule); border-bottom: 1px solid var(--rule);"></div>
+        <div style="font-family: var(--serif); font-style: italic; color: var(--tomato);">№ 04</div>
+        <h4 style="font-family: var(--serif); font-weight: 500; margin: 4px 0;">Letterhead card</h4>
+        <p style="font-family: var(--serif); font-style: italic; font-size: 13px; color: var(--ink-soft); margin: 0;">Number, name, italic tagline, paper-fold corner.</p>
+      </div>
+      <div style="background: var(--ink); color: var(--paper); padding: 20px; position: relative; overflow: hidden;">
+        <div style="position: absolute; top: -10px; right: -10px; width: 80px; height: 80px; border: 8px solid var(--tomato); border-radius: 50%; opacity: 0.10;"></div>
+        <div class="label-uc" style="color: var(--tomato);">Live banner</div>
+        <h4 style="font-family: var(--serif); font-weight: 400; margin: 6px 0;">It's <em style="color: var(--tomato); font-style: italic;">live.</em></h4>
+        <p style="font-family: var(--serif); font-size: 13px; color: var(--clay); margin: 0; font-style: italic;">A celebration block for the deploy moment.</p>
+      </div>
+      <div style="display: flex; flex-direction: column; align-items: flex-start; gap: 14px; padding: 18px;">
+        <button class="stamp-btn">Begin</button>
+        <button class="ghost-btn">Cancel</button>
+        <span style="font-family: var(--serif); font-style: italic; font-size: 13px; color: var(--ink-soft);">Stamp button + ghost button.</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────── 01 HOME ─── -->
+<section class="page" id="home">
+  <div class="corner"><span class="num">№ 01</span><em>home</em></div>
+  <h2 class="label">Home — for signed-in <em>creators</em>.</h2>
+  <p class="desc">Hero prompt + recent work + a celebration of whatever's just live. The page reads like the front of a small studio's bound notebook.</p>
+
+  <div class="surface">
+    <div class="topbar">
+      <span class="left"><span class="wm">zeroship<span class="dot">.</span></span></span>
+      <span class="center"></span>
+      <span class="right">
+        <a class="nav-link" href="#">work</a>
+        <a class="nav-link" href="#">examples</a>
+        <a class="nav-link" href="#">studio</a>
+        <span class="acct">RY</span>
+      </span>
+    </div>
+    <div class="body">
+      <div class="home-frame">
+        <aside class="marg">
+          <div class="vol">Vol. I</div>
+          ISSUE 04 · 2026<br/>
+          STUDIO OPEN<br/>
+          MON–FRI, 09–18
+          <div class="stamp"><em>est.</em>Twenty<br/>twenty-six</div>
+        </aside>
+        <div>
+          <h1>What will you <em>make</em>?</h1>
+          <p class="lede">Every project starts with a sentence. Describe it the way you'd describe it to a friend — the agent reads, drafts, builds and ships it as a real, live URL. <strong>Usually under a minute.</strong></p>
+          <div class="notebook">
+            <div class="label-uc">Project no. 04 · draft</div>
+            <textarea rows="3" placeholder="A recipe sharing space for my supper club — guests sign in, post photos, vote on who hosts next…"></textarea>
+            <div class="underline"></div>
+            <div class="row">
+              <div class="hint"><kbd>⌘</kbd><kbd>↵</kbd> to send · we'll keep your draft</div>
+              <button class="stamp-btn">Begin</button>
+            </div>
+          </div>
+
+          <div class="chips">
+            <button class="chip">A tip calculator that splits unevenly</button>
+            <button class="chip">Markdown notes with a public share link</button>
+            <button class="chip">A waiting list for my next book</button>
+          </div>
+
+          <div class="section-head">
+            <h3>Recent work</h3>
+            <span class="count">04 PROJECTS</span>
+          </div>
+          <hr class="rule-h" />
+
+          <div class="cards" style="margin-top: 20px;">
+            <a class="pcard" href="#">
+              <div class="num">№ 04</div>
+              <h4>Supper Society</h4>
+              <p class="tagline">A recipe sharing space for my supper club — guests sign in, post photos, vote on who hosts next.</p>
+              <div class="footing"><span class="live">Live</span><span>upd. 12 min</span></div>
+            </a>
+            <a class="pcard" href="#">
+              <div class="num">№ 03</div>
+              <h4>Pinion &amp; Co.</h4>
+              <p class="tagline">Newsletter signup with a small archive of past issues — for my woodworking journal.</p>
+              <div class="footing"><span class="live">Live</span><span>upd. yesterday</span></div>
+            </a>
+            <a class="pcard" href="#">
+              <div class="num">№ 02</div>
+              <h4>Reading Room</h4>
+              <p class="tagline">A private reading list shared with two friends — we mark what we've finished and rate it.</p>
+              <div class="footing"><span>Draft</span><span>upd. 4d ago</span></div>
+            </a>
+            <a class="pcard" href="#">
+              <div class="num">№ 01</div>
+              <h4>Tip Garden</h4>
+              <p class="tagline">A tip calculator with split-by-people and an emoji per person.</p>
+              <div class="footing"><span class="live">Live</span><span>upd. 2 wks</span></div>
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────── 02 TEMPLATES ─── -->
+<section class="page" id="templates">
+  <div class="corner"><span class="num">№ 02</span><em>templates</em></div>
+  <h2 class="label">Pick a <em>starting point</em>.</h2>
+  <p class="desc">A dozen templates organised by what you're trying to do — share, collect, sell, show. Or describe your own.</p>
+
+  <div class="surface">
+    <div class="topbar">
+      <span class="left">
+        <span class="wm">zeroship<span class="dot">.</span></span>
+        <span class="crumb">
+          <a href="#">studio</a><span class="sep">/</span>
+          <span style="font-family: var(--serif); font-style: italic; color: var(--ink);">templates</span>
+        </span>
+      </span>
+      <span class="center"></span>
+      <span class="right"><span class="acct">RY</span></span>
+    </div>
+    <div class="body">
+
+      <div class="filter-row">
+        <button class="filter-pill active">all</button>
+        <button class="filter-pill">sharing</button>
+        <button class="filter-pill">collecting</button>
+        <button class="filter-pill">selling</button>
+        <button class="filter-pill">showing</button>
+        <button class="filter-pill">internal</button>
+      </div>
+
+      <div class="tpl-grid">
+        <!-- Sharing -->
+        <a class="tpl" href="#wizard">
+          <div class="preview">
+            <div class="ph short"></div>
+            <div class="ph med"></div>
+            <div class="row"><div class="ph"></div><div class="ph"></div><div class="ph cap"></div></div>
+          </div>
+          <div class="num">№ 01 · Sharing</div>
+          <h4>Recipe Journal</h4>
+          <p class="tagline">A small space for recipes &amp; photos.</p>
+          <ul class="bullets">
+            <li>posts with photos</li>
+            <li>simple sign-in</li>
+            <li>reactions &amp; votes</li>
+          </ul>
+          <div class="footer"><span class="est">~ 30 s</span><span class="use">Use →</span></div>
+        </a>
+
+        <a class="tpl" href="#wizard">
+          <div class="preview">
+            <div class="ph short"></div>
+            <div class="row"><div class="ph"></div><div class="ph"></div><div class="ph"></div></div>
+            <div class="row"><div class="ph"></div><div class="ph cap"></div><div class="ph"></div></div>
+          </div>
+          <div class="num">№ 02 · Sharing</div>
+          <h4>Photo Album</h4>
+          <p class="tagline">Pictures with captions, like a real one.</p>
+          <ul class="bullets">
+            <li>upload &amp; caption</li>
+            <li>ordered grid</li>
+            <li>private link share</li>
+          </ul>
+          <div class="footer"><span class="est">~ 25 s</span><span class="use">Use →</span></div>
+        </a>
+
+        <a class="tpl" href="#wizard">
+          <div class="preview">
+            <div class="ph short"></div>
+            <div class="ph med"></div>
+            <div class="ph"></div>
+            <div class="ph short"></div>
+          </div>
+          <div class="num">№ 03 · Sharing</div>
+          <h4>Reading Room</h4>
+          <p class="tagline">A list shared with a few people.</p>
+          <ul class="bullets">
+            <li>book entries</li>
+            <li>finished / unfinished</li>
+            <li>ratings</li>
+          </ul>
+          <div class="footer"><span class="est">~ 20 s</span><span class="use">Use →</span></div>
+        </a>
+
+        <!-- Collecting -->
+        <a class="tpl" href="#wizard">
+          <div class="preview">
+            <div class="ph med"></div>
+            <div class="ph short"></div>
+            <div class="row" style="margin-top: 6px;"><div class="ph cap"></div></div>
+          </div>
+          <div class="num">№ 04 · Collecting</div>
+          <h4>Newsletter Signup</h4>
+          <p class="tagline">An email list with a small archive.</p>
+          <ul class="bullets">
+            <li>email capture</li>
+            <li>past-issues page</li>
+            <li>confirmation email</li>
+          </ul>
+          <div class="footer"><span class="est">~ 25 s</span><span class="use">Use →</span></div>
+        </a>
+
+        <a class="tpl" href="#wizard">
+          <div class="preview">
+            <div class="ph short"></div>
+            <div class="row"><div class="ph"></div><div class="ph"></div><div class="ph"></div><div class="ph cap"></div></div>
+            <div class="row"><div class="ph"></div><div class="ph"></div><div class="ph"></div><div class="ph"></div></div>
+          </div>
+          <div class="num">№ 05 · Collecting</div>
+          <h4>Booking</h4>
+          <p class="tagline">An appointment calendar that doesn't suck.</p>
+          <ul class="bullets">
+            <li>calendar slot grid</li>
+            <li>email confirm</li>
+            <li>cancel / reschedule</li>
+          </ul>
+          <div class="footer"><span class="est">~ 1 min</span><span class="use">Use →</span></div>
+        </a>
+
+        <a class="tpl" href="#wizard">
+          <div class="preview">
+            <div class="ph med"></div>
+            <div class="ph short"></div>
+            <div class="ph"></div>
+            <div class="ph short"></div>
+          </div>
+          <div class="num">№ 06 · Collecting</div>
+          <h4>Survey</h4>
+          <p class="tagline">Ask a question, see the answers.</p>
+          <ul class="bullets">
+            <li>form builder</li>
+            <li>response view</li>
+            <li>CSV export</li>
+          </ul>
+          <div class="footer"><span class="est">~ 30 s</span><span class="use">Use →</span></div>
+        </a>
+
+        <!-- Selling -->
+        <a class="tpl" href="#wizard">
+          <div class="preview">
+            <div class="ph short"></div>
+            <div class="ph med"></div>
+            <div class="row" style="margin-top: 6px;"><div class="ph cap" style="height: 22px;"></div></div>
+          </div>
+          <div class="num">№ 07 · Selling</div>
+          <h4>Tip Jar</h4>
+          <p class="tagline">One-time payments via Stripe.</p>
+          <ul class="bullets">
+            <li>Stripe Checkout</li>
+            <li>custom amount</li>
+            <li>thank-you page</li>
+          </ul>
+          <div class="footer"><span class="est">~ 1 min</span><span class="use">Use →</span></div>
+        </a>
+
+        <a class="tpl" href="#wizard">
+          <div class="preview">
+            <div class="ph short"></div>
+            <div class="row"><div class="ph"></div><div class="ph"></div><div class="ph cap"></div></div>
+            <div class="ph short"></div>
+          </div>
+          <div class="num">№ 08 · Selling</div>
+          <h4>Subscription</h4>
+          <p class="tagline">Monthly support, with tiers.</p>
+          <ul class="bullets">
+            <li>Stripe recurring</li>
+            <li>members-only content</li>
+            <li>cancel anytime</li>
+          </ul>
+          <div class="footer"><span class="est">~ 90 s</span><span class="use">Use →</span></div>
+        </a>
+
+        <a class="tpl" href="#wizard">
+          <div class="preview">
+            <div class="row"><div class="ph"></div><div class="ph"></div><div class="ph"></div></div>
+            <div class="row"><div class="ph cap"></div><div class="ph"></div><div class="ph"></div></div>
+            <div class="ph short"></div>
+          </div>
+          <div class="num">№ 09 · Selling</div>
+          <h4>Storefront</h4>
+          <p class="tagline">A small shop with cart &amp; checkout.</p>
+          <ul class="bullets">
+            <li>products grid</li>
+            <li>shopping cart</li>
+            <li>Stripe Checkout</li>
+          </ul>
+          <div class="footer"><span class="est">~ 2 min</span><span class="use">Use →</span></div>
+        </a>
+
+        <!-- Showing -->
+        <a class="tpl" href="#wizard">
+          <div class="preview">
+            <div class="ph med"></div>
+            <div class="row"><div class="ph"></div><div class="ph"></div><div class="ph cap"></div></div>
+            <div class="row"><div class="ph cap"></div><div class="ph"></div><div class="ph"></div></div>
+          </div>
+          <div class="num">№ 10 · Showing</div>
+          <h4>Portfolio</h4>
+          <p class="tagline">Show your work, beautifully.</p>
+          <ul class="bullets">
+            <li>hero + about</li>
+            <li>project grid</li>
+            <li>contact form</li>
+          </ul>
+          <div class="footer"><span class="est">~ 45 s</span><span class="use">Use →</span></div>
+        </a>
+
+        <a class="tpl" href="#wizard">
+          <div class="preview">
+            <div class="ph short"></div>
+            <div class="ph"></div>
+            <div class="ph short"></div>
+            <div class="row"><div class="ph cap"></div><div class="ph"></div></div>
+          </div>
+          <div class="num">№ 11 · Showing</div>
+          <h4>Personal Page</h4>
+          <p class="tagline">One page that's just you.</p>
+          <ul class="bullets">
+            <li>hero + bio</li>
+            <li>links</li>
+            <li>contact</li>
+          </ul>
+          <div class="footer"><span class="est">~ 20 s</span><span class="use">Use →</span></div>
+        </a>
+
+        <!-- Internal -->
+        <a class="tpl" href="#wizard">
+          <div class="preview">
+            <div class="row"><div class="ph cap" style="width: 14px;"></div><div class="ph"></div></div>
+            <div class="row"><div class="ph cap" style="width: 14px;"></div><div class="ph"></div></div>
+            <div class="row"><div class="ph cap" style="width: 14px;"></div><div class="ph short"></div></div>
+            <div class="row"><div class="ph"></div></div>
+          </div>
+          <div class="num">№ 12 · Internal</div>
+          <h4>Todo List</h4>
+          <p class="tagline">A simple list, just for you.</p>
+          <ul class="bullets">
+            <li>add / done / delete</li>
+            <li>private to your account</li>
+            <li>keyboard shortcuts</li>
+          </ul>
+          <div class="footer"><span class="est">~ 15 s</span><span class="use">Use →</span></div>
+        </a>
+      </div>
+
+      <a class="blank-link" href="#wizard">Or describe your own →</a>
+
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────── 03 WIZARD ─── -->
+<section class="page" id="wizard">
+  <div class="corner"><span class="num">№ 03</span><em>wizard</em></div>
+  <h2 class="label">Three steps to a <em>new project</em>.</h2>
+  <p class="desc">Linear, progressive, never modal. Each step is a full editorial page — nothing feels cramped or pop-up-y.</p>
+
+  <!-- Step 2 (showing both template-picked context + customize) -->
+  <div class="surface">
+    <div class="topbar">
+      <span class="left">
+        <span class="wm">zeroship<span class="dot">.</span></span>
+        <span class="crumb"><a href="#">studio</a><span class="sep">/</span><a href="#">templates</a><span class="sep">/</span><span style="font-family: var(--serif); font-style: italic; color: var(--ink);">begin</span></span>
+      </span>
+      <span class="center"></span>
+      <span class="right"><span class="acct">RY</span></span>
+    </div>
+    <div class="body">
+
+      <div class="wiz-steps">
+        <span class="s done">step 1 · pick</span>
+        <span class="gap"></span>
+        <span class="s active">step 2 · make it yours</span>
+        <span class="gap"></span>
+        <span class="s">step 3 · begin</span>
+      </div>
+
+      <div class="wiz-card">
+        <h3>Recipe Journal · <em>change</em></h3>
+        <p class="sub">Tell me anything different about yours. The agent will read this and adjust the design, copy, and behaviour.</p>
+
+        <div class="notebook" style="margin-bottom: 22px;">
+          <div class="label-uc">Notes</div>
+          <textarea rows="3" placeholder="A recipe journal for our supper club. We meet monthly. Members vote on who hosts next, and the highest-rated recipe of the month gets pinned. Make it feel a bit warm — like a printed cookbook.">A recipe journal for our supper club. We meet monthly. Members vote on who hosts next, and the highest-rated recipe of the month gets pinned. Make it feel a bit warm — like a printed cookbook.</textarea>
+          <div class="underline"></div>
+        </div>
+
+        <div class="wiz-input-row">
+          <label class="field">
+            <span class="lbl">Project name</span>
+            <input type="text" value="Supper Society" />
+          </label>
+          <label class="field">
+            <span class="lbl">URL preview</span>
+            <input type="text" value="supper-society.zeroship.app" />
+            <span class="help"><em>Must be unique. We'll suggest if taken.</em></span>
+          </label>
+        </div>
+
+        <div class="wiz-actions">
+          <button class="ghost-btn">← Back</button>
+          <button class="stamp-btn">Next</button>
+        </div>
+      </div>
+
+      <!-- step 3 preview, scrolls below -->
+      <div class="wiz-card" style="opacity: 0.55;">
+        <div class="wiz-steps">
+          <span class="s done">step 1 ✓</span>
+          <span class="gap"></span>
+          <span class="s done">step 2 ✓</span>
+          <span class="gap"></span>
+          <span class="s active">step 3 · begin</span>
+        </div>
+
+        <h3>Ready when you are.</h3>
+        <div class="wiz-summary">
+          <div class="label-uc">Just before we begin</div>
+          <ul>
+            <li><em>Recipe Journal</em>, with your supper club specifics</li>
+            <li>Live at <code style="font-family: var(--mono); font-size: 14px;">supper-society.zeroship.app</code></li>
+            <li><em>Free plan</em> — no payment until you choose to add one</li>
+          </ul>
+        </div>
+        <p class="sub">Usually under a minute. You can iterate after — just talk to the agent about anything you want to change.</p>
+        <div class="wiz-actions">
+          <button class="ghost-btn">← Back</button>
+          <button class="stamp-btn">Begin</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────── 04 WORKSPACE ─── -->
+<section class="page" id="workspace">
+  <div class="corner"><span class="num">№ 04</span><em>workspace</em></div>
+  <h2 class="label">Workspace — preview + <em>desk-side notebook</em>.</h2>
+  <p class="desc">Preview is the page (1fr). Chat is the desk-side notebook (380px). Dev tabs hidden in a quiet drawer at the foot.</p>
+
+  <div class="surface">
+    <div class="topbar">
+      <span class="left">
+        <span class="wm">zeroship<span class="dot">.</span></span>
+        <span class="crumb"><a href="#">studio</a><span class="sep">/</span><span style="font-family: var(--serif); font-weight: 500; color: var(--ink);">Supper <em style="color: var(--tomato);">Society</em></span></span>
+      </span>
+      <span class="center">
+        <span class="pulse"></span>
+        <span><strong style="color: var(--ink); font-style: normal; font-weight: 500;">building the recipe page</strong> · <span style="font-family: var(--sans); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.16em; color: var(--pencil); font-style: normal;">3 of 7</span></span>
+      </span>
+      <span class="right">
+        <a class="url-chip" href="#"><span class="live-dot"></span>supper-society.zeroship.app</a>
+        <a class="nav-link" href="#">share</a>
+        <span class="acct">RY</span>
+      </span>
+    </div>
+    <div class="body flush">
+      <div class="ws-shell">
+        <section class="ws-preview">
+          <div class="ws-plate">
+            <div class="pbar">
+              <span class="dots"><span></span><span></span><span></span></span>
+              <span class="url">https://<strong>supper-society.zeroship.app</strong></span>
+              <span class="label-uc" style="cursor: pointer;">↻ reload</span>
+            </div>
+            <div class="pbody">
+              <h2>Welcome to <em>Supper Society</em>.</h2>
+              <p>A small place for our supper club to share recipes, photos, and vote on who hosts next.</p>
+              <div class="demo-grid">
+                <div class="demo-card"><h4>Beet &amp; feta tart</h4><p>Marisol's grandmother's recipe.</p><div class="meta">9·12 · 14 ❤︎</div></div>
+                <div class="demo-card"><h4>Slow lamb shoulder</h4><p>Eight hours, dry-rubbed.</p><div class="meta">9·28 · 9 ❤︎</div></div>
+                <div class="demo-card"><h4>Lemon-thyme cake</h4><p>Anya's polenta cake.</p><div class="meta">10·03 · 22 ❤︎</div></div>
+                <div class="demo-card"><h4>Roasted carrots</h4><p>With cumin, a bit of honey.</p><div class="meta">10·09 · 6 ❤︎</div></div>
+              </div>
+            </div>
+          </div>
+          <div class="ws-drawer">
+            <span class="lbl">If you're curious:</span>
+            <span class="pill active">preview</span>
+            <span class="pill">files</span>
+            <span class="pill">logs</span>
+            <span class="pill">env</span>
+            <span class="pill">settings</span>
+            <span class="right">last shipped just now · 380 ms cold start</span>
+          </div>
+        </section>
+
+        <aside class="ws-desk">
+          <div class="head">
+            <h4>Notes &amp; thoughts</h4>
+            <span class="meta">14 turns</span>
+          </div>
+          <div class="turns">
+            <div class="turn-user">
+              <div class="who">You · 12:04</div>
+              <div class="body">A recipe sharing space for my supper club — guests sign in, post photos, vote on who hosts next.</div>
+            </div>
+            <div class="turn-bot">
+              <div class="who">The studio</div>
+              <div class="body">
+                Lovely. I'll start with a small landing page, sign-in, and a feed where members post recipes with photos. Voting we can add next.
+                <div class="receipt">
+                  <span class="glyph done">✓</span>
+                  <div class="what">Set up the project — <em>Vite, React, Tailwind</em>, with a serif typeface picked for warmth.<span class="when">12:04 · 6 s</span></div>
+                </div>
+                <div class="receipt">
+                  <span class="glyph done">✓</span>
+                  <div class="what">Wrote <span class="path">src/App.tsx</span> and the recipe feed component.<span class="when">12:04 · 11 s</span></div>
+                </div>
+                <div class="receipt">
+                  <span class="glyph run"></span>
+                  <div class="what">Building the recipe page and wiring photo upload — <em>three more files to write.</em><span class="when">in progress</span></div>
+                </div>
+              </div>
+            </div>
+            <div class="turn-user">
+              <div class="who">You · 12:05</div>
+              <div class="body">Make the title a bit warmer — like a small printed magazine.</div>
+            </div>
+          </div>
+          <div class="ws-comp">
+            <div class="pad">
+              <textarea rows="2" placeholder="Iterate, refine, or ask for something new…"></textarea>
+              <div class="row">
+                <span class="hint">↵ to send · ⇧↵ for newline</span>
+                <button class="send">Send →</button>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────── 05 FILES ─── -->
+<section class="page" id="files">
+  <div class="corner"><span class="num">№ 05</span><em>files</em></div>
+  <h2 class="label">Files — the <em>manuscript</em> view.</h2>
+  <p class="desc">Tree on the left, file in focus center, marginalia (size, path, modified) in the right rail. Code in mono, framing in serif.</p>
+
+  <div class="surface">
+    <div class="topbar">
+      <span class="left">
+        <span class="wm">zeroship<span class="dot">.</span></span>
+        <span class="crumb"><a href="#">studio</a><span class="sep">/</span><a href="#">Supper Society</a><span class="sep">/</span><span style="font-family: var(--serif); font-style: italic; color: var(--ink);">files</span></span>
+      </span>
+      <span class="center"></span>
+      <span class="right"><span class="acct">RY</span></span>
+    </div>
+    <div class="body flush">
+      <div class="files-shell">
+        <aside class="files-tree">
+          <div class="folder open">src</div>
+          <div class="file" style="padding-left: 28px;">main.tsx</div>
+          <div class="file active" style="padding-left: 28px;">App.tsx</div>
+          <div class="folder open" style="padding-left: 14px;">components</div>
+          <div class="file" style="padding-left: 42px;">RecipeCard.tsx</div>
+          <div class="file" style="padding-left: 42px;">FeedHeader.tsx</div>
+          <div class="folder" style="padding-left: 14px;">pages</div>
+          <div class="folder open">public</div>
+          <div class="file" style="padding-left: 28px;">favicon.ico</div>
+          <div class="file" style="padding-left: 0;">package.json</div>
+          <div class="file" style="padding-left: 0;">README.md</div>
+        </aside>
+        <div class="files-editor">
+          <div class="line"><span class="lineno">1</span><span class="com">// the supper society front page — kept small on purpose</span></div>
+          <div class="line"><span class="lineno">2</span><span class="kw">import</span> { useState } <span class="kw">from</span> <span class="str">"react"</span>;</div>
+          <div class="line"><span class="lineno">3</span><span class="kw">import</span> { RecipeCard } <span class="kw">from</span> <span class="str">"./components/RecipeCard"</span>;</div>
+          <div class="line"><span class="lineno">4</span></div>
+          <div class="line"><span class="lineno">5</span><span class="kw">export default function</span> App() {</div>
+          <div class="line"><span class="lineno">6</span>  <span class="kw">const</span> [recipes, setRecipes] = useState([]);</div>
+          <div class="line"><span class="lineno">7</span>  <span class="kw">return</span> (</div>
+          <div class="line"><span class="lineno">8</span>    &lt;main&gt;</div>
+          <div class="line"><span class="lineno">9</span>      &lt;h1&gt;Welcome to Supper Society.&lt;/h1&gt;</div>
+          <div class="line"><span class="lineno">10</span>      {recipes.map(r =&gt; &lt;RecipeCard key={r.id} {...r} /&gt;)}</div>
+          <div class="line"><span class="lineno">11</span>    &lt;/main&gt;</div>
+          <div class="line"><span class="lineno">12</span>  );</div>
+          <div class="line"><span class="lineno">13</span>}</div>
+        </div>
+        <aside class="files-margin">
+          <div class="label-uc">Currently open</div>
+          <dl>
+            <dt>Path</dt>
+            <dd>src/App.tsx</dd>
+            <dt>Size</dt>
+            <dd>412 B · 13 lines</dd>
+            <dt>Modified</dt>
+            <dd class="serif">12:04 · just now</dd>
+            <dt>Author</dt>
+            <dd class="serif">The studio</dd>
+          </dl>
+          <div class="label-uc">Project</div>
+          <dl>
+            <dt>Files</dt>
+            <dd>14</dd>
+            <dt>Total size</dt>
+            <dd>23.4 KB</dd>
+          </dl>
+        </aside>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────── 06 LOGS ─── -->
+<section class="page" id="logs">
+  <div class="corner"><span class="num">№ 06</span><em>logs</em></div>
+  <h2 class="label">Logs — a <em>ledger</em>, not a stream.</h2>
+  <p class="desc">Numbered rows. Plain-language messages. Filter chips at top. Calm, not alarming.</p>
+
+  <div class="surface">
+    <div class="topbar">
+      <span class="left">
+        <span class="wm">zeroship<span class="dot">.</span></span>
+        <span class="crumb"><a href="#">studio</a><span class="sep">/</span><a href="#">Supper Society</a><span class="sep">/</span><span style="font-family: var(--serif); font-style: italic; color: var(--ink);">logs</span></span>
+      </span>
+      <span class="center"></span>
+      <span class="right"><span class="acct">RY</span></span>
+    </div>
+    <div class="body">
+      <div class="filter-row">
+        <button class="filter-pill active">all</button>
+        <button class="filter-pill">info</button>
+        <button class="filter-pill">warn</button>
+        <button class="filter-pill">error</button>
+        <span style="font-family: var(--serif); font-style: italic; color: var(--ink-soft); margin-left: auto; align-self: center; font-size: 13px;">today · last 50 events</span>
+      </div>
+
+      <div class="ledger">
+        <div class="row"><div class="num">№ 014</div><div class="ts">12:14:02</div><div class="lvl info">info</div><div class="msg">Booted worker · loaded bundle in <code>380&nbsp;ms</code></div></div>
+        <div class="row"><div class="num">№ 015</div><div class="ts">12:14:08</div><div class="lvl info">info</div><div class="msg">Served <code>/</code> · <code>14&nbsp;ms</code> · 200</div></div>
+        <div class="row"><div class="num">№ 016</div><div class="ts">12:14:11</div><div class="lvl warn">warn</div><div class="msg">OpenAI returned <code>429</code> · retried in <code>800&nbsp;ms</code> (succeeded)</div></div>
+        <div class="row"><div class="num">№ 017</div><div class="ts">12:14:12</div><div class="lvl info">info</div><div class="msg">Served <code>/api/chat</code> · <code>1.4&nbsp;s</code> · 200 · <em style="font-style: italic; color: var(--ink-soft);">first chat turn</em></div></div>
+        <div class="row"><div class="num">№ 018</div><div class="ts">12:14:48</div><div class="lvl info">info</div><div class="msg">Served <code>/recipes/12</code> · <code>22&nbsp;ms</code> · 200</div></div>
+        <div class="row"><div class="num">№ 019</div><div class="ts">12:15:10</div><div class="lvl error">error</div><div class="msg">Photo upload failed — <em>file exceeded 5 MB</em>. Returned a friendly error to the user.</div></div>
+        <div class="row"><div class="num">№ 020</div><div class="ts">12:15:14</div><div class="lvl info">info</div><div class="msg">Served <code>/api/upload</code> · <code>54&nbsp;ms</code> · 413</div></div>
+      </div>
+
+      <div style="margin-top: 24px; font-family: var(--serif); font-style: italic; color: var(--ink-soft); font-size: 13.5px;">
+        Looking for an older event? <a href="#" style="color: var(--tomato); text-decoration: none;">Open the full ledger →</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────── 07 ENV ─── -->
+<section class="page" id="env">
+  <div class="corner"><span class="num">№ 07</span><em>env</em></div>
+  <h2 class="label">Env — a <em>key cabinet</em>.</h2>
+  <p class="desc">Variables and secrets. Reassuring lede above each. Secrets stay private even from us.</p>
+
+  <div class="surface">
+    <div class="topbar">
+      <span class="left">
+        <span class="wm">zeroship<span class="dot">.</span></span>
+        <span class="crumb"><a href="#">studio</a><span class="sep">/</span><a href="#">Supper Society</a><span class="sep">/</span><span style="font-family: var(--serif); font-style: italic; color: var(--ink);">env</span></span>
+      </span>
+      <span class="center"></span>
+      <span class="right"><span class="acct">RY</span></span>
+    </div>
+    <div class="body">
+
+      <div class="env-section">
+        <h4>Variables</h4>
+        <p class="lede">Settings that are fine to share — URLs, feature flags, defaults. Anyone with your code can see these.</p>
+        <div class="env-row">
+          <span class="name">CONTROL_URL</span>
+          <span class="val">https://control.zeroship.app</span>
+          <span class="updated">UPD. 2D</span>
+          <span class="actions"><a href="#">edit</a></span>
+        </div>
+        <div class="env-row">
+          <span class="name">SANDBOX_URL</span>
+          <span class="val">https://sandbox.zeroship.app</span>
+          <span class="updated">UPD. 2D</span>
+          <span class="actions"><a href="#">edit</a></span>
+        </div>
+        <div class="env-row">
+          <span class="name">LOG_LEVEL</span>
+          <span class="val">info</span>
+          <span class="updated">UPD. 1H</span>
+          <span class="actions"><a href="#">edit</a></span>
+        </div>
+        <div style="margin-top: 14px;"><a href="#" style="font-family: var(--serif); font-style: italic; color: var(--tomato); text-decoration: none;">+ Add a variable</a></div>
+      </div>
+
+      <div class="env-section">
+        <h4><em>Secrets</em> · 🔒</h4>
+        <p class="lede">Things you don't want public — API keys, passwords, tokens. We encrypt these. They're never shown again after you set them.</p>
+        <div class="env-row">
+          <span class="name">OPENAI_API_KEY</span>
+          <span class="secret-val">·····················zXq</span>
+          <span class="updated">UPD. 3D</span>
+          <span class="actions"><a href="#">rotate</a></span>
+        </div>
+        <div class="env-row">
+          <span class="name">STRIPE_SECRET_KEY</span>
+          <span class="secret-val">·····················Nv1</span>
+          <span class="updated">UPD. 1W</span>
+          <span class="actions"><a href="#">rotate</a></span>
+        </div>
+        <div style="margin-top: 14px;"><a href="#" style="font-family: var(--serif); font-style: italic; color: var(--tomato); text-decoration: none;">+ Add a secret</a></div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────── 08 SETTINGS ─── -->
+<section class="page" id="settings">
+  <div class="corner"><span class="num">№ 08</span><em>settings</em></div>
+  <h2 class="label">Settings — <em>project details</em>.</h2>
+  <p class="desc">Sectioned editorial form. Section title + helper text on the left, controls on the right. Danger zone at the foot, framed in tomato.</p>
+
+  <div class="surface">
+    <div class="topbar">
+      <span class="left">
+        <span class="wm">zeroship<span class="dot">.</span></span>
+        <span class="crumb"><a href="#">studio</a><span class="sep">/</span><a href="#">Supper Society</a><span class="sep">/</span><span style="font-family: var(--serif); font-style: italic; color: var(--ink);">settings</span></span>
+      </span>
+      <span class="center"></span>
+      <span class="right"><span class="acct">RY</span></span>
+    </div>
+    <div class="body">
+
+      <div class="settings-section">
+        <div>
+          <h4>General</h4>
+          <p class="helper">The name and tagline shown on your project's page and in the studio.</p>
+        </div>
+        <div class="controls">
+          <div class="field"><span class="lbl">Project name</span><input type="text" value="Supper Society"/></div>
+          <div class="field"><span class="lbl">Tagline</span><input type="text" value="A small space for our supper club."/></div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div>
+          <h4>Domain</h4>
+          <p class="helper">Use the studio default, or bring your own. We'll handle TLS.</p>
+        </div>
+        <div class="controls">
+          <div class="field"><span class="lbl">Studio URL</span><input type="text" value="supper-society.zeroship.app" readonly /></div>
+          <div class="field"><span class="lbl">Custom domain</span><input type="text" placeholder="e.g. recipes.suppersociety.com" /></div>
+          <div style="margin-top: 4px;"><a href="#" style="font-family: var(--serif); font-style: italic; color: var(--tomato); text-decoration: none;">Set up a custom domain →</a></div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div>
+          <h4>Plan</h4>
+          <p class="helper">Currently free. Upgrade when you need more compute or your traffic grows.</p>
+        </div>
+        <div class="controls">
+          <div class="plan-card" style="margin: 0;">
+            <div>
+              <div class="nm"><em>Free</em></div>
+              <div class="usage">CPU 320ms / 50ms · 6.4× over today</div>
+              <div class="usage-bar"><div class="fill" style="width: 64%;"></div></div>
+            </div>
+            <div class="right"><a class="ghost-btn" href="#">Upgrade →</a></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section" style="border-bottom: 0;">
+        <div>
+          <h4 style="color: var(--tomato);">Danger zone</h4>
+          <p class="helper">Permanent operations. Take a moment.</p>
+        </div>
+        <div class="controls" style="display: flex; flex-direction: column; gap: 12px; align-items: flex-start;">
+          <button class="ghost-btn">Transfer ownership</button>
+          <button class="ghost-btn" style="border-color: var(--tomato); color: var(--tomato);">Delete project</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────── 09 ACCOUNT ─── -->
+<section class="page" id="account">
+  <div class="corner"><span class="num">№ 09</span><em>account</em></div>
+  <h2 class="label">Your <em>account</em>.</h2>
+  <p class="desc">Profile + plan + usage + billing. The same warm voice as everything else.</p>
+
+  <div class="surface">
+    <div class="topbar">
+      <span class="left"><span class="wm">zeroship<span class="dot">.</span></span><span class="crumb"><a href="#">studio</a><span class="sep">/</span><span style="font-family: var(--serif); font-style: italic; color: var(--ink);">account</span></span></span>
+      <span class="center"></span>
+      <span class="right"><span class="acct">RY</span></span>
+    </div>
+    <div class="body">
+      <div class="account-h1">Ruiyang <em>Ke</em></div>
+      <div class="account-meta"><em>rieonke@gmail.com</em> · joined Apr 2026</div>
+
+      <div class="plan-card">
+        <div>
+          <div class="nm"><em>Free plan</em></div>
+          <div class="usage" style="margin-top: 6px;">412 requests this week · 2 of 3 apps deployed</div>
+          <div class="usage-bar"><div class="fill" style="width: 32%;"></div></div>
+        </div>
+        <div class="right"><a class="stamp-btn" href="#" style="text-decoration: none;">Upgrade</a></div>
+      </div>
+
+      <div class="settings-section" style="padding-top: 0; border-top: 0;">
+        <div><h4>Profile</h4><p class="helper">Public-ish — shown on your projects' about pages if you opt in.</p></div>
+        <div class="controls">
+          <div class="field"><span class="lbl">Display name</span><input type="text" value="Ruiyang Ke"/></div>
+          <div class="field"><span class="lbl">Email</span><input type="text" value="rieonke@gmail.com" readonly/></div>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div><h4>Billing</h4><p class="helper">Cards, invoices, payouts to you (when your apps earn).</p></div>
+        <div class="controls">
+          <div style="font-family: var(--serif); color: var(--ink-soft); font-style: italic; font-size: 14px;">No payment method yet.</div>
+          <div style="margin-top: 8px;"><button class="ghost-btn">Add a card</button></div>
+        </div>
+      </div>
+      <div class="settings-section" style="border-bottom: 0;">
+        <div><h4 style="color: var(--tomato);">Sign out</h4></div>
+        <div class="controls"><button class="ghost-btn" style="border-color: var(--tomato); color: var(--tomato);">Sign out of zeroship</button></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────── 10 AUTH ─── -->
+<section class="page" id="auth">
+  <div class="corner"><span class="num">№ 10</span><em>auth</em></div>
+  <h2 class="label">Sign in &amp; <em>sign up</em>.</h2>
+  <p class="desc">Two-column auth — same paper, same ink, warmer copy. The brand sits beside the form so newcomers get context.</p>
+
+  <div class="auth-shell">
+    <div class="auth-side">
+      <h3>Welcome <em>back</em>.</h3>
+      <p class="sub">Pick up where you left off — your projects are right where you saved them.</p>
+      <div class="field"><span class="lbl">Email</span><input type="email" placeholder="you@example.com"/></div>
+      <div class="field"><span class="lbl">Password</span><input type="password" placeholder="•••••••"/></div>
+      <button class="stamp-btn" style="width: 100%; padding: 13px;">Sign in</button>
+      <div class="or"><span class="line"></span>or<span class="line"></span></div>
+      <button class="google">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+          <path fill="#EA4335" d="M12 11v3.4h5.4c-.2 1.3-1.5 3.7-5.4 3.7-3.2 0-5.9-2.7-5.9-5.9 0-3.3 2.7-5.9 5.9-5.9 1.8 0 3.1.8 3.8 1.5l2.6-2.5C16.7 3.7 14.6 2.8 12 2.8 6.9 2.8 2.8 6.9 2.8 12s4.1 9.2 9.2 9.2c5.3 0 8.8-3.7 8.8-9 0-.6-.1-1.1-.2-1.5H12z" />
+        </svg>
+        continue with google
+      </button>
+      <div class="switch">No account? <a href="#auth">Make one →</a></div>
+    </div>
+
+    <div class="auth-side">
+      <h3>Make <em>something</em>.</h3>
+      <p class="sub">Sign up to start a project. We'll save your work the moment you describe it.</p>
+      <div class="field"><span class="lbl">Email</span><input type="email" placeholder="you@example.com"/></div>
+      <div class="field"><span class="lbl">Choose a password</span><input type="password" placeholder="at least 8 characters"/></div>
+      <div class="field"><span class="lbl">What should we call you?</span><input type="text" placeholder="Your name (we'll only show this on projects you publish)"/></div>
+      <button class="stamp-btn" style="width: 100%; padding: 13px;">Create account</button>
+      <div class="or"><span class="line"></span>or<span class="line"></span></div>
+      <button class="google">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+          <path fill="#EA4335" d="M12 11v3.4h5.4c-.2 1.3-1.5 3.7-5.4 3.7-3.2 0-5.9-2.7-5.9-5.9 0-3.3 2.7-5.9 5.9-5.9 1.8 0 3.1.8 3.8 1.5l2.6-2.5C16.7 3.7 14.6 2.8 12 2.8 6.9 2.8 2.8 6.9 2.8 12s4.1 9.2 9.2 9.2c5.3 0 8.8-3.7 8.8-9 0-.6-.1-1.1-.2-1.5H12z" />
+        </svg>
+        sign up with google
+      </button>
+      <div class="switch">Already have one? <a href="#auth">Sign in →</a></div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────────── 11 CELEBRATION ─── -->
+<section class="page" id="celebration">
+  <div class="corner"><span class="num">№ 11</span><em>celebration</em></div>
+  <h2 class="label">The <em>"it's live"</em> moment.</h2>
+  <p class="desc">After every successful deploy, this banner lands at the top of the workspace. The deploy is the product event — celebrate it.</p>
+
+  <div class="surface">
+    <div class="banner">
+      <div class="eyebrow">Just shipped, two minutes ago</div>
+      <h4>Supper Society is <em>live.</em></h4>
+      <div>
+        <div class="url-pill">supper-society.zeroship.app<span class="copy">copy</span></div>
+      </div>
+      <div class="actions">
+        <a href="#">open in tab ↗</a>
+        <a href="#">add a custom domain</a>
+        <a href="#">share on twitter</a>
+        <a href="#">add a price</a>
+      </div>
+    </div>
+    <div class="body" style="padding: 22px 28px;">
+      <p class="serif" style="margin: 0; color: var(--ink-soft);">Below the banner, the workspace continues — chat &amp; preview as usual. The banner can be dismissed; it returns the next time you ship.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════ ADMIN ═══════ -->
+
+<!-- ─────────────────────────────────────── 12 ADMIN OVERVIEW ─── -->
+<section class="page" id="admin-overview">
+  <div class="corner"><span class="num">№ 12</span><em>admin · library</em></div>
+  <h2 class="label">[Admin] <em>Library</em> — system overview.</h2>
+  <p class="desc">The same atelier, in ledger mode. Card-catalog density. Same paper, same ink, same tomato — but the motifs lean toward a reading-room rather than a personal notebook.</p>
+
+  <div class="surface">
+    <div class="topbar">
+      <span class="left">
+        <span class="wm">zeroship<span class="dot">.</span></span>
+        <span class="crumb"><span style="font-family: var(--sans); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.2em; color: var(--tomato);">ADMIN</span><span class="sep">/</span><span style="font-family: var(--serif); font-style: italic; color: var(--ink);">library</span></span>
+      </span>
+      <span class="center"></span>
+      <span class="right"><span class="acct" style="background: var(--tomato);">OP</span></span>
+    </div>
+    <div class="body">
+      <div class="kpi-grid">
+        <div class="kpi"><span class="label-uc">Apps</span><span class="val">1,247</span><span class="delta">+12 today</span></div>
+        <div class="kpi"><span class="label-uc">Users</span><span class="val">892</span><span class="delta">+4 today</span></div>
+        <div class="kpi"><span class="label-uc">MRR</span><span class="val">$14,302</span><span class="delta">+$214</span></div>
+        <div class="kpi"><span class="label-uc">Platform fee</span><span class="val">$2,145</span><span class="delta flat">today</span></div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 36px; align-items: flex-start;">
+        <div>
+          <div class="section-head"><h3>Recent activity</h3><span class="count">last hour</span></div>
+          <hr class="rule-h" />
+          <div class="ledger" style="margin-top: 10px;">
+            <div class="row"><div class="num">№ 4081</div><div class="ts">12:18:24</div><div class="lvl info">deploy</div><div class="msg"><em>supper-society</em> shipped (380 ms cold) · ruiyang</div></div>
+            <div class="row"><div class="num">№ 4080</div><div class="ts">12:17:14</div><div class="lvl info">signup</div><div class="msg"><em>charlotte@example.com</em> joined</div></div>
+            <div class="row"><div class="num">№ 4079</div><div class="ts">12:16:02</div><div class="lvl info">earn</div><div class="msg"><em>marigold-co.</em> earned $42 (Stripe) · platform fee $6.30</div></div>
+            <div class="row"><div class="num">№ 4078</div><div class="ts">12:14:11</div><div class="lvl warn">warn</div><div class="msg">OpenAI quota at 86% for tier · monitoring</div></div>
+            <div class="row"><div class="num">№ 4077</div><div class="ts">12:13:00</div><div class="lvl info">deploy</div><div class="msg"><em>tip-garden</em> shipped (412 ms) · ruiyang</div></div>
+          </div>
+        </div>
+        <div>
+          <div class="section-head"><h3>System pulse</h3><span class="count">live</span></div>
+          <hr class="rule-h" />
+          <div class="ledger" style="margin-top: 10px;">
+            <div class="row" style="grid-template-columns: 1fr 60px;"><div class="msg" style="font-style: italic;">workers (8)</div><div class="lvl info" style="color: var(--tomato);">●&nbsp;up</div></div>
+            <div class="row" style="grid-template-columns: 1fr 60px;"><div class="msg" style="font-style: italic;">control plane</div><div class="lvl info" style="color: var(--tomato);">●&nbsp;up</div></div>
+            <div class="row" style="grid-template-columns: 1fr 60px;"><div class="msg" style="font-style: italic;">gateway</div><div class="lvl info" style="color: var(--tomato);">●&nbsp;up</div></div>
+            <div class="row" style="grid-template-columns: 1fr 60px;"><div class="msg" style="font-style: italic;">postgres pool</div><div class="lvl info" style="color: var(--tomato);">●&nbsp;up</div></div>
+            <div class="row" style="grid-template-columns: 1fr 60px;"><div class="msg" style="font-style: italic;">stripe webhooks</div><div class="lvl info" style="color: var(--tomato);">●&nbsp;up</div></div>
+            <div class="row" style="grid-template-columns: 1fr 60px;"><div class="msg" style="font-style: italic;">sandbox docker</div><div class="lvl warn">●&nbsp;deg</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────── 13 ADMIN APPS ─── -->
+<section class="page" id="admin-apps">
+  <div class="corner"><span class="num">№ 13</span><em>admin · apps</em></div>
+  <h2 class="label">[Admin] <em>Apps</em>.</h2>
+  <p class="desc">Searchable directory of every app on the platform. Numbered rows, hairline rules, inline status pills.</p>
+
+  <div class="surface">
+    <div class="topbar">
+      <span class="left"><span class="wm">zeroship<span class="dot">.</span></span><span class="crumb"><span style="font-family: var(--sans); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.2em; color: var(--tomato);">ADMIN</span><span class="sep">/</span><a href="#">library</a><span class="sep">/</span><span style="font-family: var(--serif); font-style: italic; color: var(--ink);">apps</span></span></span>
+      <span class="center"></span>
+      <span class="right"><span class="acct" style="background: var(--tomato);">OP</span></span>
+    </div>
+    <div class="body">
+
+      <div class="filter-row">
+        <button class="filter-pill active">all · 1,247</button>
+        <button class="filter-pill">live · 891</button>
+        <button class="filter-pill">draft · 342</button>
+        <button class="filter-pill">suspended · 14</button>
+        <input type="text" placeholder="Search by name, owner, ID…" style="margin-left: auto; padding: 6px 12px; border: 1px solid var(--rule); background: #fff; font-family: var(--serif); font-size: 13px; min-width: 280px;"/>
+      </div>
+
+      <table class="table">
+        <thead><tr>
+          <th style="width: 60px;">№</th>
+          <th>Name</th>
+          <th>Owner</th>
+          <th>Plan</th>
+          <th>Status</th>
+          <th>Last deploy</th>
+          <th></th>
+        </tr></thead>
+        <tbody>
+          <tr><td class="num">4081</td><td><span class="nm">Supper Society</span><br/><span class="id">e2f3e3c7-3cc5-4aad…</span></td><td>ruiyang ke</td><td>free</td><td><span class="pill live">live</span></td><td>2 min</td><td><a href="#admin-app-detail" style="color: var(--tomato); font-style: italic; font-family: var(--serif);">open →</a></td></tr>
+          <tr><td class="num">4080</td><td><span class="nm">Pinion &amp; Co.</span><br/><span class="id">a9ac3b0e-879f-49a6…</span></td><td>charlotte</td><td>pro</td><td><span class="pill live">live</span></td><td>4 min</td><td><a href="#admin-app-detail" style="color: var(--tomato); font-style: italic; font-family: var(--serif);">open →</a></td></tr>
+          <tr><td class="num">4079</td><td><span class="nm">Marigold Co.</span><br/><span class="id">22ff89b0-fd3e-4cac…</span></td><td>charlotte</td><td>pro</td><td><span class="pill live">live</span></td><td>17 min</td><td><a href="#admin-app-detail" style="color: var(--tomato); font-style: italic; font-family: var(--serif);">open →</a></td></tr>
+          <tr><td class="num">4078</td><td><span class="nm">Reading Room</span><br/><span class="id">34009f88-a1dc-45c7…</span></td><td>ruiyang ke</td><td>free</td><td><span class="pill draft">draft</span></td><td>4 d</td><td><a href="#admin-app-detail" style="color: var(--tomato); font-style: italic; font-family: var(--serif);">open →</a></td></tr>
+          <tr><td class="num">4077</td><td><span class="nm">Old Tip Calc</span><br/><span class="id">5b5728b0-d7ad-4d22…</span></td><td>ruiyang ke</td><td>free</td><td><span class="pill suspended">suspended</span></td><td>3 mo</td><td><a href="#admin-app-detail" style="color: var(--tomato); font-style: italic; font-family: var(--serif);">open →</a></td></tr>
+          <tr><td class="num">4076</td><td><span class="nm">cold-start</span><br/><span class="id">22ff89b0-fd3e-4cac…</span></td><td>system</td><td>—</td><td><span class="pill live">live</span></td><td>9 d</td><td><a href="#admin-app-detail" style="color: var(--tomato); font-style: italic; font-family: var(--serif);">open →</a></td></tr>
+          <tr><td class="num">4075</td><td><span class="nm">counter-app</span><br/><span class="id">a9ac3b0e-879f-49a6…</span></td><td>system</td><td>—</td><td><span class="pill live">live</span></td><td>9 d</td><td><a href="#admin-app-detail" style="color: var(--tomato); font-style: italic; font-family: var(--serif);">open →</a></td></tr>
+        </tbody>
+      </table>
+
+      <div style="margin-top: 18px; font-family: var(--serif); font-style: italic; color: var(--ink-soft); font-size: 13.5px; display: flex; justify-content: space-between;">
+        <span>Showing 7 of 1,247</span>
+        <span><a href="#" style="color: var(--tomato); text-decoration: none;">Next page →</a></span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────── 14 ADMIN APP DETAIL ─── -->
+<section class="page" id="admin-app-detail">
+  <div class="corner"><span class="num">№ 14</span><em>admin · app detail</em></div>
+  <h2 class="label">[Admin] One <em>app</em>'s full ledger.</h2>
+  <p class="desc">Three-pane forensic view. Left tabs (overview · deploys · logs · audit · env · billing), centre detail, right marginalia for IDs, hashes, internal links.</p>
+
+  <div class="surface">
+    <div class="topbar">
+      <span class="left"><span class="wm">zeroship<span class="dot">.</span></span><span class="crumb"><span style="font-family: var(--sans); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.2em; color: var(--tomato);">ADMIN</span><span class="sep">/</span><a href="#admin-apps">apps</a><span class="sep">/</span><span style="font-family: var(--serif); font-weight: 500; color: var(--ink);">Supper <em style="color: var(--tomato);">Society</em></span></span></span>
+      <span class="center"></span>
+      <span class="right"><span class="acct" style="background: var(--tomato);">OP</span></span>
+    </div>
+    <div class="body flush">
+      <div style="display: grid; grid-template-columns: 200px 1fr 220px; min-height: 460px;">
+        <aside style="border-right: 1px solid var(--rule); padding: 18px 14px; background: var(--paper-2);">
+          <div style="font-family: var(--sans); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.18em; color: var(--pencil); margin-bottom: 12px;">App pages</div>
+          <a href="#" style="display: block; padding: 6px 10px; font-family: var(--serif); font-size: 14px; color: var(--ink); background: var(--paper); border-left: 2px solid var(--tomato); text-decoration: none;">Overview</a>
+          <a href="#" style="display: block; padding: 6px 10px; font-family: var(--serif); font-style: italic; font-size: 14px; color: var(--ink-soft); text-decoration: none;">Deploys (28)</a>
+          <a href="#" style="display: block; padding: 6px 10px; font-family: var(--serif); font-style: italic; font-size: 14px; color: var(--ink-soft); text-decoration: none;">Logs</a>
+          <a href="#" style="display: block; padding: 6px 10px; font-family: var(--serif); font-style: italic; font-size: 14px; color: var(--ink-soft); text-decoration: none;">Audit</a>
+          <a href="#" style="display: block; padding: 6px 10px; font-family: var(--serif); font-style: italic; font-size: 14px; color: var(--ink-soft); text-decoration: none;">Env</a>
+          <a href="#" style="display: block; padding: 6px 10px; font-family: var(--serif); font-style: italic; font-size: 14px; color: var(--ink-soft); text-decoration: none;">Billing</a>
+        </aside>
+        <div style="padding: 24px 28px;">
+          <h3 class="serif" style="font-size: 32px;">Supper <em>Society</em></h3>
+          <p style="font-family: var(--serif); font-style: italic; color: var(--ink-soft); font-size: 15px;">A small space for our supper club to share recipes, photos, and vote on who hosts next.</p>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 14px; margin: 24px 0 28px 0;">
+            <div class="kpi" style="padding: 12px;"><span class="label-uc">Status</span><span class="val" style="font-size: 22px; color: var(--tomato);">live</span></div>
+            <div class="kpi" style="padding: 12px;"><span class="label-uc">Plan</span><span class="val" style="font-size: 22px;">free</span></div>
+            <div class="kpi" style="padding: 12px;"><span class="label-uc">Deploys</span><span class="val" style="font-size: 22px;">28</span></div>
+            <div class="kpi" style="padding: 12px;"><span class="label-uc">Reqs (24h)</span><span class="val" style="font-size: 22px;">412</span></div>
+          </div>
+
+          <div class="section-head"><h3>Recent deploys</h3></div>
+          <hr class="rule-h" />
+          <div class="ledger" style="margin-top: 10px;">
+            <div class="row"><div class="num">№ 028</div><div class="ts">12:18</div><div class="lvl info">live</div><div class="msg">Hash <code style="font-family: var(--mono); font-size: 11.5px;">d3e39e8…</code> · 380 ms cold start</div></div>
+            <div class="row"><div class="num">№ 027</div><div class="ts">12:11</div><div class="lvl info">retired</div><div class="msg">Hash <code style="font-family: var(--mono); font-size: 11.5px;">7dad276…</code></div></div>
+            <div class="row"><div class="num">№ 026</div><div class="ts">11:43</div><div class="lvl info">retired</div><div class="msg">Hash <code style="font-family: var(--mono); font-size: 11.5px;">86b2e77…</code></div></div>
+          </div>
+        </div>
+        <aside style="border-left: 1px solid var(--rule); padding: 18px 16px; background: var(--paper);">
+          <div class="label-uc" style="margin-bottom: 6px;">Identifiers</div>
+          <dl style="margin: 0;">
+            <dt style="font-family: var(--sans); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.16em; color: var(--pencil); margin-top: 8px;">App ID</dt>
+            <dd style="margin: 2px 0 0 0; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;">e2f3e3c7-3cc5-4aad-9ecb-41da71925f70</dd>
+            <dt style="font-family: var(--sans); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.16em; color: var(--pencil); margin-top: 8px;">API key (hash)</dt>
+            <dd style="margin: 2px 0 0 0; font-family: var(--mono); font-size: 11px; color: var(--ink); cursor: pointer;">3a528717…b36257770</dd>
+            <dt style="font-family: var(--sans); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.16em; color: var(--pencil); margin-top: 8px;">Bundle</dt>
+            <dd style="margin: 2px 0 0 0; font-family: var(--mono); font-size: 11px; color: var(--ink);">d3e39e8…f0a08d318</dd>
+            <dt style="font-family: var(--sans); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.16em; color: var(--pencil); margin-top: 8px;">Worker</dt>
+            <dd style="margin: 2px 0 0 0; font-family: var(--mono); font-size: 11px; color: var(--ink);">w-002 / w-005</dd>
+          </dl>
+
+          <div style="margin-top: 18px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start;">
+            <button class="ghost-btn" style="font-size: 9.5px; padding: 6px 12px;">Force redeploy</button>
+            <button class="ghost-btn" style="font-size: 9.5px; padding: 6px 12px; border-color: var(--tomato); color: var(--tomato);">Suspend</button>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────── 15 ADMIN USERS ─── -->
+<section class="page" id="admin-users">
+  <div class="corner"><span class="num">№ 15</span><em>admin · users</em></div>
+  <h2 class="label">[Admin] <em>Users</em>.</h2>
+  <p class="desc">Same table format as apps. Plan, signup, app count, MRR, actions.</p>
+
+  <div class="surface">
+    <div class="topbar">
+      <span class="left"><span class="wm">zeroship<span class="dot">.</span></span><span class="crumb"><span style="font-family: var(--sans); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.2em; color: var(--tomato);">ADMIN</span><span class="sep">/</span><a href="#">library</a><span class="sep">/</span><span style="font-family: var(--serif); font-style: italic; color: var(--ink);">users</span></span></span>
+      <span class="center"></span>
+      <span class="right"><span class="acct" style="background: var(--tomato);">OP</span></span>
+    </div>
+    <div class="body">
+      <div class="filter-row">
+        <button class="filter-pill active">all · 892</button>
+        <button class="filter-pill">paying · 41</button>
+        <button class="filter-pill">free · 851</button>
+        <input type="text" placeholder="Search by email, name, ID…" style="margin-left: auto; padding: 6px 12px; border: 1px solid var(--rule); background: #fff; font-family: var(--serif); font-size: 13px; min-width: 280px;"/>
+      </div>
+
+      <table class="table">
+        <thead><tr>
+          <th style="width: 60px;">№</th>
+          <th>User</th>
+          <th>Joined</th>
+          <th>Plan</th>
+          <th>Apps</th>
+          <th>MRR</th>
+          <th></th>
+        </tr></thead>
+        <tbody>
+          <tr><td class="num">892</td><td><span class="nm">Charlotte W.</span><br/><span class="id">charlotte@example.com</span></td><td>Apr 12 · 2026</td><td>pro · $19/mo</td><td>3</td><td>$28.40</td><td><a href="#" style="color: var(--tomato); font-style: italic; font-family: var(--serif);">view →</a></td></tr>
+          <tr><td class="num">891</td><td><span class="nm">Ruiyang Ke</span><br/><span class="id">rieonke@gmail.com</span></td><td>Apr 1 · 2026</td><td>free</td><td>4</td><td>—</td><td><a href="#" style="color: var(--tomato); font-style: italic; font-family: var(--serif);">view →</a></td></tr>
+          <tr><td class="num">890</td><td><span class="nm">Levi Aronson</span><br/><span class="id">levi@levi.coffee</span></td><td>Mar 28 · 2026</td><td>pro · $19/mo</td><td>1</td><td>$54.20</td><td><a href="#" style="color: var(--tomato); font-style: italic; font-family: var(--serif);">view →</a></td></tr>
+          <tr><td class="num">889</td><td><span class="nm">Anya P.</span><br/><span class="id">anya@anyapeach.com</span></td><td>Mar 22 · 2026</td><td>free</td><td>2</td><td>—</td><td><a href="#" style="color: var(--tomato); font-style: italic; font-family: var(--serif);">view →</a></td></tr>
+          <tr><td class="num">888</td><td><span class="nm">Marisol G.</span><br/><span class="id">marisol@studiomarisol.it</span></td><td>Mar 18 · 2026</td><td>unlimited</td><td>7</td><td>$214.00</td><td><a href="#" style="color: var(--tomato); font-style: italic; font-family: var(--serif);">view →</a></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────── 16 ADMIN REVENUE ─── -->
+<section class="page" id="admin-revenue">
+  <div class="corner"><span class="num">№ 16</span><em>admin · revenue</em></div>
+  <h2 class="label">[Admin] <em>Revenue</em>.</h2>
+  <p class="desc">MRR over time, per-creator breakdown, platform fee accumulation in the right margin.</p>
+
+  <div class="surface">
+    <div class="topbar">
+      <span class="left"><span class="wm">zeroship<span class="dot">.</span></span><span class="crumb"><span style="font-family: var(--sans); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.2em; color: var(--tomato);">ADMIN</span><span class="sep">/</span><a href="#">library</a><span class="sep">/</span><span style="font-family: var(--serif); font-style: italic; color: var(--ink);">revenue</span></span></span>
+      <span class="center"></span>
+      <span class="right"><span class="acct" style="background: var(--tomato);">OP</span></span>
+    </div>
+    <div class="body">
+      <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 36px;">
+        <div>
+          <div class="section-head"><h3>MRR · last 30 days</h3><span class="count">$14,302 · today</span></div>
+          <hr class="rule-h" />
+          <div class="chart" style="margin-top: 18px;">
+            <div class="bar" style="height: 35%;"></div>
+            <div class="bar" style="height: 38%;"></div>
+            <div class="bar" style="height: 42%;"></div>
+            <div class="bar" style="height: 41%;"></div>
+            <div class="bar" style="height: 48%;"></div>
+            <div class="bar" style="height: 52%;"></div>
+            <div class="bar" style="height: 49%;"></div>
+            <div class="bar" style="height: 56%;"></div>
+            <div class="bar" style="height: 60%;"></div>
+            <div class="bar" style="height: 58%;"></div>
+            <div class="bar" style="height: 64%;"></div>
+            <div class="bar" style="height: 67%;"></div>
+            <div class="bar" style="height: 65%;"></div>
+            <div class="bar" style="height: 70%;"></div>
+            <div class="bar" style="height: 72%;"></div>
+            <div class="bar" style="height: 74%;"></div>
+            <div class="bar" style="height: 75%;"></div>
+            <div class="bar" style="height: 78%;"></div>
+            <div class="bar" style="height: 80%;"></div>
+            <div class="bar" style="height: 84%;"></div>
+            <div class="bar" style="height: 87%;"></div>
+            <div class="bar" style="height: 89%;"></div>
+            <div class="bar" style="height: 88%;"></div>
+            <div class="bar" style="height: 91%;"></div>
+            <div class="bar" style="height: 93%;"></div>
+            <div class="bar" style="height: 92%;"></div>
+            <div class="bar" style="height: 94%;"></div>
+            <div class="bar" style="height: 96%;"></div>
+            <div class="bar peak" style="height: 100%;"></div>
+            <div class="bar" style="height: 98%;"></div>
+          </div>
+          <div class="chart-axis"><span>30d ago</span><span>15d</span><span>now</span></div>
+        </div>
+        <div>
+          <div class="section-head"><h3 style="font-size: 22px;">Platform fee</h3></div>
+          <hr class="rule-h" />
+          <div style="font-family: var(--serif); font-size: 36px; line-height: 1; margin: 16px 0 4px 0;">$2,145</div>
+          <div style="font-family: var(--serif); font-style: italic; color: var(--ink-soft); font-size: 14px;">today · 15% of $14,302</div>
+          <div style="margin-top: 18px; font-family: var(--serif); font-size: 14px; color: var(--ink-soft); line-height: 1.55;">
+            Platform fee accrues in real time as Stripe webhooks settle. Payouts are weekly to the platform Stripe account.
+          </div>
+        </div>
+      </div>
+
+      <div class="section-head" style="margin-top: 36px;"><h3>By creator</h3><span class="count">top 5 today</span></div>
+      <hr class="rule-h" />
+      <table class="table" style="margin-top: 14px;">
+        <thead><tr><th style="width: 60px;">№</th><th>Creator</th><th>Apps earning</th><th>Today</th><th>This month</th><th>Platform fee</th></tr></thead>
+        <tbody>
+          <tr><td class="num">01</td><td><span class="nm">Marisol G.</span></td><td>3</td><td>$642</td><td>$8,820</td><td>$1,323</td></tr>
+          <tr><td class="num">02</td><td><span class="nm">Levi Aronson</span></td><td>1</td><td>$214</td><td>$2,940</td><td>$441</td></tr>
+          <tr><td class="num">03</td><td><span class="nm">Charlotte W.</span></td><td>2</td><td>$84</td><td>$1,180</td><td>$177</td></tr>
+          <tr><td class="num">04</td><td><span class="nm">Anya P.</span></td><td>1</td><td>$48</td><td>$702</td><td>$105</td></tr>
+          <tr><td class="num">05</td><td><span class="nm">14 others</span></td><td>21</td><td>$112</td><td>$1,660</td><td>$249</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────────────────────────────── 17 ADMIN LOGS ─── -->
+<section class="page" id="admin-logs">
+  <div class="corner"><span class="num">№ 17</span><em>admin · logs</em></div>
+  <h2 class="label">[Admin] <em>System journal</em>.</h2>
+  <p class="desc">Cross-app log stream. Filter by app, level, time, request ID.</p>
+
+  <div class="surface">
+    <div class="topbar">
+      <span class="left"><span class="wm">zeroship<span class="dot">.</span></span><span class="crumb"><span style="font-family: var(--sans); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.2em; color: var(--tomato);">ADMIN</span><span class="sep">/</span><a href="#">library</a><span class="sep">/</span><span style="font-family: var(--serif); font-style: italic; color: var(--ink);">journal</span></span></span>
+      <span class="center"></span>
+      <span class="right"><span class="acct" style="background: var(--tomato);">OP</span></span>
+    </div>
+    <div class="body">
+      <div class="filter-row">
+        <button class="filter-pill active">all</button>
+        <button class="filter-pill">info</button>
+        <button class="filter-pill">warn</button>
+        <button class="filter-pill">error</button>
+        <input type="text" placeholder="Filter by app, request id…" style="margin-left: auto; padding: 6px 12px; border: 1px solid var(--rule); background: #fff; font-family: var(--serif); font-size: 13px; min-width: 280px;"/>
+      </div>
+
+      <div class="ledger" style="font-size: 13.5px;">
+        <div class="row" style="grid-template-columns: 60px 90px 80px 200px 1fr;"><div class="num">№ 4081</div><div class="ts">12:18:24.412</div><div class="lvl info">deploy</div><div style="font-family: var(--serif); font-style: italic; color: var(--ink);">supper-society</div><div class="msg">Bundle hash <code>d3e39e8…</code> · 380 ms cold start</div></div>
+        <div class="row" style="grid-template-columns: 60px 90px 80px 200px 1fr;"><div class="num">№ 4080</div><div class="ts">12:17:14.002</div><div class="lvl info">signup</div><div style="font-family: var(--serif); font-style: italic; color: var(--ink);">— platform —</div><div class="msg">charlotte@example.com · plan=free</div></div>
+        <div class="row" style="grid-template-columns: 60px 90px 80px 200px 1fr;"><div class="num">№ 4079</div><div class="ts">12:16:02.881</div><div class="lvl info">earn</div><div style="font-family: var(--serif); font-style: italic; color: var(--ink);">marigold-co.</div><div class="msg">Stripe charge $42 · platform fee $6.30 (15%)</div></div>
+        <div class="row" style="grid-template-columns: 60px 90px 80px 200px 1fr;"><div class="num">№ 4078</div><div class="ts">12:14:11.224</div><div class="lvl warn">warn</div><div style="font-family: var(--serif); font-style: italic; color: var(--ink);">— platform —</div><div class="msg">OpenAI quota at 86% for tier · monitoring</div></div>
+        <div class="row" style="grid-template-columns: 60px 90px 80px 200px 1fr;"><div class="num">№ 4077</div><div class="ts">12:13:00.412</div><div class="lvl info">deploy</div><div style="font-family: var(--serif); font-style: italic; color: var(--ink);">tip-garden</div><div class="msg">Bundle hash <code>a53a254…</code> · 412 ms cold start</div></div>
+        <div class="row" style="grid-template-columns: 60px 90px 80px 200px 1fr;"><div class="num">№ 4076</div><div class="ts">12:12:01.013</div><div class="lvl error">error</div><div style="font-family: var(--serif); font-style: italic; color: var(--ink);">old-tip-calc</div><div class="msg">Worker terminated · CPU limit exceeded · auto-suspended after 3 incidents</div></div>
+        <div class="row" style="grid-template-columns: 60px 90px 80px 200px 1fr;"><div class="num">№ 4075</div><div class="ts">12:11:08.301</div><div class="lvl info">deploy</div><div style="font-family: var(--serif); font-style: italic; color: var(--ink);">reading-room</div><div class="msg">Draft saved · not deployed</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- footer -->
+<footer class="colophon">
+  <span>Set in <em>Fraunces</em> &amp; <em>Public Sans</em> · 17 surfaces</span>
+  <span>zeroship · made with care</span>
+</footer>
+
+</main>
+
+<script>
+  // chip → populate textarea
+  document.querySelectorAll(".chip").forEach((c) => {
+    c.addEventListener("click", () => {
+      const ta = document.querySelector("#home textarea");
+      if (ta) { ta.value = c.textContent.trim(); ta.focus(); }
+    });
+  });
+  // copy URL
+  document.querySelectorAll(".copy").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      e.preventDefault();
+      const pill = el.closest(".url-pill");
+      const text = pill ? pill.textContent.replace("copy", "").trim() : "";
+      navigator.clipboard?.writeText(text);
+      const o = el.textContent;
+      el.textContent = "copied ✓";
+      setTimeout(() => (el.textContent = o), 1400);
+    });
+  });
+  // filter pill toggles
+  document.querySelectorAll(".filter-row").forEach((row) => {
+    row.querySelectorAll(".filter-pill").forEach((p) => {
+      p.addEventListener("click", () => {
+        row.querySelectorAll(".filter-pill").forEach((q) => q.classList.remove("active"));
+        p.classList.add("active");
+      });
+    });
+  });
+  // drawer toggles
+  document.querySelectorAll(".ws-drawer").forEach((d) => {
+    d.querySelectorAll(".pill").forEach((p) => {
+      p.addEventListener("click", () => {
+        d.querySelectorAll(".pill").forEach((q) => q.classList.remove("active"));
+        p.classList.add("active");
+      });
+    });
+  });
+</script>
+</body>
+</html>

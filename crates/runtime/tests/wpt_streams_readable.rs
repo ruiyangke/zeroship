@@ -1,6 +1,6 @@
 //! WPT runner for `streams/readable-streams/`.
 //! Source: https://github.com/web-platform-tests/wpt
-//! Files vendored under `tests/wpt/streams/`.
+//! Files vendored under `crates/runtime/tests/wpt/streams/`.
 //!
 //! Mirrors the `wpt_headers.rs` pattern: minimal testharness.js shim,
 //! per-file isolate, per-test pass/fail/skip classification. The Rust

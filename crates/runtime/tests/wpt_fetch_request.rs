@@ -1,7 +1,7 @@
 //! Run W3C Web Platform Tests for `Request` against the native impl.
 //!
 //! Source: https://github.com/web-platform-tests/wpt/tree/master/fetch/api/request
-//! Files vendored at `tests/wpt/fetch/api/request/`.
+//! Files vendored at `crates/runtime/tests/wpt/fetch/api/request/`.
 //!
 //! Mirrors the `wpt_form_data.rs` pattern: minimal testharness.js shim,
 //! per-file V8 isolate, per-test pass/fail/skip. The Rust `#[test]`
@@ -20,6 +20,7 @@
 
 use std::collections::BTreeMap;
 
+use zeroship_runtime::blob_native;
 use zeroship_runtime::dom;
 use zeroship_runtime::fetch_request;
 use zeroship_runtime::fetch_response;
@@ -105,22 +106,7 @@ const TESTHARNESS_SHIM: &str = r#"
     globalThis.URLSearchParams.prototype[Symbol.toStringTag] = "URLSearchParams";
   }
 
-  // Blob / File don't exist in v1. WPT tests that construct one
-  // classify as `skip`, not fail.
-  if (typeof globalThis.Blob !== "function") {
-    globalThis.Blob = function Blob() {
-      const e = new Error("native Blob not yet implemented (v1 skip)");
-      e.__wpt_skip = true;
-      throw e;
-    };
-  }
-  if (typeof globalThis.File !== "function") {
-    globalThis.File = function File() {
-      const e = new Error("native File not yet implemented (v1 skip)");
-      e.__wpt_skip = true;
-      throw e;
-    };
-  }
+  // Native Blob and File are installed by the harness — no shims.
 
   // fetch() not yet implemented (next chunk).
   if (typeof globalThis.fetch !== "function") {
@@ -380,6 +366,7 @@ fn run_wpt(label: &str, sources: &[&str]) -> Vec<TestResult> {
     streams::strategies::install_count_queuing_strategy(scope, global);
     headers::install_global(scope, global);
     dom::install_globals(scope, global);
+    blob_native::install_globals(scope, global);
     fetch_request::install_global(scope, global);
     fetch_response::install_global(scope, global);
 

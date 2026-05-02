@@ -1,23 +1,11 @@
-// ─── Signup — email + password ──────────────────────────────────
-//
-// Mirrors Login's layout. After a successful register we don't
-// auto-login (separate POST /auth/login is required) — but we do it
-// on the user's behalf so they land directly in the dashboard.
+// ─── Signup — atelier auth ──────────────────────────────────────
 
 import { useState, type FormEvent } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useMutation } from "@tanstack/react-query";
-import {
-  register as apiRegister,
-  login as apiLogin,
-  googleStartUrl,
-} from "../api/auth";
+import { register as apiRegister, googleStartUrl } from "../api/auth";
 import { useAuth } from "../auth/AuthContext";
-import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Loader2 } from "lucide-react";
+import { StampButton } from "../components/StampButton";
 
 export default function Signup() {
   const location = useLocation();
@@ -27,109 +15,144 @@ export default function Signup() {
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
 
-  const returnTo = sanitizeReturn(new URLSearchParams(location.search).get("return"));
+  const params = new URLSearchParams(location.search);
+  const returnTo = sanitizeReturn(params.get("return"));
 
-  const submitMut = useMutation({
-    mutationFn: async () => {
-      await apiRegister({ email, password, name });
-      await apiLogin({ email, password });
-    },
+  const mut = useMutation({
+    mutationFn: () => apiRegister({ email, password, name }),
     onSuccess: async () => {
       await refresh();
-      navigate(returnTo, { replace: true });
+      // First signup → run the onboarding intent flow per spec §7.1.
+      // If the caller wanted a deeper destination (`?return=…`), respect
+      // that — login flows and OAuth callbacks supply it. Bare /signup
+      // submissions land on `/home` by default; we redirect those to
+      // /onboarding/intent so the first-run survey fires.
+      const dest = returnTo === "/home" ? "/onboarding/intent" : returnTo;
+      navigate(dest, { replace: true });
     },
   });
 
   function submit(e: FormEvent) {
     e.preventDefault();
-    if (!email.trim() || password.length < 8 || !name.trim()) return;
-    submitMut.mutate();
+    if (!email.trim() || !password || !name.trim()) return;
+    mut.mutate();
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-5 bg-background">
-      <div className="w-[380px] max-w-full" data-testid="signup-page">
-        <h1 className="text-sm font-bold tracking-[0.18em] uppercase text-primary mb-1">
-          zeroship
+    <div className="min-h-screen flex items-center justify-center px-4 sm:px-5">
+      <div className="w-[440px] max-w-full bg-white border border-rule px-6 sm:px-10 py-8 sm:py-10 reveal" data-testid="signup-page">
+        <Link to="/" className="font-serif italic text-[20px] font-medium text-ink hover:opacity-80 mb-8 inline-block" style={{ textDecoration: "none" }}>
+          zeroship<span className="text-tomato">.</span>
+        </Link>
+
+        <h1 className="font-serif font-medium text-[36px] -tracking-[0.015em] leading-[1.05] mb-1.5">
+          Make <em className="italic text-tomato">something</em>.
         </h1>
-        <div className="text-xs text-muted-foreground mb-6">
-          create your creator account
+        <p className="font-serif text-[14.5px] text-ink-soft mb-7 leading-[1.55]">
+          Sign up to start a project. We'll save your work the moment you describe it.
+        </p>
+
+        <form onSubmit={submit} className="space-y-4">
+          <Field label="Email" type="email" autoComplete="email" autoFocus required value={email} onChange={setEmail} testId="signup-email" />
+          <Field
+            label="Choose a password"
+            type="password"
+            autoComplete="new-password"
+            required
+            value={password}
+            onChange={setPassword}
+            testId="signup-password"
+            help="At least 8 characters"
+          />
+          <Field
+            label="What should we call you?"
+            type="text"
+            required
+            value={name}
+            onChange={setName}
+            testId="signup-name"
+            help="We'll only show this on projects you publish"
+          />
+          <div className="pt-2">
+            <StampButton
+              type="submit"
+              loading={mut.isPending}
+              disabled={mut.isPending || !email.trim() || !password || !name.trim()}
+              className="w-full"
+              data-testid="signup-submit"
+              noArrow
+            >
+              {mut.isPending ? "Creating…" : "Create account"}
+            </StampButton>
+          </div>
+          {mut.isError && (
+            <div className="font-serif italic text-tomato text-[13px]" data-testid="signup-error">
+              {mut.error.message}
+            </div>
+          )}
+        </form>
+
+        <div className="my-6 flex items-center gap-3 font-sans text-[10px] uppercase tracking-[0.2em] text-pencil">
+          <span className="flex-1 h-px bg-rule" />or<span className="flex-1 h-px bg-rule" />
         </div>
 
-        <Card>
-          <CardContent>
-            <form onSubmit={submit} className="space-y-3">
-              <div>
-                <Label htmlFor="name">name</Label>
-                <Input
-                  id="name" autoComplete="name" autoFocus required
-                  value={name} onChange={(e) => setName(e.target.value)}
-                  data-testid="signup-name"
-                />
-              </div>
-              <div>
-                <Label htmlFor="email">email</Label>
-                <Input
-                  id="email" type="email" autoComplete="email" required
-                  value={email} onChange={(e) => setEmail(e.target.value)}
-                  data-testid="signup-email"
-                />
-              </div>
-              <div>
-                <Label htmlFor="password">password</Label>
-                <Input
-                  id="password" type="password" autoComplete="new-password" required minLength={8}
-                  value={password} onChange={(e) => setPassword(e.target.value)}
-                  data-testid="signup-password"
-                />
-                <div className="text-[10px] text-muted-foreground mt-1">
-                  at least 8 characters
-                </div>
-              </div>
-              <Button
-                type="submit" variant="primary" className="w-full"
-                disabled={submitMut.isPending || !email.trim() || password.length < 8 || !name.trim()}
-                data-testid="signup-submit"
-              >
-                {submitMut.isPending ? <Loader2 className="size-3 animate-spin mr-1" /> : null}
-                {submitMut.isPending ? "creating…" : "create account"}
-              </Button>
-              {submitMut.isError && (
-                <div className="text-xs text-destructive" data-testid="signup-error">
-                  {submitMut.error.message}
-                </div>
-              )}
-            </form>
+        <a
+          href={googleStartUrl(returnTo)}
+          data-testid="signup-google"
+          className="flex items-center justify-center gap-2 w-full h-10 border border-rule bg-white text-ink font-sans text-[11px] uppercase tracking-[0.18em] hover:border-ink transition-colors"
+          style={{ textDecoration: "none" }}
+        >
+          <GoogleG />
+          sign up with google
+        </a>
 
-            <div className="my-4 flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
-              <div className="flex-1 h-px bg-border" />
-              or
-              <div className="flex-1 h-px bg-border" />
-            </div>
-
-            <a
-              href={googleStartUrl(returnTo)}
-              data-testid="signup-google"
-              className="flex items-center justify-center gap-2 w-full h-9 border border-border bg-card text-foreground text-xs uppercase tracking-widest hover:border-muted-foreground hover:bg-white/5 transition-colors"
-            >
-              continue with google
-            </a>
-
-            <div className="text-xs text-muted-foreground text-center mt-4">
-              already have an account?{" "}
-              <Link to="/login" className="text-primary hover:opacity-80" data-testid="signup-link-login">
-                sign in
-              </Link>
-            </div>
-          </CardContent>
-        </Card>
+        <div className="font-serif text-[14px] text-ink-soft text-center mt-6">
+          Already have one?{" "}
+          <Link to="/login" className="text-tomato hover:opacity-80" style={{ textDecoration: "none" }}>
+            Sign in →
+          </Link>
+        </div>
       </div>
     </div>
   );
 }
 
+function Field({
+  label, type, autoComplete, autoFocus, required, value, onChange, testId, help,
+}: {
+  label: string; type: string; autoComplete?: string; autoFocus?: boolean; required?: boolean;
+  value: string; onChange: (v: string) => void; testId?: string; help?: string;
+}) {
+  return (
+    <label className="block">
+      <span className="block label-uc mb-1.5">{label}</span>
+      <input
+        type={type}
+        autoComplete={autoComplete}
+        autoFocus={autoFocus}
+        required={required}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        data-testid={testId}
+        className="w-full px-3 py-2.5 border border-rule bg-white font-serif text-[15px] text-ink outline-none focus:border-ink"
+      />
+      {help && <span className="block mt-1 font-serif italic text-[12px] text-pencil">{help}</span>}
+    </label>
+  );
+}
+
 function sanitizeReturn(raw: string | null): string {
-  if (!raw) return "/";
-  if (raw.startsWith("//") || raw.includes("://") || !raw.startsWith("/")) return "/";
+  // Post-signup default lands in the authed gallery at /home — `/` is
+  // the public marketing page (per spec §5.1).
+  if (!raw) return "/home";
+  if (raw.startsWith("//") || raw.includes("://") || !raw.startsWith("/")) return "/home";
   return raw;
+}
+
+function GoogleG() {
+  return (
+    <svg viewBox="0 0 24 24" className="size-3.5" aria-hidden="true">
+      <path fill="#EA4335" d="M12 11v3.4h5.4c-.2 1.3-1.5 3.7-5.4 3.7-3.2 0-5.9-2.7-5.9-5.9 0-3.3 2.7-5.9 5.9-5.9 1.8 0 3.1.8 3.8 1.5l2.6-2.5C16.7 3.7 14.6 2.8 12 2.8 6.9 2.8 2.8 6.9 2.8 12s4.1 9.2 9.2 9.2c5.3 0 8.8-3.7 8.8-9 0-.6-.1-1.1-.2-1.5H12z" />
+    </svg>
+  );
 }

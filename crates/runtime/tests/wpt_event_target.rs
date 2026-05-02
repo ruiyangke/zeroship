@@ -2,7 +2,7 @@
 //! the native impl.
 //!
 //! Source: https://github.com/web-platform-tests/wpt/tree/master/dom/events
-//! Files are vendored at `tests/wpt/dom/events/` (sparse-checkout).
+//! Files are vendored at `crates/runtime/tests/wpt/dom/events/` (sparse-checkout).
 //!
 //! Mirrors `wpt_headers.rs` — minimal testharness.js shim, fresh V8
 //! isolate per file, per-test pass/fail. The Rust `#[test]` fails iff

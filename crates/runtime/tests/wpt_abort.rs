@@ -2,7 +2,7 @@
 //! against the native impl.
 //!
 //! Source: https://github.com/web-platform-tests/wpt/tree/master/dom/abort
-//! Files are vendored at `tests/wpt/dom/abort/`.
+//! Files are vendored at `crates/runtime/tests/wpt/dom/abort/`.
 //!
 //! Tests requiring async timer fires (timeout.any.js, the `async_test`
 //! cases in event.any.js) are reported as `skip` by the test harness

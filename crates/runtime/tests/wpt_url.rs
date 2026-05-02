@@ -1,6 +1,6 @@
 //! Run the W3C Web Platform Tests for `URL` / `URLSearchParams`
 //! against the native impl. Source: https://github.com/web-platform-tests/wpt
-//! (url/). Files are vendored under `tests/wpt/url/`.
+//! (url/). Files are vendored under `crates/runtime/tests/wpt/url/`.
 //!
 //! Mirrors `wpt_headers.rs` — minimal testharness.js shim, fresh V8
 //! isolate per file, per-test pass/fail reporting. The Rust `#[test]`

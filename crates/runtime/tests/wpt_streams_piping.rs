@@ -1,6 +1,6 @@
 //! WPT runner for `streams/piping/`.
 //! Source: https://github.com/web-platform-tests/wpt
-//! Files vendored under `tests/wpt/streams/piping/`.
+//! Files vendored under `crates/runtime/tests/wpt/streams/piping/`.
 //!
 //! Mirrors `wpt_streams_transform.rs` shape. Per-file isolate, per-test
 //! pass/fail/skip classification.

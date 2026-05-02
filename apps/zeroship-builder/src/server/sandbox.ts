@@ -1,8 +1,35 @@
 "use server";
 // Sandbox server functions — proxy to zeroship-sandbox HTTP API.
-// We hold the sandbox token here; the browser never sees it.
+//
+// Two flavours live in this file:
+//
+//  1. Legacy `/sessions/...` procedures (openSession, listFiles,
+//     readFile, writeFile, deleteFile, execCommand). These targeted
+//     an earlier controller revision. They take positional args and
+//     therefore don't survive the single-input RPC wire (the vite-
+//     plugin transform forwards `args[0]` only). The orphan
+//     workspace/tabs/FilesTab still imports them via api/files.ts;
+//     once the canvas migration deletes that tree, these can be
+//     dropped too.
+//
+//  2. New `/sandboxes/:id/...` procedures (listSandboxFiles,
+//     readSandboxFile). These are the ones the FilesCanvas calls and
+//     they take object input so the RPC wire forwards everything.
+//     They reuse `getOrCreateSandboxFor` from `_sandbox_backend.ts`
+//     so the FilesCanvas attaches to the same sandbox Builder writes
+//     into — readers see writers' bytes immediately.
 
 import { SANDBOX_URL, SANDBOX_TOKEN } from "./env";
+import { getOrCreateSandboxFor, BUILDER_USER_ID } from "./_sandbox_backend";
+
+// The controller's `/sandboxes/:id/*` routes verify ownership via a
+// `?user_id=<id>` query string and 404 on mismatch. Builder's backend
+// always appends it; canvas-facing reads must too.
+function ownerQ(): string {
+  return `?user_id=${encodeURIComponent(BUILDER_USER_ID)}`;
+}
+
+// ─── shared types / helpers ──────────────────────────────────────
 
 export interface SessionInfo {
   session_id: string;
@@ -33,6 +60,54 @@ async function jsonOrThrow<T>(res: Response, op: string): Promise<T> {
   return res.json();
 }
 
+function encodePath(p: string): string {
+  const trimmed = p.startsWith("/") ? p.slice(1) : p;
+  return trimmed.split("/").map(encodeURIComponent).join("/");
+}
+
+// ─── new `/sandboxes/:id/...` procs (canvas-facing) ──────────────
+//
+// Both take an object input so the single-input RPC wire delivers
+// every field intact. `appId` is forwarded straight to
+// `getOrCreateSandboxFor` — the same key Builder uses for its own
+// sandbox lookup, so reads from the canvas hit the same workspace
+// the agent is writing into.
+
+export interface ListSandboxFilesInput { appId: string }
+
+export async function listSandboxFiles(
+  input: ListSandboxFilesInput,
+): Promise<FileEntry[]> {
+  const { id } = await getOrCreateSandboxFor(input.appId);
+  const res = await fetch(
+    `${SANDBOX_URL()}/sandboxes/${id}/file-tree${ownerQ()}`,
+    { headers: authHeaders() },
+  );
+  const data = await jsonOrThrow<{ entries: FileEntry[] }>(res, "list files");
+  return data.entries ?? [];
+}
+listSandboxFiles.config = { id: "sandbox.listSandboxFiles" };
+
+export interface ReadSandboxFileInput { appId: string; path: string }
+
+export async function readSandboxFile(
+  input: ReadSandboxFileInput,
+): Promise<string> {
+  const { id } = await getOrCreateSandboxFor(input.appId);
+  const res = await fetch(
+    `${SANDBOX_URL()}/sandboxes/${id}/files/${encodePath(input.path)}${ownerQ()}`,
+    { headers: authHeaders() },
+  );
+  if (!res.ok) {
+    throw new Error(`read ${input.path} → ${res.status}: ${await res.text()}`);
+  }
+  return res.text();
+}
+readSandboxFile.config = { id: "sandbox.readSandboxFile" };
+
+// ─── legacy `/sessions/...` procs (kept for orphan tree, scheduled
+// for deletion alongside workspace/tabs) ────────────────────────
+
 export async function openSession(projectId: string): Promise<SessionInfo> {
   const res = await fetch(`${SANDBOX_URL()}/sessions`, {
     method: "POST",
@@ -41,6 +116,7 @@ export async function openSession(projectId: string): Promise<SessionInfo> {
   });
   return jsonOrThrow(res, "create session");
 }
+openSession.config = { id: "sandbox.openSession" };
 
 async function sessionFor(projectId: string): Promise<string> {
   const s = await openSession(projectId);
@@ -53,6 +129,7 @@ export async function listFiles(projectId: string): Promise<FileEntry[]> {
   const data = await jsonOrThrow<{ entries: FileEntry[] }>(res, "list files");
   return data.entries ?? [];
 }
+listFiles.config = { id: "sandbox.listFiles" };
 
 export async function readFile(projectId: string, path: string): Promise<string> {
   const sid = await sessionFor(projectId);
@@ -63,6 +140,7 @@ export async function readFile(projectId: string, path: string): Promise<string>
   if (!res.ok) throw new Error(`read ${path} → ${res.status}: ${await res.text()}`);
   return res.text();
 }
+readFile.config = { id: "sandbox.readFile" };
 
 export async function writeFile(
   projectId: string, path: string, content: string,
@@ -78,6 +156,7 @@ export async function writeFile(
   );
   return jsonOrThrow(res, `write ${path}`);
 }
+writeFile.config = { id: "sandbox.writeFile" };
 
 export async function deleteFile(projectId: string, path: string): Promise<void> {
   const sid = await sessionFor(projectId);
@@ -88,6 +167,7 @@ export async function deleteFile(projectId: string, path: string): Promise<void>
   if (res.status === 404) return;
   await jsonOrThrow<unknown>(res, `delete ${path}`);
 }
+deleteFile.config = { id: "sandbox.deleteFile" };
 
 export async function execCommand(
   projectId: string,
@@ -102,7 +182,4 @@ export async function execCommand(
   });
   return jsonOrThrow(res, "exec");
 }
-
-function encodePath(p: string): string {
-  return p.split("/").map(encodeURIComponent).join("/");
-}
+execCommand.config = { id: "sandbox.execCommand" };

@@ -1,105 +1,82 @@
-// ─── App — routing root for zeroship-builder ───────────────────
-//
-// Every route runs against this app's own server functions
-// (`"use server"` modules in src/server/) — there is no separate
-// agent process or dashboard backend. The app IS the dashboard +
-// the agent + the auth proxy + the sandbox proxy, deployed as a
-// single zeroship app (dogfooded on the platform's own runtime).
-
-import {
-  BrowserRouter, Routes, Route, Navigate, useParams, useLocation,
-} from "react-router-dom";
-import type { ReactNode } from "react";
-
-import { AuthProvider, useAuth } from "./auth/AuthContext";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { WorkspaceShell } from "./workspace/WorkspaceShell";
+import { WizardWorkspace } from "./pages/WizardWorkspace";
 import { Home } from "./pages/Home";
-import { Account } from "./pages/Account";
+import { Marketing } from "./pages/Marketing";
+import { Pricing } from "./pages/Pricing";
+import { Skills } from "./pages/Skills";
+import { Templates } from "./pages/Templates";
+import { About } from "./pages/About";
+import { Changelog } from "./pages/Changelog";
+import { Privacy } from "./pages/Privacy";
+import { Terms } from "./pages/Terms";
 import Login from "./pages/Login";
 import Signup from "./pages/Signup";
-import { ProjectWorkspace } from "./workspace/ProjectWorkspace";
-import { ChatTab } from "./workspace/tabs/ChatTab";
-import { FilesTab } from "./workspace/tabs/FilesTab";
-import { LogsTab } from "./workspace/tabs/LogsTab";
-import { EnvTab } from "./workspace/tabs/EnvTab";
-import { SettingsTab } from "./workspace/tabs/SettingsTab";
+import ForgotPassword from "./pages/ForgotPassword";
+import { Account } from "./pages/Account";
+import { OnboardingIntent } from "./pages/OnboardingIntent";
+import { AuthGuard } from "./auth/AuthGuard";
+import { DevEventsBadge } from "./components/DevEventsBadge";
 
-function App() {
+export default function App() {
   return (
     <BrowserRouter>
-      <AuthProvider>
-        <AppRoutes />
-      </AuthProvider>
+      <Routes>
+        {/* ─── Public surfaces (per spec §5) ───────────────────── */}
+        {/* `/` is the marketing landing for unauthed visitors. The
+            authed gallery (project list) lives at `/home` behind
+            AuthGuard. Post-login redirects target `/home`. */}
+        <Route path="/" element={<Marketing />} />
+        <Route path="/pricing" element={<Pricing />} />
+        <Route path="/skills" element={<Skills />} />
+        <Route path="/templates" element={<Templates />} />
+        <Route path="/about" element={<About />} />
+        <Route path="/changelog" element={<Changelog />} />
+        <Route path="/legal/privacy" element={<Privacy />} />
+        <Route path="/legal/terms" element={<Terms />} />
+
+        {/* Public auth surfaces — no AuthGuard. */}
+        <Route path="/login" element={<Login />} />
+        <Route path="/signup" element={<Signup />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
+
+        {/* Onboarding intent picker — first run after signup (spec §7.1).
+            Public so the post-signup hand-off doesn't race with auth
+            propagation; the page itself doesn't need a session. */}
+        <Route path="/onboarding/intent" element={<OnboardingIntent />} />
+
+        {/* Authed gallery — formerly `/`. */}
+        <Route path="/home" element={<AuthGuard><Home /></AuthGuard>} />
+
+        {/* Pre-coding clarification flow per spec §8.2.7 / §4.8.2b.
+            PUBLIC by design — the wizard collects a brief without auth,
+            and only Begin → createApp triggers a 401 when the user
+            isn't signed in. */}
+        <Route path="/new" element={<WizardWorkspace />} />
+
+        {/* Project workspace — the WORKSPACE Builder takes over here.
+            `:appId` is the typed-id (UUIDv7 + base62) returned by
+            createApp; suffix routes (/preview, /code, /env, …) are
+            handled inside WorkspaceShell via canvas pills. */}
+        <Route
+          path="/p/:appId/*"
+          element={<AuthGuard><WorkspaceShell /></AuthGuard>}
+        />
+
+        {/* Account settings — gated. */}
+        <Route
+          path="/account"
+          element={<AuthGuard><Account /></AuthGuard>}
+        />
+
+        {/* Catch-all stays last so explicit routes match first. */}
+        <Route path="*" element={<AuthGuard><WorkspaceShell /></AuthGuard>} />
+      </Routes>
+      {/* Dev-only floating analytics inspector. Renders nothing in
+          production builds (the component itself short-circuits on
+          `import.meta.env.DEV`). Helps verify telemetry firing without
+          opening the console. */}
+      <DevEventsBadge />
     </BrowserRouter>
   );
 }
-
-function AppRoutes() {
-  const { logout } = useAuth();
-  const handleLogout = async () => { await logout(); };
-
-  return (
-    <Routes>
-      <Route path="/login"  element={<RedirectIfAuthed><Login /></RedirectIfAuthed>} />
-      <Route path="/signup" element={<RedirectIfAuthed><Signup /></RedirectIfAuthed>} />
-
-      <Route path="/" element={<RequireAuth><Home onLogout={handleLogout} /></RequireAuth>} />
-
-      <Route
-        path="/p/:appId"
-        element={<RequireAuth><ProjectWorkspace onLogout={handleLogout} /></RequireAuth>}
-      >
-        <Route index           element={<Navigate to="chat" replace />} />
-        <Route path="chat"     element={<ChatTab />} />
-        <Route path="files"    element={<FilesTab />} />
-        <Route path="logs"     element={<LogsTab />} />
-        <Route path="env"      element={<EnvTab />} />
-        <Route path="settings" element={<SettingsTab />} />
-      </Route>
-
-      <Route path="/account" element={<RequireAuth><Account onLogout={handleLogout} /></RequireAuth>} />
-
-      <Route path="/builder"        element={<Navigate to="/" replace />} />
-      <Route path="/builder/:appId" element={<RedirectBuilder />} />
-
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
-  );
-}
-
-function RequireAuth({ children }: { children: ReactNode }) {
-  const { user, loading, devBypass } = useAuth();
-  const location = useLocation();
-  if (devBypass) return <>{children}</>;
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center text-xs text-muted-foreground">
-        loading…
-      </div>
-    );
-  }
-  if (!user) {
-    const ret = encodeURIComponent(location.pathname + location.search);
-    return <Navigate to={`/login?return=${ret}`} replace />;
-  }
-  return <>{children}</>;
-}
-
-function RedirectIfAuthed({ children }: { children: ReactNode }) {
-  const { user, loading, devBypass } = useAuth();
-  const location = useLocation();
-  if (devBypass) return <>{children}</>;
-  if (loading) return null;
-  if (user) {
-    const params = new URLSearchParams(location.search);
-    const ret = params.get("return") ?? "/";
-    return <Navigate to={ret} replace />;
-  }
-  return <>{children}</>;
-}
-
-function RedirectBuilder() {
-  const { appId } = useParams<{ appId: string }>();
-  return <Navigate to={appId ? `/p/${appId}/chat` : "/"} replace />;
-}
-
-export default App;

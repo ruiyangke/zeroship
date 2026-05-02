@@ -1,7 +1,7 @@
 //! Run the W3C Web Platform Tests for `Blob` and `File` against the
 //! native impl. Source: https://github.com/web-platform-tests/wpt
 //! (FileAPI/blob and FileAPI/file). Files are vendored under
-//! `tests/wpt/FileAPI/`.
+//! `crates/runtime/tests/wpt/FileAPI/`.
 //!
 //! Pattern mirrors `wpt_headers.rs` — minimal testharness.js shim,
 //! one V8 isolate per file, per-test pass/skip/fail tally. The Rust

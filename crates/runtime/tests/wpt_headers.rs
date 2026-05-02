@@ -1,6 +1,6 @@
 //! Run the W3C Web Platform Tests for `Headers` against the native impl.
 //! Source: https://github.com/web-platform-tests/wpt (fetch/api/headers).
-//! Files are vendored under `tests/wpt/fetch/api/headers/`.
+//! Files are vendored under `crates/runtime/tests/wpt/fetch/api/headers/`.
 //!
 //! Mirrors `wpt_text_encoding.rs` — we provide a minimal testharness.js
 //! shim, run each file in a fresh V8 isolate, and report per-test

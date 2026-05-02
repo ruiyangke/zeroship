@@ -1,6 +1,6 @@
 //! WPT runner for `streams/writable-streams/`.
 //! Source: https://github.com/web-platform-tests/wpt
-//! Files vendored under `tests/wpt/streams/writable-streams/`.
+//! Files vendored under `crates/runtime/tests/wpt/streams/writable-streams/`.
 //!
 //! Mirrors `wpt_streams_readable.rs`. Per-file isolate, per-test
 //! pass/fail/skip classification.

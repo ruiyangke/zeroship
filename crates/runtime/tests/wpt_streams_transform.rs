@@ -1,6 +1,6 @@
 //! WPT runner for `streams/transform-streams/`.
 //! Source: https://github.com/web-platform-tests/wpt
-//! Files vendored under `tests/wpt/streams/transform-streams/`.
+//! Files vendored under `crates/runtime/tests/wpt/streams/transform-streams/`.
 //!
 //! Mirrors `wpt_streams_writable.rs` shape. Per-file isolate, per-test
 //! pass/fail/skip classification.

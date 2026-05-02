@@ -3,7 +3,7 @@
 //! the native impl.
 //!
 //! Source: https://github.com/web-platform-tests/wpt/tree/master/fetch/api/body
-//! Files vendored at `tests/wpt/fetch/api/body/`.
+//! Files vendored at `crates/runtime/tests/wpt/fetch/api/body/`.
 //!
 //! Mirrors the `wpt_fetch_request.rs` / `wpt_fetch_response.rs`
 //! pattern. The body suite is small (3 files) — most body-consumer
@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 
+use zeroship_runtime::blob_native;
 use zeroship_runtime::dom;
 use zeroship_runtime::fetch_request;
 use zeroship_runtime::fetch_response;
@@ -95,20 +96,7 @@ const TESTHARNESS_SHIM: &str = r#"
     globalThis.URLSearchParams.prototype[Symbol.toStringTag] = "URLSearchParams";
   }
 
-  if (typeof globalThis.Blob !== "function") {
-    globalThis.Blob = function Blob() {
-      const e = new Error("native Blob not yet implemented (v1 skip)");
-      e.__wpt_skip = true;
-      throw e;
-    };
-  }
-  if (typeof globalThis.File !== "function") {
-    globalThis.File = function File() {
-      const e = new Error("native File not yet implemented (v1 skip)");
-      e.__wpt_skip = true;
-      throw e;
-    };
-  }
+  // Native Blob and File are installed by the harness — no shims.
   if (typeof globalThis.fetch !== "function") {
     globalThis.fetch = function fetch() {
       const e = new Error("fetch() not yet implemented (next chunk)");
@@ -206,16 +194,8 @@ const TESTHARNESS_SHIM: &str = r#"
     Promise.resolve().then(fn).then(
       () => __wpt_results.push({ name, status: "pass" }),
       e => {
-        // Classify multipart/form-data deferral and Blob deferral as
-        // skip rather than fail (v1 ships urlencoded formData() but
-        // not multipart parsing or Blob support).
         const msg = e && e.message ? e.message : String(e);
-        if (
-          (e && e.__wpt_skip) ||
-          msg.indexOf("multipart/form-data parsing is deferred") >= 0 ||
-          msg.indexOf("Blob class deferred") >= 0 ||
-          msg.indexOf("not yet implemented (v1 skip)") >= 0
-        ) {
+        if ((e && e.__wpt_skip) || msg.indexOf("not yet implemented (v1 skip)") >= 0) {
           __wpt_results.push({ name, status: "skip", reason: sanitize(msg) });
         } else {
           __wpt_results.push({
@@ -368,6 +348,7 @@ fn run_wpt(label: &str, sources: &[&str]) -> Vec<TestResult> {
     streams::strategies::install_count_queuing_strategy(scope, global);
     headers::install_global(scope, global);
     dom::install_globals(scope, global);
+    blob_native::install_globals(scope, global);
     fetch_request::install_global(scope, global);
     fetch_response::install_global(scope, global);
 
