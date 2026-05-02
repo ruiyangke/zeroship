@@ -69,6 +69,33 @@ pub fn v8_method(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Marker attribute consumed by `#[v8_class]`: declare an async method
+/// whose return value materialises as a Promise on the JS surface.
+///
+/// The macro emits a sync V8 callback that:
+///   1. Allocates a `v8::PromiseResolver`
+///   2. Spawns the user's `async fn` body via `state.spawned_ops`
+///   3. Returns the Promise immediately
+///
+/// When the future settles, the runtime pump dequeues an
+/// `OpResult::JsValue` and resolves (or rejects) the bound promise. The
+/// user's `async fn` body can `.await` freely.
+///
+/// Constraints (rejected at compile time):
+///   - `&mut self` is not allowed — borrow across `.await` is unsound
+///     under V8 re-entry. Use `&self` with interior mutability (Cell /
+///     RefCell) for state that needs to mutate inside the body.
+///   - Return type must be one of: `()`, `T`, or `Result<T, OpError>`
+///     where `T ∈ { (), bool, u32, i32, f64, String, Vec<u8> }`.
+///
+/// Outside a `#[v8_class]` impl block this attribute is a no-op (the
+/// fn stays as written) so editor tooling that pre-expands attribute
+/// macros doesn't trip a false positive.
+#[proc_macro_attribute]
+pub fn v8_async_method(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
 #[proc_macro_attribute]
 pub fn v8_getter(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item

@@ -51,6 +51,13 @@ use crate::{gen_call_return, gen_extract};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MethodKind {
     Method,
+    /// An async method — emits a callback that spawns a future via
+    /// `state.spawned_ops` and returns a Promise. The user writes
+    /// `async fn foo(&self, ...) -> T` (or `Result<T, OpError>`) and
+    /// the macro hides the resolver/spawn dance. Rejected at compile
+    /// time if the receiver is `&mut self` (borrow across .await is
+    /// unsound under V8 re-entry).
+    AsyncMethod,
     Getter,
     Setter,
     Constructor,
@@ -73,6 +80,9 @@ fn classify(func: &ImplItemFn) -> Option<MethodKind> {
         let path = attr.path();
         if path.is_ident("v8_method") {
             return Some(MethodKind::Method);
+        }
+        if path.is_ident("v8_async_method") {
+            return Some(MethodKind::AsyncMethod);
         }
         if path.is_ident("v8_getter") {
             return Some(MethodKind::Getter);
@@ -255,10 +265,47 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
             if let Some(kind) = classify(func) {
                 let js_name = extract_v8_name(&func.attrs)
                     .unwrap_or_else(|| func.sig.ident.to_string());
+                let mut_recv = has_mut_self(func);
+
+                // Compile-time guard: `#[v8_async_method]` + `&mut self`
+                // is unsound under V8 re-entry. The future captures a
+                // `*mut Self` that's re-acquired on every poll; if a
+                // user `.await` runs JS that re-enters the same method
+                // (e.g. `await something(); this.foo()` triggered by a
+                // microtask), we'd alias `&mut self` with another
+                // borrow inside the same instance. Cell/RefCell on a
+                // `&self` method makes the runtime borrow check
+                // explicit; we require that pattern here.
+                if matches!(kind, MethodKind::AsyncMethod) && mut_recv {
+                    return syn::Error::new_spanned(
+                        &func.sig.ident,
+                        "#[v8_async_method] does not support &mut self — use \
+                         &self with Cell/RefCell on state that needs to mutate \
+                         (borrow across .await is unsound under V8 re-entry)",
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+
+                // Compile-time guard: `#[v8_async_method]` requires the
+                // function to be declared `async`. Without `async`, the
+                // user's body would need to return a Future explicitly
+                // (an unergonomic shape we don't support) — and the
+                // macro's call-site emits `.await`, which would fail
+                // type-check on a non-Future return.
+                if matches!(kind, MethodKind::AsyncMethod) && func.sig.asyncness.is_none() {
+                    return syn::Error::new_spanned(
+                        &func.sig.ident,
+                        "#[v8_async_method] requires the method to be declared `async`",
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+
                 methods.push(ClassMethod {
                     kind,
                     func,
-                    mut_receiver: has_mut_self(func),
+                    mut_receiver: mut_recv,
                     js_name,
                 });
             }
@@ -306,10 +353,16 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
         .filter(|m| m.kind != MethodKind::Constructor)
         .collect();
 
-    // Per-method callback fns
+    // Per-method callback fns. Async methods take a different codegen
+    // path (spawn a future via `state.spawned_ops` and return a Promise
+    // immediately) but install on the prototype identically — async vs
+    // sync is opaque to V8.
     let callbacks: Vec<TokenStream2> = regular
         .iter()
-        .map(|m| gen_method_callback(class_ty, m))
+        .map(|m| match m.kind {
+            MethodKind::AsyncMethod => gen_async_method_callback(class_ty, m),
+            _ => gen_method_callback(class_ty, m),
+        })
         .collect();
 
     let constructor_callback = match constructor {
@@ -389,6 +442,7 @@ fn strip_marker_attrs(mut input: ItemImpl) -> ItemImpl {
             func.attrs.retain(|attr| {
                 let p = attr.path();
                 !(p.is_ident("v8_method")
+                    || p.is_ident("v8_async_method")
                     || p.is_ident("v8_getter")
                     || p.is_ident("v8_setter")
                     || p.is_ident("v8_constructor")
@@ -450,7 +504,10 @@ fn gen_install(
         .filter_map(|m| {
             let js_name = m.js_name.clone();
             match m.kind {
-                MethodKind::Method => {
+                MethodKind::Method | MethodKind::AsyncMethod => {
+                    // Async vs sync is opaque to V8 — async methods
+                    // return a Promise from a sync callback, so they
+                    // install on the prototype identically.
                     let name = &m.func.sig.ident;
                     let cb = method_callback_ident(class_ty, name);
                     Some(quote! {
@@ -739,6 +796,176 @@ fn gen_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
 
             #(#extractions)*
             #call_return
+        }
+    }
+}
+
+/// Codegen for `#[v8_async_method]` — emits a sync V8 callback that
+/// allocates a Promise, spawns the user's async body via
+/// `state.spawned_ops`, and returns the Promise immediately. The pump
+/// resolves (or rejects) the promise when the future settles.
+///
+/// Shape of the emitted callback:
+/// ```ignore
+/// fn __Foo_method_callback(scope, args, rv) {
+///     // 1. Resolve `this` → Box<Foo> via internal field 0.
+///     let raw_self_addr = ...;
+///     // 2. Extract JS args (using existing gen_param_extractions).
+///     let arg_0 = ...;
+///     // 3. Allocate resolver + capture Globals.
+///     let resolver = v8::PromiseResolver::new(scope).unwrap();
+///     let promise = resolver.get_promise(scope);
+///     let resolver_global = v8::Global::new(scope, resolver);
+///     let wrapper_global = v8::Global::new(scope, args.this());
+///     // 4. Pull SharedState off the isolate slot.
+///     let state = scope.get_slot::<SharedState>().unwrap().clone();
+///     let request_id = state.borrow().executing_request_id;
+///     // 5. Build the future.
+///     let fut = async move {
+///         let _keepalive = wrapper_global; // pin Box<Foo> across .await
+///         // SAFETY: see emitted comment.
+///         let this: &Foo = unsafe { &*(raw_self_addr as *mut Foo) };
+///         let result = this.method(arg_0).await;
+///         OpResult::JsValue {
+///             resolver: resolver_global,
+///             value: result.into_resolve_value(),
+///             request_id,
+///         }
+///     };
+///     // 6. Push to spawned_ops + wake pump.
+///     state.borrow_mut().spawned_ops.push(Box::pin(fut));
+///     if let Some(mut tx) = state.borrow().pump_notify_tx.clone() {
+///         let _ = tx.try_send(());
+///     }
+///     // 7. Return promise.
+///     rv.set(promise.into());
+/// }
+/// ```
+///
+/// Borrow-safety contract for the emitted code:
+///   - `wrapper_global` is captured by value into the future. As long as
+///     the future has not dropped, the V8 wrapper Object is reachable;
+///     therefore the GC-finalizer that drops the boxed instance cannot
+///     fire. The `*mut Self` recovered each poll is valid for the
+///     future's lifetime.
+///   - The macro REJECTS `&mut self` async methods (see `expand`); the
+///     re-acquired pointer is always taken as `&Self`, so two
+///     simultaneous polls (or re-entry from a microtask) cannot
+///     materialise an aliased `&mut Self`. State that needs to mutate
+///     must use `Cell` / `RefCell` — the user's responsibility, not
+///     the macro's.
+///   - All future captures are owned (`Vec<u8>`, `String`, `Global<…>`,
+///     scalar), never borrowed. The future is `'static + !Send`, which
+///     matches the single-thread compio invariant.
+fn gen_async_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
+    let method_name = &m.func.sig.ident;
+    let callback_name = method_callback_ident(class_ty, method_name);
+
+    // Skip the receiver param when extracting JS args.
+    let params = parse_params_skipping_self(m.func);
+    let reject_shared_names = extract_reject_shared(&m.func.attrs);
+    let extractions = gen_param_extractions(&params, &reject_shared_names);
+
+    let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
+
+    quote! {
+        #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
+        pub(crate) fn #callback_name(
+            scope: &mut v8::PinScope,
+            args: v8::FunctionCallbackArguments,
+            mut rv: v8::ReturnValue,
+        ) {
+            // 1. Recover the `Box<Self>` pointer from internal field 0.
+            //    On illegal invocation (receiver is not a wrapper), fail
+            //    *synchronously* with a TypeError — same contract as the
+            //    sync method path. The user code never runs.
+            let __this = args.this();
+            let __ext = match __this.get_internal_field(scope, 0)
+                .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
+            {
+                Some(e) => e,
+                None => {
+                    let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                    let __exc = v8::Exception::type_error(scope, __msg);
+                    scope.throw_exception(__exc);
+                    return;
+                }
+            };
+            // Cast to usize so the future capture doesn't carry a raw
+            // pointer (Rust treats `*mut T` as !Send/!Sync; the future
+            // is single-thread either way, but cleaner to launder).
+            let __raw_addr: usize = __ext.value() as usize;
+
+            // 2. Extract JS args. Uses the same shared logic as sync
+            //    methods so type extraction (Vec<u8>, ByteString,
+            //    Option<String>, …) is identical across sync/async.
+            //    These run BEFORE we move out of `scope` for the
+            //    resolver allocation, matching the sync convention.
+            #(#extractions)*
+
+            // 3. Allocate the Promise + capture Globals to bridge into
+            //    the future. `wrapper_global` keeps the Box<Self>
+            //    alive: as long as `wrapper_global` lives in the
+            //    future capture, V8 cannot finalise the wrapper, so
+            //    the Box behind `__raw_addr` stays valid across every
+            //    poll of the future.
+            let __resolver = v8::PromiseResolver::new(scope).unwrap();
+            let __promise = __resolver.get_promise(scope);
+            let __resolver_global = v8::Global::new(scope, __resolver);
+            let __wrapper_global = v8::Global::new(scope, __this);
+
+            // 4. Pull SharedState off the isolate slot. Cloned `Rc`,
+            //    cheap. The future captures another clone; the
+            //    callback can drop its handle freely.
+            let __state: ::zeroship_runtime::state::SharedState = scope
+                .get_slot::<::zeroship_runtime::state::SharedState>()
+                .expect("RuntimeState not in isolate slot")
+                .clone();
+            let __request_id = __state.borrow().executing_request_id;
+
+            // 5. Build the future. The block keeps `wrapper_global`
+            //    alive for the future's full lifetime (as the
+            //    `_keepalive` binding) so the JS wrapper stays
+            //    reachable even if no user JS holds a reference.
+            //    Re-acquiring `&Self` per poll is safe because:
+            //      a) the macro rejects `&mut self` async (see
+            //         `expand`), so no aliased `&mut` can exist;
+            //      b) the wrapper Global pins the Box.
+            let __fut = async move {
+                let _keepalive = __wrapper_global;
+                // SAFETY: __raw_addr was Box::into_raw'd from
+                // Box<#class_ty> at construction time; the keepalive
+                // Global pins that allocation for as long as this
+                // future hasn't dropped. The macro's `expand` rejects
+                // `&mut self` async, so a `&Self` borrow is the only
+                // shape the user method takes — no aliasing risk
+                // even under V8 re-entry from microtasks.
+                let __instance: &#class_ty = unsafe { &*(__raw_addr as *mut #class_ty) };
+                let __result = <#class_ty>::#method_name(__instance, #(#call_args),*).await;
+                let __value = ::zeroship_runtime::state::IntoResolveValue::into_resolve_value(__result);
+                ::zeroship_runtime::state::OpResult::JsValue {
+                    resolver: __resolver_global,
+                    value: __value,
+                    request_id: __request_id,
+                }
+            };
+
+            // 6. Push to the runtime's spawned_ops queue. The pump
+            //    polls these futures on every event-loop tick;
+            //    settling produces the OpResult::JsValue that the
+            //    pump matches into `r.resolve(scope, …)`.
+            __state.borrow_mut().spawned_ops.push(::std::boxed::Box::pin(__fut));
+            // Wake the pump so streaming / cross-task spawns settle
+            // promptly. Mirrors `fetch_native::fetch_callback`'s
+            // notify shape.
+            let __notify = __state.borrow().pump_notify_tx.clone();
+            if let Some(mut __tx) = __notify {
+                let _ = __tx.try_send(());
+            }
+
+            // 7. Return the unsettled Promise. JS sees this as the
+            //    method's return value and `await`s on it.
+            rv.set(__promise.into());
         }
     }
 }

@@ -587,8 +587,99 @@ pub enum ResolveValue {
     /// Resolve with a Uint8Array view over the given bytes (zero-extra-copy:
     /// the bytes are moved into a fresh ArrayBuffer at dispatch time).
     Bytes(Vec<u8>),
+    /// Resolve with a JS string materialised from this UTF-8 buffer.
+    String(String),
+    /// Resolve with a JS Boolean.
+    Bool(bool),
+    /// Resolve with a JS Number from an unsigned 32-bit integer.
+    U32(u32),
+    /// Resolve with a JS Number from a signed 32-bit integer.
+    I32(i32),
+    /// Resolve with a JS Number from a 64-bit float.
+    F64(f64),
     /// Reject with the given V8 value.
     Reject(v8::Global<v8::Value>),
+    /// Reject with a typed Error (TypeError / RangeError / Error)
+    /// materialised by the pump from this `OpError`. Used by
+    /// `#[v8_async_method]` codegen so user methods can return
+    /// `Result<T, OpError>` and the pump constructs the right JS
+    /// exception kind without the future needing a scope.
+    RejectError(OpError),
+}
+
+/// Convert a Rust value into a `ResolveValue` so async methods can
+/// hand back arbitrary primitives (and Vec<u8>) through the
+/// `OpResult::JsValue` channel without each call site reinventing the
+/// dispatch shape.
+///
+/// The macro `#[v8_async_method]` calls `result.into_resolve_value()`
+/// after the user's `async fn` body runs; the trait fans out per
+/// return type into the right `ResolveValue` variant. The pump
+/// (`runtime.rs::OpResult::JsValue` arm) then materialises the V8
+/// value and resolves (or rejects) the bound promise.
+///
+/// `Result<T: IntoResolveValue, OpError>` is supported transparently:
+/// `Err` becomes `ResolveValue::RejectError`, which the pump turns
+/// into the matching `TypeError` / `RangeError` / `Error` exception.
+pub trait IntoResolveValue {
+    fn into_resolve_value(self) -> ResolveValue;
+}
+
+impl IntoResolveValue for () {
+    fn into_resolve_value(self) -> ResolveValue {
+        ResolveValue::Undefined
+    }
+}
+
+impl IntoResolveValue for Vec<u8> {
+    fn into_resolve_value(self) -> ResolveValue {
+        ResolveValue::Bytes(self)
+    }
+}
+
+impl IntoResolveValue for String {
+    fn into_resolve_value(self) -> ResolveValue {
+        ResolveValue::String(self)
+    }
+}
+
+impl IntoResolveValue for bool {
+    fn into_resolve_value(self) -> ResolveValue {
+        ResolveValue::Bool(self)
+    }
+}
+
+impl IntoResolveValue for u32 {
+    fn into_resolve_value(self) -> ResolveValue {
+        ResolveValue::U32(self)
+    }
+}
+
+impl IntoResolveValue for i32 {
+    fn into_resolve_value(self) -> ResolveValue {
+        ResolveValue::I32(self)
+    }
+}
+
+impl IntoResolveValue for f64 {
+    fn into_resolve_value(self) -> ResolveValue {
+        ResolveValue::F64(self)
+    }
+}
+
+impl IntoResolveValue for v8::Global<v8::Value> {
+    fn into_resolve_value(self) -> ResolveValue {
+        ResolveValue::JsGlobal(self)
+    }
+}
+
+impl<T: IntoResolveValue> IntoResolveValue for Result<T, OpError> {
+    fn into_resolve_value(self) -> ResolveValue {
+        match self {
+            Ok(v) => v.into_resolve_value(),
+            Err(e) => ResolveValue::RejectError(e),
+        }
+    }
 }
 
 /// Result produced by a spawned async op future.
