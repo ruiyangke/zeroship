@@ -52,7 +52,8 @@ use uuid::Uuid;
 
 use crate::auth;
 use crate::preview_share::{
-    self, validate_token, RegistrySecretLookup, TokenClaims, TokenError, TOKEN_RAW_MAX,
+    self, validate_token, validate_token_skip_scope, RegistrySecretLookup, TokenClaims,
+    TokenError, TOKEN_RAW_MAX,
 };
 use crate::AppState;
 use zeroship_core::preview_ports::{is_proxyable_port, DEFAULT_DENY};
@@ -149,10 +150,25 @@ pub async fn preview_proxy(
     };
 
     if !authorized {
+        // Distinguish scope-mismatch from not-owner so the audit log
+        // reflects ground truth (the WIRE response stays uniform —
+        // the audit reason is internal-only). Both share-token-with-
+        // wrong-scope AND creator-of-different-sandbox land here as
+        // 404; the audit string lets the operator tell them apart.
         let reason = match (&principal_opt, &info_opt, port_allowed) {
             (None, _, _) => "auth-failed",
             (_, None, _) => "sandbox-not-found",
             (_, _, false) => "port-denied",
+            (Some(Principal::ShareToken { claims }), Some(info), true)
+                if claims.sbx == info.sandbox_id
+                    && claims.port == port
+                    && !preview_share::scope_allows_method(
+                        &claims.scope,
+                        req.method().as_str(),
+                    ) =>
+            {
+                "scope-mismatch"
+            }
             (Some(_), Some(_), true) => "not-owner",
         };
         eprintln!(
@@ -409,9 +425,16 @@ fn authenticate(
 }
 
 /// Look up `__Host-zsbx_share_<sbx>` and validate the carried token.
-/// Returns `Some(claims)` only on a fully-valid HMAC + claims check
-/// against the request's `(sandbox_id, port, method)` triple. Any
-/// failure → `None` (the caller falls through to bearer auth).
+/// Returns `Some(claims)` on a valid HMAC + claims check against the
+/// request's `(sandbox_id, port)` tuple. Scope-vs-method is NOT
+/// enforced here — `authorize_with_method` re-checks scope and
+/// surfaces a uniform 404 on mismatch, matching the oracle-uniformity
+/// of port-deny / not-owner / sandbox-not-found (§ II.8).
+///
+/// The cookie-conversion handler (`?t=…` first hit) calls
+/// `validate_token` directly so a scope-violation surfaces as the
+/// helpful `403 scope_forbidden` for AI-builder UX (§ II.4); only
+/// the dispatch path collapses scope-violation into 404.
 fn try_share_cookie(
     req: &HttpRequest,
     state: &AppState,
@@ -428,11 +451,10 @@ fn try_share_cookie(
         registry: &state.sandboxes,
         sandbox_id,
     };
-    validate_token(
+    validate_token_skip_scope(
         &token,
         &sandbox_id.to_string(),
         port,
-        req.method().as_str(),
         unix_now(),
         &lookup,
     )

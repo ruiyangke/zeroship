@@ -217,6 +217,19 @@ impl SecretLookup for RegistrySecretLookup<'_> {
 /// Caller MUST have already enforced any `__Host-` cookie / Sec-Fetch
 /// gating; this function only validates the token's wire form +
 /// claims + HMAC.
+///
+/// Two callers, two scope-policies:
+///
+/// - **Cookie-conversion handler** (`__zsbx_share?t=…`) wants the
+///   *helpful* `403 scope_forbidden` so the AI-builder UI can render
+///   "this is a read-only link, the action you tried needs a `rw`
+///   token". It calls this top-level [`validate_token`] which DOES
+///   enforce scope.
+/// - **Dispatch path** (`try_share_cookie`) wants the *uniform 404*
+///   that port-deny + not-owner already produce — adding a 403 here
+///   would create an oracle for "this is a real, owned, ro-scoped
+///   token". That path calls [`validate_token_skip_scope`] and lets
+///   `authorize_with_method` re-check scope as a uniform-404 path.
 pub fn validate_token(
     raw_token: &str,
     sandbox_id_str: &str,
@@ -312,6 +325,31 @@ pub fn validate_token(
     }
 
     Ok(claims)
+}
+
+/// Like [`validate_token`] but does NOT enforce the scope-vs-method
+/// check. Used by the dispatch path so that scope-violation collapses
+/// to the same uniform 404 as port-deny / not-owner / sandbox-not-
+/// found, rather than surfacing a `403 scope_forbidden` oracle on the
+/// public edge.
+///
+/// The caller is responsible for re-running `scope_allows_method` —
+/// in practice this is `preview::authorize_with_method` which already
+/// does so as a belt-and-suspenders check, then returns `false` →
+/// `uniform_404`.
+pub fn validate_token_skip_scope(
+    raw_token: &str,
+    sandbox_id_str: &str,
+    port: u16,
+    now_unix: u64,
+    secrets: &dyn SecretLookup,
+) -> Result<TokenClaims, TokenError> {
+    // Reuse `validate_token` with method=GET (always passes scope for
+    // any known scope), then trust the caller's
+    // `scope_allows_method(claims.scope, real_method)` re-check. This
+    // keeps the validation logic in one place — there's no second
+    // copy to drift.
+    validate_token(raw_token, sandbox_id_str, port, "GET", now_unix, secrets)
 }
 
 /// Generate a token-id (`tid` claim). 16 random bytes, base64url

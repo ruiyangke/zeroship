@@ -13,7 +13,8 @@
 //! - Mint → exchange → fetch (green path).
 //! - Tamper byte → 401.
 //! - Expiry → 401 `code: "expired"`.
-//! - Scope: `ro` token + POST → 403.
+//! - Scope: `ro` token + POST through dispatch → 404 uniform; via
+//!   cookie-conversion `?t=` → 403 `scope_forbidden` (UX-helpful).
 //! - Cross-sandbox: token for sbx-A used against sbx-B → 401.
 //! - Path scope: token against `/sandboxes/{id}/exec` → 401.
 //! - Round-6 CRITICAL-3 cookie-after-revoke.
@@ -569,25 +570,75 @@ async fn expired_token_returns_401_with_expired_code() {
     assert_eq!(body["code"].as_str().unwrap(), "expired");
 }
 
+/// Dispatch-path scope mismatch — the cookie validates fully (HMAC,
+/// audience, sandbox, port, expiry) but the bound scope (`ro`) does
+/// not allow the request method (`POST`). Per § II.8 the dispatch
+/// path collapses scope-mismatch into the same uniform 404 as
+/// port-deny / not-owner / sandbox-not-found so an attacker on the
+/// public edge cannot distinguish a valid-but-wrong-scope token from
+/// any other reason for failure.
+///
+/// The cookie-conversion path (`?t=<token>`) is intentionally noisier:
+/// see [`scope_forbidden_via_cookie_conversion_returns_403`] below.
 #[ntex::test]
-async fn ro_token_post_returns_403() {
+async fn ro_token_post_via_dispatch_returns_404_uniform() {
     let sk = SigningKey::from_bytes(&[12u8; 32]);
     let agent = FixtureAgent::spawn(AgentReply { status: 200, body: b"ok".to_vec() });
     let (state, id) = make_state("tok", "alice", agent.port, sk);
     let app = make_app!(state.clone());
     let token = direct_mint(&state, id, 5173, "ro", 3600);
     let cookie = format!("{}={token}", cookie_name_for(id));
+    // NOTE: path is a single segment (no slash) — the controller's
+    // catch-all `{path:.*}` is per-segment in ntex. Single-segment
+    // path is enough to exercise the dispatch + authorize_with_method
+    // gate.
     let req = test::TestRequest::post()
-        .uri(&format!("/sandboxes/{id}/preview/5173/api/foo"))
+        .uri(&format!("/sandboxes/{id}/preview/5173/api"))
         .header("Cookie", cookie.as_str())
-        .set_json(&serde_json::json!({"x": 1}))
         .to_request();
     let resp = test::call_service(&app, req).await;
-    // Cookie-bearing path: principal_opt is Some(ShareToken{ro}); the
-    // method-scope re-check denies, surfacing as the uniform 404 (not
-    // 403) per § II.2 — the wire stays uniform with the other
-    // authorize-failures.
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "ro+POST through dispatch must surface as uniform 404 \
+         (oracle-safe; scope-mismatch coalesced with port-deny / not-owner)"
+    );
+    let bytes = test::read_body(resp).await;
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["code"].as_str().unwrap(), "not_found");
+}
+
+/// Cookie-conversion scope-mismatch — the helpful 403 path.
+///
+/// `?t=<ro-token>` on a POST hits `handle_cookie_conversion`, which
+/// runs the *full* `validate_token` (with scope-vs-method enforced)
+/// so the AI-builder UI gets a distinct `code: "scope_forbidden"`
+/// error to render "this is a read-only link, the action you tried
+/// needs a `rw` token". Only the dispatch path collapses into 404
+/// (oracle-uniform); cookie-conversion stays specific by design.
+#[ntex::test]
+async fn scope_forbidden_via_cookie_conversion_returns_403() {
+    let sk = SigningKey::from_bytes(&[13u8; 32]);
+    let agent = FixtureAgent::spawn(AgentReply { status: 200, body: b"ok".to_vec() });
+    let (state, id) = make_state("tok", "alice", agent.port, sk);
+    let app = make_app!(state.clone());
+    let token = direct_mint(&state, id, 5173, "ro", 3600);
+    let req = test::TestRequest::post()
+        .uri(&format!("/sandboxes/{id}/preview/5173/api?t={token}"))
+        .header("Sec-Fetch-Site", "cross-site")
+        .header("Sec-Fetch-Mode", "navigate")
+        .header("Sec-Fetch-Dest", "document")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "ro+POST via cookie-conversion (?t=…) must surface 403 \
+         scope_forbidden for the AI-builder UI"
+    );
+    let bytes = test::read_body(resp).await;
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["code"].as_str().unwrap(), "scope_forbidden");
 }
 
 #[ntex::test]
