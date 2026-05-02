@@ -176,11 +176,23 @@ async fn data_url_fetch(
     let (mime, bytes) = parse_data_url(&request.url)
         .map_err(|_| "network error: invalid data: URL".to_string())?;
 
+    // Per Fetch's network-fetch convention, HEAD requests have an
+    // empty body even when the underlying scheme would produce one.
+    // Mirrors browser behaviour for data: URLs (Chromium / Firefox /
+    // WebKit all return empty body on HEAD). WPT
+    // `fetch/api/basic/scheme-data.any.js` verifies this for the
+    // `checkFetchResponse(...,"HEAD")` case.
+    let body = if request.method.eq_ignore_ascii_case("HEAD") {
+        Vec::new()
+    } else {
+        bytes
+    };
+
     Ok(AlgorithmResponse {
         status: 200,
         status_text: "OK".to_string(),
         headers: vec![("Content-Type".to_string(), mime)],
-        body: bytes,
+        body,
         url: request.url.clone(),
         redirected: false,
     })
