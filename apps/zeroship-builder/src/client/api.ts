@@ -67,16 +67,39 @@ export {
 // Plan / Health canvas stubs (Plan 01.7). Every export takes ONE
 // object input — see `server/agents.ts` header for the wire-shape
 // rationale. V1 is in-memory; persistence lands with ISS-14/16/etc.
+//
+// Data + Media canvas stubs (Plan 01.8) live in the same module —
+// same single-input wire convention. Persistence + real backing
+// lives behind ISS-20 → ISS-26.
 export {
   listIssues,
   addIssue,
   getQualityScores,
+  // Data canvas (ISS-20 → ISS-25)
+  listTables,
+  getTableRows,
+  listIndexes,
+  listMigrations,
+  listBackups,
+  triggerBackup,
+  // Media canvas (ISS-26)
+  listMedia,
+  uploadMedia,
+  deleteMedia,
   type Issue,
   type IssueStatus,
   type IssueSource,
   type QualityScores,
   type QualityDimension,
   type QualityGrade,
+  type TableSummary,
+  type TableRow,
+  type IndexInfo,
+  type MigrationEntry,
+  type MigrationStatus,
+  type BackupEntry,
+  type BackupKind,
+  type MediaEntry,
 } from "../server/agents";
 
 export { appPreviewUrl } from "./lib/preview-url";
