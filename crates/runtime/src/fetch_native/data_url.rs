@@ -16,8 +16,10 @@
 //! pulls in `mime` + a percent-decoder) showed it was simpler to inline
 //! the parser. The grammar from RFC 2397 is tiny:
 //!
-//!     data:[<mediatype>][;base64],<data>
-//!     mediatype := type "/" subtype *( ";" parameter )
+//! ```text
+//! data:[<mediatype>][;base64],<data>
+//! mediatype := type "/" subtype *( ";" parameter )
+//! ```
 //!
 //! We percent-decode the data segment (always), then base64-decode if the
 //! `;base64` flag was present, then UTF-8-validate ONLY when the MIME is
