@@ -954,3 +954,95 @@ preview, useless for the deployed app.
 3. Replace the Map in `agents.ts` with proxied calls; switch the
    tile's `url` field from a `data:` URL to the real public URL.
 
+---
+
+## ISS-28 · Cron / scheduled-worker harness missing — PM digest + SRE monitor are RPC-only
+
+**Status:** open
+**Severity:** medium — the dual-shape PM/SRE design (spec §4.8.3.2)
+calls for periodic background passes (PM digest, SRE monitor) that
+post into the project chat thread on a cadence. The procs exist
+(`pmDigest`, `sreMonitor`), but nothing fires them; an external cron
+or manual hit is required to see output.
+**First observed:** 2026-05-01, building the PM/SRE worker stubs in
+`apps/zeroship-builder/src/server/pm_worker.ts` +
+`apps/zeroship-builder/src/server/sre_worker.ts`.
+**Component:** `crates/control` (scheduler) + chat-thread write path
+(out-of-band assistant turns)
+
+### Symptom
+
+Spec §4.8.3.2 calls out that PM and SRE both ship as a dual shape:
+
+- A chat SubAgent (Builder dispatches via `task("pm", …)` /
+  `task("sre", …)`) — implemented in `_pm.ts` / `_sre.ts`.
+- A scheduled background worker that polls project state on a
+  cadence and posts findings into the chat thread.
+
+The worker procs are wired (`pmDigest({appId})` →
+`/_zs/v1/pm.digest`, `sreMonitor({appId})` →
+`/_zs/v1/sre.monitor`), but there's no scheduler to call them:
+
+- No `crates/control` job that polls `apps` on a timer (e.g. every
+  hour for SRE monitor, daily for PM digest) and POSTs to the
+  worker procs.
+- No "out-of-band assistant turn" path in chat that lets an
+  external caller drop a `data-pm-recommendation` /
+  `data-sre-finding` chunk into a project's existing thread
+  without an HTTP `useChat` round-trip.
+- No observability for the cron itself — last-run timestamps,
+  failure rates, opt-out per project.
+
+The procs themselves work standalone: a curl from a developer's
+shell or an external cron container can hit them today and get a
+real structured response back.
+
+### Workaround in use
+
+Manual / external invocation only. The procs are exposed via the
+RPC wire (single-input `{appId}` shape) so a one-line curl is
+enough to test:
+
+```
+curl -X POST http://localhost:5173/_zs/v1/pm.digest \
+  -H "content-type: application/json" \
+  -d '{"json":{"appId":"<appId>"}}'
+```
+
+A future external scheduler (cron container, CI cron, GitHub
+Actions on a cron schedule) can drive both procs against the
+deployed builder. The dashboard does not yet expose a "run digest
+now" affordance.
+
+### Fix path
+
+1. `crates/control/src/scheduler.rs` — small compio-native scheduler
+   that ticks every minute, looks at `apps.scheduled_jobs` (new
+   table: `app_id, kind, last_run_at, cadence, opt_out`), and
+   POSTs to the builder's worker procs when a job is due. Use the
+   existing builder RPC wire — no new auth surface needed.
+2. New table: `agent_digests` (id, app_id, kind, payload_json,
+   created_at) so the cron's results survive worker restarts and
+   can be replayed into the chat thread.
+3. Out-of-band chat write: `chat.ts` gains a path that accepts a
+   `digest_id` and emits the corresponding `data-pm-recommendation`
+   /  `data-sre-finding` chunk into the project's chat thread.
+4. Dashboard: a "Run digest now" button on the Plan canvas
+   (`PlanCanvas.tsx`) and "Scan health now" on Health
+   (`HealthCanvas.tsx`) that hit the worker procs directly,
+   bypassing the cron, for ad-hoc use.
+5. Per-project opt-out + cadence editor in SettingsCanvas (e.g.
+   "PM digest: weekly · SRE monitor: hourly · off").
+
+### Related references
+
+- `apps/zeroship-builder/src/server/pm_worker.ts` — `pmDigest` proc
+  + the digest-shaped prompt rendering helpers
+- `apps/zeroship-builder/src/server/sre_worker.ts` — `sreMonitor`
+  proc + the monitor-shaped prompt rendering helpers
+- `apps/zeroship-builder/src/server/_pm.ts` /
+  `apps/zeroship-builder/src/server/_sre.ts` — the chat-mode
+  SubAgent halves of the dual shape
+- `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md`
+  §4.8.3.2 — the dual PM/SRE shape spec
+
