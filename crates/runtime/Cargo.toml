@@ -71,7 +71,13 @@ name = "echo-server"
 path = "src/echo_server.rs"
 
 [features]
-default = []
+# Cutover landing 2: the native WebSocket impl is on by default.
+# The polyfill's `WebSocket` and `WebSocketPair` JS classes still install
+# but only wire to the native plumbing via `__nativeWebSocket` detection
+# in `embed/websocket.js`. Tests that reach into the polyfill's per-WS
+# state (state.websockets HashMap) and were not yet migrated to native
+# can opt out via `--no-default-features`.
+default = ["runtime_native_websocket"]
 # Per docs/proposals/websocket-native.md D-25 (cutover cadence):
 #  Landing 1: native behind feature flag, polyfill default — current.
 #  Landing 2: flip default to native; polyfill remains as fallback.

@@ -32,6 +32,7 @@ git sparse-checkout set \
     "/xhr/formdata/" \
     "/FileAPI/" \
     "/url/" \
+    "/websockets/" \
     "/resources/" \
     "/common/"
 

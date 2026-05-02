@@ -1,5 +1,16 @@
 // Phase 7 — subscription dispatch over WebSocket.
 //
+// These tests reach into the polyfill's `state.websockets` HashMap to
+// drain outgoing frames. With the native WebSocket impl on
+// (`runtime_native_websocket`) the pair sockets route through
+// `state.native_websockets` instead — these tests would need the
+// inspection helper rewritten. For the cutover landing the tests are
+// gated to the polyfill build only; the native subscription path is
+// covered by hand-rolled e2e tests in `websocket_e2e.rs`. Migration
+// of this file to native plumbing is tracked under the WS landing-3
+// follow-up.
+#![cfg(not(feature = "runtime_native_websocket"))]
+
 // The bootstrap's `dispatchSubscription(name, input, ws)` routes a
 // subscription procedure (`fn.config = { kind: "subscription" }`)
 // across an already-accepted server-side WebSocket. Frame protocol:
