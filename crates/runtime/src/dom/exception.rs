@@ -198,6 +198,70 @@ impl DOMException {
 }
 
 // ---------------------------------------------------------------------------
+// Construction helpers — Rust-side DOMException minting
+// ---------------------------------------------------------------------------
+
+/// Build a native DOMException JS object with the given message + name.
+/// Returns the wrapper as a `v8::Local<v8::Object>` so callers can
+/// `scope.throw_exception(obj.into())` or store the value as a JS-
+/// visible reason. The returned object has the full DOMException
+/// prototype chain (including `instanceof Error`) and a real boxed
+/// state in internal field 0.
+///
+/// Use this from Rust paths that need to construct a DOMException
+/// with a spec-correct shape — e.g. atob/btoa "InvalidCharacterError",
+/// structuredClone "DataCloneError", AbortSignal "AbortError" /
+/// "TimeoutError".
+pub fn build<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    message: &str,
+    name: &str,
+) -> v8::Local<'s, v8::Object> {
+    let tmpl = DOMException::install(scope);
+    let inst_tmpl = tmpl.instance_template(scope);
+    let obj = inst_tmpl
+        .new_instance(scope)
+        .expect("DOMException instance allocation failed");
+
+    let state = DOMException {
+        name: name.to_string(),
+        message: message.to_string(),
+        code: legacy_code_for_name(name),
+    };
+    let boxed: Box<DOMException> = Box::new(state);
+    let raw = Box::into_raw(boxed);
+    let raw_addr = raw as usize;
+    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
+    obj.set_internal_field(0, ext.into());
+
+    // Wire prototype to DOMException.prototype.
+    let class_fn = tmpl.get_function(scope).unwrap();
+    let proto_key = v8::String::new(scope, "prototype").unwrap();
+    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
+    obj.set_prototype(scope, proto_v);
+
+    // Finalizer: reclaim the Box on GC or isolate teardown.
+    let weak = v8::Weak::with_guaranteed_finalizer(
+        scope,
+        obj,
+        Box::new(move || unsafe {
+            drop(Box::from_raw(raw_addr as *mut DOMException));
+        }),
+    );
+    std::mem::forget(weak);
+
+    obj
+}
+
+/// Throw a native DOMException with the given message + name. The
+/// pending exception is set on `scope`; callers should immediately
+/// return from their V8 callback.
+pub fn throw(scope: &mut v8::PinScope, message: &str, name: &str) {
+    let obj = build(scope, message, name);
+    scope.throw_exception(obj.into());
+}
+
+// ---------------------------------------------------------------------------
 // install_global — wire DOMException onto globalThis with Error
 // prototype chain + legacy code constants.
 // ---------------------------------------------------------------------------

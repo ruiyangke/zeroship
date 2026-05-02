@@ -7,6 +7,7 @@
 extern crate self as zeroship_runtime;
 
 pub mod auth;
+pub mod base64;
 pub mod blob_native;
 pub mod byte_string;
 pub mod codec;

@@ -1397,6 +1397,12 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
         global.set(scope, nav_key.into(), nav.into());
     }
 
+    // atob / btoa per WHATWG HTML §8.6 — replaces the old fetch.js polyfill
+    // that silently dropped >0xFF code units in btoa and ignored invalid
+    // base64 in atob. The native impls throw native DOMException
+    // ("InvalidCharacterError") on out-of-range / malformed input.
+    crate::base64::install_global(scope, global);
+
     // (`__rawFetch` was the V8 callback the JS polyfill in `embed/fetch.js`
     // dispatched into. Both were removed at D-23 step 3 — `globalThis.fetch`
     // is now the native callback installed by
