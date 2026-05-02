@@ -285,6 +285,24 @@ pub(crate) fn is_enforce_range_u32(ty: &Type) -> bool {
     type_ident(ty).as_deref() == Some("EnforceRangeU32")
 }
 
+/// Check if type is one of the `Clamp{U16,U32,I32,U64,I64}` newtypes from
+/// `zeroship_runtime::clamp`. Used for WebIDL `[Clamp]` integer coercion
+/// — clamps to the integer range and round-half-even rounds, instead of
+/// throwing TypeError like `[EnforceRange]`. Returns the suffix
+/// (`"u16"`, `"u32"`, `"i32"`, `"u64"`, `"i64"`) so the codegen can
+/// dispatch on the target integer type, or `None` if the param isn't a
+/// Clamp newtype.
+pub(crate) fn clamp_kind(ty: &Type) -> Option<&'static str> {
+    match type_ident(ty).as_deref() {
+        Some("ClampU16") => Some("u16"),
+        Some("ClampU32") => Some("u32"),
+        Some("ClampI32") => Some("i32"),
+        Some("ClampU64") => Some("u64"),
+        Some("ClampI64") => Some("i64"),
+        _ => None,
+    }
+}
+
 /// Check if type is the `USVString` newtype from
 /// `zeroship_runtime::url_native::helpers`. Used for WebIDL USVString
 /// args (URL.* setters, URLSearchParams names/values). Conversion
@@ -437,6 +455,41 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
                 } else {
                     None
                 };
+        };
+    }
+
+    // Clamp{U16,U32,I32,U64,I64} → WebIDL [Clamp] integer coercion.
+    // Unlike [EnforceRange], [Clamp] never throws: NaN → 0, < min → min,
+    // > max → max, otherwise round-half-even. The reader fns in
+    // `zeroship_runtime::clamp` implement the algorithm; this match
+    // dispatches on the target integer type and wraps in the right
+    // newtype constructor.
+    if let Some(kind) = clamp_kind(ty) {
+        let (reader, ctor) = match kind {
+            "u16" => (
+                quote! { ::zeroship_runtime::clamp::read_clamp_u16 },
+                quote! { ::zeroship_runtime::clamp::ClampU16 },
+            ),
+            "u32" => (
+                quote! { ::zeroship_runtime::clamp::read_clamp_u32 },
+                quote! { ::zeroship_runtime::clamp::ClampU32 },
+            ),
+            "i32" => (
+                quote! { ::zeroship_runtime::clamp::read_clamp_i32 },
+                quote! { ::zeroship_runtime::clamp::ClampI32 },
+            ),
+            "u64" => (
+                quote! { ::zeroship_runtime::clamp::read_clamp_u64 },
+                quote! { ::zeroship_runtime::clamp::ClampU64 },
+            ),
+            "i64" => (
+                quote! { ::zeroship_runtime::clamp::read_clamp_i64 },
+                quote! { ::zeroship_runtime::clamp::ClampI64 },
+            ),
+            _ => unreachable!("clamp_kind returned an unrecognised suffix"),
+        };
+        return quote! {
+            let #name = #ctor(#reader(scope, args.get(#idx)));
         };
     }
 

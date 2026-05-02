@@ -83,6 +83,73 @@ so we can grep back through the rationale.
   - Lands: commit `3cb0fe11` (codegen + 4 smoke tests in
     `tests/v8_same_object_smoke.rs`).
 
+- **`[NewObject]` semantic — confirmed: default IS no-cache** (audit
+  only, no codegen change). The TODO entry implied the macro was
+  caching default getter results and asked for an opt-out attribute.
+  Reading `gen_method_callback` (the path every non-`same_object`
+  getter takes) shows the user method runs unconditionally on each
+  read and `gen_call_return` sets `rv` directly — no Private-symbol
+  stash, no instance-scoped cache. The implicit default IS therefore
+  WebIDL `[NewObject]`. Caching is the OPT-IN: `#[v8_getter(same_object)]`
+  (commit `3cb0fe11`). No new attribute required.
+  - Smoke test `tests/v8_new_object_smoke.rs` (2 tests) demonstrates
+    that a default `#[v8_getter]` returning `v8::Local<v8::Value>`
+    mints a fresh JS Object on every read (`a !== b`) and runs the
+    user method N times for N reads. Pairs with the existing
+    `tests/v8_same_object_smoke.rs` to document both halves of the
+    contract.
+  - Lands: commit `4a557dc4` (smoke test only, no codegen delta).
+
+- **Re-entry guard on `&mut self`** — every macro-emitted `&mut self`
+  callback (regular method, setter, SameObject getter cache-miss path)
+  now opens with a per-method, per-instance, thread-local
+  `RefCell<HashSet<usize>>` guard keyed by the External pointer's
+  address (`__ext.value() as usize` == Box raw addr). On entry: insert.
+  If the addr was already in the set, throw a V8 TypeError with a
+  per-method message and `return` BEFORE the unsafe `&mut Self`
+  materialisation. RAII drop guard removes on scope exit.
+  - **Mechanism**: V8 TypeError, NOT `panic!`. Rust panic can't unwind
+    through V8's C++ frames cleanly — empirically that surfaces as
+    "fatal runtime error: failed to initiate panic, error 5" + SIGABRT
+    on Linux. A V8 exception propagates the same way every other
+    macro-emitted error already does (brand-check `Illegal invocation`,
+    `[EnforceRange]` TypeError, etc.).
+  - **Granularity trade-off**: per-method, per-instance. The set is
+    instance-keyed (no false positives across distinct `Foo`
+    instances), and there's a separate set per Rust method (no false
+    positives across `Foo::a` calling `Foo::b` on the same instance).
+    Real-world re-entry via JS callback overwhelmingly hits the SAME
+    method (`this.method(...)` from a callback method registered),
+    which is what the guard catches.
+  - **Cost**: emitted ONLY for `&mut self` methods — `&self` callbacks
+    skip the guard. Per-call overhead is one HashSet insert + one
+    remove on the steady-state path; the set has 0 or 1 entries
+    typically.
+  - **Pre-fix symptom**: classes that wrapped state in an inner
+    `RefCell` would panic with `RefCell already mutably borrowed`
+    from deep inside V8 on re-entry; classes without an inner cell
+    silently corrupted memory.
+  - Lands: commit `7ce7f260` (codegen + 4 smoke tests in
+    `tests/v8_reentrancy_smoke.rs`).
+
+- **`[Clamp]` integer coercion** — `ClampU16` / `ClampU32` / `ClampI32`
+  / `ClampU64` / `ClampI64` newtypes in `zeroship_runtime::clamp`
+  implement WebIDL `[Clamp]` ConvertToInt: NaN → 0, < min → min, > max
+  → max, otherwise round-half-even (banker's rounding) per
+  https://webidl.spec.whatwg.org/#abstract-opdef-converttoint step 8.
+  Unlike `[EnforceRange]` there is NO TypeError path — `[Clamp]` is
+  the lenient counterpart. The 64-bit widths cap at `2^53 - 1` (JS
+  Number precision boundary) on both sides; 32-bit widths cap at
+  `i32::MIN..=i32::MAX` / `0..=u32::MAX`.
+  - Macro detection by ident in `lib.rs::clamp_kind`; emission in
+    `gen_extract` mirrors the `EnforceRangeU64` path but never throws.
+  - Used (when migrated) by Streams chunk-size strategies (`[Clamp]
+    unsigned long`), Blob.slice (`[Clamp] long long`), WebSocket close
+    code (`[Clamp] unsigned short` — currently hand-rolled in
+    `websocket_native::algorithms::clamp_unsigned_short`).
+  - Lands: commit `dc26721d` (codegen + 5 smoke tests in
+    `tests/v8_clamp_smoke.rs`).
+
 ## Open
 
 ### Same-name getter+setter pairing
@@ -108,26 +175,6 @@ getters) require a code edit in `lib.rs::gen_scalar_set`. A trait-based
 dispatch (similar to `IntoResolveValue`) would let users opt in by
 implementing the trait, but the existing list covers every fetch /
 streams / WebSocket / WebCrypto consumer.
-
-### `[NewObject]` semantic
-
-WebIDL marker for getters that must return a fresh object per access
-(`Response.json(data)`, future Crypto methods). Macro currently caches;
-needs an opt-out attribute.
-
-### `[Clamp]` integer coercion
-
-WebIDL `[Clamp] long` clamps Number to integer range instead of
-throwing. Used by Streams' chunk-size strategies and Blob.slice.
-Currently hand-rolled via `f64::round_ties_even`. Add a `ClampLong`
-newtype mirroring `EnforceRangeU64`.
-
-### Reentrancy guard on `&mut self`
-
-If a user-supplied JS callback re-enters the same instance, the macro's
-auto-generated `borrow_mut` panics. Currently agents wrap state in
-`RefCell` manually inside `Box<State>`. Macro could emit a soft
-re-entry guard with a clear panic message, or auto-wrap in `RefCell`.
 
 ### Lifetime-tied `Local<'s, T>` returns
 
