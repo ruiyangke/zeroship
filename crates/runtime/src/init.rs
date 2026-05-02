@@ -98,12 +98,6 @@ pub const FETCH_JS: &str = include_str!("embed/fetch.js");
 /// Embedded crypto polyfill (getRandomValues, SubtleCrypto.digest, base64 helpers).
 pub const CRYPTO_JS: &str = include_str!("embed/crypto.js");
 
-/// `TextEncoderStream` / `TextDecoderStream` — WHATWG Encoding §7.1/§7.2.
-/// Thin TransformStream wrappers around TextEncoder/TextDecoder; ~50 LOC of
-/// JS rather than a separate native class. Loaded AFTER native streams +
-/// the encoding classes are installed.
-pub const TEXT_STREAMS_JS: &str = include_str!("embed/text-streams.js");
-
 /// Embedded WebSocket/WebSocketPair polyfill (depends on the native
 /// EventTarget installed by `install_dom`).
 pub const WEBSOCKET_JS: &str = include_str!("embed/websocket.js");
@@ -718,15 +712,13 @@ pub fn load_polyfills_and_modules(
     // through the user-visible class.
     install_blob_native(scope);
 
-    // TextEncoderStream / TextDecoderStream — pure-JS TransformStream
-    // wrappers, ~50 LOC. Loaded AFTER native streams install so
-    // `globalThis.TransformStream` (and TextEncoder/TextDecoder from
-    // `setup_globals`) are present.
-    {
-        let code = v8::String::new(scope, TEXT_STREAMS_JS).unwrap();
-        let script = v8::Script::compile(scope, code, None).unwrap();
-        script.run(scope).unwrap();
-    }
+    // Native TextEncoderStream / TextDecoderStream. Replaces the
+    // `embed/text-streams.js` shim — closes spec gaps around
+    // Symbol.toStringTag, brand-checked accessors, and the
+    // GenericTransformStream §6.1 prototype-side getter shape. Loaded
+    // AFTER native streams install (needs `globalThis.TransformStream`)
+    // and AFTER `setup_globals` (needs `TextEncoder` / `TextDecoder`).
+    install_text_encoding_streams(scope);
 
     // Native DOM (EventTarget / Event / CustomEvent / AbortController /
     // AbortSignal / FormData / Request / Response / fetch). MUST run
@@ -1797,6 +1789,37 @@ pub fn install_dom(scope: &mut v8::PinScope) {
 pub fn install_native_streams(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
     crate::streams::install_native_streams(scope, global);
+}
+
+/// Install native `TextEncoderStream` and `TextDecoderStream` onto
+/// `globalThis`. Replaces the legacy `embed/text-streams.js` shim,
+/// closing spec gaps the JS shim left open: `Symbol.toStringTag`,
+/// brand-checked `encoding`/`fatal`/`ignoreBOM` accessors, and the
+/// WHATWG GenericTransformStream §6.1 prototype-side `readable` /
+/// `writable` getter shape (the shim assigned own data props in the
+/// constructor body, which broke libraries that introspect via
+/// `Object.getOwnPropertyDescriptor(Object.getPrototypeOf(s), …)`).
+///
+/// Must run AFTER:
+///   * `install_native_streams` — internal `new TransformStream(...)`
+///     construction needs the user-visible class on `globalThis`.
+///   * `setup_globals` — needs `TextEncoder` / `TextDecoder` on
+///     `globalThis` (the encode/decode primitives the wrappers
+///     delegate to).
+pub fn install_text_encoding_streams(scope: &mut v8::PinScope) {
+    let global = scope.get_current_context().global(scope);
+    {
+        let tmpl = crate::text_encoding::streams::TextEncoderStream::install(scope);
+        let class_fn = tmpl.get_function(scope).unwrap();
+        let key = v8::String::new(scope, "TextEncoderStream").unwrap();
+        global.set(scope, key.into(), class_fn.into());
+    }
+    {
+        let tmpl = crate::text_encoding::streams::TextDecoderStream::install(scope);
+        let class_fn = tmpl.get_function(scope).unwrap();
+        let key = v8::String::new(scope, "TextDecoderStream").unwrap();
+        global.set(scope, key.into(), class_fn.into());
+    }
 }
 
 /// Install native `Blob` and `File` (per WHATWG File API) onto
