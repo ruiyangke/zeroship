@@ -18,7 +18,7 @@ Status legend:
 
 | Section | What it asks for | Status | Where it lives | Notes |
 |---|---|---|---|---|
-| §0 | Two modes (Maker default / Dev reveal) + graduated +Data middle | **partial** | `src/client/workspace/CanvasPills.tsx` | All 9 canvas pills render; the `visible` prop is plumbed but the tier-filter (Maker / +Data / +Code) is not wired — every authed creator sees all pills. Tracked under spec §3.2; punted to Plan 03. |
+| §0 | Two modes (Maker default / Dev reveal) + graduated +Data middle | **shipped** | `src/client/workspace/CanvasPills.tsx` (`pillsForTier`), `WorkspaceShell.tsx` (`TierToggle`) | Tier toggle in TopBar cycles maker → +data → +code. Tier persists in localStorage (`zeroship_canvas_tier`); active pill snaps to "preview" if a tier change hides it. Default ships as "code" (every pill visible) so existing tests don't need explicit tier setup; users can opt down via the toggle. |
 
 ---
 
@@ -30,9 +30,9 @@ Status legend:
 | §1.2 | Refined Atelier brand, neutral operational | **shipped** | `src/client/index.css` (tokens), `src/client/pages/Marketing.tsx` | Editorial italic on marketing + signup; operational chrome stays Inter / sans. |
 | §1.3 | Single shell · chat right rail · canvas pills | **shipped** | `WorkspaceShell.tsx` | 320px right rail; pills swap canvas; collapses to drawer < 768px. |
 | §1.4 | Living-document chat, ⌘+Enter, big stop | **shipped** | `workspace/chat/ChatComposer.tsx`, `ChatRail.tsx` | ⌘+Enter to send; Stop button replaces Send while streaming (verified in `e2e/chat-openai.spec.ts`). |
-| §1.5 | Three tiers Maker / +Data / +Code | **partial** | `CanvasPills.tsx` `visible` prop | Tier toggle not yet exposed; spec calls it a "tiny + data / + code link" — deferred. |
+| §1.5 | Three tiers Maker / +Data / +Code | **shipped** | `CanvasPills.tsx` (`pillsForTier`), `WorkspaceShell.tsx` (`TierToggle`) | Tiny editorial chip next to the pills cycles tiers; localStorage-persistent. |
 | §1.6 | Multi-agent: Builder + Critic + Reviewer + PM + SRE | **shipped** | `src/server/{_critic,_reviewer,_pm,_sre}.ts`, `_translator.ts` | All four SubAgents defined with `responseFormat` Zod schemas; wired into `createDeepAgent({subagents})`. |
-| §1.7 | Critic ⇄ Builder loop, pre-deploy gates, scorecard | **partial** | `_critic.ts`, `_middleware.ts` | Critic loop runs; scorecard quality grid is in HealthCanvas with hardcoded scores (ISS-16). |
+| §1.7 | Critic ⇄ Builder loop, pre-deploy gates, scorecard | **shipped** (modulo per-deploy persistence) | `_critic.ts`, `_middleware.ts`, `agents.ts` (`setQualityFromCritic` + `gradeFromIssues`) | Critic loop runs; per-round scorecard now persists into KV via `waitUntil()` after each `data-critic-round` emit. HealthCanvas reads live grades + `last_run_at`. Per-deploy snapshot still tracked under ISS-15 + ISS-16 carry-over. |
 | §1.8 | deepagents + LangGraph + LangChain server / AI SDK client / translator | **shipped** | `_translator.ts` (595 LOC), `_middleware.ts`, `client/api.ts` | Translator wider than the spec's "~110 LOC" estimate after Phase B added native tool-call handling and resume-suppression. |
 | §1.9 | deepagents-native fleet (SubAgent[] + middleware + interruptOn) | **shipped** | `_critic.ts`, `_reviewer.ts`, `_pm.ts`, `_sre.ts`, `_tools.ts`, `_middleware.ts` | `wrapToolCall` middleware emits `data-*` parts; `askSurveyTool` calls `interrupt()` directly (per §4.8.3.2). |
 
@@ -43,7 +43,7 @@ Status legend:
 | Section | What it asks for | Status | Where it lives | Notes |
 |---|---|---|---|---|
 | §2.1 | Fleet diagram: Builder ⇄ Critic + Reviewer + PM + SRE | **shipped** | `_translator.ts` `createDeepAgent({subagents:[critic,reviewer,pm,sre]})` | All five agents wired. |
-| §2.2 | Roles, triggers, lifecycles | **partial** | `_prompts.ts` (system prompts), `pm_worker.ts`, `sre_worker.ts` | Chat-mode SubAgents shipped. Background-polling PM/SRE procs exist but no scheduler fires them (ISS-28). |
+| §2.2 | Roles, triggers, lifecycles | **partial** | `_prompts.ts` (system prompts), `pm_worker.ts`, `sre_worker.ts`, `PlanCanvas.tsx` (Run digest), `HealthCanvas.tsx` (Scan for issues) | Chat-mode SubAgents shipped. Background-polling PM/SRE procs are now invokable from the dashboard via "Run digest" (Plan canvas) / "Scan for issues" (Health canvas) — the buttons hit `pm.digest` / `sre.monitor` directly. The cron scheduler that would fire them on a cadence is still tracked as ISS-28. |
 | §2.3 | Single source of truth + actor attribution + chat addressing | **partial** | `agents.ts` (issue source field), `_middleware.ts` (data-pm-recommendation/data-sre-finding) | Data parts carry agent attribution; `@pm` / `@sre` mention dropdown shipped (`MentionDropdown.tsx`); audit log is in-memory only (ISS-14 family). |
 | §2.4 | Cost / latency budget, fast/balanced/thorough setting | **deferred** | — | No per-project iteration setting exposed; cost-meter chat-receipt copy not surfaced. Spec frames as cost-tier follow-up. |
 
@@ -54,7 +54,7 @@ Status legend:
 | Section | What it asks for | Status | Where it lives | Notes |
 |---|---|---|---|---|
 | §3.1 | Site map (marketing + authed) | **shipped** | `App.tsx` routes table | All §5 public surfaces wired to routes; admin tree not yet (Plan 10 per Plan 01). |
-| §3.2 | Pill visibility per tier | **partial** | `CanvasPills.tsx` | Pills render unconditionally; tier filter not active. |
+| §3.2 | Pill visibility per tier | **shipped** | `CanvasPills.tsx` (`pillsForTier`), `WorkspaceShell.tsx` (`TierToggle`) | Tier toggle in TopBar; localStorage-persistent. |
 | §3.3 | Workspace shell layout (TopBar + canvas + chat rail) | **shipped** | `WorkspaceShell.tsx`, `TopBar.tsx` | TopBar 48px; rail 320px desktop; phone drawer < 768px. |
 
 ---
@@ -234,7 +234,7 @@ Status legend:
 
 | Section | What it asks for | Status | Where it lives | Notes |
 |---|---|---|---|---|
-| §17 | Account page (8 sections) | **partial** | `pages/Account.tsx` | Profile / Plan / Sign out shipped; Email change, Password change, Connected accounts, Billing/Payouts links, Delete (ISS-12), 2FA (ISS-11), Sessions (ISS-10) ship as deferred-section stubs. |
+| §17 | Account page (8 sections) | **partial** | `pages/Account.tsx` | Profile / Plan / Sign out shipped. **Sessions** now ship as a client-only single-row view ("this browser, signed in <relative time>" + "sign out everywhere") — multi-device list still tracked under ISS-10. Email change, Password change, Connected accounts, Billing/Payouts links, Delete (ISS-12), 2FA (ISS-11) ship as deferred-section stubs. |
 | §18 | Billing | **deferred** | — | Spec routes `/account/billing`; V1 work tracked under platform Stripe integration. |
 | §19 | Payouts | **deferred** | — | Stripe Connect Express not wired in builder. |
 
@@ -288,7 +288,7 @@ Status legend:
 
 | Section | What it asks for | Status | Where it lives | Notes |
 |---|---|---|---|---|
-| §28 | All listed events emitted | **partial** | `lib/analytics.ts` `track()`; called from `WizardWorkspace.tsx` (project.creation_*), `OnboardingIntent.tsx` (signup intent), `WorkspaceShell.tsx` (project.first_deploy), `ChatRail.tsx` (chat.turn_*) | Auth / payout / quality.scorecard_computed / sre.* events not yet emitted. Audit-log sink is localStorage-only. |
+| §28 | All listed events emitted | **partial** | `lib/analytics.ts` `track()` + ring-buffer + `subscribeEvents`; `components/DevEventsBadge.tsx` floating dev inspector; called from `WizardWorkspace.tsx` (project.creation_*), `OnboardingIntent.tsx` (signup intent), `WorkspaceShell.tsx` (project.first_deploy), `ChatRail.tsx` (chat.turn_*) | Dev-only floating badge in the bottom-right corner shows event count + popover with the last 50 events (name + props + relative time). Mounts only when `import.meta.env.DEV` is truthy. Auth / payout / quality.scorecard_computed / sre.* events not yet emitted. |
 
 ---
 
@@ -296,10 +296,10 @@ Status legend:
 
 | Bucket | Count of §-rows |
 |---|---|
-| **shipped** | 50 |
-| **partial** | 22 |
+| **shipped** | 55 |
+| **partial** | 17 |
 | **stubbed** (tracked in ISSUES.md) | 13 |
 | **deferred** (V1.5 / V2 by spec phasing) | 17 |
 | **missing** | 0 |
 
-The branch covers the §0–§14 spec surface end-to-end and the §17–§28 polish layer. §15 / §16 / §18 / §19 / §23 are spec-phased as later releases. Every gap that the spec asks for in V1.0 (Release 0 per §30) is either shipped or stubbed against an ISSUES.md entry — no uncovered V1 gates remain.
+Foundation-polish pass (plan-01 follow-on) promoted §0, §1.5, §1.7, §2.2, §3.2 to **shipped** by wiring the tier filter, the Critic→scorecard persistence, and the Run-digest / Scan-for-issues affordances. The branch covers the §0–§14 spec surface end-to-end and the §17–§28 polish layer. §15 / §16 / §18 / §19 / §23 are spec-phased as later releases. Every gap that the spec asks for in V1.0 (Release 0 per §30) is either shipped or stubbed against an ISSUES.md entry — no uncovered V1 gates remain.

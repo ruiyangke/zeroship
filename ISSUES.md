@@ -31,9 +31,14 @@ pointer for whoever picks it up.
 | low-medium | ISS-19 |
 | low | ISS-10 · ISS-11 · ISS-22 |
 
-All entries below are **open** as of 2026-05-01. None of the ~120 commits on
-`redesign/plan-01-foundation` resolved any of these — each is a control-
-plane / platform-side fix that the builder app can't land in isolation.
+All entries below are **open** as of 2026-05-01. The foundation-polish
+pass (plan-01 follow-on) promoted **ISS-14**, **ISS-16**, **ISS-19**,
+and **ISS-26** from "in-memory Map" to "KV-backed via `@zeroship/kv`"
+without closing them — the real fix (Postgres-backed table /
+control-plane endpoint / object-store wiring) is still the listed
+**Fix path** for each. The KV step shrinks the visible blast radius
+(state survives HMR cycles in dev) but doesn't replace the real
+backing.
 
 Entries are listed below in the same order as the index above (severity
 descending; ties broken by issue id). Anchor links are preserved by ID.
@@ -354,13 +359,14 @@ roadmap, not vapor) and unblocks signup-funnel work.
 
 ---
 
-## ISS-14 · Issues table missing — PlanCanvas reads from in-memory stub
+## ISS-14 · Issues table missing — PlanCanvas reads from KV stub
 
-**Status:** open
+**Status:** open (partial — KV-backed, no real table)
 **Severity:** medium — every issue (filed by the user, the PM agent,
-the Critic, or the SRE agent) lives only in the worker's V8 isolate
-and disappears when the process restarts. Roadmap and Deployments are
-adjacent symptoms.
+the Critic, or the SRE agent) lives in the worker's `@zeroship/kv`
+namespace, which IS in-memory in dev (so it survives HMR module
+reloads but vanishes on a hard worker restart). Roadmap and
+Deployments are adjacent symptoms.
 **First observed:** 2026-05-01, building the Plan canvas
 (`apps/zeroship-builder/src/client/workspace/canvases/PlanCanvas.tsx`,
 spec §9.8).
@@ -384,11 +390,14 @@ reading or writing them:
 
 ### Workaround in use
 
-`apps/zeroship-builder/src/server/agents.ts` exposes a module-level
-`Map<appId, Issue[]>` lazily seeded with three sample issues per
-project. `listIssues({appId})` reads the map; `addIssue({appId,
-title, description})` prepends to it. The map evicts on V8 isolate
-eviction (worker LRU) so the data is best described as "ephemeral".
+`apps/zeroship-builder/src/server/agents.ts` reads/writes through the
+`@zeroship/kv` SDK keyed by `issues:<appId>`. Lazy-seeded with three
+sample issues on first read so a brand-new project's canvas isn't
+empty. The KV backend is in-memory in dev (per
+`crates/cli/src/main.rs` — `KvPlugin::in_memory()` when
+`ZEROSHIP_KV_URL` is unset), so writes survive vite HMR cycles but
+vanish on a hard worker restart. Real Postgres-backed `issues` table
+still tracked by the **Fix path** below.
 
 The PlanCanvas Roadmap section attributes every issue to the first
 milestone (`v0.1`) because there's no milestone-association data.
@@ -452,10 +461,16 @@ yet — ship something first.") fires when `deploy_hash` is null.
 
 ## ISS-16 · Critic → quality scoreboard wiring missing
 
-**Status:** open
-**Severity:** medium — HealthCanvas's quality grid ships with hardcoded
-scores. Spec §11.1 promises a live scorecard updated by the Critic
-loop; that wire doesn't exist yet.
+**Status:** open (partial — Critic-loop wire shipped, no per-deploy
+persistence yet)
+**Severity:** medium — HealthCanvas's quality grid now updates from
+real Critic rounds via the chat middleware (`_middleware.ts` →
+`setQualityFromCritic` via `waitUntil()` after every
+`data-critic-round` emit). The scorecard is still keyed only by appId
+(not by deploy hash) so hot-rolling a new deploy that the Critic
+hasn't graded yet leaves the previous round's grades visible — the
+remaining `Fix path` below covers persisting per-deploy scorecards
+once ISS-15 lands.
 **First observed:** 2026-05-01, building the Health canvas
 (`apps/zeroship-builder/src/client/workspace/canvases/HealthCanvas.tsx`,
 spec §9.9 + §11.1).
@@ -478,11 +493,15 @@ implementation in `_critic.ts` returns an internal verdict
 
 ### Workaround in use
 
-`apps/zeroship-builder/src/server/agents.ts` exposes
-`getQualityScores({appId})` returning a hardcoded snapshot
-(per-dimension grade + rationale + null `last_run_at`). HealthCanvas
-renders that snapshot with overall + per-dimension cards. Grades are
-the same for every app for now.
+`apps/zeroship-builder/src/server/agents.ts` keeps a KV-backed
+scorecard at `quality:<appId>`. The chat middleware (`_middleware.ts`)
+now extracts the Critic round's per-dimension issues, maps severity →
+letter grade via `gradeFromIssues()`, and persists via
+`waitUntil(setQualityFromCritic(appId, issues))` so the canvas
+reflects the live grading on its next refetch. Apps without a Critic
+round yet fall back to a "freshly scaffolded" default snapshot so the
+canvas doesn't render blank. `last_run_at` shows when the last round
+graded the project (or "Not graded yet" when never).
 
 ### Fix path
 
@@ -772,13 +791,15 @@ the lifetime of the V8 isolate.
 
 ---
 
-## ISS-26 · Media canvas backed by in-memory Map, not real `@zeroship/storage`
+## ISS-26 · Media canvas backed by KV (data URLs), not real `@zeroship/storage`
 
-**Status:** open
-**Severity:** medium — every uploaded file lives in the worker's V8
-isolate as a base64 data URL. Files vanish on isolate eviction and
-aren't reachable from the deployed app's runtime (which is the whole
-point of an asset library).
+**Status:** open (partial — KV-backed, no real storage backend yet)
+**Severity:** medium — uploads now persist to the V8 worker's KV
+namespace as base64 data URLs (capped at 1 MB so the KV store can't be
+DOS'd by a single large drop). Files survive HMR cycles, vanish on
+hard worker restart, and aren't reachable from the deployed app's
+runtime (which is the whole point of an asset library — that needs
+the real Storage backend).
 **First observed:** 2026-05-01, building the Media canvas
 (`apps/zeroship-builder/src/client/workspace/canvases/MediaCanvas.tsx`,
 spec §9.4).
@@ -802,10 +823,11 @@ upload RPC:
 ### Workaround in use
 
 `agents.ts` exposes `listMedia` / `uploadMedia` / `deleteMedia` over
-a per-appId `Map<string, MediaEntry[]>` seeded with 3 sample tiles
-(2 picsum.photos URLs + 1 PDF). Uploads round-trip the file as base64
-and store the bytes inline as a `data:` URL — fine for the canvas
-preview, useless for the deployed app.
+a KV-backed list keyed `media:<appId>`, seeded with 3 sample tiles
+(2 picsum.photos URLs + 1 PDF). Uploads are gated to ≤ 1 MB and
+round-trip the file as base64; the bytes ride inline as a `data:` URL
+on the entry — fine for the canvas preview, useless for the deployed
+app.
 
 ### Fix path
 
@@ -915,12 +937,13 @@ now" affordance.
 
 ## ISS-19 · Project archive — control-plane backing missing
 
-**Status:** open
+**Status:** open (partial — KV-backed, no control-plane column yet)
 **Severity:** low-medium — archive is a reversible UI affordance and
 the spec (§8.3) explicitly frames it as a soft alternative to delete.
-The current stub gives users the affordance without losing data, but
-state doesn't survive a server restart and isn't shared across
-control-plane nodes.
+Archive state now lives in the V8 worker's KV store keyed
+`archive-set:usr_dev`; survives HMR cycles but vanishes on hard
+worker restart. Control-plane column + endpoint still tracked by the
+fix path below.
 **First observed:** 2026-05-01, building the project lifecycle polish.
 **Component:** `crates/control` + `apps/zeroship-builder/src/server/apps.ts`
 
@@ -936,13 +959,12 @@ Archive has no backing column or endpoint:
 
 ### Workaround in use
 
-`apps/zeroship-builder/src/server/apps.ts` ships a module-level
-`Set<string>` (`archivedApps`) that tracks which app ids are flagged
-archived. `listApps` / `getApp` decorate the proxied control-plane
-records with `archived: bool` from this Set; `archiveApp({appId})`
-and `unarchiveApp({appId})` mutate it. The Set is local to the
-zeroship-builder dev server process — it's lost on restart and not
-shared across multi-node deployments.
+`apps/zeroship-builder/src/server/apps.ts` keeps a per-user list of
+archived appIds in KV at `archive-set:<userId>`. `listApps` / `getApp`
+decorate the proxied control-plane records with `archived: bool` from
+this list; `archiveApp({appId})` and `unarchiveApp({appId})` mutate
+it. KV is in-memory in dev — survives HMR cycles, vanishes on a hard
+worker restart and isn't shared across multi-node deployments.
 
 The Home gallery and SettingsCanvas read `app.archived` and render
 the Archive section / filter pill accordingly. From the user's
