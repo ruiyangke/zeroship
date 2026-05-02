@@ -5,6 +5,7 @@
 //! containers and k8s+libkrun Pods.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ntex::util::Bytes;
 use ntex::web::{self, HttpRequest, HttpResponse};
@@ -37,6 +38,7 @@ fn err(status: u16, msg: impl Into<String>) -> HttpResponse {
         404 => HttpResponse::NotFound(),
         409 => HttpResponse::Conflict(),
         500 => HttpResponse::InternalServerError(),
+        503 => HttpResponse::ServiceUnavailable(),
         _ => HttpResponse::InternalServerError(),
     };
     resp.json(&serde_json::json!({"error": s}))
@@ -172,13 +174,161 @@ pub async fn create_sandbox(
         }
     }
 
-    let sandbox_id = Uuid::new_v4();
-    let info = match state.backend.create(sandbox_id, &user_id, &project_id).await {
-        Ok(i) => i,
-        Err(e) => return err(500, format!("backend.create: {e}")),
-    };
-    let stored = state.sandboxes.insert(sandbox_id, info);
-    HttpResponse::Created().json(&stored)
+    // FM-E: retry on stale-tenant or /livez-timeout errors. Each
+    // retry mints a fresh sandbox UUID — the NomadCHBackend's
+    // create() flow allocates a new vm_index inside, so the next
+    // attempt naturally lands on a different IP.
+    //
+    // Retry contract:
+    //   - Backend's contract stays "create returns Result<_, String>";
+    //     the recovery decision lives at the handler layer.
+    //   - Retry budget is bounded both by attempt-count
+    //     (config.create_retry_max) AND total wall-time
+    //     (config.create_retry_total_timeout_secs) — a pathological
+    //     backend that consumes the full per-attempt timeout
+    //     shouldn't tie up an ntex worker indefinitely.
+    //   - On exhaustion we return 503 (transient — please retry
+    //     later) rather than 500. With FM-F's host-side fence in
+    //     place this path should be rare; the retry is one layer of
+    //     defense for a truly bad host state.
+    let total_budget =
+        Duration::from_secs(state.config.create_retry_total_timeout_secs);
+    let max_attempts = state.config.create_retry_max.saturating_add(1);
+    let outcome = run_create_with_retry(
+        max_attempts,
+        total_budget,
+        || async {
+            let sandbox_id = Uuid::new_v4();
+            let res = state.backend.create(sandbox_id, &user_id, &project_id).await;
+            (sandbox_id, res)
+        },
+    )
+    .await;
+    match outcome {
+        CreateOutcome::Ok { sandbox_id, info } => {
+            let stored = state.sandboxes.insert(sandbox_id, info);
+            HttpResponse::Created().json(&stored)
+        }
+        CreateOutcome::Failed { status, message } => err(status, message),
+    }
+}
+
+/// FM-E: retry result.
+pub(crate) enum CreateOutcome {
+    Ok {
+        sandbox_id: Uuid,
+        info: crate::backend::SandboxInfo,
+    },
+    /// `status` is the HTTP code the handler should emit (500 for
+    /// non-retriable, 503 for retry-budget exhaustion).
+    Failed { status: u16, message: String },
+}
+
+/// FM-E: drives the create + retry loop. Extracted so unit tests
+/// can verify the retry contract without spinning up the full ntex
+/// app or a real Backend.
+///
+/// The closure `mint_and_create` is called once per attempt — it
+/// must mint a fresh `Uuid` and call `Backend::create` with it.
+/// Returning a `(Uuid, Result)` (rather than just a `Result`) lets
+/// us record which UUID was tried so the success path can register
+/// it in the state map.
+pub(crate) async fn run_create_with_retry<F, Fut>(
+    max_attempts: u32,
+    total_budget: Duration,
+    mut mint_and_create: F,
+) -> CreateOutcome
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<
+            Output = (Uuid, Result<crate::backend::SandboxInfo, String>),
+        >,
+{
+    let started = Instant::now();
+    let mut last_err: Option<String> = None;
+    for attempt in 1..=max_attempts {
+        let elapsed = started.elapsed();
+        if elapsed >= total_budget {
+            eprintln!(
+                "[sandbox/handlers] create: retry budget exhausted \
+                 (elapsed_ms={} budget_ms={} attempts={})",
+                elapsed.as_millis(),
+                total_budget.as_millis(),
+                attempt - 1,
+            );
+            return CreateOutcome::Failed {
+                status: 503,
+                message: format!(
+                    "backend.create: retry budget exhausted after {} \
+                     attempt(s); last error: {}",
+                    attempt - 1,
+                    last_err.unwrap_or_else(|| "<no error captured>".to_string()),
+                ),
+            };
+        }
+
+        let (sandbox_id, res) = mint_and_create().await;
+        match res {
+            Ok(info) => {
+                if attempt > 1 {
+                    eprintln!(
+                        "[sandbox/handlers] create: succeeded on attempt={attempt} \
+                         sandbox_id={sandbox_id} elapsed_ms={}",
+                        started.elapsed().as_millis(),
+                    );
+                }
+                return CreateOutcome::Ok { sandbox_id, info };
+            }
+            Err(e) => {
+                let retriable = is_retriable_create_error(&e);
+                eprintln!(
+                    "[sandbox/handlers] create: error attempt={attempt}/{max_attempts} \
+                     sandbox_id={sandbox_id} retriable={retriable} error={e}"
+                );
+                last_err = Some(e);
+                if !retriable {
+                    return CreateOutcome::Failed {
+                        status: 500,
+                        message: format!(
+                            "backend.create: {}",
+                            last_err.unwrap_or_default()
+                        ),
+                    };
+                }
+            }
+        }
+    }
+    CreateOutcome::Failed {
+        status: 503,
+        message: format!(
+            "backend.create: {max_attempts} attempts failed; last error: {last}",
+            last = last_err.unwrap_or_else(|| "<no error captured>".to_string()),
+        ),
+    }
+}
+
+/// FM-E: classify a `backend.create` error as retriable.
+///
+/// Retriable cases (caused by a stale previous tenant whose VM is
+/// still draining on the same IP):
+///   - "stale agent" — FM-A fingerprint check fired
+///   - "never returned 200 on /livez" — agent never came up at all
+///     (could be a wedged previous tenant or genuinely bad host;
+///     either way a fresh vm_index is the cheapest recovery)
+///
+/// Non-retriable cases (configuration / serialization / pool):
+///   - validate_id failures
+///   - "concurrent sandbox create" (per-user gate)
+///   - "no free vm_index" (pool exhausted)
+///   - "nomad-ch backend unhealthy" (probe loop sets the bit)
+///
+/// We match on substrings rather than typed errors because the
+/// Backend trait is `Result<_, String>` — keeping that contract
+/// surface narrow lets the recovery policy live entirely in the
+/// handler. If retry classification grows past this it should be
+/// promoted to a typed error.
+fn is_retriable_create_error(msg: &str) -> bool {
+    msg.contains("stale agent") || msg.contains("never returned 200 on /livez")
 }
 
 // ─── GET /sandboxes ───────────────────────────────────────────────
@@ -424,5 +574,235 @@ pub async fn delete_file(
         Ok(true) => HttpResponse::Ok().json(&serde_json::json!({"deleted": file_path})),
         Ok(false) => err(404, "file not found"),
         Err(e) => err(400, e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::SandboxInfo;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn fake_info(id: Uuid) -> SandboxInfo {
+        SandboxInfo {
+            sandbox_id: id.to_string(),
+            user_id: "u".into(),
+            project_id: "p".into(),
+            backend: "nomad-ch".into(),
+            backend_hint: "test".into(),
+            created_at_secs: 0,
+            last_used_at_secs: 0,
+        }
+    }
+
+    // ─── FM-E: classifier ───────────────────────────────────────
+
+    #[test]
+    fn classifier_retries_stale_agent() {
+        assert!(is_retriable_create_error(
+            "stale agent at http://10.99.101.2:7777: expected pubkey_fingerprint=aa, got bb"
+        ));
+        assert!(is_retriable_create_error(
+            "stale agent at http://10.99.101.2:7777: /version returned 401"
+        ));
+    }
+
+    #[test]
+    fn classifier_retries_livez_timeout() {
+        assert!(is_retriable_create_error(
+            "agent at http://10.99.101.2:7777 never returned 200 on /livez (expected fp=aa)"
+        ));
+    }
+
+    #[test]
+    fn classifier_does_not_retry_pool_exhausted() {
+        // FM-E: must NOT loop forever on a structural failure (pool
+        // empty, validation, concurrent-create gate). 500-immediate
+        // is the right answer.
+        assert!(!is_retriable_create_error("no free vm_index in pool"));
+        assert!(!is_retriable_create_error(
+            "concurrent sandbox create in progress for user \"alice\"; retry"
+        ));
+        assert!(!is_retriable_create_error(
+            "nomad-ch backend unhealthy; refusing new sandboxes"
+        ));
+        assert!(!is_retriable_create_error("validate_id: bad chars"));
+    }
+
+    // ─── FM-E: retry loop ───────────────────────────────────────
+
+    #[compio::test]
+    async fn retry_loop_returns_ok_on_first_attempt() {
+        let outcome = run_create_with_retry(3, Duration::from_secs(10), || async {
+            let id = Uuid::new_v4();
+            (id, Ok(fake_info(id)))
+        })
+        .await;
+        match outcome {
+            CreateOutcome::Ok { .. } => {}
+            CreateOutcome::Failed { status, message } => {
+                panic!("expected Ok, got {status}: {message}")
+            }
+        }
+    }
+
+    #[compio::test]
+    async fn retry_loop_recovers_from_stale_agent_on_second_attempt() {
+        // The pilot's exact scenario: cycle-2 first attempt sees a
+        // stale-agent fp mismatch on the recycled IP; the retry
+        // mints a fresh UUID, the backend's create flow allocates a
+        // different vm_index, and the second attempt succeeds.
+        let attempts = Rc::new(RefCell::new(0u32));
+        let attempts_c = attempts.clone();
+        let outcome = run_create_with_retry(3, Duration::from_secs(10), move || {
+            let attempts = attempts_c.clone();
+            async move {
+                let n = {
+                    let mut x = attempts.borrow_mut();
+                    *x += 1;
+                    *x
+                };
+                let id = Uuid::new_v4();
+                if n == 1 {
+                    (
+                        id,
+                        Err(
+                            "stale agent at http://10.99.101.2:7777: \
+                             expected pubkey_fingerprint=aa, got bb"
+                                .to_string(),
+                        ),
+                    )
+                } else {
+                    (id, Ok(fake_info(id)))
+                }
+            }
+        })
+        .await;
+        assert_eq!(*attempts.borrow(), 2, "must retry exactly once");
+        assert!(matches!(outcome, CreateOutcome::Ok { .. }));
+    }
+
+    #[compio::test]
+    async fn retry_loop_returns_503_after_exhausting_retries() {
+        let attempts = Rc::new(RefCell::new(0u32));
+        let attempts_c = attempts.clone();
+        let outcome = run_create_with_retry(3, Duration::from_secs(10), move || {
+            let attempts = attempts_c.clone();
+            async move {
+                *attempts.borrow_mut() += 1;
+                let id = Uuid::new_v4();
+                (
+                    id,
+                    Err(
+                        "stale agent at http://10.99.101.2:7777: expected fp=aa, got bb"
+                            .to_string(),
+                    ),
+                )
+            }
+        })
+        .await;
+        assert_eq!(
+            *attempts.borrow(),
+            3,
+            "must try max_attempts (1 initial + 2 retries) times"
+        );
+        match outcome {
+            CreateOutcome::Failed { status, message } => {
+                assert_eq!(status, 503, "exhausted retries → 503");
+                assert!(
+                    message.contains("attempts failed") || message.contains("attempt"),
+                    "503 body must include attempt count for triage; got {message:?}"
+                );
+            }
+            CreateOutcome::Ok { .. } => panic!("expected failure"),
+        }
+    }
+
+    #[compio::test]
+    async fn retry_loop_does_not_retry_non_retriable_error() {
+        let attempts = Rc::new(RefCell::new(0u32));
+        let attempts_c = attempts.clone();
+        let outcome = run_create_with_retry(3, Duration::from_secs(10), move || {
+            let attempts = attempts_c.clone();
+            async move {
+                *attempts.borrow_mut() += 1;
+                let id = Uuid::new_v4();
+                (id, Err("no free vm_index in pool".to_string()))
+            }
+        })
+        .await;
+        assert_eq!(
+            *attempts.borrow(),
+            1,
+            "non-retriable error must NOT loop"
+        );
+        match outcome {
+            CreateOutcome::Failed { status, .. } => {
+                assert_eq!(status, 500, "non-retriable → 500, not 503")
+            }
+            CreateOutcome::Ok { .. } => panic!("expected failure"),
+        }
+    }
+
+    #[compio::test]
+    async fn retry_loop_uses_fresh_uuid_per_attempt() {
+        // FM-E invariant: each attempt mints a fresh UUID. The
+        // registry's entry().or_insert_with would refuse a duplicate
+        // and the same vm_index would be re-allocated on the same IP.
+        let seen: Rc<RefCell<Vec<Uuid>>> = Rc::new(RefCell::new(Vec::new()));
+        let seen_c = seen.clone();
+        let _outcome = run_create_with_retry(3, Duration::from_secs(10), move || {
+            let seen = seen_c.clone();
+            async move {
+                let id = Uuid::new_v4();
+                seen.borrow_mut().push(id);
+                (
+                    id,
+                    Err("stale agent at x: expected fp=a got b".to_string()),
+                )
+            }
+        })
+        .await;
+        let s = seen.borrow();
+        assert_eq!(s.len(), 3);
+        assert_ne!(s[0], s[1], "attempt 1 and 2 must use distinct UUIDs");
+        assert_ne!(s[1], s[2], "attempt 2 and 3 must use distinct UUIDs");
+        assert_ne!(s[0], s[2], "attempt 1 and 3 must use distinct UUIDs");
+    }
+
+    #[compio::test]
+    async fn retry_loop_bails_when_total_budget_exceeded() {
+        // Tight budget + slow attempts → second attempt should hit
+        // the wall-time check before invoking the closure.
+        let attempts = Rc::new(RefCell::new(0u32));
+        let attempts_c = attempts.clone();
+        let outcome = run_create_with_retry(5, Duration::from_millis(100), move || {
+            let attempts = attempts_c.clone();
+            async move {
+                *attempts.borrow_mut() += 1;
+                // Sleep past the budget so the next iteration hits
+                // the elapsed check.
+                compio::time::sleep(Duration::from_millis(120)).await;
+                let id = Uuid::new_v4();
+                (id, Err("stale agent at x: a/b".to_string()))
+            }
+        })
+        .await;
+        let n = *attempts.borrow();
+        assert!(
+            n < 5,
+            "budget cap must short-circuit before max_attempts; got {n}"
+        );
+        match outcome {
+            CreateOutcome::Failed { status, message } => {
+                assert_eq!(status, 503);
+                assert!(
+                    message.contains("budget") || message.contains("attempts failed"),
+                    "exhaustion message must hint at the cause; got {message:?}"
+                );
+            }
+            CreateOutcome::Ok { .. } => panic!("expected failure"),
+        }
     }
 }
