@@ -472,9 +472,14 @@ crates/runtime/src/websocket.rs       (deleted in landing 3 — replaced by crat
 
 crates/runtime/src/runtime.rs         (modified) dispatch OpResult::WebSocketEvent variant.
 
-crates/runtime/Cargo.toml             (modified) explicit `compio-ws = { version = "0.3" }` dep
-                                                  (currently transitive via compio); add the
-                                                  feature `tls` for compio_ws::client_async_tls.
+crates/runtime/Cargo.toml             (modified) explicit
+                                                  `compio-ws = { version = "0.3", default-features = false, features = ["client", "tls"] }`
+                                                  (currently transitive via compio). Explicitly omits `deflate`
+                                                  so RSV1=1 frames hard-fail per RFC 6455 §5.2 (addresses
+                                                  critic MAJOR #18). A startup assertion in `init.rs` verifies
+                                                  `WebSocketConfig::default().compression == None` so a
+                                                  feature-flag mistake fails loudly at boot, not silently in
+                                                  per-message decompression.
 
 crates/runtime/tests/
 ├── websocket_construct.rs            (new) hand-written Constructor / URL parse / protocol-validation tests
@@ -1305,6 +1310,13 @@ fn parse_and_validate_protocols(
     };
 
     // Uniqueness — case-insensitive per spec.
+    // Per RFC 6455 §4.1 + RFC 7230 token grammar, subprotocol tokens
+    // are restricted to U+0021..U+007E excluding separators. There
+    // are NO non-ASCII characters in valid subprotocol tokens, so
+    // ASCII case-folding is sufficient (no Unicode case-fold needed).
+    // The `is_valid_subprotocol` check below rejects non-ASCII codepoints
+    // BEFORE this dedup, so `to_ascii_lowercase` is always correct.
+    // (addresses critic MINOR #34)
     let mut seen = std::collections::HashSet::new();
     for p in &list {
         let lowered = p.to_ascii_lowercase();
@@ -1544,10 +1556,16 @@ if let Some(sig_global) = signal {
     let ws_id_clone = ws_id;
     crate::dom::abort_signal::add_abort_algorithm(
         scope, sig_obj,
-        Box::new(move || {
-            // Wake the connect task with an Aborted result — it will
-            // emit Close{1006} and exit.
-            cancel_flag_for_ws(ws_id_clone).cancel();
+        Box::new(move |scope: &mut v8::PinScope| {
+            // Read AbortSignal.reason for propagation to close.reason.
+            // (addresses critic MAJOR #25)
+            let abort_reason = crate::dom::abort_signal::reason_string(
+                scope, sig_obj,
+            ).unwrap_or_else(|| "aborted".to_string());
+            // Wake the connect task; it observes the cancel flag and
+            // emits Error+Close{1006, reason: abort_reason} per the
+            // §V.3 connection-failed dispatch.
+            cancel_flag_for_ws(ws_id_clone).cancel_with_reason(abort_reason);
         }),
     );
 }
@@ -3187,10 +3205,31 @@ post-merge populates the directory.
 
 Functional WPT tests need a real WebSocket server. The runtime already
 ships `echo-server` (`crates/runtime/src/echo_server.rs`, declared in
-`crates/runtime/Cargo.toml`). v1 extends it with WebSocket echo support
-via `compio_ws::accept_async` — ~80 LOC addition. Test runner spawns
-the echo server on `127.0.0.1:0`, captures the bound port, sets the
-WPT `WSPORT` substitution variable, runs the test.
+`crates/runtime/Cargo.toml`). v2 extends it with WebSocket echo support
+via `compio_ws::accept_async` — ~80 LOC addition.
+
+The WPT WebSocket tests use the wptserve `wss://{{host}}:{{ports[wss][0]}}/...`
+substitution scheme, NOT a single `WSPORT` variable (v1's claim was
+inaccurate per critic MINOR #36). The runner mirrors wptserve's
+substitution map by binding `{{ports[ws][0]}}`, `{{ports[wss][0]}}`,
+and `{{host}}` to the in-process echo server's address.
+
+The echo server exposes the WPT-required endpoints:
+
+| Endpoint | Behaviour |
+|----------|-----------|
+| `/echo` | echo every text/binary frame back verbatim |
+| `/echo-with-headers` | dump request headers as a text frame, then echo |
+| `/echo-error` | echo, then close with the code parsed from the first frame |
+| `/echo-binary` | echo binary frames; reject text frames with Close{1003} |
+| `/echo-fragmented` | echo, but split each response into 2 fragments |
+| `/handshake-extensions` | reflect Sec-WebSocket-Extensions; tests CRITICAL #7 |
+| `/handshake-subprotocol` | reflect/echo subprotocol; tests CRITICAL #9 |
+
+(addresses critic MINOR #28 + missing-concept #14)
+
+Test runner spawns the echo server on `127.0.0.1:0`, captures the
+bound port, populates the WPT substitution map, runs the test.
 
 ### XII.4. Hand-written tests
 
@@ -3280,22 +3319,26 @@ callbacks).
 
 | Step | Hours |
 |------|------:|
-| 1. MessageEvent + CloseEvent native classes (~270 LOC + tests) | 8 |
-| 2. WebSocketImpl skeleton (no network) (~600 LOC) | 16 |
-| 3. Hand-rolled construction/close/binaryType tests (~400 LOC) | 12 |
-| 4. handshake.rs (RFC 6455 §4.1, ~200 LOC) + sha1/key helpers | 10 |
-| 5. receive_loop.rs + send_pump.rs (~300 LOC) | 14 |
-| 6. WebSocketPair (~120 LOC) + gateway-coupling refactor | 8 |
+| 1. MessageEvent + CloseEvent native classes (~280 LOC + tests; ports cache, code modulo conversion, ports identity) | 10 |
+| 2. WebSocketImpl skeleton (no network) (~620 LOC; [[full]] flag, Option<u16> close code, EventHandler null-coerce) | 20 |
+| 3. Hand-rolled construction/close/binaryType tests (~450 LOC; v2 [Clamp] correctness, modulo correctness, null-coerce, ports identity) | 16 |
+| 4. handshake.rs (RFC 6455 §4.1, ~250 LOC; two-phase SSRF, extensions strict-fail, subprotocol strict-fail, opt-in Origin) | 16 |
+| 5. receive_loop.rs + send_pump.rs (~360 LOC; backpressure, error-propagation, ping interval, close-handshake timeout, pair drain signal) | 22 |
+| 6. WebSocketPair (~140 LOC) + gateway-coupling refactor + bufferedAmount-on-pair drain | 10 |
 | 7. http.rs inspect_response refactor (~50 LOC change) | 4 |
-| 8. WPT runner + sparse-checkout extension + 3-4 WPT subdirs | 24 |
-| 9. End-to-end echo + 5 hand-rolled e2e tests | 10 |
-| 10. D-25 cutover landings 1+2+3 (3 commits over 2 weeks) | 12 |
-| **Total** | **118 industry-hours** |
+| 8. WPT runner + sparse-checkout extension + 5-6 WPT subdirs (debugging the spec edge cases is ~3x v1's estimate) | 60 |
+| 9. End-to-end echo + 7 hand-rolled e2e tests (extensions reject, subprotocol reject, abort+reason, ping keepalive, deflate-off assertion) | 14 |
+| 10. D-25 cutover landings 1+2+3 (3 commits over 2 weeks; includes binaryType-default migration notes) | 16 |
+| **Total** | **188 industry-hours** |
+
+(v1 estimated 118h; the critic correctly flagged this as low — the
+spec-bug-fix rounds and the WPT-debugging step are the dominant cost.
+v2 increases to 188h. addresses critic MINOR #35 + #39.)
 
 User productivity is industry/40 per `feedback_estimates_hours_not_weeks.md`,
-so ~3 user-hours of focused work. The 118-hour figure is the ADR-style
+so ~4.5 user-hours of focused work. The 188-hour figure is the ADR-style
 estimate for cross-team comparison; if a follow-up agent picks this up
-on a freshly-spun cluster, plan for ~3-4 days at industry pace.
+on a freshly-spun cluster, plan for ~5 days at industry pace.
 
 ## XV. Comparison with reference implementations
 
@@ -3397,6 +3440,17 @@ app. Both flows land on the same `#[v8_class] WebSocket`; the JS-visible
 surface is unified. The `docs/reference/websocket-design.md` reference
 doc remains the authority on the gateway flow.
 
+### XVII.4b. Origin header policy (RESOLVED in v2)
+
+**Picked:** Opt-in only via `WebSocketInit.origin`. Default: do NOT
+send Origin. Per RFC 6455 §10.2
+(https://datatracker.ietf.org/doc/html/rfc6455#section-10.2),
+non-browser clients SHOULD NOT send Origin. v1's "always-on" decision
+(referencing a misread of Deno) was a CRITICAL spec violation;
+the critic flagged it as item #3. v2 resolves: opt-in only.
+(addresses critic CRITICAL #3, originally tracked here as XVII.4
+"cross-check"; now closed.)
+
 ### XVII.5. MessageEvent shape — full HTML §9.4.2 vs WebSocket-subset
 
 **Picked:** Full HTML §9.4.2 IDL surface, but `source` always null and
@@ -3449,6 +3503,95 @@ strict UTF-8 (D-17 — RFC 6455 §8.1).
 `Send-paired-surrogates.any.js` and `Send-unpaired-surrogates.any.js`
 test the send-side conversion (USVString replaces lone surrogates with
 U+FFFD); the receive side is in `interfaces/` and the autobahn fuzzer.
+
+### XVII.10b. Per-app WebSocket metering (zeroship.meter integration)
+
+**Picked:** v2 hooks WS bytes-in / bytes-out into the existing
+`zeroship.meter.*` primitive (per AGENTS.md "Native primitives"). Each
+WebSocket frame increments a `ws_bytes_in` / `ws_bytes_out` counter
+keyed by the app id; the gateway pump's existing per-request metering
+handles the gateway-side accounting; the worker-side
+`new WebSocket(url)` outbound flow gets a parallel meter hook in the
+send_pump and receive_loop.
+
+**Why:** The platform's revenue model (AGENTS.md "The platform only
+earns when creators earn") requires accurate per-app bandwidth
+accounting; otherwise outbound WebSocket traffic is invisible to the
+billing pipeline. The hook is a single line in send_pump.rs and
+receive_loop.rs, adding ~10 LOC.
+
+(addresses critic missing-concept #1)
+
+### XVII.10c. Worker-shutdown drain protocol
+
+**Picked:** On worker termination (deploy / scaledown), the runtime
+shutdown sequence runs `make_disappear` on every live WebSocket. Per
+§IX.1, OPEN sockets get a Close{1001, "Going Away"} frame; CONNECTING
+sockets get the connection-failed cancel.
+
+**Why:** A clean Close{1001} lets the peer distinguish "graceful
+shutdown" from "TCP RST" (Close{1006}); important for
+production-grade reliability metrics. The shutdown sequence:
+
+1. Set the runtime's `shutting_down` flag.
+2. Iterate the websockets HashMap; for each, run make_disappear.
+3. Drain the send pumps for up to 5 seconds (RFC 6455 §7.1.1
+   close-handshake timeout, §IX.3).
+4. Force-close any remaining sockets.
+
+**Defer:** v1 doesn't implement step 3 / 4; v1 relies on the per-WS
+5s close timeout, which gives the same effective behaviour. Step 1
+and 2 ship in v1.
+
+(addresses critic missing-concept #2)
+
+### XVII.10d. Sticky routing for outbound `new WebSocket(url)`
+
+**Picked:** Worker-local. The outbound WebSocket lives on the worker
+that constructed it; CHWBL routing pins subsequent HTTP requests to
+the same worker (existing gateway logic in
+`crates/gateway/src/dispatch.rs`). If the worker is evicted (LRU,
+scaledown), the WebSocket is force-closed with Close{1001}.
+
+**Why:** A creator app's outbound `new WebSocket(...)` is logically
+tied to the request that triggered it; CHWBL keeps the request
+pipeline on one worker. Multi-node migration is out of scope (would
+need WebSocket WAL / persistence; missing-concept #2).
+
+(addresses critic missing-concept #3)
+
+### XVII.10e. TLS root-trust + ALPN config for wss://
+
+**Picked:** mirror fetch's TLS config in `network.rs::build_tls_connector`:
+- **Root cert store:** `rustls_native_certs` (system trust). Same as
+  fetch.
+- **SNI:** the URL hostname (passed to
+  `client_async_tls_with_connector_and_config`).
+- **ALPN:** advertise `http/1.1` only. RFC 8441 (HTTP/2 baseline) is
+  out of scope (Non-goals); the WS upgrade is HTTP/1.1.
+
+**Why:** SSRF defence requires SNI to be the hostname (not IP), so a
+DNS-rebound IP that happens to listen on 443 still fails cert
+validation. ALPN-`http/1.1` prevents accidental HTTP/2 negotiation if
+cyper later flips features.
+
+(addresses critic missing-concept #4)
+
+### XVII.10f. WebSocketStream deprecated forms
+
+**Picked:** v1 throws ReferenceError on `new WebSocketStream(...)`.
+The deprecated Chrome ship (which exposed `WebSocketStream` returning
+a stream of strings) is not worth shimming.
+
+**Defer:** v2 adds the live spec'd `WebSocketStream` (per
+https://websockets.spec.whatwg.org/#websocketstream and the
+ricea/websocketstream-explainer).
+
+The runtime's global registration explicitly does NOT install
+`WebSocketStream`; AI-builder code that emits it gets a clear
+ReferenceError with a hint pointing to `new WebSocket(...)`.
+
+(addresses critic missing-concept #8)
 
 ### XVII.10. The 1024-cap on concurrent WebSockets
 
