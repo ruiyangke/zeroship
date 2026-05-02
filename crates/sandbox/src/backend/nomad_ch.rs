@@ -1198,6 +1198,43 @@ impl NomadCHBackend {
         })
     }
 
+    /// **Test-only.** Inject a synthetic sandbox record with a
+    /// caller-supplied `agent_url`. Bypasses the full Nomad/CH
+    /// create flow + the `derive_agent_url` rule (which targets
+    /// `10.99.<100+idx>.2`). Used by the preview-proxy e2e tests
+    /// to point the controller at a fixture HTTP listener on
+    /// `127.0.0.1:<ephemeral>`.
+    ///
+    /// Marked `pub` rather than `pub(crate)` so integration tests
+    /// in `tests/` can call it; the `#[cfg(any(test, feature =
+    /// "test-support"))]` gate would be cleaner if we want to
+    /// strip it from production binaries — Phase 1 leaves it
+    /// unconditionally public with a "tests only" doc-comment
+    /// (the function name self-identifies as test scaffolding).
+    pub fn _test_inject_sandbox(
+        &self,
+        sandbox_id: Uuid,
+        user_id: &str,
+        signing_key: SigningKey,
+        agent_url: String,
+        vm_index: u16,
+    ) {
+        let job_id = Self::derive_job_id(sandbox_id);
+        let host_dir = self.derive_host_dir(sandbox_id);
+        let mut g = self.state.write().unwrap_or_else(|p| p.into_inner());
+        g.insert(
+            sandbox_id,
+            NomadChSandbox {
+                user_id: user_id.to_string(),
+                job_id,
+                vm_index,
+                host_dir,
+                agent_url,
+                signing_key: Arc::new(signing_key),
+            },
+        );
+    }
+
     /// Re-derive the deterministic `agent_url` for a given vm_index.
     /// `http://10.<subnet_second_octet>.<100+idx>.2:7777`. Public so
     /// the controller's restart-restore path can recompute the URL

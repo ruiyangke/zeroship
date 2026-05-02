@@ -10,7 +10,7 @@
 //! for the full architecture.
 
 use ntex::web;
-use zeroship_sandbox::{handlers, registry, AppState};
+use zeroship_sandbox::{handlers, preview, registry, AppState};
 use zeroship_sandbox::config::SandboxConfig;
 
 #[global_allocator]
@@ -163,6 +163,17 @@ async fn main() -> std::io::Result<()> {
                     .route(web::get().to(handlers::read_file))
                     .route(web::put().to(handlers::write_file))
                     .route(web::delete().to(handlers::delete_file)),
+            )
+            // Preview proxy (§ II.2). Creator-authed; signed v1.1
+            // forward to the agent at /proxy/{port}/{path*}. Body cap
+            // matches the agent (100 MiB) plus 1 MiB serialization slack.
+            .service(
+                web::resource("/sandboxes/{id}/preview/{port}/{path:.*}")
+                    .state(
+                        web::types::PayloadConfig::default()
+                            .limit(preview::DEFAULT_MAX_BODY_BYTES + 1024 * 1024),
+                    )
+                    .route(web::route().to(preview::preview_proxy)),
             )
     })
     .bind(&bind)?
