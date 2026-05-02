@@ -336,25 +336,31 @@ function FileViewer({
   loading: boolean;
   error: unknown;
 }) {
+  // `min-w-0` is the key to making this column shrinkable inside the
+  // grid — without it, long source lines force the column to expand
+  // past its `1fr` share and clip the metadata rail. The inner content
+  // wrapper also needs `min-w-0` so the shiki <pre>'s overflow-x can
+  // actually take effect (shiki sets `white-space: pre`, so without a
+  // width constraint above it, the pre never scrolls).
   return (
-    <div className="bg-white overflow-auto flex flex-col min-h-0">
-      <div className="border-b border-rule px-5 py-2.5 flex items-center justify-between sticky top-0 bg-white z-10">
-        <span className="font-mono text-[12px] text-ink-soft">
+    <div className="bg-white flex flex-col min-h-0 min-w-0 overflow-hidden">
+      <div className="border-b border-rule px-5 py-2.5 flex items-center justify-between bg-white">
+        <span className="font-mono text-[12px] text-ink-soft truncate">
           {path ?? "—"}
         </span>
-        <span className="font-serif italic text-[11.5px] text-pencil">
+        <span className="font-serif italic text-[11.5px] text-pencil shrink-0 ml-3">
           read-only
         </span>
       </div>
       <div
-        className="flex-1 px-5 py-4 font-mono text-[12.5px] leading-[1.65]"
+        className="flex-1 min-h-0 min-w-0 overflow-auto px-5 py-4 font-mono text-[12.5px] leading-[1.65]"
         data-testid="files-viewer"
       >
         {!path ? (
           <div className="font-serif italic text-pencil text-[14px]">
             Pick a file to read it.
           </div>
-        ) : loading ? (
+        ) : loading && !content ? (
           <div className="font-serif italic text-pencil text-[14px]">
             loading…
           </div>
@@ -366,7 +372,7 @@ function FileViewer({
           <CodeView code={content ?? ""} path={path} />
         )}
       </div>
-      <div className="border-t border-rule px-5 py-2 font-serif italic text-[12px] text-pencil">
+      <div className="border-t border-rule px-5 py-2 font-serif italic text-[12px] text-pencil shrink-0">
         Builder is the only writer. Tell the chat what to change.
       </div>
     </div>
