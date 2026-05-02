@@ -86,7 +86,20 @@ export async function unarchiveApp(input: { appId: string }): Promise<{ archived
 }
 unarchiveApp.config = { id: "apps.unarchiveApp" };
 
-export async function createApp(name: string, plan_id: string = "free"): Promise<AppRecord> {
+/**
+ * Single-input wire — the vite-plugin RPC stub forwards `args[0]` only,
+ * so taking `(name, plan_id)` as positional arguments would silently
+ * lose `plan_id` (and the dev-bootstrap actually passes `ctx` as the
+ * second arg, which produced an "expected a string" deserialize error
+ * upstream when `JSON.stringify({..., plan_id: ctx})` ran). Wrap into
+ * one object per spec §RPC.
+ */
+export async function createApp(input: {
+  name: string;
+  plan_id?: string;
+}): Promise<AppRecord> {
+  const name = input?.name;
+  const plan_id = input?.plan_id ?? "free";
   return proxy("/api/apps", {
     method: "POST",
     body: JSON.stringify({ name, plan_id }),

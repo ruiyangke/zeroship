@@ -29,11 +29,9 @@ export function isDevAutoAuth(): boolean {
 // wire). Callers `import { createApp } from "../api"` and call them
 // like normal async functions; the wire is `/_zs/v1/apps.<name>`.
 //
-// Note on positional args: the wire forwards `args[0]` only. For
-// `createApp(name, plan_id?)` the second arg defaults server-side, so
-// `createApp(name)` works. Procedures that need multiple inputs would
-// need an object input shape, but for Plan 03.1's spine we only call
-// listApps / getApp / createApp.
+// Note on positional args: the wire forwards `args[0]` only. Every
+// proc that needs more than one input takes a single object input
+// (e.g. `createApp({ name, plan_id })`).
 export {
   listApps,
   getApp,

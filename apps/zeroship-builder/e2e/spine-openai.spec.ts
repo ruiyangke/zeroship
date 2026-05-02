@@ -70,8 +70,12 @@ test.describe("Plan 03.1 spine — home → wizard → workspace", () => {
     await expect(page.getByTestId("workspace-error-home")).toBeVisible();
   });
 
-  test("idea → survey → brief → Begin → workspace → seeded user msg → assistant reply", async ({ page }) => {
+  test("idea → survey → brief → Begin → workspace → seeded user msg → assistant reply", async ({ page }, testInfo) => {
     test.skip(!HAS_KEY, "OPENAI_API_KEY not set — skipping real-LLM spine test");
+    // The full spine drives ~5 LLM round-trips (decide × N surveys, finalize,
+    // createApp, Builder first turn) — each is a real network round-trip.
+    // Default 30s test budget is far too tight; allow up to 6 × STEP_TIMEOUT.
+    testInfo.setTimeout(STEP_TIMEOUT * 6);
     const controlUrl = process.env.CONTROL_URL ?? "http://localhost:9090";
     const sandboxUrl = process.env.SANDBOX_URL ?? "http://localhost:9091";
     const [controlUp, sandboxUp] = await Promise.all([
@@ -100,10 +104,27 @@ test.describe("Plan 03.1 spine — home → wizard → workspace", () => {
 
     // 3. Loop — answer surveys until the brief shows up. Cap at the
     // wizard's own max (5 surveys) plus one for slack.
+    let activeSurveyIndex = 0;
     for (let i = 0; i < 6; i++) {
       if (await brief.isVisible()) break;
-      const current = page.getByTestId("survey-card").last();
-      await current.waitFor({ state: "visible", timeout: STEP_TIMEOUT });
+      // Race the next live (non-collapsed) survey vs. the brief. The
+      // wizard collapses the previous survey before streaming the next
+      // chunk, so `survey-card` (live) and `survey-card-collapsed`
+      // are mutually exclusive on the same row. We wait for either:
+      //  - a NEW live survey-card past the index we already answered, or
+      //  - the brief.
+      const allSurveysHandle = page.getByTestId("survey-card");
+      const anySurvey = allSurveysHandle.nth(activeSurveyIndex);
+      const winner = await Promise.race([
+        anySurvey
+          .waitFor({ state: "visible", timeout: STEP_TIMEOUT })
+          .then(() => "survey" as const),
+        brief
+          .waitFor({ state: "visible", timeout: STEP_TIMEOUT })
+          .then(() => "brief" as const),
+      ]);
+      if (winner === "brief") break;
+      const current = anySurvey;
       const questions = await current.locator(".space-y-3 > div").all();
       for (const q of questions) {
         const firstOption = q.locator("button").first();
@@ -112,13 +133,15 @@ test.describe("Plan 03.1 spine — home → wizard → workspace", () => {
         }
       }
       await current.getByRole("button", { name: /send/i }).click();
-      // Wait for either a new survey or the brief.
+      activeSurveyIndex += 1;
+      // Wait for either a NEW live survey or the brief.
       await Promise.race([
-        page.getByTestId("survey-card-collapsed").last().waitFor({ state: "visible", timeout: STEP_TIMEOUT }),
+        page
+          .getByTestId("survey-card")
+          .nth(activeSurveyIndex)
+          .waitFor({ state: "visible", timeout: STEP_TIMEOUT }),
         brief.waitFor({ state: "visible", timeout: STEP_TIMEOUT }),
       ]);
-      // The next iteration will detect brief.isVisible() and exit; or
-      // wait for a new survey-card on the next loop.
       await page.waitForTimeout(500); // small breath for the data-survey/data-brief chunk to land
     }
 

@@ -210,6 +210,19 @@ export async function buildTranslatedStream(
       const dataPartMw = await dataPartMiddleware(writer, {
         isResume: mode === "resume",
       });
+      // Override each SubAgent's `model: "openai:gpt-5.4-mini"` (string)
+      // with the live ChatOpenAI instance. deepagents resolves a string
+      // model via `langchain/chat_models/universal#initChatModel`, which
+      // does `await import("@langchain/openai")` with a runtime-variable
+      // package name. Vite can't statically detect that import, so the
+      // module gets externalized and the V8 dev-bootstrap throws
+      // "Cannot import external module" the first time a subagent is
+      // dispatched. Passing an already-constructed BaseChatModel instance
+      // skips initChatModel entirely.
+      const subagents = [critic, reviewer, pm, sre].map((sa) => ({
+        ...sa,
+        model,
+      }));
       const agent = createDeepAgent({
         model,
         tools: [askSurveyTool],
@@ -217,7 +230,7 @@ export async function buildTranslatedStream(
         systemPrompt: BUILDER_SYSTEM,
         checkpointer,
         middleware: [dataPartMw] as const,
-        subagents: [critic, reviewer, pm, sre],
+        subagents,
       });
 
       const textId = crypto.randomUUID();

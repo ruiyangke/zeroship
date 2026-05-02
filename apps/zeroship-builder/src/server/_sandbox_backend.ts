@@ -113,7 +113,7 @@ function sanitizeId(raw: string, fallback: string): string {
 // currently thread it through. Placeholder until Phase B.3 routes the
 // real uid here. Project_id derives from threadId so a user with one
 // chat per project still gets one sandbox per chat.
-const BUILDER_USER_ID = "builder";
+export const BUILDER_USER_ID = "builder";
 
 async function controllerCreateSandbox(
   userId: string,

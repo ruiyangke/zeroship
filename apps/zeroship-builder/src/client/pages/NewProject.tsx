@@ -59,7 +59,7 @@ export function NewProject() {
 
   const create = useMutation({
     mutationFn: async () => {
-      const app = await createApp(slug, "free");
+      const app = await createApp({ name: slug, plan_id: "free" });
       try { sessionStorage.setItem(PENDING_PROMPT_KEY, prompt); } catch {}
       return app;
     },

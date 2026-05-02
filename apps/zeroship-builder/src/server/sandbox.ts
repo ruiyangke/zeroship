@@ -20,7 +20,14 @@
 //     into — readers see writers' bytes immediately.
 
 import { SANDBOX_URL, SANDBOX_TOKEN } from "./env";
-import { getOrCreateSandboxFor } from "./_sandbox_backend";
+import { getOrCreateSandboxFor, BUILDER_USER_ID } from "./_sandbox_backend";
+
+// The controller's `/sandboxes/:id/*` routes verify ownership via a
+// `?user_id=<id>` query string and 404 on mismatch. Builder's backend
+// always appends it; canvas-facing reads must too.
+function ownerQ(): string {
+  return `?user_id=${encodeURIComponent(BUILDER_USER_ID)}`;
+}
 
 // ─── shared types / helpers ──────────────────────────────────────
 
@@ -73,7 +80,7 @@ export async function listSandboxFiles(
 ): Promise<FileEntry[]> {
   const { id } = await getOrCreateSandboxFor(input.appId);
   const res = await fetch(
-    `${SANDBOX_URL()}/sandboxes/${id}/file-tree`,
+    `${SANDBOX_URL()}/sandboxes/${id}/file-tree${ownerQ()}`,
     { headers: authHeaders() },
   );
   const data = await jsonOrThrow<{ entries: FileEntry[] }>(res, "list files");
@@ -88,7 +95,7 @@ export async function readSandboxFile(
 ): Promise<string> {
   const { id } = await getOrCreateSandboxFor(input.appId);
   const res = await fetch(
-    `${SANDBOX_URL()}/sandboxes/${id}/files/${encodePath(input.path)}`,
+    `${SANDBOX_URL()}/sandboxes/${id}/files/${encodePath(input.path)}${ownerQ()}`,
     { headers: authHeaders() },
   );
   if (!res.ok) {

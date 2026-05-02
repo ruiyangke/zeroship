@@ -111,11 +111,17 @@ test.describe("Plan 01 — multi-agent fleet (Reviewer / PM / SRE)", () => {
     await page.goto(SHELL_PATH);
     await expect(page.getByTestId("chat-rail")).toBeVisible();
 
+    // Sharpened to force the dispatch — the model otherwise sometimes
+    // self-diagnoses with `ls` / `glob` instead of routing the question.
+    // Explicit "do not run any other tools first" + the literal call
+    // signature kept Builder honest in 5/5 retries during dev.
     const prompt =
       "Users say the dashboard feels slow — pages take ~3 seconds to " +
-      "load. Diagnose the issue and recommend a fix. Route this " +
-      'reliability question through task("sre", …) so the SRE subagent ' +
-      "can produce a finding.";
+      "load. Your FIRST tool call must be " +
+      'task({ subagent_type: "sre", description: "diagnose dashboard slowness, recommend a fix" }). ' +
+      "Do not call ls, glob, write_todos, or any other tool before " +
+      "the SRE subagent has returned. After it returns, you may " +
+      "summarise its finding for the user.";
 
     await page.getByTestId("chat-input").fill(prompt);
     await page.getByTestId("chat-input").press("Control+Enter");

@@ -33,8 +33,12 @@ async function probe(url: string): Promise<boolean> {
 test.describe("Plan 02 Phase B.3 — critic loop wires into the chat stream", () => {
   test("Builder writes a file → task(\"critic\") → CriticRoundCard renders", async ({
     page,
-  }) => {
+  }, testInfo) => {
     test.skip(!HAS_KEY, "OPENAI_API_KEY not set — skipping real-LLM test");
+    // Builder turn + write_file + critic dispatch — three real LLM
+    // round-trips. Default 30s outer budget would expire before the
+    // critic round-trip even starts; raise it to twice STEP_TIMEOUT.
+    testInfo.setTimeout(STEP_TIMEOUT * 2 + 30_000);
     const sandboxUrl = process.env.SANDBOX_URL ?? "http://localhost:9091";
     const sandboxUp = await probe(`${sandboxUrl}/health`);
     test.skip(

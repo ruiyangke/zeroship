@@ -35,19 +35,30 @@ const FIRST_RUN_KEY = "zeroship_first_run";
 const STUCK_TIMEOUT_MS = 60_000;
 
 /**
- * Derive a deterministic project name from a free-text idea. Take the
- * first three whitespace-separated words and Title-Case them; falls
- * back to "Untitled" when the idea is empty/whitespace. Matches the
- * shape control-plane `name` accepts (server-side validation lives in
- * the control plane, not here — if it rejects, the mutation surfaces
- * the error inline).
+ * Derive a project name from a free-text idea. The control plane
+ * validates `name` as 1-64 chars of alphanumeric / hyphen /
+ * underscore — no spaces, no punctuation — AND enforces uniqueness
+ * (UNIQUE constraint on apps.name). Take the first three words,
+ * lowercase, slugified to a hyphen-joined string, then suffix with a
+ * short random token so two projects from similar ideas don't
+ * collide. Falls back to "untitled" when the idea is empty.
  */
 function deriveProjectName(idea: string): string {
   const words = idea.trim().split(/\s+/).filter(Boolean).slice(0, 3);
-  if (words.length === 0) return "Untitled";
-  return words
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-    .join(" ");
+  const slugBase = words
+    .map((w) => w.toLowerCase().replace(/[^a-z0-9]+/g, ""))
+    .filter(Boolean)
+    .join("-");
+  const base = slugBase.length > 0 ? slugBase : "untitled";
+  // 6-char base36 suffix (~36^6 ≈ 2B values) — collision-resistant
+  // for any single user without making names ugly. Crypto.randomUUID
+  // is available everywhere we render (browser + V8 dev runtime).
+  const suffix = (
+    crypto.getRandomValues(new Uint32Array(1))[0] % 36 ** 6
+  )
+    .toString(36)
+    .padStart(6, "0");
+  return `${base}-${suffix}`.slice(0, 64);
 }
 
 // Inline minimal frame instead of PageFrame because the latter pulls
@@ -101,7 +112,7 @@ export function WizardWorkspace() {
   // on failure the error band at the bottom of the page renders it.
   const createMutation = useMutation({
     mutationFn: async (vars: { name: string; brief: Brief }) => {
-      const app = await createApp(vars.name);
+      const app = await createApp({ name: vars.name });
       return { app, brief: vars.brief };
     },
     onSuccess: ({ app, brief }) => {
