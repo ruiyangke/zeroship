@@ -34,14 +34,11 @@ export interface HealthCanvasProps {
 export function HealthCanvas({ appId, app }: HealthCanvasProps) {
   return (
     <div data-testid="health-canvas" className="h-full overflow-auto bg-paper">
-      <div className="max-w-[860px] mx-auto px-4 sm:px-8 lg:px-12 py-6 sm:py-10">
+      <div className="max-w-[920px] mx-auto px-4 sm:px-8 lg:px-12 py-6 sm:py-8 space-y-8">
         <StatusPulse app={app} />
-        <div className="h-12" />
         <QualityScorecard appId={appId} />
-        <div className="h-12" />
-        <Incidents appId={appId} />
-        <div className="h-12" />
         <Performance appId={appId} />
+        <Incidents appId={appId} />
       </div>
     </div>
   );
@@ -53,56 +50,80 @@ function StatusPulse({ app }: { app?: AppRecord }) {
   const live = !!app?.deploy_hash;
   return (
     <section data-testid="health-status-section">
-      <header className="mb-4">
-        <h2 className="font-serif italic font-medium text-[24px] m-0 mb-1">
-          Status
-        </h2>
-        <p className="font-serif text-[14px] text-ink-soft leading-[1.55]">
-          Is your project up? When did it last ship? Where does it run?
-        </p>
-      </header>
+      <SectionHeader title="Status" subtitle="Is your project up? When did it last ship? Where does it run?" />
       <div
         className={
-          "border px-6 py-5 " +
+          "grid grid-cols-1 sm:grid-cols-3 border " +
           (live ? "border-ivy/40 bg-ivy/5" : "border-rule-2 bg-paper-2/40")
         }
       >
-        <div className="flex items-center gap-3">
-          <span
-            aria-hidden="true"
-            className={
-              "size-3 rounded-full inline-block " +
-              (live ? "bg-ivy pulse-dot" : "bg-pencil")
-            }
-          />
-          <span
-            data-testid="health-status-label"
-            className={
-              "font-serif italic font-medium text-[22px] " +
-              (live ? "text-ivy" : "text-ink-soft")
-            }
-          >
-            {live ? "Live" : "Draft"}
-          </span>
-          <span className="font-sans text-[10px] uppercase tracking-[0.18em] text-ink-soft border border-rule rounded-full px-2 py-0.5 ml-auto">
-            us-east-1
-          </span>
+        {/* 1 · live/draft pulse */}
+        <div className="px-5 py-4 sm:border-r border-rule-2/50">
+          <div className="label-uc mb-2">State</div>
+          <div className="flex items-center gap-2">
+            <span
+              aria-hidden="true"
+              className={
+                "size-2.5 rounded-full inline-block " +
+                (live ? "bg-ivy pulse-dot" : "bg-pencil")
+              }
+            />
+            <span
+              data-testid="health-status-label"
+              className={
+                "font-serif italic font-medium text-[20px] leading-none " +
+                (live ? "text-ivy" : "text-ink-soft")
+              }
+            >
+              {live ? "Live" : "Draft"}
+            </span>
+          </div>
         </div>
-        <div className="mt-3 font-serif text-[14px] text-ink-soft">
-          {live ? (
-            <>
-              Last deploy{" "}
-              <span className="text-ink">
-                {app ? relativeTime(app.updated_at) : "—"}
-              </span>
-              .
-            </>
-          ) : (
-            <em>Nothing has shipped yet — once you deploy, this turns green.</em>
-          )}
+        {/* 2 · last deploy */}
+        <div className="px-5 py-4 sm:border-r border-rule-2/50 border-t sm:border-t-0">
+          <div className="label-uc mb-2">Last deploy</div>
+          <div className="font-serif italic font-medium text-[18px] text-ink leading-none">
+            {live && app ? relativeTime(app.updated_at) : "—"}
+          </div>
+        </div>
+        {/* 3 · region */}
+        <div className="px-5 py-4 border-t sm:border-t-0">
+          <div className="label-uc mb-2">Region</div>
+          <div className="font-mono text-[13px] text-ink leading-none">us-east-1</div>
         </div>
       </div>
+      {!live && (
+        <p className="mt-2 font-serif italic text-[12.5px] text-pencil">
+          Nothing has shipped yet — once you deploy, this turns green.
+        </p>
+      )}
     </section>
+  );
+}
+
+function SectionHeader({
+  title,
+  subtitle,
+  right,
+}: {
+  title: string;
+  subtitle?: string;
+  right?: React.ReactNode;
+}) {
+  return (
+    <header className="flex items-baseline justify-between gap-4 mb-3">
+      <div>
+        <h2 className="font-serif italic font-medium text-[22px] m-0 leading-tight">
+          {title}
+        </h2>
+        {subtitle && (
+          <p className="font-serif text-[13px] text-ink-soft leading-[1.5] mt-0.5">
+            {subtitle}
+          </p>
+        )}
+      </div>
+      {right && <div className="shrink-0">{right}</div>}
+    </header>
   );
 }
 
@@ -117,43 +138,44 @@ function QualityScorecard({ appId }: { appId: string }) {
 
   return (
     <section data-testid="health-quality-section">
-      <header className="mb-4">
-        <h2 className="font-serif italic font-medium text-[24px] m-0 mb-1">
-          Quality
-        </h2>
-        <p className="font-serif text-[14px] text-ink-soft leading-[1.55]">
-          Seven dimensions the Critic grades on every build. Updated
-          live as Builder works — refresh after a chat turn to see the
-          latest scorecard.
-        </p>
-      </header>
+      <SectionHeader
+        title="Quality"
+        subtitle="Seven dimensions the Critic grades on every build."
+        right={
+          data && (
+            <span
+              data-testid="health-quality-last-run"
+              className="font-serif italic text-[11.5px] text-pencil"
+            >
+              {data.last_run_at
+                ? `Graded ${relativeTime(data.last_run_at)}`
+                : "Not graded yet"}
+            </span>
+          )
+        }
+      />
       {isLoading && (
         <div className="font-serif italic text-pencil py-2">loading…</div>
       )}
       {data && (
-        <div className="grid gap-3" data-testid="health-quality-grid">
+        <div data-testid="health-quality-grid">
+          {/* Overall — full-width banner card with stronger weight */}
           <div
-            className="grid items-center gap-4 px-4 py-3 border border-ink bg-paper-2"
-            style={{ gridTemplateColumns: "120px 1fr" }}
+            className="flex items-center gap-4 px-5 py-3 border border-ink bg-paper-2 mb-2"
           >
-            <div className="label-uc">Overall</div>
-            <div className="flex items-baseline gap-3">
-              <GradeBadge grade={data.overall} />
-              <span className="font-serif italic text-[13.5px] text-ink-soft">
-                Composite of the seven dimensions below.
-              </span>
+            <GradeBadge grade={data.overall} />
+            <div className="min-w-0">
+              <div className="label-uc">Overall</div>
+              <div className="font-serif italic text-[13px] text-ink-soft mt-0.5">
+                Composite of the seven dimensions.
+              </div>
             </div>
           </div>
-          {data.dimensions.map((d) => (
-            <DimensionRow key={d.key} dim={d} />
-          ))}
-          <div
-            data-testid="health-quality-last-run"
-            className="font-serif italic text-[12px] text-pencil text-right pt-1"
-          >
-            {data.last_run_at
-              ? `Last graded ${relativeTime(data.last_run_at)}.`
-              : "Not graded yet — a Critic round will set this."}
+          {/* Dimensions — 2-column dense grid (1-col on phones) */}
+          <div className="grid gap-2 grid-cols-1 sm:grid-cols-2">
+            {data.dimensions.map((d) => (
+              <DimensionRow key={d.key} dim={d} />
+            ))}
           </div>
         </div>
       )}
@@ -165,17 +187,16 @@ function DimensionRow({ dim }: { dim: QualityDimension }) {
   return (
     <div
       data-testid={`health-quality-row:${dim.key}`}
-      className="grid items-center gap-4 px-4 py-3 border border-rule-2 bg-paper"
-      style={{ gridTemplateColumns: "120px 1fr" }}
+      className="flex items-center gap-3 px-3 py-2.5 border border-rule-2 bg-paper min-w-0"
     >
-      <div className="font-serif italic font-medium text-[15px] text-ink">
-        {dim.label}
-      </div>
-      <div className="flex items-center gap-3">
-        <GradeBadge grade={dim.grade} />
-        <span className="font-serif text-[13.5px] text-ink-soft truncate">
+      <GradeBadge grade={dim.grade} />
+      <div className="min-w-0 flex-1">
+        <div className="font-serif italic font-medium text-[14px] text-ink leading-tight">
+          {dim.label}
+        </div>
+        <div className="font-serif text-[12.5px] text-ink-soft leading-[1.4] truncate">
           {dim.rationale}
-        </span>
+        </div>
       </div>
     </div>
   );
@@ -187,7 +208,7 @@ function GradeBadge({ grade }: { grade: QualityGrade }) {
     <span
       data-testid="health-quality-grade"
       className={
-        "inline-flex items-center justify-center font-serif italic font-medium text-[18px] w-10 h-8 border " +
+        "inline-flex items-center justify-center font-serif italic font-medium text-[16px] w-9 h-8 border shrink-0 " +
         tone
       }
     >
@@ -216,28 +237,23 @@ function Incidents({ appId }: { appId: string }) {
   });
   return (
     <section data-testid="health-incidents-section">
-      <header className="flex items-baseline justify-between mb-4">
-        <div>
-          <h2 className="font-serif italic font-medium text-[24px] m-0 mb-1">
-            Incidents
-          </h2>
-          <p className="font-serif text-[14px] text-ink-soft leading-[1.55]">
-            When something breaks, the SRE agent files a record here with
-            a timeline, root cause, and fix.
-          </p>
-        </div>
-        <GhostButton
-          onClick={() => scan.mutate()}
-          disabled={scan.isPending}
-          data-testid="health-scan-issues"
-        >
-          {scan.isPending ? "scanning…" : findings ? "Scan again" : "Scan for issues"}
-        </GhostButton>
-      </header>
+      <SectionHeader
+        title="Incidents"
+        subtitle="When something breaks, the SRE agent files a record here with a timeline, root cause, and fix."
+        right={
+          <GhostButton
+            onClick={() => scan.mutate()}
+            disabled={scan.isPending}
+            data-testid="health-scan-issues"
+          >
+            {scan.isPending ? "scanning…" : findings ? "Scan again" : "Scan for issues"}
+          </GhostButton>
+        }
+      />
       {scan.error && (
         <div
           data-testid="health-scan-error"
-          className="border border-tomato/40 bg-tomato/5 px-4 py-3 mb-3 font-serif italic text-[13.5px] text-tomato"
+          className="border border-tomato/40 bg-tomato/5 px-4 py-2.5 mb-2 font-serif italic text-[13px] text-tomato"
         >
           {(scan.error as Error).message || "Scan failed."}
         </div>
@@ -245,12 +261,12 @@ function Incidents({ appId }: { appId: string }) {
       {findings === null && !scan.isPending && !scan.error && (
         <div
           data-testid="health-incidents-empty"
-          className="border border-rule-2 bg-paper-2/40 py-10 text-center"
+          className="border border-rule-2 bg-paper-2/40 py-5 px-4 text-center"
         >
-          <div className="font-serif italic text-[15px] text-ink-soft">
+          <div className="font-serif italic text-[14px] text-ink-soft">
             All quiet — no incidents on record.
           </div>
-          <div className="mt-1 font-serif italic text-[12px] text-pencil">
+          <div className="mt-0.5 font-serif italic text-[11.5px] text-pencil">
             Backing table tracked as ISS-17.
           </div>
         </div>
@@ -258,15 +274,15 @@ function Incidents({ appId }: { appId: string }) {
       {findings && findings.length === 0 && (
         <div
           data-testid="health-incidents-clear"
-          className="border border-ivy/40 bg-ivy/5 py-8 text-center"
+          className="border border-ivy/40 bg-ivy/5 py-4 px-4 text-center"
         >
-          <div className="font-serif italic text-[15px] text-ivy">
+          <div className="font-serif italic text-[14px] text-ivy">
             All quiet — the SRE agent didn't see anything concerning.
           </div>
         </div>
       )}
       {findings && findings.length > 0 && (
-        <div className="grid gap-3" data-testid="health-incidents-list">
+        <div className="grid gap-2" data-testid="health-incidents-list">
           {findings.map((f, i) => (
             <FindingCard key={i} finding={f} />
           ))}
@@ -409,16 +425,18 @@ function Performance({ appId }: { appId: string }) {
 
   return (
     <section data-testid="health-performance-section">
-      <header className="mb-4">
-        <h2 className="font-serif italic font-medium text-[24px] m-0 mb-1">
-          Performance
-        </h2>
-        <p className="font-serif text-[14px] text-ink-soft leading-[1.55]">
-          Live latency, error rate, and request volume — derived from the
-          log stream. Numbers refresh every 5s.
-        </p>
-      </header>
-      <div className="grid gap-3 grid-cols-1 sm:grid-cols-3">
+      <SectionHeader
+        title="Performance"
+        subtitle="Live latency, error rate, and request volume from the log stream. Refreshes every 5s."
+        right={
+          !snapshot.hasData ? (
+            <span className="font-serif italic text-[11.5px] text-pencil">
+              Connect a deploy
+            </span>
+          ) : undefined
+        }
+      />
+      <div className="grid gap-2 grid-cols-1 sm:grid-cols-3">
         <PerfTile
           label="p95 latency"
           testid="health-perf-latency"
@@ -443,7 +461,7 @@ function Performance({ appId }: { appId: string }) {
           empty={!snapshot.hasData}
         />
       </div>
-      <div className="mt-3 font-serif italic text-[12px] text-pencil">
+      <div className="mt-2 font-serif italic text-[11.5px] text-pencil">
         Best-effort signals from log text. Structured metering tracked as ISS-18.
       </div>
     </section>
@@ -467,23 +485,23 @@ function PerfTile({
     <div
       data-testid={testid}
       className={
-        "border px-4 py-5 " +
+        "border px-4 py-3 flex flex-col gap-1.5 " +
         (empty ? "border-rule-2 bg-paper-2/40" : "border-ink/30 bg-paper")
       }
     >
-      <div className="label-uc mb-2">{label}</div>
-      <div
-        className={
-          "font-serif italic font-medium text-[28px] mb-1 " +
-          (empty ? "text-pencil" : "text-ink")
-        }
-      >
-        {value ?? "—"}
+      <div className="flex items-baseline justify-between gap-2">
+        <div className="label-uc">{label}</div>
+        <div
+          className={
+            "font-serif italic font-medium text-[22px] leading-none " +
+            (empty ? "text-pencil" : "text-ink")
+          }
+        >
+          {value ?? "—"}
+        </div>
       </div>
       {empty ? (
-        <div className="font-serif italic text-[12px] text-pencil leading-[1.4]">
-          Connect a deploy to see live performance.
-        </div>
+        <div className="h-8" aria-hidden="true" />
       ) : (
         <Sparkline values={series} testid={`${testid}-spark`} />
       )}
