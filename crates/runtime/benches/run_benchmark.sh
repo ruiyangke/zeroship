@@ -74,7 +74,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "=== Building ===" >&2
-(cd "$ROOT_DIR" && cargo build --release --bin v8-server-compio --bin echo-server 2>&1 | tail -1) >&2
+(cd "$ROOT_DIR" && cargo build --release --bin zeroship-bench-server --bin echo-server 2>&1 | tail -1) >&2
 
 echo "=== Starting servers (NUMA node 0) ===" >&2
 for port in $PORT_COMPIO_1 $PORT_COMPIO_N $PORT_NODE $PORT_NODE_CLUSTER $PORT_ECHO; do
@@ -85,10 +85,10 @@ sleep 1
 $NUMA_SERVER "$ROOT_DIR/target/release/echo-server" $PORT_ECHO &
 PIDS+=($!)
 
-$NUMA_SERVER "$ROOT_DIR/target/release/v8-server-compio" --port=$PORT_COMPIO_1 --workers=1 &
+$NUMA_SERVER "$ROOT_DIR/target/release/zeroship-bench-server" --port=$PORT_COMPIO_1 --workers=1 &
 PIDS+=($!)
 
-$NUMA_SERVER "$ROOT_DIR/target/release/v8-server-compio" --port=$PORT_COMPIO_N --workers=$SERVER_WORKERS &
+$NUMA_SERVER "$ROOT_DIR/target/release/zeroship-bench-server" --port=$PORT_COMPIO_N --workers=$SERVER_WORKERS &
 PIDS+=($!)
 
 $NUMA_SERVER node "$SCRIPT_DIR/node_server.js" $PORT_NODE &

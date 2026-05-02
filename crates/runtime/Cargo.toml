@@ -56,7 +56,7 @@ sha1 = { workspace = true }
 zeroship-runtime-macros = { workspace = true }
 
 [[bin]]
-name = "v8-server-compio"
+name = "zeroship-bench-server"
 path = "src/server.rs"
 
 [[bin]]

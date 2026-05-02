@@ -8,7 +8,7 @@
 //   zerobench run crates/runtime/benches/zeroship-bench.rhai -c 300
 //
 // The server must be running:
-//   target/release/v8-server-compio --port=5101 --workers=16
+//   target/release/zeroship-bench-server --port=5101 --workers=16
 //   target/release/echo-server --port=8888
 //
 // Each RPC scenario sends a JSON-RPC request to the /rpc endpoint. The
