@@ -36,6 +36,7 @@ pub use legacy_bridge::{
 
 // Native classes & primitives — installed unconditionally per D-19.
 pub mod algorithms;
+pub mod async_iter;
 pub mod budget;
 pub mod byob_request;
 pub mod byte_tee;
@@ -82,4 +83,5 @@ pub fn install_native_streams(
     writable_writer::install(scope, global);
     transform::install_native_transform_stream(scope, global);
     transform_controller::install(scope, global);
+    async_iter::install(scope, global);
 }

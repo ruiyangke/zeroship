@@ -251,8 +251,19 @@ fn stream_class_template<'s>(
     install_method(scope, proto, "pipeTo", pipe_to_method_callback);
     install_method(scope, proto, "pipeThrough", pipe_through_method_callback);
     install_method(scope, proto, "tee", tee_method_callback);
-    // values / async-iteration is still deferred (next dispatch).
-    install_method(scope, proto, "values", stub_values_callback);
+
+    // values — async-iteration entry point (§3.2.5.9).
+    install_method(scope, proto, "values", values_method_callback);
+    // [Symbol.asyncIterator] — per WebIDL §3.7.10, aliases `values()`.
+    {
+        let sym = v8::Symbol::get_async_iterator(scope);
+        let tmpl = v8::FunctionTemplate::new(scope, values_method_callback);
+        // Set the function name to "values" to match WebIDL semantics
+        // (the @@asyncIterator method shares the same impl as `values`).
+        let name_v = v8::String::new(scope, "values").unwrap();
+        tmpl.set_class_name(name_v);
+        proto.set(sym.into(), tmpl.into());
+    }
 
     // Symbol.toStringTag → "ReadableStream" per WebIDL §3.7.4.
     let tag_sym = v8::Symbol::get_to_string_tag(scope);
@@ -856,6 +867,60 @@ fn tee_method_callback<'s>(
     }
 }
 
+/// `values(options?)` — spec §3.2.5.9.
+///
+/// 1. Receiver MUST be a ReadableStream.
+/// 2. Parse `options.preventCancel` (default false). Coerced to boolean
+///    per WebIDL `boolean` conversion (`ToBoolean`).
+/// 3. AcquireReadableStreamDefaultReader(this) — throws TypeError if
+///    locked.
+/// 4. Return a fresh `ReadableStreamAsyncIterator` bound to (reader,
+///    preventCancel).
+fn values_method_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s>,
+) {
+    let this = args.this();
+    if !is_readable_stream(scope, this) {
+        let msg = v8::String::new(scope, "ReadableStream.values: receiver is not a ReadableStream")
+            .unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    }
+
+    // Parse options. Per WebIDL: optional dict; missing/undefined/null →
+    // empty dict (preventCancel defaults to false).
+    let options = args.get(0);
+    let prevent_cancel = if options.is_undefined() || options.is_null() {
+        false
+    } else {
+        let Ok(obj) = v8::Local::<v8::Object>::try_from(options) else {
+            let msg = v8::String::new(scope, "ReadableStream.values: options must be an object")
+                .unwrap();
+            let exc = v8::Exception::type_error(scope, msg);
+            scope.throw_exception(exc);
+            return;
+        };
+        let key = v8::String::new(scope, "preventCancel").unwrap();
+        let v = obj
+            .get(scope, key.into())
+            .unwrap_or_else(|| v8::undefined(scope).into());
+        v.boolean_value(scope)
+    };
+
+    match crate::streams::async_iter::create_async_iterator(scope, this, prevent_cancel) {
+        Ok(iter) => rv.set(iter.into()),
+        Err(msg) => {
+            let v8_msg = v8::String::new(scope, &msg).unwrap();
+            let exc = v8::Exception::type_error(scope, v8_msg);
+            scope.throw_exception(exc);
+        }
+    }
+}
+
+#[allow(dead_code)]
 fn stub_values_callback(
     scope: &mut v8::PinScope,
     _args: v8::FunctionCallbackArguments,
@@ -1214,6 +1279,157 @@ pub fn install_native_streams(
     let key = v8::String::new(scope, "ReadableStream").unwrap();
     global.set(scope, key.into(), stream_class_fn.into());
 
+    // ReadableStream.from(asyncIterable) — static method, spec §3.2.1.
+    install_readable_stream_from(scope, stream_class_fn);
+
     crate::streams::readable_default_controller::install(scope, global);
     crate::streams::readable_default_reader::install(scope, global);
+}
+
+// ---------------------------------------------------------------------------
+// ReadableStream.from(asyncIterable) — spec §3.2.1.2
+// ---------------------------------------------------------------------------
+//
+// Per spec, `from` calls `GetIterator(value, async)` which:
+//   1. Tries `value[@@asyncIterator]` first.
+//   2. Falls back to `value[@@iterator]` (sync), wrapping it via the
+//      "create async-from-sync iterator" helper.
+//   3. If neither is present, throws TypeError.
+//
+// The resulting ReadableStream has a `pull` algorithm that calls
+// `iter.next()` and either enqueues the chunk or closes the stream
+// based on `done`. `cancel` calls `iter.return()`.
+//
+// Implementation: JS-compiled at install time. Cleaner than synthesizing
+// JS functions from Rust callbacks because:
+//   - the underlying-source path already accepts plain JS objects with
+//     `pull`/`cancel` properties;
+//   - the iterator protocol is JS-native (no Rust crossing per chunk);
+//   - errors propagate through the Promise machinery automatically.
+
+fn install_readable_stream_from(
+    scope: &mut v8::PinScope,
+    stream_class_fn: v8::Local<v8::Function>,
+) {
+    // Source: per spec / reference impl. Uses `new ReadableStream(...)`
+    // with a `pull` that bridges to iterator.next(). We use Function
+    // constructor (not Script) so the resulting function has clean lexical
+    // scope and we can pass `ReadableStream` explicitly.
+    const FROM_BODY: &str = r#"
+        return function from(asyncIterable) {
+            // Per spec: if asyncIterable is a ReadableStream, return it
+            // unchanged would be incorrect — instead `from` always wraps
+            // through GetIteratorFromMethod. We obtain the iterator first.
+            if (asyncIterable === null || asyncIterable === undefined) {
+                throw new TypeError("ReadableStream.from: argument is not iterable");
+            }
+            // Get @@asyncIterator method, falling back to @@iterator.
+            let isAsync = true;
+            let method = asyncIterable[Symbol.asyncIterator];
+            if (method === undefined || method === null) {
+                method = asyncIterable[Symbol.iterator];
+                isAsync = false;
+            }
+            if (typeof method !== "function") {
+                throw new TypeError("ReadableStream.from: argument is not iterable");
+            }
+            const iter = method.call(asyncIterable);
+            if (iter === null || iter === undefined || typeof iter !== "object") {
+                throw new TypeError("ReadableStream.from: iterator is not an object");
+            }
+            // The iterator's `next` and `return` may be undefined (sync
+            // iterables don't require return).
+            const nextFn = iter.next;
+            if (typeof nextFn !== "function") {
+                throw new TypeError("ReadableStream.from: iterator has no next method");
+            }
+            return new ReadableStream({
+                async pull(controller) {
+                    let result;
+                    try {
+                        result = await nextFn.call(iter);
+                    } catch (e) {
+                        controller.error(e);
+                        return;
+                    }
+                    if (result === null || typeof result !== "object") {
+                        controller.error(new TypeError("Iterator result is not an object"));
+                        return;
+                    }
+                    if (result.done) {
+                        controller.close();
+                    } else {
+                        // Per spec: for async iterables, value is awaited (already
+                        // by `await` above). For sync iterables wrapped as async,
+                        // value may itself be a Promise; await it again.
+                        const value = isAsync ? result.value : await result.value;
+                        controller.enqueue(value);
+                    }
+                },
+                async cancel(reason) {
+                    const returnFn = iter.return;
+                    if (typeof returnFn !== "function") {
+                        return;
+                    }
+                    let result;
+                    try {
+                        result = await returnFn.call(iter, reason);
+                    } catch (_e) {
+                        // Per spec: iterator.return() rejection bubbles up.
+                        throw _e;
+                    }
+                    if (result !== null && typeof result !== "object") {
+                        throw new TypeError("Iterator return result is not an object");
+                    }
+                },
+            }, { highWaterMark: 0 });
+        };
+    "#;
+
+    // Use Function constructor: `new Function("ReadableStream", FROM_BODY)`.
+    // Then call it with the actual class to capture it in closure.
+    let body = v8::String::new(scope, FROM_BODY).unwrap();
+    let arg_name = v8::String::new(scope, "ReadableStream").unwrap();
+    // Build `new Function("ReadableStream", FROM_BODY)`. Use Function
+    // constructor exposed via v8::Function::new — actually let's just use
+    // a Script wrapped in IIFE to avoid Function-constructor security
+    // concerns (CSP).
+    let wrapper_src = v8::String::new(
+        scope,
+        r#"((ReadableStream) => {
+            // Body of `from` wrapped in a closure with ReadableStream captured.
+            // The returned value is the from function itself.
+        })"#,
+    );
+    let _ = (body, arg_name, wrapper_src);
+
+    // Simpler: Wrap FROM_BODY in `(function(ReadableStream){<body>})` and
+    // call it with the class. Compile, run, returned value is the wrapper
+    // function; calling it with the ReadableStream class returns `from`.
+    let wrapper = format!("(function(ReadableStream) {{ {FROM_BODY} }})");
+    let wrapper_v8 = v8::String::new(scope, &wrapper).unwrap();
+    let script = match v8::Script::compile(scope, wrapper_v8, None) {
+        Some(s) => s,
+        None => return,
+    };
+    let wrapper_val = match script.run(scope) {
+        Some(v) => v,
+        None => return,
+    };
+    let Ok(wrapper_fn) = v8::Local::<v8::Function>::try_from(wrapper_val) else {
+        return;
+    };
+    let undef: v8::Local<v8::Value> = v8::undefined(scope).into();
+    let stream_class_v: v8::Local<v8::Value> = stream_class_fn.into();
+    let from_val = match wrapper_fn.call(scope, undef, &[stream_class_v]) {
+        Some(v) => v,
+        None => return,
+    };
+    let Ok(from_fn) = v8::Local::<v8::Function>::try_from(from_val) else {
+        return;
+    };
+
+    // Set ReadableStream.from to the function.
+    let from_key = v8::String::new(scope, "from").unwrap();
+    stream_class_fn.set(scope, from_key.into(), from_fn.into());
 }

@@ -2477,3 +2477,295 @@ fn byte_tee_cancel_one_keeps_other() {
     );
     assert_eq!(r, "7,8,9", "cancelled branch1 should not stop branch2");
 }
+
+// ===========================================================================
+// Async iteration (§3.4.6 + §3.9.1) — `for await ... of`, .values(), .from()
+// ===========================================================================
+
+#[test]
+fn async_iter_values_returns_iterator_with_next_return() {
+    // Spec §3.4.6: ReadableStream has `async iterable<any>` which auto-defines
+    // `values(options?)` and `[Symbol.asyncIterator]`. The iterator object's
+    // prototype has `next` and `return` (no `throw`). Methods are enumerable,
+    // configurable, writable. next.length === 0; return.length === 1.
+    let r = run_with_streams(
+        r#"
+        const s = new ReadableStream();
+        const it = s.values();
+        const proto = Object.getPrototypeOf(it);
+        const props = Object.getOwnPropertyNames(proto).sort();
+        const nextDesc = Object.getOwnPropertyDescriptor(proto, "next");
+        const retDesc  = Object.getOwnPropertyDescriptor(proto, "return");
+        const aip = Object.getPrototypeOf(Object.getPrototypeOf(async function*(){}).prototype);
+        const inheritsAip = Object.getPrototypeOf(proto) === aip;
+        const tag = it[Symbol.toStringTag];
+        ({
+          props: props.join(","),
+          nextLen: it.next.length,
+          retLen: it.return.length,
+          throwUndef: typeof it.throw === "undefined",
+          nextEnum: nextDesc.enumerable, nextConf: nextDesc.configurable, nextWrite: nextDesc.writable,
+          retEnum: retDesc.enumerable, retConf: retDesc.configurable, retWrite: retDesc.writable,
+          inheritsAip,
+          tag,
+        });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let g = |k: &str| -> String {
+                let key = v8::String::new(scope, k).unwrap();
+                obj.get(scope, key.into()).unwrap().to_rust_string_lossy(scope)
+            };
+            (
+                g("props"),
+                g("nextLen"),
+                g("retLen"),
+                g("throwUndef"),
+                g("nextEnum"),
+                g("nextConf"),
+                g("nextWrite"),
+                g("retEnum"),
+                g("retConf"),
+                g("retWrite"),
+                g("inheritsAip"),
+                g("tag"),
+            )
+        },
+    );
+    assert_eq!(r.0, "next,return", "should expose next + return");
+    assert_eq!(r.1, "0", "next.length === 0");
+    assert_eq!(r.2, "1", "return.length === 1");
+    assert_eq!(r.3, "true", "throw should not exist");
+    assert_eq!((r.4.as_str(), r.5.as_str(), r.6.as_str()), ("true", "true", "true"));
+    assert_eq!((r.7.as_str(), r.8.as_str(), r.9.as_str()), ("true", "true", "true"));
+    assert_eq!(r.10, "true", "iterator inherits AsyncIteratorPrototype");
+    assert_eq!(r.11, "ReadableStream Async Iterator", "@@toStringTag");
+}
+
+#[test]
+fn async_iter_for_await_of_collects_chunks() {
+    let r = run_with_streams(
+        r#"
+        let result = "pending";
+        const s = new ReadableStream({
+          start(c) {
+            c.enqueue(1); c.enqueue(2); c.enqueue(3); c.close();
+          }
+        });
+        async function run() {
+          const out = [];
+          for await (const ch of s) out.push(ch);
+          return out.join(",");
+        }
+        run().then(v => result = v);
+        ({ get out() { return result; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let key = v8::String::new(scope, "out").unwrap();
+            obj.get(scope, key.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "1,2,3");
+}
+
+#[test]
+fn async_iter_next_returns_iter_results() {
+    let r = run_with_streams(
+        r#"
+        let result = "pending";
+        const s = new ReadableStream({
+          start(c) { c.enqueue("a"); c.close(); }
+        });
+        const it = s.values();
+        async function run() {
+          const r1 = await it.next();   // {value: "a", done: false}
+          const r2 = await it.next();   // {value: undefined, done: true}
+          return [r1.value, r1.done, String(r2.value), r2.done].join("|");
+        }
+        run().then(v => result = v);
+        ({ get out() { return result; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let key = v8::String::new(scope, "out").unwrap();
+            obj.get(scope, key.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "a|false|undefined|true");
+}
+
+#[test]
+fn async_iter_break_cancels_source_by_default() {
+    // for-await-of break invokes iter.return() which by default cancels
+    // the underlying source (preventCancel === false).
+    let r = run_with_streams(
+        r#"
+        let result = "pending", cancelReason = "no-cancel";
+        const s = new ReadableStream({
+          start(c) { c.enqueue(1); c.enqueue(2); c.enqueue(3); },
+          cancel(r) { cancelReason = String(r); }
+        });
+        async function run() {
+          for await (const ch of s) { if (ch === 1) break; }
+          return cancelReason;
+        }
+        run().then(v => result = v);
+        ({ get out() { return result; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let key = v8::String::new(scope, "out").unwrap();
+            obj.get(scope, key.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "undefined", "break passes undefined to return → cancel(undefined)");
+}
+
+#[test]
+fn async_iter_prevent_cancel_does_not_cancel() {
+    let r = run_with_streams(
+        r#"
+        let result = "pending", cancelled = false;
+        const s = new ReadableStream({
+          start(c) { c.enqueue(1); c.enqueue(2); },
+          cancel() { cancelled = true; }
+        });
+        async function run() {
+          const it = s.values({ preventCancel: true });
+          const r1 = await it.next();   // {value: 1, done: false}
+          await it.return("bye");       // releases reader, does NOT cancel
+          return cancelled ? "cancel-fired" : ("ok:" + r1.value);
+        }
+        run().then(v => result = v);
+        ({ get out() { return result; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let key = v8::String::new(scope, "out").unwrap();
+            obj.get(scope, key.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "ok:1");
+}
+
+#[test]
+fn async_iter_return_resolves_with_value_done_true() {
+    // iter.return(arg) resolves with {value: arg, done: true}.
+    let r = run_with_streams(
+        r#"
+        let result = "pending";
+        const s = new ReadableStream({
+          start(c) { c.enqueue(1); }
+        });
+        const it = s.values({ preventCancel: true });
+        async function run() {
+          const r1 = await it.return("done");
+          return r1.value + "|" + r1.done;
+        }
+        run().then(v => result = v);
+        ({ get out() { return result; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let key = v8::String::new(scope, "out").unwrap();
+            obj.get(scope, key.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "done|true");
+}
+
+#[test]
+fn async_iter_locks_stream_during_iteration() {
+    // values() acquires a default reader → stream is locked while
+    // iterator is alive.
+    let r = run_with_streams(
+        r#"
+        const s = new ReadableStream();
+        s.values();
+        s.locked;
+        "#,
+        |val, scope| val.boolean_value(scope),
+    );
+    assert!(r, "stream should be locked once values() is called");
+}
+
+#[test]
+fn async_iter_second_iteration_throws_already_locked() {
+    // First values() locks; second values() should throw because the
+    // stream is already locked.
+    let r = run_with_streams(
+        r#"
+        const s = new ReadableStream();
+        s.values();
+        let kind;
+        try { s.values(); }
+        catch (e) { kind = e.constructor.name; }
+        kind || "no-throw";
+        "#,
+        |val, scope| val.to_rust_string_lossy(scope),
+    );
+    assert_eq!(r, "TypeError");
+}
+
+#[test]
+fn readable_stream_from_sync_iterable() {
+    // ReadableStream.from([1,2,3]) wraps a sync iterable.
+    let r = run_with_streams(
+        r#"
+        let result = "pending";
+        const s = ReadableStream.from([1, 2, 3]);
+        async function run() {
+          const out = [];
+          for await (const ch of s) out.push(ch);
+          return out.join(",");
+        }
+        run().then(v => result = v);
+        ({ get out() { return result; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let key = v8::String::new(scope, "out").unwrap();
+            obj.get(scope, key.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "1,2,3");
+}
+
+#[test]
+fn readable_stream_from_async_iterable() {
+    let r = run_with_streams(
+        r#"
+        let result = "pending";
+        async function* gen() { yield "a"; yield "b"; yield "c"; }
+        const s = ReadableStream.from(gen());
+        async function run() {
+          const out = [];
+          for await (const ch of s) out.push(ch);
+          return out.join(",");
+        }
+        run().then(v => result = v);
+        ({ get out() { return result; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let key = v8::String::new(scope, "out").unwrap();
+            obj.get(scope, key.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "a,b,c");
+}
+
+#[test]
+fn readable_stream_from_non_iterable_throws_typeerror() {
+    let r = run_with_streams(
+        r#"
+        let kind;
+        try { ReadableStream.from(42); }
+        catch (e) { kind = e.constructor.name; }
+        kind || "no-throw";
+        "#,
+        |val, scope| val.to_rust_string_lossy(scope),
+    );
+    assert_eq!(r, "TypeError");
+}
