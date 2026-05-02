@@ -32,8 +32,10 @@
 
 use std::collections::BTreeMap;
 
+use zeroship_runtime::blob_native;
 use zeroship_runtime::dom;
 use zeroship_runtime::init_v8;
+use zeroship_runtime::streams;
 
 const TESTHARNESS_SHIM: &str = r#"
 (function () {
@@ -52,23 +54,8 @@ const TESTHARNESS_SHIM: &str = r#"
     }
   };
 
-  // Native Blob / File don't exist in v1. WPT FormData tests that
-  // construct one should classify as `skip`, not fail. The shim
-  // throws a sentinel-tagged Error so test() catches it as skip.
-  if (typeof globalThis.Blob !== "function") {
-    globalThis.Blob = function Blob() {
-      const e = new Error("native Blob not yet implemented (v1 skip)");
-      e.__wpt_skip = true;
-      throw e;
-    };
-  }
-  if (typeof globalThis.File !== "function") {
-    globalThis.File = function File() {
-      const e = new Error("native File not yet implemented (v1 skip)");
-      e.__wpt_skip = true;
-      throw e;
-    };
-  }
+  // Native Blob and File are installed by the harness — no shims
+  // needed here.
 
   function fmt(v) {
     if (typeof v === "string") return JSON.stringify(v);
@@ -181,6 +168,12 @@ const TESTHARNESS_SHIM: &str = r#"
   globalThis.assert_less_than_equal = function (actual, expected, msg) {
     if (!(actual <= expected)) fail(`${msg ? msg + ": " : ""}expected ${actual} <= ${expected}`);
   };
+  globalThis.assert_greater_than = function (actual, expected, msg) {
+    if (!(actual > expected)) fail(`${msg ? msg + ": " : ""}expected ${actual} > ${expected}`);
+  };
+  globalThis.assert_less_than = function (actual, expected, msg) {
+    if (!(actual < expected)) fail(`${msg ? msg + ": " : ""}expected ${actual} < ${expected}`);
+  };
   globalThis.assert_throws_js = function (ctor, fn, msg) {
     try { fn(); }
     catch (e) {
@@ -256,7 +249,13 @@ fn run_wpt(label: &str, source: &str) -> Vec<TestResult> {
     let scope = &mut v8::ContextScope::new(handle_scope, context);
 
     let global = scope.get_current_context().global(scope);
+    // Streams must be installed before Blob (Blob.stream() reads
+    // globalThis.ReadableStream).
+    streams::install_native_streams(scope, global);
+    streams::strategies::install_byte_length_queuing_strategy(scope, global);
+    streams::strategies::install_count_queuing_strategy(scope, global);
     dom::install_globals(scope, global);
+    blob_native::install_globals(scope, global);
 
     let shim = v8::String::new(scope, TESTHARNESS_SHIM).unwrap();
     v8::Script::compile(scope, shim, None)
