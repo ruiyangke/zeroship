@@ -34,9 +34,7 @@
 
 use std::rc::Rc;
 
-use crate::byte_string::read_byte_string;
 use crate::state::OpError;
-use crate::streams::readable::is_readable_stream;
 
 use super::body::{BodyImpl, BodySource};
 
@@ -74,8 +72,16 @@ pub fn extract_body(
     // body doesn't accidentally fall into the string arm.
 
     // ReadableStream branch (step 11.11).
+    //
+    // We check via `instanceof globalThis.ReadableStream` here rather
+    // than the streams crate's `is_readable_stream` helper. The helper
+    // tests for "any V8 wrapper with an External in internal field 0",
+    // which `#[v8_class]`-generated classes (FormData, Headers, etc.)
+    // also match — leading to a body extraction that wrongly treats
+    // FormData as a stream. The instanceof check is the spec-faithful
+    // discriminator.
     if let Ok(obj) = v8::Local::<v8::Object>::try_from(value) {
-        if is_readable_stream(scope, obj) {
+        if is_readable_stream_instance(scope, obj) {
             return extract_from_stream(scope, obj, keepalive);
         }
     }
@@ -145,6 +151,25 @@ pub fn extract_body(
 // ---------------------------------------------------------------------------
 // Path: ReadableStream
 // ---------------------------------------------------------------------------
+
+/// True iff `obj instanceof globalThis.ReadableStream`. Used for body
+/// extraction's stream-arm dispatch — must NOT collide with FormData /
+/// Headers / Request / Response which also use V8 internal field 0
+/// for native state. Falls back to false if the global is missing.
+fn is_readable_stream_instance(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
+    let global = scope.get_current_context().global(scope);
+    let key = match v8::String::new(scope, "ReadableStream") {
+        Some(k) => k,
+        None => return false,
+    };
+    let Some(class_v) = global.get(scope, key.into()) else {
+        return false;
+    };
+    let Ok(class_obj) = v8::Local::<v8::Object>::try_from(class_v) else {
+        return false;
+    };
+    obj.instance_of(scope, class_obj).unwrap_or(false)
+}
 
 fn extract_from_stream(
     scope: &mut v8::PinScope,
