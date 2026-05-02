@@ -5,9 +5,15 @@
 //!
 //! # Module layout (per design §I.2)
 //!
-//! - `legacy_bridge` — the historical `__streams.{create,read,enqueue,close,
-//!   error}` native callbacks used by the fetch response body forwarder
-//!   and the JS-side `streams.js` skeleton. Deleted in D-19 step 2.
+//! - `legacy_bridge` — `__streams.{create,read,enqueue,close,error}`
+//!   native callbacks plus `push_stream_chunk`. The misleading "legacy"
+//!   name predates the native streams classes; it is the live backing
+//!   for the response-body forwarder (`__zsBeginStreamForward` in
+//!   `embed/fetch.js`) and the streamed-fetch chunk pump in
+//!   `crate::fetch` / `crate::runtime`. Kept as a separate module so
+//!   the chunk-id channel remains decoupled from the spec class
+//!   files; planned to be folded into the native pipe path once the
+//!   forwarder is rewritten in Rust.
 //! - `slots` — V8 private symbol helpers (read/write `[[reader]]`,
 //!   `[[controller]]`, `[[storedError]]` etc).
 //! - `queue` — `VecDeque<QueueEntry>` + `[[queueTotalSize]]` invariant
@@ -26,8 +32,8 @@
 //! - `transform` / `transform_controller`
 //! - `strategies` (ByteLength + Count)
 
-// Legacy bridge — re-exported as `crate::streams::*` so existing callers in
-// fetch.rs / runtime.rs / init.rs keep working unchanged.
+// Stream-id chunk channel — re-exported as `crate::streams::*` so the
+// callers in fetch.rs / runtime.rs / init.rs keep working unchanged.
 pub mod legacy_bridge;
 pub use legacy_bridge::{
     push_stream_chunk, stream_close_callback, stream_create_callback,

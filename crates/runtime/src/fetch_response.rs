@@ -138,17 +138,11 @@ fn state_ptr(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> Option<*mu
 // Public surface used by `crate::http::inspect_response` (D-23 landing 2a).
 //
 // The kernel inspects a Response object after the user's handler resolves.
-// During the cutover from JS polyfill to native, `inspect_response` must
-// work against either implementation. The polyfill exposed body state via
-// the underscore-prefixed properties `_bodyText`, `_isStreamBody`,
-// `_streamId`. The native class hides those behind internal field 0.
-//
 // `try_native_response_body` returns a structured view of the body so the
-// kernel can avoid reaching into either impl's privates: when this returns
-// `Some(view)`, the value is a native Response and the kernel reads the
-// view directly; when it returns `None`, the value is either the polyfill
-// shape (kernel's existing slow-path field reads still apply) or not a
-// Response at all (kernel falls through to its plain-value handler).
+// kernel can read the body without poking at internal fields: `Some(view)`
+// when `obj` is a native Response (state pointer in internal field 0);
+// `None` when it's a plain handler return (`{ status, url }`-shaped duck
+// type) so the kernel falls through to its plain-value handler.
 // ---------------------------------------------------------------------------
 
 /// Body view emitted by `try_native_response_body`. The kernel handles
@@ -173,14 +167,14 @@ pub enum NativeResponseBody {
 
 /// True iff `obj` is an instance of the native Response class (i.e.
 /// has a non-null Box<ResponseState> in internal field 0). Returns
-/// `false` for the JS polyfill Response, plain objects, and primitives.
+/// `false` for plain objects and primitives.
 pub fn is_native_response(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
     state_ptr(scope, obj).is_some()
 }
 
 /// Inspect a native Response's body for the kernel's wire path. Returns
-/// `None` if `obj` is not a native Response (kernel falls back to the
-/// polyfill probe path).
+/// `None` if `obj` is not a native Response — caller treats that as a
+/// plain handler return and falls through to its duck-typed handler.
 ///
 /// Stream classification: a body is `Stream` iff `BodySource::Stream`,
 /// i.e. the user passed a ReadableStream to `new Response(...)`. All

@@ -7,20 +7,17 @@ var CONNECTING = 0, OPEN = 1, CLOSING = 2, CLOSED = 3;
 // Global registry so native code can find WebSocket objects by ID
 var __wsRegistry = Object.create(null);
 
-// Build a MessageEvent-shaped Event by constructing a real (native or
-// polyfill) Event and then attaching the MessageEvent-specific fields
-// as expandos. Works against both the JS polyfill EventTarget (where
-// Event is the polyfill's plain JS function and `dispatchEvent` accepts
-// any object) and the native EventTarget (where Event is `#[v8_class]`
-// with brand-checked dispatch — only real Event instances pass).
+// Build a MessageEvent-shaped Event by constructing a native Event and
+// attaching the MessageEvent-specific fields as expandos. Native
+// EventTarget is `#[v8_class]` with brand-checked dispatch — only real
+// Event instances (with internal field 0 holding `Box<EventState>`)
+// survive `dispatchEvent`.
 //
-// The previous `function MessageEvent(type, init) { Event.call(this, …) }`
-// pattern broke under the native cutover because:
+// The pre-cutover `function MessageEvent(type, init) { Event.call(this, …) }`
+// pattern broke under the native classes because:
 //
-//   - Native Event has internal field 0 holding `Box<EventState>`.
-//   - `Event.call(this, …)` on a polyfill MessageEvent instance does
-//     a `set_internal_field(0, …)` on a wrapper that has no field
-//     slot — silent no-op or panic depending on the V8 build.
+//   - `Event.call(this, …)` on a wrapper with no internal-field slot
+//     either no-ops or panics depending on the V8 build.
 //   - Native dispatchEvent's brand check rejects the resulting object
 //     ("event is not an Event instance").
 //
@@ -53,11 +50,11 @@ function makeCloseEvent(type, init) {
 function WebSocket(url) {
     // Acquire a real EventTarget-shaped instance whose prototype is
     // WebSocket.prototype. `new EventTarget()` builds the wrapper
-    // with internal-field 0 backed by a fresh `Box<EventTarget>` (or
-    // a no-op for the polyfill); `Reflect.construct` then re-points
-    // the prototype to WebSocket.prototype so `instanceof WebSocket`
-    // still works. Equivalent to ES6 `super()` without needing class
-    // syntax (this file is ES5 for legacy V8 compat).
+    // with internal-field 0 backed by a fresh `Box<EventTarget>`;
+    // `Reflect.construct` then re-points the prototype to
+    // WebSocket.prototype so `instanceof WebSocket` still works.
+    // Equivalent to ES6 `super()` without needing class syntax
+    // (this file is ES5 for legacy V8 compat).
     var self = Reflect.construct(EventTarget, [], WebSocket);
     self.url = url || "";
     self.readyState = CONNECTING;
@@ -121,9 +118,8 @@ WebSocket.prototype._onError = function(message) {
 // Re-exported for instanceof / type-checking. Since `makeMessageEvent`
 // returns a plain Event with expandos (not an Event subclass), the
 // returned event is `instanceof Event === true` but
-// `instanceof MessageEvent === false`. Acceptable for a polyfill;
-// Cloudflare's MessageEvent shape (`data` / `origin` / `lastEventId`)
-// is the contract we promise.
+// `instanceof MessageEvent === false`. The contract we promise is
+// Cloudflare's MessageEvent shape (`data` / `origin` / `lastEventId`).
 function MessageEvent(type, init) {
     return makeMessageEvent(type, init);
 }

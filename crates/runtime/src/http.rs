@@ -205,20 +205,20 @@ fn inspect_native_response(
         }),
         NativeResponseBody::Bytes(rc) => {
             // Materialise as UTF-8 text. The wire path treats body as
-            // a String (matching the polyfill's _bodyText semantics);
-            // binary bodies survive lossy conversion because the
-            // resulting Rust String is round-tripped to bytes when
+            // a String; binary bodies survive lossy conversion because
+            // the resulting Rust String is round-tripped to bytes when
             // sent on the wire.
             let body = String::from_utf8_lossy(&rc).into_owned();
             Ok(ResponseInfo::Complete { status, headers, body })
         }
         NativeResponseBody::Stream => {
-            // Lock the native ReadableStream on the Response and start
-            // the body pump. `__zsBeginStreamForward` reads `response.body`
-            // (native getter) and `response._streamId` (allowed expando),
-            // then sets `response._streamId` to the freshly-allocated id.
-            // Native Response objects are extensible — the assignment
-            // succeeds.
+            // Lock the body's ReadableStream and start the body pump.
+            // `__zsBeginStreamForward` (in `embed/fetch.js`) reads
+            // `response.body` (native getter), allocates a Rust-side
+            // StreamState via `__streams.create()`, stamps the id on
+            // `response._streamId` for idempotence, and pumps each
+            // chunk into the StreamState. Native Response objects are
+            // extensible, so the expando write succeeds.
             let stream_id = forward_stream(scope, obj)?;
             classify_stream(scope, status, headers, stream_id)
         }
@@ -275,11 +275,13 @@ fn classify_stream(
     }
 }
 
-/// Extract headers from a Response object via the WebIDL `iterable<>`
-/// mixin (`Headers.prototype[Symbol.iterator]()` per WHATWG Fetch §2.2).
+/// Extract headers from a Response object.
 ///
-/// Native Headers ships this surface; the previous polyfill `_zsHeadersArr`
-/// fast path was retired with `embed/fetch.js` in D-23 landing 3.
+/// Hot path: pull the native Headers state pointer directly (FIX D —
+/// see `crate::headers::try_native_headers`). Falls back to the
+/// WebIDL `iterable<>` protocol
+/// (`Headers.prototype[Symbol.iterator]()` per WHATWG Fetch §2.2) for
+/// any non-native Headers shape that user code may have substituted.
 pub fn extract_response_headers(scope: &mut v8::PinScope, response_obj: v8::Local<v8::Object>) -> Vec<(String, String)> {
     let headers_key = key(scope, &K_HEADERS);
     let Some(headers_val) = response_obj.get(scope, headers_key.into()) else { return Vec::new() };
@@ -305,8 +307,8 @@ pub fn extract_response_headers(scope: &mut v8::PinScope, response_obj: v8::Loca
         return result;
     }
 
-    // Slow path: polyfill / non-native Headers — go through the
-    // WebIDL iterable<> protocol.
+    // Slow path: a user-supplied non-native Headers shape — go through
+    // the WebIDL iterable<> protocol.
     let mut result = Vec::new();
 
     let sym_iter = v8::Symbol::get_iterator(scope);
@@ -348,9 +350,7 @@ pub fn extract_response_headers(scope: &mut v8::PinScope, response_obj: v8::Loca
 /// (`{ status, url }`, primitives, arrays) don't carry the brand.
 ///
 /// One internal-field probe per async RPC settlement. V8's inline cache
-/// turns the lookup into a hidden-class check after warmup. The
-/// previous polyfill probe (`__zsResponse` prototype tag from
-/// `embed/fetch.js`) was retired with the polyfill in D-23 landing 3.
+/// turns the lookup into a hidden-class check after warmup.
 pub fn looks_like_response(scope: &mut v8::PinScope, val: v8::Local<v8::Value>) -> bool {
     // Fast reject: primitives and null can't carry brands.
     if !val.is_object() { return false; }
