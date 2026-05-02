@@ -184,6 +184,94 @@ pub(crate) fn build_blob_stream_public<'s>(
     build_blob_stream(scope, bytes)
 }
 
+/// Construct a JS-visible Blob wrapper from a Rust byte vec and a
+/// content-type string. Used by `body.blob()` and other callers that
+/// need to mint a fresh Blob from native bytes.
+///
+/// `type_` is normalized per §3.1 step 2 (lowercased if all chars are
+/// printable ASCII, else empty). The returned object passes
+/// `instanceof Blob` and inherits all Blob.prototype methods.
+pub fn create_blob<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    bytes: Vec<u8>,
+    type_: &str,
+) -> v8::Local<'s, v8::Value> {
+    let normalized_type = normalize_type(type_);
+    let blob = Blob::from_bytes_owned(bytes, normalized_type);
+    wrap_blob_in_v8(scope, blob)
+}
+
+/// True if `obj` is an instance of `globalThis.Blob` (or a subclass —
+/// like File). Public form of `is_blob_instance` for use by other
+/// modules that need to brand-check Blob values (FormData, fetch_body
+/// extract).
+pub fn is_blob_instance_public(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
+    is_blob_instance(scope, obj)
+}
+
+/// True if `obj` is an instance of `globalThis.File`. Used by FormData
+/// to distinguish a File from a plain Blob when storing values.
+pub fn is_file_instance_public(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
+    let global = scope.get_current_context().global(scope);
+    let key = match v8::String::new(scope, "File") {
+        Some(s) => s,
+        None => return false,
+    };
+    let class_v = match global.get(scope, key.into()) {
+        Some(v) => v,
+        None => return false,
+    };
+    let class_obj: v8::Local<v8::Object> = match class_v.try_into() {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    obj.instance_of(scope, class_obj).unwrap_or(false)
+}
+
+/// Read the bytes out of a Blob (or File, since File is layout-prefix
+/// compatible with Blob). Returns `None` if the object isn't a Blob
+/// instance (per `is_blob_instance_public`).
+///
+/// Caller must hold a Local handle for the lifetime of use; the bytes
+/// are copied out of the Rc-shared backing and own a fresh Vec.
+pub fn read_blob_bytes(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> Option<Vec<u8>> {
+    if !is_blob_instance(scope, obj) {
+        return None;
+    }
+    let ext = obj
+        .get_internal_field(scope, 0)
+        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
+    let ptr = ext.value() as *const Blob;
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: same as `append_part_bytes` — the External points at a
+    // Box<Blob> created in `wrap_blob_in_v8` that stays alive while V8
+    // holds the wrapper.
+    let blob: &Blob = unsafe { &*ptr };
+    Some(blob.as_bytes().to_vec())
+}
+
+/// Read `(bytes, type)` pair from a Blob/File. Returns None if not a
+/// Blob.
+pub fn read_blob_bytes_and_type(
+    scope: &mut v8::PinScope,
+    obj: v8::Local<v8::Object>,
+) -> Option<(Vec<u8>, String)> {
+    if !is_blob_instance(scope, obj) {
+        return None;
+    }
+    let ext = obj
+        .get_internal_field(scope, 0)
+        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
+    let ptr = ext.value() as *const Blob;
+    if ptr.is_null() {
+        return None;
+    }
+    let blob: &Blob = unsafe { &*ptr };
+    Some((blob.as_bytes().to_vec(), blob.type_.clone()))
+}
+
 /// Append the bytes of one BlobPart to `out`. Returns Err on a part
 /// that isn't a valid `(BufferSource | Blob | USVString)` per WebIDL
 /// §3.2.2 (sequence<BlobPart>) — though in practice WebIDL converts

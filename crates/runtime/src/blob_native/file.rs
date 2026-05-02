@@ -37,6 +37,7 @@ use std::rc::Rc;
 use crate::blob_native::blob::Blob;
 use crate::state::OpError;
 
+
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method};
 
@@ -340,4 +341,94 @@ impl File {
     fn stream<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
         crate::blob_native::blob::build_blob_stream_public(scope, self.blob.as_bytes())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Native creation helpers
+// ---------------------------------------------------------------------------
+
+/// Construct a JS-visible File wrapper from native bytes + filename +
+/// content-type. Used by the multipart parser in `body.formData()` to
+/// build File entries for parts that have a `filename=` Content-
+/// Disposition param.
+///
+/// `last_modified` defaults to the current wall-clock time, matching
+/// the constructor's behaviour when the user doesn't supply a
+/// FilePropertyBag.
+pub fn create_file<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    bytes: Vec<u8>,
+    name: String,
+    content_type: &str,
+) -> v8::Local<'s, v8::Value> {
+    create_file_with_last_modified(scope, bytes, name, content_type, None)
+}
+
+/// Like `create_file`, but the caller can supply an explicit
+/// `lastModified`. Used by FormData's append/set when wrapping a
+/// File with a custom name — per WHATWG XHR §5, the wrapped File
+/// preserves the source's lastModified.
+pub fn create_file_with_last_modified<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    bytes: Vec<u8>,
+    name: String,
+    content_type: &str,
+    last_modified: Option<i64>,
+) -> v8::Local<'s, v8::Value> {
+    let normalized_type = crate::blob_native::blob::normalize_type_public(content_type);
+    let blob = crate::blob_native::blob::from_bytes_owned_public(bytes, normalized_type);
+    let file = File {
+        blob,
+        name,
+        last_modified: last_modified.unwrap_or_else(current_time_ms),
+    };
+    wrap_file_in_v8(scope, file)
+}
+
+/// Wrap a Rust-built `File` into a JS object whose prototype chain is
+/// `globalThis.File.prototype` (which inherits from Blob.prototype).
+/// Mirrors `wrap_blob_in_v8` for the File class.
+fn wrap_file_in_v8<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    file: File,
+) -> v8::Local<'s, v8::Value> {
+    let tmpl = File::install(scope);
+    let inst_tmpl = tmpl.instance_template(scope);
+    let obj = inst_tmpl.new_instance(scope).unwrap();
+
+    // Wire prototype to globalThis.File.prototype so `instanceof File`
+    // and `instanceof Blob` both work.
+    let global = scope.get_current_context().global(scope);
+    let file_class_key = v8::String::new(scope, "File").unwrap();
+    let proto = match global.get(scope, file_class_key.into()) {
+        Some(class_v) => match v8::Local::<v8::Object>::try_from(class_v) {
+            Ok(class_obj) => {
+                let proto_key = v8::String::new(scope, "prototype").unwrap();
+                class_obj.get(scope, proto_key.into())
+            }
+            Err(_) => None,
+        },
+        None => None,
+    };
+    if let Some(proto) = proto {
+        obj.set_prototype(scope, proto);
+    }
+
+    // Box the File, store in internal field 0, install finalizer.
+    let boxed = Box::new(file);
+    let raw_ptr = Box::into_raw(boxed);
+    let raw_addr = raw_ptr as usize;
+    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
+    obj.set_internal_field(0, ext.into());
+
+    let weak = v8::Weak::with_guaranteed_finalizer(
+        scope,
+        obj,
+        Box::new(move || unsafe {
+            drop(Box::from_raw(raw_addr as *mut File));
+        }),
+    );
+    std::mem::forget(weak);
+
+    obj.into()
 }
