@@ -442,23 +442,33 @@ fn parse_callback(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let input = match read_usv_string(scope, args.get(0)) {
-        Some(s) => s,
-        None => {
-            rv.set(v8::null(scope).into());
-            return;
-        }
-    };
-    let base = if args.length() > 1 && !args.get(1).is_undefined() {
-        match read_usv_string(scope, args.get(1)) {
-            Some(s) => Some(s),
-            None => {
-                rv.set(v8::null(scope).into());
-                return;
+    // C4: URL.parse must NEVER throw per §4.6. Every V8-fallible step
+    // (USVString conversion via `to_string`, which throws for Symbol;
+    // `new_instance` for the URL constructor, which can fail with OOM
+    // etc.) runs inside a TryCatch. On any thrown exception we drop
+    // it and return null.
+
+    // Step 1: ToUSVString on input + base under a TryCatch. Symbol
+    // args throw inside `to_string`; the TryCatch absorbs that.
+    let strings: Option<(String, Option<String>)> = {
+        v8::tc_scope!(let tc, scope);
+        match read_usv_string(tc, args.get(0)) {
+            None => None,
+            Some(input) => {
+                if args.length() > 1 && !args.get(1).is_undefined() {
+                    match read_usv_string(tc, args.get(1)) {
+                        Some(b) => Some((input, Some(b))),
+                        None => None,
+                    }
+                } else {
+                    Some((input, None))
+                }
             }
         }
-    } else {
-        None
+    };
+    let Some((input, base)) = strings else {
+        rv.set(v8::null(scope).into());
+        return;
     };
 
     // Pre-validate so we don't pay the construct-and-rollback price on
@@ -483,22 +493,34 @@ fn parse_callback(
 
     // Construct via `new URL(input, base?)`. Per spec the constructor
     // throws TypeError on parse failure; we already validated above so
-    // this path always succeeds. Internal field 0 (the boxed URL) is
-    // populated automatically by the macro-emitted constructor.
+    // this path always succeeds in normal conditions. Internal field
+    // 0 (the boxed URL) is populated automatically by the
+    // macro-emitted constructor. Wrap in a TryCatch so any V8
+    // internal failure (OOM, isolate teardown) doesn't propagate as a
+    // thrown exception — URL.parse must honor its "never throws"
+    // contract.
     let input_v = v8::String::new(scope, &input).unwrap();
     let argv: Vec<v8::Local<v8::Value>> = if let Some(b) = base.as_deref() {
         vec![input_v.into(), v8::String::new(scope, b).unwrap().into()]
     } else {
         vec![input_v.into()]
     };
-    let new_inst = match url_fn.new_instance(scope, &argv) {
-        Some(o) => o,
-        None => {
-            rv.set(v8::null(scope).into());
-            return;
+    let new_inst_global: Option<v8::Global<v8::Object>> = {
+        v8::tc_scope!(let tc, scope);
+        match url_fn.new_instance(tc, &argv) {
+            Some(o) => Some(v8::Global::new(tc, o)),
+            None => None,
         }
     };
-    rv.set(new_inst.into());
+    match new_inst_global {
+        Some(g) => {
+            let local = v8::Local::new(scope, &g);
+            rv.set(local.into());
+        }
+        None => {
+            rv.set(v8::null(scope).into());
+        }
+    }
 }
 
 /// `url.searchParams` getter. Lazily instantiate a URLSearchParams JS

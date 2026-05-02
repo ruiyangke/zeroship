@@ -180,6 +180,44 @@ fn url_parse_with_base() {
     assert_eq!(s, "https://example.com/api");
 }
 
+/// C4: URL.parse must NEVER throw. Even on internal V8 failure
+/// (e.g. proxy traps that throw inside argument conversion), the API
+/// must return null, not propagate the exception.
+#[test]
+fn url_parse_never_throws() {
+    // We can't easily synthesize a V8 internal failure from JS, but we
+    // can verify that URL.parse on a Symbol (which would throw if
+    // ToString were called naively) does NOT propagate the throw. Per
+    // spec, ToUSVString of a Symbol throws TypeError — the parse_callback
+    // catches that and returns null instead of letting the exception
+    // escape.
+    let s = run_in_v8(
+        r#"
+        let threw = false;
+        let result = "?";
+        try {
+            result = URL.parse(Symbol("nope"));
+        } catch (e) {
+            threw = true;
+            result = e && e.constructor && e.constructor.name;
+        }
+        JSON.stringify({ threw, result });
+        "#,
+        js_string,
+    );
+    let v: serde_json::Value = serde_json::from_str(&s).expect("json");
+    // Spec says URL.parse must return null, not throw. Some impls
+    // (Chrome) do throw for Symbol — but per the spec note "must
+    // never throw" and our parse_callback's tc_scope semantics, we
+    // return null.
+    assert_eq!(v["threw"], false, "URL.parse propagated an exception");
+    assert!(
+        v["result"].is_null() || v["result"] == serde_json::Value::Null,
+        "expected null result, got: {}",
+        v["result"]
+    );
+}
+
 // ===========================================================================
 // URL setters — spec-correct via ada-url
 // ===========================================================================
