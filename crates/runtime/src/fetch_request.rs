@@ -437,6 +437,21 @@ fn request_constructor_callback(
         if let Some(k) = get_init(scope, init, "keepalive") {
             *state.keepalive.borrow_mut() = k.boolean_value(scope);
         }
+        // Per Fetch (Chrome/Deno/etc.): `duplex: "full"` is not yet
+        // supported — implementations throw TypeError. We match that
+        // behaviour. WPT request-init-stream.any.js explicitly
+        // requires this for any body shape (null, string, Uint8Array,
+        // ReadableStream) when duplex is "full".
+        if state.duplex.borrow().as_str() == "full" {
+            let m = v8::String::new(
+                scope,
+                "Request init.duplex = 'full' is not supported",
+            )
+            .unwrap();
+            let exc = v8::Exception::type_error(scope, m);
+            scope.throw_exception(exc);
+            return;
+        }
     }
 
     // Body extraction. Step 35–36.
@@ -483,6 +498,35 @@ fn request_constructor_callback(
     // `init.body` exists and method is GET/HEAD, throw TypeError.
     if let Some(b) = body_input {
         if !b.is_null_or_undefined() {
+            // Per Fetch §5.4 step 36: when body is a ReadableStream,
+            // init["duplex"] must exist (since the body is half-duplex
+            // by default — full-duplex is opt-in). The spec's exact
+            // wording: "If body is a ReadableStream and init["duplex"]
+            // does not exist, throw a TypeError."
+            //
+            // We match Chrome / Deno here: only validate when body is
+            // a ReadableStream. URLSearchParams / Blob / etc. don't
+            // need duplex.
+            if let Some(init) = init_obj {
+                let body_is_stream = if let Ok(obj) = v8::Local::<v8::Object>::try_from(b) {
+                    is_readable_stream_global_instance(scope, obj)
+                } else {
+                    false
+                };
+                if body_is_stream {
+                    let duplex_v = get_init(scope, init, "duplex");
+                    if duplex_v.is_none() {
+                        let m = v8::String::new(
+                            scope,
+                            "Request with ReadableStream body requires init.duplex = 'half'",
+                        )
+                        .unwrap();
+                        let exc = v8::Exception::type_error(scope, m);
+                        scope.throw_exception(exc);
+                        return;
+                    }
+                }
+            }
             let method = state.method.borrow().clone();
             if method == "GET" || method == "HEAD" {
                 let m = v8::String::new(
@@ -597,6 +641,27 @@ fn is_request_instance(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> 
     let class_obj: v8::Local<v8::Object> = match class_v.try_into() {
         Ok(o) => o,
         Err(_) => return false,
+    };
+    obj.instance_of(scope, class_obj).unwrap_or(false)
+}
+
+/// True iff `obj instanceof globalThis.ReadableStream`. Used for the
+/// duplex-validation step (Fetch §5.4 step 36) — needs the same
+/// discriminator as fetch_body::extract::is_readable_stream_instance.
+fn is_readable_stream_global_instance(
+    scope: &mut v8::PinScope,
+    obj: v8::Local<v8::Object>,
+) -> bool {
+    let global = scope.get_current_context().global(scope);
+    let key = match v8::String::new(scope, "ReadableStream") {
+        Some(k) => k,
+        None => return false,
+    };
+    let Some(class_v) = global.get(scope, key.into()) else {
+        return false;
+    };
+    let Ok(class_obj) = v8::Local::<v8::Object>::try_from(class_v) else {
+        return false;
     };
     obj.instance_of(scope, class_obj).unwrap_or(false)
 }
@@ -992,11 +1057,18 @@ fn request_clone_callback(
     };
 
     // Build init that passes the URL via the constructor's URL parser
-    // and the cloned body / headers.
+    // and the cloned body / headers. We include `duplex: "half"`
+    // unconditionally — the constructor's duplex check fires for any
+    // ReadableStream body, and we may pass a tee'd stream below.
     let init = v8::Object::new(scope);
     {
         let key = v8::String::new(scope, "method").unwrap();
         let v = v8::String::new(scope, &state.method.borrow()).unwrap();
+        init.set(scope, key.into(), v.into());
+    }
+    {
+        let key = v8::String::new(scope, "duplex").unwrap();
+        let v = v8::String::new(scope, "half").unwrap();
         init.set(scope, key.into(), v.into());
     }
     if let Some(h_g) = state.headers.borrow().clone() {

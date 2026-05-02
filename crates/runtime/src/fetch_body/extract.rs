@@ -202,17 +202,23 @@ fn extract_from_stream(
     })
 }
 
-/// Probe `stream.locked === true` OR `stream` is disturbed (the disturbed
-/// flag is exposed via the body-consumption protocol but not via a JS
-/// getter on ReadableStream itself; per the spec consumers see it via
-/// the disturbed bit on the body's stream). We only check `locked` from
-/// JS here — the spec's definition of "disturbed for body extraction"
-/// piggybacks on lock acquisition since extracting requires a fresh
-/// reader.
+/// Probe `stream.locked === true` OR the streams crate's RSState
+/// `disturbed` slot is set. Per Fetch §3.2 step 11.11.2 (extract a
+/// body from a ReadableStream): "If body's stream is disturbed or
+/// locked, then throw a TypeError." The locked getter is observable
+/// from JS; the disturbed flag is private (per WHATWG Streams §4.1).
+/// We inspect both to honour the spec.
 fn stream_is_locked_or_disturbed(
     scope: &mut v8::PinScope,
     stream_obj: v8::Local<v8::Object>,
 ) -> Result<bool, OpError> {
+    if let Some(disturbed) =
+        crate::streams::readable::with_rs_state(scope, stream_obj, |s| s.disturbed.get())
+    {
+        if disturbed {
+            return Ok(true);
+        }
+    }
     let key = v8::String::new(scope, "locked").unwrap();
     let v = stream_obj
         .get(scope, key.into())

@@ -142,10 +142,17 @@ fn body_used_getter<T: Body + BodyMarker + 'static>(
 }
 
 /// Check if the body's stream has been used. Combines:
+///   - The streams crate's disturbed flag (true if the stream has been
+///     read from — survives reader.releaseLock()),
 ///   - The stream's `locked` getter (true while a reader holds the lock),
 ///   - A private symbol marker `__zsBodyUsed` we set on the wrapper
 ///     when a consumer starts (so post-consume, after lock release,
 ///     we still report `bodyUsed === true`).
+///
+/// Per Fetch §3.5 + WPT request-init-stream.any.js: a stream that's
+/// had `getReader().read().releaseLock()` is disturbed even though
+/// `locked === false`. The disturbed flag on RSState is the
+/// authoritative answer.
 pub fn stream_disturbed_or_used(
     scope: &mut v8::PinScope,
     wrapper: v8::Local<v8::Object>,
@@ -153,6 +160,17 @@ pub fn stream_disturbed_or_used(
 ) -> bool {
     if check_used_marker(scope, wrapper) {
         return true;
+    }
+    // Reach into the streams crate's RSState for the spec-faithful
+    // disturbed flag. Falls through to the legacy locked-getter check
+    // for non-native streams (e.g. tests that pass a Headers object
+    // accidentally — defensively).
+    if let Some(disturbed) =
+        crate::streams::readable::with_rs_state(scope, stream, |s| s.disturbed.get())
+    {
+        if disturbed {
+            return true;
+        }
     }
     let key = v8::String::new(scope, "locked").unwrap();
     if let Some(v) = stream.get(scope, key.into()) {

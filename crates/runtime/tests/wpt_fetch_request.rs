@@ -308,6 +308,35 @@ const TESTHARNESS_SHIM: &str = r#"
       throw e;
     }
   };
+
+  globalThis.promise_rejects_js = function (t, ctor, promise, msg) {
+    return promise.then(
+      () => fail(`${msg ? msg + ": " : ""}expected ${ctor.name} rejection but resolved`),
+      e => {
+        if (e instanceof ctor) return;
+        if (e && e.name === ctor.name) return;
+        fail(`${msg ? msg + ": " : ""}expected ${ctor.name}, got ${e && e.name ? e.name : fmt(e)}`);
+      }
+    );
+  };
+  globalThis.promise_rejects_dom = function (t, name, promise, msg) {
+    return promise.then(
+      () => fail(`${msg ? msg + ": " : ""}expected DOMException ${name} rejection`),
+      e => {
+        if (e && e.name === name) return;
+        fail(`${msg ? msg + ": " : ""}expected DOMException ${name}, got ${e && e.name ? e.name : fmt(e)}`);
+      }
+    );
+  };
+  globalThis.promise_rejects_exactly = function (t, expected, promise, msg) {
+    return promise.then(
+      () => fail(`${msg ? msg + ": " : ""}expected exact rejection`),
+      e => {
+        if (e === expected) return;
+        fail(`${msg ? msg + ": " : ""}wrong rejection: ${fmt(e)} vs ${fmt(expected)}`);
+      }
+    );
+  };
 })();
 "#;
 
