@@ -677,3 +677,280 @@ session.
 4. Replace the in-memory Set in
    `apps/zeroship-builder/src/server/apps.ts` with proxied calls.
 
+---
+
+## ISS-20 · pg_catalog table introspection missing — DataCanvas Tables list is hardcoded
+
+**Status:** open
+**Severity:** medium — every project's Tables tab shows the same three
+sample rows (`users`, `posts`, `comments`). Without real introspection
+the canvas can't reflect what the project actually wrote.
+**First observed:** 2026-05-01, building the Data canvas
+(`apps/zeroship-builder/src/client/workspace/canvases/DataCanvas.tsx`,
+spec §9.3).
+**Component:** `crates/control` (per-app db introspection) +
+`apps/zeroship-builder/src/server/agents.ts`
+
+### Symptom
+
+Spec §9.3 calls for a Tables list per project sourced from
+`pg_class` + `pg_total_relation_size` for the per-app schema. The
+control plane has no introspection RPC:
+
+- No `GET /api/apps/:id/db/tables` handler.
+- No way to query `pg_catalog.pg_class` scoped to the app's schema.
+- No row-count / size aggregation over the per-app `search_path`.
+
+### Workaround in use
+
+`agents.ts` exposes `listTables({appId})` returning a shared
+`SAMPLE_TABLES` constant (3 rows). Every appId sees the same data;
+nothing the user does in the canvas mutates it.
+
+### Fix path
+
+1. `crates/control/src/db_introspect.rs` — `GET /api/apps/:id/db/tables`
+   handler that runs `SELECT relname, reltuples, pg_total_relation_size, ...
+   FROM pg_class WHERE relnamespace = (per-app schema oid)`.
+2. Cache the result on the control plane (TTL 30s) so repeated
+   dashboard polls don't hammer the catalog.
+3. Replace the `SAMPLE_TABLES` constant with a proxied call.
+
+---
+
+## ISS-21 · Table row pagination over real per-app schema missing
+
+**Status:** open
+**Severity:** medium — clicking into a table on the Data canvas opens
+a row browser sourced from the same hardcoded sample data. There's
+no path to read actual rows from the per-app schema.
+**First observed:** 2026-05-01, building the Data canvas row browser.
+**Component:** `crates/control` + `apps/zeroship-builder/src/server/agents.ts`
+
+### Symptom
+
+The Data canvas row browser (clicking a table row) calls
+`getTableRows({appId, tableName, limit, offset})`. Backing logic
+needs:
+
+- A per-app database connection (the worker has one; the dashboard
+  doesn't).
+- A safe `SELECT * FROM <schema>.<table> LIMIT $1 OFFSET $2` runner
+  that quotes identifiers properly and refuses non-existent relations.
+- Type-aware cell rendering (jsonb, timestamptz, numeric) — V1 strings
+  every cell which is fine for stub data but loses precision for
+  real rows.
+
+### Workaround in use
+
+`getTableRows` returns slices of a fixed in-memory `SAMPLE_ROWS` map
+keyed by `users` / `posts` / `comments`. Pagination state echoes back
+correctly so the UI's prev/next behaves like the real thing.
+
+### Fix path
+
+1. `crates/control/src/db_introspect.rs` — gain
+   `GET /api/apps/:id/db/tables/:name/rows?limit=&offset=` returning
+   `{columns, rows, total}`. Use `pg_class.reltuples` for `total`
+   (cheap; exact COUNT is too slow).
+2. Identifier quoting via the postgres protocol's parameter mechanism
+   for the table name (or a strict allowlist filter against the
+   introspection list from ISS-20).
+3. `agents.ts` — replace the SAMPLE_ROWS lookup with a proxied call;
+   the canvas wire stays the same.
+
+---
+
+## ISS-22 · Schema visualizer not built — DataCanvas Schema tab is a placeholder
+
+**Status:** open
+**Severity:** low — the Data canvas's Schema tab is a "coming soon"
+card. Tables / Indexes / Migrations cover the day-one introspection
+surface; a graph visualizer is a polish piece.
+**First observed:** 2026-05-01, building the Data canvas.
+**Component:** `apps/zeroship-builder/src/client/workspace/canvases/DataCanvas.tsx`
+
+### Symptom
+
+Spec §9.3 calls for a Schema sub-tab that renders the per-app schema
+as a navigable graph: tables as nodes, foreign keys as edges, with
+a click-to-zoom interaction. Today the tab ships as a single
+editorial card pointing at this issue.
+
+There's no introspection of `pg_constraint` (`contype = 'f'`) for
+foreign keys, no layout engine, and no SVG/canvas renderer chosen.
+
+### Workaround in use
+
+`SchemaPane` in `DataCanvas.tsx` renders a static empty state:
+
+> "Schema visualizer coming soon — see ISSUES.md ISS-22."
+
+### Fix path
+
+1. Extend the introspection endpoint from ISS-20 with a
+   `GET /api/apps/:id/db/schema` handler returning
+   `{tables: [...], foreign_keys: [{from_table, from_column,
+   to_table, to_column}, ...]}`.
+2. Pick a layout engine — `d3-force` is heavy but well-tested;
+   `elkjs` produces nicer hierarchical layouts. Default to a
+   force-directed graph for the smallest dependency footprint.
+3. Replace `SchemaPane` with the live visualizer; keep the
+   "coming soon" copy as a fallback when the schema is empty.
+
+---
+
+## ISS-23 · Index introspection (`pg_indexes`) missing — DataCanvas Indexes tab is hardcoded
+
+**Status:** open
+**Severity:** medium — same shape as ISS-20 but for indexes.
+**First observed:** 2026-05-01, building the Data canvas Indexes tab.
+**Component:** `crates/control` + `apps/zeroship-builder/src/server/agents.ts`
+
+### Symptom
+
+Spec §9.3 calls for an Indexes tab listing every index on the per-app
+schema with table, name, type, columns, on-disk size, and last-used
+timestamp. The control plane has no introspection RPC:
+
+- No `GET /api/apps/:id/db/indexes` handler.
+- No reads of `pg_indexes` / `pg_class` / `pg_stat_user_indexes`
+  (`idx_scan`, `last_idx_scan`).
+
+### Workaround in use
+
+`agents.ts` exposes `listIndexes({appId})` returning a shared
+`SAMPLE_INDEXES` constant (5 sample rows across the three sample
+tables).
+
+### Fix path
+
+1. Extend the introspection endpoint family with
+   `GET /api/apps/:id/db/indexes` joining `pg_indexes`,
+   `pg_class.relpages` (for size), and `pg_stat_user_indexes`
+   (for `idx_scan` + `last_idx_scan`).
+2. Replace `SAMPLE_INDEXES` with a proxied call.
+
+---
+
+## ISS-24 · Migration log not persisted — DataCanvas Migrations tab is hardcoded
+
+**Status:** open
+**Severity:** medium — the timeline is the user's audit trail of
+what changed when. Without persistence the only record of a
+migration is in the deploy bundle's git history (which the dashboard
+doesn't read).
+**First observed:** 2026-05-01, building the Data canvas Migrations tab.
+**Component:** `crates/control` (migrations table) + `@zeroship/db`
+(migration runner emits records) + `apps/zeroship-builder/src/server/agents.ts`
+
+### Symptom
+
+Spec §9.3 calls for a chronological list of every migration: id,
+name, status (applied/pending/failed), author, applied-at. There's
+no `migrations` table on the control plane and no instrumentation in
+the `@zeroship/db` migration runner to record runs.
+
+### Workaround in use
+
+`agents.ts` exposes `listMigrations({appId})` returning a shared
+`SAMPLE_MIGRATIONS` constant (4 rows including one `pending` to
+exercise the status dot variants).
+
+### Fix path
+
+1. `crates/control/src/migrations.rs` — `migrations` table (id,
+   app_id, name, status, author, started_at, finished_at,
+   error) + `GET /api/apps/:id/migrations` handler.
+2. `@zeroship/db` runner — wrap each migration in a try/finally that
+   POSTs status updates to the control plane.
+3. Replace `SAMPLE_MIGRATIONS` with a proxied call.
+
+---
+
+## ISS-25 · Backup trigger + history not wired to actual pg_dump
+
+**Status:** open
+**Severity:** medium — the "Trigger backup" button and snapshot list
+are pure UI today. No real backup is taken; restore doesn't exist.
+**First observed:** 2026-05-01, building the Data canvas Backups tab.
+**Component:** `crates/control` (backup orchestrator) + cloud storage
+(snapshot blob writes) + `apps/zeroship-builder/src/server/agents.ts`
+
+### Symptom
+
+Spec §9.3 calls for daily auto-snapshots plus on-demand manual ones,
+with a list view (label, kind, size, taken-at), a restore action, and
+a per-app retention policy. The control plane has none of:
+
+- A `backups` table or `POST /api/apps/:id/backups` trigger.
+- A pg_dump runner (logical) or volume-snapshot integration (physical).
+- Cloud-storage writes for the snapshot blobs.
+- A `POST /api/apps/:id/backups/:id/restore` handler.
+
+### Workaround in use
+
+`agents.ts` exposes `listBackups({appId})` (per-appId Map seeded with
+3 sample snapshots) and `triggerBackup({appId})` (prepends a fake
+`Manual snapshot` entry with a randomized size). The Map survives only
+the lifetime of the V8 isolate.
+
+### Fix path
+
+1. `crates/control/src/backups.rs` — `backups` table + REST handlers
+   (list, trigger, restore).
+2. Backup runner: spawn `pg_dump` in a sandboxed worker, stream the
+   output to S3/R2 with content-addressed key, write the metadata row
+   when complete.
+3. Background scheduler that triggers a backup per app per day.
+4. Replace the in-memory Map in `agents.ts` with proxied calls.
+
+---
+
+## ISS-26 · Media canvas backed by in-memory Map, not real `@zeroship/storage`
+
+**Status:** open
+**Severity:** medium — every uploaded file lives in the worker's V8
+isolate as a base64 data URL. Files vanish on isolate eviction and
+aren't reachable from the deployed app's runtime (which is the whole
+point of an asset library).
+**First observed:** 2026-05-01, building the Media canvas
+(`apps/zeroship-builder/src/client/workspace/canvases/MediaCanvas.tsx`,
+spec §9.4).
+**Component:** `crates/control` (per-app upload RPC) +
+`apps/zeroship-builder/src/server/agents.ts`
+
+### Symptom
+
+Spec §9.4 calls for a Media canvas where uploads land in the project's
+object store and become servable via a public URL the deployed app
+can reference. The platform has the `zeroship.storage.*` primitive
+and `@zeroship/storage` SDK package, but there's no dashboard-side
+upload RPC:
+
+- No `POST /api/apps/:id/media` (multipart) handler.
+- No `GET /api/apps/:id/media` (list) handler.
+- No `DELETE /api/apps/:id/media/:key` handler.
+- No public-URL minting for uploaded blobs.
+- No CDN/cache headers on the asset path.
+
+### Workaround in use
+
+`agents.ts` exposes `listMedia` / `uploadMedia` / `deleteMedia` over
+a per-appId `Map<string, MediaEntry[]>` seeded with 3 sample tiles
+(2 picsum.photos URLs + 1 PDF). Uploads round-trip the file as base64
+and store the bytes inline as a `data:` URL — fine for the canvas
+preview, useless for the deployed app.
+
+### Fix path
+
+1. `crates/control/src/media.rs` — multipart upload handler that
+   streams the body straight to the platform's object store
+   (`LocalFs` in dev, S3/R2 in prod) and writes a `media` row
+   (id, app_id, key, name, size, content_type, uploaded_at).
+2. URL minting: a `GET /m/:app_id/:key` proxy endpoint on the gateway
+   (or a signed S3/R2 URL) so the deployed app and dashboard read
+   from the same path.
+3. Replace the Map in `agents.ts` with proxied calls; switch the
+   tile's `url` field from a `data:` URL to the real public URL.
+
