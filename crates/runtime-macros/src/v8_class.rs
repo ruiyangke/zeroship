@@ -1480,9 +1480,12 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
                 Ok(__v) => __v,
                 Err(__err) => {
                     let __msg = v8::String::new(scope, &__err.message).unwrap();
-                    let __exc = match __err.kind {
+                    let __exc: v8::Local<v8::Value> = match __err.kind {
                         ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
                         ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+                        ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
+                            ::zeroship_runtime::dom::exception::build(scope, &__err.message, __name).into()
+                        }
                         _ => v8::Exception::error(scope, __msg),
                     };
                     scope.throw_exception(__exc);

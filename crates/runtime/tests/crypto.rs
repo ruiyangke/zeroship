@@ -73,12 +73,16 @@ fn crypto_import_export_hmac_raw() {
 
 #[test]
 fn crypto_generate_hmac_key() {
+    // Per W3C WebCrypto §31.4.3 step 2: when `length` is omitted, the
+    // generated HMAC key uses the hash function's *block size* in bits
+    // (SHA-256 = 512 bits = 64 bytes), not the digest length. The
+    // legacy polyfill returned 32 bytes; the native impl is spec-correct.
     let r = dispatch(m(r#"
         export async function test() {
             var key = await crypto.subtle.generateKey({name: "HMAC", hash: "SHA-256"}, true, ["sign", "verify"]);
             if (key.type !== "secret") return "wrong type";
             var exported = await crypto.subtle.exportKey("raw", key);
-            if (new Uint8Array(exported).length !== 32) return "wrong length";
+            if (new Uint8Array(exported).length !== 64) return "wrong length: " + new Uint8Array(exported).length;
             return "ok";
         }
     "#), "test", "[]").unwrap();

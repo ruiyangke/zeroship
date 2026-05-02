@@ -46,6 +46,74 @@ impl From<EnforceRangeU64> for u64 {
     }
 }
 
+/// WebIDL `[EnforceRange] unsigned long`. Companion to
+/// [`EnforceRangeU64`] for the 32-bit IDL type. Range is `[0, 2^32 - 1]`.
+///
+/// Used by the WebCrypto IDL surface (`Pbkdf2Params.iterations`,
+/// `RsaKeyGenParams.modulusLength`, `subtle.deriveBits.length`,
+/// `AesCtrParams.length`). See `docs/proposals/webcrypto-native.md` D-20.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnforceRangeU32(pub u32);
+
+impl EnforceRangeU32 {
+    pub fn new(v: u32) -> Self {
+        EnforceRangeU32(v)
+    }
+}
+
+impl From<EnforceRangeU32> for u32 {
+    fn from(v: EnforceRangeU32) -> Self {
+        v.0
+    }
+}
+
+/// Read a JS value as `[EnforceRange] unsigned long`.
+///
+/// Returns `Err(TypeError)` for `NaN`, `±Infinity`, negative finite numbers,
+/// non-integer (fractional) values, and finite numbers `> 2^32 - 1`.
+/// Otherwise the integer part (truncated towards zero) is returned.
+pub fn read_enforce_range_u32(
+    scope: &mut v8::PinScope,
+    val: v8::Local<v8::Value>,
+) -> Result<EnforceRangeU32, OpError> {
+    let n = match val.number_value(scope) {
+        Some(n) => n,
+        None => {
+            return Err(OpError::type_error(
+                "[EnforceRange] unsigned long: failed to convert to number",
+            ));
+        }
+    };
+
+    if !n.is_finite() {
+        return Err(OpError::type_error(
+            "[EnforceRange] unsigned long: value is not a finite number",
+        ));
+    }
+
+    if n < 0.0 {
+        return Err(OpError::type_error(
+            "[EnforceRange] unsigned long: value is negative",
+        ));
+    }
+
+    if n > u32::MAX as f64 {
+        return Err(OpError::type_error(
+            "[EnforceRange] unsigned long: value exceeds 2^32 - 1",
+        ));
+    }
+
+    // WebIDL §3.2.10 "ConvertToInt" with [EnforceRange]: integer part
+    // (truncated towards zero); reject if the JS value was non-integer.
+    if n.trunc() != n {
+        return Err(OpError::type_error(
+            "[EnforceRange] unsigned long: value is not an integer",
+        ));
+    }
+
+    Ok(EnforceRangeU32(n as u32))
+}
+
 /// Read a JS value as `[EnforceRange] unsigned long long`.
 ///
 /// Returns `Err(TypeError)` for:

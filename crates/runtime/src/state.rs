@@ -36,6 +36,16 @@ pub enum OpErrorKind {
     RangeError,
     /// Generic `Error`
     Error,
+    /// A WebIDL `DOMException`. The `&'static str` carries the spec
+    /// `name` (e.g. `"OperationError"`, `"DataError"`,
+    /// `"NotSupportedError"`, `"InvalidAccessError"`,
+    /// `"QuotaExceededError"`, `"TypeMismatchError"`, `"DataCloneError"`,
+    /// `"SyntaxError"`). The macro's `gen_throw_error` arm constructs a
+    /// real `globalThis.DOMException(message, name)` instance via the
+    /// native `DOMException` class installed in `setup_globals`.
+    ///
+    /// Per `docs/proposals/webcrypto-native.md` D-6.
+    DomException(&'static str),
 }
 
 /// An error from a V8 op.
@@ -63,6 +73,19 @@ impl OpError {
     pub fn error(msg: impl Into<String>) -> Self {
         Self {
             kind: OpErrorKind::Error,
+            message: msg.into(),
+        }
+    }
+
+    /// Construct a `DOMException`-flavoured `OpError`. The `name`
+    /// argument must be a spec DOMException name (e.g.
+    /// `"OperationError"`, `"DataError"`, `"NotSupportedError"`,
+    /// `"InvalidAccessError"`, `"QuotaExceededError"`,
+    /// `"TypeMismatchError"`, `"DataCloneError"`, `"SyntaxError"`).
+    /// The macro emits a `new DOMException(msg, name)` instance.
+    pub fn dom(name: &'static str, msg: impl Into<String>) -> Self {
+        Self {
+            kind: OpErrorKind::DomException(name),
             message: msg.into(),
         }
     }

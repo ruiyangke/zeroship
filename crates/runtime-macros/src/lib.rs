@@ -276,6 +276,15 @@ pub(crate) fn is_enforce_range_u64(ty: &Type) -> bool {
     type_ident(ty).as_deref() == Some("EnforceRangeU64")
 }
 
+/// Check if type is the `EnforceRangeU32` newtype — companion to
+/// `EnforceRangeU64` for WebIDL `[EnforceRange] unsigned long`.
+/// Used by the WebCrypto IDL surface (Pbkdf2Params.iterations,
+/// RsaKeyGenParams.modulusLength, deriveBits.length, etc.).
+/// See `docs/proposals/webcrypto-native.md` D-20.
+pub(crate) fn is_enforce_range_u32(ty: &Type) -> bool {
+    type_ident(ty).as_deref() == Some("EnforceRangeU32")
+}
+
 /// Check if type is the `USVString` newtype from
 /// `zeroship_runtime::url_native::helpers`. Used for WebIDL USVString
 /// args (URL.* setters, URLSearchParams names/values). Conversion
@@ -437,6 +446,31 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
     if is_enforce_range_u64(ty) {
         return quote! {
             let #name = match ::zeroship_runtime::enforce_range::read_enforce_range_u64(
+                scope,
+                args.get(#idx),
+            ) {
+                Ok(__v) => __v,
+                Err(__err) => {
+                    let __msg = v8::String::new(scope, &__err.message).unwrap();
+                    let __exc = match __err.kind {
+                        ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
+                        ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+                        _ => v8::Exception::error(scope, __msg),
+                    };
+                    scope.throw_exception(__exc);
+                    return;
+                }
+            };
+        };
+    }
+
+    // EnforceRangeU32 → WebIDL [EnforceRange] unsigned long. Throws
+    // TypeError for NaN, ±∞, negative, non-integer, and values > 2^32-1.
+    // Used by the WebCrypto IDL surface (Pbkdf2Params.iterations etc.) —
+    // see `docs/proposals/webcrypto-native.md` D-20.
+    if is_enforce_range_u32(ty) {
+        return quote! {
+            let #name = match ::zeroship_runtime::enforce_range::read_enforce_range_u32(
                 scope,
                 args.get(#idx),
             ) {
@@ -670,12 +704,23 @@ fn gen_vec_vec_u8_set() -> TokenStream2 {
 }
 
 /// Generate error throw from `OpError`.
+///
+/// `OpErrorKind::DomException(name)` constructs a real DOMException
+/// instance via `new globalThis.DOMException(message, name)`. The
+/// native DOMException class is installed during `setup_globals` (see
+/// `crates/runtime/src/dom/exception.rs`); the constructor lookup is
+/// per-throw because callers of this codegen don't always have the
+/// active class function in scope. Per `docs/proposals/webcrypto-native.md`
+/// D-6.
 fn gen_throw_error() -> TokenStream2 {
     quote! {
         let __msg = v8::String::new(scope, &__err.message).unwrap();
-        let __exc = match __err.kind {
+        let __exc: v8::Local<v8::Value> = match __err.kind {
             ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
             ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+            ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
+                ::zeroship_runtime::dom::exception::build(scope, &__err.message, __name).into()
+            }
             _ => v8::Exception::error(scope, __msg),
         };
         scope.throw_exception(__exc);
