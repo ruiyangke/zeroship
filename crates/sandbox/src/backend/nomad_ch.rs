@@ -440,6 +440,7 @@ impl NomadCHBackend {
             self.cfg.nomad_ch.nomad_addr.clone(),
             job_id.clone(),
             host_dir.clone(),
+            sandbox_id,
         );
 
         let result = self
@@ -1177,6 +1178,12 @@ struct CreateGuard {
     nomad_addr: String,
     job_id: String,
     host_dir: PathBuf,
+    /// FM-B': sandbox_id is captured at guard construction so the
+    /// detached cleanup task can tag its log line with it. Without
+    /// this, an operator scanning logs for `sandbox=<uuid>` saw the
+    /// `create: error step=…` line but no matching vm_index release,
+    /// making a failed-create cleanup look like a leak.
+    sandbox_id: Uuid,
     pub vm_index: Option<u16>,
     pub host_dir_created: bool,
     pub job_submitted: bool,
@@ -1189,12 +1196,14 @@ impl CreateGuard {
         nomad_addr: String,
         job_id: String,
         host_dir: PathBuf,
+        sandbox_id: Uuid,
     ) -> Self {
         Self {
             vm_index_allocator,
             nomad_addr,
             job_id,
             host_dir,
+            sandbox_id,
             vm_index: None,
             host_dir_created: false,
             job_submitted: false,
@@ -1226,6 +1235,7 @@ impl Drop for CreateGuard {
         let host_dir = std::mem::take(&mut self.host_dir);
         let vm_index_allocator = self.vm_index_allocator.clone();
         let vm_index_opt = self.vm_index.take();
+        let sandbox_id = self.sandbox_id;
 
         // Captures for the runtime-down (no-spawn) fallback branch
         // below. The clones inside the spawn closure are separate
@@ -1287,19 +1297,34 @@ impl Drop for CreateGuard {
                     // 2. vm_index release — only on confirmed purge.
                     //    Same policy as the `stop` path (lines
                     //    644-649 of the file's stable doc-comment).
+                    //
+                    //    FM-B': mirror the `stop()` path's
+                    //    `vm_index: release=<n>` log line so an
+                    //    operator scanning for "where did the index
+                    //    go?" finds the cleanup-tail event. Tagged
+                    //    `reason=create-failure-cleanup` so it's
+                    //    distinguishable from the normal stop()
+                    //    path; previously the detached task did the
+                    //    release silently and a failed create looked
+                    //    like a leak.
                     if purge_ok {
                         if let Some(i) = vm_index_opt {
                             vm_index_allocator
                                 .lock()
                                 .unwrap_or_else(|p| p.into_inner())
                                 .release(i);
+                            eprintln!(
+                                "[sandbox/nomad-ch] vm_index: release={i} \
+                                 reason=create-failure-cleanup \
+                                 sandbox={sandbox_id} job={job_id}"
+                            );
                         }
                     } else if let Some(i) = vm_index_opt {
                         eprintln!(
-                            "[sandbox/nomad-ch] guard cleanup: leaking \
-                             vm_index={i} for job {job_id} (Nomad purge \
-                             not confirmed; orphan-prune will reclaim on \
-                             next boot)"
+                            "[sandbox/nomad-ch] vm_index: leak={i} \
+                             reason=create-failure-cleanup-purge-failed \
+                             sandbox={sandbox_id} job={job_id} \
+                             (orphan-prune will reclaim on next boot)"
                         );
                     }
 
@@ -1363,6 +1388,11 @@ impl Drop for CreateGuard {
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .release(i);
+                eprintln!(
+                    "[sandbox/nomad-ch] vm_index: release={i} \
+                     reason=create-failure-cleanup-runtime-down \
+                     sandbox={sandbox_id} job={job_id_for_fallback}"
+                );
             }
             eprintln!(
                 "[sandbox/nomad-ch] guard cleanup: compio::spawn failed (no \
@@ -2536,6 +2566,7 @@ mod tests {
                 "http://127.0.0.1:1".to_string(), // unreachable
                 "zsbx-test-no-purge".to_string(),
                 PathBuf::from("/tmp/zsbx-c1-test"),
+                Uuid::nil(),
             );
             g.vm_index = Some(allocated);
             g.job_submitted = false; // skip http_delete entirely
@@ -2592,6 +2623,7 @@ mod tests {
                 "http://127.0.0.1:1".to_string(),
                 "zsbx-test-leak".to_string(),
                 PathBuf::from("/tmp/zsbx-c1-leak"),
+                Uuid::nil(),
             );
             g.vm_index = Some(allocated);
             g.job_submitted = true;
