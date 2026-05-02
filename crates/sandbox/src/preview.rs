@@ -96,10 +96,20 @@ pub enum Principal {
 
 /// `ANY /sandboxes/{id}/preview/{port}/{path*}` — controller-side
 /// preview forwarder.
+///
+/// NOTE: Path params are split out of `req.path()` directly rather than
+/// through the ntex `Path<…>` extractor or `match_info().get(...)`.
+/// ntex-router 1.0.0 stores the tail-glob's `(start, end)` byte-indices
+/// one-past-end when the `{path}*` capture is empty (e.g. the bare-root
+/// URL `/sandboxes/{id}/preview/{port}/` after the trailing slash), so
+/// any access through the router's path machinery — `Path<(_, u16, _)>`
+/// extractor in `PathIter::next` (path.rs:185) AND `Path::get` itself
+/// (path.rs:128) — panics with "byte index N is out of bounds." That
+/// makes the canonical browser entry URL a worker-DoS vector. Splitting
+/// `req.path()` ourselves sidesteps the router's index math entirely.
 pub async fn preview_proxy(
     req: HttpRequest,
     state: State,
-    path: web::types::Path<(String, u16, String)>,
     body: Bytes,
 ) -> HttpResponse {
     // 1. Body cap. The whole body has to be buffered to compute its
@@ -109,7 +119,31 @@ pub async fn preview_proxy(
         return uniform_413();
     }
 
-    let (sandbox_id_str, port, sub_path) = path.into_inner();
+    // Split `/sandboxes/{id}/preview/{port}/{path*}` from the raw URL
+    // path. ntex has already verified the route matches this pattern,
+    // so the prefix and slot count are known-good — but the tail may
+    // be empty.
+    let raw = req.path();
+    let stripped = match raw.strip_prefix("/sandboxes/") {
+        Some(s) => s,
+        None => return uniform_404(),
+    };
+    // `id/preview/port/...` — split on `/` with bounded splits so that
+    // the tail keeps any embedded slashes verbatim.
+    let mut parts = stripped.splitn(4, '/');
+    let sandbox_id_str = parts.next().unwrap_or("").to_string();
+    let preview_kw = parts.next().unwrap_or("");
+    let port_str = parts.next().unwrap_or("");
+    let sub_path = parts.next().unwrap_or("").to_string();
+    if preview_kw != "preview" {
+        return uniform_404();
+    }
+    let port: u16 = match port_str.parse() {
+        Ok(p) => p,
+        // Malformed port → uniform 404 (no oracle on which segment was
+        // bad; treat the whole route like an unknown resource).
+        Err(_) => return uniform_404(),
+    };
     let sandbox_id_opt: Option<Uuid> = sandbox_id_str.parse().ok();
 
     // 2. Cookie-conversion: if the request carries `?t=<token>`, this
