@@ -49,6 +49,9 @@
 //!   `compio::runtime::spawn_blocking` so the ntex worker stays
 //!   responsive.
 
+use std::sync::Arc;
+
+use ed25519_dalek::SigningKey;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -57,6 +60,45 @@ use crate::config::SandboxConfig;
 pub mod docker;
 pub mod k8s;
 pub mod nomad_ch;
+
+/// Authentication material the controller uses to drive the in-VM
+/// agent. Lifted out of each backend's per-sandbox record so handlers
+/// (preview proxy, future signed-RPC dispatch) can call into the
+/// agent without knowing which backend hosts the sandbox.
+///
+/// **What lives here, and why:**
+/// - `signing_key`: the controller-side per-sandbox Ed25519 SK. The
+///   agent inside the VM holds only the matching verifying key, mounted
+///   read-only at `/run/keys/controller-pubkey`. The SK never leaves
+///   this process.
+/// - `agent_url`: where to reach the agent. NomadCh derives it from
+///   `vm_index` (`http://10.99.<100+idx>.2:7777`); K8s uses Pod-IP or
+///   the port-forward loopback; Docker uses the container's bridge IP.
+/// - `pubkey_fp`: stable short fingerprint of the verifying key
+///   (`sig::pubkey_fingerprint(...)` — first 8 bytes of SHA-256 over
+///   the 32-byte pubkey, hex-encoded → 16 ASCII chars). Used by the
+///   controller's restart-time `/version` rebind probe (§ II.5 of
+///   docs/proposals/sandbox-preview-urls.md) to confirm the agent at
+///   `agent_url` is the same agent the controller minted keys for.
+///
+/// **Debug discipline.** The signing key is private; this struct's
+/// hand-rolled `Debug` impl elides it. Do NOT `#[derive(Debug)]`.
+#[derive(Clone)]
+pub struct SandboxAuth {
+    pub signing_key: Arc<SigningKey>,
+    pub agent_url: String,
+    pub pubkey_fp: String,
+}
+
+impl std::fmt::Debug for SandboxAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // signing_key intentionally omitted — see struct doc-comment.
+        f.debug_struct("SandboxAuth")
+            .field("agent_url", &self.agent_url)
+            .field("pubkey_fp", &self.pubkey_fp)
+            .finish_non_exhaustive()
+    }
+}
 
 /// Unified exec result — same shape regardless of backend so handlers
 /// don't branch.
@@ -250,6 +292,25 @@ impl Backend {
             Self::Docker(b) => b.file_tree(session_id).await,
             Self::K8s(b) => b.file_tree(session_id).await,
             Self::NomadCh(b) => b.file_tree(session_id).await,
+        }
+    }
+
+    /// Lift the per-sandbox authentication material out of the backend
+    /// so it can be used uniformly by the preview proxy and the
+    /// sealed-record persistence layer.
+    ///
+    /// Returns `Err` for sandboxes the backend doesn't know about
+    /// (e.g. a stale sandbox-id from a controller-restart race).
+    /// Returns `Err` from the Docker backend if its agent-launch
+    /// path was disabled (ed25519 keys are not minted).
+    ///
+    /// **Cheap to call.** Each backend stores `signing_key` as
+    /// `Arc<SigningKey>` and clones the Arc, not the secret bytes.
+    pub async fn session_auth(&self, sandbox_id: Uuid) -> Result<SandboxAuth, String> {
+        match self {
+            Self::Docker(b) => b.session_auth(sandbox_id).await,
+            Self::K8s(b) => b.session_auth(sandbox_id).await,
+            Self::NomadCh(b) => b.session_auth(sandbox_id).await,
         }
     }
 }

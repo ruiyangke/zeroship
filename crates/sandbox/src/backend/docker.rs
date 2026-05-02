@@ -196,6 +196,33 @@ impl DockerBackend {
             .map(|s| s.workspace_path.clone())
             .ok_or_else(|| "sandbox not found in docker backend".to_string())
     }
+
+    /// Lift the per-sandbox auth material into a backend-agnostic
+    /// envelope. See `super::SandboxAuth` for the contract.
+    ///
+    /// **Phase 0 status (intentional gap).** The Docker backend
+    /// historically uses `docker exec` for shell commands and
+    /// host-path file CRUD — no agent process inside the container,
+    /// no per-container Ed25519 keypair. Until the agent-launch path
+    /// lands (next commit on this branch), `session_auth` returns an
+    /// `Err` so the preview-proxy / sealed-record paths cleanly
+    /// degrade to "Docker doesn't currently support previews."
+    pub async fn session_auth(
+        &self,
+        sandbox_id: Uuid,
+    ) -> Result<super::SandboxAuth, String> {
+        // Distinguish "no such sandbox" from "no agent path on docker
+        // yet" so the controller's audit log says the right thing.
+        let guard = self.state.read().unwrap();
+        if !guard.contains_key(&sandbox_id) {
+            return Err("sandbox not found in docker backend".to_string());
+        }
+        Err(
+            "docker backend: agent-launch path not yet enabled \
+             (preview / signed-RPC unavailable on this backend)"
+                .to_string(),
+        )
+    }
 }
 
 // ─── docker CLI shell-outs ──────────────────────────────────────
@@ -381,5 +408,84 @@ mod tests {
     fn short_id_shortens() {
         assert_eq!(super::short_id("abcdef0123456789"), "abcdef012345");
         assert_eq!(super::short_id("short"), "short");
+    }
+
+    /// Phase-0: Docker has no agent-launch path yet, so
+    /// `session_auth` cleanly errors instead of silently misbehaving.
+    /// Distinguishes "no such sandbox" from "no agent path on docker"
+    /// so the controller's audit log says the right thing.
+    #[compio::test]
+    async fn session_auth_reports_no_agent_path() {
+        use super::DockerBackend;
+        use crate::config::{ApiToken, K8sConfig, NomadCHConfig, SandboxConfig};
+        use std::path::PathBuf;
+        use uuid::Uuid;
+
+        let cfg = SandboxConfig {
+            port: 9091,
+            token: ApiToken::new("x"),
+            backend: "docker".into(),
+            image: "alpine".into(),
+            workspace_root: PathBuf::from("/tmp/zsbx-test"),
+            network: "bridge".into(),
+            memory_mb: 256,
+            cpus: 1.0,
+            idle_timeout_secs: 1800,
+            max_lifetime_secs: 28800,
+            auto_pull: false,
+            k8s: K8sConfig {
+                namespace: "default".into(),
+                image: "i".into(),
+                runtime_class: "kvm-sandbox".into(),
+                ready_timeout_secs: 120,
+                use_port_forward: false,
+                port_forward_start: 18000,
+                user_home_size: "5Gi".into(),
+                user_home_storage_class: None,
+                startup_orphan_cleanup: false,
+            },
+            nomad_ch: NomadCHConfig {
+                nomad_addr: "http://127.0.0.1:4646".into(),
+                datacenter: "dc1".into(),
+                wrapper_path: PathBuf::from("/etc/zeroship/nomad-vm-wrapper.sh"),
+                runtime_dir: PathBuf::from("/var/lib/zeroship/ch"),
+                host_state_dir: PathBuf::from("/var/zeroship/ch"),
+                user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
+                vm_index_floor: 1,
+                vm_index_ceil: 155,
+                alloc_running_timeout_secs: 60,
+                agent_livez_timeout_secs: 30,
+                host_fence_timeout_secs: 30,
+                startup_orphan_cleanup: false,
+                subnet_second_octet: 99,
+            },
+            create_retry_max: 2,
+            create_retry_total_timeout_secs: 90,
+        };
+        let backend = DockerBackend::new(cfg);
+        let id = Uuid::now_v7();
+
+        // Unknown sandbox → "not found".
+        let err = backend.session_auth(id).await.expect_err("missing");
+        assert!(
+            err.contains("not found"),
+            "expected 'not found' for unknown id; got {err:?}"
+        );
+
+        // Insert a fake record (workspace path doesn't have to exist
+        // for the read path).
+        backend.state.write().unwrap().insert(
+            id,
+            super::DockerSandbox {
+                container_id: "abc123".into(),
+                container_name: "zsbx-test".into(),
+                workspace_path: PathBuf::from("/tmp/zsbx-test/p"),
+            },
+        );
+        let err = backend.session_auth(id).await.expect_err("no agent path");
+        assert!(
+            err.contains("agent-launch path not yet enabled"),
+            "expected the no-agent-path error message; got {err:?}"
+        );
     }
 }

@@ -664,6 +664,24 @@ impl K8sBackend {
         // drop).
         Ok((s.signing_key.clone(), s.agent_url.clone()))
     }
+
+    /// Lift the per-sandbox auth material into a backend-agnostic
+    /// envelope. See `super::SandboxAuth` for the contract.
+    pub async fn session_auth(
+        &self,
+        sandbox_id: Uuid,
+    ) -> Result<super::SandboxAuth, String> {
+        let guard = self.state.read().unwrap();
+        let s = guard
+            .get(&sandbox_id)
+            .ok_or_else(|| "sandbox not found in k8s backend".to_string())?;
+        let pubkey_fp = sig::pubkey_fingerprint(&s.signing_key.verifying_key());
+        Ok(super::SandboxAuth {
+            signing_key: s.signing_key.clone(),
+            agent_url: s.agent_url.clone(),
+            pubkey_fp,
+        })
+    }
 }
 
 // ─── create-time bookkeeping ────────────────────────────────────

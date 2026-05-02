@@ -1098,6 +1098,24 @@ impl NomadCHBackend {
         Ok((s.signing_key.clone(), s.agent_url.clone()))
     }
 
+    /// Lift the per-sandbox auth material into a backend-agnostic
+    /// envelope. See `super::SandboxAuth` for the contract.
+    pub async fn session_auth(
+        &self,
+        sandbox_id: Uuid,
+    ) -> Result<super::SandboxAuth, String> {
+        let guard = self.state.read().unwrap_or_else(|p| p.into_inner());
+        let s = guard
+            .get(&sandbox_id)
+            .ok_or_else(|| "sandbox not found in nomad-ch backend".to_string())?;
+        let pubkey_fp = sig::pubkey_fingerprint(&s.signing_key.verifying_key());
+        Ok(super::SandboxAuth {
+            signing_key: s.signing_key.clone(),
+            agent_url: s.agent_url.clone(),
+            pubkey_fp,
+        })
+    }
+
     /// Build a short prefix for agent-error log lines so a fleet-
     /// wide log search can pivot on sandbox / vm_index / job (M1).
     /// Format: `[sandbox=<id> vm_index=<idx> job=<job>]`. Returns
@@ -3316,6 +3334,50 @@ mod tests {
             err.contains("401") || err.contains("different controller pubkey"),
             "FM-A regression: persistent-401 timeout did not surface \
              'verifying with a different controller pubkey'; got {err:?}"
+        );
+    }
+
+    /// Phase-0 surface check (preview-URL design § II.0): the
+    /// nomad-ch backend's `session_auth` lifts `signing_key`,
+    /// `agent_url`, and a derived `pubkey_fp` into the
+    /// backend-agnostic `SandboxAuth` envelope. Missing-id surfaces
+    /// as `Err`. This is what the preview proxy + sealed-record
+    /// persistence layer call.
+    #[compio::test]
+    async fn session_auth_returns_lifted_record() {
+        let backend = NomadCHBackend::new(make_cfg()).expect("new");
+
+        // Hand-insert a sandbox record with a known signing key to
+        // bypass the full Nomad-create path (this is the standard
+        // unit-test trick used elsewhere in this module).
+        let sk = make_sk();
+        let expected_fp = sig::pubkey_fingerprint(&sk.verifying_key());
+        let id = Uuid::now_v7();
+        let agent_url = "http://10.99.107.2:7777".to_string();
+        backend.state.write().unwrap().insert(
+            id,
+            NomadChSandbox {
+                user_id: "alice".into(),
+                job_id: "zsbx-test".into(),
+                vm_index: 7,
+                host_dir: PathBuf::from("/tmp/zsbx-test"),
+                agent_url: agent_url.clone(),
+                signing_key: sk.clone(),
+            },
+        );
+
+        let auth = backend.session_auth(id).await.expect("session_auth");
+        assert_eq!(auth.agent_url, agent_url);
+        assert_eq!(auth.pubkey_fp, expected_fp);
+        // Pointer-equal Arc clone: no secret-bytes copy.
+        assert!(Arc::ptr_eq(&auth.signing_key, &sk));
+
+        // Unknown id surfaces a clear Err.
+        let other = Uuid::now_v7();
+        let err = backend.session_auth(other).await.expect_err("missing");
+        assert!(
+            err.contains("not found"),
+            "Err must mention not-found; got {err:?}"
         );
     }
 }
