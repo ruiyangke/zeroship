@@ -16,6 +16,7 @@ pub mod handlers;
 pub mod persist;
 pub mod preview;
 pub mod preview_share;
+pub mod preview_share_handlers;
 pub mod preview_ws;
 pub mod registry;
 pub mod restore;
@@ -26,6 +27,7 @@ use std::time::Duration;
 use crate::backend::Backend;
 use crate::config::SandboxConfig;
 use crate::persist::Persistence;
+use crate::preview_share_handlers::MintRateLimiter;
 use crate::registry::SandboxRegistry;
 
 /// Shared application state passed to every handler.
@@ -34,6 +36,10 @@ pub struct AppState {
     pub config: SandboxConfig,
     pub sandboxes: SandboxRegistry,
     pub backend: Backend,
+    /// Phase-3 mint-side rate limiter. `Some` in production; `None`
+    /// for tests that build `AppState` directly without
+    /// `from_config`. Handlers that consume it `expect()` on `Some`.
+    pub mint_rate_limiter: Option<MintRateLimiter>,
 }
 
 impl AppState {
@@ -108,6 +114,7 @@ impl AppState {
             config,
             sandboxes: registry,
             backend,
+            mint_rate_limiter: Some(MintRateLimiter::new()),
         });
         // Background re-probe so /readyz reflects current backend
         // state. Without this, the `is_healthy()` flag is set once

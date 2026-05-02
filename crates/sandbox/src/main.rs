@@ -10,7 +10,9 @@
 //! for the full architecture.
 
 use ntex::web;
-use zeroship_sandbox::{handlers, preview, preview_ws, registry, AppState};
+use zeroship_sandbox::{
+    handlers, preview, preview_share_handlers, preview_ws, registry, AppState,
+};
 use zeroship_sandbox::config::SandboxConfig;
 
 #[global_allocator]
@@ -179,6 +181,24 @@ async fn main() -> std::io::Result<()> {
                     .route(web::get().to(handlers::read_file))
                     .route(web::put().to(handlers::write_file))
                     .route(web::delete().to(handlers::delete_file)),
+            )
+            // Phase-3 share-token mint/list/revoke (§ III). The
+            // `/share` resource is registered BEFORE the catch-all
+            // `/preview/{port}/{path:.*}` so ntex matches the more
+            // specific routes first.
+            .service(
+                web::resource("/sandboxes/{id}/preview/{port}/share")
+                    .route(web::post().to(preview_share_handlers::mint_share))
+                    .route(web::get().to(preview_share_handlers::list_share))
+                    .route(
+                        web::delete().to(preview_share_handlers::revoke_all_share),
+                    ),
+            )
+            .service(
+                web::resource(
+                    "/sandboxes/{id}/preview/{port}/share/{token_id}",
+                )
+                .route(web::delete().to(preview_share_handlers::revoke_one_share)),
             )
             // Preview proxy (§ II.2). Creator-authed; signed v1.1
             // forward to the agent at /proxy/{port}/{path*}. Body cap

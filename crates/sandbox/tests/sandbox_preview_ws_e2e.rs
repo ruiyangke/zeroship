@@ -231,6 +231,7 @@ fn make_state(
         config: cfg,
         sandboxes: registry,
         backend,
+        mint_rate_limiter: Some(zeroship_sandbox::preview_share_handlers::MintRateLimiter::new()),
     });
     (state, sandbox_id)
 }
