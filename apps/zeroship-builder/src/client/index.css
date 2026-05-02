@@ -62,3 +62,29 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ─── Global focus-visible ring (WCAG 2.4.7) ─────────────────────
+   Every interactive element gets a tomato outline on keyboard focus
+   without disturbing pointer interaction. Components can override
+   per-instance via Tailwind `focus:outline-*` if they want a
+   different placement (e.g. round buttons). We use `:focus-visible`
+   so mouse clicks don't paint a ring.
+
+   `outline-offset: 2px` keeps the ring clear of the element's
+   border. The same 2px tomato outline is what Tailwind classes
+   `focus:outline-2 focus:outline-tomato focus:outline-offset-2`
+   reproduce inline — so explicit per-component classes layer
+   cleanly on top.                                                  */
+:focus-visible {
+  outline: 2px solid var(--color-tomato);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+/* Form inputs get the ring from their `focus:border-ink` class
+   already; suppress the default ring there to avoid the double-line
+   look that breaks the editorial baseline. */
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
+}

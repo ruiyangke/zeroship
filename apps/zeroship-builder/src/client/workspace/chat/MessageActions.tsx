@@ -103,6 +103,7 @@ function ActionButton({
       type="button"
       data-testid={testid}
       title={title}
+      aria-label={title}
       onClick={onClick}
       className={cn(
         "font-sans text-[10px] uppercase tracking-wider text-pencil",
