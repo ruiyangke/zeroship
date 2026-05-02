@@ -43,6 +43,14 @@ fn rpc(base, method, body) {
         .expect_status(200)
 }
 
+// Raw baseline: hit the nginx echo target directly with a plain GET.
+// Independent of the runtime under test — every slot benchmarks the
+// same nginx, so any slot's reading establishes the wire upper-bound.
+// The fetchEcho / httpGet ratio (runtime / nginxRaw) is the real
+// "fetch overhead" signal. Without this, a 132K fetchEcho number is
+// hard to read: is fetch slow, or is nginx the bottleneck?
+scenario("nginxRaw", |s| { s.step(GET(`${echo_url}/`).expect_status(200)); });
+
 // No-arg procedures: empty `{}` body. The dispatcher unwraps to
 // `undefined`, which all the no-arg fixtures ignore.
 scenario("ping",         |s| { s.step(rpc(base, "ping",         "{}")); });
