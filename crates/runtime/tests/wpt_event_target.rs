@@ -326,19 +326,19 @@ fn parse_results(json: &str) -> Vec<TestResult> {
 const WPT_FILES: &[(&str, &str)] = &[
     (
         "AddEventListenerOptions-once",
-        include_str!("wpt/dom/events/AddEventListenerOptions-once.any.js"),
+        include_str!("../../../tests/wpt/dom/events/AddEventListenerOptions-once.any.js"),
     ),
     (
         "AddEventListenerOptions-passive",
-        include_str!("wpt/dom/events/AddEventListenerOptions-passive.any.js"),
+        include_str!("../../../tests/wpt/dom/events/AddEventListenerOptions-passive.any.js"),
     ),
     (
         "AddEventListenerOptions-signal",
-        include_str!("wpt/dom/events/AddEventListenerOptions-signal.any.js"),
+        include_str!("../../../tests/wpt/dom/events/AddEventListenerOptions-signal.any.js"),
     ),
     (
         "Event-constructors",
-        include_str!("wpt/dom/events/Event-constructors.any.js"),
+        include_str!("../../../tests/wpt/dom/events/Event-constructors.any.js"),
     ),
 ];
 

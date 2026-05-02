@@ -466,9 +466,9 @@ fn abort_signal_dependent(name: &str, err: &str) -> bool {
         || name.contains("patched-global")
 }
 
-const TEST_UTILS: &str = include_str!("wpt/streams/resources/test-utils.js");
-const RECORDING_STREAMS: &str = include_str!("wpt/streams/resources/recording-streams.js");
-const RS_UTILS: &str = include_str!("wpt/streams/resources/rs-utils.js");
+const TEST_UTILS: &str = include_str!("../../../tests/wpt/streams/resources/test-utils.js");
+const RECORDING_STREAMS: &str = include_str!("../../../tests/wpt/streams/resources/recording-streams.js");
+const RS_UTILS: &str = include_str!("../../../tests/wpt/streams/resources/rs-utils.js");
 
 const WPT_FILES: &[(&str, &[&str])] = &[
     (
@@ -476,7 +476,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
         &[
             TEST_UTILS,
             RS_UTILS,
-            include_str!("wpt/streams/transform-streams/general.any.js"),
+            include_str!("../../../tests/wpt/streams/transform-streams/general.any.js"),
         ],
     ),
     (
@@ -484,7 +484,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
         &[
             TEST_UTILS,
             RECORDING_STREAMS,
-            include_str!("wpt/streams/transform-streams/backpressure.any.js"),
+            include_str!("../../../tests/wpt/streams/transform-streams/backpressure.any.js"),
         ],
     ),
     (
@@ -492,7 +492,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
         &[
             TEST_UTILS,
             RECORDING_STREAMS,
-            include_str!("wpt/streams/transform-streams/errors.any.js"),
+            include_str!("../../../tests/wpt/streams/transform-streams/errors.any.js"),
         ],
     ),
     (
@@ -500,7 +500,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
         &[
             TEST_UTILS,
             RECORDING_STREAMS,
-            include_str!("wpt/streams/transform-streams/strategies.any.js"),
+            include_str!("../../../tests/wpt/streams/transform-streams/strategies.any.js"),
         ],
     ),
 ];

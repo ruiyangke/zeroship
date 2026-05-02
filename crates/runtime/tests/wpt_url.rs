@@ -195,10 +195,10 @@ const TESTHARNESS_SHIM: &str = r#"
 
 // Pre-loaded JSON fixtures for the data-driven tests. Embedded so the
 // shim's stub fetch() can return them synchronously.
-const URLTESTDATA_JSON: &str = include_str!("wpt/url/resources/urltestdata.json");
+const URLTESTDATA_JSON: &str = include_str!("../../../tests/wpt/url/resources/urltestdata.json");
 const URLTESTDATA_JS_ONLY_JSON: &str =
-    include_str!("wpt/url/resources/urltestdata-javascript-only.json");
-const SETTERS_TESTS_JSON: &str = include_str!("wpt/url/resources/setters_tests.json");
+    include_str!("../../../tests/wpt/url/resources/urltestdata-javascript-only.json");
+const SETTERS_TESTS_JSON: &str = include_str!("../../../tests/wpt/url/resources/setters_tests.json");
 
 #[derive(Debug, Clone)]
 enum Outcome {
@@ -372,77 +372,77 @@ struct WptFile {
 const WPT_FILES: &[WptFile] = &[
     WptFile {
         name: "urlsearchparams-append",
-        source: include_str!("wpt/url/urlsearchparams-append.any.js"),
+        source: include_str!("../../../tests/wpt/url/urlsearchparams-append.any.js"),
         fixture: &[],
     },
     WptFile {
         name: "urlsearchparams-delete",
-        source: include_str!("wpt/url/urlsearchparams-delete.any.js"),
+        source: include_str!("../../../tests/wpt/url/urlsearchparams-delete.any.js"),
         fixture: &[],
     },
     WptFile {
         name: "urlsearchparams-foreach",
-        source: include_str!("wpt/url/urlsearchparams-foreach.any.js"),
+        source: include_str!("../../../tests/wpt/url/urlsearchparams-foreach.any.js"),
         fixture: &[],
     },
     WptFile {
         name: "urlsearchparams-get",
-        source: include_str!("wpt/url/urlsearchparams-get.any.js"),
+        source: include_str!("../../../tests/wpt/url/urlsearchparams-get.any.js"),
         fixture: &[],
     },
     WptFile {
         name: "urlsearchparams-getall",
-        source: include_str!("wpt/url/urlsearchparams-getall.any.js"),
+        source: include_str!("../../../tests/wpt/url/urlsearchparams-getall.any.js"),
         fixture: &[],
     },
     WptFile {
         name: "urlsearchparams-has",
-        source: include_str!("wpt/url/urlsearchparams-has.any.js"),
+        source: include_str!("../../../tests/wpt/url/urlsearchparams-has.any.js"),
         fixture: &[],
     },
     WptFile {
         name: "urlsearchparams-set",
-        source: include_str!("wpt/url/urlsearchparams-set.any.js"),
+        source: include_str!("../../../tests/wpt/url/urlsearchparams-set.any.js"),
         fixture: &[],
     },
     WptFile {
         name: "urlsearchparams-size",
-        source: include_str!("wpt/url/urlsearchparams-size.any.js"),
+        source: include_str!("../../../tests/wpt/url/urlsearchparams-size.any.js"),
         fixture: &[],
     },
     WptFile {
         name: "urlsearchparams-sort",
-        source: include_str!("wpt/url/urlsearchparams-sort.any.js"),
+        source: include_str!("../../../tests/wpt/url/urlsearchparams-sort.any.js"),
         fixture: &[],
     },
     WptFile {
         name: "urlsearchparams-stringifier",
-        source: include_str!("wpt/url/urlsearchparams-stringifier.any.js"),
+        source: include_str!("../../../tests/wpt/url/urlsearchparams-stringifier.any.js"),
         fixture: &[],
     },
     WptFile {
         name: "urlsearchparams-constructor",
-        source: include_str!("wpt/url/urlsearchparams-constructor.any.js"),
+        source: include_str!("../../../tests/wpt/url/urlsearchparams-constructor.any.js"),
         fixture: &[],
     },
     WptFile {
         name: "url-tojson",
-        source: include_str!("wpt/url/url-tojson.any.js"),
+        source: include_str!("../../../tests/wpt/url/url-tojson.any.js"),
         fixture: &[],
     },
     WptFile {
         name: "url-statics-canparse",
-        source: include_str!("wpt/url/url-statics-canparse.any.js"),
+        source: include_str!("../../../tests/wpt/url/url-statics-canparse.any.js"),
         fixture: &[],
     },
     WptFile {
         name: "url-statics-parse",
-        source: include_str!("wpt/url/url-statics-parse.any.js"),
+        source: include_str!("../../../tests/wpt/url/url-statics-parse.any.js"),
         fixture: &[],
     },
     WptFile {
         name: "url-constructor",
-        source: include_str!("wpt/url/url-constructor.any.js"),
+        source: include_str!("../../../tests/wpt/url/url-constructor.any.js"),
         fixture: &[
             ("resources/urltestdata.json", URLTESTDATA_JSON),
             (
@@ -453,7 +453,7 @@ const WPT_FILES: &[WptFile] = &[
     },
     WptFile {
         name: "url-setters",
-        source: include_str!("wpt/url/url-setters.any.js"),
+        source: include_str!("../../../tests/wpt/url/url-setters.any.js"),
         fixture: &[("resources/setters_tests.json", SETTERS_TESTS_JSON)],
     },
 ];

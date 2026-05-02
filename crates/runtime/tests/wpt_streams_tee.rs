@@ -379,11 +379,11 @@ fn byte_tee_dependent(name: &str) -> bool {
         || name.contains("ReadableByteStream")
 }
 
-const TEST_UTILS: &str = include_str!("wpt/streams/resources/test-utils.js");
-const RECORDING_STREAMS: &str = include_str!("wpt/streams/resources/recording-streams.js");
-const RS_UTILS: &str = include_str!("wpt/streams/resources/rs-utils.js");
+const TEST_UTILS: &str = include_str!("../../../tests/wpt/streams/resources/test-utils.js");
+const RECORDING_STREAMS: &str = include_str!("../../../tests/wpt/streams/resources/recording-streams.js");
+const RS_UTILS: &str = include_str!("../../../tests/wpt/streams/resources/rs-utils.js");
 const RS_TEST_TEMPLATES: &str =
-    include_str!("wpt/streams/resources/rs-test-templates.js");
+    include_str!("../../../tests/wpt/streams/resources/rs-test-templates.js");
 
 const WPT_FILES: &[(&str, &[&str])] = &[(
     "tee",
@@ -392,7 +392,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[(
         RS_UTILS,
         RECORDING_STREAMS,
         RS_TEST_TEMPLATES,
-        include_str!("wpt/streams/readable-streams/tee.any.js"),
+        include_str!("../../../tests/wpt/streams/readable-streams/tee.any.js"),
     ],
 )];
 

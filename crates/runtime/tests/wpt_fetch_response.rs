@@ -455,23 +455,23 @@ fn parse_results(json: &str) -> Vec<TestResult> {
 const WPT_FILES: &[(&str, &[&str])] = &[
     (
         "response-init-001",
-        &[include_str!("wpt/fetch/api/response/response-init-001.any.js")],
+        &[include_str!("../../../tests/wpt/fetch/api/response/response-init-001.any.js")],
     ),
     (
         "response-init-002",
-        &[include_str!("wpt/fetch/api/response/response-init-002.any.js")],
+        &[include_str!("../../../tests/wpt/fetch/api/response/response-init-002.any.js")],
     ),
     (
         "response-static-error",
-        &[include_str!("wpt/fetch/api/response/response-static-error.any.js")],
+        &[include_str!("../../../tests/wpt/fetch/api/response/response-static-error.any.js")],
     ),
     (
         "response-static-redirect",
-        &[include_str!("wpt/fetch/api/response/response-static-redirect.any.js")],
+        &[include_str!("../../../tests/wpt/fetch/api/response/response-static-redirect.any.js")],
     ),
     (
         "response-static-json",
-        &[include_str!("wpt/fetch/api/response/response-static-json.any.js")],
+        &[include_str!("../../../tests/wpt/fetch/api/response/response-static-json.any.js")],
     ),
 ];
 

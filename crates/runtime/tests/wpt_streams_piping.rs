@@ -515,9 +515,9 @@ fn abort_signal_dependent(name: &str, err: &str) -> bool {
     name.contains("teed readable byte stream")
 }
 
-const TEST_UTILS: &str = include_str!("wpt/streams/resources/test-utils.js");
-const RECORDING_STREAMS: &str = include_str!("wpt/streams/resources/recording-streams.js");
-const RS_UTILS: &str = include_str!("wpt/streams/resources/rs-utils.js");
+const TEST_UTILS: &str = include_str!("../../../tests/wpt/streams/resources/test-utils.js");
+const RECORDING_STREAMS: &str = include_str!("../../../tests/wpt/streams/resources/recording-streams.js");
+const RS_UTILS: &str = include_str!("../../../tests/wpt/streams/resources/rs-utils.js");
 
 const WPT_FILES: &[(&str, &[&str])] = &[
     (
@@ -525,7 +525,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
         &[
             TEST_UTILS,
             RECORDING_STREAMS,
-            include_str!("wpt/streams/piping/general.any.js"),
+            include_str!("../../../tests/wpt/streams/piping/general.any.js"),
         ],
     ),
     (
@@ -534,7 +534,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
             TEST_UTILS,
             RS_UTILS,
             RECORDING_STREAMS,
-            include_str!("wpt/streams/piping/error-propagation-backward.any.js"),
+            include_str!("../../../tests/wpt/streams/piping/error-propagation-backward.any.js"),
         ],
     ),
     (
@@ -543,7 +543,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
             TEST_UTILS,
             RS_UTILS,
             RECORDING_STREAMS,
-            include_str!("wpt/streams/piping/error-propagation-forward.any.js"),
+            include_str!("../../../tests/wpt/streams/piping/error-propagation-forward.any.js"),
         ],
     ),
     (
@@ -551,7 +551,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
         &[
             TEST_UTILS,
             RECORDING_STREAMS,
-            include_str!("wpt/streams/piping/close-propagation-backward.any.js"),
+            include_str!("../../../tests/wpt/streams/piping/close-propagation-backward.any.js"),
         ],
     ),
     (
@@ -559,7 +559,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
         &[
             TEST_UTILS,
             RECORDING_STREAMS,
-            include_str!("wpt/streams/piping/close-propagation-forward.any.js"),
+            include_str!("../../../tests/wpt/streams/piping/close-propagation-forward.any.js"),
         ],
     ),
     (
@@ -567,7 +567,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
         &[
             TEST_UTILS,
             RECORDING_STREAMS,
-            include_str!("wpt/streams/piping/multiple-propagation.any.js"),
+            include_str!("../../../tests/wpt/streams/piping/multiple-propagation.any.js"),
         ],
     ),
     (
@@ -575,7 +575,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
         &[
             TEST_UTILS,
             RECORDING_STREAMS,
-            include_str!("wpt/streams/piping/abort.any.js"),
+            include_str!("../../../tests/wpt/streams/piping/abort.any.js"),
         ],
     ),
     (
@@ -583,7 +583,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
         &[
             TEST_UTILS,
             RECORDING_STREAMS,
-            include_str!("wpt/streams/piping/then-interception.any.js"),
+            include_str!("../../../tests/wpt/streams/piping/then-interception.any.js"),
         ],
     ),
 ];
