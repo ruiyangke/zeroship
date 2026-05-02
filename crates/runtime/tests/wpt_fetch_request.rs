@@ -530,6 +530,17 @@ const WPT_FILES: &[(&str, &[&str])] = &[
         "request-init-stream",
         &[include_str!("wpt/fetch/api/request/request-init-stream.any.js")],
     ),
+    // basic/historical.any.js exercises the Request / Response / Headers
+    // surface (no fetch() needed). Tests removed-API absence:
+    //   - Headers#getAll deleted (whatwg/fetch#979).
+    //   - Request#type deleted.
+    //   - Response#trailer deleted.
+    // Added here (rather than a basic-runner) since it's a pure IDL
+    // surface check that fits this runner's V8-only harness.
+    (
+        "historical",
+        &[include_str!("wpt/fetch/api/basic/historical.any.js")],
+    ),
 ];
 
 #[derive(Default, Debug)]

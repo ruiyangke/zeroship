@@ -462,17 +462,29 @@ fn request_constructor_callback(
     };
 
     // If init.body is missing AND input was a Request, inherit the
-    // input's body. Per Fetch §5.4 step 36: if input is a Request
-    // with a non-null disturbed body and init.body is missing, this
-    // is a TypeError. (When init.body IS provided, we ignore input's
-    // body entirely — the override path is fine even on a disturbed
-    // input.)
-    let inherited_body_value: Option<v8::Local<v8::Value>> = if body_v.is_none() && input_is_request {
+    // input's body. Per Fetch §5.4 step 36 + step 42 ("clone a body"):
+    // the new request's body is a CLONE of the input's body — a fresh
+    // body whose stream is independent of the input's.
+    //
+    // We delay both the actual cloning AND the input-disturb marker
+    // until AFTER all input validation succeeds (per WPT
+    // request-disturbed.any.js "Request construction failure should
+    // not set bodyUsed"). For now record only that we should perform
+    // an inherit clone; carry forward the disturbed-check error.
+    enum InheritMode {
+        None,
+        BytesSource(std::rc::Rc<Vec<u8>>),
+        StreamSource,
+    }
+    let inherit_mode: InheritMode = if body_v.is_none() && input_is_request {
         let req_obj: v8::Local<v8::Object> = input_v.try_into().unwrap();
         let raw = state_ptr(scope, req_obj).unwrap();
         let other: &RequestState = unsafe { &*raw };
-        if let Some(stream_g) = other.body.borrow().stream.clone() {
-            let stream = v8::Local::new(scope, stream_g);
+        let other_stream_g = other.body.borrow().stream.clone();
+        let other_source = other.body.borrow().source.clone();
+
+        if let Some(stream_g) = other_stream_g.as_ref() {
+            let stream = v8::Local::new(scope, stream_g.clone());
             if crate::fetch_body::consumers::stream_disturbed_or_used(scope, req_obj, stream) {
                 let m = v8::String::new(
                     scope,
@@ -484,18 +496,54 @@ fn request_constructor_callback(
                 return;
             }
         }
-        other.body.borrow().stream.as_ref().map(|g| {
-            let local = v8::Local::new(scope, g.clone());
-            local.into()
-        })
+        match other_source {
+            Some(crate::fetch_body::body::BodySource::Bytes(rc))
+            | Some(crate::fetch_body::body::BodySource::Blob(rc, _))
+            | Some(crate::fetch_body::body::BodySource::UrlSearchParams(rc))
+            | Some(crate::fetch_body::body::BodySource::FormData(rc, _)) => {
+                InheritMode::BytesSource(rc)
+            }
+            Some(crate::fetch_body::body::BodySource::Stream) => InheritMode::StreamSource,
+            None => InheritMode::None,
+        }
     } else {
-        None
+        InheritMode::None
     };
 
-    let body_input = body_v.or(inherited_body_value);
+    // For the GET/HEAD/forbidden-method check below to fire BEFORE we
+    // disturb input, the inherited body value here is ONLY the
+    // disturbing-not-yet-applied marker. The actual stream construction
+    // happens after validation succeeds.
+    //
+    // We synthesise a non-null sentinel (a fresh empty stream is
+    // overkill, so we use null but track the mode separately). The
+    // GET/HEAD validation needs to know SOMETHING is there → use a
+    // null + mode-driven inherit applied later.
+    let has_inherited_body = !matches!(inherit_mode, InheritMode::None);
 
-    // Body + GET/HEAD validation. Per Fetch §5.4 step 35.5: if
-    // `init.body` exists and method is GET/HEAD, throw TypeError.
+    let body_input: Option<v8::Local<v8::Value>> = body_v;
+
+    // GET/HEAD body-presence check (Fetch §5.4 step 35.5). Fires for
+    // BOTH explicit init.body AND inherited body. This must run BEFORE
+    // any body extraction / disturb-marker — per WPT
+    // request-disturbed.any.js "Request construction failure should
+    // not set bodyUsed".
+    let has_explicit_body = body_input.is_some_and(|b| !b.is_null_or_undefined());
+    if has_explicit_body || has_inherited_body {
+        let method = state.method.borrow().clone();
+        if method == "GET" || method == "HEAD" {
+            let m = v8::String::new(
+                scope,
+                "Request with GET/HEAD method cannot have body",
+            )
+            .unwrap();
+            let exc = v8::Exception::type_error(scope, m);
+            scope.throw_exception(exc);
+            return;
+        }
+    }
+
+    // Process explicit init.body if any.
     if let Some(b) = body_input {
         if !b.is_null_or_undefined() {
             // Per Fetch §5.4 step 36: when body is a ReadableStream,
@@ -526,17 +574,6 @@ fn request_constructor_callback(
                         return;
                     }
                 }
-            }
-            let method = state.method.borrow().clone();
-            if method == "GET" || method == "HEAD" {
-                let m = v8::String::new(
-                    scope,
-                    "Request with GET/HEAD method cannot have body",
-                )
-                .unwrap();
-                let exc = v8::Exception::type_error(scope, m);
-                scope.throw_exception(exc);
-                return;
             }
             let keepalive = *state.keepalive.borrow();
             match extract_body(scope, b, keepalive) {
@@ -571,11 +608,56 @@ fn request_constructor_callback(
         }
     }
 
-    // Per Fetch §5.4: if input is a Request with a non-null body, the
-    // body is "transferred" to the new Request — input's body becomes
-    // a locked ReadableStream and thus reads as disturbed/used. Mark
-    // the input wrapper used so `input.bodyUsed === true` after the
-    // constructor returns. Spec: dummyStream-locking step.
+    // Apply inherited body from input Request (if init.body wasn't
+    // provided). At this point all validation has succeeded, so
+    // disturbing the input is safe. Per Fetch §5.4 step 42 ("If
+    // initBody is null and inputBody is non-null, set finalBody to the
+    // result of cloning inputBody.") — clone via body-source rebuild
+    // (preserves input's stream identity for byte sources) or tee
+    // (for true Stream sources).
+    if !has_explicit_body {
+        if let InheritMode::BytesSource(rc) = &inherit_mode {
+            let new_stream_g = crate::fetch_body::extract::build_byte_stream(scope, rc.clone());
+            // Mirror extract_body's BodyImpl shape for Bytes-source:
+            // shared Rc, fresh stream, same length.
+            let length = Some(rc.len() as u64);
+            *state.body.borrow_mut() = crate::fetch_body::body::BodyImpl {
+                stream: Some(new_stream_g),
+                source: Some(crate::fetch_body::body::BodySource::Bytes(rc.clone())),
+                length,
+            };
+        } else if let InheritMode::StreamSource = &inherit_mode {
+            // Tee the input's stream; replace input's stream with
+            // branch[0] (it remains in input's body slot but is now
+            // tee'd-locked); use branch[1] as the new request's body.
+            let req_obj: v8::Local<v8::Object> = input_v.try_into().unwrap();
+            let raw = state_ptr(scope, req_obj).unwrap();
+            let other: &RequestState = unsafe { &*raw };
+            let other_stream_g = other.body.borrow().stream.clone();
+            if let Some(stream_g) = other_stream_g {
+                let stream_local = v8::Local::new(scope, stream_g);
+                if let Some((branch_a, branch_b)) = tee_stream(scope, stream_local) {
+                    other.body.borrow_mut().stream = Some(v8::Global::new(scope, branch_a));
+                    *state.body.borrow_mut() = crate::fetch_body::body::BodyImpl {
+                        stream: Some(v8::Global::new(scope, branch_b)),
+                        source: Some(crate::fetch_body::body::BodySource::Stream),
+                        length: None,
+                    };
+                }
+            }
+        }
+    }
+
+    // Per Fetch §5.4 step 42 + WPT request-disturbed.any.js: if input
+    // is a Request with a non-null body, the input is marked body-used
+    // regardless of whether init.body overrode the body. The test
+    // "Input request used for creating new request became disturbed
+    // even if body is not used" confirms this: even when init.body is
+    // provided, the input request becomes disturbed.
+    //
+    // Fire only on construction success (we only reach here past all
+    // validation throws — per WPT "Request construction failure should
+    // not set bodyUsed").
     if input_is_request {
         let req_obj: v8::Local<v8::Object> = input_v.try_into().unwrap();
         let raw = state_ptr(scope, req_obj).unwrap();
