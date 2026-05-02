@@ -697,6 +697,15 @@ pub fn load_polyfills_and_modules(
     // construction.
     install_headers(scope);
 
+    // Native WHATWG Streams cutover step 1 (D-19 step 1, design
+    // `docs/proposals/streams-native.md`). Behind ZEROSHIP_NATIVE_STREAMS=1.
+    // Install AFTER the streams.js skeleton + streams-polyfill.js load:
+    // both classes' globals (ReadableStream, WritableStream, TransformStream,
+    // ReadableStreamBYOBReader, ReadableStreamBYOBRequest,
+    // *DefaultController, *DefaultWriter) get clobbered by the native install
+    // — intentional. Polyfill remains the default until step 2 flips it.
+    install_native_streams_post(scope);
+
     // Wrap the user's module graph in the bootstrap entry.
     //
     // Layout after wrapping:
@@ -1721,6 +1730,23 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
 pub fn install_headers(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
     crate::headers::install_global(scope, global);
+}
+
+/// Step-1-of-cutover hook: install native WHATWG Streams classes AFTER
+/// the JS skeleton (`embed/streams.js`) and the vendored
+/// web-streams-polyfill (`embed/streams-polyfill.js`) have run. With
+/// `ZEROSHIP_NATIVE_STREAMS=1`, the native classes (ReadableStream,
+/// WritableStream, TransformStream, *Controller, *Reader, *Writer,
+/// BYOBReader, BYOBRequest, async iter prototype patches) clobber the
+/// JS-defined globals — that's intentional: the polyfill is the bootstrap
+/// fallback for v1 and native takes over per the cutover cadence in
+/// `docs/proposals/streams-native.md` D-19. Default off; step 2 flips it.
+pub fn install_native_streams_post(scope: &mut v8::PinScope) {
+    if std::env::var("ZEROSHIP_NATIVE_STREAMS").as_deref() != Ok("1") {
+        return;
+    }
+    let global = scope.get_current_context().global(scope);
+    crate::streams::install_native_streams(scope, global);
 }
 
 // ===========================================================================
