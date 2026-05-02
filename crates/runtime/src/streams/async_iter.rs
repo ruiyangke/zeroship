@@ -86,12 +86,19 @@ const ITER_TAG: &str = "[[asyncIter.tag]]";
 pub struct AsyncIterState {
     /// `[[preventCancel]]` from the options dict (§3.2.5.9 step 5).
     pub prevent_cancel: Cell<bool>,
+    /// `[[ongoingPromise]]` per ref impl `ReadableStreamAsyncIterator-impl.js`.
+    ///
+    /// Each call to `next()` / `return()` chains onto this promise so
+    /// concurrent invocations are processed in order. Initially undefined.
+    /// Stored as Cell<Option<Global<Promise>>> for interior mutability.
+    pub ongoing_promise: std::cell::RefCell<Option<v8::Global<v8::Promise>>>,
 }
 
 impl AsyncIterState {
     fn new(prevent_cancel: bool) -> Self {
         Self {
             prevent_cancel: Cell::new(prevent_cancel),
+            ongoing_promise: std::cell::RefCell::new(None),
         }
     }
 }
@@ -328,8 +335,153 @@ fn next_method_callback<'s>(
     mut rv: v8::ReturnValue<'s>,
 ) {
     let this = args.this();
-    let p = next_impl(scope, this);
+    let p = sequenced_call(scope, this, IterOp::Next, v8::undefined(scope).into());
     rv.set(p.into());
+}
+
+/// Identity-then on a Promise. Equivalent to `p.then(x => x)`. Adds one
+/// microtask hop between `p`'s fulfillment and the returned promise's
+/// fulfillment, matching the timing of an `async`-declared method body.
+///
+/// Rejections pass through unchanged (we don't supply on_rejected, so V8's
+/// PerformPromiseThen forwards the rejection from `p` to the chained
+/// promise without invoking any handler — that's the "no rejection
+/// handler" pass-through behavior of `Promise.prototype.then(onF)`).
+fn then_identity<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    p: v8::Local<'s, v8::Promise>,
+) -> v8::Local<'s, v8::Promise> {
+    crate::streams::promise_resolve::react_to_promise_with(
+        scope,
+        p,
+        Some(Box::new(|scope, v| v8::Global::new(scope, v))),
+        None,
+    )
+}
+
+/// Discriminator for the deferred operation a sequenced call must run.
+#[derive(Clone, Copy)]
+enum IterOp {
+    Next,
+    Return,
+}
+
+/// Sequence an iterator operation through `[[ongoingPromise]]`.
+///
+/// Per ref impl `ReadableStreamAsyncIterator-impl.js`:
+///
+/// ```text
+/// async next() {
+///   this._ongoingPromise = this._ongoingPromise
+///     ? transformPromiseWith(this._ongoingPromise, () => this._nextSteps(), () => this._nextSteps())
+///     : this._nextSteps();
+///   return this._ongoingPromise;
+/// }
+/// ```
+///
+/// Same shape for `return`. The chained promise becomes the new
+/// `ongoingPromise` so the next call starts only after this one resolves.
+///
+/// Both fulfillment AND rejection of the prior promise must trigger the
+/// next operation (the spec doesn't propagate prior errors into next's
+/// rejection — each call is independent in outcome but ordered in time).
+fn sequenced_call<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    iter: v8::Local<v8::Object>,
+    op: IterOp,
+    arg: v8::Local<'s, v8::Value>,
+) -> v8::Local<'s, v8::Promise> {
+    if !is_async_iterator(scope, iter) {
+        let msg_text = match op {
+            IterOp::Next => "ReadableStreamAsyncIterator.next: invalid receiver",
+            IterOp::Return => "ReadableStreamAsyncIterator.return: invalid receiver",
+        };
+        let msg = v8::String::new(scope, msg_text).unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        return algorithms::rejected_with_promise(scope, exc.into());
+    }
+
+    let ongoing = with_state(scope, iter, |s| s.ongoing_promise.borrow().clone()).flatten();
+
+    let new_promise = match ongoing {
+        // No prior op — run inline (with one microtask hop for async-method
+        // shape) and store as the new ongoing promise.
+        None => {
+            let inner = run_op(scope, iter, op, arg);
+            then_identity(scope, inner)
+        }
+        // Chain on the prior — when prior settles (either way), run our
+        // op. transformPromiseWith semantics: each handler returns the new
+        // result, which becomes the chained promise's resolution.
+        Some(prior_g) => {
+            let prior = v8::Local::new(scope, &prior_g);
+            let iter_g = v8::Global::new(scope, iter);
+            let iter_g2 = iter_g.clone();
+            let arg_g = v8::Global::new(scope, arg);
+            let arg_g2 = arg_g.clone();
+            crate::streams::promise_resolve::react_to_promise_with(
+                scope,
+                prior,
+                Some(Box::new(move |scope, _v| {
+                    let iter = v8::Local::new(scope, &iter_g);
+                    let arg = v8::Local::new(scope, &arg_g);
+                    let p = run_op(scope, iter, op, arg);
+                    let p_v: v8::Local<v8::Value> = p.into();
+                    v8::Global::new(scope, p_v)
+                })),
+                Some(Box::new(move |scope, _e| {
+                    let iter = v8::Local::new(scope, &iter_g2);
+                    let arg = v8::Local::new(scope, &arg_g2);
+                    let p = run_op(scope, iter, op, arg);
+                    let p_v: v8::Local<v8::Value> = p.into();
+                    v8::Global::new(scope, p_v)
+                })),
+            )
+        }
+    };
+
+    // Store new_promise as the new ongoing promise.
+    let new_g = v8::Global::new(scope, new_promise);
+    with_state(scope, iter, |s| {
+        *s.ongoing_promise.borrow_mut() = Some(new_g.clone());
+    });
+
+    // When new_promise settles, clear ongoing if it still points at this
+    // promise (it may have been replaced by a later call already).
+    let iter_g3 = v8::Global::new(scope, iter);
+    let new_g_for_clear = new_g.clone();
+    crate::streams::promise_resolve::upon_promise(
+        scope,
+        new_promise,
+        Some(Box::new(move |scope, _v| {
+            let iter = v8::Local::new(scope, &iter_g3);
+            with_state(scope, iter, |s| {
+                let mut ongoing = s.ongoing_promise.borrow_mut();
+                if let Some(cur) = ongoing.as_ref() {
+                    if cur == &new_g_for_clear {
+                        *ongoing = None;
+                    }
+                }
+            });
+        })),
+        None,
+    );
+
+    new_promise
+}
+
+/// Run the actual implementation for `op` (no sequencing logic — just the
+/// inline next-iteration / return-iteration steps).
+fn run_op<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    iter: v8::Local<v8::Object>,
+    op: IterOp,
+    arg: v8::Local<'s, v8::Value>,
+) -> v8::Local<'s, v8::Promise> {
+    match op {
+        IterOp::Next => next_impl(scope, iter),
+        IterOp::Return => return_impl(scope, iter, arg),
+    }
 }
 
 /// `next()` per spec §3.4.6 + WebIDL §3.7.10.4 "next iteration result":
@@ -443,7 +595,7 @@ fn return_method_callback<'s>(
 ) {
     let this = args.this();
     let value = args.get(0);
-    let p = return_impl(scope, this, value);
+    let p = sequenced_call(scope, this, IterOp::Return, value);
     rv.set(p.into());
 }
 

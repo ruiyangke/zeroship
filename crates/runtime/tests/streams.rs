@@ -2757,6 +2757,39 @@ fn readable_stream_from_async_iterable() {
 }
 
 #[test]
+fn async_iter_pull_count_after_next() {
+    // Regression: WPT 'next() that succeeds; return()' expects timesPulled === 2.
+    // The iterator's `next()` adds one microtask hop (matching ref impl's
+    // `async next()`) so the controller's pull-cleanup runs BEFORE the
+    // user's await continuation, allowing the second pull to fire.
+    let r = run_with_streams(
+        r#"
+        let result = "pending";
+        let timesPulled = 0;
+        const s = new ReadableStream({
+          pull(c) {
+            c.enqueue(timesPulled);
+            ++timesPulled;
+          }
+        });
+        const it = s[Symbol.asyncIterator]();
+        async function run() {
+          const r1 = await it.next();
+          return "p=" + timesPulled + ",v=" + r1.value;
+        }
+        run().then(v => result = v);
+        ({ get out() { return result; } });
+        "#,
+        |val, scope| {
+            let obj: v8::Local<v8::Object> = val.try_into().unwrap();
+            let key = v8::String::new(scope, "out").unwrap();
+            obj.get(scope, key.into()).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "p=2,v=0");
+}
+
+#[test]
 fn readable_stream_from_non_iterable_throws_typeerror() {
     let r = run_with_streams(
         r#"
