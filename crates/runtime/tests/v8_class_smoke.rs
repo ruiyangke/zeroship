@@ -562,6 +562,119 @@ mod intrinsic_iter {
 }
 
 // ---------------------------------------------------------------------------
+// Test 7d2: #[v8_inherit(BaseClass)] — class inheritance via prototype chain
+// ---------------------------------------------------------------------------
+//
+// Per fetch-native design §XIV.1: AbortSignal : EventTarget needs the
+// prototype chain wired up so `signal instanceof EventTarget === true`
+// and `signal.addEventListener(...)` resolves through the prototype.
+//
+// We exercise the macro extension with a minimal Animal/Dog pair: Dog
+// inherits Animal, calling .speak() (Dog's own method) and .breathe()
+// (Animal's inherited method) both work; `dog instanceof Animal === true`.
+
+#[allow(unused_imports)]
+use zeroship_runtime_macros::v8_inherit;
+
+mod inherit_base {
+    use super::*;
+
+    #[derive(Default)]
+    pub struct Animal {
+        pub breaths: u32,
+    }
+
+    #[v8_class]
+    impl Animal {
+        #[v8_constructor]
+        fn new() -> Animal {
+            Animal { breaths: 0 }
+        }
+
+        #[v8_method]
+        fn breathe(&mut self) -> u32 {
+            self.breaths += 1;
+            self.breaths
+        }
+    }
+
+    #[derive(Default)]
+    pub struct Dog;
+
+    // Dog inherits Animal: `dog.breathe()` must resolve to Animal's
+    // method via the prototype chain. Note: Dog has its OWN internal
+    // field 0 holding `Box<Dog>`, NOT `Box<Animal>` — which means
+    // `Dog::breathe` callbacks would mis-cast if we tried to call them
+    // here. The valid pattern (used by AbortSignal : EventTarget) is
+    // that Animal's methods only access state shared via priv-syms /
+    // global-side state, NOT the internal-field box. For a unit test,
+    // we instead verify (a) `instanceof Animal === true`, (b) the
+    // prototype chain is correctly chained, (c) dog's own methods
+    // continue to work.
+    #[v8_class]
+    #[v8_inherit(Animal)]
+    impl Dog {
+        #[v8_constructor]
+        fn new() -> Dog {
+            Dog
+        }
+
+        #[v8_method]
+        fn bark(&self) -> String {
+            "woof".into()
+        }
+    }
+}
+
+#[test]
+fn v8_inherit_chains_prototype() {
+    let s = run_in_v8(
+        |scope, global| {
+            // Install both — Animal first so Dog's install can see it.
+            install_class::<inherit_base::Animal>(
+                inherit_base::Animal::install, "Animal", scope, global,
+            );
+            install_class::<inherit_base::Dog>(
+                inherit_base::Dog::install, "Dog", scope, global,
+            );
+        },
+        r#"
+        const dog = new Dog();
+        const dogProto = Object.getPrototypeOf(dog);
+        const animalProto = Object.getPrototypeOf(dogProto);
+        const objectProto = Object.getPrototypeOf(animalProto);
+        JSON.stringify({
+            // dog instanceof Dog AND instanceof Animal — instanceof walks
+            // the prototype chain, so both must be true.
+            isDog: dog instanceof Dog,
+            isAnimal: dog instanceof Animal,
+            // Animal.prototype is exactly the next link in the chain.
+            chainOk: animalProto === Animal.prototype,
+            // The chain bottoms out at Object.prototype.
+            chainEndsAtObject: objectProto === Object.prototype,
+            // Dog's own method works.
+            bark: dog.bark(),
+            // Animal's method is reachable via prototype lookup. We
+            // can't actually CALL it (the callback would mis-cast
+            // Box<Dog> as Box<Animal>); we just check the property is
+            // present on the prototype chain.
+            hasBreathe: typeof Animal.prototype.breathe === "function",
+            breatheReachable: typeof dog.breathe === "function",
+        });
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&s).expect("json");
+    assert_eq!(parsed["isDog"], serde_json::json!(true), "dog instanceof Dog: {parsed}");
+    assert_eq!(parsed["isAnimal"], serde_json::json!(true), "dog instanceof Animal: {parsed}");
+    assert_eq!(parsed["chainOk"], serde_json::json!(true), "prototype chain: {parsed}");
+    assert_eq!(parsed["chainEndsAtObject"], serde_json::json!(true), "chain ends at Object: {parsed}");
+    assert_eq!(parsed["bark"], serde_json::json!("woof"), "bark works: {parsed}");
+    assert_eq!(parsed["hasBreathe"], serde_json::json!(true), "Animal.prototype.breathe: {parsed}");
+    assert_eq!(parsed["breatheReachable"], serde_json::json!(true), "dog.breathe via proto: {parsed}");
+}
+
+// ---------------------------------------------------------------------------
 // Test 7e: ByteString newtype extraction
 // ---------------------------------------------------------------------------
 //
@@ -1322,4 +1435,148 @@ fn reject_shared_throws_for_bare_sab_arg() {
         Some("TypeError"),
         "bare SAB arg must throw TypeError; got {parsed}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// [EnforceRange] u64 extraction (streams §XIV.8) — newtype EnforceRangeU64
+// ---------------------------------------------------------------------------
+//
+// WebIDL §3.2.10 [EnforceRange] unsigned long long: convert to Number; reject
+// NaN, ±∞, negative, and any value larger than 2^53-1 (Number precision
+// boundary) with TypeError. WPT readable-byte-streams/read-min.any.js tests
+// MAX_SAFE_INTEGER + 1 must throw.
+//
+// The streams design (§XIV.8) requires this extraction for BYOBReader's
+// `min` parameter and for BYOBRequest.respond(bytesWritten).
+
+mod enforce_range_u64 {
+    use super::*;
+    use zeroship_runtime::EnforceRangeU64;
+
+    pub struct Counter {
+        pub last: u64,
+    }
+
+    impl Default for Counter {
+        fn default() -> Self {
+            Counter { last: 0 }
+        }
+    }
+
+    #[v8_class]
+    impl Counter {
+        #[v8_method]
+        fn set(&mut self, n: EnforceRangeU64) -> f64 {
+            self.last = n.into();
+            self.last as f64
+        }
+    }
+}
+
+#[test]
+fn enforce_range_u64_accepts_safe_integer() {
+    // Number.MAX_SAFE_INTEGER = 2^53 - 1 = 9007199254740991. Within range
+    // is fine and round-trips cleanly through Number.
+    let s = run_in_v8(
+        |scope, global| install_class::<enforce_range_u64::Counter>(
+            enforce_range_u64::Counter::install, "Counter", scope, global,
+        ),
+        r#"
+        const c = new Counter();
+        c.set(Number.MAX_SAFE_INTEGER);
+        "#,
+        |val, scope| val.number_value(scope).unwrap(),
+    );
+    assert_eq!(s as u64, (1u64 << 53) - 1);
+}
+
+#[test]
+fn enforce_range_u64_throws_on_negative() {
+    let s = run_in_v8(
+        |scope, global| install_class::<enforce_range_u64::Counter>(
+            enforce_range_u64::Counter::install, "Counter", scope, global,
+        ),
+        r#"
+        const c = new Counter();
+        let kind;
+        try { c.set(-1); }
+        catch (e) { kind = e.constructor.name; }
+        kind || "no-throw";
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "TypeError");
+}
+
+#[test]
+fn enforce_range_u64_throws_on_nan() {
+    let s = run_in_v8(
+        |scope, global| install_class::<enforce_range_u64::Counter>(
+            enforce_range_u64::Counter::install, "Counter", scope, global,
+        ),
+        r#"
+        const c = new Counter();
+        let kind;
+        try { c.set(NaN); }
+        catch (e) { kind = e.constructor.name; }
+        kind || "no-throw";
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "TypeError");
+}
+
+#[test]
+fn enforce_range_u64_throws_on_infinity() {
+    let s = run_in_v8(
+        |scope, global| install_class::<enforce_range_u64::Counter>(
+            enforce_range_u64::Counter::install, "Counter", scope, global,
+        ),
+        r#"
+        const c = new Counter();
+        let kind;
+        try { c.set(Infinity); }
+        catch (e) { kind = e.constructor.name; }
+        kind || "no-throw";
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "TypeError");
+}
+
+#[test]
+fn enforce_range_u64_throws_above_max_safe_integer() {
+    // MAX_SAFE_INTEGER + 1 = 2^53 cannot be represented precisely as a JS
+    // Number. WPT requires TypeError per spec [EnforceRange] semantics —
+    // we reject anything that would lose precision through Number.
+    let s = run_in_v8(
+        |scope, global| install_class::<enforce_range_u64::Counter>(
+            enforce_range_u64::Counter::install, "Counter", scope, global,
+        ),
+        r#"
+        const c = new Counter();
+        let kind;
+        try { c.set(Number.MAX_SAFE_INTEGER + 1); }
+        catch (e) { kind = e.constructor.name; }
+        kind || "no-throw";
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "TypeError");
+}
+
+#[test]
+fn enforce_range_u64_accepts_zero() {
+    // 0 is a valid value at the boundary.
+    let s = run_in_v8(
+        |scope, global| install_class::<enforce_range_u64::Counter>(
+            enforce_range_u64::Counter::install, "Counter", scope, global,
+        ),
+        r#"
+        const c = new Counter();
+        c.set(0);
+        "#,
+        |val, scope| val.number_value(scope).unwrap(),
+    );
+    assert_eq!(s, 0.0);
 }

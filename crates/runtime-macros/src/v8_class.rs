@@ -189,6 +189,34 @@ fn extract_inherit_intrinsic(attrs: &[Attribute]) -> Option<String> {
     None
 }
 
+/// Read `#[v8_inherit(BaseClass)]` from impl-block attributes. Returns
+/// the base class path — e.g. for AbortSignal inheriting EventTarget,
+/// this is the parsed path `super::event_target::EventTarget`. Used
+/// to plumb spec-mandated DOM inheritance (DOM §3.3 AbortSignal :
+/// EventTarget) through the FunctionTemplate's `inherit` API.
+///
+/// Accepts both bare identifiers (`#[v8_inherit(EventTarget)]`) and
+/// fully-qualified paths (`#[v8_inherit(super::event_target::EventTarget)]`)
+/// — the latter is what real cross-module usage emits.
+///
+/// The codegen emits `__ctor_tmpl.inherit(<BaseClass>::install(scope))`.
+/// The base class must itself be a `#[v8_class]`-decorated struct (or
+/// expose an equivalent `install` fn — EventTarget hand-rolls one) that
+/// returns a cached FunctionTemplate.
+fn extract_inherit_base(attrs: &[Attribute]) -> Option<syn::Path> {
+    for attr in attrs {
+        if !attr.path().is_ident("v8_inherit") {
+            continue;
+        }
+        // List form: `#[v8_inherit(Path::To::Base)]`. Parse as a
+        // path so module-qualified bases work.
+        if let Ok(path) = attr.parse_args::<syn::Path>() {
+            return Some(path);
+        }
+    }
+    None
+}
+
 fn has_mut_self(func: &ImplItemFn) -> bool {
     func.sig.inputs.iter().any(|arg| {
         matches!(
@@ -241,21 +269,34 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // (lines 28–34) calls this out: a `#[v8_name = "x"]` rename
     // colliding with another method literally named `x` would silently
     // double-install on the prototype. Catch it at compile time.
+    //
+    // Exception: a (Getter, Setter) pair under the same JS name is
+    // legal — that's how WebIDL `attribute` accessors work (e.g.
+    // `URL.href`'s getter+setter pair). The install codegen detects
+    // this and emits a single `set_accessor_property` with both
+    // templates rather than two separate calls.
     let mut seen: HashMap<String, &ClassMethod> = HashMap::new();
     for m in &methods {
         if m.kind == MethodKind::Constructor {
             continue;
         }
-        if seen.insert(m.js_name.clone(), m).is_some() {
-            return syn::Error::new_spanned(
-                &m.func.sig.ident,
-                format!(
-                    "#[v8_class]: duplicate JS-visible method name `{}` (rename one with #[v8_name])",
-                    m.js_name,
-                ),
-            )
-            .to_compile_error()
-            .into();
+        if let Some(prev) = seen.insert(m.js_name.clone(), m) {
+            let pair_ok = matches!(
+                (prev.kind, m.kind),
+                (MethodKind::Getter, MethodKind::Setter)
+                    | (MethodKind::Setter, MethodKind::Getter)
+            );
+            if !pair_ok {
+                return syn::Error::new_spanned(
+                    &m.func.sig.ident,
+                    format!(
+                        "#[v8_class]: duplicate JS-visible method name `{}` (rename one with #[v8_name])",
+                        m.js_name,
+                    ),
+                )
+                .to_compile_error()
+                .into();
+            }
         }
     }
 
@@ -279,6 +320,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // Impl-block-level overrides for class-wide install behaviour.
     let to_string_tag_override = extract_to_string_tag(&input.attrs);
     let inherit_intrinsic = extract_inherit_intrinsic(&input.attrs);
+    let inherit_base = extract_inherit_base(&input.attrs);
 
     // `Self::install(scope) -> v8::Local<v8::FunctionTemplate>`
     let install = gen_install(
@@ -287,14 +329,32 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
         constructor.is_some(),
         to_string_tag_override.as_deref(),
         inherit_intrinsic.as_deref(),
+        inherit_base.as_ref(),
     );
 
     // Strip our marker attributes from the impl items so rustc doesn't
     // see unknown attributes after expansion. Keep everything else.
     let stripped_impl = strip_marker_attrs(input.clone());
 
+    // Per-class isolate-slot marker type. Emitted at module scope (a
+    // `pub struct` can't live inside an `impl` block). The macro's
+    // generated `Foo::install` reads/writes the slot keyed by this
+    // type so repeated calls return the same FunctionTemplate (see
+    // `gen_install`'s comment).
+    let install_slot_ty = format_ident!("__InstallSlot_{}", class_ty);
+
     let expanded = quote! {
         #stripped_impl
+
+        /// Per-class isolate-slot marker holding the cached
+        /// FunctionTemplate. Exists so `Foo::install` is idempotent
+        /// per isolate — required for `#[v8_inherit]` to chain
+        /// derived classes onto the SAME template the global was
+        /// bound to (otherwise `instanceof` walks a different
+        /// [[FunctionPrototype]] and returns false).
+        #[doc(hidden)]
+        #[allow(non_camel_case_types)]
+        pub struct #install_slot_ty(::v8::Global<::v8::FunctionTemplate>);
 
         #[allow(non_snake_case, dead_code)]
         impl #class_ty {
@@ -320,7 +380,9 @@ fn strip_marker_attrs(mut input: ItemImpl) -> ItemImpl {
     // not a real Rust feature).
     input.attrs.retain(|attr| {
         let p = attr.path();
-        !(p.is_ident("v8_to_string_tag") || p.is_ident("v8_inherit_intrinsic"))
+        !(p.is_ident("v8_to_string_tag")
+            || p.is_ident("v8_inherit_intrinsic")
+            || p.is_ident("v8_inherit"))
     });
     for item in &mut input.items {
         if let ImplItem::Fn(func) = item {
@@ -348,50 +410,96 @@ fn gen_install(
     has_user_constructor: bool,
     to_string_tag_override: Option<&str>,
     inherit_intrinsic: Option<&str>,
+    inherit_base: Option<&syn::Path>,
 ) -> TokenStream2 {
     let class_name_str = class_ty.to_string();
     let constructor_callback_ident = format_ident!("__{}_constructor_callback", class_ty);
 
     // Per-method prototype installation lines.
-    let proto_sets: Vec<TokenStream2> = methods
-        .iter()
-        .map(|m| {
+    //
+    // Accessors with matching JS names (one getter + one setter) are
+    // combined into a single `set_accessor_property` call with both
+    // templates. V8 rejects two separate calls for the same key —
+    // each call replaces the previous one's slot, so the second call
+    // wipes out the first. The pair-detection runs over the full
+    // method list to find getter↔setter siblings.
+    //
+    // Build a name → (getter_cb?, setter_cb?, sample_method) map so we
+    // can short-circuit duplicate emit cycles.
+    let mut accessor_pairs: HashMap<String, (Option<TokenStream2>, Option<TokenStream2>)> =
+        HashMap::new();
+    for m in methods {
+        if matches!(m.kind, MethodKind::Getter | MethodKind::Setter) {
             let name = &m.func.sig.ident;
             let cb = method_callback_ident(class_ty, name);
+            let entry = accessor_pairs.entry(m.js_name.clone()).or_default();
+            match m.kind {
+                MethodKind::Getter => entry.0 = Some(quote! { #cb }),
+                MethodKind::Setter => entry.1 = Some(quote! { #cb }),
+                _ => {}
+            }
+        }
+    }
+
+    // Track which accessor names have been emitted so we don't emit
+    // them twice (once per ClassMethod entry).
+    let mut emitted_accessors: HashSet<String> = HashSet::new();
+
+    let proto_sets: Vec<TokenStream2> = methods
+        .iter()
+        .filter_map(|m| {
             let js_name = m.js_name.clone();
             match m.kind {
-                MethodKind::Method => quote! {
-                    {
-                        let __key = v8::String::new(scope, #js_name).unwrap();
-                        let __fn_tmpl = v8::FunctionTemplate::new(scope, #cb);
-                        __proto.set(__key.into(), __fn_tmpl.into());
+                MethodKind::Method => {
+                    let name = &m.func.sig.ident;
+                    let cb = method_callback_ident(class_ty, name);
+                    Some(quote! {
+                        {
+                            let __key = v8::String::new(scope, #js_name).unwrap();
+                            let __fn_tmpl = v8::FunctionTemplate::new(scope, #cb);
+                            __proto.set(__key.into(), __fn_tmpl.into());
+                        }
+                    })
+                }
+                MethodKind::Getter | MethodKind::Setter => {
+                    if !emitted_accessors.insert(js_name.clone()) {
+                        return None;
                     }
-                },
-                MethodKind::Getter => quote! {
-                    {
-                        let __key = v8::String::new(scope, #js_name).unwrap();
-                        let __getter_tmpl = v8::FunctionTemplate::new(scope, #cb);
-                        __proto.set_accessor_property(
-                            __key.into(),
-                            Some(__getter_tmpl.into()),
-                            None,
-                            v8::PropertyAttribute::NONE,
-                        );
-                    }
-                },
-                MethodKind::Setter => quote! {
-                    {
-                        let __key = v8::String::new(scope, #js_name).unwrap();
-                        let __setter_tmpl = v8::FunctionTemplate::new(scope, #cb);
-                        __proto.set_accessor_property(
-                            __key.into(),
-                            None,
-                            Some(__setter_tmpl.into()),
-                            v8::PropertyAttribute::NONE,
-                        );
-                    }
-                },
-                MethodKind::Constructor => quote! {},
+                    let pair = accessor_pairs.get(&js_name);
+                    let (getter_opt, setter_opt) = pair.cloned().unwrap_or_default();
+                    let getter_tokens = match getter_opt {
+                        Some(cb) => quote! {
+                            let __getter_tmpl = v8::FunctionTemplate::new(scope, #cb);
+                            let __getter_arg: Option<v8::Local<v8::FunctionTemplate>> = Some(__getter_tmpl);
+                        },
+                        None => quote! {
+                            let __getter_arg: Option<v8::Local<v8::FunctionTemplate>> = None;
+                        },
+                    };
+                    let setter_tokens = match setter_opt {
+                        Some(cb) => quote! {
+                            let __setter_tmpl = v8::FunctionTemplate::new(scope, #cb);
+                            let __setter_arg: Option<v8::Local<v8::FunctionTemplate>> = Some(__setter_tmpl);
+                        },
+                        None => quote! {
+                            let __setter_arg: Option<v8::Local<v8::FunctionTemplate>> = None;
+                        },
+                    };
+                    Some(quote! {
+                        {
+                            let __key = v8::String::new(scope, #js_name).unwrap();
+                            #getter_tokens
+                            #setter_tokens
+                            __proto.set_accessor_property(
+                                __key.into(),
+                                __getter_arg,
+                                __setter_arg,
+                                v8::PropertyAttribute::NONE,
+                            );
+                        }
+                    })
+                }
+                MethodKind::Constructor => None,
             }
         })
         .collect();
@@ -449,17 +557,77 @@ fn gen_install(
         }
     };
 
+    // `#[v8_inherit(BaseClass)]` plumbs prototype-chain inheritance —
+    // e.g. AbortSignal : EventTarget per DOM §3.3 — by calling
+    // `FunctionTemplate::inherit(parent_tmpl)` BEFORE the prototype
+    // template is touched. The parent's template MUST be the same
+    // FunctionTemplate object the parent was registered with
+    // globally; otherwise `signal instanceof EventTarget === false`
+    // because the [[FunctionPrototype]] chain points at the parent's
+    // first template while the global `EventTarget` is bound to the
+    // first one. We therefore call the parent's `install` (which
+    // caches its own template per isolate via `__cached_install`)
+    // and trust it to return the same Local on every call within a
+    // single isolate.
+    //
+    // We call `inherit` AFTER `set_class_name` and BEFORE adding our
+    // own prototype methods so the chain is established before any
+    // method/getter/setter sets are layered on. Internal-field count
+    // is set on the instance template separately and is independent
+    // of inheritance.
+    let inherit_base_block = match inherit_base {
+        None => quote! {},
+        Some(base) => quote! {
+            {
+                let __base_tmpl = <#base>::install(scope);
+                __ctor_tmpl.inherit(__base_tmpl);
+            }
+        },
+    };
+
+    // Per-class isolate-slot marker. Holds the cached FunctionTemplate
+    // as a `v8::Global<v8::FunctionTemplate>` so repeated `install`
+    // calls (e.g. from a derived class's `#[v8_inherit]` codegen) see
+    // the exact same template object — required for V8's instanceof
+    // check (which compares the underlying [[FunctionPrototype]] by
+    // identity) and for the global `globalThis.Foo` to match
+    // `Foo.prototype` of `new Foo()` via the prototype chain.
+    //
+    // The slot type is private to this class's expansion (named after
+    // the class to avoid TypeId collisions across classes). The first
+    // call writes the slot; subsequent calls in the same isolate
+    // return the cached `Local` reborrow.
+    let install_slot_ty = format_ident!("__InstallSlot_{}", class_ty);
+
     quote! {
         /// Install this class on the given V8 scope, returning the
         /// FunctionTemplate. The runtime calls this from
         /// `setup_globals` and uses the returned template to attach
         /// the class as a global (e.g. `globalThis.Headers`).
+        ///
+        /// Idempotent per isolate: subsequent calls return the same
+        /// FunctionTemplate (looked up via an isolate slot keyed by
+        /// the per-class `__InstallSlot_<Class>` marker type emitted
+        /// by `#[v8_class]` at module scope). This is what makes
+        /// `#[v8_inherit]` work — derived classes resolve the parent's
+        /// template by calling the parent's install, which returns
+        /// the cached template on the second call (the first call
+        /// typically being the runtime's own register-as-global step).
         pub fn install<'s>(
             scope: &mut v8::PinScope<'s, '_>,
         ) -> v8::Local<'s, v8::FunctionTemplate> {
+            // Hot path: template already cached for this isolate.
+            if let Some(cached) = scope.get_slot::<#install_slot_ty>() {
+                return v8::Local::new(scope, cached.0.clone());
+            }
+
             let __ctor_tmpl = v8::FunctionTemplate::new(scope, #constructor_callback_ident);
             let __class_name = v8::String::new(scope, #class_name_str).unwrap();
             __ctor_tmpl.set_class_name(__class_name);
+
+            // `#[v8_inherit(BaseClass)]` — establish the prototype chain
+            // BEFORE we layer our own prototype properties on top.
+            #inherit_base_block
 
             // Reserve one internal field to hold the boxed Rust state.
             __ctor_tmpl
@@ -489,7 +657,13 @@ fn gen_install(
 
             #inherit_block
 
-            __ctor_tmpl
+            // Cache the template for this isolate. Future `install`
+            // calls return the same Local — required for `#[v8_inherit]`
+            // to chain derived classes onto the same prototype.
+            let __global = ::v8::Global::new(scope, __ctor_tmpl);
+            let __local = ::v8::Local::new(scope, __global.clone());
+            scope.set_slot(#install_slot_ty(__global));
+            __local
         }
     }
 }
@@ -738,16 +912,19 @@ fn gen_box_and_install_finalizer(class_ty: &syn::Ident) -> TokenStream2 {
 /// Build the per-arg extraction code, treating `&mut v8::PinScope` (or
 /// any `PinScope`-typed reference) as a "synthetic" arg that consumes
 /// no JS index. The synthetic arg is reborrowed from the callback's
-/// own `scope` so user methods can pass it on to v8 ops without
-/// fighting the borrow checker.
+/// own `scope` AFTER all JS-arg extractions complete, so user methods
+/// can pass it on to v8 ops without fighting the borrow checker —
+/// crucially, the reborrow happens after the extractions release any
+/// implicit borrows that `args.get(idx)` keeps alive (the returned
+/// `Local<'s, Value>` borrows from `args`, whose lifetime can unify
+/// with `scope`'s in inference; reborrowing `scope` mutably while a
+/// `Local<'s>` is alive triggers E0502 — see commit 4c41d... for
+/// the regression test case).
 ///
 /// Concrete output for `fn decode(&mut self, scope: &mut PinScope, n:
 /// u32)` is:
-///   let scope = &mut *scope;        // reborrow, shadows callback param
 ///   let n: u32 = args.get(0).uint32_value(scope).unwrap_or(0);
-///
-/// Synthetic args are emitted FIRST so the reborrowed `scope` is
-/// available to subsequent JS-arg extractions.
+///   let scope = &mut *scope;        // synthetic reborrow, shadows param
 ///
 /// `reject_shared_names` is the set of parameter names whose JS-side
 /// argument must reject SharedArrayBuffer-backed views with
@@ -761,16 +938,10 @@ fn gen_param_extractions(
     let mut out = Vec::with_capacity(params.len());
     let mut js_idx: usize = 0;
 
-    // Emit reborrows for synthetic params first (they don't consume
-    // JS indices and they need to be in scope before extractions).
-    for p in params.iter() {
-        if is_pin_scope_ref(&p.ty) {
-            let name = &p.name;
-            out.push(quote! { let #name = &mut *scope; });
-        }
-    }
-    // Then emit JS-arg extractions in declared order, skipping
-    // synthetics.
+    // Emit JS-arg extractions FIRST in declared order (skipping
+    // synthetic PinScope refs). These use the original `scope` param,
+    // so no shadow reborrow is alive yet — `args.get(idx)` is free to
+    // produce Locals whose lifetime unifies with the param `scope`.
     for p in params.iter() {
         if is_pin_scope_ref(&p.ty) {
             continue;
@@ -812,6 +983,25 @@ fn gen_param_extractions(
         }
         out.push(gen_extract(js_idx, &p.name, &p.ty));
         js_idx += 1;
+    }
+
+    // The user method takes the synthetic param BY NAME — usually
+    // literally `scope`, but could be any identifier. If the user
+    // chose a name OTHER than `scope`, we need to rebind it so the
+    // call-site can pass it through. For the common case (`scope`),
+    // shadowing is unnecessary because the callback parameter is
+    // already named `scope` and the user method body refers to it
+    // verbatim. Skip the shadowing in that case to avoid borrow-check
+    // conflicts when JS args' Locals are still alive (their lifetime
+    // unifies with `scope`'s, and a mutable reborrow while a Local is
+    // alive is E0502).
+    for p in params.iter() {
+        if is_pin_scope_ref(&p.ty) {
+            let name = &p.name;
+            if name != "scope" {
+                out.push(quote! { let #name = &mut *scope; });
+            }
+        }
     }
 
     out

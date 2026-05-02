@@ -137,7 +137,13 @@ struct K8sSandbox {
     agent_url: String,
     /// Per-sandbox signing key. Lives only in this process; never
     /// touches the cluster.
-    signing_key: SigningKey,
+    ///
+    /// **Wrapped in Arc** so signed-RPC dispatch can clone a refcount
+    /// (cheap) instead of the 32-byte secret bytes (which would mean
+    /// two heap copies of the secret coexisting during every signed
+    /// request, since `ed25519_dalek::SigningKey` doesn't zeroize on
+    /// drop).
+    signing_key: Arc<SigningKey>,
     /// Background `kubectl port-forward` subprocess if enabled, kept
     /// alive for the sandbox lifetime. Killed on stop. The local
     /// port is recorded so `stop` can return it to the allocator.
@@ -270,6 +276,21 @@ impl K8sBackend {
         validate_id(user_id, "user_id")?;
         validate_id(project_id, "project_id")?;
 
+        // M7 parity with NomadCHBackend. Refuse new sandboxes if
+        // the most recent probe failed — kubectl/apiserver outages
+        // would otherwise queue every concurrent create on the
+        // spawn_blocking pool. Terminal: probe loop is what flips
+        // healthy back, callers should not retry.
+        if !self.is_healthy() {
+            return Err(
+                "k8s backend unhealthy; refusing new sandboxes \
+                 (probe failed — kubectl unreachable or namespace \
+                 missing). The probe loop will flip the bit back \
+                 when the cluster recovers."
+                    .to_string(),
+            );
+        }
+
         // **Per-user serialization.** Two concurrent creates for the
         // same user racing the "one active sandbox per user" check
         // would each see no existing → both apply Pods → second
@@ -370,8 +391,11 @@ impl K8sBackend {
         guard: &mut CreateGuard,
     ) -> Result<SandboxInfo, String> {
         // 1. Mint Ed25519 keypair. Only the public key leaves this process.
+        //    Wrap in Arc immediately so wait_for_agent_livez can sign
+        //    /version probes (FM-A parity) without taking ownership;
+        //    moved into the state map verbatim at commit-time.
         let sk_bytes = random_key32()?;
-        let signing_key = SigningKey::from_bytes(&sk_bytes);
+        let signing_key = Arc::new(SigningKey::from_bytes(&sk_bytes));
         let pubkey = signing_key.verifying_key();
         let pubkey_b64 = B64.encode(pubkey.as_bytes());
         let key_fp = sig::pubkey_fingerprint(&pubkey);
@@ -417,12 +441,12 @@ impl K8sBackend {
             // Track immediately so cleanup can kill it on later failure.
             guard.port_forward_local_port = Some(port);
             let url = format!("http://127.0.0.1:{port}");
-            wait_for_agent_livez(&url, Duration::from_secs(20)).await?;
+            wait_for_agent_livez(&url, &key_fp, &signing_key, Duration::from_secs(20)).await?;
             (url, Some(pf), Some(port))
         } else {
             let ip = pod_ip(pod_name, ns).await?;
             let url = format!("http://{ip}:7777");
-            wait_for_agent_livez(&url, Duration::from_secs(20)).await?;
+            wait_for_agent_livez(&url, &key_fp, &signing_key, Duration::from_secs(20)).await?;
             (url, None, None)
         };
         // Move the Child into the guard so cleanup-on-error can
@@ -438,6 +462,9 @@ impl K8sBackend {
             user_home_pvc: user_home_pvc.to_string(),
             namespace: ns.to_string(),
             agent_url,
+            // signing_key was already wrapped in Arc at step 1 so the
+            // FM-A /version probe inside wait_for_agent_livez could
+            // borrow it; move into the state map verbatim.
             signing_key,
             port_forward,
             port_forward_local_port: local_port,
@@ -542,7 +569,15 @@ impl K8sBackend {
         let v: serde_json::Value = serde_json::from_str(&resp.body)
             .map_err(|e| format!("agent /exec response not JSON: {e}"))?;
         Ok(ExecOutput {
-            status: v["status"].as_i64().unwrap_or(-1) as i32,
+            // try_into instead of `as i32` — a status outside i32
+            // range is almost certainly garbage from a buggy agent;
+            // falling back to -1 is no worse than the previous
+            // wrap-on-cast and avoids signed-overflow surprises.
+            status: v["status"]
+                .as_i64()
+                .unwrap_or(-1)
+                .try_into()
+                .unwrap_or(-1),
             stdout: v["stdout"].as_str().unwrap_or("").to_string(),
             stderr: v["stderr"].as_str().unwrap_or("").to_string(),
             timed_out: v["timed_out"].as_bool().unwrap_or(false),
@@ -617,11 +652,16 @@ impl K8sBackend {
             .collect())
     }
 
-    fn sandbox_keys(&self, id: Uuid) -> Result<(SigningKey, String), String> {
+    fn sandbox_keys(&self, id: Uuid) -> Result<(Arc<SigningKey>, String), String> {
         let guard = self.state.read().unwrap();
         let s = guard
             .get(&id)
             .ok_or_else(|| "sandbox not found in k8s backend".to_string())?;
+        // Arc clone is a refcount bump — cheap. Cloning the SigningKey
+        // by value would heap-copy the 32-byte secret on every signed
+        // RPC, doubling the in-memory key count for the duration of
+        // the request (ed25519-dalek::SigningKey doesn't zeroize on
+        // drop).
         Ok((s.signing_key.clone(), s.agent_url.clone()))
     }
 }
@@ -770,7 +810,7 @@ struct AgentResponse {
 /// on that worker. The stress test never caught it because port-
 /// forward to localhost is fast.
 async fn http_signed_async(
-    signing_key: &SigningKey,
+    signing_key: &Arc<SigningKey>,
     method: &str,
     url: &str,
     body: &[u8],
@@ -782,10 +822,10 @@ async fn http_signed_async(
         .unwrap_or_else(|| "/".to_string());
     let path = path.split('?').next().unwrap_or("/").to_string();
 
-    // Move all the request data into the closure. SigningKey is
-    // Clone (32 bytes); cloning is cheap and avoids a lifetime
-    // dance with the pool's `'static` requirement.
-    let signing_key = signing_key.clone();
+    // Arc clone — refcount bump, NOT a 32-byte secret copy. Avoids
+    // having two heap copies of the secret coexisting during every
+    // signed RPC (ed25519-dalek::SigningKey doesn't zeroize on drop).
+    let signing_key = Arc::clone(signing_key);
     let method = method.to_string();
     let url = url.to_string();
     let body = body.to_vec();
@@ -1161,8 +1201,9 @@ fn start_port_forward(pod: &str, namespace: &str, local_port: u16) -> Result<Chi
         .map_err(|e| format!("spawn port-forward: {e}"))
 }
 
-/// Poll the agent's `/livez` until it returns 200, or until the
-/// deadline expires.
+/// Poll the agent's `/livez` until 200 AND the agent's `/version`
+/// reports the **expected pubkey fingerprint**, or the deadline
+/// expires.
 ///
 /// **Async** — uses `compio::time::sleep` between polls and
 /// `compio::runtime::spawn_blocking` for each ureq call. The
@@ -1171,12 +1212,30 @@ fn start_port_forward(pod: &str, namespace: &str, local_port: u16) -> Result<Chi
 /// blocked the worker for up to `timeout` seconds during every Pod
 /// create. With multiple concurrent creates that's an O(N×timeout)
 /// stall on the entire ntex pool.
-async fn wait_for_agent_livez(base_url: &str, timeout: Duration) -> Result<(), String> {
+///
+/// **FM-A parity:** the K8s backend has the identical race shape as
+/// nomad-ch — when a Pod is recycled, the cluster may serve a
+/// /livez=200 from the *previous* tenant's still-alive Pod (Pod IP
+/// reuse during teardown, kubelet lag, or a stale `kubectl
+/// port-forward` connection that survived a pod restart). Verify
+/// the agent answering /livez is also signing-and-attesting with
+/// OUR pubkey (its `/version.pubkey_fingerprint` matches the fp the
+/// controller minted at create-time). See the nomad-ch helper of
+/// the same name for the full rationale and the backward-compat
+/// fall-back for legacy agents.
+async fn wait_for_agent_livez(
+    base_url: &str,
+    expected_fp: &str,
+    signing_key: &Arc<SigningKey>,
+    timeout: Duration,
+) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
-    let url = format!("{base_url}/livez");
+    let livez_url = format!("{base_url}/livez");
+    let mut last_fp: Option<String> = None;
+    let mut last_version_status: Option<u16> = None;
     while Instant::now() < deadline {
-        let probe_url = url.clone();
-        let status = compio::runtime::spawn_blocking(move || {
+        let probe_url = livez_url.clone();
+        let livez_status = compio::runtime::spawn_blocking(move || {
             ureq::get(&probe_url)
                 .timeout(Duration::from_millis(500))
                 .call()
@@ -1186,12 +1245,62 @@ async fn wait_for_agent_livez(base_url: &str, timeout: Duration) -> Result<(), S
         .await
         .ok()
         .flatten();
-        if status == Some(200) {
-            return Ok(());
+        if livez_status == Some(200) {
+            let version_url = format!("{base_url}/version");
+            match http_signed_async(signing_key, "GET", &version_url, &[]).await {
+                Ok(resp) => {
+                    last_version_status = Some(resp.status);
+                    if resp.status == 200 {
+                        let fp_opt = serde_json::from_str::<serde_json::Value>(&resp.body)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("pubkey_fingerprint")
+                                    .and_then(|s| s.as_str())
+                                    .map(|s| s.to_string())
+                            });
+                        match fp_opt {
+                            Some(fp) if fp == expected_fp => return Ok(()),
+                            Some(fp) => {
+                                last_fp = Some(fp);
+                            }
+                            None => {
+                                // Legacy agent missing the field —
+                                // /version was signed-auth-checked, so
+                                // the agent IS verifying with our
+                                // pubkey. Warn + accept.
+                                eprintln!(
+                                    "[sandbox/k8s] wait_for_agent: legacy agent at \
+                                     {base_url} returned no pubkey_fingerprint on \
+                                     /version; falling back to signed-auth-only \
+                                     attestation"
+                                );
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                Err(_e) => {
+                    // Transport error on /version — retry.
+                }
+            }
         }
         compio::time::sleep(Duration::from_millis(150)).await;
     }
-    Err(format!("agent at {base_url} never returned 200 on /livez"))
+    if let Some(actual_fp) = last_fp {
+        Err(format!(
+            "stale agent at {base_url}: expected pubkey_fingerprint={expected_fp}, \
+             got {actual_fp}; previous tenant's Pod still answers on this IP/port"
+        ))
+    } else if last_version_status == Some(401) {
+        Err(format!(
+            "stale agent at {base_url}: /version returned 401 (agent is verifying with \
+             a different controller pubkey); expected fp={expected_fp}"
+        ))
+    } else {
+        Err(format!(
+            "agent at {base_url} never returned 200 on /livez (expected fp={expected_fp})"
+        ))
+    }
 }
 
 // ─── small utilities ────────────────────────────────────────────
@@ -1210,11 +1319,19 @@ fn random_nonce() -> Result<String, String> {
     Ok(bytes.iter().take(16).map(|b| format!("{b:02x}")).collect())
 }
 
+/// Wall-clock seconds since UNIX_EPOCH.
+///
+/// Crash-loud on clock-before-epoch instead of silently returning 0:
+/// the silent fallback would put signed-RPC timestamps 56 years in
+/// the past (agent 401s forever), make the idle reaper cull every
+/// sandbox immediately, and lie in the UI's "created_at" field.
+/// Better to panic and let orchestration surface the broken host
+/// clock. Mirrors `nomad_ch.rs::unix_now` and `sandbox-agent::sig::unix_now`.
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .expect("system clock before UNIX_EPOCH")
+        .as_secs()
 }
 
 /// Sanitize a request-supplied relative path before forwarding to

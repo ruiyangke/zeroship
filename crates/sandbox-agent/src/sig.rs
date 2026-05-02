@@ -304,11 +304,20 @@ fn evict_expired(cache: &mut LruCache<String, u64>, now: u64) {
     }
 }
 
+/// Wall-clock seconds since UNIX_EPOCH.
+///
+/// Crash-loud on clock-before-epoch instead of silently returning 0:
+/// inside the agent, `ts=0` would make every reply's nonce-LRU key
+/// behave bizarrely + the skew check would 401 every controller
+/// request forever. A panicking agent surfaces a broken VM clock
+/// (the controller's `wait_for_agent_livez` timeout), which is the
+/// right place to act on it. Mirror of `controller::unix_now` in
+/// both backends.
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .expect("system clock before UNIX_EPOCH")
+        .as_secs()
 }
 
 #[inline]

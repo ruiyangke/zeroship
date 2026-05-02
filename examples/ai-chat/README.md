@@ -60,23 +60,24 @@ Two adapters bridge zeroship and the AI SDK:
 
 ## Behind the scenes
 
-The runtime gained three pieces of WHATWG plumbing to make the AI SDK
+The runtime gained two pieces of WHATWG plumbing to make the AI SDK
 work without modification:
 
 - **`TextEncoderStream` / `TextDecoderStream`** — WHATWG transform
   streams that wrap `TextEncoder` / `TextDecoder`. The AI SDK's
   `toUIMessageStreamResponse()` ends with
-  `pipeThrough(new TextEncoderStream())`. Polyfilled in
-  `crates/runtime/src/embed/streams-polyfill.js` (loaded after
-  `TransformStream` is available).
+  `pipeThrough(new TextEncoderStream())`. Implemented as ~50 LOC
+  of JS in `crates/runtime/src/embed/text-streams.js`, layered on
+  top of native `TransformStream` (see
+  `docs/proposals/streams-native.md`).
 
-- **Bridge from polyfill to native ReadableStream** — `pipeThrough`
-  on our zero-copy ReadableStream returns a polyfill-class
-  ReadableStream (web-streams-polyfill v3). The Response constructor
-  in `embed/fetch.js` detects polyfill streams via
-  `instanceof __zsPolyfillReadableStream` and pumps their chunks
-  through a native ReadableStream so the kernel's stream forwarder
-  (`_id`-based) sees the byte chunks.
+- **Stream-body forwarder** — when a handler returns
+  `new Response(stream)`, the kernel's `inspect_response` calls
+  `__zsBeginStreamForward(response)` (in `embed/fetch.js`) which
+  locks the body via `getReader()` and pumps each chunk into a
+  Rust-side StreamState identified by `response._streamId`. Works
+  against any class implementing the spec ReadableStream surface;
+  no reach into private fields.
 
 - **`process.env` preservation in SSR builds** —
   `target: "webworker"` makes Rolldown statically rewrite

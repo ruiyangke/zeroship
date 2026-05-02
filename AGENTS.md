@@ -24,6 +24,7 @@ This file is the AI-agent landing page. Read the **task router** below first.
 | **Benchmarks** | `crates/runtime/benches/` · `docs/reference/zerobench.md` · `docs/benchmarks/` |
 | **Local dev setup** | `docs/runbooks/local-dev.md` |
 | **Multi-node / Docker Compose** | `docs/runbooks/docker-compose.md` |
+| **Nomad + Cloud Hypervisor sandbox backend** | `docs/runbooks/sandbox-nomad-ch.md` · `crates/sandbox/src/backend/nomad_ch.rs` · `crates/sandbox/scripts/nomad-vm-wrapper.sh` |
 | **Why we made decision X** | `docs/decisions/` (date-prefixed ADRs, immutable once landed) |
 | **Pre-ship proposals** | `docs/proposals/` (active, may not have shipped) |
 | **AI-builder competitive landscape** | `docs/research/ai-builder-features.md` |
@@ -203,6 +204,12 @@ cargo test -p zeroship-core
 cargo test -p zeroship-gateway
 cargo test -p zeroship-runtime --lib
 cargo test -p compio-postgres -- --test-threads=1   # needs DB
+
+# Web Platform Tests (WPT) — vendored as a sparse, shallow git submodule
+# at tests/wpt for spec-conformance runners (Headers, encoding, streams,
+# fetch, compression). After cloning the repo:
+git submodule update --init --depth=1
+./tests/setup-wpt.sh                                # ~9MB sparse checkout
 
 # E2E + benchmarks
 ./tests/e2e_platform.sh

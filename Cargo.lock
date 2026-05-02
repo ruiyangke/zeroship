@@ -6450,6 +6450,7 @@ dependencies = [
  "bytes",
  "compio",
  "ed25519-dalek",
+ "futures",
  "hex",
  "mimalloc",
  "ntex",

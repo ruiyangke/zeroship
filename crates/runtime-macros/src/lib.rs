@@ -113,6 +113,30 @@ pub fn v8_inherit_intrinsic(_attr: TokenStream, item: TokenStream) -> TokenStrea
     item
 }
 
+/// Impl-block-level marker attribute: chain the class's FunctionTemplate
+/// to a base class's FunctionTemplate via `FunctionTemplate::inherit`.
+/// Used for spec-mandated DOM-class inheritance, e.g.
+/// `AbortSignal : EventTarget` (DOM §3.3) — without this the
+/// `signal instanceof EventTarget === true` check fails.
+///
+/// Usage:
+/// ```ignore
+/// #[v8_class]
+/// #[v8_inherit(EventTarget)]
+/// impl AbortSignal { /* ... */ }
+/// ```
+///
+/// Codegen calls `__ctor_tmpl.inherit(BaseClass::install(scope))` after
+/// reserving internal-field slots; the base class's `install` is invoked
+/// fresh per realm, which is fine because the template chain is per-
+/// realm anyway. Per design fetch-native §XIV.1, this is the only
+/// `#[v8_inherit]` user in v1; future users include WebSocket /
+/// EventSource / MessagePort / XMLHttpRequest.
+#[proc_macro_attribute]
+pub fn v8_inherit(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
 /// Argument-level marker attribute consumed by `#[v8_class]`: when
 /// applied to a `Vec<u8>` parameter, the macro emits a SAB-rejection
 /// guard *before* extracting the bytes. A SharedArrayBuffer-backed
@@ -200,6 +224,28 @@ pub(crate) fn is_byte_string(ty: &Type) -> bool {
     type_ident(ty).as_deref() == Some("ByteString")
 }
 
+/// Check if type is the `EnforceRangeU64` newtype from
+/// `zeroship_runtime::enforce_range`. Used for WebIDL `[EnforceRange]
+/// unsigned long long` args (BYOBReader.read min, BYOBRequest.respond
+/// bytesWritten). Detection by last segment ident, like ByteString.
+pub(crate) fn is_enforce_range_u64(ty: &Type) -> bool {
+    type_ident(ty).as_deref() == Some("EnforceRangeU64")
+}
+
+/// Check if type is the `USVString` newtype from
+/// `zeroship_runtime::url_native::helpers`. Used for WebIDL USVString
+/// args (URL.* setters, URLSearchParams names/values). Conversion
+/// replaces unmatched surrogate code units with U+FFFD.
+pub(crate) fn is_usv_string(ty: &Type) -> bool {
+    type_ident(ty).as_deref() == Some("USVString")
+}
+
+/// Check if type is `Option<USVString>`.
+pub(crate) fn is_option_usv_string(ty: &Type) -> bool {
+    type_ident(ty).as_deref() == Some("Option")
+        && first_generic_arg(ty).map(is_usv_string).unwrap_or(false)
+}
+
 /// Extract the first generic type argument (e.g. `String` from `Option<String>`).
 pub(crate) fn first_generic_arg(ty: &Type) -> Option<&Type> {
     if let Type::Path(TypePath { path, .. }) = ty {
@@ -274,6 +320,83 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
                 args.get(#idx),
             ) {
                 Ok(__bytes) => ::zeroship_runtime::byte_string::ByteString::from_bytes(__bytes),
+                Err(__err) => {
+                    let __msg = v8::String::new(scope, &__err.message).unwrap();
+                    let __exc = match __err.kind {
+                        ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
+                        ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+                        _ => v8::Exception::error(scope, __msg),
+                    };
+                    scope.throw_exception(__exc);
+                    return;
+                }
+            };
+        };
+    }
+
+    // USVString → WebIDL USVString conversion. Replaces lone surrogate
+    // code units with U+FFFD per https://webidl.spec.whatwg.org/#es-USVString.
+    // The result is owned `String` so callers don't keep a `Local<Value>`
+    // borrow alive across subsequent V8 ops.
+    if is_usv_string(ty) {
+        return quote! {
+            let #name = match ::zeroship_runtime::url_native::helpers::read_usv_string_or_throw(
+                scope,
+                args.get(#idx),
+            ) {
+                Ok(__s) => ::zeroship_runtime::url_native::helpers::USVString::from_string(__s),
+                Err(__err) => {
+                    let __msg = v8::String::new(scope, &__err.message).unwrap();
+                    let __exc = match __err.kind {
+                        ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
+                        ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+                        _ => v8::Exception::error(scope, __msg),
+                    };
+                    scope.throw_exception(__exc);
+                    return;
+                }
+            };
+        };
+    }
+
+    // Option<USVString> — undefined / null produces None; otherwise
+    // run USVString conversion and wrap in Some.
+    if is_option_usv_string(ty) {
+        return quote! {
+            let #name: Option<::zeroship_runtime::url_native::helpers::USVString> =
+                if args.length() > #idx && !args.get(#idx).is_undefined() {
+                    match ::zeroship_runtime::url_native::helpers::read_usv_string_or_throw(
+                        scope,
+                        args.get(#idx),
+                    ) {
+                        Ok(__s) => Some(::zeroship_runtime::url_native::helpers::USVString::from_string(__s)),
+                        Err(__err) => {
+                            let __msg = v8::String::new(scope, &__err.message).unwrap();
+                            let __exc = match __err.kind {
+                                ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
+                                ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+                                _ => v8::Exception::error(scope, __msg),
+                            };
+                            scope.throw_exception(__exc);
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
+        };
+    }
+
+    // EnforceRangeU64 → WebIDL [EnforceRange] unsigned long long. Throws
+    // TypeError for NaN, ±∞, negative, and values > 2^53-1 (Number
+    // precision limit) — see streams design §XIV.8.
+    if is_enforce_range_u64(ty) {
+        return quote! {
+            let #name = match ::zeroship_runtime::enforce_range::read_enforce_range_u64(
+                scope,
+                args.get(#idx),
+            ) {
+                Ok(__v) => __v,
                 Err(__err) => {
                     let __msg = v8::String::new(scope, &__err.message).unwrap();
                     let __exc = match __err.kind {
@@ -626,12 +749,30 @@ pub(crate) fn gen_call_return(call: &TokenStream2, output: &ReturnType) -> Token
                 }
 
                 // --- Scalars ---
-                Some("bool") => quote! { rv.set(v8::Boolean::new(scope, #call).into()); },
-                Some("u32") => {
-                    quote! { rv.set(v8::Integer::new_from_unsigned(scope, #call).into()); }
-                }
-                Some("i32") => quote! { rv.set(v8::Integer::new(scope, #call).into()); },
-                Some("f64") => quote! { rv.set(v8::Number::new(scope, #call).into()); },
+                //
+                // Bind the user-method call's result to a local FIRST,
+                // then construct the V8 value. Inlining `#call` into
+                // `v8::Integer::new_from_unsigned(scope, #call)` would
+                // borrow `scope` twice in the same expression — once
+                // immutably for the first arg, once mutably inside
+                // `#call` (when the user method itself takes
+                // `scope: &mut PinScope`). E0502.
+                Some("bool") => quote! {
+                    let __r = #call;
+                    rv.set(v8::Boolean::new(scope, __r).into());
+                },
+                Some("u32") => quote! {
+                    let __r = #call;
+                    rv.set(v8::Integer::new_from_unsigned(scope, __r).into());
+                },
+                Some("i32") => quote! {
+                    let __r = #call;
+                    rv.set(v8::Integer::new(scope, __r).into());
+                },
+                Some("f64") => quote! {
+                    let __r = #call;
+                    rv.set(v8::Number::new(scope, __r).into());
+                },
                 Some("String") => quote! {
                     let __r = #call;
                     let __v = v8::String::new(scope, &__r).unwrap();

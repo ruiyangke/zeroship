@@ -35,6 +35,13 @@ pub const DEFAULT_WORKSPACE: &str = "/workspace";
 /// so the cluster NetworkPolicy can name a single port.
 pub const DEFAULT_PORT: u16 = 7777;
 
+/// Same value, different name — this is the "controller-side" alias
+/// for the agent's listening port. Anywhere a backend formats an
+/// agent URL (e.g. `http://<vm-ip>:7777`) should reference
+/// [`AGENT_PORT`] rather than hard-coding 7777, so a future port
+/// change is one edit.
+pub const AGENT_PORT: u16 = DEFAULT_PORT;
+
 /// Build [`AppState`] from explicit paths. Tests use this directly
 /// to avoid mutating `SANDBOX_AGENT_PUBKEY_FILE` (which races with
 /// other parallel tests).
