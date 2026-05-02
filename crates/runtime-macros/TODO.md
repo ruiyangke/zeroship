@@ -83,6 +83,24 @@ so we can grep back through the rationale.
   - Lands: commit `3cb0fe11` (codegen + 4 smoke tests in
     `tests/v8_same_object_smoke.rs`).
 
+- **`[Clamp]` integer coercion** — `ClampU16` / `ClampU32` / `ClampI32`
+  / `ClampU64` / `ClampI64` newtypes in `zeroship_runtime::clamp`
+  implement WebIDL `[Clamp]` ConvertToInt: NaN → 0, < min → min, > max
+  → max, otherwise round-half-even (banker's rounding) per
+  https://webidl.spec.whatwg.org/#abstract-opdef-converttoint step 8.
+  Unlike `[EnforceRange]` there is NO TypeError path — `[Clamp]` is
+  the lenient counterpart. The 64-bit widths cap at `2^53 - 1` (JS
+  Number precision boundary) on both sides; 32-bit widths cap at
+  `i32::MIN..=i32::MAX` / `0..=u32::MAX`.
+  - Macro detection by ident in `lib.rs::clamp_kind`; emission in
+    `gen_extract` mirrors the `EnforceRangeU64` path but never throws.
+  - Used (when migrated) by Streams chunk-size strategies (`[Clamp]
+    unsigned long`), Blob.slice (`[Clamp] long long`), WebSocket close
+    code (`[Clamp] unsigned short` — currently hand-rolled in
+    `websocket_native::algorithms::clamp_unsigned_short`).
+  - Lands: commit `<TBD-clamp>` (codegen + 5 smoke tests in
+    `tests/v8_clamp_smoke.rs`).
+
 ## Open
 
 ### Same-name getter+setter pairing
@@ -114,13 +132,6 @@ streams / WebSocket / WebCrypto consumer.
 WebIDL marker for getters that must return a fresh object per access
 (`Response.json(data)`, future Crypto methods). Macro currently caches;
 needs an opt-out attribute.
-
-### `[Clamp]` integer coercion
-
-WebIDL `[Clamp] long` clamps Number to integer range instead of
-throwing. Used by Streams' chunk-size strategies and Blob.slice.
-Currently hand-rolled via `f64::round_ties_even`. Add a `ClampLong`
-newtype mirroring `EnforceRangeU64`.
 
 ### Reentrancy guard on `&mut self`
 

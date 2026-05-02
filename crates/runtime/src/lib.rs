@@ -68,6 +68,7 @@ pub mod auth;
 pub mod base64;
 pub mod blob_native;
 pub mod byte_string;
+pub mod clamp;
 pub mod codec;
 pub mod dom;
 pub mod enforce_range;
@@ -100,6 +101,10 @@ pub(crate) mod panic_util;
 pub mod cpu_timer;
 
 // Convenience re-exports
+pub use clamp::{
+    ClampI32, ClampI64, ClampU16, ClampU32, ClampU64,
+    read_clamp_i32, read_clamp_i64, read_clamp_u16, read_clamp_u32, read_clamp_u64,
+};
 pub use enforce_range::{EnforceRangeU64, read_enforce_range_u64};
 pub use url_native::helpers::USVString;
 pub use init::{init_v8, RequestResult, HttpResult};
