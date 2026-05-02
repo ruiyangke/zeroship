@@ -17,8 +17,10 @@ import { ChatRail } from "./chat/ChatRail";
 import { briefSchema, type Brief } from "../types/chat";
 import { LiveBanner } from "../components/LiveBanner";
 import { ProductTour } from "../components/ProductTour";
+import { ErrorBoundary } from "../components/ErrorBoundary";
 import { lsGet, lsSet } from "../lib/storage";
 import { track } from "../lib/analytics";
+import { useMediaQuery } from "../lib/useMediaQuery";
 
 const PENDING_BRIEF_KEY = "zeroship_pending_brief";
 const FIRST_DEPLOY_PREFIX = "zeroship_first_deploy_celebrated_";
@@ -59,6 +61,11 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
   const [active, setActive] = useState<CanvasPillId>("preview");
   const [tourOpen, setTourOpen] = useState(false);
   const [showLiveBanner, setShowLiveBanner] = useState(false);
+  // Phone breakpoint: < 768px. The chat rail collapses out of the
+  // grid and becomes a togglable full-screen drawer. Tablet and up
+  // keep the 320px sidebar.
+  const isPhone = useMediaQuery("(max-width: 767px)");
+  const [chatOpen, setChatOpen] = useState(false);
 
   // One-shot brief consume on mount. We keep the value in state so
   // re-renders during the chat's first turn don't re-trigger the seed
@@ -103,8 +110,8 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
 
   if (appId && appQuery.error) {
     return (
-      <div className="h-screen flex items-center justify-center bg-paper">
-        <div data-testid="workspace-error" className="text-center">
+      <div className="h-screen flex items-center justify-center bg-paper p-6">
+        <div data-testid="workspace-error" className="text-center max-w-md">
           <h1 className="font-serif italic text-2xl text-ink mb-2">Project not found</h1>
           <p className="font-serif text-ink-soft mb-4">
             We couldn't load that project. It may have been deleted or you don't have access.
@@ -112,7 +119,7 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
           <Link
             to="/home"
             data-testid="workspace-error-home"
-            className="font-serif italic text-tomato hover:opacity-80"
+            className="font-serif italic text-tomato hover:opacity-80 focus:outline-2 focus:outline-tomato focus:outline-offset-2 rounded-sm"
           >
             ← Back to home
           </Link>
@@ -134,20 +141,35 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
         }
         right={
           <div className="flex items-center gap-2">
+            {isPhone && (
+              <button
+                type="button"
+                onClick={() => setChatOpen((v) => !v)}
+                data-testid="topbar-chat-toggle"
+                aria-label={chatOpen ? "Close chat" : "Open chat"}
+                aria-expanded={chatOpen}
+                title={chatOpen ? "Close chat" : "Open chat"}
+                className="inline-flex items-center justify-center size-7 border border-rule rounded-full bg-paper-2 font-serif italic text-[13px] text-ink-soft hover:border-ink hover:text-ink cursor-pointer focus:outline-2 focus:outline-tomato focus:outline-offset-2"
+              >
+                {/* Speech-bubble glyph; reads as chat at any size. */}
+                <span aria-hidden="true">≡</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setTourOpen(true)}
               data-testid="topbar-tour"
               aria-label="Take the tour"
               title="Take the tour"
-              className="inline-flex items-center justify-center size-7 border border-rule rounded-full bg-paper-2 font-serif italic text-[13px] text-ink-soft hover:border-ink hover:text-ink cursor-pointer"
+              className="inline-flex items-center justify-center size-7 border border-rule rounded-full bg-paper-2 font-serif italic text-[13px] text-ink-soft hover:border-ink hover:text-ink cursor-pointer focus:outline-2 focus:outline-tomato focus:outline-offset-2"
             >
               ?
             </button>
             <a
               href="#"
               data-testid="topbar-url"
-              className="inline-flex items-center gap-2 px-3 py-1.5 border border-rule rounded-full bg-paper-2 font-mono text-[11px] text-ink-soft hover:border-ink hover:text-ink"
+              aria-label={`Live URL: ${projectName}.zeroship.app`}
+              className="hidden sm:inline-flex items-center gap-2 px-3 py-1.5 border border-rule rounded-full bg-paper-2 font-mono text-[11px] text-ink-soft hover:border-ink hover:text-ink focus:outline-2 focus:outline-tomato focus:outline-offset-2"
               style={{ textDecoration: "none" }}
             >
               <span className="size-[5px] rounded-full bg-ivy pulse-dot" aria-hidden="true" />
@@ -160,7 +182,12 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
 
       <div
         className="flex-1 grid min-h-0"
-        style={{ gridTemplateColumns: "1fr 320px" }}
+        style={{
+          // On phones, the chat collapses out of the layout entirely
+          // and re-mounts as a drawer below; the main column claims
+          // 100% of the width.
+          gridTemplateColumns: isPhone ? "1fr" : "1fr 320px",
+        }}
       >
         <main data-testid="canvas-area" className="min-h-0 min-w-0 overflow-y-auto flex flex-col">
           {showLiveBanner && appId && appQuery.data && (
@@ -174,37 +201,98 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
           {/* Files / Logs / Env / Settings ship in Plan 01.6.
               Plan / Health ship in Plan 01.7. Data / Media ship in
               Plan 01.8 (this commit) over in-memory stubs (ISS-20 →
-              ISS-26). The catch-all below keeps each pill clickable
+              ISS-26). Each canvas is wrapped in its own ErrorBoundary
+              so a render crash in one pane doesn't blank the whole
+              workspace — the user can switch tabs out of the broken
+              one. The catch-all at the bottom keeps each pill clickable
               when an appId isn't available. */}
-          {active === "preview" && <PreviewCanvasStub />}
-          {active === "files" && appId && <FilesCanvas appId={appId} />}
-          {active === "data" && appId && <DataCanvas appId={appId} />}
-          {active === "media" && appId && <MediaCanvas appId={appId} />}
-          {active === "logs" && appId && <LogsCanvas appId={appId} />}
-          {active === "env" && appId && <EnvCanvas appId={appId} />}
+          {active === "preview" && (
+            <ErrorBoundary label="the preview"><PreviewCanvasStub /></ErrorBoundary>
+          )}
+          {active === "files" && appId && (
+            <ErrorBoundary label="the files canvas"><FilesCanvas appId={appId} /></ErrorBoundary>
+          )}
+          {active === "data" && appId && (
+            <ErrorBoundary label="the data canvas"><DataCanvas appId={appId} /></ErrorBoundary>
+          )}
+          {active === "media" && appId && (
+            <ErrorBoundary label="the media canvas"><MediaCanvas appId={appId} /></ErrorBoundary>
+          )}
+          {active === "logs" && appId && (
+            <ErrorBoundary label="the logs canvas"><LogsCanvas appId={appId} /></ErrorBoundary>
+          )}
+          {active === "env" && appId && (
+            <ErrorBoundary label="the env canvas"><EnvCanvas appId={appId} /></ErrorBoundary>
+          )}
           {active === "plan" && appId && (
-            <PlanCanvas appId={appId} app={appQuery.data} />
+            <ErrorBoundary label="the plan canvas">
+              <PlanCanvas appId={appId} app={appQuery.data} />
+            </ErrorBoundary>
           )}
           {active === "health" && appId && (
-            <HealthCanvas appId={appId} app={appQuery.data} />
+            <ErrorBoundary label="the health canvas">
+              <HealthCanvas appId={appId} app={appQuery.data} />
+            </ErrorBoundary>
           )}
           {active === "settings" && appId && (
-            <SettingsCanvas appId={appId} app={appQuery.data} />
+            <ErrorBoundary label="settings">
+              <SettingsCanvas appId={appId} app={appQuery.data} />
+            </ErrorBoundary>
           )}
           {!appId && active !== "preview" && (
-            <div className="h-full flex items-center justify-center text-ink-soft font-serif italic">
+            <div className="h-full flex items-center justify-center text-ink-soft font-serif italic px-6 text-center">
               No project selected.
             </div>
           )}
         </main>
-        <aside className="border-l border-rule min-h-0 min-w-0 overflow-hidden flex flex-col">
-          <ChatRail
-            appName={projectName}
-            appId={appId}
-            seedBrief={seedBrief ?? undefined}
-          />
-        </aside>
+        {!isPhone && (
+          <aside className="border-l border-rule min-h-0 min-w-0 overflow-hidden flex flex-col">
+            <ErrorBoundary label="the chat rail">
+              <ChatRail
+                appName={projectName}
+                appId={appId}
+                seedBrief={seedBrief ?? undefined}
+              />
+            </ErrorBoundary>
+          </aside>
+        )}
       </div>
+
+      {/* Phone drawer: full-screen chat overlay. Mounted only while
+          open so the rail's onMount seedBrief effect fires correctly,
+          and a backdrop-click closes it. */}
+      {isPhone && chatOpen && (
+        <div
+          data-testid="chat-drawer"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Chat"
+          className="fixed inset-0 z-40 flex flex-col bg-paper-2"
+        >
+          <div className="flex items-center justify-between px-4 py-2 border-b border-rule bg-paper">
+            <span className="font-display italic font-medium text-base">Notes &amp; thoughts</span>
+            <button
+              type="button"
+              onClick={() => setChatOpen(false)}
+              data-testid="chat-drawer-close"
+              aria-label="Close chat"
+              className="font-serif italic text-[13px] text-ink-soft hover:text-ink bg-transparent border-0 cursor-pointer px-2 py-1 focus:outline-2 focus:outline-tomato focus:outline-offset-2"
+            >
+              close
+            </button>
+          </div>
+          <div className="flex-1 min-h-0">
+            <ErrorBoundary label="the chat rail">
+              <ChatRail
+                appName={projectName}
+                appId={appId}
+                seedBrief={seedBrief ?? undefined}
+              />
+            </ErrorBoundary>
+          </div>
+        </div>
+      )}
+
       <ProductTour open={tourOpen} onClose={() => setTourOpen(false)} />
     </div>
   );
