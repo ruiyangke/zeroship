@@ -118,27 +118,57 @@ struct AdmissionErrors {
     fetches: v8::Global<v8::Object>,
 }
 
-/// Build a plain object with `.name = "RangeError"` and `.message = msg`.
-/// Skips V8's Error class so no stack trace is captured.
+/// Build a plain object with the dispatch-layer's expected error shape:
+/// `.name`, `.message`, `.status` set to real values; `.stack`, `.code`,
+/// `.details`, `.retryable` set to `null`. Skips V8's Error class so no
+/// stack trace is captured.
+///
+/// Why pre-set the remaining 4 fields to `null` rather than leaving them
+/// absent: `v8_exception_to_{stack,code,details_json,retryable}` each
+/// call `obj.get(scope, key)` on the rejection value. If the key is
+/// **absent**, V8 walks the prototype chain (Object.prototype → null) to
+/// confirm absence — a measured ~0.6-0.7% per lookup in our perf data.
+/// If the key is **present and null**, V8 returns the slot value directly.
+/// All four helpers null-check the result and return `None` either way,
+/// so the wire shape is identical; we just trade a prototype walk for an
+/// own-property hit. The shape is now closed (one map, all 7 keys), which
+/// V8 can optimize as a single hidden class.
 fn build_admission_error<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     msg: &str,
 ) -> v8::Local<'s, v8::Object> {
     let obj = v8::Object::new(scope);
-    let name_key = v8::String::new(scope, "name").unwrap();
-    let name_val = v8::String::new(scope, "RangeError").unwrap();
-    obj.set(scope, name_key.into(), name_val.into());
+    let null_v: v8::Local<v8::Value> = v8::null(scope).into();
 
-    let msg_key = v8::String::new(scope, "message").unwrap();
-    let msg_val = v8::String::new(scope, msg).unwrap();
-    obj.set(scope, msg_key.into(), msg_val.into());
+    // Insert in dispatch lookup order so V8's hidden-class transitions
+    // settle on a shape matching the access order: name, message, stack,
+    // status, code, details, retryable.
+    let key = v8::String::new(scope, "name").unwrap();
+    let v = v8::String::new(scope, "RangeError").unwrap();
+    obj.set(scope, key.into(), v.into());
 
-    // Set `.status = 503` so `v8_exception_to_status` returns 503
-    // instead of falling back to 500. The bench server's dispatcher
-    // honors this for the HTTP response code.
-    let status_key = v8::String::new(scope, "status").unwrap();
-    let status_val = v8::Integer::new_from_unsigned(scope, 503);
-    obj.set(scope, status_key.into(), status_val.into());
+    let key = v8::String::new(scope, "message").unwrap();
+    let v = v8::String::new(scope, msg).unwrap();
+    obj.set(scope, key.into(), v.into());
+
+    let key = v8::String::new(scope, "stack").unwrap();
+    obj.set(scope, key.into(), null_v);
+
+    // status: 503 — `v8_exception_to_status` honors it for the HTTP
+    // response code; the dispatcher otherwise falls back to 500.
+    let key = v8::String::new(scope, "status").unwrap();
+    let v = v8::Integer::new_from_unsigned(scope, 503);
+    obj.set(scope, key.into(), v.into());
+
+    let key = v8::String::new(scope, "code").unwrap();
+    obj.set(scope, key.into(), null_v);
+
+    let key = v8::String::new(scope, "details").unwrap();
+    obj.set(scope, key.into(), null_v);
+
+    let key = v8::String::new(scope, "retryable").unwrap();
+    obj.set(scope, key.into(), null_v);
+
     obj
 }
 
