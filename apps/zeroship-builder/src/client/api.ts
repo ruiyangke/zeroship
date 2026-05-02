@@ -102,6 +102,23 @@ export {
   type MediaEntry,
 } from "../server/agents";
 
+// PM / SRE scheduled-worker procs (spec §4.8.3.2). Each takes
+// `{appId}` and returns a structured digest / findings payload — see
+// `server/pm_worker.ts` and `server/sre_worker.ts` for the wire shape
+// and the ISS-28 caveat about missing cron infrastructure.
+export {
+  pmDigest,
+  type PMDigest,
+  type PMDigestRecommendationItem,
+  type PMDigestInput,
+} from "../server/pm_worker";
+export {
+  sreMonitor,
+  type SREMonitorResult,
+  type SREFindingItem,
+  type SREMonitorInput,
+} from "../server/sre_worker";
+
 export { appPreviewUrl } from "./lib/preview-url";
 
 // One procedure to start with — Plan 02 may add more (file CRUD, deploy,
