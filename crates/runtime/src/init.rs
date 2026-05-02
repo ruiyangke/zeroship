@@ -689,10 +689,11 @@ pub fn load_polyfills_and_modules(
     //      EventTarget prototype (not the now-deleted polyfill's).
     install_url_native(scope);
 
-    // Native WebCrypto (gated behind ZEROSHIP_NATIVE_CRYPTO=1 — D-23
-    // landing 1). When enabled we install Crypto / SubtleCrypto /
-    // CryptoKey classes and skip the JS polyfill; without the flag,
-    // the crypto.js shim runs as before.
+    // Native WebCrypto (D-23 landing 2: default-on). When enabled we
+    // install Crypto / SubtleCrypto / CryptoKey classes and skip the
+    // JS polyfill. Set `ZEROSHIP_NATIVE_CRYPTO=0` to opt out and
+    // re-engage the legacy `crypto.js` polyfill until landing 3
+    // deletes it.
     let native_crypto = crate::crypto_native::is_enabled();
     if native_crypto {
         let global = scope.get_current_context().global(scope);

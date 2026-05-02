@@ -47,8 +47,10 @@
 //!
 //! # Activation
 //!
-//! Set the env var `ZEROSHIP_NATIVE_CRYPTO=1` to swap the JS polyfill
-//! for native (D-23 cadence step 1). Default: polyfill.
+//! D-23 landing 2 (current): native is the default. Set the env var
+//! `ZEROSHIP_NATIVE_CRYPTO=0` to opt out and fall back to the JS
+//! polyfill (`embed/crypto.js`). Landing 3 will delete the polyfill
+//! once landing 2 has soaked.
 
 #![allow(unsafe_code)]
 
@@ -84,11 +86,13 @@ pub fn install_globals<'s>(
 }
 
 /// Returns true when the runtime should use the native WebCrypto path
-/// instead of the JS polyfill. Currently keyed off the
-/// `ZEROSHIP_NATIVE_CRYPTO` env var (D-23 landing 1). When the flag
-/// flips to default-on (landing 2), this returns true unconditionally.
+/// instead of the JS polyfill. D-23 landing 2: default-on. The
+/// `ZEROSHIP_NATIVE_CRYPTO` env var still acts as an opt-out — set it
+/// to `0` (or empty) to revert to the polyfill. Landing 3 deletes the
+/// polyfill and removes the opt-out.
 pub fn is_enabled() -> bool {
-    std::env::var("ZEROSHIP_NATIVE_CRYPTO")
-        .map(|v| !v.is_empty() && v != "0")
-        .unwrap_or(false)
+    match std::env::var("ZEROSHIP_NATIVE_CRYPTO") {
+        Ok(v) => !v.is_empty() && v != "0",
+        Err(_) => true,
+    }
 }
