@@ -8,11 +8,14 @@
 //   · Delete       — wipe the account (deferred · ISS-12).
 //   · Sign out     — calls AuthContext.logout, redirects to /login.
 
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { PageFrame } from "../components/PageFrame";
 import { GhostButton } from "../components/GhostButton";
 import { StampButton } from "../components/StampButton";
+
+const SESSION_START_KEY = "zeroship_session_started_at";
 
 export function Account({ onLogout }: { onLogout?: () => void }) {
   const { user, logout } = useAuth();
@@ -59,12 +62,7 @@ export function Account({ onLogout }: { onLogout?: () => void }) {
           <Field label="Email" value={user?.email ?? ""} readOnly testId="account-email" />
         </Section>
 
-        <DeferredSection
-          title="Sessions"
-          helper="Where you're signed in — log out remote devices anytime."
-          issue="ISS-10"
-          testId="account-sessions"
-        />
+        <SessionsSection />
 
         <DeferredSection
           title="Two-factor auth"
@@ -89,6 +87,114 @@ export function Account({ onLogout }: { onLogout?: () => void }) {
       </section>
     </PageFrame>
   );
+}
+
+/**
+ * Sessions block — V1 client-only view of "this browser's session".
+ * Reads (or seeds) a localStorage timestamp for the start of the
+ * current session and renders a single-row table per spec §6.5. The
+ * "sign out everywhere" affordance is wired to the same logout path
+ * AuthContext exposes (in dev that's a no-op; in prod it'll revoke
+ * once ISS-10's control-plane endpoint lands and the SDK switches to
+ * the real list). Self-revoke shouldn't actually do anything in dev —
+ * we surface it as "sign out" since that's all we can do client-side.
+ */
+function SessionsSection() {
+  const { logout } = useAuth();
+  const navigate = useNavigate();
+
+  // Synthetic session start timestamp. Stable across page reloads so
+  // "signed in 5m ago" stays accurate; resets on logout (cleared by
+  // the logout handler so the next login mints a fresh start).
+  const [startedAt, setStartedAt] = useState<string | null>(null);
+  useEffect(() => {
+    let v: string | null = null;
+    try { v = localStorage.getItem(SESSION_START_KEY); } catch {}
+    if (!v) {
+      v = new Date().toISOString();
+      try { localStorage.setItem(SESSION_START_KEY, v); } catch {}
+    }
+    setStartedAt(v);
+  }, []);
+
+  const ua = useMemo(() => {
+    if (typeof navigator === "undefined") return "Browser";
+    return shortUserAgent(navigator.userAgent);
+  }, []);
+
+  async function handleRevokeAll() {
+    try { localStorage.removeItem(SESSION_START_KEY); } catch {}
+    await logout();
+    navigate("/login", { replace: true });
+  }
+
+  return (
+    <Section title="Sessions" helper="Where you're signed in — V1 shows this browser only.">
+      <div
+        data-testid="account-sessions"
+        className="border border-rule bg-paper-2/40 px-4 py-3"
+      >
+        <div className="grid items-baseline gap-3" style={{ gridTemplateColumns: "1fr auto" }}>
+          <div>
+            <div className="font-serif italic font-medium text-[15px] text-ink">
+              {ua} · this browser
+            </div>
+            <div className="font-serif text-[13px] text-ink-soft">
+              Signed in {startedAt ? relativeTime(startedAt) : "just now"}.
+            </div>
+          </div>
+          <span
+            data-testid="account-sessions-current-pill"
+            className="font-sans text-[10px] uppercase tracking-[0.18em] text-ivy border border-ivy/40 rounded-full px-2 py-0.5"
+          >
+            current
+          </span>
+        </div>
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={handleRevokeAll}
+            data-testid="account-sessions-revoke-all"
+            className="font-serif italic text-[13px] text-tomato bg-transparent border-0 cursor-pointer hover:opacity-80"
+          >
+            Sign out everywhere →
+          </button>
+        </div>
+        <div className="mt-2 font-serif italic text-[12px] text-pencil">
+          Multi-device list is tracked as ISS-10 — landing with the
+          control-plane sessions endpoint.
+        </div>
+      </div>
+    </Section>
+  );
+}
+
+function shortUserAgent(ua: string): string {
+  // Tiny matcher — enough to label "Chrome on macOS" without dragging
+  // in a real ua-parser dep. We only show this as flavour; if every
+  // matcher misses we just show "Browser" rather than the raw string.
+  const browser =
+    /Firefox\/(\d+)/.test(ua) ? "Firefox" :
+    /Edg\//.test(ua) ? "Edge" :
+    /Chrome\//.test(ua) ? "Chrome" :
+    /Safari\//.test(ua) ? "Safari" : "Browser";
+  const os =
+    /Mac OS X/.test(ua) ? "macOS" :
+    /Windows NT/.test(ua) ? "Windows" :
+    /X11.*Linux/.test(ua) ? "Linux" :
+    /Android/.test(ua) ? "Android" :
+    /iPhone|iPad/.test(ua) ? "iOS" : "";
+  return os ? `${browser} on ${os}` : browser;
+}
+
+function relativeTime(iso: string): string {
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return "just now";
+  const diff = Date.now() - t;
+  if (diff < 60_000) return "just now";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
 function Section({
