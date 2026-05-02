@@ -14,6 +14,7 @@ pub mod config;
 pub mod files;
 pub mod handlers;
 pub mod persist;
+pub mod preview;
 pub mod registry;
 pub mod restore;
 
