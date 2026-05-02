@@ -72,35 +72,22 @@ impl URL {
     ///   4. If parsedURL is failure, then throw a TypeError.
     ///
     /// Both args are USVString — lone surrogates → U+FFFD.
-    /// `input` is REQUIRED per IDL: zero-arity throws TypeError. An
-    /// EXPLICIT undefined arg ToUSVString-converts to the string
-    /// "undefined" per WebIDL §3.2.21 (and may then parse fine
-    /// against a base — see WPT url-statics-parse.any.js's
-    /// `URL.parse(undefined, aaa:/b)` case).
     ///
-    /// We distinguish missing-arg from explicit-undefined via the
-    /// `__zs_argc` slot the macro exposes — see `args.length()` in
-    /// the macro's gen_extract for `Local<Value>`.
+    /// `input` is required per IDL but EXPLICIT `undefined`
+    /// ToUSVString-converts to the string `"undefined"` (per WebIDL
+    /// §3.2.21). So `URL.parse(undefined, "aaa:/b")` parses
+    /// `"undefined"` against base `"aaa:/b"` and may succeed (this
+    /// matters for the WPT url-statics-parse case). The `new URL()`
+    /// (no-args) path also runs the same conversion: undefined →
+    /// "undefined" → ada-url parse of "undefined" alone fails
+    /// (no scheme, no base) → TypeError. So zero-arity still throws,
+    /// just via the parse-failure path rather than an arity check.
     #[v8_constructor]
     fn new(
         scope: &mut v8::PinScope,
         input: v8::Local<v8::Value>,
         base: v8::Local<v8::Value>,
     ) -> Result<Self, OpError> {
-        // `is_missing_required` set by the macro for
-        // `[v8_required] input: Local<Value>` — but we don't have
-        // that attribute yet; fall back to a sentinel: per the
-        // bookkeeping the macro uses, `input` arrives as undefined
-        // both when (a) caller passed no arg and (b) caller passed
-        // explicit undefined. Distinguishing requires the caller's
-        // arg count.
-        //
-        // Use `v8::Isolate::set_slot` to thread argc? No — simpler:
-        // the macro could expose `args.length()` directly, but that
-        // needs a separate attribute. For now: treat input==undefined
-        // as ToUSVString("undefined") per WebIDL (see WPT
-        // url-statics-parse). The "no args" case would be caught by
-        // a future arity check.
         let input_s = read_usv_string(scope, input)
             .ok_or_else(|| OpError::type_error("Cannot convert input to USVString"))?;
 
