@@ -55,6 +55,17 @@ libc = { workspace = true }
 # responsive. No TLS feature — loopback only.
 ureq = { version = "2", default-features = false, features = ["json"] }
 
+# WebSocket Upgrade parsing for the preview proxy (Phase 2). The WS
+# port runs a tiny compio raw-TCP listener that parses just the HTTP
+# request-head with httparse, verifies the V1_1_Ws canonical, and
+# splices the two TCP sockets after a 101. No frame parsing.
+httparse = { workspace = true }
+
+# `futures_util::future::{select, join}` — used by the WS Upgrade
+# splice loop (race the lifetime cap against the two splice halves).
+# `default-features = false` keeps it lean.
+futures-util = { version = "0.3", default-features = false }
+
 [lints]
 workspace = true
 

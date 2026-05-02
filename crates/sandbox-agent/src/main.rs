@@ -14,7 +14,8 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use zeroship_sandbox_agent::{
-    dropuser, handlers, proxy, reap, state_from_env, version, DEFAULT_PORT, DEFAULT_WORKSPACE,
+    dropuser, handlers, proxy, proxy_ws, reap, state_from_env, version, DEFAULT_PORT,
+    DEFAULT_WORKSPACE,
 };
 
 #[ntex::main]
@@ -85,6 +86,29 @@ async fn run() -> Result<(), String> {
     let state = state_from_env(workspace.clone())?;
     let bind = format!("0.0.0.0:{port}");
     info!(bind = %bind, workspace = %workspace.display(), "agent listening");
+
+    // WebSocket Upgrade handler — Phase 2. Bound on a separate port
+    // (default 7778; configurable via `SANDBOX_AGENT_WS_PORT`) and
+    // serves ONLY `/proxy/{port}/{path*}` Upgrade requests verified
+    // under the V1_1_Ws canonical (ED25519-V1.1-WS domain tag). The
+    // controller learns the port via the `proxy.ws-v1` capability.
+    //
+    // Implementation note: ntex's connection-hijack surface
+    // (`HttpRequest::head().take_io()`) doesn't compose cleanly with
+    // a compio TcpStream upstream splice; the proposal explicitly
+    // permits a separate compio listener for the WS path
+    // (`docs/proposals/sandbox-preview-urls.md` Phase 2 plan, "If
+    // ntex's surface is too awkward, fall back to a compio raw-socket
+    // path"). We take that path.
+    let ws_port = proxy_ws::ws_port_from_env();
+    let ws_state = state.clone();
+    compio::runtime::spawn(async move {
+        if let Err(e) = proxy_ws::serve(ws_state, ws_port).await {
+            tracing::error!(error = %e, ws_port, "[sandbox-agent] proxy_ws serve exited with error");
+        }
+    })
+    .detach();
+    info!(ws_port, "agent ws-upgrade listener");
 
     // Per-route payload caps — applied at the ntex extractor so
     // oversize bodies are rejected before handlers run (no
