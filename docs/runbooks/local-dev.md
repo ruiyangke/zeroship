@@ -128,7 +128,7 @@ cargo test -p compio-postgres -- --test-threads=1
 
 ```bash
 # Build the bench binaries
-cargo build --release --bin v8-server-compio --bin zerobench
+cargo build --release --bin zeroship-bench-server --bin zerobench
 
 # Run the standard suite (uses NUMA pinning if available)
 cd crates/runtime/benches

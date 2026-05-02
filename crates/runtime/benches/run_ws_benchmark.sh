@@ -16,7 +16,7 @@ cleanup() { for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done; w
 trap cleanup EXIT
 
 echo "=== Building ===" >&2
-(cd "$ROOT_DIR" && cargo build --release --bin v8-server-compio 2>&1 | tail -1) >&2
+(cd "$ROOT_DIR" && cargo build --release --bin zeroship-bench-server 2>&1 | tail -1) >&2
 
 echo "=== Starting servers ===" >&2
 for port in $PORT_COMPIO_1 $PORT_COMPIO_N $PORT_NODE; do
@@ -24,10 +24,10 @@ for port in $PORT_COMPIO_1 $PORT_COMPIO_N $PORT_NODE; do
 done
 sleep 1
 
-"$ROOT_DIR/target/release/v8-server-compio" --port=$PORT_COMPIO_1 --workers=1 &
+"$ROOT_DIR/target/release/zeroship-bench-server" --port=$PORT_COMPIO_1 --workers=1 &
 PIDS+=($!)
 
-"$ROOT_DIR/target/release/v8-server-compio" --port=$PORT_COMPIO_N --workers=$(nproc) &
+"$ROOT_DIR/target/release/zeroship-bench-server" --port=$PORT_COMPIO_N --workers=$(nproc) &
 PIDS+=($!)
 
 node "$SCRIPT_DIR/node_ws_server.js" $PORT_NODE &

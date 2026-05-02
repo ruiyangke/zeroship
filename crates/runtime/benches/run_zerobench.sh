@@ -44,8 +44,20 @@ for arg in "$@"; do
         --workers=*)  WORKERS="${arg#*=}" ;;
         --rate=*)     RATE="${arg#*=}"; MODE=rate ;;
         --saturate)   MODE=saturate ;;
+        --scenario=*) SCENARIO="${arg#*=}" ;;
+        --target=*)   TARGETS="${arg#*=}" ;;
     esac
 done
+
+# --target=v8-1w  (or comma-separated: "v8-1w,v8-16w") restricts which
+# of the four runtime slots get benched. Empty default benches all
+# four. Names: v8-1w, v8-16w, node-single, node-cluster.
+TARGETS="${TARGETS:-}"
+target_selected() {
+    [ -z "$TARGETS" ] && return 0
+    case ",$TARGETS," in *",$1,"*) return 0 ;; esac
+    return 1
+}
 
 # ---------------------------------------------------------------------------
 # NUMA isolation
@@ -82,7 +94,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "=== Building ==="
-cargo build --release -p zeroship-runtime --bin v8-server-compio 2>&1 | tail -2
+cargo build --release -p zeroship-runtime --bin zeroship-bench-server 2>&1 | tail -2
 
 # Ensure nginx is available (stable, industry-standard echo server — removes
 # our own HTTP impl from the fetch() benchmark loop).
@@ -128,17 +140,26 @@ PIDS+=($!)
 # fetchEcho scenario can hit the in-NUMA nginx on 127.0.0.1 —
 # otherwise the runtime returns 500 "Blocked request to
 # private/internal IP" on every fetchExternal call.
-ZEROSHIP_DEV=1 $NUMA_SERVER "$BIN/v8-server-compio" --port="$PORT_V8_1" --workers=1 > /dev/null 2>&1 &
-PIDS+=($!)
-ZEROSHIP_DEV=1 $NUMA_SERVER "$BIN/v8-server-compio" --port="$PORT_V8_N" --workers="$WORKERS" > /dev/null 2>&1 &
-PIDS+=($!)
-$NUMA_SERVER node "$SCRIPT_DIR/node_server.js" $PORT_NODE > /dev/null 2>&1 &
-PIDS+=($!)
-$NUMA_SERVER node "$SCRIPT_DIR/node_server_cluster.js" $PORT_NODE_CLUSTER "$WORKERS" > /dev/null 2>&1 &
-PIDS+=($!)
+PROBE_PORTS=()
+if target_selected v8-1w; then
+    ZEROSHIP_DEV=1 $NUMA_SERVER "$BIN/zeroship-bench-server" --port="$PORT_V8_1" --workers=1 > /dev/null 2>&1 &
+    PIDS+=($!); PROBE_PORTS+=($PORT_V8_1)
+fi
+if target_selected v8-16w; then
+    ZEROSHIP_DEV=1 $NUMA_SERVER "$BIN/zeroship-bench-server" --port="$PORT_V8_N" --workers="$WORKERS" > /dev/null 2>&1 &
+    PIDS+=($!); PROBE_PORTS+=($PORT_V8_N)
+fi
+if target_selected node-single; then
+    $NUMA_SERVER node "$SCRIPT_DIR/node_server.js" $PORT_NODE > /dev/null 2>&1 &
+    PIDS+=($!); PROBE_PORTS+=($PORT_NODE)
+fi
+if target_selected node-cluster; then
+    $NUMA_SERVER node "$SCRIPT_DIR/node_server_cluster.js" $PORT_NODE_CLUSTER "$WORKERS" > /dev/null 2>&1 &
+    PIDS+=($!); PROBE_PORTS+=($PORT_NODE_CLUSTER)
+fi
 sleep 4
 
-for port in $PORT_V8_1 $PORT_V8_N $PORT_NODE $PORT_NODE_CLUSTER; do
+for port in "${PROBE_PORTS[@]}"; do
     # zeroship v1 RPC wire — POST /_zs/v1/ping with superjson `{ json }` body.
     if ! curl -sf -X POST -H 'Content-Type: application/json' \
         -d '{"json":null}' "http://127.0.0.1:$port/_zs/v1/ping" > /dev/null 2>&1; then
@@ -183,13 +204,12 @@ echo "================================================================="
 RESULTS_DIR="$(mktemp -d)"
 
 bench_target() {
-    local label=$1 port=$2 include_streaming=${3:-0}
-    local slot=$4
+    local label=$1 port=$2 slot=$3
     local out_file="$RESULTS_DIR/$slot.raw"
     printf "  [%d/4] %-30s" "$slot" "$label"
     local env_vars=(BENCH_HOST=127.0.0.1 BENCH_PORT="$port" BENCH_ECHO_PORT="$PORT_ECHO")
-    if [ "$include_streaming" = "0" ]; then
-        env_vars+=(BENCH_SKIP_STREAMING=1 BENCH_HTTP_GET=0)
+    if [ -n "${SCENARIO:-}" ]; then
+        env_vars+=(BENCH_SCENARIO="$SCENARIO")
     fi
     local start=$(date +%s)
     # zerobench's exit policy now gates on hard transport errors only
@@ -210,15 +230,10 @@ bench_target() {
 
 echo
 echo "=== Benchmarking targets ==="
-bench_target "v8-compio (1w)"           $PORT_V8_1         0  1
-bench_target "v8-compio (${WORKERS}w)"  $PORT_V8_N         1  2
-bench_target "node single"              $PORT_NODE         0  3
-bench_target "node cluster (${WORKERS}w)" $PORT_NODE_CLUSTER 0  4
-
-# The `nginxRaw` scenario in zeroship-bench.rhai hits nginx directly,
-# independent of which runtime slot is benchmarking. All four slots
-# produce equivalent readings; the summary picks slot 2 (16-worker
-# v8-compio) as the canonical baseline for the fetchEcho/httpGet ratio.
+target_selected v8-1w        && bench_target "v8-compio (1w)"           $PORT_V8_1         1
+target_selected v8-16w       && bench_target "v8-compio (${WORKERS}w)"  $PORT_V8_N         2
+target_selected node-single  && bench_target "node single"              $PORT_NODE         3
+target_selected node-cluster && bench_target "node cluster (${WORKERS}w)" $PORT_NODE_CLUSTER 4
 
 # ---------------------------------------------------------------------------
 # Pass 2: parse each result file into per-(target,scenario) pairs.
@@ -255,28 +270,26 @@ parse_results() {
 ALL="$RESULTS_DIR/all.tsv"
 > "$ALL"
 for slot in 1 2 3 4; do
+    [ -f "$RESULTS_DIR/$slot.raw" ] || continue
     parse_results "$slot" "$RESULTS_DIR/$slot.raw" >> "$ALL"
 done
-
-# Pull the raw nginx rps from slot 2 (16w v8-compio's reading) for the
-# fetch-overhead ratio. Any slot's reading would do — nginx is the
-# same target regardless of which runtime was benchmarking against
-# itself in the other scenarios.
-NGINX_RAW_RPS=$(awk -F'\t' '$1=="2" && $2=="nginxRaw" {print $3; exit}' "$ALL")
 
 # ---------------------------------------------------------------------------
 # Pass 3: scenario-first layout — each scenario shows all 4 targets.
 # ---------------------------------------------------------------------------
 
-# Scenarios in declaration order (take the first target's ordering).
-SCENARIOS=$(awk -F'\t' '$1=="2" {print $2}' "$ALL")
-[ -z "$SCENARIOS" ] && SCENARIOS=$(awk -F'\t' '$1=="1" {print $2}' "$ALL")
+# Scenarios in declaration order (prefer slot 2's ordering, fall back
+# to whichever slot was actually run).
+SCENARIOS=""
+for slot in 2 1 3 4; do
+    SCENARIOS=$(awk -F'\t' -v s="$slot" '$1==s {print $2}' "$ALL")
+    [ -n "$SCENARIOS" ] && break
+done
 
 echo
 echo "================================================================="
 echo "  Per-scenario comparison (req/s · p50 · p99)"
 echo "================================================================="
-
 
 for sc in $SCENARIOS; do
     echo
@@ -291,19 +304,8 @@ for sc in $SCENARIOS; do
         rps=$(echo "$row" | awk -F'\t' '{print $3}')
         p50=$(echo "$row" | awk -F'\t' '{print $4}')
         p99=$(echo "$row" | awk -F'\t' '{print $5}')
-        # For fetch-shaped scenarios, append the raw-baseline ratio.
-        ratio_suffix=""
-        if [ -n "$NGINX_RAW_RPS" ] && [ "$NGINX_RAW_RPS" -gt 0 ]; then
-            case "$sc" in
-                fetchEcho|httpGet)
-                    pct=$(awk -v r="$rps" -v b="$NGINX_RAW_RPS" \
-                        'BEGIN{printf "%.0f", (r * 100.0) / b}')
-                    ratio_suffix="  (${pct}% of raw)"
-                    ;;
-            esac
-        fi
-        printf "  %-30s %'14d req/s  p50=%s  p99=%s%s\n" \
-            "$label" "$rps" "$p50" "$p99" "$ratio_suffix"
+        printf "  %-30s %'14d req/s  p50=%s  p99=%s\n" \
+            "$label" "$rps" "$p50" "$p99"
     done
 done
 

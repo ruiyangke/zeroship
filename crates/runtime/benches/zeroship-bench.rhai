@@ -8,7 +8,7 @@
 //   zerobench run crates/runtime/benches/zeroship-bench.rhai -c 300
 //
 // The server must be running:
-//   target/release/v8-server-compio --port=5101 --workers=16
+//   target/release/zeroship-bench-server --port=5101 --workers=16
 //   target/release/echo-server --port=8888
 //
 // Each RPC scenario sends a JSON-RPC request to the /rpc endpoint. The
@@ -31,6 +31,12 @@ let base = `http://${host}:${port}`;
 let ws_base = `ws://${host}:${port}`;
 let echo_url = `http://${host}:${echo_port}`;
 
+// BENCH_SCENARIO=ping runs only the matching scenario; empty string
+// runs everything. Used by the runner's `--scenario=NAME` flag for
+// per-scenario perf iteration.
+let only = env("BENCH_SCENARIO", "");
+let want = |name| only == "" || only == name;
+
 // RPC wire (zeroship v1, /_zs/v1/<id> with superjson `{ json }`
 // envelope). Body is a single JSON value wrapped under `json` —
 // `null` for no-arg procedures, `<value>` for single-arg. Response
@@ -43,47 +49,35 @@ fn rpc(base, method, body) {
         .expect_status(200)
 }
 
-// Raw baseline: hit the nginx echo target directly with a plain GET.
-// Independent of the runtime under test — every slot benchmarks the
-// same nginx, so any slot's reading establishes the wire upper-bound.
-// The fetchEcho / httpGet ratio (runtime / nginxRaw) is the real
-// "fetch overhead" signal. Without this, a 132K fetchEcho number is
-// hard to read: is fetch slow, or is nginx the bottleneck?
-scenario("nginxRaw", |s| { s.step(GET(`${echo_url}/`).expect_status(200)); });
-
 // No-arg procedures: empty `{}` body. The dispatcher unwraps to
 // `undefined`, which all the no-arg fixtures ignore.
-scenario("ping",         |s| { s.step(rpc(base, "ping",         "{}")); });
-scenario("fib10",        |s| { s.step(rpc(base, "fib",          `{"json":10}`)); });
-scenario("setTimeout0",  |s| { s.step(rpc(base, "timeout0",     "{}")); });
-scenario("promiseChain", |s| { s.step(rpc(base, "promiseChain", "{}")); });
-scenario("fetchEcho",    |s| { s.step(rpc(base, "fetchExternal", `{"json":"${echo_url}"}`)); });
-scenario("sha256",       |s| { s.step(rpc(base, "sha256",       "{}")); });
-scenario("hmacSign",     |s| { s.step(rpc(base, "hmacSign",     "{}")); });
-scenario("randomUUID",   |s| { s.step(rpc(base, "uuid",         "{}")); });
-scenario("aesEncrypt",   |s| { s.step(rpc(base, "aesEncrypt",   "{}")); });
-scenario("ecdsaSign",    |s| { s.step(rpc(base, "ecdsaSign",    "{}")); });
+if want.call("ping")         { scenario("ping",         |s| { s.step(rpc(base, "ping",         "{}")); }); }
+if want.call("fib10")        { scenario("fib10",        |s| { s.step(rpc(base, "fib",          `{"json":10}`)); }); }
+if want.call("setTimeout0")  { scenario("setTimeout0",  |s| { s.step(rpc(base, "timeout0",     "{}")); }); }
+if want.call("promiseChain") { scenario("promiseChain", |s| { s.step(rpc(base, "promiseChain", "{}")); }); }
+if want.call("fetchEcho")    { scenario("fetchEcho",    |s| { s.step(rpc(base, "fetchExternal", `{"json":"${echo_url}"}`)); }); }
+if want.call("sha256")       { scenario("sha256",       |s| { s.step(rpc(base, "sha256",       "{}")); }); }
+if want.call("hmacSign")     { scenario("hmacSign",     |s| { s.step(rpc(base, "hmacSign",     "{}")); }); }
+if want.call("randomUUID")   { scenario("randomUUID",   |s| { s.step(rpc(base, "uuid",         "{}")); }); }
+if want.call("aesEncrypt")   { scenario("aesEncrypt",   |s| { s.step(rpc(base, "aesEncrypt",   "{}")); }); }
+if want.call("ecdsaSign")    { scenario("ecdsaSign",    |s| { s.step(rpc(base, "ecdsaSign",    "{}")); }); }
 
-// HTTP dispatch scenario (zeroship only — node doesn't implement /hello)
-if env("BENCH_HTTP_GET", "1") != "0" {
+// HTTP dispatch (GET /hello via the WinterCG fetch path).
+if want.call("httpGet") {
     scenario("httpGet", |s| {
         s.step(GET(`${base}/hello`).expect_status(200));
     });
 }
 
-// SSE + WS scenarios (zeroship only — node baselines don't implement these
-// endpoints identically; skip when BENCH_SKIP_STREAMING=1).
-//
-// v0.1.0 DSL: protocol-native primitives replace the old single-shot
-// builders. `sse_hold` measures events/s + inter-event gap p99 across
-// N subscribers held for a duration (the production question for SSE);
-// `ws_echo_rtt` measures per-message RTT across N persistent
+// Streaming scenarios — `sse_hold` measures events/s + inter-event gap
+// p99 across N subscribers held for a duration (production question
+// for SSE); `ws_echo_rtt` measures per-message RTT across N persistent
 // connections sending at a fixed rate (production question for WS).
-if env("BENCH_SKIP_STREAMING", "0") != "1" {
-    let hold_for = env("BENCH_STREAM_HOLD", "10s");
-    let stream_subs = parse_int(env("BENCH_STREAM_SUBS", "50"));
-    let ws_rate = parse_int(env("BENCH_WS_MSG_RATE", "100"));
+let hold_for = env("BENCH_STREAM_HOLD", "10s");
+let stream_subs = parse_int(env("BENCH_STREAM_SUBS", "50"));
+let ws_rate = parse_int(env("BENCH_WS_MSG_RATE", "100"));
 
+if want.call("sseHold") {
     scenario("sseHold", |s| {
         // `delay` (not `delay_ms`) — matches the server-side query
         // key in scenarios.js and node_server.js. A 10ms pace gives
@@ -94,6 +88,8 @@ if env("BENCH_SKIP_STREAMING", "0") != "1" {
             sse_hold(`${base}/sse?chunks=100000&delay=10`, stream_subs, hold_for)
         );
     });
+}
+if want.call("wsEchoRtt") {
     scenario("wsEchoRtt", |s| {
         s.step(
             ws_echo_rtt(`${ws_base}/`, stream_subs, ws_rate)
