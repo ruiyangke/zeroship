@@ -303,6 +303,7 @@ FormData), Body + Request + Response, fetch() core and algorithms.
 | `66c5618f` | WPT basic — add 5 in-process network runners (16 sub-cases @ 100%) |
 | `3f986248` | spec gap — Headers immutable guard for Response.error() (response 38/0/1 was 37/1/1) |
 | `851a33ba` | WPT abort — add fetch-level abort runner (4 sub-cases @ 100%) |
+| `6e776e21` | spec gap — `new Request(req)` body identity preservation + WPT historical (request 38/0/5 was 37/1/5) |
 
 Net polyfill LOC removed: ~1,000. The remaining JS embed code is the
 DOMException polyfill + `__zsBeginStreamForward` kernel-bridge helper
