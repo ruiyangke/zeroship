@@ -91,13 +91,29 @@ pub fn extract_body(
         return extract_from_buffer_source(scope, value);
     }
 
-    // Blob — v1 has no native Blob class. The polyfill Blob (when the
-    // polyfill is enabled) is an object with an `arrayBuffer()` /
-    // `text()` method and a `type` string property. We could
-    // duck-type, but for v1 the cleanest division is "if you want
-    // Blob, register a native Blob class first". Defer and document.
-    // (When native Blob lands, add an `is_blob(value)` check here
-    // BEFORE the string fallback.)
+    // Blob — native class. Per Fetch §3.2 step 11.3:
+    //   - body's stream is a stream that emits the Blob's bytes,
+    //   - Content-Type defaults to the Blob's `type`.
+    if let Ok(obj) = v8::Local::<v8::Object>::try_from(value) {
+        if crate::blob_native::blob::is_blob_instance_public(scope, obj) {
+            if let Some((bytes, type_)) =
+                crate::blob_native::blob::read_blob_bytes_and_type(scope, obj)
+            {
+                let length = Some(bytes.len() as u64);
+                let content_type = if type_.is_empty() { None } else { Some(type_.clone()) };
+                let bytes_rc = Rc::new(bytes);
+                let stream = build_byte_stream(scope, bytes_rc.clone());
+                return Ok(Extracted {
+                    body: BodyImpl {
+                        stream: Some(stream),
+                        source: Some(BodySource::Blob(bytes_rc, Some(type_))),
+                        length,
+                    },
+                    content_type,
+                });
+            }
+        }
+    }
 
     // FormData — duck-type via `Symbol.toStringTag === "FormData"` and
     // the `entries()` iterable. The native FormData is `formData.entries()`
@@ -371,13 +387,27 @@ fn encode_utf8(cp: u32, out: &mut Vec<u8>) {
 // Path: FormData
 // ---------------------------------------------------------------------------
 
+/// One FormData entry as the multipart serializer sees it: the name
+/// (USVString bytes) plus the value, which is either bytes (USVString
+/// stringified UTF-8 OR file bytes), plus optional `(filename,
+/// content_type)` for File-typed entries.
+struct ExtractedEntry {
+    name: Vec<u8>,
+    value: ExtractedValue,
+}
+
+enum ExtractedValue {
+    Text(Vec<u8>),
+    File {
+        filename: String,
+        content_type: String,
+        bytes: Vec<u8>,
+    },
+}
+
 /// Try to extract a FormData. Returns `Ok(Some((bytes, boundary, mime)))`
 /// if the value duck-types as FormData; `Ok(None)` otherwise; `Err` on
-/// real failure (e.g. non-string entry value when File support deferred).
-///
-/// v1 emits a multipart/form-data serialization since the polyfill has
-/// urlencoded fallback in body consumers. The byte-only multipart form
-/// (no Blob/File) is straightforward.
+/// real failure.
 fn try_extract_form_data(
     scope: &mut v8::PinScope,
     value: v8::Local<v8::Value>,
@@ -389,8 +419,6 @@ fn try_extract_form_data(
         return Ok(None);
     }
 
-    // Drive `entries()` on the FormData. Entries are USVString pairs in
-    // v1 (no Blob/File). Multipart-serialize.
     let entries = read_form_data_entries(scope, obj)?;
     let boundary = generate_multipart_boundary();
     let bytes = serialize_form_data_multipart(&entries, &boundary);
@@ -411,7 +439,7 @@ fn is_form_data(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
 fn read_form_data_entries(
     scope: &mut v8::PinScope,
     fd_obj: v8::Local<v8::Object>,
-) -> Result<Vec<(Vec<u8>, Vec<u8>)>, OpError> {
+) -> Result<Vec<ExtractedEntry>, OpError> {
     // Call fd.entries() to get the iterator.
     let key = v8::String::new(scope, "entries").unwrap();
     let entries_fn_v = fd_obj
@@ -436,7 +464,7 @@ fn read_form_data_entries(
     let done_key = v8::String::new(scope, "done").unwrap();
     let value_key = v8::String::new(scope, "value").unwrap();
 
-    let mut out: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut out: Vec<ExtractedEntry> = Vec::new();
     loop {
         let step_v = next_fn
             .call(scope, iter.into(), &[])
@@ -463,8 +491,37 @@ fn read_form_data_entries(
             .get_index(scope, 1)
             .ok_or_else(|| OpError::type_error("FormData entry [1] access threw"))?;
         let name_b = string_to_usv_bytes(scope, name_v)?;
-        let val_b = string_to_usv_bytes(scope, val_v)?;
-        out.push((name_b, val_b));
+
+        // Distinguish Blob/File from string. For File entries we read
+        // the raw bytes + filename + type. For non-Blob entries we
+        // USVString-coerce.
+        let value: ExtractedValue = if let Ok(obj) = v8::Local::<v8::Object>::try_from(val_v) {
+            if crate::blob_native::blob::is_blob_instance_public(scope, obj) {
+                let (bytes, content_type) = crate::blob_native::blob::read_blob_bytes_and_type(scope, obj)
+                    .ok_or_else(|| OpError::type_error("FormData entry Blob has no bytes"))?;
+                // For File: read the .name property; for plain Blob,
+                // default filename is "blob".
+                let filename = if crate::blob_native::blob::is_file_instance_public(scope, obj) {
+                    let name_key = v8::String::new(scope, "name").unwrap();
+                    obj.get(scope, name_key.into())
+                        .map(|v| v.to_rust_string_lossy(scope))
+                        .unwrap_or_else(|| "blob".to_string())
+                } else {
+                    "blob".to_string()
+                };
+                ExtractedValue::File {
+                    filename,
+                    content_type,
+                    bytes,
+                }
+            } else {
+                ExtractedValue::Text(string_to_usv_bytes(scope, val_v)?)
+            }
+        } else {
+            ExtractedValue::Text(string_to_usv_bytes(scope, val_v)?)
+        };
+
+        out.push(ExtractedEntry { name: name_b, value });
     }
     Ok(out)
 }
@@ -483,34 +540,60 @@ fn generate_multipart_boundary() -> String {
     format!("----zsboundary-{mix:016x}")
 }
 
-fn serialize_form_data_multipart(
-    entries: &[(Vec<u8>, Vec<u8>)],
-    boundary: &str,
-) -> Vec<u8> {
+fn serialize_form_data_multipart(entries: &[ExtractedEntry], boundary: &str) -> Vec<u8> {
     let mut out = Vec::new();
-    for (name, value) in entries {
+    for entry in entries {
         out.extend_from_slice(b"--");
         out.extend_from_slice(boundary.as_bytes());
         out.extend_from_slice(b"\r\n");
         out.extend_from_slice(b"Content-Disposition: form-data; name=\"");
         // RFC 7578 §4.2: percent-encode the name's "%", CR, LF, and
         // double-quote. Keep other UTF-8 bytes.
-        for &b in name {
-            match b {
-                b'"' => out.extend_from_slice(b"%22"),
-                b'\r' => out.extend_from_slice(b"%0D"),
-                b'\n' => out.extend_from_slice(b"%0A"),
-                _ => out.push(b),
+        for &b in &entry.name {
+            push_disp_escaped(&mut out, b);
+        }
+        out.extend_from_slice(b"\"");
+        match &entry.value {
+            ExtractedValue::Text(value) => {
+                out.extend_from_slice(b"\r\n\r\n");
+                out.extend_from_slice(value);
+            }
+            ExtractedValue::File { filename, content_type, bytes } => {
+                out.extend_from_slice(b"; filename=\"");
+                for &b in filename.as_bytes() {
+                    push_disp_escaped(&mut out, b);
+                }
+                out.extend_from_slice(b"\"\r\n");
+                // Per RFC 7578 §4.4: include Content-Type if known.
+                // Default to application/octet-stream when missing —
+                // matches every browser implementation.
+                let ct = if content_type.is_empty() {
+                    "application/octet-stream"
+                } else {
+                    content_type.as_str()
+                };
+                out.extend_from_slice(b"Content-Type: ");
+                out.extend_from_slice(ct.as_bytes());
+                out.extend_from_slice(b"\r\n\r\n");
+                out.extend_from_slice(bytes);
             }
         }
-        out.extend_from_slice(b"\"\r\n\r\n");
-        out.extend_from_slice(value);
         out.extend_from_slice(b"\r\n");
     }
     out.extend_from_slice(b"--");
     out.extend_from_slice(boundary.as_bytes());
     out.extend_from_slice(b"--\r\n");
     out
+}
+
+#[inline]
+fn push_disp_escaped(out: &mut Vec<u8>, b: u8) {
+    match b {
+        b'"' => out.extend_from_slice(b"%22"),
+        b'\r' => out.extend_from_slice(b"%0D"),
+        b'\n' => out.extend_from_slice(b"%0A"),
+        _ => out.push(b),
+    }
 }
 
 // ---------------------------------------------------------------------------
