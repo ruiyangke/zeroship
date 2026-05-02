@@ -483,6 +483,44 @@ fn search_params_from_record() {
     assert_eq!(s, "a=1&b=2");
 }
 
+/// C5: ArrayBuffer (non-iterable object) takes the record path; should
+/// produce empty entries, not the pre-fix "[object ArrayBuffer]=" garbage.
+#[test]
+fn search_params_from_array_buffer() {
+    let s = run_in_v8(
+        r#"
+        const ab = new ArrayBuffer(8);
+        const p = new URLSearchParams(ab);
+        // Per WebIDL: ArrayBuffer is an object without @@iterator,
+        // so it takes the record path. Records over ArrayBuffer have
+        // no own enumerable string-keyed properties, so the result
+        // is empty. Pre-fix: ToString(ab) = "[object ArrayBuffer]"
+        // → string-path parse → garbage.
+        p.toString();
+        "#,
+        js_string,
+    );
+    assert_eq!(s, "");
+}
+
+/// C5 (continued): Uint8Array (iterable object) goes through the
+/// sequence path and fails because each yielded number is not a
+/// 2-element pair iterable.
+#[test]
+fn search_params_from_uint8array_throws() {
+    let s = run_in_v8(
+        r#"
+        const u8 = new Uint8Array([1, 2, 3]);
+        let kind = "no-throw";
+        try { new URLSearchParams(u8); }
+        catch (e) { kind = e && e.constructor && e.constructor.name; }
+        kind;
+        "#,
+        js_string,
+    );
+    assert_eq!(s, "TypeError");
+}
+
 #[test]
 fn search_params_empty_construction() {
     let s = run_in_v8(

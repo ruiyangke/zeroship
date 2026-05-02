@@ -215,7 +215,19 @@ impl URLSearchParams {
         // (Array, Map, custom iterables) takes the sequence path; only
         // plain objects fall through to the record path. The string
         // path is the catch-all.
-        if init.is_object() && !init.is_array_buffer() && !init.is_array_buffer_view() {
+        //
+        // C5: Per WebIDL §3.10 record conversion, ANY non-iterable
+        // object goes through the record path. The previous code
+        // excluded ArrayBuffer/ArrayBufferView from the object branch,
+        // forcing them into the string path where ToString produced
+        // "[object ArrayBuffer]" or similar — non-spec garbage. The
+        // correct behaviour:
+        //   - Plain ArrayBuffer (no @@iterator): record path → empty
+        //     (no own enumerable string-keyed properties).
+        //   - Typed-array views (Uint8Array etc.) ARE iterable via
+        //     @@iterator (yielding numbers), so they take the sequence
+        //     path and fail naturally on the per-pair length check.
+        if init.is_object() {
             let obj: v8::Local<v8::Object> = match init.try_into() {
                 Ok(o) => o,
                 Err(_) => return Ok(sp),
