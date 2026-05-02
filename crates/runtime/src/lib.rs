@@ -7,6 +7,7 @@
 extern crate self as zeroship_runtime;
 
 pub mod auth;
+pub mod base64;
 pub mod blob_native;
 pub mod byte_string;
 pub mod codec;
@@ -27,6 +28,7 @@ pub mod fetch_outcome;
 pub mod modules;
 pub mod crypto;
 pub mod streams;
+pub mod structured_clone;
 pub mod url_native;
 pub mod websocket;
 pub mod channel;
@@ -44,7 +46,7 @@ pub use enforce_range::{EnforceRangeU64, read_enforce_range_u64};
 pub use url_native::helpers::USVString;
 pub use init::{init_v8, RequestResult, HttpResult};
 pub use modules::ModuleEntry;
-pub use state::{SharedState, RuntimeState, OpResult, StreamState, SpawnedTimer, WebSocketState, WsMessage};
+pub use state::{SharedState, RuntimeState, OpResult, SpawnedTimer, WebSocketState, WsMessage};
 pub use storage::AppStorage;
 pub use runtime::{Runtime, RuntimeBuilder, RuntimeLimits, AsyncWork, AsyncEvent};
 pub use fetch_outcome::{FetchOutcome, SettledFetch, RequestCtx, EnvSnapshot};

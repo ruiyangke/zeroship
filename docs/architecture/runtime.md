@@ -90,7 +90,7 @@ Modules come from a `Vec<ModuleEntry>` (specifier + source). Today every deploy 
 - WebCrypto subset
 - Node compat shims (`process.versions`, `process.nextTick`, `AbortSignal.any`, ICU data)
 
-Stream chunks moving onto an HTTP wire go through the kernel-callable `__zsBeginStreamForward(response)` helper in `fetch.js`: it locks the body via `getReader()` and pumps each chunk into a Rust StreamState identified by `response._streamId`. `inspect_response` reads that id and forwards to the TCP writer.
+Stream chunks moving onto an HTTP wire go through the Rust-side response forwarder in `crates/runtime/src/streams/response_forwarder.rs`: when `inspect_response` sees a Response with a stream body, `begin_forward` locks it via `getReader()` and drives `read()` in a Rust promise-reaction loop, pushing each chunk into a per-stream forwarder. The kernel attaches a `direct_writer` (StreamWriter to the TCP-bound channel) in `build_fetch_outcome`; from then on chunks pump straight to the wire. This used to be a JS shim (`__zsBeginStreamForward` + `__streams.{create,enqueue,close,error}` namespace) — both deleted.
 
 ## Bench infrastructure
 

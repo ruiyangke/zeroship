@@ -42,17 +42,23 @@ pub mod abort_signal;
 pub mod custom_event;
 pub mod event;
 pub mod event_target;
+pub mod exception;
 pub mod form_data;
 
 /// Install the DOM primitives on `globalThis` in the spec-mandated
-/// order: EventTarget → Event → CustomEvent → AbortSignal →
-/// AbortController → FormData. FormData is order-independent (no
-/// inheritance, no dependency on the others) but lives here because
-/// it's a DOM-adjacent primitive shared by fetch and XHR.
+/// order: DOMException → EventTarget → Event → CustomEvent →
+/// AbortSignal → AbortController → FormData. DOMException is
+/// installed first because AbortSignal's mint helpers construct
+/// DOMException-shaped abort reasons via the global constructor — if
+/// the class isn't there yet, those mints fall back to a plain Error.
+/// FormData is order-independent (no inheritance, no dependency on
+/// the others) but lives here because it's a DOM-adjacent primitive
+/// shared by fetch and XHR.
 pub fn install_globals<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     global: v8::Local<v8::Object>,
 ) {
+    exception::install_global(scope, global);
     event_target::install_global(scope, global);
     install_class(scope, global, "Event", event::Event::install);
     install_class(

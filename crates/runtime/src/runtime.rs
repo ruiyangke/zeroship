@@ -98,7 +98,7 @@ use crate::state::{
 };
 
 use crate::channel::{
-    self, CancelFlag, ResultSender, StreamWriter,
+    self, CancelFlag, ResultSender,
 };
 
 // ---------------------------------------------------------------------------
@@ -130,47 +130,6 @@ impl From<String> for DispatchError {
 impl From<&str> for DispatchError {
     fn from(s: &str) -> Self {
         Self { message: s.into(), status: 500 }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// StreamForwarder — overflow-buffered channel writer for outbound HTTP streams
-// ---------------------------------------------------------------------------
-
-struct StreamForwarder {
-    writer: StreamWriter,
-    /// Set once `writer.push` has returned `Full`. Further chunks are
-    /// dropped rather than buffered — the reader already saw the overflow
-    /// via `is_overflow()` and has terminated forwarding.
-    overflowed: bool,
-}
-
-impl StreamForwarder {
-    fn new(writer: StreamWriter) -> Self {
-        Self { writer, overflowed: false }
-    }
-
-    /// Forward a chunk into the reader buffer. Returns `false` when the
-    /// underlying `StreamWriter` rejected the chunk (cap exceeded or
-    /// stream closed). Callers should stop producing on `false` — the
-    /// downstream consumer is either gone or too slow, and buffering more
-    /// data would just grow memory without delivering it.
-    fn try_forward(&mut self, data: Vec<u8>) -> bool {
-        if self.overflowed {
-            return false;
-        }
-        match self.writer.push(data) {
-            crate::channel::StreamPushResult::Ok => true,
-            crate::channel::StreamPushResult::Full => {
-                self.overflowed = true;
-                // Close the stream so readers observe completion and exit
-                // their drain loops cleanly.
-                self.writer.close();
-                eprintln!("[runtime] stream forwarder: buffer cap exceeded — dropping producer");
-                false
-            }
-            crate::channel::StreamPushResult::Closed => false,
-        }
     }
 }
 
@@ -503,9 +462,6 @@ pub(crate) struct RuntimeInner {
     /// Plugins registered on the runtime at boot.
     plugins: Vec<Arc<dyn NativePlugin>>,
 
-    /// Stream forwarders: stream_id -> StreamForwarder for outbound HTTP streams.
-    stream_forwarders: HashMap<u32, StreamForwarder>,
-
     pending_requests: HashMap<u64, PendingRequest>,
     next_direct_request_id: u64,
 
@@ -690,7 +646,6 @@ impl RuntimeInner {
             initialized: false,
             state,
             plugins,
-            stream_forwarders: HashMap::new(),
             pending_requests: HashMap::new(),
             next_direct_request_id: 1,
             pump_notify_tx: None,
@@ -794,14 +749,12 @@ impl RuntimeInner {
                 !s.spawned_ops.is_empty()
                     || !s.spawned_timers.is_empty()
                     || !s.ready_timers.is_empty()
-                    || !s.outbound_streams.is_empty()
             };
 
             if needs_drain {
                 let mut rt = runtime.borrow_mut();
                 rt.enter_isolate();
                 rt.drain_new_tasks_into(&mut work);
-                rt.flush_outbound_streams();
                 rt.exit_isolate();
             }
 
@@ -891,7 +844,6 @@ impl RuntimeInner {
                     for ev in batch {
                         rt.handle_async_event(ev, &mut work);
                     }
-                    rt.flush_outbound_streams();
                     rt.exit_isolate();
 
                     // Per-app pump CPU budget: if this app's async
@@ -1537,26 +1489,16 @@ impl RuntimeInner {
             }
             ResponseInfo::Stream { status, headers, stream_id } => {
                 let (writer, reader) = channel::stream_buffer();
-
-                // Attach the writer directly to the stream state so future
-                // enqueue() calls from JS write straight to the TCP-bound
-                // channel — no buffer, no pump cycle. (Mirrors
-                // `build_http_outcome`.)
-                {
-                    let mut s = self.state.borrow_mut();
-                    if let Some(stream) = s.streams.get_mut(&stream_id) {
-                        for chunk in stream.buffer.drain(..) {
-                            let _ = writer.push(chunk);
-                        }
-                        if stream.closed {
-                            writer.close();
-                        } else {
-                            stream.direct_writer = Some(writer);
-                        }
-                    } else {
-                        writer.close();
-                    }
-                }
+                // Hand the writer to the response forwarder. It drains
+                // any chunks buffered between `begin_forward` and now,
+                // then either closes the writer (if the body already
+                // completed) or stashes the writer so future chunks
+                // pump straight to the TCP-bound channel.
+                crate::streams::response_forwarder::attach_writer(
+                    &self.state,
+                    stream_id,
+                    writer,
+                );
                 crate::FetchOutcome::Stream { status, headers, body_reader: reader, logs }
             }
             ResponseInfo::WebSocket { ws_id, headers } => {
@@ -1597,41 +1539,6 @@ impl RuntimeInner {
 
         // Fire zero-delay timers inline
         self.fire_ready_timers_pump(work);
-    }
-
-    /// Move buffered chunks from RuntimeState.streams → StreamForwarder → StreamWriter.
-    /// Must be called after any V8 execution that may have called __streams.enqueue().
-    pub fn flush_outbound_streams(&mut self) {
-        let outbound_ids: Vec<u32> = {
-            self.state.borrow().outbound_streams.iter().copied().collect()
-        };
-        for stream_id in outbound_ids {
-            let chunks: Vec<Vec<u8>> = {
-                let mut s = self.state.borrow_mut();
-                if let Some(stream) = s.streams.get_mut(&stream_id) {
-                    stream.buffer.drain(..).collect()
-                } else {
-                    continue;
-                }
-            };
-            if let Some(forwarder) = self.stream_forwarders.get_mut(&stream_id) {
-                for chunk in chunks {
-                    forwarder.try_forward(chunk);
-                }
-            }
-
-            // Check if stream was closed
-            let is_closed = {
-                let s = self.state.borrow();
-                s.streams.get(&stream_id).map(|st| st.closed).unwrap_or(true)
-            };
-            if is_closed {
-                if let Some(forwarder) = self.stream_forwarders.remove(&stream_id) {
-                    forwarder.writer.close();
-                }
-                self.state.borrow_mut().outbound_streams.remove(&stream_id);
-            }
-        }
     }
 
     /// Handle an async event from the pump (op completed or timer fired).
@@ -1834,42 +1741,6 @@ impl RuntimeInner {
                 self.cleanup_cancelled_requests();
                 self.clear_executing_request();
                 self.drain_new_tasks_into(work);
-            }
-            OpResult::StreamChunk { stream_id, data, done } => {
-                // Fast path: if there's a stream forwarder, send directly (no V8 entry)
-                if let Some(forwarder) = self.stream_forwarders.get_mut(&stream_id) {
-                    if !data.is_empty() {
-                        forwarder.try_forward(data);
-                    }
-                    if done {
-                        // Signal completion to the reader, then remove
-                        forwarder.writer.close();
-                        self.stream_forwarders.remove(&stream_id);
-                    }
-                } else {
-                    // Slow path: push into V8 ReadableStream. Pushing a chunk
-                    // can wake a pending `reader.read()` promise, which in
-                    // turn may resolve `r.text()` / `r.json()`, the user's
-                    // `await`ing handler, and the outer `default.fetch`
-                    // promise — all via microtasks drained by the
-                    // `perform_microtask_checkpoint` inside `enter_v8!`.
-                    // We must run `collect_settled_promises` after so the
-                    // pump actually delivers the settled outer promise to
-                    // its `reply_fetch`. Without this, `await r.text()` hangs
-                    // even though the body has fully arrived.
-                    self.arm_cpu_timer();
-                    let settled_results = enter_v8!(self, |scope| {
-                        crate::streams::push_stream_chunk(scope, &self.state, stream_id, &data, done);
-                        collect_settled_promises(scope, &mut self.pending_requests)
-                    });
-                    self.disarm_cpu_timer();
-                    self.check_v8_terminated();
-
-                    let cpu_elapsed = Duration::ZERO;
-                    for (id, req, settled) in settled_results {
-                        self.send_settled_reply_any(id, req, settled, cpu_elapsed);
-                    }
-                }
             }
             OpResult::Cancelled => {}
         }

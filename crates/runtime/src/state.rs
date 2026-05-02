@@ -4,7 +4,7 @@
 //! callbacks can borrow it without crossing thread boundaries.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -248,10 +248,17 @@ pub struct RuntimeState {
     /// removed when the timer fires (in `dom::abort_signal::run_abort_steps`).
     pub timeout_pinned_signals: HashMap<u32, v8::Global<v8::Object>>,
 
-    /// Active ReadableStream instances, keyed by stream-id.
-    pub streams: HashMap<u32, StreamState>,
-    /// Monotonically increasing stream-id counter.
+    /// Monotonically increasing stream-id counter, shared across all
+    /// stream-id-keyed maps (currently just `response_forwarders`).
     pub next_stream_id: u32,
+
+    /// Response-body forwarders — Rust-side replacements for the legacy
+    /// JS pump in `__zsBeginStreamForward`. Populated by
+    /// `streams::response_forwarder::begin_forward` when the kernel's
+    /// `inspect_response` decides a Response with a ReadableStream body
+    /// should ship to the wire; drained via `attach_writer` /
+    /// `is_closed` / `drain_into_complete` in `runtime.rs`.
+    pub response_forwarders: HashMap<u32, crate::streams::response_forwarder::ResponseForwarder>,
 
     /// Futures for in-flight async ops (fetch, kv, ...).
     pub spawned_ops: Vec<Pin<Box<dyn Future<Output = OpResult>>>>,
@@ -392,11 +399,6 @@ pub struct RuntimeState {
     /// Monotonically increasing key-id counter.
     pub next_key_id: u32,
 
-    /// Stream IDs that have outbound StreamForwarders (HTTP streaming responses).
-    /// When a stream_id is in this set, `stream_enqueue_callback` forwards chunks
-    /// via the stream events channel instead of buffering them for JS reads.
-    pub outbound_streams: HashSet<u32>,
-
     /// WebSocket instances, keyed by ws_id.
     pub websockets: HashMap<u32, WebSocketState>,
     /// Monotonically increasing WebSocket ID counter (incremented by 2 for pairs).
@@ -429,8 +431,8 @@ impl RuntimeState {
             timer_owner: HashMap::new(),
             timeout_pinned_signals: HashMap::new(),
 
-            streams: HashMap::new(),
             next_stream_id: 1,
+            response_forwarders: HashMap::new(),
 
             spawned_ops: Vec::new(),
             spawned_timers: Vec::new(),
@@ -458,8 +460,6 @@ impl RuntimeState {
 
             key_store: HashMap::new(),
             next_key_id: 1,
-
-            outbound_streams: HashSet::new(),
 
             websockets: HashMap::new(),
             next_ws_id: 1,
@@ -512,7 +512,7 @@ impl RuntimeState {
         self.env_expose_keys = expose;
     }
 
-    /// Allocate a stream-id that is not currently held by an active stream or
+    /// Allocate a stream-id that is not currently held by an active forwarder or
     /// pending resolver. Uses the monotonic `next_stream_id` counter with
     /// collision-avoidance after wrap, so long-running runtimes (>12 hours at
     /// 100k fetches/sec) don't silently cross-wire a new stream with an
@@ -524,31 +524,14 @@ impl RuntimeState {
             if sid == 0 {
                 continue;
             }
-            if self.streams.contains_key(&sid) || self.pending_resolvers.contains_key(&sid) {
+            if self.response_forwarders.contains_key(&sid)
+                || self.pending_resolvers.contains_key(&sid)
+            {
                 continue;
             }
             return sid;
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Stream state
-// ---------------------------------------------------------------------------
-
-/// State for a single `ReadableStream` instance.
-#[allow(missing_debug_implementations)]
-pub struct StreamState {
-    /// Resolver waiting on the next `read()` call, if any.
-    pub pending_read: Option<v8::Global<v8::PromiseResolver>>,
-    /// Buffered chunks not yet consumed by JS.
-    pub buffer: VecDeque<Vec<u8>>,
-    /// Whether the stream has been closed/errored.
-    pub closed: bool,
-    /// Direct writer for HTTP response body streams.
-    /// When set, `enqueue()` bypasses the buffer and writes directly to this
-    /// writer — chunks reach the TCP socket without a pump cycle.
-    pub direct_writer: Option<crate::channel::StreamWriter>,
 }
 
 // ---------------------------------------------------------------------------
@@ -620,13 +603,6 @@ pub enum OpResult {
         resolver: v8::Global<v8::PromiseResolver>,
         value: ResolveValue,
         request_id: Option<u64>,
-    },
-    /// A streaming body chunk arrived.
-    StreamChunk {
-        stream_id: u32,
-        data: Vec<u8>,
-        /// `true` signals end-of-stream.
-        done: bool,
     },
     /// The op was cancelled (e.g. request was killed).
     Cancelled,
