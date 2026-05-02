@@ -773,3 +773,42 @@ pub fn install_global<'s>(
     let key = v8::String::new(scope, "WebSocket").unwrap();
     global.set(scope, key.into(), class_fn.into());
 }
+
+// ---------------------------------------------------------------------------
+// Helper: read the WebSocketImpl boxed state from a JS wrapper.
+// Used by http.rs::inspect_response to ferry the `ws_id` of a 101-upgrade
+// Response's `webSocket` slot to the gateway.
+// ---------------------------------------------------------------------------
+
+/// Get the `WebSocketImpl` boxed state from a V8 wrapper. Returns
+/// `None` if the object isn't a WebSocket (no internal field, or the
+/// field isn't an External, or the pointer is null).
+///
+/// SAFETY: caller must ensure `obj` is a WebSocket JS wrapper produced
+/// by the native class. The boxed state's lifetime is tied to the
+/// wrapper via the macro's guaranteed finalizer.
+pub fn websocket_from_obj<'a>(
+    scope: &mut v8::PinScope,
+    obj: v8::Local<v8::Object>,
+) -> Option<&'a WebSocketImpl> {
+    let ext = obj
+        .get_internal_field(scope, 0)
+        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
+    let ptr = ext.value() as *mut WebSocketImpl;
+    if ptr.is_null() {
+        return None;
+    }
+    Some(unsafe { &*ptr })
+}
+
+/// Extract `ws_id` from a native WebSocket wrapper, or 0 if not a
+/// native WebSocket. Used by `http.rs::inspect_response` for the
+/// `Response { status: 101, webSocket: client }` path.
+///
+/// Per §X.1: ws_id lives on the boxed state, NOT mirrored in V8
+/// private symbols.
+pub fn ws_id_of(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> u32 {
+    websocket_from_obj(scope, obj)
+        .map(|w| w.ws_id.get())
+        .unwrap_or(0)
+}

@@ -166,15 +166,36 @@ pub fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Va
 
     // WebSocket upgrade: status 101 with a `webSocket` property. The
     // gateway path stashes the client WebSocket Global on the Response;
-    // we ferry the `id` (set by `__wsAccept` / `__wsLinkPair`) through
-    // to the kernel.
+    // we ferry the `ws_id` through to the kernel.
+    //
+    // Two layouts in flight during the cutover (D-25):
+    //   - polyfill: `webSocket` is a plain JS object with an `_id`
+    //     expando set by `__wsCreatePair` / `__wsLinkPair`. Read via
+    //     `ws_obj.get("_id")`.
+    //   - native (feature `runtime_native_websocket` ON): `webSocket`
+    //     is a native `#[v8_class]` WebSocket whose `ws_id` lives in
+    //     the boxed state (internal field 0). Read via
+    //     `websocket_native::ws_id_of`.
+    //
+    // We try the native path first, then fall back to the polyfill
+    // expando. (per design §X.1 — addresses the v1 design's "polyfill
+    // `_id` field" gap.)
     if status == 101 {
         if let Some(ws_g) = crate::fetch_response::try_native_response_websocket(scope, obj) {
             let ws_obj = v8::Local::new(scope, ws_g);
-            let id_key = key(scope, &K_ID);
-            let ws_id = ws_obj.get(scope, id_key.into())
-                .and_then(|v| v.uint32_value(scope))
-                .unwrap_or(0);
+
+            // Native path first: read ws_id from the boxed state.
+            let mut ws_id = crate::websocket_native::ws_id_of(scope, ws_obj);
+
+            // Fallback: polyfill `_id` expando.
+            if ws_id == 0 {
+                let id_key = key(scope, &K_ID);
+                ws_id = ws_obj
+                    .get(scope, id_key.into())
+                    .and_then(|v| v.uint32_value(scope))
+                    .unwrap_or(0);
+            }
+
             return Ok(ResponseInfo::WebSocket { ws_id, headers });
         }
     }
