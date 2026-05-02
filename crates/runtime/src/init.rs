@@ -1759,6 +1759,13 @@ pub fn install_dom(scope: &mut v8::PinScope) {
     }
     let global = scope.get_current_context().global(scope);
     crate::dom::install_globals(scope, global);
+    // Native Request + Response: install AFTER dom (which gives us
+    // FormData / AbortSignal that the constructors need to resolve via
+    // globalThis). MUST run after fetch.js + formdata.js so the
+    // polyfill's unconditional re-assignment of Request/Response
+    // doesn't clobber the native install.
+    crate::fetch_request::install_global(scope, global);
+    crate::fetch_response::install_global(scope, global);
 }
 
 /// Install native WHATWG Streams classes onto `globalThis`. Called
