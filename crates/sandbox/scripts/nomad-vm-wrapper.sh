@@ -167,6 +167,22 @@ VFS_HOME_PID=$!
 # Cleanup trap. Any signal (or the script exits naturally on CH
 # termination) → kill all three virtiofsd processes plus CH itself.
 # SIGTERM first with a brief grace, then SIGKILL.
+#
+# **Tightened for the FM-F long tail.** The N=8 stress run showed
+# that the previous 0.5 s sleep between TERM and KILL contributed a
+# meaningful chunk of the 0.5–60 s host-side process-tree drain that
+# Nomad's "alloc terminal" hides. Reducing to 0.2 s shaves ~300 ms
+# off the median teardown (cloud-hypervisor honours TERM in <50 ms
+# on a healthy host; the grace exists for the rare panic path).
+#
+# **`wait` after the kills.** Without an explicit wait the script
+# can exit while reaped-but-not-collected zombies keep the parent
+# bash visible to Nomad — `raw_exec`'s ClientStatus flips to
+# "complete" only when the wrapper bash itself exits. The wait
+# blocks until each child PID is fully reaped (or already-gone, in
+# which case `wait $pid` returns immediately). This shortens the
+# Nomad-vs-host-process-tree skew that the controller's host_fence
+# now polls for.
 cleanup() {
   # When CH already exited normally we clear CH_PID below so the
   # log says "ch already-exited" rather than "ch ?", which reads
@@ -174,9 +190,18 @@ cleanup() {
   echo "[wrapper] cleaning up (vfs $VFS_KEYS_PID/$VFS_WS_PID/$VFS_HOME_PID, ch ${CH_PID:-already-exited})"
   [ -n "${CH_PID-}" ] && kill -TERM "$CH_PID" 2>/dev/null || true
   kill -TERM "$VFS_KEYS_PID" "$VFS_WS_PID" "$VFS_HOME_PID" 2>/dev/null || true
-  sleep 0.5
+  sleep 0.2
   [ -n "${CH_PID-}" ] && kill -KILL "$CH_PID" 2>/dev/null || true
   kill -KILL "$VFS_KEYS_PID" "$VFS_WS_PID" "$VFS_HOME_PID" 2>/dev/null || true
+  # Reap so the wrapper bash doesn't exit ahead of its children.
+  # `wait` on a PID we don't own (because some other ancestor
+  # collected it) returns immediately with status 127 — harmless,
+  # we discard via `|| true`. The point is: when this function
+  # returns, every child we know of has been collected.
+  [ -n "${CH_PID-}" ] && wait "$CH_PID" 2>/dev/null || true
+  wait "$VFS_KEYS_PID" 2>/dev/null || true
+  wait "$VFS_WS_PID"   2>/dev/null || true
+  wait "$VFS_HOME_PID" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
