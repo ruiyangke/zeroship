@@ -51,6 +51,9 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::auth;
+use crate::preview_share::{
+    self, validate_token, RegistrySecretLookup, TokenClaims, TokenError, TOKEN_RAW_MAX,
+};
 use crate::AppState;
 use zeroship_core::preview_ports::{is_proxyable_port, DEFAULT_DENY};
 use zeroship_sandbox_agent::sig::{self, CanonicalKind};
@@ -77,15 +80,17 @@ const HOP_BY_HOP: &[&str] = &[
     "upgrade",
 ];
 
-/// Authenticated principal. Phase 1 only mints `Creator(user_id)` via
-/// the bearer-token + `?user_id=` flow; share-token claims arrive in
-/// Phase 3.
+/// Authenticated principal.
 #[derive(Debug, Clone)]
 pub enum Principal {
     /// Creator session — the creator's bearer token plus their
     /// `?user_id=` claim. Authorisation matches against the sandbox
     /// record's `user_id`.
     Creator { user_id: String },
+    /// Phase-3 share-token principal. The HMAC + claims have already
+    /// been validated against the path-bound `(sandbox_id, port,
+    /// method)`; the `authorize` re-check is belt-and-suspenders.
+    ShareToken { claims: TokenClaims },
 }
 
 /// `ANY /sandboxes/{id}/preview/{port}/{path*}` — controller-side
@@ -103,12 +108,32 @@ pub async fn preview_proxy(
         return uniform_413();
     }
 
-    // 2. Authenticate. The bearer-token check fails closed; failure
-    // is uniform 401 with NO sandbox-existence oracle (round-6 H4).
-    let principal_opt = authenticate(&req, &state);
-
     let (sandbox_id_str, port, sub_path) = path.into_inner();
     let sandbox_id_opt: Option<Uuid> = sandbox_id_str.parse().ok();
+
+    // 2. Cookie-conversion: if the request carries `?t=<token>`, this
+    //    is the share-token first-hit. Validate, set `__Host-zsbx_share_<sbx>`,
+    //    303-redirect to the same path with `?t=` stripped (round-6
+    //    `__zsbx_share` flow). On both `?t=` AND cookie present, `?t=`
+    //    wins (§ II.4 "If `?t=` is present AND the cookie is also
+    //    present: validate both; the `?t=` wins"). Sec-Fetch CSRF
+    //    guard fires on this path.
+    if let Some(raw_token) = query_param(&req, "t") {
+        return handle_cookie_conversion(
+            &req,
+            &state,
+            &sandbox_id_str,
+            sandbox_id_opt,
+            port,
+            &raw_token,
+        );
+    }
+
+    // 3. Authenticate. Try the share-token cookie FIRST (cheaper —
+    //    no header allocation), fall through to creator bearer.
+    //    Both paths fail closed on bad input. Uniform 401 with NO
+    //    sandbox-existence oracle (round-6 H4).
+    let principal_opt = authenticate(&req, &state, sandbox_id_opt, port);
 
     // Coalesced check: principal-Some + uuid parsed + info-Some +
     // ownership-match + port-allowed. Anything failing produces an
@@ -117,7 +142,9 @@ pub async fn preview_proxy(
     let port_allowed = is_proxyable_port(port, DEFAULT_DENY);
 
     let authorized = match (&principal_opt, &info_opt, port_allowed) {
-        (Some(p), Some(info), true) => authorize(p, info, port),
+        (Some(p), Some(info), true) => {
+            authorize_with_method(p, info, port, req.method().as_str())
+        }
         _ => false,
     };
 
@@ -138,6 +165,14 @@ pub async fn preview_proxy(
             return uniform_401();
         }
         return uniform_404();
+    }
+
+    // Audit-log every accepted share-token use so `GET /share` shows
+    // updated last_used / use_count.
+    if let (Some(Principal::ShareToken { claims }), Some(id)) =
+        (&principal_opt, sandbox_id_opt)
+    {
+        state.sandboxes.record_audit_use(id, &claims.tid);
     }
 
     // 3. Resolve agent_url + signing_key for this sandbox.
@@ -336,51 +371,324 @@ fn compute_preview_host(sandbox_id: &str, port: u16) -> String {
     format!("preview-{slug}-{port}.preview.zeroship.dev")
 }
 
-/// Authenticate the request. Returns `Some(Principal)` only on a
-/// passing bearer-token check + valid `?user_id=` claim. The
-/// existing `auth::check` enforces the bearer; we additionally
-/// extract `user_id` from the query string (same pattern as the
-/// rest of the controller's handlers — `require_owner`).
-fn authenticate(req: &HttpRequest, state: &AppState) -> Option<Principal> {
+/// Authenticate the request. Either:
+///
+/// 1. A creator's bearer token + `?user_id=<id>` claim → `Principal::Creator`.
+/// 2. A `__Host-zsbx_share_<sbx>` cookie carrying a share-token →
+///    `Principal::ShareToken`.
+///
+/// Returns `None` if neither path validates. The bearer check fails
+/// closed; the cookie path runs full HMAC + claims validation
+/// (matches the `?t=` path's validator — round-6 CRITICAL-3 cookie-
+/// after-revoke invariant).
+fn authenticate(
+    req: &HttpRequest,
+    state: &AppState,
+    sandbox_id_opt: Option<Uuid>,
+    port: u16,
+) -> Option<Principal> {
+    // Try share-token cookie first. The cookie's name is
+    // `__Host-zsbx_share_<sbx>`; we look up the sandbox slug from the
+    // sandbox-id passed by the route. Validation runs against the
+    // sandbox's per-sandbox secret ring AND scopes the method.
+    if let Some(id) = sandbox_id_opt {
+        if let Some(claims) = try_share_cookie(req, state, id, port) {
+            return Some(Principal::ShareToken { claims });
+        }
+    }
+
+    // Fall through to creator bearer auth.
     if !auth::check(req, state) {
         return None;
     }
-    let user_id = req.uri().query().and_then(|q| {
-        q.split('&').find_map(|kv| {
-            let (k, v) = kv.split_once('=')?;
-            if k == "user_id" {
-                Some(v.to_string())
-            } else {
-                None
-            }
-        })
-    })?;
+    let user_id = query_param(req, "user_id")?;
     if user_id.is_empty() {
         return None;
     }
     Some(Principal::Creator { user_id })
 }
 
+/// Look up `__Host-zsbx_share_<sbx>` and validate the carried token.
+/// Returns `Some(claims)` only on a fully-valid HMAC + claims check
+/// against the request's `(sandbox_id, port, method)` triple. Any
+/// failure → `None` (the caller falls through to bearer auth).
+fn try_share_cookie(
+    req: &HttpRequest,
+    state: &AppState,
+    sandbox_id: Uuid,
+    port: u16,
+) -> Option<TokenClaims> {
+    let cookie_name = format!("__Host-zsbx_share_{}", sandbox_slug(sandbox_id));
+    let raw_cookie_header = req.headers().get("cookie")?.to_str().ok()?;
+    let token = parse_cookie_value(raw_cookie_header, &cookie_name)?;
+    if token.len() > TOKEN_RAW_MAX {
+        return None;
+    }
+    let lookup = RegistrySecretLookup {
+        registry: &state.sandboxes,
+        sandbox_id,
+    };
+    validate_token(
+        &token,
+        &sandbox_id.to_string(),
+        port,
+        req.method().as_str(),
+        unix_now(),
+        &lookup,
+    )
+    .ok()
+}
+
+/// Cookie-conversion handler. § II.4 + § II.6:
+///
+/// - Validate the token from `?t=<token>`.
+/// - On success: 303 redirect to the same URL minus `?t=`, with
+///   `Set-Cookie: __Host-zsbx_share_<sbx>=<token>; HttpOnly; Secure;
+///   SameSite=Strict; Path=/` and `Clear-Site-Data: "cache"`.
+/// - On failure: uniform 401.
+///
+/// Sec-Fetch-* fail-closed (§ II.6 round-6 H6): a request without
+/// Sec-Fetch-Site is rejected with `code: "client_too_old"`.
+fn handle_cookie_conversion(
+    req: &HttpRequest,
+    state: &AppState,
+    sandbox_id_str: &str,
+    sandbox_id_opt: Option<Uuid>,
+    port: u16,
+    raw_token: &str,
+) -> HttpResponse {
+    // Sec-Fetch CSRF gate. Three required headers; missing ANY
+    // triggers `client_too_old`. Top-level navigation only.
+    if let Err(resp) = check_sec_fetch(req) {
+        return resp;
+    }
+    if raw_token.len() > TOKEN_RAW_MAX {
+        return uniform_401();
+    }
+    let id = match sandbox_id_opt {
+        Some(id) => id,
+        None => return uniform_401(),
+    };
+    let lookup = RegistrySecretLookup {
+        registry: &state.sandboxes,
+        sandbox_id: id,
+    };
+    let claims = match validate_token(
+        raw_token,
+        &id.to_string(),
+        port,
+        req.method().as_str(),
+        unix_now(),
+        &lookup,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "[sandbox/preview] __zsbx_share token validation failed: {:?}",
+                e
+            );
+            // Specifically surface "expired"/"revoked" so the AI builder UI
+            // can render a tailored error; everything else collapses to 401.
+            return token_error_response(e);
+        }
+    };
+
+    // Record audit use BEFORE emitting the redirect — the conversion
+    // counts as one use of the token.
+    state.sandboxes.record_audit_use(id, &claims.tid);
+
+    // Build the same path with `?t=` stripped. Other query params are
+    // preserved (rare in practice, but if a user pastes
+    // `?t=...&foo=bar`, the `foo=bar` survives the redirect).
+    let stripped_query = strip_t_query(req.uri().query().unwrap_or(""));
+    let path = req.path().to_string();
+    let location = if stripped_query.is_empty() {
+        path
+    } else {
+        format!("{path}?{stripped_query}")
+    };
+
+    let cookie_name = format!("__Host-zsbx_share_{}", sandbox_slug(id));
+    // `__Host-` requires Secure AND Path=/ AND no Domain attribute
+    // (RFC 6265bis). SameSite=Strict for share-cookie (§ II.6 byte-
+    // exact contract).
+    let set_cookie = format!(
+        "{cookie_name}={raw_token}; HttpOnly; Secure; SameSite=Strict; Path=/"
+    );
+
+    HttpResponse::SeeOther()
+        .header("Location", location.as_str())
+        .header("Set-Cookie", set_cookie.as_str())
+        .header("Cache-Control", "no-store")
+        .header("Clear-Site-Data", "\"cache\"")
+        .header("Referrer-Policy", "no-referrer")
+        .json(&json!({"ok": true, "sandbox_id": sandbox_id_str, "port": port}))
+}
+
+/// Sec-Fetch-* enforcement (§ II.6 + round-6 H6 — fail-closed). The
+/// `__zsbx_share` cookie-conversion is gated on a top-level
+/// navigation: `Sec-Fetch-Mode: navigate` AND `Sec-Fetch-Dest:
+/// document`. Sec-Fetch-Site may be `none` (typed-in URL),
+/// `same-origin` (link from same origin), or `cross-site` (paste from
+/// chat, Slack, etc — the canonical share-link UX).
+///
+/// Missing ANY of the three headers → `400 client_too_old`. Other
+/// invalid combinations → `403 csrf`.
+fn check_sec_fetch(req: &HttpRequest) -> Result<(), HttpResponse> {
+    let site = req
+        .headers()
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok());
+    let mode = req
+        .headers()
+        .get("sec-fetch-mode")
+        .and_then(|v| v.to_str().ok());
+    let dest = req
+        .headers()
+        .get("sec-fetch-dest")
+        .and_then(|v| v.to_str().ok());
+    if site.is_none() || mode.is_none() || dest.is_none() {
+        return Err(HttpResponse::BadRequest()
+            .header("Cache-Control", "no-store")
+            .json(&json!({
+                "error": "client too old; Fetch Metadata required for cookie-conversion",
+                "code": "client_too_old",
+                "min_browser_versions": {
+                    "chrome": 76, "firefox": 90, "safari": 16.4, "edge": 79
+                },
+            })));
+    }
+    let mode = mode.unwrap();
+    let dest = dest.unwrap();
+    let site = site.unwrap();
+    // Top-level navigation: Mode=navigate, Dest=document.
+    if !mode.eq_ignore_ascii_case("navigate") || !dest.eq_ignore_ascii_case("document") {
+        return Err(HttpResponse::Forbidden()
+            .header("Cache-Control", "no-store")
+            .json(&json!({"error": "CSRF: not a top-level navigation", "code": "csrf"})));
+    }
+    // Site values that indicate an OK navigation. `none` =
+    // user-typed-or-bookmark; `same-origin` = link from this same
+    // origin; `cross-site` = paste from external (Slack, email, etc.).
+    if !matches!(site, "none" | "same-origin" | "cross-site" | "same-site") {
+        return Err(HttpResponse::Forbidden()
+            .header("Cache-Control", "no-store")
+            .json(&json!({"error": "CSRF: unrecognized Sec-Fetch-Site", "code": "csrf"})));
+    }
+    Ok(())
+}
+
+/// Render the appropriate response for a token-error. `expired` and
+/// `revoked` carry their own codes; everything else collapses to 401.
+fn token_error_response(e: TokenError) -> HttpResponse {
+    let code = e.wire_code();
+    let status = match e {
+        TokenError::Expired => StatusCode::UNAUTHORIZED,
+        TokenError::Revoked => StatusCode::UNAUTHORIZED,
+        TokenError::ScopeForbidden => StatusCode::FORBIDDEN,
+        _ => StatusCode::UNAUTHORIZED,
+    };
+    HttpResponse::build(status).json(&json!({
+        "error": "share token rejected",
+        "code": code,
+    }))
+}
+
+/// Compute the `__Host-zsbx_share_<sbx>` cookie suffix. The slug is
+/// the typed-id with `_` → `-` (DNS-safe) and lower-cased; for v1
+/// sandbox-ids are UUIDs, so we lowercase + strip non-alphanumerics
+/// (matches `compute_preview_host`).
+fn sandbox_slug(id: Uuid) -> String {
+    id.to_string()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// Pull a query parameter from the request's URI. Hand-parses to
+/// avoid pulling another extractor through every signature.
+fn query_param(req: &HttpRequest, key: &str) -> Option<String> {
+    req.uri().query().and_then(|q| {
+        q.split('&').find_map(|kv| {
+            let (k, v) = kv.split_once('=')?;
+            if k == key {
+                // URL-decode `+` → ` ` is NOT performed; share tokens
+                // and user_ids never contain spaces.
+                Some(v.to_string())
+            } else {
+                None
+            }
+        })
+    })
+}
+
+/// Pull a single cookie value out of the `Cookie:` header. Cookies
+/// are `;`-separated `name=value` pairs (RFC 6265 §5.4); we split,
+/// trim, and find by exact name.
+fn parse_cookie_value(header: &str, name: &str) -> Option<String> {
+    for piece in header.split(';') {
+        let p = piece.trim();
+        if let Some((k, v)) = p.split_once('=') {
+            if k == name {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Strip `t=<value>` from a query string, preserving every other
+/// `key=value` pair. The result has no leading `?`.
+fn strip_t_query(q: &str) -> String {
+    q.split('&')
+        .filter(|piece| !piece.is_empty() && !piece.starts_with("t="))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 /// `authorize(principal, info, port)` — the SOLE gate (round-6
-/// CRITICAL-2). All four conditions MUST hold:
+/// CRITICAL-2). All conditions MUST hold:
 ///
 /// 1. Port is in the proxyable allow-set (caller already checks this
 ///    before calling, but the gate re-checks as belt-and-suspenders).
-/// 2. Principal owns the sandbox: `info.user_id == creator_id`.
+/// 2. Principal owns the sandbox (Creator) OR the share-token claims
+///    bind to this exact `(sbx, port)` tuple (ShareToken).
 ///
-/// (The "sandbox exists" check is folded into the registry lookup at
-/// the call site — `info` here is the already-resolved record, so
-/// "exists" is implicit.)
+/// Method-scope enforcement (`ro` vs `rw`) lives in
+/// [`authorize_with_method`]; this signature is preserved for
+/// callers that don't need method-scope (the test surface).
 pub fn authorize(
     principal: &Principal,
     info: &crate::backend::SandboxInfo,
     port: u16,
+) -> bool {
+    authorize_with_method(principal, info, port, "GET")
+}
+
+/// `authorize` plus method-scope enforcement for share tokens. Used
+/// by the live request path; the legacy `authorize` is kept as a
+/// thin wrapper for the unit tests that pre-date the method-scope.
+pub fn authorize_with_method(
+    principal: &Principal,
+    info: &crate::backend::SandboxInfo,
+    port: u16,
+    method: &str,
 ) -> bool {
     if !is_proxyable_port(port, DEFAULT_DENY) {
         return false;
     }
     match principal {
         Principal::Creator { user_id } => &info.user_id == user_id,
+        Principal::ShareToken { claims } => {
+            // The claims were already validated end-to-end by the
+            // public-edge layer (`try_share_cookie` / cookie-conversion)
+            // against this exact `(sbx, port, method)`. Re-check here
+            // belt-and-suspenders against principal-construction bugs.
+            claims.sbx == info.sandbox_id
+                && claims.port == port
+                && preview_share::scope_allows_method(&claims.scope, method)
+        }
     }
 }
 
