@@ -5,12 +5,18 @@ use common::*;
 
 #[test]
 fn readable_stream_sync_enqueue() {
+    // WHATWG Streams chunks are typed values — `controller.enqueue("hello")`
+    // emits the string verbatim, not auto-encoded bytes. The pre-cutover
+    // skeleton in `embed/streams.js` coerced strings to UTF-8; native is
+    // spec-faithful and preserves the type. Tests now explicitly encode
+    // when they want bytes.
     let r = dispatch(m(r#"
         export async function test() {
+            var enc = new TextEncoder();
             var stream = new ReadableStream({
                 start(controller) {
-                    controller.enqueue("hello ");
-                    controller.enqueue("world");
+                    controller.enqueue(enc.encode("hello "));
+                    controller.enqueue(enc.encode("world"));
                     controller.close();
                 }
             });

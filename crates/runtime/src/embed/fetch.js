@@ -277,49 +277,28 @@
       this.webSocket = init.webSocket;
     }
 
-    // ReadableStream body — store reference, defer body text extraction.
-    if (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) {
-      this.body = body;
-      this._bodyText = null;
-      this._bodyBytes = null;
-      this._bodyUsed = false;
-      this._isStreamBody = true;
-    } else if (
-      // Polyfill ReadableStream — typically the result of
-      // `someStream.pipeThrough(transform)` since our ReadableStream's
-      // pipeTo/pipeThrough delegate to the web-streams-polyfill class.
-      // The AI SDK's `toUIMessageStreamResponse()` ends with
-      // `.pipeThrough(new TextEncoderStream())`, so its body is one of
-      // these. Bridge it through OUR ReadableStream so the kernel's
-      // stream forwarder (which reads `body._id`) sees byte chunks.
-      //
-      // Pumping happens in `start()` (not `pull()`): the kernel's HTTP
-      // forwarder doesn't read from our ReadableStream — it watches the
-      // native `__streams` slot for byte chunks pushed via
-      // `controller.enqueue(bytes)`. With `pull()`, the polyfill reader
-      // would never be consumed because nothing calls `read()` on the
-      // bridge. `start()` kicks off a self-driving loop instead.
-      typeof globalThis.__zsPolyfillReadableStream !== "undefined" &&
-      body instanceof globalThis.__zsPolyfillReadableStream
+    // ReadableStream body — store the stream as-is and mark for streaming.
+    // The lock-and-pump happens lazily in `__zsBeginStreamForward(this)`,
+    // called from Rust's `inspect_response` after the kernel has decided
+    // this Response will be sent to the wire. Locking eagerly here would
+    // block `resp.text()` / `resp.json()` on Responses the user constructs
+    // and then consumes themselves before returning a different value.
+    //
+    // Detection is duck-typed: anything with a `getReader()` method —
+    // native ReadableStream, the polyfill class returned from
+    // `pipeThrough` chains, or user-defined classes that implement the
+    // surface — flows through unchanged. The kernel reads
+    // `response._streamId` (allocated by the lazy forward helper);
+    // legacy paths that still publish `body._id` are honoured via the
+    // `__zsBeginStreamForward` fast-path so the polyfill skeleton's
+    // direct-buffer write keeps working until D-19 step 2 deletes it.
+    if (
+      body !== null && body !== undefined &&
+      typeof body === "object" &&
+      typeof body.getReader === "function"
     ) {
-      var polyfillReader = body.getReader();
-      var bridged = new ReadableStream({
-        start: function (controller) {
-          (function pump() {
-            polyfillReader.read().then(function (r) {
-              if (r.done) { controller.close(); return; }
-              controller.enqueue(r.value);
-              pump();
-            }, function (e) {
-              controller.error(e);
-            });
-          })();
-        },
-        cancel: function (reason) {
-          return polyfillReader.cancel(reason);
-        },
-      });
-      this.body = bridged;
+      this.body = body;
+      this._streamId = -1;  // sentinel: not yet allocated; set on first forward
       this._bodyText = null;
       this._bodyBytes = null;
       this._bodyUsed = false;
@@ -616,9 +595,27 @@
         response.ok = parsed.status >= 200 && parsed.status < 300;
 
         if (parsed.stream_id !== undefined) {
-          // Streaming body — create ReadableStream backed by the pre-allocated stream_id.
-          // The Rust event loop will push chunks via LoopEvent::StreamChunk.
-          response.body = new ReadableStream(null, { _streamId: parsed.stream_id });
+          // Streaming body — wrap the pre-allocated stream_id in a
+          // spec-shaped ReadableStream. The Rust event loop pushes chunks
+          // via LoopEvent::StreamChunk into the StreamState behind
+          // stream_id; `__streams.read(stream_id)` returns a Promise<{value,done}>
+          // that the underlying-source's pull() drains lazily.
+          //
+          // Users see only the spec API (`response.body.getReader()`,
+          // `for-await`, `pipeThrough`) — no reach into private fields.
+          var rsId = parsed.stream_id;
+          response.body = new ReadableStream({
+            pull: function (controller) {
+              return __streams.read(rsId).then(function (r) {
+                if (r.done) { controller.close(); return; }
+                controller.enqueue(r.value);
+              });
+            },
+            cancel: function () {
+              __streams.close(rsId);
+            },
+          });
+          response._streamId = rsId;
           response._bodyText = null;
           response._bodyBytes = null;
           response._bodyUsed = false;
@@ -636,6 +633,83 @@
       });
     });
   }
+
+  // =========================================================================
+  // __zsBeginStreamForward — kernel hook for Response stream-body forwarding
+  // =========================================================================
+  //
+  // Called by Rust's `http::inspect_response` AFTER it determines a
+  // Response with a ReadableStream body should be sent to the wire.
+  // Allocates a Rust-side StreamState (via `__streams.create()`), locks
+  // the body via `getReader()`, and launches a self-driving pump that
+  // pushes each chunk onto that StreamState. Returns the allocated
+  // streamId so the kernel can forward chunks to the TCP writer.
+  //
+  // Lazy locking: `new Response(stream)` does NOT lock the stream — only
+  // this function does. That keeps `resp.text()` / `resp.json()` working
+  // on user-constructed Responses that the user reads themselves before
+  // returning a different value to the handler. Once the kernel decides
+  // to wire-forward (i.e. handler returned this Response), this helper
+  // takes the lock and the user can no longer read the body — same race
+  // semantics as the pre-cutover skeleton, but explicit instead of
+  // implicit.
+  //
+  // No reach into stream-class private fields. Works against any class
+  // that exposes the spec `getReader()` API: native ReadableStream, the
+  // polyfill class returned from `pipeThrough` chains, or user-defined
+  // classes implementing the surface.
+  function __zsBeginStreamForward(response) {
+    if (response._streamId !== undefined && response._streamId >= 0) {
+      // Already forwarding (idempotent): inspect_response was called twice
+      // on the same Response (rare but possible during cancel/replay paths).
+      return response._streamId;
+    }
+    var stream = response.body;
+
+    // Polyfill-skeleton fast path: if the stream exposes `_id`, it is
+    // backed by a Rust-side StreamState that the user's controller writes
+    // to directly via `__streams.enqueue(_id, ...)`. The wire forwarder
+    // can attach to that StreamState immediately — no pump, no second
+    // copy, no race against the skeleton's internal _valueWaiter dispatch
+    // (which clobbers a final `[DONE]` chunk if a recursive read parks
+    // between enqueue+close). This keeps the pre-cutover semantics until
+    // D-19 step 2 removes the skeleton entirely.
+    if (typeof stream._id === "number") {
+      response._streamId = stream._id;
+      return stream._id;
+    }
+
+    // Native / spec-conformant fallback: lock the stream and pump via
+    // `getReader().read()` into a freshly-allocated StreamState. Works
+    // against native ReadableStream, polyfill `__zsPolyfillReadableStream`,
+    // and any user-defined class implementing the surface.
+    var streamId = __streams.create();
+    response._streamId = streamId;
+    var reader = stream.getReader();
+    (function pump() {
+      reader.read().then(function (r) {
+        if (r.done) { __streams.close(streamId); return; }
+        var v = r.value;
+        if (v instanceof Uint8Array) {
+          __streams.enqueue(streamId, v);
+        } else if (typeof v === "string") {
+          __streams.enqueue(streamId, new TextEncoder().encode(v));
+        } else if (v instanceof ArrayBuffer) {
+          __streams.enqueue(streamId, new Uint8Array(v));
+        } else if (ArrayBuffer.isView && ArrayBuffer.isView(v)) {
+          __streams.enqueue(streamId, new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
+        } else {
+          // Non-byte chunk on the response wire is unsupported — coerce.
+          __streams.enqueue(streamId, new TextEncoder().encode(String(v)));
+        }
+        pump();
+      }, function (e) {
+        __streams.error(streamId, e && e.message ? String(e.message) : String(e));
+      });
+    })();
+    return streamId;
+  }
+  globalThis.__zsBeginStreamForward = __zsBeginStreamForward;
 
   // =========================================================================
   // Export to globalThis
