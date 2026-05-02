@@ -145,35 +145,82 @@ fn fetch_callback(
         return;
     };
 
-    // Step 1: coerce input to a Request via `new Request(input, init)`.
-    let req_obj = match coerce_to_request(scope, args.get(0), args.get(1)) {
-        Some(o) => o,
-        None => {
-            // Constructor threw — exception is on the isolate; let V8
-            // propagate it as a synchronous throw. (Spec strictly says
-            // the fetch promise rejects with this throw value; matching
-            // that requires an inner try/catch shim — same shape every
-            // other implementation ships with.)
-            return;
-        }
-    };
-
-    // Step 2: synchronous abort check. Fetch §5.1 step 7.
-    let signal_obj_opt = read_request_signal(scope, req_obj);
     let resolver = v8::PromiseResolver::new(scope).unwrap();
     let promise = resolver.get_promise(scope);
 
-    if let Some(sig) = signal_obj_opt {
-        if crate::dom::abort_signal::is_aborted(scope, sig) {
-            let reason = read_signal_reason(scope, sig).unwrap_or_else(|| {
-                let m = v8::String::new(scope, "The operation was aborted.").unwrap();
-                v8::Exception::error(scope, m)
-            });
-            resolver.reject(scope, reason);
-            rv.set(promise.into());
-            return;
+    // FIX E fast path: `fetch(string)` (or `fetch(string, undefined)`)
+    // — the most common shape. Skip the Request constructor + headers
+    // construction + AbortSignal wiring + snapshot_request entirely.
+    // Build the AlgFetchRequest inline.
+    let input_v = args.get(0);
+    let init_v = args.get(1);
+    let alg_req_fast = if input_v.is_string() && init_v.is_undefined() {
+        let url_str = input_v.to_rust_string_lossy(scope);
+        // Validate the URL via ada-url (matches the Request
+        // constructor's URL parse step). Anything that fails to parse
+        // throws TypeError — matching the spec.
+        match ada_url::Url::parse(&url_str, None) {
+            Ok(parsed) => {
+                let canonical = parsed.href().to_string();
+                Some(AlgFetchRequest {
+                    method: "GET".to_string(),
+                    url: canonical.clone(),
+                    headers: Vec::new(),
+                    body: None,
+                    body_source: None,
+                    redirect_mode: RedirectMode::Follow,
+                    credentials_mode: CredentialsMode::SameOrigin,
+                    cancel: Some(CancelFlag::new()),
+                    redirect_count: 0,
+                    origin_url: canonical,
+                })
+            }
+            Err(_) => {
+                let m = v8::String::new(scope, &format!("fetch: invalid URL: {url_str}"))
+                    .unwrap();
+                let exc = v8::Exception::type_error(scope, m);
+                resolver.reject(scope, exc);
+                rv.set(promise.into());
+                return;
+            }
         }
-    }
+    } else {
+        None
+    };
+
+    // Slow path: coerce input to a Request via `new Request(input, init)`.
+    let alg_req_slow_data = if alg_req_fast.is_none() {
+        let req_obj = match coerce_to_request(scope, input_v, init_v) {
+            Some(o) => o,
+            None => {
+                // Constructor threw — exception is on the isolate; let V8
+                // propagate it as a synchronous throw. (Spec strictly says
+                // the fetch promise rejects with this throw value; matching
+                // that requires an inner try/catch shim — same shape every
+                // other implementation ships with.)
+                return;
+            }
+        };
+
+        // Step 2: synchronous abort check. Fetch §5.1 step 7.
+        let signal_obj_opt = read_request_signal(scope, req_obj);
+
+        if let Some(sig) = signal_obj_opt {
+            if crate::dom::abort_signal::is_aborted(scope, sig) {
+                let reason = read_signal_reason(scope, sig).unwrap_or_else(|| {
+                    let m = v8::String::new(scope, "The operation was aborted.").unwrap();
+                    v8::Exception::error(scope, m)
+                });
+                resolver.reject(scope, reason);
+                rv.set(promise.into());
+                return;
+            }
+        }
+
+        Some((req_obj, signal_obj_opt))
+    } else {
+        None
+    };
 
     // Admission control.
     {
@@ -212,16 +259,23 @@ fn fetch_callback(
         }
     }
 
-    // Snapshot request fields.
-    let alg_req = match snapshot_request(scope, req_obj) {
-        Ok(r) => r,
-        Err(msg) => {
-            let m = v8::String::new(scope, &msg).unwrap();
-            let exc = v8::Exception::type_error(scope, m);
-            resolver.reject(scope, exc);
-            rv.set(promise.into());
-            return;
+    let (alg_req, signal_obj_opt) = match (alg_req_fast, alg_req_slow_data) {
+        (Some(alg), _) => (alg, None),
+        (None, Some((req_obj, sig_opt))) => {
+            // Snapshot request fields.
+            let alg = match snapshot_request(scope, req_obj) {
+                Ok(r) => r,
+                Err(msg) => {
+                    let m = v8::String::new(scope, &msg).unwrap();
+                    let exc = v8::Exception::type_error(scope, m);
+                    resolver.reject(scope, exc);
+                    rv.set(promise.into());
+                    return;
+                }
+            };
+            (alg, sig_opt)
         }
+        (None, None) => unreachable!(),
     };
 
     // Wire AbortSignal: register a Rust abort algorithm that flips the
@@ -229,7 +283,7 @@ fn fetch_callback(
     let cancel = alg_req
         .cancel
         .clone()
-        .expect("snapshot_request always populates cancel");
+        .expect("AlgFetchRequest always populates cancel");
     if let Some(sig_obj) = signal_obj_opt {
         let cf = cancel.clone();
         crate::dom::abort_signal::add_abort_algorithm(
