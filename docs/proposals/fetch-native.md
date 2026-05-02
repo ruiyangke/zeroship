@@ -295,6 +295,15 @@ FormData), Body + Request + Response, fetch() core and algorithms.
 | 3b | `d45800c8` | delete formdata.js polyfill (~250 LOC removed) |
 | 3c | `934e51f8` | slim events.js to CustomEvent shim (73→25 LOC) |
 
+**D-23 WPT pass-count expansion — DONE:**
+
+| Commit | Scope |
+|--------|-------|
+| `56716d70` | WPT redirect — add mode + origin + location runners (35 sub-cases @ 100%) |
+| `66c5618f` | WPT basic — add 5 in-process network runners (16 sub-cases @ 100%) |
+| `3f986248` | spec gap — Headers immutable guard for Response.error() (response 38/0/1 was 37/1/1) |
+| `851a33ba` | WPT abort — add fetch-level abort runner (4 sub-cases @ 100%) |
+
 Net polyfill LOC removed: ~1,000. The remaining JS embed code is the
 DOMException polyfill + `__zsBeginStreamForward` kernel-bridge helper
 in fetch.js (154 LOC), the CustomEvent shim in events.js (25 LOC), and
