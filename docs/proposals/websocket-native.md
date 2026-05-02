@@ -2012,10 +2012,32 @@ return a RefMut that the closure couldn't outlive). v2 takes the
 
 ### V.7. accept() — workerd extension preserved (D-21)
 
+The `accept()` method lives on the `WebSocket.prototype` regardless of
+construction mode (one shared prototype across both client-side and
+WebSocketPair-coupled instances) — matching workerd, which does not
+hide the method on client sockets either. The discriminator at call
+time is `peer_id.is_some()`. This is the simplest matching shape;
+splitting accept off the client-side prototype would require either:
+
+- A dynamic getter that throws on access — a bigger surface than a
+  method that throws on call.
+- Two separate WebSocket classes — breaks `instanceof WebSocket`.
+
+v2 keeps the v1 design here (per critic MAJOR #13's "current design
+is workerd-consistent" assessment).
+
 ```rust
-/// Cloudflare-Workers extension — required for WebSocketPair[1] to begin
-/// receiving messages. Throws TypeError on a client-side WebSocket
-/// (created via `new WebSocket(url)`); silent no-op if already accepted.
+/// Cloudflare-Workers extension — required for WebSocketPair[1] to
+/// begin receiving messages. Throws TypeError on a client-side
+/// WebSocket (created via `new WebSocket(url)`); silent no-op if
+/// already accepted.
+///
+/// The method is on the shared WebSocket.prototype; the
+/// peer_id.is_some() check distinguishes pair-coupled from
+/// client-side at call time. Mutating `accepted` on a client-side
+/// socket is harmless because the field is unused on that path
+/// (the connect task sets it true unconditionally at construction).
+/// (addresses critic MAJOR #13)
 #[v8_method]
 fn accept(&self, scope: &mut v8::PinScope) -> Result<(), OpError> {
     if self.peer_id.get().is_none() {
