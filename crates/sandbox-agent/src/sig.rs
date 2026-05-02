@@ -105,10 +105,22 @@ const EMPTY_BODY_SHA256_HEX: &str =
 /// delimiter, not part of this tag).
 const V1_1_DOMAIN_TAG: &str = "ED25519-V1.1";
 
+/// Domain-separator tag for the **WebSocket-Upgrade variant** of
+/// canonical v1.1. Round-2 fix (D-14): prevents a captured non-WS
+/// signature whose body matches `b"sec-websocket-key=…"` from being
+/// replayed as a WebSocket Upgrade. The `-WS` suffix on the tag puts
+/// every Upgrade canonical in a disjoint domain from the HTTP
+/// canonical: `ED25519-V1.1` vs `ED25519-V1.1-WS` — distinct prefixes
+/// → distinct messages → distinct signatures, regardless of the body
+/// hash. See `docs/proposals/sandbox-preview-urls.md` § II.1
+/// "Sec-WebSocket-Key binding".
+const V1_1_WS_DOMAIN_TAG: &str = "ED25519-V1.1-WS";
+
 /// Canonical-string version. Picked by the dispatcher (the agent uses
 /// the path prefix `/proxy/` to choose v1.1; everything else stays on
 /// v1). Wire-stable; new variants append, never reorder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(non_camel_case_types)] // V1_1 / V1_1_Ws mirror the wire-protocol names verbatim.
 pub enum CanonicalKind {
     /// Original wire-protocol-v1: `method\npath\nts\nnonce\nsha256_hex(body)`.
     /// Query strings are NOT covered (and rejected outright by the
@@ -137,6 +149,30 @@ pub enum CanonicalKind {
     /// Both signer and verifier MUST hash the same bytes per these
     /// rules; the helper [`v1_1_path_query`] enforces them.
     V1_1,
+    /// `auth.ed25519-v1.1-ws` — separately-versioned canonical for
+    /// **WebSocket Upgrade** requests on the `/proxy/...` path
+    /// (round-2 D-14). Same shape as v1.1 but with a `-WS` suffix on
+    /// the domain-separator tag. The Upgrade body MUST be empty; the
+    /// body-hash slot uses the empty-body constant
+    /// (`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`).
+    ///
+    /// ```text
+    /// canonical_v1.1-ws = "ED25519-V1.1-WS\n"
+    ///                   + method + "\n"
+    ///                   + path_query + "\n"
+    ///                   + ts + "\n" + nonce + "\n"
+    ///                   + sha256_hex(empty)
+    /// ```
+    ///
+    /// **Why a separate canonical and not a body-hash mutation:** any
+    /// scheme that folds `Sec-WebSocket-Key` into the body-hash slot
+    /// (e.g. `sha256_hex(sec_websocket_key)`) creates a forgery path
+    /// where a captured v1.1 HTTP signature whose body happens to be
+    /// `b"sec-websocket-key=…"` validates under the WS canonical too.
+    /// The `-WS` tag puts WS Upgrade in a disjoint message-space —
+    /// different leading bytes ⇒ different signatures ⇒ no
+    /// cross-canonical replay. See § II.1 "Sec-WebSocket-Key binding".
+    V1_1_Ws,
 }
 
 /// Reasons a signature fails. Each maps to a distinct audit event so
@@ -254,6 +290,14 @@ impl Verifier {
     /// followed by everything up to a `#` or end-of-URL). The signer
     /// and verifier MUST agree byte-exact; the helper centralises
     /// the rule.
+    ///
+    /// For [`CanonicalKind::V1_1_Ws`] the `path_query` argument
+    /// follows the same rules as V1_1, AND the `body` argument MUST
+    /// be empty (RFC 6455 §1.3 — Upgrade requests carry no body).
+    /// A non-empty body is rejected with [`AuthFail::BadSignature`]
+    /// (the body-hash mismatch is the cleanest failure path; we
+    /// could add a dedicated variant but the controller would
+    /// already 400 a non-empty body before signing).
     pub fn verify_kind(
         &self,
         kind: CanonicalKind,
@@ -354,6 +398,18 @@ fn build_canonical(
                 "{V1_1_DOMAIN_TAG}\n{method}\n{path_query}\n{ts}\n{nonce}\n{body_hash_hex}"
             )
         }
+        CanonicalKind::V1_1_Ws => {
+            // The body-hash slot for V1_1_Ws is ALWAYS the empty-body
+            // constant — `verify_kind` is the contract owner here:
+            // callers pass `body=&[]` for WS Upgrade verification, so
+            // `body_hash_hex` is already `EMPTY_BODY_SHA256_HEX`. We
+            // re-emit through the same template so the byte-layout
+            // (`tag\nmethod\npq\nts\nnonce\nhash`) matches V1_1
+            // exactly except for the leading domain-separator tag.
+            format!(
+                "{V1_1_WS_DOMAIN_TAG}\n{method}\n{path_query}\n{ts}\n{nonce}\n{body_hash_hex}"
+            )
+        }
     }
 }
 
@@ -441,8 +497,13 @@ pub fn sign(
 /// Sign a request under a specific [`CanonicalKind`].
 ///
 /// `path_query` carries the bare path for [`CanonicalKind::V1`] and
-/// the v1.1 path-and-query string for [`CanonicalKind::V1_1`] —
-/// see [`v1_1_path_query`] for the byte-exact format.
+/// the v1.1 path-and-query string for [`CanonicalKind::V1_1`] /
+/// [`CanonicalKind::V1_1_Ws`] — see [`v1_1_path_query`] for the
+/// byte-exact format. For V1_1_Ws callers MUST pass `body=&[]` so
+/// the body-hash slot reduces to the empty-body constant; signing
+/// V1_1_Ws over a non-empty body produces a signature that no
+/// verifier will accept (the controller refuses the Upgrade with
+/// non-empty body before reaching `sign_kind`).
 pub fn sign_kind(
     kind: CanonicalKind,
     signing_key: &ed25519_dalek::SigningKey,
@@ -961,6 +1022,203 @@ mod tests {
         assert_eq!(
             AuthFail::WrongCanonicalVersion.as_str(),
             "wrong-canonical-version"
+        );
+    }
+
+    // ─── canonical V1_1_Ws (WebSocket Upgrade) ──────────────────
+
+    /// D-14: the V1_1_Ws canonical bytes match the doc's exact format
+    /// — `"ED25519-V1.1-WS\n" + method + "\n" + path_query + "\n" + ts
+    /// + "\n" + nonce + "\n" + sha256_hex(empty)`. Pin it byte-exact
+    /// so a future contributor who reorders fields can't silently
+    /// change the wire-stable canonical.
+    #[test]
+    fn v1_1_ws_canonical_bytes_match_doc_format() {
+        let method = "GET";
+        let path_query = "/proxy/5173/ws?token=abc";
+        let ts: u64 = 1_700_000_000;
+        let nonce = "ws-nonce";
+        let body_hash_hex = EMPTY_BODY_SHA256_HEX;
+        let canonical = build_canonical(
+            CanonicalKind::V1_1_Ws,
+            method,
+            path_query,
+            ts,
+            nonce,
+            body_hash_hex,
+        );
+        let expected = format!(
+            "ED25519-V1.1-WS\nGET\n/proxy/5173/ws?token=abc\n1700000000\nws-nonce\n{body_hash_hex}",
+        );
+        assert_eq!(canonical, expected);
+    }
+
+    #[test]
+    fn v1_1_ws_canonical_includes_ws_domain_tag() {
+        let (sk, pk) = keypair();
+        let v = Verifier::new(pk);
+        let ts = ts_now();
+        let nonce = "v1-1-ws-tag";
+        let path_query = "/proxy/5173/ws";
+        let sig = sign_kind(CanonicalKind::V1_1_Ws, &sk, "GET", path_query, b"", ts, nonce);
+        assert!(v
+            .verify_kind(
+                CanonicalKind::V1_1_Ws,
+                "GET",
+                path_query,
+                b"",
+                &ts.to_string(),
+                nonce,
+                &sig,
+            )
+            .is_ok());
+    }
+
+    /// **CRITICAL forgery defense (round-2 D-14).** A signature minted
+    /// under V1_1 (HTTP, with body bytes that happen to look like a
+    /// captured Sec-WebSocket-Key) MUST NOT validate as V1_1_Ws. The
+    /// `-WS` domain-separator puts the two canonicals in disjoint
+    /// message-spaces. Closes the round-2 forgery vector.
+    #[test]
+    fn v1_1_http_signature_does_not_validate_as_v1_1_ws() {
+        let (sk, pk) = keypair();
+        let v = Verifier::new(pk);
+        let ts = ts_now();
+        let nonce = "cross-replay-1";
+        let path_query = "/proxy/5173/ws";
+        // Mint an HTTP-canonical signature with a body that contains
+        // the literal "sec-websocket-key=…" string (the body shape
+        // round-2 calls out as the forgery target).
+        let body: &[u8] = b"sec-websocket-key=dGhlIHNhbXBsZSBub25jZQ==";
+        let v1_1_sig = sign_kind(
+            CanonicalKind::V1_1,
+            &sk,
+            "POST",
+            path_query,
+            body,
+            ts,
+            nonce,
+        );
+        // Replay as a WS Upgrade — same headers, same path-query,
+        // but verifier picks V1_1_Ws (because the controller's
+        // dispatcher saw `Upgrade: websocket`).
+        assert_eq!(
+            v.verify_kind(
+                CanonicalKind::V1_1_Ws,
+                "POST",
+                path_query,
+                b"",
+                &ts.to_string(),
+                nonce,
+                &v1_1_sig,
+            ),
+            Err(AuthFail::BadSignature)
+        );
+    }
+
+    /// Symmetric defense: a V1_1_Ws signature MUST NOT validate as
+    /// V1_1 HTTP. Closes the reverse direction of the cross-canonical
+    /// replay surface.
+    #[test]
+    fn v1_1_ws_signature_does_not_validate_as_v1_1_http() {
+        let (sk, pk) = keypair();
+        let v = Verifier::new(pk);
+        let ts = ts_now();
+        let nonce = "cross-replay-2";
+        let path_query = "/proxy/5173/api";
+        let ws_sig = sign_kind(
+            CanonicalKind::V1_1_Ws,
+            &sk,
+            "GET",
+            path_query,
+            b"",
+            ts,
+            nonce,
+        );
+        assert_eq!(
+            v.verify_kind(
+                CanonicalKind::V1_1,
+                "GET",
+                path_query,
+                b"",
+                &ts.to_string(),
+                nonce,
+                &ws_sig,
+            ),
+            Err(AuthFail::BadSignature)
+        );
+    }
+
+    /// Negative: a V1 (legacy, no domain tag) signature does not
+    /// validate as V1_1_Ws. Belt-and-suspenders — this tests the
+    /// V1↔V1_1_Ws gap in addition to the V1↔V1_1 gap covered above.
+    #[test]
+    fn v1_canonical_does_not_validate_under_v1_1_ws() {
+        let (sk, pk) = keypair();
+        let v = Verifier::new(pk);
+        let ts = ts_now();
+        let nonce = "v1-as-ws";
+        let path = "/proxy/5173/ws";
+        let v1_sig = sign_kind(CanonicalKind::V1, &sk, "GET", path, b"", ts, nonce);
+        assert_eq!(
+            v.verify_kind(
+                CanonicalKind::V1_1_Ws,
+                "GET",
+                path,
+                b"",
+                &ts.to_string(),
+                nonce,
+                &v1_sig,
+            ),
+            Err(AuthFail::BadSignature)
+        );
+    }
+
+    /// V1_1_Ws covers method + path-query, same as V1_1. Method
+    /// tampering between sign and verify MUST fail.
+    #[test]
+    fn v1_1_ws_method_tampering_rejected() {
+        let (sk, pk) = keypair();
+        let v = Verifier::new(pk);
+        let ts = ts_now();
+        let nonce = "ws-method";
+        let path_query = "/proxy/5173/ws";
+        let sig = sign_kind(CanonicalKind::V1_1_Ws, &sk, "GET", path_query, b"", ts, nonce);
+        assert_eq!(
+            v.verify_kind(
+                CanonicalKind::V1_1_Ws,
+                "POST",
+                path_query,
+                b"",
+                &ts.to_string(),
+                nonce,
+                &sig,
+            ),
+            Err(AuthFail::BadSignature)
+        );
+    }
+
+    /// V1_1_Ws covers the query string, same as V1_1.
+    #[test]
+    fn v1_1_ws_query_is_covered() {
+        let (sk, pk) = keypair();
+        let v = Verifier::new(pk);
+        let ts = ts_now();
+        let nonce = "ws-query";
+        let signed = "/proxy/5173/ws?t=1";
+        let sent = "/proxy/5173/ws?t=2";
+        let sig = sign_kind(CanonicalKind::V1_1_Ws, &sk, "GET", signed, b"", ts, nonce);
+        assert_eq!(
+            v.verify_kind(
+                CanonicalKind::V1_1_Ws,
+                "GET",
+                sent,
+                b"",
+                &ts.to_string(),
+                nonce,
+                &sig,
+            ),
+            Err(AuthFail::BadSignature)
         );
     }
 

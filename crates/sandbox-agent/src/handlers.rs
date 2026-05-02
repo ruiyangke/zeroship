@@ -150,11 +150,18 @@ fn verify_signed(req: &HttpRequest, body: &[u8], state: &AppState) -> bool {
             }
             path.to_string()
         }
-        CanonicalKind::V1_1 => {
+        CanonicalKind::V1_1 | CanonicalKind::V1_1_Ws => {
             // Reconstruct path-and-query from the request URI's
             // path_and_query() so the bytes match what the controller
             // signed. ntex's `uri()` returns a `http::Uri`; its
             // `path_and_query()` gives "/path?query" (no fragment).
+            //
+            // V1_1 and V1_1_Ws share the same path-query rules; they
+            // differ only in the leading domain-separator tag inside
+            // `build_canonical`. The dispatcher (canonical_kind_for)
+            // chooses between them based on the request shape — the
+            // ntex HTTP path always picks V1_1; the compio raw-TCP
+            // WS handler (`proxy_ws.rs`) picks V1_1_Ws.
             match req.uri().path_and_query() {
                 Some(pq) => sig::v1_1_path_query(pq.as_str()).to_string(),
                 None => path.to_string(),
