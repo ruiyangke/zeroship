@@ -102,10 +102,12 @@ pub fn extract_body(
                 let length = Some(bytes.len() as u64);
                 let content_type = if type_.is_empty() { None } else { Some(type_.clone()) };
                 let bytes_rc = Rc::new(bytes);
-                let stream = build_byte_stream(scope, bytes_rc.clone());
+                // Defer stream materialization (Fix B): consumers can drain
+                // the source bytes directly without ever constructing a
+                // ReadableStream when they know they'll fully consume.
                 return Ok(Extracted {
                     body: BodyImpl {
-                        stream: Some(stream),
+                        stream: std::cell::RefCell::new(None),
                         source: Some(BodySource::Blob(bytes_rc, Some(type_))),
                         length,
                     },
@@ -122,10 +124,12 @@ pub fn extract_body(
         let (bytes, boundary, mime) = fd_bytes;
         let length = Some(bytes.len() as u64);
         let bytes_rc = Rc::new(bytes);
-        let stream = build_byte_stream(scope, bytes_rc.clone());
+        // FIX B: defer stream construction — body getter materializes
+        // it lazily on first access. Saves a JS ReadableStream alloc
+        // when the body is consumed via text/json/arrayBuffer/bytes.
         return Ok(Extracted {
             body: BodyImpl {
-                stream: Some(stream),
+                stream: std::cell::RefCell::new(None),
                 source: Some(BodySource::FormData(bytes_rc, boundary)),
                 length,
             },
@@ -138,10 +142,9 @@ pub fn extract_body(
     if let Some(usp_bytes) = try_extract_url_search_params(scope, value)? {
         let length = Some(usp_bytes.len() as u64);
         let bytes_rc = Rc::new(usp_bytes);
-        let stream = build_byte_stream(scope, bytes_rc.clone());
         return Ok(Extracted {
             body: BodyImpl {
-                stream: Some(stream),
+                stream: std::cell::RefCell::new(None),
                 source: Some(BodySource::UrlSearchParams(bytes_rc.clone())),
                 length,
             },
@@ -153,10 +156,9 @@ pub fn extract_body(
     let bytes = string_to_usv_bytes(scope, value)?;
     let length = Some(bytes.len() as u64);
     let bytes_rc = Rc::new(bytes);
-    let stream = build_byte_stream(scope, bytes_rc.clone());
     Ok(Extracted {
         body: BodyImpl {
-            stream: Some(stream),
+            stream: std::cell::RefCell::new(None),
             source: Some(BodySource::Bytes(bytes_rc)),
             length,
         },
@@ -210,7 +212,7 @@ fn extract_from_stream(
     let stream_global = v8::Global::new(scope, stream_obj);
     Ok(Extracted {
         body: BodyImpl {
-            stream: Some(stream_global),
+            stream: std::cell::RefCell::new(Some(stream_global)),
             source: Some(BodySource::Stream),
             length: None,
         },
@@ -253,10 +255,9 @@ fn extract_from_buffer_source(
     let bytes = read_buffer_source_bytes(scope, value)?;
     let length = Some(bytes.len() as u64);
     let bytes_rc = Rc::new(bytes);
-    let stream = build_byte_stream(scope, bytes_rc.clone());
     Ok(Extracted {
         body: BodyImpl {
-            stream: Some(stream),
+            stream: std::cell::RefCell::new(None),
             source: Some(BodySource::Bytes(bytes_rc)),
             length,
         },

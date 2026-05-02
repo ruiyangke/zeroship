@@ -480,7 +480,7 @@ fn request_constructor_callback(
         let req_obj: v8::Local<v8::Object> = input_v.try_into().unwrap();
         let raw = state_ptr(scope, req_obj).unwrap();
         let other: &RequestState = unsafe { &*raw };
-        let other_stream_g = other.body.borrow().stream.clone();
+        let other_stream_g = other.body.borrow().stream.borrow().clone();
         let other_source = other.body.borrow().source.clone();
 
         if let Some(stream_g) = other_stream_g.as_ref() {
@@ -617,12 +617,11 @@ fn request_constructor_callback(
     // (for true Stream sources).
     if !has_explicit_body {
         if let InheritMode::BytesSource(rc) = &inherit_mode {
-            let new_stream_g = crate::fetch_body::extract::build_byte_stream(scope, rc.clone());
-            // Mirror extract_body's BodyImpl shape for Bytes-source:
-            // shared Rc, fresh stream, same length.
+            // FIX B: defer stream construction. The body getter
+            // builds a ReadableStream lazily from the source.
             let length = Some(rc.len() as u64);
             *state.body.borrow_mut() = crate::fetch_body::body::BodyImpl {
-                stream: Some(new_stream_g),
+                stream: std::cell::RefCell::new(None),
                 source: Some(crate::fetch_body::body::BodySource::Bytes(rc.clone())),
                 length,
             };
@@ -633,13 +632,13 @@ fn request_constructor_callback(
             let req_obj: v8::Local<v8::Object> = input_v.try_into().unwrap();
             let raw = state_ptr(scope, req_obj).unwrap();
             let other: &RequestState = unsafe { &*raw };
-            let other_stream_g = other.body.borrow().stream.clone();
+            let other_stream_g = other.body.borrow().stream.borrow().clone();
             if let Some(stream_g) = other_stream_g {
                 let stream_local = v8::Local::new(scope, stream_g);
                 if let Some((branch_a, branch_b)) = tee_stream(scope, stream_local) {
-                    other.body.borrow_mut().stream = Some(v8::Global::new(scope, branch_a));
+                    *other.body.borrow().stream.borrow_mut() = Some(v8::Global::new(scope, branch_a));
                     *state.body.borrow_mut() = crate::fetch_body::body::BodyImpl {
-                        stream: Some(v8::Global::new(scope, branch_b)),
+                        stream: std::cell::RefCell::new(Some(v8::Global::new(scope, branch_b))),
                         source: Some(crate::fetch_body::body::BodySource::Stream),
                         length: None,
                     };
@@ -662,7 +661,13 @@ fn request_constructor_callback(
         let req_obj: v8::Local<v8::Object> = input_v.try_into().unwrap();
         let raw = state_ptr(scope, req_obj).unwrap();
         let other: &RequestState = unsafe { &*raw };
-        if other.body.borrow().stream.is_some() {
+        // Body is non-null when the stream is materialized OR a
+        // rewindable source is present (FIX B lazy-stream path).
+        let body_present = {
+            let body = other.body.borrow();
+            body.stream.borrow().is_some() || body.source.is_some()
+        };
+        if body_present {
             crate::fetch_body::consumers::set_body_used_marker(scope, req_obj);
         }
     }
@@ -1092,7 +1097,7 @@ fn request_clone_callback(
     // Disturbed body → TypeError. Use both the locked-stream check
     // AND the wrapper's body-used marker (which fires when a consumer
     // started but the stream auto-released its lock).
-    let stream_global_opt = state.body.borrow().stream.clone();
+    let stream_global_opt = state.body.borrow().stream.borrow().clone();
     if let Some(stream_g) = &stream_global_opt {
         let stream = v8::Local::new(scope, stream_g.clone());
         if crate::fetch_body::consumers::stream_disturbed_or_used(scope, this, stream) {
@@ -1114,16 +1119,15 @@ fn request_clone_callback(
     let req_class_v = global.get(scope, req_class_key.into()).unwrap();
     let req_class_fn: v8::Local<v8::Function> = req_class_v.try_into().unwrap();
 
-    let body_is_stream = state.body.borrow().stream.is_some()
-        && matches!(
-            state.body.borrow().source,
-            Some(crate::fetch_body::body::BodySource::Stream)
-        );
+    let body_is_stream = matches!(
+        state.body.borrow().source,
+        Some(crate::fetch_body::body::BodySource::Stream)
+    ) && state.body.borrow().stream.borrow().is_some();
 
     // Tee the stream so original + clone share both halves and remain
     // independently consumable.
     let (left_branch, right_branch) = if body_is_stream {
-        let stream_g = state.body.borrow().stream.clone().unwrap();
+        let stream_g = state.body.borrow().stream.borrow().clone().unwrap();
         let stream = v8::Local::new(scope, stream_g);
         match tee_stream(scope, stream) {
             Some(pair) => (Some(pair.0), Some(pair.1)),
@@ -1162,7 +1166,7 @@ fn request_clone_callback(
         let key = v8::String::new(scope, "body").unwrap();
         init.set(scope, key.into(), rb.into());
         if let Some(lb) = left_branch {
-            state.body.borrow_mut().stream = Some(v8::Global::new(scope, lb));
+            *state.body.borrow().stream.borrow_mut() = Some(v8::Global::new(scope, lb));
         }
     } else if let Some(src) = state.body.borrow().source.clone() {
         match src {

@@ -145,35 +145,82 @@ fn fetch_callback(
         return;
     };
 
-    // Step 1: coerce input to a Request via `new Request(input, init)`.
-    let req_obj = match coerce_to_request(scope, args.get(0), args.get(1)) {
-        Some(o) => o,
-        None => {
-            // Constructor threw — exception is on the isolate; let V8
-            // propagate it as a synchronous throw. (Spec strictly says
-            // the fetch promise rejects with this throw value; matching
-            // that requires an inner try/catch shim — same shape every
-            // other implementation ships with.)
-            return;
-        }
-    };
-
-    // Step 2: synchronous abort check. Fetch §5.1 step 7.
-    let signal_obj_opt = read_request_signal(scope, req_obj);
     let resolver = v8::PromiseResolver::new(scope).unwrap();
     let promise = resolver.get_promise(scope);
 
-    if let Some(sig) = signal_obj_opt {
-        if crate::dom::abort_signal::is_aborted(scope, sig) {
-            let reason = read_signal_reason(scope, sig).unwrap_or_else(|| {
-                let m = v8::String::new(scope, "The operation was aborted.").unwrap();
-                v8::Exception::error(scope, m)
-            });
-            resolver.reject(scope, reason);
-            rv.set(promise.into());
-            return;
+    // FIX E fast path: `fetch(string)` (or `fetch(string, undefined)`)
+    // — the most common shape. Skip the Request constructor + headers
+    // construction + AbortSignal wiring + snapshot_request entirely.
+    // Build the AlgFetchRequest inline.
+    let input_v = args.get(0);
+    let init_v = args.get(1);
+    let alg_req_fast = if input_v.is_string() && init_v.is_undefined() {
+        let url_str = input_v.to_rust_string_lossy(scope);
+        // Validate the URL via ada-url (matches the Request
+        // constructor's URL parse step). Anything that fails to parse
+        // throws TypeError — matching the spec.
+        match ada_url::Url::parse(&url_str, None) {
+            Ok(parsed) => {
+                let canonical = parsed.href().to_string();
+                Some(AlgFetchRequest {
+                    method: "GET".to_string(),
+                    url: canonical.clone(),
+                    headers: Vec::new(),
+                    body: None,
+                    body_source: None,
+                    redirect_mode: RedirectMode::Follow,
+                    credentials_mode: CredentialsMode::SameOrigin,
+                    cancel: Some(CancelFlag::new()),
+                    redirect_count: 0,
+                    origin_url: canonical,
+                })
+            }
+            Err(_) => {
+                let m = v8::String::new(scope, &format!("fetch: invalid URL: {url_str}"))
+                    .unwrap();
+                let exc = v8::Exception::type_error(scope, m);
+                resolver.reject(scope, exc);
+                rv.set(promise.into());
+                return;
+            }
         }
-    }
+    } else {
+        None
+    };
+
+    // Slow path: coerce input to a Request via `new Request(input, init)`.
+    let alg_req_slow_data = if alg_req_fast.is_none() {
+        let req_obj = match coerce_to_request(scope, input_v, init_v) {
+            Some(o) => o,
+            None => {
+                // Constructor threw — exception is on the isolate; let V8
+                // propagate it as a synchronous throw. (Spec strictly says
+                // the fetch promise rejects with this throw value; matching
+                // that requires an inner try/catch shim — same shape every
+                // other implementation ships with.)
+                return;
+            }
+        };
+
+        // Step 2: synchronous abort check. Fetch §5.1 step 7.
+        let signal_obj_opt = read_request_signal(scope, req_obj);
+
+        if let Some(sig) = signal_obj_opt {
+            if crate::dom::abort_signal::is_aborted(scope, sig) {
+                let reason = read_signal_reason(scope, sig).unwrap_or_else(|| {
+                    let m = v8::String::new(scope, "The operation was aborted.").unwrap();
+                    v8::Exception::error(scope, m)
+                });
+                resolver.reject(scope, reason);
+                rv.set(promise.into());
+                return;
+            }
+        }
+
+        Some((req_obj, signal_obj_opt))
+    } else {
+        None
+    };
 
     // Admission control.
     {
@@ -212,16 +259,23 @@ fn fetch_callback(
         }
     }
 
-    // Snapshot request fields.
-    let alg_req = match snapshot_request(scope, req_obj) {
-        Ok(r) => r,
-        Err(msg) => {
-            let m = v8::String::new(scope, &msg).unwrap();
-            let exc = v8::Exception::type_error(scope, m);
-            resolver.reject(scope, exc);
-            rv.set(promise.into());
-            return;
+    let (alg_req, signal_obj_opt) = match (alg_req_fast, alg_req_slow_data) {
+        (Some(alg), _) => (alg, None),
+        (None, Some((req_obj, sig_opt))) => {
+            // Snapshot request fields.
+            let alg = match snapshot_request(scope, req_obj) {
+                Ok(r) => r,
+                Err(msg) => {
+                    let m = v8::String::new(scope, &msg).unwrap();
+                    let exc = v8::Exception::type_error(scope, m);
+                    resolver.reject(scope, exc);
+                    rv.set(promise.into());
+                    return;
+                }
+            };
+            (alg, sig_opt)
         }
+        (None, None) => unreachable!(),
     };
 
     // Wire AbortSignal: register a Rust abort algorithm that flips the
@@ -229,7 +283,7 @@ fn fetch_callback(
     let cancel = alg_req
         .cancel
         .clone()
-        .expect("snapshot_request always populates cancel");
+        .expect("AlgFetchRequest always populates cancel");
     if let Some(sig_obj) = signal_obj_opt {
         let cf = cancel.clone();
         crate::dom::abort_signal::add_abort_algorithm(
@@ -405,8 +459,14 @@ fn snapshot_request<'s>(
     })
 }
 
-/// Iterate `request.headers` via `Array.from(...)` and collect into
-/// `Vec<(name, value)>`.
+/// Read `request.headers` directly from the native `Headers` state
+/// pointer when possible (FIX D), falling back to the JS-visible
+/// `Array.from(headers)` iteration for non-native (polyfill) shapes.
+///
+/// The native fast path saves ~17 V8 ops + 2N String allocations
+/// per fetch (where N is the header count): no `globalThis.Array`
+/// lookup, no `Array.from` invocation, no JS Array materialization,
+/// no per-pair `get_index` + `to_rust_string_lossy` round-trips.
 fn read_headers<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     req: v8::Local<'s, v8::Object>,
@@ -419,6 +479,25 @@ fn read_headers<'s>(
         .try_into()
         .map_err(|_| "Request: headers is not an object".to_string())?;
 
+    // FIX D fast path: native Headers state pointer access.
+    if let Some(headers_state) = crate::headers::try_native_headers(scope, h_obj) {
+        let list = headers_state.list();
+        let mut headers: Vec<(String, String)> = Vec::with_capacity(list.len());
+        for (n, v) in list {
+            // Header names + values are byte sequences, but the
+            // wire layer (cyper) takes &str. The HTTP §5 grammar
+            // already validated them as ASCII-safe-ish (tchar +
+            // VCHAR/obs-text), so a lossy decode is fine here.
+            headers.push((
+                String::from_utf8_lossy(n).into_owned(),
+                String::from_utf8_lossy(v).into_owned(),
+            ));
+        }
+        return Ok(headers);
+    }
+
+    // Slow path: polyfill / non-native Headers shape — go through
+    // `Array.from(headers)`.
     let global = scope.get_current_context().global(scope);
     let array_key = v8::String::new(scope, "Array").unwrap();
     let array_v = global
@@ -508,8 +587,31 @@ pub fn materialise_pending<'s>(
     }
 }
 
-/// Build a JS Response object via `new Response(body, init)`, then
-/// patch url / redirected (which the constructor doesn't accept).
+/// Build a JS Response object directly from algorithm output.
+///
+/// FIX B (perf): instead of running `new Response(body, init)` which
+/// re-extracts the body bytes (Uint8Array → Vec<u8> ptr::copy →
+/// Rc<Vec<u8>> + builds a JS ReadableStream wrapping the bytes), we:
+///
+///   1. Construct the Response wrapper with `null` body so the JS
+///      constructor takes the cheap null-body path (no extract_body
+///      run, no stream wrapper alloc).
+///   2. Move the bytes from `alg.body` into a fresh BodyImpl with
+///      `BodySource::Bytes(rc)` and `stream: None`. The body() getter
+///      and consumer fast paths (FIX C) read source directly.
+///   3. Patch url + redirected as before.
+///
+/// Lazy stream materialization: when the user code reads
+/// `response.body` (rare in benchmarks; common for streaming),
+/// the body getter (added below) lazily builds the JS stream
+/// wrapper on first access.
+///
+/// Eliminates per-fetch:
+///   - 1 ArrayBuffer + Uint8Array alloc (the body argument)
+///   - 1 v8::Function::new_instance JS->JS hop (Response ctor)
+///   - 1 extract_body run (read_buffer_source_bytes copy of body
+///     bytes, build_byte_stream wrapper alloc)
+///   - 1 ReadableStream constructor invocation
 fn build_response_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     alg: AlgorithmResponse,
@@ -545,33 +647,51 @@ fn build_response_object<'s>(
         init.set(scope, key.into(), arr.into());
     }
 
-    // Body — Uint8Array view over the bytes. Status-table null-body
-    // statuses (101/103/204/205/304) get null instead.
-    let body_v: v8::Local<v8::Value> = if matches!(alg.status, 101 | 103 | 204 | 205 | 304) {
-        v8::null(scope).into()
-    } else {
-        let len = alg.body.len();
-        let ab = v8::ArrayBuffer::new(scope, len);
-        let store = ab.get_backing_store();
-        for (i, &b) in alg.body.iter().enumerate() {
-            store[i].set(b);
-        }
-        let u8a = v8::Uint8Array::new(scope, ab, 0, len).unwrap();
-        u8a.into()
-    };
+    // Step 1: construct with null body so the constructor takes
+    // the cheap null-body path. We patch the body in step 2.
+    let null_body = v8::null(scope);
+    let result = class_fn
+        .new_instance(scope, &[null_body.into(), init.into()])
+        .unwrap();
 
-    let result = class_fn.new_instance(scope, &[body_v, init.into()]).unwrap();
-
-    // Patch url / redirected directly via state pointer (Response
-    // constructor doesn't accept those in init).
-    if let Some(raw) = response_state_ptr(scope, result) {
+    // Step 2: install the Rust-side body directly. Skips
+    // extract_body's bytes copy + ReadableStream construction.
+    if let Some(raw) = response_state_ptr_mut(scope, result) {
         // SAFETY: pointer stable for the lifetime of the wrapper.
         let state: &crate::fetch_response::ResponseState = unsafe { &*raw };
         *state.url.borrow_mut() = alg.url;
         *state.redirected.borrow_mut() = alg.redirected;
+
+        // Null-body status set: leave the body as null per spec.
+        if !matches!(alg.status, 101 | 103 | 204 | 205 | 304) {
+            let len = alg.body.len() as u64;
+            let body_rc = std::rc::Rc::new(alg.body);
+            *state.body.borrow_mut() = crate::fetch_body::body::BodyImpl {
+                // Stream stays None until first observation; the body
+                // getter materializes a ReadableStream from `source`
+                // on demand. Keeps the fast path zero-stream-alloc.
+                stream: std::cell::RefCell::new(None),
+                source: Some(crate::fetch_body::body::BodySource::Bytes(body_rc)),
+                length: Some(len),
+            };
+        }
     }
 
     result
+}
+
+fn response_state_ptr_mut<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<'s, v8::Object>,
+) -> Option<*mut crate::fetch_response::ResponseState> {
+    let ext = obj
+        .get_internal_field(scope, 0)
+        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
+    let ptr = ext.value() as *mut crate::fetch_response::ResponseState;
+    if ptr.is_null() {
+        return None;
+    }
+    Some(ptr)
 }
 
 fn response_state_ptr<'s>(

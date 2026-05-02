@@ -281,11 +281,33 @@ fn classify_stream(
 /// Native Headers ships this surface; the previous polyfill `_zsHeadersArr`
 /// fast path was retired with `embed/fetch.js` in D-23 landing 3.
 pub fn extract_response_headers(scope: &mut v8::PinScope, response_obj: v8::Local<v8::Object>) -> Vec<(String, String)> {
-    let mut result = Vec::new();
-
     let headers_key = key(scope, &K_HEADERS);
-    let Some(headers_val) = response_obj.get(scope, headers_key.into()) else { return result };
-    let Some(headers_obj) = headers_val.to_object(scope) else { return result };
+    let Some(headers_val) = response_obj.get(scope, headers_key.into()) else { return Vec::new() };
+    let Some(headers_obj) = headers_val.to_object(scope) else { return Vec::new() };
+
+    // FIX D fast path: native Headers state pointer access — skips
+    // the WebIDL iterable<> protocol (one Function.call per pair,
+    // step.done lookup, etc.). Note that for the WinterCG response
+    // path we don't need spec-sorted headers — wire emission order
+    // doesn't depend on iteration order, and the kernel forwards the
+    // raw list to the HTTP writer. Going through the iterator would
+    // sort+combine, which is observable to user code via `for ... of
+    // headers` but wasted work for the wire path.
+    if let Some(headers_state) = crate::headers::try_native_headers(scope, headers_obj) {
+        let list = headers_state.list();
+        let mut result: Vec<(String, String)> = Vec::with_capacity(list.len());
+        for (n, v) in list {
+            result.push((
+                String::from_utf8_lossy(n).into_owned(),
+                String::from_utf8_lossy(v).into_owned(),
+            ));
+        }
+        return result;
+    }
+
+    // Slow path: polyfill / non-native Headers — go through the
+    // WebIDL iterable<> protocol.
+    let mut result = Vec::new();
 
     let sym_iter = v8::Symbol::get_iterator(scope);
     let Some(iter_fn_val) = headers_obj.get(scope, sym_iter.into()) else { return result };
