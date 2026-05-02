@@ -21,6 +21,7 @@ pub mod dispatch;
 pub mod init;
 pub mod http;
 pub mod fetch;
+pub mod fetch_native;
 pub mod fetch_outcome;
 pub mod modules;
 pub mod crypto;

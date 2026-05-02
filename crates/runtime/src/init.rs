@@ -1766,6 +1766,7 @@ pub fn install_dom(scope: &mut v8::PinScope) {
     // doesn't clobber the native install.
     crate::fetch_request::install_global(scope, global);
     crate::fetch_response::install_global(scope, global);
+    crate::fetch_native::install_fetch_global(scope, global);
 }
 
 /// Install native WHATWG Streams classes onto `globalThis`. Called
