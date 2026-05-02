@@ -124,8 +124,13 @@ export function LogsCanvas({ appId }: LogsCanvasProps) {
           </div>
         )}
         {!error && visible.length === 0 && (
-          <div className="font-serif italic text-pencil">
-            No logs yet — give it a deploy first.
+          <div
+            data-testid="logs-empty"
+            className="font-serif italic text-pencil py-8 text-center"
+          >
+            {search || filter !== "all"
+              ? "Quiet on this front — no lines match that filter."
+              : "Quiet on this front — give it a deploy first."}
           </div>
         )}
         <div data-testid="logs-list">

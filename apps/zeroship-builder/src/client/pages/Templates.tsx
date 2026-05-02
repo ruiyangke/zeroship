@@ -51,13 +51,31 @@ export function Templates() {
           ))}
         </div>
 
-        <div
-          className="grid gap-5"
-          style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}
-          data-testid="templates-grid"
-        >
-          {visible.map((t) => <TemplateCard key={t.slug} template={t} />)}
-        </div>
+        {visible.length === 0 ? (
+          <div
+            data-testid="templates-empty"
+            className="border border-dashed border-rule p-10 text-center"
+          >
+            <p className="font-serif italic text-ink-soft text-[15px] mb-1">
+              Nothing in <em>{filter}</em> yet — that shelf is still being stocked.
+            </p>
+            <button
+              type="button"
+              onClick={() => setFilter("all")}
+              className="font-serif italic text-[14px] text-tomato bg-transparent border-0 cursor-pointer hover:opacity-80 mt-2 focus:outline-2 focus:outline-tomato focus:outline-offset-2"
+            >
+              ← Show all templates
+            </button>
+          </div>
+        ) : (
+          <div
+            className="grid gap-5"
+            style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}
+            data-testid="templates-grid"
+          >
+            {visible.map((t) => <TemplateCard key={t.slug} template={t} />)}
+          </div>
+        )}
 
         <div className="mt-12 mb-14">
           <Link

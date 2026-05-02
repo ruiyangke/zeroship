@@ -88,9 +88,9 @@ function Variables({ appId }: { appId: string }) {
         {!isLoading && items.length === 0 && !adding && (
           <div
             data-testid="env-variables-empty"
-            className="font-serif italic text-pencil py-2"
+            className="font-serif italic text-pencil py-3"
           >
-            No variables yet.
+            Nothing here yet — variables are the public knobs your app reads at runtime.
           </div>
         )}
         {items.map((v) => (
@@ -126,7 +126,7 @@ function Variables({ appId }: { appId: string }) {
             type="button"
             onClick={() => setAdding(true)}
             data-testid="env-add-var"
-            className="mt-3 font-serif italic text-[14px] text-tomato bg-transparent border-0 cursor-pointer hover:opacity-80"
+            className="mt-3 font-serif italic text-[14px] text-tomato bg-transparent border-0 cursor-pointer hover:opacity-80 focus:outline-2 focus:outline-tomato focus:outline-offset-2"
           >
             + Add a variable
           </button>
@@ -183,9 +183,9 @@ function Secrets({ appId }: { appId: string }) {
         {!isLoading && items.length === 0 && !adding && (
           <div
             data-testid="env-secrets-empty"
-            className="font-serif italic text-pencil py-2"
+            className="font-serif italic text-pencil py-3"
           >
-            No secrets yet.
+            Nothing here yet — secrets are the keys you'd never paste in chat.
           </div>
         )}
         {items.map((k) => (
@@ -222,7 +222,7 @@ function Secrets({ appId }: { appId: string }) {
             type="button"
             onClick={() => setAdding(true)}
             data-testid="env-add-secret"
-            className="mt-3 font-serif italic text-[14px] text-tomato bg-transparent border-0 cursor-pointer hover:opacity-80"
+            className="mt-3 font-serif italic text-[14px] text-tomato bg-transparent border-0 cursor-pointer hover:opacity-80 focus:outline-2 focus:outline-tomato focus:outline-offset-2"
           >
             + Add a secret
           </button>

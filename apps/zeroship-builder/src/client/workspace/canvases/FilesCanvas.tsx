@@ -171,8 +171,12 @@ function FileTree({
         <div className="font-serif italic text-pencil text-[13px]">loading…</div>
       )}
       {!loading && entries.length === 0 && (
-        <div className="font-serif italic text-pencil text-[13px]">
-          no files yet
+        <div
+          data-testid="files-empty"
+          className="font-serif italic text-pencil text-[13px] leading-[1.55]"
+        >
+          Builder hasn't written anything yet — start a turn in the chat
+          and the manuscript will fill in here.
         </div>
       )}
       <ul className="list-none p-0 m-0 font-serif text-[13.5px]">

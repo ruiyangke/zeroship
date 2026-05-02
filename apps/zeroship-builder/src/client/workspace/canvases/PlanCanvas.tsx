@@ -96,9 +96,10 @@ function IssuesSection({ appId }: { appId: string }) {
       {!isLoading && (data?.issues.length ?? 0) === 0 && (
         <div
           data-testid="plan-issues-empty"
-          className="font-serif italic text-pencil py-6 text-center"
+          className="font-serif italic text-pencil py-8 text-center border border-dashed border-rule"
         >
-          No issues yet — file the first one.
+          Builder hasn't filed any issues yet — neither has the Critic.
+          File the first one above.
         </div>
       )}
 
@@ -409,9 +410,9 @@ function DeploymentsSection({ app }: { app?: AppRecord }) {
       {!hasDeploy && (
         <div
           data-testid="plan-deployments-empty"
-          className="font-serif italic text-pencil py-6 text-center"
+          className="font-serif italic text-pencil py-8 text-center border border-dashed border-rule"
         >
-          No deploys yet. Ship something first.
+          Not deployed yet — once Builder ships, the current pin lands here.
         </div>
       )}
       {hasDeploy && (

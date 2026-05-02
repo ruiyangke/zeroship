@@ -123,9 +123,10 @@ function TablesPane({ appId }: { appId: string }) {
       {data && data.tables.length === 0 && (
         <div
           data-testid="data-tables-empty"
-          className="font-serif italic text-pencil py-6 text-center"
+          className="font-serif italic text-pencil py-8 text-center border border-dashed border-rule"
         >
-          No tables yet — once your project writes data, they show up here.
+          Empty schema — Builder hasn't seeded any tables yet. They'll show up
+          here once your project writes the first row.
         </div>
       )}
       {data && data.tables.length > 0 && (
@@ -229,8 +230,11 @@ function RowBrowser({
       )}
 
       {data && data.rows.length === 0 && (
-        <div className="font-serif italic text-pencil py-6 text-center border border-rule-2">
-          No rows in this table.
+        <div
+          data-testid="data-rows-empty"
+          className="font-serif italic text-pencil py-8 text-center border border-dashed border-rule"
+        >
+          Empty table — Builder hasn't seeded any rows yet.
         </div>
       )}
 
@@ -335,8 +339,11 @@ function IndexesPane({ appId }: { appId: string }) {
         <div className="font-serif italic text-pencil py-2">loading…</div>
       )}
       {data && data.indexes.length === 0 && (
-        <div className="font-serif italic text-pencil py-6 text-center">
-          No indexes on record.
+        <div
+          data-testid="data-indexes-empty"
+          className="font-serif italic text-pencil py-8 text-center border border-dashed border-rule"
+        >
+          No indexes on record — Builder will add them as the schema grows.
         </div>
       )}
       {data && data.indexes.length > 0 && (
@@ -404,8 +411,11 @@ function MigrationsPane({ appId }: { appId: string }) {
         <div className="font-serif italic text-pencil py-2">loading…</div>
       )}
       {data && data.migrations.length === 0 && (
-        <div className="font-serif italic text-pencil py-6 text-center">
-          No migrations applied yet.
+        <div
+          data-testid="data-migrations-empty"
+          className="font-serif italic text-pencil py-8 text-center border border-dashed border-rule"
+        >
+          No migrations applied yet — once the schema changes, the timeline starts here.
         </div>
       )}
       {data && data.migrations.length > 0 && (
@@ -503,8 +513,11 @@ function BackupsPane({ appId }: { appId: string }) {
       )}
 
       {data && data.backups.length === 0 && (
-        <div className="font-serif italic text-pencil py-6 text-center">
-          No snapshots yet.
+        <div
+          data-testid="data-backups-empty"
+          className="font-serif italic text-pencil py-8 text-center border border-dashed border-rule"
+        >
+          No snapshots yet — daily auto-snapshots start once Builder ships v0.1.
         </div>
       )}
 

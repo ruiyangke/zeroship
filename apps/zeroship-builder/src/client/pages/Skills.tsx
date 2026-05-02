@@ -53,13 +53,31 @@ export function Skills() {
         </div>
 
         {/* ─── Skill cards ──────────────────────────────────────── */}
-        <div
-          className="grid gap-5 mb-14"
-          style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}
-          data-testid="skills-grid"
-        >
-          {visible.map((s) => <SkillCard key={s.slug} skill={s} />)}
-        </div>
+        {visible.length === 0 ? (
+          <div
+            data-testid="skills-empty"
+            className="border border-dashed border-rule p-10 text-center mb-14"
+          >
+            <p className="font-serif italic text-ink-soft text-[15px] mb-1">
+              No skills in <em>{filter}</em> yet — the catalogue's still wiring up.
+            </p>
+            <button
+              type="button"
+              onClick={() => setFilter("all")}
+              className="font-serif italic text-[14px] text-tomato bg-transparent border-0 cursor-pointer hover:opacity-80 mt-2 focus:outline-2 focus:outline-tomato focus:outline-offset-2"
+            >
+              ← Show all skills
+            </button>
+          </div>
+        ) : (
+          <div
+            className="grid gap-5 mb-14"
+            style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}
+            data-testid="skills-grid"
+          >
+            {visible.map((s) => <SkillCard key={s.slug} skill={s} />)}
+          </div>
+        )}
 
         {/* ─── Note about the registry ──────────────────────────── */}
         <section className="reveal mb-14 bg-paper-2 border border-rule px-7 py-6 max-w-[680px]">
