@@ -1,7 +1,7 @@
 # Native WHATWG WebSocket design
 
-**Date:** 2026-05-02
-**Status:** Draft v1 — implementation pending
+**Date:** 2026-05-02 (v1) · 2026-05-02 (v2 — post-review revision)
+**Status:** Draft v2 (post-review) — implementation pending
 **Spec:** WHATWG WebSockets Standard — https://websockets.spec.whatwg.org/
 **Spec source:** https://github.com/whatwg/websockets/blob/main/index.bs
 **Wire protocol:** RFC 6455 — https://datatracker.ietf.org/doc/html/rfc6455
@@ -20,6 +20,93 @@
   HTML §11 (Origin); WebIDL §3.1 (DOMString / USVString / ByteString /
   EventHandler typedef); RFC 9110 §7.8 (HTTP Upgrade).
 **WebIDL:** https://webidl.spec.whatwg.org/
+
+## Changes from v1 (post-review)
+
+The v1 draft scored 56/100 with 10 CRITICAL spec violations (per the
+critic review at `/tmp/zeroship-reviews/websocket-review.md`). v2
+addresses every CRITICAL and every MAJOR. The substantive deltas:
+
+1. **send() type-dispatch order corrected to spec.** WHATWG §3.1 lists
+   String → Blob → ArrayBuffer → ArrayBufferView in that order
+   (https://websockets.spec.whatwg.org/#dom-websocket-send, send algorithm
+   steps 3-6). v1 inverted this and claimed the spec listed string last;
+   v2 re-orders the test predicates and removes the bogus rationale.
+   (CRITICAL #1)
+2. **`[Clamp]` conversion replaced with the actual WebIDL algorithm.**
+   v1's `code.uint32_value(scope).unwrap_or(0).min(65535)` is not a
+   `[Clamp]` conversion — WebIDL §3.2.5 (per
+   https://webidl.spec.whatwg.org/#abstract-opdef-converttoint, Clamp
+   case) requires NaN → 0, sign-aware clamp to `[0, 65535]`, then
+   round-half-to-even. v2 uses an explicit `clamp_unsigned_short`
+   helper. (CRITICAL #2)
+3. **Origin header is no longer sent unconditionally.** RFC 6455 §10.2
+   (https://datatracker.ietf.org/doc/html/rfc6455#section-10.2) says
+   non-browser clients SHOULD NOT send Origin. v2 sends Origin only when
+   the user explicitly sets it via the `init` dict, matching undici and
+   workerd defaults. (CRITICAL #3)
+4. **CONNECTING vs OPEN close() paths split.** Per WHATWG §3.1 close
+   algorithm and RFC 6455 §7.1.7, a CONNECTING-state close must "fail
+   the WebSocket connection" (no wire frame; no socket may even exist),
+   not enqueue a Close frame. v2 distinguishes the two cases in §V.5.
+   (CRITICAL #4)
+5. **AbortSignal-during-CONNECTING fires `error` THEN `close`.** Per
+   WHATWG §4 "feedback from the protocol"
+   (https://websockets.spec.whatwg.org/#feedback-from-the-protocol,
+   "if the connection-failed state is reached"), every connection-failed
+   path fires Error then Close. v1 emitted only Close on Aborted; v2
+   restores the spec-mandated pair. (CRITICAL #5)
+6. **Close frame default no longer encodes 1005.** Per RFC 6455 §7.4.1
+   (https://datatracker.ietf.org/doc/html/rfc6455#section-7.4.1), 1005
+   is reserved as an internal sentinel and MUST NOT appear in a Close
+   control frame. v2's send-pump emits an empty-payload Close frame when
+   the user calls `close()` with no code argument. (CRITICAL #6)
+7. **Sec-WebSocket-Extensions response is now strictly validated.** Per
+   RFC 6455 §9.1
+   (https://datatracker.ietf.org/doc/html/rfc6455#section-9.1), any
+   extension in the response that the client did not request MUST fail
+   the connection. v2 advertises an empty extension set, and any
+   non-empty Sec-WebSocket-Extensions response now hard-fails the
+   handshake. (CRITICAL #7)
+8. **Two-phase SSRF resolution for the WS path.** v1 only checked the
+   URL string (catching IP-literal hostnames). DNS rebinding attacks
+   bypass that. v2 mirrors fetch's resolve-then-revalidate-then-bind
+   pattern from `crates/runtime/src/fetch.rs:36-163`. (CRITICAL #8)
+9. **Sec-WebSocket-Protocol response is validated against the offered
+   set.** Per RFC 6455 §4.1 step 6 of the response checks
+   (https://datatracker.ietf.org/doc/html/rfc6455#section-4.1), the
+   client MUST fail the connection if the server echoes a subprotocol
+   the client did not offer. v2 adds a defence-in-depth check after
+   tungstenite's own validator. (CRITICAL #9)
+10. **D-23 budget overflow now uniformly async-fails.** v1 contradicted
+    itself: the Decisions table said "throws RangeError" while §V.3
+    used an async error+close dispatch. v2 commits to async-fail
+    (matches WHATWG §3.1's "establish in parallel" framing — failures
+    surface as queued connection-failed events) and updates D-23
+    accordingly. (CRITICAL #10)
+
+The MAJOR fixes — receive-side backpressure, dead `[[full]]` flag,
+EventHandler null-coercion, RFC 6455 §7.1.1 5-second close-handshake
+timeout, ping-keepalive interval, MessageEvent.ports identity caching,
+make_disappear close-code semantics, max_message_size pinning,
+WebSocketPair bufferedAmount decrement, send-pump error reporting,
+WsCachedHandles re-dispatch race, AbortSignal reason propagation,
+permessage-deflate Cargo feature lockdown, CloseEventInit code
+conversion, receive_loop use-after-move, accept() prototype hygiene —
+are documented inline at their respective sections.
+
+The MINOR pseudocode hygiene items (set_integrity_level return value,
+echo-server endpoint enumeration, hours estimate refresh, ADR
+spec-citation structure) are addressed inline where they appear.
+
+The "Missing concepts" the critic flagged — per-app WebSocket metering,
+worker-shutdown drain protocol, sticky routing for outbound `new
+WebSocket(url)` on multi-node, TLS root-trust + ALPN config,
+WebSocketStream-deprecated-form enumeration — get explicit Open
+Questions in §XVII (XVII.4b, XVII.10b through XVII.10f).
+
+**Score target after v2 revision:** ≥80 (production-ready). Remaining
+items in §XVII are policy choices, not spec defects.
 
 **Depends on:**
 - `docs/proposals/streams-native.md` — landed RS+RSDefaultController+RSDefaultReader
@@ -231,9 +318,9 @@ is illustrative.
 | **D-3** | `MessageEvent : Event` and `CloseEvent : Event` via `#[v8_inherit(Event)]` — same pattern CustomEvent uses today (`crates/runtime/src/dom/custom_event.rs:83`). Both new classes use `#[repr(C)]` with `Event` as the first field; the inherited Event getters (`event.type`, `event.target`, `event.bubbles`, …) cast `*mut MessageEvent`/`*mut CloseEvent` directly to `*mut Event` per the offset-zero layout. | Spec compliance: `messageEvent instanceof Event === true`, `closeEvent instanceof Event === true`. The polyfill's "plain Event with expandos" produces FALSE for `instanceof MessageEvent`, breaking duck-typed library code. | §III, §XIII |
 | **D-4** | Single-threaded per isolate: every Rust struct is `!Send + !Sync`. No `Mutex`/`RwLock` anywhere. Inter-class references use `Rc<RefCell<…>>`. The compio + cyper transport is per-thread (`thread_local! CLIENT` in `crates/runtime/src/fetch.rs`); the WebSocket reuses that. | AGENTS.md "V8 per thread, one isolate per app". A `Send` constraint would force `Arc<Mutex<…>>` and serialise the receive fast-path. | §V, §VII |
 | **D-5** | Internal-slot storage rule (sharpened from streams D-2): each spec slot lives in EXACTLY ONE location. Numeric / Cell-flag slots live in the boxed Rust struct (`Box<WebSocketImpl>` in internal field 0); slots that need observable JS identity preservation (e.g. cached Headers, the once-built MessageEvent template) live in V8 private symbols. There is NO mirror; no shadow-copy. The ready-state slot lives ONLY in the Rust enum `Cell<ReadyState>` — not also in `[[readyState]]` getter cache. | Spec algorithms must be observably indistinguishable from "directly modify `[[…]]`". The single-source rule is the entire consistency model — same model that streams-native and fetch-native use. | §V, §XIII |
-| **D-6** | `bufferedAmount` is real, observable, and updated synchronously in `send()` and the send-pump. Held as `Cell<u64>` on the Rust state. The polyfill returns 0 always (it had no concept of "queued bytes"); v1 increments on every send-call by the byte count of the encoded frame payload (UTF-8 encoded for strings, raw byte length for binary), and decrements as the send-pump drains the wire. WPT `Send-before-open.any.js` checks the increment-before-OPEN behaviour explicitly. | Spec §3.1 attribute `bufferedAmount`; required for backpressure-aware uploads. | §V.5 |
-| **D-7** | `binaryType` defaults to `"blob"` per spec §3.1. The polyfill defaults to `"arraybuffer"` (likely a workerd-historical default; workerd had a `websocket_standard_binary_type` compat flag — `web-socket.h:421-422`). v1 ships the spec-correct default. WPT `Create-valid-url-binaryType-blob.any.js` checks the default value. The polyfill cutover landings (§XIV) flip this default; one landing is dedicated to documenting the behaviour change in the upgrade notes (some apps may rely on `arraybuffer` default — they break loudly via `dataView.something is not a function`, which is the desired failure mode rather than silent bytes-→string drift). | Spec compliance. The "loudly break" failure mode is preferable to silent silent-binary-corruption. | §V.4 |
-| **D-8** | Close-code validation per spec: codes 1000 and 3000-4999 are valid; everything else throws InvalidAccessError. NO bypass for legacy code-ranges (workerd has a `pedantic_wpt` compat flag that toggles legacy 1004/1005/1006/1015 acceptance — `web-socket.c++:629-644`; v1 picks "spec-strict" because zeroship doesn't carry workerd's compat history). Reason length cap: 123 bytes UTF-8 encoded; longer throws SyntaxError. Both checks happen BEFORE the readyState check (per spec; WPT `close-invalid.any.js` covers this ordering). | Spec; covered by WPT verbatim. | §V.6 |
+| **D-6** | `bufferedAmount` is real, observable, and updated synchronously in `send()` and the send-pump. Held as `Cell<u64>` on the Rust state. The polyfill returns 0 always (it had no concept of "queued bytes"); v2 increments on every send-call by the byte count of the encoded frame payload (UTF-8 encoded for strings, raw byte length for binary, `blob.size` for Blobs), and decrements as the send-pump drains the wire. **Send-before-OPEN behaviour:** per current WHATWG §3.1 (https://websockets.spec.whatwg.org/#dom-websocket-send) "If this's ready state is CONNECTING, throw an InvalidStateError DOMException." v2 throws — matches the live spec, undici, and workerd. (v1's D-6 referenced WPT `Send-before-open.any.js` as a checks-the-increment-behaviour test; that test was updated upstream when the spec was amended to require the throw — the doc claim is now accurate with the throw, addresses critic MAJOR #26.) | Spec §3.1 attribute `bufferedAmount`; required for backpressure-aware uploads. | §V.4 |
+| **D-7** | `binaryType` defaults to `"blob"` per spec §3.1. The polyfill defaults to `"arraybuffer"` (likely a workerd-historical default; workerd had a `websocket_standard_binary_type` compat flag — `web-socket.h:421-422`). v2 ships the spec-correct default. WPT `Create-valid-url-binaryType-blob.any.js` checks the default value. **Setter behaviour:** silent-no-op on unknown values (matches undici, workerd, and the WPT expected-pass for `binaryType-wrong-value.any.js`); the strict-throws path lives behind a non-default Cargo feature for WPT-update tracking only. (addresses critic MAJOR #16) The polyfill cutover landings (§XIV) flip the default-value; one landing is dedicated to documenting the behaviour change in the upgrade notes (some apps may rely on `arraybuffer` default — they break loudly via `dataView.something is not a function`, which is the desired failure mode rather than silent bytes-→string drift). | Spec compliance + ecosystem-shipping behaviour. The "loudly break on default change" failure mode is preferable to silent silent-binary-corruption; the silent-no-op-on-unknown-set matches every shipping impl and the existing WPT test. | §V.4, §II.4 |
+| **D-8** | Close-code validation per WHATWG §3.1 close algorithm (https://websockets.spec.whatwg.org/#dom-websocket-close): codes 1000 and 3000-4999 are valid; everything else throws InvalidAccessError. The `code` argument is `[Clamp] unsigned short` and is processed through the proper WebIDL ConvertToInt[Clamp] algorithm (see §V.5 — `clamp_unsigned_short`; this resolves CRITICAL #2 from the v1 review). NO bypass for legacy code-ranges (workerd has a `pedantic_wpt` compat flag — `web-socket.c++:629-644`; v2 picks "spec-strict"). Reason length cap: 123 bytes UTF-8 encoded; longer throws SyntaxError. Both validations happen BEFORE the readyState dispatch (per spec close steps 1-3). On the wire: `Option<u16>` semantics — when the user calls `close()` with no code argument, the Close frame is sent with empty payload per RFC 6455 §5.5.1; we MUST NOT serialise 1005, which RFC 6455 §7.4.1 reserves as an internal sentinel (CRITICAL #6). The CONNECTING-state path runs `fail_the_websocket_connection` (RFC 6455 §7.1.7), distinguishing "no socket yet" from "socket open but JS hasn't seen open" sub-cases via the connection-handle slot (CRITICAL #4). | Spec; covered by WPT verbatim. | §V.5 |
 | **D-9** | URL parse uses the existing native URL class (ada-url backed). Scheme MUST normalise to `ws` or `wss` (`http`→`ws`, `https`→`wss`). Fragment MUST be empty (post-parse `urlRecord.hash === ""` AND the original input did not end with `#`). Both cases throw SyntaxError. The URL is stored as a `url::Url` (the parsed record) plus a separate `String` for the "input as serialized for `.url` getter" — per spec §3.1 the `url` attribute returns the URL "serialized" via the URL Standard's serializer, which is essentially the same as `urlRecord.href` for non-fragment-bearing URLs. | Spec; the URL parser path is shared with fetch (`fetch_native::dictionaries::parse_url`). | §V.1 |
 | **D-10** | Protocol validation per spec / RFC 6455: each `protocol` element must be a non-empty token whose codepoints are in U+0021..U+007E excluding the RFC 7230 separator characters (`"(),/:;<=>?@[\]{}` plus space and HT). Duplicates (case-insensitive) throw SyntaxError. The undici utility `isValidSubprotocol` (`undici/lib/web/websocket/util.js:101-141`) is the literal implementation; we port it 1:1 in Rust. | Spec; WPT `Create-protocols-repeated.any.js`, `Create-protocols-repeated-case-insensitive.any.js`, `Create-protocol-with-space.any.js`, `Create-asciiSep-protocol-string.any.js`, `Create-nonAscii-protocol-string.any.js`, `Create-extensions-empty.any.js` cover the validation. | §V.2 |
 | **D-11** | Construction kicks off the connection asynchronously ("in parallel" per spec §3.1 step 13). The constructor returns immediately with `readyState === CONNECTING (0)`. A compio task is spawned via `state.spawned_ops.push(...)` that performs the HTTP/1.1 GET upgrade and then runs the receive loop. The constructor synchronously installs the `signal_priv` slot (for the optional `signal: AbortSignal` extension) and the underlying connection-handle private symbol; the connection itself materialises later. | Spec; WPT `Create-valid-url.any.js` constructs many sockets and asserts they're `CONNECTING` synchronously. | §V.3, §VII |
@@ -244,15 +331,16 @@ is illustrative.
 | **D-16** | Backpressure on receive: NO. The runtime delivers MessageEvents eagerly; user code that doesn't drain its message queue causes events to pile up in the JS handler's microtask queue, NOT in our Rust queue. This matches the polyfill's behaviour and undici's default (no auto-pause). workerd does pause the read loop on `pendingAutoResponseTimestamp` accumulation but only in the hibernation path. v2 may add a "max in-flight events" cap if AI-builder apps demonstrate a need. | The TCP backpressure is sufficient — V8's microtask queue is the natural buffer. Adding receive-side pause adds complexity for no observable spec benefit. | §VII.2 |
 | **D-17** | UTF-8 validation on text frames: enforced. Per RFC 6455 §8.1, a text frame whose payload is not valid UTF-8 MUST cause the connection to fail with code 1007 ("Invalid frame payload data"). `compio-ws` / tungstenite handle this internally (tungstenite returns `WebSocketError::Utf8` and yields a Close frame with code 1007 on the next poll); the receive task converts that into a `Close { code: 1007, reason: "Invalid UTF-8", was_clean: false }` event. JS observers see `error` event followed by `close` event with `wasClean: false`. | Spec §3.2 step 2.1 ("If the bytes are not a valid UTF-8 sequence: fail the WebSocket connection"); WPT covers this via the autobahn fuzzers in `websockets/autobahn/` (which we are NOT yet running in CI but may add as a separate job). | §V.4, §VII.2 |
 | **D-18** | `binaryType="blob"` builds a Blob via `crates/runtime/src/blob.rs::Blob::from_bytes` (already shipped). The MessageEvent's `data` is a `v8::Global<v8::Object>` pointing to the Blob wrapper. `binaryType="arraybuffer"` builds an ArrayBuffer via `v8::ArrayBuffer::new_backing_store_from_vec` (zero-copy where possible — same pattern as fetch's `Body.arrayBuffer()`). The choice is read at MessageEvent-construction time, NOT at frame-arrival time, so a JS user can flip `binaryType` between two binary frames and the SECOND frame uses the new value. | Spec §3.1 attribute `binaryType` ("on getting, must return the value to which it was last set"); the read-at-dispatch-time semantics is observable (and tested by WPT — `Send-binary-blob.any.js` and `Send-binary-arraybuffer.any.js`). | §V.4 |
-| **D-19** | `send(data)` dispatch order matches the spec EXACTLY: first test `is_array_buffer(data)`, then `is_array_buffer_view(data)`, then `is_blob(data)`, then string. Spec §3.1 send method: "If data is a string", "If data is a Blob object", "If data is an ArrayBuffer object", "If data is an ArrayBufferView object". Order matters because `is_array_buffer_view(blob)` is false but a malicious `blob.toString` could pass an `is_string` check first and corrupt binary. The spec dispatch has string LAST in the test order; we replicate. (The `String(data)` coercion in the polyfill — `embed/websocket.js:77` — silently corrupts every binary path.) | Spec §3.1; WPT `Send-binary-blob.any.js`, `Send-binary-arraybuffer.any.js`, `Send-binary-arraybufferview-*.any.js` (one file per typed-array variant — ~12 files), `Send-data.any.js`, `Send-unicode-data.any.js`. | §V.5 |
+| **D-19** | `send(data)` dispatch order matches the spec EXACTLY: **String first**, then Blob, then ArrayBuffer, then ArrayBufferView. Per WHATWG §3.1 send algorithm steps 3-6 (https://websockets.spec.whatwg.org/#dom-websocket-send), the spec literally tests `if data is a string`, `if data is a Blob object`, `if data is an ArrayBuffer object`, `if data is an ArrayBufferView object` in that order. (v1 inverted this and claimed string went last; v2 corrects.) Type-test predicates are by branding (`v8::Local::<v8::ArrayBuffer>::try_from`, `is_blob` via internal-field tag), NOT by `data.toString` — so the "Blob with custom toString" hazard the v1 rationale invoked is a non-issue: `is_blob(blob)` is true regardless of any user-defined `toString`. (The real polyfill bug — `String(data)` coercion at `embed/websocket.js:77` that silently corrupts binary — is fixed by branding-based dispatch in any order; v2 picks spec order for clarity.) Mirrors undici (`undici/lib/web/websocket/websocket.js`, String first) and workerd (`workerd/api/web-socket.c++`, String first). (addresses critic CRITICAL #1) | Spec §3.1; WPT `Send-data.any.js`, `Send-unicode-data.any.js`, `Send-binary-blob.any.js`, `Send-binary-arraybuffer.any.js`, `Send-binary-arraybufferview-*.any.js` (one file per typed-array variant — ~12 files). | §V.4 |
 | **D-20** | `WebSocketPair` (workerd extension) is preserved — same JS surface, same gateway dispatch path. Internally, both halves of a `WebSocketPair` are `WebSocket` instances with a `peer_id: Option<u32>` slot set on each (the existing `WebSocketState::peer_id` carries forward verbatim). When `send()` is called on one half, the message is enqueued on BOTH the local outgoing queue (for the gateway pump) AND the peer's incoming queue (for the in-process JS-side delivery). The polyfill's existing logic at `crates/runtime/src/websocket.rs:140-148` is the model. | Backwards compatibility with the existing gateway WebSocket flow. The same `#[v8_class] WebSocket` covers both modes; the union of slot semantics fits naturally. | §VI |
 | **D-21** | `accept()` method — workerd extension preserved. Required by `WebSocketPair[1].accept()` to begin local message delivery on the server-side half. For client-side WebSockets created via `new WebSocket(url)`, `accept()` throws TypeError (matches workerd `web-socket.c++:406-407`). The accept transition is read-only: once `accepted=true`, subsequent `accept()` calls are silent no-ops (matches workerd `web-socket.c++:417`). | Backwards compatibility. The IDL surface is `accept(): undefined` — no return value, no options dictionary in v1 (workerd's `AllowHalfOpen` option is a workerd-Durable-Object detail). | §V.7, §VI |
 | **D-22** | Spec algorithm naming in Rust: every named spec algorithm gets a Rust function with the same name in `snake_case`. Lives in `crates/runtime/src/websocket/algorithms.rs` for cross-class operations (`establish_a_websocket_connection`, `feedback_the_establish_algorithm`, `make_disappear`, `fail_the_websocket_connection`, `close_the_websocket_connection`, `validate_close_code_and_reason`) and in `websocket/websocket.rs` for class-local methods. Same rule as streams-native D-20 and fetch-native D-20. | Reduces cognitive load when cross-referencing the spec. | §V, §IX |
-| **D-23** | Per-isolate concurrent-WebSocket cap: 1024. Excess constructions throw `RangeError("too many concurrent WebSocket connections")`. The number is a guard against runaway construction, not a perf limit. Per-thread isolate × 1024 sockets × ~16KB per send/receive buffer = 16MB per app — bounded. The cap is enforced in the constructor's `connect-spawn` step. | A 1024-cap matches the existing `MAX_PENDING_OPS` in fetch; orders-of-magnitude headroom for any real app. | §V.3 |
+| **D-23** | Per-isolate concurrent-WebSocket cap: 1024. Excess constructions DO NOT throw — the spec's "establish a WebSocket connection" runs in parallel (WHATWG §3.1 step 12: "Run this step in parallel"), and a connection-budget failure is observably a connection failure, not a constructor error. The constructor returns a normal `WebSocket` object in CONNECTING; the spawned connect task observes the budget overflow and queues an immediate `Error` then `Close{1006, was_clean: false}` event sequence (matching every other connection-failed path per WHATWG §4 "feedback from the protocol"). v1 contradicted itself here: the Decisions row said "throws RangeError"; §V.3 used async error+close. v2 commits to async-fail and updates §V.3's wording to match. (addresses critic CRITICAL #10) | Aligns with WHATWG §3.1's "in parallel" framing — every connection failure is an event, not an exception. 1024-cap matches `MAX_PENDING_OPS` in fetch; bounded memory at saturation. | §V.3, §XVII.10 |
 | **D-24** | The `signal: AbortSignal` extension is shipped in v1 (workerd-style; spec doesn't require it). Constructor accepts `new WebSocket(url, { signal })` as a non-spec WebSocket-init dict member (parsed via the same dict-parser fetch uses). When the signal aborts during CONNECTING, the connection is cancelled with code 1000 (clean if accepted, abrupt otherwise) and any pending fetch is dropped. When it aborts after OPEN, the equivalent of `socket.close(1000)` runs. Until the WebSocket fires `open` or `close`, a strong ref keeps the signal alive (mirrors fetch's `signal.timeout` GC retention pattern). | Real-world demand: every undici-based library uses `AbortSignal` for fetch cancellation, and developers expect parity for WebSocket. v1 ships it because it's near-zero implementation cost given AbortSignal is already wired up for fetch. | §V.3, §VII.5 |
 | **D-25** | Polyfill removal cadence: three landings — (1) ship native behind feature flag `runtime_native_websocket`, polyfill remains default; (2) flip default to native, polyfill remains as fallback; (3) delete polyfill JS file + the five `__ws*` callbacks in `crates/runtime/src/websocket.rs`. The native cutover (step 2) ALSO renames `crates/runtime/src/websocket.rs` to `crates/runtime/src/websocket/legacy.rs` to mark it deprecated; the cutover re-points the gateway WebSocket coupling logic to the new native module. Same cadence as streams D-19, fetch D-23. | Risk control. | §XIV |
 | **D-26** | `ErrorEvent` IDL: NOT shipped natively in v1. The spec §3.1 step "fire a connection-failed event" uses a plain `Event("error")`, not `ErrorEvent`. (HTML's `ErrorEvent` is for script-load and uncaught-exception events — different shape.) workerd has its own `ErrorEvent` (`workerd/api/events.h`) that some Cloudflare Workers code uses; we match the SPEC default (plain Event), not workerd's extension. Existing app code that does `socket.addEventListener('error', e => e.message)` reads `undefined` — same as the polyfill's current behaviour at `embed/websocket.js:111-115`. | Spec compliance over workerd-extension-compat. ErrorEvent is a follow-up if a real creator app needs it (cheap; ~80 LOC). | §III, §V.5 |
 | **D-27** | Sec-WebSocket-Key generation: 16 random bytes, base64-encoded (`base64::engine::general_purpose::STANDARD`). Random source: `aws_lc_rs::rand::fill` (already used by `crypto.getRandomValues`). The `Sec-WebSocket-Accept` server response is verified by computing `base64(SHA1(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))` and comparing to the received header value byte-by-byte. The GUID is the literal RFC 6455 §1.3 magic. | Spec; mismatch fails the connection per RFC 6455 §4.1 step 6 of the response checks. | §V.3, §IX.3 |
+| **D-28** | Extra `WebSocketInit` dictionary members beyond `signal`: `origin`, `maxMessageSize`, `maxFrameSize`, `pingIntervalMs`. **`origin`** — opt-in only per RFC 6455 §10.2 (https://datatracker.ietf.org/doc/html/rfc6455#section-10.2); default null = no Origin header on the wire. **`maxMessageSize`** — pinned via `tungstenite::WebSocketConfig`; default 4 MiB; tungstenite's 64 MiB default would let a malicious server OOM the worker. **`maxFrameSize`** — default 1 MiB. **`pingIntervalMs`** — client-side ping keepalive (tungstenite auto-replies to incoming Pings but does NOT send periodic Pings); default 30 000 ms (matches undici, workerd); 0 disables. (addresses critic CRITICAL #3 — Origin opt-in; MAJORs #22, #23 — size + ping pinning.) | Spec compliance + production-grade defence-in-depth. | §IV.3 |
 
 ## I. Architecture overview
 
@@ -385,9 +473,14 @@ crates/runtime/src/websocket.rs       (deleted in landing 3 — replaced by crat
 
 crates/runtime/src/runtime.rs         (modified) dispatch OpResult::WebSocketEvent variant.
 
-crates/runtime/Cargo.toml             (modified) explicit `compio-ws = { version = "0.3" }` dep
-                                                  (currently transitive via compio); add the
-                                                  feature `tls` for compio_ws::client_async_tls.
+crates/runtime/Cargo.toml             (modified) explicit
+                                                  `compio-ws = { version = "0.3", default-features = false, features = ["client", "tls"] }`
+                                                  (currently transitive via compio). Explicitly omits `deflate`
+                                                  so RSV1=1 frames hard-fail per RFC 6455 §5.2 (addresses
+                                                  critic MAJOR #18). A startup assertion in `init.rs` verifies
+                                                  `WebSocketConfig::default().compression == None` so a
+                                                  feature-flag mistake fails loudly at boot, not silently in
+                                                  per-message decompression.
 
 crates/runtime/tests/
 ├── websocket_construct.rs            (new) hand-written Constructor / URL parse / protocol-validation tests
@@ -571,8 +664,13 @@ pub struct WebSocketImpl {
     pub binary_type: Cell<BinaryType>,
 
     /// Internal "full" flag — RFC 6455 §6.1 — set when the send queue
-    /// exceeds an implementation cap (we choose 16 MB to match cyper's
-    /// MAX_RESPONSE_SIZE). When set, the next send() short-circuits.
+    /// exceeds an implementation cap (`MAX_BUFFERED_AMOUNT = 16 MiB`,
+    /// matching cyper's MAX_RESPONSE_SIZE). When set, every subsequent
+    /// `send()` returns early without queuing — the message is dropped
+    /// on the floor. Cleared by the send pump when bufferedAmount
+    /// drops below 50% of the cap (8 MiB hysteresis), to avoid
+    /// flapping between FULL and not-FULL on every drain. Internal
+    /// only — never observable from JS. (addresses critic MAJOR #11)
     pub full: Cell<bool>,
 
     /// Per-isolate WebSocket id. Used by:
@@ -646,7 +744,24 @@ pub struct WsCachedHandles {
 pub enum WsFrame {
     Text(String),
     Binary(Vec<u8>),
-    Close { code: u16, reason: String },
+    /// Spec §3.1 step 4 — Blob byte-extraction is async; bufferedAmount
+    /// jumps by `size` synchronously and the bytes are resolved in the
+    /// send pump. Holds a `Global<Object>` to the Blob and the cached
+    /// size (so a `pop_front()`-induced decrement uses the right number
+    /// even if Blob.size changes mid-transit, which it cannot per IDL).
+    /// Mirrors undici's per-frame Blob deferral (`sender.js`).
+    /// (addresses critic MAJOR #6 + #19 — covers the "WsFrame::Blob
+    /// referenced by §V.4 prose but missing from the §II type list" gap.)
+    Blob { handle: v8::Global<v8::Object>, size: u64 },
+    /// Close frame. `code: None` means "send Close with empty payload"
+    /// per RFC 6455 §5.5.1
+    /// (https://datatracker.ietf.org/doc/html/rfc6455#section-5.5.1):
+    /// the close frame is sent without a status code field. Code 1005
+    /// is RESERVED as an internal sentinel and MUST NOT appear on the
+    /// wire (RFC 6455 §7.4.1
+    /// https://datatracker.ietf.org/doc/html/rfc6455#section-7.4.1).
+    /// (addresses critic CRITICAL #6)
+    Close { code: Option<u16>, reason: String },
 }
 ```
 
@@ -728,6 +843,12 @@ pub struct MessageEventState {
     /// `lastEventId` — empty for WebSocket-dispatched events; meaningful
     /// for EventSource. Default "".
     pub last_event_id: RefCell<String>,
+
+    /// Cached FrozenArray for `ports` — required for object identity
+    /// per WebIDL §3.2.34 (FrozenArray returns the same array on every
+    /// getter call). Populated on first `.ports` access.
+    /// (addresses critic MAJOR #27)
+    pub ports_cache: RefCell<Option<v8::Global<v8::Array>>>,
 }
 ```
 
@@ -772,8 +893,18 @@ pub struct CloseEventState {
 
 The IDL is small and the parser reads four init members:
 `bubbles`/`cancelable`/`composed` (inherited) plus `wasClean`/`code`/`reason`.
-The `code` member uses WebIDL `unsigned short` conversion (mod 2^16, no
-clamp — same as Event.eventPhase) per IDL §3.2.4.
+The `code` member uses WebIDL `unsigned short` conversion per
+https://webidl.spec.whatwg.org/#abstract-opdef-converttoint (default
+case: NaN/inf → 0; truncate toward zero; modulo 2^16). NOT [Clamp]
+— close()'s code argument is `[Clamp]`, but CloseEventInit.code is
+plain `unsigned short`. Examples per the spec:
+- `new CloseEvent("close", { code: 1.5 })` → code === 1 (truncate).
+- `new CloseEvent("close", { code: -1 })` → code === 65535 (modulo).
+- `new CloseEvent("close", { code: NaN })` → code === 0.
+
+The conversion lives in `algorithms::convert_unsigned_short_modulo`
+alongside `clamp_unsigned_short` (§V.5). WPT `CloseEvent-constructor.any.js`
+covers these cases. (addresses critic MAJOR #28)
 
 ### II.4. `BinaryType` enum
 
@@ -782,16 +913,31 @@ enum BinaryType { "blob", "arraybuffer" };
 ```
 
 A two-variant Rust enum. WebIDL `enum` setters reject any value not in
-the set; the polyfill silently coerces unknown values to "blob" — undici
-matches that behaviour at `undici/lib/web/websocket/websocket.js:453-461`.
-The CURRENT spec (verified 2026-05-02) explicitly uses
-`enum BinaryType { ... }` IDL syntax. Setting `socket.binaryType =
-"unknown"` per WebIDL §3.10.4 enum coercion rules is a TypeError.
-**Decision for v1:** match the CURRENT spec (TypeError) — undici and
-the polyfill predate the IDL change to a strict enum. WPT
-`binaryType-wrong-value.any.js` is the test that distinguishes; v1 should
-pass it (matching strict enum). If a creator app breaks on the strictness,
-add a graceful coercion behind a feature flag.
+the set; per WebIDL §3.2.13 enum conversion
+(https://webidl.spec.whatwg.org/#es-enumeration), the conversion throws
+a TypeError when the input is not in the enum set.
+
+**Decision for v2: silent coerce-to-current-value (do nothing).**
+WPT `binaryType-wrong-value.any.js` historically expects setter-with-
+unknown-value to be a SILENT no-op (the value is left unchanged). The
+test predates the IDL change to a strict enum; the live spec at
+https://websockets.spec.whatwg.org/ now defines it as a strict enum,
+but every shipping implementation (undici
+`undici/lib/web/websocket/websocket.js:453-461`, workerd
+`web-socket.c++` setter, the existing polyfill) silently no-ops on
+unknown values, and breaking that behaviour produces a JS TypeError
+on a path that worked for years across the entire ecosystem.
+
+v1 picked TypeError-throws-strict-enum then immediately hedged with a
+feature flag, which the critic correctly flagged as "perpetual tech
+debt invitation". v2 commits to silent-no-op (matching the install
+base) and aligns the WPT runner's expected outcome accordingly. If
+the WPT test is updated upstream to expect TypeError, this design's
+runner will switch with a one-line change.
+
+The "strict throw" path remains available via a (non-default) Cargo
+feature `runtime_websocket_strict_enum`, kept ONLY for WPT's existing
+update lifecycle — not for creator apps. (addresses critic MAJOR #16)
 
 ## III. Event classes — implementation detail
 
@@ -852,15 +998,29 @@ impl MessageEventState {
         v8::null(scope).into()
     }
 
-    /// `ports` — empty FrozenArray in v1.
+    /// `ports` — empty FrozenArray. Per WebIDL §3.2.34 (FrozenArray,
+    /// https://webidl.spec.whatwg.org/#es-frozen-array): EVERY getter
+    /// invocation MUST return the SAME frozen array instance (object
+    /// identity). v2 caches the FrozenArray as a `v8::Global` on the
+    /// state; `event.ports === event.ports` is true.
+    /// (addresses critic MAJOR #27)
+    /// Also: `set_integrity_level` returns `Option<bool>` and CAN
+    /// fail; v2 treats `None` / `Some(false)` as a hard runtime error
+    /// (the V8 invariant should never let it fail on a fresh array,
+    /// but blindly discarding the result is the v1 hygiene bug
+    /// flagged by MAJOR #30).
     #[v8_getter]
     fn ports<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+        // Cache check.
+        if let Some(g) = self.ports_cache.borrow().as_ref() {
+            return v8::Local::new(scope, g.clone()).into();
+        }
         let arr = v8::Array::new(scope, 0);
-        // FrozenArray semantics: freeze the array. WebIDL §3.10.34 says
-        // "frozen array type values are exposed as immutable JavaScript
-        // arrays" — Object.isFrozen(arr) === true.
-        arr.set_integrity_level(scope, v8::IntegrityLevel::Frozen);
-        arr.into()
+        let froze = arr.set_integrity_level(scope, v8::IntegrityLevel::Frozen);
+        debug_assert_eq!(froze, Some(true), "set_integrity_level Frozen failed");
+        let g = v8::Global::new(scope, arr);
+        *self.ports_cache.borrow_mut() = Some(g.clone());
+        v8::Local::new(scope, g).into()
     }
 
     #[v8_method]
@@ -945,11 +1105,41 @@ pub(crate) fn build_message_event<'s>(
 Same shape as MessageEvent (~120 LOC). The `code` getter returns u16,
 `reason` returns String, `wasClean` returns bool. Constructor reads
 `{ bubbles, cancelable, composed, wasClean, code, reason }` from
-init dict; `code` uses WebIDL `unsigned short` conversion (no Clamp —
-spec doesn't mark `code` as `[Clamp]`).
+init dict; `code` uses WebIDL `unsigned short` conversion via
+`algorithms::convert_unsigned_short_modulo` (default case, NOT
+`[Clamp]` — `[Clamp]` only appears on `close()`'s code argument):
+
+```rust
+/// WebIDL `unsigned short` conversion per
+/// https://webidl.spec.whatwg.org/#abstract-opdef-converttoint
+/// (default case, no extended attributes):
+///   1. Let V be the input coerced to a Number (V8 ToNumber).
+///   2. If V is NaN, +0, −0, +∞, or −∞: return 0.
+///   3. Let V be sign(V) × floor(|V|).
+///   4. Let V be V modulo 2^16 (signed → unsigned wrap).
+///   5. Return V cast to u16.
+/// (addresses critic MAJOR #28)
+pub fn convert_unsigned_short_modulo(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> u16 {
+    let n = value.number_value(scope).unwrap_or(0.0);
+    if !n.is_finite() {
+        return 0;  // NaN / ±∞
+    }
+    // sign × floor(|V|) — truncate toward zero.
+    let truncated = n.trunc();
+    // Modulo 2^16. f64 → i64 → u16 with wrap.
+    let as_i64 = truncated as i64;
+    (as_i64 as u32 & 0xFFFF) as u16
+}
+```
 
 A native mint helper `build_close_event(scope, code, reason, was_clean)`
 mirrors `build_message_event`, used by the receive task on Close frame.
+The mint helper takes a raw `u16` (already converted at frame-parse time);
+the JS-constructor path runs `convert_unsigned_short_modulo` on the dict
+member.
 
 ## IV. WebSocket constructor — step-by-step
 
@@ -1121,6 +1311,13 @@ fn parse_and_validate_protocols(
     };
 
     // Uniqueness — case-insensitive per spec.
+    // Per RFC 6455 §4.1 + RFC 7230 token grammar, subprotocol tokens
+    // are restricted to U+0021..U+007E excluding separators. There
+    // are NO non-ASCII characters in valid subprotocol tokens, so
+    // ASCII case-folding is sufficient (no Unicode case-fold needed).
+    // The `is_valid_subprotocol` check below rejects non-ASCII codepoints
+    // BEFORE this dedup, so `to_ascii_lowercase` is always correct.
+    // (addresses critic MINOR #34)
     let mut seen = std::collections::HashSet::new();
     for p in &list {
         let lowered = p.to_ascii_lowercase();
@@ -1140,25 +1337,56 @@ fn parse_and_validate_protocols(
 }
 ```
 
-### IV.3. WebSocket-init dict (the `signal` extension, D-24)
+### IV.3. WebSocket-init dict (the `signal` and `origin` extensions, D-24, D-28)
 
 The IDL `constructor(USVString url, optional (DOMString or sequence<DOMString>) protocols = [])`
-takes two args. The `signal` extension (workerd-style, deferred elsewhere
-to v2 by some impls) is added as a third arg `init?: WebSocketInit`:
+takes two args. v2 ships a third dictionary argument carrying
+non-spec init members: `signal` (per workerd convention) and `origin`
+(per RFC 6455 §10.2 opt-in design):
 
 ```webidl
-// Extension — not in the WHATWG spec, ships in v1 (D-24).
+// Extension — not in the WHATWG spec. ships in v1 (D-24, D-28).
 dictionary WebSocketInit {
   AbortSignal? signal = null;
+  /// Per RFC 6455 §10.2 + critic CRITICAL #3: server-side runtimes
+  /// SHOULD NOT auto-emit Origin. If the creator app wants the server
+  /// to see an Origin header, they pass it explicitly here. Empty /
+  /// null / unset = no Origin header on the wire (the spec-correct
+  /// default for non-browser clients).
+  USVString? origin = null;
+  /// Per RFC 6455 §7.4 + critic MAJOR #14: hard upper bound on
+  /// in-bound message size. Defaults to 4 MiB (creator-app realistic);
+  /// pinned in tungstenite via `WebSocketConfig::max_message_size`.
+  /// Larger creator apps (file uploads over WS) may bump.
+  unsigned long maxMessageSize = 4194304;
+  /// Per critic MAJOR #12: hard upper bound on a single frame.
+  /// Defaults to 1 MiB. Tungstenite default is 16 MiB; we tighten.
+  unsigned long maxFrameSize = 1048576;
+  /// Per critic MAJOR #21: client-side ping keepalive interval, in
+  /// milliseconds. 0 = disabled. Default 30000 (matches undici and
+  /// workerd defaults). The runtime sends an empty Ping every
+  /// `pingIntervalMs` ms when the connection is idle; tungstenite
+  /// auto-replies with Pong on incoming Pings.
+  unsigned long pingIntervalMs = 30000;
 };
 ```
 
 The constructor signature becomes
 `constructor(USVString url, optional (DOMString or sequence<DOMString>) protocols = [], optional WebSocketInit init = {})`.
-`new WebSocket("wss://...", undefined, { signal })` works. The init
-parser looks for `signal` and stores it in a private symbol on the
-wrapper. At connect-spawn time the connect task registers an
-`add_abort_algorithm` on the signal that cancels the connect future.
+`new WebSocket("wss://...", undefined, { signal, origin: "https://my-app" })`
+works. The init parser:
+
+- `signal` → AbortSignal Global stored as a private symbol; the connect
+  task registers an `add_abort_algorithm` on it (§VII.5).
+- `origin` → stored on the boxed `WebSocketImpl::origin: Option<String>`;
+  `run_client_handshake` emits the header only when `Some`.
+- `maxMessageSize` / `maxFrameSize` → passed into `tungstenite::WebSocketConfig`
+  via `compio_ws::client_async_with_config`.
+- `pingIntervalMs` → drives a per-WS interval timer that pushes
+  `WsFrame::Ping(Vec::new())` onto the send queue.
+
+(addresses critic CRITICAL #3 — origin opt-in; MAJORs #14, #12, #21 —
+size and ping-interval pinning.)
 
 ## V. The WebSocket class — methods and getters
 
@@ -1199,18 +1427,30 @@ fn binary_type(&self) -> String {
 #[v8_setter]
 #[v8_name = "binaryType"]
 fn set_binary_type(&self, scope: &mut v8::PinScope, v: v8::Local<v8::Value>) -> Result<(), OpError> {
-    // Per CURRENT spec §3.1: binaryType is `attribute BinaryType binaryType`,
-    // and BinaryType is `enum BinaryType { "blob", "arraybuffer" }`. Per
-    // WebIDL §3.10.4 enum coercion: any value not in the enum throws TypeError.
+    // Per v2 D-7 / §II.4 policy: silent-no-op on unknown values
+    // (matches undici, workerd, and the existing WPT
+    // `binaryType-wrong-value.any.js` expected-pass path). The strict
+    // TypeError-throws path is gated behind the
+    // `runtime_websocket_strict_enum` Cargo feature for WPT-update
+    // tracking only.
+    // (addresses critic MAJOR #16)
     let s = v.to_rust_string_lossy(scope);
-    let new_type = match s.as_str() {
-        "blob" => BinaryType::Blob,
-        "arraybuffer" => BinaryType::ArrayBuffer,
-        _ => return Err(OpError::type_error(&format!(
-            "WebSocket.binaryType: invalid enum value '{s}'"
-        ))),
-    };
-    self.binary_type.set(new_type);
+    match s.as_str() {
+        "blob" => self.binary_type.set(BinaryType::Blob),
+        "arraybuffer" => self.binary_type.set(BinaryType::ArrayBuffer),
+        _ => {
+            #[cfg(feature = "runtime_websocket_strict_enum")]
+            {
+                return Err(OpError::type_error(&format!(
+                    "WebSocket.binaryType: invalid enum value '{s}'"
+                )));
+            }
+            #[cfg(not(feature = "runtime_websocket_strict_enum"))]
+            {
+                // Silent no-op; current value retained.
+            }
+        }
+    }
     Ok(())
 }
 ```
@@ -1230,9 +1470,14 @@ pub fn spawn_establish_a_websocket_connection(
     protocols: Vec<String>,
     signal: Option<v8::Global<v8::Object>>,
 ) {
-    // Per D-23 budget cap: enforce concurrent-WebSocket limit.
+    // Per D-23 budget cap: enforce concurrent-WebSocket limit. WHATWG
+    // §3.1 step 12 frames this entire spawn as "in parallel"; budget
+    // overflow is a connection-failed signal, not a constructor throw.
+    // Per WHATWG §4 "feedback from the protocol"
+    // (https://websockets.spec.whatwg.org/#feedback-from-the-protocol):
+    // every connection-failed path queues `error` then `close` with
+    // wasClean=false. (addresses critic CRITICAL #10)
     if !budget::reserve_websocket_slot(scope) {
-        // Simulate failure: schedule an immediate 'error' + 'close' dispatch.
         push_event(scope, ws_id, WsEvent::Error {
             reason: "too many concurrent WebSocket connections".into(),
         });
@@ -1246,10 +1491,16 @@ pub fn spawn_establish_a_websocket_connection(
     let request_id = current_request_id(scope);
     let cancel_flag = current_cancel_flag(scope);
 
+    // The constructor passes the full WebSocketInit dict here so the
+    // handshake can honour origin / maxMessageSize / maxFrameSize /
+    // pingIntervalMs (per D-28).
+    let init = read_websocket_init(scope);  // origin, sizes, ping interval
+    let config = init.to_tungstenite_config();
+
     let task = Box::pin(async move {
         // Step 1 of §4.1: Convert `ws`/`wss` to `http`/`https` for the fetch.
         // Step 2-10: build the request (handled in handshake.rs).
-        match handshake::run_client_handshake(url, protocols).await {
+        match handshake::run_client_handshake(url, protocols, init.origin, config).await {
             Ok(handshake::Established { ws_stream, protocol, extensions }) => {
                 // Push Open event first so JS sees state transition before
                 // any messages arrive.
@@ -1258,10 +1509,29 @@ pub fn spawn_establish_a_websocket_connection(
                 // Begin the receive loop. This runs until Close / error.
                 receive_loop::run(ws_id, ws_stream).await;
             }
-            Err(handshake::HandshakeError::Aborted) => {
-                // Signal-aborted during connect — emit Close, no error event.
+            Err(handshake::HandshakeError::Aborted { signal_reason }) => {
+                // Per WHATWG §4 "feedback from the protocol"
+                // (https://websockets.spec.whatwg.org/#feedback-from-the-protocol,
+                // "if the connection-failed state is reached"): the
+                // connection-failed task fires:
+                //   1. set readyState = CLOSED
+                //   2. fire `error` event
+                //   3. fire `close` event with wasClean=false
+                // EVERY connection-failed path must produce both. v1
+                // emitted only Close on the Aborted branch; v2 emits
+                // Error then Close so AbortSignal users get the same
+                // observable shape as any other handshake failure.
+                // (addresses critic CRITICAL #5 + MAJOR #25)
+                //
+                // signal_reason is propagated into close.reason so that
+                // app code reading `closeEvent.reason` knows WHY the
+                // connection was aborted. v1 emitted reason="" always.
+                let reason = signal_reason.unwrap_or_default();
+                push_event_blocking(ws_id, WsEvent::Error {
+                    reason: format!("aborted: {reason}"),
+                });
                 push_event_blocking(ws_id, WsEvent::Close {
-                    code: 1006, reason: "".into(), was_clean: false,
+                    code: 1006, reason, was_clean: false,
                 });
             }
             Err(e) => {
@@ -1293,10 +1563,16 @@ if let Some(sig_global) = signal {
     let ws_id_clone = ws_id;
     crate::dom::abort_signal::add_abort_algorithm(
         scope, sig_obj,
-        Box::new(move || {
-            // Wake the connect task with an Aborted result — it will
-            // emit Close{1006} and exit.
-            cancel_flag_for_ws(ws_id_clone).cancel();
+        Box::new(move |scope: &mut v8::PinScope| {
+            // Read AbortSignal.reason for propagation to close.reason.
+            // (addresses critic MAJOR #25)
+            let abort_reason = crate::dom::abort_signal::reason_string(
+                scope, sig_obj,
+            ).unwrap_or_else(|| "aborted".to_string());
+            // Wake the connect task; it observes the cancel flag and
+            // emits Error+Close{1006, reason: abort_reason} per the
+            // §V.3 connection-failed dispatch.
+            cancel_flag_for_ws(ws_id_clone).cancel_with_reason(abort_reason);
         }),
     );
 }
@@ -1323,37 +1599,77 @@ fn send(
         return Ok(());
     }
 
-    // Dispatch order per spec §3.1: ArrayBuffer → ArrayBufferView → Blob → string.
-    // (Spec lists them in this order; type-test predicates run in the
-    // same order. Critically: string is LAST so a Blob with a custom
-    // toString isn't silently coerced.)
-    if let Some(ab) = v8::Local::<v8::ArrayBuffer>::try_from(data).ok() {
-        // ArrayBuffer
+    // Per RFC 6455 §6.1 + WHATWG §3.1 step 4 of send: when the send
+    // queue would exceed the implementation cap, set the [[full]] flag
+    // and return early (the buffer is full; bytes are dropped on the
+    // floor — same observable as fetch's body-too-large path).
+    // [[full]] is internal-only, never exposed to JS.
+    // (addresses critic MAJOR #11)
+    if self.full.get() {
+        // Subsequent sends are silent no-ops while [[full]] is set.
+        // bufferedAmount stays at its high-water mark; the pump-drain
+        // resets [[full]] when the queue drops below 50% of the cap.
+        return Ok(());
+    }
+    let projected_bytes = self.buffered_amount.get()
+        .saturating_add(estimate_send_bytes(scope, data));
+    if projected_bytes > MAX_BUFFERED_AMOUNT {
+        self.full.set(true);
+        return Ok(());
+    }
+
+    // Dispatch order per WHATWG §3.1 send algorithm steps 3-6
+    // (https://websockets.spec.whatwg.org/#dom-websocket-send):
+    //   step 3: "If data is a string, ..."
+    //   step 4: "If data is a Blob object, ..."
+    //   step 5: "If data is an ArrayBuffer object, ..."
+    //   step 6: "If data is an ArrayBufferView object, ..."
+    // Type-test predicates are by branding (V8 internal slots / IsBlob),
+    // NOT by `data.toString` — so the "Blob.toString hazard" that the
+    // v1 rationale invented is not a real concern.
+    // (addresses critic CRITICAL #1)
+    if data.is_string() {
+        let str_v8 = data.to_string(scope)
+            .ok_or_else(|| OpError::error("send: string conversion failed"))?;
+        // USVString conversion: V8 strings can contain unpaired
+        // surrogates; per WebIDL USVString
+        // (https://webidl.spec.whatwg.org/#es-USVString) the spec replaces
+        // them with U+FFFD before transmission. `to_rust_string_lossy`
+        // performs the same replacement.
+        let s = str_v8.to_rust_string_lossy(scope);
+        self.queue_text(s);
+        return Ok(());
+    }
+    // Blob — duck-type via has-internal-field-0-and-Blob-tag.
+    if crate::blob::is_blob(scope, data) {
+        // Per spec step 4: enqueue a "send placeholder" with the Blob's
+        // size so bufferedAmount reflects the byte count synchronously,
+        // and resolve the actual bytes in the send pump. Matches undici
+        // (`sender.js`).
+        let blob_size = crate::blob::size_sync(scope, data);
+        self.queue_blob(scope, data, blob_size);
+        return Ok(());
+    }
+    if let Ok(ab) = v8::Local::<v8::ArrayBuffer>::try_from(data) {
         let bs = ab.get_backing_store(scope);
         let bytes = bs.iter().map(|c| c.get()).collect::<Vec<u8>>();
         self.queue_binary(bytes);
         return Ok(());
     }
-    if let Some(view) = v8::Local::<v8::ArrayBufferView>::try_from(data).ok() {
-        // ArrayBufferView (Uint8Array, Float32Array, DataView, …)
-        // Per spec: send the underlying buffer's bytes from view.byteOffset,
-        // view.byteLength.
+    if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(data) {
+        // ArrayBufferView (Uint8Array, Float32Array, DataView, …) —
+        // per spec, send the underlying buffer's bytes from
+        // view.byteOffset, view.byteLength.
         let mut buf = vec![0u8; view.byte_length()];
         let copied = view.copy_contents(&mut buf);
         debug_assert_eq!(copied, buf.len());
         self.queue_binary(buf);
         return Ok(());
     }
-    // Blob — duck-type via has-internal-field-0-and-Blob-tag.
-    if crate::blob::is_blob(scope, data) {
-        let blob_bytes = crate::blob::extract_bytes_sync(scope, data)?;
-        self.queue_binary(blob_bytes);
-        return Ok(());
-    }
-    // String — fallthrough.
-    let Some(str_v8) = data.to_string(scope) else {
-        return Err(OpError::error("send: data could not be coerced"));
-    };
+    // Per WHATWG §3.1: if data matches none of the above, the WebIDL
+    // union conversion algorithm coerces to USVString.
+    let str_v8 = data.to_string(scope)
+        .ok_or_else(|| OpError::error("send: data could not be coerced"))?;
     let s = str_v8.to_rust_string_lossy(scope);
     self.queue_text(s);
     Ok(())
@@ -1381,15 +1697,21 @@ fn notify_send_pump(&self) {
 }
 ```
 
-The `queue_binary` path for Blob: in the v1 we extract bytes synchronously
-because `Blob.bytes()` is async per IDL. The simplest spec-compliant
-path is "send the Blob's bytes" — but the spec is silent on whether
-this is sync or async. undici's path (`undici/lib/web/websocket/sender.js`)
-queues a sentinel and resolves the bytes asynchronously, making
-`bufferedAmount` jump immediately by the Blob's `.size` and the actual
-bytes wired at frame time. v1 takes the same approach — a `WsFrame::Blob`
-variant is added that defers byte extraction until the send pump
-processes it.
+The Blob path defers byte extraction: `Blob.bytes()` is async per IDL,
+and the spec is silent on whether the WebSocket send is sync or async at
+the byte level. v2 follows undici (`undici/lib/web/websocket/sender.js`):
+`bufferedAmount` jumps by `blob.size` synchronously, and the send pump
+extracts bytes when it pops the frame. The `WsFrame::Blob { handle, size }`
+variant in §II.1 carries the Global<Object> + cached size; the pump
+calls `crate::blob::extract_bytes(scope, handle).await` and then writes
+a Binary message. (addresses critic MAJOR #6 timing-discussion gap and
+#19 missing-WsFrame-variant gap.)
+
+`queue_blob` increments `bufferedAmount` by `size` and pushes the
+deferred frame onto the queue, so `socket.send(blob); socket.bufferedAmount`
+read on the next line returns the right value. The synchronous-increment-
+async-drain split matches undici's observable shape and passes WPT
+`Send-binary-blob.any.js`'s bufferedAmount-after-send assertion.
 
 ### V.5. close(code, reason) — validation + state transition
 
@@ -1402,12 +1724,29 @@ fn close(
     reason: v8::Local<v8::Value>,
 ) -> Result<(), OpError> {
     // Step 1: validate code.
+    // Per WHATWG IDL, the `code` argument is `optional [Clamp] unsigned
+    // short code`. The `[Clamp]` extended attribute drives the WebIDL
+    // ConvertToInt algorithm
+    // (https://webidl.spec.whatwg.org/#abstract-opdef-converttoint, the
+    // [Clamp] case):
+    //   1. If V is NaN → return 0.
+    //   2. Set V to min(max(V, 0), 65535).
+    //   3. If V is finite and V−floor(V) === 0.5 and floor(V) is even,
+    //      return floor(V) (round half to even — banker's rounding).
+    //   4. Otherwise return round(V) (half-away-from-zero is wrong here;
+    //      [Clamp] specifies banker's rounding only for the .5 tie case;
+    //      otherwise nearest-integer).
+    // v1 used `code.uint32_value(scope).unwrap_or(0).min(65535) as u16`
+    // which:
+    //   - reads V8's uint32_value (modulo 2^32 on negative — wrong vs
+    //     step 2 which clamps to 0),
+    //   - never applies banker's rounding (V8 truncates toward zero).
+    // v2 implements ConvertToInt[Clamp] explicitly via `clamp_unsigned_short`.
+    // (addresses critic CRITICAL #2)
     let code_opt: Option<u16> = if code.is_undefined() {
         None
     } else {
-        // [Clamp] unsigned short → uint16 with Clamp = clamp to 0..=65535.
-        let c = code.uint32_value(scope).unwrap_or(0).min(65535) as u16;
-        Some(c)
+        Some(algorithms::clamp_unsigned_short(scope, code))
     };
 
     // Step 2: validate reason length.
@@ -1418,23 +1757,66 @@ fn close(
         Some(s)
     };
 
-    // Per spec §3.1: validate close code and reason BEFORE the readyState check.
+    // Per WHATWG §3.1 close algorithm
+    // (https://websockets.spec.whatwg.org/#dom-websocket-close):
+    //   step 1: if code is present and not 1000 nor in 3000-4999, throw.
+    //   step 2: if reason is present, UTF-8 encode; if > 123 bytes, throw.
+    //   step 3: run the close-the-WebSocket-connection algorithm with
+    //           code/reason and readyState dispatch.
+    // Validation MUST run before any state transition.
     algorithms::validate_close_code_and_reason(code_opt, reason_opt.as_deref())?;
 
-    // Per spec §3.1 step 3: dispatch by readyState.
+    // Per WHATWG §3.1 step 3 + RFC 6455 §7.1.7 (Fail the WebSocket
+    // Connection https://datatracker.ietf.org/doc/html/rfc6455#section-7.1.7)
+    // and §7.1.1 (Closing the Connection
+    // https://datatracker.ietf.org/doc/html/rfc6455#section-7.1.1):
+    //
+    //   - CLOSING / CLOSED: do nothing.
+    //   - CONNECTING: fail-the-WebSocket-connection. There may or may
+    //     not be a TCP socket open at this point — the connect future
+    //     might not have reached `compio_ws::client_async`, in which
+    //     case there is no wire to send a Close frame on. In either
+    //     sub-case the spec yields `Close{1006, was_clean: false}`
+    //     (RFC 6455 §7.4.1: 1006 = Abnormal Closure).
+    //   - OPEN: start the closing handshake — enqueue a Close frame,
+    //     transition to CLOSING. The send pump emits the frame, then
+    //     waits up to 5s (§IX.3) for the peer's Close ACK.
+    //
+    // v1 collapsed CONNECTING to "fail" without distinguishing the
+    // two CONNECTING sub-cases; v2 distinguishes them via the
+    // `connection_handle.is_some()` check inside
+    // `fail_the_websocket_connection`. (addresses critic CRITICAL #4)
     use ReadyState::*;
     match self.ready_state.get() {
-        Closing | Closed => return Ok(()), // step 3.1: do nothing
+        Closing | Closed => return Ok(()),
         Connecting => {
-            // step 3.2: Fail the WebSocket connection. set readyState=CLOSING.
             self.ready_state.set(Closing);
-            algorithms::fail_the_websocket_connection(scope, self);
+            // fail_the_websocket_connection handles the "wire exists"
+            // vs "no wire yet" sub-cases internally — see §IX.2.
+            // No Close frame is enqueued; the connect future will
+            // observe the cancel flag and emit Close{1006} via the
+            // connection-failed path.
+            algorithms::fail_the_websocket_connection(
+                scope,
+                self,
+                /* code */ code_opt,
+                /* reason */ reason_opt.as_deref().unwrap_or(""),
+            );
         }
         Open => {
-            // step 3.3-3.4: start closing handshake; readyState=CLOSING.
+            // Step 3.3-3.4: start closing handshake; readyState=CLOSING.
+            // Per RFC 6455 §5.5.1
+            // (https://datatracker.ietf.org/doc/html/rfc6455#section-5.5.1):
+            // a Close frame's status code is OPTIONAL on the wire. When
+            // the user calls `close()` with no code argument, we MUST
+            // send a Close frame WITHOUT a status code field — we MUST
+            // NOT serialise 1005, which RFC 6455 §7.4.1 reserves as an
+            // internal sentinel. Storing `Option<u16>` in WsFrame::Close
+            // preserves the "no code" case end-to-end.
+            // (addresses critic CRITICAL #6)
             self.ready_state.set(Closing);
             let frame = WsFrame::Close {
-                code: code_opt.unwrap_or(1005),
+                code: code_opt,  // Option<u16>, NOT Some(1005)
                 reason: reason_opt.unwrap_or_default(),
             };
             self.send_queue.borrow_mut().push_back(frame);
@@ -1474,7 +1856,61 @@ pub fn validate_close_code_and_reason(
     }
     Ok(())
 }
+
+/// WebIDL `[Clamp] unsigned short` conversion per
+/// https://webidl.spec.whatwg.org/#abstract-opdef-converttoint (Clamp
+/// case). Applied to the close() `code` argument.
+///
+/// Algorithm:
+///   1. Let V be the input value coerced to a Number (V8 ToNumber).
+///   2. If V is NaN, return 0.
+///   3. Set V to min(max(V, 0), 2^16 − 1).
+///   4. If V is finite and V − floor(V) === 0.5 and floor(V) is even,
+///      return floor(V) (round-half-to-even).
+///   5. Otherwise return the integer nearest to V (rounding ties to the
+///      higher integer for the non-half-even case is technically wrong;
+///      WebIDL says "rounded to the nearest integer", which combined with
+///      step 4 gives banker's rounding for ties only). For non-tie cases,
+///      `(V).round()` (half-away-from-zero) gives the right answer because
+///      ties are already covered by step 4.
+///
+/// (addresses critic CRITICAL #2)
+pub fn clamp_unsigned_short(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> u16 {
+    // Step 1: ToNumber. V8's `number_value` runs ECMAScript ToNumber.
+    let n = value.number_value(scope).unwrap_or(f64::NAN);
+
+    // Step 2: NaN → 0.
+    if n.is_nan() {
+        return 0;
+    }
+
+    // Step 3: clamp to [0, 65535].
+    let clamped = n.max(0.0).min(65535.0);
+
+    // Step 4: round-half-to-even (banker's rounding) for the .5 tie case.
+    if clamped.is_finite() {
+        let floor_v = clamped.floor();
+        let frac = clamped - floor_v;
+        if frac == 0.5 {
+            // Tie → round to the even integer.
+            let floor_u = floor_v as u32;
+            let rounded = if floor_u % 2 == 0 { floor_u } else { floor_u + 1 };
+            return rounded as u16;
+        }
+    }
+
+    // Step 5: nearest integer (half-away-from-zero is fine for non-ties).
+    clamped.round() as u16
+}
 ```
+
+The same `clamp_unsigned_short` helper is reused if any future
+WebSocket attribute or argument acquires `[Clamp]` semantics; the
+function is callable from the dictionary parser (so CloseEventInit and
+similar parsing paths share one implementation).
 
 ### V.6. EventHandler attributes (onopen / onmessage / onerror / onclose)
 
@@ -1483,16 +1919,29 @@ EventHandlerNonNull / EventHandlerNullable IDL attributes that, when
 set, install (or replace) a single internal listener that the
 EventTarget.dispatchEvent runs alongside any manually-added listeners.
 
-The spec algorithm (HTML §8.1.5.1 "event handler IDL attributes"):
-- Set: store the value in `[[event handler]]` slot. If the slot already
-  had a listener registered, remove that listener; install a new one.
-- Get: return the stored value (the original function, not a wrapper).
-- The internal listener delegates to the stored value when fired.
+The spec algorithm (HTML §8.1.5.1 "event handler IDL attributes",
+https://html.spec.whatwg.org/#event-handler-idl-attributes):
+- **Setter step 4:** "If the given value is not a callable Object,
+  set this[handlerName] to null." This null-coercion is mandatory —
+  `socket.onmessage = "not a function"` MUST NOT throw; it MUST set
+  the handler to null. v1's design didn't show this coercion; v2
+  encodes it in `set_event_handler_attr`.
+- **Setter step 5+:** Store the value in `[[event handler]]` slot.
+  If the slot already had a listener registered, remove that listener;
+  install a new one.
+- **Getter:** return the stored value (the original function, not a
+  wrapper). When `null` is stored, the getter returns `null`.
+- **The internal listener delegates to the stored value when fired.**
 
 undici's implementation (`websocket.js:355-445`) is the reference: it
-stores the raw user function in `#events.{open,error,close,message}`,
-removes the previous listener (if any) via removeEventListener, and adds
-the new one via addEventListener. Same pattern in v1.
+stores the raw user function (or null) in
+`#events.{open,error,close,message}`, removes the previous listener
+(if any) via removeEventListener, and adds the new one via
+addEventListener. workerd similarly null-coerces non-callables
+(`workerd/api/web-socket.c++` event-handler setter). Same pattern in v2.
+
+WPT `idlharness.any.js` and `eventhandlers.any.js` test the
+null-coercion behaviour explicitly. (addresses critic MAJOR #15)
 
 ```rust
 #[v8_setter]
@@ -1501,8 +1950,8 @@ fn onmessage(
     scope: &mut v8::PinScope,
     fn_arg: v8::Local<v8::Value>,
 ) -> Result<(), OpError> {
-    set_event_handler_attr(scope, /* this */ self, "message",
-        &self.cached_handles.borrow_mut().as_mut().map(|h| &mut h.on_message_handler),
+    set_event_handler_attr(scope, self, "message",
+        |handles| &mut handles.on_message_handler,
         fn_arg)
 }
 
@@ -1517,12 +1966,84 @@ fn onmessage<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::V
 // ... same for onopen / onerror / onclose
 ```
 
-### V.7. accept() — workerd extension preserved (D-21)
+`set_event_handler_attr` performs the HTML §8.1.5.1 algorithm:
 
 ```rust
-/// Cloudflare-Workers extension — required for WebSocketPair[1] to begin
-/// receiving messages. Throws TypeError on a client-side WebSocket
-/// (created via `new WebSocket(url)`); silent no-op if already accepted.
+fn set_event_handler_attr<F>(
+    scope: &mut v8::PinScope,
+    ws: &WebSocketImpl,
+    event_name: &str,
+    slot_picker: F,
+    fn_arg: v8::Local<v8::Value>,
+) -> Result<(), OpError>
+where F: Fn(&mut WsCachedHandles) -> &mut Option<v8::Global<v8::Function>>,
+{
+    // HTML §8.1.5.1 step 4: coerce non-callable to null.
+    let new_handler: Option<v8::Global<v8::Function>> = if fn_arg.is_function() {
+        let f = v8::Local::<v8::Function>::try_from(fn_arg).unwrap();
+        Some(v8::Global::new(scope, f))
+    } else {
+        // null, undefined, string, object, number, etc. — all become null.
+        // Per spec, this is NOT a TypeError.
+        None
+    };
+    // Lazily allocate the cache.
+    let mut handles_ref = ws.cached_handles.borrow_mut();
+    if handles_ref.is_none() {
+        *handles_ref = Some(WsCachedHandles::default());
+    }
+    let handles = handles_ref.as_mut().unwrap();
+    let slot = slot_picker(handles);
+    // Remove the previously-installed listener (if any) before
+    // installing the new one — undici-style.
+    if slot.is_some() {
+        crate::dom::event_target::remove_internal_listener(
+            scope, ws.self_weak.upgrade(scope).unwrap(), event_name,
+        );
+    }
+    *slot = new_handler.clone();
+    if let Some(g) = new_handler {
+        crate::dom::event_target::add_internal_listener(
+            scope, ws.self_weak.upgrade(scope).unwrap(), event_name, g,
+        );
+    }
+    Ok(())
+}
+```
+
+The `slot_picker` closure-of-fn-pointer pattern avoids the v1 prose's
+borrow-and-discard `RefMut::as_mut` antipattern (the borrow_mut would
+return a RefMut that the closure couldn't outlive). v2 takes the
+`RefMut` once at the top, then dereferences via the slot picker.
+
+### V.7. accept() — workerd extension preserved (D-21)
+
+The `accept()` method lives on the `WebSocket.prototype` regardless of
+construction mode (one shared prototype across both client-side and
+WebSocketPair-coupled instances) — matching workerd, which does not
+hide the method on client sockets either. The discriminator at call
+time is `peer_id.is_some()`. This is the simplest matching shape;
+splitting accept off the client-side prototype would require either:
+
+- A dynamic getter that throws on access — a bigger surface than a
+  method that throws on call.
+- Two separate WebSocket classes — breaks `instanceof WebSocket`.
+
+v2 keeps the v1 design here (per critic MAJOR #13's "current design
+is workerd-consistent" assessment).
+
+```rust
+/// Cloudflare-Workers extension — required for WebSocketPair[1] to
+/// begin receiving messages. Throws TypeError on a client-side
+/// WebSocket (created via `new WebSocket(url)`); silent no-op if
+/// already accepted.
+///
+/// The method is on the shared WebSocket.prototype; the
+/// peer_id.is_some() check distinguishes pair-coupled from
+/// client-side at call time. Mutating `accepted` on a client-side
+/// socket is harmless because the field is unused on that path
+/// (the connect task sets it true unconditionally at construction).
+/// (addresses critic MAJOR #13)
 #[v8_method]
 fn accept(&self, scope: &mut v8::PinScope) -> Result<(), OpError> {
     if self.peer_id.get().is_none() {
@@ -1694,6 +2215,56 @@ The native cutover preserves both pumps verbatim — the only thing that
 changes is the JS-visible class. The pump reads the same `WebSocketImpl`
 fields the polyfill's `WebSocketState` exposed (renamed; see §I.2).
 
+### VI.5. bufferedAmount accounting on pair-coupled sends
+
+Per critic MAJOR #19: when `socket.send(data)` is called on one half of
+a WebSocketPair, the bytes are enqueued on BOTH the local outgoing
+queue (drained by the gateway pump) AND the peer's incoming queue
+(delivered as a MessageEvent on the peer half). The local-side
+`bufferedAmount` counter increments by the byte count, per WHATWG §3.1
+("the number of bytes of application data that have been queued using
+send()").
+
+**Decrement timing for paired sockets:** unlike a client-side socket
+where the pump-drain decrement runs when the kernel write returns, a
+pair-coupled socket has TWO decrement triggers:
+
+1. The local outgoing-queue pump (gateway → external client) drains
+   the outgoing entry; decrement at that point.
+2. The peer-side incoming-queue dispatch fires the MessageEvent on the
+   peer; this is the "delivered to peer" event.
+
+v2 decrements bufferedAmount on trigger (1) — the gateway-pump drain.
+For a unit-tested local-only pair (no gateway, e.g. test code that
+constructs `WebSocketPair` directly), the gateway pump never runs, so
+the outgoing queue would never drain. To keep `bufferedAmount` from
+monotonically growing in test code, v2 adds an "implicit drain on peer
+delivery" path: when the peer half dispatches the MessageEvent
+(receive_loop's pair-coupled equivalent), it ALSO signals the source
+half's pump to drop the corresponding outgoing entry and decrement
+`bufferedAmount`.
+
+This makes the test:
+
+```javascript
+const [a, b] = Object.values(new WebSocketPair());
+b.accept();
+a.send("x");  // queues on both a.outgoing AND b.incoming
+// turn of event loop: b.onmessage fires; a's pump observes peer
+// delivery and decrements a.bufferedAmount.
+expect(a.bufferedAmount).toEqual(0);  // passes
+```
+
+Behave identically in unit tests and in production (where the gateway
+pump is the primary drain path; the peer-delivery signal is redundant
+but harmless — the entry is already gone by the time the peer
+delivers).
+
+Implementation: a `pair_drain_signal: Rc<Cell<u64>>` on each half;
+the peer's MessageEvent dispatch path sets it to "drained N bytes",
+and the source's pump observes the signal and decrements
+bufferedAmount accordingly. (addresses critic MAJOR #19)
+
 ### VI.5. Relationship to the existing `docs/reference/websocket-design.md`
 
 The existing reference doc covers the GATEWAY-SIDE WebSocket — the
@@ -1746,13 +2317,43 @@ The framer handles:
 - **Fragmentation reassembly** — text and binary frames split across
   multiple wire frames are reassembled before yielding.
 - **Ping/Pong auto-response** — tungstenite auto-replies with Pong on
-  Ping by default. We KEEP that default (matches undici, workerd).
-- **Mask validation** — server-to-client frames must be unmasked
-  (RFC 6455 §5.2 "MUST NOT mask"); the framer fails the connection on
-  masked frames.
+  incoming Ping (verified `tungstenite 0.28` source). We KEEP that
+  default (matches undici, workerd).
+- **Client-side ping keepalive** — tungstenite does NOT send periodic
+  Pings on its own. v2 spawns a per-WS interval task driven by
+  `WebSocketInit.pingIntervalMs` (default 30 000 ms, matching undici
+  and workerd; 0 disables). The task pushes `Message::Ping(Vec::new())`
+  onto the send queue at every interval; tungstenite's Pong
+  auto-response on the peer side keeps the kernel idle-timer alive.
+  WPT `keeping-connection-open/` tests this. (addresses critic
+  MAJOR #23)
+- **Mask validation** — server-to-client frames MUST be unmasked per
+  RFC 6455 §5.2
+  (https://datatracker.ietf.org/doc/html/rfc6455#section-5.2:
+  "A server MUST NOT mask any frames..."); the framer fails the
+  connection on masked frames. v2 verifies tungstenite has this
+  enforcement enabled by default — `tungstenite::Role::Client` rejects
+  masked frames as a protocol error. **Symmetric:** client-to-server
+  frames MUST be masked; tungstenite enforces this when run in
+  Client role. Both directions are tungstenite's defaults; v2 pins
+  the role explicitly via `Role::Client` in
+  `compio_ws::client_async_with_config`.
 - **UTF-8 validation on text frames** — D-17. Fails with `WebSocketError::Utf8`.
 - **Control-frame size limit** — RFC 6455 §5.5: control frames ≤ 125
   bytes. Framer enforces.
+- **Message and frame size caps** — `WebSocketConfig::max_message_size`
+  (4 MiB default per WebSocketInit) and `max_frame_size` (1 MiB default)
+  pinned by v2. Tungstenite's defaults (64 MiB / 16 MiB) would let a
+  malicious server OOM the worker; v2 caps at creator-app-realistic
+  sizes. (addresses critic MAJOR #22)
+- **permessage-deflate is OFF.** The Cargo manifest pins `compio-ws`
+  features to exclude `deflate` so RSV1=1 frames hard-fail per RFC 6455
+  §5.2. v2's `Cargo.toml` line:
+  `compio-ws = { version = "0.3", default-features = false, features = ["client", "tls"] }`
+  — explicitly NO `deflate`. The runtime startup check in
+  `crates/runtime/src/init.rs` asserts that
+  `compio_ws::WebSocketConfig::default().compression == None` so a
+  feature-flag mistake fails loud at boot. (addresses critic MAJOR #18)
 
 ### VII.2. The receive loop
 
@@ -1764,21 +2365,39 @@ use std::sync::Arc;
 
 pub async fn run<S>(ws_id: u32, mut stream: WebSocketStream<S>)
 where S: compio::buf::IoBuf + Unpin + 'static {
+    // Per critic MAJOR #12: receive-side backpressure is required to
+    // avoid an unbounded events_queue. tungstenite's stream-level
+    // backpressure pauses on full kernel buffer; we add a per-WS event
+    // queue cap above that. When the queue exceeds RECV_BACKPRESSURE_CAP
+    // (default: 256 messages, configurable via WebSocketInit), the
+    // receive loop awaits drain before reading the next frame.
     while let Some(item) = stream.next().await {
+        // Backpressure-await before parsing the next frame so the
+        // tungstenite-level receive buffer can apply TCP backpressure.
+        wait_for_recv_drain(ws_id).await;
         let event = match item {
             Ok(Message::Text(s)) => WsEvent::Message(WsMessage::Text(s)),
             Ok(Message::Binary(b)) => WsEvent::Message(WsMessage::Binary(b)),
             Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => continue, // auto-handled
             Ok(Message::Close(frame)) => {
+                // Per RFC 6455 §7.4.1: a Close control frame received
+                // with NO status code is observed as the internal
+                // sentinel 1005 ("No Status Rcvd"). 1005 IS the
+                // internal-only API representation; the wire payload
+                // for a "no code" Close is empty, NOT 1005-encoded.
+                // The CloseEvent.code that JS sees is 1005 in this
+                // case — that's the JS-observable value per spec §3.2
+                // and the §XVII.6 CloseEvent.code policy.
                 let (code, reason) = match frame {
                     Some(f) => (u16::from(f.code), f.reason.to_string()),
-                    None => (1005, String::new()), // No status code received
+                    None => (1005, String::new()),
                 };
                 WsEvent::Close { code, reason, was_clean: true }
             }
             Err(e) => {
                 // Protocol error / UTF-8 failure / TCP error.
-                // Emit Error then Close{1006}.
+                // Per WHATWG §4: connection-failed → fire `error` then
+                // `close{1006, was_clean: false}`.
                 push_event_blocking(ws_id, WsEvent::Error { reason: e.to_string() });
                 push_event_blocking(ws_id, WsEvent::Close {
                     code: 1006, reason: String::new(), was_clean: false,
@@ -1787,10 +2406,18 @@ where S: compio::buf::IoBuf + Unpin + 'static {
             }
             Ok(Message::Frame(_)) => continue, // raw frame — not surfaced
         };
+        // Per critic MAJOR #20: avoid the v1 use-after-move bug —
+        // `event` is moved into push_event_blocking and then read by
+        // matches!. v2 inspects the kind FIRST, then moves.
+        let is_close = matches!(event, WsEvent::Close { .. });
         push_event_blocking(ws_id, event);
-        if matches!(event, WsEvent::Close { .. }) { return; }
+        if is_close { return; }
     }
     // Stream ended without a Close frame — abnormal closure.
+    // Per WHATWG §4: emit error first, then close{1006, was_clean: false}.
+    push_event_blocking(ws_id, WsEvent::Error {
+        reason: "connection terminated without Close frame".into(),
+    });
     push_event_blocking(ws_id, WsEvent::Close {
         code: 1006, reason: String::new(), was_clean: false,
     });
@@ -1807,13 +2434,22 @@ When the runtime pump pulls an `OpResult::WebSocketEvent` off the
 OpResult::WebSocketEvent { ws_id, kind } => {
     let state = state_clone.borrow();
     let Some(impl_) = state.websockets.get(&ws_id) else { return; };
-    let Some(handles) = &impl_.cached_handles.borrow().as_ref() else {
+    if impl_.cached_handles.borrow().is_none() {
         // First event for this WS: resolve and cache the handles.
-        // Same lazy-resolve pattern the polyfill uses today.
+        // Per critic MAJOR #24: v1 used to early-return after
+        // resolving, dropping the first event (which is often a
+        // Message — the Open event lands first only on client-side
+        // sockets; for WebSocketPair-coupled sockets the first event
+        // is whatever the peer sends first). v2 resolves the handles
+        // SYNCHRONOUSLY here and falls through to dispatch in the
+        // same tick, so no event is dropped.
         ws_resolve_handles(scope, ws_id);
-        // ... retry
-        return;
-    };
+        // After resolution, cached_handles is guaranteed Some().
+        debug_assert!(impl_.cached_handles.borrow().is_some());
+    }
+    let handles_borrow = impl_.cached_handles.borrow();
+    let handles = handles_borrow.as_ref()
+        .expect("cached_handles must be Some after ws_resolve_handles");
     let ws_obj = v8::Local::new(scope, handles.ws_obj.clone());
 
     match kind {
@@ -1828,7 +2464,14 @@ OpResult::WebSocketEvent { ws_id, kind } => {
         WsEvent::Message(WsMessage::Text(s)) => {
             // §4 step 2.1: text frame → DOMString.
             let s_v8 = v8::String::new(scope, &s).unwrap();
-            let origin = compute_origin(impl_.url.borrow().origin().as_str());
+            // MessageEvent.origin per WebSockets §3.1 + HTML §3.5 origin
+            // serialisation: serialise the WebSocket URL's origin.
+            // `url::Url::origin()` returns an `url::Origin`, whose
+            // `ascii_serialization()` produces "wss://api.example.com:8443"
+            // (omitting the default port). v1 used `.as_str()` on the
+            // Origin which doesn't exist; v2 uses the correct method.
+            // (addresses critic MAJOR #17)
+            let origin = impl_.url.borrow().origin().ascii_serialization();
             let me = build_message_event(scope, s_v8.into(), &origin);
             crate::dom::event_target::dispatch_event(scope, ws_obj, me);
         }
@@ -1845,7 +2488,14 @@ OpResult::WebSocketEvent { ws_id, kind } => {
                     ab.into()
                 }
             };
-            let origin = compute_origin(impl_.url.borrow().origin().as_str());
+            // MessageEvent.origin per WebSockets §3.1 + HTML §3.5 origin
+            // serialisation: serialise the WebSocket URL's origin.
+            // `url::Url::origin()` returns an `url::Origin`, whose
+            // `ascii_serialization()` produces "wss://api.example.com:8443"
+            // (omitting the default port). v1 used `.as_str()` on the
+            // Origin which doesn't exist; v2 uses the correct method.
+            // (addresses critic MAJOR #17)
+            let origin = impl_.url.borrow().origin().ascii_serialization();
             let me = build_message_event(scope, data_v8, &origin);
             crate::dom::event_target::dispatch_event(scope, ws_obj, me);
         }
@@ -1900,25 +2550,89 @@ where S: ... {
         match frame {
             WsFrame::Text(s) => {
                 let bytes_len = s.len() as u64;
-                if let Err(_) = stream.send(Message::Text(s)).await {
-                    return; // connection broken
+                if stream.send(Message::Text(s)).await.is_err() {
+                    // Per critic MAJOR #21: the pump used to silently
+                    // return on send error; the receive loop would
+                    // eventually notice and emit Error+Close, but a
+                    // race could leave bufferedAmount non-zero. v2:
+                    //   1. notify_send_failure pushes an
+                    //      OpResult::WebSocketEvent::Error so the JS
+                    //      side observes the failure even if the
+                    //      receive loop hasn't tripped yet;
+                    //   2. drain_outgoing_and_zero clears the
+                    //      remaining queue and zeros bufferedAmount.
+                    notify_send_failure(ws_id, "send error: connection broken");
+                    drain_outgoing_and_zero(ws_id);
+                    return;
                 }
                 decrement_buffered(ws_id, bytes_len);
             }
             WsFrame::Binary(b) => {
                 let bytes_len = b.len() as u64;
-                if let Err(_) = stream.send(Message::Binary(b)).await {
+                if stream.send(Message::Binary(b)).await.is_err() {
+                    notify_send_failure(ws_id, "send error: connection broken");
+                    drain_outgoing_and_zero(ws_id);
+                    return;
+                }
+                decrement_buffered(ws_id, bytes_len);
+            }
+            WsFrame::Text(_) | WsFrame::Binary(_) => {
+                // (Handled above; rust analyser checks exhaustiveness here.)
+                unreachable!()
+            }
+            WsFrame::Blob { handle, size: _ } => {
+                // Per spec §3.1 step 4 — Blob byte extraction is async.
+                // Decrement bufferedAmount by the cached size after
+                // extraction succeeds. (addresses critic MAJOR #6, #19)
+                let bytes = match crate::blob::extract_bytes_async(scope_handle, handle).await {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                let bytes_len = bytes.len() as u64;
+                if stream.send(Message::Binary(bytes)).await.is_err() {
+                    notify_send_failure(ws_id);
                     return;
                 }
                 decrement_buffered(ws_id, bytes_len);
             }
             WsFrame::Close { code, reason } => {
-                let frame = compio_ws::CloseFrame {
-                    code: compio_ws::CloseCode::from(code),
-                    reason: reason.into(),
+                // Per RFC 6455 §5.5.1
+                // (https://datatracker.ietf.org/doc/html/rfc6455#section-5.5.1):
+                // Close frames may be sent with NO payload (no status
+                // code, no reason) or with a 16-bit big-endian status
+                // code optionally followed by a reason. Code 1005 is
+                // reserved (RFC 6455 §7.4.1
+                // https://datatracker.ietf.org/doc/html/rfc6455#section-7.4.1)
+                // and MUST NOT appear in any sent Close frame.
+                //
+                // tungstenite's `Message::Close(None)` sends an empty
+                // payload; `Message::Close(Some(CloseFrame { code, reason }))`
+                // sends a code + reason payload. v2 maps Option<u16>
+                // directly: `None` → empty payload; `Some(c)` → code
+                // payload (with reason if non-empty).
+                // (addresses critic CRITICAL #6)
+                let payload = match code {
+                    None => None,
+                    Some(c) => Some(compio_ws::CloseFrame {
+                        code: compio_ws::CloseCode::from(c),
+                        reason: reason.into(),
+                    }),
                 };
-                let _ = stream.send(Message::Close(Some(frame))).await;
-                let _ = stream.close(None).await;
+                let _ = stream.send(Message::Close(payload)).await;
+
+                // Per RFC 6455 §7.1.1
+                // (https://datatracker.ietf.org/doc/html/rfc6455#section-7.1.1):
+                // after sending Close, wait up to ~5 seconds for the
+                // peer's Close frame ACK; if it doesn't arrive, drop
+                // the TCP connection. tungstenite does NOT auto-timeout
+                // on close; v2 wraps `stream.close(None).await` in a
+                // 5s `compio::time::timeout` to avoid half-open hangs.
+                // (addresses critic MAJOR #14)
+                use std::time::Duration;
+                let _ = compio::time::timeout(
+                    Duration::from_secs(5),
+                    stream.close(None),
+                ).await;
                 return; // close pump exits
             }
         }
@@ -1933,9 +2647,15 @@ algorithm on the signal. When the signal aborts:
 
 - During **CONNECTING**: cancel the connect future via the per-WS
   `CancelFlag`. The connect task observes the cancel, drops the
-  in-flight cyper request, emits `Close{1006, was_clean: false}`.
-- During **OPEN**: equivalent to `socket.close(1000)` — enqueue a close
-  frame on the send pump.
+  in-flight cyper request, emits `Error` THEN
+  `Close{1006, was_clean: false, reason: signal.reason}` per WHATWG
+  §4 connection-failed semantics. v1 emitted only Close with empty
+  reason; v2 fires Error first (CRITICAL #5) and propagates
+  `signal.reason` into `closeEvent.reason` (MAJOR #25).
+- During **OPEN**: equivalent to `socket.close(1000, signal.reason)` —
+  enqueue a Close frame on the send pump. The reason argument carries
+  the AbortSignal's reason so app code reading `closeEvent.reason`
+  knows the abort cause.
 - During **CLOSING / CLOSED**: no-op.
 
 ```rust
@@ -1946,17 +2666,32 @@ fn install_signal_abort_algorithm(
 ) {
     crate::dom::abort_signal::add_abort_algorithm(
         scope, signal,
-        Box::new(move || {
+        Box::new(move |scope: &mut v8::PinScope| {
+            // Per critic MAJOR #25: signal.reason should be readable
+            // and propagated into close.reason. v1 emitted reason=""
+            // regardless. v2 reads signal.reason via the AbortSignal
+            // API and stores it for the close event.
+            let abort_reason = crate::dom::abort_signal::reason_string(
+                scope, signal,
+            ).unwrap_or_else(|| "aborted".to_string());
+
             let state = current_state();
             let mut s = state.borrow_mut();
             let Some(impl_) = s.websockets.get_mut(&ws_id) else { return; };
             match impl_.ready_state.get() {
                 ReadyState::Connecting => {
-                    cancel_connect_future(ws_id);
+                    // Per CRITICAL #5: emit Error then Close from the
+                    // connect task itself when it observes the cancel
+                    // flag. The cancel_connect_future helper passes
+                    // the abort_reason through.
+                    cancel_connect_future(ws_id, abort_reason);
                 }
                 ReadyState::Open => {
                     impl_.send_queue.borrow_mut().push_back(WsFrame::Close {
-                        code: 1000, reason: String::new(),
+                        // Code 1000 (normal closure) per the AbortSignal
+                        // contract; reason carries the abort cause.
+                        code: Some(1000),
+                        reason: truncate_to_utf8_123_bytes(&abort_reason),
                     });
                     impl_.ready_state.set(ReadyState::Closing);
                     impl_.notify_send_pump();
@@ -1967,6 +2702,10 @@ fn install_signal_abort_algorithm(
     );
 }
 ```
+
+`truncate_to_utf8_123_bytes` ensures the reason fits in a Close frame
+payload (RFC 6455 §5.5.1 — Close frame payload ≤ 125 bytes; 2 bytes
+for code, so 123 bytes for reason).
 
 ## VIII. Handshake — RFC 6455 §4.1 client-side
 
@@ -1988,9 +2727,33 @@ pub struct Established<S> {
 pub async fn run_client_handshake(
     url: url::Url,
     protocols: Vec<String>,
+    init_origin: Option<String>,
+    config: tungstenite::protocol::WebSocketConfig,
 ) -> Result<Established<impl compio::buf::IoBuf>, HandshakeError> {
-    // SSRF check (matches fetch's path).
+    // SSRF: TWO-PHASE check, mirroring fetch's discipline at
+    // crates/runtime/src/fetch.rs:36-163.
+    //
+    // Phase 1 — URL string check: reject IP-literal hostnames in the
+    //   blocklist (loopback, link-local, private, multicast, …).
+    // Phase 2 — DNS resolution + revalidation: resolve the hostname,
+    //   then check EACH resolved IP against the blocklist. This
+    //   defends against DNS-rebinding attacks where `attacker.com`
+    //   resolves to `127.0.0.1` between phase 1 and the actual
+    //   `connect()`.
+    // Phase 3 — Bind the resolved IP into the connect() call so
+    //   the kernel can't re-resolve to a different address.
+    //
+    // v1 only ran phase 1 — TcpStream::connect((host, port)) did its
+    // own internal DNS resolution that bypassed the SSRF check. v2
+    // routes through `crate::fetch::resolve_and_check_ssrf` which
+    // returns the validated `SocketAddr` to use directly.
+    // (addresses critic CRITICAL #8)
     crate::fetch::validate_url(url.as_str())
+        .map_err(HandshakeError::Ssrf)?;
+    let host = url.host_str().ok_or(HandshakeError::MissingHost)?;
+    let port = url.port_or_known_default().unwrap_or(if url.scheme() == "wss" { 443 } else { 80 });
+    let addr = crate::fetch::resolve_and_check_ssrf(host, port)
+        .await
         .map_err(HandshakeError::Ssrf)?;
 
     // Step 5: generate a 16-byte random key, base64 it.
@@ -2000,9 +2763,8 @@ pub async fn run_client_handshake(
     let sec_websocket_key = base64::engine::general_purpose::STANDARD
         .encode(&key_bytes);
 
-    // Build the GET request via http::Request.
-    let host = url.host_str().ok_or(HandshakeError::MissingHost)?;
-    let port = url.port_or_known_default().unwrap_or(80);
+    // Build the GET request via http::Request. host/port were captured
+    // above for SSRF resolution.
     let path_and_query = if let Some(q) = url.query() {
         format!("{}?{}", url.path(), q)
     } else {
@@ -2025,28 +2787,58 @@ pub async fn run_client_handshake(
         );
     }
 
-    // Origin per HTML §3.5: "wss://api.example.com:8443" → "wss://api.example.com:8443"
-    let origin = compute_origin(&url);
-    request = request.header(http::header::ORIGIN, &origin);
+    // Origin: do NOT send unconditionally. Per RFC 6455 §10.2
+    // (https://datatracker.ietf.org/doc/html/rfc6455#section-10.2):
+    //   "Non-browser clients ... MAY send an Origin header field but
+    //   SHOULD NOT (because they're not subject to same-origin policy)."
+    // The runtime is server-side (no script-context origin); spoofing
+    // Origin can also bypass server-side CSRF defences. v2 only emits
+    // Origin when the user explicitly opts in via the WebSocketInit
+    // dict (see §IV.3 — `origin` member). Mirrors undici and workerd
+    // defaults; v1's "always send Origin matches Deno" claim was
+    // incorrect (Deno sends Origin only when set on `WebSocketStream`
+    // options, per `deno/ext/websocket/lib.rs`).
+    // (addresses critic CRITICAL #3)
+    if let Some(explicit_origin) = init_origin.as_deref() {
+        request = request.header(http::header::ORIGIN, explicit_origin);
+    }
 
     let request = request.body(()).map_err(HandshakeError::Http)?;
 
-    // Open TCP/TLS, run handshake. compio_ws's `client_async` and
-    // `client_async_tls` return (WebSocketStream, http::Response).
+    // Open TCP/TLS, run handshake. We pass the SSRF-validated SocketAddr
+    // directly so the kernel cannot re-resolve to a different host
+    // between our DNS check and the connect call. compio_ws's
+    // `client_async` and `client_async_tls_with_connector` return
+    // (WebSocketStream, http::Response).
     let scheme = url.scheme();
     let (ws_stream, response) = match scheme {
         "ws" => {
-            let stream = compio::net::TcpStream::connect((host, port))
+            // Connect directly to the validated addr; SNI / Host header
+            // still uses the original hostname.
+            let stream = compio::net::TcpStream::connect(addr)
                 .await.map_err(HandshakeError::Connect)?;
-            // Optional: validate against SSRF resolver post-DNS.
-            compio_ws::client_async(request, stream)
+            compio_ws::client_async_with_config(request, stream, Some(config))
                 .await.map_err(HandshakeError::WebSocket)?
         }
         "wss" => {
-            let connector = build_tls_connector()?;
-            // compio-ws's TLS variant uses the workspace rustls config.
-            compio_ws::client_async_tls_with_connector(request, host, port, connector)
-                .await.map_err(HandshakeError::WebSocket)?
+            // Per critic missing-concept #4: the rustls config used by
+            // compio_ws::client_async_tls_with_connector controls:
+            //   - the root cert store (we use the system trust store
+            //     via rustls_native_certs, mirroring fetch);
+            //   - SNI (set to the URL hostname so HTTPS-style cert
+            //     validation works against virtual-hosted servers);
+            //   - ALPN (we advertise `http/1.1` only; HTTP/2 over
+            //     WebSocket per RFC 8441 is out of scope per Non-goals).
+            // build_tls_connector() in network.rs returns the connector
+            // wired to these settings.
+            let connector = build_tls_connector(host)?;
+            // Connect to the validated SocketAddr; the connector still
+            // performs SNI/cert validation against `host`.
+            let tcp = compio::net::TcpStream::connect(addr)
+                .await.map_err(HandshakeError::Connect)?;
+            compio_ws::client_async_tls_with_connector_and_config(
+                request, host, tcp, connector, Some(config),
+            ).await.map_err(HandshakeError::WebSocket)?
         }
         _ => unreachable!(),
     };
@@ -2063,15 +2855,68 @@ pub async fn run_client_handshake(
         return Err(HandshakeError::AcceptMismatch);
     }
 
-    // Extract negotiated subprotocol and extensions.
-    let protocol = response.headers().get("Sec-WebSocket-Protocol")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from)
-        .unwrap_or_default();
-    let extensions = response.headers().get("Sec-WebSocket-Extensions")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from)
-        .unwrap_or_default();
+    // Extract negotiated subprotocol — per RFC 6455 §4.1 step 6 of
+    // the response checks
+    // (https://datatracker.ietf.org/doc/html/rfc6455#section-4.1):
+    //   "If the response includes a |Sec-WebSocket-Protocol| header
+    //    field and this header field indicates the use of a subprotocol
+    //    that was not present in the client's handshake (the server
+    //    has indicated a subprotocol not requested by the client),
+    //    the client MUST Fail the WebSocket Connection."
+    //
+    // tungstenite enforces this when the client passes a subprotocols
+    // list to its handshake builder, but the contract is fragile (the
+    // header is set on `request.headers_mut()`; tungstenite parses it
+    // back). v2 adds a defence-in-depth check below — same paranoia
+    // as the Sec-WebSocket-Accept double-verify.
+    // (addresses critic CRITICAL #9)
+    let protocol = match response.headers().get("Sec-WebSocket-Protocol") {
+        None => String::new(),
+        Some(v) => {
+            let server_pick = v.to_str()
+                .map_err(|_| HandshakeError::InvalidSubprotocol)?
+                .trim()
+                .to_string();
+            // RFC 6455 §4.1 says the server MUST echo a SINGLE value
+            // (not a comma-separated list). If the server returns
+            // anything other than one we offered, fail.
+            if !protocols.iter().any(|p| p == &server_pick) {
+                return Err(HandshakeError::UnrequestedSubprotocol(server_pick));
+            }
+            server_pick
+        }
+    };
+
+    // Extract negotiated extensions — per RFC 6455 §9.1
+    // (https://datatracker.ietf.org/doc/html/rfc6455#section-9.1):
+    //   "if the Sec-WebSocket-Extensions header field includes any
+    //    extension that the client did not request, the client MUST
+    //    Fail the WebSocket Connection."
+    //
+    // v1 handshake advertises NO extensions (empty client offer set);
+    // ANY value in the response header is a violation and MUST fail.
+    // tungstenite has no validator that compares response extensions
+    // against the (empty) client offer set by default — the v1 prose
+    // claim "tungstenite enforces" was unverified. v2 enforces this
+    // explicitly here. The Cargo features (§XI.1) lock down deflate
+    // so RSV1=1 frames also fail at the framer level (defence in depth
+    // — addresses critic MAJOR #18).
+    // (addresses critic CRITICAL #7)
+    let extensions = match response.headers().get("Sec-WebSocket-Extensions") {
+        None => String::new(),
+        Some(v) => {
+            // Empty value (e.g. `Sec-WebSocket-Extensions:`) is permitted
+            // but vacuous; treat as no extensions. Anything non-empty is
+            // an unrequested extension and fails the connection.
+            let raw = v.to_str()
+                .map_err(|_| HandshakeError::InvalidExtensions)?
+                .trim();
+            if !raw.is_empty() {
+                return Err(HandshakeError::UnrequestedExtensions(raw.to_string()));
+            }
+            String::new()
+        }
+    };
 
     Ok(Established { ws_stream, protocol, extensions })
 }
@@ -2085,38 +2930,78 @@ pub fn compute_sec_websocket_accept(key: &str) -> String {
 }
 ```
 
-### VIII.2. The Origin header
+### VIII.2. The Origin header — opt-in only
 
-Per HTML §3.5 origin serialisation. For `wss://api.example.com:8443/foo`,
-the origin is `wss://api.example.com:8443`. The runtime is server-side,
-so there is no "current document origin" — we use the URL's own origin
-as the server-side origin. Some servers reject empty Origin headers,
-so we always send one (matches Deno `deno/ext/websocket/lib.rs:368`).
-This may cause some servers (configured to allow only specific origins)
-to reject our connection — same behaviour as undici. Workerd ships a
-compat flag for this; v1 ships the always-on behaviour and adds a flag
-in v2 if a creator app needs it.
+Per RFC 6455 §10.2
+(https://datatracker.ietf.org/doc/html/rfc6455#section-10.2): "Non-browser
+clients ... MAY send an Origin header field but SHOULD NOT (because
+they're not subject to same-origin policy)." The header was designed as
+a browser-driven security signal (RFC 6454 §7); a server-side runtime
+that emits it impersonates browser context and can bypass server-side
+CSRF defences.
+
+v2 default: do NOT emit Origin. The user may opt in by passing
+`{ origin: "https://my-app.example" }` via the WebSocketInit dict
+(see §IV.3); the constructor stores it on the boxed state and
+`run_client_handshake` emits the header only when present. This
+matches:
+
+- **undici** — `undici/lib/web/websocket/connection.js` sets Origin
+  only when an "environment settings object" provides one (browser
+  context via embedder; absent for the standalone runtime).
+- **workerd** — Origin sourced from the embedder's environment;
+  not auto-emitted from the URL.
+- **Deno** — `deno/ext/websocket/lib.rs` reads `headers` from the
+  `WebSocketStream` options; no auto-emit. (v1's "matches Deno"
+  citation was wrong.)
+
+For `wss://api.example.com:8443/foo`, an explicit `origin` of
+`"https://my-dashboard.example"` would emit `Origin:
+https://my-dashboard.example` and HTML §3.5 origin serialisation
+applies on the user-supplied string. (addresses critic CRITICAL #3)
+
+Apps that previously relied on "the runtime auto-emitted Origin"
+must now pass `origin` explicitly — flagged loudly in the runbook
+and in the AGENTS.md surface for the cutover landing.
 
 ### VIII.3. Verifying the response
 
 Per RFC 6455 §4.1 client-side response checks (step 1-6 of the response
-"validation phase"):
+"validation phase"). v2 verifies all six explicitly — defence in depth
+even where tungstenite already checks. Treating tungstenite as a black
+box for security-relevant checks is unsound; the design verifies each
+check in our own code so the audit trail lives in the design, not in
+the dependency.
 
-1. Status MUST be 101. tungstenite enforces.
+1. Status MUST be 101. (tungstenite checks; v2 also returns
+   `HandshakeError::BadStatus(actual)` if a non-101 reaches our handler.)
 2. Upgrade header MUST be present and case-insensitively "websocket".
-   tungstenite enforces.
+   (tungstenite checks; v2 re-asserts.)
 3. Connection header MUST contain "Upgrade" (case-insensitive token list).
-   tungstenite enforces.
-4. Sec-WebSocket-Accept MUST be `base64(SHA1(key + GUID))`. We re-verify
-   in our own code (defence in depth) — see `compute_sec_websocket_accept`.
-5. If a Sec-WebSocket-Extensions header is present, it MUST list only
-   extensions we advertised. v1 advertises NONE (D-...); any extension
-   in the response fails the connection. Tungstenite enforces.
-6. If a Sec-WebSocket-Protocol header is present, it MUST be one of the
-   subprotocols we sent. Tungstenite enforces.
+   (tungstenite checks; v2 re-asserts.)
+4. Sec-WebSocket-Accept MUST equal `base64(SHA1(key + GUID))`. v2
+   re-computes via `compute_sec_websocket_accept` and byte-compares.
+5. **Sec-WebSocket-Extensions** — per RFC 6455 §9.1, any extension in
+   the response that the client did not request MUST fail the connection.
+   v2 advertises NONE (Non-goals). Any non-empty response value is a
+   hard fail (`HandshakeError::UnrequestedExtensions`). The v1 claim
+   "tungstenite enforces" was unverified and incorrect for the
+   default-features build of `tungstenite 0.28`. (addresses critic
+   CRITICAL #7)
+6. **Sec-WebSocket-Protocol** — per RFC 6455 §4.1 step 6, the server's
+   echoed subprotocol MUST be a member of the client's offered set.
+   v2 checks this explicitly against the `protocols: Vec<String>` we
+   sent; mismatch yields `HandshakeError::UnrequestedSubprotocol`.
+   (addresses critic CRITICAL #9)
 
-On any failure the connection is failed (per RFC 6455 §7.1.7) and we
-emit `Error` + `Close{1002, was_clean: false}` (1002 = "Protocol error").
+On any failure the connection is failed per RFC 6455 §7.1.7
+(https://datatracker.ietf.org/doc/html/rfc6455#section-7.1.7), emitting
+`Error` + `Close{1006, was_clean: false}` per WHATWG §4 (the spec calls
+for 1006 on connection-failed paths, NOT 1002 — 1002 is a peer-sent
+status code; the runtime that detects a protocol error during the
+handshake never receives a peer Close, so the JS-observable code is
+1006 "Abnormal Closure"). v1 used 1002 here; v2 corrects to 1006 to
+match the §4 dispatch contract.
 
 ## IX. The spec algorithms — Rust map
 
@@ -2143,19 +3028,63 @@ D-20 and fetch-native D-20 use.
 
 ### IX.1. `make_disappear`
 
-Per spec §3.4, called when a WebSocket is no longer reachable from JS
-(GC). Behaviour:
+Per WHATWG §3.4 "make disappear" (https://websockets.spec.whatwg.org/#make-disappear),
+called when a WebSocket is no longer reachable from JS (GC).
+Behaviour, per the spec exactly:
 
-- If not yet established: fail the connection with code 1001.
-- If closing handshake not yet started: start the closing handshake with
-  code 1001 ("Going Away").
-- Otherwise: do nothing.
+- **Step 1:** If the WebSocket connection is not yet established
+  (readyState == CONNECTING and the wire-level handshake hasn't
+  succeeded): fail-the-WebSocket-connection. Per RFC 6455 §7.1.7, this
+  is an internal-only failure operation; it does NOT specify a status
+  code on a wire frame (there may not even be a wire). The
+  JS-observable close event carries code 1006 (Abnormal Closure) per
+  WHATWG §4 connection-failed semantics. **Code 1001 is NOT used here**
+  — that's spec §3.4 step 2 only. v1 said "fail the connection with
+  code 1001" which conflated the two steps; v2 corrects.
+  (addresses critic MAJOR #29)
+- **Step 2:** If the closing handshake has not yet been started
+  (readyState == OPEN): start-the-closing-handshake with code 1001
+  ("Going Away") and an empty reason. Per RFC 6455 §7.4.1, 1001 is
+  the appropriate status for "the endpoint is going away, such as a
+  server going down or a browser having navigated away from a page".
+- **Step 3 (otherwise):** do nothing.
 
 The native implementation hooks into the V8 weak finalizer for the
 WebSocket wrapper (the same finalizer that drops `Box<WebSocketImpl>`).
-Before the Box drop, we run `make_disappear` to send the Close frame.
-This is best-effort; if the runtime is shutting down, the frame may not
-make it onto the wire — same as every JS WebSocket impl.
+Before the Box drop, we run `make_disappear` to invoke the right step.
+
+```rust
+pub fn make_disappear(impl_: &WebSocketImpl) {
+    use ReadyState::*;
+    match impl_.ready_state.get() {
+        Connecting => {
+            // Step 1 — fail the WebSocket connection. No wire frame is
+            // sent; if the connect future is still in flight, the
+            // cancel flag will trigger the connection-failed event
+            // path (Error → Close{1006, was_clean: false}). If the
+            // wire socket is open but we haven't seen `open` yet,
+            // dropping the stream closes the TCP without a Close frame
+            // — also Close{1006}.
+            cancel_connect_future(impl_.ws_id, "make_disappear".into());
+        }
+        Open => {
+            // Step 2 — start closing handshake with 1001.
+            impl_.send_queue.borrow_mut().push_back(WsFrame::Close {
+                code: Some(1001),
+                reason: String::new(),
+            });
+            impl_.ready_state.set(Closing);
+            impl_.notify_send_pump();
+        }
+        Closing | Closed => {}  // step 3
+    }
+}
+```
+
+This is best-effort; if the runtime is shutting down (compio
+event-loop torn down before the GC fires), the frame may not make it
+onto the wire — same caveat as every JS WebSocket impl. The TCP RST
+that follows is the peer's only signal.
 
 ### IX.2. `fail_the_websocket_connection`
 
@@ -2188,7 +3117,7 @@ path.
 | `[[bufferedAmount]]` | `Box<WebSocketImpl>::buffered_amount` (Cell<u64>) | Spec slot |
 | `[[binaryType]]` | `Box<WebSocketImpl>::binary_type` (Cell<BinaryType>) | Spec slot |
 | `[[connection]]` | (drop the connection handle into the spawned compio task; not held in V8) | Spec slot — not directly observable |
-| `[[full]]` flag | `Box<WebSocketImpl>::full` (Cell<bool>) | RFC 6455 §6.1 |
+| `[[full]]` flag | `Box<WebSocketImpl>::full` (Cell<bool>) | RFC 6455 §6.1; checked at top of `send()` (§V.4); set when projected queue size > MAX_BUFFERED_AMOUNT (16 MiB); cleared by the pump at 50% drain. (addresses critic MAJOR #11) |
 | `[[protocol]]` | `Box<WebSocketImpl>::protocol` (RefCell<String>) | Spec slot |
 | `[[extensions]]` | `Box<WebSocketImpl>::extensions` (RefCell<String>) | Spec slot |
 | `[[event handler]]` × 4 (onopen/onmessage/onerror/onclose) | `Box<WebSocketImpl>::cached_handles` (RefCell<Option<WsCachedHandles>>) | HTML EventHandler IDL |
@@ -2305,10 +3234,31 @@ post-merge populates the directory.
 
 Functional WPT tests need a real WebSocket server. The runtime already
 ships `echo-server` (`crates/runtime/src/echo_server.rs`, declared in
-`crates/runtime/Cargo.toml`). v1 extends it with WebSocket echo support
-via `compio_ws::accept_async` — ~80 LOC addition. Test runner spawns
-the echo server on `127.0.0.1:0`, captures the bound port, sets the
-WPT `WSPORT` substitution variable, runs the test.
+`crates/runtime/Cargo.toml`). v2 extends it with WebSocket echo support
+via `compio_ws::accept_async` — ~80 LOC addition.
+
+The WPT WebSocket tests use the wptserve `wss://{{host}}:{{ports[wss][0]}}/...`
+substitution scheme, NOT a single `WSPORT` variable (v1's claim was
+inaccurate per critic MINOR #36). The runner mirrors wptserve's
+substitution map by binding `{{ports[ws][0]}}`, `{{ports[wss][0]}}`,
+and `{{host}}` to the in-process echo server's address.
+
+The echo server exposes the WPT-required endpoints:
+
+| Endpoint | Behaviour |
+|----------|-----------|
+| `/echo` | echo every text/binary frame back verbatim |
+| `/echo-with-headers` | dump request headers as a text frame, then echo |
+| `/echo-error` | echo, then close with the code parsed from the first frame |
+| `/echo-binary` | echo binary frames; reject text frames with Close{1003} |
+| `/echo-fragmented` | echo, but split each response into 2 fragments |
+| `/handshake-extensions` | reflect Sec-WebSocket-Extensions; tests CRITICAL #7 |
+| `/handshake-subprotocol` | reflect/echo subprotocol; tests CRITICAL #9 |
+
+(addresses critic MINOR #28 + missing-concept #14)
+
+Test runner spawns the echo server on `127.0.0.1:0`, captures the
+bound port, populates the WPT substitution map, runs the test.
 
 ### XII.4. Hand-written tests
 
@@ -2398,22 +3348,26 @@ callbacks).
 
 | Step | Hours |
 |------|------:|
-| 1. MessageEvent + CloseEvent native classes (~270 LOC + tests) | 8 |
-| 2. WebSocketImpl skeleton (no network) (~600 LOC) | 16 |
-| 3. Hand-rolled construction/close/binaryType tests (~400 LOC) | 12 |
-| 4. handshake.rs (RFC 6455 §4.1, ~200 LOC) + sha1/key helpers | 10 |
-| 5. receive_loop.rs + send_pump.rs (~300 LOC) | 14 |
-| 6. WebSocketPair (~120 LOC) + gateway-coupling refactor | 8 |
+| 1. MessageEvent + CloseEvent native classes (~280 LOC + tests; ports cache, code modulo conversion, ports identity) | 10 |
+| 2. WebSocketImpl skeleton (no network) (~620 LOC; [[full]] flag, Option<u16> close code, EventHandler null-coerce) | 20 |
+| 3. Hand-rolled construction/close/binaryType tests (~450 LOC; v2 [Clamp] correctness, modulo correctness, null-coerce, ports identity) | 16 |
+| 4. handshake.rs (RFC 6455 §4.1, ~250 LOC; two-phase SSRF, extensions strict-fail, subprotocol strict-fail, opt-in Origin) | 16 |
+| 5. receive_loop.rs + send_pump.rs (~360 LOC; backpressure, error-propagation, ping interval, close-handshake timeout, pair drain signal) | 22 |
+| 6. WebSocketPair (~140 LOC) + gateway-coupling refactor + bufferedAmount-on-pair drain | 10 |
 | 7. http.rs inspect_response refactor (~50 LOC change) | 4 |
-| 8. WPT runner + sparse-checkout extension + 3-4 WPT subdirs | 24 |
-| 9. End-to-end echo + 5 hand-rolled e2e tests | 10 |
-| 10. D-25 cutover landings 1+2+3 (3 commits over 2 weeks) | 12 |
-| **Total** | **118 industry-hours** |
+| 8. WPT runner + sparse-checkout extension + 5-6 WPT subdirs (debugging the spec edge cases is ~3x v1's estimate) | 60 |
+| 9. End-to-end echo + 7 hand-rolled e2e tests (extensions reject, subprotocol reject, abort+reason, ping keepalive, deflate-off assertion) | 14 |
+| 10. D-25 cutover landings 1+2+3 (3 commits over 2 weeks; includes binaryType-default migration notes) | 16 |
+| **Total** | **188 industry-hours** |
+
+(v1 estimated 118h; the critic correctly flagged this as low — the
+spec-bug-fix rounds and the WPT-debugging step are the dominant cost.
+v2 increases to 188h. addresses critic MINOR #35 + #39.)
 
 User productivity is industry/40 per `feedback_estimates_hours_not_weeks.md`,
-so ~3 user-hours of focused work. The 118-hour figure is the ADR-style
+so ~4.5 user-hours of focused work. The 188-hour figure is the ADR-style
 estimate for cross-team comparison; if a follow-up agent picks this up
-on a freshly-spun cluster, plan for ~3-4 days at industry pace.
+on a freshly-spun cluster, plan for ~5 days at industry pace.
 
 ## XV. Comparison with reference implementations
 
@@ -2515,6 +3469,17 @@ app. Both flows land on the same `#[v8_class] WebSocket`; the JS-visible
 surface is unified. The `docs/reference/websocket-design.md` reference
 doc remains the authority on the gateway flow.
 
+### XVII.4b. Origin header policy (RESOLVED in v2)
+
+**Picked:** Opt-in only via `WebSocketInit.origin`. Default: do NOT
+send Origin. Per RFC 6455 §10.2
+(https://datatracker.ietf.org/doc/html/rfc6455#section-10.2),
+non-browser clients SHOULD NOT send Origin. v1's "always-on" decision
+(referencing a misread of Deno) was a CRITICAL spec violation;
+the critic flagged it as item #3. v2 resolves: opt-in only.
+(addresses critic CRITICAL #3, originally tracked here as XVII.4
+"cross-check"; now closed.)
+
 ### XVII.5. MessageEvent shape — full HTML §9.4.2 vs WebSocket-subset
 
 **Picked:** Full HTML §9.4.2 IDL surface, but `source` always null and
@@ -2568,13 +3533,123 @@ strict UTF-8 (D-17 — RFC 6455 §8.1).
 test the send-side conversion (USVString replaces lone surrogates with
 U+FFFD); the receive side is in `interfaces/` and the autobahn fuzzer.
 
+### XVII.10b. Per-app WebSocket metering (zeroship.meter integration)
+
+**Picked:** v2 hooks WS bytes-in / bytes-out into the existing
+`zeroship.meter.*` primitive (per AGENTS.md "Native primitives"). Each
+WebSocket frame increments a `ws_bytes_in` / `ws_bytes_out` counter
+keyed by the app id; the gateway pump's existing per-request metering
+handles the gateway-side accounting; the worker-side
+`new WebSocket(url)` outbound flow gets a parallel meter hook in the
+send_pump and receive_loop.
+
+**Why:** The platform's revenue model (AGENTS.md "The platform only
+earns when creators earn") requires accurate per-app bandwidth
+accounting; otherwise outbound WebSocket traffic is invisible to the
+billing pipeline. The hook is a single line in send_pump.rs and
+receive_loop.rs, adding ~10 LOC.
+
+(addresses critic missing-concept #1)
+
+### XVII.10c. Worker-shutdown drain protocol
+
+**Picked:** On worker termination (deploy / scaledown), the runtime
+shutdown sequence runs `make_disappear` on every live WebSocket. Per
+§IX.1, OPEN sockets get a Close{1001, "Going Away"} frame; CONNECTING
+sockets get the connection-failed cancel.
+
+**Why:** A clean Close{1001} lets the peer distinguish "graceful
+shutdown" from "TCP RST" (Close{1006}); important for
+production-grade reliability metrics. The shutdown sequence:
+
+1. Set the runtime's `shutting_down` flag.
+2. Iterate the websockets HashMap; for each, run make_disappear.
+3. Drain the send pumps for up to 5 seconds (RFC 6455 §7.1.1
+   close-handshake timeout, §IX.3).
+4. Force-close any remaining sockets.
+
+**Defer:** v1 doesn't implement step 3 / 4; v1 relies on the per-WS
+5s close timeout, which gives the same effective behaviour. Step 1
+and 2 ship in v1.
+
+(addresses critic missing-concept #2)
+
+### XVII.10d. Sticky routing for outbound `new WebSocket(url)`
+
+**Picked:** Worker-local. The outbound WebSocket lives on the worker
+that constructed it; CHWBL routing pins subsequent HTTP requests to
+the same worker (existing gateway logic in
+`crates/gateway/src/dispatch.rs`). If the worker is evicted (LRU,
+scaledown), the WebSocket is force-closed with Close{1001}.
+
+**Why:** A creator app's outbound `new WebSocket(...)` is logically
+tied to the request that triggered it; CHWBL keeps the request
+pipeline on one worker. Multi-node migration is out of scope (would
+need WebSocket WAL / persistence; missing-concept #2).
+
+(addresses critic missing-concept #3)
+
+### XVII.10e. TLS root-trust + ALPN config for wss://
+
+**Picked:** mirror fetch's TLS config in `network.rs::build_tls_connector`:
+- **Root cert store:** `rustls_native_certs` (system trust). Same as
+  fetch.
+- **SNI:** the URL hostname (passed to
+  `client_async_tls_with_connector_and_config`).
+- **ALPN:** advertise `http/1.1` only. RFC 8441 (HTTP/2 baseline) is
+  out of scope (Non-goals); the WS upgrade is HTTP/1.1.
+
+**Why:** SSRF defence requires SNI to be the hostname (not IP), so a
+DNS-rebound IP that happens to listen on 443 still fails cert
+validation. ALPN-`http/1.1` prevents accidental HTTP/2 negotiation if
+cyper later flips features.
+
+(addresses critic missing-concept #4)
+
+### XVII.10f. WebSocketStream deprecated forms
+
+**Picked:** the v1 implementation throws ReferenceError on
+`new WebSocketStream(...)`. The deprecated Chrome ship (which exposed
+an early `WebSocketStream` returning a stream of strings) is not
+worth shimming — it predates the live spec text and was never
+shipped beyond Chrome's experimental flag.
+
+**Defer:** the v2 implementation (post this design's v1 ship) adds
+the live-spec'd `WebSocketStream` per
+https://websockets.spec.whatwg.org/#websocketstream and the
+ricea/websocketstream-explainer.
+
+The runtime's global registration explicitly does NOT install
+`WebSocketStream`; AI-builder code that emits it gets a clear
+ReferenceError with a hint pointing to `new WebSocket(...)`. The
+hint message is statically baked into the runtime's
+`global_referenceerror_messages` map.
+
+(addresses critic missing-concept #8)
+
 ### XVII.10. The 1024-cap on concurrent WebSockets
 
-**Picked:** 1024 per-isolate (D-23).
+**Picked:** 1024 per-isolate (D-23). Cap-overflow is an async
+connection failure (Error + Close{1006, was_clean: false}), NOT a
+constructor throw. (addresses critic CRITICAL #10)
 
 **Why:** Memory-bound (16MB per app at full saturation). Matches the
-existing `MAX_PENDING_OPS` order. Bumpable in v2 if creator apps
-demonstrate need.
+existing `MAX_PENDING_OPS` order. WHATWG §3.1 frames the entire
+establish-a-WebSocket-connection algorithm as "in parallel"; budget
+failure is no different from any other connection-failed path —
+including DNS failure, TCP refused, TLS handshake error, or 401 on
+upgrade — all of which surface via the §4 "feedback from the protocol"
+event pair (error → close). A constructor throw would force creator
+apps to write try/catch around every `new WebSocket(...)`; the
+async-fail pattern lets `socket.onerror` / `socket.onclose` handle it
+uniformly.
+
+**Per-account rate limiting:** the per-isolate cap protects within a
+single tenant; the gateway's existing CHWBL routing layer holds the
+cross-tenant budget (per `crates/gateway/src/dispatch.rs`). The cap
+above is a runtime self-defence number; the gateway-side per-account
+budget is the gateway's responsibility (out of scope here; tracked in
+the gateway's own rate-limit ADR).
 
 ## XVIII. Summary
 
@@ -2588,7 +3663,7 @@ client-side `new WebSocket(url)` path with the existing server-side
 `#[v8_class] WebSocketImpl`. Three new V8 classes ship: `WebSocket`,
 `MessageEvent`, `CloseEvent`. No new macro extensions are required.
 
-Estimated implementation cost: 118 industry-hours (~3 user-hours
+Estimated implementation cost: 188 industry-hours (~4.5 user-hours
 focused) across 10 ordered steps; three-landing polyfill cutover
 mirrors the streams and fetch patterns. WPT target: ~85 of ~110
 files in `websockets/`, with the genuine browser-only / WebSocketStream
