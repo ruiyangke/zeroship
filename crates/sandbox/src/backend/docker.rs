@@ -434,6 +434,58 @@ impl DockerBackend {
             pubkey_fp,
         })
     }
+
+    /// Persist-on-mint helper for the docker backend. See
+    /// [`super::Backend::seal_with_preview_state`] for the contract.
+    /// Returns `Ok(false)` when persistence is disabled OR when the
+    /// agent-launch path didn't materialize for this sandbox (no
+    /// signing_key / agent_url to seal).
+    pub async fn seal_with_preview_state(
+        &self,
+        sandbox_id: Uuid,
+        info: &super::SandboxInfo,
+        secrets: Option<crate::persist::SealedPreviewSecrets>,
+        audit: Vec<crate::persist::SealedAuditEntry>,
+    ) -> Result<bool, String> {
+        let Some(persist) = self.persist.clone() else {
+            return Ok(false);
+        };
+        let (sk_bytes, agent_url) = {
+            let guard = self.state.read().unwrap();
+            let Some(s) = guard.get(&sandbox_id) else {
+                return Ok(false);
+            };
+            let Some(sk) = &s.signing_key else {
+                return Ok(false);
+            };
+            let Some(url) = &s.agent_url else {
+                return Ok(false);
+            };
+            (sk.to_bytes(), url.clone())
+        };
+        let pubkey_fp = sig::pubkey_fingerprint(
+            &SigningKey::from_bytes(&sk_bytes).verifying_key(),
+        );
+        let record = crate::persist::SealedAuth {
+            version: crate::persist::SEAL_VERSION,
+            sandbox_id: sandbox_id.to_string(),
+            user_id: info.user_id.clone(),
+            project_id: info.project_id.clone(),
+            backend: "docker".to_string(),
+            signing_key_bytes: sk_bytes,
+            vm_index: None,
+            agent_url: Some(agent_url),
+            pubkey_fp,
+            created_at_secs: info.created_at_secs,
+            preview_secrets: secrets,
+            preview_audit: audit,
+        };
+        persist
+            .seal(sandbox_id, &record)
+            .await
+            .map(|()| true)
+            .map_err(|e| format!("seal failed: {e}"))
+    }
 }
 
 // ─── docker CLI shell-outs ──────────────────────────────────────

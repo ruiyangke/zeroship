@@ -366,4 +366,49 @@ impl Backend {
             )),
         }
     }
+
+    /// Seal an updated `SealedAuth` for `sandbox_id` that carries the
+    /// caller-provided preview-share state (`preview_secrets`,
+    /// `preview_audit`). Used by the share-token mint / rotate
+    /// handlers to persist newly-minted secrets + audit rows so a
+    /// controller crash mid-flight doesn't lose them.
+    ///
+    /// `info` is the registry's [`SandboxInfo`] for the sandbox —
+    /// supplies `user_id` / `project_id` / `created_at_secs` since
+    /// not every backend stores those internally (Docker doesn't).
+    ///
+    /// Returns:
+    /// - `Ok(true)` — record sealed.
+    /// - `Ok(false)` — persistence disabled (`SANDBOX_PERSIST_AUTH != 1`)
+    ///   OR sandbox unknown to the backend; nothing written. Caller
+    ///   treats both as best-effort no-ops.
+    /// - `Err(e)` — backend was supposed to seal but I/O / encryption
+    ///   failed. Caller logs at WARN and proceeds (Phase-3 mint MUST
+    ///   NOT fail an API call on seal failure — the record's
+    ///   in-memory state is still authoritative for live traffic).
+    ///
+    /// **Concurrency.** Each backend's session map is read under its
+    /// own lock; the sealed record is rewritten in full (no partial
+    /// updates). Two concurrent share-mints on the same sandbox each
+    /// re-seal the full state; last-writer-wins on disk and matches
+    /// the in-memory ring's last-writer-wins.
+    pub async fn seal_with_preview_state(
+        &self,
+        sandbox_id: Uuid,
+        info: &SandboxInfo,
+        secrets: Option<crate::persist::SealedPreviewSecrets>,
+        audit: Vec<crate::persist::SealedAuditEntry>,
+    ) -> Result<bool, String> {
+        match self {
+            Self::Docker(b) => {
+                b.seal_with_preview_state(sandbox_id, info, secrets, audit).await
+            }
+            Self::K8s(b) => {
+                b.seal_with_preview_state(sandbox_id, info, secrets, audit).await
+            }
+            Self::NomadCh(b) => {
+                b.seal_with_preview_state(sandbox_id, info, secrets, audit).await
+            }
+        }
+    }
 }

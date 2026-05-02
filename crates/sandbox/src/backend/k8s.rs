@@ -736,6 +736,51 @@ impl K8sBackend {
             pubkey_fp,
         })
     }
+
+    /// Persist-on-mint helper for the k8s backend. See
+    /// [`super::Backend::seal_with_preview_state`] for the contract.
+    /// Returns `Ok(false)` when persistence is disabled or the sandbox
+    /// is unknown to the backend.
+    pub async fn seal_with_preview_state(
+        &self,
+        sandbox_id: Uuid,
+        info: &super::SandboxInfo,
+        secrets: Option<crate::persist::SealedPreviewSecrets>,
+        audit: Vec<crate::persist::SealedAuditEntry>,
+    ) -> Result<bool, String> {
+        let Some(persist) = self.persist.clone() else {
+            return Ok(false);
+        };
+        let (sk_bytes, agent_url) = {
+            let guard = self.state.read().unwrap();
+            let Some(s) = guard.get(&sandbox_id) else {
+                return Ok(false);
+            };
+            (s.signing_key.to_bytes(), s.agent_url.clone())
+        };
+        let pubkey_fp = sig::pubkey_fingerprint(
+            &SigningKey::from_bytes(&sk_bytes).verifying_key(),
+        );
+        let record = crate::persist::SealedAuth {
+            version: crate::persist::SEAL_VERSION,
+            sandbox_id: sandbox_id.to_string(),
+            user_id: info.user_id.clone(),
+            project_id: info.project_id.clone(),
+            backend: "k8s".to_string(),
+            signing_key_bytes: sk_bytes,
+            vm_index: None,
+            agent_url: Some(agent_url),
+            pubkey_fp,
+            created_at_secs: info.created_at_secs,
+            preview_secrets: secrets,
+            preview_audit: audit,
+        };
+        persist
+            .seal(sandbox_id, &record)
+            .await
+            .map(|()| true)
+            .map_err(|e| format!("seal failed: {e}"))
+    }
 }
 
 // ─── create-time bookkeeping ────────────────────────────────────

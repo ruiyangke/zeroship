@@ -166,8 +166,41 @@ fn make_state(
     agent_port: u16,
     sk: SigningKey,
 ) -> (Arc<zeroship_sandbox::AppState>, Uuid) {
+    make_state_inner(token, user_id, agent_port, sk, None)
+}
+
+/// Variant of [`make_state`] that wires a real `Persistence` handle
+/// into the backend; used by the persist-on-mint regression tests.
+/// Returns `(state, sbx_id, persist_dir)` so the test can read back
+/// the sealed file directly to confirm round-trip.
+#[allow(clippy::type_complexity)]
+fn make_state_with_persist(
+    token: &str,
+    user_id: &str,
+    agent_port: u16,
+    sk: SigningKey,
+) -> (Arc<zeroship_sandbox::AppState>, Uuid, std::path::PathBuf, [u8; 32]) {
+    let aead = [0x9Au8; 32];
+    let dir = std::env::temp_dir()
+        .join(format!("zsbx-share-mint-persist-{}", Uuid::now_v7().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let persist = Arc::new(zeroship_sandbox::persist::Persistence::new(
+        dir.clone(),
+        zeroship_sandbox::persist::AeadKey::from_bytes(aead),
+    ));
+    let (state, id) = make_state_inner(token, user_id, agent_port, sk, Some(persist));
+    (state, id, dir, aead)
+}
+
+fn make_state_inner(
+    token: &str,
+    user_id: &str,
+    agent_port: u16,
+    sk: SigningKey,
+    persist: Option<Arc<zeroship_sandbox::persist::Persistence>>,
+) -> (Arc<zeroship_sandbox::AppState>, Uuid) {
     let cfg = make_cfg(token);
-    let backend = Backend::from_config(&cfg).expect("backend");
+    let backend = Backend::from_config_with_persist(&cfg, persist).expect("backend");
     let sandbox_id = Uuid::now_v7();
     if let Backend::NomadCh(b) = &backend {
         b._test_inject_sandbox(
@@ -1030,4 +1063,106 @@ async fn cross_creator_authorize_returns_404_uniform() {
         .to_request();
     let resp = test::call_service(&app_b, req).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// Persist-on-mint end-to-end: POST /share through the real handler
+/// triggers `persist_preview_state` which calls
+/// `Backend::seal_with_preview_state`. We then unseal the file and
+/// confirm the freshly-minted token's audit row + the new
+/// `PreviewSecrets` ring round-trip — i.e. a controller crash mid-
+/// flight wouldn't lose the just-issued token's metadata.
+#[ntex::test]
+async fn mint_endpoint_seals_preview_state_to_disk() {
+    use zeroship_sandbox::persist::{unseal_one, AeadKey};
+
+    let sk = SigningKey::from_bytes(&[60u8; 32]);
+    let agent = FixtureAgent::spawn(AgentReply { status: 200, body: vec![] });
+    let (state, id, persist_dir, aead) =
+        make_state_with_persist("tok", "alice", agent.port, sk);
+    let app = make_app!(state.clone());
+
+    let path = format!("/sandboxes/{id}/preview/5173/share?user_id=alice");
+    let req = test::TestRequest::post()
+        .uri(&path)
+        .header("Authorization", "Bearer tok")
+        .set_json(&serde_json::json!({"expires_in_secs": 3600, "scope": "ro"}))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = test::read_body(resp).await;
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let token_id_wire = body["token_id"].as_str().unwrap().to_string();
+    let raw_tid = token_id_wire.strip_prefix("shr_").unwrap();
+
+    // Read back the sealed file directly (simulates controller restart).
+    let sealed_path = persist_dir
+        .join("sealed-records")
+        .join(zeroship_sandbox::persist::seal_filename_for(id));
+    assert!(
+        sealed_path.exists(),
+        "POST /share must persist-on-mint (sealed file at {sealed_path:?})"
+    );
+    let key = AeadKey::from_bytes(aead);
+    let reread = unseal_one(&sealed_path, &key).expect("unseal");
+    assert_eq!(reread.sandbox_id, id.to_string());
+    let ring = reread.preview_secrets.expect("ring sealed on mint");
+    assert_eq!(ring.sv_current, 1);
+    assert_eq!(reread.preview_audit.len(), 1, "audit row sealed");
+    assert_eq!(reread.preview_audit[0].token_id, raw_tid);
+    assert_eq!(reread.preview_audit[0].port, 5173);
+    assert_eq!(reread.preview_audit[0].scope, "ro");
+    let _ = std::fs::remove_dir_all(&persist_dir);
+}
+
+/// Persist-on-rotate: DELETE /share rebumps the sealed record with
+/// the new `(sv_current, audit=cleared)` state. The sandbox itself
+/// stays alive — the sealed record is updated, NOT removed.
+#[ntex::test]
+async fn delete_endpoint_seals_post_rotate_state_to_disk() {
+    use zeroship_sandbox::persist::{unseal_one, AeadKey};
+
+    let sk = SigningKey::from_bytes(&[61u8; 32]);
+    let agent = FixtureAgent::spawn(AgentReply { status: 200, body: vec![] });
+    let (state, id, persist_dir, aead) =
+        make_state_with_persist("tok", "alice", agent.port, sk);
+    let app = make_app!(state.clone());
+
+    // 1. Mint a token first so there's audit content + sv_current=1.
+    let path = format!("/sandboxes/{id}/preview/5173/share?user_id=alice");
+    let req = test::TestRequest::post()
+        .uri(&path)
+        .header("Authorization", "Bearer tok")
+        .set_json(&serde_json::json!({"expires_in_secs": 3600, "scope": "ro"}))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 2. DELETE — explicit rotate-and-clear (zero-grace).
+    let req = test::TestRequest::delete()
+        .uri(&format!(
+            "/sandboxes/{id}/preview/5173/share?user_id=alice"
+        ))
+        .header("Authorization", "Bearer tok")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 3. Sealed file should reflect the post-rotate state: bumped
+    //    sv_current AND empty audit (the DELETE handler clears the
+    //    audit table; the seal helper re-snapshots from the registry).
+    let sealed_path = persist_dir
+        .join("sealed-records")
+        .join(zeroship_sandbox::persist::seal_filename_for(id));
+    assert!(sealed_path.exists(), "DELETE persists the rotated state");
+    let reread = unseal_one(&sealed_path, &AeadKey::from_bytes(aead)).expect("unseal");
+    let ring = reread.preview_secrets.expect("ring still sealed post-rotate");
+    assert_eq!(
+        ring.sv_current, 2,
+        "DELETE bumps secret_version_current to 2"
+    );
+    assert!(
+        reread.preview_audit.is_empty(),
+        "explicit DELETE clears the audit table (zero-grace)"
+    );
+    let _ = std::fs::remove_dir_all(&persist_dir);
 }

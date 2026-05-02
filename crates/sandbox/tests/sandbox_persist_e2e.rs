@@ -311,6 +311,167 @@ fn sealed_filename_for_evil_string_is_refused() {
     assert!(err.contains("not a valid UUID"));
 }
 
+/// Phase-3 persist-on-mint regression — `Backend::seal_with_preview_state`
+/// captures the registry's current `(secrets, audit)` snapshot into the
+/// per-sandbox sealed record. After a simulated controller restart
+/// (i.e. unseal the file the seal helper wrote), the audit metadata
+/// + `PreviewSecrets` ring must round-trip byte-for-byte.
+///
+/// Setup pattern: the nomad-ch backend exposes `_test_inject_sandbox`
+/// for fixture-driven tests; we plug a real `Persistence` handle into
+/// the backend and call the seal helper directly. No agent fixture
+/// required — the seal path doesn't talk to the agent.
+#[compio::test]
+async fn persist_on_mint_seals_preview_state_for_restart() {
+    use zeroship_sandbox::backend::SandboxInfo;
+    use zeroship_sandbox::persist::{unseal_one, Persistence, SealedAuditEntry, SealedPreviewSecrets};
+    use zeroship_sandbox::backend::nomad_ch::NomadCHBackend;
+
+    let dir = fresh_dir("mint-seal");
+    let aead_key_bytes = [0xAEu8; 32];
+    let persist = Arc::new(Persistence::new(dir.clone(), AeadKey::from_bytes(aead_key_bytes)));
+
+    // Build the backend with persistence wired up.
+    let backend = NomadCHBackend::new(make_cfg("nomad-ch"), Some(persist.clone())).unwrap();
+
+    let id = Uuid::now_v7();
+    let sk = SigningKey::from_bytes(&[0xab; 32]);
+    let fp = sig::pubkey_fingerprint(&sk.verifying_key());
+    backend._test_inject_sandbox(id, "alice", sk, "http://10.99.107.2:7777".into(), 7);
+
+    let info = SandboxInfo {
+        sandbox_id: id.to_string(),
+        user_id: "alice".into(),
+        project_id: "p1".into(),
+        backend: "nomad-ch".into(),
+        backend_hint: "test".into(),
+        created_at_secs: 1_700_000_000,
+        last_used_at_secs: 1_700_000_000,
+    };
+
+    // Caller-supplied snapshot — what the registry would emit via
+    // `preview_state_for_seal` after the in-memory `mint` /
+    // `append_audit` calls.
+    let secrets = Some(SealedPreviewSecrets {
+        sv_current: 1,
+        current: [0x11; 32],
+        previous: None,
+        grace_until_unix: None,
+    });
+    let audit = vec![SealedAuditEntry {
+        token_id: "abc123".into(),
+        port: 5173,
+        issued_at_unix: 1_700_000_500,
+        expires_at_unix: 1_700_004_100,
+        scope: "ro".into(),
+        secret_version: 1,
+        iss: Some("usr_alice".into()),
+        last_used_at_unix: 0,
+        use_count: 0,
+    }];
+
+    let wrote = backend
+        .seal_with_preview_state(id, &info, secrets.clone(), audit.clone())
+        .await
+        .expect("seal-with-preview-state");
+    assert!(wrote, "persist enabled → record written");
+
+    // Simulate a controller restart by re-reading the file directly.
+    let sealed_dir = dir.join("sealed-records");
+    let filename = zeroship_sandbox::persist::seal_filename_for(id);
+    let path = sealed_dir.join(&filename);
+    assert!(path.exists(), "seal MUST write to sealed-records/<digest>.sealed");
+
+    let aead_key = AeadKey::from_bytes(aead_key_bytes);
+    let reread = unseal_one(&path, &aead_key).expect("unseal");
+
+    assert_eq!(reread.sandbox_id, id.to_string());
+    assert_eq!(reread.user_id, "alice");
+    assert_eq!(reread.project_id, "p1");
+    assert_eq!(reread.backend, "nomad-ch");
+    assert_eq!(reread.vm_index, Some(7));
+    assert_eq!(reread.pubkey_fp, fp);
+
+    let got_secrets = reread.preview_secrets.as_ref().expect("ring sealed");
+    let want_secrets = secrets.as_ref().unwrap();
+    assert_eq!(got_secrets.sv_current, want_secrets.sv_current);
+    assert_eq!(got_secrets.current, want_secrets.current);
+    assert_eq!(got_secrets.previous, want_secrets.previous);
+    assert_eq!(got_secrets.grace_until_unix, want_secrets.grace_until_unix);
+
+    assert_eq!(reread.preview_audit.len(), 1);
+    assert_eq!(reread.preview_audit[0].token_id, audit[0].token_id);
+    assert_eq!(reread.preview_audit[0].port, audit[0].port);
+    assert_eq!(reread.preview_audit[0].issued_at_unix, audit[0].issued_at_unix);
+    assert_eq!(reread.preview_audit[0].expires_at_unix, audit[0].expires_at_unix);
+    assert_eq!(reread.preview_audit[0].scope, audit[0].scope);
+    assert_eq!(reread.preview_audit[0].secret_version, audit[0].secret_version);
+    assert_eq!(reread.preview_audit[0].iss, audit[0].iss);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Companion test: `seal_with_preview_state` returns `Ok(false)` when
+/// the backend has no `Persistence` configured (default boot mode
+/// without `SANDBOX_PERSIST_AUTH=1`). No file is written.
+#[compio::test]
+async fn persist_on_mint_no_op_when_persistence_disabled() {
+    use zeroship_sandbox::backend::SandboxInfo;
+    use zeroship_sandbox::backend::nomad_ch::NomadCHBackend;
+
+    // No persist handle => seal_with_preview_state returns Ok(false).
+    let backend = NomadCHBackend::new(make_cfg("nomad-ch"), None).unwrap();
+    let id = Uuid::now_v7();
+    let sk = SigningKey::from_bytes(&[0xab; 32]);
+    backend._test_inject_sandbox(id, "alice", sk, "http://10.99.107.2:7777".into(), 7);
+
+    let info = SandboxInfo {
+        sandbox_id: id.to_string(),
+        user_id: "alice".into(),
+        project_id: "p".into(),
+        backend: "nomad-ch".into(),
+        backend_hint: "test".into(),
+        created_at_secs: 0,
+        last_used_at_secs: 0,
+    };
+    let wrote = backend
+        .seal_with_preview_state(id, &info, None, Vec::new())
+        .await
+        .expect("Ok shape");
+    assert!(!wrote, "persist disabled → Ok(false), no I/O");
+}
+
+/// Companion test: Backend::seal_with_preview_state on an unknown
+/// sandbox-id returns `Ok(false)` (no panic, no error). Same shape
+/// as persistence-disabled — both are best-effort no-ops.
+#[compio::test]
+async fn persist_on_mint_no_op_when_sandbox_unknown() {
+    use zeroship_sandbox::backend::SandboxInfo;
+    use zeroship_sandbox::backend::nomad_ch::NomadCHBackend;
+    use zeroship_sandbox::persist::Persistence;
+
+    let dir = fresh_dir("unknown-id");
+    let persist = Arc::new(Persistence::new(dir.clone(), AeadKey::from_bytes([0u8; 32])));
+    let backend = NomadCHBackend::new(make_cfg("nomad-ch"), Some(persist)).unwrap();
+
+    let id = Uuid::now_v7(); // never injected
+    let info = SandboxInfo {
+        sandbox_id: id.to_string(),
+        user_id: "alice".into(),
+        project_id: "p".into(),
+        backend: "nomad-ch".into(),
+        backend_hint: "test".into(),
+        created_at_secs: 0,
+        last_used_at_secs: 0,
+    };
+    let wrote = backend
+        .seal_with_preview_state(id, &info, None, Vec::new())
+        .await
+        .expect("Ok shape");
+    assert!(!wrote, "unknown sandbox-id → Ok(false), no I/O");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Boot path with no records returns a zero-summary cleanly (and
 /// doesn't blow up on a missing `sealed-records` subdir — the
 /// directory is created on demand by the first `seal`).

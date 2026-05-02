@@ -246,10 +246,13 @@ pub async fn mint_share(
         },
     );
 
-    // Persist (best-effort). The seal helper isn't hooked up at the
-    // mint path in v1 — explicit-DELETE wipes both in-memory + on-disk
-    // via the sandbox-stop pathway today. Phase-5 GA wires per-mint
-    // re-seal.
+    // Persist-on-mint (best-effort). A controller crash between the
+    // in-memory ring/audit update and the next sealed-record write
+    // would lose the freshly-minted token's metadata otherwise.
+    // Failures here are logged and swallowed — the API call MUST
+    // NOT fail on seal failure (the in-memory state is authoritative
+    // for live traffic; persistence is for restart resilience only).
+    persist_preview_state(&state, id).await;
 
     HttpResponse::Ok().json(&json!({
         "token": token,
@@ -331,12 +334,50 @@ pub async fn revoke_all_share(
     };
     let new_ring = state.sandboxes.rotate_preview_secret(id, true);
     let sv = new_ring.map(|r| r.sv_current).unwrap_or(0);
+    // Persist-on-rotate (best-effort). The sandbox itself isn't
+    // dropped — the sealed record is updated, NOT removed; restart
+    // restore must read back the new (post-rotate) state. See doc
+    // § II.4 "Revocation".
+    persist_preview_state(&state, id).await;
     HttpResponse::Ok().json(&json!({
         "revoked": "all",
         "secret_version_current": sv,
         "grace": "none",
         "note": "explicit DELETE is zero-grace; all prior tokens are now invalid.",
     }))
+}
+
+/// Snapshot the registry's current preview state for `sandbox_id` and
+/// hand it to the backend's seal-with-preview-state helper. Best-
+/// effort: a backend that has no persistence configured returns
+/// `Ok(false)` (nothing to write); an I/O failure is logged at WARN
+/// and swallowed. The API caller never fails on seal failure — the
+/// in-memory ring/audit is authoritative for live traffic.
+async fn persist_preview_state(state: &Arc<AppState>, sandbox_id: Uuid) {
+    let info = match state.sandboxes.get(&sandbox_id) {
+        Some(i) => i,
+        None => return,
+    };
+    let (secrets, audit) = state.sandboxes.preview_state_for_seal(sandbox_id);
+    match state
+        .backend
+        .seal_with_preview_state(sandbox_id, &info, secrets, audit)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            // Persistence disabled OR sandbox-id not in backend's
+            // session map. Phase-3 boots with persistence off by
+            // default; this is the normal path for that mode.
+        }
+        Err(e) => {
+            eprintln!(
+                "[sandbox/preview_share] persist-on-mint/rotate failed \
+                 sandbox={sandbox_id} (non-fatal; in-memory state is \
+                 authoritative; restart-restore degraded for this mint): {e}"
+            );
+        }
+    }
 }
 
 /// `DELETE /sandboxes/{id}/preview/{port}/share/{token_id}` — Phase 5

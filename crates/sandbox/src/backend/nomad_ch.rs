@@ -1200,6 +1200,58 @@ impl NomadCHBackend {
         })
     }
 
+    /// Persist-on-mint helper: rebuild the on-disk `SealedAuth` for
+    /// `sandbox_id` carrying the caller-provided preview-share state
+    /// and seal it. See [`super::Backend::seal_with_preview_state`]
+    /// for the contract; this implementation reads the per-sandbox
+    /// `signing_key` + `vm_index` from the backend's own session map
+    /// and pulls `user_id` / `project_id` / `created_at_secs` from
+    /// the supplied [`super::SandboxInfo`] (the registry-side view).
+    ///
+    /// Nomad-CH records seal `agent_url = None` (it's deterministic
+    /// from `vm_index` at restore time; round-6 I3) — same as
+    /// [`Self::create`] writes at sandbox-create time.
+    pub async fn seal_with_preview_state(
+        &self,
+        sandbox_id: Uuid,
+        info: &super::SandboxInfo,
+        secrets: Option<crate::persist::SealedPreviewSecrets>,
+        audit: Vec<crate::persist::SealedAuditEntry>,
+    ) -> Result<bool, String> {
+        let Some(persist) = self.persist.clone() else {
+            return Ok(false);
+        };
+        let (sk_bytes, vm_index) = {
+            let guard = self.state.read().unwrap_or_else(|p| p.into_inner());
+            let Some(s) = guard.get(&sandbox_id) else {
+                return Ok(false);
+            };
+            (s.signing_key.to_bytes(), s.vm_index)
+        };
+        let pubkey_fp = sig::pubkey_fingerprint(
+            &SigningKey::from_bytes(&sk_bytes).verifying_key(),
+        );
+        let record = crate::persist::SealedAuth {
+            version: crate::persist::SEAL_VERSION,
+            sandbox_id: sandbox_id.to_string(),
+            user_id: info.user_id.clone(),
+            project_id: info.project_id.clone(),
+            backend: "nomad-ch".to_string(),
+            signing_key_bytes: sk_bytes,
+            vm_index: Some(vm_index),
+            agent_url: None,
+            pubkey_fp,
+            created_at_secs: info.created_at_secs,
+            preview_secrets: secrets,
+            preview_audit: audit,
+        };
+        persist
+            .seal(sandbox_id, &record)
+            .await
+            .map(|()| true)
+            .map_err(|e| format!("seal failed: {e}"))
+    }
+
     /// **Test-only.** Inject a synthetic sandbox record with a
     /// caller-supplied `agent_url`. Bypasses the full Nomad/CH
     /// create flow + the `derive_agent_url` rule (which targets
