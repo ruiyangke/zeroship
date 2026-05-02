@@ -404,6 +404,23 @@ pub struct RuntimeState {
     /// Monotonically increasing WebSocket ID counter (incremented by 2 for pairs).
     pub next_ws_id: u32,
 
+    /// Native WebSocket per-id state (events queue, send queue, cancel flag).
+    /// Disjoint from `websockets`/`next_ws_id` (which are polyfill-side).
+    /// Removed once the polyfill is deleted in cutover landing 3.
+    #[cfg(feature = "runtime_native_websocket")]
+    pub native_websockets: HashMap<u32, std::rc::Rc<std::cell::RefCell<crate::websocket_native::network::NativeWsState>>>,
+    /// Monotonically increasing native WebSocket id counter.
+    #[cfg(feature = "runtime_native_websocket")]
+    pub next_native_ws_id: u32,
+    /// Cached JS wrapper Global per native ws_id. Captured by the
+    /// constructor so the dispatch arm can resolve the wrapper from
+    /// `ws_id` alone (no need to walk listener registries). Removed
+    /// when the WebSocket transitions to CLOSED + the per-WS state
+    /// is freed; the wrapper Global keeps the underlying
+    /// `WebSocketImpl` alive until the JS GC collects the JS object.
+    #[cfg(feature = "runtime_native_websocket")]
+    pub native_ws_wrappers: HashMap<u32, v8::Global<v8::Object>>,
+
     /// Per-isolate time origin for `performance.now()`. Set once at Runtime
     /// creation. Prevents cross-app timing side-channels.
     pub perf_epoch: std::time::Instant,
@@ -463,6 +480,13 @@ impl RuntimeState {
 
             websockets: HashMap::new(),
             next_ws_id: 1,
+
+            #[cfg(feature = "runtime_native_websocket")]
+            native_websockets: HashMap::new(),
+            #[cfg(feature = "runtime_native_websocket")]
+            next_native_ws_id: 1,
+            #[cfg(feature = "runtime_native_websocket")]
+            native_ws_wrappers: HashMap::new(),
 
             perf_epoch: std::time::Instant::now(),
             pump_notify_tx: None,
@@ -697,6 +721,15 @@ pub enum OpResult {
     },
     /// The op was cancelled (e.g. request was killed).
     Cancelled,
+    /// A native WebSocket event is ready for dispatch on the V8 thread.
+    /// The actual event payload sits in `RuntimeState::native_websockets[ws_id].events`
+    /// — the pump arm drains and dispatches in FIFO order. One queued
+    /// `OpResult::WebSocketEvent` corresponds to ONE pushed event;
+    /// extras are coalesced (drain returns all queued events in one
+    /// shot, leaving subsequent OpResult::WebSocketEvent occurrences
+    /// to be no-ops). See `websocket_native::network::drain_events`.
+    #[cfg(feature = "runtime_native_websocket")]
+    WebSocketEvent { ws_id: u32 },
 }
 
 // ---------------------------------------------------------------------------

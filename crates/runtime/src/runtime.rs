@@ -1781,6 +1781,40 @@ impl RuntimeInner {
                 self.drain_new_tasks_into(work);
             }
             OpResult::Cancelled => {}
+            #[cfg(feature = "runtime_native_websocket")]
+            OpResult::WebSocketEvent { ws_id } => {
+                // Native WebSocket events: drain the per-WS event
+                // queue and dispatch each event in FIFO order. Multiple
+                // events may have been coalesced under one OpResult
+                // (the network task pushes one OpResult per event,
+                // but the drain takes them all at once — extras
+                // resolve as no-op drains).
+                let state_clone = self.state.clone();
+
+                self.arm_cpu_timer();
+                let settled_results = enter_v8!(self, |scope| {
+                    crate::websocket_native::dispatch::dispatch_pending_ws_events(
+                        scope, &state_clone, ws_id,
+                    );
+                    scope.perform_microtask_checkpoint();
+                    collect_settled_promises(scope, &mut self.pending_requests)
+                });
+                self.disarm_cpu_timer();
+
+                if self.check_v8_terminated() {
+                    self.clear_executing_request();
+                    self.drain_new_tasks_into(work);
+                    return;
+                }
+
+                for (id, req, settled) in settled_results {
+                    self.send_settled_reply_any(id, req, settled, std::time::Duration::ZERO);
+                }
+
+                self.cleanup_cancelled_requests();
+                self.clear_executing_request();
+                self.drain_new_tasks_into(work);
+            }
         }
     }
 

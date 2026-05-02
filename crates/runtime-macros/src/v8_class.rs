@@ -1176,7 +1176,7 @@ fn gen_param_extractions(
     // so no shadow reborrow is alive yet — `args.get(idx)` is free to
     // produce Locals whose lifetime unifies with the param `scope`.
     for p in params.iter() {
-        if is_pin_scope_ref(&p.ty) {
+        if is_pin_scope_ref(&p.ty) || is_wrapper_local(&p.ty) {
             continue;
         }
         // Optional SAB-rejection guard, emitted *before* the regular
@@ -1237,6 +1237,19 @@ fn gen_param_extractions(
         }
     }
 
+    // Bind synthetic `wrapper: v8::Local<v8::Object>` (or any
+    // `v8::Local<v8::Object>` typed param) to `args.this()`. Methods
+    // that need to register themselves with the runtime (e.g.
+    // WebSocket.send registering the wrapper Global for event
+    // dispatch) take this synthetic. Idempotent: `args.this()` is
+    // cheap to call repeatedly.
+    for p in params.iter() {
+        if is_wrapper_local(&p.ty) {
+            let name = &p.name;
+            out.push(quote! { let #name: v8::Local<v8::Object> = args.this(); });
+        }
+    }
+
     out
 }
 
@@ -1250,6 +1263,34 @@ fn is_pin_scope_ref(ty: &Type) -> bool {
         return type_path_contains_segment(&r.elem, "PinScope");
     }
     false
+}
+
+/// True for `v8::Local<v8::Object>` typed params — synthetic that
+/// gets bound to `args.this()`. Used by methods that need access
+/// to the JS wrapper itself (e.g. to register a Global for use by
+/// async event-dispatch paths). Distinct from is_pin_scope_ref:
+/// no reference form, just the bare Local<Object>.
+fn is_wrapper_local(ty: &Type) -> bool {
+    let Type::Path(tp) = ty else {
+        return false;
+    };
+    let last = match tp.path.segments.last() {
+        Some(s) => s,
+        None => return false,
+    };
+    if last.ident != "Local" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return false;
+    };
+    // Look for v8::Object as the last generic arg.
+    args.args.iter().any(|arg| {
+        if let syn::GenericArgument::Type(inner) = arg {
+            return type_path_contains_segment(inner, "Object");
+        }
+        false
+    })
 }
 
 fn type_path_contains_segment(ty: &Type, target: &str) -> bool {

@@ -20,9 +20,16 @@ pub mod constants;
 
 #[cfg(feature = "runtime_native_websocket")]
 pub mod handshake;
+#[cfg(feature = "runtime_native_websocket")]
+pub mod network;
+#[cfg(feature = "runtime_native_websocket")]
+pub mod pair;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "runtime_native_websocket")]
+pub mod dispatch;
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -163,7 +170,13 @@ pub struct WebSocketImpl {
     /// Spec `[[bufferedAmount]]` — bytes queued for send. Bumped by
     /// `send()`, decremented by the send pump as frames go over the
     /// wire. (D-6)
-    pub buffered_amount: Cell<u64>,
+    ///
+    /// `Rc<Cell<u64>>` so the network task can hold a clone and
+    /// decrement after a successful write without any pointer dance
+    /// through the V8 wrapper. The cell itself is `!Sync` and lives
+    /// on the V8 thread — the network task runs on the same thread
+    /// (compio is single-threaded), so no race.
+    pub buffered_amount: Rc<Cell<u64>>,
 
     /// Spec `[[binaryType]]` — "blob" (default per §3.1) or "arraybuffer".
     pub binary_type: Cell<BinaryType>,
@@ -174,7 +187,9 @@ pub struct WebSocketImpl {
     /// high-water mark. Cleared by the pump when the queue drops
     /// below 50% of the cap (8 MiB hysteresis). NEVER observable
     /// from JS. (addresses critic MAJOR #11)
-    pub full: Cell<bool>,
+    ///
+    /// `Rc<Cell<bool>>` for the same reason as `buffered_amount`.
+    pub full: Rc<Cell<bool>>,
 
     /// Per-isolate WebSocket id — used by:
     ///   - the runtime pump's `OpResult::WebSocketEvent { ws_id, ... }`
@@ -232,9 +247,9 @@ impl Default for WebSocketImpl {
             url_serialized: RefCell::new(String::new()),
             protocol: RefCell::new(String::new()),
             extensions: RefCell::new(String::new()),
-            buffered_amount: Cell::new(0),
+            buffered_amount: Rc::new(Cell::new(0)),
             binary_type: Cell::new(BinaryType::Blob),
-            full: Cell::new(false),
+            full: Rc::new(Cell::new(false)),
             ws_id: Cell::new(0),
             cached_handles: RefCell::new(WsCachedHandles::default()),
             send_queue: RefCell::new(VecDeque::new()),
@@ -272,10 +287,18 @@ impl WebSocketImpl {
     #[v8_constructor]
     fn new(
         scope: &mut v8::PinScope,
+        wrapper: v8::Local<v8::Object>,
         url_arg: v8::Local<v8::Value>,
         protocols_arg: v8::Local<v8::Value>,
         init_arg: v8::Local<v8::Value>,
     ) -> Result<WebSocketImpl, OpError> {
+        // The macro extension binds `wrapper` to `args.this()` (the
+        // freshly-allocated JS wrapper). We capture it as a Global so
+        // the dispatch arm in `dispatch.rs` can find it from `ws_id`
+        // alone — without it, MessageEvents/CloseEvents can't be
+        // dispatched after the user has discarded their direct
+        // reference but listeners are still attached.
+        let _wrapper = wrapper; // consumed below under the cfg gate
         // STEP per IDL: `url` is required. A no-args call must
         // TypeError per WebIDL. (Server-side mode via `WebSocketPair`
         // uses the hidden `mint_paired_websocket` helper which bypasses
@@ -345,26 +368,73 @@ impl WebSocketImpl {
         // STEP 13: ready state CONNECTING.
         let impl_ = WebSocketImpl::default();
         *impl_.url_serialized.borrow_mut() = url_record.as_str().to_string();
-        *impl_.url.borrow_mut() = Some(url_record);
+        *impl_.url.borrow_mut() = Some(url_record.clone());
         impl_.ready_state.set(ReadyState::Connecting);
         impl_.binary_type.set(BinaryType::Blob); // D-7 spec default
         impl_.accepted.set(true); // client-mode: implicitly accepted
 
         // Read the optional WebSocketInit dictionary (D-28).
         let init = algorithms::read_websocket_init(scope, init_arg)?;
-        *impl_.explicit_origin.borrow_mut() = init.origin;
+        *impl_.explicit_origin.borrow_mut() = init.origin.clone();
         impl_.max_message_size.set(init.max_message_size);
         impl_.max_frame_size.set(init.max_frame_size);
         impl_.ping_interval_ms.set(init.ping_interval_ms);
 
-        // The connect task is wired in step 4 (handshake.rs). For the
-        // step-2 skeleton we leave the state in CONNECTING — which
-        // means `send` throws InvalidStateError per spec, and `close()`
-        // takes the CONNECTING branch.
+        // Allocate ws_id and register per-WS state, then spawn the
+        // connect task. The task owns the handshake + receive +
+        // send_pump loops until the socket terminates. Events flow
+        // back via OpResult::WebSocketEvent.
         //
-        // `protocols` is captured here for the eventual handshake step;
-        // we shadow into _ to silence unused-variable until step 4.
-        let _ = protocols;
+        // Test isolates that don't install `SharedState` (e.g. the
+        // hand-rolled IDL-surface tests) skip the connect spawn and
+        // leave the socket in CONNECTING — exactly the spec-defined
+        // observable from JS until `open` fires.
+        #[cfg(feature = "runtime_native_websocket")]
+        if let Some(state_handle) = scope.get_slot::<crate::state::SharedState>() {
+            let state = state_handle.clone();
+
+            let ws_id = network::alloc_native_ws_id(&state);
+            impl_.ws_id.set(ws_id);
+
+            // Cache the wrapper Global for the dispatch arm.
+            let wrapper_global = v8::Global::new(scope, _wrapper);
+            state
+                .borrow_mut()
+                .native_ws_wrappers
+                .insert(ws_id, wrapper_global);
+
+            // Wire the per-WS NativeWsState's buffered_amount/full
+            // counters to share the WebSocketImpl's counters by Rc
+            // clone. Same single-threaded invariant as elsewhere.
+            if let Some(ws_state) = network::lookup_native_ws_state(&state, ws_id) {
+                let mut s = ws_state.borrow_mut();
+                s.buffered_amount = impl_.buffered_amount.clone();
+                s.full = impl_.full.clone();
+            }
+
+            // Make sure the EventTarget listener Rc is attached on
+            // the wrapper so addEventListener / dispatchEvent work.
+            crate::dom::event_target::attach_listeners(scope, _wrapper);
+
+            let opts = handshake::HandshakeOptions {
+                protocols,
+                origin: init.origin,
+                max_message_size: init.max_message_size as usize,
+                max_frame_size: init.max_frame_size as usize,
+                connect_timeout: std::time::Duration::from_secs(30),
+            };
+
+            network::spawn_connect_task(state, ws_id, url_record, opts);
+        } else {
+            let _ = protocols;
+            let _ = _wrapper;
+        }
+
+        #[cfg(not(feature = "runtime_native_websocket"))]
+        {
+            let _ = protocols; // unused without the network task
+            let _ = _wrapper;
+        }
 
         Ok(impl_)
     }
@@ -547,6 +617,17 @@ impl WebSocketImpl {
             return Ok(());
         }
 
+        // Pre-flight [[full]] check + RFC 6455 §6.1: project queue
+        // size; trip [[full]] (and drop the byte) when over cap.
+        let projected = self
+            .buffered_amount
+            .get()
+            .saturating_add(estimate_send_bytes(scope, data));
+        if projected > constants::MAX_BUFFERED_AMOUNT {
+            self.full.set(true);
+            return Ok(());
+        }
+
         // Type dispatch per WHATWG §3.1 send algorithm steps 3-6
         // (https://websockets.spec.whatwg.org/#dom-websocket-send):
         //   step 3: data is a string
@@ -565,6 +646,7 @@ impl WebSocketImpl {
             // per https://webidl.spec.whatwg.org/#es-USVString.
             let s = s_v8.to_rust_string_lossy(scope);
             self.queue_text(s);
+            self.flush_to_network(scope);
             return Ok(());
         }
 
@@ -574,6 +656,7 @@ impl WebSocketImpl {
                 // bytes are extracted asynchronously by the send pump.
                 let blob_size = crate::blob_native::blob::blob_size_public(scope, blob_obj);
                 self.queue_blob(scope, blob_obj, blob_size);
+                self.flush_to_network(scope);
                 return Ok(());
             }
         }
@@ -584,6 +667,7 @@ impl WebSocketImpl {
             // a copy. Single-threaded isolate → no race.
             let bytes: Vec<u8> = bs.iter().map(|c| c.get()).collect();
             self.queue_binary(bytes);
+            self.flush_to_network(scope);
             return Ok(());
         }
 
@@ -591,6 +675,7 @@ impl WebSocketImpl {
             let mut buf = vec![0u8; view.byte_length()];
             let _copied = view.copy_contents(&mut buf);
             self.queue_binary(buf);
+            self.flush_to_network(scope);
             return Ok(());
         }
 
@@ -601,6 +686,7 @@ impl WebSocketImpl {
         })?;
         let s = s_v8.to_rust_string_lossy(scope);
         self.queue_text(s);
+        self.flush_to_network(scope);
         Ok(())
     }
 
@@ -650,15 +736,18 @@ impl WebSocketImpl {
             Closing | Closed => return Ok(()),
             Connecting => {
                 // Per RFC 6455 §7.1.7 (Fail the WebSocket Connection):
-                // there may or may not be a TCP socket open at this
-                // point. The send_pump (step 5) doesn't run during
-                // CONNECTING; transitioning to CLOSING here is enough
-                // to trip the connect task's cancel flag once that
-                // wiring lands. For the step-2 skeleton, just flip
-                // state and notify the pump (no-op until step 5).
+                // the connect task cancels — Error+Close{1006} land
+                // via the connection-failed path. The reason is
+                // propagated so closeEvent.reason carries the user's
+                // intent.
                 self.ready_state.set(Closing);
-                // No wire frame is enqueued; the connection-failed
-                // path emits Close{1006} via the pump cancellation.
+                #[cfg(feature = "runtime_native_websocket")]
+                if let Some(state_handle) = scope.get_slot::<crate::state::SharedState>() {
+                    let state = state_handle.clone();
+                    let reason = reason_opt.clone().unwrap_or_default();
+                    network::cancel_native_ws(&state, self.ws_id.get(), reason);
+                }
+                let _ = code_opt; // wire-frame code unused on CONNECTING fail
             }
             Open => {
                 // Step 3.3-3.4: start closing handshake; readyState=CLOSING.
@@ -668,7 +757,7 @@ impl WebSocketImpl {
                     reason: reason_opt.unwrap_or_default(),
                 };
                 self.send_queue.borrow_mut().push_back(frame);
-                self.notify_send_pump();
+                self.flush_to_network(scope);
             }
         }
 
@@ -728,6 +817,74 @@ impl WebSocketImpl {
             waker.wake();
         }
     }
+
+    /// Drain `WebSocketImpl::send_queue` into the per-WS network
+    /// state's `send_queue` and wake the network task. No-op when the
+    /// native feature is off (the polyfill drains via `__wsSend`) or
+    /// when there is no `SharedState` in the isolate slot (test
+    /// isolates that don't run a compio runtime).
+    #[allow(unused_variables)]
+    pub(crate) fn flush_to_network(&self, scope: &mut v8::PinScope) {
+        #[cfg(feature = "runtime_native_websocket")]
+        {
+            let Some(state_handle) = scope.get_slot::<crate::state::SharedState>() else {
+                return;
+            };
+            let state = state_handle.clone();
+
+            // Pair-coupled: route to peer instead of the framer.
+            if let Some(peer_id) = self.peer_id.get() {
+                let frames: Vec<WsFrame> = self.send_queue.borrow_mut().drain(..).collect();
+                if frames.is_empty() {
+                    return;
+                }
+                pair::deliver_to_peer(&state, self.ws_id.get(), peer_id, frames);
+                return;
+            }
+
+            // Client (network-backed): hand frames to the per-WS
+            // NativeWsState send_queue and wake the send pump.
+            let Some(ws) = network::lookup_native_ws_state(&state, self.ws_id.get()) else {
+                return;
+            };
+            let frames: Vec<WsFrame> = self.send_queue.borrow_mut().drain(..).collect();
+            if frames.is_empty() {
+                return;
+            }
+            let mut s = ws.borrow_mut();
+            for f in frames {
+                s.send_queue.push_back(f);
+            }
+            if let Some(w) = s.send_waker.take() {
+                w.wake();
+            }
+        }
+    }
+}
+
+/// Estimate how many bytes `data` will add to bufferedAmount. The
+/// estimate is conservative — actual UTF-8 encoding may differ for
+/// strings with multibyte chars, but the difference doesn't impact
+/// the [[full]] guard which is a soft cap.
+fn estimate_send_bytes(scope: &mut v8::PinScope, data: v8::Local<v8::Value>) -> u64 {
+    if data.is_string() {
+        if let Some(s) = data.to_string(scope) {
+            return s.utf8_length(scope) as u64;
+        }
+        return 0;
+    }
+    if let Ok(ab) = v8::Local::<v8::ArrayBuffer>::try_from(data) {
+        return ab.byte_length() as u64;
+    }
+    if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(data) {
+        return view.byte_length() as u64;
+    }
+    if let Ok(blob_obj) = v8::Local::<v8::Object>::try_from(data) {
+        if crate::blob_native::blob::is_blob_instance_public(scope, blob_obj) {
+            return crate::blob_native::blob::blob_size_public(scope, blob_obj);
+        }
+    }
+    0
 }
 
 // ---------------------------------------------------------------------------
