@@ -135,6 +135,10 @@ pub struct NomadCHBackend {
     /// because the only writer is the periodic probe and reads are
     /// rare; Mutex is simpler and the contention is irrelevant.
     last_probe_err: Arc<Mutex<Option<String>>>,
+    /// Sealed-record persistence (preview-URL § II.0 §4). See
+    /// [`crate::persist::Persistence`]. `None` when
+    /// `SANDBOX_PERSIST_AUTH` is unset.
+    persist: Option<Arc<crate::persist::Persistence>>,
 }
 
 /// Per-sandbox bookkeeping. Lives only in process memory; on
@@ -271,7 +275,10 @@ impl VmIndexAllocator {
 }
 
 impl NomadCHBackend {
-    pub fn new(cfg: SandboxConfig) -> Result<Self, String> {
+    pub fn new(
+        cfg: SandboxConfig,
+        persist: Option<Arc<crate::persist::Persistence>>,
+    ) -> Result<Self, String> {
         let alloc = VmIndexAllocator::new(
             cfg.nomad_ch.vm_index_floor,
             cfg.nomad_ch.vm_index_ceil,
@@ -283,6 +290,7 @@ impl NomadCHBackend {
             creating_users: Arc::new(Mutex::new(HashSet::new())),
             healthy: Arc::new(AtomicBool::new(false)),
             last_probe_err: Arc::new(Mutex::new(None)),
+            persist,
         })
     }
 
@@ -713,6 +721,38 @@ impl NomadCHBackend {
         }
 
         let now = unix_now();
+
+        // Seal the per-sandbox auth to disk (preview-URL § II.0 §4).
+        // BEST-EFFORT: a seal failure does NOT fail create() — the
+        // sandbox is live and usable; persistence is for restart
+        // resilience only. Log loudly so operators see when the
+        // restart-restore guarantee is degraded for this sandbox.
+        // nomad-ch records intentionally seal `agent_url = None`:
+        // it's deterministically derived from `vm_index` at restore
+        // time, which shrinks the AEAD plaintext + removes a
+        // migration hazard if the agent listen address ever changes.
+        if let Some(persist) = &self.persist {
+            let record = crate::persist::SealedAuth {
+                version: crate::persist::SEAL_VERSION,
+                sandbox_id: sandbox_id.to_string(),
+                user_id: user_id.to_string(),
+                project_id: project_id.to_string(),
+                backend: "nomad-ch".to_string(),
+                signing_key_bytes: sk_bytes,
+                vm_index: Some(vm_index),
+                agent_url: None,
+                pubkey_fp: key_fp.clone(),
+                created_at_secs: now,
+            };
+            if let Err(e) = persist.seal(sandbox_id, &record).await {
+                eprintln!(
+                    "[sandbox/nomad-ch] persist.seal failed sandbox={sandbox_id} \
+                     vm_index={vm_index} (non-fatal; sandbox live, \
+                     restart-restore unavailable for this record): {e}"
+                );
+            }
+        }
+
         Ok(SandboxInfo {
             sandbox_id: sandbox_id.to_string(),
             user_id: user_id.to_string(),
@@ -956,6 +996,21 @@ impl NomadCHBackend {
                 sandbox.job_id,
                 sandbox.host_dir.display(),
             );
+        }
+
+        // Delete the sealed record (preview-URL § II.0 §4). BEST-EFFORT:
+        // a delete failure is logged but does NOT fail stop(). The next
+        // boot's restore loop probes the sandbox's `/version`, finds it
+        // unreachable (the VM is gone), and leaves the file in place
+        // for periodic prune (Phase 5) to mop up.
+        if let Some(persist) = &self.persist {
+            if let Err(e) = persist.delete(sandbox_id).await {
+                eprintln!(
+                    "[sandbox/nomad-ch] persist.delete failed sandbox={sandbox_id} \
+                     (non-fatal; sealed record will be cleaned by next-boot \
+                     unreachable-probe + Phase-5 prune): {e}"
+                );
+            }
         }
 
         eprintln!(
@@ -3478,7 +3533,7 @@ mod tests {
     /// persistence layer call.
     #[compio::test]
     async fn session_auth_returns_lifted_record() {
-        let backend = NomadCHBackend::new(make_cfg()).expect("new");
+        let backend = NomadCHBackend::new(make_cfg(), None).expect("new");
 
         // Hand-insert a sandbox record with a known signing key to
         // bypass the full Nomad-create path (this is the standard
