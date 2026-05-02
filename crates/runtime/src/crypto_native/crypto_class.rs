@@ -95,13 +95,20 @@ impl Crypto {
 }
 
 fn is_allowed_typed_array(value: v8::Local<v8::Value>) -> bool {
-    if value.is_data_view() {
-        return false;
-    }
-    if value.is_float32_array() || value.is_float64_array() {
-        return false;
-    }
-    v8::Local::<v8::ArrayBufferView>::try_from(value).is_ok()
+    // Spec §10.1.1 step 1: must be one of Int8/Uint8/Uint8Clamped/
+    // Int16/Uint16/Int32/Uint32/BigInt64/BigUint64 only. Reject every
+    // other ArrayBufferView (DataView, Float16/32/64Array). Listing
+    // the allowed types explicitly catches both today's float types
+    // and any future TypedArray (Float16Array landed in V8 ~v138).
+    value.is_int8_array()
+        || value.is_uint8_array()
+        || value.is_uint8_clamped_array()
+        || value.is_int16_array()
+        || value.is_uint16_array()
+        || value.is_int32_array()
+        || value.is_uint32_array()
+        || value.is_big_int64_array()
+        || value.is_big_uint64_array()
 }
 
 // ---------------------------------------------------------------------------
