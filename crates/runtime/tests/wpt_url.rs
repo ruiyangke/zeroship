@@ -545,17 +545,22 @@ fn wpt_url_compliance() {
     let pct = (totals.pass * 100) / total_run;
     eprintln!("  pass rate: {pct}% (target ≥ 85%)");
 
+    // m4: print every failure name so a regression isn't truncated
+    // from the report. The detail (error message) is capped at 50
+    // entries to keep CI output readable, but the names always
+    // appear so the developer can see *which* test regressed.
     if !failures.is_empty() {
         eprintln!("\n=== Failures ({}) ===", failures.len());
-        for (file, r) in failures.iter().take(50) {
+        for (i, (file, r)) in failures.iter().enumerate() {
             let detail = match &r.outcome {
                 Outcome::Fail(s) => s.as_str(),
                 _ => "?",
             };
-            eprintln!("  [{file}] {}: {detail}", r.name);
-        }
-        if failures.len() > 50 {
-            eprintln!("  … and {} more", failures.len() - 50);
+            if i < 50 {
+                eprintln!("  [{file}] {}: {detail}", r.name);
+            } else {
+                eprintln!("  [{file}] {}", r.name);
+            }
         }
     }
 
