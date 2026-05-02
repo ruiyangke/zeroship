@@ -88,3 +88,86 @@ textarea:focus-visible,
 select:focus-visible {
   outline: none;
 }
+
+/* ─── stamp-btn — primary action style ─────────────────────────────
+   Used by `<StampButton/>` (components/StampButton.tsx). Tomato-on-
+   paper, slightly rotated, with a soft drop-shadow press. Styled in
+   plain CSS rather than Tailwind because the rotated-stamp look
+   needs precise box-shadow stacking, and Tailwind's utility classes
+   would multiply the cost of every primary CTA in the app. The
+   selector is `.stamp-btn` so the className stays terse.            */
+.stamp-btn {
+  appearance: none;
+  border: 0;
+  background: var(--color-tomato);
+  color: var(--color-paper);
+  font-family: var(--font-sans);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 12px;
+  padding: 14px 24px 12px 24px;
+  cursor: pointer;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.18),
+    0 1px 0 0 var(--color-tomato-2),
+    0 6px 0 -2px rgba(60, 12, 0, 0.18);
+  transition: transform 80ms ease, box-shadow 80ms ease, background 200ms ease;
+  transform: rotate(-0.6deg);
+  border-radius: 1px;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+.stamp-btn:hover {
+  transform: rotate(-0.2deg) translateY(-1px);
+}
+.stamp-btn:active:not(:disabled) {
+  transform: rotate(-0.4deg) translateY(2px);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.22),
+    0 0 0 0 var(--color-tomato-2),
+    0 1px 0 -2px rgba(60, 12, 0, 0.18);
+  background: var(--color-tomato-2);
+}
+.stamp-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.stamp-btn .arrow {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: 16px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+
+/* ─── label-uc — small editorial caps label ────────────────────────
+   The "label-uc" utility used across canvases/sections renders a
+   small uppercase eyebrow in the editorial sans, similar to the
+   chapter-heading style throughout the design comps.                */
+.label-uc {
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--color-pencil);
+}
+
+/* ─── reveal — gentle fade-in on first paint ───────────────────────
+   Applied liberally on hero sections; pure CSS so it works without
+   any JS. Reduced-motion users skip the animation via the global
+   `prefers-reduced-motion` block earlier in this file.              */
+@keyframes reveal-fade {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.reveal {
+  animation: reveal-fade 480ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.reveal.d-1 {
+  animation-delay: 120ms;
+}
