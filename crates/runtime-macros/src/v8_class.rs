@@ -1024,6 +1024,66 @@ fn gen_setter_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
 // Constructor callback codegen
 // ---------------------------------------------------------------------------
 
+/// `#[v8_constructor(...)]` opt-out for the must-new check — currently
+/// unused (no class today wants `Foo()` without `new` to succeed), but
+/// retained as a hook for future legacy-callable shapes (a few WebIDL
+/// interfaces are spec'd with `[LegacyFactoryFunction]`, e.g.
+/// `Image()`). When `callable_no_new` is present the macro skips the
+/// `is_construct_call` guard.
+fn extract_callable_no_new(attrs: &[Attribute]) -> bool {
+    for attr in attrs {
+        if !attr.path().is_ident("v8_constructor") {
+            continue;
+        }
+        if let Ok(idents) = attr.parse_args_with(|input: syn::parse::ParseStream| {
+            let mut acc: Vec<syn::Ident> = Vec::new();
+            while !input.is_empty() {
+                let id: syn::Ident = input.parse()?;
+                acc.push(id);
+                if input.is_empty() {
+                    break;
+                }
+                let _: syn::Token![,] = input.parse()?;
+            }
+            Ok(acc)
+        }) {
+            for id in idents {
+                if id == "callable_no_new" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// WebIDL §3.7.1: every interface constructor MUST be called with `new`.
+/// Returns the `if !args.is_construct_call() { throw TypeError; return; }`
+/// prologue unless the class opts out via `#[v8_constructor(callable_no_new)]`.
+///
+/// Class-name interpolation in the message (e.g. `"Constructor Headers
+/// requires 'new'"`) lets WPT diagnose mistakes per-class. The
+/// `is_construct_call` flag is V8-native — it differentiates `new Foo()`
+/// (true) from `Foo()` and `Foo.call(...)` (false) without a runtime
+/// thunk in the user code.
+fn gen_must_new_prologue(class_ty: &syn::Ident, opt_out: bool) -> TokenStream2 {
+    if opt_out {
+        return quote! {};
+    }
+    let class_name_str = class_ty.to_string();
+    let msg = format!(
+        "Failed to construct '{class_name_str}': Please use the 'new' operator, this DOM object constructor cannot be called as a function."
+    );
+    quote! {
+        if !args.is_construct_call() {
+            let __msg = v8::String::new(scope, #msg).unwrap();
+            let __exc = v8::Exception::type_error(scope, __msg);
+            scope.throw_exception(__exc);
+            return;
+        }
+    }
+}
+
 fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStream2 {
     let ctor_name = &c.func.sig.ident;
     let callback_ident = format_ident!("__{}_constructor_callback", class_ty);
@@ -1063,6 +1123,7 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
     };
 
     let store = gen_box_and_install_finalizer(class_ty);
+    let must_new = gen_must_new_prologue(class_ty, extract_callable_no_new(&c.func.attrs));
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -1071,6 +1132,7 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
             args: v8::FunctionCallbackArguments,
             _rv: v8::ReturnValue,
         ) {
+            #must_new
             let __this = args.this();
 
             #(#extractions)*
@@ -1084,6 +1146,10 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
 fn gen_default_constructor_callback(class_ty: &syn::Ident) -> TokenStream2 {
     let callback_ident = format_ident!("__{}_constructor_callback", class_ty);
     let store = gen_box_and_install_finalizer(class_ty);
+    // No method-level attrs to read — the Default-derived constructor
+    // is always must-new. The opt-out attribute requires a user-written
+    // `#[v8_constructor]`, by definition.
+    let must_new = gen_must_new_prologue(class_ty, false);
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -1092,6 +1158,7 @@ fn gen_default_constructor_callback(class_ty: &syn::Ident) -> TokenStream2 {
             args: v8::FunctionCallbackArguments,
             _rv: v8::ReturnValue,
         ) {
+            #must_new
             let __this = args.this();
             let __instance: #class_ty = <#class_ty as ::core::default::Default>::default();
 
