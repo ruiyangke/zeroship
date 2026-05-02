@@ -18,6 +18,9 @@
 pub mod algorithms;
 pub mod constants;
 
+#[cfg(feature = "runtime_native_websocket")]
+pub mod handshake;
+
 #[cfg(test)]
 mod tests;
 

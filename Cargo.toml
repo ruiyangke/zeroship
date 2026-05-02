@@ -15,6 +15,13 @@ exclude = [
 # Async / I/O
 compio = { version = "0.18", features = ["io", "net", "runtime", "macros", "time"] }
 compio-tls = { version = "0.9", features = ["native-tls"] }
+# WebSocket framer — wraps tungstenite over compio. Default features off
+# to keep `permessage-deflate` disabled (RSV1=1 frames hard-fail at the
+# framer layer per RFC 6455 §5.2; design §VII.1 / MAJOR #18). We pick
+# `rustls` + `rustls-native-certs` so handshake TLS uses the system trust
+# store (matches fetch's discipline). NO `deflate` feature exists on
+# tungstenite 0.28 — verify at boot via WebSocketConfig::default check.
+compio-ws = { version = "0.3", default-features = false, features = ["rustls", "rustls-native-certs"] }
 futures = "0.3"
 async-trait = "0.1"
 
