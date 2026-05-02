@@ -1,6 +1,6 @@
 //! ntex + compio + V8 benchmark server.
 //!
-//! Same as v8-server-compio but uses ntex for HTTP instead of raw httparse.
+//! Same as zeroship-bench-server but uses ntex for HTTP instead of raw httparse.
 //! Each ntex worker thread gets its own V8 Runtime (same as serve.rs).
 
 use std::cell::RefCell;
