@@ -57,6 +57,7 @@
 pub mod aes;
 pub mod crypto_class;
 pub mod crypto_key;
+pub mod der;
 pub mod derive;
 pub mod digest;
 pub mod ec;

@@ -79,7 +79,11 @@ pub fn generate_ed25519<'s>(
         .as_ref()
         .try_into()
         .map_err(|_| OpError::dom("OperationError", "Ed25519 public not 32 bytes"))?;
-    let raw_d: [u8; 32] = [0u8; 32]; // aws-lc-rs hides the seed; left empty (JWK export will fail).
+    // aws-lc-rs hides the seed; recover it by walking the PKCS#8 we
+    // just got back (RFC 8410 OneAsymmetricKey wrapping a 32-byte
+    // CurvePrivateKey OCTET STRING).
+    let raw_d: [u8; 32] = super::der::extract_cfrg_raw_seed(&pkcs8_bytes)
+        .ok_or_else(|| OpError::dom("OperationError", "Ed25519 PKCS#8 walk failed"))?;
 
     let (priv_usages, pub_usages) = split_sig_usages(usages);
     let priv_state = CryptoKeyState {

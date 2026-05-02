@@ -670,3 +670,148 @@ fn aes_kw_wrap_unwrap_round_trip() {
     );
     assert!(ok, "AES-KW wrap/unwrap round-trip");
 }
+
+// =============================================================================
+// JWK private-key export for generated EC / Ed25519 keys (Blocker 2)
+// =============================================================================
+//
+// aws-lc-rs hides the private scalar after generateKey, so we walk the
+// returned PKCS#8 to recover it for JWK export. Without the walker
+// these round-trips fail with OperationError on exportKey("jwk").
+
+#[test]
+fn ecdsa_p256_generate_jwk_round_trip() {
+    let ok = run_js(
+        r#"
+        (async () => {
+            const kp = await crypto.subtle.generateKey(
+                { name: "ECDSA", namedCurve: "P-256" },
+                true,
+                ["sign", "verify"]
+            );
+            // Export private and public to JWK.
+            const privJwk = await crypto.subtle.exportKey("jwk", kp.privateKey);
+            const pubJwk = await crypto.subtle.exportKey("jwk", kp.publicKey);
+            if (privJwk.kty !== "EC" || privJwk.crv !== "P-256") return false;
+            if (typeof privJwk.d !== "string" || privJwk.d.length === 0) return false;
+            if (typeof privJwk.x !== "string" || typeof privJwk.y !== "string") return false;
+            // Re-import private JWK and verify a signature it makes.
+            const privAgain = await crypto.subtle.importKey(
+                "jwk", privJwk, { name: "ECDSA", namedCurve: "P-256" }, true, ["sign"]);
+            const pubAgain = await crypto.subtle.importKey(
+                "jwk", pubJwk, { name: "ECDSA", namedCurve: "P-256" }, true, ["verify"]);
+            const data = new TextEncoder().encode("ec-jwk-rt");
+            const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, privAgain, data);
+            return await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, pubAgain, sig, data);
+        })();
+        "#,
+        |v, scope| {
+            let p: v8::Local<v8::Promise> = v.try_into().unwrap();
+            for _ in 0..32 {
+                scope.perform_microtask_checkpoint();
+            }
+            let result = p.result(scope);
+            result.boolean_value(scope)
+        },
+    );
+    assert!(ok, "ECDSA P-256 generate→export(JWK)→import→sign/verify round-trip");
+}
+
+#[test]
+fn ecdsa_p384_generate_jwk_round_trip() {
+    let ok = run_js(
+        r#"
+        (async () => {
+            const kp = await crypto.subtle.generateKey(
+                { name: "ECDSA", namedCurve: "P-384" }, true, ["sign", "verify"]);
+            const privJwk = await crypto.subtle.exportKey("jwk", kp.privateKey);
+            if (typeof privJwk.d !== "string" || privJwk.d.length === 0) return false;
+            // Decoded length should be 48 bytes (base64url adds ~33% then we trim padding).
+            // 48 bytes → 64 chars un-padded.
+            if (privJwk.d.length !== 64) return false;
+            return true;
+        })();
+        "#,
+        |v, scope| {
+            let p: v8::Local<v8::Promise> = v.try_into().unwrap();
+            for _ in 0..32 {
+                scope.perform_microtask_checkpoint();
+            }
+            let result = p.result(scope);
+            result.boolean_value(scope)
+        },
+    );
+    assert!(ok, "ECDSA P-384 JWK private export carries 48-byte d");
+}
+
+#[test]
+fn ecdh_p256_generate_jwk_round_trip() {
+    let ok = run_js(
+        r#"
+        (async () => {
+            const kp = await crypto.subtle.generateKey(
+                { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+            const privJwk = await crypto.subtle.exportKey("jwk", kp.privateKey);
+            if (typeof privJwk.d !== "string" || privJwk.d.length === 0) return false;
+            const privAgain = await crypto.subtle.importKey(
+                "jwk", privJwk, { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+            // Generate another key + use it as the peer.
+            const peer = await crypto.subtle.generateKey(
+                { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+            const bits1 = await crypto.subtle.deriveBits(
+                { name: "ECDH", public: peer.publicKey }, kp.privateKey, 256);
+            const bits2 = await crypto.subtle.deriveBits(
+                { name: "ECDH", public: peer.publicKey }, privAgain, 256);
+            const a = new Uint8Array(bits1), b = new Uint8Array(bits2);
+            if (a.length !== b.length) return false;
+            for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+            return true;
+        })();
+        "#,
+        |v, scope| {
+            let p: v8::Local<v8::Promise> = v.try_into().unwrap();
+            for _ in 0..32 {
+                scope.perform_microtask_checkpoint();
+            }
+            let result = p.result(scope);
+            result.boolean_value(scope)
+        },
+    );
+    assert!(ok, "ECDH P-256 JWK round-trip preserves shared-secret derivation");
+}
+
+#[test]
+fn ed25519_generate_jwk_round_trip() {
+    let ok = run_js(
+        r#"
+        (async () => {
+            const kp = await crypto.subtle.generateKey(
+                { name: "Ed25519" }, true, ["sign", "verify"]);
+            const privJwk = await crypto.subtle.exportKey("jwk", kp.privateKey);
+            if (privJwk.kty !== "OKP" || privJwk.crv !== "Ed25519") return false;
+            if (typeof privJwk.d !== "string" || privJwk.d.length === 0) return false;
+            if (typeof privJwk.x !== "string" || privJwk.x.length === 0) return false;
+            const privAgain = await crypto.subtle.importKey(
+                "jwk", privJwk, { name: "Ed25519" }, true, ["sign"]);
+            const data = new TextEncoder().encode("ed-jwk-rt");
+            const sig1 = await crypto.subtle.sign({ name: "Ed25519" }, kp.privateKey, data);
+            const sig2 = await crypto.subtle.sign({ name: "Ed25519" }, privAgain, data);
+            const a = new Uint8Array(sig1), b = new Uint8Array(sig2);
+            // Ed25519 is deterministic per RFC 8032 — same key/data should
+            // produce identical signatures, so we can byte-compare.
+            if (a.length !== b.length) return false;
+            for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+            return true;
+        })();
+        "#,
+        |v, scope| {
+            let p: v8::Local<v8::Promise> = v.try_into().unwrap();
+            for _ in 0..32 {
+                scope.perform_microtask_checkpoint();
+            }
+            let result = p.result(scope);
+            result.boolean_value(scope)
+        },
+    );
+    assert!(ok, "Ed25519 JWK round-trip yields the same deterministic signature");
+}

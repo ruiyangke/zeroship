@@ -409,10 +409,21 @@ pub fn export_ec<'s>(
     set_str(scope, obj, "crv", ec.named_curve.as_str());
     set_str(scope, obj, "x", &base64url_encode(x_part));
     set_str(scope, obj, "y", &base64url_encode(y_part));
-    if let KeyMaterial::EcPrivate { raw_d, .. } = &key.material {
-        if !raw_d.is_empty() {
-            set_str(scope, obj, "d", &base64url_encode(raw_d));
-        }
+    if let KeyMaterial::EcPrivate { raw_d, pkcs8_der, .. } = &key.material {
+        // Generated keys store an empty raw_d (aws-lc-rs hides the
+        // scalar). Walk the PKCS#8 lazily to recover it. JWK-imported
+        // keys already have raw_d populated.
+        let scalar = if !raw_d.is_empty() {
+            raw_d.clone()
+        } else {
+            super::der::extract_ec_raw_d(pkcs8_der, n).ok_or_else(|| {
+                OpError::dom(
+                    "OperationError",
+                    "EC private-key DER walk failed (scalar unrecoverable)",
+                )
+            })?
+        };
+        set_str(scope, obj, "d", &base64url_encode(&scalar));
     }
     write_key_ops(scope, obj, &key.usages);
     set_bool(scope, obj, "ext", key.extractable);
@@ -884,16 +895,22 @@ pub fn export_ed25519<'s>(
         KeyMaterial::Ed25519Public { raw_x, .. } => {
             set_str(scope, obj, "x", &base64url_encode(raw_x));
         }
-        KeyMaterial::Ed25519Private { raw_x, raw_d, .. } => {
+        KeyMaterial::Ed25519Private { raw_x, raw_d, pkcs8_der } => {
             set_str(scope, obj, "x", &base64url_encode(raw_x));
-            if raw_d.iter().any(|&b| b != 0) {
-                set_str(scope, obj, "d", &base64url_encode(raw_d));
+            // Generated keys: aws-lc-rs hides the seed and we stored
+            // [0; 32] as a placeholder. Walk the PKCS#8 (RFC 8410) to
+            // recover the actual seed for JWK export.
+            let seed = if raw_d.iter().any(|&b| b != 0) {
+                *raw_d
             } else {
-                return Err(OpError::dom(
-                    "OperationError",
-                    "Ed25519 JWK export requires raw seed (only stored on JWK-imported keys)",
-                ));
-            }
+                super::der::extract_cfrg_raw_seed(pkcs8_der).ok_or_else(|| {
+                    OpError::dom(
+                        "OperationError",
+                        "Ed25519 PKCS#8 walk failed (seed unrecoverable)",
+                    )
+                })?
+            };
+            set_str(scope, obj, "d", &base64url_encode(&seed));
         }
         _ => return Err(OpError::dom("OperationError", "Not Ed25519")),
     }
