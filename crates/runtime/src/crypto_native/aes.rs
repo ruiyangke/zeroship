@@ -820,6 +820,15 @@ fn validate_aes_usages(alg: AlgorithmName, usages: &[KeyUsage]) -> Result<(), Op
             KeyUsage::UnwrapKey,
         ],
     };
+    // Per W3C WebCrypto §§29-32 (AES-CBC/-CTR/-GCM/-KW import) step 5:
+    // an empty usages list throws SyntaxError. Same shape applies to
+    // HMAC + RSA-* private keys.
+    if usages.is_empty() {
+        return Err(OpError::dom(
+            "SyntaxError",
+            format!("{} importKey: usages must be non-empty", alg.canonical()),
+        ));
+    }
     for u in usages {
         if !allowed.contains(u) {
             return Err(OpError::dom(

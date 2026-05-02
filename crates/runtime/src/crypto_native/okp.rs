@@ -125,6 +125,19 @@ pub fn import_ed25519<'s>(
     usages: &[KeyUsage],
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {
     validate_sig_usages(usages)?;
+    if usages.is_empty() {
+        let is_private = match format {
+            KeyFormat::Pkcs8 => true,
+            KeyFormat::Jwk => jwk_has_private_d(scope, key_data),
+            _ => false,
+        };
+        if is_private {
+            return Err(OpError::dom(
+                "SyntaxError",
+                "Ed25519 private-key import: usages must be non-empty",
+            ));
+        }
+    }
     match format {
         KeyFormat::Raw => {
             let bytes = read_buffer_source(scope, key_data)?;
@@ -349,15 +362,11 @@ pub fn x25519_derive_bits<'s>(
         }
     };
 
-    // aws-lc-rs's `agreement::PrivateKey::from_x25519` would be ideal,
-    // but the API takes raw 32 bytes via a constructor. The
-    // simpler route is to pass via reconstructed PKCS8 — but for v1
-    // we use the lower-level Curve25519 directly via aws-lc-sys is
-    // more involved. As a compromise, build the PKCS8 wrapper.
-    let pkcs8 = build_x25519_pkcs8_from_seed(priv_d);
-    let priv_key = aws_lc_rs::agreement::PrivateKey::from_private_key_der(
+    // aws-lc-rs's `from_private_key_der` rejects X25519 outright;
+    // `from_private_key` accepts the raw 32-byte seed directly.
+    let priv_key = aws_lc_rs::agreement::PrivateKey::from_private_key(
         &aws_lc_rs::agreement::X25519,
-        &pkcs8,
+        priv_d,
     )
     .map_err(|_| OpError::dom("OperationError", "X25519 private key load"))?;
     let peer = aws_lc_rs::agreement::UnparsedPublicKey::new(
@@ -405,15 +414,15 @@ pub fn generate_x25519<'s>(
     usages: &[KeyUsage],
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
     validate_kdf_usages(usages)?;
-    // Generate via aws-lc-rs agreement; we don't get the raw seed
-    // back. Use aws-lc-rs SystemRandom to fill our own seed and
-    // derive the public key via PKCS#8 round-trip.
+    // aws-lc-rs's `from_private_key_der` rejects X25519 outright (the
+    // PKCS#8 path is gated to ECDH-* curves). We instead use
+    // `from_private_key` which takes a raw 32-byte seed.
     let mut seed = [0u8; 32];
     super::helpers::fill_random(&mut seed);
     let pkcs8 = build_x25519_pkcs8_from_seed(&seed);
-    let priv_key = aws_lc_rs::agreement::PrivateKey::from_private_key_der(
+    let priv_key = aws_lc_rs::agreement::PrivateKey::from_private_key(
         &aws_lc_rs::agreement::X25519,
-        &pkcs8,
+        &seed,
     )
     .map_err(|_| OpError::dom("OperationError", "X25519 key load"))?;
     let public = priv_key
@@ -469,6 +478,19 @@ pub fn import_x25519<'s>(
     usages: &[KeyUsage],
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {
     validate_kdf_usages(usages)?;
+    if usages.is_empty() {
+        let is_private = match format {
+            KeyFormat::Pkcs8 => true,
+            KeyFormat::Jwk => jwk_has_private_d(scope, key_data),
+            _ => false,
+        };
+        if is_private {
+            return Err(OpError::dom(
+                "SyntaxError",
+                "X25519 private-key import: usages must be non-empty",
+            ));
+        }
+    }
     match format {
         KeyFormat::Raw => {
             let bytes = read_buffer_source(scope, key_data)?;
@@ -515,11 +537,10 @@ pub fn import_x25519<'s>(
             let raw_d = super::der::extract_cfrg_raw_seed(&bytes).ok_or_else(|| {
                 OpError::dom("DataError", "X25519 PKCS#8 seed extract failed")
             })?;
-            // Derive the public from the seed via aws-lc-rs round-trip.
-            let pkcs8_full = build_x25519_pkcs8_from_seed(&raw_d);
-            let priv_key = aws_lc_rs::agreement::PrivateKey::from_private_key_der(
+            // Derive the public from the raw seed via aws-lc-rs.
+            let priv_key = aws_lc_rs::agreement::PrivateKey::from_private_key(
                 &aws_lc_rs::agreement::X25519,
-                &pkcs8_full,
+                &raw_d,
             )
             .map_err(|_| OpError::dom("DataError", "X25519 reload via aws-lc-rs failed"))?;
             let public = priv_key
@@ -595,6 +616,21 @@ pub fn export_x25519<'s>(
                 "X25519 PKCS#8 export requires a private key",
             )),
         },
+    }
+}
+
+fn jwk_has_private_d<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    key_data: v8::Local<v8::Value>,
+) -> bool {
+    let obj: v8::Local<v8::Object> = match key_data.try_into() {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    let key = v8::String::new(scope, "d").unwrap();
+    match obj.get(scope, key.into()) {
+        Some(v) if v.is_string() => !v.to_rust_string_lossy(scope).is_empty(),
+        _ => false,
     }
 }
 

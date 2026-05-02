@@ -41,14 +41,20 @@ pub fn sign_ecdsa<'s>(
             ));
         }
     };
-    let alg = ecdsa_signing_alg(curve, hash)?;
-    let rng = aws_lc_rs::rand::SystemRandom::new();
-    let key_pair = aws_lc_rs::signature::EcdsaKeyPair::from_pkcs8(alg, pkcs8)
-        .map_err(|_| OpError::dom("DataError", "ECDSA key construction failed"))?;
-    let sig = key_pair
-        .sign(&rng, data)
-        .map_err(|_| OpError::dom("OperationError", "ECDSA sign failed"))?;
-    Ok(sig.as_ref().to_vec())
+    // For matched curve/hash pairs aws-lc-rs has a fast path that
+    // returns r||s directly. For mismatched (e.g. P-256 + SHA-384) we
+    // route through aws-lc-sys EVP_DigestSign and post-process the
+    // DER signature into r||s.
+    if let Ok(alg) = ecdsa_signing_alg(curve, hash) {
+        let rng = aws_lc_rs::rand::SystemRandom::new();
+        let key_pair = aws_lc_rs::signature::EcdsaKeyPair::from_pkcs8(alg, pkcs8)
+            .map_err(|_| OpError::dom("DataError", "ECDSA key construction failed"))?;
+        let sig = key_pair
+            .sign(&rng, data)
+            .map_err(|_| OpError::dom("OperationError", "ECDSA sign failed"))?;
+        return Ok(sig.as_ref().to_vec());
+    }
+    super::evp_ffi::ecdsa_sign(pkcs8, hash, data, curve.order_len())
 }
 
 pub fn verify_ecdsa<'s>(
@@ -81,9 +87,44 @@ pub fn verify_ecdsa<'s>(
             ));
         }
     };
-    let alg = ecdsa_verify_alg(curve, hash)?;
-    let unparsed = aws_lc_rs::signature::UnparsedPublicKey::new(alg, raw_xy.as_slice());
-    Ok(unparsed.verify(data, sig).is_ok())
+    if let Ok(alg) = ecdsa_verify_alg(curve, hash) {
+        let unparsed = aws_lc_rs::signature::UnparsedPublicKey::new(alg, raw_xy.as_slice());
+        return Ok(unparsed.verify(data, sig).is_ok());
+    }
+    // Mismatched curve/hash. Use EVP_DigestVerify; needs a SubjectPublicKeyInfo.
+    let spki = match &key.material {
+        KeyMaterial::EcPublic { spki_der, .. } if !spki_der.is_empty() => spki_der.clone(),
+        _ => build_ec_spki_for_verify(curve, raw_xy)?,
+    };
+    super::evp_ffi::ecdsa_verify(&spki, hash, data, sig, curve.order_len())
+}
+
+fn build_ec_spki_for_verify(curve: NamedCurve, raw_xy: &[u8]) -> Result<Vec<u8>, OpError> {
+    // Reuse the same SPKI builder used for export.
+    let oid_curve: &[u8] = match curve {
+        NamedCurve::P256 => &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07],
+        NamedCurve::P384 => &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22],
+        NamedCurve::P521 => &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23],
+    };
+    let oid_ec_public: &[u8] = &[0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
+    let mut alg_id = Vec::new();
+    alg_id.extend_from_slice(oid_ec_public);
+    alg_id.extend_from_slice(oid_curve);
+    let mut alg_id_seq = vec![0x30];
+    alg_id_seq.extend_from_slice(&der_len(alg_id.len()));
+    alg_id_seq.extend_from_slice(&alg_id);
+    let mut bit_string_payload = vec![0u8];
+    bit_string_payload.extend_from_slice(raw_xy);
+    let mut bit_string = vec![0x03];
+    bit_string.extend_from_slice(&der_len(bit_string_payload.len()));
+    bit_string.extend_from_slice(&bit_string_payload);
+    let mut body = Vec::new();
+    body.extend_from_slice(&alg_id_seq);
+    body.extend_from_slice(&bit_string);
+    let mut out = vec![0x30];
+    out.extend_from_slice(&der_len(body.len()));
+    out.extend_from_slice(&body);
+    Ok(out)
 }
 
 fn ecdsa_signing_alg(
@@ -91,17 +132,19 @@ fn ecdsa_signing_alg(
     hash: HashAlgo,
 ) -> Result<&'static aws_lc_rs::signature::EcdsaSigningAlgorithm, OpError> {
     use aws_lc_rs::signature as s;
+    // WebCrypto §23 allows any combination — the actual signing
+    // operation hashes the message with the chosen hash and feeds the
+    // digest to the curve's group operation. aws-lc-rs only ships
+    // matched-curve/hash signing combos on its high-level path, so
+    // mismatched pairs are routed through aws-lc-sys EVP_DigestSign
+    // by the caller (see sign_ecdsa).
     match (curve, hash) {
         (NamedCurve::P256, HashAlgo::Sha256) => Ok(&s::ECDSA_P256_SHA256_FIXED_SIGNING),
         (NamedCurve::P384, HashAlgo::Sha384) => Ok(&s::ECDSA_P384_SHA384_FIXED_SIGNING),
         (NamedCurve::P521, HashAlgo::Sha512) => Ok(&s::ECDSA_P521_SHA512_FIXED_SIGNING),
         _ => Err(OpError::dom(
-            "NotSupportedError",
-            format!(
-                "ECDSA: unsupported curve/hash pair ({}/{})",
-                curve.as_str(),
-                hash.as_str()
-            ),
+            "_FALLBACK_FFI_",
+            "use aws-lc-sys ECDSA path",
         )),
     }
 }
@@ -116,12 +159,8 @@ fn ecdsa_verify_alg(
         (NamedCurve::P384, HashAlgo::Sha384) => Ok(&s::ECDSA_P384_SHA384_FIXED),
         (NamedCurve::P521, HashAlgo::Sha512) => Ok(&s::ECDSA_P521_SHA512_FIXED),
         _ => Err(OpError::dom(
-            "NotSupportedError",
-            format!(
-                "ECDSA: unsupported curve/hash pair ({}/{})",
-                curve.as_str(),
-                hash.as_str()
-            ),
+            "_FALLBACK_FFI_",
+            "use aws-lc-sys ECDSA path",
         )),
     }
 }
@@ -340,6 +379,20 @@ pub fn import_key<'s>(
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {
     validate_ec_usages(alg, usages)?;
     let curve = read_named_curve(scope, alg_obj)?;
+    // Empty usages on private-key import → SyntaxError (spec §23.4.2 / §24.4.2).
+    if usages.is_empty() {
+        let is_private = match format {
+            KeyFormat::Pkcs8 => true,
+            KeyFormat::Jwk => jwk_has_private_d(scope, key_data),
+            _ => false,
+        };
+        if is_private {
+            return Err(OpError::dom(
+                "SyntaxError",
+                "EC private-key import: usages must be non-empty",
+            ));
+        }
+    }
     match format {
         KeyFormat::Raw => {
             let bytes = read_buffer_source(scope, key_data)?;
@@ -600,6 +653,21 @@ fn der_len(n: usize) -> Vec<u8> {
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
+
+fn jwk_has_private_d<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    key_data: v8::Local<v8::Value>,
+) -> bool {
+    let obj: v8::Local<v8::Object> = match key_data.try_into() {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    let key = v8::String::new(scope, "d").unwrap();
+    match obj.get(scope, key.into()) {
+        Some(v) if v.is_string() => !v.to_rust_string_lossy(scope).is_empty(),
+        _ => false,
+    }
+}
 
 fn read_named_curve(
     scope: &mut v8::PinScope,

@@ -41,7 +41,7 @@ pub fn sign_pkcs1(key: &CryptoKeyState, data: &[u8]) -> Result<Vec<u8>, OpError>
     // drop down to aws-lc-sys for that one case. SHA-256/384/512
     // stay on the high-level fast path.
     if matches!(hash, HashAlgo::Sha1) {
-        return super::rsa_pss_variable_salt::pkcs1_sign(pkcs8, hash, data);
+        return super::evp_ffi::pkcs1_sign(pkcs8, hash, data);
     }
     let alg: &'static dyn aws_lc_rs::signature::RsaEncoding = match hash {
         HashAlgo::Sha256 => &aws_lc_rs::signature::RSA_PKCS1_SHA256,
@@ -80,14 +80,11 @@ pub fn verify_pkcs1(
         }
     };
     let hash = require_rsa_hash(key)?;
-    // The 1024-8192 algorithms cover the full WebCrypto-permissible
-    // range; 2048-8192 would reject 1024-bit test vectors. SHA-1 is
+    // The 1024-8192 algorithms cover the SHA-1/256/512 cases; the
+    // SHA-384 path only has the 2048-8192 variant in aws-lc-rs (will
+    // reject keys <2048 bits when SHA-384 is paired). SHA-1 is
     // legacy-only per aws-lc-rs naming but the WebCrypto spec
     // requires it for back-compat with older deployments.
-    // The 1024-8192 algorithms cover the SHA-1/256/512 cases; the
-    // SHA-384 path only has the 2048-8192 variant (will reject keys
-    // <2048 bits when SHA-384 is paired). aws-lc-rs's surface; the
-    // WebCrypto spec range is the same.
     let alg: &dyn aws_lc_rs::signature::VerificationAlgorithm = match hash {
         HashAlgo::Sha1 => &aws_lc_rs::signature::RSA_PKCS1_1024_8192_SHA1_FOR_LEGACY_USE_ONLY,
         HashAlgo::Sha256 => &aws_lc_rs::signature::RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY,
@@ -125,7 +122,7 @@ pub fn sign_pss<'s>(
     // digest length, so any caller-specified saltLength other than
     // hLen would otherwise round-trip incorrectly. The SHA-1 path is
     // also routed here (aws-lc-rs has no SHA-1 PSS sign at all).
-    super::rsa_pss_variable_salt::sign_with_salt(pkcs8, hash, data, salt_len as i32)
+    super::evp_ffi::sign_with_salt(pkcs8, hash, data, salt_len as i32)
 }
 
 pub fn verify_pss<'s>(
@@ -147,7 +144,7 @@ pub fn verify_pss<'s>(
     };
     let hash = require_rsa_hash(key)?;
     let salt_len = read_salt_length(scope, alg_obj)?;
-    super::rsa_pss_variable_salt::verify_with_salt(spki, hash, data, sig, salt_len as i32)
+    super::evp_ffi::verify_with_salt(spki, hash, data, sig, salt_len as i32)
 }
 
 fn read_salt_length(
@@ -401,12 +398,37 @@ pub fn import_key<'s>(
     let hash = hash.ok_or_else(|| {
         OpError::dom("NotSupportedError", "RSA importKey requires 'hash'")
     })?;
+    // Empty-usages SyntaxError: per W3C WebCrypto §28.4.2 (RSA-OAEP) +
+    // §22/§24 (RSA-PSS / PKCS1) — for "pkcs8" (private key) and for
+    // "jwk" when the parsed JWK has a "d" member (which signals
+    // private), an empty `usages` array is a SyntaxError. Public-key
+    // imports (spki, jwk without d) accept empty usages.
+    if usages.is_empty() {
+        let is_private = match format {
+            KeyFormat::Pkcs8 => true,
+            KeyFormat::Jwk => jwk_has_private_d(scope, key_data),
+            _ => false,
+        };
+        if is_private {
+            return Err(OpError::dom(
+                "SyntaxError",
+                format!(
+                    "{} private-key import: usages must be non-empty",
+                    alg.canonical()
+                ),
+            ));
+        }
+    }
     match format {
         KeyFormat::Spki => {
             let bytes = read_buffer_source(scope, key_data)?;
-            let pub_key = aws_lc_rs::rsa::PublicEncryptingKey::from_der(&bytes)
-                .map_err(|_| OpError::dom("DataError", "RSA SPKI parse failed"))?;
-            let modulus_bits = (pub_key.key_size_bytes() as u32) * 8;
+            // aws-lc-rs's `PublicEncryptingKey::from_der` rejects keys
+            // outside 2048-8192 bits. WebCrypto allows 1024-bit keys
+            // for legacy compat. Parse via aws-lc-sys to get the raw
+            // EVP_PKEY (any size), pull the modulus length, and keep
+            // the SPKI bytes verbatim (we'll re-parse on use).
+            let modulus_bits = super::evp_ffi::rsa_spki_modulus_bits(&bytes)
+                .ok_or_else(|| OpError::dom("DataError", "RSA SPKI parse failed"))?;
             let state = CryptoKeyState {
                 key_type: KeyType::Public,
                 extractable,
@@ -429,9 +451,8 @@ pub fn import_key<'s>(
         }
         KeyFormat::Pkcs8 => {
             let bytes = read_buffer_source(scope, key_data)?;
-            let priv_key = aws_lc_rs::rsa::PrivateDecryptingKey::from_pkcs8(&bytes)
-                .map_err(|_| OpError::dom("DataError", "RSA PKCS#8 parse failed"))?;
-            let modulus_bits = (priv_key.key_size_bytes() as u32) * 8;
+            let modulus_bits = super::evp_ffi::rsa_pkcs8_modulus_bits(&bytes)
+                .ok_or_else(|| OpError::dom("DataError", "RSA PKCS#8 parse failed"))?;
             let state = CryptoKeyState {
                 key_type: KeyType::Private,
                 extractable,
@@ -491,6 +512,27 @@ pub fn export_key<'s>(
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
+
+/// Cheap structural check: does this JWK value have a `d` member with
+/// a non-empty string? Used to decide whether to apply private-key
+/// validation rules.
+fn jwk_has_private_d<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    key_data: v8::Local<v8::Value>,
+) -> bool {
+    let obj: v8::Local<v8::Object> = match key_data.try_into() {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    let key = v8::String::new(scope, "d").unwrap();
+    match obj.get(scope, key.into()) {
+        Some(v) if v.is_string() => {
+            let s = v.to_rust_string_lossy(scope);
+            !s.is_empty()
+        }
+        _ => false,
+    }
+}
 
 fn validate_rsa_usages(alg: AlgorithmName, usages: &[KeyUsage]) -> Result<(), OpError> {
     let allowed: &[KeyUsage] = match alg {

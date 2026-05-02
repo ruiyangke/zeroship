@@ -891,6 +891,9 @@ pub fn export_ed25519<'s>(
     let obj = v8::Object::new(scope);
     set_str(scope, obj, "kty", "OKP");
     set_str(scope, obj, "crv", "Ed25519");
+    // RFC 8037 §2 + WebCrypto §35: include `alg: "Ed25519"`. (X25519
+    // does NOT have an alg per RFC 8037 §5.)
+    set_str(scope, obj, "alg", "Ed25519");
     match &key.material {
         KeyMaterial::Ed25519Public { raw_x, .. } => {
             set_str(scope, obj, "x", &base64url_encode(raw_x));

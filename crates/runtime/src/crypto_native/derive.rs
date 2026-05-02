@@ -26,13 +26,16 @@ pub fn pbkdf2_derive_bits<'s>(
         KeyMaterial::Symmetric(b) => b.as_slice(),
         _ => return Err(OpError::dom("InvalidAccessError", "Not a PBKDF2 key")),
     };
+    // Per spec §29.4.2 step 1: if length is null, throw OperationError.
+    // The spec's "length is null" maps to JS undefined/null on input;
+    // we still allow length=0 (returns empty, per spec).
     let length = length_bits.ok_or_else(|| {
         OpError::dom("OperationError", "PBKDF2 requires non-null length")
     })?;
-    if length == 0 || length % 8 != 0 {
+    if length % 8 != 0 {
         return Err(OpError::dom(
             "OperationError",
-            "PBKDF2 length must be > 0 and multiple of 8",
+            "PBKDF2 length must be a multiple of 8",
         ));
     }
     if length > 1_048_576 {
@@ -41,13 +44,21 @@ pub fn pbkdf2_derive_bits<'s>(
             "PBKDF2 length too large (cap 128 KiB)",
         ));
     }
+    // Missing salt/iterations → TypeError per IDL conversion of
+    // required dictionary members.
     let salt_v = alg_obj
         .get(scope, v8::String::new(scope, "salt").unwrap().into())
         .ok_or_else(|| OpError::type_error("Pbkdf2Params: missing 'salt'"))?;
+    if salt_v.is_undefined() || salt_v.is_null() {
+        return Err(OpError::type_error("Pbkdf2Params: missing 'salt'"));
+    }
     let salt = read_buffer_source(scope, salt_v)?;
     let iter_v = alg_obj
         .get(scope, v8::String::new(scope, "iterations").unwrap().into())
         .ok_or_else(|| OpError::type_error("Pbkdf2Params: missing 'iterations'"))?;
+    if iter_v.is_undefined() || iter_v.is_null() {
+        return Err(OpError::type_error("Pbkdf2Params: missing 'iterations'"));
+    }
     let iterations = read_enforce_range_u32(scope, iter_v)?.0;
     if iterations == 0 {
         return Err(OpError::dom(
@@ -56,6 +67,11 @@ pub fn pbkdf2_derive_bits<'s>(
         ));
     }
     let hash = read_hash(scope, alg_obj)?;
+    if length == 0 {
+        // Spec: zero-length derivation returns an empty buffer without
+        // running PBKDF2.
+        return Ok(Vec::new());
+    }
     let alg = match hash {
         HashAlgo::Sha1 => aws_lc_rs::pbkdf2::PBKDF2_HMAC_SHA1,
         HashAlgo::Sha256 => aws_lc_rs::pbkdf2::PBKDF2_HMAC_SHA256,
@@ -76,6 +92,12 @@ pub fn import_pbkdf2<'s>(
     extractable: bool,
     usages: &[KeyUsage],
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {
+    if usages.is_empty() {
+        return Err(OpError::dom(
+            "SyntaxError",
+            "PBKDF2 importKey: usages must be non-empty",
+        ));
+    }
     validate_kdf_usages(usages)?;
     if extractable {
         return Err(OpError::dom(
@@ -119,21 +141,31 @@ pub fn hkdf_derive_bits<'s>(
     let length = length_bits.ok_or_else(|| {
         OpError::dom("OperationError", "HKDF requires non-null length")
     })?;
-    if length == 0 || length % 8 != 0 {
+    if length % 8 != 0 {
         return Err(OpError::dom(
             "OperationError",
-            "HKDF length must be > 0 and multiple of 8",
+            "HKDF length must be a multiple of 8",
         ));
     }
     let hash = read_hash(scope, alg_obj)?;
+    // Missing salt/info → TypeError (required dictionary members).
     let salt_v = alg_obj
         .get(scope, v8::String::new(scope, "salt").unwrap().into())
         .ok_or_else(|| OpError::type_error("HkdfParams: missing 'salt'"))?;
+    if salt_v.is_undefined() || salt_v.is_null() {
+        return Err(OpError::type_error("HkdfParams: missing 'salt'"));
+    }
     let salt = read_buffer_source(scope, salt_v)?;
     let info_v = alg_obj
         .get(scope, v8::String::new(scope, "info").unwrap().into())
         .ok_or_else(|| OpError::type_error("HkdfParams: missing 'info'"))?;
+    if info_v.is_undefined() || info_v.is_null() {
+        return Err(OpError::type_error("HkdfParams: missing 'info'"));
+    }
     let info = read_buffer_source(scope, info_v)?;
+    if length == 0 {
+        return Ok(Vec::new());
+    }
     // RFC 5869 §2.3 max length: 255 * digest_len.
     let max_bytes = 255 * hash.digest_len();
     let out_len = (length / 8) as usize;
@@ -176,6 +208,12 @@ pub fn import_hkdf<'s>(
     extractable: bool,
     usages: &[KeyUsage],
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {
+    if usages.is_empty() {
+        return Err(OpError::dom(
+            "SyntaxError",
+            "HKDF importKey: usages must be non-empty",
+        ));
+    }
     validate_kdf_usages(usages)?;
     if extractable {
         return Err(OpError::dom(
@@ -202,13 +240,17 @@ pub fn import_hkdf<'s>(
     Ok(crypto_key::build(scope, state))
 }
 
+/// Bare validator — only checks that each usage is in the allowed set.
+/// Empty-usage checks are format-aware and live at the call site
+/// (HKDF/PBKDF2 always reject; X25519 only rejects on private-key
+/// imports).
 fn validate_kdf_usages(usages: &[KeyUsage]) -> Result<(), OpError> {
     for u in usages {
         if !matches!(u, KeyUsage::DeriveBits | KeyUsage::DeriveKey) {
             return Err(OpError::dom(
                 "SyntaxError",
                 format!(
-                    "Usage '{}' not allowed for HKDF/PBKDF2",
+                    "Usage '{}' not allowed for HKDF/PBKDF2/X25519",
                     u.as_str()
                 ),
             ));

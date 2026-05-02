@@ -215,8 +215,219 @@ pub fn pkcs1_verify(
 }
 
 // -----------------------------------------------------------------------------
+// ECDSA cross-hash sign/verify (any curve × any hash) per WebCrypto §23.
+// aws-lc-rs's high-level path only exposes matched-curve+hash pairs.
+// EVP_DigestSign* lets us pair P-256 with SHA-512, etc. Output is the
+// raw r||s wire format (W3C WebCrypto §23 step 4) — we strip the DER
+// SEQUENCE that EVP emits.
+// -----------------------------------------------------------------------------
+
+pub fn ecdsa_sign(
+    pkcs8_der: &[u8],
+    hash: HashAlgo,
+    data: &[u8],
+    coord_len: usize,
+) -> Result<Vec<u8>, OpError> {
+    unsafe {
+        let pkey = parse_pkcs8(pkcs8_der)?;
+        let _guard = PkeyGuard(pkey);
+
+        let md = md_for(hash)?;
+        let md_ctx = sys::EVP_MD_CTX_new();
+        if md_ctx.is_null() {
+            return Err(op_err("EVP_MD_CTX_new"));
+        }
+        let _ctx_guard = MdCtxGuard(md_ctx);
+
+        let mut pctx: *mut sys::EVP_PKEY_CTX = std::ptr::null_mut();
+        if sys::EVP_DigestSignInit(md_ctx, &mut pctx, md, std::ptr::null_mut(), pkey) != 1 {
+            return Err(op_err("ECDSA EVP_DigestSignInit"));
+        }
+        if sys::EVP_DigestSignUpdate(md_ctx, data.as_ptr() as *const _, data.len()) != 1 {
+            return Err(op_err("ECDSA EVP_DigestSignUpdate"));
+        }
+        let mut sig_len: usize = 0;
+        if sys::EVP_DigestSignFinal(md_ctx, std::ptr::null_mut(), &mut sig_len) != 1 {
+            return Err(op_err("ECDSA EVP_DigestSignFinal(probe)"));
+        }
+        let mut der = vec![0u8; sig_len];
+        if sys::EVP_DigestSignFinal(md_ctx, der.as_mut_ptr(), &mut sig_len) != 1 {
+            return Err(op_err("ECDSA EVP_DigestSignFinal"));
+        }
+        der.truncate(sig_len);
+        // The DER signature is `SEQUENCE { INTEGER r, INTEGER s }`.
+        // Convert to fixed-length r||s for the WebCrypto wire format.
+        ecdsa_der_to_p1363(&der, coord_len)
+    }
+}
+
+pub fn ecdsa_verify(
+    spki_der: &[u8],
+    hash: HashAlgo,
+    data: &[u8],
+    sig: &[u8],
+    coord_len: usize,
+) -> Result<bool, OpError> {
+    if sig.len() != 2 * coord_len {
+        return Ok(false);
+    }
+    let der = ecdsa_p1363_to_der(sig, coord_len);
+    unsafe {
+        let pkey = parse_spki(spki_der)?;
+        let _guard = PkeyGuard(pkey);
+
+        let md = md_for(hash)?;
+        let md_ctx = sys::EVP_MD_CTX_new();
+        if md_ctx.is_null() {
+            return Err(op_err("EVP_MD_CTX_new"));
+        }
+        let _ctx_guard = MdCtxGuard(md_ctx);
+
+        let mut pctx: *mut sys::EVP_PKEY_CTX = std::ptr::null_mut();
+        if sys::EVP_DigestVerifyInit(md_ctx, &mut pctx, md, std::ptr::null_mut(), pkey) != 1 {
+            return Err(op_err("ECDSA EVP_DigestVerifyInit"));
+        }
+        if sys::EVP_DigestVerifyUpdate(md_ctx, data.as_ptr() as *const _, data.len()) != 1 {
+            return Err(op_err("ECDSA EVP_DigestVerifyUpdate"));
+        }
+        let r = sys::EVP_DigestVerifyFinal(md_ctx, der.as_ptr(), der.len());
+        if r == 1 {
+            Ok(true)
+        } else if r == 0 {
+            Ok(false)
+        } else {
+            Err(op_err("ECDSA EVP_DigestVerifyFinal"))
+        }
+    }
+}
+
+/// Convert DER `SEQUENCE { INTEGER r, INTEGER s }` -> r||s (each
+/// `coord_len` bytes, big-endian).
+fn ecdsa_der_to_p1363(der: &[u8], coord_len: usize) -> Result<Vec<u8>, OpError> {
+    use crate::crypto_native::der::read_tlv_pub;
+    let (top, rest) = read_tlv_pub(der)
+        .ok_or_else(|| op_err("ECDSA DER: top SEQUENCE"))?;
+    if !rest.is_empty() || top.tag != 0x30 {
+        return Err(op_err("ECDSA DER: not a SEQUENCE"));
+    }
+    let body = top.value;
+    let (r, body) = read_tlv_pub(body).ok_or_else(|| op_err("ECDSA DER: r INTEGER"))?;
+    if r.tag != 0x02 {
+        return Err(op_err("ECDSA DER: r tag"));
+    }
+    let (s, _) = read_tlv_pub(body).ok_or_else(|| op_err("ECDSA DER: s INTEGER"))?;
+    if s.tag != 0x02 {
+        return Err(op_err("ECDSA DER: s tag"));
+    }
+    let mut out = vec![0u8; 2 * coord_len];
+    pad_int_be(r.value, &mut out[..coord_len])?;
+    pad_int_be(s.value, &mut out[coord_len..])?;
+    Ok(out)
+}
+
+fn pad_int_be(int_octets: &[u8], dst: &mut [u8]) -> Result<(), OpError> {
+    // ASN.1 INTEGER may have a leading 0 (sign-bit guard) — strip it.
+    let value = if !int_octets.is_empty() && int_octets[0] == 0 && int_octets.len() > dst.len() {
+        &int_octets[1..]
+    } else {
+        int_octets
+    };
+    if value.len() > dst.len() {
+        return Err(op_err("ECDSA DER: integer larger than coord"));
+    }
+    let off = dst.len() - value.len();
+    dst[..off].fill(0);
+    dst[off..].copy_from_slice(value);
+    Ok(())
+}
+
+/// Convert r||s -> DER `SEQUENCE { INTEGER r, INTEGER s }`.
+fn ecdsa_p1363_to_der(p1363: &[u8], coord_len: usize) -> Vec<u8> {
+    let r = &p1363[..coord_len];
+    let s = &p1363[coord_len..];
+    let r_int = encode_asn1_integer(r);
+    let s_int = encode_asn1_integer(s);
+    let mut body = Vec::new();
+    body.extend_from_slice(&r_int);
+    body.extend_from_slice(&s_int);
+    let mut out = Vec::with_capacity(body.len() + 4);
+    out.push(0x30);
+    push_der_len(&mut out, body.len());
+    out.extend_from_slice(&body);
+    out
+}
+
+fn encode_asn1_integer(be: &[u8]) -> Vec<u8> {
+    // Strip leading zeros, then add a single 0 if high bit is set.
+    let mut start = 0usize;
+    while start < be.len() - 1 && be[start] == 0 {
+        start += 1;
+    }
+    let trimmed = &be[start..];
+    let needs_pad = !trimmed.is_empty() && (trimmed[0] & 0x80) != 0;
+    let payload_len = trimmed.len() + if needs_pad { 1 } else { 0 };
+    let mut out = Vec::with_capacity(payload_len + 4);
+    out.push(0x02);
+    push_der_len(&mut out, payload_len);
+    if needs_pad {
+        out.push(0);
+    }
+    out.extend_from_slice(trimmed);
+    out
+}
+
+fn push_der_len(buf: &mut Vec<u8>, n: usize) {
+    if n < 0x80 {
+        buf.push(n as u8);
+    } else if n < 0x100 {
+        buf.push(0x81);
+        buf.push(n as u8);
+    } else {
+        buf.push(0x82);
+        buf.push((n >> 8) as u8);
+        buf.push(n as u8);
+    }
+}
+
+// -----------------------------------------------------------------------------
 // FFI plumbing
 // -----------------------------------------------------------------------------
+
+/// Inspect an RSA SPKI blob and return its modulus length in bits.
+/// Used by importKey to populate `algorithm.modulusLength` for keys
+/// outside aws-lc-rs's 2048-8192 acceptance range.
+pub fn rsa_spki_modulus_bits(spki: &[u8]) -> Option<u32> {
+    unsafe {
+        let pkey = parse_spki(spki).ok()?;
+        let _guard = PkeyGuard(pkey);
+        let id = sys::EVP_PKEY_id(pkey);
+        if id != sys::EVP_PKEY_RSA && id != sys::EVP_PKEY_RSA_PSS {
+            return None;
+        }
+        let bits = sys::EVP_PKEY_size(pkey) * 8;
+        if bits <= 0 {
+            return None;
+        }
+        Some(bits as u32)
+    }
+}
+
+/// Same shape, for PKCS#8 RSA private keys.
+pub fn rsa_pkcs8_modulus_bits(pkcs8: &[u8]) -> Option<u32> {
+    unsafe {
+        let pkey = parse_pkcs8(pkcs8).ok()?;
+        let _guard = PkeyGuard(pkey);
+        let id = sys::EVP_PKEY_id(pkey);
+        if id != sys::EVP_PKEY_RSA && id != sys::EVP_PKEY_RSA_PSS {
+            return None;
+        }
+        let bits = sys::EVP_PKEY_size(pkey) * 8;
+        if bits <= 0 {
+            return None;
+        }
+        Some(bits as u32)
+    }
+}
 
 unsafe fn parse_pkcs8(pkcs8_der: &[u8]) -> Result<*mut sys::EVP_PKEY, OpError> {
     let mut p = pkcs8_der.as_ptr();

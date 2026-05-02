@@ -68,8 +68,8 @@ pub mod key_material;
 pub mod okp;
 pub mod ops;
 pub mod registry;
+pub mod evp_ffi;
 pub mod rsa;
-pub mod rsa_pss_variable_salt;
 pub mod subtle;
 pub mod wrap;
 

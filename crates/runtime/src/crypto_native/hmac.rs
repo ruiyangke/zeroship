@@ -150,6 +150,14 @@ pub fn export_key<'s>(
 }
 
 fn validate_hmac_usages(usages: &[KeyUsage]) -> Result<(), OpError> {
+    // Per W3C WebCrypto §31 (HMAC importKey) step 6: empty usages →
+    // SyntaxError.
+    if usages.is_empty() {
+        return Err(OpError::dom(
+            "SyntaxError",
+            "HMAC importKey: usages must be non-empty",
+        ));
+    }
     for u in usages {
         if !matches!(u, KeyUsage::Sign | KeyUsage::Verify) {
             return Err(OpError::dom(
