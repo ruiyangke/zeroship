@@ -493,6 +493,19 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
         /// ~100ns V8 callback overhead — the brand check itself is
         /// O(depth) Local pointer comparisons.
         ///
+        /// The cached prototype is populated lazily on first call —
+        /// NOT in `install` — because eager `get_function(scope)` at
+        /// install time would freeze the FunctionTemplate's instance
+        /// shape and silently no-op any subsequent
+        /// `prototype_template().set_accessor_property(...)` calls.
+        /// Several classes (URL.searchParams, etc.) install accessors
+        /// on the prototype_template AFTER `Self::install` returns; we
+        /// must not break those.
+        ///
+        /// First-call cost (one-time per isolate): one `get_function`
+        /// + one `.get(prototype)`. Steady state: an isolate-slot read
+        /// (Rc-clone-shaped) plus the chain walk.
+        ///
         /// Lifetimes are elided here on purpose. An explicit `<'s>`
         /// would tie the `Local<Object>` argument's lifetime to the
         /// `&mut PinScope` lifetime in an invariant way (mutable
@@ -508,10 +521,45 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
             scope: &mut v8::PinScope,
             obj: v8::Local<v8::Object>,
         ) -> bool {
-            let Some(cached) = scope.get_slot::<#brand_slot_ty>() else {
-                return false;
-            };
-            let expected_proto: v8::Local<v8::Object> = v8::Local::new(scope, &cached.0);
+            // Resolve the cached prototype, lazily populating the
+            // brand slot on first call. We can't hold the slot's
+            // borrow across `set_slot` (mutable borrow) so we drop
+            // it (via `.cloned()` of the Global) before any `set_slot`
+            // call.
+            let cached_global: v8::Global<v8::Object> =
+                if let Some(slot) = scope.get_slot::<#brand_slot_ty>() {
+                    slot.0.clone()
+                } else {
+                    // Lazy fetch from the install slot. If that slot
+                    // is missing too, the class wasn't installed in
+                    // this isolate — fall through to false.
+                    let tmpl_global = match scope.get_slot::<#install_slot_ty>() {
+                        Some(s) => s.0.clone(),
+                        None => return false,
+                    };
+                    let tmpl_local = v8::Local::new(scope, &tmpl_global);
+                    let func = match tmpl_local.get_function(scope) {
+                        Some(f) => f,
+                        None => return false,
+                    };
+                    let proto_key = match v8::String::new(scope, "prototype") {
+                        Some(s) => s,
+                        None => return false,
+                    };
+                    let proto_v = match func.get(scope, proto_key.into()) {
+                        Some(v) => v,
+                        None => return false,
+                    };
+                    let proto: v8::Local<v8::Object> = match proto_v.try_into() {
+                        Ok(o) => o,
+                        Err(_) => return false,
+                    };
+                    let g = v8::Global::new(scope, proto);
+                    let g_clone = g.clone();
+                    scope.set_slot(#brand_slot_ty(g));
+                    g_clone
+                };
+            let expected_proto: v8::Local<v8::Object> = v8::Local::new(scope, &cached_global);
             // Walk the [[Prototype]] chain. Each `get_prototype` call
             // can return null (chain root) or a Value (potentially an
             // Object). Bail at depth 32 to bound worst-case cost.
@@ -850,45 +898,23 @@ fn gen_install(
 
             #inherit_block
 
-            // Capture `Foo.prototype` for the WebIDL §3.7 brand check.
-            // Materialising the Function (and thereby the prototype
-            // Object) requires an active Context — every caller of
-            // `install` already runs inside one (verified across the
-            // workspace; see `init.rs::install_globals`). The captured
-            // Object is realm-specific; isolates with multiple realms
-            // would need per-realm slots, but our worker uses one
-            // realm per isolate so this is correct in practice.
-            //
-            // We capture AFTER `#inherit_block` (and after the proto
-            // sets above) so the prototype's `[[Prototype]]` chain is
-            // fully established before we snapshot it. The brand check
-            // compares by Local handle identity against this snapshot.
-            //
-            // Both Globals materialise BEFORE the `set_slot` calls
-            // because `set_slot` takes `&mut scope` and would otherwise
-            // overlap with the in-flight `Global::new(scope, ...)`
-            // borrows.
-            let __ctor_fn = __ctor_tmpl.get_function(scope).unwrap();
-            let __proto_key = v8::String::new(scope, "prototype").unwrap();
-            let __proto_v = __ctor_fn.get(scope, __proto_key.into()).unwrap();
-            let __proto_obj: v8::Local<v8::Object> = __proto_v
-                .try_into()
-                .expect("Foo.prototype is an Object on every FunctionTemplate");
-            let __proto_global = ::v8::Global::new(scope, __proto_obj);
-            let __tmpl_global = ::v8::Global::new(scope, __ctor_tmpl);
-            // Materialise the return Local BEFORE the slot writes —
-            // its lifetime is tied to `scope`, and `set_slot` is a
-            // mutable borrow of `scope`, so we can't compute it after.
-            let __local = ::v8::Local::new(scope, __tmpl_global.clone());
-
-            // Cache both for this isolate. Future `install` calls
-            // return the same FunctionTemplate (required for
+            // Cache the FunctionTemplate for this isolate. Future
+            // `install` calls return the same Local — required for
             // `#[v8_inherit]` to chain derived classes onto the same
-            // prototype) and read the cached prototype for brand
-            // checks.
-            scope.set_slot(#install_slot_ty(__tmpl_global));
-            scope.set_slot(#brand_slot_ty(__proto_global));
-
+            // prototype.
+            //
+            // The brand-check prototype is captured LAZILY on first
+            // brand check (see `__brand_check_<ClassTy>`) rather than
+            // here, because eagerly calling `get_function(scope)` at
+            // install time freezes the FunctionTemplate's instance
+            // shape — any subsequent `prototype_template()
+            // .set_accessor_property(...)` from outside `install`
+            // would silently no-op. URL hand-installs `searchParams`
+            // on the prototype_template right after `URL::install`
+            // returns; we must not break that.
+            let __global = ::v8::Global::new(scope, __ctor_tmpl);
+            let __local = ::v8::Local::new(scope, __global.clone());
+            scope.set_slot(#install_slot_ty(__global));
             __local
         }
     }
