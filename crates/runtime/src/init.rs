@@ -696,7 +696,7 @@ pub fn load_polyfills_and_modules(
     //      `addEventListener` then throws "Cannot read properties of
     //      undefined (reading 'message')" on the first server frame.
     //   4. Native Headers / Streams / TextEncoderStream wrappers.
-    for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, NODE_GLOBALS_JS, EVENTS_JS, BLOB_JS] {
+    for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, NODE_GLOBALS_JS, BLOB_JS] {
         let code = v8::String::new(scope, polyfill).unwrap();
         let script = v8::Script::compile(scope, code, None).unwrap();
         script.run(scope).unwrap();
@@ -734,9 +734,17 @@ pub fn load_polyfills_and_modules(
     // up the native EventTarget prototype.
     install_dom(scope);
 
+    // CustomEvent shim — extends native Event with a `.detail` field. Pure
+    // JS for now (~25 LOC); deletes when CustomEvent goes native. Loads
+    // AFTER install_dom so `globalThis.Event` is the native class.
+    {
+        let code = v8::String::new(scope, EVENTS_JS).unwrap();
+        let script = v8::Script::compile(scope, code, None).unwrap();
+        script.run(scope).unwrap();
+    }
+
     // WebSocket polyfill — loaded LAST so its prototype chain references
-    // whichever EventTarget is in charge: native when the gate is set,
-    // polyfill events.js otherwise.
+    // the native EventTarget (install_dom installed it just above).
     {
         let code = v8::String::new(scope, WEBSOCKET_JS).unwrap();
         let script = v8::Script::compile(scope, code, None).unwrap();
