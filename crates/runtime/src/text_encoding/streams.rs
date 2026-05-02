@@ -657,9 +657,12 @@ fn read_bool_prop(
 }
 
 fn read_buffer_source(val: v8::Local<v8::Value>) -> Result<Vec<u8>, OpError> {
-    if val.is_undefined() || val.is_null() {
-        return Ok(Vec::new());
-    }
+    // Unlike `TextDecoder.decode()` (where `input` is `optional
+    // BufferSource`, so `undefined` legitimately means "no input"),
+    // the streams transform algorithm specifies the chunk as a
+    // required `BufferSource` parameter — undefined / null / number /
+    // plain object must reject with TypeError. WPT
+    // `decode-bad-chunks.any.js` enforces this.
     if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(val) {
         let mut buf = vec![0u8; view.byte_length()];
         view.copy_contents(&mut buf);
