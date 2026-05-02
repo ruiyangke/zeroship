@@ -1,7 +1,7 @@
 # Native WHATWG WebSocket design
 
-**Date:** 2026-05-02
-**Status:** Draft v1 — implementation pending
+**Date:** 2026-05-02 (v1) · 2026-05-02 (v2 — post-review revision)
+**Status:** Draft v2 (post-review) — implementation pending
 **Spec:** WHATWG WebSockets Standard — https://websockets.spec.whatwg.org/
 **Spec source:** https://github.com/whatwg/websockets/blob/main/index.bs
 **Wire protocol:** RFC 6455 — https://datatracker.ietf.org/doc/html/rfc6455
@@ -20,6 +20,93 @@
   HTML §11 (Origin); WebIDL §3.1 (DOMString / USVString / ByteString /
   EventHandler typedef); RFC 9110 §7.8 (HTTP Upgrade).
 **WebIDL:** https://webidl.spec.whatwg.org/
+
+## Changes from v1 (post-review)
+
+The v1 draft scored 56/100 with 10 CRITICAL spec violations (per the
+critic review at `/tmp/zeroship-reviews/websocket-review.md`). v2
+addresses every CRITICAL and every MAJOR. The substantive deltas:
+
+1. **send() type-dispatch order corrected to spec.** WHATWG §3.1 lists
+   String → Blob → ArrayBuffer → ArrayBufferView in that order
+   (https://websockets.spec.whatwg.org/#dom-websocket-send, send algorithm
+   steps 3-6). v1 inverted this and claimed the spec listed string last;
+   v2 re-orders the test predicates and removes the bogus rationale.
+   (CRITICAL #1)
+2. **`[Clamp]` conversion replaced with the actual WebIDL algorithm.**
+   v1's `code.uint32_value(scope).unwrap_or(0).min(65535)` is not a
+   `[Clamp]` conversion — WebIDL §3.2.5 (per
+   https://webidl.spec.whatwg.org/#abstract-opdef-converttoint, Clamp
+   case) requires NaN → 0, sign-aware clamp to `[0, 65535]`, then
+   round-half-to-even. v2 uses an explicit `clamp_unsigned_short`
+   helper. (CRITICAL #2)
+3. **Origin header is no longer sent unconditionally.** RFC 6455 §10.2
+   (https://datatracker.ietf.org/doc/html/rfc6455#section-10.2) says
+   non-browser clients SHOULD NOT send Origin. v2 sends Origin only when
+   the user explicitly sets it via the `init` dict, matching undici and
+   workerd defaults. (CRITICAL #3)
+4. **CONNECTING vs OPEN close() paths split.** Per WHATWG §3.1 close
+   algorithm and RFC 6455 §7.1.7, a CONNECTING-state close must "fail
+   the WebSocket connection" (no wire frame; no socket may even exist),
+   not enqueue a Close frame. v2 distinguishes the two cases in §V.5.
+   (CRITICAL #4)
+5. **AbortSignal-during-CONNECTING fires `error` THEN `close`.** Per
+   WHATWG §4 "feedback from the protocol"
+   (https://websockets.spec.whatwg.org/#feedback-from-the-protocol,
+   "if the connection-failed state is reached"), every connection-failed
+   path fires Error then Close. v1 emitted only Close on Aborted; v2
+   restores the spec-mandated pair. (CRITICAL #5)
+6. **Close frame default no longer encodes 1005.** Per RFC 6455 §7.4.1
+   (https://datatracker.ietf.org/doc/html/rfc6455#section-7.4.1), 1005
+   is reserved as an internal sentinel and MUST NOT appear in a Close
+   control frame. v2's send-pump emits an empty-payload Close frame when
+   the user calls `close()` with no code argument. (CRITICAL #6)
+7. **Sec-WebSocket-Extensions response is now strictly validated.** Per
+   RFC 6455 §9.1
+   (https://datatracker.ietf.org/doc/html/rfc6455#section-9.1), any
+   extension in the response that the client did not request MUST fail
+   the connection. v2 advertises an empty extension set, and any
+   non-empty Sec-WebSocket-Extensions response now hard-fails the
+   handshake. (CRITICAL #7)
+8. **Two-phase SSRF resolution for the WS path.** v1 only checked the
+   URL string (catching IP-literal hostnames). DNS rebinding attacks
+   bypass that. v2 mirrors fetch's resolve-then-revalidate-then-bind
+   pattern from `crates/runtime/src/fetch.rs:36-163`. (CRITICAL #8)
+9. **Sec-WebSocket-Protocol response is validated against the offered
+   set.** Per RFC 6455 §4.1 step 6 of the response checks
+   (https://datatracker.ietf.org/doc/html/rfc6455#section-4.1), the
+   client MUST fail the connection if the server echoes a subprotocol
+   the client did not offer. v2 adds a defence-in-depth check after
+   tungstenite's own validator. (CRITICAL #9)
+10. **D-23 budget overflow now uniformly async-fails.** v1 contradicted
+    itself: the Decisions table said "throws RangeError" while §V.3
+    used an async error+close dispatch. v2 commits to async-fail
+    (matches WHATWG §3.1's "establish in parallel" framing — failures
+    surface as queued connection-failed events) and updates D-23
+    accordingly. (CRITICAL #10)
+
+The MAJOR fixes — receive-side backpressure, dead `[[full]]` flag,
+EventHandler null-coercion, RFC 6455 §7.1.1 5-second close-handshake
+timeout, ping-keepalive interval, MessageEvent.ports identity caching,
+make_disappear close-code semantics, max_message_size pinning,
+WebSocketPair bufferedAmount decrement, send-pump error reporting,
+WsCachedHandles re-dispatch race, AbortSignal reason propagation,
+permessage-deflate Cargo feature lockdown, CloseEventInit code
+conversion, receive_loop use-after-move, accept() prototype hygiene —
+are documented inline at their respective sections.
+
+The MINOR pseudocode hygiene items (set_integrity_level return value,
+echo-server endpoint enumeration, hours estimate refresh, ADR
+spec-citation structure) are addressed inline where they appear.
+
+The "Missing concepts" the critic flagged — per-app WebSocket metering,
+worker-shutdown drain protocol, sticky routing for outbound `new
+WebSocket(url)` on multi-node, TLS root-trust + ALPN config,
+WebSocketStream-deprecated-form enumeration — get explicit Open
+Questions in §XVII (XVII.11 through XVII.16).
+
+**Score target after v2 revision:** ≥80 (production-ready). Remaining
+items in §XVII are policy choices, not spec defects.
 
 **Depends on:**
 - `docs/proposals/streams-native.md` — landed RS+RSDefaultController+RSDefaultReader
