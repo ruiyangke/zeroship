@@ -107,6 +107,32 @@ impl Default for Blob {
 // Spec helpers
 // ---------------------------------------------------------------------------
 
+/// WebIDL `[Clamp] long long` conversion (§3.2.4): map a JS Number to
+/// an i64 with banker's rounding (round-half-to-even). Used by
+/// `Blob.slice(start, end)` per the WPT slice tests, which check that
+/// `slice(1.5)` resolves to `slice(2)`, `slice(2.5)` also to `slice(2)`,
+/// and `slice(3.5)` to `slice(4)`.
+///
+/// Spec algorithm (simplified for our integer-saturating use):
+///   1. If x is NaN: return 0.
+///   2. Set x = clamp(x, i64::MIN, i64::MAX).
+///   3. Set x = round-half-to-even(x).
+///   4. Return x.
+fn clamp_long_long(x: f64) -> i64 {
+    if x.is_nan() {
+        return 0;
+    }
+    if x <= i64::MIN as f64 {
+        return i64::MIN;
+    }
+    if x >= i64::MAX as f64 {
+        return i64::MAX;
+    }
+    // f64::round_ties_even is round-half-to-even (banker's rounding).
+    // Stable since 1.77 — checked compatible with our toolchain.
+    x.round_ties_even() as i64
+}
+
 /// §3.1 step 2 of the Blob constructor: lowercase the `type` if every
 /// character is a printable ASCII byte (U+0020..U+007E inclusive).
 /// Otherwise the resulting type is the empty string. (V8 strings can
@@ -126,6 +152,11 @@ fn normalize_type(s: &str) -> String {
 /// duplicating the algorithm.
 pub(crate) fn normalize_type_public(s: &str) -> String {
     normalize_type(s)
+}
+
+/// Public re-export of `clamp_long_long` for `file.rs::slice`.
+pub(crate) fn clamp_long_long_public(x: f64) -> i64 {
+    clamp_long_long(x)
 }
 
 /// Public wrapper around `Blob::from_bytes_owned`. Used by `File`'s
@@ -225,6 +256,12 @@ fn append_part_bytes(
     Ok(())
 }
 
+/// True for objects and functions; matches WebIDL "object" semantics
+/// (which excludes primitives but includes callable functions).
+fn is_object_like(v: v8::Local<v8::Value>) -> bool {
+    v.is_object() || v.is_function()
+}
+
 /// True if `obj` is an instance of `globalThis.Blob` per ES `instanceof`.
 /// Used as the brand check inside the `BlobPart` union dispatch — we
 /// can't rely solely on internal-field 0 being an External (other
@@ -252,26 +289,58 @@ fn is_blob_instance(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> boo
 // ---------------------------------------------------------------------------
 
 /// Parse the BlobPropertyBag (`{ type?: string, endings?: "transparent" | "native" }`).
-/// Per WebIDL dictionary semantics:
-///   - `undefined` → empty dict.
-///   - `null` → empty dict (per WebIDL §3.2.18 Records-and-dicts allow null).
-///   - non-object that's neither undefined nor null → TypeError.
-///   - object → read each member; missing members fall to defaults.
+/// Per WebIDL §3.2.18 dictionary conversion:
+///   - `undefined` → empty dict (defaults applied).
+///   - `null` → empty dict (defaults applied).
+///   - **Object** (incl. function, regex, array, etc.) → read each member.
+///   - Any other primitive (boolean, number, bigint, string, symbol)
+///     → throw TypeError. The Blob WPT confirms this: passing 123,
+///     123.4, true, 'abc' for options throws.
+///
+/// Members are accessed in **lexicographic key order** per spec
+/// (`endings` before `type` for BlobPropertyBag). The WPT test
+/// `"options properties should be accessed in lexicographic order"`
+/// enforces this with throwing accessors that record their order.
 fn parse_property_bag(
     scope: &mut v8::PinScope,
     init: v8::Local<v8::Value>,
 ) -> Result<String, OpError> {
+    // Spec step 1: undefined/null → empty dictionary.
     if init.is_undefined() || init.is_null() {
         return Ok(String::new());
     }
+    // Spec step 2: non-object primitives throw TypeError.
+    if !is_object_like(init) {
+        return Err(OpError::type_error(
+            "Blob options must be an object or undefined",
+        ));
+    }
     let obj: v8::Local<v8::Object> = match init.try_into() {
         Ok(o) => o,
-        // Per WebIDL §3.2.18: dictionary conversion of a primitive
-        // (other than undefined/null) throws TypeError.
-        Err(_) => return Err(OpError::type_error("Blob options must be an object")),
+        // Defensive: the is_object_like check above implies this
+        // succeeds, but the type system can't see that.
+        Err(_) => return Ok(String::new()),
     };
 
-    // `type` member (USVString, default "").
+    // Step 1: `endings` (observed but discarded — Linux has nothing
+    // to normalize line endings against, and the spec lets us treat
+    // "transparent" as the only effective option).
+    //
+    // Read happens BEFORE `type` per WebIDL lexicographic ordering.
+    // We must do the get even though we don't use the result, because
+    // the side-effect (a throwing accessor) is observable — the spec
+    // mandates the throw propagate through Blob's constructor.
+    let endings_key = v8::String::new(scope, "endings").unwrap();
+    let endings_v = obj
+        .get(scope, endings_key.into())
+        .ok_or_else(|| OpError::type_error("Blob options.endings access threw"))?;
+    if !endings_v.is_undefined() {
+        // Spec also calls ToString on the value (per the EndingType
+        // enum conversion). Trigger that side-effect.
+        let _ = endings_v.to_rust_string_lossy(scope);
+    }
+
+    // Step 2: `type` member (USVString, default "").
     let type_key = v8::String::new(scope, "type").unwrap();
     let type_v = obj
         .get(scope, type_key.into())
@@ -281,12 +350,6 @@ fn parse_property_bag(
     } else {
         type_v.to_rust_string_lossy(scope)
     };
-
-    // We don't actually validate or store `endings` (it's a no-op on
-    // Linux); but we DO read it to mirror WebIDL semantics where an
-    // accessor with an observable side-effect would still fire.
-    let endings_key = v8::String::new(scope, "endings").unwrap();
-    let _ = obj.get(scope, endings_key.into());
 
     Ok(normalize_type(&raw_type))
 }
@@ -299,12 +362,16 @@ fn parse_property_bag(
 ///   "Otherwise, for each blobPart in blobParts, the bytes…"
 /// — i.e. the input is a `sequence<BlobPart>`, which in WebIDL means
 /// "anything iterable". Arrays and TypedArray itself both qualify.
+///
+/// Only `undefined` is treated as default-empty; `null`, primitives,
+/// and non-iterable objects all throw TypeError per WebIDL §3.2.18.
+/// The Blob WPT `Blob constructor` checks this explicitly.
 fn collect_parts(
     scope: &mut v8::PinScope,
     parts: v8::Local<v8::Value>,
     out: &mut Vec<u8>,
 ) -> Result<(), OpError> {
-    if parts.is_undefined() || parts.is_null() {
+    if parts.is_undefined() {
         // The default-empty case. Spec §3.2 step 1: missing argument
         // means empty.
         return Ok(());
@@ -407,10 +474,11 @@ impl Blob {
     /// per §3.3.6. Negative indices clamp from the end; the resulting
     /// Blob shares the backing buffer with `self` (no copy).
     ///
-    /// Note on signed vs unsigned bounds: spec uses `[Clamp] long long`
-    /// for `start`/`end`. Values outside i32 range get clamped at the
-    /// JS-to-i32 boundary, which for typical use is the same as the
-    /// spec (real-world Blobs don't hit 2^31 bytes).
+    /// `start` and `end` are WebIDL `[Clamp] long long` arguments —
+    /// non-integer values round to the nearest integer, with halves
+    /// rounded to even (banker's rounding) per WebIDL §3.2.4. So
+    /// `slice(1.5)` resolves to `slice(2)`, `slice(2.5)` is also
+    /// `slice(2)`, and `slice(3.5)` is `slice(4)`.
     ///
     /// Args declared as `v8::Local<v8::Value>` so we can distinguish
     /// "missing" (undefined) from "0", which the spec treats
@@ -429,11 +497,7 @@ impl Blob {
         let start: i64 = if start_arg.is_undefined() {
             0
         } else {
-            // i64 via f64 round-toward-zero matches Clamp's behavior
-            // for the common case; the spec says "if relativeStart is
-            // negative, let relativeStart be max((size + start), 0);
-            // else min(start, size)".
-            start_arg.number_value(scope).unwrap_or(0.0) as i64
+            clamp_long_long(start_arg.number_value(scope).unwrap_or(0.0))
         };
         let rel_start = if start < 0 {
             (size + start).max(0)
@@ -445,7 +509,7 @@ impl Blob {
         let end: i64 = if end_arg.is_undefined() {
             size
         } else {
-            end_arg.number_value(scope).unwrap_or(0.0) as i64
+            clamp_long_long(end_arg.number_value(scope).unwrap_or(0.0))
         };
         let rel_end = if end < 0 {
             (size + end).max(0)

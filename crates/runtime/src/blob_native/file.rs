@@ -148,6 +148,12 @@ impl File {
     /// `new File(fileBits, fileName, options?)` per §4.3.
     /// Args: sequence<BlobPart> fileBits, USVString fileName,
     ///       FilePropertyBag options.
+    ///
+    /// Per WebIDL, both `fileBits` and `fileName` are required (no
+    /// `optional` keyword in the IDL); calling `new File()` or
+    /// `new File([])` throws TypeError. We detect "missing" by
+    /// `is_undefined()` — JS callers passing `undefined` explicitly
+    /// or omitting the arg both end up the same.
     #[v8_constructor]
     fn new(
         scope: &mut v8::PinScope,
@@ -155,6 +161,17 @@ impl File {
         file_name: v8::Local<v8::Value>,
         options: v8::Local<v8::Value>,
     ) -> Result<Self, OpError> {
+        if file_bits.is_undefined() {
+            return Err(OpError::type_error(
+                "Failed to construct 'File': 1 argument required, but only 0 present.",
+            ));
+        }
+        if file_name.is_undefined() {
+            return Err(OpError::type_error(
+                "Failed to construct 'File': 2 arguments required, but only 1 present.",
+            ));
+        }
+
         // Step 2: name = USVString(fileName). USVString conversion runs
         // ToString(V) then replaces unpaired surrogates with U+FFFD;
         // V8's `to_rust_string_lossy` does this (we treat WTF-16 lone
@@ -231,7 +248,9 @@ impl File {
         let start: i64 = if start_arg.is_undefined() {
             0
         } else {
-            start_arg.number_value(scope).unwrap_or(0.0) as i64
+            crate::blob_native::blob::clamp_long_long_public(
+                start_arg.number_value(scope).unwrap_or(0.0),
+            )
         };
         let rel_start = if start < 0 {
             (size + start).max(0)
@@ -241,7 +260,9 @@ impl File {
         let end: i64 = if end_arg.is_undefined() {
             size
         } else {
-            end_arg.number_value(scope).unwrap_or(0.0) as i64
+            crate::blob_native::blob::clamp_long_long_public(
+                end_arg.number_value(scope).unwrap_or(0.0),
+            )
         };
         let rel_end = if end < 0 {
             (size + end).max(0)
