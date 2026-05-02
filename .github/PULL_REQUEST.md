@@ -1,9 +1,10 @@
 # Builder: full redesign + multi-agent fleet (Plan 01 foundation + Plan 02 finish)
 
 **Branch:** `redesign/plan-01-foundation` → `master`
-**Commits:** ~120 since fork
+**Commits:** ~150 since fork
 **TypeScript:** `tsc --noEmit` clean (0 errors)
-**Tests:** 54 e2e across 13 spec files (~32 always-passing, ~22 env-gated)
+**Tests:** 221 e2e across ~25 spec files — **all passing** with `OPENAI_API_KEY` + control plane up; ~150 always-passing without env, the rest skip cleanly when their env isn't set
+**Production build:** clean (`vite build` → `dist/app.zsapp` 3.91 MB, 559 blobs)
 
 ---
 
@@ -45,10 +46,11 @@ What didn't land: real backing for ~13 control-plane-side features (skill regist
 - Logs: filtered ledger with 2s poll + sticky-bottom.
 - Env: variables + secrets (real control-plane backing).
 - Settings: identity · plan picker · archive · danger zone.
-- Plan: Issues / Roadmap / Deployments (in-memory stub, ISS-14 / ISS-15).
-- Health: Status / Quality / Incidents / Performance (hardcoded scorecard, ISS-16 / ISS-17 / ISS-18).
-- Data: 5 sub-tabs (Tables / Schema / Indexes / Migrations / Backups) over `SAMPLE_*` constants (ISS-20 → ISS-25).
-- Media: drop-zone grid (base64 data URLs, ISS-26).
+- Plan: Issues / Roadmap / Deployments — KV-backed issues + "Run digest" CTA wired to the PM SubAgent (ISS-14 partial, ISS-15 still in-memory).
+- Health: Status / Quality / Incidents / Performance — quality grid is now **live from the Critic** (KV-persisted via `setQualityFromCritic` on every `data-critic-round` emit, ISS-16); Incidents has "Scan for issues" CTA wired to the SRE SubAgent (ISS-17 stays partial); Performance section now derives **real signals from log lines** (request rate / error rate / p95 latency) with hand-rolled SVG sparklines (ISS-18 partial).
+- Data: 5 sub-tabs (Tables / Schema / Indexes / Migrations / Backups) over `SAMPLE_*` constants (ISS-20 → ISS-25); KV-backed media + backups list.
+- Media: drop-zone grid (base64 data URLs persisted to KV, ISS-26).
+- Files: shiki syntax highlighting (resolves ISS-27).
 
 **Public surfaces**
 - Marketing landing · Pricing (3 plans + 15 % share band with worked example) · Skills (static catalogue) · Templates · About · Changelog · Privacy · Terms.
@@ -64,11 +66,22 @@ What didn't land: real backing for ~13 control-plane-side features (skill regist
 - `/onboarding/intent` picker (six chips per spec §7.1).
 - First-run hint on the `/new` wizard composer.
 - First-deploy celebration banner (`<LiveBanner>`) gated on `deploy_hash` transition + per-app localStorage flag.
-- Skippable 4-step product tour triggered from the TopBar `?` button.
+- 4-step product tour with **surface highlighting** — each step targets a real DOM surface by testid (chat-composer, canvas-pills, topbar-url), draws a 4px outlined frame around it via the box-shadow inset trick, floats the tooltip adjacent with viewport-clamped fallback sides. Esc closes; ←/→ navigate; Prev disables on step 1; backdrop click skips. 4 e2e tests verify the full walk.
 
 **Project archive**
 - UI in `SettingsCanvas` + filter pill on Home.
-- In-memory `Set<string>` (ISS-19); state lost on server restart.
+- KV-backed `Set<string>` (survives HMR / isolate eviction within a single process; multi-node consistency still tracked under ISS-19).
+
+**Tier toggle (§1.5)**
+- Editorial chip next to canvas pills cycles Maker → +Data → +Code; choice persists in localStorage; active pill snaps to "preview" if a tier change hides it.
+
+**Persistence layer**
+- `_persist.ts` wraps `@zeroship/kv` with a same-process `Map` fallback. Internal helpers tagged `_internal.<name>` (ISS-02 mitigation) so the prod build's manifest emitter accepts them.
+- Issues, archive set, quality scorecard, media, backups all moved off bare module-level `Map`s onto KV.
+
+**Analytics + telemetry (§28)**
+- `lib/analytics.ts` `track()` ring-buffered emitter + `subscribeEvents`.
+- `DevEventsBadge` floating popover (DEV-only, bottom-left) shows the last 50 events live so devs can verify `track()` calls without console-diving.
 
 **Chat polish**
 - Hover actions: copy / regenerate / edit-prior.
@@ -117,26 +130,16 @@ All deferred work is tracked in `ISSUES.md`. Quick index:
 
 ## Tests
 
-**Inventory:**
+`tsc --noEmit` is clean. **221 e2e tests passing** with `OPENAI_API_KEY` + control plane up; ~150 always pass without env, the rest skip cleanly when their env isn't set.
 
-```
-auth.spec.ts                 4 tests   no env required
-chat-actions.spec.ts         8 tests   no env required (mock chat path)
-chat-openai.spec.ts          3 tests   OPENAI_API_KEY required
-critic-loop.spec.ts          1 test    OPENAI_API_KEY required
-data-media.spec.ts           4 tests   control plane required
-lifecycle.spec.ts            3 tests   no env required
-multi-agent.spec.ts          3 tests   OPENAI_API_KEY required
-onboarding.spec.ts           6 tests   no env required
-plan-health.spec.ts          3 tests   control plane required
-public-pages.spec.ts        11 tests   no env required
-spine-openai.spec.ts         2 tests   OPENAI_API_KEY + control plane
-wizard-openai.spec.ts        2 tests   OPENAI_API_KEY required
-workspace-canvases.spec.ts   4 tests   control plane required
-─────────────────────────── 54 tests
-```
+Highlights since the original Plan 02:
 
-`tsc --noEmit` is clean. ~32 tests always pass without env. ~22 are gated and skip cleanly when their env isn't set.
+- **Real-LLM full-spine** (`e2e/full-spine-real.spec.ts`) — landing → wizard → survey → brief → Begin → workspace → seeded user msg → assistant reply, against the live OpenAI API. Surfaced four wire bugs that are now fixed (commit `dd3f2f30`).
+- **Critic iteration loop** (`e2e/critic-loop.spec.ts`) — exercises the `task("critic", …)` while-loop end-to-end with real LLM dispatch.
+- **Multi-agent deep flows** (`e2e/multi-agent.spec.ts` + Reviewer / PM / SRE deep specs) — each SubAgent verified to fire on its trigger and emit its data-part shape.
+- **Foundation-polish spec** (`e2e/foundation-polish.spec.ts`) — tier filter, KV persistence, run-digest, mobile wizard, dev-events-badge.
+- **Product tour** (4 new tests in `e2e/onboarding.spec.ts`) — opens, walks all 4 steps with surface highlighting visible, Esc closes, Skip closes, Prev navigation.
+- **Health + Plan canvases** (`e2e/plan-health.spec.ts`) — three sections + four-section verifies; sparklines under the new Performance section.
 
 ---
 
@@ -207,6 +210,12 @@ For reviewers picking a starting point:
 **Single-input RPC wire.** Every server proc takes one object input (`{appId, ...}`). The vite-plugin's RPC discovery loop forwards `args[0]` only, so this is the only safe shape for multi-arg procs. ISS-02 traces the missing opt-in marker that makes this convention fragile.
 
 **In-memory checkpointer.** `MemorySaver` is process-local and dev-only. Production needs a Postgres-backed `BaseCheckpointSaver`. Deferred to control-plane work.
+
+**KV instead of Postgres for stub state.** The night's persistence sweep moved issues / archive set / quality scorecard / media / backups onto `@zeroship/kv` so they survive HMR and isolate eviction within a single process. KV is in-memory in dev (no real cluster yet), so multi-node is still inconsistent — that's tracked in the relevant ISSUES.md entries (ISS-14 / ISS-15 / ISS-19 / ISS-26). The `_persist.ts` wrapper falls back to a process-local Map when KV throws, so the canvas always renders something.
+
+**Internal helper id convention (ISS-02).** The vite-plugin's manifest emitter refuses prod builds when any exported procedure lacks an explicit `.config.id`. To unblock prod builds without changing the plugin's discovery loop, each underscore-prefixed internal helper now ships with `<name>.config = { id: "_internal.<name>" }`. The `_internal.` prefix lets reviewers and a future kernel-side filter spot/skip them. Plugin-side opt-out marker is still the right fix.
+
+**Health perf via log parsing.** Rather than wait for the structured metering pipeline (ISS-18 fix path), the Performance section now derives request-rate / error-rate / p95-latency from log lines via loose regexes (`HTTP_METHOD_RE`, `ERROR_RE`, `LATENCY_RE`). It's best-effort by design — apps that don't log in a method/latency-ms style will show zeros, which is honest. Sparkline is hand-rolled SVG (single `<polyline>`) — no chart-lib dependency.
 
 **Tool-call rendering taxonomy (G4).** `write_file` / `edit_file` / `ask_survey` / `task` → custom `data-*` parts via middleware (UI shape ≠ I/O shape). `ls` / `read_file` / `grep` / `glob` / `execute` → native AI SDK v6 `tool-call` / `tool-result` chunks via the translator. The translator skips middleware-handled tool names so the wire shows one card, not two.
 

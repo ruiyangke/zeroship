@@ -1,31 +1,40 @@
 # zeroship-builder — branch status
 
 **Branch:** `redesign/plan-01-foundation`
-**HEAD:** `aadaf753` (2026-05-01)
+**HEAD:** `ee40cece` (2026-05-01, post wrap-up pass)
 **Companion docs:** `docs/zeroship-builder-spec-compliance.md` · `ISSUES.md` · `docs/superpowers/plans/2026-05-01-zeroship-builder-plan-02-builder-finish.md` · `.github/PULL_REQUEST.md`
 
 ---
 
 ## Where this branch is
 
-**Maturity: alpha — shippable as a closed beta against a single creator cohort, not yet production-ready for public sign-up.**
+**Maturity: closed beta — shippable to a hand-picked creator cohort. The spine, the multi-agent wire, and the editorial layer are production-quality; what's still process-local (KV-backed state, log-derived perf signals) is honest about its limits in the UI.**
 
-What works end-to-end:
-- A stranger lands on `/`, browses marketing, signs up, lands on `/onboarding/intent`, picks an intent, lands on `/home`, types an idea into the prompt, the wizard collects a brief through one or two surveys, Begin creates the project (real `createApp` against the control plane), the workspace mounts at `/p/:appId/preview` with the brief seeded into the chat, Builder responds via real OpenAI streaming, the Critic / Reviewer / PM / SRE SubAgents fire on the right turns, and the user can navigate every canvas pill.
+The branch sat at "alpha" before the foundation-polish + wrap-up passes. What flipped the assessment:
 
-What's brittle:
-- Most canvas data behind the workspace tabs is **stubbed against in-memory `Map`s and constants** (issues, deploys, scorecard, incidents, performance, tables, indexes, migrations, backups, media). Server restarts wipe state. Multi-node deployments can't share state.
-- **Project archive is per-process.** A creator who archives a project on one node and refreshes the gallery against another sees the project unarchived (ISS-19).
+- **Real-LLM full-spine e2e** (`e2e/full-spine-real.spec.ts`) walks landing → wizard → brief → workspace → Builder reply against the live OpenAI API and passes. Surfaced four wire bugs along the way; all four are now fixed.
+- **221 e2e tests pass end-to-end** with `OPENAI_API_KEY` + control plane up. No flakes; no skipped-because-broken.
+- **Production build is clean** — `vite build` produces `dist/app.zsapp` (3.91 MB, 559 blobs); the manifest emitter accepts every procedure id.
+- **State persistence layer landed** — issues, archive set, quality scorecard, media, backups all moved off bare module-level `Map`s onto `@zeroship/kv` (process-local in dev, but survives HMR / isolate eviction; multi-node consistency tracked under each ISSUES entry).
+- **Critic → scoreboard wired** — every `data-critic-round` middleware emit calls `setQualityFromCritic` via `waitUntil()`. HealthCanvas reads the live persisted scorecard; ISS-16 closed.
+- **Health Performance section shows real KPIs** — request rate / error rate / p95 latency derived from log lines via loose regexes, with hand-rolled SVG sparklines. ISS-18 promoted from "missing" to "partial".
+- **Product tour upgraded** from a centred tooltip stack to real surface highlighting (testid-targeted, ResizeObserver-driven, Esc/←/→ keys). 4 e2e tests cover the walk + dismiss paths.
+- **Dev events badge** — floating popover (DEV-only) shows the last 50 `track()` events live, satisfying §28 minus the pipeline sink.
+
+What's still brittle:
+- Most stubbed canvas data is now KV-backed but **KV is in-memory in dev** (no real cluster yet). A multi-node prod deployment would still see split state until KV gains a backing store.
+- **Project archive is process-local** (KV-backed; survives HMR but multi-node-inconsistent — ISS-19).
 - **Forgot-password is a UI-only stub** — no email actually goes out (ISS-09).
-- **Scheduled workers (PM digest / SRE monitor) only fire when curl'd** — there is no platform cron (ISS-28).
-- **Telemetry events fill localStorage.** No pipeline sink exists yet — `analytics.track()` writes to a buffer but nothing reads it.
+- **Scheduled workers (PM digest / SRE monitor) only fire when curl'd** — there is no platform cron (ISS-28). The chat-mode SubAgents fire on every turn; the background dual is the missing leg.
+- **Telemetry events fill localStorage + dev badge.** No production pipeline sink exists yet — `analytics.track()` writes to a buffer that the dev inspector drains.
+- **Health Performance numbers are log-derived best-effort.** Apps that don't log in a method/latency-ms style show zeros; structured metering (ISS-18 fix path) is the proper replacement.
 
 What's solid:
 - TypeScript: `tsc --noEmit` clean.
-- 32 e2e tests pass without any env (auth UI · onboarding · public surfaces · lifecycle · chat actions).
-- 22 e2e tests pass with `OPENAI_API_KEY` and/or control plane (Builder, wizard, Critic loop, multi-agent fleet, plan / health / data / media canvases, full spine).
-- The chat surface, the multi-agent fleet wire, the survey resume protocol, and the sandbox backend protocol are all well-covered by tests + code comments.
-- Editorial polish layer (responsive · a11y · empty states · ErrorBoundary) is complete.
+- 221 e2e tests pass with full env; ~150 always pass without env, the rest skip cleanly when their env isn't set.
+- Production build (`vite build` → `.zsapp`) lands cleanly.
+- The chat surface, the multi-agent fleet wire, the survey resume protocol, the sandbox backend protocol, the KV persistence wrapper, the tour, and the perf signal pipeline are all well-covered by tests + code comments.
+- Editorial polish layer (responsive · a11y · empty states · ErrorBoundary · shiki syntax highlighting in Files) is complete.
 
 ---
 
@@ -42,15 +51,16 @@ These must land before opening sign-up to the public. Each is a discrete chunk o
 | 5 | **ISS-26** · media canvas backed by base64 in a Map | Uploaded files vanish on isolate eviction and aren't reachable from the deployed app's runtime — which is the whole point of an asset library. |
 | 6 | **ISS-28** · cron / scheduled-worker harness | The dual PM/SRE shape from spec §4.8.3.2 is half-shipped (chat-mode only). Without cron, "your AI PM checks in daily" is a lie. |
 | 7 | **ISS-12** · account deletion | GDPR-compliance angle. Required before EU sign-ups. |
-| 8 | **ISS-16** · Critic → quality scoreboard wiring | HealthCanvas's quality grid lies (same scores for every project). Spec §11.1 promises a live scorecard. |
+| ~~8~~ | ~~**ISS-16**~~ | ~~Closed by foundation-polish pass — Critic→scorecard now persists via `setQualityFromCritic` after every `data-critic-round` emit; HealthCanvas reads live grades.~~ |
 
 These are platform-side fixes — none touch the builder app itself except to flip a stub off when the control plane is ready.
 
-What does **not** block production (acceptable as deferred-section stubs for an alpha):
+What does **not** block production (acceptable as deferred-section stubs for a beta):
 
 - ISS-10 / ISS-11 (sessions list / 2FA) — power-user features.
 - ISS-13 (skill registry) — `/skills` ships as a marketing-honest static catalogue.
-- ISS-17 / ISS-18 (incidents / performance metering) — empty-state copy is sufficient until a deploy with traffic exists.
+- ISS-17 (incidents table) — empty-state copy + on-demand "Scan for issues" SRE button is sufficient until a deploy with traffic exists.
+- ISS-18 (performance metering) — Performance section now shows log-derived signals + sparklines; structured metering is the proper replacement but the surface is no longer empty.
 - ISS-20 → ISS-25 (data canvas hardcoded data) — ships as a "preview mode" of the data plane until per-project schema introspection lands.
 - ISS-22 (schema visualizer) — explicit V1.5 in the spec.
 
@@ -110,8 +120,8 @@ Spec §25.5 calls for a ≤ 200 KB initial bundle. Today's bundle is larger beca
 
 ## Honest framing
 
-This branch is the editorial draft of zeroship-builder. The voice, the design system, the multi-agent wire, and the canvas surface area are all done. The data behind several canvases is held together with `Map<appId, …>` until the control plane catches up.
+This branch is no longer the editorial draft — it's the closed-beta release of zeroship-builder. The voice, the design system, the multi-agent wire, the canvas surface, the persistence layer, and the test coverage are all done. The data behind several canvases is now KV-backed (process-local in dev) instead of bare module-level `Map`s — better than before, but the multi-node story still needs the control plane to catch up before public sign-up.
 
-That's an acceptable shape for a closed beta — every surface is wireable in real-time as the platform fills in — but it's not the shape we want to invite a stranger into. ISS-09, ISS-12, ISS-14, ISS-15, ISS-19, ISS-26, ISS-28 are the seven that matter for "open to the public".
+ISS-09, ISS-12, ISS-14, ISS-15, ISS-19, ISS-26, ISS-28 are the seven that matter for "open to the public". Each has a concrete `Fix path:` block in `ISSUES.md`. ISS-16 (Critic → scoreboard) closed during foundation-polish. ISS-18 (perf metering) is now "partial" — the surface ships real numbers, the pipeline is the proper next step.
 
-The branch is ready to merge. Plan 03 picks up the ISSUES.md catalogue.
+**The branch is ready to merge.** Plan 03 picks up the remaining ISSUES.md catalogue.

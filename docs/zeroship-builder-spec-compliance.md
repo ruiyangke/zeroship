@@ -1,7 +1,7 @@
 # zeroship-builder — spec compliance walkthrough
 
 **Spec:** `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md`
-**Branch reviewed:** `redesign/plan-01-foundation` @ `aadaf753` (HEAD as of 2026-05-01)
+**Branch reviewed:** `redesign/plan-01-foundation` @ `ee40cece` (HEAD as of 2026-05-01, post wrap-up pass)
 **Scope:** §0 → §28 (data-model touchpoints onward are platform-side; covered by ISSUES.md `Fix path` notes).
 
 Status legend:
@@ -11,6 +11,16 @@ Status legend:
 - **partial** — load-bearing pieces shipped; named follow-on work explicitly deferred to a later plan.
 - **deferred** — out-of-scope for Plan 01/02 by spec phasing (V1.5 / V2 / V2+).
 - **missing** — nothing landed and nothing tracked. None remain in this walkthrough.
+
+## Status counts (post wrap-up)
+
+| Bucket | Count | Δ from prior |
+|---|---|---|
+| **shipped** | 57 | +2 (§7.5 product-tour upgraded; §28 dev-events badge promoted; §9.9 Performance promoted from stubbed) |
+| **partial** | 16 | -1 (§9.9 Performance promoted) |
+| **stubbed** | 12 | -1 |
+| **deferred** | 17 | — |
+| **missing** | 0 | — |
 
 ---
 
@@ -119,7 +129,7 @@ Status legend:
 | §7.2 | Empty home | **shipped** | `pages/Home.tsx` | "What will you make?" hero + NotebookPrompt + intent-aware example chips + filter pills (all/live/draft/archived). |
 | §7.3 | First prompt → ship | **shipped** | `pages/NewProject.tsx`, `pages/WizardWorkspace.tsx`, `WorkspaceShell.tsx` | Wizard collects brief → Begin calls `createApp` → navigate to `/p/:appId/preview` with `seedBrief` consumed by ChatRail. |
 | §7.4 | First-deploy celebration | **shipped** | `WorkspaceShell.tsx` `LiveBanner` (deploy_hash transition + per-app localStorage flag) | Editorial copy + 15% share whisper. |
-| §7.5 | Optional product tour | **shipped** | `components/ProductTour.tsx` | 4-step tour, dismiss-forever, triggered by `?` in TopBar. |
+| §7.5 | Optional product tour | **shipped** | `components/ProductTour.tsx`, `e2e/onboarding.spec.ts` (4 tour tests) | 4-step tour with **surface highlighting** — each step targets a real DOM surface by testid (chat-composer, canvas-pills, topbar-url) via `document.querySelector` + `ResizeObserver`; draws an outlined frame around the target via the box-shadow inset trick; tooltip floats adjacent with viewport-clamped fallback sides. Esc / ←/→ keys, Prev disabled on step 1, backdrop click skips. Dismiss-forever via `localStorage.zeroship_tour_completed`. Triggered by `?` in TopBar. |
 
 ---
 
@@ -152,7 +162,7 @@ Status legend:
 | §9.6 | Env canvas | **shipped** | `canvases/EnvCanvas.tsx` (347 LOC), `apps.ts` env procs | Variables + Secrets sections; add / edit / delete / mask. Per-environment / branch overlay is the §11.5.3 follow-on. |
 | §9.7 | Settings canvas | **shipped** | `canvases/SettingsCanvas.tsx` (363 LOC) | Identity (name / tagline / icon stub) · Plan picker · Danger zone (Archive / Delete) · Custom-domain block exists as a placeholder (verify-DNS deferred to platform). |
 | §9.8 | Plan canvas (Issues / Roadmap / Deployments) | **stubbed** | `canvases/PlanCanvas.tsx` (473 LOC), `agents.ts` `listIssues` / `addIssue` | Three sub-tabs render; data is in-memory (ISS-14, ISS-15). Roadmap pins everything to v0.1 milestone. |
-| §9.9 | Health canvas (Status / Quality / Incidents / Performance) | **stubbed** | `canvases/HealthCanvas.tsx` (270 LOC), `agents.ts` `getQualityScores` | Quality grid uses hardcoded scores (ISS-16); Incidents shows empty state (ISS-17); Performance shows placeholder tiles (ISS-18). |
+| §9.9 | Health canvas (Status / Quality / Incidents / Performance) | **partial** | `canvases/HealthCanvas.tsx`, `agents.ts` `getQualityScores`, `_agent_writes.ts` `setQualityFromCritic` | Quality grid is **live from the Critic** — every `data-critic-round` emit calls `setQualityFromCritic` via `waitUntil()`; HealthCanvas reads the persisted scorecard (ISS-16 closed). Incidents has "Scan for issues" CTA wired to the SRE SubAgent; backing table still tracked under ISS-17. Performance section now shows **real signals** derived from log lines (request rate / error rate / p95 latency) with hand-rolled SVG sparklines polling every 5s; structured metering still pending under ISS-18 (now "partial"). |
 
 ---
 
@@ -296,10 +306,10 @@ Status legend:
 
 | Bucket | Count of §-rows |
 |---|---|
-| **shipped** | 55 |
-| **partial** | 17 |
-| **stubbed** (tracked in ISSUES.md) | 13 |
+| **shipped** | 57 |
+| **partial** | 16 |
+| **stubbed** (tracked in ISSUES.md) | 12 |
 | **deferred** (V1.5 / V2 by spec phasing) | 17 |
 | **missing** | 0 |
 
-Foundation-polish pass (plan-01 follow-on) promoted §0, §1.5, §1.7, §2.2, §3.2 to **shipped** by wiring the tier filter, the Critic→scorecard persistence, and the Run-digest / Scan-for-issues affordances. The branch covers the §0–§14 spec surface end-to-end and the §17–§28 polish layer. §15 / §16 / §18 / §19 / §23 are spec-phased as later releases. Every gap that the spec asks for in V1.0 (Release 0 per §30) is either shipped or stubbed against an ISSUES.md entry — no uncovered V1 gates remain.
+Foundation-polish pass (plan-01 follow-on) promoted §0, §1.5, §1.7, §2.2, §3.2 to **shipped** by wiring the tier filter, the Critic→scorecard persistence, and the Run-digest / Scan-for-issues affordances. The wrap-up pass (HEAD `ee40cece`) further promoted §7.5 (product tour with real surface highlighting + 4 e2e tests) and §9.9 (Performance section now shows real KPI signals + sparklines from log-line parsing); §28 telemetry is now backed by the `DevEventsBadge` floating dev inspector. The branch covers the §0–§14 spec surface end-to-end and the §17–§28 polish layer. §15 / §16 / §18 / §19 / §23 are spec-phased as later releases. Every gap that the spec asks for in V1.0 (Release 0 per §30) is either shipped or stubbed against an ISSUES.md entry — no uncovered V1 gates remain.
