@@ -6489,6 +6489,7 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "hex",
+ "httparse",
  "mimalloc",
  "ntex",
  "serde",

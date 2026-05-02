@@ -10,7 +10,7 @@
 //! for the full architecture.
 
 use ntex::web;
-use zeroship_sandbox::{handlers, preview, registry, AppState};
+use zeroship_sandbox::{handlers, preview, preview_ws, registry, AppState};
 use zeroship_sandbox::config::SandboxConfig;
 
 #[global_allocator]
@@ -112,6 +112,22 @@ async fn main() -> std::io::Result<()> {
 
     // Idle GC sweep — kills runtimes idle longer than `idle_timeout_secs`.
     registry::start_idle_gc(state.clone());
+
+    // Preview WebSocket-Upgrade forwarder (Phase 2). Bound on a
+    // separate port (default 9092; configurable via
+    // `SANDBOX_PREVIEW_WS_PORT`) per the proposal's Phase-2 fallback
+    // ("the controller listens on a separate port for Upgrade
+    // forwarding"). The HTTP path on `config.port` continues to handle
+    // /sandboxes/{id}/preview/{port}/{path*} non-Upgrade traffic.
+    let ws_port = preview_ws::ws_port_from_env();
+    let ws_state = state.clone();
+    compio::runtime::spawn(async move {
+        if let Err(e) = preview_ws::serve(ws_state, ws_port).await {
+            eprintln!("[sandbox] preview_ws serve exited: {e}");
+        }
+    })
+    .detach();
+    eprintln!("[sandbox] preview-ws listening on :{ws_port}");
 
     let bind = format!("0.0.0.0:{}", config.port);
     eprintln!("[sandbox] http://{bind}");
