@@ -1403,6 +1403,13 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
     // ("InvalidCharacterError") on out-of-range / malformed input.
     crate::base64::install_global(scope, global);
 
+    // structuredClone per WHATWG HTML §2.7.3 — replaces the old fetch.js
+    // JSON-roundtrip polyfill that lost Map/Set/Date/ArrayBuffer/circular
+    // refs. Drives V8's ValueSerializer/Deserializer (the spec-reference
+    // structured-clone algorithm). Throws native
+    // DOMException("DataCloneError") on non-cloneable values.
+    crate::structured_clone::install_global(scope, global);
+
     // (`__rawFetch` was the V8 callback the JS polyfill in `embed/fetch.js`
     // dispatched into. Both were removed at D-23 step 3 — `globalThis.fetch`
     // is now the native callback installed by
