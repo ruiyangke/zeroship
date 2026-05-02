@@ -3,18 +3,17 @@
 //! Per Fetch §5.7 / §5.8 (HTTP-network-or-cache fetch / HTTP-network
 //! fetch). For our simplified flow:
 //!
-//!   1. Validate the URL through SSRF (preserving the existing
-//!      `validate_url` from `crate::fetch`).
+//!   1. Validate the URL through SSRF (`crate::fetch::validate_url` plus
+//!      `crate::fetch::SsrfResolver` wired into the cyper client).
 //!   2. Build a `cyper::RequestBuilder` from the FetchRequest.
 //!   3. Drain the response body fully (subject to MAX_RESPONSE_SIZE),
 //!      since the algorithms layer needs raw bytes for redirect
 //!      response handling and Content-Encoding decoding.
 //!
-//! The streaming-response path the legacy fetch.rs uses (chunk-by-chunk
-//! into a JS ReadableStream via stream_id) is preserved for non-redirected
-//! final hops in a follow-up — for v1 native fetch we buffer to keep the
-//! algorithm chain straightforward and avoid the bridge through V8 mid-
-//! request.
+//! Streaming responses (chunk-by-chunk into a JS ReadableStream via
+//! stream_id) are deferred to a follow-up — for v1 native fetch we
+//! buffer to keep the algorithm chain straightforward and avoid the
+//! bridge through V8 mid-request.
 
 use super::algorithms::{
     append_origin_if_needed, default_accept_encoding, has_accept_encoding, FetchRequest,
@@ -172,14 +171,17 @@ fn parse_http_method(s: &str) -> Result<http::Method, String> {
     }
 }
 
-/// Reuse the per-thread cyper client from `crate::fetch`. The legacy
-/// `__rawFetch` path uses the same constant so client-side connection
-/// pooling is shared across the polyfill cutover window.
+/// Per-thread cyper client.
+///
+/// **Must be thread-local**, NOT a process-wide static. cyper's connector
+/// wraps its I/O in `SendWrapper` (panics if dereferenced from a thread
+/// other than the one that created it). With V8 isolates per worker
+/// thread each driving `fetch()` calls, a process-wide `OnceLock<Client>`
+/// would cache pooled connections on whichever thread ran first, then
+/// panic the moment a different thread's isolate dispatched. Per-thread
+/// costs a small handful of idle connections per host — cheap and
+/// correct.
 fn shared_cyper_client() -> cyper::Client {
-    // Build with the same SsrfResolver as the legacy path. We mirror
-    // the thread_local construction here rather than reaching into
-    // `crate::fetch::CLIENT` (which is not pub) — this keeps the module
-    // boundary clean.
     thread_local! {
         static CLIENT: cyper::Client = {
             let builder = cyper::Client::builder();

@@ -261,23 +261,21 @@ pub struct RuntimeState {
     /// Drained by the Runtime after each enter_v8, avoiding sleep overhead.
     pub ready_timers: VecDeque<u32>,
 
-    /// Fetch requests queued by V8 callbacks, drained by the runtime executor.
-    pub spawned_fetches: Vec<FetchRequest>,
-
-    /// Number of fetches currently queued OR executing for this runtime.
-    /// Incremented in the V8 `__rawFetch` callback and decremented when
-    /// the fetch's detached body-reader task finishes (EOF, error, or
-    /// cancellation). Guards against one app exhausting the shared cyper
-    /// client's connection pool — `MAX_PENDING_OPS` would let this climb
-    /// to 1024 which is well within OOM-by-sockets territory when the
-    /// upstream is slow.
+    /// Number of fetches currently executing for this runtime.
+    /// Incremented in the native `fetch_native::fetch_callback` when a
+    /// fetch task is spawned, decremented when the algorithm chain
+    /// returns (success or failure). Guards against one app exhausting
+    /// the shared cyper client's connection pool — `MAX_PENDING_OPS`
+    /// alone would let this climb to 1024 which is well within
+    /// OOM-by-sockets territory when the upstream is slow.
     pub in_flight_fetches: usize,
 
     /// The request currently being executed (None between requests).
     pub executing_request_id: Option<u64>,
     /// Cancellation flag for the request currently being executed. Captured
-    /// by V8 callbacks (e.g. `__rawFetch`) so that async ops they spawn
-    /// inherit the same flag and abort early if the handler gives up.
+    /// by V8 callbacks (e.g. `fetch_native::fetch_callback`) so that async
+    /// ops they spawn inherit the same flag and abort early if the handler
+    /// gives up.
     pub executing_request_cancel: Option<crate::channel::CancelFlag>,
 
     /// Per-request log lines accumulated during execution.
@@ -437,7 +435,6 @@ impl RuntimeState {
             spawned_ops: Vec::new(),
             spawned_timers: Vec::new(),
             ready_timers: VecDeque::new(),
-            spawned_fetches: Vec::new(),
             in_flight_fetches: 0,
 
             executing_request_id: None,
@@ -533,27 +530,6 @@ impl RuntimeState {
             return sid;
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// FetchRequest — queued by V8 callback, executed by runtime
-// ---------------------------------------------------------------------------
-
-/// A fetch request queued by the V8 `__rawFetch` callback.
-/// The runtime executor drains these and spawns the actual HTTP I/O.
-pub struct FetchRequest {
-    pub op_id: u32,
-    pub stream_id: u32,
-    pub request_id: Option<u64>,
-    pub method: String,
-    pub url: String,
-    pub headers_json: String,
-    pub body: Option<String>,
-    /// Cancellation flag for the owning request. When set, the fetch executor
-    /// short-circuits before sending the HTTP request and before reading the
-    /// response body, so a timed-out request does not continue to consume
-    /// network and memory after the client gave up.
-    pub cancel: Option<crate::channel::CancelFlag>,
 }
 
 // ---------------------------------------------------------------------------
