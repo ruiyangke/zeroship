@@ -644,11 +644,34 @@ fn consumer_form_data<T: Body + BodyMarker + 'static>(
     };
     match pre {
         PreFlight::EmptyBody => {
-            // Empty body → empty FormData (regardless of MIME).
+            // Empty body — for urlencoded resolve with an empty
+            // FormData; for multipart reject with TypeError because
+            // an empty buffer has no parts (matches WPT
+            // request-consume-empty.any.js "with correct multipart
+            // type (error case)").
             let resolver = v8::PromiseResolver::new(scope).unwrap();
             let promise = resolver.get_promise(scope);
-            let fd = build_empty_form_data(scope);
-            resolver.resolve(scope, fd.into());
+            match kind {
+                MapKind::UrlencodedFormData => {
+                    let fd = build_empty_form_data(scope);
+                    resolver.resolve(scope, fd.into());
+                }
+                MapKind::MultipartFormData { .. } => {
+                    let m = v8::String::new(
+                        scope,
+                        "formData() multipart parsing failed: body is empty",
+                    )
+                    .unwrap();
+                    let exc = v8::Exception::type_error(scope, m);
+                    resolver.reject(scope, exc);
+                }
+                _ => {
+                    // Unreachable: kind is constructed above as
+                    // urlencoded or multipart.
+                    let fd = build_empty_form_data(scope);
+                    resolver.resolve(scope, fd.into());
+                }
+            }
             rv.set(promise.into());
         }
         PreFlight::HasBody { stream_global } => {

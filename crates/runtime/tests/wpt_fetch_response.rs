@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 
+use zeroship_runtime::blob_native;
 use zeroship_runtime::dom;
 use zeroship_runtime::fetch_request;
 use zeroship_runtime::fetch_response;
@@ -76,20 +77,7 @@ const TESTHARNESS_SHIM: &str = r#"
     globalThis.URLSearchParams.prototype[Symbol.toStringTag] = "URLSearchParams";
   }
 
-  if (typeof globalThis.Blob !== "function") {
-    globalThis.Blob = function Blob() {
-      const e = new Error("native Blob not yet implemented (v1 skip)");
-      e.__wpt_skip = true;
-      throw e;
-    };
-  }
-  if (typeof globalThis.File !== "function") {
-    globalThis.File = function File() {
-      const e = new Error("native File not yet implemented (v1 skip)");
-      e.__wpt_skip = true;
-      throw e;
-    };
-  }
+  // Native Blob and File are installed by the harness — no shims.
   if (typeof globalThis.fetch !== "function") {
     globalThis.fetch = function fetch() {
       const e = new Error("fetch() not yet implemented (next chunk)");
@@ -342,6 +330,7 @@ fn run_wpt(label: &str, sources: &[&str]) -> Vec<TestResult> {
     streams::strategies::install_count_queuing_strategy(scope, global);
     headers::install_global(scope, global);
     dom::install_globals(scope, global);
+    blob_native::install_globals(scope, global);
     fetch_request::install_global(scope, global);
     fetch_response::install_global(scope, global);
 
