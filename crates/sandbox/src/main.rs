@@ -26,17 +26,76 @@ async fn main() -> std::io::Result<()> {
         }
     };
 
+    // FM-D: backend-aware startup banner. The previous unconditional
+    // `else` branch printed k8s config (namespace, runtime_class,
+    // port-forward) even when backend=nomad-ch — operators reading
+    // the boot log got a misleading mix of irrelevant k8s fields and
+    // missing nomad-ch fields. Print the section that matches the
+    // configured backend; common fields (port, idle_timeout,
+    // max_lifetime) print regardless.
     eprintln!("[sandbox] backend:        {}", config.backend);
-    if config.backend == "docker" {
-        eprintln!("[sandbox] image:          {}", config.image);
-        eprintln!("[sandbox] workspace root: {}", config.workspace_root.display());
-    } else {
-        eprintln!("[sandbox] k8s namespace:  {}", config.k8s.namespace);
-        eprintln!("[sandbox] agent image:    {}", config.k8s.image);
-        eprintln!("[sandbox] runtime class:  {}", config.k8s.runtime_class);
-        eprintln!("[sandbox] port-forward:   {}", config.k8s.use_port_forward);
-    }
     eprintln!("[sandbox] idle timeout:   {}s", config.idle_timeout_secs);
+    eprintln!("[sandbox] max lifetime:   {}s", config.max_lifetime_secs);
+    match config.backend.as_str() {
+        "docker" => {
+            eprintln!("[sandbox] image:          {}", config.image);
+            eprintln!("[sandbox] workspace root: {}", config.workspace_root.display());
+            eprintln!("[sandbox] network:        {}", config.network);
+            eprintln!("[sandbox] memory:         {} MiB", config.memory_mb);
+            eprintln!("[sandbox] cpus:           {}", config.cpus);
+        }
+        "k8s" => {
+            eprintln!("[sandbox] k8s namespace:  {}", config.k8s.namespace);
+            eprintln!("[sandbox] agent image:    {}", config.k8s.image);
+            eprintln!("[sandbox] runtime class:  {}", config.k8s.runtime_class);
+            eprintln!("[sandbox] port-forward:   {}", config.k8s.use_port_forward);
+            eprintln!("[sandbox] memory:         {} MiB", config.memory_mb);
+            eprintln!("[sandbox] cpus:           {}", config.cpus);
+        }
+        "nomad-ch" => {
+            eprintln!("[sandbox] nomad addr:     {}", config.nomad_ch.nomad_addr);
+            eprintln!("[sandbox] datacenter:     {}", config.nomad_ch.datacenter);
+            eprintln!(
+                "[sandbox] wrapper script: {}",
+                config.nomad_ch.wrapper_path.display()
+            );
+            eprintln!(
+                "[sandbox] runtime dir:    {}",
+                config.nomad_ch.runtime_dir.display()
+            );
+            eprintln!(
+                "[sandbox] host state dir: {}",
+                config.nomad_ch.host_state_dir.display()
+            );
+            eprintln!(
+                "[sandbox] user homes:     {}",
+                config.nomad_ch.user_home_dir_root.display()
+            );
+            eprintln!(
+                "[sandbox] vm-index pool:  [{}, {}]",
+                config.nomad_ch.vm_index_floor, config.nomad_ch.vm_index_ceil
+            );
+            eprintln!(
+                "[sandbox] subnet 10.{}.x.x",
+                config.nomad_ch.subnet_second_octet
+            );
+            eprintln!(
+                "[sandbox] alloc timeout:  {}s",
+                config.nomad_ch.alloc_running_timeout_secs
+            );
+            eprintln!(
+                "[sandbox] livez timeout:  {}s",
+                config.nomad_ch.agent_livez_timeout_secs
+            );
+            eprintln!(
+                "[sandbox] orphan cleanup: {}",
+                config.nomad_ch.startup_orphan_cleanup
+            );
+        }
+        other => {
+            eprintln!("[sandbox] (unknown backend {other:?}; no banner detail)");
+        }
+    }
 
     if config.token.is_empty() {
         eprintln!("[sandbox] WARNING: SANDBOX_TOKEN not set — endpoints are unauthenticated");
