@@ -98,8 +98,39 @@ so we can grep back through the rationale.
     user method N times for N reads. Pairs with the existing
     `tests/v8_same_object_smoke.rs` to document both halves of the
     contract.
-  - Lands: commit `<TBD-newobject>` (smoke test only, no codegen
-    delta).
+  - Lands: commit `4a557dc4` (smoke test only, no codegen delta).
+
+- **Re-entry guard on `&mut self`** — every macro-emitted `&mut self`
+  callback (regular method, setter, SameObject getter cache-miss path)
+  now opens with a per-method, per-instance, thread-local
+  `RefCell<HashSet<usize>>` guard keyed by the External pointer's
+  address (`__ext.value() as usize` == Box raw addr). On entry: insert.
+  If the addr was already in the set, throw a V8 TypeError with a
+  per-method message and `return` BEFORE the unsafe `&mut Self`
+  materialisation. RAII drop guard removes on scope exit.
+  - **Mechanism**: V8 TypeError, NOT `panic!`. Rust panic can't unwind
+    through V8's C++ frames cleanly — empirically that surfaces as
+    "fatal runtime error: failed to initiate panic, error 5" + SIGABRT
+    on Linux. A V8 exception propagates the same way every other
+    macro-emitted error already does (brand-check `Illegal invocation`,
+    `[EnforceRange]` TypeError, etc.).
+  - **Granularity trade-off**: per-method, per-instance. The set is
+    instance-keyed (no false positives across distinct `Foo`
+    instances), and there's a separate set per Rust method (no false
+    positives across `Foo::a` calling `Foo::b` on the same instance).
+    Real-world re-entry via JS callback overwhelmingly hits the SAME
+    method (`this.method(...)` from a callback method registered),
+    which is what the guard catches.
+  - **Cost**: emitted ONLY for `&mut self` methods — `&self` callbacks
+    skip the guard. Per-call overhead is one HashSet insert + one
+    remove on the steady-state path; the set has 0 or 1 entries
+    typically.
+  - **Pre-fix symptom**: classes that wrapped state in an inner
+    `RefCell` would panic with `RefCell already mutably borrowed`
+    from deep inside V8 on re-entry; classes without an inner cell
+    silently corrupted memory.
+  - Lands: commit `<TBD-reentrancy>` (codegen + 4 smoke tests in
+    `tests/v8_reentrancy_smoke.rs`).
 
 - **`[Clamp]` integer coercion** — `ClampU16` / `ClampU32` / `ClampI32`
   / `ClampU64` / `ClampI64` newtypes in `zeroship_runtime::clamp`
@@ -144,13 +175,6 @@ getters) require a code edit in `lib.rs::gen_scalar_set`. A trait-based
 dispatch (similar to `IntoResolveValue`) would let users opt in by
 implementing the trait, but the existing list covers every fetch /
 streams / WebSocket / WebCrypto consumer.
-
-### Reentrancy guard on `&mut self`
-
-If a user-supplied JS callback re-enters the same instance, the macro's
-auto-generated `borrow_mut` panics. Currently agents wrap state in
-`RefCell` manually inside `Box<State>`. Macro could emit a soft
-re-entry guard with a clear panic message, or auto-wrap in `RefCell`.
 
 ### Lifetime-tied `Local<'s, T>` returns
 
