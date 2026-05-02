@@ -1730,7 +1730,7 @@ impl RuntimeInner {
                             // OpError::kind. Mirrors the sync-path
                             // `gen_throw_error` shape.
                             let msg = v8::String::new(scope, &e.message).unwrap();
-                            let exc = match e.kind {
+                            let exc: v8::Local<v8::Value> = match e.kind {
                                 crate::state::OpErrorKind::TypeError => {
                                     v8::Exception::type_error(scope, msg)
                                 }
@@ -1739,6 +1739,9 @@ impl RuntimeInner {
                                 }
                                 crate::state::OpErrorKind::Error => {
                                     v8::Exception::error(scope, msg)
+                                }
+                                crate::state::OpErrorKind::DomException(name) => {
+                                    crate::dom::exception::build(scope, &e.message, name).into()
                                 }
                             };
                             r.reject(scope, exc);
