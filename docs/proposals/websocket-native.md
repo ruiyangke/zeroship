@@ -319,7 +319,7 @@ is illustrative.
 | **D-4** | Single-threaded per isolate: every Rust struct is `!Send + !Sync`. No `Mutex`/`RwLock` anywhere. Inter-class references use `Rc<RefCell<…>>`. The compio + cyper transport is per-thread (`thread_local! CLIENT` in `crates/runtime/src/fetch.rs`); the WebSocket reuses that. | AGENTS.md "V8 per thread, one isolate per app". A `Send` constraint would force `Arc<Mutex<…>>` and serialise the receive fast-path. | §V, §VII |
 | **D-5** | Internal-slot storage rule (sharpened from streams D-2): each spec slot lives in EXACTLY ONE location. Numeric / Cell-flag slots live in the boxed Rust struct (`Box<WebSocketImpl>` in internal field 0); slots that need observable JS identity preservation (e.g. cached Headers, the once-built MessageEvent template) live in V8 private symbols. There is NO mirror; no shadow-copy. The ready-state slot lives ONLY in the Rust enum `Cell<ReadyState>` — not also in `[[readyState]]` getter cache. | Spec algorithms must be observably indistinguishable from "directly modify `[[…]]`". The single-source rule is the entire consistency model — same model that streams-native and fetch-native use. | §V, §XIII |
 | **D-6** | `bufferedAmount` is real, observable, and updated synchronously in `send()` and the send-pump. Held as `Cell<u64>` on the Rust state. The polyfill returns 0 always (it had no concept of "queued bytes"); v1 increments on every send-call by the byte count of the encoded frame payload (UTF-8 encoded for strings, raw byte length for binary), and decrements as the send-pump drains the wire. WPT `Send-before-open.any.js` checks the increment-before-OPEN behaviour explicitly. | Spec §3.1 attribute `bufferedAmount`; required for backpressure-aware uploads. | §V.5 |
-| **D-7** | `binaryType` defaults to `"blob"` per spec §3.1. The polyfill defaults to `"arraybuffer"` (likely a workerd-historical default; workerd had a `websocket_standard_binary_type` compat flag — `web-socket.h:421-422`). v1 ships the spec-correct default. WPT `Create-valid-url-binaryType-blob.any.js` checks the default value. The polyfill cutover landings (§XIV) flip this default; one landing is dedicated to documenting the behaviour change in the upgrade notes (some apps may rely on `arraybuffer` default — they break loudly via `dataView.something is not a function`, which is the desired failure mode rather than silent bytes-→string drift). | Spec compliance. The "loudly break" failure mode is preferable to silent silent-binary-corruption. | §V.4 |
+| **D-7** | `binaryType` defaults to `"blob"` per spec §3.1. The polyfill defaults to `"arraybuffer"` (likely a workerd-historical default; workerd had a `websocket_standard_binary_type` compat flag — `web-socket.h:421-422`). v2 ships the spec-correct default. WPT `Create-valid-url-binaryType-blob.any.js` checks the default value. **Setter behaviour:** silent-no-op on unknown values (matches undici, workerd, and the WPT expected-pass for `binaryType-wrong-value.any.js`); the strict-throws path lives behind a non-default Cargo feature for WPT-update tracking only. (addresses critic MAJOR #16) The polyfill cutover landings (§XIV) flip the default-value; one landing is dedicated to documenting the behaviour change in the upgrade notes (some apps may rely on `arraybuffer` default — they break loudly via `dataView.something is not a function`, which is the desired failure mode rather than silent bytes-→string drift). | Spec compliance + ecosystem-shipping behaviour. The "loudly break on default change" failure mode is preferable to silent silent-binary-corruption; the silent-no-op-on-unknown-set matches every shipping impl and the existing WPT test. | §V.4, §II.4 |
 | **D-8** | Close-code validation per WHATWG §3.1 close algorithm (https://websockets.spec.whatwg.org/#dom-websocket-close): codes 1000 and 3000-4999 are valid; everything else throws InvalidAccessError. The `code` argument is `[Clamp] unsigned short` and is processed through the proper WebIDL ConvertToInt[Clamp] algorithm (see §V.5 — `clamp_unsigned_short`; this resolves CRITICAL #2 from the v1 review). NO bypass for legacy code-ranges (workerd has a `pedantic_wpt` compat flag — `web-socket.c++:629-644`; v2 picks "spec-strict"). Reason length cap: 123 bytes UTF-8 encoded; longer throws SyntaxError. Both validations happen BEFORE the readyState dispatch (per spec close steps 1-3). On the wire: `Option<u16>` semantics — when the user calls `close()` with no code argument, the Close frame is sent with empty payload per RFC 6455 §5.5.1; we MUST NOT serialise 1005, which RFC 6455 §7.4.1 reserves as an internal sentinel (CRITICAL #6). The CONNECTING-state path runs `fail_the_websocket_connection` (RFC 6455 §7.1.7), distinguishing "no socket yet" from "socket open but JS hasn't seen open" sub-cases via the connection-handle slot (CRITICAL #4). | Spec; covered by WPT verbatim. | §V.5 |
 | **D-9** | URL parse uses the existing native URL class (ada-url backed). Scheme MUST normalise to `ws` or `wss` (`http`→`ws`, `https`→`wss`). Fragment MUST be empty (post-parse `urlRecord.hash === ""` AND the original input did not end with `#`). Both cases throw SyntaxError. The URL is stored as a `url::Url` (the parsed record) plus a separate `String` for the "input as serialized for `.url` getter" — per spec §3.1 the `url` attribute returns the URL "serialized" via the URL Standard's serializer, which is essentially the same as `urlRecord.href` for non-fragment-bearing URLs. | Spec; the URL parser path is shared with fetch (`fetch_native::dictionaries::parse_url`). | §V.1 |
 | **D-10** | Protocol validation per spec / RFC 6455: each `protocol` element must be a non-empty token whose codepoints are in U+0021..U+007E excluding the RFC 7230 separator characters (`"(),/:;<=>?@[\]{}` plus space and HT). Duplicates (case-insensitive) throw SyntaxError. The undici utility `isValidSubprotocol` (`undici/lib/web/websocket/util.js:101-141`) is the literal implementation; we port it 1:1 in Rust. | Spec; WPT `Create-protocols-repeated.any.js`, `Create-protocols-repeated-case-insensitive.any.js`, `Create-protocol-with-space.any.js`, `Create-asciiSep-protocol-string.any.js`, `Create-nonAscii-protocol-string.any.js`, `Create-extensions-empty.any.js` cover the validation. | §V.2 |
@@ -658,8 +658,13 @@ pub struct WebSocketImpl {
     pub binary_type: Cell<BinaryType>,
 
     /// Internal "full" flag — RFC 6455 §6.1 — set when the send queue
-    /// exceeds an implementation cap (we choose 16 MB to match cyper's
-    /// MAX_RESPONSE_SIZE). When set, the next send() short-circuits.
+    /// exceeds an implementation cap (`MAX_BUFFERED_AMOUNT = 16 MiB`,
+    /// matching cyper's MAX_RESPONSE_SIZE). When set, every subsequent
+    /// `send()` returns early without queuing — the message is dropped
+    /// on the floor. Cleared by the send pump when bufferedAmount
+    /// drops below 50% of the cap (8 MiB hysteresis), to avoid
+    /// flapping between FULL and not-FULL on every drain. Internal
+    /// only — never observable from JS. (addresses critic MAJOR #11)
     pub full: Cell<bool>,
 
     /// Per-isolate WebSocket id. Used by:
@@ -886,16 +891,31 @@ enum BinaryType { "blob", "arraybuffer" };
 ```
 
 A two-variant Rust enum. WebIDL `enum` setters reject any value not in
-the set; the polyfill silently coerces unknown values to "blob" — undici
-matches that behaviour at `undici/lib/web/websocket/websocket.js:453-461`.
-The CURRENT spec (verified 2026-05-02) explicitly uses
-`enum BinaryType { ... }` IDL syntax. Setting `socket.binaryType =
-"unknown"` per WebIDL §3.10.4 enum coercion rules is a TypeError.
-**Decision for v1:** match the CURRENT spec (TypeError) — undici and
-the polyfill predate the IDL change to a strict enum. WPT
-`binaryType-wrong-value.any.js` is the test that distinguishes; v1 should
-pass it (matching strict enum). If a creator app breaks on the strictness,
-add a graceful coercion behind a feature flag.
+the set; per WebIDL §3.2.13 enum conversion
+(https://webidl.spec.whatwg.org/#es-enumeration), the conversion throws
+a TypeError when the input is not in the enum set.
+
+**Decision for v2: silent coerce-to-current-value (do nothing).**
+WPT `binaryType-wrong-value.any.js` historically expects setter-with-
+unknown-value to be a SILENT no-op (the value is left unchanged). The
+test predates the IDL change to a strict enum; the live spec at
+https://websockets.spec.whatwg.org/ now defines it as a strict enum,
+but every shipping implementation (undici
+`undici/lib/web/websocket/websocket.js:453-461`, workerd
+`web-socket.c++` setter, the existing polyfill) silently no-ops on
+unknown values, and breaking that behaviour produces a JS TypeError
+on a path that worked for years across the entire ecosystem.
+
+v1 picked TypeError-throws-strict-enum then immediately hedged with a
+feature flag, which the critic correctly flagged as "perpetual tech
+debt invitation". v2 commits to silent-no-op (matching the install
+base) and aligns the WPT runner's expected outcome accordingly. If
+the WPT test is updated upstream to expect TypeError, this design's
+runner will switch with a one-line change.
+
+The "strict throw" path remains available via a (non-default) Cargo
+feature `runtime_websocket_strict_enum`, kept ONLY for WPT's existing
+update lifecycle — not for creator apps. (addresses critic MAJOR #16)
 
 ## III. Event classes — implementation detail
 
@@ -1334,18 +1354,30 @@ fn binary_type(&self) -> String {
 #[v8_setter]
 #[v8_name = "binaryType"]
 fn set_binary_type(&self, scope: &mut v8::PinScope, v: v8::Local<v8::Value>) -> Result<(), OpError> {
-    // Per CURRENT spec §3.1: binaryType is `attribute BinaryType binaryType`,
-    // and BinaryType is `enum BinaryType { "blob", "arraybuffer" }`. Per
-    // WebIDL §3.10.4 enum coercion: any value not in the enum throws TypeError.
+    // Per v2 D-7 / §II.4 policy: silent-no-op on unknown values
+    // (matches undici, workerd, and the existing WPT
+    // `binaryType-wrong-value.any.js` expected-pass path). The strict
+    // TypeError-throws path is gated behind the
+    // `runtime_websocket_strict_enum` Cargo feature for WPT-update
+    // tracking only.
+    // (addresses critic MAJOR #16)
     let s = v.to_rust_string_lossy(scope);
-    let new_type = match s.as_str() {
-        "blob" => BinaryType::Blob,
-        "arraybuffer" => BinaryType::ArrayBuffer,
-        _ => return Err(OpError::type_error(&format!(
-            "WebSocket.binaryType: invalid enum value '{s}'"
-        ))),
-    };
-    self.binary_type.set(new_type);
+    match s.as_str() {
+        "blob" => self.binary_type.set(BinaryType::Blob),
+        "arraybuffer" => self.binary_type.set(BinaryType::ArrayBuffer),
+        _ => {
+            #[cfg(feature = "runtime_websocket_strict_enum")]
+            {
+                return Err(OpError::type_error(&format!(
+                    "WebSocket.binaryType: invalid enum value '{s}'"
+                )));
+            }
+            #[cfg(not(feature = "runtime_websocket_strict_enum"))]
+            {
+                // Silent no-op; current value retained.
+            }
+        }
+    }
     Ok(())
 }
 ```
@@ -1479,6 +1511,25 @@ fn send(
     // ("If the connection is established and the WebSocket closing
     // handshake has not yet started"). The polyfill does the same.
     if self.ready_state.get() != ReadyState::Open {
+        return Ok(());
+    }
+
+    // Per RFC 6455 §6.1 + WHATWG §3.1 step 4 of send: when the send
+    // queue would exceed the implementation cap, set the [[full]] flag
+    // and return early (the buffer is full; bytes are dropped on the
+    // floor — same observable as fetch's body-too-large path).
+    // [[full]] is internal-only, never exposed to JS.
+    // (addresses critic MAJOR #11)
+    if self.full.get() {
+        // Subsequent sends are silent no-ops while [[full]] is set.
+        // bufferedAmount stays at its high-water mark; the pump-drain
+        // resets [[full]] when the queue drops below 50% of the cap.
+        return Ok(());
+    }
+    let projected_bytes = self.buffered_amount.get()
+        .saturating_add(estimate_send_bytes(scope, data));
+    if projected_bytes > MAX_BUFFERED_AMOUNT {
+        self.full.set(true);
         return Ok(());
     }
 
@@ -1783,16 +1834,29 @@ EventHandlerNonNull / EventHandlerNullable IDL attributes that, when
 set, install (or replace) a single internal listener that the
 EventTarget.dispatchEvent runs alongside any manually-added listeners.
 
-The spec algorithm (HTML §8.1.5.1 "event handler IDL attributes"):
-- Set: store the value in `[[event handler]]` slot. If the slot already
-  had a listener registered, remove that listener; install a new one.
-- Get: return the stored value (the original function, not a wrapper).
-- The internal listener delegates to the stored value when fired.
+The spec algorithm (HTML §8.1.5.1 "event handler IDL attributes",
+https://html.spec.whatwg.org/#event-handler-idl-attributes):
+- **Setter step 4:** "If the given value is not a callable Object,
+  set this[handlerName] to null." This null-coercion is mandatory —
+  `socket.onmessage = "not a function"` MUST NOT throw; it MUST set
+  the handler to null. v1's design didn't show this coercion; v2
+  encodes it in `set_event_handler_attr`.
+- **Setter step 5+:** Store the value in `[[event handler]]` slot.
+  If the slot already had a listener registered, remove that listener;
+  install a new one.
+- **Getter:** return the stored value (the original function, not a
+  wrapper). When `null` is stored, the getter returns `null`.
+- **The internal listener delegates to the stored value when fired.**
 
 undici's implementation (`websocket.js:355-445`) is the reference: it
-stores the raw user function in `#events.{open,error,close,message}`,
-removes the previous listener (if any) via removeEventListener, and adds
-the new one via addEventListener. Same pattern in v1.
+stores the raw user function (or null) in
+`#events.{open,error,close,message}`, removes the previous listener
+(if any) via removeEventListener, and adds the new one via
+addEventListener. workerd similarly null-coerces non-callables
+(`workerd/api/web-socket.c++` event-handler setter). Same pattern in v2.
+
+WPT `idlharness.any.js` and `eventhandlers.any.js` test the
+null-coercion behaviour explicitly. (addresses critic MAJOR #15)
 
 ```rust
 #[v8_setter]
@@ -1801,8 +1865,8 @@ fn onmessage(
     scope: &mut v8::PinScope,
     fn_arg: v8::Local<v8::Value>,
 ) -> Result<(), OpError> {
-    set_event_handler_attr(scope, /* this */ self, "message",
-        &self.cached_handles.borrow_mut().as_mut().map(|h| &mut h.on_message_handler),
+    set_event_handler_attr(scope, self, "message",
+        |handles| &mut handles.on_message_handler,
         fn_arg)
 }
 
@@ -1816,6 +1880,56 @@ fn onmessage<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::V
 }
 // ... same for onopen / onerror / onclose
 ```
+
+`set_event_handler_attr` performs the HTML §8.1.5.1 algorithm:
+
+```rust
+fn set_event_handler_attr<F>(
+    scope: &mut v8::PinScope,
+    ws: &WebSocketImpl,
+    event_name: &str,
+    slot_picker: F,
+    fn_arg: v8::Local<v8::Value>,
+) -> Result<(), OpError>
+where F: Fn(&mut WsCachedHandles) -> &mut Option<v8::Global<v8::Function>>,
+{
+    // HTML §8.1.5.1 step 4: coerce non-callable to null.
+    let new_handler: Option<v8::Global<v8::Function>> = if fn_arg.is_function() {
+        let f = v8::Local::<v8::Function>::try_from(fn_arg).unwrap();
+        Some(v8::Global::new(scope, f))
+    } else {
+        // null, undefined, string, object, number, etc. — all become null.
+        // Per spec, this is NOT a TypeError.
+        None
+    };
+    // Lazily allocate the cache.
+    let mut handles_ref = ws.cached_handles.borrow_mut();
+    if handles_ref.is_none() {
+        *handles_ref = Some(WsCachedHandles::default());
+    }
+    let handles = handles_ref.as_mut().unwrap();
+    let slot = slot_picker(handles);
+    // Remove the previously-installed listener (if any) before
+    // installing the new one — undici-style.
+    if slot.is_some() {
+        crate::dom::event_target::remove_internal_listener(
+            scope, ws.self_weak.upgrade(scope).unwrap(), event_name,
+        );
+    }
+    *slot = new_handler.clone();
+    if let Some(g) = new_handler {
+        crate::dom::event_target::add_internal_listener(
+            scope, ws.self_weak.upgrade(scope).unwrap(), event_name, g,
+        );
+    }
+    Ok(())
+}
+```
+
+The `slot_picker` closure-of-fn-pointer pattern avoids the v1 prose's
+borrow-and-discard `RefMut::as_mut` antipattern (the borrow_mut would
+return a RefMut that the closure couldn't outlive). v2 takes the
+`RefMut` once at the top, then dereferences via the slot picker.
 
 ### V.7. accept() — workerd extension preserved (D-21)
 
@@ -1993,6 +2107,56 @@ Both pumps run as compio tasks; they exit when either side closes.
 The native cutover preserves both pumps verbatim — the only thing that
 changes is the JS-visible class. The pump reads the same `WebSocketImpl`
 fields the polyfill's `WebSocketState` exposed (renamed; see §I.2).
+
+### VI.5. bufferedAmount accounting on pair-coupled sends
+
+Per critic MAJOR #19: when `socket.send(data)` is called on one half of
+a WebSocketPair, the bytes are enqueued on BOTH the local outgoing
+queue (drained by the gateway pump) AND the peer's incoming queue
+(delivered as a MessageEvent on the peer half). The local-side
+`bufferedAmount` counter increments by the byte count, per WHATWG §3.1
+("the number of bytes of application data that have been queued using
+send()").
+
+**Decrement timing for paired sockets:** unlike a client-side socket
+where the pump-drain decrement runs when the kernel write returns, a
+pair-coupled socket has TWO decrement triggers:
+
+1. The local outgoing-queue pump (gateway → external client) drains
+   the outgoing entry; decrement at that point.
+2. The peer-side incoming-queue dispatch fires the MessageEvent on the
+   peer; this is the "delivered to peer" event.
+
+v2 decrements bufferedAmount on trigger (1) — the gateway-pump drain.
+For a unit-tested local-only pair (no gateway, e.g. test code that
+constructs `WebSocketPair` directly), the gateway pump never runs, so
+the outgoing queue would never drain. To keep `bufferedAmount` from
+monotonically growing in test code, v2 adds an "implicit drain on peer
+delivery" path: when the peer half dispatches the MessageEvent
+(receive_loop's pair-coupled equivalent), it ALSO signals the source
+half's pump to drop the corresponding outgoing entry and decrement
+`bufferedAmount`.
+
+This makes the test:
+
+```javascript
+const [a, b] = Object.values(new WebSocketPair());
+b.accept();
+a.send("x");  // queues on both a.outgoing AND b.incoming
+// turn of event loop: b.onmessage fires; a's pump observes peer
+// delivery and decrements a.bufferedAmount.
+expect(a.bufferedAmount).toEqual(0);  // passes
+```
+
+Behave identically in unit tests and in production (where the gateway
+pump is the primary drain path; the peer-delivery signal is redundant
+but harmless — the entry is already gone by the time the peer
+delivers).
+
+Implementation: a `pair_drain_signal: Rc<Cell<u64>>` on each half;
+the peer's MessageEvent dispatch path sets it to "drained N bytes",
+and the source's pump observes the signal and decrements
+bufferedAmount accordingly. (addresses critic MAJOR #19)
 
 ### VI.5. Relationship to the existing `docs/reference/websocket-design.md`
 
@@ -2724,7 +2888,7 @@ path.
 | `[[bufferedAmount]]` | `Box<WebSocketImpl>::buffered_amount` (Cell<u64>) | Spec slot |
 | `[[binaryType]]` | `Box<WebSocketImpl>::binary_type` (Cell<BinaryType>) | Spec slot |
 | `[[connection]]` | (drop the connection handle into the spawned compio task; not held in V8) | Spec slot — not directly observable |
-| `[[full]]` flag | `Box<WebSocketImpl>::full` (Cell<bool>) | RFC 6455 §6.1 |
+| `[[full]]` flag | `Box<WebSocketImpl>::full` (Cell<bool>) | RFC 6455 §6.1; checked at top of `send()` (§V.4); set when projected queue size > MAX_BUFFERED_AMOUNT (16 MiB); cleared by the pump at 50% drain. (addresses critic MAJOR #11) |
 | `[[protocol]]` | `Box<WebSocketImpl>::protocol` (RefCell<String>) | Spec slot |
 | `[[extensions]]` | `Box<WebSocketImpl>::extensions` (RefCell<String>) | Spec slot |
 | `[[event handler]]` × 4 (onopen/onmessage/onerror/onclose) | `Box<WebSocketImpl>::cached_handles` (RefCell<Option<WsCachedHandles>>) | HTML EventHandler IDL |
