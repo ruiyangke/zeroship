@@ -766,9 +766,12 @@ impl WebSocketImpl {
 
     /// `socket.accept()` — workerd extension (D-21). Required by
     /// `WebSocketPair[1]` to begin local message delivery; throws
-    /// TypeError on a client-side socket.
+    /// TypeError on a client-side socket. Transitions readyState
+    /// CONNECTING → OPEN and queues an `open` event for dispatch on
+    /// the next pump tick — matching the spec's "fire `open` event
+    /// once the connection is established" wording.
     #[v8_method]
-    fn accept(&self) -> Result<(), OpError> {
+    fn accept(&self, scope: &mut v8::PinScope) -> Result<(), OpError> {
         if self.peer_id.get().is_none() {
             return Err(OpError::type_error(
                 "WebSocket.accept: cannot accept() a client-side WebSocket",
@@ -778,6 +781,35 @@ impl WebSocketImpl {
             return Ok(()); // idempotent
         }
         self.accepted.set(true);
+        if self.ready_state.get() == ReadyState::Connecting {
+            self.ready_state.set(ReadyState::Open);
+            #[cfg(feature = "runtime_native_websocket")]
+            if let Some(state_handle) = scope.get_slot::<crate::state::SharedState>() {
+                let state = state_handle.clone();
+                let ws_id = self.ws_id.get();
+                // Push an Open event so dispatch fires `open` on the
+                // wrapper — matches the polyfill's transition shape.
+                if let Some(ws) = network::lookup_native_ws_state(&state, ws_id) {
+                    ws.borrow_mut().events.push_back(network::WsEvent::Open {
+                        protocol: String::new(),
+                        extensions: String::new(),
+                    });
+                }
+                // Push a one-shot future to drain the event.
+                let id = ws_id;
+                let fut: std::pin::Pin<
+                    Box<dyn std::future::Future<Output = crate::state::OpResult>>,
+                > = Box::pin(async move {
+                    crate::state::OpResult::WebSocketEvent { ws_id: id }
+                });
+                state.borrow_mut().spawned_ops.push(fut);
+                let notify = state.borrow().pump_notify_tx.clone();
+                if let Some(mut tx) = notify {
+                    let _ = tx.try_send(());
+                }
+            }
+        }
+        let _ = scope;
         Ok(())
     }
 }

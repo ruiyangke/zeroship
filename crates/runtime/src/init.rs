@@ -735,6 +735,10 @@ pub fn load_polyfills_and_modules(
     {
         let global = scope.get_current_context().global(scope);
         crate::websocket_native::install_global(scope, global);
+        // Native WebSocketPair (workerd extension): replaces the
+        // polyfill's WebSocketPair so the two paired sockets are
+        // native instances backed by the per-WS event channel.
+        crate::websocket_native::pair::install_global(scope, global);
     }
 
     // WebSocket polyfill — loaded LAST so its prototype chain references

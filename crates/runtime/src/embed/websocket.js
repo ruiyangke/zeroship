@@ -147,8 +147,13 @@ function WebSocketPair() {
 // internal WebSocket class scoped to the IIFE.
 if (!__nativeWebSocket) {
     globalThis.WebSocket = WebSocket;
+    globalThis.WebSocketPair = WebSocketPair;
 }
-globalThis.WebSocketPair = WebSocketPair;
+// Native WebSocket and WebSocketPair are both installed by
+// `init.rs` BEFORE this polyfill runs when the feature is on; we
+// detect that and leave them in place. The polyfill's own
+// WebSocketPair wraps polyfill WebSockets which reference the
+// internal __wsRegistry — incompatible with native flow.
 // MessageEvent / CloseEvent are installed natively by dom::install_globals.
 globalThis.__wsRegistry = __wsRegistry;
 

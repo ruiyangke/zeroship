@@ -150,3 +150,125 @@ pub fn mint_pair(state: &SharedState) -> (u32, u32) {
     }
     (lo, hi)
 }
+
+// ---------------------------------------------------------------------------
+// Native WebSocketPair constructor — installed on globalThis when the
+// `runtime_native_websocket` feature is on (step 6). Replaces the
+// polyfill's `WebSocketPair` for native-WS code paths.
+// ---------------------------------------------------------------------------
+
+use super::WebSocketImpl;
+
+/// JS-callable constructor: `new WebSocketPair()` returns an object
+/// with index keys [0] and [1] holding two paired native WebSocket
+/// instances. Each side starts in CONNECTING; `accept()` transitions
+/// to OPEN and unblocks message delivery (workerd contract).
+pub fn websocket_pair_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state = match scope.get_slot::<crate::state::SharedState>() {
+        Some(s) => s.clone(),
+        None => {
+            // No runtime — synthesize an empty pair object so simple
+            // `new WebSocketPair()` doesn't crash unit tests.
+            let result = v8::Object::new(scope);
+            rv.set(result.into());
+            return;
+        }
+    };
+
+    let (lo, hi) = mint_pair(&state);
+
+    // Build two paired WebSocketImpl wrappers. Each wrapper is a
+    // brand-new JS object whose internal field 0 holds a Box<WebSocketImpl>
+    // pre-seeded with the right ws_id + peer_id.
+    let ws0 = build_paired_wrapper(scope, &state, lo, hi);
+    let ws1 = build_paired_wrapper(scope, &state, hi, lo);
+
+    let result = v8::Object::new(scope);
+    let zero_key = v8::Integer::new_from_unsigned(scope, 0);
+    let one_key = v8::Integer::new_from_unsigned(scope, 1);
+    result.set(scope, zero_key.into(), ws0.into());
+    result.set(scope, one_key.into(), ws1.into());
+    rv.set(result.into());
+}
+
+/// Build one JS wrapper over a `WebSocketImpl` pre-seeded with the
+/// given ws_id + peer_id. Used by the WebSocketPair constructor.
+fn build_paired_wrapper<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    state: &crate::state::SharedState,
+    ws_id: u32,
+    peer_id: u32,
+) -> v8::Local<'s, v8::Object> {
+    let tmpl = WebSocketImpl::install(scope);
+    let inst_tmpl = tmpl.instance_template(scope);
+    let obj = inst_tmpl
+        .new_instance(scope)
+        .expect("WebSocketImpl instance allocation failed");
+
+    // Wire the prototype to globalThis.WebSocket.prototype so
+    // `instanceof WebSocket` works.
+    let class_fn = tmpl.get_function(scope).unwrap();
+    let proto_key = v8::String::new(scope, "prototype").unwrap();
+    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
+    obj.set_prototype(scope, proto_v);
+
+    // Pre-seed the impl with ws_id, peer_id; pre-accepted=false so
+    // the workerd contract `ws.accept()` is required before message
+    // delivery starts. CONNECTING readyState — `open` event fires
+    // when accept() flips state to OPEN.
+    let impl_ = WebSocketImpl::default();
+    impl_.ws_id.set(ws_id);
+    impl_.peer_id.set(Some(peer_id));
+    impl_.accepted.set(false);
+    impl_.ready_state.set(super::ReadyState::Connecting);
+
+    // Share the buffered_amount + full counters with NativeWsState.
+    if let Some(ws_state) = network::lookup_native_ws_state(state, ws_id) {
+        let mut s = ws_state.borrow_mut();
+        s.buffered_amount = impl_.buffered_amount.clone();
+        s.full = impl_.full.clone();
+    }
+
+    // Register the wrapper Global so the dispatch arm can find it.
+    let wrapper_global = v8::Global::new(scope, obj);
+    state
+        .borrow_mut()
+        .native_ws_wrappers
+        .insert(ws_id, wrapper_global);
+
+    // Box + finalizer (matches the macro pattern).
+    let boxed = Box::new(impl_);
+    let raw = Box::into_raw(boxed);
+    let raw_addr = raw as usize;
+    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
+    obj.set_internal_field(0, ext.into());
+
+    let weak = v8::Weak::with_guaranteed_finalizer(
+        scope,
+        obj,
+        Box::new(move || unsafe {
+            drop(Box::from_raw(raw_addr as *mut WebSocketImpl));
+        }),
+    );
+    std::mem::forget(weak);
+
+    // Attach the EventTarget listener Rc so addEventListener works.
+    crate::dom::event_target::attach_listeners(scope, obj);
+
+    obj
+}
+
+/// Install `globalThis.WebSocketPair` to point at the native callback.
+/// Called from `init.rs` AFTER the polyfill so the native shadow wins.
+pub fn install_global<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    global: v8::Local<v8::Object>,
+) {
+    let f = v8::Function::new(scope, websocket_pair_callback).unwrap();
+    let key = v8::String::new(scope, "WebSocketPair").unwrap();
+    global.set(scope, key.into(), f.into());
+}
