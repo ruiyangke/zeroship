@@ -19,6 +19,71 @@
 use crate::state::{DispatchResult, SharedState};
 
 // ---------------------------------------------------------------------------
+// Cached property-name keys (perf)
+// ---------------------------------------------------------------------------
+//
+// Each `v8_exception_to_<field>` looks up a constant key
+// (`"message"`, `"name"`, `"stack"`, etc) on the exception object. The
+// pre-cached keys avoid the per-call `v8::String::new` (UTF-8 validation
+// + hash + StringTable internalize), which the bench shows at ~1.8% on
+// saturated load. Cached as v8::Globals in an isolate slot so they're
+// shared across every call into dispatch.
+struct DispatchKeys {
+    message: v8::Global<v8::String>,
+    name: v8::Global<v8::String>,
+    stack: v8::Global<v8::String>,
+    status: v8::Global<v8::String>,
+    code: v8::Global<v8::String>,
+    details: v8::Global<v8::String>,
+    retryable: v8::Global<v8::String>,
+}
+
+fn dispatch_keys<'s>(scope: &mut v8::PinScope<'s, '_>) -> DispatchKeysLocal<'s> {
+    if scope.get_slot::<DispatchKeys>().is_none() {
+        let mk = |s: &str| v8::Global::new(scope, v8::String::new(scope, s).unwrap());
+        let keys = DispatchKeys {
+            message: mk("message"),
+            name: mk("name"),
+            stack: mk("stack"),
+            status: mk("status"),
+            code: mk("code"),
+            details: mk("details"),
+            retryable: mk("retryable"),
+        };
+        scope.set_slot(keys);
+    }
+    let slot = scope.get_slot::<DispatchKeys>().unwrap();
+    let g = (
+        slot.message.clone(),
+        slot.name.clone(),
+        slot.stack.clone(),
+        slot.status.clone(),
+        slot.code.clone(),
+        slot.details.clone(),
+        slot.retryable.clone(),
+    );
+    DispatchKeysLocal {
+        message: v8::Local::new(scope, g.0),
+        name: v8::Local::new(scope, g.1),
+        stack: v8::Local::new(scope, g.2),
+        status: v8::Local::new(scope, g.3),
+        code: v8::Local::new(scope, g.4),
+        details: v8::Local::new(scope, g.5),
+        retryable: v8::Local::new(scope, g.6),
+    }
+}
+
+struct DispatchKeysLocal<'s> {
+    message: v8::Local<'s, v8::String>,
+    name: v8::Local<'s, v8::String>,
+    stack: v8::Local<'s, v8::String>,
+    status: v8::Local<'s, v8::String>,
+    code: v8::Local<'s, v8::String>,
+    details: v8::Local<'s, v8::String>,
+    retryable: v8::Local<'s, v8::String>,
+}
+
+// ---------------------------------------------------------------------------
 // Error envelope
 // ---------------------------------------------------------------------------
 
@@ -213,18 +278,73 @@ pub fn v8_exception_to_retryable(
 /// One-shot extractor for a thrown JS error → `DispatchResult::ErrorValue`.
 /// Reads message/name/stack/status (always) plus the structured-error
 /// extras (code, details, retryable) when the throw shape carries them.
+///
+/// Uses cached property-name keys (`DispatchKeys`) to avoid 7 per-call
+/// `v8::String::new` invocations. The bench showed a flat ~1.8% on those
+/// allocations alone in the saturated rejection loop.
 pub fn v8_exception_to_error_value(
     scope: &mut v8::PinScope,
     exception: v8::Local<v8::Value>,
 ) -> DispatchResult {
+    let keys = dispatch_keys(scope);
+    let obj_opt = exception.to_object(scope);
+
+    let message = match obj_opt {
+        Some(obj) => match obj.get(scope, keys.message.into()) {
+            Some(v) if !v.is_undefined() && !v.is_null() => v.to_rust_string_lossy(scope),
+            _ => exception
+                .to_string(scope)
+                .map(|s| s.to_rust_string_lossy(scope))
+                .unwrap_or_else(|| "unknown error".to_string()),
+        },
+        None => exception
+            .to_string(scope)
+            .map(|s| s.to_rust_string_lossy(scope))
+            .unwrap_or_else(|| "unknown error".to_string()),
+    };
+
+    let name = obj_opt
+        .and_then(|obj| obj.get(scope, keys.name.into()))
+        .filter(|v| !v.is_undefined() && !v.is_null())
+        .map(|v| v.to_rust_string_lossy(scope))
+        .unwrap_or_else(|| "Error".to_string());
+
+    let stack = obj_opt
+        .and_then(|obj| obj.get(scope, keys.stack.into()))
+        .filter(|v| !v.is_undefined() && !v.is_null())
+        .map(|v| v.to_rust_string_lossy(scope));
+
+    let status = obj_opt
+        .and_then(|obj| obj.get(scope, keys.status.into()))
+        .and_then(|v| v.int32_value(scope))
+        .filter(|n| (400..=599).contains(n))
+        .map(|n| n as u16)
+        .unwrap_or(500);
+
+    let code = obj_opt
+        .and_then(|obj| obj.get(scope, keys.code.into()))
+        .filter(|v| v.is_string())
+        .map(|v| v.to_rust_string_lossy(scope));
+
+    let details_json = obj_opt
+        .and_then(|obj| obj.get(scope, keys.details.into()))
+        .filter(|v| !v.is_undefined())
+        .and_then(|v| v8::json::stringify(scope, v))
+        .map(|s| s.to_rust_string_lossy(scope));
+
+    let retryable = obj_opt
+        .and_then(|obj| obj.get(scope, keys.retryable.into()))
+        .filter(|v| v.is_boolean())
+        .map(|v| v.boolean_value(scope));
+
     DispatchResult::ErrorValue {
-        message: v8_exception_to_message(scope, exception),
-        name: v8_exception_to_name(scope, exception),
-        stack: v8_exception_to_stack(scope, exception),
-        status: v8_exception_to_status(scope, exception).unwrap_or(500),
-        code: v8_exception_to_code(scope, exception),
-        details_json: v8_exception_to_details_json(scope, exception),
-        retryable: v8_exception_to_retryable(scope, exception),
+        message,
+        name,
+        stack,
+        status,
+        code,
+        details_json,
+        retryable,
     }
 }
 

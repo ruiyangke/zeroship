@@ -1,0 +1,100 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 12K of event 'task-clock:ppp'
+# Event count (approx.): 12987987975
+#
+# Overhead  Command          Shared Object          Symbol                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         
+# ........  ...............  .....................  ...........................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................
+#
+    12.76%  zeroship-bench-  [kernel.kallsyms]      [k] _raw_spin_unlock_irqrestore
+            |
+            ---_raw_spin_unlock_irqrestore
+               |          
+               |--11.65%--sock_def_readable
+               |          |          
+               |           --11.58%--tcp_rcv_established
+               |                     tcp_v4_do_rcv
+               |                     tcp_v4_rcv
+               |                     ip_protocol_deliver_rcu
+               |                     ip_local_deliver_finish
+               |                     ip_local_deliver
+               |                     __netif_receive_skb_one_core
+               |                     process_backlog
+               |                     __napi_poll
+               |                     net_rx_action
+               |                     handle_softirqs
+               |                     do_softirq.part.0
+               |                     __local_bh_enable_ip
+               |                     __dev_queue_xmit
+               |                     ip_finish_output2
+               |                     ip_output
+               |                     __ip_queue_xmit
+               |                     __tcp_transmit_skb
+               |                     tcp_write_xmit
+               |                     __tcp_push_pending_frames
+               |                     tcp_sendmsg_locked
+               |                     tcp_sendmsg
+               |                     sock_sendmsg
+               |                     io_send
+               |                     io_issue_sqe
+               |                     io_submit_sqes
+               |                     __do_sys_io_uring_enter
+               |                     do_syscall_64
+               |                     entry_SYSCALL_64_after_hwframe
+               |                     syscall
+               |          
+                --0.77%--__mod_timer
+                          sk_reset_timer
+
+     2.21%  zeroship-bench-  [nf_tables]            [k] nft_do_chain
+            |
+            ---nft_do_chain
+               nft_do_chain_ipv4
+               nf_hook_slow
+               |          
+               |--0.90%--ip_local_deliver
+               |          __netif_receive_skb_one_core
+               |          process_backlog
+               |          __napi_poll
+               |          net_rx_action
+               |          handle_softirqs
+               |          do_softirq.part.0
+               |          __local_bh_enable_ip
+               |          __dev_queue_xmit
+               |          ip_finish_output2
+               |          ip_output
+               |          __ip_queue_xmit
+               |          __tcp_transmit_skb
+               |          tcp_write_xmit
+               |          __tcp_push_pending_frames
+               |          tcp_sendmsg_locked
+               |          tcp_sendmsg
+               |          sock_sendmsg
+               |          io_send
+               |          io_issue_sqe
+               |          io_submit_sqes
+               |          __do_sys_io_uring_enter
+               |          do_syscall_64
+               |          entry_SYSCALL_64_after_hwframe
+               |          syscall
+               |          
+               |--0.78%--__ip_local_out
+               |          ip_local_out
+               |          __ip_queue_xmit
+               |          __tcp_transmit_skb
+               |          tcp_write_xmit
+               |          __tcp_push_pending_frames
+               |          tcp_sendmsg_locked
+               |          tcp_sendmsg
+               |          sock_sendmsg
+               |          io_send
+               |          io_issue_sqe
+               |          io_submit_sqes
+               |          __do_sys_io_uring_enter
+               |          do_syscall_64
+               |          entry_SYSCALL_64_after_hwframe
+               |          syscall
+               |          

@@ -1187,14 +1187,10 @@ impl RuntimeInner {
                 logs: vec![],
             };
         }
-        if self.http_create_request_fn.is_none() {
-            return crate::FetchOutcome::Response {
-                status: 500,
-                headers: vec![("content-type".into(), "application/json".into())],
-                body: r#"{"message":"HTTP request helper not compiled","name":"Error"}"#.into(),
-                logs: vec![],
-            };
-        }
+        // Note: `http_create_request_fn` is no longer required for
+        // dispatch (the kernel-side fast-path Request builder
+        // `build_kernel_request` is unconditional), but the slot stays
+        // around for back-compat with any path still referencing it.
 
         let request_id = self.next_direct_request_id;
         self.next_direct_request_id += 1;
@@ -1236,18 +1232,13 @@ impl RuntimeInner {
             None
         };
 
-        // Serialize headers + env JSON only when the slow path will need
-        // them. The RPC fast path doesn't construct a Request object;
-        // skipping the JSON serialize saves ~0.15% CPU per request
-        // (per perf profile: serde_json::serialize_element was 0.16%
-        // pre-skip).
-        let (headers_json, env_json) = if rpc_id_str.is_some() {
-            (String::new(), String::new())
+        // Serialize env JSON only when the slow path will need it.
+        // (Headers no longer need JSON marshalling: the kernel-side
+        // fast-path Request builder takes the headers slice directly.)
+        let env_json = if rpc_id_str.is_some() {
+            String::new()
         } else {
-            (
-                serde_json::to_string(headers).unwrap_or_else(|_| "[]".into()),
-                env.as_json().to_string(),
-            )
+            env.as_json().to_string()
         };
 
         self.arm_cpu_timer();
@@ -1320,29 +1311,28 @@ impl RuntimeInner {
                 } else {
                     // ---- Slow path: full default.fetch(request, env, ctx) ----
                     //
-                    // Rust-native Request construction via `obj.set_prototype`
-                    // + per-field `obj.set` was prototyped (Tier 1) and
-                    // measured ~3-4% SLOWER than the JS helper: every
-                    // Rust→V8 FFI crossing (~50-80ns via rusty_v8) exceeds
-                    // the savings from skipping JS bytecode interpretation,
-                    // since the JS helper's inline field sets get JIT-inlined
-                    // with a stable hidden class after warmup. See http.rs.
-                    let create_fn = v8::Local::new(scope, self.http_create_request_fn.as_ref().unwrap());
-                    let method_val = v8::String::new(scope, method).unwrap().into();
-                    let url_val = v8::String::new(scope, url).unwrap().into();
-                    let headers_val = v8::String::new(scope, &headers_json).unwrap().into();
-                    let body_val = v8::String::new(scope, body).unwrap().into();
-                    let request_opt = create_fn.call(scope, undefined, &[method_val, url_val, headers_val, body_val]);
+                    // Build the Request directly in Rust via
+                    // `fetch_request::build_kernel_request`. Skips:
+                    //   - the JS helper compile/run (HTTP_CREATE_REQUEST_JS),
+                    //   - JSON.parse on the headers list,
+                    //   - the WebIDL constructor algorithm (URL re-parse,
+                    //     init union dispatch, body extraction, signal
+                    //     minting).
+                    // The earlier "3–4% slower" measurement predated full-
+                    // native Request + Headers; with both classes now
+                    // backed by Box<State> in internal field 0, the V8
+                    // round trips collapse to one per Request.
+                    let request_opt = crate::fetch_request::build_kernel_request(
+                        scope, method, url, headers, body,
+                    );
                     if let Some(request) = request_opt {
                         // Stash the Request so `getRequest()` can find it
                         // without the bootstrap having to push `ctx.__zs_request`
                         // through JS on every call. Cleared in drain_request_logs /
                         // discard_request_state together with the other per-request
                         // state (user, ctx, logs).
-                        if let Some(req_obj) = request.to_object(scope) {
-                            let global = v8::Global::new(scope, req_obj);
-                            self.state.borrow_mut().request_by_id.insert(request_id, global);
-                        }
+                        let global = v8::Global::new(scope, request);
+                        self.state.borrow_mut().request_by_id.insert(request_id, global);
 
                         let env_val: v8::Local<v8::Value> = {
                             let maybe_global = self.state.borrow().env_obj.clone();
@@ -1369,7 +1359,7 @@ impl RuntimeInner {
                         };
 
                         let handler = v8::Local::new(scope, self.fetch_handler_fn.as_ref().unwrap());
-                        call_fetch_inner(scope, handler, undefined, request, env_val, ctx_val)
+                        call_fetch_inner(scope, handler, undefined, request.into(), env_val, ctx_val)
                     } else {
                         Ok(DispatchResult::Error("Failed to construct Request object".to_string()))
                     }
