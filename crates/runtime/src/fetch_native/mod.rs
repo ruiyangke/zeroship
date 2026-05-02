@@ -133,10 +133,19 @@ fn fetch_callback(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
+    // No SharedState slot → not running inside a Runtime. Reject the
+    // returned promise rather than panicking; callers in tests can
+    // observe the wiring without spinning up the full pump.
+    let state_opt = scope.get_slot::<SharedState>().cloned();
+    let Some(state) = state_opt else {
+        let resolver = v8::PromiseResolver::new(scope).unwrap();
+        let promise = resolver.get_promise(scope);
+        let m = v8::String::new(scope, "fetch: no Runtime").unwrap();
+        let exc = v8::Exception::error(scope, m);
+        resolver.reject(scope, exc);
+        rv.set(promise.into());
+        return;
+    };
 
     // Step 1: coerce input to a Request via `new Request(input, init)`.
     let req_obj = match coerce_to_request(scope, args.get(0), args.get(1)) {
