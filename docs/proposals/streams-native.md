@@ -159,10 +159,11 @@ encoder hand-off, WPT regression for the streams suite.
 
 ### Status
 
-Draft v2 — **near-complete implementation** on
-`feature/streams-native`. Every IDL surface in spec §3-§5 ships native;
-async iteration + ReadableStream.from landed; only the polyfill
-cutover (D-19) remains.
+Draft v2 — **complete implementation** on `feature/streams-native`.
+Every IDL surface in spec §3-§5 ships native; async iteration +
+ReadableStream.from landed; D-19 polyfill cutover DONE — `streams.js`
+and `streams-polyfill.js` are both deleted, native is the only stream
+implementation in the runtime.
 
 **Landed (feature/streams-native):**
 
@@ -185,6 +186,11 @@ cutover (D-19) remains.
 | `591c33af` | streams: async iter (`values` + `@@asyncIterator`) + `ReadableStream.from` (§3.4.6 / D-8 / §IV) |
 | `5db45fc0` | streams: async iter ongoing-promise sequencing + WPT runner — 41/41 |
 | `25ac170f` | streams TS: shared `[[finishPromise]]` across abort/close/source-cancel (§5.4.6.{8,9,10}) |
+| `4a8cd82f` | streams cutover landing 1 — native behind `ZEROSHIP_NATIVE_STREAMS=1` (D-19 step 1) |
+| `b602a6d1` | streams cutover landing 2a — refactor callsites off streams.js skeleton (`body._id` -> `_streamId`, `__zsBeginStreamForward` helper) |
+| `db1470c9` | streams cutover landing 2b — delete streams.js, native is default (D-19 step 2) |
+| `bc4a1c71` | streams cutover landing 3a — drop dead skeleton `_id` fast path from `__zsBeginStreamForward` |
+| `888f26dd` | streams cutover landing 3b — delete streams-polyfill.js + extract TextEncoderStream/TextDecoderStream into `embed/text-streams.js` (D-19 step 3) |
 
 **WPT compliance summary (this branch):**
 
@@ -202,9 +208,14 @@ cutover (D-19) remains.
 **Test count this branch:** 111 hand-written streams.rs integration
 tests, plus 7 WPT runners (one cargo test each).
 
-**Not yet shipped** — pending dispatches:
-- Polyfill cutover (D-19) — native and polyfill coexist while the
-  final cleanup lands.
+**LOC removed by D-19 cutover:**
+- `embed/streams.js` (skeleton):  358
+- `embed/streams-polyfill.js` (vendored web-streams-polyfill v3.3.3): 3700
+- TOTAL deleted: 4058
+- `embed/text-streams.js` added (TextEncoderStream/TextDecoderStream):  70
+- NET removed: 3988
+
+**Pending:**
 - The 6 deferred-known TS WPT failures (controller.error/cancel
   ordering edge cases involving WS abort-pipeline interactions).
 
