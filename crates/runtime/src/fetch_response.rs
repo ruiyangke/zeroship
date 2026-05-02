@@ -151,8 +151,8 @@ fn state_ptr(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> Option<*mu
 ///   - `Empty`: respond with an empty body (no Content-Length set by us).
 ///   - `Bytes(Vec<u8>)`: rewindable buffered body — read once, ship it.
 ///   - `Stream`: a user-visible ReadableStream — the kernel calls
-///     `__zsBeginStreamForward(response)` to lock + pump the stream
-///     into a Rust StreamState.
+///     `streams::response_forwarder::begin_forward` to lock + pump the
+///     stream into a Rust-side forwarder.
 pub enum NativeResponseBody {
     /// Body is conceptually `null` (no Content-Length, empty body).
     Empty,
@@ -160,8 +160,8 @@ pub enum NativeResponseBody {
     /// UrlSearchParams/FormData`. Cheap clone via Rc.
     Bytes(std::rc::Rc<Vec<u8>>),
     /// Body source is a user-supplied ReadableStream. Kernel must call
-    /// `__zsBeginStreamForward(response)` to start pumping into a
-    /// Rust-side StreamState.
+    /// `streams::response_forwarder::begin_forward` to start pumping
+    /// into a Rust-side forwarder.
     Stream,
 }
 

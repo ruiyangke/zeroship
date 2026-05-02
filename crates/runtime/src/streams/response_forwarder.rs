@@ -80,14 +80,6 @@ pub type ResponseForwarder = Rc<RefCell<ResponseForwarderInner>>;
 // Registry — stream_id → ResponseForwarder
 // ---------------------------------------------------------------------------
 
-/// Per-isolate registry mapping stream_id → ResponseForwarder. Lives
-/// on the SharedState as a slot; populated by `begin_forward`,
-/// drained by the kernel via `take` / `attach_writer` / `is_closed`.
-///
-/// Distinct from the legacy `state.streams: HashMap<u32, StreamState>`
-/// which is being deleted alongside `legacy_bridge.rs`.
-type ForwarderMap = std::collections::HashMap<u32, ResponseForwarder>;
-
 /// Insert a forwarder into the per-isolate map. Caller must hold the
 /// SharedState mutex (we do that internally).
 fn register(state: &SharedState, stream_id: u32, fwd: ResponseForwarder) {
