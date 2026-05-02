@@ -345,6 +345,12 @@ async fn mint_then_use_token_round_trip() {
     let token_id = body["token_id"].as_str().unwrap().to_string();
     assert!(!token.is_empty());
     assert!(token.contains('~'));
+    // Wire-stable token_id is `shr_` + raw 22-char base64url tid.
+    assert!(
+        token_id.starts_with("shr_"),
+        "API surface prefixes token_id with shr_; got {token_id}"
+    );
+    assert_eq!(token_id.len(), 4 + 22, "shr_ + 22-char tid");
 
     // 2. Use the token via cookie-conversion: ?t=<token>.
     let convert_path = format!("/sandboxes/{id}/preview/5173/index.html?t={token}");
@@ -378,10 +384,13 @@ async fn mint_then_use_token_round_trip() {
     let body = test::read_body(resp).await;
     assert_eq!(&body[..], b"ok");
 
-    // 4. Audit row reflects use — list_audit.
+    // 4. Audit row reflects use — list_audit. The audit stores the
+    // raw `tid` claim bytes; the API surface adds the `shr_` prefix
+    // for presentation. Strip the prefix to compare.
     let audit = state.sandboxes.list_audit(id);
     assert_eq!(audit.len(), 1);
-    assert_eq!(audit[0].token_id, token_id);
+    let raw_tid = token_id.strip_prefix("shr_").expect("API prefix");
+    assert_eq!(audit[0].token_id, raw_tid);
     assert!(audit[0].use_count >= 2, "convert + fetch both bump use_count");
 }
 
@@ -456,6 +465,13 @@ async fn list_share_returns_audit_metadata() {
     // The bytes themselves are NEVER returned.
     for tok in tokens {
         assert!(tok.get("token").is_none(), "token bytes must not be in list");
+        // Wire-stable token_id is `shr_` + raw 22-char base64url tid.
+        let tid_str = tok["token_id"].as_str().unwrap();
+        assert!(
+            tid_str.starts_with("shr_"),
+            "GET /share rows prefix token_id with shr_; got {tid_str}"
+        );
+        assert_eq!(tid_str.len(), 4 + 22, "shr_ + 22-char tid");
     }
 }
 

@@ -253,7 +253,11 @@ pub async fn mint_share(
 
     HttpResponse::Ok().json(&json!({
         "token": token,
-        "token_id": token_id,
+        // Wire-stable token_id is `shr_` + raw `tid` claim base64url;
+        // prefix is presentation-only. The internal `tid` claim and
+        // audit-table key stay byte-exact (no migration of stored
+        // rows).
+        "token_id": format!("shr_{token_id}"),
         "issued_at_unix": now,
         "expires_at_unix": claims.exp,
         "scope": claims.scope,
@@ -289,7 +293,9 @@ pub async fn list_share(
         .filter(|r| r.port == port)
         .map(|r| {
             json!({
-                "token_id": r.token_id,
+                // Wire-stable token_id is `shr_` + raw `tid` claim
+                // base64url; prefix is presentation-only.
+                "token_id": format!("shr_{}", r.token_id),
                 "issued_at_unix": r.issued_at_unix,
                 "expires_at_unix": r.expires_at_unix,
                 "scope": r.scope,
