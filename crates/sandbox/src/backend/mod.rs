@@ -313,4 +313,34 @@ impl Backend {
             Self::NomadCh(b) => b.session_auth(sandbox_id).await,
         }
     }
+
+    /// Re-install per-sandbox state from a sealed record. Called
+    /// from the controller's restart-restore path
+    /// (`crate::AppState::from_config`) after the boot loop has
+    /// signed-`/version` probed the agent and confirmed the
+    /// fingerprint.
+    ///
+    /// Phase-0 status: only nomad-ch implements full backend-state
+    /// rehydration (the structural model + the integration-test
+    /// target per the design's Phase-0 plan). Docker and K8s return
+    /// `Err` until their re-derive paths land — `agent_url` is not
+    /// deterministic for those backends (Docker: bridge IP requires
+    /// `docker inspect`; K8s: requires `kubectl get pod -o jsonpath`)
+    /// and Phase 0 doesn't ship that re-derive code yet. Tracked as
+    /// a Phase-1 follow-up.
+    pub async fn restore_from_sealed(
+        &self,
+        sandbox_id: Uuid,
+        sealed: &crate::persist::SealedAuth,
+    ) -> Result<SandboxAuth, String> {
+        match self {
+            Self::NomadCh(b) => b.restore_from_sealed(sandbox_id, sealed).await,
+            Self::Docker(_) | Self::K8s(_) => Err(format!(
+                "restore_from_sealed: backend {:?} doesn't yet support \
+                 restart-restore (Phase-0 nomad-ch-only; tracked as a \
+                 Phase-1 follow-up)",
+                self.name()
+            )),
+        }
+    }
 }

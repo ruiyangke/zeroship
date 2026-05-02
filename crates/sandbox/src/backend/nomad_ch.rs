@@ -241,6 +241,33 @@ impl VmIndexAllocator {
             self.freed.insert(i);
         }
     }
+
+    /// Mark `i` as in-use without taking it from the free list. Used
+    /// by the controller's restart-restore path (preview-URL § II.0):
+    /// a sealed record's `vm_index` must be claimed in the allocator
+    /// before normal `alloc()` traffic resumes — otherwise a fresh
+    /// `create()` could hand the same index to a new sandbox while
+    /// the original VM is still alive.
+    ///
+    /// Returns `Err` if `i` is out of `[floor, ceil]`. Idempotent on
+    /// already-reserved indices (the second call is a no-op).
+    pub(crate) fn reserve(&mut self, i: u16) -> Result<(), String> {
+        if i < self.floor || i > self.ceil {
+            return Err(format!(
+                "vm-index {i} out of range [{}, {}]",
+                self.floor, self.ceil
+            ));
+        }
+        // Bump `next` past `i` so future first-time allocs don't
+        // hand it out, and remove `i` from the freed set if the
+        // pre-restart sandbox happened to land on a previously-
+        // released index.
+        if i >= self.next {
+            self.next = i.saturating_add(1);
+        }
+        self.freed.remove(&i);
+        Ok(())
+    }
 }
 
 impl NomadCHBackend {
@@ -1112,6 +1139,112 @@ impl NomadCHBackend {
         Ok(super::SandboxAuth {
             signing_key: s.signing_key.clone(),
             agent_url: s.agent_url.clone(),
+            pubkey_fp,
+        })
+    }
+
+    /// Re-derive the deterministic `agent_url` for a given vm_index.
+    /// `http://10.<subnet_second_octet>.<100+idx>.2:7777`. Public so
+    /// the controller's restart-restore path can recompute the URL
+    /// from a sealed record's `vm_index` without re-running create().
+    pub fn derive_agent_url(&self, vm_index: u16) -> String {
+        format!(
+            "http://10.{}.{}.2:{AGENT_PORT}",
+            self.cfg.nomad_ch.subnet_second_octet,
+            100u16 + vm_index
+        )
+    }
+
+    /// Re-derive the per-sandbox host directory: same layout the
+    /// `create()` path writes (`<host_state_dir>/<sandbox-id>/`).
+    fn derive_host_dir(&self, sandbox_id: Uuid) -> PathBuf {
+        self.cfg.nomad_ch.host_state_dir.join(sandbox_id.to_string())
+    }
+
+    /// Re-derive the deterministic Nomad job-id format used by the
+    /// create path: `zsbx-<sandbox-id-simple>`. Kept private (the
+    /// boot-restore code below is the sole caller); callers outside
+    /// the backend always look the job up by its sandbox-id key.
+    fn derive_job_id(sandbox_id: Uuid) -> String {
+        format!("zsbx-{}", sandbox_id.simple())
+    }
+
+    /// Restart-restore: re-install in-memory state for a sandbox the
+    /// controller minted before its previous lifetime ended. Caller
+    /// (the boot-path in `lib.rs`) is expected to have already
+    /// (a) read the sealed record from disk, (b) signed-`/version`
+    /// probed the agent, and (c) confirmed the agent's reported
+    /// `pubkey_fingerprint` byte-matches the sealed `pubkey_fp`.
+    ///
+    /// On success the backend's per-sandbox HashMap holds the same
+    /// shape as a fresh `create()` would have produced; `exec` /
+    /// `read_file` / etc. all dispatch normally. The vm_index is
+    /// reserved in the allocator so a concurrent fresh `create()`
+    /// can't hand the same tap subnet to a different tenant.
+    ///
+    /// Returns `Err` if the sealed record lacks `vm_index` (a
+    /// schema violation for a `backend = "nomad-ch"` record), if
+    /// the index is outside the configured pool, or if the
+    /// in-memory map already has an entry for `sandbox_id`.
+    pub async fn restore_from_sealed(
+        &self,
+        sandbox_id: Uuid,
+        sealed: &crate::persist::SealedAuth,
+    ) -> Result<super::SandboxAuth, String> {
+        if sealed.backend != "nomad-ch" {
+            return Err(format!(
+                "restore_from_sealed: backend mismatch (record says {:?}, this backend is nomad-ch)",
+                sealed.backend
+            ));
+        }
+        let vm_index = sealed.vm_index.ok_or_else(|| {
+            "restore_from_sealed: sealed nomad-ch record has no vm_index".to_string()
+        })?;
+        // Reserve the index BEFORE inserting state — a failure here
+        // (e.g. ceil-out-of-range after operator shrinks the pool)
+        // means the record can't be safely restored on this
+        // controller; the boot path quarantines it.
+        self.vm_index_allocator
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .reserve(vm_index)
+            .map_err(|e| format!("restore_from_sealed: vm_index reserve: {e}"))?;
+
+        let signing_key = Arc::new(SigningKey::from_bytes(&sealed.signing_key_bytes));
+        let pubkey_fp = sig::pubkey_fingerprint(&signing_key.verifying_key());
+        if pubkey_fp != sealed.pubkey_fp {
+            return Err(format!(
+                "restore_from_sealed: derived pubkey_fp ({pubkey_fp}) != sealed pubkey_fp ({})",
+                sealed.pubkey_fp
+            ));
+        }
+        let agent_url = self.derive_agent_url(vm_index);
+        let host_dir = self.derive_host_dir(sandbox_id);
+        let job_id = Self::derive_job_id(sandbox_id);
+
+        {
+            let mut g = self.state.write().unwrap_or_else(|p| p.into_inner());
+            if g.contains_key(&sandbox_id) {
+                return Err(format!(
+                    "restore_from_sealed: sandbox {sandbox_id} already present in nomad-ch state"
+                ));
+            }
+            g.insert(
+                sandbox_id,
+                NomadChSandbox {
+                    user_id: sealed.user_id.clone(),
+                    job_id,
+                    vm_index,
+                    host_dir,
+                    agent_url: agent_url.clone(),
+                    signing_key: signing_key.clone(),
+                },
+            );
+        }
+
+        Ok(super::SandboxAuth {
+            signing_key,
+            agent_url,
             pubkey_fp,
         })
     }

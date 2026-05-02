@@ -16,16 +16,24 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-use crate::backend::SandboxInfo;
+use crate::backend::{SandboxAuth, SandboxInfo};
 use crate::AppState;
 
 /// Internal sandbox record. Holds the public `SandboxInfo` plus
-/// timing data for the GC.
+/// timing data for the GC. The `auth` field is the per-sandbox
+/// signing-key + agent-URL bundle the preview proxy and any future
+/// signed-RPC dispatch reach for; populated at `insert_with_auth`
+/// time, `None` for legacy callers that haven't lifted yet (the
+/// preview-URL proposal § II.0 says the registry SHOULD always
+/// hold auth, but we keep the optional shape so the migration is
+/// gradual — the Backend's `session_auth` lookup is still the
+/// authoritative source).
 #[derive(Clone)]
 struct Sandbox {
     info: SandboxInfo,
     created_at: Instant,
     last_used: Arc<RwLock<Instant>>,
+    auth: Option<SandboxAuth>,
 }
 
 impl Sandbox {
@@ -99,16 +107,49 @@ impl SandboxRegistry {
 
     /// Insert a freshly-spawned sandbox.
     pub fn insert(&self, sandbox_id: Uuid, info: SandboxInfo) -> SandboxInfo {
+        self.insert_inner(sandbox_id, info, None)
+    }
+
+    /// Insert a sandbox alongside its lifted auth material. Used by
+    /// the controller's restart-restore path (preview-URL § II.0):
+    /// once a sealed record's `/version` rebind probe succeeds, the
+    /// info + auth go in together so the registry holds a complete
+    /// view. Phase 1's preview proxy reads `auth` here.
+    pub fn insert_with_auth(
+        &self,
+        sandbox_id: Uuid,
+        info: SandboxInfo,
+        auth: SandboxAuth,
+    ) -> SandboxInfo {
+        self.insert_inner(sandbox_id, info, Some(auth))
+    }
+
+    fn insert_inner(
+        &self,
+        sandbox_id: Uuid,
+        info: SandboxInfo,
+        auth: Option<SandboxAuth>,
+    ) -> SandboxInfo {
         let now = Instant::now();
         let sandbox = Sandbox {
             info: info.clone(),
             created_at: now,
             last_used: Arc::new(RwLock::new(now)),
+            auth,
         };
         let key = (info.user_id.clone(), info.project_id.clone());
         self.by_sandbox.write().unwrap().insert(sandbox_id, sandbox);
         self.by_user_project.write().unwrap().insert(key, sandbox_id);
         info
+    }
+
+    /// Look up the auth bundle for a sandbox-id. Cheap; clones an
+    /// `Arc` (no secret-bytes copy). Returns `None` for sandboxes
+    /// inserted via `insert` (no auth attached) — callers should
+    /// fall back to `Backend::session_auth` for those.
+    pub fn get_auth(&self, id: &Uuid) -> Option<SandboxAuth> {
+        let guard = self.by_sandbox.read().unwrap();
+        guard.get(id)?.auth.clone()
     }
 
     /// Drop a sandbox from the registry. Caller should already have
