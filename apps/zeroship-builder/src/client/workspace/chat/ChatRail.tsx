@@ -76,10 +76,11 @@ export function ChatRail({ appName, seedBrief }: ChatRailProps) {
   // message state.
   const [answeredSurveys, setAnsweredSurveys] = useState<Set<string>>(() => new Set());
 
-  const { messages, sendMessage, status, error, stop } = useChat({
-    transport: chatTransport(rpc.chat),
-    onError: (err) => console.error("[chat]", err),
-  });
+  const { messages, sendMessage, setMessages, regenerate, status, error, stop } =
+    useChat({
+      transport: chatTransport(rpc.chat),
+      onError: (err) => console.error("[chat]", err),
+    });
 
   const busy = status === "submitted" || status === "streaming";
 
@@ -105,6 +106,39 @@ export function ChatRail({ appName, seedBrief }: ChatRailProps) {
   function handleSubmit(text: string, _attachments: File[]) {
     if (!text.trim() || busy) return;
     sendMessage({ text });
+  }
+
+  /**
+   * Truncate the conversation at (and including) the edited user
+   * message, then re-fire the new text as a fresh send. The AI SDK's
+   * `regenerate()` rewinds to the previous user turn — useful for the
+   * "↻ regenerate" affordance — but doesn't accept a substitute prompt.
+   * For "✎ edit prior" we want to *replace* the user message, so we
+   * mutate `messages` directly via setMessages, then sendMessage. The
+   * server treats the submitted history as the new ground truth.
+   */
+  function handleEditUser(messageId: string, newText: string) {
+    if (busy) return;
+    const idx = messages.findIndex((m) => m.id === messageId);
+    if (idx < 0) return;
+    setMessages(messages.slice(0, idx));
+    sendMessage({ text: newText });
+  }
+
+  /** ↻ regenerate on the latest assistant turn. The SDK helper drops
+   *  the trailing assistant message and re-runs the previous user
+   *  turn — exactly the spec §10.6 semantics. */
+  function handleRegenerate() {
+    if (busy) return;
+    void regenerate();
+  }
+
+  /** Retry button shown on error. The SDK keeps the failed user turn
+   *  in `messages` and clears `error` once a new request succeeds.
+   *  We just call regenerate(): same intent, no manual replay. */
+  function handleRetry() {
+    if (busy) return;
+    void regenerate();
   }
 
   function submitSurvey(token: string, response: SurveyResponse) {
@@ -146,11 +180,26 @@ export function ChatRail({ appName, seedBrief }: ChatRailProps) {
         busy={busy}
         onSubmitSurvey={submitSurvey}
         answeredSurveys={answeredSurveys}
+        onRegenerate={handleRegenerate}
+        onEditUser={handleEditUser}
       />
 
       {error && (
-        <div className="px-5 py-2 border-t border-blood/30 bg-blood/5 font-sans text-[12px] text-blood">
-          {error.message}
+        <div
+          data-testid="chat-error"
+          className="px-5 py-2 border-t border-blood/30 bg-blood/5 font-sans text-[12px] text-blood flex items-center justify-between gap-2"
+        >
+          <span className="truncate" title={error.message}>
+            {error.message}
+          </span>
+          <button
+            type="button"
+            data-testid="chat-retry"
+            onClick={handleRetry}
+            className="font-sans uppercase tracking-wider text-[10.5px] text-blood hover:text-ink cursor-pointer"
+          >
+            ↻ retry
+          </button>
         </div>
       )}
 

@@ -70,6 +70,12 @@ export interface ChatMessagesProps {
   briefCommitted?: boolean;
   /** Loading flag for the createApp mutation triggered by Begin. */
   briefBusy?: boolean;
+  /** Hover-action: regenerate an assistant turn. ChatRail wires this
+   *  to useChat.regenerate(). Hidden on streaming turns. */
+  onRegenerate?: () => void;
+  /** Hover-action: edit a prior user message and replay from there.
+   *  Receives the message id + the new text. */
+  onEditUser?: (messageId: string, newText: string) => void;
 }
 
 export function ChatMessages({
@@ -80,6 +86,8 @@ export function ChatMessages({
   onBeginBrief,
   briefCommitted,
   briefBusy,
+  onRegenerate,
+  onEditUser,
 }: ChatMessagesProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -105,8 +113,19 @@ export function ChatMessages({
       className="flex-1 overflow-y-auto px-5 py-4 flex flex-col gap-5 min-h-0"
     >
       {messages.length === 0 && !busy && (
-        <div className="font-serif text-[14px] italic text-ink-soft">
-          Tell Builder what to make.
+        <div
+          data-testid="chat-empty"
+          className="flex flex-col gap-2 text-ink-soft"
+        >
+          <div className="font-display italic text-[18px] text-ink leading-tight">
+            What shall we make?
+          </div>
+          <div className="font-serif text-[13.5px] italic text-pencil leading-snug">
+            Describe an app, paste a screenshot, or sketch a feature.
+            Type{" "}
+            <span className="font-mono not-italic text-[12px]">@</span>{" "}
+            to mention a file, an issue, or a recent error.
+          </div>
         </div>
       )}
 
@@ -117,7 +136,15 @@ export function ChatMessages({
           .join("");
 
         if (m.role === "user") {
-          return <MessageUser key={m.id} text={text} />;
+          return (
+            <MessageUser
+              key={m.id}
+              text={text}
+              onEdit={
+                onEditUser ? (newText) => onEditUser(m.id, newText) : undefined
+              }
+            />
+          );
         }
 
         const isLast = idx === messages.length - 1;
@@ -134,6 +161,14 @@ export function ChatMessages({
             text={text}
             streaming={isLast && busy}
             parts={renderedParts}
+            // Only the latest assistant turn gets a regenerate button.
+            // Regenerating a mid-history turn would require truncating
+            // forward and replaying — the AI SDK's regenerate() always
+            // operates on the tail, so only expose it where it matches
+            // user intent.
+            onRegenerate={
+              onRegenerate && isLast && !busy ? onRegenerate : undefined
+            }
           />
         );
       })}
