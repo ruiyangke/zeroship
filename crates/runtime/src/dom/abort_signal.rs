@@ -267,46 +267,25 @@ pub fn add_abort_algorithm(
 }
 
 // ---------------------------------------------------------------------------
-// Build helpers — DOMException-shaped error reasons
+// Build helpers — DOMException error reasons
 // ---------------------------------------------------------------------------
 
-/// Build the default abort reason: a DOMException-shaped Error with
-/// `name = "AbortError"`. The JS polyfill's DOMException shim uses
-/// the same shape; we mirror it here.
-///
-/// Real DOMException is a `#[v8_class]` we'll add in the next chunk
-/// (Body / Request / Response). For now, build a vanilla Error and
-/// patch on the spec-correct properties.
+/// Build the default abort reason: a real native `DOMException` with
+/// `name = "AbortError"`. WPT abort tests check
+/// `signal.reason instanceof DOMException`, which the previous
+/// shape-only fallback (Error + patched properties) failed.
 pub(crate) fn build_abort_error<'s>(
     scope: &mut v8::PinScope<'s, '_>,
 ) -> v8::Local<'s, v8::Object> {
-    build_dom_exception(scope, "The operation was aborted.", "AbortError", 20)
+    super::exception::build(scope, "The operation was aborted.", "AbortError")
 }
 
-/// Build a "TimeoutError" DOMException-shaped error for
-/// `AbortSignal.timeout` (DOM §3.3 step 5).
+/// Build a "TimeoutError" DOMException for `AbortSignal.timeout`
+/// (DOM §3.3 step 5).
 pub(crate) fn build_timeout_error<'s>(
     scope: &mut v8::PinScope<'s, '_>,
 ) -> v8::Local<'s, v8::Object> {
-    build_dom_exception(scope, "The operation timed out.", "TimeoutError", 23)
-}
-
-fn build_dom_exception<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    message: &str,
-    name: &str,
-    code: u32,
-) -> v8::Local<'s, v8::Object> {
-    let msg = v8::String::new(scope, message).unwrap();
-    let err = v8::Exception::error(scope, msg);
-    let err_obj: v8::Local<v8::Object> = err.try_into().unwrap();
-    let name_key = v8::String::new(scope, "name").unwrap();
-    let name_val = v8::String::new(scope, name).unwrap();
-    err_obj.set(scope, name_key.into(), name_val.into());
-    let code_key = v8::String::new(scope, "code").unwrap();
-    let code_val = v8::Integer::new_from_unsigned(scope, code);
-    err_obj.set(scope, code_key.into(), code_val.into());
-    err_obj
+    super::exception::build(scope, "The operation timed out.", "TimeoutError")
 }
 
 // ---------------------------------------------------------------------------

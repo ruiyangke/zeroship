@@ -199,10 +199,9 @@ fn dom_exception_to_string_tag_is_dom_exception() {
 
 #[test]
 fn abort_signal_uses_native_dom_exception() {
-    // AbortSignal's default abort reason is a DOMException — this test
-    // validates the integration. The reason returned by signal.reason
-    // (when no explicit reason was passed) MUST behave like a DOMException
-    // and be `instanceof DOMException === true`.
+    // AbortSignal's default abort reason is a real native DOMException
+    // (post-rewire). signal.reason instanceof DOMException must be true,
+    // matching WPT abort-event expectations.
     let r = dispatch(
         m(r#"export function test() {
             const c = new AbortController();
@@ -210,6 +209,7 @@ fn abort_signal_uses_native_dom_exception() {
             const reason = c.signal.reason;
             return {
                 isDom: reason instanceof DOMException,
+                isError: reason instanceof Error,
                 name: reason?.name,
                 code: reason?.code,
             };
@@ -218,11 +218,8 @@ fn abort_signal_uses_native_dom_exception() {
         "[]",
     )
     .unwrap();
-    // Note: the build_dom_exception helper in abort_signal.rs currently
-    // builds via v8::Exception::error + property patches, NOT through the
-    // native DOMException class. The test just checks shape compatibility:
-    // name + code are right. The full instanceof switch lands when we
-    // re-route abort_signal's helper through the native class.
+    assert!(r.json.contains("\"isDom\":true"), "got: {}", r.json);
+    assert!(r.json.contains("\"isError\":true"), "got: {}", r.json);
     assert!(r.json.contains("\"name\":\"AbortError\""), "got: {}", r.json);
     assert!(r.json.contains("\"code\":20"), "got: {}", r.json);
 }
