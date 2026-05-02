@@ -326,28 +326,28 @@ fn parse_results(json: &str) -> Vec<TestResult> {
 // inline-load it before running. This mirrors the // META: script=...
 // directive WPT uses. Must come BEFORE the test harness loads.
 const ABORT_SIGNAL_ANY_TESTS_RESOURCE: &str =
-    include_str!("wpt/dom/abort/resources/abort-signal-any-tests.js");
+    include_str!("../../../tests/wpt/dom/abort/resources/abort-signal-any-tests.js");
 
 const WPT_FILES: &[(&str, &str, Option<&str>)] = &[
     (
         "AbortSignal-static",
-        include_str!("wpt/dom/abort/AbortSignal.any.js"),
+        include_str!("../../../tests/wpt/dom/abort/AbortSignal.any.js"),
         None,
     ),
     (
         "abort-event",
-        include_str!("wpt/dom/abort/event.any.js"),
+        include_str!("../../../tests/wpt/dom/abort/event.any.js"),
         None,
     ),
     (
         "abort-signal-any",
-        include_str!("wpt/dom/abort/abort-signal-any.any.js"),
+        include_str!("../../../tests/wpt/dom/abort/abort-signal-any.any.js"),
         // Depends on the helper file at resources/abort-signal-any-tests.js.
         Some(ABORT_SIGNAL_ANY_TESTS_RESOURCE),
     ),
     (
         "abort-timeout",
-        include_str!("wpt/dom/abort/timeout.any.js"),
+        include_str!("../../../tests/wpt/dom/abort/timeout.any.js"),
         None,
     ),
 ];

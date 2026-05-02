@@ -317,35 +317,35 @@ fn parse_results(json: &str) -> Vec<TestResult> {
 const WPT_FILES: &[(&str, &str)] = &[
     (
         "headers-basic",
-        include_str!("wpt/fetch/api/headers/headers-basic.any.js"),
+        include_str!("../../../tests/wpt/fetch/api/headers/headers-basic.any.js"),
     ),
     (
         "headers-casing",
-        include_str!("wpt/fetch/api/headers/headers-casing.any.js"),
+        include_str!("../../../tests/wpt/fetch/api/headers/headers-casing.any.js"),
     ),
     (
         "headers-combine",
-        include_str!("wpt/fetch/api/headers/headers-combine.any.js"),
+        include_str!("../../../tests/wpt/fetch/api/headers/headers-combine.any.js"),
     ),
     (
         "headers-errors",
-        include_str!("wpt/fetch/api/headers/headers-errors.any.js"),
+        include_str!("../../../tests/wpt/fetch/api/headers/headers-errors.any.js"),
     ),
     (
         "headers-normalize",
-        include_str!("wpt/fetch/api/headers/headers-normalize.any.js"),
+        include_str!("../../../tests/wpt/fetch/api/headers/headers-normalize.any.js"),
     ),
     (
         "headers-record",
-        include_str!("wpt/fetch/api/headers/headers-record.any.js"),
+        include_str!("../../../tests/wpt/fetch/api/headers/headers-record.any.js"),
     ),
     (
         "header-setcookie",
-        include_str!("wpt/fetch/api/headers/header-setcookie.any.js"),
+        include_str!("../../../tests/wpt/fetch/api/headers/header-setcookie.any.js"),
     ),
     (
         "headers-structure",
-        include_str!("wpt/fetch/api/headers/headers-structure.any.js"),
+        include_str!("../../../tests/wpt/fetch/api/headers/headers-structure.any.js"),
     ),
     // Skipped in v1 (need Request/Response):
     //   - header-values.any.js          — every test uses fetch/XHR

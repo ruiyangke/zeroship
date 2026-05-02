@@ -349,15 +349,15 @@ fn parse_results(json: &str) -> Vec<TestResult> {
 // ---------------------------------------------------------------------------
 
 const WPT_FILES: &[(&str, &str)] = &[
-    ("api-basics", include_str!("wpt/api-basics.any.js")),
-    ("api-surrogates-utf8", include_str!("wpt/api-surrogates-utf8.any.js")),
-    ("textdecoder-arguments", include_str!("wpt/textdecoder-arguments.any.js")),
-    ("textdecoder-byte-order-marks", include_str!("wpt/textdecoder-byte-order-marks.any.js")),
-    ("textdecoder-eof", include_str!("wpt/textdecoder-eof.any.js")),
-    ("textdecoder-fatal", include_str!("wpt/textdecoder-fatal.any.js")),
-    ("textdecoder-streaming", include_str!("wpt/textdecoder-streaming.any.js")),
-    ("textdecoder-utf16-surrogates", include_str!("wpt/textdecoder-utf16-surrogates.any.js")),
-    ("encodeInto", include_str!("wpt/encodeInto.any.js")),
+    ("api-basics", include_str!("../../../tests/wpt/encoding/api-basics.any.js")),
+    ("api-surrogates-utf8", include_str!("../../../tests/wpt/encoding/api-surrogates-utf8.any.js")),
+    ("textdecoder-arguments", include_str!("../../../tests/wpt/encoding/textdecoder-arguments.any.js")),
+    ("textdecoder-byte-order-marks", include_str!("../../../tests/wpt/encoding/textdecoder-byte-order-marks.any.js")),
+    ("textdecoder-eof", include_str!("../../../tests/wpt/encoding/textdecoder-eof.any.js")),
+    ("textdecoder-fatal", include_str!("../../../tests/wpt/encoding/textdecoder-fatal.any.js")),
+    ("textdecoder-streaming", include_str!("../../../tests/wpt/encoding/textdecoder-streaming.any.js")),
+    ("textdecoder-utf16-surrogates", include_str!("../../../tests/wpt/encoding/textdecoder-utf16-surrogates.any.js")),
+    ("encodeInto", include_str!("../../../tests/wpt/encoding/encodeInto.any.js")),
 ];
 
 #[derive(Default, Debug)]

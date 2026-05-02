@@ -472,15 +472,15 @@ fn parse_results(json: &str) -> Vec<TestResult> {
 const WPT_FILES: &[(&str, &[&str])] = &[
     (
         "cloned-any",
-        &[include_str!("wpt/fetch/api/body/cloned-any.js")],
+        &[include_str!("../../../tests/wpt/fetch/api/body/cloned-any.js")],
     ),
     (
         "formdata",
-        &[include_str!("wpt/fetch/api/body/formdata.any.js")],
+        &[include_str!("../../../tests/wpt/fetch/api/body/formdata.any.js")],
     ),
     (
         "mime-type",
-        &[include_str!("wpt/fetch/api/body/mime-type.any.js")],
+        &[include_str!("../../../tests/wpt/fetch/api/body/mime-type.any.js")],
     ),
 ];
 

@@ -372,21 +372,21 @@ fn parse_results(json: &str) -> Vec<TestResult> {
 const WPT_FILES: &[(&str, &str)] = &[
     (
         "constructor",
-        include_str!("wpt/xhr/formdata/constructor.any.js"),
+        include_str!("../../../tests/wpt/xhr/formdata/constructor.any.js"),
     ),
-    ("append", include_str!("wpt/xhr/formdata/append.any.js")),
-    ("delete", include_str!("wpt/xhr/formdata/delete.any.js")),
-    ("get", include_str!("wpt/xhr/formdata/get.any.js")),
-    ("has", include_str!("wpt/xhr/formdata/has.any.js")),
-    ("set", include_str!("wpt/xhr/formdata/set.any.js")),
+    ("append", include_str!("../../../tests/wpt/xhr/formdata/append.any.js")),
+    ("delete", include_str!("../../../tests/wpt/xhr/formdata/delete.any.js")),
+    ("get", include_str!("../../../tests/wpt/xhr/formdata/get.any.js")),
+    ("has", include_str!("../../../tests/wpt/xhr/formdata/has.any.js")),
+    ("set", include_str!("../../../tests/wpt/xhr/formdata/set.any.js")),
     (
         "iteration",
-        include_str!("wpt/xhr/formdata/iteration.any.js"),
+        include_str!("../../../tests/wpt/xhr/formdata/iteration.any.js"),
     ),
-    ("foreach", include_str!("wpt/xhr/formdata/foreach.any.js")),
+    ("foreach", include_str!("../../../tests/wpt/xhr/formdata/foreach.any.js")),
     (
         "set-blob",
-        include_str!("wpt/xhr/formdata/set-blob.any.js"),
+        include_str!("../../../tests/wpt/xhr/formdata/set-blob.any.js"),
     ),
 ];
 

@@ -411,11 +411,11 @@ fn parse_results(json: &str) -> Vec<TestResult> {
     }
 }
 
-const TEST_UTILS: &str = include_str!("wpt/streams/resources/test-utils.js");
-const RECORDING_STREAMS: &str = include_str!("wpt/streams/resources/recording-streams.js");
-const RS_UTILS: &str = include_str!("wpt/streams/resources/rs-utils.js");
+const TEST_UTILS: &str = include_str!("../../../tests/wpt/streams/resources/test-utils.js");
+const RECORDING_STREAMS: &str = include_str!("../../../tests/wpt/streams/resources/recording-streams.js");
+const RS_UTILS: &str = include_str!("../../../tests/wpt/streams/resources/rs-utils.js");
 const RS_TEST_TEMPLATES: &str =
-    include_str!("wpt/streams/resources/rs-test-templates.js");
+    include_str!("../../../tests/wpt/streams/resources/rs-test-templates.js");
 
 const WPT_FILES: &[(&str, &[&str])] = &[
     (
@@ -425,7 +425,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
             RS_UTILS,
             RECORDING_STREAMS,
             RS_TEST_TEMPLATES,
-            include_str!("wpt/streams/readable-byte-streams/construct-byob-request.any.js"),
+            include_str!("../../../tests/wpt/streams/readable-byte-streams/construct-byob-request.any.js"),
         ],
     ),
     (
@@ -435,7 +435,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
             RS_UTILS,
             RECORDING_STREAMS,
             RS_TEST_TEMPLATES,
-            include_str!("wpt/streams/readable-byte-streams/enqueue-with-detached-buffer.any.js"),
+            include_str!("../../../tests/wpt/streams/readable-byte-streams/enqueue-with-detached-buffer.any.js"),
         ],
     ),
     (
@@ -445,7 +445,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
             RS_UTILS,
             RECORDING_STREAMS,
             RS_TEST_TEMPLATES,
-            include_str!("wpt/streams/readable-byte-streams/non-transferable-buffers.any.js"),
+            include_str!("../../../tests/wpt/streams/readable-byte-streams/non-transferable-buffers.any.js"),
         ],
     ),
     (
@@ -455,7 +455,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
             RS_UTILS,
             RECORDING_STREAMS,
             RS_TEST_TEMPLATES,
-            include_str!("wpt/streams/readable-byte-streams/respond-after-enqueue.any.js"),
+            include_str!("../../../tests/wpt/streams/readable-byte-streams/respond-after-enqueue.any.js"),
         ],
     ),
     (
@@ -465,7 +465,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
             RS_UTILS,
             RECORDING_STREAMS,
             RS_TEST_TEMPLATES,
-            include_str!("wpt/streams/readable-byte-streams/read-min.any.js"),
+            include_str!("../../../tests/wpt/streams/readable-byte-streams/read-min.any.js"),
         ],
     ),
     (
@@ -475,7 +475,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
             RS_UTILS,
             RECORDING_STREAMS,
             RS_TEST_TEMPLATES,
-            include_str!("wpt/streams/readable-byte-streams/bad-buffers-and-views.any.js"),
+            include_str!("../../../tests/wpt/streams/readable-byte-streams/bad-buffers-and-views.any.js"),
         ],
     ),
     (
@@ -485,7 +485,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
             RS_UTILS,
             RECORDING_STREAMS,
             RS_TEST_TEMPLATES,
-            include_str!("wpt/streams/readable-byte-streams/tee.any.js"),
+            include_str!("../../../tests/wpt/streams/readable-byte-streams/tee.any.js"),
         ],
     ),
     (
@@ -495,7 +495,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
             RS_UTILS,
             RECORDING_STREAMS,
             RS_TEST_TEMPLATES,
-            include_str!("wpt/streams/readable-byte-streams/general.any.js"),
+            include_str!("../../../tests/wpt/streams/readable-byte-streams/general.any.js"),
         ],
     ),
 ];

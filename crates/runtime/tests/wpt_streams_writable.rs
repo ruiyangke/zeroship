@@ -443,14 +443,14 @@ fn abort_signal_dependent(name: &str, err: &str) -> bool {
         || (name.contains("abort signal") && err.contains("expected"))
 }
 
-const TEST_UTILS: &str = include_str!("wpt/streams/resources/test-utils.js");
-const RECORDING_STREAMS: &str = include_str!("wpt/streams/resources/recording-streams.js");
+const TEST_UTILS: &str = include_str!("../../../tests/wpt/streams/resources/test-utils.js");
+const RECORDING_STREAMS: &str = include_str!("../../../tests/wpt/streams/resources/recording-streams.js");
 
 const WPT_FILES: &[(&str, &[&str])] = &[
     (
         "constructor",
         &[include_str!(
-            "wpt/streams/writable-streams/constructor.any.js"
+            "../../../tests/wpt/streams/writable-streams/constructor.any.js"
         )],
     ),
     (
@@ -458,7 +458,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
         &[
             TEST_UTILS,
             RECORDING_STREAMS,
-            include_str!("wpt/streams/writable-streams/general.any.js"),
+            include_str!("../../../tests/wpt/streams/writable-streams/general.any.js"),
         ],
     ),
     (
@@ -466,7 +466,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
         &[
             TEST_UTILS,
             RECORDING_STREAMS,
-            include_str!("wpt/streams/writable-streams/close.any.js"),
+            include_str!("../../../tests/wpt/streams/writable-streams/close.any.js"),
         ],
     ),
     (
@@ -474,7 +474,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
         &[
             TEST_UTILS,
             RECORDING_STREAMS,
-            include_str!("wpt/streams/writable-streams/aborting.any.js"),
+            include_str!("../../../tests/wpt/streams/writable-streams/aborting.any.js"),
         ],
     ),
 ];
