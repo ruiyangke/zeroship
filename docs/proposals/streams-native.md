@@ -159,10 +159,10 @@ encoder hand-off, WPT regression for the streams suite.
 
 ### Status
 
-Draft v2 — **partial implementation in progress** on
-`feature/streams-native`. Foundation + ReadableStream value-path
-landed; pipeTo/pipeThrough/tee/values, byte streams, WritableStream,
-TransformStream still pending.
+Draft v2 — **near-complete implementation** on
+`feature/streams-native`. Every IDL surface in spec §3-§5 ships native;
+async iteration + ReadableStream.from landed; only the polyfill
+cutover (D-19) remains.
 
 **Landed (feature/streams-native):**
 
@@ -173,27 +173,40 @@ TransformStream still pending.
 | `c4537d1a` | streams: queue + slots + budget primitives (§V.3, §VI.1, §XII / D-18) |
 | `2b0047c7` | streams: `enqueue_microtask` + `upon_promise` + `set_promise_is_handled_to_true` (D-12 / §VII.3-§VII.4) |
 | `5a0bee5d` | streams: `ByteLengthQueuingStrategy` + `CountQueuingStrategy` (§6.2, §6.3, D-17) |
-| `20b47470` | streams: `ReadableStream` + `ReadableStreamDefaultController` + `ReadableStreamDefaultReader` (§II.1, §II.3, §II.5, §III.1-§III.3) plus `NativeSource` trait + `from_native_source` (D-9) |
-| `af1d7a84` | streams: WPT runner for `streams/readable-streams/` (constructor, general, default-reader) — 68/68 pass + spec-faithful constructor argument-conversion ordering |
-| `747be412` | streams: clean up unused imports (no behavior change) |
-| `5e05f5b8` | streams: `WritableStream` + `WritableStreamDefaultController` + `WritableStreamDefaultWriter` (§II.8-§II.10, §III.5-§III.7) plus `NativeSink` trait + `from_native_sink` (D-9). 16 hand-written tests. |
-| (this commit) | streams: WPT runner for `streams/writable-streams/` (constructor, general, close, aborting) — 110/120 pass, 10 skip (AbortSignal-dependent — explicit reasons) |
+| `20b47470` | streams: `ReadableStream` + `ReadableStreamDefaultController` + `ReadableStreamDefaultReader` plus `NativeSource` trait + `from_native_source` (D-9) |
+| `af1d7a84` | streams: WPT runner for `streams/readable-streams/` (constructor, general, default-reader) — 68/68 pass |
+| `5e05f5b8` | streams: `WritableStream` + `WritableStreamDefaultController` + `WritableStreamDefaultWriter` plus `NativeSink` trait + `from_native_sink` (D-9) |
+| `0ea0be77` | streams: WPT runner for `streams/writable-streams/` — 110/120 pass, 10 skip (AbortSignal) |
+| `b1ff1836` | streams: native `TransformStream` + controller + cross-class algorithms (§II.11-§II.12) |
+| `ab25d201` | streams: WPT runner for `streams/transform-streams/` |
+| `c07c7102` | streams: native `pipeTo` / `pipeThrough` / `tee` (§IX, §X) |
+| `1bca8e86` | streams: pipe + tee Native ReadRequest + WPT runners — 100% pipe (170/170), 100% tee (26/26) |
+| `1e24bcbf` … `121837c3` | streams: byte streams / BYOB (§3.7-§3.8, D-6, D-15) — full byte controller + BYOB reader + BYOBRequest + byte-tee. WPT BYOB 185/185 |
+| `591c33af` | streams: async iter (`values` + `@@asyncIterator`) + `ReadableStream.from` (§3.4.6 / D-8 / §IV) |
+| `5db45fc0` | streams: async iter ongoing-promise sequencing + WPT runner — 41/41 |
+| `25ac170f` | streams TS: shared `[[finishPromise]]` across abort/close/source-cancel (§5.4.6.{8,9,10}) |
 
-**Test count this branch:** 339 passing across cargo `#[test]`s
-(58 lib unit + 281 integration, including the new 16 hand-written
-WS tests). WPT runners are 2 cargo tests: readable (68/68 pass) and
-writable (110 pass / 0 fail / 10 skip).
+**WPT compliance summary (this branch):**
+
+| Suite | Pass | Fail | Skip |
+|-------|-----:|-----:|-----:|
+| readable-streams (constructor/general/default-reader) | 68 | 0 | 0 |
+| writable-streams | 110 | 0 | 10 |
+| transform-streams | 64 | 6 (deferred-known) | 0 |
+| piping | 170 | 0 | 0 |
+| tee | 26 | 0 | 0 |
+| BYOB | 185 | 0 | 0 |
+| async-iterator | 41 | 0 | 0 |
+| **Total** | **664** | **6 (deferred-known)** | **10 (AbortSignal)** |
+
+**Test count this branch:** 111 hand-written streams.rs integration
+tests, plus 7 WPT runners (one cargo test each).
 
 **Not yet shipped** — pending dispatches:
-- `TransformStream` + controller (§II.11-§II.12).
-- `pipeTo` / `pipeThrough` / `tee` / async iterator (§IX, §X, §IV)
-  — depend on Writable + Transform.
-- Byte streams / BYOB (§3.7-§3.8, D-6, D-15).
-- Native runtime-loop driver for `AlgorithmFn::Native` — currently
-  the type surface is in place but the future is not driven (next
-  dispatch wires it via `OpResult::JsValue` per §VII.5).
 - Polyfill cutover (D-19) — native and polyfill coexist while the
-  implementation lands.
+  final cleanup lands.
+- The 6 deferred-known TS WPT failures (controller.error/cancel
+  ordering edge cases involving WS abort-pipeline interactions).
 
 **Macro deviation:** §XIV.1's `#[v8_async_method]` extension is
 deferred. Per §XIV.6, plain methods returning `v8::Local<v8::Promise>`
