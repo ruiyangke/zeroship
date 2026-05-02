@@ -35,7 +35,6 @@ use std::time::Duration;
 
 use compio_ws::tungstenite::{self, Message, protocol::frame::CloseFrame};
 use compio_ws::tungstenite::protocol::frame::coding::CloseCode;
-use futures::FutureExt;
 
 use super::handshake::{Established, EstablishedStream, HandshakeError, HandshakeOptions};
 use super::{WebSocketImpl, WsFrame};
@@ -397,7 +396,9 @@ async fn run_socket_loop_inner<S>(
         Some(w) => w,
         None => return,
     };
+    #[allow(unused_assignments)]
     let mut sent_close = false;
+    #[allow(unused_assignments)]
     let mut peer_closed = false;
 
     // The single-task design avoids the compio-io "buffer was submitted

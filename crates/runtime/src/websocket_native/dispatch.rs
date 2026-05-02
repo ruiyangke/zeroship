@@ -13,8 +13,6 @@
 
 #![cfg(feature = "runtime_native_websocket")]
 
-use std::rc::Rc;
-
 use crate::state::SharedState;
 
 use super::network::{self, WsEvent};
