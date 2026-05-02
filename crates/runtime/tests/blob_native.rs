@@ -151,17 +151,36 @@ fn type_lowercased() {
 }
 
 #[test]
-fn options_non_object_throws() {
+fn options_object_kinds_treated_as_dict() {
+    // Per WebIDL §3.2.18: `Object` (regex, function, plain object) is
+    // accepted; primitives throw. This tests the accepted shapes.
     let s = run_in_v8(
         r#"
-        let kind;
-        try { new Blob([], 42); }
-        catch (e) { kind = e.constructor.name; }
-        kind || "no-throw";
+        const c = new Blob([], /regex/);
+        const d = new Blob([], () => {});
+        const e = new Blob([], { unrecognized: true });
+        JSON.stringify({ c: c.size, d: d.size, e: e.size });
         "#,
         |val, scope| js_string(val, scope),
     );
-    assert_eq!(s, "TypeError");
+    assert_eq!(s, r#"{"c":0,"d":0,"e":0}"#);
+}
+
+#[test]
+fn options_primitives_throw() {
+    // 123, 'abc', true, 123.4 → TypeError.
+    let s = run_in_v8(
+        r#"
+        let count = 0;
+        for (const arg of [123, 123.4, true, "abc"]) {
+            try { new Blob([], arg); }
+            catch (e) { if (e instanceof TypeError) count++; }
+        }
+        count;
+        "#,
+        |val, scope| val.uint32_value(scope).unwrap_or(0),
+    );
+    assert_eq!(s, 4);
 }
 
 #[test]
