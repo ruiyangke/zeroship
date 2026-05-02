@@ -17,13 +17,12 @@ pub mod persist;
 pub mod registry;
 pub mod restore;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::backend::Backend;
 use crate::config::SandboxConfig;
-use crate::persist::AeadKey;
+use crate::persist::Persistence;
 use crate::registry::SandboxRegistry;
 
 /// Shared application state passed to every handler.
@@ -42,7 +41,18 @@ impl AppState {
     /// only live in process memory; orphan Pods would 401 every
     /// signed request from the new controller forever).
     pub async fn from_config(config: SandboxConfig) -> Result<Arc<Self>, String> {
-        let backend = Backend::from_config(&config)?;
+        // Build the shared persistence handle FIRST so the same `Arc`
+        // can be cloned into both the backend (for seal-on-create /
+        // delete-on-stop) and the boot-restore loop below (for the
+        // initial directory walk). `from_env` returns `None` when
+        // `SANDBOX_PERSIST_AUTH` is not `1` — the disabled shape both
+        // for the backend and the restore call. Failures here are
+        // fail-fast: an operator who set the flag with a missing /
+        // wrong-mode key file wants to see that at boot, not silently
+        // run with persistence off.
+        let persist: Option<Arc<Persistence>> =
+            Persistence::from_env()?.map(Arc::new);
+        let backend = Backend::from_config_with_persist(&config, persist.clone())?;
         backend.probe().await?;
         // Clean up orphan Pods + ConfigMaps from a previous run.
         // Errors here are non-fatal — operators may want to keep
@@ -55,53 +65,40 @@ impl AppState {
         let registry = SandboxRegistry::new();
 
         // Sealed-record restore (preview-URL § II.0 §4 + § II.5).
-        // Feature-flagged behind `SANDBOX_PERSIST_AUTH=1`; default
-        // OFF so existing operators see no behaviour change. When
-        // enabled, requires `SANDBOX_AEAD_KEY_PATH` (round-6 H8:
-        // file-mount only, never an env var). A boot that succeeds
-        // without the key file fails-fast — operators MUST opt in
-        // intentionally.
-        if persist_auth_enabled() {
-            match load_aead_key() {
-                Ok(key) => {
-                    let persist_dir = persist_dir();
-                    eprintln!(
-                        "[sandbox] persist: SANDBOX_PERSIST_AUTH=1; \
-                         restoring sealed records from {persist_dir:?}"
-                    );
-                    match restore::restore_at_startup(
-                        &persist_dir,
-                        &key,
-                        &backend,
-                        &registry,
-                        restore::DEFAULT_PROBE_TIMEOUT,
-                    )
-                    .await
-                    {
-                        Ok(s) => eprintln!(
-                            "[sandbox] persist: restore done seen={} \
-                             restored={} mismatched={} unreachable={} \
-                             corrupt={} unsupported={}",
-                            s.records_seen,
-                            s.restored,
-                            s.mismatched,
-                            s.unreachable,
-                            s.corrupt,
-                            s.unsupported,
-                        ),
-                        Err(e) => eprintln!(
-                            "[sandbox] persist: restore_at_startup IO failure \
-                             (non-fatal; sealed records left in place): {e}"
-                        ),
-                    }
-                }
-                Err(e) => {
-                    return Err(format!(
-                        "SANDBOX_PERSIST_AUTH=1 but AEAD key load failed: {e}. \
-                         Set SANDBOX_AEAD_KEY_PATH to a 0400-mode 32-byte file \
-                         (round-6 H8: env-var sourcing not supported)."
-                    ));
-                }
+        // Reuses the shared `persist` handle built above so we don't
+        // re-open the AEAD key file or re-read the env. `None` is the
+        // disabled/no-op shape — feature-flagged behind
+        // `SANDBOX_PERSIST_AUTH=1`; default OFF.
+        if let Some(p) = &persist {
+            let dir = p.persist_dir();
+            eprintln!(
+                "[sandbox] persist: SANDBOX_PERSIST_AUTH=1; \
+                 restoring sealed records from {dir:?}"
+            );
+            match restore::restore_at_startup(
+                &dir,
+                p.aead_key(),
+                &backend,
+                &registry,
+                restore::DEFAULT_PROBE_TIMEOUT,
+            )
+            .await
+            {
+                Ok(s) => eprintln!(
+                    "[sandbox] persist: restore done seen={} \
+                     restored={} mismatched={} unreachable={} \
+                     corrupt={} unsupported={}",
+                    s.records_seen,
+                    s.restored,
+                    s.mismatched,
+                    s.unreachable,
+                    s.corrupt,
+                    s.unsupported,
+                ),
+                Err(e) => eprintln!(
+                    "[sandbox] persist: restore_at_startup IO failure \
+                     (non-fatal; sealed records left in place): {e}"
+                ),
             }
         }
         let state = Arc::new(Self {
@@ -116,32 +113,6 @@ impl AppState {
         start_health_loop(state.clone());
         Ok(state)
     }
-}
-
-/// Feature-flag gate for the sealed-record restore path. Defaults
-/// off so existing deployments see no change.
-fn persist_auth_enabled() -> bool {
-    matches!(std::env::var("SANDBOX_PERSIST_AUTH").as_deref(), Ok("1"))
-}
-
-/// Load the controller-wide AEAD key from `$SANDBOX_AEAD_KEY_PATH`.
-/// Round-6 H8: file-mount only; env-var sourcing is intentionally
-/// not supported (procfs leaks).
-fn load_aead_key() -> Result<AeadKey, String> {
-    let path = std::env::var("SANDBOX_AEAD_KEY_PATH").map_err(|_| {
-        "SANDBOX_AEAD_KEY_PATH not set (file-mount only — see preview-URL § IX.a)"
-            .to_string()
-    })?;
-    AeadKey::from_path(path)
-}
-
-/// Per-controller persist root. `$SANDBOX_PERSIST_DIR` or default
-/// `/var/lib/zeroship/sandbox`. The sealed-records subdir is
-/// computed inside `restore`.
-fn persist_dir() -> PathBuf {
-    std::env::var("SANDBOX_PERSIST_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/var/lib/zeroship/sandbox"))
 }
 
 /// Periodic backend probe. `probe()` updates the `healthy` flag

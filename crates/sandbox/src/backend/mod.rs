@@ -165,11 +165,34 @@ pub enum Backend {
 }
 
 impl Backend {
+    /// Construct without sealed-record persistence. Convenience wrapper
+    /// around [`Backend::from_config_with_persist`] for callers (tests,
+    /// the legacy lifecycle examples) that don't exercise the
+    /// restart-restore path. New code in the controller goes through
+    /// the with-persist variant — see `crate::AppState::from_config`.
     pub fn from_config(cfg: &SandboxConfig) -> Result<Self, String> {
+        Self::from_config_with_persist(cfg, None)
+    }
+
+    /// Construct from config with an optional shared persistence
+    /// handle. The same handle is cloned (`Arc::clone`) into all three
+    /// backend variants so the file I/O state (sealed-records dir +
+    /// AEAD key) lives in one place. `None` disables seal-on-create
+    /// and delete-on-stop entirely (Phase 0 default off behaviour).
+    pub fn from_config_with_persist(
+        cfg: &SandboxConfig,
+        persist: Option<std::sync::Arc<crate::persist::Persistence>>,
+    ) -> Result<Self, String> {
         match cfg.backend.as_str() {
-            "docker" => Ok(Self::Docker(docker::DockerBackend::new(cfg.clone()))),
-            "k8s" => Ok(Self::K8s(k8s::K8sBackend::new(cfg.clone())?)),
-            "nomad-ch" => Ok(Self::NomadCh(nomad_ch::NomadCHBackend::new(cfg.clone())?)),
+            "docker" => Ok(Self::Docker(docker::DockerBackend::new(
+                cfg.clone(),
+                persist,
+            ))),
+            "k8s" => Ok(Self::K8s(k8s::K8sBackend::new(cfg.clone(), persist)?)),
+            "nomad-ch" => Ok(Self::NomadCh(nomad_ch::NomadCHBackend::new(
+                cfg.clone(),
+                persist,
+            )?)),
             other => Err(format!(
                 "unknown SANDBOX_BACKEND={other:?}; expected \"docker\", \"k8s\", or \"nomad-ch\""
             )),

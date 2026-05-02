@@ -629,6 +629,27 @@ impl Persistence {
     pub fn sealed_records_dir(&self) -> &Path {
         &self.sealed_records_dir
     }
+
+    /// Parent of [`Self::sealed_records_dir`] — i.e. the value the
+    /// operator gave via `SANDBOX_PERSIST_DIR`. Used by the boot
+    /// restore loop, which expects the parent and computes
+    /// `<parent>/sealed-records/` itself.
+    pub fn persist_dir(&self) -> PathBuf {
+        // sealed_records_dir = <persist_dir>/sealed-records by
+        // construction in `Persistence::new`. Strip the trailing
+        // component to recover the parent.
+        self.sealed_records_dir
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.sealed_records_dir.clone())
+    }
+
+    /// Borrow the AEAD key for the (synchronous) restore code path.
+    /// The key is held in an `Arc` so this is a refcount bump, not a
+    /// secret-bytes copy. Tests in this module also use it.
+    pub fn aead_key(&self) -> &AeadKey {
+        &self.key
+    }
 }
 
 #[cfg(test)]
