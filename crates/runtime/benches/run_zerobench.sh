@@ -215,11 +215,6 @@ bench_target "v8-compio (${WORKERS}w)"  $PORT_V8_N         1  2
 bench_target "node single"              $PORT_NODE         0  3
 bench_target "node cluster (${WORKERS}w)" $PORT_NODE_CLUSTER 0  4
 
-# The `nginxRaw` scenario in zeroship-bench.rhai hits nginx directly,
-# independent of which runtime slot is benchmarking. All four slots
-# produce equivalent readings; the summary picks slot 2 (16-worker
-# v8-compio) as the canonical baseline for the fetchEcho/httpGet ratio.
-
 # ---------------------------------------------------------------------------
 # Pass 2: parse each result file into per-(target,scenario) pairs.
 # Emits lines: "slot<TAB>scenario<TAB>rps<TAB>p50<TAB>p99"
@@ -258,12 +253,6 @@ for slot in 1 2 3 4; do
     parse_results "$slot" "$RESULTS_DIR/$slot.raw" >> "$ALL"
 done
 
-# Pull the raw nginx rps from slot 2 (16w v8-compio's reading) for the
-# fetch-overhead ratio. Any slot's reading would do — nginx is the
-# same target regardless of which runtime was benchmarking against
-# itself in the other scenarios.
-NGINX_RAW_RPS=$(awk -F'\t' '$1=="2" && $2=="nginxRaw" {print $3; exit}' "$ALL")
-
 # ---------------------------------------------------------------------------
 # Pass 3: scenario-first layout — each scenario shows all 4 targets.
 # ---------------------------------------------------------------------------
@@ -276,7 +265,6 @@ echo
 echo "================================================================="
 echo "  Per-scenario comparison (req/s · p50 · p99)"
 echo "================================================================="
-
 
 for sc in $SCENARIOS; do
     echo
@@ -291,19 +279,8 @@ for sc in $SCENARIOS; do
         rps=$(echo "$row" | awk -F'\t' '{print $3}')
         p50=$(echo "$row" | awk -F'\t' '{print $4}')
         p99=$(echo "$row" | awk -F'\t' '{print $5}')
-        # For fetch-shaped scenarios, append the raw-baseline ratio.
-        ratio_suffix=""
-        if [ -n "$NGINX_RAW_RPS" ] && [ "$NGINX_RAW_RPS" -gt 0 ]; then
-            case "$sc" in
-                fetchEcho|httpGet)
-                    pct=$(awk -v r="$rps" -v b="$NGINX_RAW_RPS" \
-                        'BEGIN{printf "%.0f", (r * 100.0) / b}')
-                    ratio_suffix="  (${pct}% of raw)"
-                    ;;
-            esac
-        fi
-        printf "  %-30s %'14d req/s  p50=%s  p99=%s%s\n" \
-            "$label" "$rps" "$p50" "$p99" "$ratio_suffix"
+        printf "  %-30s %'14d req/s  p50=%s  p99=%s\n" \
+            "$label" "$rps" "$p50" "$p99"
     done
 done
 
