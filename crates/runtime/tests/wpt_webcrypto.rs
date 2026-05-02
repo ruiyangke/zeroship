@@ -820,7 +820,7 @@ fn wpt_must_pass_v1_compliance() {
             file, t.pass, t.fail, t.skip, pct
         );
     }
-    let exec = totals.count_executed();
+    let _exec = totals.count_executed();
     let pct = totals.pass_rate() * 100.0;
     eprintln!(
         "  {:-<60} pass={:3} fail={:3} skip={:3} ({:5.1}%)",
