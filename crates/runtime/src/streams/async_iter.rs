@@ -56,7 +56,6 @@
 use std::cell::Cell;
 
 use crate::streams::algorithms;
-use crate::streams::readable;
 use crate::streams::readable_default_reader::{
     self as default_reader, ReadRequest, ReadRequestKind, ReadRequestNative,
 };
