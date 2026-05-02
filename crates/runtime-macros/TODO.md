@@ -129,7 +129,7 @@ so we can grep back through the rationale.
     `RefCell` would panic with `RefCell already mutably borrowed`
     from deep inside V8 on re-entry; classes without an inner cell
     silently corrupted memory.
-  - Lands: commit `<TBD-reentrancy>` (codegen + 4 smoke tests in
+  - Lands: commit `7ce7f260` (codegen + 4 smoke tests in
     `tests/v8_reentrancy_smoke.rs`).
 
 - **`[Clamp]` integer coercion** — `ClampU16` / `ClampU32` / `ClampI32`
