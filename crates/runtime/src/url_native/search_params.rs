@@ -154,6 +154,49 @@ impl URLSearchParams {
     }
 }
 
+/// Brand check: walk `obj`'s prototype chain looking for the cached
+/// `URLSearchParams.prototype`. Returns true iff the receiver is a real
+/// URLSearchParams instance.
+///
+/// M4/M5 — `URLSearchParams.prototype.entries.call(headers)` was
+/// type-unsafe pre-fix because the only check was "internal field 0 is
+/// an External", which any `#[v8_class]` instance with one internal
+/// field would pass. Reinterpreting a Headers Box as a URLSearchParams
+/// Box was UB. This brand check prevents that: the receiver must have
+/// our specific URLSearchParams.prototype somewhere on its prototype
+/// chain.
+///
+/// Note: this is a system-wide macro gap; the broader fix lives in the
+/// `#[v8_class]` callback codegen (see runtime-macros/TODO.md). For
+/// now we apply it locally to the URLSearchParams iterator factories
+/// and forEach.
+fn is_url_search_params(obj: v8::Local<v8::Object>, scope: &mut v8::PinScope) -> bool {
+    let Some(slot) = scope.get_slot::<crate::url_native::UrlNativeSlot>() else {
+        return false;
+    };
+    let expected_proto = v8::Local::new(scope, &slot.search_params_prototype);
+    // Walk the [[Prototype]] chain. Stop at null or after a depth cap.
+    let mut current: v8::Local<v8::Value> = obj.get_prototype(scope).unwrap_or_else(|| v8::null(scope).into());
+    for _ in 0..32 {
+        if current.is_null_or_undefined() {
+            return false;
+        }
+        // V8 compares by pointer identity for the same Local; our
+        // expected_proto is the prototype Function created at install
+        // time, so any genuine URLSearchParams instance has it on its
+        // chain.
+        if let Ok(co) = v8::Local::<v8::Object>::try_from(current) {
+            if co == expected_proto {
+                return true;
+            }
+            current = co.get_prototype(scope).unwrap_or_else(|| v8::null(scope).into());
+        } else {
+            return false;
+        }
+    }
+    false
+}
+
 /// Reach into a V8 object's internal field 0 and recover the raw
 /// pointer to the boxed `URL` if present. Returns `None` for non-URL
 /// receivers.
@@ -819,6 +862,14 @@ fn for_each_callback(
     _rv: v8::ReturnValue,
 ) {
     let this_obj = args.this();
+    // M5 brand check: `URLSearchParams.prototype.forEach.call(headers)`
+    // would otherwise reinterpret the Headers Box as URLSearchParams.
+    if !is_url_search_params(this_obj, scope) {
+        let msg = v8::String::new(scope, "Illegal invocation").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    }
     let sp: &mut URLSearchParams = match this_obj
         .get_internal_field(scope, 0)
         .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
@@ -893,19 +944,15 @@ fn iter_factory_callback(
     mut rv: v8::ReturnValue,
 ) {
     let this_obj = args.this();
-    // Verify `this` is a URLSearchParams instance.
-    let _check_ptr = match this_obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-    {
-        Some(e) => e.value() as *mut URLSearchParams,
-        None => {
-            let msg = v8::String::new(scope, "Illegal invocation").unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
-            return;
-        }
-    };
+    // M4 brand check: real URLSearchParams instance only — otherwise
+    // `URLSearchParams.prototype.entries.call(headers)` would
+    // reinterpret arbitrary memory as a URLSearchParams Box.
+    if !is_url_search_params(this_obj, scope) {
+        let msg = v8::String::new(scope, "Illegal invocation").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    }
 
     let kind = {
         let raw = args.data();

@@ -649,6 +649,68 @@ fn search_params_to_string_tag() {
 }
 
 // ===========================================================================
+// Brand check (M4/M5)
+// ===========================================================================
+
+/// M4: URLSearchParams.prototype.entries.call(non-SP) must throw, not
+/// reinterpret arbitrary memory.
+#[test]
+fn search_params_entries_call_with_wrong_this_throws() {
+    let s = run_in_v8(
+        r#"
+        let kind = "no-throw";
+        try {
+            // Plain object, no internal field. Pre-fix this took a
+            // shortcut that read internal field 0 and called .value()
+            // → segfault in some isolations.
+            URLSearchParams.prototype.entries.call({});
+        } catch (e) {
+            kind = e && e.constructor && e.constructor.name;
+        }
+        kind;
+        "#,
+        js_string,
+    );
+    assert_eq!(s, "TypeError");
+}
+
+/// M5: URLSearchParams.prototype.forEach.call(non-SP) must throw.
+#[test]
+fn search_params_for_each_call_with_wrong_this_throws() {
+    let s = run_in_v8(
+        r#"
+        let kind = "no-throw";
+        try {
+            URLSearchParams.prototype.forEach.call({}, () => {});
+        } catch (e) {
+            kind = e && e.constructor && e.constructor.name;
+        }
+        kind;
+        "#,
+        js_string,
+    );
+    assert_eq!(s, "TypeError");
+}
+
+/// Sanity: legitimate URLSearchParams.prototype.entries.call() still
+/// works on a real URLSearchParams.
+#[test]
+fn search_params_entries_call_with_correct_this_works() {
+    let s = run_in_v8(
+        r#"
+        const sp = new URLSearchParams("a=1&b=2");
+        const it = URLSearchParams.prototype.entries.call(sp);
+        const a = it.next();
+        JSON.stringify({ done: a.done, value: a.value });
+        "#,
+        js_string,
+    );
+    let v: serde_json::Value = serde_json::from_str(&s).expect("json");
+    assert_eq!(v["done"], false);
+    assert_eq!(v["value"], serde_json::json!(["a", "1"]));
+}
+
+// ===========================================================================
 // URLSearchParams iteration
 // ===========================================================================
 
