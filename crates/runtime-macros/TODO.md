@@ -22,91 +22,65 @@ so we can grep back through the rationale.
     stays valid across every poll. Detail in
     `gen_async_method_callback`'s doc comment.
 
+- **Brand check via cached prototype walk (WebIDL §3.7)** — every
+  method/getter/setter/async-method callback now walks `this`'s
+  prototype chain looking for the cached `Foo.prototype`, throwing
+  `TypeError("Illegal invocation")` synchronously before the unsafe
+  internal-field deref. Pre-fix the only check was "internal field 0
+  is an External", which let cross-class deception
+  (`Foo.prototype.method.call(bar)`) reinterpret a Bar Box as a Foo
+  Box and dereference — UB whenever the structs diverged in field
+  layout, and reachable from any user JS.
+  - Capture: `install` snapshots `Foo.prototype` as a Global<Object>
+    in a `__BrandSlot_<ClassTy>` isolate slot, after any
+    `#[v8_inherit]` / `#[v8_inherit_intrinsic]` chaining has settled.
+  - Check: per-class `__brand_check_<ClassTy>(scope, obj)` walks up
+    to 32 prototype links comparing handle identity against the
+    cached prototype. Subclasses (via `#[v8_inherit]`) match because
+    the parent prototype IS on their chain.
+  - Cost: 1–3 extra Local pointer comparisons per call (typical
+    chain depth), dwarfed by V8's ~100ns callback overhead.
+  - Lands: commit `c95915e1` (macro codegen + 7 smoke tests in
+    `tests/v8_brand_check_smoke.rs`).
+  - The local fix in `url_native/search_params.rs::is_url_search_params`
+    is now redundant for any class going through the macro; it's left
+    in place as the URL-specific manual brand check until that file
+    is migrated.
+
+- **`#[v8_constructor(must_new)]` — reject `Foo()` without `new`**
+  (WebIDL §3.7.1). Default-on for every macro-emitted constructor
+  (both user-supplied `#[v8_constructor]` and the Default-derived
+  fallback). Pre-fix, calling `Foo()` (no `new`) bound `this` to
+  globalThis and let the constructor write internal fields onto the
+  wrong shape. WPT failures across event_target, blob_native, and
+  abort all stem from this gap.
+  - The TypeError message interpolates the class name so callers
+    diagnose mistakes per-class
+    (`"Failed to construct 'Headers': Please use the 'new' operator…"`).
+  - Opt-out via `#[v8_constructor(callable_no_new)]` for future
+    legacy-callable WebIDL shapes (none today; the attribute is
+    parsed and threaded but no class uses it).
+  - Lands: commit `5b16b016` (macro prologue + 5 smoke tests in
+    `tests/v8_must_new_smoke.rs`).
+
+- **`[SameObject]` getter cache attribute** — `#[v8_getter(same_object)]`
+  wraps a getter with WebIDL [SameObject] caching: subsequent reads
+  on the same wrapper instance return the same JS Object via a V8
+  Private symbol stash, instead of minting a fresh Object on every
+  read.
+  - Cache key: per-class-and-getter Private symbol
+    `__zs_same_object_<ClassTy>_<getter>` on the wrapper instance.
+  - User method returns `v8::Global<v8::Object>` (minted on first
+    call); macro stashes via `set_private` and returns the cached
+    Local thereafter. Brand check still applies on the cached path.
+  - Existing hand-rolled SameObject implementations
+    (`Request.headers` in `fetch_request.rs:299`, `Response.headers`,
+    `URL.searchParams`) are NOT migrated in the same commit — that's
+    a follow-up. The smoke test proves the attribute works.
+  - Lands: commit `3cb0fe11` (codegen + 4 smoke tests in
+    `tests/v8_same_object_smoke.rs`).
+
 ## Open
-
-### Brand check: every callback should verify `this` per WebIDL §3.7
-
-**Source**: URL review, M4/M5 (2026-05-02). The local fix lives in
-`crates/runtime/src/url_native/search_params.rs::is_url_search_params`.
-
-#### Problem
-
-The macro currently emits the following pattern for every method/getter/
-setter callback (see `gen_method_callback` and `gen_setter_callback` in
-`v8_class.rs`):
-
-```rust
-let __ext = match __this.get_internal_field(scope, 0)
-    .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-{
-    Some(e) => e,
-    None => { /* throw "Illegal invocation" */ }
-};
-let __instance = unsafe { &mut *(__ext.value() as *mut #class_ty) };
-```
-
-The "verification" is "internal field 0 is an External" — but every
-`#[v8_class]` instance with `internal_field_count = 1` has an External
-there. So:
-
-```js
-URLSearchParams.prototype.entries.call(headers_instance)
-//   the Headers Box is reinterpreted as a URLSearchParams Box → UB
-```
-
-WebIDL §3.7 mandates a real brand check: the receiver must be a genuine
-instance of the class, verified by walking the prototype chain (or by
-some other class-identity mechanism).
-
-#### Local fix shipped (URLSearchParams)
-
-`crates/runtime/src/url_native/search_params.rs` adds:
-- `UrlNativeSlot::search_params_prototype: Global<Object>` — captured
-  at install time.
-- `is_url_search_params(obj, scope)` — walks the prototype chain
-  (max depth 32) looking for the cached `URLSearchParams.prototype`.
-- `iter_factory_callback` and `for_each_callback` invoke the check
-  before any Box deref.
-
-#### System-wide fix
-
-Every `#[v8_class]` callback should perform an equivalent check before
-the unsafe deref. Sketch:
-
-1. At `install` time (in the macro-emitted code) cache the class's
-   prototype in a per-class isolate slot (e.g.
-   `__BrandSlot_<ClassTy>(Global<Object>)`).
-2. In `gen_method_callback` / `gen_setter_callback` /
-   `gen_constructor_callback`'s prologue, walk `__this`'s prototype
-   chain for the cached prototype. If absent, throw "Illegal
-   invocation".
-3. The check is cheap (≤32 pointer comparisons; in practice 1–2 hops
-   for a direct instance); the cost is dwarfed by the V8 callback
-   overhead.
-
-#### Affected classes (current map of `#[v8_class]`)
-
-- Headers, Request, Response, FormData
-- AbortSignal, EventTarget, Event
-- Blob, File
-- ReadableStream, ReadableStreamDefaultReader, etc. (all stream classes)
-- URL, URLSearchParams, URLSearchParamsIterator (URLSearchParams +
-  URLSearchParamsIterator already brand-checked locally; URL still
-  relies on the unsafe pattern but has no cross-class lookalikes among
-  installed `#[v8_class]` types).
-
-#### Acceptance
-
-```js
-// Headers method called with non-Headers receiver throws
-try { Headers.prototype.append.call({}, "k", "v"); }
-catch (e) { /* expect TypeError "Illegal invocation" */ }
-
-// Response method called with Request receiver throws (cross-class)
-const req = new Request("https://x");
-try { Response.prototype.text.call(req); }
-catch (e) { /* expect TypeError */ }
-```
 
 ### Same-name getter+setter pairing
 
@@ -131,13 +105,6 @@ getters) require a code edit in `lib.rs::gen_scalar_set`. A trait-based
 dispatch (similar to `IntoResolveValue`) would let users opt in by
 implementing the trait, but the existing list covers every fetch /
 streams / WebSocket / WebCrypto consumer.
-
-### `#[v8_constructor(must_new)]` — reject `Foo()` without `new`
-
-WPT failures across event_target, blob_native, abort tests. V8's
-FunctionTemplate doesn't expose a flag, but `args.is_construct_call()`
-is queryable. Auto-emit the check at the top of the constructor
-callback.
 
 ### `[NewObject]` semantic
 
@@ -202,12 +169,14 @@ structurally-identical iterator boilerplate. A derive could emit all of
 it from a single `value_pairs(&self) -> &[(K, V)]` method. Net ~400 LOC
 removed across the 5 iterable classes.
 
-### `[SameObject]` cache attribute
+### Migrate hand-rolled `[SameObject]` getters to `#[v8_getter(same_object)]`
 
-`Request.headers`, `URL.searchParams`, several others must return the
-same object reference across accesses. Each impl caches via a V8 private
-symbol. A `#[v8_getter(same_object)]` attribute would emit the cache
-automatically.
+The macro now ships the attribute (commit `3cb0fe11`) but the existing
+hand-rolled SameObject implementations (`Request.headers` in
+`fetch_request.rs:299`, `Response.headers`, `URL.searchParams`) still
+hand-roll the V8 Private symbol stash. Migrate each to the attribute
+to delete the boilerplate and keep one cache implementation in the
+codebase.
 
 ### V8 fastcall annotation
 
