@@ -749,6 +749,47 @@ fn url_search_params_cycle_no_leak() {
     assert_eq!(s, "ok");
 }
 
+/// Regression for C3 (O(n²) iteration). Each iterator next() used to
+/// re-parse the entire query string; for N entries iterating cost
+/// O(n²). The last_seen_search cache short-circuits when the parent's
+/// search is unchanged.
+///
+/// We can't directly assert the parse count without instrumentation,
+/// but we can assert that for-of over a large bound SP completes in
+/// reasonable wall time — quadratic blow-up at N=2000 would push
+/// well past any sane budget.
+#[test]
+fn search_params_iter_is_linear_not_quadratic() {
+    let s = run_in_v8(
+        r#"
+        // Build a URL with 2000 query entries.
+        const parts = [];
+        for (let i = 0; i < 2000; i++) parts.push("k" + i + "=" + i);
+        const u = new URL("http://example.com/?" + parts.join("&"));
+        const sp = u.searchParams;
+
+        // for-of over the live SP. Pre-fix this was N * O(N) =
+        // O(N²) ≈ 4M parse calls. Post-fix should be O(N) total
+        // since the cached search hash matches every step.
+        const t0 = Date.now();
+        let count = 0;
+        for (const [k, v] of sp) count++;
+        const t1 = Date.now();
+
+        JSON.stringify({ count, ms: t1 - t0 });
+        "#,
+        js_string,
+    );
+    let v: serde_json::Value = serde_json::from_str(&s).expect("json");
+    assert_eq!(v["count"], 2000);
+    // Wide budget: 2000 entries with O(N) iteration takes <50ms in
+    // release mode; with O(N²) it would take seconds. The 1000ms
+    // bound rejects the quadratic regression while leaving slack
+    // for slow CI machines.
+    let ms = v["ms"].as_i64().unwrap();
+    assert!(ms < 1000, "iteration too slow ({ms} ms) — possible O(N²) regression");
+}
+
 /// Regression: a URLSearchParams whose parent URL has been GC'd should
 /// behave like a standalone instance — no panic, no UB. The SP retains
 /// its weak reference; on access, we attempt to upgrade. If the URL is
