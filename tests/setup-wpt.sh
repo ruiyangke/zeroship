@@ -26,6 +26,7 @@ git sparse-checkout set \
     "/encoding/resources/" \
     "/encoding/streams/" \
     "/compression/" \
+    "/FileAPI/" \
     "/resources/" \
     "/common/"
 
