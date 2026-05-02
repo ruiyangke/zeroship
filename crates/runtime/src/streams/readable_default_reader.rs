@@ -30,7 +30,7 @@ use std::collections::VecDeque;
 
 use crate::streams::algorithms;
 use crate::streams::readable::{is_readable_stream, StreamState};
-use crate::streams::slots::{self, CLOSED_PROMISE, READER, STORED_ERROR, STREAM};
+use crate::streams::slots::{self, CLOSED_PROMISE, CONTROLLER, READER, STORED_ERROR, STREAM};
 
 // ---------------------------------------------------------------------------
 // Reader state — Box<DefaultReaderState> in internal field 0
@@ -623,11 +623,13 @@ pub fn readable_stream_default_reader_release(
 /// `ReadableStreamReaderGenericRelease(reader)` — §3.9.2.
 ///
 /// 1. Assert reader.[[stream]] is not undefined.
-/// 2. If state == "readable": reject closedPromise with TypeError.
+/// 2. Run controller's [[ReleaseSteps]]() — for byte controllers this
+///    marks the front pendingPullInto's readerType="none".
+/// 3. If state == "readable": reject closedPromise with TypeError.
 ///    Else: replace closedPromise with a rejected one.
 ///    (Both: PromiseIsHandled = true).
-/// 3. Set stream.[[reader]] = undefined.
-/// 4. Set reader.[[stream]] = undefined.
+/// 4. Set stream.[[reader]] = undefined.
+/// 5. Set reader.[[stream]] = undefined.
 pub fn readable_stream_reader_generic_release(
     scope: &mut v8::PinScope,
     reader: v8::Local<v8::Object>,
@@ -636,6 +638,16 @@ pub fn readable_stream_reader_generic_release(
     let Ok(stream) = v8::Local::<v8::Object>::try_from(stream_v) else {
         return;
     };
+
+    // Run controller's [[ReleaseSteps]]. For byte controllers this
+    // marks the front pendingPullInto.readerType="none" so the
+    // descriptor — possibly auto-allocated — survives the release.
+    let controller_v = slots::read_slot(scope, stream, CONTROLLER);
+    if let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) {
+        if crate::streams::readable_byte_controller::is_byte_controller(scope, controller) {
+            crate::streams::readable_byte_controller::release_steps(scope, stream);
+        }
+    }
 
     let st = crate::streams::readable::with_rs_state(scope, stream, |s| s.state.get());
     let msg = v8::String::new(scope, "Reader was released and can no longer be used to monitor the stream's state").unwrap();

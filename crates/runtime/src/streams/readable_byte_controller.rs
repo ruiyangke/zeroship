@@ -1674,8 +1674,55 @@ fn set_up_readable_byte_stream_controller(
     slots::write_slot(scope, stream, CONTROLLER, controller_obj.into());
     slots::write_slot(scope, controller_obj, STREAM_OBJ_SLOT, stream.into());
 
-    // Run startAlgorithm.
-    let start_promise = start_algorithm.invoke_with_controller(scope, controller_obj);
+    // Run startAlgorithm. For JS-defined start functions, surface
+    // synchronous throws as construction-time errors (per spec — a
+    // throwing start() makes the constructor throw). The
+    // AlgorithmFn::invoke_with_controller helper wraps any throw in a
+    // rejected Promise, so we have to peek the start function ourselves
+    // to detect the synchronous-throw case.
+    let start_promise = if let AlgorithmFn::Js {
+        function,
+        this_obj,
+    } = &start_algorithm
+    {
+        let f = v8::Local::new(scope, function);
+        let this = v8::Local::new(scope, this_obj);
+        let outcome = {
+            v8::tc_scope!(let tc, scope);
+            let r = f.call(tc, this, &[controller_obj.into()]);
+            if tc.has_caught() {
+                let exc = tc.exception().map(|e| v8::Global::new(tc, e));
+                Err(exc)
+            } else {
+                Ok(r.map(|v| v8::Global::new(tc, v)))
+            }
+        };
+        match outcome {
+            Err(Some(exc_g)) => {
+                // Re-throw synchronously as the constructor's exception.
+                scope.throw_exception(v8::Local::new(scope, &exc_g));
+                return Err("start() threw".to_string());
+            }
+            Err(None) => {
+                return Err("start() failed without an exception value".to_string());
+            }
+            Ok(None) => algorithms::resolved_undefined_promise(scope),
+            Ok(Some(v_g)) => {
+                let v = v8::Local::new(scope, &v_g);
+                if let Ok(p) = v8::Local::<v8::Promise>::try_from(v) {
+                    p
+                } else {
+                    let resolver = v8::PromiseResolver::new(scope).unwrap();
+                    let p = resolver.get_promise(scope);
+                    resolver.resolve(scope, v);
+                    p
+                }
+            }
+        }
+    } else {
+        start_algorithm.invoke_with_controller(scope, controller_obj)
+    };
+
     let controller_g = v8::Global::new(scope, controller_obj);
     let controller_g2 = controller_g.clone();
     promise_resolve::upon_promise(

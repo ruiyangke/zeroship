@@ -282,10 +282,11 @@ pub fn is_detached_buffer(buffer: v8::Local<v8::ArrayBuffer>) -> bool {
 }
 
 /// `CanTransferArrayBuffer(O)` per spec §6.4.2. True iff `O` is a
-/// non-shared, non-detached ArrayBuffer. We don't model SharedArrayBuffer
-/// (out of scope), so the check reduces to non-detached.
+/// non-shared, non-detached, detachable ArrayBuffer. WebAssembly.Memory
+/// backing buffers are non-detachable; a TypeError must surface to the
+/// user when they pass one to read()/enqueue()/respondWithNewView().
 pub fn can_transfer_array_buffer(buffer: v8::Local<v8::ArrayBuffer>) -> bool {
-    !buffer.was_detached()
+    !buffer.was_detached() && buffer.is_detachable()
 }
 
 // ---------------------------------------------------------------------------

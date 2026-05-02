@@ -543,7 +543,33 @@ fn get_reader_method_callback(
             .get(scope, mode_key.into())
             .unwrap_or_else(|| v8::undefined(scope).into());
         if !mode_v.is_undefined() {
-            let s = mode_v.to_rust_string_lossy(scope);
+            // WebIDL enum coercion calls ToString on the value. Wrap in a
+            // tc-scope so a throwing custom toString()/valueOf() rethrows
+            // through the getReader exception path.
+            let outcome: Result<String, Option<v8::Global<v8::Value>>> = {
+                v8::tc_scope!(let tc, scope);
+                match mode_v.to_string(tc) {
+                    Some(s) => Ok(s.to_rust_string_lossy(tc)),
+                    None => {
+                        let exc = tc.exception().map(|e| v8::Global::new(tc, e));
+                        Err(exc)
+                    }
+                }
+            };
+            let s = match outcome {
+                Ok(s) => s,
+                Err(Some(exc_g)) => {
+                    scope.throw_exception(v8::Local::new(scope, &exc_g));
+                    return;
+                }
+                Err(None) => {
+                    let msg =
+                        v8::String::new(scope, "getReader: mode toString failed").unwrap();
+                    let exc = v8::Exception::type_error(scope, msg);
+                    scope.throw_exception(exc);
+                    return;
+                }
+            };
             if s == "byob" {
                 mode_byob = true;
             } else {

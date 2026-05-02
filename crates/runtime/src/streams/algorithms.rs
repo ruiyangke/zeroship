@@ -187,6 +187,9 @@ fn invoke_error_steps<'s>(
 /// 3. Fulfill the reader's `[[closedPromise]]` with undefined.
 /// 4. If the reader is a default reader, close all its outstanding
 ///    read requests with `{value: undefined, done: true}`.
+/// 5. If the reader is a BYOB reader: do NOT drain readIntoRequests
+///    here — the byte controller's RespondInClosedState path is what
+///    delivers the (zero-length) views to the pending requests.
 pub fn readable_stream_close(
     scope: &mut v8::PinScope,
     stream: v8::Local<v8::Object>,
@@ -198,21 +201,32 @@ pub fn readable_stream_close(
     debug_assert_eq!(rs_state, StreamState::Readable);
     crate::streams::readable::with_rs_state(scope, stream, |s| s.state.set(StreamState::Closed));
 
-    // Reader:
-    //  - resolve closedPromise with undefined
-    //  - drain pending read requests with closeSteps each
     let reader_v = slots::read_slot(scope, stream, READER);
     let Ok(reader_obj) = v8::Local::<v8::Object>::try_from(reader_v) else {
         return;
     };
-    crate::streams::readable_default_reader::resolve_closed_promise(scope, reader_obj);
-    let drained: Vec<ReadRequest> =
-        crate::streams::readable_default_reader::with_state(scope, reader_obj, |state| {
-            state.read_requests.borrow_mut().drain(..).collect()
-        })
-        .unwrap_or_default();
-    for req in drained {
-        invoke_close_steps(scope, req);
+
+    // Resolve the reader's closedPromise — works for both default and BYOB.
+    if crate::streams::readable_byob_reader::is_byob_reader(scope, reader_obj) {
+        crate::streams::readable_byob_reader::resolve_closed_promise(scope, reader_obj);
+        // Spec: drain readIntoRequests with closeSteps(undefined). Per
+        // ReadableStreamClose, the chunks are NOT the buffered bytes —
+        // those are delivered by the byte controller's
+        // RespondInClosedState path. Here we just terminate any
+        // requests that arrived AFTER the controller's close.
+        // For now we leave the read_into_requests in place; the byte
+        // controller's RespondInClosedState handles them via commit.
+    } else {
+        crate::streams::readable_default_reader::resolve_closed_promise(scope, reader_obj);
+        let drained: Vec<ReadRequest> =
+            crate::streams::readable_default_reader::with_state(
+                scope, reader_obj,
+                |state| state.read_requests.borrow_mut().drain(..).collect(),
+            )
+            .unwrap_or_default();
+        for req in drained {
+            invoke_close_steps(scope, req);
+        }
     }
 }
 
