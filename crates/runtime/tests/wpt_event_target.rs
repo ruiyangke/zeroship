@@ -218,7 +218,18 @@ struct TestResult {
     outcome: Outcome,
 }
 
-fn prepare_wpt_source(source: &str) -> String {
+fn prepare_wpt_source(label: &str, source: &str) -> String {
+    // CustomEvent is the one HTML-only test in this batch: upstream WPT
+    // ships `dom/events/CustomEvent.html` with three subtests, all of
+    // which assume a Document factory (`createElement` / `createEvent`).
+    // We extract the inline `<script>` block and prefix it with a tiny
+    // `document` shim so the legacy entry points map to native
+    // EventTarget / CustomEvent. The spec checks (event.type round-trip
+    // through dispatch, initCustomEvent argcount, initCustomEvent
+    // defaults) are unchanged.
+    if label == "CustomEvent" {
+        return prepare_custom_event_source(source);
+    }
     let mut out = String::with_capacity(source.len());
     for line in source.lines() {
         let t = line.trim_start();
@@ -228,6 +239,69 @@ fn prepare_wpt_source(source: &str) -> String {
         out.push_str(line);
         out.push('\n');
     }
+    out
+}
+
+/// Extract the inline `<script>...</script>` body from
+/// `dom/events/CustomEvent.html` and prefix with a minimal `document`
+/// shim. Tracks the topmost script block — there's only one in this
+/// file, but the parser is conservative so a future testharness-loader
+/// `<script src=...>` tag won't bleed into the captured body.
+fn prepare_custom_event_source(html: &str) -> String {
+    // Minimal `document` factory shim: createElement returns an
+    // EventTarget (good enough for `addEventListener` /
+    // `dispatchEvent`); createEvent("CustomEvent") returns a
+    // partially-initialised CustomEvent that the test's
+    // `initEvent` / `initCustomEvent` calls will fully populate.
+    const DOCUMENT_SHIM: &str = r#"
+globalThis.document = {
+    createElement(_tag) { return new EventTarget(); },
+    createEvent(iface) {
+        if (iface === "CustomEvent") {
+            // Per legacy DOM, createEvent returns an "uninitialised"
+            // event whose type is the empty string until initEvent /
+            // initCustomEvent runs.
+            return new CustomEvent("");
+        }
+        throw new Error("createEvent: unsupported interface " + iface);
+    },
+};
+"#;
+
+    // Carve out the <script> block. We stop at the first `<script>`
+    // without a `src=` attribute (the testharness loader scripts have
+    // src=...). The end is `</script>`.
+    let mut out = String::with_capacity(html.len() + DOCUMENT_SHIM.len());
+    out.push_str(DOCUMENT_SHIM);
+
+    let mut idx = 0;
+    let bytes = html.as_bytes();
+    while idx < bytes.len() {
+        // Find next `<script`
+        let Some(start_rel) = html[idx..].find("<script") else {
+            break;
+        };
+        let tag_start = idx + start_rel;
+        // Find the closing `>` of the open tag.
+        let Some(gt_rel) = html[tag_start..].find('>') else {
+            break;
+        };
+        let body_start = tag_start + gt_rel + 1;
+        let open_tag = &html[tag_start..body_start];
+        // Skip script tags with `src=` (the testharness loaders).
+        if open_tag.contains("src=") {
+            idx = body_start;
+            continue;
+        }
+        let Some(end_rel) = html[body_start..].find("</script>") else {
+            break;
+        };
+        let body_end = body_start + end_rel;
+        out.push_str(&html[body_start..body_end]);
+        out.push('\n');
+        idx = body_end + "</script>".len();
+    }
+
     out
 }
 
@@ -247,7 +321,7 @@ fn run_wpt(label: &str, source: &str) -> Vec<TestResult> {
         .run(scope)
         .unwrap();
 
-    let prepared = prepare_wpt_source(source);
+    let prepared = prepare_wpt_source(label, source);
     let src = v8::String::new(scope, &prepared).unwrap();
 
     let top_throw: Option<String> = {
@@ -339,6 +413,16 @@ const WPT_FILES: &[(&str, &str)] = &[
     (
         "Event-constructors",
         include_str!("wpt/dom/events/Event-constructors.any.js"),
+    ),
+    (
+        "CustomEvent",
+        // Upstream WPT only ships an HTML driver for CustomEvent
+        // (`dom/events/CustomEvent.html`) — there's no `.any.js` to
+        // include. We extract the inline script and synthesize the
+        // tiny `document` surface the tests rely on (createElement,
+        // createEvent) so the spec checks run against our native
+        // CustomEvent class. See `prepare_custom_event_source` below.
+        include_str!("wpt/dom/events/CustomEvent.html"),
     ),
 ];
 

@@ -115,14 +115,16 @@ impl Default for Event {
 // EventInit dictionary parser
 // ---------------------------------------------------------------------------
 
+/// Parsed `EventInit` dict. Sibling DOM classes (`CustomEvent`, future
+/// derived events) reuse this rather than re-implementing the parse.
 #[derive(Default, Debug)]
-struct EventInit {
-    bubbles: bool,
-    cancelable: bool,
-    composed: bool,
+pub(crate) struct EventInit {
+    pub bubbles: bool,
+    pub cancelable: bool,
+    pub composed: bool,
 }
 
-fn read_event_init(
+pub(crate) fn read_event_init(
     scope: &mut v8::PinScope,
     val: v8::Local<v8::Value>,
 ) -> Result<EventInit, OpError> {
@@ -161,7 +163,7 @@ fn read_bool_prop(
 // return a monotonic-ish number.
 // ---------------------------------------------------------------------------
 
-fn now_ms() -> f64 {
+pub(crate) fn now_ms() -> f64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

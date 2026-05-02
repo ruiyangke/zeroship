@@ -3,7 +3,7 @@
 //! Consolidates everything needed to boot an isolate:
 //! - `init_v8()` — one-time V8 platform init
 //! - `setup_globals()` — console, timers, fetch, URL, KV, crypto, env, streams
-//! - Polyfill constants (`FETCH_JS`, `CRYPTO_JS`, `STREAMS_JS`, `EVENTS_JS`)
+//! - Polyfill constants (`FETCH_JS`, `CRYPTO_JS`, `STREAMS_JS`)
 //! - Result types (`RequestResult`, `HttpResult`)
 
 use std::time::Duration;
@@ -104,10 +104,8 @@ pub const CRYPTO_JS: &str = include_str!("embed/crypto.js");
 /// the encoding classes are installed.
 pub const TEXT_STREAMS_JS: &str = include_str!("embed/text-streams.js");
 
-/// Embedded Event/CustomEvent/EventTarget polyfill.
-pub const EVENTS_JS: &str = include_str!("embed/events.js");
-
-/// Embedded WebSocket/WebSocketPair polyfill (depends on events.js for EventTarget).
+/// Embedded WebSocket/WebSocketPair polyfill (depends on the native
+/// EventTarget installed by `install_dom`).
 pub const WEBSOCKET_JS: &str = include_str!("embed/websocket.js");
 
 /// Node-shaped globals the runtime doesn't already install: a lazy
@@ -673,14 +671,14 @@ pub fn load_polyfills_and_modules(
 
     // Order matters here:
     //
-    //   1. Load fetch.js / events.js / formdata.js / blob.js polyfills
-    //      first. With the native gate ON they're shadowed below; with
-    //      the gate OFF (legacy build) they remain in charge.
+    //   1. Load fetch.js / formdata.js / blob.js polyfills first. With
+    //      the native gate ON they're shadowed below; with the gate OFF
+    //      (legacy build) they remain in charge.
     //   2. install_dom installs native DOM (EventTarget / Event /
-    //      AbortController / AbortSignal / FormData / Request / Response /
-    //      fetch). MUST run AFTER fetch.js / events.js / formdata.js so
-    //      their unconditional `globalThis.X = X` assignments don't
-    //      overwrite the native install.
+    //      CustomEvent / AbortController / AbortSignal / FormData /
+    //      Request / Response / fetch). MUST run AFTER fetch.js /
+    //      formdata.js so their unconditional `globalThis.X = X`
+    //      assignments don't overwrite the native install.
     //   3. Load WEBSOCKET_JS LAST so its `WebSocket.prototype =
     //      Object.create(EventTarget.prototype)` captures the NATIVE
     //      EventTarget prototype (not the polyfill's). Otherwise
@@ -730,23 +728,13 @@ pub fn load_polyfills_and_modules(
         script.run(scope).unwrap();
     }
 
-    // Native DOM (EventTarget / Event / AbortController / AbortSignal /
-    // FormData / Request / Response / fetch) gated on
-    // `ZEROSHIP_NATIVE_FETCH=1` (D-23 landing-1). MUST run AFTER fetch.js /
-    // events.js / formdata.js or their unconditional re-assignment would
-    // clobber the native install — and BEFORE websocket.js so
+    // Native DOM (EventTarget / Event / CustomEvent / AbortController /
+    // AbortSignal / FormData / Request / Response / fetch). MUST run
+    // AFTER fetch.js / formdata.js or their unconditional re-assignment
+    // would clobber the native install — and BEFORE websocket.js so
     // `WebSocket.prototype = Object.create(EventTarget.prototype)` picks
     // up the native EventTarget prototype.
     install_dom(scope);
-
-    // CustomEvent shim — extends native Event with a `.detail` field. Pure
-    // JS for now (~25 LOC); deletes when CustomEvent goes native. Loads
-    // AFTER install_dom so `globalThis.Event` is the native class.
-    {
-        let code = v8::String::new(scope, EVENTS_JS).unwrap();
-        let script = v8::Script::compile(scope, code, None).unwrap();
-        script.run(scope).unwrap();
-    }
 
     // WebSocket polyfill — loaded LAST so its prototype chain references
     // the native EventTarget (install_dom installed it just above).
@@ -1772,12 +1760,12 @@ pub fn install_headers(scope: &mut v8::PinScope) {
     crate::headers::install_global(scope, global);
 }
 
-/// Install native DOM primitives (EventTarget, Event, AbortController,
-/// AbortSignal, FormData) plus Request / Response / fetch on
-/// `globalThis`. Per D-23 step 2c the native cutover is now the
-/// default — no env-var gate.
+/// Install native DOM primitives (EventTarget, Event, CustomEvent,
+/// AbortController, AbortSignal, FormData) plus Request / Response /
+/// fetch on `globalThis`. Per D-23 step 2c the native cutover is now
+/// the default — no env-var gate.
 ///
-/// Called AFTER fetch.js / formdata.js / events.js run so the polyfills'
+/// Called AFTER fetch.js / formdata.js run so the polyfills'
 /// unconditional `globalThis.X = X` assignments don't overwrite our
 /// native install. The polyfills are deleted in D-23 step 3.
 ///
