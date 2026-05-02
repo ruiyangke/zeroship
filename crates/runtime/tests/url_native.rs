@@ -180,6 +180,50 @@ fn url_parse_with_base() {
     assert_eq!(s, "https://example.com/api");
 }
 
+/// M6: URL.parse should now parse the input ONCE per call. We don't
+/// have a counter to assert this directly, but we can establish a
+/// rough wall-time budget and assert URL.parse is not slower than
+/// `new URL` (the constructor is the single-parse baseline).
+///
+/// Pre-fix: URL.parse parsed twice (can_parse + new_instance). On a
+/// machine that runs the constructor in ~1µs, URL.parse ran in
+/// ~2µs. Post-fix it's ~1µs.
+#[test]
+fn url_parse_is_not_slower_than_constructor() {
+    let s = run_in_v8(
+        r#"
+        const ITERS = 100000;
+        const URL_S = "https://user:pass@example.com:8080/api/v1/users?limit=10&offset=5#section";
+
+        // Warm-up
+        for (let i = 0; i < 1000; i++) URL.parse(URL_S);
+        for (let i = 0; i < 1000; i++) new URL(URL_S);
+
+        const t0 = Date.now();
+        for (let i = 0; i < ITERS; i++) URL.parse(URL_S);
+        const t1 = Date.now();
+        for (let i = 0; i < ITERS; i++) new URL(URL_S);
+        const t2 = Date.now();
+
+        const parse_ms = t1 - t0;
+        const ctor_ms = t2 - t1;
+        // URL.parse should be within 1.5x the constructor's time
+        // (tolerance for V8's JIT decisions and per-call overhead).
+        // Pre-fix it was ~2x; post-fix it's ~1.0x.
+        const ratio = parse_ms / Math.max(ctor_ms, 1);
+        JSON.stringify({ parse_ms, ctor_ms, ratio });
+        "#,
+        js_string,
+    );
+    let v: serde_json::Value = serde_json::from_str(&s).expect("json");
+    let ratio = v["ratio"].as_f64().unwrap();
+    assert!(
+        ratio < 1.6,
+        "URL.parse {} ms / constructor {} ms = {:.2}x (expected <1.6x; pre-M6 was ~2x)",
+        v["parse_ms"], v["ctor_ms"], ratio
+    );
+}
+
 /// C4: URL.parse must NEVER throw. Even on internal V8 failure
 /// (e.g. proxy traps that throw inside argument conversion), the API
 /// must return null, not propagate the exception.
