@@ -24,6 +24,8 @@ hex = { workspace = true }
 sha2 = { workspace = true }
 mimalloc = { workspace = true }
 subtle = "2"
+# Phase-3 share-token HMAC. base64url + sha2 are already pulled in.
+hmac = { workspace = true }
 # Wraps `SandboxConfig.token` so debug output is redacted and the
 # heap allocation is zeroed on drop (defense vs core-dump /
 # /proc/<pid>/mem post-mortem reads).
