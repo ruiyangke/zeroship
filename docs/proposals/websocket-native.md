@@ -2064,21 +2064,39 @@ use std::sync::Arc;
 
 pub async fn run<S>(ws_id: u32, mut stream: WebSocketStream<S>)
 where S: compio::buf::IoBuf + Unpin + 'static {
+    // Per critic MAJOR #12: receive-side backpressure is required to
+    // avoid an unbounded events_queue. tungstenite's stream-level
+    // backpressure pauses on full kernel buffer; we add a per-WS event
+    // queue cap above that. When the queue exceeds RECV_BACKPRESSURE_CAP
+    // (default: 256 messages, configurable via WebSocketInit), the
+    // receive loop awaits drain before reading the next frame.
     while let Some(item) = stream.next().await {
+        // Backpressure-await before parsing the next frame so the
+        // tungstenite-level receive buffer can apply TCP backpressure.
+        wait_for_recv_drain(ws_id).await;
         let event = match item {
             Ok(Message::Text(s)) => WsEvent::Message(WsMessage::Text(s)),
             Ok(Message::Binary(b)) => WsEvent::Message(WsMessage::Binary(b)),
             Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => continue, // auto-handled
             Ok(Message::Close(frame)) => {
+                // Per RFC 6455 §7.4.1: a Close control frame received
+                // with NO status code is observed as the internal
+                // sentinel 1005 ("No Status Rcvd"). 1005 IS the
+                // internal-only API representation; the wire payload
+                // for a "no code" Close is empty, NOT 1005-encoded.
+                // The CloseEvent.code that JS sees is 1005 in this
+                // case — that's the JS-observable value per spec §3.2
+                // and the §XVII.6 CloseEvent.code policy.
                 let (code, reason) = match frame {
                     Some(f) => (u16::from(f.code), f.reason.to_string()),
-                    None => (1005, String::new()), // No status code received
+                    None => (1005, String::new()),
                 };
                 WsEvent::Close { code, reason, was_clean: true }
             }
             Err(e) => {
                 // Protocol error / UTF-8 failure / TCP error.
-                // Emit Error then Close{1006}.
+                // Per WHATWG §4: connection-failed → fire `error` then
+                // `close{1006, was_clean: false}`.
                 push_event_blocking(ws_id, WsEvent::Error { reason: e.to_string() });
                 push_event_blocking(ws_id, WsEvent::Close {
                     code: 1006, reason: String::new(), was_clean: false,
@@ -2087,10 +2105,18 @@ where S: compio::buf::IoBuf + Unpin + 'static {
             }
             Ok(Message::Frame(_)) => continue, // raw frame — not surfaced
         };
+        // Per critic MAJOR #20: avoid the v1 use-after-move bug —
+        // `event` is moved into push_event_blocking and then read by
+        // matches!. v2 inspects the kind FIRST, then moves.
+        let is_close = matches!(event, WsEvent::Close { .. });
         push_event_blocking(ws_id, event);
-        if matches!(event, WsEvent::Close { .. }) { return; }
+        if is_close { return; }
     }
     // Stream ended without a Close frame — abnormal closure.
+    // Per WHATWG §4: emit error first, then close{1006, was_clean: false}.
+    push_event_blocking(ws_id, WsEvent::Error {
+        reason: "connection terminated without Close frame".into(),
+    });
     push_event_blocking(ws_id, WsEvent::Close {
         code: 1006, reason: String::new(), was_clean: false,
     });
@@ -2226,13 +2252,63 @@ where S: ... {
                 }
                 decrement_buffered(ws_id, bytes_len);
             }
-            WsFrame::Close { code, reason } => {
-                let frame = compio_ws::CloseFrame {
-                    code: compio_ws::CloseCode::from(code),
-                    reason: reason.into(),
+            WsFrame::Text(_) | WsFrame::Binary(_) => {
+                // (Handled above; rust analyser checks exhaustiveness here.)
+                unreachable!()
+            }
+            WsFrame::Blob { handle, size: _ } => {
+                // Per spec §3.1 step 4 — Blob byte extraction is async.
+                // Decrement bufferedAmount by the cached size after
+                // extraction succeeds. (addresses critic MAJOR #6, #19)
+                let bytes = match crate::blob::extract_bytes_async(scope_handle, handle).await {
+                    Ok(b) => b,
+                    Err(_) => continue,
                 };
-                let _ = stream.send(Message::Close(Some(frame))).await;
-                let _ = stream.close(None).await;
+                let bytes_len = bytes.len() as u64;
+                if stream.send(Message::Binary(bytes)).await.is_err() {
+                    notify_send_failure(ws_id);
+                    return;
+                }
+                decrement_buffered(ws_id, bytes_len);
+            }
+            WsFrame::Close { code, reason } => {
+                // Per RFC 6455 §5.5.1
+                // (https://datatracker.ietf.org/doc/html/rfc6455#section-5.5.1):
+                // Close frames may be sent with NO payload (no status
+                // code, no reason) or with a 16-bit big-endian status
+                // code optionally followed by a reason. Code 1005 is
+                // reserved (RFC 6455 §7.4.1
+                // https://datatracker.ietf.org/doc/html/rfc6455#section-7.4.1)
+                // and MUST NOT appear in any sent Close frame.
+                //
+                // tungstenite's `Message::Close(None)` sends an empty
+                // payload; `Message::Close(Some(CloseFrame { code, reason }))`
+                // sends a code + reason payload. v2 maps Option<u16>
+                // directly: `None` → empty payload; `Some(c)` → code
+                // payload (with reason if non-empty).
+                // (addresses critic CRITICAL #6)
+                let payload = match code {
+                    None => None,
+                    Some(c) => Some(compio_ws::CloseFrame {
+                        code: compio_ws::CloseCode::from(c),
+                        reason: reason.into(),
+                    }),
+                };
+                let _ = stream.send(Message::Close(payload)).await;
+
+                // Per RFC 6455 §7.1.1
+                // (https://datatracker.ietf.org/doc/html/rfc6455#section-7.1.1):
+                // after sending Close, wait up to ~5 seconds for the
+                // peer's Close frame ACK; if it doesn't arrive, drop
+                // the TCP connection. tungstenite does NOT auto-timeout
+                // on close; v2 wraps `stream.close(None).await` in a
+                // 5s `compio::time::timeout` to avoid half-open hangs.
+                // (addresses critic MAJOR #14)
+                use std::time::Duration;
+                let _ = compio::time::timeout(
+                    Duration::from_secs(5),
+                    stream.close(None),
+                ).await;
                 return; // close pump exits
             }
         }
