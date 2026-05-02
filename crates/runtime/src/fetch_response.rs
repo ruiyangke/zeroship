@@ -801,9 +801,13 @@ fn static_error_callback(
     *state.status_text.borrow_mut() = String::new();
     *state.body.borrow_mut() = BodyImpl::null();
 
-    // Per spec: error response's headers list is empty + immutable.
-    // The Headers we minted above already exist — empty by default.
-    // (v1 has no immutable guard; deferred.)
+    // Per Fetch §6.2.4 step 4: "Set response's headers' guard to
+    // immutable." Seal the headers we minted above. WPT
+    // response-static-error.any.js verifies this.
+    if let Some(headers_g) = state.headers.borrow().clone() {
+        let headers_local = v8::Local::new(scope, headers_g);
+        crate::headers::seal_immutable(scope, headers_local);
+    }
     rv.set(obj.into());
 }
 
