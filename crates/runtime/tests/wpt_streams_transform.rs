@@ -567,13 +567,12 @@ fn wpt_streams_transform_compliance() {
     }
 
     // Known-deferred failures: TS-internal abort/cancel/close ordering
-    // edge cases. These need finishPromise sharing across simultaneous
-    // writer.abort + readable.cancel + controller.error invocations
-    // (spec §5.3 [[finishPromise]]). v1 keeps the finishPromise inline
-    // (per-call) which trips this small set; the slot-shared
-    // finishPromise refactor is a separate followup (NOT pipeTo —
-    // pipeTo passes through the TS halves' standard public APIs and
-    // doesn't expose the slot-sharing gap).
+    // edge cases. The shared `[[finishPromise]]` refactor (committed
+    // separately) closed one gap; the remaining failures involve
+    // additional spec-correctness work in WritableStream's abort
+    // pipeline (StartErroring/FinishErroring) and the
+    // controller.error/terminate signaling between TS halves —
+    // out of scope for the async-iteration dispatch.
     //
     // The fail count is asserted exactly so a regression in a previously-
     // passing test still trips the assertion.
@@ -587,12 +586,10 @@ fn wpt_streams_transform_compliance() {
         // get the user's Error (the strategy's error()), spec wants the
         // URIError thrown after.
         ("errors", "when strategy.size calls controller.error() then throws, the constructor should throw the first error"),
-        // The remaining 4 "bad things are happening!" tests — abort/cancel
-        // simultaneity that needs finishPromise sharing.
+        // controller.error/cancel timing during TS abort pipeline.
         ("errors", "abort should set the close reason for the writable when it happens before cancel during start, and cancel should reject"),
         ("errors", "controller.error() should close writable immediately after readable.cancel()"),
         ("errors", "controller.error() should do nothing after writable.abort() has completed"),
-        ("errors", "abort should set the close reason for the writable when it happens before cancel during underlying sink write, but cancel should still succeed"),
         ("errors", "a write() that was waiting for backpressure should reject if the writable is aborted"),
     ];
 
