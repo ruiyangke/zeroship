@@ -209,12 +209,45 @@ same object reference across accesses. Each impl caches via a V8 private
 symbol. A `#[v8_getter(same_object)]` attribute would emit the cache
 automatically.
 
-### V8 fastcall annotation
+### V8 fastcall annotation — `#[v8_getter(fastcall)]` / `#[v8_method(fastcall)]`
 
-Turbofan can inline FastApiCall callbacks, skipping the External read
-on hot paths. Candidates: Headers `.has()` / `.get()`, Streams
-`.desiredSize` getter, URL component getters. ~10–30ns/call on inlined
-paths.
+Turbofan can inline `CFunction` callbacks at hot call sites,
+skipping External lookup, scope setup, and the FunctionCallback
+entry/exit dance. ~10–30 ns saved per inlined call.
+
+**Macro shape:** an attribute that emits BOTH a slow-path
+`FunctionCallback` (current behavior, unchanged) AND a typed
+`CFunction` shim, then wires them via
+`function_template.set_c_function(...)`. User's Rust fn must be
+`extern "C"` and accept a final `*mut FastApiCallbackOptions` arg
+so it can opt into the slow-path fallback on edge cases (multibyte
+strings, exception paths, etc.).
+
+**Constraints (V8-imposed):**
+- No allocation (no new JS objects, no GC).
+- No exceptions in the fast path — set
+  `FastApiCallbackOptions::fallback = true` to bail to slow path.
+- Restricted arg/return types: `i32` / `u32` / `i64` / `u64` /
+  `f32` / `f64` / `bool`, plus `Local<Value>`, `FastOneByteString`
+  (ASCII string fast path), and `FastApiTypedArray<T>`. WebIDL
+  `DOMString` requires `FastOneByteString` + slow-path fallback
+  on multibyte.
+
+**Top ROI candidates (ordered by call frequency × per-call savings):**
+
+| Site | Signature | Why hot |
+|---|---|---|
+| `AbortSignal.aborted` getter | `(this) → bool` | Every cancel-aware op checks; ~20 ns × N/req |
+| `URL.protocol` / `.host` / `.pathname` getters | `(this) → FastOneByteString` | User handlers parsing URLs |
+| `Headers.has(name)` | `(this, FastOneByteString) → bool` | Routing / proxy handlers |
+| `crypto.getRandomValues(buf)` | `(this, FastApiTypedArray<u8>) → void` | Currently allocates + copies; fastcall writes in place |
+| `Streams.desiredSize` getter | `(this) → f64` | Backpressure-aware producers |
+| `URLSearchParams.size` getter | `(this) → u32` | Common in dispatch logic |
+
+**Phasing:** start with `AbortSignal.aborted` + `URL.pathname`
+(highest call frequency in real handlers), measure with the bench
+harness against the v8-1w slot (`--scenario=httpGet --duration=5s`).
+Expand if a single attribute saves ≥5%; pause if not.
 
 ### Better compile errors
 
