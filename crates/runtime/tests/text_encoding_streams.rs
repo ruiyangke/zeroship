@@ -475,12 +475,18 @@ fn decoder_stream_tail_replacement_on_close() {
                 }
             })();
             await Promise.all([writes, reads]);
-            // Codepoints: U+FFFD (\uFFFD) → JSON-encoded "\\ufffd".
-            return acc;
+            // The JS `acc` contains a single U+FFFD codepoint. We
+            // return the codepoints array so the harness's
+            // `JSON.stringify` doesn't depend on which characters JSON
+            // chooses to backslash-escape (it doesn't escape U+FFFD —
+            // it leaves it as a literal in the output, since U+FFFD is
+            // a valid printable codepoint, not a control char).
+            return [...acc].map(c => c.codePointAt(0));
         })()
         "#,
     );
-    assert_eq!(s, r#""\ufffd""#);
+    // 0xFFFD = 65533.
+    assert_eq!(s, "[65533]");
 }
 
 #[test]
