@@ -30,6 +30,7 @@ git sparse-checkout set \
     "/dom/abort/" \
     "/dom/events/" \
     "/xhr/formdata/" \
+    "/FileAPI/" \
     "/resources/" \
     "/common/"
 

@@ -3,7 +3,7 @@
 //! Consolidates everything needed to boot an isolate:
 //! - `init_v8()` — one-time V8 platform init
 //! - `setup_globals()` — console, timers, fetch, URL, KV, crypto, env, streams
-//! - Polyfill constants (`FETCH_JS`, `URL_JS`, `CRYPTO_JS`, `STREAMS_JS`, `EVENTS_JS`, `BLOB_JS`)
+//! - Polyfill constants (`FETCH_JS`, `URL_JS`, `CRYPTO_JS`, `STREAMS_JS`, `EVENTS_JS`)
 //! - Result types (`RequestResult`, `HttpResult`)
 
 use std::time::Duration;
@@ -109,9 +109,6 @@ pub const TEXT_STREAMS_JS: &str = include_str!("embed/text-streams.js");
 
 /// Embedded Event/CustomEvent/EventTarget polyfill.
 pub const EVENTS_JS: &str = include_str!("embed/events.js");
-
-/// Embedded Blob/File polyfill.
-pub const BLOB_JS: &str = include_str!("embed/blob.js");
 
 /// Embedded WebSocket/WebSocketPair polyfill (depends on events.js for EventTarget).
 pub const WEBSOCKET_JS: &str = include_str!("embed/websocket.js");
@@ -696,7 +693,7 @@ pub fn load_polyfills_and_modules(
     //      `addEventListener` then throws "Cannot read properties of
     //      undefined (reading 'message')" on the first server frame.
     //   4. Native Headers / Streams / TextEncoderStream wrappers.
-    for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, NODE_GLOBALS_JS, BLOB_JS] {
+    for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, NODE_GLOBALS_JS] {
         let code = v8::String::new(scope, polyfill).unwrap();
         let script = v8::Script::compile(scope, code, None).unwrap();
         script.run(scope).unwrap();
@@ -714,6 +711,12 @@ pub fn load_polyfills_and_modules(
     // BYOBRequest, and the async-iter prototype patches are all
     // native-backed.
     install_native_streams(scope);
+
+    // Native Blob + File per WHATWG File API. Replaces the
+    // `embed/blob.js` polyfill. Installed AFTER native streams
+    // because `Blob.stream()` constructs a `new ReadableStream(...)`
+    // through the user-visible class.
+    install_blob_native(scope);
 
     // TextEncoderStream / TextDecoderStream — pure-JS TransformStream
     // wrappers, ~50 LOC. Loaded AFTER native streams install so
@@ -1814,6 +1817,16 @@ pub fn install_dom(scope: &mut v8::PinScope) {
 pub fn install_native_streams(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
     crate::streams::install_native_streams(scope, global);
+}
+
+/// Install native `Blob` and `File` (per WHATWG File API) onto
+/// `globalThis`. Replaces the legacy `embed/blob.js` polyfill.
+///
+/// Must run AFTER `install_native_streams` because `Blob.stream()`
+/// constructs a user-visible `new ReadableStream(...)`.
+pub fn install_blob_native(scope: &mut v8::PinScope) {
+    let global = scope.get_current_context().global(scope);
+    crate::blob_native::install_globals(scope, global);
 }
 
 // ===========================================================================
