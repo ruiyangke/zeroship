@@ -161,10 +161,15 @@ pub fn build<'s>(
     req
 }
 
-/// `InvalidateBYOBRequest(request)` — clear `[[controller]]` and `[[view]]`.
+/// `InvalidateBYOBRequest(request)` — set `request.[[controller]]` and
+/// `request.[[view]]` to null per spec §3.7.5.4. Note: spec says "null",
+/// not "undefined" — `request.view` should return JS null after this,
+/// which a WPT test asserts (general.any.js: "view of initial byobRequest
+/// must be null after respond()").
 pub fn invalidate(scope: &mut v8::PinScope, request: v8::Local<v8::Object>) {
-    slots::delete_slot(scope, request, CONTROLLER_OBJ_SLOT);
-    slots::delete_slot(scope, request, VIEW);
+    let null_v: v8::Local<v8::Value> = v8::null(scope).into();
+    slots::write_slot(scope, request, CONTROLLER_OBJ_SLOT, null_v);
+    slots::write_slot(scope, request, VIEW, null_v);
 }
 
 // ---------------------------------------------------------------------------

@@ -1232,67 +1232,141 @@ pub fn readable_byte_stream_controller_respond_internal(
 }
 
 /// `ReadableByteStreamControllerRespondInClosedState(controller, descriptor)`
-/// — spec §3.11.x.
+/// — spec §3.11.x. The `descriptor` parameter is the FRONT of pendingPullIntos.
+///
+/// Spec steps:
+///   1. assert descriptor.bytesFilled mod descriptor.elementSize == 0
+///   2. If descriptor.readerType is "none":
+///        ShiftPendingPullInto(controller)
+///   3. stream = controller.[[stream]]
+///   4. If ReadableStreamHasBYOBReader(stream):
+///        While ReadableStreamGetNumReadIntoRequests(stream) > 0:
+///          d = ShiftPendingPullInto(controller)
+///          CommitPullIntoDescriptor(stream, d)
 pub fn readable_byte_stream_controller_respond_in_closed_state(
     scope: &mut v8::PinScope,
     controller: v8::Local<v8::Object>,
 ) {
-    let descriptor = with_controller_state(scope, controller, |s| {
-        s.pending_pull_intos.borrow_mut().pop_front()
+    // Inspect the FRONT descriptor without popping yet.
+    let front = with_controller_state(scope, controller, |s| {
+        s.pending_pull_intos
+            .borrow()
+            .front()
+            .map(|d| (d.bytes_filled, d.element_size, d.reader_type))
     })
     .flatten();
-    let Some(d) = descriptor else {
+    let Some((bytes_filled, element_size, reader_type)) = front else {
         return;
     };
-    debug_assert_eq!(d.bytes_filled % d.element_size, 0);
-    if d.reader_type == ReaderType::None {
-        // No-op — reader was released; descriptor has been moved
-        // (or we silently drop).
-        return;
+    debug_assert_eq!(bytes_filled % element_size, 0);
+
+    if reader_type == ReaderType::None {
+        // Step 2: pop and discard.
+        with_controller_state(scope, controller, |s| {
+            s.pending_pull_intos.borrow_mut().pop_front();
+        });
     }
+
+    // Step 4: drain BYOB read-into requests by shifting+committing.
     let stream = match stream_obj(scope, controller) {
         Some(s) => s,
         None => return,
     };
     if crate::streams::readable_byob_reader::readable_stream_has_byob_reader(scope, stream) {
-        // Drain all pending read-into requests for this descriptor
-        // sequence.
-        readable_byte_stream_controller_commit_pull_into_descriptor(scope, stream, &d);
+        loop {
+            let n = crate::streams::readable_byob_reader::readable_stream_get_num_read_into_requests(
+                scope, stream,
+            );
+            if n == 0 {
+                break;
+            }
+            let d = with_controller_state(scope, controller, |s| {
+                s.pending_pull_intos.borrow_mut().pop_front()
+            })
+            .flatten();
+            let Some(d) = d else { break };
+            readable_byte_stream_controller_commit_pull_into_descriptor(scope, stream, &d);
+        }
     }
 }
 
 /// `ReadableByteStreamControllerRespondInReadableState(controller,
 /// bytesWritten, descriptor)` — spec §3.11.x.
+///
+/// Spec steps (the `descriptor` parameter is the front of pendingPullIntos):
+///   1. assert descriptor.bytesFilled + bytesWritten <= descriptor.byteLength
+///   2. FillHeadPullIntoDescriptor(controller, bytesWritten, descriptor)
+///   3. If descriptor.readerType is "none":
+///        a. If descriptor.bytesFilled > 0: EnqueueDetachedPullIntoToQueue(controller, descriptor)
+///        b. Else: ShiftPendingPullInto(controller)
+///        c. ProcessPullIntoDescriptorsUsingQueue(controller)
+///        d. Return
+///   4. If descriptor.bytesFilled < descriptor.minimumFill → return (wait)
+///   5. ShiftPendingPullInto(controller)
+///   6. remainderSize = descriptor.bytesFilled mod descriptor.elementSize
+///   7. If remainderSize > 0:
+///        a. end = descriptor.byteOffset + descriptor.bytesFilled
+///        b. EnqueueClonedChunkToQueue(controller, descriptor.buffer, end-remainderSize, remainderSize)
+///        c. descriptor.bytesFilled -= remainderSize
+///   8. CommitPullIntoDescriptor(stream, descriptor)
+///   9. ProcessPullIntoDescriptorsUsingQueue(controller)
 pub fn readable_byte_stream_controller_respond_in_readable_state(
     scope: &mut v8::PinScope,
     controller: v8::Local<v8::Object>,
     bytes_written: u64,
 ) {
-    let descriptor_filled = with_controller_state(scope, controller, |s| {
-        s.pending_pull_intos
-            .borrow()
-            .front()
-            .map(|d| (d.bytes_filled, d.minimum_fill, d.element_size, d.byte_length))
+    // Snapshot front descriptor metadata.
+    let front = with_controller_state(scope, controller, |s| {
+        s.pending_pull_intos.borrow().front().map(|d| {
+            (
+                d.bytes_filled,
+                d.minimum_fill,
+                d.element_size,
+                d.byte_length,
+                d.reader_type,
+            )
+        })
     })
     .flatten();
-    let Some((mut bytes_filled, minimum_fill, element_size, byte_length)) = descriptor_filled
+    let Some((bytes_filled_pre, minimum_fill, element_size, byte_length, reader_type)) = front
     else {
         return;
     };
-    debug_assert!(bytes_filled + bytes_written <= byte_length);
-    bytes_filled += bytes_written;
+    debug_assert!(bytes_filled_pre + bytes_written <= byte_length);
+
+    // Step 2: FillHeadPullIntoDescriptor — bumps bytes_filled by bytesWritten
+    // (we already invalidated byob_request in respond_internal).
     with_controller_state(scope, controller, |s| {
         if let Some(d) = s.pending_pull_intos.borrow_mut().front_mut() {
-            d.bytes_filled = bytes_filled;
+            d.bytes_filled += bytes_written;
         }
     });
+    let bytes_filled = bytes_filled_pre + bytes_written;
 
-    if bytes_filled < minimum_fill {
-        return; // wait for more
+    // Step 3: readerType == "none".
+    if reader_type == ReaderType::None {
+        if bytes_filled > 0 {
+            // EnqueueDetachedPullIntoToQueue pops the front descriptor and
+            // moves its bytes into the queue.
+            readable_byte_stream_controller_enqueue_detached_pull_into_to_queue(scope, controller);
+        } else {
+            // Empty descriptor; just pop.
+            with_controller_state(scope, controller, |s| {
+                s.pending_pull_intos.borrow_mut().pop_front();
+            });
+        }
+        let _ = readable_byte_stream_controller_process_pull_into_descriptors_using_queue(
+            scope, controller,
+        );
+        return;
     }
 
-    // Take the descriptor; potentially partition the trailing bytes
-    // (if bytes_filled is greater than aligned multiple).
+    // Step 4: not enough yet, wait for more.
+    if bytes_filled < minimum_fill {
+        return;
+    }
+
+    // Step 5: pop the descriptor.
     let mut descriptor = match with_controller_state(scope, controller, |s| {
         s.pending_pull_intos.borrow_mut().pop_front()
     })
@@ -1302,38 +1376,33 @@ pub fn readable_byte_stream_controller_respond_in_readable_state(
         None => return,
     };
 
-    // If element_size > 1 and the filled count isn't a multiple, split
-    // the trailing bytes into the controller's queue. Spec
-    // ConvertPullIntoDescriptor handles this.
+    // Steps 6-7: split off the trailing bytes that don't align to elementSize.
     let aligned_filled = (descriptor.bytes_filled / element_size) * element_size;
     let remainder = descriptor.bytes_filled - aligned_filled;
     if remainder > 0 {
-        // Move the trailing remainder into the queue (so subsequent reads
-        // see it). The descriptor itself completes with `aligned_filled`
-        // bytes.
-        let dest_off = descriptor.byte_offset + aligned_filled;
-        // Clone the buffer global for the queue entry (the descriptor
-        // surrenders ownership when committed).
+        let end = descriptor.byte_offset + descriptor.bytes_filled;
+        // Spec says EnqueueClonedChunkToQueue (clones the bytes — the
+        // descriptor's buffer will be transferred to the consumer).
         let buf_g = descriptor.buffer.clone();
-        readable_byte_stream_controller_enqueue_chunk_to_queue(
+        let _ = readable_byte_stream_controller_enqueue_cloned_chunk_to_queue(
             scope,
             controller,
             &buf_g,
-            dest_off,
+            end - remainder,
             remainder,
         );
         descriptor.bytes_filled = aligned_filled;
     }
 
+    // Steps 8-9: commit + process subsequent descriptors.
     let stream = match stream_obj(scope, controller) {
         Some(s) => s,
         None => return,
     };
     readable_byte_stream_controller_commit_pull_into_descriptor(scope, stream, &descriptor);
-
-    // Process any subsequent descriptors against the queue.
-    let _ =
-        readable_byte_stream_controller_process_pull_into_descriptors_using_queue(scope, controller);
+    let _ = readable_byte_stream_controller_process_pull_into_descriptors_using_queue(
+        scope, controller,
+    );
 }
 
 /// `ReadableByteStreamControllerRespondWithNewView(controller, view)` —
