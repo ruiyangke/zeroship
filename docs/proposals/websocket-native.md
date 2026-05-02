@@ -2378,9 +2378,33 @@ pub struct Established<S> {
 pub async fn run_client_handshake(
     url: url::Url,
     protocols: Vec<String>,
+    init_origin: Option<String>,
+    config: tungstenite::protocol::WebSocketConfig,
 ) -> Result<Established<impl compio::buf::IoBuf>, HandshakeError> {
-    // SSRF check (matches fetch's path).
+    // SSRF: TWO-PHASE check, mirroring fetch's discipline at
+    // crates/runtime/src/fetch.rs:36-163.
+    //
+    // Phase 1 — URL string check: reject IP-literal hostnames in the
+    //   blocklist (loopback, link-local, private, multicast, …).
+    // Phase 2 — DNS resolution + revalidation: resolve the hostname,
+    //   then check EACH resolved IP against the blocklist. This
+    //   defends against DNS-rebinding attacks where `attacker.com`
+    //   resolves to `127.0.0.1` between phase 1 and the actual
+    //   `connect()`.
+    // Phase 3 — Bind the resolved IP into the connect() call so
+    //   the kernel can't re-resolve to a different address.
+    //
+    // v1 only ran phase 1 — TcpStream::connect((host, port)) did its
+    // own internal DNS resolution that bypassed the SSRF check. v2
+    // routes through `crate::fetch::resolve_and_check_ssrf` which
+    // returns the validated `SocketAddr` to use directly.
+    // (addresses critic CRITICAL #8)
     crate::fetch::validate_url(url.as_str())
+        .map_err(HandshakeError::Ssrf)?;
+    let host = url.host_str().ok_or(HandshakeError::MissingHost)?;
+    let port = url.port_or_known_default().unwrap_or(if url.scheme() == "wss" { 443 } else { 80 });
+    let addr = crate::fetch::resolve_and_check_ssrf(host, port)
+        .await
         .map_err(HandshakeError::Ssrf)?;
 
     // Step 5: generate a 16-byte random key, base64 it.
@@ -2390,9 +2414,8 @@ pub async fn run_client_handshake(
     let sec_websocket_key = base64::engine::general_purpose::STANDARD
         .encode(&key_bytes);
 
-    // Build the GET request via http::Request.
-    let host = url.host_str().ok_or(HandshakeError::MissingHost)?;
-    let port = url.port_or_known_default().unwrap_or(80);
+    // Build the GET request via http::Request. host/port were captured
+    // above for SSRF resolution.
     let path_and_query = if let Some(q) = url.query() {
         format!("{}?{}", url.path(), q)
     } else {
@@ -2433,22 +2456,40 @@ pub async fn run_client_handshake(
 
     let request = request.body(()).map_err(HandshakeError::Http)?;
 
-    // Open TCP/TLS, run handshake. compio_ws's `client_async` and
-    // `client_async_tls` return (WebSocketStream, http::Response).
+    // Open TCP/TLS, run handshake. We pass the SSRF-validated SocketAddr
+    // directly so the kernel cannot re-resolve to a different host
+    // between our DNS check and the connect call. compio_ws's
+    // `client_async` and `client_async_tls_with_connector` return
+    // (WebSocketStream, http::Response).
     let scheme = url.scheme();
     let (ws_stream, response) = match scheme {
         "ws" => {
-            let stream = compio::net::TcpStream::connect((host, port))
+            // Connect directly to the validated addr; SNI / Host header
+            // still uses the original hostname.
+            let stream = compio::net::TcpStream::connect(addr)
                 .await.map_err(HandshakeError::Connect)?;
-            // Optional: validate against SSRF resolver post-DNS.
-            compio_ws::client_async(request, stream)
+            compio_ws::client_async_with_config(request, stream, Some(config))
                 .await.map_err(HandshakeError::WebSocket)?
         }
         "wss" => {
-            let connector = build_tls_connector()?;
-            // compio-ws's TLS variant uses the workspace rustls config.
-            compio_ws::client_async_tls_with_connector(request, host, port, connector)
-                .await.map_err(HandshakeError::WebSocket)?
+            // Per critic missing-concept #4: the rustls config used by
+            // compio_ws::client_async_tls_with_connector controls:
+            //   - the root cert store (we use the system trust store
+            //     via rustls_native_certs, mirroring fetch);
+            //   - SNI (set to the URL hostname so HTTPS-style cert
+            //     validation works against virtual-hosted servers);
+            //   - ALPN (we advertise `http/1.1` only; HTTP/2 over
+            //     WebSocket per RFC 8441 is out of scope per Non-goals).
+            // build_tls_connector() in network.rs returns the connector
+            // wired to these settings.
+            let connector = build_tls_connector(host)?;
+            // Connect to the validated SocketAddr; the connector still
+            // performs SNI/cert validation against `host`.
+            let tcp = compio::net::TcpStream::connect(addr)
+                .await.map_err(HandshakeError::Connect)?;
+            compio_ws::client_async_tls_with_connector_and_config(
+                request, host, tcp, connector, Some(config),
+            ).await.map_err(HandshakeError::WebSocket)?
         }
         _ => unreachable!(),
     };
@@ -2465,15 +2506,68 @@ pub async fn run_client_handshake(
         return Err(HandshakeError::AcceptMismatch);
     }
 
-    // Extract negotiated subprotocol and extensions.
-    let protocol = response.headers().get("Sec-WebSocket-Protocol")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from)
-        .unwrap_or_default();
-    let extensions = response.headers().get("Sec-WebSocket-Extensions")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from)
-        .unwrap_or_default();
+    // Extract negotiated subprotocol — per RFC 6455 §4.1 step 6 of
+    // the response checks
+    // (https://datatracker.ietf.org/doc/html/rfc6455#section-4.1):
+    //   "If the response includes a |Sec-WebSocket-Protocol| header
+    //    field and this header field indicates the use of a subprotocol
+    //    that was not present in the client's handshake (the server
+    //    has indicated a subprotocol not requested by the client),
+    //    the client MUST Fail the WebSocket Connection."
+    //
+    // tungstenite enforces this when the client passes a subprotocols
+    // list to its handshake builder, but the contract is fragile (the
+    // header is set on `request.headers_mut()`; tungstenite parses it
+    // back). v2 adds a defence-in-depth check below — same paranoia
+    // as the Sec-WebSocket-Accept double-verify.
+    // (addresses critic CRITICAL #9)
+    let protocol = match response.headers().get("Sec-WebSocket-Protocol") {
+        None => String::new(),
+        Some(v) => {
+            let server_pick = v.to_str()
+                .map_err(|_| HandshakeError::InvalidSubprotocol)?
+                .trim()
+                .to_string();
+            // RFC 6455 §4.1 says the server MUST echo a SINGLE value
+            // (not a comma-separated list). If the server returns
+            // anything other than one we offered, fail.
+            if !protocols.iter().any(|p| p == &server_pick) {
+                return Err(HandshakeError::UnrequestedSubprotocol(server_pick));
+            }
+            server_pick
+        }
+    };
+
+    // Extract negotiated extensions — per RFC 6455 §9.1
+    // (https://datatracker.ietf.org/doc/html/rfc6455#section-9.1):
+    //   "if the Sec-WebSocket-Extensions header field includes any
+    //    extension that the client did not request, the client MUST
+    //    Fail the WebSocket Connection."
+    //
+    // v1 handshake advertises NO extensions (empty client offer set);
+    // ANY value in the response header is a violation and MUST fail.
+    // tungstenite has no validator that compares response extensions
+    // against the (empty) client offer set by default — the v1 prose
+    // claim "tungstenite enforces" was unverified. v2 enforces this
+    // explicitly here. The Cargo features (§XI.1) lock down deflate
+    // so RSV1=1 frames also fail at the framer level (defence in depth
+    // — addresses critic MAJOR #18).
+    // (addresses critic CRITICAL #7)
+    let extensions = match response.headers().get("Sec-WebSocket-Extensions") {
+        None => String::new(),
+        Some(v) => {
+            // Empty value (e.g. `Sec-WebSocket-Extensions:`) is permitted
+            // but vacuous; treat as no extensions. Anything non-empty is
+            // an unrequested extension and fails the connection.
+            let raw = v.to_str()
+                .map_err(|_| HandshakeError::InvalidExtensions)?
+                .trim();
+            if !raw.is_empty() {
+                return Err(HandshakeError::UnrequestedExtensions(raw.to_string()));
+            }
+            String::new()
+        }
+    };
 
     Ok(Established { ws_stream, protocol, extensions })
 }
@@ -2524,23 +2618,41 @@ and in the AGENTS.md surface for the cutover landing.
 ### VIII.3. Verifying the response
 
 Per RFC 6455 §4.1 client-side response checks (step 1-6 of the response
-"validation phase"):
+"validation phase"). v2 verifies all six explicitly — defence in depth
+even where tungstenite already checks. Treating tungstenite as a black
+box for security-relevant checks is unsound; the design verifies each
+check in our own code so the audit trail lives in the design, not in
+the dependency.
 
-1. Status MUST be 101. tungstenite enforces.
+1. Status MUST be 101. (tungstenite checks; v2 also returns
+   `HandshakeError::BadStatus(actual)` if a non-101 reaches our handler.)
 2. Upgrade header MUST be present and case-insensitively "websocket".
-   tungstenite enforces.
+   (tungstenite checks; v2 re-asserts.)
 3. Connection header MUST contain "Upgrade" (case-insensitive token list).
-   tungstenite enforces.
-4. Sec-WebSocket-Accept MUST be `base64(SHA1(key + GUID))`. We re-verify
-   in our own code (defence in depth) — see `compute_sec_websocket_accept`.
-5. If a Sec-WebSocket-Extensions header is present, it MUST list only
-   extensions we advertised. v1 advertises NONE (D-...); any extension
-   in the response fails the connection. Tungstenite enforces.
-6. If a Sec-WebSocket-Protocol header is present, it MUST be one of the
-   subprotocols we sent. Tungstenite enforces.
+   (tungstenite checks; v2 re-asserts.)
+4. Sec-WebSocket-Accept MUST equal `base64(SHA1(key + GUID))`. v2
+   re-computes via `compute_sec_websocket_accept` and byte-compares.
+5. **Sec-WebSocket-Extensions** — per RFC 6455 §9.1, any extension in
+   the response that the client did not request MUST fail the connection.
+   v2 advertises NONE (Non-goals). Any non-empty response value is a
+   hard fail (`HandshakeError::UnrequestedExtensions`). The v1 claim
+   "tungstenite enforces" was unverified and incorrect for the
+   default-features build of `tungstenite 0.28`. (addresses critic
+   CRITICAL #7)
+6. **Sec-WebSocket-Protocol** — per RFC 6455 §4.1 step 6, the server's
+   echoed subprotocol MUST be a member of the client's offered set.
+   v2 checks this explicitly against the `protocols: Vec<String>` we
+   sent; mismatch yields `HandshakeError::UnrequestedSubprotocol`.
+   (addresses critic CRITICAL #9)
 
-On any failure the connection is failed (per RFC 6455 §7.1.7) and we
-emit `Error` + `Close{1002, was_clean: false}` (1002 = "Protocol error").
+On any failure the connection is failed per RFC 6455 §7.1.7
+(https://datatracker.ietf.org/doc/html/rfc6455#section-7.1.7), emitting
+`Error` + `Close{1006, was_clean: false}` per WHATWG §4 (the spec calls
+for 1006 on connection-failed paths, NOT 1002 — 1002 is a peer-sent
+status code; the runtime that detects a protocol error during the
+handshake never receives a peer Close, so the JS-observable code is
+1006 "Abnormal Closure"). v1 used 1002 here; v2 corrects to 1006 to
+match the §4 dispatch contract.
 
 ## IX. The spec algorithms — Rust map
 
