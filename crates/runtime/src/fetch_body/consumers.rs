@@ -517,7 +517,7 @@ fn consumer_bytes<T: Body + BodyMarker + 'static>(
 }
 
 // ---------------------------------------------------------------------------
-// blob() — deferred in v1
+// blob() — returns a native Blob whose type comes from Content-Type
 // ---------------------------------------------------------------------------
 
 fn consumer_blob<T: Body + BodyMarker + 'static>(
@@ -526,75 +526,13 @@ fn consumer_blob<T: Body + BodyMarker + 'static>(
     mut rv: v8::ReturnValue,
 ) {
     // Per Fetch §3.5 step 1, every body consumer disturbs the body
-    // even if the rest of the algorithm fails. We run pre_flight here
-    // so that `request.bodyUsed` flips to true after the (rejecting)
-    // call — matching WPT request-disturbed.any.js expectations and
-    // workerd's behaviour. The pre_flight will reject early if the
-    // body is null OR already disturbed; if the body is intact it
-    // marks the wrapper used and we then synchronously reject with
-    // TypeError because we ship no native Blob class in v1.
+    // even if the rest of the algorithm fails. The pre_flight checks
+    // body-null/already-used and marks `bodyUsed` true on success.
     let this = args.this();
-    let pre = match pre_flight::<T>(scope, this) {
-        Ok(p) => p,
-        Err(promise_global) => {
-            let promise = v8::Local::new(scope, promise_global);
-            rv.set(promise.into());
-            return;
-        }
-    };
-    // Body is now marked used (or empty). Reject with TypeError —
-    // Blob class is the next chunk.
-    let _ = pre;
-    let resolver = v8::PromiseResolver::new(scope).unwrap();
-    let promise = resolver.get_promise(scope);
-    let m = v8::String::new(scope, "blob() not yet implemented (Blob class deferred)").unwrap();
-    let exc = v8::Exception::type_error(scope, m);
-    resolver.reject(scope, exc);
-    rv.set(promise.into());
-}
-
-// ---------------------------------------------------------------------------
-// formData() — urlencoded only in v1
-// ---------------------------------------------------------------------------
-
-fn consumer_form_data<T: Body + BodyMarker + 'static>(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let this = args.this();
-
-    // Look at Content-Type to choose the parser. v1 only handles
-    // urlencoded; multipart raises a TypeError.
-    let ct = T::content_type(scope, this).unwrap_or_default();
-    let lower = ct.to_ascii_lowercase();
-    if lower.contains("multipart/form-data") {
-        let resolver = v8::PromiseResolver::new(scope).unwrap();
-        let promise = resolver.get_promise(scope);
-        let m = v8::String::new(
-            scope,
-            "formData() multipart/form-data parsing is deferred",
-        )
-        .unwrap();
-        let exc = v8::Exception::type_error(scope, m);
-        resolver.reject(scope, exc);
-        rv.set(promise.into());
-        return;
-    }
-    if !lower.contains("application/x-www-form-urlencoded") {
-        let resolver = v8::PromiseResolver::new(scope).unwrap();
-        let promise = resolver.get_promise(scope);
-        let m = v8::String::new(
-            scope,
-            "formData() requires Content-Type to be application/x-www-form-urlencoded \
-             (multipart/form-data deferred)",
-        )
-        .unwrap();
-        let exc = v8::Exception::type_error(scope, m);
-        resolver.reject(scope, exc);
-        rv.set(promise.into());
-        return;
-    }
+    // Read the Content-Type before pre_flight (cheap and unaffected by
+    // bodyUsed marker) — this becomes the resulting Blob's `type` per
+    // Fetch §3.5 "blob" step 4.
+    let content_type = T::content_type(scope, this).unwrap_or_default();
 
     let pre = match pre_flight::<T>(scope, this) {
         Ok(p) => p,
@@ -606,11 +544,13 @@ fn consumer_form_data<T: Body + BodyMarker + 'static>(
     };
     match pre {
         PreFlight::EmptyBody => {
-            // Empty urlencoded → empty FormData.
+            // No bytes — resolve with an empty Blob whose type matches
+            // the (possibly empty) Content-Type.
             let resolver = v8::PromiseResolver::new(scope).unwrap();
             let promise = resolver.get_promise(scope);
-            let fd = build_empty_form_data(scope);
-            resolver.resolve(scope, fd.into());
+            let blob =
+                crate::blob_native::blob::create_blob(scope, Vec::new(), &content_type);
+            resolver.resolve(scope, blob);
             rv.set(promise.into());
         }
         PreFlight::HasBody { stream_global } => {
@@ -627,10 +567,478 @@ fn consumer_form_data<T: Body + BodyMarker + 'static>(
                     return;
                 }
             };
-            let outer = map_promise_with(scope, bytes_promise, MapKind::UrlencodedFormData);
+            let outer = map_promise_with(
+                scope,
+                bytes_promise,
+                MapKind::Blob {
+                    content_type,
+                },
+            );
             rv.set(outer.into());
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// formData() — urlencoded + multipart/form-data (RFC 7578)
+// ---------------------------------------------------------------------------
+
+fn consumer_form_data<T: Body + BodyMarker + 'static>(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let this = args.this();
+
+    // Look at Content-Type to choose the parser. We support two MIME
+    // types per Fetch §3.5 "formData":
+    //   * application/x-www-form-urlencoded → key=value pairs
+    //   * multipart/form-data; boundary=... → RFC 7578 parts
+    let ct = T::content_type(scope, this).unwrap_or_default();
+    let lower = ct.to_ascii_lowercase();
+    let is_multipart = lower.starts_with("multipart/form-data")
+        || lower.contains("; boundary=")
+        || (lower.contains("multipart/form-data") && extract_boundary(&ct).is_some());
+
+    let kind: MapKind = if is_multipart {
+        match extract_boundary(&ct) {
+            Some(b) => MapKind::MultipartFormData { boundary: b },
+            None => {
+                let resolver = v8::PromiseResolver::new(scope).unwrap();
+                let promise = resolver.get_promise(scope);
+                let m = v8::String::new(
+                    scope,
+                    "formData(): multipart/form-data Content-Type missing boundary parameter",
+                )
+                .unwrap();
+                let exc = v8::Exception::type_error(scope, m);
+                resolver.reject(scope, exc);
+                rv.set(promise.into());
+                return;
+            }
+        }
+    } else if lower.contains("application/x-www-form-urlencoded") {
+        MapKind::UrlencodedFormData
+    } else {
+        let resolver = v8::PromiseResolver::new(scope).unwrap();
+        let promise = resolver.get_promise(scope);
+        let m = v8::String::new(
+            scope,
+            "formData() requires Content-Type to be application/x-www-form-urlencoded \
+             or multipart/form-data",
+        )
+        .unwrap();
+        let exc = v8::Exception::type_error(scope, m);
+        resolver.reject(scope, exc);
+        rv.set(promise.into());
+        return;
+    };
+
+    let pre = match pre_flight::<T>(scope, this) {
+        Ok(p) => p,
+        Err(promise_global) => {
+            let promise = v8::Local::new(scope, promise_global);
+            rv.set(promise.into());
+            return;
+        }
+    };
+    match pre {
+        PreFlight::EmptyBody => {
+            // Empty body — for urlencoded resolve with an empty
+            // FormData; for multipart reject with TypeError because
+            // an empty buffer has no parts (matches WPT
+            // request-consume-empty.any.js "with correct multipart
+            // type (error case)").
+            let resolver = v8::PromiseResolver::new(scope).unwrap();
+            let promise = resolver.get_promise(scope);
+            match kind {
+                MapKind::UrlencodedFormData => {
+                    let fd = build_empty_form_data(scope);
+                    resolver.resolve(scope, fd.into());
+                }
+                MapKind::MultipartFormData { .. } => {
+                    let m = v8::String::new(
+                        scope,
+                        "formData() multipart parsing failed: body is empty",
+                    )
+                    .unwrap();
+                    let exc = v8::Exception::type_error(scope, m);
+                    resolver.reject(scope, exc);
+                }
+                _ => {
+                    // Unreachable: kind is constructed above as
+                    // urlencoded or multipart.
+                    let fd = build_empty_form_data(scope);
+                    resolver.resolve(scope, fd.into());
+                }
+            }
+            rv.set(promise.into());
+        }
+        PreFlight::HasBody { stream_global } => {
+            let stream_local = v8::Local::new(scope, stream_global);
+            let bytes_promise = match read_all_bytes(scope, stream_local) {
+                Ok(p) => p,
+                Err(e) => {
+                    let resolver = v8::PromiseResolver::new(scope).unwrap();
+                    let promise = resolver.get_promise(scope);
+                    let m = v8::String::new(scope, &e.message).unwrap();
+                    let exc = v8::Exception::type_error(scope, m);
+                    resolver.reject(scope, exc);
+                    rv.set(promise.into());
+                    return;
+                }
+            };
+            let outer = map_promise_with(scope, bytes_promise, kind);
+            rv.set(outer.into());
+        }
+    }
+}
+
+/// Parse the `boundary=` parameter out of a `multipart/form-data;
+/// boundary=...` Content-Type. Per RFC 2046 §5.1.1, a boundary is up
+/// to 70 chars from a restricted ASCII set, optionally double-quoted.
+fn extract_boundary(content_type: &str) -> Option<String> {
+    // Look for `boundary=` or `boundary =` (loose whitespace).
+    // Case-insensitive parameter name per RFC 7231 §3.1.1.1.
+    let bytes = content_type.as_bytes();
+    let lower = content_type.to_ascii_lowercase();
+    let key = "boundary";
+    let mut idx = 0;
+    while idx + key.len() <= lower.len() {
+        if lower[idx..idx + key.len()].eq(key) {
+            // Verify boundary at parameter position (after a `;` or
+            // start-of-string, followed by optional whitespace then
+            // `=`). Cheap approximation: look for `=` after this.
+            let mut j = idx + key.len();
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'=' {
+                j += 1;
+                while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                    j += 1;
+                }
+                let (start, quoted) = if j < bytes.len() && bytes[j] == b'"' {
+                    (j + 1, true)
+                } else {
+                    (j, false)
+                };
+                let mut end = start;
+                if quoted {
+                    while end < bytes.len() && bytes[end] != b'"' {
+                        end += 1;
+                    }
+                } else {
+                    while end < bytes.len() && bytes[end] != b';' && bytes[end] != b' ' && bytes[end] != b'\t' {
+                        end += 1;
+                    }
+                }
+                if end > start {
+                    return Some(content_type[start..end].to_string());
+                }
+                return None;
+            }
+        }
+        idx += 1;
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Multipart parser (RFC 7578)
+// ---------------------------------------------------------------------------
+
+/// One parsed multipart entry: either a text field or a file field.
+enum MultipartEntry {
+    Text {
+        name: String,
+        value: String,
+    },
+    File {
+        name: String,
+        filename: String,
+        content_type: String,
+        bytes: Vec<u8>,
+    },
+}
+
+/// Parse RFC 7578 multipart/form-data bytes. Returns one `MultipartEntry`
+/// per part. The expected wire format is:
+///
+/// ```text
+/// --<boundary>\r\n
+/// Content-Disposition: form-data; name="..."[; filename="..."]\r\n
+/// [Content-Type: ...\r\n]
+/// \r\n
+/// <bytes>\r\n
+/// --<boundary>\r\n
+/// ...
+/// --<boundary>--\r\n
+/// ```
+///
+/// We accept LF-only line endings as a robustness measure (mirrors
+/// curl, browsers). The parser is small and focused on the test
+/// fixtures the platform actually emits — it's not a full RFC 7578
+/// validator.
+fn parse_multipart(bytes: &[u8], boundary: &str) -> Result<Vec<MultipartEntry>, String> {
+    // The opening delimiter is `--<boundary>` at the start of a line.
+    // Between parts we have `\r\n--<boundary>\r\n` (or LF-only).
+    // The terminator is `--<boundary>--`.
+    let dash_boundary: Vec<u8> = {
+        let mut v = Vec::with_capacity(2 + boundary.len());
+        v.extend_from_slice(b"--");
+        v.extend_from_slice(boundary.as_bytes());
+        v
+    };
+
+    // Find the first boundary occurrence — anything before it is
+    // preamble per RFC 2046 §5.1.1 and is ignored.
+    let first = match find_subsequence(bytes, &dash_boundary) {
+        Some(i) => i,
+        None => return Err("multipart: opening boundary not found".to_string()),
+    };
+
+    let mut entries: Vec<MultipartEntry> = Vec::new();
+    let mut cursor = first + dash_boundary.len();
+    loop {
+        // After a boundary marker we expect either:
+        //   "--" (terminator) followed by optional CRLF/LF/EOF, or
+        //   CRLF/LF (next part header) or end-of-buffer.
+        if cursor + 2 <= bytes.len() && &bytes[cursor..cursor + 2] == b"--" {
+            // Terminator. We're done — anything after is epilogue.
+            break;
+        }
+        // Skip the optional whitespace after the boundary (per RFC 2046
+        // some implementations include LWSP-char) and the CRLF/LF.
+        cursor = skip_optional_whitespace(bytes, cursor);
+        cursor = skip_line_ending(bytes, cursor);
+
+        // Parse headers until empty line.
+        let mut name: Option<String> = None;
+        let mut filename: Option<String> = None;
+        let mut content_type: String = String::new();
+        loop {
+            let line_end = match find_line_ending(bytes, cursor) {
+                Some(p) => p,
+                None => return Err("multipart: unterminated headers".to_string()),
+            };
+            if line_end == cursor {
+                // Empty line — end of headers.
+                cursor = skip_line_ending(bytes, cursor);
+                break;
+            }
+            let header_line = std::str::from_utf8(&bytes[cursor..line_end])
+                .map_err(|_| "multipart: non-UTF-8 header line".to_string())?;
+            cursor = skip_line_ending(bytes, line_end);
+
+            // Split at the first colon.
+            let (h_name, h_value) = match header_line.find(':') {
+                Some(i) => (header_line[..i].trim(), header_line[i + 1..].trim()),
+                None => continue, // skip malformed header lines defensively
+            };
+            let h_name_l = h_name.to_ascii_lowercase();
+            if h_name_l == "content-disposition" {
+                // Parse `form-data; name="..."[; filename="..."]`.
+                let (n, fname) = parse_content_disposition(h_value);
+                name = n;
+                filename = fname;
+            } else if h_name_l == "content-type" {
+                content_type = h_value.to_string();
+            }
+        }
+
+        let name = match name {
+            Some(n) => n,
+            None => {
+                return Err(
+                    "multipart: part missing Content-Disposition name= parameter".to_string()
+                )
+            }
+        };
+
+        // Body of the part runs until the next CRLF/LF + "--<boundary>".
+        // We search for `\r\n--<boundary>` (preferred) and fall back to
+        // `\n--<boundary>` if the input uses LF-only line endings.
+        let next_boundary = find_part_boundary(bytes, cursor, &dash_boundary)
+            .ok_or_else(|| "multipart: terminating boundary not found".to_string())?;
+        let body = bytes[cursor..next_boundary.body_end].to_vec();
+        cursor = next_boundary.boundary_end;
+
+        // Build the entry. Spec §3.5 of HTML form encoding: a part
+        // with `filename=` is a File-valued entry; without filename
+        // it's a String-valued entry.
+        match filename {
+            Some(fname) => {
+                entries.push(MultipartEntry::File {
+                    name,
+                    filename: fname,
+                    content_type,
+                    bytes: body,
+                });
+            }
+            None => {
+                let value = match std::str::from_utf8(&body) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => String::from_utf8_lossy(&body).into_owned(),
+                };
+                entries.push(MultipartEntry::Text { name, value });
+            }
+        }
+    }
+
+    Ok(entries)
+}
+
+/// Result of locating the next `--<boundary>` after a part body.
+/// `body_end` points at the CR (or LF) before the boundary; `boundary_end`
+/// is the byte AFTER `--<boundary>` so the caller can resume parsing.
+struct PartBoundary {
+    body_end: usize,
+    boundary_end: usize,
+}
+
+fn find_part_boundary(bytes: &[u8], start: usize, dash_boundary: &[u8]) -> Option<PartBoundary> {
+    // Search for `\r\n` + dash_boundary first; fallback to `\n` + dash_boundary.
+    let mut i = start;
+    while i + dash_boundary.len() < bytes.len() {
+        // Try CRLF-prefixed boundary.
+        if bytes[i] == b'\r'
+            && i + 1 < bytes.len()
+            && bytes[i + 1] == b'\n'
+            && i + 2 + dash_boundary.len() <= bytes.len()
+            && &bytes[i + 2..i + 2 + dash_boundary.len()] == dash_boundary
+        {
+            return Some(PartBoundary {
+                body_end: i,
+                boundary_end: i + 2 + dash_boundary.len(),
+            });
+        }
+        // Fallback: LF-prefixed boundary (used by some non-conforming impls).
+        if bytes[i] == b'\n'
+            && i + 1 + dash_boundary.len() <= bytes.len()
+            && &bytes[i + 1..i + 1 + dash_boundary.len()] == dash_boundary
+        {
+            return Some(PartBoundary {
+                body_end: i,
+                boundary_end: i + 1 + dash_boundary.len(),
+            });
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Parse the value of a Content-Disposition header (without the name).
+/// Returns `(name, filename)`. We expect the disposition type to be
+/// `form-data` and ignore other parameters. Quoted-string values are
+/// supported; bare tokens are too.
+fn parse_content_disposition(value: &str) -> (Option<String>, Option<String>) {
+    // value e.g. `form-data; name="a"; filename="b.txt"`
+    let mut name = None;
+    let mut filename = None;
+    // Tokenize on `;` then split each on `=`.
+    for raw_param in value.split(';').skip(1) {
+        let param = raw_param.trim();
+        let (k, v) = match param.find('=') {
+            Some(i) => (param[..i].trim(), param[i + 1..].trim()),
+            None => continue,
+        };
+        let k_l = k.to_ascii_lowercase();
+        // Strip surrounding double quotes if present.
+        let v_unquoted: String = if v.starts_with('"') && v.ends_with('"') && v.len() >= 2 {
+            // Note: per RFC 7578 §4.2, the only escape is `\"`. We do
+            // NOT decode those for simplicity; the senders we test
+            // against don't emit them.
+            v[1..v.len() - 1].to_string()
+        } else {
+            v.to_string()
+        };
+        if k_l == "name" {
+            name = Some(percent_decode_form_field(&v_unquoted));
+        } else if k_l == "filename" {
+            filename = Some(percent_decode_form_field(&v_unquoted));
+        }
+    }
+    (name, filename)
+}
+
+/// Reverse the limited percent-encoding done in
+/// `extract::serialize_form_data_multipart` (which encodes `"`, `\r`,
+/// `\n` as `%22`, `%0D`, `%0A`). All other bytes pass through.
+fn percent_decode_form_field(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Find the index where the line ending starts (`\r` of `\r\n`, or
+/// `\n`). Returns None if no line ending is found.
+fn find_line_ending(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut i = start;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+            return Some(i);
+        }
+        if bytes[i] == b'\n' {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Skip past a line ending starting at `start`. Returns the index of
+/// the byte AFTER the ending. If `start` doesn't sit on a line ending
+/// it returns `start` unchanged.
+fn skip_line_ending(bytes: &[u8], start: usize) -> usize {
+    if start < bytes.len() && bytes[start] == b'\r' && start + 1 < bytes.len() && bytes[start + 1] == b'\n' {
+        return start + 2;
+    }
+    if start < bytes.len() && bytes[start] == b'\n' {
+        return start + 1;
+    }
+    start
+}
+
+/// Skip ASCII whitespace ` ` and `\t` starting at `start`.
+fn skip_optional_whitespace(bytes: &[u8], start: usize) -> usize {
+    let mut i = start;
+    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+        i += 1;
+    }
+    i
+}
+
+/// Naïve subsequence search: returns the index of the first occurrence
+/// of `needle` in `haystack`, or None.
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    if needle.len() > haystack.len() {
+        return None;
+    }
+    let last = haystack.len() - needle.len();
+    let mut i = 0;
+    while i <= last {
+        if &haystack[i..i + needle.len()] == needle {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
 }
 
 fn build_empty_form_data<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Object> {
@@ -645,13 +1053,26 @@ fn build_empty_form_data<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, 
 // Promise mapping — bytes promise -> outer typed promise
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum MapKind {
     Text,
     Json,
     ArrayBuffer,
     Bytes,
     UrlencodedFormData,
+    /// `body.blob()` — content_type is the value of the body's
+    /// Content-Type header, becomes the Blob's `type` (after Blob's
+    /// own normalize step lowercases printable-ASCII).
+    Blob {
+        content_type: String,
+    },
+    /// `body.formData()` parsed as multipart/form-data with the given
+    /// boundary. The parser walks the byte buffer and emits a FormData
+    /// with String entries for text parts and File entries for parts
+    /// with a `filename=` Content-Disposition param.
+    MultipartFormData {
+        boundary: String,
+    },
 }
 
 /// Chain a bytes promise into a typed outer promise. The bytes promise
@@ -695,7 +1116,7 @@ impl Clone for MapState {
     fn clone(&self) -> Self {
         MapState {
             outer_resolver: self.outer_resolver.clone(),
-            kind: self.kind,
+            kind: self.kind.clone(),
         }
     }
 }
@@ -809,7 +1230,7 @@ fn settle_outer(scope: &mut v8::PinScope, state: &MapState, bytes: Vec<u8>) {
     };
     let resolver = v8::Local::new(scope, resolver_global);
 
-    match state.kind {
+    match &state.kind {
         MapKind::Text => {
             let s = String::from_utf8_lossy(&bytes).into_owned();
             let v = v8::String::new(scope, &s).unwrap();
@@ -898,7 +1319,77 @@ fn settle_outer(scope: &mut v8::PinScope, state: &MapState, bytes: Vec<u8>) {
             }
             resolver.resolve(scope, fd.into());
         }
+        MapKind::Blob { content_type } => {
+            // Construct a native Blob whose `type` is the body's
+            // Content-Type. The Blob constructor's normalize step
+            // lowercases printable-ASCII content.
+            let blob = crate::blob_native::blob::create_blob(scope, bytes, content_type);
+            resolver.resolve(scope, blob);
+        }
+        MapKind::MultipartFormData { boundary } => {
+            // Parse RFC 7578 multipart/form-data into a FormData. Text
+            // parts (no filename) become String entries; parts with a
+            // filename become File entries.
+            match parse_multipart(&bytes, boundary) {
+                Ok(parsed) => {
+                    let fd = build_empty_form_data(scope);
+                    for part in parsed {
+                        match part {
+                            MultipartEntry::Text { name, value } => {
+                                form_data_append(scope, fd, &name, &value);
+                            }
+                            MultipartEntry::File {
+                                name,
+                                filename,
+                                content_type,
+                                bytes,
+                            } => {
+                                form_data_append_file(
+                                    scope,
+                                    fd,
+                                    &name,
+                                    bytes,
+                                    filename,
+                                    &content_type,
+                                );
+                            }
+                        }
+                    }
+                    resolver.resolve(scope, fd.into());
+                }
+                Err(msg) => {
+                    let m = v8::String::new(scope, &msg).unwrap();
+                    let exc = v8::Exception::type_error(scope, m);
+                    resolver.reject(scope, exc);
+                }
+            }
+        }
     }
+}
+
+/// Append a File-typed entry to a FormData via its prototype `append`.
+/// We construct the File via `blob_native::file::create_file` and
+/// call `append(name, file)` with two args (the spec says the filename
+/// is already part of the File).
+fn form_data_append_file(
+    scope: &mut v8::PinScope,
+    fd: v8::Local<v8::Object>,
+    name: &str,
+    bytes: Vec<u8>,
+    filename: String,
+    content_type: &str,
+) {
+    let file = crate::blob_native::file::create_file(scope, bytes, filename, content_type);
+    let key = v8::String::new(scope, "append").unwrap();
+    let Some(fn_v) = fd.get(scope, key.into()) else {
+        return;
+    };
+    let Ok(fn_l) = v8::Local::<v8::Function>::try_from(fn_v) else {
+        return;
+    };
+    let n = v8::String::new(scope, name).unwrap();
+    let args = [n.into(), file];
+    let _ = fn_l.call(scope, fd.into(), &args);
 }
 
 fn ab_to_vec(ab: v8::Local<v8::ArrayBuffer>) -> Vec<u8> {
