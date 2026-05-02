@@ -85,6 +85,7 @@ pub mod fetch_native;
 pub mod fetch_outcome;
 pub mod modules;
 pub mod crypto;
+pub mod crypto_native;
 pub mod streams;
 pub mod structured_clone;
 pub mod url_native;

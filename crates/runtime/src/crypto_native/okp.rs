@@ -1,0 +1,462 @@
+//! Ed25519 + X25519 (D-26). Per spec §§25, 26.
+
+#![allow(dead_code)]
+
+use super::crypto_key;
+use super::helpers::{read_buffer_source, vec_to_uint8array};
+use super::key_material::{
+    CryptoKeyState, KeyAlgorithm, KeyFormat, KeyMaterial, KeyType, KeyUsage,
+};
+use crate::state::OpError;
+
+// -----------------------------------------------------------------------------
+// Ed25519
+// -----------------------------------------------------------------------------
+
+pub fn sign_ed25519(key: &CryptoKeyState, data: &[u8]) -> Result<Vec<u8>, OpError> {
+    if key.key_type != KeyType::Private {
+        return Err(OpError::dom(
+            "InvalidAccessError",
+            "Ed25519 sign requires a private key",
+        ));
+    }
+    let pkcs8 = match &key.material {
+        KeyMaterial::Ed25519Private { pkcs8_der, .. } => pkcs8_der,
+        _ => {
+            return Err(OpError::dom(
+                "InvalidAccessError",
+                "Ed25519: missing private material",
+            ));
+        }
+    };
+    let key_pair = aws_lc_rs::signature::Ed25519KeyPair::from_pkcs8(pkcs8)
+        .map_err(|_| OpError::dom("DataError", "Ed25519 key load failed"))?;
+    let sig = key_pair.sign(data);
+    Ok(sig.as_ref().to_vec())
+}
+
+pub fn verify_ed25519(
+    key: &CryptoKeyState,
+    data: &[u8],
+    sig: &[u8],
+) -> Result<bool, OpError> {
+    if key.key_type != KeyType::Public {
+        return Err(OpError::dom(
+            "InvalidAccessError",
+            "Ed25519 verify requires a public key",
+        ));
+    }
+    let raw_x = match &key.material {
+        KeyMaterial::Ed25519Public { raw_x, .. } => raw_x.as_slice(),
+        KeyMaterial::Ed25519Private { raw_x, .. } => raw_x.as_slice(),
+        _ => {
+            return Err(OpError::dom(
+                "InvalidAccessError",
+                "Ed25519: missing public material",
+            ));
+        }
+    };
+    let unparsed =
+        aws_lc_rs::signature::UnparsedPublicKey::new(&aws_lc_rs::signature::ED25519, raw_x);
+    Ok(unparsed.verify(data, sig).is_ok())
+}
+
+pub fn generate_ed25519<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    extractable: bool,
+    usages: &[KeyUsage],
+) -> Result<v8::Local<'s, v8::Value>, OpError> {
+    validate_sig_usages(usages)?;
+    let rng = aws_lc_rs::rand::SystemRandom::new();
+    let pkcs8 = aws_lc_rs::signature::Ed25519KeyPair::generate_pkcs8(&rng)
+        .map_err(|_| OpError::dom("OperationError", "Ed25519 keygen failed"))?;
+    let pkcs8_bytes = pkcs8.as_ref().to_vec();
+    let key_pair = aws_lc_rs::signature::Ed25519KeyPair::from_pkcs8(&pkcs8_bytes)
+        .map_err(|_| OpError::dom("OperationError", "Ed25519 keygen reload"))?;
+    use aws_lc_rs::signature::KeyPair as _;
+    let pub_bytes: [u8; 32] = key_pair
+        .public_key()
+        .as_ref()
+        .try_into()
+        .map_err(|_| OpError::dom("OperationError", "Ed25519 public not 32 bytes"))?;
+    let raw_d: [u8; 32] = [0u8; 32]; // aws-lc-rs hides the seed; left empty (JWK export will fail).
+
+    let (priv_usages, pub_usages) = split_sig_usages(usages);
+    let priv_state = CryptoKeyState {
+        key_type: KeyType::Private,
+        extractable,
+        algorithm: KeyAlgorithm::Ed25519,
+        usages: priv_usages,
+        material: KeyMaterial::Ed25519Private {
+            pkcs8_der: pkcs8_bytes,
+            raw_d,
+            raw_x: pub_bytes,
+        },
+    };
+    let pub_state = CryptoKeyState {
+        key_type: KeyType::Public,
+        extractable: true,
+        algorithm: KeyAlgorithm::Ed25519,
+        usages: pub_usages,
+        material: KeyMaterial::Ed25519Public {
+            spki_der: Vec::new(),
+            raw_x: pub_bytes,
+        },
+    };
+    let priv_obj = crypto_key::build(scope, priv_state);
+    let pub_obj = crypto_key::build(scope, pub_state);
+    let pair = v8::Object::new(scope);
+    let priv_k = v8::String::new(scope, "privateKey").unwrap();
+    let pub_k = v8::String::new(scope, "publicKey").unwrap();
+    pair.set(scope, priv_k.into(), priv_obj.into());
+    pair.set(scope, pub_k.into(), pub_obj.into());
+    Ok(pair.into())
+}
+
+pub fn import_ed25519<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    format: KeyFormat,
+    key_data: v8::Local<v8::Value>,
+    extractable: bool,
+    usages: &[KeyUsage],
+) -> Result<v8::Local<'s, v8::Object>, OpError> {
+    validate_sig_usages(usages)?;
+    match format {
+        KeyFormat::Raw => {
+            let bytes = read_buffer_source(scope, key_data)?;
+            if bytes.len() != 32 {
+                return Err(OpError::dom(
+                    "DataError",
+                    "Ed25519 raw public key must be 32 bytes",
+                ));
+            }
+            let mut raw_x = [0u8; 32];
+            raw_x.copy_from_slice(&bytes);
+            let state = CryptoKeyState {
+                key_type: KeyType::Public,
+                extractable,
+                algorithm: KeyAlgorithm::Ed25519,
+                usages: usages.to_vec(),
+                material: KeyMaterial::Ed25519Public {
+                    spki_der: Vec::new(),
+                    raw_x,
+                },
+            };
+            Ok(crypto_key::build(scope, state))
+        }
+        KeyFormat::Jwk => {
+            super::jwk::import_ed25519(scope, key_data, extractable, usages)
+        }
+        _ => Err(OpError::dom(
+            "NotSupportedError",
+            "Ed25519 import: 'raw' or 'jwk' supported (spki/pkcs8 deferred)",
+        )),
+    }
+}
+
+pub fn export_ed25519<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    format: KeyFormat,
+    key: &CryptoKeyState,
+) -> Result<v8::Local<'s, v8::Value>, OpError> {
+    match format {
+        KeyFormat::Raw => {
+            if key.key_type == KeyType::Private {
+                return Err(OpError::dom(
+                    "NotSupportedError",
+                    "Ed25519 private keys cannot export 'raw'",
+                ));
+            }
+            let raw_x = match &key.material {
+                KeyMaterial::Ed25519Public { raw_x, .. } => raw_x,
+                KeyMaterial::Ed25519Private { raw_x, .. } => raw_x,
+                _ => return Err(OpError::dom("OperationError", "Not Ed25519")),
+            };
+            Ok(vec_to_uint8array(scope, raw_x))
+        }
+        KeyFormat::Jwk => super::jwk::export_ed25519(scope, key),
+        _ => Err(OpError::dom(
+            "NotSupportedError",
+            "Ed25519 export 'spki'/'pkcs8' deferred (use 'raw' or 'jwk')",
+        )),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// X25519
+// -----------------------------------------------------------------------------
+
+pub fn x25519_derive_bits<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    alg_obj: v8::Local<v8::Object>,
+    key: &CryptoKeyState,
+    length_bits: Option<u32>,
+) -> Result<Vec<u8>, OpError> {
+    if key.key_type != KeyType::Private {
+        return Err(OpError::dom(
+            "InvalidAccessError",
+            "X25519 deriveBits requires a private key",
+        ));
+    }
+    if !matches!(key.algorithm, KeyAlgorithm::X25519) {
+        return Err(OpError::dom(
+            "InvalidAccessError",
+            "X25519 deriveBits: key is not X25519",
+        ));
+    }
+    let public_v = alg_obj
+        .get(scope, v8::String::new(scope, "public").unwrap().into())
+        .ok_or_else(|| OpError::type_error("X25519: missing 'public'"))?;
+    let pub_state = crypto_key::require(scope, public_v)?;
+    if !matches!(pub_state.algorithm, KeyAlgorithm::X25519) {
+        return Err(OpError::dom(
+            "InvalidAccessError",
+            "X25519 'public' key must be X25519",
+        ));
+    }
+    let priv_d = match &key.material {
+        KeyMaterial::X25519Private { raw_d, .. } => raw_d,
+        _ => {
+            return Err(OpError::dom(
+                "InvalidAccessError",
+                "X25519: missing private material",
+            ));
+        }
+    };
+    let pub_x = match &pub_state.material {
+        KeyMaterial::X25519Public { raw_x, .. } => raw_x,
+        KeyMaterial::X25519Private { raw_x, .. } => raw_x,
+        _ => {
+            return Err(OpError::dom(
+                "InvalidAccessError",
+                "X25519: missing public material",
+            ));
+        }
+    };
+
+    // aws-lc-rs's `agreement::PrivateKey::from_x25519` would be ideal,
+    // but the API takes raw 32 bytes via a constructor. The
+    // simpler route is to pass via reconstructed PKCS8 — but for v1
+    // we use the lower-level Curve25519 directly via aws-lc-sys is
+    // more involved. As a compromise, build the PKCS8 wrapper.
+    let pkcs8 = build_x25519_pkcs8_from_seed(priv_d);
+    let priv_key = aws_lc_rs::agreement::PrivateKey::from_private_key_der(
+        &aws_lc_rs::agreement::X25519,
+        &pkcs8,
+    )
+    .map_err(|_| OpError::dom("OperationError", "X25519 private key load"))?;
+    let peer = aws_lc_rs::agreement::UnparsedPublicKey::new(
+        &aws_lc_rs::agreement::X25519,
+        pub_x.as_slice(),
+    );
+    let dom_err = OpError::dom("OperationError", "X25519 agreement");
+    let shared = aws_lc_rs::agreement::agree(&priv_key, &peer, dom_err, |z: &[u8]| {
+        Ok::<Vec<u8>, OpError>(z.to_vec())
+    })?;
+    truncate_bits(&shared, length_bits)
+}
+
+fn truncate_bits(data: &[u8], length_bits: Option<u32>) -> Result<Vec<u8>, OpError> {
+    super::ec::truncate_to_bits_pub(data, length_bits)
+}
+
+fn build_x25519_pkcs8_from_seed(seed: &[u8; 32]) -> Vec<u8> {
+    // Minimal X25519 PKCS#8 (RFC 8410). The structure is:
+    //   PrivateKeyInfo ::= SEQUENCE {
+    //     version INTEGER (0),
+    //     privateKeyAlgorithm AlgorithmIdentifier {{ X25519 }},
+    //     privateKey OCTET STRING (encoding of CurvePrivateKey)
+    //   }
+    //   CurvePrivateKey ::= OCTET STRING
+    //
+    // The full DER for a 32-byte X25519 seed is 48 bytes total.
+    // Hand-rolled — header bytes are constant.
+    let mut out = Vec::with_capacity(48);
+    out.extend_from_slice(&[0x30, 0x2e]); // SEQUENCE, length 0x2e
+    out.extend_from_slice(&[0x02, 0x01, 0x00]); // INTEGER 0
+    out.extend_from_slice(&[
+        0x30, 0x05, // SEQUENCE
+        0x06, 0x03, 0x2b, 0x65, 0x6e, // OID 1.3.101.110 (X25519)
+    ]);
+    out.extend_from_slice(&[0x04, 0x22]); // OCTET STRING, length 0x22
+    out.extend_from_slice(&[0x04, 0x20]); // inner OCTET STRING, length 0x20
+    out.extend_from_slice(seed);
+    out
+}
+
+pub fn generate_x25519<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    extractable: bool,
+    usages: &[KeyUsage],
+) -> Result<v8::Local<'s, v8::Value>, OpError> {
+    validate_kdf_usages(usages)?;
+    // Generate via aws-lc-rs agreement; we don't get the raw seed
+    // back. Use aws-lc-rs SystemRandom to fill our own seed and
+    // derive the public key via PKCS#8 round-trip.
+    let mut seed = [0u8; 32];
+    super::helpers::fill_random(&mut seed);
+    let pkcs8 = build_x25519_pkcs8_from_seed(&seed);
+    let priv_key = aws_lc_rs::agreement::PrivateKey::from_private_key_der(
+        &aws_lc_rs::agreement::X25519,
+        &pkcs8,
+    )
+    .map_err(|_| OpError::dom("OperationError", "X25519 key load"))?;
+    let public = priv_key
+        .compute_public_key()
+        .map_err(|_| OpError::dom("OperationError", "X25519 pub derive"))?;
+    let mut pub_arr = [0u8; 32];
+    let pb = public.as_ref();
+    if pb.len() != 32 {
+        return Err(OpError::dom(
+            "OperationError",
+            "X25519 public key not 32 bytes",
+        ));
+    }
+    pub_arr.copy_from_slice(pb);
+
+    let (priv_usages, pub_usages) = split_kdf_usages(usages);
+    let priv_state = CryptoKeyState {
+        key_type: KeyType::Private,
+        extractable,
+        algorithm: KeyAlgorithm::X25519,
+        usages: priv_usages,
+        material: KeyMaterial::X25519Private {
+            pkcs8_der: pkcs8,
+            raw_d: seed,
+            raw_x: pub_arr,
+        },
+    };
+    let pub_state = CryptoKeyState {
+        key_type: KeyType::Public,
+        extractable: true,
+        algorithm: KeyAlgorithm::X25519,
+        usages: pub_usages,
+        material: KeyMaterial::X25519Public {
+            spki_der: Vec::new(),
+            raw_x: pub_arr,
+        },
+    };
+    let priv_obj = crypto_key::build(scope, priv_state);
+    let pub_obj = crypto_key::build(scope, pub_state);
+    let pair = v8::Object::new(scope);
+    let priv_k = v8::String::new(scope, "privateKey").unwrap();
+    let pub_k = v8::String::new(scope, "publicKey").unwrap();
+    pair.set(scope, priv_k.into(), priv_obj.into());
+    pair.set(scope, pub_k.into(), pub_obj.into());
+    Ok(pair.into())
+}
+
+pub fn import_x25519<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    format: KeyFormat,
+    key_data: v8::Local<v8::Value>,
+    extractable: bool,
+    usages: &[KeyUsage],
+) -> Result<v8::Local<'s, v8::Object>, OpError> {
+    validate_kdf_usages(usages)?;
+    match format {
+        KeyFormat::Raw => {
+            let bytes = read_buffer_source(scope, key_data)?;
+            if bytes.len() != 32 {
+                return Err(OpError::dom(
+                    "DataError",
+                    "X25519 raw public key must be 32 bytes",
+                ));
+            }
+            let mut raw_x = [0u8; 32];
+            raw_x.copy_from_slice(&bytes);
+            let state = CryptoKeyState {
+                key_type: KeyType::Public,
+                extractable,
+                algorithm: KeyAlgorithm::X25519,
+                usages: usages.to_vec(),
+                material: KeyMaterial::X25519Public {
+                    spki_der: Vec::new(),
+                    raw_x,
+                },
+            };
+            Ok(crypto_key::build(scope, state))
+        }
+        KeyFormat::Jwk => super::jwk::import_x25519(scope, key_data, extractable, usages),
+        _ => Err(OpError::dom(
+            "NotSupportedError",
+            "X25519 import 'spki'/'pkcs8' deferred (use 'raw' or 'jwk')",
+        )),
+    }
+}
+
+pub fn export_x25519<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    format: KeyFormat,
+    key: &CryptoKeyState,
+) -> Result<v8::Local<'s, v8::Value>, OpError> {
+    match format {
+        KeyFormat::Raw => {
+            if key.key_type == KeyType::Private {
+                return Err(OpError::dom(
+                    "NotSupportedError",
+                    "X25519 private keys cannot export 'raw'",
+                ));
+            }
+            let raw_x = match &key.material {
+                KeyMaterial::X25519Public { raw_x, .. } => raw_x,
+                KeyMaterial::X25519Private { raw_x, .. } => raw_x,
+                _ => return Err(OpError::dom("OperationError", "Not X25519")),
+            };
+            Ok(vec_to_uint8array(scope, raw_x))
+        }
+        KeyFormat::Jwk => super::jwk::export_x25519(scope, key),
+        _ => Err(OpError::dom(
+            "NotSupportedError",
+            "X25519 export 'spki'/'pkcs8' deferred (use 'raw' or 'jwk')",
+        )),
+    }
+}
+
+fn validate_sig_usages(usages: &[KeyUsage]) -> Result<(), OpError> {
+    for u in usages {
+        if !matches!(u, KeyUsage::Sign | KeyUsage::Verify) {
+            return Err(OpError::dom(
+                "SyntaxError",
+                format!("Usage '{}' not allowed for Ed25519", u.as_str()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn split_sig_usages(usages: &[KeyUsage]) -> (Vec<KeyUsage>, Vec<KeyUsage>) {
+    let mut p = Vec::new();
+    let mut q = Vec::new();
+    for &u in usages {
+        match u {
+            KeyUsage::Sign => p.push(u),
+            KeyUsage::Verify => q.push(u),
+            _ => {}
+        }
+    }
+    (p, q)
+}
+
+fn validate_kdf_usages(usages: &[KeyUsage]) -> Result<(), OpError> {
+    for u in usages {
+        if !matches!(u, KeyUsage::DeriveBits | KeyUsage::DeriveKey) {
+            return Err(OpError::dom(
+                "SyntaxError",
+                format!("Usage '{}' not allowed for X25519", u.as_str()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn split_kdf_usages(usages: &[KeyUsage]) -> (Vec<KeyUsage>, Vec<KeyUsage>) {
+    let mut p = Vec::new();
+    for &u in usages {
+        match u {
+            KeyUsage::DeriveBits | KeyUsage::DeriveKey => p.push(u),
+            _ => {}
+        }
+    }
+    (p, Vec::new())
+}
