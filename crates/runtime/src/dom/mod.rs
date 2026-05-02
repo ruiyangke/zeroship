@@ -16,8 +16,8 @@
 //! ## Install order
 //!
 //! `install_globals` MUST install in this order: EventTarget, Event,
-//! AbortSignal (which inherits EventTarget at template install time),
-//! AbortController. The order matters because:
+//! CustomEvent, AbortSignal (which inherits EventTarget at template
+//! install time), AbortController. The order matters because:
 //!
 //!   - AbortSignal's `#[v8_inherit(EventTarget)]` resolves the
 //!     EventTarget template by calling `EventTarget::install`, which
@@ -26,27 +26,41 @@
 //!     template is the same object the global `EventTarget` is bound
 //!     to — required for `signal instanceof EventTarget` to walk the
 //!     same prototype chain.
-//!   - Event must exist before AbortSignal mints "abort" events.
+//!   - Event must exist before CustomEvent (which inherits via
+//!     `#[v8_inherit(Event)]`) AND before AbortSignal mints "abort"
+//!     events.
+//!   - CustomEvent's template must be installed AFTER Event for the
+//!     same `__InstallSlot_Event`-cache reason as AbortSignal:
+//!     `e instanceof Event` walks the same prototype chain only when
+//!     both the global `Event` binding and CustomEvent's `inherit`
+//!     call resolve the SAME FunctionTemplate.
 //!   - AbortController instantiates AbortSignal in its constructor,
 //!     so AbortSignal must be installed first.
 
 pub mod abort_controller;
 pub mod abort_signal;
+pub mod custom_event;
 pub mod event;
 pub mod event_target;
 pub mod form_data;
 
 /// Install the DOM primitives on `globalThis` in the spec-mandated
-/// order: EventTarget → Event → AbortSignal → AbortController →
-/// FormData. FormData is order-independent (no inheritance, no
-/// dependency on the others) but lives here because it's a
-/// DOM-adjacent primitive shared by fetch and XHR.
+/// order: EventTarget → Event → CustomEvent → AbortSignal →
+/// AbortController → FormData. FormData is order-independent (no
+/// inheritance, no dependency on the others) but lives here because
+/// it's a DOM-adjacent primitive shared by fetch and XHR.
 pub fn install_globals<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     global: v8::Local<v8::Object>,
 ) {
     event_target::install_global(scope, global);
     install_class(scope, global, "Event", event::Event::install);
+    install_class(
+        scope,
+        global,
+        "CustomEvent",
+        custom_event::CustomEvent::install,
+    );
     abort_signal::install_global(scope, global);
     abort_controller::install_global(scope, global);
     form_data::install_global(scope, global);
