@@ -47,10 +47,9 @@
 //!
 //! # Activation
 //!
-//! D-23 landing 2 (current): native is the default. Set the env var
-//! `ZEROSHIP_NATIVE_CRYPTO=0` to opt out and fall back to the JS
-//! polyfill (`embed/crypto.js`). Landing 3 will delete the polyfill
-//! once landing 2 has soaked.
+//! D-23 landing 3 (current): native is the only path. The legacy
+//! `embed/crypto.js` polyfill has been deleted; `is_enabled()` is
+//! retained as a sentinel function but always returns true.
 
 #![allow(unsafe_code)]
 
@@ -87,14 +86,9 @@ pub fn install_globals<'s>(
     crypto_class::install_global(scope, global);
 }
 
-/// Returns true when the runtime should use the native WebCrypto path
-/// instead of the JS polyfill. D-23 landing 2: default-on. The
-/// `ZEROSHIP_NATIVE_CRYPTO` env var still acts as an opt-out — set it
-/// to `0` (or empty) to revert to the polyfill. Landing 3 deletes the
-/// polyfill and removes the opt-out.
+/// Always true (D-23 landing 3 — native is the only path; the
+/// polyfill is gone). Retained as a callable so out-of-tree consumers
+/// that may still query the gate keep building.
 pub fn is_enabled() -> bool {
-    match std::env::var("ZEROSHIP_NATIVE_CRYPTO") {
-        Ok(v) => !v.is_empty() && v != "0",
-        Err(_) => true,
-    }
+    true
 }
