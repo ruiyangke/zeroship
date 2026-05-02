@@ -7,26 +7,20 @@
 //! iterators were not live (snapshot-on-construct, contradicting
 //! WebIDL §3.7.10.2).
 //!
-//! ## v1 simplifications (documented inline)
-//!
-//! - **No HTMLFormElement / HTMLElement.** Server-side runtime has no
-//!   DOM tree, so `new FormData(form)` with a non-undefined argument
-//!   throws TypeError. Matches workerd / Cloudflare Workers.
-//! - **No Blob / File support.** All values are USVString in v1; the
-//!   `(Blob, filename)` overloads of `append` / `set` will surface
-//!   when the native Blob class lands. v1 simply runs `ToString` on
-//!   whatever is passed — which is harmless for the USVString-only
-//!   `Request`/`Response` body integration coming next.
-//! - **No multipart serialization.** That's part of fetch's body
-//!   extraction (request-init step "byte sequence"), not FormData
-//!   itself.
-//!
 //! ## Storage
 //!
-//! `Vec<(String, String)>` insertion-ordered (NOT a multimap — the
-//! spec calls it "entry list" and order is observable: `forEach` /
+//! `Vec<(String, FormDataValue)>` insertion-ordered (NOT a multimap —
+//! the spec calls it "entry list" and order is observable: `forEach` /
 //! `for-of` iterate in insertion order, and `set(name)` replaces the
 //! first match in-place to preserve position).
+//!
+//! `FormDataValue` is one of:
+//!   - `String(String)` — USVString entry,
+//!   - `Blob(v8::Global<v8::Object>)` — a File (post-spec wrapping per
+//!     XHR §5: a Blob value is wrapped as a File at append time with
+//!     name="blob" or the supplied filename, lastModified=current
+//!     time. We always store a File-shaped object so `get` can return
+//!     `instanceof File === true` directly.).
 //!
 //! Compare with `Headers`: those use byte-case-insensitive name
 //! lookup. FormData names are case-SENSITIVE per spec — string
@@ -35,17 +29,7 @@
 //! ## Live iteration (WebIDL §3.7.10.2)
 //!
 //! `FormDataIterator::next()` re-reads the parent's entry list on every
-//! call. Mutations between yields ARE observable. The polyfill
-//! snapshotted at construction; this fixes that.
-//!
-//! ## Forward-compat (Blob + Body integration)
-//!
-//! When Blob lands: extend the storage to
-//! `Vec<(String, FormDataEntry)>` where
-//!   `enum FormDataEntry { Str(String), Blob(BlobEntry) }`.
-//! The IDL methods become overload-dispatched on the second arg
-//! (USVString vs Blob). Body integration: `extract_body` for
-//! FormData runs the multipart serializer over the entry list.
+//! call. Mutations between yields ARE observable.
 
 use crate::state::OpError;
 
@@ -58,33 +42,41 @@ use zeroship_runtime_macros::{
 // FormData struct
 // ---------------------------------------------------------------------------
 
+/// One entry value: either a USVString or a File-wrapped Blob.
+///
+/// Per WHATWG XHR §5 the spec calls this `FormDataEntryValue` and
+/// defines it as `(File | USVString)`. We store the File-side as a
+/// V8 Global so the JS object identity is preserved across get()
+/// calls (mandated by `setEntries(name, value)` step "set its
+/// value to entry's value", which the WPT iterates).
+pub enum FormDataValue {
+    /// USVString entry.
+    String(String),
+    /// File entry (always a File, not a Blob — per the spec's
+    /// "blob → File" wrapping at append time).
+    File(v8::Global<v8::Object>),
+}
+
 /// `FormData` instance state. Stored in the V8 wrapper's internal
 /// field 0 as `Box<FormData>`.
 ///
 /// `entries` is the WHATWG "entry list": `[(name, value), ...]` in
-/// insertion order. v1 stores values as `String` (USVString); v2 will
-/// promote to an enum once Blob exists.
+/// insertion order.
 #[derive(Default)]
 pub struct FormData {
-    pub entries: Vec<(String, String)>,
+    pub entries: Vec<(String, FormDataValue)>,
 }
 
 impl FormData {
     // -----------------------------------------------------------------
-    // Spec algorithms (private). Names match the spec verbs (D-20).
+    // Spec algorithms (private). Names match the spec verbs.
     // -----------------------------------------------------------------
 
-    /// "append an entry" (XHR §5): create an entry (name, value), add
-    /// it to the entry list. v1 has no Blob so no filename / content-
-    /// type bookkeeping.
-    fn list_append(&mut self, name: String, value: String) {
+    fn list_append(&mut self, name: String, value: FormDataValue) {
         self.entries.push((name, value));
     }
 
-    /// "set an entry" (XHR §5): if there are entries with name in the
-    /// list, set the first such entry's value to value and remove the
-    /// others. Otherwise append (name, value).
-    fn list_set(&mut self, name: String, value: String) {
+    fn list_set(&mut self, name: String, value: FormDataValue) {
         let mut found = false;
         let mut taken_value = Some(value);
         self.entries.retain_mut(|(n, v)| {
@@ -104,58 +96,30 @@ impl FormData {
         });
         if !found {
             self.entries
-                .push((name, taken_value.unwrap_or_default()));
+                .push((name, taken_value.unwrap_or(FormDataValue::String(String::new()))));
         }
     }
 
-    /// "delete entries" (XHR §5): remove every entry from the list
-    /// whose name equals name.
     fn list_delete(&mut self, name: &str) {
         self.entries.retain(|(n, _)| n != name);
     }
 
-    /// "first entry value" (XHR §5 dom-formdata-get): return the value
-    /// of the first entry whose name matches, or null.
-    fn list_get(&self, name: &str) -> Option<String> {
-        self.entries
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, v)| v.clone())
-    }
-
-    /// "all entry values" (XHR §5 dom-formdata-getall): return values
-    /// of all entries whose name matches, in list order.
-    fn list_get_all(&self, name: &str) -> Vec<String> {
-        self.entries
-            .iter()
-            .filter(|(n, _)| n == name)
-            .map(|(_, v)| v.clone())
-            .collect()
-    }
-
-    /// "contains an entry" (XHR §5 dom-formdata-has): true iff any
-    /// entry has name as its name.
     fn list_has(&self, name: &str) -> bool {
         self.entries.iter().any(|(n, _)| n == name)
     }
 }
 
 // ---------------------------------------------------------------------------
-// FormData IDL surface
+// FormData IDL surface (constructor + has + delete via macro;
+// append/set/get/getAll/forEach/iterators hand-rolled below)
 // ---------------------------------------------------------------------------
 
 #[v8_class]
 impl FormData {
     /// `new FormData(form?: HTMLFormElement, submitter?: HTMLElement)`
     ///
-    /// XHR §5: "If form is given, then ... construct the entry list."
     /// Server-side we have no HTMLFormElement, so any non-undefined
-    /// `form` argument throws TypeError. Matches workerd's behaviour.
-    /// `submitter` is ignored entirely (only meaningful when form is
-    /// present).
-    ///
-    /// `new FormData()` and `new FormData(undefined)` succeed with an
-    /// empty entry list.
+    /// `form` argument throws TypeError.
     #[v8_constructor]
     fn new(form: v8::Local<v8::Value>) -> Result<Self, OpError> {
         if !form.is_undefined() {
@@ -166,48 +130,11 @@ impl FormData {
         Ok(FormData::default())
     }
 
-    /// `append(name: USVString, value: USVString)` — XHR §5
-    /// `dom-formdata-append`.
-    ///
-    /// v1 IDL is USVString-only (D-1 for v1; Blob overloads come with
-    /// the native Blob class). Both arguments are USVString-coerced
-    /// via the macro's `String` extraction (which uses
-    /// `to_rust_string_lossy` — same effect as the USVString algorithm
-    /// because lone surrogates are replaced with U+FFFD).
-    #[v8_method]
-    fn append(&mut self, name: String, value: String) {
-        self.list_append(name, value);
-    }
-
-    /// `set(name: USVString, value: USVString)` — XHR §5
-    /// `dom-formdata-set`. Same shape as append, but list-set.
-    #[v8_method]
-    fn set(&mut self, name: String, value: String) {
-        self.list_set(name, value);
-    }
-
     /// `delete(name: USVString)` — XHR §5 `dom-formdata-delete`.
-    /// Renamed at JS surface because `delete` is a Rust keyword.
     #[v8_method]
     #[v8_name = "delete"]
     fn delete_(&mut self, name: String) {
         self.list_delete(&name);
-    }
-
-    /// `get(name: USVString) -> FormDataEntryValue?` — XHR §5
-    /// `dom-formdata-get`. Returns the first matching entry's value,
-    /// or null if no match.
-    #[v8_method]
-    fn get(&self, name: String) -> Option<String> {
-        self.list_get(&name)
-    }
-
-    /// `getAll(name: USVString) -> sequence<FormDataEntryValue>` —
-    /// XHR §5 `dom-formdata-getall`.
-    #[v8_method]
-    #[v8_name = "getAll"]
-    fn get_all(&self, name: String) -> Vec<String> {
-        self.list_get_all(&name)
     }
 
     /// `has(name: USVString) -> boolean` — XHR §5 `dom-formdata-has`.
@@ -215,31 +142,19 @@ impl FormData {
     fn has(&self, name: String) -> bool {
         self.list_has(&name)
     }
-
-    // forEach / keys() / values() / entries() / [@@iterator] aren't
-    // emitted by the macro. Same reason as `Headers`: they need direct
-    // access to `args.this()` to wire `parent: Global<Object>` into the
-    // FormDataIterator. They're installed in `install_global` below.
 }
 
 // ---------------------------------------------------------------------------
 // FormDataIterator (live, default iterator object per WebIDL §3.7.10)
 // ---------------------------------------------------------------------------
 
-/// WebIDL §3.7.10 iteration kinds for the default iterator object.
 #[derive(Debug, Clone, Copy)]
 pub enum IterKind {
-    /// "key" — `FormData.keys()` and the default iterator's key arg.
     Key,
-    /// "value" — `FormData.values()`.
     Value,
-    /// "key+value" — `FormData.entries()` and `[Symbol.iterator]`.
     KeyAndValue,
 }
 
-/// Iterator state. The `parent` Global keeps the source FormData
-/// wrapper alive (and thus its boxed `FormData` valid); `index`
-/// advances per `next()`; `kind` controls each yielded value's shape.
 pub struct FormDataIterator {
     parent: Option<v8::Global<v8::Object>>,
     index: usize,
@@ -260,9 +175,7 @@ impl Default for FormDataIterator {
 #[v8_to_string_tag = "FormData Iterator"]
 #[v8_inherit_intrinsic = "IteratorPrototype"]
 impl FormDataIterator {
-    /// `next() -> { value, done }` per ECMA-262 25.1.1 (Iterator
-    /// Protocol) and WebIDL §3.7.10.2 (default iterator object).
-    ///
+    /// `next() -> { value, done }` per ECMA-262 25.1.1.
     /// Re-reads the parent's `entries` on every call so mutations
     /// between yields ARE observable per spec.
     #[v8_method]
@@ -273,13 +186,6 @@ impl FormDataIterator {
         };
         let parent = v8::Local::new(scope, parent_global);
 
-        // Reach into the parent's internal field 0 and reborrow its
-        // boxed FormData. Safe because:
-        //   - V8 isolates are per-thread (AGENTS.md key invariant).
-        //   - The Global keeps the parent alive, which keeps
-        //     Box<FormData> alive (its finalizer runs only after GC).
-        //   - The borrow scope is the entirety of next() — we don't
-        //     yield across it.
         let ext = match parent
             .get_internal_field(scope, 0)
             .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
@@ -292,26 +198,41 @@ impl FormDataIterator {
         if self.index >= fd.entries.len() {
             return iter_result_done(scope);
         }
-        let (n, v) = fd.entries[self.index].clone();
+        let entry = &fd.entries[self.index];
+        let n = entry.0.clone();
+        let v_local = entry_value_to_v8(scope, &entry.1);
         self.index += 1;
 
         let value: v8::Local<v8::Value> = match self.kind {
             IterKind::KeyAndValue => {
                 let arr = v8::Array::new(scope, 2);
                 let n_str = v8::String::new(scope, &n).unwrap();
-                let v_str = v8::String::new(scope, &v).unwrap();
                 arr.set_index(scope, 0, n_str.into());
-                arr.set_index(scope, 1, v_str.into());
+                arr.set_index(scope, 1, v_local);
                 arr.into()
             }
             IterKind::Key => v8::String::new(scope, &n).unwrap().into(),
-            IterKind::Value => v8::String::new(scope, &v).unwrap().into(),
+            IterKind::Value => v_local,
         };
         iter_result(scope, value, false)
     }
 }
 
-/// Build `{ value, done }` per ECMA-262 7.4.7 "CreateIterResultObject".
+/// Convert a stored `FormDataValue` to a JS value in the given scope.
+/// Strings become V8 strings; File entries become Local handles.
+fn entry_value_to_v8<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    v: &FormDataValue,
+) -> v8::Local<'s, v8::Value> {
+    match v {
+        FormDataValue::String(s) => v8::String::new(scope, s).unwrap().into(),
+        FormDataValue::File(g) => {
+            let local = v8::Local::new(scope, g);
+            local.into()
+        }
+    }
+}
+
 fn iter_result<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     value: v8::Local<v8::Value>,
@@ -332,17 +253,13 @@ fn iter_result_done<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::V
 }
 
 // ---------------------------------------------------------------------------
-// Iterator factory: keys / values / entries / [Symbol.iterator] / forEach
+// install_global — wire append/set/get/getAll + iterator factories
 // ---------------------------------------------------------------------------
 
 fn iter_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::FunctionTemplate> {
     FormDataIterator::install(scope)
 }
 
-/// Install `FormData` on `globalThis`, wiring the macro-emitted
-/// constructor + IDL methods AND the parent-aware
-/// keys/values/entries/forEach/[Symbol.iterator] surface that the
-/// macro can't emit (they need access to `args.this()`).
 pub fn install_global<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     global: v8::Local<v8::Object>,
@@ -354,16 +271,16 @@ pub fn install_global<'s>(
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     let proto: v8::Local<v8::Object> = proto_v.try_into().unwrap();
 
+    install_method(scope, proto, "append", append_callback);
+    install_method(scope, proto, "set", set_callback);
+    install_method(scope, proto, "get", get_callback);
+    install_method(scope, proto, "getAll", get_all_callback);
+
     install_iter_factory(scope, proto, "keys", IterKind::Key);
     install_iter_factory(scope, proto, "values", IterKind::Value);
     install_iter_factory(scope, proto, "entries", IterKind::KeyAndValue);
 
-    {
-        let tmpl = v8::FunctionTemplate::new(scope, for_each_callback);
-        let func = tmpl.get_function(scope).unwrap();
-        let key = v8::String::new(scope, "forEach").unwrap();
-        proto.set(scope, key.into(), func.into());
-    }
+    install_method(scope, proto, "forEach", for_each_callback);
 
     // [Symbol.iterator] aliases entries per WebIDL §3.7.10.
     let sym_iter = v8::Symbol::get_iterator(scope);
@@ -375,28 +292,223 @@ pub fn install_global<'s>(
     global.set(scope, key.into(), class_fn.into());
 }
 
-/// Hand-rolled `FormData.prototype.forEach(callback, thisArg?)` per
-/// WebIDL §3.7.10.3. Re-reads the live entry list between callback
-/// invocations (mutation during forEach IS observable per spec).
+fn install_method<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    proto: v8::Local<v8::Object>,
+    name: &str,
+    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+) {
+    let tmpl = v8::FunctionTemplate::new(scope, cb);
+    let func = tmpl.get_function(scope).unwrap();
+    let key = v8::String::new(scope, name).unwrap();
+    proto.set(scope, key.into(), func.into());
+}
+
+// ---------------------------------------------------------------------------
+// append / set — handle both USVString and Blob/File overloads
+// ---------------------------------------------------------------------------
+
+fn append_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let this_obj = args.this();
+    let fd = match fd_from_this(scope, this_obj) {
+        Some(p) => p,
+        None => {
+            throw_illegal_invocation(scope);
+            return;
+        }
+    };
+    let name = args.get(0).to_rust_string_lossy(scope);
+    let value_v = args.get(1);
+    let filename_v = args.get(2);
+    let entry = match build_entry(scope, value_v, filename_v) {
+        Ok(e) => e,
+        Err(msg) => {
+            let m = v8::String::new(scope, &msg).unwrap();
+            let exc = v8::Exception::type_error(scope, m);
+            scope.throw_exception(exc);
+            return;
+        }
+    };
+    fd.list_append(name, entry);
+}
+
+fn set_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let this_obj = args.this();
+    let fd = match fd_from_this(scope, this_obj) {
+        Some(p) => p,
+        None => {
+            throw_illegal_invocation(scope);
+            return;
+        }
+    };
+    let name = args.get(0).to_rust_string_lossy(scope);
+    let value_v = args.get(1);
+    let filename_v = args.get(2);
+    let entry = match build_entry(scope, value_v, filename_v) {
+        Ok(e) => e,
+        Err(msg) => {
+            let m = v8::String::new(scope, &msg).unwrap();
+            let exc = v8::Exception::type_error(scope, m);
+            scope.throw_exception(exc);
+            return;
+        }
+    };
+    fd.list_set(name, entry);
+}
+
+/// Build a `FormDataValue` from the IDL argument pair `(value,
+/// filenameOrUndefined)`. Per WHATWG XHR §5 "create an entry" /
+/// HTML "constructing the form data set":
 ///
-/// Why hand-rolled (not macro): the callback's third arg is the
-/// FormData object itself — `args.this()` — and the macro doesn't
-/// thread that through user method bodies.
+///   - If `value` is a File and filename is missing → entry value
+///     is the File itself (preserve identity).
+///   - If `value` is a File and filename is given → entry value is a
+///     new File with content+type+lastModified copied from the
+///     source but name set to filename.
+///   - If `value` is a Blob (not a File) → wrap as a new File with
+///     name=filename or "blob", lastModified=now.
+///   - Otherwise → USVString-coerce.
+fn build_entry(
+    scope: &mut v8::PinScope,
+    value_v: v8::Local<v8::Value>,
+    filename_v: v8::Local<v8::Value>,
+) -> Result<FormDataValue, String> {
+    if let Ok(obj) = v8::Local::<v8::Object>::try_from(value_v) {
+        if crate::blob_native::blob::is_blob_instance_public(scope, obj) {
+            // Determine the filename arg (USVString-coerced).
+            let filename: Option<String> = if filename_v.is_undefined() {
+                None
+            } else {
+                Some(filename_v.to_rust_string_lossy(scope))
+            };
+            let is_file = crate::blob_native::blob::is_file_instance_public(scope, obj);
+            // Identity preservation: File without filename override.
+            if is_file && filename.is_none() {
+                return Ok(FormDataValue::File(v8::Global::new(scope, obj)));
+            }
+            // Mint a new File from the Blob/File's bytes + type.
+            let (bytes, blob_type) =
+                match crate::blob_native::blob::read_blob_bytes_and_type(scope, obj) {
+                    Some(p) => p,
+                    None => {
+                        return Err(
+                            "FormData append/set: Blob value has no readable bytes".into()
+                        )
+                    }
+                };
+            let final_filename = filename.unwrap_or_else(|| "blob".to_string());
+            // Preserve lastModified for File→File rewraps; default to
+            // current time for Blob→File.
+            let last_modified: Option<i64> = if is_file {
+                let lm_key = v8::String::new(scope, "lastModified").unwrap();
+                obj.get(scope, lm_key.into())
+                    .and_then(|v| v.number_value(scope))
+                    .map(|n| n as i64)
+            } else {
+                None
+            };
+            let file_v = crate::blob_native::file::create_file_with_last_modified(
+                scope,
+                bytes,
+                final_filename,
+                &blob_type,
+                last_modified,
+            );
+            let file_obj: v8::Local<v8::Object> = match file_v.try_into() {
+                Ok(o) => o,
+                Err(_) => {
+                    return Err(
+                        "FormData append/set: minted File is not an object".into()
+                    )
+                }
+            };
+            return Ok(FormDataValue::File(v8::Global::new(scope, file_obj)));
+        }
+    }
+    // USVString fallback. Spec requires USVString conversion (lone
+    // surrogates → U+FFFD); to_rust_string_lossy does this.
+    Ok(FormDataValue::String(value_v.to_rust_string_lossy(scope)))
+}
+
+// ---------------------------------------------------------------------------
+// get / getAll
+// ---------------------------------------------------------------------------
+
+fn get_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let this_obj = args.this();
+    let fd = match fd_from_this(scope, this_obj) {
+        Some(p) => p,
+        None => {
+            throw_illegal_invocation(scope);
+            return;
+        }
+    };
+    let name = args.get(0).to_rust_string_lossy(scope);
+    for (n, v) in &fd.entries {
+        if *n == name {
+            let local = entry_value_to_v8(scope, v);
+            rv.set(local);
+            return;
+        }
+    }
+    rv.set(v8::null(scope).into());
+}
+
+fn get_all_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let this_obj = args.this();
+    let fd = match fd_from_this(scope, this_obj) {
+        Some(p) => p,
+        None => {
+            throw_illegal_invocation(scope);
+            return;
+        }
+    };
+    let name = args.get(0).to_rust_string_lossy(scope);
+    let arr = v8::Array::new(scope, 0);
+    let mut i: u32 = 0;
+    for (n, v) in &fd.entries {
+        if *n == name {
+            let local = entry_value_to_v8(scope, v);
+            arr.set_index(scope, i, local);
+            i += 1;
+        }
+    }
+    rv.set(arr.into());
+}
+
+// ---------------------------------------------------------------------------
+// forEach + iterator factories
+// ---------------------------------------------------------------------------
+
 fn for_each_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
 ) {
     let this_obj = args.this();
-    let fd: &mut FormData = match this_obj
+    let _fd_ptr = match this_obj
         .get_internal_field(scope, 0)
         .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
     {
-        Some(e) => unsafe { &mut *(e.value() as *mut FormData) },
+        Some(e) => e.value() as *mut FormData,
         None => {
-            let msg = v8::String::new(scope, "Illegal invocation").unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
+            throw_illegal_invocation(scope);
             return;
         }
     };
@@ -415,18 +527,27 @@ fn for_each_callback(
 
     let mut idx = 0usize;
     loop {
+        // Re-read fd via internal field on each iteration so live
+        // mutations during forEach are visible.
+        let fd: &FormData = unsafe {
+            let ext = match this_obj
+                .get_internal_field(scope, 0)
+                .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
+            {
+                Some(e) => e,
+                None => return,
+            };
+            &*(ext.value() as *const FormData)
+        };
         if idx >= fd.entries.len() {
             return;
         }
-        let (n, v) = fd.entries[idx].clone();
+        let entry = &fd.entries[idx];
+        let n = entry.0.clone();
+        let value_v = entry_value_to_v8(scope, &entry.1);
         idx += 1;
-
-        let value_v = v8::String::new(scope, &v).unwrap();
         let key_v = v8::String::new(scope, &n).unwrap();
-        let cb_args = [value_v.into(), key_v.into(), this_obj.into()];
-
-        // call() returns None on throw — V8 has the exception pending.
-        // Stop iteration; the throw propagates to the JS caller.
+        let cb_args = [value_v, key_v.into(), this_obj.into()];
         if cb_fn.call(scope, this_arg, &cb_args).is_none() {
             return;
         }
@@ -439,8 +560,6 @@ fn install_iter_factory<'s>(
     name: &str,
     kind: IterKind,
 ) {
-    // Encode the kind as an integer in the External so the same
-    // raw callback dispatches all three factory methods.
     let kind_marker: i64 = match kind {
         IterKind::Key => 0,
         IterKind::Value => 1,
@@ -460,8 +579,6 @@ fn iter_factory_callback(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    // `this` must be a FormData instance — its internal field 0 holds
-    // Box<FormData>. Verify by ext extraction; throw on mismatch.
     let this_obj = args.this();
     let _fd_ptr = match this_obj
         .get_internal_field(scope, 0)
@@ -469,14 +586,11 @@ fn iter_factory_callback(
     {
         Some(e) => e.value() as *mut FormData,
         None => {
-            let msg = v8::String::new(scope, "Illegal invocation").unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
+            throw_illegal_invocation(scope);
             return;
         }
     };
 
-    // Decode kind from the FunctionTemplate data slot.
     let kind = {
         let raw = args.data();
         let n = if let Ok(int) = v8::Local::<v8::Integer>::try_from(raw) {
@@ -491,7 +605,6 @@ fn iter_factory_callback(
         }
     };
 
-    // Build a FormDataIterator object via the cached template.
     let it_tmpl = iter_template(scope);
     let inst_tmpl = it_tmpl.instance_template(scope);
     let it_obj = match inst_tmpl.new_instance(scope) {
@@ -503,9 +616,6 @@ fn iter_factory_callback(
             return;
         }
     };
-    // Wire prototype to the macro-emitted prototype (which carries
-    // `next` and is chained to %IteratorPrototype% via
-    // #[v8_inherit_intrinsic]).
     let it_class_fn = it_tmpl.get_function(scope).unwrap();
     let proto_key = v8::String::new(scope, "prototype").unwrap();
     let it_proto_v = it_class_fn.get(scope, proto_key.into()).unwrap();
@@ -522,7 +632,6 @@ fn iter_factory_callback(
     let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
     it_obj.set_internal_field(0, ext.into());
 
-    // Finalizer: same shape as the macro's gen_box_and_install_finalizer.
     let weak = v8::Weak::with_guaranteed_finalizer(
         scope,
         it_obj,
@@ -533,4 +642,32 @@ fn iter_factory_callback(
     std::mem::forget(weak);
 
     rv.set(it_obj.into());
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn fd_from_this<'a>(
+    scope: &mut v8::PinScope,
+    this_obj: v8::Local<v8::Object>,
+) -> Option<&'a mut FormData> {
+    let ext = this_obj
+        .get_internal_field(scope, 0)
+        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
+    let ptr = ext.value() as *mut FormData;
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: Each FormData wrapper carries a unique boxed FormData
+    // (the macro's gen_box_and_install_finalizer ensures finalizer
+    // ownership). V8 isolates are single-threaded per AGENTS.md
+    // invariant, and we don't yield across the borrow.
+    Some(unsafe { &mut *ptr })
+}
+
+fn throw_illegal_invocation(scope: &mut v8::PinScope) {
+    let msg = v8::String::new(scope, "Illegal invocation").unwrap();
+    let exc = v8::Exception::type_error(scope, msg);
+    scope.throw_exception(exc);
 }
