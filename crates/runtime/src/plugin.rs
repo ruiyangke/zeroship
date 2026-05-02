@@ -88,6 +88,23 @@ impl NativeRegistrar {
             }),
         ));
     }
+
+    /// Push an arbitrary setup closure that runs once during
+    /// `build_env_object`, with access to the active scope and the
+    /// plugin's namespace object. Used by plugins that need to do
+    /// side-effect setup beyond a single function registration —
+    /// e.g. installing classes onto `globalThis` via their
+    /// `Class::install(scope)` shape.
+    ///
+    /// The `name` argument is purely for debugging; the closure is
+    /// applied by `build_env_object` exactly once after `register`
+    /// returns.
+    pub fn add_setup<F>(&mut self, name: &'static str, setup: F)
+    where
+        F: Fn(&mut v8::PinScope, v8::Local<v8::Object>) + 'static,
+    {
+        self.entries.push((name, Box::new(setup)));
+    }
 }
 
 /// Build the `env` object that user code sees as:

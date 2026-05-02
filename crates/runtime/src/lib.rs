@@ -1,3 +1,61 @@
+//! Compile-fail doctests for the `#[v8_async_method]` rejection rules.
+//! These live at the runtime crate level (not on the proc macro itself)
+//! because proc-macro crates can't depend on themselves, so doctests
+//! that exercise the macro must run from a downstream crate.
+//!
+//! `&mut self` is rejected — borrow across `.await` is unsound under
+//! V8 re-entry:
+//!
+//! ```compile_fail
+//! use zeroship_runtime::state::OpError;
+//! use zeroship_runtime_macros::{v8_class, v8_async_method, v8_constructor};
+//! struct Mutator { n: u32 }
+//! #[v8_class]
+//! impl Mutator {
+//!     #[v8_constructor]
+//!     fn new() -> Self { Mutator { n: 0 } }
+//!     #[v8_async_method]
+//!     async fn bump(&mut self) -> Result<u32, OpError> {
+//!         self.n += 1;
+//!         Ok(self.n)
+//!     }
+//! }
+//! ```
+//!
+//! Non-`async` methods marked with the attribute are rejected:
+//!
+//! ```compile_fail
+//! use zeroship_runtime::state::OpError;
+//! use zeroship_runtime_macros::{v8_class, v8_async_method, v8_constructor};
+//! struct NotAsync;
+//! #[v8_class]
+//! impl NotAsync {
+//!     #[v8_constructor]
+//!     fn new() -> Self { NotAsync }
+//!     #[v8_async_method]
+//!     fn must_be_async(&self) -> Result<u32, OpError> { Ok(0) }
+//! }
+//! ```
+//!
+//! The positive `&self` shape compiles fine:
+//!
+//! ```
+//! use std::cell::Cell;
+//! use zeroship_runtime::state::OpError;
+//! use zeroship_runtime_macros::{v8_class, v8_async_method, v8_constructor};
+//! struct Ok_ { n: Cell<u32> }
+//! #[v8_class]
+//! impl Ok_ {
+//!     #[v8_constructor]
+//!     fn new() -> Self { Ok_ { n: Cell::new(0) } }
+//!     #[v8_async_method]
+//!     async fn bump(&self) -> Result<u32, OpError> {
+//!         self.n.set(self.n.get() + 1);
+//!         Ok(self.n.get())
+//!     }
+//! }
+//! ```
+
 #![allow(unsafe_code)]
 #![allow(missing_debug_implementations)]
 

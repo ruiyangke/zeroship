@@ -1705,6 +1705,44 @@ impl RuntimeInner {
                             let v = v8::Local::new(scope, &g);
                             r.reject(scope, v);
                         }
+                        ResolveValue::String(s) => {
+                            let v = v8::String::new(scope, &s).unwrap();
+                            r.resolve(scope, v.into());
+                        }
+                        ResolveValue::Bool(b) => {
+                            let v = v8::Boolean::new(scope, b);
+                            r.resolve(scope, v.into());
+                        }
+                        ResolveValue::U32(n) => {
+                            let v = v8::Integer::new_from_unsigned(scope, n);
+                            r.resolve(scope, v.into());
+                        }
+                        ResolveValue::I32(n) => {
+                            let v = v8::Integer::new(scope, n);
+                            r.resolve(scope, v.into());
+                        }
+                        ResolveValue::F64(n) => {
+                            let v = v8::Number::new(scope, n);
+                            r.resolve(scope, v.into());
+                        }
+                        ResolveValue::RejectError(e) => {
+                            // Materialise the typed exception per
+                            // OpError::kind. Mirrors the sync-path
+                            // `gen_throw_error` shape.
+                            let msg = v8::String::new(scope, &e.message).unwrap();
+                            let exc = match e.kind {
+                                crate::state::OpErrorKind::TypeError => {
+                                    v8::Exception::type_error(scope, msg)
+                                }
+                                crate::state::OpErrorKind::RangeError => {
+                                    v8::Exception::range_error(scope, msg)
+                                }
+                                crate::state::OpErrorKind::Error => {
+                                    v8::Exception::error(scope, msg)
+                                }
+                            };
+                            r.reject(scope, exc);
+                        }
                     }
                     scope.perform_microtask_checkpoint();
                     collect_settled_promises(scope, &mut self.pending_requests)

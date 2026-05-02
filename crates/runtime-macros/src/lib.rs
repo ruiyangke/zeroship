@@ -27,6 +27,13 @@
 //!
 //!     #[v8_method]
 //!     fn set(&mut self, name: String, value: String) -> Result<(), OpError> { ... }
+//!
+//!     // Async methods compile to a Promise-returning sync V8 callback
+//!     // that spawns the body via state.spawned_ops. &mut self is
+//!     // rejected at compile time — use &self + Cell/RefCell for state
+//!     // that needs to mutate inside the body.
+//!     #[v8_async_method]
+//!     async fn fetch_remote(&self, url: String) -> Result<Vec<u8>, OpError> { ... }
 //! }
 //! ```
 //!
@@ -66,6 +73,43 @@ pub fn v8_method(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // outside a `#[v8_class]` impl block this is a no-op (the method stays
     // as written) — the macro doesn't error so editor tooling that
     // pre-expands attribute macros doesn't surface a false positive.
+    item
+}
+
+/// Marker attribute consumed by `#[v8_class]`: declare an async method
+/// whose return value materialises as a Promise on the JS surface.
+///
+/// The macro emits a sync V8 callback that:
+///   1. Allocates a `v8::PromiseResolver`
+///   2. Spawns the user's `async fn` body via `state.spawned_ops`
+///   3. Returns the Promise immediately
+///
+/// When the future settles, the runtime pump dequeues an
+/// `OpResult::JsValue` and resolves (or rejects) the bound promise. The
+/// user's `async fn` body can `.await` freely.
+///
+/// # Rejected at compile time
+///
+/// `&mut self` async methods are rejected — borrow across `.await` is
+/// unsound under V8 re-entry. The macro emits a `compile_error!` with
+/// the suggested fix (use `&self` + `Cell` / `RefCell`). See
+/// `crates/runtime/tests/v8_async_method_smoke.rs` for the positive
+/// shapes and the runtime-level doctests for the rejection rules.
+///
+/// Non-`async` methods marked with the attribute are also rejected for
+/// the same reason — the call-site emits `.await`, which doesn't
+/// type-check on a non-Future return.
+///
+/// # Allowed return shapes
+///
+/// `()`, `T`, or `Result<T, OpError>` where
+/// `T ∈ { (), bool, u32, i32, f64, String, Vec<u8>, v8::Global<v8::Value> }`.
+///
+/// Outside a `#[v8_class]` impl block this attribute is a no-op (the
+/// fn stays as written) so editor tooling that pre-expands attribute
+/// macros doesn't trip a false positive.
+#[proc_macro_attribute]
+pub fn v8_async_method(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
