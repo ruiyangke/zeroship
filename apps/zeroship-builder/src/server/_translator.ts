@@ -63,6 +63,14 @@ export interface BuilderTurnInput {
    * replaying the message history.
    */
   resume?: { token: string; value: unknown };
+  /**
+   * Project id this chat surface is scoped to. Distinct from `id`
+   * (the chat thread): one project may host multiple threads but the
+   * scorecard / issues / health belong to the project. The middleware
+   * uses this to persist Critic-graded scorecards into the right KV
+   * slot (per ISS-16 fix path). Optional — missing → side-effect skipped.
+   */
+  appId?: string;
 }
 
 /**
@@ -209,6 +217,7 @@ export async function buildTranslatedStream(
       // same tools so the wire shows one card per call, not two.
       const dataPartMw = await dataPartMiddleware(writer, {
         isResume: mode === "resume",
+        appId: input.appId,
       });
       // Override each SubAgent's `model: "openai:gpt-5.4-mini"` (string)
       // with the live ChatOpenAI instance. deepagents resolves a string

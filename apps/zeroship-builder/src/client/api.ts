@@ -122,7 +122,7 @@ export { appPreviewUrl } from "./lib/preview-url";
 // One procedure to start with — Plan 02 may add more (file CRUD, deploy,
 // etc.) and they go here as additional fields on `App`.
 type App = {
-  chat: ProcedureType<"stream", { messages: UIMessage[] }, never>;
+  chat: ProcedureType<"stream", { messages: UIMessage[]; appId?: string }, never>;
   // Wizard: project-creation flow runtime, plain LangGraph (see
   // §4.8.2b). Same wire envelope as chat, but the input is `{idea, id}`
   // on a fresh turn (no message history — the wizard's checkpointer
@@ -155,9 +155,12 @@ export const rpc = client<App>({ baseUrl: "" });
  *     transport: chatTransport(rpc.chat),
  *   });
  */
-export function chatTransport<TIn>(handle: {
-  streamUrl: (input?: TIn) => string | Promise<string>;
-}) {
+export function chatTransport<TIn>(
+  handle: {
+    streamUrl: (input?: TIn) => string | Promise<string>;
+  },
+  options: { appId?: string } = {},
+) {
   return new DefaultChatTransport({
     // streamUrl() with no input returns a synchronous URL
     // (`/_zs/v1/<id>`). With `transformer: "superjson"` set on the
@@ -171,10 +174,16 @@ export function chatTransport<TIn>(handle: {
       // skip message replay and feed Command({resume}) into the same
       // thread.
       const resume = (body as { resume?: { token: string; value: unknown } } | undefined)?.resume;
+      // appId carried alongside both fresh and resume payloads so the
+      // server's data-part middleware can persist Critic-graded
+      // scorecards back to the right project (per ISS-16 fix path).
+      // Optional — when missing (rare; tests, default thread), the
+      // middleware skips the persistence side-effect.
+      const appId = options.appId;
       if (resume) {
-        return { body: { json: { resume, id } } };
+        return { body: { json: { resume, id, appId } } };
       }
-      return { body: { json: { messages, id } } };
+      return { body: { json: { messages, id, appId } } };
     },
   });
 }

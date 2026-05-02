@@ -83,7 +83,10 @@ export function ChatRail({ appName, appId, seedBrief }: ChatRailProps) {
 
   const { messages, sendMessage, setMessages, regenerate, status, error, stop } =
     useChat({
-      transport: chatTransport(rpc.chat),
+      // appId is threaded through the transport's body so the server-
+      // side data-part middleware can persist Critic-graded quality
+      // scorecards into the right project's KV slot (ISS-16 fix path).
+      transport: chatTransport(rpc.chat, { appId }),
       onError: (err) => console.error("[chat]", err),
     });
 

@@ -9,13 +9,17 @@
 //      ISSUES.md ISS-17).
 //   4. Performance — placeholder boxes (no metering yet, ISS-18).
 
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   getQualityScores,
+  sreMonitor,
   type AppRecord,
   type QualityDimension,
   type QualityGrade,
+  type SREFindingItem,
 } from "../../api";
+import { GhostButton } from "../../components/GhostButton";
 
 export interface HealthCanvasProps {
   appId: string;
@@ -30,7 +34,7 @@ export function HealthCanvas({ appId, app }: HealthCanvasProps) {
         <div className="h-12" />
         <QualityScorecard appId={appId} />
         <div className="h-12" />
-        <Incidents />
+        <Incidents appId={appId} />
         <div className="h-12" />
         <Performance />
       </div>
@@ -113,8 +117,9 @@ function QualityScorecard({ appId }: { appId: string }) {
           Quality
         </h2>
         <p className="font-serif text-[14px] text-ink-soft leading-[1.55]">
-          Seven dimensions the Critic grades on every build. The current
-          snapshot is a stub — wiring lands with ISS-16.
+          Seven dimensions the Critic grades on every build. Updated
+          live as Builder works — refresh after a chat turn to see the
+          latest scorecard.
         </p>
       </header>
       {isLoading && (
@@ -137,6 +142,14 @@ function QualityScorecard({ appId }: { appId: string }) {
           {data.dimensions.map((d) => (
             <DimensionRow key={d.key} dim={d} />
           ))}
+          <div
+            data-testid="health-quality-last-run"
+            className="font-serif italic text-[12px] text-pencil text-right pt-1"
+          >
+            {data.last_run_at
+              ? `Last graded ${relativeTime(data.last_run_at)}.`
+              : "Not graded yet — a Critic round will set this."}
+          </div>
         </div>
       )}
     </section>
@@ -187,30 +200,103 @@ function gradeTone(grade: QualityGrade): string {
 
 // ─── 2c · Incidents ────────────────────────────────────────────
 
-function Incidents() {
+function Incidents({ appId }: { appId: string }) {
+  // Findings live in component state — same shape as PlanCanvas's
+  // digest panel. No persistence needed for the on-demand path; if a
+  // page refresh wipes the result, the user can hit Scan again.
+  const [findings, setFindings] = useState<SREFindingItem[] | null>(null);
+  const scan = useMutation({
+    mutationFn: () => sreMonitor({ appId }),
+    onSuccess: (r) => setFindings(r.findings),
+  });
   return (
     <section data-testid="health-incidents-section">
-      <header className="mb-4">
-        <h2 className="font-serif italic font-medium text-[24px] m-0 mb-1">
-          Incidents
-        </h2>
-        <p className="font-serif text-[14px] text-ink-soft leading-[1.55]">
-          When something breaks, the SRE agent files a record here with
-          a timeline, root cause, and fix.
-        </p>
+      <header className="flex items-baseline justify-between mb-4">
+        <div>
+          <h2 className="font-serif italic font-medium text-[24px] m-0 mb-1">
+            Incidents
+          </h2>
+          <p className="font-serif text-[14px] text-ink-soft leading-[1.55]">
+            When something breaks, the SRE agent files a record here with
+            a timeline, root cause, and fix.
+          </p>
+        </div>
+        <GhostButton
+          onClick={() => scan.mutate()}
+          disabled={scan.isPending}
+          data-testid="health-scan-issues"
+        >
+          {scan.isPending ? "scanning…" : findings ? "Scan again" : "Scan for issues"}
+        </GhostButton>
       </header>
-      <div
-        data-testid="health-incidents-empty"
-        className="border border-rule-2 bg-paper-2/40 py-10 text-center"
-      >
-        <div className="font-serif italic text-[15px] text-ink-soft">
-          All quiet — no incidents on record.
+      {scan.error && (
+        <div
+          data-testid="health-scan-error"
+          className="border border-tomato/40 bg-tomato/5 px-4 py-3 mb-3 font-serif italic text-[13.5px] text-tomato"
+        >
+          {(scan.error as Error).message || "Scan failed."}
         </div>
-        <div className="mt-1 font-serif italic text-[12px] text-pencil">
-          Backing table tracked as ISS-17.
+      )}
+      {findings === null && !scan.isPending && !scan.error && (
+        <div
+          data-testid="health-incidents-empty"
+          className="border border-rule-2 bg-paper-2/40 py-10 text-center"
+        >
+          <div className="font-serif italic text-[15px] text-ink-soft">
+            All quiet — no incidents on record.
+          </div>
+          <div className="mt-1 font-serif italic text-[12px] text-pencil">
+            Backing table tracked as ISS-17.
+          </div>
         </div>
-      </div>
+      )}
+      {findings && findings.length === 0 && (
+        <div
+          data-testid="health-incidents-clear"
+          className="border border-ivy/40 bg-ivy/5 py-8 text-center"
+        >
+          <div className="font-serif italic text-[15px] text-ivy">
+            All quiet — the SRE agent didn't see anything concerning.
+          </div>
+        </div>
+      )}
+      {findings && findings.length > 0 && (
+        <div className="grid gap-3" data-testid="health-incidents-list">
+          {findings.map((f, i) => (
+            <FindingCard key={i} finding={f} />
+          ))}
+        </div>
+      )}
     </section>
+  );
+}
+
+function FindingCard({ finding }: { finding: SREFindingItem }) {
+  const tone =
+    finding.severity === "critical"
+      ? "border-tomato bg-tomato/10 text-tomato"
+      : finding.severity === "error"
+        ? "border-tomato/60 bg-tomato/5 text-tomato"
+        : finding.severity === "warning"
+          ? "border-ink/40 bg-paper-2 text-ink"
+          : "border-rule-2 bg-paper-2/40 text-ink-soft";
+  return (
+    <div
+      data-testid="health-finding-card"
+      className={"border px-4 py-3 " + tone}
+    >
+      <div className="flex items-baseline justify-between mb-1.5">
+        <span className="font-serif italic font-medium text-[16px]">
+          {finding.diagnosis}
+        </span>
+        <span className="font-sans text-[10px] uppercase tracking-[0.18em] border border-current rounded-full px-2 py-0.5">
+          {finding.severity}
+        </span>
+      </div>
+      <div className="font-serif text-[13.5px] text-ink leading-[1.55]">
+        {finding.recommendation}
+      </div>
+    </div>
   );
 }
 

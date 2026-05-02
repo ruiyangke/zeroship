@@ -62,11 +62,21 @@
 
 import type { AgentMiddleware } from "langchain";
 import type { UIMessageStreamWriter } from "ai";
+// `waitUntil` from the zeroship runtime extends the request's lifetime
+// past the SSE close so a fire-and-forget side-effect (writing the
+// quality scorecard to KV) finishes before the worker prunes the task.
+// Outside the V8 runtime (SDK unit tests) this is a no-op shim — see
+// `sdks/zeroship-stub/index.js`.
+import { waitUntil } from "zeroship";
 
 // emit helper is shared with the wizard runtime (per spec §4.8.2b /
 // §8.2.7). The wizard calls it directly from its node body; Builder
 // goes through this middleware. Same chunk shape on the wire.
 import { emitDataSurvey, type SurveyInput } from "./_survey_wire.js";
+// Quality-scoreboard updater (per ISS-16 fix path). Lives in
+// `_agent_writes.ts` (underscore-prefixed) so it stays out of the
+// public RPC surface — only the server middleware writes here.
+import { setQualityFromCritic } from "./_agent_writes.js";
 
 /**
  * Build a middleware bound to a specific v6 stream writer. The middleware
@@ -94,9 +104,9 @@ import { emitDataSurvey, type SurveyInput } from "./_survey_wire.js";
  */
 export async function dataPartMiddleware(
   writer: UIMessageStreamWriter,
-  options: { isResume?: boolean } = {},
+  options: { isResume?: boolean; appId?: string } = {},
 ): Promise<AgentMiddleware> {
-  const { isResume = false } = options;
+  const { isResume = false, appId } = options;
   // Lazy import to keep non-chat code paths free of the langchain
   // dep tree (matches the translator's lazy-import policy).
   const { createMiddleware } = await import("langchain");
@@ -202,6 +212,29 @@ export async function dataPartMiddleware(
             } catch {
               // Stream closed — drop. The Command still propagates back
               // to the LLM as a ToolMessage so Builder can react.
+            }
+            // ISS-16 fix path: persist the Critic-graded scorecard into
+            // the per-app KV slot so HealthCanvas reflects the live
+            // grades on its next refetch. Fire-and-forget via
+            // waitUntil() so the SSE stream isn't held open by the KV
+            // round-trip — the user-visible part is the chat receipt
+            // already emitted above.
+            if (appId) {
+              try {
+                waitUntil(
+                  setQualityFromCritic(appId, round.issues).catch((e) => {
+                    console.warn(
+                      `[zeroship:_middleware] setQualityFromCritic threw: ${
+                        e instanceof Error ? e.message : String(e)
+                      }`,
+                    );
+                  }),
+                );
+              } catch {
+                // waitUntil unavailable (test stub throws on missing
+                // request scope) — drop the side-effect; the scorecard
+                // just stays at its previous value.
+              }
             }
           }
         } else if (subagentType === "reviewer") {

@@ -38,6 +38,10 @@ export async function chat(
     // When present, the translator skips message replay and feeds the
     // value into a `Command({resume})` against the same thread.
     resume?: { token: string; value: unknown };
+    // Project id — threaded through to the data-part middleware so
+    // Critic-graded scorecards persist to the right KV slot
+    // (ISS-16 fix path).
+    appId?: string;
   },
 ): Promise<Response> {
   const { buildTranslatedStream } = await import("./_translator.js");
