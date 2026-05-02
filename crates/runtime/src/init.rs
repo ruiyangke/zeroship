@@ -1417,12 +1417,10 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
         global.set(scope, nav_key.into(), nav.into());
     }
 
-    // __rawFetch (native HTTP fetch)
-    {
-        let f = v8::Function::new(scope, crate::fetch::raw_fetch_callback).unwrap();
-        let key = v8::String::new(scope, "__rawFetch").unwrap();
-        global.set(scope, key.into(), f.into());
-    }
+    // (`__rawFetch` was the V8 callback the JS polyfill in `embed/fetch.js`
+    // dispatched into. Both were removed at D-23 step 3 — `globalThis.fetch`
+    // is now the native callback installed by
+    // `crate::fetch_native::install_fetch_global`. See ADR D-23.)
 
     // (URL parsing is now part of native URL — see install_url_native.
     // __urlParse / __urlCanParse callbacks are no longer needed.)

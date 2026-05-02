@@ -793,7 +793,6 @@ impl RuntimeInner {
                 let s = rt.state().borrow();
                 !s.spawned_ops.is_empty()
                     || !s.spawned_timers.is_empty()
-                    || !s.spawned_fetches.is_empty()
                     || !s.ready_timers.is_empty()
                     || !s.outbound_streams.is_empty()
             };
@@ -1566,32 +1565,18 @@ impl RuntimeInner {
         }
     }
 
-    /// Drain newly spawned ops/timers/fetches from RuntimeState into the
-    /// external `AsyncWork` (for the pump task).
+    /// Drain newly spawned ops/timers from RuntimeState into the external
+    /// `AsyncWork` (for the pump task).
     pub fn drain_new_tasks_into(&mut self, work: &mut AsyncWork) {
         // Fast path
         {
             let s = self.state.borrow();
             if s.spawned_ops.is_empty()
                 && s.spawned_timers.is_empty()
-                && s.spawned_fetches.is_empty()
                 && s.ready_timers.is_empty()
             {
                 return;
             }
-        }
-
-        // Drain spawned fetches
-        let fetches: Vec<crate::state::FetchRequest> = {
-            self.state.borrow_mut().spawned_fetches.drain(..).collect()
-        };
-        for fetch_req in fetches {
-            // execute_fetch now needs SharedState because it spawns a
-            // detached body-reader task that pushes `OpResult::StreamChunk`
-            // entries back into `state.spawned_ops`. The task outlives the
-            // header-resolve future, so it can't capture `self` directly.
-            let future = crate::fetch::execute_fetch(fetch_req, self.state.clone());
-            work.pending_ops.push(future);
         }
 
         {

@@ -44,7 +44,7 @@ pub use enforce_range::{EnforceRangeU64, read_enforce_range_u64};
 pub use url_native::helpers::USVString;
 pub use init::{init_v8, RequestResult, HttpResult};
 pub use modules::ModuleEntry;
-pub use state::{SharedState, RuntimeState, OpResult, FetchRequest, StreamState, SpawnedTimer, WebSocketState, WsMessage};
+pub use state::{SharedState, RuntimeState, OpResult, StreamState, SpawnedTimer, WebSocketState, WsMessage};
 pub use storage::AppStorage;
 pub use runtime::{Runtime, RuntimeBuilder, RuntimeLimits, AsyncWork, AsyncEvent};
 pub use fetch_outcome::{FetchOutcome, SettledFetch, RequestCtx, EnvSnapshot};

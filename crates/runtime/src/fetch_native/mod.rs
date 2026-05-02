@@ -225,8 +225,7 @@ fn fetch_callback(
     // Admission control.
     {
         let s = state.borrow();
-        let in_flight_ops =
-            s.pending_resolvers.len() + s.spawned_fetches.len() + s.spawned_ops.len();
+        let in_flight_ops = s.pending_resolvers.len() + s.spawned_ops.len();
         if in_flight_ops >= MAX_PENDING_OPS {
             drop(s);
             let m = v8::String::new(
