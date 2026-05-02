@@ -37,12 +37,15 @@ futures = { workspace = true }
 # compio event loop
 compio = { workspace = true, features = ["time", "macros", "bytes"] }
 
-# Native WebSocket framer (RFC 6455 / tungstenite over compio).
-# Optional + gated behind `runtime_native_websocket` so the polyfill
-# build path doesn't drag in tungstenite. See
-# docs/proposals/websocket-native.md §VII.1.
+# Native WebSocket framer (RFC 6455 — in-tree decoder/encoder + raw
+# compio TCP / compio-tls TLS. compio-ws kept ONLY for its TLS connector
+# helper; we hand-roll the HTTP handshake so the framer owns the
+# leftover bytes after the 101 response.)
 compio-ws = { workspace = true, optional = true }
 compio-tls = { workspace = true, optional = true }
+# Native trust roots for the wss:// handshake. Direct dep — used in
+# `websocket_native::handshake::build_tls_connector`.
+rustls-native-certs = { version = "0.8", optional = true }
 
 # HTTP client (fetch)
 cyper = { workspace = true }
@@ -86,7 +89,7 @@ default = ["runtime_native_websocket"]
 # `globalThis.WebSocket`; native classes are NOT installed.
 # When ON: native classes install BEFORE the polyfill runs, and the
 # polyfill detects this and skips its WebSocket assignment.
-runtime_native_websocket = ["dep:compio-ws", "dep:compio-tls"]
+runtime_native_websocket = ["dep:compio-ws", "dep:compio-tls", "dep:rustls-native-certs"]
 # Strict-throws path for `binaryType` setter on unknown values. v2 D-7
 # default is silent-no-op (matches undici, workerd, the WPT test); the
 # strict path is preserved behind this feature only for WPT-update tracking.

@@ -89,6 +89,13 @@ pub fn deliver_to_peer(
                     );
                 }
             }
+            WsFrame::Pong(_) => {
+                // Pong frames are an internal protocol artifact (reply
+                // to a peer Ping). Pair sockets have no real wire and
+                // don't generate Pings; if user code somehow queues a
+                // Pong we drop it silently — it has no observable
+                // effect.
+            }
         }
     }
 

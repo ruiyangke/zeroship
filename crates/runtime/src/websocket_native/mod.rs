@@ -103,6 +103,13 @@ pub enum WsFrame {
         code: Option<u16>,
         reason: String,
     },
+    /// Pong frame queued by the reader in response to a peer Ping
+    /// (RFC 6455 §5.5.3 — the Pong payload echoes the Ping payload).
+    /// The reader pushes this onto the writer channel; the writer
+    /// emits the bytes in FIFO order with any pending data frames.
+    /// Pongs do NOT touch `bufferedAmount` — they're internal to the
+    /// stack and not user-visible.
+    Pong(Vec<u8>),
 }
 
 // ---------------------------------------------------------------------------
@@ -887,21 +894,9 @@ impl WebSocketImpl {
             }
 
             // Client (network-backed): hand frames to the per-WS
-            // NativeWsState send_queue and wake the send pump.
-            let Some(ws) = network::lookup_native_ws_state(&state, self.ws_id.get()) else {
-                return;
-            };
-            let frames: Vec<WsFrame> = self.send_queue.borrow_mut().drain(..).collect();
-            if frames.is_empty() {
-                return;
-            }
-            let mut s = ws.borrow_mut();
-            for f in frames {
-                s.send_queue.push_back(f);
-            }
-            if let Some(w) = s.send_waker.take() {
-                w.wake();
-            }
+            // network::flush_v8_send_queue, which routes them onto the
+            // writer task's mpsc channel.
+            network::flush_v8_send_queue(&state, self.ws_id.get(), self);
         }
     }
 }

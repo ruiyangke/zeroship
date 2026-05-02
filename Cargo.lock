@@ -6426,6 +6426,7 @@ dependencies = [
  "libc",
  "mimalloc",
  "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "sha1",

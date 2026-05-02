@@ -137,6 +137,24 @@ struct FragmentedMessage {
     bytes: Vec<u8>,
 }
 
+/// Result of one sans-IO decode attempt against a byte buffer.
+pub enum StepResult {
+    /// A complete frame was assembled. `consumed` bytes should be
+    /// removed from the front of the input buffer.
+    Frame {
+        frame: DecodedFrame,
+        consumed: usize,
+    },
+    /// A non-final fragment was buffered internally; `consumed` bytes
+    /// should be removed. Caller should loop and call `decode_step`
+    /// again on the remaining bytes.
+    NeedMoreContinuation { consumed: usize },
+    /// Need more bytes from the wire to complete the next frame. The
+    /// buffer should NOT be modified; the caller reads more bytes and
+    /// calls `decode_step` again with the appended buffer.
+    NeedMoreBytes,
+}
+
 impl FrameReader {
     pub fn new(max_frame_size: usize, max_message_size: usize) -> Self {
         FrameReader {
@@ -161,6 +179,181 @@ impl FrameReader {
                 return Ok(frame);
             }
             // None = continuation collected; loop and read the next frame.
+        }
+    }
+
+    /// Sans-IO decode step against an in-memory buffer. Used by callers
+    /// that want cooperative cancellation safety: they own the read
+    /// buffer, top it up via raw `AsyncRead::read` calls (each one
+    /// cancellation-safe at the buffer-append level), and drive the
+    /// decoder forward via this method.
+    ///
+    /// Returns one of three outcomes: a complete frame, a buffered
+    /// continuation (loop on remaining bytes), or "need more bytes from
+    /// the wire" (no consumption — caller must read more before
+    /// re-calling).
+    ///
+    /// On `DecodeError`, the buffer is unspecified — the connection
+    /// MUST be failed.
+    pub fn decode_step(&mut self, buf: &[u8]) -> Result<StepResult, DecodeError> {
+        // Need at least 2 bytes for the fixed header.
+        if buf.len() < 2 {
+            return Ok(StepResult::NeedMoreBytes);
+        }
+        let h0 = buf[0];
+        let h1 = buf[1];
+        let fin = (h0 & 0x80) != 0;
+        let rsv = h0 & 0x70;
+        let opcode = h0 & 0x0F;
+        let masked = (h1 & 0x80) != 0;
+        let len_marker = h1 & 0x7F;
+
+        // RFC 6455 §5.1: server MUST NOT mask.
+        if masked {
+            return Err(DecodeError::MaskedServerFrame);
+        }
+        if rsv != 0 {
+            return Err(DecodeError::NonZeroReserved);
+        }
+
+        // Decode payload length per §5.2.
+        let (payload_len, hdr_size) = if len_marker <= 125 {
+            (len_marker as usize, 2usize)
+        } else if len_marker == 126 {
+            if buf.len() < 4 {
+                return Ok(StepResult::NeedMoreBytes);
+            }
+            (u16::from_be_bytes([buf[2], buf[3]]) as usize, 4)
+        } else {
+            // len_marker == 127
+            if buf.len() < 10 {
+                return Ok(StepResult::NeedMoreBytes);
+            }
+            let v = u64::from_be_bytes([
+                buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8], buf[9],
+            ]);
+            if v > usize::MAX as u64 {
+                return Err(DecodeError::FrameTooLarge {
+                    actual: usize::MAX,
+                    limit: self.max_frame_size,
+                });
+            }
+            (v as usize, 10)
+        };
+
+        // Frame size cap.
+        if payload_len > self.max_frame_size {
+            return Err(DecodeError::FrameTooLarge {
+                actual: payload_len,
+                limit: self.max_frame_size,
+            });
+        }
+
+        // Control-frame guards (§5.5).
+        let is_control = (opcode & 0x08) != 0;
+        if is_control {
+            if !fin {
+                return Err(DecodeError::FragmentedControlFrame);
+            }
+            if payload_len > 125 {
+                return Err(DecodeError::OversizedControlFrame(payload_len));
+            }
+        }
+
+        // Need the full frame in the buffer.
+        let total = hdr_size + payload_len;
+        if buf.len() < total {
+            return Ok(StepResult::NeedMoreBytes);
+        }
+
+        let payload = &buf[hdr_size..total];
+        let consumed = total;
+
+        // Dispatch by opcode (mirrors `read_one`).
+        match opcode {
+            OPCODE_CONTINUATION => {
+                let Some(frag) = self.fragmented_message.as_mut() else {
+                    return Err(DecodeError::OrphanContinuation);
+                };
+                let new_total = frag.bytes.len().saturating_add(payload_len);
+                if new_total > self.max_message_size {
+                    return Err(DecodeError::MessageTooLarge {
+                        actual: new_total,
+                        limit: self.max_message_size,
+                    });
+                }
+                frag.bytes.extend_from_slice(payload);
+                if fin {
+                    let frag = self.fragmented_message.take().unwrap();
+                    let frame = if frag.is_text {
+                        let s = String::from_utf8(frag.bytes).map_err(|_| DecodeError::InvalidUtf8)?;
+                        DecodedFrame::Text(s)
+                    } else {
+                        DecodedFrame::Binary(frag.bytes)
+                    };
+                    Ok(StepResult::Frame { frame, consumed })
+                } else {
+                    Ok(StepResult::NeedMoreContinuation { consumed })
+                }
+            }
+            OPCODE_TEXT | OPCODE_BINARY => {
+                if self.fragmented_message.is_some() {
+                    return Err(DecodeError::InterleavedDataFrame);
+                }
+                if fin {
+                    if payload_len > self.max_message_size {
+                        return Err(DecodeError::MessageTooLarge {
+                            actual: payload_len,
+                            limit: self.max_message_size,
+                        });
+                    }
+                    let frame = if opcode == OPCODE_TEXT {
+                        let s = String::from_utf8(payload.to_vec())
+                            .map_err(|_| DecodeError::InvalidUtf8)?;
+                        DecodedFrame::Text(s)
+                    } else {
+                        DecodedFrame::Binary(payload.to_vec())
+                    };
+                    Ok(StepResult::Frame { frame, consumed })
+                } else {
+                    if payload_len > self.max_message_size {
+                        return Err(DecodeError::MessageTooLarge {
+                            actual: payload_len,
+                            limit: self.max_message_size,
+                        });
+                    }
+                    self.fragmented_message = Some(FragmentedMessage {
+                        is_text: opcode == OPCODE_TEXT,
+                        bytes: payload.to_vec(),
+                    });
+                    Ok(StepResult::NeedMoreContinuation { consumed })
+                }
+            }
+            OPCODE_CLOSE => {
+                let (code, reason) = if payload.is_empty() {
+                    (1005u16, String::new())
+                } else if payload.len() == 1 {
+                    return Err(DecodeError::OversizedControlFrame(1));
+                } else {
+                    let code = u16::from_be_bytes([payload[0], payload[1]]);
+                    let reason = String::from_utf8(payload[2..].to_vec())
+                        .map_err(|_| DecodeError::InvalidUtf8)?;
+                    (code, reason)
+                };
+                Ok(StepResult::Frame {
+                    frame: DecodedFrame::Close { code, reason },
+                    consumed,
+                })
+            }
+            OPCODE_PING => Ok(StepResult::Frame {
+                frame: DecodedFrame::Ping(payload.to_vec()),
+                consumed,
+            }),
+            OPCODE_PONG => Ok(StepResult::Frame {
+                frame: DecodedFrame::Pong(payload.to_vec()),
+                consumed,
+            }),
+            other => Err(DecodeError::UnknownOpcode(other)),
         }
     }
 

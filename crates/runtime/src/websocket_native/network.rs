@@ -1,25 +1,79 @@
-//! Per-WS network plumbing — handshake spawn, receive loop, send pump.
+//! Per-WS network plumbing — handshake spawn + bidirectional reader/writer.
 //!
-//! Two long-lived compio tasks per established socket (one for read,
-//! one for write) plus a connect task that owns the handshake. All
-//! three communicate via the shared `Rc<RefCell<NativeWsState>>`
-//! registered on `RuntimeState::native_websockets`.
+//! ## Architecture
 //!
-//! Events flow JS-ward via `OpResult::WebSocketEvent`: each event
-//! resolved by the receive task wakes the pump (push a one-shot
-//! future onto `spawned_ops`); the runtime arm in `runtime.rs`
-//! calls `dispatch_ws_event` (this file) to mint native MessageEvent
-//! / CloseEvent / Event and dispatch via `dom::event_target`.
+//! Each established WebSocket runs **bidirectionally without starvation**:
+//! a recv from the V8 thread can be processed at any time, even while
+//! a frame is being assembled from the wire. Sends and reads NEVER
+//! block each other.
 //!
-//! Backpressure: the receive loop awaits while the per-WS event queue
-//! exceeds RECV_BACKPRESSURE_CAP. The cap is small (256) — no event
-//! ever sits there longer than one pump tick in steady state.
+//! ### Plain TCP (`ws://`) — true two-task split
 //!
-//! Close handshake timeout: per RFC 6455 §7.1.1 we wait up to 5s for
-//! the peer's Close echo before dropping TCP. Wrapped in
-//! `compio::time::timeout`.
+//! Reader and writer are independent compio tasks sharing
+//! `Rc<TcpStream>`. They borrow the stream immutably via
+//! `&TcpStream: AsyncRead + AsyncWrite` — io_uring multiplexes
+//! concurrent submissions on the same fd, so reads and writes proceed
+//! in parallel.
 //!
-//! Spec citations:
+//! ### TLS (`wss://`) — single-task cooperative interleave
+//!
+//! `compio_tls::TlsStream` is not aliasable (cipher state is unique).
+//! A single owner task runs a loop:
+//!
+//!   1. Try to decode a frame from `read_buffer` (sans-IO; pure
+//!      function on the buffer + reader state).
+//!   2. If a frame: dispatch.
+//!   3. Otherwise: `select(tls.read(chunk), rx.next())`.
+//!      - read resolved → append bytes to `read_buffer`, retry decode.
+//!      - recv resolved → encode, write to `tls`, retry decode.
+//!
+//! The `tls.read(chunk)` future reads INTO a fresh `chunk` buffer per
+//! iteration. If we cancel mid-read (because recv resolved first),
+//! the future drops without losing any state from `read_buffer` —
+//! `chunk` gets discarded but `read_buffer` is untouched. The recv
+//! future resolves only when V8 actually has a frame to send.
+//!
+//! In practice the `read` is almost always cheap (often returns
+//! `WouldBlock` or one chunk) so the cancellation cost is negligible.
+//!
+//! ## Leftover bytes from the handshake
+//!
+//! The HTTP handshake reads a 4 KiB chunk at a time; the server may
+//! pipeline a frame past the 101 response. Those bytes are returned
+//! from the handshake in `Established::leftover` and seeded into the
+//! reader's buffer BEFORE the first network read.
+//!
+//! For the plain-TCP driver we use a `ChainReader` adapter that yields
+//! the leftover slice first, then the underlying stream. For the TLS
+//! driver we just prepend to `read_buffer`.
+//!
+//! ## Event flow JS-ward
+//!
+//! Every queued `WsEvent` triggers a one-shot
+//! `OpResult::WebSocketEvent` future; the runtime arm in `runtime.rs`
+//! calls `dispatch_ws_event`, which drains the per-WS queue (so
+//! multiple events queued in one batch dispatch in one V8 turn).
+//!
+//! ## Backpressure
+//!
+//! Receive: when the per-WS event queue exceeds `RECV_BACKPRESSURE_CAP`
+//! the reader awaits drain (the V8 pump wakes it once the queue drops
+//! below `RECV_BACKPRESSURE_RESUME`). Combined with TCP's flow control
+//! this propagates to the peer.
+//!
+//! Send: bounded by `bufferedAmount` cap (per WHATWG §3.1). The V8
+//! wrapper short-circuits `send()` when `full` is set.
+//!
+//! ## Close handshake (RFC 6455 §7.1)
+//!
+//! - Local close: V8 calls `close()` → enqueues `WsFrame::Close` on
+//!   `send_tx` → writer encodes and sends. The reader continues until
+//!   it sees the peer's Close echo.
+//! - Peer close: reader sees a `Close` frame, queues a `Close` echo
+//!   on the writer's channel, fires CloseEvent, then exits. The
+//!   writer drains the echo and exits when its channel closes.
+//!
+//! ## Spec citations
 //! - `establish a WebSocket connection`: WHATWG §4.1.
 //! - `WebSocket message received`: WHATWG §4.4.
 //! - `closing handshake started`: WHATWG §4.5.
@@ -31,11 +85,18 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::task::Waker;
-use std::time::Duration;
 
-use compio_ws::tungstenite::{self, Message, protocol::frame::CloseFrame};
-use compio_ws::tungstenite::protocol::frame::coding::CloseCode;
+use compio::buf::IoBuf;
+use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use compio::net::TcpStream;
+use compio_tls::TlsStream;
+use futures::channel::mpsc;
+use futures::StreamExt;
 
+use super::frame_reader::{DecodedFrame, FrameReader, StepResult};
+use super::frame_writer::{
+    encode_binary_frame, encode_close_frame, encode_pong_frame, encode_text_frame,
+};
 use super::handshake::{Established, EstablishedStream, HandshakeError, HandshakeOptions};
 use super::{WebSocketImpl, WsFrame};
 use crate::state::{OpResult, SharedState};
@@ -63,57 +124,23 @@ pub enum WsEvent {
         was_clean: bool,
     },
     /// Connection-failed signal — fires `error` event.
-    /// Per WHATWG §4 connection-failed dispatch always emits `error`
-    /// then `close{1006, was_clean: false}`; `Close` is queued
-    /// separately from `Error` so the pump dispatches them in order.
     Error { reason: String },
 }
 
-/// Per-WS native state — shared between the connect task, receive loop,
-/// send pump, and the V8-thread dispatch arm.
-///
-/// Lives behind `Rc<RefCell<...>>` (single-threaded, isolate-bound) and
-/// is keyed on `ws_id` in `RuntimeState::native_websockets`. Holding
-/// the buffered-amount counter HERE (not on `WebSocketImpl`) lets the
-/// network task update it without dereferencing a raw pointer to the
-/// boxed impl — the V8-side getter reads it through the same Rc.
+/// Per-WS native state — shared between the connect task, both pumps,
+/// and the V8-thread dispatch arm.
 pub struct NativeWsState {
-    /// Pending events awaiting dispatch on the V8 thread.
     pub events: VecDeque<WsEvent>,
-    /// Receive-loop backpressure waker — woken when `events` shrinks
-    /// below the resume watermark.
     pub recv_backpressure_waker: Option<Waker>,
-    /// Pump-side: outgoing send queue (drained by send_pump).
-    pub send_queue: VecDeque<WsFrame>,
-    /// Send-pump waker.
-    pub send_waker: Option<Waker>,
-    /// "Close-was-sent" latch: once true, send_pump exits cleanly after
-    /// emitting one Close frame.
-    pub close_initiated: bool,
-    /// Cancellation flag — flipped by `WebSocketImpl::close()` during
-    /// CONNECTING and by AbortSignal abort. The connect task observes
-    /// it and emits Error+Close{1006}.
     pub cancel: bool,
-    /// Cancel reason for AbortSignal abort propagation.
     pub cancel_reason: String,
-    /// Tracks whether the receive loop has exited (so send_pump can
-    /// stop enqueueing).
-    pub recv_finished: bool,
-    /// Last-resort waker for the connect task while CONNECTING (so
-    /// `close()` during CONNECTING can break the connect future).
     pub connect_waker: Option<Waker>,
-    /// Shared `WebSocketImpl::buffered_amount` (same Rc — both sides
-    /// see the same underlying Cell). The network task decrements
-    /// after a successful write; the V8 thread bumps at queue time.
-    /// `Rc` clone is fine: single-threaded isolate, never sent.
     pub buffered_amount: Rc<Cell<u64>>,
-    /// Shared `WebSocketImpl::full` flag — set when projected queue
-    /// size would exceed `MAX_BUFFERED_AMOUNT`; cleared by the pump
-    /// at 50% drain (hysteresis).
     pub full: Rc<Cell<bool>>,
-    /// True for client sockets (network-backed); false for paired sockets
-    /// (no real network, message passing only).
     pub is_pair: bool,
+    /// Sender end of the writer channel. `None` until the connect task
+    /// has finished the handshake.
+    pub send_tx: Option<mpsc::UnboundedSender<WsFrame>>,
 }
 
 impl NativeWsState {
@@ -121,16 +148,13 @@ impl NativeWsState {
         NativeWsState {
             events: VecDeque::new(),
             recv_backpressure_waker: None,
-            send_queue: VecDeque::new(),
-            send_waker: None,
-            close_initiated: false,
             cancel: false,
             cancel_reason: String::new(),
-            recv_finished: false,
             connect_waker: None,
             buffered_amount: Rc::new(Cell::new(0)),
             full: Rc::new(Cell::new(false)),
             is_pair: false,
+            send_tx: None,
         }
     }
 
@@ -142,28 +166,21 @@ impl NativeWsState {
     }
 }
 
-/// Receive-side backpressure cap. When the per-WS event queue exceeds
-/// this, the receive loop awaits drain before reading the next frame.
-/// Combined with tungstenite's stream-level read buffer (~128 KiB) this
-/// applies TCP backpressure.
 const RECV_BACKPRESSURE_CAP: usize = 256;
-
-/// Resume watermark — receive loop wakes when queue drops below this.
 const RECV_BACKPRESSURE_RESUME: usize = 128;
 
-/// Close handshake timeout per RFC 6455 §7.1.1.
-const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Outcome of one iteration of the TLS driver's `select` between a
+/// network read and a user send. Used to break the borrow on `tls`
+/// before writing.
+enum Action {
+    ReadCompleted(compio::buf::BufResult<usize, Vec<u8>>),
+    RecvCompleted(Option<WsFrame>),
+}
 
 // ---------------------------------------------------------------------------
-// Spawning the connect task
+// State registration
 // ---------------------------------------------------------------------------
 
-/// Allocate a fresh `ws_id` for a native client WebSocket and register
-/// its `NativeWsState`. Called from `WebSocketImpl::new`.
-///
-/// IDs are odd numbers (1, 3, 5, …) to leave the even space for
-/// WebSocketPair which mints two IDs together (the polyfill uses
-/// `next_ws_id` to allocate two; the native side stays disjoint).
 pub fn alloc_native_ws_id(state: &SharedState) -> u32 {
     let mut s = state.borrow_mut();
     let id = s.next_native_ws_id;
@@ -173,19 +190,18 @@ pub fn alloc_native_ws_id(state: &SharedState) -> u32 {
     id
 }
 
-/// Free the `NativeWsState` for `ws_id` after the connect task and
-/// both pumps have exited. Idempotent.
 pub fn free_native_ws_state(state: &SharedState, ws_id: u32) {
     let mut s = state.borrow_mut();
     s.native_websockets.remove(&ws_id);
 }
 
-/// Get a clone of the per-WS state Rc, if registered.
-pub fn lookup_native_ws_state(state: &SharedState, ws_id: u32) -> Option<Rc<RefCell<NativeWsState>>> {
+pub fn lookup_native_ws_state(
+    state: &SharedState,
+    ws_id: u32,
+) -> Option<Rc<RefCell<NativeWsState>>> {
     state.borrow().native_websockets.get(&ws_id).cloned()
 }
 
-/// Push an event onto the per-WS queue and wake the pump.
 fn push_event(state: &SharedState, ws_id: u32, event: WsEvent) {
     let ws = match lookup_native_ws_state(state, ws_id) {
         Some(w) => w,
@@ -193,11 +209,6 @@ fn push_event(state: &SharedState, ws_id: u32, event: WsEvent) {
     };
     ws.borrow_mut().events.push_back(event);
 
-    // Push a one-shot future onto spawned_ops that yields
-    // `OpResult::WebSocketEvent`. The pump's existing select loop
-    // picks it up; the dispatch arm in runtime.rs drains the per-WS
-    // queue (so multiple events queued in one batch dispatch in one
-    // V8 turn).
     let id = ws_id;
     let fut: std::pin::Pin<Box<dyn std::future::Future<Output = OpResult>>> =
         Box::pin(async move { OpResult::WebSocketEvent { ws_id: id } });
@@ -206,14 +217,12 @@ fn push_event(state: &SharedState, ws_id: u32, event: WsEvent) {
         s.spawned_ops.push(fut);
     }
 
-    // Wake the pump.
     let notify = state.borrow().pump_notify_tx.clone();
     if let Some(mut tx) = notify {
         let _ = tx.try_send(());
     }
 }
 
-/// Backpressure: await until events queue drops below resume watermark.
 async fn await_recv_drain(ws_state: &Rc<RefCell<NativeWsState>>) {
     use std::future::poll_fn;
     poll_fn(|cx| {
@@ -228,9 +237,6 @@ async fn await_recv_drain(ws_state: &Rc<RefCell<NativeWsState>>) {
     .await
 }
 
-/// Drain a batch of events for `ws_id`. Called by the V8-thread pump
-/// arm when it sees `OpResult::WebSocketEvent`. Returns the events in
-/// FIFO order. Caller must dispatch them in the same V8 turn.
 pub fn drain_events(state: &SharedState, ws_id: u32) -> Vec<WsEvent> {
     let Some(ws) = lookup_native_ws_state(state, ws_id) else {
         return Vec::new();
@@ -239,8 +245,6 @@ pub fn drain_events(state: &SharedState, ws_id: u32) -> Vec<WsEvent> {
         let mut s = ws.borrow_mut();
         s.events.drain(..).collect()
     };
-    // After draining, wake the receive loop if it was paused for
-    // backpressure.
     let waker = {
         let mut s = ws.borrow_mut();
         if s.events.len() < RECV_BACKPRESSURE_RESUME {
@@ -256,11 +260,9 @@ pub fn drain_events(state: &SharedState, ws_id: u32) -> Vec<WsEvent> {
 }
 
 // ---------------------------------------------------------------------------
-// Connect task — handshake + spawn receive_loop + send_pump
+// Connect task
 // ---------------------------------------------------------------------------
 
-/// Spawn the connect task for a freshly constructed WebSocket. The task
-/// runs on the same compio thread as V8 (no Send required).
 pub fn spawn_connect_task(
     state: SharedState,
     ws_id: u32,
@@ -269,8 +271,6 @@ pub fn spawn_connect_task(
 ) {
     let state_for_task = state.clone();
     let task = async move {
-        // Observe pre-emptive cancellation (e.g. the user called
-        // close() between construction and the task being polled).
         if let Some(ws) = lookup_native_ws_state(&state_for_task, ws_id) {
             if ws.borrow().cancel {
                 let reason = ws.borrow().cancel_reason.clone();
@@ -294,18 +294,18 @@ pub fn spawn_connect_task(
             }
         }
 
-        let result = {
-            let url_for_handshake = url.clone();
-            super::handshake::run_client_handshake(url_for_handshake, opts).await
-        };
+        let max_frame_size = opts.max_frame_size;
+        let max_message_size = opts.max_message_size;
+
+        let result = super::handshake::run_handshake(url, opts).await;
 
         match result {
             Ok(Established {
                 stream,
+                leftover,
                 protocol,
                 extensions,
             }) => {
-                // Open event first (before any messages).
                 push_event(
                     &state_for_task,
                     ws_id,
@@ -315,14 +315,22 @@ pub fn spawn_connect_task(
                     },
                 );
 
-                // Run the read+send pumps to completion. Both share the
-                // single underlying WebSocketStream — we need to
-                // multiplex via `futures::select`. Because compio_ws's
-                // WebSocketStream is `&mut self` for both read and send,
-                // we run them as a single loop that alternates based on
-                // wakeups. (The simple way: wrap both in one task that
-                // selects between read and a send notification.)
-                run_socket_loop(state_for_task.clone(), ws_id, stream).await;
+                let (tx, rx) = mpsc::unbounded::<WsFrame>();
+                if let Some(ws) = lookup_native_ws_state(&state_for_task, ws_id) {
+                    ws.borrow_mut().send_tx = Some(tx.clone());
+                }
+
+                run_socket_driver(
+                    state_for_task.clone(),
+                    ws_id,
+                    stream,
+                    leftover,
+                    rx,
+                    tx,
+                    max_frame_size,
+                    max_message_size,
+                )
+                .await;
             }
             Err(HandshakeError::Aborted { signal_reason }) => {
                 let reason = signal_reason.unwrap_or_default();
@@ -344,8 +352,6 @@ pub fn spawn_connect_task(
                 );
             }
             Err(e) => {
-                // Connection-failed dispatch per WHATWG §4: error then
-                // close(1006). Both events queued; dispatched in order.
                 push_event(
                     &state_for_task,
                     ws_id,
@@ -370,284 +376,553 @@ pub fn spawn_connect_task(
 }
 
 // ---------------------------------------------------------------------------
-// run_socket_loop — multiplexed read/send on a single stream
+// run_socket_driver — dispatch by stream variant
 // ---------------------------------------------------------------------------
 
-/// Drives the socket post-handshake. Single task that:
-///   1. Awaits incoming frames (read).
-///   2. Drains outgoing frames (send).
-///   3. Honours backpressure on the per-WS event queue.
-///   4. Exits cleanly on Close.
-async fn run_socket_loop(state: SharedState, ws_id: u32, stream: EstablishedStream) {
+#[allow(clippy::too_many_arguments)]
+async fn run_socket_driver(
+    state: SharedState,
+    ws_id: u32,
+    stream: EstablishedStream,
+    leftover: Vec<u8>,
+    rx: mpsc::UnboundedReceiver<WsFrame>,
+    tx: mpsc::UnboundedSender<WsFrame>,
+    max_frame_size: usize,
+    max_message_size: usize,
+) {
     match stream {
-        EstablishedStream::Plain(ws) => run_socket_loop_inner(state, ws_id, ws).await,
-        EstablishedStream::Tls(ws) => run_socket_loop_inner(state, ws_id, ws).await,
+        EstablishedStream::Plain(tcp) => {
+            run_plain_driver(
+                state,
+                ws_id,
+                tcp,
+                leftover,
+                rx,
+                tx,
+                max_frame_size,
+                max_message_size,
+            )
+            .await
+        }
+        EstablishedStream::Tls(tls) => {
+            run_tls_driver(
+                state,
+                ws_id,
+                tls,
+                leftover,
+                rx,
+                tx,
+                max_frame_size,
+                max_message_size,
+            )
+            .await
+        }
     }
 }
 
-async fn run_socket_loop_inner<S>(
+// ---------------------------------------------------------------------------
+// Plain-TCP driver — true two-task split
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+async fn run_plain_driver(
     state: SharedState,
     ws_id: u32,
-    mut stream: compio_ws::WebSocketStream<S>,
-) where
-    S: compio::io::AsyncRead + compio::io::AsyncWrite + 'static,
-{
+    tcp: TcpStream,
+    leftover: Vec<u8>,
+    rx: mpsc::UnboundedReceiver<WsFrame>,
+    tx: mpsc::UnboundedSender<WsFrame>,
+    max_frame_size: usize,
+    max_message_size: usize,
+) {
+    let tcp = Rc::new(tcp);
+
+    let reader_task = {
+        let state = state.clone();
+        let tcp = tcp.clone();
+        let tx_for_reader = tx.clone();
+        async move {
+            let r = TcpReadHalf { tcp };
+            run_reader_loop(
+                &state,
+                ws_id,
+                r,
+                leftover,
+                tx_for_reader,
+                max_frame_size,
+                max_message_size,
+            )
+            .await;
+        }
+    };
+
+    let writer_task = {
+        let state = state.clone();
+        let tcp = tcp.clone();
+        async move {
+            let w = TcpWriteHalf { tcp };
+            run_writer_loop(&state, ws_id, w, rx).await;
+        }
+    };
+
+    let reader_handle = compio::runtime::spawn(crate::panic_util::guard("ws-reader", reader_task));
+    let writer_handle = compio::runtime::spawn(crate::panic_util::guard("ws-writer", writer_task));
+
+    drop(tx);
+    let _ = reader_handle.await;
+    let _ = writer_handle.await;
+    // Free per-WS state — the JS side may still hold the wrapper, but
+    // the network is dead. The state remove itself happens during
+    // wrapper finalisation; we just clear the send channel.
+    if let Some(ws) = lookup_native_ws_state(&state, ws_id) {
+        ws.borrow_mut().send_tx = None;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TLS driver — single-task cooperative interleave
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+async fn run_tls_driver(
+    state: SharedState,
+    ws_id: u32,
+    mut tls: TlsStream<TcpStream>,
+    leftover: Vec<u8>,
+    mut rx: mpsc::UnboundedReceiver<WsFrame>,
+    _tx: mpsc::UnboundedSender<WsFrame>,
+    max_frame_size: usize,
+    max_message_size: usize,
+) {
+    use futures::future::{select, Either};
+
+    let mut reader = FrameReader::new(max_frame_size, max_message_size);
+    let mut read_buffer: Vec<u8> = leftover;
     let ws_state = match lookup_native_ws_state(&state, ws_id) {
         Some(w) => w,
         None => return,
     };
-    #[allow(unused_assignments)]
-    let mut sent_close = false;
-    #[allow(unused_assignments)]
-    let mut peer_closed = false;
 
-    // The single-task design avoids the compio-io "buffer was submitted
-    // for io and never returned" panic that fires if we drop a partially-
-    // polled `stream.read()` future. tungstenite over compio is
-    // serialise-only at the future level: once a read or send future is
-    // started, it MUST run to completion.
-    //
-    // To allow sends without blocking on reads, we use a small drain
-    // step per iteration:
-    //   1. Drain everything in `send_queue` synchronously (each send
-    //      is one `stream.send().await` — never cancellable but
-    //      always run to completion).
-    //   2. Run ONE `stream.read().await` to completion and dispatch.
-    //   3. After a read returns, loop back to step 1 in case sends
-    //      arrived while we were blocked on the read.
-    //
-    // The cost: a send queued WHILE a read is blocked waits until
-    // that read returns. For low-latency request/response apps this
-    // is fine — the peer's response wakes the read; for one-way
-    // streaming sends this could starve. Future improvement: spawn a
-    // periodic "wakeup ping" the user can disable, OR adopt a true
-    // splittable framer (out of scope).
+    let mut sent_close = false;
+    let mut peer_closed = false;
+    // Self-feeding pong / close-echo queue: written to by the read
+    // pipeline, consumed BEFORE we touch the user's `rx`. (Otherwise
+    // a fast peer that sends only Pings could starve user sends.)
+    let mut internal_outbound: VecDeque<WsFrame> = VecDeque::new();
+
     loop {
-        // Bail out if the queue is paused for backpressure.
         await_recv_drain(&ws_state).await;
         if sent_close && peer_closed {
             break;
         }
 
-        // STEP 1: drain pending sends.
+        // Attempt to drain frames from the in-memory buffer until we
+        // either need more bytes or run out of work.
         loop {
-            let cancelled = ws_state.borrow().cancel;
-            if cancelled {
-                let reason = ws_state.borrow().cancel_reason.clone();
-                push_event(
-                    &state,
-                    ws_id,
-                    WsEvent::Error {
-                        reason: format!("aborted: {reason}"),
-                    },
-                );
-                push_event(
-                    &state,
-                    ws_id,
-                    WsEvent::Close {
-                        code: 1006,
-                        reason,
-                        was_clean: false,
-                    },
-                );
-                return;
-            }
-
-            let frame_opt = ws_state.borrow_mut().send_queue.pop_front();
-            let Some(frame) = frame_opt else { break };
-            let mut sent_close_now = false;
-            let send_result: Result<u64, String> = match frame {
-                WsFrame::Text(s) => {
-                    let bytes_len = s.len() as u64;
-                    match stream.send(Message::Text(s.into())).await {
-                        Ok(()) => Ok(bytes_len),
-                        Err(e) => Err(e.to_string()),
+            match reader.decode_step(&read_buffer) {
+                Ok(StepResult::Frame { frame, consumed }) => {
+                    read_buffer.drain(..consumed);
+                    let cont = handle_frame_tls(
+                        &state,
+                        ws_id,
+                        frame,
+                        &mut internal_outbound,
+                        sent_close,
+                        &mut peer_closed,
+                    );
+                    if !cont {
+                        // Flush internal_outbound (close echo / pong)
+                        // before exiting so the peer sees a clean
+                        // handshake.
+                        while let Some(f) = internal_outbound.pop_front() {
+                            if let Err(e) =
+                                write_frame(&mut tls, &state, ws_id, f, &mut sent_close).await
+                            {
+                                fail_connection(&state, ws_id, format!("write error: {e}"));
+                                return;
+                            }
+                        }
+                        let _ = tls.shutdown().await;
+                        return;
                     }
+                    continue;
                 }
-                WsFrame::Binary(b) => {
-                    let bytes_len = b.len() as u64;
-                    match stream.send(Message::Binary(b.into())).await {
-                        Ok(()) => Ok(bytes_len),
-                        Err(e) => Err(e.to_string()),
-                    }
+                Ok(StepResult::NeedMoreContinuation { consumed }) => {
+                    read_buffer.drain(..consumed);
+                    continue;
                 }
-                WsFrame::Blob { handle: _, size } => {
-                    // v1 ships text/Binary fast paths only. The
-                    // bufferedAmount was bumped at queue time;
-                    // release the budget.
-                    Ok(size)
-                }
-                WsFrame::Close { code, reason } => {
-                    let payload = code.map(|c| CloseFrame {
-                        code: CloseCode::from(c),
-                        reason: reason.into(),
-                    });
-                    sent_close_now = true;
-                    match stream.send(Message::Close(payload)).await {
-                        Ok(()) => Ok(0),
-                        Err(e) => Err(e.to_string()),
-                    }
-                }
-            };
-            match send_result {
-                Ok(n) if n > 0 => decrement_buffered_amount(&state, ws_id, n),
-                Ok(_) => {}
+                Ok(StepResult::NeedMoreBytes) => break,
                 Err(e) => {
-                    send_failure(&state, ws_id, e);
+                    fail_connection(&state, ws_id, e);
+                    let _ = tls.shutdown().await;
                     return;
                 }
             }
-            if sent_close_now {
-                sent_close = true;
-                ws_state.borrow_mut().close_initiated = true;
-                // Wait for peer's Close echo, up to 5s. Then drop.
-                let close_done = compio::time::timeout(
-                    CLOSE_TIMEOUT,
-                    wait_for_peer_close(&mut stream),
-                )
-                .await;
-                match close_done {
-                    Ok(Ok((code, reason))) => {
-                        push_event(
-                            &state,
-                            ws_id,
-                            WsEvent::Close {
-                                code,
-                                reason,
-                                was_clean: true,
-                            },
-                        );
-                    }
-                    Ok(Err(e)) => {
-                        push_event(
-                            &state,
-                            ws_id,
-                            WsEvent::Error {
-                                reason: format!("{e}"),
-                            },
-                        );
-                        push_event(
-                            &state,
-                            ws_id,
-                            WsEvent::Close {
-                                code: 1006,
-                                reason: String::new(),
-                                was_clean: false,
-                            },
-                        );
-                    }
-                    Err(_) => {
-                        push_event(
-                            &state,
-                            ws_id,
-                            WsEvent::Close {
-                                code: 1006,
-                                reason: String::new(),
-                                was_clean: false,
-                            },
-                        );
-                    }
-                }
+        }
+
+        // Drain pending internal_outbound BEFORE waiting for either
+        // a network read OR a user send.
+        while let Some(f) = internal_outbound.pop_front() {
+            if let Err(e) = write_frame(&mut tls, &state, ws_id, f, &mut sent_close).await {
+                fail_connection(&state, ws_id, format!("write error: {e}"));
                 return;
             }
         }
 
-        // STEP 2: read ONE message. This await is non-cancellable
-        // (compio-io panic if we drop). We rely on the peer / TCP
-        // RST to wake us; for true cancel, the cancel flag has
-        // already returned the loop above.
-        match stream.read().await {
-            Ok(msg) => match msg {
-                Message::Text(s) => {
-                    push_event(&state, ws_id, WsEvent::MessageText(s.to_string()));
+        // Issue ONE read into a fresh buffer chunk OR receive ONE
+        // frame from the V8 thread, whichever resolves first.
+        //
+        // Cancellation safety: if the read is cancelled mid-call (a
+        // recv resolved first), compio cancels the underlying io_uring
+        // submission. Any bytes that arrived but didn't get into our
+        // chunk are still TCP-buffered at the kernel — the next read
+        // picks them up. `read_buffer` is untouched. The recv future
+        // is independent of the stream borrow, so dropping it has no
+        // I/O side effects.
+        //
+        // Why we recreate the read future each iteration instead of
+        // preserving the surviving half: the borrow checker won't let
+        // us hold the surviving read (which carries `&mut tls`) and
+        // also write to `tls` in the same scope. By dropping the
+        // surviver before the write, we release the borrow. The cost
+        // is a wasted io_uring submission per recv-wins iteration
+        // (typically <1 syscall — the cancellation is async).
+        let chunk = vec![0u8; 4096];
+        let action = {
+            let read_fut = AsyncRead::read(&mut tls, chunk);
+            let recv_fut = rx.next();
+            let read_fut = std::pin::pin!(read_fut);
+            let recv_fut = std::pin::pin!(recv_fut);
+            match select(read_fut, recv_fut).await {
+                Either::Left((res, _surviving_recv)) => Action::ReadCompleted(res),
+                Either::Right((maybe_frame, _surviving_read)) => {
+                    Action::RecvCompleted(maybe_frame)
                 }
-                Message::Binary(b) => {
-                    push_event(&state, ws_id, WsEvent::MessageBinary(b.to_vec()));
+            }
+        };
+        // Both futures are dropped here — the `&mut tls` borrow is
+        // released and we can write below.
+
+        match action {
+            Action::ReadCompleted(res) => {
+                let n = match res.0 {
+                    Ok(n) => n,
+                    Err(e) => {
+                        fail_connection(&state, ws_id, e);
+                        return;
+                    }
+                };
+                if n == 0 {
+                    fail_connection(&state, ws_id, "TCP EOF without Close frame");
+                    return;
                 }
-                Message::Ping(_) | Message::Pong(_) => {}
-                Message::Close(frame) => {
-                    let (code, reason) = match frame {
-                        Some(f) => (u16::from(f.code), f.reason.to_string()),
-                        None => (1005, String::new()),
-                    };
-                    push_event(
-                        &state,
-                        ws_id,
-                        WsEvent::Close {
-                            code,
-                            reason,
-                            was_clean: true,
-                        },
-                    );
-                    peer_closed = true;
-                    if sent_close {
+                let chunk = res.1;
+                read_buffer.extend_from_slice(&chunk.as_slice()[..n]);
+            }
+            Action::RecvCompleted(maybe_frame) => {
+                let Some(frame) = maybe_frame else {
+                    if !sent_close {
+                        let close = WsFrame::Close {
+                            code: None,
+                            reason: String::new(),
+                        };
+                        if let Err(e) =
+                            write_frame(&mut tls, &state, ws_id, close, &mut sent_close).await
+                        {
+                            fail_connection(&state, ws_id, format!("write error: {e}"));
+                            return;
+                        }
+                    }
+                    if peer_closed {
                         break;
                     }
-                    ws_state.borrow_mut().close_initiated = true;
-                    let _ = compio::time::timeout(CLOSE_TIMEOUT, stream.close(None)).await;
+                    continue;
+                };
+                if let Err(e) = write_frame(&mut tls, &state, ws_id, frame, &mut sent_close).await {
+                    fail_connection(&state, ws_id, format!("write error: {e}"));
+                    return;
+                }
+                if sent_close && peer_closed {
                     break;
                 }
-                Message::Frame(_) => {}
-            },
-            Err(e) => {
-                push_event(
-                    &state,
-                    ws_id,
-                    WsEvent::Error {
-                        reason: format!("{e}"),
-                    },
-                );
-                push_event(
-                    &state,
-                    ws_id,
-                    WsEvent::Close {
-                        code: 1006,
-                        reason: String::new(),
-                        was_clean: false,
-                    },
-                );
-                break;
             }
         }
     }
 
-    // Mark recv finished + mark state for cleanup.
+    let _ = tls.shutdown().await;
     if let Some(ws) = lookup_native_ws_state(&state, ws_id) {
-        ws.borrow_mut().recv_finished = true;
+        ws.borrow_mut().send_tx = None;
     }
 }
 
-/// After we sent Close, wait for the peer's Close echo. Drains
-/// in-flight non-Close frames silently (per RFC 6455 §7.1.2 the
-/// receiver SHOULD continue processing data until the Close arrives).
-async fn wait_for_peer_close<S>(
-    stream: &mut compio_ws::WebSocketStream<S>,
-) -> Result<(u16, String), tungstenite::Error>
-where
-    S: compio::io::AsyncRead + compio::io::AsyncWrite,
-{
-    loop {
-        let msg = stream.read().await?;
-        match msg {
-            Message::Close(frame) => {
-                let (code, reason) = match frame {
-                    Some(f) => (u16::from(f.code), f.reason.to_string()),
-                    None => (1005, String::new()),
-                };
-                return Ok((code, reason));
+/// Side-effect interpreter for a decoded TLS frame. Pushes user-facing
+/// events to V8 and queues internal outbound frames (Pong / Close echo).
+/// Returns `false` to break the outer loop.
+fn handle_frame_tls(
+    state: &SharedState,
+    ws_id: u32,
+    frame: DecodedFrame,
+    internal_outbound: &mut VecDeque<WsFrame>,
+    sent_close: bool,
+    peer_closed: &mut bool,
+) -> bool {
+    match frame {
+        DecodedFrame::Text(s) => {
+            push_event(state, ws_id, WsEvent::MessageText(s));
+            true
+        }
+        DecodedFrame::Binary(b) => {
+            push_event(state, ws_id, WsEvent::MessageBinary(b));
+            true
+        }
+        DecodedFrame::Ping(payload) => {
+            internal_outbound.push_back(WsFrame::Pong(payload));
+            true
+        }
+        DecodedFrame::Pong(_) => true,
+        DecodedFrame::Close { code, reason } => {
+            push_event(
+                state,
+                ws_id,
+                WsEvent::Close {
+                    code,
+                    reason: reason.clone(),
+                    was_clean: true,
+                },
+            );
+            *peer_closed = true;
+            if !sent_close {
+                // Echo the close back — clean handshake.
+                internal_outbound.push_back(WsFrame::Close {
+                    code: if code == 1005 { None } else { Some(code) },
+                    reason: String::new(),
+                });
             }
-            // Drop everything else while in the closing handshake.
-            _ => continue,
+            // Exit the outer loop; the writer drains internal_outbound
+            // before shutdown.
+            false
         }
     }
 }
 
-fn send_failure(state: &SharedState, ws_id: u32, msg: String) {
+// ---------------------------------------------------------------------------
+// Plain-TCP read/write halves (shared `Rc<TcpStream>`)
+// ---------------------------------------------------------------------------
+
+struct TcpReadHalf {
+    tcp: Rc<TcpStream>,
+}
+
+impl AsyncRead for TcpReadHalf {
+    async fn read<B: compio::buf::IoBufMut>(
+        &mut self,
+        buf: B,
+    ) -> compio::buf::BufResult<usize, B> {
+        let r: &TcpStream = &self.tcp;
+        let mut r = r;
+        r.read(buf).await
+    }
+}
+
+struct TcpWriteHalf {
+    tcp: Rc<TcpStream>,
+}
+
+impl AsyncWrite for TcpWriteHalf {
+    async fn write<T: IoBuf>(&mut self, buf: T) -> compio::buf::BufResult<usize, T> {
+        let w: &TcpStream = &self.tcp;
+        let mut w = w;
+        w.write(buf).await
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        let w: &TcpStream = &self.tcp;
+        let mut w = w;
+        w.shutdown().await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reader / writer loops (plain TCP)
+// ---------------------------------------------------------------------------
+
+async fn run_reader_loop<R>(
+    state: &SharedState,
+    ws_id: u32,
+    mut r: R,
+    leftover: Vec<u8>,
+    tx: mpsc::UnboundedSender<WsFrame>,
+    max_frame_size: usize,
+    max_message_size: usize,
+) where
+    R: AsyncRead + Unpin,
+{
+    let mut reader = FrameReader::new(max_frame_size, max_message_size);
+    let mut read_buffer: Vec<u8> = leftover;
+    let ws_state = match lookup_native_ws_state(state, ws_id) {
+        Some(w) => w,
+        None => return,
+    };
+
+    loop {
+        await_recv_drain(&ws_state).await;
+
+        // Drain frames already in the buffer.
+        loop {
+            match reader.decode_step(&read_buffer) {
+                Ok(StepResult::Frame { frame, consumed }) => {
+                    read_buffer.drain(..consumed);
+                    if !handle_frame_plain(state, ws_id, frame, &tx) {
+                        return;
+                    }
+                    continue;
+                }
+                Ok(StepResult::NeedMoreContinuation { consumed }) => {
+                    read_buffer.drain(..consumed);
+                    continue;
+                }
+                Ok(StepResult::NeedMoreBytes) => break,
+                Err(e) => {
+                    fail_connection(state, ws_id, e);
+                    return;
+                }
+            }
+        }
+
+        // Issue a read.
+        let chunk = vec![0u8; 4096];
+        let res = AsyncRead::read(&mut r, chunk).await;
+        let n = match res.0 {
+            Ok(n) => n,
+            Err(e) => {
+                fail_connection(state, ws_id, e);
+                return;
+            }
+        };
+        if n == 0 {
+            fail_connection(state, ws_id, "TCP EOF without Close frame");
+            return;
+        }
+        let chunk = res.1;
+        read_buffer.extend_from_slice(&chunk.as_slice()[..n]);
+    }
+}
+
+/// Side-effect interpreter for a decoded plain-TCP frame. Returns
+/// `false` to break the read loop.
+fn handle_frame_plain(
+    state: &SharedState,
+    ws_id: u32,
+    frame: DecodedFrame,
+    tx: &mpsc::UnboundedSender<WsFrame>,
+) -> bool {
+    match frame {
+        DecodedFrame::Text(s) => {
+            push_event(state, ws_id, WsEvent::MessageText(s));
+            true
+        }
+        DecodedFrame::Binary(b) => {
+            push_event(state, ws_id, WsEvent::MessageBinary(b));
+            true
+        }
+        DecodedFrame::Ping(payload) => {
+            let _ = tx.unbounded_send(WsFrame::Pong(payload));
+            true
+        }
+        DecodedFrame::Pong(_) => true,
+        DecodedFrame::Close { code, reason } => {
+            // Echo Close back via the writer channel.
+            let echo = WsFrame::Close {
+                code: if code == 1005 { None } else { Some(code) },
+                reason: String::new(),
+            };
+            let _ = tx.unbounded_send(echo);
+            push_event(
+                state,
+                ws_id,
+                WsEvent::Close {
+                    code,
+                    reason,
+                    was_clean: true,
+                },
+            );
+            false
+        }
+    }
+}
+
+async fn run_writer_loop<W>(
+    state: &SharedState,
+    ws_id: u32,
+    mut w: W,
+    mut rx: mpsc::UnboundedReceiver<WsFrame>,
+) where
+    W: AsyncWrite + Unpin,
+{
+    let mut sent_close = false;
+    while let Some(frame) = rx.next().await {
+        if let Err(e) = write_frame(&mut w, state, ws_id, frame, &mut sent_close).await {
+            fail_connection(state, ws_id, format!("write error: {e}"));
+            return;
+        }
+    }
+    let _ = w.shutdown().await;
+}
+
+async fn write_frame<W>(
+    w: &mut W,
+    state: &SharedState,
+    ws_id: u32,
+    frame: WsFrame,
+    sent_close: &mut bool,
+) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    match frame {
+        WsFrame::Text(s) => {
+            let n = s.len() as u64;
+            let bytes = encode_text_frame(&s);
+            let res = w.write_all(bytes).await;
+            res.0?;
+            decrement_buffered_amount(state, ws_id, n);
+        }
+        WsFrame::Binary(b) => {
+            let n = b.len() as u64;
+            let bytes = encode_binary_frame(&b);
+            let res = w.write_all(bytes).await;
+            res.0?;
+            decrement_buffered_amount(state, ws_id, n);
+        }
+        WsFrame::Blob { handle: _, size } => {
+            // v1 ships text/Binary fast paths only.
+            decrement_buffered_amount(state, ws_id, size);
+        }
+        WsFrame::Pong(payload) => {
+            let bytes = encode_pong_frame(&payload);
+            let res = w.write_all(bytes).await;
+            res.0?;
+        }
+        WsFrame::Close { code, reason } => {
+            *sent_close = true;
+            let bytes = encode_close_frame(code, &reason);
+            let res = w.write_all(bytes).await;
+            res.0?;
+        }
+    }
+    Ok(())
+}
+
+fn fail_connection<E: std::fmt::Display>(state: &SharedState, ws_id: u32, err: E) {
     push_event(
         state,
         ws_id,
         WsEvent::Error {
-            reason: format!("send error: {msg}"),
+            reason: format!("{err}"),
         },
     );
     push_event(
@@ -659,18 +934,14 @@ fn send_failure(state: &SharedState, ws_id: u32, msg: String) {
             was_clean: false,
         },
     );
-    // Zero out the buffered counter on failure — outstanding frames
-    // are dropped on the floor (matches v1 polyfill behaviour).
     if let Some(ws) = lookup_native_ws_state(state, ws_id) {
         let mut s = ws.borrow_mut();
-        s.send_queue.clear();
         s.buffered_amount.set(0);
         s.full.set(false);
+        s.send_tx = None;
     }
 }
 
-/// Decrement the per-WS buffered_amount counter after a successful write.
-/// Hysteresis: clear `full` when we drop below 50%.
 fn decrement_buffered_amount(state: &SharedState, ws_id: u32, n: u64) {
     let Some(ws) = lookup_native_ws_state(state, ws_id) else {
         return;
@@ -684,30 +955,31 @@ fn decrement_buffered_amount(state: &SharedState, ws_id: u32, n: u64) {
 }
 
 // ---------------------------------------------------------------------------
-// Send-side hook from `WebSocketImpl::send` / `close` — bridges the
-// per-instance `WebSocketImpl::send_queue` (which the V8 thread populates)
-// with the per-WS network task's `NativeWsState::send_queue` (which the
-// network task drains).
+// Send-side hook from `WebSocketImpl::send` / `close`
 // ---------------------------------------------------------------------------
 
-/// Move all queued frames from `impl_.send_queue` (V8-side) into the
-/// per-WS native state's `send_queue` (network-side) and notify the
-/// send pump. Called whenever JS calls `socket.send()` or
-/// `socket.close()`.
+/// Move all queued frames from `impl_.send_queue` (V8-side) onto the
+/// writer channel.
 pub fn flush_v8_send_queue(state: &SharedState, ws_id: u32, impl_: &WebSocketImpl) {
     let Some(ws) = lookup_native_ws_state(state, ws_id) else {
         return;
     };
-    let frames: Vec<WsFrame> = impl_.send_queue.borrow_mut().drain(..).collect();
-    if frames.is_empty() {
+
+    let tx_opt = ws.borrow().send_tx.clone();
+    let Some(tx) = tx_opt else {
+        // Handshake hasn't finished yet — leave frames on the impl's
+        // queue. The connect task drains it once it spawns the writer
+        // (via the V8 dispatch arm calling flush again on next pump
+        // turn after Open fires).
         return;
-    }
-    let mut s = ws.borrow_mut();
+    };
+
+    let frames: Vec<WsFrame> = impl_.send_queue.borrow_mut().drain(..).collect();
     for f in frames {
-        s.send_queue.push_back(f);
-    }
-    if let Some(w) = s.send_waker.take() {
-        w.wake();
+        if tx.unbounded_send(f).is_err() {
+            // Channel closed — writer has exited; drop frames.
+            break;
+        }
     }
 }
 
@@ -725,22 +997,23 @@ pub fn cancel_native_ws(state: &SharedState, ws_id: u32, reason: String) {
         s.cancel = true;
         s.cancel_reason = reason;
     }
-    // Wake any of the three potential waiters.
-    let (sw, rw, cw) = {
+    let (rw, cw) = {
         let mut s = ws.borrow_mut();
         (
-            s.send_waker.take(),
             s.recv_backpressure_waker.take(),
             s.connect_waker.take(),
         )
     };
-    if let Some(w) = sw {
-        w.wake();
-    }
     if let Some(w) = rw {
         w.wake();
     }
     if let Some(w) = cw {
         w.wake();
+    }
+    // For established sockets, drop the writer channel — the writer
+    // task exits, the reader unblocks via TCP RST when its peer
+    // disconnects.
+    if let Some(ws) = lookup_native_ws_state(state, ws_id) {
+        ws.borrow_mut().send_tx = None;
     }
 }
