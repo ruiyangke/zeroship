@@ -542,6 +542,74 @@ pub fn dispatch_event(
 }
 
 // ---------------------------------------------------------------------------
+// Internal listener install/remove — used by EventHandler IDL attributes
+// (onopen / onabort / etc.) per HTML §8.1.5.1.
+//
+// Same semantics as `addEventListener` / `removeEventListener` but
+// callable from Rust. The listener is added with capture=false,
+// once=false, passive=false (matching the EventHandler IDL contract).
+// ---------------------------------------------------------------------------
+
+/// Install a Rust-driven listener on `target_obj` for `event_name`.
+/// Idempotent on `(callback, capture)` pair — same dedup as
+/// `addEventListener`. Used by EventHandler IDL setters
+/// (`socket.onmessage = f`) so dispatchEvent finds the handler.
+///
+/// Note: this attaches a listener Rc (idempotent) on first call.
+pub fn add_internal_listener(
+    scope: &mut v8::PinScope,
+    target_obj: v8::Local<v8::Object>,
+    event_name: &str,
+    cb: v8::Global<v8::Function>,
+) {
+    let listeners_rc = attach_listeners(scope, target_obj);
+    let already_present = {
+        let map = listeners_rc.borrow();
+        map.get(event_name)
+            .map(|list| {
+                list.iter()
+                    .any(|l| !l.removed && !l.capture && l.callback == cb)
+            })
+            .unwrap_or(false)
+    };
+    if !already_present {
+        listeners_rc
+            .borrow_mut()
+            .entry(event_name.to_string())
+            .or_default()
+            .push(RegisteredListener {
+                callback: cb,
+                capture: false,
+                once: false,
+                passive: false,
+                removed: false,
+            });
+    }
+}
+
+/// Remove ALL non-capture listeners with the given event_name from the
+/// target. Used by EventHandler IDL setters when REPLACING a previously
+/// installed handler — the IDL contract is "remove the previous internal
+/// listener installed by this attribute, install the new one". Since
+/// each EventHandler attribute has at most one internal listener at a
+/// time, removing all non-capture matches for the event_name is sound
+/// and matches undici's behaviour
+/// (`undici/lib/web/websocket/websocket.js:355-445`).
+pub fn remove_internal_listener(
+    scope: &mut v8::PinScope,
+    target_obj: v8::Local<v8::Object>,
+    event_name: &str,
+) {
+    let Some(listeners_rc) = listeners_of(scope, target_obj) else {
+        return;
+    };
+    let mut map = listeners_rc.borrow_mut();
+    if let Some(list) = map.get_mut(event_name) {
+        list.retain(|l| l.capture);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // install_global — wire up EventTarget on globalThis
 // ---------------------------------------------------------------------------
 

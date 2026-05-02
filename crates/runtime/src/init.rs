@@ -726,6 +726,17 @@ pub fn load_polyfills_and_modules(
     // picks up the native EventTarget prototype.
     install_dom(scope);
 
+    // Native WebSocket — D-25 cutover landing 1: gated behind
+    // `runtime_native_websocket` feature flag. When ON, install BEFORE
+    // the polyfill so `globalThis.WebSocket` is the native class; the
+    // polyfill's setup detects the native marker and skips its
+    // assignment. When OFF, the polyfill is the sole provider.
+    #[cfg(feature = "runtime_native_websocket")]
+    {
+        let global = scope.get_current_context().global(scope);
+        crate::websocket_native::install_global(scope, global);
+    }
+
     // WebSocket polyfill — loaded LAST so its prototype chain references
     // the native EventTarget (install_dom installed it just above).
     {

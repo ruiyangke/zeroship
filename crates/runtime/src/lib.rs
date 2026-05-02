@@ -89,6 +89,7 @@ pub mod streams;
 pub mod structured_clone;
 pub mod url_native;
 pub mod websocket;
+pub mod websocket_native;
 pub mod channel;
 pub mod runtime;
 pub mod storage;

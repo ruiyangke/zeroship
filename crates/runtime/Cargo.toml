@@ -63,5 +63,24 @@ path = "src/server.rs"
 name = "echo-server"
 path = "src/echo_server.rs"
 
+[features]
+default = []
+# Per docs/proposals/websocket-native.md D-25 (cutover cadence):
+#  Landing 1: native behind feature flag, polyfill default — current.
+#  Landing 2: flip default to native; polyfill remains as fallback.
+#  Landing 3: delete polyfill.
+# When OFF: the JS polyfill at `embed/websocket.js` provides
+# `globalThis.WebSocket`; native classes are NOT installed.
+# When ON: native classes install BEFORE the polyfill runs, and the
+# polyfill detects this and skips its WebSocket assignment.
+runtime_native_websocket = []
+# Strict-throws path for `binaryType` setter on unknown values. v2 D-7
+# default is silent-no-op (matches undici, workerd, the WPT test); the
+# strict path is preserved behind this feature only for WPT-update tracking.
+runtime_websocket_strict_enum = []
+# Emergency rollback to the polyfill once cutover landing 3 has shipped
+# (delete polyfill); reserved.
+runtime_legacy_websocket = []
+
 [lints]
 workspace = true

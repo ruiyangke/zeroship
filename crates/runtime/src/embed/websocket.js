@@ -1,6 +1,20 @@
 (function(globalThis) {
 "use strict";
 
+// Per docs/proposals/websocket-native.md D-25 cutover: when the native
+// WebSocket impl is feature-flagged ON, `globalThis.WebSocket` was
+// already installed by `crate::websocket_native::install_global` BEFORE
+// this polyfill ran. Detect via the constructor's prototype having a
+// Symbol.toStringTag of "WebSocket" — the polyfill sets a function
+// prototype with no toStringTag. If the native is present, skip the
+// polyfill's class definitions but still install the per-instance
+// __wsRegistry hooks for the existing WebSocketPair gateway path.
+var __nativeWebSocket = (
+    typeof globalThis.WebSocket === "function"
+    && globalThis.WebSocket.prototype
+    && globalThis.WebSocket.prototype[Symbol.toStringTag] === "WebSocket"
+);
+
 // WebSocket states
 var CONNECTING = 0, OPEN = 1, CLOSING = 2, CLOSED = 3;
 
@@ -122,7 +136,18 @@ function WebSocketPair() {
     this[1] = ws1;
 }
 
-globalThis.WebSocket = WebSocket;
+// When native WebSocket is feature-flagged ON, do NOT overwrite
+// globalThis.WebSocket — keep the native class as the single
+// implementation. The polyfill's WebSocketPair constructor still
+// creates pair-coupled sockets via the same __ws* callbacks, but it
+// uses `new WebSocket()` which will route to the native class once
+// step 6 lands the no-arg server-mode constructor support. For step 2
+// (this commit), the polyfill's WebSocketPair path remains the only
+// way to mint pair-coupled sockets — and it uses the polyfill's
+// internal WebSocket class scoped to the IIFE.
+if (!__nativeWebSocket) {
+    globalThis.WebSocket = WebSocket;
+}
 globalThis.WebSocketPair = WebSocketPair;
 // MessageEvent / CloseEvent are installed natively by dom::install_globals.
 globalThis.__wsRegistry = __wsRegistry;
