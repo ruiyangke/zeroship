@@ -405,8 +405,14 @@ fn snapshot_request<'s>(
     })
 }
 
-/// Iterate `request.headers` via `Array.from(...)` and collect into
-/// `Vec<(name, value)>`.
+/// Read `request.headers` directly from the native `Headers` state
+/// pointer when possible (FIX D), falling back to the JS-visible
+/// `Array.from(headers)` iteration for non-native (polyfill) shapes.
+///
+/// The native fast path saves ~17 V8 ops + 2N String allocations
+/// per fetch (where N is the header count): no `globalThis.Array`
+/// lookup, no `Array.from` invocation, no JS Array materialization,
+/// no per-pair `get_index` + `to_rust_string_lossy` round-trips.
 fn read_headers<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     req: v8::Local<'s, v8::Object>,
@@ -419,6 +425,25 @@ fn read_headers<'s>(
         .try_into()
         .map_err(|_| "Request: headers is not an object".to_string())?;
 
+    // FIX D fast path: native Headers state pointer access.
+    if let Some(headers_state) = crate::headers::try_native_headers(scope, h_obj) {
+        let list = headers_state.list();
+        let mut headers: Vec<(String, String)> = Vec::with_capacity(list.len());
+        for (n, v) in list {
+            // Header names + values are byte sequences, but the
+            // wire layer (cyper) takes &str. The HTTP §5 grammar
+            // already validated them as ASCII-safe-ish (tchar +
+            // VCHAR/obs-text), so a lossy decode is fine here.
+            headers.push((
+                String::from_utf8_lossy(n).into_owned(),
+                String::from_utf8_lossy(v).into_owned(),
+            ));
+        }
+        return Ok(headers);
+    }
+
+    // Slow path: polyfill / non-native Headers shape — go through
+    // `Array.from(headers)`.
     let global = scope.get_current_context().global(scope);
     let array_key = v8::String::new(scope, "Array").unwrap();
     let array_v = global

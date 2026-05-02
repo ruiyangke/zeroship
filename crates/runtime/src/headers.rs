@@ -203,6 +203,14 @@ impl Headers {
         self.invalidate_sort_cache();
     }
 
+    /// Return the raw header list as a slice. Used by perf-critical
+    /// internal callers that need to iterate headers without going
+    /// through the JS-visible iterator protocol (which materializes
+    /// a sorted+combined view).
+    pub fn list(&self) -> &[(Vec<u8>, Vec<u8>)] {
+        &self.list
+    }
+
     /// "to append a header" §2.2.1: if list contains a header byte-case-
     /// insensitively matching name, set name to the first such match's
     /// name (preserving casing); push (name, value).
@@ -314,6 +322,29 @@ impl Headers {
         }
         self.sorted_cache.as_deref().unwrap()
     }
+}
+
+/// Read the underlying `Headers` Rust state from a JS `Headers`
+/// wrapper object. Returns `None` if `obj` isn't a Headers wrapper
+/// (no External in internal field 0, or null pointer).
+///
+/// The returned reference borrows the Box<Headers> in the wrapper's
+/// internal field 0. The wrapper is single-threaded (per V8 isolate)
+/// and the Box is dropped only by the V8 weak finalizer, which fires
+/// after all JS callbacks complete — so a borrow that ends before
+/// the next V8 entry is safe.
+pub fn try_native_headers<'a>(
+    scope: &mut v8::PinScope,
+    obj: v8::Local<v8::Object>,
+) -> Option<&'a Headers> {
+    let ext = obj
+        .get_internal_field(scope, 0)
+        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
+    let ptr = ext.value() as *const Headers;
+    if ptr.is_null() {
+        return None;
+    }
+    Some(unsafe { &*ptr })
 }
 
 // ---------------------------------------------------------------------------
