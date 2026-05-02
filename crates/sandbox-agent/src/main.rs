@@ -182,8 +182,12 @@ async fn run() -> Result<(), String> {
             // `handlers::canonical_kind_for` keys off the `/proxy/`
             // prefix. Body cap matches the proxy module's
             // DEFAULT_MAX_BODY_BYTES (100 MiB).
+            //
+            // `{path}*` — tail-match for multi-segment paths
+            // (Vite-style `/assets/main-abc.js`). ntex's `{path:.*}`
+            // only matches a single segment.
             .service(
-                web::resource("/proxy/{port}/{path:.*}")
+                web::resource("/proxy/{port}/{path}*")
                     .state(
                         web::types::PayloadConfig::default()
                             .limit(proxy_limit),

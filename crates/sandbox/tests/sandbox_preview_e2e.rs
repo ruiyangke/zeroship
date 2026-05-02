@@ -205,7 +205,7 @@ macro_rules! make_app {
                     web::types::PayloadConfig::default().limit(256 * 1024 * 1024),
                 )
                 .service(
-                    web::resource("/sandboxes/{id}/preview/{port}/{path:.*}")
+                    web::resource("/sandboxes/{id}/preview/{port}/{path}*")
                         .state(
                             web::types::PayloadConfig::default()
                                 .limit(256 * 1024 * 1024),

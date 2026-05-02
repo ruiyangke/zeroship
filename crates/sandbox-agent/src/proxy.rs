@@ -79,7 +79,7 @@ const HOP_BY_HOP: &[&str] = &[
     "upgrade",
 ];
 
-/// `ANY /proxy/{port}/{path:.*}` — the agent-side proxy handler.
+/// `ANY /proxy/{port}/{path}*` — the agent-side proxy handler.
 ///
 /// Authentication is verified inline (matches the pattern of the
 /// other handlers); the v1.1 canonical is dispatched automatically
@@ -682,7 +682,7 @@ mod tests {
                             .limit(256 * 1024 * 1024),
                     )
                     .service(
-                        web::resource("/proxy/{port}/{path:.*}")
+                        web::resource("/proxy/{port}/{path}*")
                             .state(
                                 web::types::PayloadConfig::default()
                                     .limit(256 * 1024 * 1024),

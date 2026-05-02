@@ -269,7 +269,7 @@ macro_rules! make_app {
                     ),
                 )
                 .service(
-                    web::resource("/sandboxes/{id}/preview/{port}/{path:.*}")
+                    web::resource("/sandboxes/{id}/preview/{port}/{path}*")
                         .state(
                             web::types::PayloadConfig::default()
                                 .limit(256 * 1024 * 1024),
@@ -637,10 +637,9 @@ async fn ro_token_post_via_dispatch_returns_404_uniform() {
     let app = make_app!(state.clone());
     let token = direct_mint(&state, id, 5173, "ro", 3600);
     let cookie = format!("{}={token}", cookie_name_for(id));
-    // NOTE: path is a single segment (no slash) — the controller's
-    // catch-all `{path:.*}` is per-segment in ntex. Single-segment
-    // path is enough to exercise the dispatch + authorize_with_method
-    // gate.
+    // Single-segment path here is sufficient to exercise the
+    // dispatch + authorize_with_method gate. (Production route is
+    // `/sandboxes/{id}/preview/{port}/{path}*` for tail-match.)
     let req = test::TestRequest::post()
         .uri(&format!("/sandboxes/{id}/preview/5173/api"))
         .header("Cookie", cookie.as_str())

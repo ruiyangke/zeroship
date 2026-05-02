@@ -184,7 +184,7 @@ async fn main() -> std::io::Result<()> {
             )
             // Phase-3 share-token mint/list/revoke (§ III). The
             // `/share` resource is registered BEFORE the catch-all
-            // `/preview/{port}/{path:.*}` so ntex matches the more
+            // `/preview/{port}/{path}*` so ntex matches the more
             // specific routes first.
             .service(
                 web::resource("/sandboxes/{id}/preview/{port}/share")
@@ -203,8 +203,13 @@ async fn main() -> std::io::Result<()> {
             // Preview proxy (§ II.2). Creator-authed; signed v1.1
             // forward to the agent at /proxy/{port}/{path*}. Body cap
             // matches the agent (100 MiB) plus 1 MiB serialization slack.
+            //
+            // NOTE: `{path}*` (tail-match) — NOT `{path:.*}`. ntex's
+            // regex constraint matches a single path segment only;
+            // `{tail}*` is the documented multi-segment tail-match
+            // syntax. See gateway/main.rs for the same pattern.
             .service(
-                web::resource("/sandboxes/{id}/preview/{port}/{path:.*}")
+                web::resource("/sandboxes/{id}/preview/{port}/{path}*")
                     .state(
                         web::types::PayloadConfig::default()
                             .limit(preview::DEFAULT_MAX_BODY_BYTES + 1024 * 1024),
