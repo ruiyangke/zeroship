@@ -4,6 +4,40 @@ Tracking known platform-level issues with no immediate fix landed. Each entry
 is a self-contained workaround note for downstream work plus a `Fix path:`
 pointer for whoever picks it up.
 
+## Status legend
+
+- **open** — not yet fixed; the workaround in this entry is still in use.
+- **closed** — fix landed in tree; entry kept for the historical record.
+- **superseded** — replaced by a newer entry with a wider fix path.
+
+## Severity legend
+
+- **medium-high** — forces unnatural code shapes or has a public-surface
+  consequence; fix soon, but a workaround keeps the product honest in the
+  meantime.
+- **medium** — a stubbed surface that ships as a UI-honest placeholder while
+  the backing wire is missing. Acceptable for V1 alpha; must close before
+  GA / production sign-up.
+- **low-medium** — feature ships per-process or with reduced fidelity; correct
+  for one user / one session, broken across nodes / restarts.
+- **low** — power-user / polish feature; not in the V1 critical path.
+
+## Index (by severity, then ID)
+
+| Severity | Issues |
+|---|---|
+| medium-high | ISS-01 |
+| medium | ISS-02 · ISS-09 · ISS-12 · ISS-13 · ISS-14 · ISS-15 · ISS-16 · ISS-17 · ISS-18 · ISS-20 · ISS-21 · ISS-23 · ISS-24 · ISS-25 · ISS-26 · ISS-28 |
+| low-medium | ISS-19 |
+| low | ISS-10 · ISS-11 · ISS-22 |
+
+All entries below are **open** as of 2026-05-01. None of the ~120 commits on
+`redesign/plan-01-foundation` resolved any of these — each is a control-
+plane / platform-side fix that the builder app can't land in isolation.
+
+Entries are listed below in the same order as the index above (severity
+descending; ties broken by issue id). Anchor links are preserved by ID.
+
 ---
 
 ## ISS-01 · `node:async_hooks` / `AsyncLocalStorage` not propagated by `@zeroship/vite-plugin`
@@ -222,85 +256,6 @@ visible reply.
 4. Update `ForgotPassword.tsx` to call `/auth/forgot-password` (still
    ignoring status for no-enumeration).
 5. New page `ResetPassword.tsx` for the token-bearing landing URL.
-
----
-
-## ISS-10 · `/auth/sessions` list/revoke endpoints not exposed
-
-**Status:** open
-**Severity:** low — power-user feature; not blocking sign-up/sign-in.
-**First observed:** 2026-05-01, building the Account page (spec §6.5).
-**Component:** `crates/control` + gateway `/auth/*` proxy
-
-### Symptom
-
-Spec §6.5 calls for an Account → Sessions card listing every active
-session for the current user (created_at, ip, user-agent) with a
-"sign out" button per row plus "sign out everywhere". The control
-plane stores sessions in the `auth_sessions` table but doesn't expose
-them via the API:
-
-- No `GET /auth/sessions` handler.
-- No `DELETE /auth/sessions/:id` handler.
-- No `POST /auth/sessions/revoke-all` handler.
-
-### Workaround in use
-
-The Account page renders a **deferred-section stub** for Sessions:
-
-> "Coming soon — see ISSUES.md ISS-10."
-
-The stub keeps the layout from collapsing and signposts the gap.
-
-### Fix path
-
-1. `crates/control/src/auth_sessions.rs` — list/revoke handlers, scoped
-   to the current user.
-2. Marker for "this session" in the list response so the UI can show
-   "current device".
-3. Wire into `src/server/auth.ts` as `listSessions` / `revokeSession` /
-   `revokeAllSessions` proxy procedures.
-4. Replace the stub in `Account.tsx` with a real table + per-row
-   action button.
-
----
-
-## ISS-11 · Two-factor (TOTP) enrollment not wired
-
-**Status:** open
-**Severity:** low — security upgrade, not a blocker for V1.
-**First observed:** 2026-05-01, building the Account page (spec §6.5).
-**Component:** `crates/control` + gateway `/auth/*` proxy
-
-### Symptom
-
-Spec §6.5 calls for a TOTP enrollment flow on the Account page:
-QR-code scan → 6-digit confirm → backup-codes panel. None of that
-exists in the control plane yet:
-
-- No `totp_secrets` table.
-- No `POST /auth/2fa/enroll` (returns provisioning URI + QR data).
-- No `POST /auth/2fa/verify` (consumes the first 6-digit code, marks
-  enrollment as active).
-- No `POST /auth/2fa/disable`.
-- Login flow does not branch on a `requires_2fa` response.
-
-### Workaround in use
-
-The Account page renders a **deferred-section stub** for Two-factor:
-
-> "Coming soon — see ISSUES.md ISS-11."
-
-### Fix path
-
-1. `crates/control/src/auth_totp.rs` — enroll/verify/disable handlers,
-   secret stored encrypted at rest.
-2. `auth_sessions` augmented with `mfa_validated_at` so the session
-   carries the proof.
-3. Login response gains a `{requires_2fa: true, challenge_id}` branch
-   when 2FA is on; UI prompts for the code.
-4. Replace the Account stub with the QR enrollment card + backup-codes
-   reveal.
 
 ---
 
@@ -628,57 +583,6 @@ italic line points at this issue.
 
 ---
 
-## ISS-19 · Project archive — control-plane backing missing
-
-**Status:** open
-**Severity:** low-medium — archive is a reversible UI affordance and
-the spec (§8.3) explicitly frames it as a soft alternative to delete.
-The current stub gives users the affordance without losing data, but
-state doesn't survive a server restart and isn't shared across
-control-plane nodes.
-**First observed:** 2026-05-01, building the project lifecycle polish.
-**Component:** `crates/control` + `apps/zeroship-builder/src/server/apps.ts`
-
-### Symptom
-
-Spec §8.3 calls for archive / delete / transfer in the Settings
-canvas. Delete is wired (control plane has DELETE /api/apps/:id).
-Archive has no backing column or endpoint:
-
-- `AppRecord` has no `archived_at` / `archived` field.
-- There's no `PUT /api/apps/:id/archive` or equivalent.
-- No filter on `GET /api/apps?archived=true|false`.
-
-### Workaround in use
-
-`apps/zeroship-builder/src/server/apps.ts` ships a module-level
-`Set<string>` (`archivedApps`) that tracks which app ids are flagged
-archived. `listApps` / `getApp` decorate the proxied control-plane
-records with `archived: bool` from this Set; `archiveApp({appId})`
-and `unarchiveApp({appId})` mutate it. The Set is local to the
-zeroship-builder dev server process — it's lost on restart and not
-shared across multi-node deployments.
-
-The Home gallery and SettingsCanvas read `app.archived` and render
-the Archive section / filter pill accordingly. From the user's
-perspective the affordance behaves correctly within a single
-session.
-
-### Fix path
-
-1. `crates/control` — add `archived_at TIMESTAMPTZ NULL` column to
-   `apps` (migration). Index on `(creator_id, archived_at IS NULL)`
-   so the active-projects list stays fast.
-2. REST: `PUT /api/apps/:id/archive` and
-   `PUT /api/apps/:id/unarchive` (or a single
-   `PATCH /api/apps/:id { archived: bool }`).
-3. `GET /api/apps?include_archived=true` for the archived view;
-   default lists active only.
-4. Replace the in-memory Set in
-   `apps/zeroship-builder/src/server/apps.ts` with proxied calls.
-
----
-
 ## ISS-20 · pg_catalog table introspection missing — DataCanvas Tables list is hardcoded
 
 **Status:** open
@@ -758,45 +662,6 @@ correctly so the UI's prev/next behaves like the real thing.
    introspection list from ISS-20).
 3. `agents.ts` — replace the SAMPLE_ROWS lookup with a proxied call;
    the canvas wire stays the same.
-
----
-
-## ISS-22 · Schema visualizer not built — DataCanvas Schema tab is a placeholder
-
-**Status:** open
-**Severity:** low — the Data canvas's Schema tab is a "coming soon"
-card. Tables / Indexes / Migrations cover the day-one introspection
-surface; a graph visualizer is a polish piece.
-**First observed:** 2026-05-01, building the Data canvas.
-**Component:** `apps/zeroship-builder/src/client/workspace/canvases/DataCanvas.tsx`
-
-### Symptom
-
-Spec §9.3 calls for a Schema sub-tab that renders the per-app schema
-as a navigable graph: tables as nodes, foreign keys as edges, with
-a click-to-zoom interaction. Today the tab ships as a single
-editorial card pointing at this issue.
-
-There's no introspection of `pg_constraint` (`contype = 'f'`) for
-foreign keys, no layout engine, and no SVG/canvas renderer chosen.
-
-### Workaround in use
-
-`SchemaPane` in `DataCanvas.tsx` renders a static empty state:
-
-> "Schema visualizer coming soon — see ISSUES.md ISS-22."
-
-### Fix path
-
-1. Extend the introspection endpoint from ISS-20 with a
-   `GET /api/apps/:id/db/schema` handler returning
-   `{tables: [...], foreign_keys: [{from_table, from_column,
-   to_table, to_column}, ...]}`.
-2. Pick a layout engine — `d3-force` is heavy but well-tested;
-   `elkjs` produces nicer hierarchical layouts. Default to a
-   force-directed graph for the smallest dependency footprint.
-3. Replace `SchemaPane` with the live visualizer; keep the
-   "coming soon" copy as a fallback when the schema is empty.
 
 ---
 
@@ -1046,3 +911,171 @@ now" affordance.
 - `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md`
   §4.8.3.2 — the dual PM/SRE shape spec
 
+---
+
+## ISS-19 · Project archive — control-plane backing missing
+
+**Status:** open
+**Severity:** low-medium — archive is a reversible UI affordance and
+the spec (§8.3) explicitly frames it as a soft alternative to delete.
+The current stub gives users the affordance without losing data, but
+state doesn't survive a server restart and isn't shared across
+control-plane nodes.
+**First observed:** 2026-05-01, building the project lifecycle polish.
+**Component:** `crates/control` + `apps/zeroship-builder/src/server/apps.ts`
+
+### Symptom
+
+Spec §8.3 calls for archive / delete / transfer in the Settings
+canvas. Delete is wired (control plane has DELETE /api/apps/:id).
+Archive has no backing column or endpoint:
+
+- `AppRecord` has no `archived_at` / `archived` field.
+- There's no `PUT /api/apps/:id/archive` or equivalent.
+- No filter on `GET /api/apps?archived=true|false`.
+
+### Workaround in use
+
+`apps/zeroship-builder/src/server/apps.ts` ships a module-level
+`Set<string>` (`archivedApps`) that tracks which app ids are flagged
+archived. `listApps` / `getApp` decorate the proxied control-plane
+records with `archived: bool` from this Set; `archiveApp({appId})`
+and `unarchiveApp({appId})` mutate it. The Set is local to the
+zeroship-builder dev server process — it's lost on restart and not
+shared across multi-node deployments.
+
+The Home gallery and SettingsCanvas read `app.archived` and render
+the Archive section / filter pill accordingly. From the user's
+perspective the affordance behaves correctly within a single
+session.
+
+### Fix path
+
+1. `crates/control` — add `archived_at TIMESTAMPTZ NULL` column to
+   `apps` (migration). Index on `(creator_id, archived_at IS NULL)`
+   so the active-projects list stays fast.
+2. REST: `PUT /api/apps/:id/archive` and
+   `PUT /api/apps/:id/unarchive` (or a single
+   `PATCH /api/apps/:id { archived: bool }`).
+3. `GET /api/apps?include_archived=true` for the archived view;
+   default lists active only.
+4. Replace the in-memory Set in
+   `apps/zeroship-builder/src/server/apps.ts` with proxied calls.
+
+---
+
+## ISS-10 · `/auth/sessions` list/revoke endpoints not exposed
+
+**Status:** open
+**Severity:** low — power-user feature; not blocking sign-up/sign-in.
+**First observed:** 2026-05-01, building the Account page (spec §6.5).
+**Component:** `crates/control` + gateway `/auth/*` proxy
+
+### Symptom
+
+Spec §6.5 calls for an Account → Sessions card listing every active
+session for the current user (created_at, ip, user-agent) with a
+"sign out" button per row plus "sign out everywhere". The control
+plane stores sessions in the `auth_sessions` table but doesn't expose
+them via the API:
+
+- No `GET /auth/sessions` handler.
+- No `DELETE /auth/sessions/:id` handler.
+- No `POST /auth/sessions/revoke-all` handler.
+
+### Workaround in use
+
+The Account page renders a **deferred-section stub** for Sessions:
+
+> "Coming soon — see ISSUES.md ISS-10."
+
+The stub keeps the layout from collapsing and signposts the gap.
+
+### Fix path
+
+1. `crates/control/src/auth_sessions.rs` — list/revoke handlers, scoped
+   to the current user.
+2. Marker for "this session" in the list response so the UI can show
+   "current device".
+3. Wire into `src/server/auth.ts` as `listSessions` / `revokeSession` /
+   `revokeAllSessions` proxy procedures.
+4. Replace the stub in `Account.tsx` with a real table + per-row
+   action button.
+
+---
+
+## ISS-11 · Two-factor (TOTP) enrollment not wired
+
+**Status:** open
+**Severity:** low — security upgrade, not a blocker for V1.
+**First observed:** 2026-05-01, building the Account page (spec §6.5).
+**Component:** `crates/control` + gateway `/auth/*` proxy
+
+### Symptom
+
+Spec §6.5 calls for a TOTP enrollment flow on the Account page:
+QR-code scan → 6-digit confirm → backup-codes panel. None of that
+exists in the control plane yet:
+
+- No `totp_secrets` table.
+- No `POST /auth/2fa/enroll` (returns provisioning URI + QR data).
+- No `POST /auth/2fa/verify` (consumes the first 6-digit code, marks
+  enrollment as active).
+- No `POST /auth/2fa/disable`.
+- Login flow does not branch on a `requires_2fa` response.
+
+### Workaround in use
+
+The Account page renders a **deferred-section stub** for Two-factor:
+
+> "Coming soon — see ISSUES.md ISS-11."
+
+### Fix path
+
+1. `crates/control/src/auth_totp.rs` — enroll/verify/disable handlers,
+   secret stored encrypted at rest.
+2. `auth_sessions` augmented with `mfa_validated_at` so the session
+   carries the proof.
+3. Login response gains a `{requires_2fa: true, challenge_id}` branch
+   when 2FA is on; UI prompts for the code.
+4. Replace the Account stub with the QR enrollment card + backup-codes
+   reveal.
+
+---
+
+## ISS-22 · Schema visualizer not built — DataCanvas Schema tab is a placeholder
+
+**Status:** open
+**Severity:** low — the Data canvas's Schema tab is a "coming soon"
+card. Tables / Indexes / Migrations cover the day-one introspection
+surface; a graph visualizer is a polish piece.
+**First observed:** 2026-05-01, building the Data canvas.
+**Component:** `apps/zeroship-builder/src/client/workspace/canvases/DataCanvas.tsx`
+
+### Symptom
+
+Spec §9.3 calls for a Schema sub-tab that renders the per-app schema
+as a navigable graph: tables as nodes, foreign keys as edges, with
+a click-to-zoom interaction. Today the tab ships as a single
+editorial card pointing at this issue.
+
+There's no introspection of `pg_constraint` (`contype = 'f'`) for
+foreign keys, no layout engine, and no SVG/canvas renderer chosen.
+
+### Workaround in use
+
+`SchemaPane` in `DataCanvas.tsx` renders a static empty state:
+
+> "Schema visualizer coming soon — see ISSUES.md ISS-22."
+
+### Fix path
+
+1. Extend the introspection endpoint from ISS-20 with a
+   `GET /api/apps/:id/db/schema` handler returning
+   `{tables: [...], foreign_keys: [{from_table, from_column,
+   to_table, to_column}, ...]}`.
+2. Pick a layout engine — `d3-force` is heavy but well-tested;
+   `elkjs` produces nicer hierarchical layouts. Default to a
+   force-directed graph for the smallest dependency footprint.
+3. Replace `SchemaPane` with the live visualizer; keep the
+   "coming soon" copy as a fallback when the schema is empty.
