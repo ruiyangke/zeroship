@@ -198,7 +198,11 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
           )}
         </main>
         <aside className="border-l border-rule min-h-0 min-w-0 overflow-hidden flex flex-col">
-          <ChatRail appName={projectName} seedBrief={seedBrief ?? undefined} />
+          <ChatRail
+            appName={projectName}
+            appId={appId}
+            seedBrief={seedBrief ?? undefined}
+          />
         </aside>
       </div>
       <ProductTour open={tourOpen} onClose={() => setTourOpen(false)} />

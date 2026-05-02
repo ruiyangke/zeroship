@@ -21,6 +21,11 @@ import { ChatMessages } from "./ChatMessages";
 
 export interface ChatRailProps {
   appName?: string;
+  /** App id from the URL — feeds the composer's `@`-mention dropdown
+   *  (file picker / issue picker / recent log error). When omitted
+   *  (catch-all route, no project), the dropdown silently degrades to
+   *  "no suggestions". */
+  appId?: string;
   /** Wizard hand-off: the brief stashed by WizardWorkspace.handleBegin
    *  and consumed once by WorkspaceShell. ChatRail synthesises a first
    *  user message from this on mount so Builder has full clarification
@@ -66,7 +71,7 @@ function buildSeedMessage(brief: Brief): string {
   return lines.join("\n");
 }
 
-export function ChatRail({ appName, seedBrief }: ChatRailProps) {
+export function ChatRail({ appName, appId, seedBrief }: ChatRailProps) {
   const [input, setInput] = useState("");
   // Tokens of surveys the user has already answered or skipped this
   // session. Prevents the SurveyCard from re-firing on re-render after
@@ -209,6 +214,7 @@ export function ChatRail({ appName, seedBrief }: ChatRailProps) {
         onSubmit={handleSubmit}
         onStop={() => stop()}
         busy={busy}
+        appId={appId}
         placeholder={appName ? `Tell ${appName} what to make.` : "Describe what to make."}
       />
     </div>
