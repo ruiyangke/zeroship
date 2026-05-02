@@ -249,16 +249,7 @@ fn run_js_with_runtime(src: &str, max_wait: Duration) -> String {
 // ---------------------------------------------------------------------------
 
 /// Echo: client sends "hello", expects "hello" back.
-///
-/// Currently ignored — compio_ws 0.3 doesn't expose a splittable
-/// stream, so the receive loop holds &mut on the WebSocketStream
-/// across `read().await`; sends queued from the V8 thread sit until
-/// the next read returns. For an echo where the server immediately
-/// echoes our send, this would resolve once the send actually went
-/// out — but the send can't go out until the read returns. This is
-/// fixable with a splittable framer (out of scope for v1; tracked).
 #[test]
-#[ignore = "blocked on splittable WebSocketStream — see file header"]
 fn ws_echo_text_roundtrip() {
     let server = start_server(ServerCfg::default());
     let url = server.url();
@@ -385,7 +376,7 @@ fn ws_no_extensions_header_sent() {
 
 /// Binary roundtrip: send Uint8Array; receive ArrayBuffer.
 #[test]
-#[ignore = "blocked on splittable WebSocketStream — see file header"]
+
 fn ws_binary_arraybuffer_roundtrip() {
     let server = start_server(ServerCfg::default());
     let url = server.url();
@@ -423,7 +414,7 @@ fn ws_binary_arraybuffer_roundtrip() {
 
 /// Graceful close: client sends close(1000); CloseEvent.code=1000 + wasClean=true.
 #[test]
-#[ignore = "blocked on splittable WebSocketStream — see file header"]
+
 fn ws_graceful_close_code_1000() {
     let server = start_server(ServerCfg::default());
     let url = server.url();
@@ -476,7 +467,7 @@ fn ws_ping_keepalive_pongs() {
 
 /// AbortSignal abort propagates reason into CloseEvent.reason.
 #[test]
-#[ignore = "blocked on splittable WebSocketStream — see file header"]
+
 fn ws_abort_signal_reason_propagates() {
     let server = start_server(ServerCfg::default());
     let url = server.url();
