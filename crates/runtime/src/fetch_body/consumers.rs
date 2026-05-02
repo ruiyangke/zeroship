@@ -748,24 +748,16 @@ fn consumer_blob<T: Body + BodyMarker + 'static>(
             rv.set(promise.into());
         }
         PreFlight::Bytes(rc) => {
-            // FIX C fast path — parse urlencoded directly.
+            // FIX C fast path — build the Blob directly from the
+            // source bytes without going through a stream read.
             let resolver = v8::PromiseResolver::new(scope).unwrap();
             let promise = resolver.get_promise(scope);
-            let fd = build_empty_form_data(scope);
-            let s = String::from_utf8_lossy(&rc).into_owned();
-            for pair in s.split('&') {
-                if pair.is_empty() {
-                    continue;
-                }
-                let (name, value) = match pair.find('=') {
-                    Some(i) => (&pair[..i], &pair[i + 1..]),
-                    None => (pair, ""),
-                };
-                let name = url_decode_form(name);
-                let value = url_decode_form(value);
-                form_data_append(scope, fd, &name, &value);
-            }
-            resolver.resolve(scope, fd.into());
+            let blob = crate::blob_native::blob::create_blob(
+                scope,
+                (*rc).clone(),
+                &content_type,
+            );
+            resolver.resolve(scope, blob);
             rv.set(promise.into());
         }
         PreFlight::HasBody { stream_global } => {
@@ -909,8 +901,10 @@ fn consumer_form_data<T: Body + BodyMarker + 'static>(
         PreFlight::Bytes(bytes_rc) => {
             // Fast-path (Fix C): Body source is Rust-side bytes. Skip
             // stream construction entirely — synthesize a resolved
-            // Promise<bytes> and feed map_promise_with as if it came
-            // from a stream read.
+            // Promise<ArrayBuffer> and feed map_promise_with. The map
+            // callback expects an ArrayBuffer (see map_fulfilled_callback);
+            // resolving with a Uint8Array view would silently produce
+            // an empty FormData.
             let resolver = v8::PromiseResolver::new(scope).unwrap();
             let promise = resolver.get_promise(scope);
             let store = v8::ArrayBuffer::new_backing_store_from_vec(
@@ -918,9 +912,7 @@ fn consumer_form_data<T: Body + BodyMarker + 'static>(
             )
             .make_shared();
             let ab = v8::ArrayBuffer::with_backing_store(scope, &store);
-            let len = ab.byte_length();
-            let u8 = v8::Uint8Array::new(scope, ab, 0, len).unwrap();
-            resolver.resolve(scope, u8.into());
+            resolver.resolve(scope, ab.into());
             let outer = map_promise_with(scope, promise, kind);
             rv.set(outer.into());
         }
