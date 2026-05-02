@@ -401,6 +401,8 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // type so repeated calls return the same FunctionTemplate (see
     // `gen_install`'s comment).
     let install_slot_ty = format_ident!("__InstallSlot_{}", class_ty);
+    let brand_slot_ty = format_ident!("__BrandSlot_{}", class_ty);
+    let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
 
     let expanded = quote! {
         #stripped_impl
@@ -414,6 +416,85 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #[doc(hidden)]
         #[allow(non_camel_case_types)]
         pub struct #install_slot_ty(::v8::Global<::v8::FunctionTemplate>);
+
+        /// Per-class isolate-slot marker holding `Foo.prototype` for
+        /// WebIDL §3.7 brand checks. Captured eagerly during `install`
+        /// (after `get_function`) and consulted by every method,
+        /// getter, and setter callback before the unsafe internal-field
+        /// deref.
+        ///
+        /// Without this, the only "brand check" in the prologue is "is
+        /// internal field 0 an External" — which any `#[v8_class]`
+        /// instance with one internal field passes, allowing
+        /// `Headers.prototype.append.call(blob)` to reinterpret the
+        /// Blob's box as a Headers and write Vec<u8> internals into
+        /// arbitrary memory (UB).
+        #[doc(hidden)]
+        #[allow(non_camel_case_types)]
+        pub struct #brand_slot_ty(::v8::Global<::v8::Object>);
+
+        /// Brand-check helper: walks the prototype chain of `this`
+        /// looking for the cached `Foo.prototype`. Returns true on
+        /// match (the receiver IS a Foo, or a subclass via
+        /// `#[v8_inherit]`), false otherwise.
+        ///
+        /// Walks at most 32 prototype links (deep chains are typically
+        /// 1–3 hops; the cap protects against pathologically deep
+        /// chains a malicious caller could craft with
+        /// `Object.setPrototypeOf` loops). The cost is dwarfed by the
+        /// ~100ns V8 callback overhead — the brand check itself is
+        /// O(depth) Local pointer comparisons.
+        ///
+        /// Lifetimes are elided here on purpose. An explicit `<'s>`
+        /// would tie the `Local<Object>` argument's lifetime to the
+        /// `&mut PinScope` lifetime in an invariant way (mutable
+        /// references are invariant over their type param), which
+        /// then conflicts with `args.this()`'s callsite-derived
+        /// lifetime. Elision lets each Local pick its own appropriate
+        /// (and shorter) lifetime — the helper body never returns a
+        /// `Local` so there's no need to relate them outside the
+        /// function.
+        #[doc(hidden)]
+        #[allow(non_snake_case, dead_code)]
+        fn #brand_check_fn(
+            scope: &mut v8::PinScope,
+            obj: v8::Local<v8::Object>,
+        ) -> bool {
+            let Some(cached) = scope.get_slot::<#brand_slot_ty>() else {
+                return false;
+            };
+            let expected_proto: v8::Local<v8::Object> = v8::Local::new(scope, &cached.0);
+            // Walk the [[Prototype]] chain. Each `get_prototype` call
+            // can return null (chain root) or a Value (potentially an
+            // Object). Bail at depth 32 to bound worst-case cost.
+            let mut current: v8::Local<v8::Value> = match obj.get_prototype(scope) {
+                Some(v) => v,
+                None => return false,
+            };
+            for _ in 0..32 {
+                if current.is_null_or_undefined() {
+                    return false;
+                }
+                let cur_obj: v8::Local<v8::Object> = match current.try_into() {
+                    Ok(o) => o,
+                    Err(_) => return false,
+                };
+                // V8 Locals compare by handle equality, which matches
+                // pointer identity for Persistent-derived Locals. The
+                // cached prototype is the exact Object the install
+                // captured at first-install time; any genuine `new
+                // Foo()` (or instance of a class inheriting Foo) has
+                // that Object on its chain.
+                if cur_obj == expected_proto {
+                    return true;
+                }
+                current = match cur_obj.get_prototype(scope) {
+                    Some(v) => v,
+                    None => return false,
+                };
+            }
+            false
+        }
 
         #[allow(non_snake_case, dead_code)]
         impl #class_ty {
@@ -661,6 +742,7 @@ fn gen_install(
     // call writes the slot; subsequent calls in the same isolate
     // return the cached `Local` reborrow.
     let install_slot_ty = format_ident!("__InstallSlot_{}", class_ty);
+    let brand_slot_ty = format_ident!("__BrandSlot_{}", class_ty);
 
     quote! {
         /// Install this class on the given V8 scope, returning the
@@ -720,12 +802,45 @@ fn gen_install(
 
             #inherit_block
 
-            // Cache the template for this isolate. Future `install`
-            // calls return the same Local — required for `#[v8_inherit]`
-            // to chain derived classes onto the same prototype.
-            let __global = ::v8::Global::new(scope, __ctor_tmpl);
-            let __local = ::v8::Local::new(scope, __global.clone());
-            scope.set_slot(#install_slot_ty(__global));
+            // Capture `Foo.prototype` for the WebIDL §3.7 brand check.
+            // Materialising the Function (and thereby the prototype
+            // Object) requires an active Context — every caller of
+            // `install` already runs inside one (verified across the
+            // workspace; see `init.rs::install_globals`). The captured
+            // Object is realm-specific; isolates with multiple realms
+            // would need per-realm slots, but our worker uses one
+            // realm per isolate so this is correct in practice.
+            //
+            // We capture AFTER `#inherit_block` (and after the proto
+            // sets above) so the prototype's `[[Prototype]]` chain is
+            // fully established before we snapshot it. The brand check
+            // compares by Local handle identity against this snapshot.
+            //
+            // Both Globals materialise BEFORE the `set_slot` calls
+            // because `set_slot` takes `&mut scope` and would otherwise
+            // overlap with the in-flight `Global::new(scope, ...)`
+            // borrows.
+            let __ctor_fn = __ctor_tmpl.get_function(scope).unwrap();
+            let __proto_key = v8::String::new(scope, "prototype").unwrap();
+            let __proto_v = __ctor_fn.get(scope, __proto_key.into()).unwrap();
+            let __proto_obj: v8::Local<v8::Object> = __proto_v
+                .try_into()
+                .expect("Foo.prototype is an Object on every FunctionTemplate");
+            let __proto_global = ::v8::Global::new(scope, __proto_obj);
+            let __tmpl_global = ::v8::Global::new(scope, __ctor_tmpl);
+            // Materialise the return Local BEFORE the slot writes —
+            // its lifetime is tied to `scope`, and `set_slot` is a
+            // mutable borrow of `scope`, so we can't compute it after.
+            let __local = ::v8::Local::new(scope, __tmpl_global.clone());
+
+            // Cache both for this isolate. Future `install` calls
+            // return the same FunctionTemplate (required for
+            // `#[v8_inherit]` to chain derived classes onto the same
+            // prototype) and read the cached prototype for brand
+            // checks.
+            scope.set_slot(#install_slot_ty(__tmpl_global));
+            scope.set_slot(#brand_slot_ty(__proto_global));
+
             __local
         }
     }
@@ -778,6 +893,8 @@ fn gen_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
 
     let _ = getter_args;
 
+    let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
+
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
         pub(crate) fn #callback_name(
@@ -785,8 +902,22 @@ fn gen_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
             args: v8::FunctionCallbackArguments,
             mut rv: v8::ReturnValue,
         ) {
-            // Extract the boxed instance from internal field 0 of `this`.
+            // WebIDL §3.7 brand check: walk the prototype chain
+            // looking for the cached `Foo.prototype`. If absent, the
+            // receiver isn't a Foo (or a Foo subclass) — throwing
+            // "Illegal invocation" is mandatory before the unsafe
+            // internal-field deref. See `__brand_check_<ClassTy>`'s
+            // doc-comment for the soundness rationale.
             let __this = args.this();
+            if !#brand_check_fn(scope, __this) {
+                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                let __exc = v8::Exception::type_error(scope, __msg);
+                scope.throw_exception(__exc);
+                return;
+            }
+            // Brand check passed: internal field 0 is guaranteed to
+            // hold a `Box<#class_ty>` raw pointer (set in
+            // `gen_box_and_install_finalizer`). Recover the External.
             let __ext = match __this.get_internal_field(scope, 0)
                 .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
             {
@@ -873,6 +1004,7 @@ fn gen_async_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStr
     let extractions = gen_param_extractions(&params, &reject_shared_names);
 
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
+    let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -884,8 +1016,18 @@ fn gen_async_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStr
             // 1. Recover the `Box<Self>` pointer from internal field 0.
             //    On illegal invocation (receiver is not a wrapper), fail
             //    *synchronously* with a TypeError — same contract as the
-            //    sync method path. The user code never runs.
+            //    sync method path. The user code never runs. The brand
+            //    check (WebIDL §3.7) walks the prototype chain rather
+            //    than just verifying internal-field 0 is an External,
+            //    so cross-class calls (`Foo.prototype.method.call(bar)`)
+            //    fail before the unsafe deref.
             let __this = args.this();
+            if !#brand_check_fn(scope, __this) {
+                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                let __exc = v8::Exception::type_error(scope, __msg);
+                scope.throw_exception(__exc);
+                return;
+            }
             let __ext = match __this.get_internal_field(scope, 0)
                 .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
             {
@@ -990,6 +1132,7 @@ fn gen_setter_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
     } else {
         quote! { &*__instance }
     };
+    let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -998,7 +1141,15 @@ fn gen_setter_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
             args: v8::FunctionCallbackArguments,
             mut rv: v8::ReturnValue,
         ) {
+            // WebIDL §3.7 brand check — see method-callback prologue
+            // for the soundness rationale.
             let __this = args.this();
+            if !#brand_check_fn(scope, __this) {
+                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                let __exc = v8::Exception::type_error(scope, __msg);
+                scope.throw_exception(__exc);
+                return;
+            }
             let __ext = match __this.get_internal_field(scope, 0)
                 .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
             {
