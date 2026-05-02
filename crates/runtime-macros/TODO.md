@@ -41,7 +41,10 @@ so we can grep back through the rationale.
   - Cost: 1–3 extra Local pointer comparisons per call (typical
     chain depth), dwarfed by V8's ~100ns callback overhead.
   - Lands: commit `c95915e1` (macro codegen + 7 smoke tests in
-    `tests/v8_brand_check_smoke.rs`).
+    `tests/v8_brand_check_smoke.rs`); follow-up `b0339e23` makes the
+    prototype capture lazy on first brand check (eager get_function
+    inside `install` froze the FunctionTemplate's instance shape and
+    silently no-op'd late accessor installs like URL.searchParams).
   - The local fix in `url_native/search_params.rs::is_url_search_params`
     is now redundant for any class going through the macro; it's left
     in place as the URL-specific manual brand check until that file
