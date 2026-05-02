@@ -35,6 +35,11 @@ sha1 = "0.10"
 hmac = "0.12"
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "fast", "zeroize"] }
 aws-lc-rs = "1"
+# XChaCha20-Poly1305 AEAD for sealed-record persistence
+# (sandbox preview-URL feature § II.0 / § IX.a). Single trait dep
+# pulls the symmetric-cipher + AEAD stack from RustCrypto. Used
+# only by `crates/sandbox/src/persist.rs`.
+chacha20poly1305 = "0.10"
 base64 = "0.22"
 bcrypt = "0.17"
 jsonwebtoken = "9"

@@ -32,6 +32,9 @@ bytes = { workspace = true }
 # Ed25519 keypair generation for the K8s backend (controller-side
 # private key; only the public half ships to the Pod).
 ed25519-dalek = { workspace = true }
+# XChaCha20-Poly1305 AEAD for sealed-record persistence; see
+# crates/sandbox/src/persist.rs and the preview-URL design § II.0.
+chacha20poly1305 = { workspace = true }
 base64 = { workspace = true }
 # Sync HTTP client (blocking) for talking to the in-VM agent. Run
 # inside `compio::runtime::spawn_blocking` so the ntex runtime

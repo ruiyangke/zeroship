@@ -13,6 +13,7 @@ pub mod backend;
 pub mod config;
 pub mod files;
 pub mod handlers;
+pub mod persist;
 pub mod registry;
 
 use std::sync::Arc;
