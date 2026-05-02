@@ -399,29 +399,49 @@ function CodeView({ code, path }: { code: string; path: string }) {
   );
 
   const lang = useMemo(() => langFromPath(path), [path]);
-  const [html, setHtml] = useState<string | null>(null);
+  // Track which (code, lang) pair the cached `html` belongs to. When
+  // the user switches files we WANT the new content to render
+  // immediately (raw text, instant) — the highlighted HTML belongs to
+  // the previous file and would mislead. So we render the fallback
+  // until shiki finishes, but we don't blank `html` while a new shiki
+  // job runs against THE SAME content (defence against StrictMode
+  // double-effect or component re-mounts mid-fetch).
+  const [highlight, setHighlight] = useState<{
+    code: string;
+    lang: string;
+    html: string;
+  } | null>(null);
 
   useEffect(() => {
-    setHtml(null);
-    if (lang === "text" || !code) return;
+    if (lang === "text" || !code) {
+      setHighlight(null);
+      return;
+    }
     let cancelled = false;
     loadShiki()
       .then((codeToHtml) =>
         codeToHtml(code, { lang, theme: "github-light" }),
       )
       .then((rendered) => {
-        if (!cancelled) setHtml(rendered);
+        if (!cancelled) setHighlight({ code, lang, html: rendered });
       })
       .catch(() => {
         // Highlighting failed (unsupported lang, WASM blocked, etc).
-        // Leave `html` null so the fallback renders.
+        // Leave `highlight` stale so the fallback renders the new code.
       });
     return () => {
       cancelled = true;
     };
   }, [code, lang]);
 
-  if (!html) return fallback;
+  // Two-phase render: ALWAYS show the fallback (raw, line-numbered
+  // text) the instant `code` arrives. If shiki has finished and its
+  // result matches the current code/lang, swap to the highlighted
+  // overlay. While shiki is still working on the current code, the
+  // fallback stays visible — no spinner, no flash.
+  const ready =
+    highlight && highlight.code === code && highlight.lang === lang;
+  if (!ready) return fallback;
 
   // shiki returns a <pre><code>…</code></pre> wrapper. We let it apply
   // its own colours/background, but reset its margins and pin our font
@@ -431,7 +451,7 @@ function CodeView({ code, path }: { code: string; path: string }) {
       className="shiki-host font-mono text-[12.5px] leading-[1.65]"
       data-lang={lang}
       // shiki produces trusted HTML from a static theme; safe to inject.
-      dangerouslySetInnerHTML={{ __html: html }}
+      dangerouslySetInnerHTML={{ __html: highlight.html }}
     />
   );
 }
