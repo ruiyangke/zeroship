@@ -37,6 +37,13 @@ use crate::fetch_body::body::{Body, BodyImpl};
 use crate::fetch_body::consumers::{install_body_methods, BodyMarker};
 use crate::fetch_body::extract::extract_body;
 
+/// Synthetic base URL used when `new Request(input)` receives a
+/// relative URL or an empty string. Server-side runtimes (workerd,
+/// Deno workers) follow the same convention since there is no
+/// document.baseURI / Window.location to source the spec's "API base
+/// URL" from. Matches workerd's default.
+const DEFAULT_BASE_URL: &str = "http://localhost/";
+
 // ---------------------------------------------------------------------------
 // RequestState — boxed state stored in V8 internal field 0
 // ---------------------------------------------------------------------------
@@ -347,28 +354,30 @@ fn request_constructor_callback(
         *state.keepalive.borrow_mut() = *other.keepalive.borrow();
         *state.priority.borrow_mut() = other.priority.borrow().clone();
         // Body / Headers will be (potentially) overridden by init.
-        // For the input-Request copy path, body is checked for "used" —
-        // a disturbed input Request is a TypeError.
-        if let Some(stream_g) = other.body.borrow().stream.clone() {
-            let stream = v8::Local::new(scope, stream_g);
-            let key = v8::String::new(scope, "locked").unwrap();
-            if let Some(v) = stream.get(scope, key.into()) {
-                if v.boolean_value(scope) {
-                    let m =
-                        v8::String::new(scope, "Cannot construct Request from a disturbed Request")
-                            .unwrap();
-                    let exc = v8::Exception::type_error(scope, m);
-                    scope.throw_exception(exc);
-                    return;
-                }
-            }
-        }
+        // The disturbed-input-Request check (Fetch §5.4 step 36 "If
+        // input is a Request and inputBody is non-null and inputBody
+        // is a body whose stream is disturbed, throw a TypeError")
+        // moves AFTER we know whether init.body provides an override.
+        // If init.body is set, we use that and don't inherit the
+        // input's body — so a disturbed input is fine.
         other.url.borrow().clone()
     } else {
-        // String input. Spec says parse against entry settings object's
-        // base URL. v1 has no document base; we require an absolute URL.
+        // String input. Per Fetch §5.4 step 6: parse input against entry
+        // settings object's API base URL. In a server-side runtime we
+        // don't have a document or a worker location; we follow the
+        // workerd convention of using `http://localhost/` as the
+        // synthetic API base URL so that:
+        //   - Empty string and relative URLs resolve (per spec they
+        //     resolve against the base URL, not fail).
+        //   - Absolute URLs short-circuit and use their own scheme.
+        // ada-url tries absolute-parse first; if that fails it falls
+        // back to base-relative parsing. We prefer absolute parse
+        // explicitly to keep the resulting href closer to user input
+        // when possible.
         let url_str = input_v.to_rust_string_lossy(scope);
-        match ada_url::Url::parse(&url_str, None) {
+        let parsed = ada_url::Url::parse(&url_str, None)
+            .or_else(|_| ada_url::Url::parse(&url_str, Some(DEFAULT_BASE_URL)));
+        match parsed {
             Ok(u) => u.href().to_string(),
             Err(_) => {
                 let m = v8::String::new(
@@ -438,11 +447,28 @@ fn request_constructor_callback(
     };
 
     // If init.body is missing AND input was a Request, inherit the
-    // input's body (must not be disturbed, checked above).
+    // input's body. Per Fetch §5.4 step 36: if input is a Request
+    // with a non-null disturbed body and init.body is missing, this
+    // is a TypeError. (When init.body IS provided, we ignore input's
+    // body entirely — the override path is fine even on a disturbed
+    // input.)
     let inherited_body_value: Option<v8::Local<v8::Value>> = if body_v.is_none() && input_is_request {
         let req_obj: v8::Local<v8::Object> = input_v.try_into().unwrap();
         let raw = state_ptr(scope, req_obj).unwrap();
         let other: &RequestState = unsafe { &*raw };
+        if let Some(stream_g) = other.body.borrow().stream.clone() {
+            let stream = v8::Local::new(scope, stream_g);
+            if crate::fetch_body::consumers::stream_disturbed_or_used(scope, req_obj, stream) {
+                let m = v8::String::new(
+                    scope,
+                    "Cannot construct Request from a disturbed Request",
+                )
+                .unwrap();
+                let exc = v8::Exception::type_error(scope, m);
+                scope.throw_exception(exc);
+                return;
+            }
+        }
         other.body.borrow().stream.as_ref().map(|g| {
             let local = v8::Local::new(scope, g.clone());
             local.into()
@@ -498,6 +524,20 @@ fn request_constructor_callback(
                     return;
                 }
             }
+        }
+    }
+
+    // Per Fetch §5.4: if input is a Request with a non-null body, the
+    // body is "transferred" to the new Request — input's body becomes
+    // a locked ReadableStream and thus reads as disturbed/used. Mark
+    // the input wrapper used so `input.bodyUsed === true` after the
+    // constructor returns. Spec: dummyStream-locking step.
+    if input_is_request {
+        let req_obj: v8::Local<v8::Object> = input_v.try_into().unwrap();
+        let raw = state_ptr(scope, req_obj).unwrap();
+        let other: &RequestState = unsafe { &*raw };
+        if other.body.borrow().stream.is_some() {
+            crate::fetch_body::consumers::set_body_used_marker(scope, req_obj);
         }
     }
 
@@ -902,37 +942,39 @@ fn request_clone_callback(
     };
     let state: &RequestState = unsafe { &*raw };
 
-    // Disturbed body → TypeError.
-    if let Some(stream_g) = state.body.borrow().stream.clone() {
-        let stream = v8::Local::new(scope, stream_g);
-        let key = v8::String::new(scope, "locked").unwrap();
-        if let Some(v) = stream.get(scope, key.into()) {
-            if v.boolean_value(scope) {
-                let m = v8::String::new(scope, "Cannot clone a disturbed Request").unwrap();
-                let exc = v8::Exception::type_error(scope, m);
-                scope.throw_exception(exc);
-                return;
-            }
+    // Disturbed body → TypeError. Use both the locked-stream check
+    // AND the wrapper's body-used marker (which fires when a consumer
+    // started but the stream auto-released its lock).
+    let stream_global_opt = state.body.borrow().stream.clone();
+    if let Some(stream_g) = &stream_global_opt {
+        let stream = v8::Local::new(scope, stream_g.clone());
+        if crate::fetch_body::consumers::stream_disturbed_or_used(scope, this, stream) {
+            let m = v8::String::new(scope, "Cannot clone a disturbed Request").unwrap();
+            let exc = v8::Exception::type_error(scope, m);
+            scope.throw_exception(exc);
+            return;
         }
     }
 
-    // The simplest spec-faithful path: invoke `new Request(this)` with
-    // the existing Request as input. The constructor copy path tees
-    // the body via re-extracting from source / cloning the source Rc.
-    // For ReadableStream-bodied requests we tee the stream.
+    // Build the clone WITHOUT going through `new Request(this, ...)`.
+    // The constructor's "transfer body" step (per Fetch §5.4 step 36)
+    // would disturb the original — we don't want that for clone(),
+    // since the spec's `clone()` algorithm preserves the original's
+    // body usability. So we build a fresh Request instance, copy
+    // scalar fields from `this`, and tee or rebuild the body.
     let global = scope.get_current_context().global(scope);
     let req_class_key = v8::String::new(scope, "Request").unwrap();
     let req_class_v = global.get(scope, req_class_key.into()).unwrap();
     let req_class_fn: v8::Local<v8::Function> = req_class_v.try_into().unwrap();
 
-    // Tee the body's stream if present (so original + clone are
-    // independently consumable).
     let body_is_stream = state.body.borrow().stream.is_some()
         && matches!(
             state.body.borrow().source,
             Some(crate::fetch_body::body::BodySource::Stream)
         );
 
+    // Tee the stream so original + clone share both halves and remain
+    // independently consumable.
     let (left_branch, right_branch) = if body_is_stream {
         let stream_g = state.body.borrow().stream.clone().unwrap();
         let stream = v8::Local::new(scope, stream_g);
@@ -949,49 +991,44 @@ fn request_clone_callback(
         (None, None)
     };
 
-    // Build the clone. Pass `this` as the input; init.body will be
-    // either the right tee branch (for stream bodies) or omitted (for
-    // byte-source bodies — they re-extract from the Rc<Vec<u8>> via
-    // the input-Request copy path).
+    // Build init that passes the URL via the constructor's URL parser
+    // and the cloned body / headers.
     let init = v8::Object::new(scope);
-    if let Some(rb) = right_branch {
-        let key = v8::String::new(scope, "body").unwrap();
-        init.set(scope, key.into(), rb.into());
-        // Replace the original's stream with the left branch so that
-        // both the original AND the clone are independently usable.
-        if let Some(lb) = left_branch {
-            state.body.borrow_mut().stream = Some(v8::Global::new(scope, lb));
-        }
-    } else {
-        // For byte-source bodies, hand the bytes through init.body.
-        // We re-build a fresh stream from the Rc so reading on the
-        // clone doesn't disturb the original (whose stream may already
-        // be drained-but-not-disturbed in some edge cases).
-        if let Some(src) = state.body.borrow().source.clone() {
-            match src {
-                crate::fetch_body::body::BodySource::Bytes(rc)
-                | crate::fetch_body::body::BodySource::Blob(rc, _)
-                | crate::fetch_body::body::BodySource::UrlSearchParams(rc)
-                | crate::fetch_body::body::BodySource::FormData(rc, _) => {
-                    let new_stream = crate::fetch_body::extract::build_byte_stream(scope, rc);
-                    let stream_local = v8::Local::new(scope, new_stream);
-                    let key = v8::String::new(scope, "body").unwrap();
-                    init.set(scope, key.into(), stream_local.into());
-                }
-                crate::fetch_body::body::BodySource::Stream => {}
-            }
-        }
+    {
+        let key = v8::String::new(scope, "method").unwrap();
+        let v = v8::String::new(scope, &state.method.borrow()).unwrap();
+        init.set(scope, key.into(), v.into());
     }
-
-    // Also pass headers from the original (avoid re-extracting Content-
-    // Type from a fresh body).
     if let Some(h_g) = state.headers.borrow().clone() {
         let h_local = v8::Local::new(scope, h_g);
         let key = v8::String::new(scope, "headers").unwrap();
         init.set(scope, key.into(), h_local.into());
     }
+    if let Some(rb) = right_branch {
+        let key = v8::String::new(scope, "body").unwrap();
+        init.set(scope, key.into(), rb.into());
+        if let Some(lb) = left_branch {
+            state.body.borrow_mut().stream = Some(v8::Global::new(scope, lb));
+        }
+    } else if let Some(src) = state.body.borrow().source.clone() {
+        match src {
+            crate::fetch_body::body::BodySource::Bytes(rc)
+            | crate::fetch_body::body::BodySource::Blob(rc, _)
+            | crate::fetch_body::body::BodySource::UrlSearchParams(rc)
+            | crate::fetch_body::body::BodySource::FormData(rc, _) => {
+                let new_stream = crate::fetch_body::extract::build_byte_stream(scope, rc);
+                let stream_local = v8::Local::new(scope, new_stream);
+                let key = v8::String::new(scope, "body").unwrap();
+                init.set(scope, key.into(), stream_local.into());
+            }
+            crate::fetch_body::body::BodySource::Stream => {}
+        }
+    }
 
-    let args2 = [this.into(), init.into()];
+    // Pass URL as a string input (NOT `this` — that would trigger the
+    // constructor's input-Request copy path which disturbs the input).
+    let url_str = v8::String::new(scope, &state.url.borrow()).unwrap();
+    let args2 = [url_str.into(), init.into()];
     let result = req_class_fn.new_instance(scope, &args2);
     match result {
         Some(o) => rv.set(o.into()),

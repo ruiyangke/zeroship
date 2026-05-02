@@ -106,11 +106,15 @@ fn construct_with_valid_url_succeeds() {
 #[test]
 fn construct_with_invalid_url_throws_type_error() {
     // Per Fetch §5.4 step 6 (b): if URL parsing fails, throw TypeError.
+    // "not a url" actually parses successfully as a path-relative URL
+    // against our synthetic base — to test the error path we use an
+    // input that fails parsing in BOTH absolute and relative modes.
+    // "http://" with no host is one such case.
     let s = run_in_v8(
         r#"
         let err = null;
         try {
-            new Request("not a url");
+            new Request("http://[invalid");
         } catch (e) {
             err = e;
         }

@@ -364,12 +364,18 @@ fn response_constructor_callback(
 
 fn is_valid_reason_phrase(s: &str) -> bool {
     // RFC 7230: reason-phrase = *( HTAB / SP / VCHAR / obs-text ).
-    // Reject CR, LF, NUL, and any byte > 0x7E (we conservatively
-    // disallow non-ASCII in v1; obs-text is 0x80-0xFF and the polyfill
-    // also rejects).
-    s.chars().all(|c| {
-        let cu = c as u32;
-        cu == 0x09 || cu == 0x20 || (cu >= 0x21 && cu <= 0x7E)
+    //   HTAB     = 0x09
+    //   SP       = 0x20
+    //   VCHAR    = 0x21..=0x7E
+    //   obs-text = 0x80..=0xFF (per RFC 7230 §3.2.6)
+    // Per Fetch spec ByteString conversion of statusText, we accept
+    // each ByteString byte if it satisfies the above. Reject CR/LF/NUL.
+    // WPT response-init-001 explicitly tests `String.fromCharCode(0x80)`.
+    s.bytes().all(|b| match b {
+        0x09 | 0x20 => true,
+        0x21..=0x7E => true,
+        0x80..=0xFF => true,
+        _ => false,
     })
 }
 
@@ -785,13 +791,58 @@ fn static_json_callback(
     let data_v = args.get(0);
     let init_v = args.get(1);
 
-    // JSON.stringify(data). v8::json::stringify returns Option<Local<String>>.
-    let json_str = match v8::json::stringify(scope, data_v) {
-        Some(s) => s,
-        None => {
-            // Stringify threw — propagate.
+    // Per Fetch §5.5 Response.json step 1: "serialize a JavaScript
+    // value to JSON bytes". Per the WHATWG Infra spec, this:
+    //   1. Sets `string` to JSON.stringify(value).
+    //   2. If `string` is undefined (i.e., `value` is a Symbol or
+    //      undefined or contains non-encodables), throw TypeError.
+    //   3. Otherwise, UTF-8 encode `string`.
+    //
+    // V8's JSON.stringify behaviour:
+    //   - Symbol value, undefined value, function value → returns
+    //     undefined (a JS undefined, NOT a throw).
+    //   - Circular reference, BigInt → throws TypeError.
+    //   - Object with throwing `toJSON` / getter → throws that error.
+    //
+    // v8::json::stringify mirrors this: it returns `Some(JsString)`
+    // when JSON.stringify returned a string, `None` when JSON.stringify
+    // threw. To match the spec we need a third case: when JSON.stringify
+    // returned `undefined` (no exception), throw TypeError ourselves.
+    //
+    // We test by running `JSON.stringify(value)` and checking the result.
+    let json_result_v = {
+        let global = scope.get_current_context().global(scope);
+        let json_key = v8::String::new(scope, "JSON").unwrap();
+        let json_obj_v = global.get(scope, json_key.into()).unwrap();
+        let Ok(json_obj) = v8::Local::<v8::Object>::try_from(json_obj_v) else {
             return;
+        };
+        let stringify_key = v8::String::new(scope, "stringify").unwrap();
+        let Some(stringify_v) = json_obj.get(scope, stringify_key.into()) else {
+            return;
+        };
+        let Ok(stringify_fn) = v8::Local::<v8::Function>::try_from(stringify_v) else {
+            return;
+        };
+        match stringify_fn.call(scope, json_obj.into(), &[data_v]) {
+            Some(v) => v,
+            None => {
+                // JSON.stringify threw — exception is on the isolate,
+                // propagate.
+                return;
+            }
         }
+    };
+    if json_result_v.is_undefined() {
+        let m =
+            v8::String::new(scope, "Response.json: data is not JSON-serializable").unwrap();
+        let exc = v8::Exception::type_error(scope, m);
+        scope.throw_exception(exc);
+        return;
+    }
+    let Ok(json_str) = v8::Local::<v8::String>::try_from(json_result_v) else {
+        // Defensive: should not happen.
+        return;
     };
 
     let global = scope.get_current_context().global(scope);
@@ -802,22 +853,78 @@ fn static_json_callback(
     let result = class_fn.new_instance(scope, &[json_str.into(), init_v]);
     let Some(obj) = result else { return };
 
-    // Force Content-Type to application/json.
+    // Per Fetch §5.5 Response.json: invoke "initialize a response"
+    // with the body content-type set to "application/json". The
+    // "initialize a response" algorithm sets Content-Type ONLY IF the
+    // user's init.headers didn't supply one. The Response constructor
+    // already runs `set_default_content_type` when extracting the
+    // body — but it uses the body-derived MIME (which for our string
+    // path is "text/plain;charset=UTF-8"). We replace that with
+    // "application/json" UNLESS init.headers explicitly provided a
+    // Content-Type.
     if let Some(raw) = state_ptr(scope, obj) {
         let state: &ResponseState = unsafe { &*raw };
         if let Some(h_g) = state.headers.borrow().clone() {
             let h = v8::Local::new(scope, h_g);
-            // Per Fetch §5.5 Response.json: set with replace semantics.
-            let set_key = v8::String::new(scope, "set").unwrap();
-            if let Some(set_v) = h.get(scope, set_key.into()) {
-                if let Ok(set_fn) = v8::Local::<v8::Function>::try_from(set_v) {
-                    let n = v8::String::new(scope, "Content-Type").unwrap();
-                    let v = v8::String::new(scope, "application/json").unwrap();
-                    let _ = set_fn.call(scope, h.into(), &[n.into(), v.into()]);
+            let user_supplied_ct =
+                init_supplied_content_type(scope, init_v).unwrap_or(false);
+            if !user_supplied_ct {
+                let set_key = v8::String::new(scope, "set").unwrap();
+                if let Some(set_v) = h.get(scope, set_key.into()) {
+                    if let Ok(set_fn) = v8::Local::<v8::Function>::try_from(set_v) {
+                        let n = v8::String::new(scope, "Content-Type").unwrap();
+                        let v = v8::String::new(scope, "application/json").unwrap();
+                        let _ = set_fn.call(scope, h.into(), &[n.into(), v.into()]);
+                    }
                 }
             }
         }
     }
 
     rv.set(obj.into());
+}
+
+/// Inspect init?.headers to see whether the user supplied a
+/// Content-Type. Used by Response.json so we don't clobber a
+/// user-provided MIME with the default "application/json".
+fn init_supplied_content_type(
+    scope: &mut v8::PinScope,
+    init_v: v8::Local<v8::Value>,
+) -> Option<bool> {
+    if init_v.is_null_or_undefined() {
+        return Some(false);
+    }
+    let init_obj: v8::Local<v8::Object> = init_v.try_into().ok()?;
+    let headers_key = v8::String::new(scope, "headers")?;
+    let h_v = init_obj.get(scope, headers_key.into())?;
+    if h_v.is_null_or_undefined() {
+        return Some(false);
+    }
+    // h_v can be a Headers instance OR a record OR a sequence-of-pairs.
+    // We need to check each shape for "Content-Type" (case-insensitively).
+    if let Ok(h_obj) = v8::Local::<v8::Object>::try_from(h_v) {
+        // Try `headers.has("Content-Type")` first (Headers instance).
+        let has_key = v8::String::new(scope, "has")?;
+        if let Some(has_v) = h_obj.get(scope, has_key.into()) {
+            if let Ok(has_fn) = v8::Local::<v8::Function>::try_from(has_v) {
+                let arg = v8::String::new(scope, "Content-Type")?;
+                if let Some(r) = has_fn.call(scope, h_obj.into(), &[arg.into()]) {
+                    if r.boolean_value(scope) {
+                        return Some(true);
+                    }
+                }
+            }
+        }
+        // Plain object record: walk own properties case-insensitively.
+        if let Some(names) = h_obj.get_own_property_names(scope, Default::default()) {
+            for i in 0..names.length() {
+                let Some(k) = names.get_index(scope, i) else { continue };
+                let key_str = k.to_rust_string_lossy(scope);
+                if key_str.eq_ignore_ascii_case("content-type") {
+                    return Some(true);
+                }
+            }
+        }
+    }
+    Some(false)
 }

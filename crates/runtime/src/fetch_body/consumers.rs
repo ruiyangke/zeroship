@@ -507,7 +507,26 @@ fn consumer_blob<T: Body + BodyMarker + 'static>(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let _ = args;
+    // Per Fetch §3.5 step 1, every body consumer disturbs the body
+    // even if the rest of the algorithm fails. We run pre_flight here
+    // so that `request.bodyUsed` flips to true after the (rejecting)
+    // call — matching WPT request-disturbed.any.js expectations and
+    // workerd's behaviour. The pre_flight will reject early if the
+    // body is null OR already disturbed; if the body is intact it
+    // marks the wrapper used and we then synchronously reject with
+    // TypeError because we ship no native Blob class in v1.
+    let this = args.this();
+    let pre = match pre_flight::<T>(scope, this) {
+        Ok(p) => p,
+        Err(promise_global) => {
+            let promise = v8::Local::new(scope, promise_global);
+            rv.set(promise.into());
+            return;
+        }
+    };
+    // Body is now marked used (or empty). Reject with TypeError —
+    // Blob class is the next chunk.
+    let _ = pre;
     let resolver = v8::PromiseResolver::new(scope).unwrap();
     let promise = resolver.get_promise(scope);
     let m = v8::String::new(scope, "blob() not yet implemented (Blob class deferred)").unwrap();
