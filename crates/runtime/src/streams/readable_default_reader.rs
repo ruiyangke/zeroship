@@ -102,10 +102,20 @@ pub trait ReadRequestNative: 'static {
 // ---------------------------------------------------------------------------
 
 pub fn is_default_reader(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
-    obj.get_internal_field(scope, 0)
+    let has_state = obj
+        .get_internal_field(scope, 0)
         .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
         .map(|e| !e.value().is_null())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if !has_state {
+        return false;
+    }
+    // BYOB readers also have a non-null state Box; distinguish by the
+    // BYOB-only tag slot.
+    if crate::streams::readable_byob_reader::is_byob_reader(scope, obj) {
+        return false;
+    }
+    true
 }
 
 pub fn with_state<R>(

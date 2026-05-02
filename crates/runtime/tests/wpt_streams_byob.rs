@@ -229,6 +229,60 @@ const TESTHARNESS_SHIM: &str = r#"
       .then(() => Promise.resolve())
       .then(() => Promise.resolve());
   };
+
+  // Minimal `structuredClone` for ArrayBuffer arguments — WPT's BYOB tests
+  // pass `{transfer: [buffer]}` to detach the source, then read from the
+  // returned clone. We approximate via ArrayBuffer.transfer (V8) when
+  // available, falling back to a copy.
+  globalThis.structuredClone = function (value, options) {
+    options = options || {};
+    if (value instanceof ArrayBuffer) {
+      const transfer = options.transfer;
+      if (Array.isArray(transfer) && transfer.includes(value)) {
+        // Detach + transfer ownership: V8 ArrayBuffer.transfer().
+        if (typeof value.transfer === 'function') {
+          return value.transfer();
+        }
+        // Fallback: copy bytes then detach via a no-op (best-effort).
+        const out = new ArrayBuffer(value.byteLength);
+        new Uint8Array(out).set(new Uint8Array(value));
+        return out;
+      }
+      // Plain clone — copy bytes.
+      const out = new ArrayBuffer(value.byteLength);
+      new Uint8Array(out).set(new Uint8Array(value));
+      return out;
+    }
+    if (ArrayBuffer.isView && ArrayBuffer.isView(value)) {
+      const buf = value.buffer;
+      const transfer = options.transfer;
+      // Snapshot view metadata BEFORE any potential detach.
+      const ctor = value.constructor;
+      const byteOffset = value.byteOffset;
+      const length = value.length !== undefined ? value.length : value.byteLength;
+      const byteLength = value.byteLength;
+      let outBuf;
+      if (Array.isArray(transfer) && transfer.includes(buf)) {
+        if (typeof buf.transfer === 'function') {
+          outBuf = buf.transfer();
+        } else {
+          outBuf = new ArrayBuffer(buf.byteLength);
+          new Uint8Array(outBuf).set(new Uint8Array(buf));
+        }
+      } else {
+        outBuf = new ArrayBuffer(buf.byteLength);
+        new Uint8Array(outBuf).set(new Uint8Array(buf));
+      }
+      // DataView constructor takes (buffer, byteOffset, byteLength); typed
+      // array constructors take (buffer, byteOffset, length-in-elements).
+      if (ctor === DataView) {
+        return new ctor(outBuf, byteOffset, byteLength);
+      }
+      return new ctor(outBuf, byteOffset, length);
+    }
+    // Non-ArrayBuffer values aren't covered by our minimal polyfill.
+    throw new Error('structuredClone: unsupported value type for WPT shim');
+  };
 })();
 "#;
 

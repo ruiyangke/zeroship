@@ -430,31 +430,42 @@ pub fn readable_byte_stream_controller_close(
     }
     let queue_total = with_controller_state(scope, controller, |s| s.queue.total_size())
         .unwrap_or(0.0);
-    if queue_total > 0.0 {
-        // Defer close until queue drains.
-        with_controller_state(scope, controller, |s| s.close_requested.set(true));
-        return;
-    }
-    // If a pending pull-into has filled bytes (partial), we MUST error
-    // the stream — spec §3.11 ReadableByteStreamControllerClose step 3.
-    let has_partial = with_controller_state(scope, controller, |s| {
-        s.pending_pull_intos
-            .borrow()
-            .front()
-            .map(|d| d.bytes_filled > 0)
-            .unwrap_or(false)
+    // Spec step 4: defer close while queue has bytes (the queue will be
+    // drained by ProcessReadRequestsUsingQueue or ProcessPullIntoUsingQueue
+    // and HandleQueueDrain will then call close).
+    let has_pending = with_controller_state(scope, controller, |s| {
+        !s.pending_pull_intos.borrow().is_empty()
     })
     .unwrap_or(false);
-    if has_partial {
-        let msg =
-            v8::String::new(scope, "Insufficient bytes to fill elements in the given buffer")
-                .unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        readable_byte_stream_controller_error(scope, controller, exc);
-        let exc_g = v8::Global::new(scope, exc);
-        // Throw to caller of close().
-        scope.throw_exception(v8::Local::new(scope, &exc_g));
+    with_controller_state(scope, controller, |s| s.close_requested.set(true));
+    if queue_total > 0.0 {
+        // Defer close until queue drains.
         return;
+    }
+    // Spec step 5: a pending pull-into with non-aligned filled bytes
+    // means the consumer asked for whole elements but the stream gave
+    // us a partial element — that's a usage error.
+    if has_pending {
+        let unaligned = with_controller_state(scope, controller, |s| {
+            s.pending_pull_intos
+                .borrow()
+                .front()
+                .map(|d| d.bytes_filled % d.element_size != 0)
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+        if unaligned {
+            let msg = v8::String::new(
+                scope,
+                "Insufficient bytes to fill elements in the given buffer",
+            )
+            .unwrap();
+            let exc = v8::Exception::type_error(scope, msg);
+            readable_byte_stream_controller_error(scope, controller, exc);
+            // Throw to the caller of close().
+            scope.throw_exception(exc);
+            return;
+        }
     }
     readable_byte_stream_controller_clear_algorithms(scope, controller);
     algorithms::readable_stream_close(scope, stream);
@@ -596,8 +607,23 @@ pub fn readable_byte_stream_controller_enqueue<'s>(
             debug_assert!(
                 with_controller_state(scope, controller, |s| s.queue.is_empty()).unwrap_or(true)
             );
-            // No 'none' descriptors should be present per spec.
-            // (Cleared above when refreshing pending pull-intos.)
+            // Per spec / ref impl: if pendingPullIntos is non-empty here,
+            // the front MUST be readerType="default" (an auto-alloc
+            // descriptor). Shift it off — it is being discarded in favour
+            // of the fast path.
+            let has_default_pending = with_controller_state(scope, controller, |s| {
+                s.pending_pull_intos
+                    .borrow()
+                    .front()
+                    .map(|d| d.reader_type == ReaderType::Default)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+            if has_default_pending {
+                with_controller_state(scope, controller, |s| {
+                    s.pending_pull_intos.borrow_mut().pop_front();
+                });
+            }
             let view = v8::Uint8Array::new(
                 scope,
                 transferred,
@@ -736,6 +762,8 @@ pub fn readable_byte_stream_controller_fill_head_pull_into_descriptor(
 ///
 /// The function copies bytes from the controller's queue into the
 /// descriptor's buffer, popping queue entries as fully consumed.
+/// Per spec, each copy iteration calls FillHeadPullIntoDescriptor
+/// (which invalidates the byob_request and bumps bytes_filled).
 pub fn readable_byte_stream_controller_fill_pull_into_descriptor_from_queue(
     scope: &mut v8::PinScope,
     controller: v8::Local<v8::Object>,
@@ -789,7 +817,14 @@ pub fn readable_byte_stream_controller_fill_pull_into_descriptor_from_queue(
                 });
             });
         }
+        // Spec: FillHeadPullIntoDescriptor invalidates byob_request and
+        // bumps bytes_filled. We bump locally (the caller of
+        // process_pull_into_descriptors_using_queue is responsible for
+        // syncing back to the front-of-list). Invalidate happens here
+        // so successive byobRequest reads during multi-chunk fills see
+        // a fresh request reflecting the current bytes_filled.
         descriptor.bytes_filled += bytes_to_copy;
+        readable_byte_stream_controller_invalidate_byob_request(scope, controller);
         total_bytes_to_copy_remaining -= bytes_to_copy;
     }
 
@@ -856,9 +891,15 @@ pub fn readable_byte_stream_controller_process_read_requests_using_queue(
 }
 
 /// `ReadableByteStreamControllerProcessPullIntoDescriptorsUsingQueue(
-/// controller)` — spec §3.11.x. Returns the list of filled descriptors
-/// (per critic #38). The caller commits each of them into BYOB read
-/// requests via CommitPullIntoDescriptor.
+/// controller)` — spec §3.11.x. Returns the list of filled descriptors.
+/// The caller commits each of them into BYOB read requests via
+/// CommitPullIntoDescriptor.
+///
+/// Reference-impl pattern: PEEK the front descriptor (don't pop),
+/// fill in place, then ShiftPendingPullInto only when ready. This
+/// matters because FillPullIntoDescriptorFromQueue calls
+/// FillHeadPullIntoDescriptor which asserts pendingPullIntos non-empty
+/// and calls InvalidateBYOBRequest per copy.
 pub fn readable_byte_stream_controller_process_pull_into_descriptors_using_queue(
     scope: &mut v8::PinScope,
     controller: v8::Local<v8::Object>,
@@ -868,13 +909,25 @@ pub fn readable_byte_stream_controller_process_pull_into_descriptors_using_queue
     );
     let mut filled: Vec<PullIntoDescriptor> = Vec::new();
     loop {
+        // Stop if no descriptors or no bytes to consume.
+        let pending_empty = with_controller_state(scope, controller, |s| {
+            s.pending_pull_intos.borrow().is_empty()
+        })
+        .unwrap_or(true);
+        if pending_empty {
+            break;
+        }
         let q_total = with_controller_state(scope, controller, |s| s.queue.total_size())
             .unwrap_or(0.0);
         if q_total == 0.0 {
             break;
         }
-        let mut head = match with_controller_state(scope, controller, |s| {
-            s.pending_pull_intos.borrow_mut().pop_front()
+        // PEEK the front; FillPullIntoDescriptorFromQueue modifies
+        // bytes_filled in place via the borrow-mut path inside the fill
+        // helper (we can't pass &mut while peeking without splitting).
+        // Snapshot then call the fill function on a temporary local.
+        let mut local = match with_controller_state(scope, controller, |s| {
+            s.pending_pull_intos.borrow().front().map(clone_descriptor)
         })
         .flatten()
         {
@@ -884,17 +937,29 @@ pub fn readable_byte_stream_controller_process_pull_into_descriptors_using_queue
         let ready = readable_byte_stream_controller_fill_pull_into_descriptor_from_queue(
             scope,
             controller,
-            &mut head,
+            &mut local,
         );
+        // Persist the (possibly partial) bytes_filled back to the front
+        // descriptor in pendingPullIntos.
+        with_controller_state(scope, controller, |s| {
+            if let Some(d) = s.pending_pull_intos.borrow_mut().front_mut() {
+                d.bytes_filled = local.bytes_filled;
+                d.buffer = local.buffer.clone();
+            }
+        });
         if !ready {
-            // Put it back and stop.
-            with_controller_state(scope, controller, |s| {
-                s.pending_pull_intos.borrow_mut().push_front(head);
-            });
+            // Queue exhausted before reaching minimumFill; descriptor
+            // stays at front.
             break;
         }
-        readable_byte_stream_controller_handle_queue_drain(scope, controller);
-        filled.push(head);
+        // ShiftPendingPullInto + record for commit.
+        let popped = with_controller_state(scope, controller, |s| {
+            s.pending_pull_intos.borrow_mut().pop_front()
+        })
+        .flatten();
+        if let Some(d) = popped {
+            filled.push(d);
+        }
     }
     // Commit each filled descriptor on the BYOB reader's read-into queue.
     let stream = match stream_obj(scope, controller) {
@@ -905,6 +970,25 @@ pub fn readable_byte_stream_controller_process_pull_into_descriptors_using_queue
         readable_byte_stream_controller_commit_pull_into_descriptor(scope, stream, d);
     }
     filled
+}
+
+/// Make a fresh `PullIntoDescriptor` with all the same fields as `src`.
+/// Used to peek-fill in place: we can't hold a `&mut` into the
+/// pending_pull_intos vec across the fill call (which itself reaches
+/// into controller state via with_controller_state), so we work on a
+/// local clone and write back.
+fn clone_descriptor(src: &PullIntoDescriptor) -> PullIntoDescriptor {
+    PullIntoDescriptor {
+        buffer: src.buffer.clone(),
+        buffer_byte_length: src.buffer_byte_length,
+        byte_offset: src.byte_offset,
+        byte_length: src.byte_length,
+        bytes_filled: src.bytes_filled,
+        minimum_fill: src.minimum_fill,
+        element_size: src.element_size,
+        view_constructor: src.view_constructor,
+        reader_type: src.reader_type,
+    }
 }
 
 /// `ReadableByteStreamControllerCommitPullIntoDescriptor(stream,
@@ -936,14 +1020,22 @@ pub fn readable_byte_stream_controller_commit_pull_into_descriptor(
     }
 }
 
+/// `ReadableByteStreamControllerConvertPullIntoDescriptor(descriptor)` —
+/// spec §3.11.x. Spec calls TransferArrayBuffer on the descriptor's
+/// buffer before constructing the view (so the view the consumer
+/// receives owns a fresh ArrayBuffer; the descriptor's local copy is
+/// detached). Then constructs `new viewConstructor(transferred,
+/// byteOffset, bytesFilled / elementSize)`.
 fn build_view_from_descriptor<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     descriptor: &PullIntoDescriptor,
 ) -> Option<v8::Local<'s, v8::ArrayBufferView>> {
     let buf_l = v8::Local::new(scope, &descriptor.buffer);
+    // Spec: TransferArrayBuffer on the descriptor's buffer.
+    let transferred = transfer_array_buffer(scope, buf_l);
     descriptor.view_constructor.new_view(
         scope,
-        buf_l,
+        transferred,
         descriptor.byte_offset as usize,
         descriptor.bytes_filled as usize,
     )

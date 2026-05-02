@@ -668,14 +668,11 @@ fn parse_min<'s>(
             let exc = v8::Exception::type_error(scope, msg);
             exc
         })?;
-    if !n.is_finite() {
-        let msg = v8::String::new(scope, "read: min is not finite").unwrap();
-        let exc = v8::Exception::range_error(scope, msg);
-        return Err(exc);
-    }
-    if n < 0.0 || n > (1u64 << 53) as f64 {
+    // [EnforceRange] per WebIDL: if not a finite integer in the valid
+    // range, throw a TypeError. (NaN/inf, < 0, > 2^53-1 → TypeError.)
+    if !n.is_finite() || n < 0.0 || n > (1u64 << 53) as f64 || n.fract() != 0.0 {
         let msg = v8::String::new(scope, "read: min out of [EnforceRange]").unwrap();
-        let exc = v8::Exception::range_error(scope, msg);
+        let exc = v8::Exception::type_error(scope, msg);
         return Err(exc);
     }
     Ok(n as u64)
