@@ -113,6 +113,47 @@ The pool is full. Either:
 
 The wrapper waited up to 1s for each virtiofsd UDS, then bailed. Look at `${NOMAD_TASK_DIR}/vfs-{keys,ws,home}.log`. Most common cause: the host share dir doesn't exist or isn't readable by the user the Nomad agent runs as.
 
+## Rebaking the rootfs after agent changes
+
+Whenever the sandbox-agent source changes you need to bake a fresh agent
+binary into `${ZSBX_ARTIFACT_DIR}/rootfs-slim.img`. There is one subtlety:
+agent binaries built on a Nix host link against `/nix/store/...` glibc and
+a Nix-store ELF interpreter. Dropped into a debian-trixie rootfs as-is the
+binary boots with the kernel, then init's exec of the agent silently
+fails (interpreter doesn't exist), and the failure surfaces several layers
+up as "/livez never returned 200" — no agent log, no obvious cause.
+
+The `bake-rootfs.sh` helper rewrites PT_INTERP to debian's canonical
+`/lib64/ld-linux-x86-64.so.2`, strips the Nix RPATH, verifies the new
+preview-feature capability tokens are present in the patched binary, and
+copies it into the mounted rootfs at `/usr/local/bin/sandbox-agent`:
+
+```sh
+./crates/sandbox/scripts/bake-rootfs.sh \
+    --build \
+    target/release/sandbox-agent \
+    /var/lib/zeroship/ch/rootfs-slim.img
+```
+
+Drop `--build` if you've already built the binary. The script needs
+`sudo` (for the loop mount), `patchelf`, and `strings`. If the
+capability-token check fails the binary is older than the preview-URL
+feature; rebuild from this worktree and retry.
+
+## Running long-lived processes inside the sandbox
+
+`/exec` runs commands in a process group and kills the whole group with
+SIGKILL when the request returns. This is intentional anti-DoS — the
+shell can otherwise `cmd &`-fork a daemonized grandchild that lives
+forever. Long-lived processes (Vite, Node, Python dev servers) must
+escape the group with `setsid` AND have stdio detached:
+
+    setsid sh -c 'node server.js >/tmp/server.log 2>&1 < /dev/null &'
+
+A future "service API" (sandbox-controller side, not /exec) will
+replace this pattern; until then, every long-lived launcher needs the
+setsid wrapper.
+
 ## What's deliberately not in scope
 
 - **Per-user `/home/u` persistence across hosts.** The current single-node design uses a host bind-mount. The next milestone replaces this with Ceph-RBD-backed volumes via a CSI plugin; until then, sandboxes scheduled on a different host won't see the user's package caches.
