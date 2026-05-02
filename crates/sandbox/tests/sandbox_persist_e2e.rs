@@ -170,7 +170,7 @@ async fn restart_with_unreachable_agent_keeps_sealed_records() {
     //    address has no listener so the probe fails-fast as
     //    Unreachable. The sealed record is left on disk.
     let backend = Backend::NomadCh(
-        zeroship_sandbox::backend::nomad_ch::NomadCHBackend::new(make_cfg("nomad-ch"))
+        zeroship_sandbox::backend::nomad_ch::NomadCHBackend::new(make_cfg("nomad-ch"), None)
             .unwrap(),
     );
     let registry = SandboxRegistry::new();
@@ -235,7 +235,7 @@ async fn restart_with_mismatched_agent_deletes_sealed_record_and_records_outcome
     assert!(sealed_path.exists());
 
     let backend = Backend::K8s(
-        zeroship_sandbox::backend::k8s::K8sBackend::new(make_cfg("k8s")).unwrap(),
+        zeroship_sandbox::backend::k8s::K8sBackend::new(make_cfg("k8s"), None).unwrap(),
     );
     let registry = SandboxRegistry::new();
 
@@ -259,7 +259,7 @@ async fn restart_with_matching_agent_rehydrates_for_supported_backend() {
     // unit tests in `restore.rs`. This test confirms the mid-boot
     // sequence after a successful probe lands the registry entry.
     let backend =
-        zeroship_sandbox::backend::nomad_ch::NomadCHBackend::new(make_cfg("nomad-ch"))
+        zeroship_sandbox::backend::nomad_ch::NomadCHBackend::new(make_cfg("nomad-ch"), None)
             .unwrap();
     let id = Uuid::now_v7();
     let sk_bytes = [0xc1; 32];
@@ -313,7 +313,7 @@ async fn empty_persist_dir_is_zero_records() {
     let dir = fresh_dir("empty");
     let aead_key = AeadKey::from_bytes([0u8; 32]);
     let backend = Backend::NomadCh(
-        zeroship_sandbox::backend::nomad_ch::NomadCHBackend::new(make_cfg("nomad-ch"))
+        zeroship_sandbox::backend::nomad_ch::NomadCHBackend::new(make_cfg("nomad-ch"), None)
             .unwrap(),
     );
     let registry = SandboxRegistry::new();

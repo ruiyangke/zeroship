@@ -545,7 +545,7 @@ mod tests {
         let dir = fresh_dir("nodir");
         let key = AeadKey::from_bytes([0u8; 32]);
         let backend = Backend::NomadCh(
-            crate::backend::nomad_ch::NomadCHBackend::new(make_cfg()).unwrap(),
+            crate::backend::nomad_ch::NomadCHBackend::new(make_cfg(), None).unwrap(),
         );
         let reg = SandboxRegistry::new();
         // sealed-records subdir doesn't exist → zero records.
@@ -610,7 +610,7 @@ mod tests {
         seal(id, &sealed, &sealed_dir, &key).unwrap();
 
         let backend = Backend::NomadCh(
-            crate::backend::nomad_ch::NomadCHBackend::new(make_cfg()).unwrap(),
+            crate::backend::nomad_ch::NomadCHBackend::new(make_cfg(), None).unwrap(),
         );
         let reg = SandboxRegistry::new();
         // 10.99.107.2:7777 — never going to answer in the test
@@ -694,7 +694,7 @@ mod tests {
                 panic!("k8s test cfg: {e}");
             }
         };
-        let backend = Backend::K8s(crate::backend::k8s::K8sBackend::new(k8s).unwrap());
+        let backend = Backend::K8s(crate::backend::k8s::K8sBackend::new(k8s, None).unwrap());
         let reg = SandboxRegistry::new();
 
         let outcome =
@@ -722,7 +722,7 @@ mod tests {
     #[compio::test]
     async fn nomad_ch_restore_from_sealed_rehydrates_state() {
         let backend =
-            crate::backend::nomad_ch::NomadCHBackend::new(make_cfg()).unwrap();
+            crate::backend::nomad_ch::NomadCHBackend::new(make_cfg(), None).unwrap();
         let id = Uuid::now_v7();
         let sk_bytes = [0xee; 32];
         let sk = SigningKey::from_bytes(&sk_bytes);
@@ -756,7 +756,7 @@ mod tests {
     #[compio::test]
     async fn nomad_ch_restore_rejects_wrong_backend_label() {
         let backend =
-            crate::backend::nomad_ch::NomadCHBackend::new(make_cfg()).unwrap();
+            crate::backend::nomad_ch::NomadCHBackend::new(make_cfg(), None).unwrap();
         let id = Uuid::now_v7();
         let sk_bytes = [0xee; 32];
         let sk = SigningKey::from_bytes(&sk_bytes);
@@ -804,7 +804,7 @@ mod tests {
         };
         let path = seal(id, &sealed, &sealed_dir, &key).unwrap();
         let backend = Backend::K8s(
-            crate::backend::k8s::K8sBackend::new(make_cfg_k8s().unwrap()).unwrap(),
+            crate::backend::k8s::K8sBackend::new(make_cfg_k8s().unwrap(), None).unwrap(),
         );
         let reg = SandboxRegistry::new();
         let outcome =
