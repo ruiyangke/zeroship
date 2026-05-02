@@ -1,6 +1,6 @@
 // ─── DevEventsBadge — floating telemetry inspector (dev only) ──
 //
-// A small floating chip in the bottom-right corner that shows the
+// A small floating chip in the bottom-LEFT corner that shows the
 // running count of fired analytics events. Click to open a popover
 // listing the most recent ones (name + props + relative time). Helps
 // developers verify that `track()` calls are firing without console-
@@ -9,6 +9,12 @@
 // Hidden in production builds — the chip mounts only when
 // `import.meta.env.DEV` is true. The badge is non-interactive for
 // non-dev users; never bothers them.
+//
+// Positioning note: the badge sits bottom-left so it doesn't overlap
+// the chat composer's Send / Stop buttons (which sit bottom-right
+// inside the chat sidebar). Sharing the bottom-right corner with
+// real interactive surfaces caused click-intercept failures (e.g.,
+// e2e/chat-openai.spec.ts "stop button cancels an in-flight stream").
 
 import { useEffect, useRef, useState } from "react";
 import { subscribeEvents, type TrackedEvent } from "../lib/analytics";
@@ -36,7 +42,7 @@ export function DevEventsBadge() {
   return (
     <div
       data-testid="dev-events-badge"
-      className="fixed bottom-3 right-3 z-50 font-mono text-[11px]"
+      className="fixed bottom-3 left-3 z-50 font-mono text-[11px]"
     >
       <button
         type="button"
@@ -51,7 +57,7 @@ export function DevEventsBadge() {
         <div
           ref={popoverRef}
           data-testid="dev-events-popover"
-          className="absolute bottom-9 right-0 w-[320px] max-h-[60vh] overflow-y-auto bg-paper border border-rule shadow-xl"
+          className="absolute bottom-9 left-0 w-[320px] max-h-[60vh] overflow-y-auto bg-paper border border-rule shadow-xl"
         >
           <div className="px-3 py-2 border-b border-rule flex items-center justify-between">
             <span className="font-sans text-[10px] uppercase tracking-[0.18em] text-ink-soft">
