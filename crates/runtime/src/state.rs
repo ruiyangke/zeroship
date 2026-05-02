@@ -594,7 +594,29 @@ pub struct SpawnedTimer {
 // Op result
 // ---------------------------------------------------------------------------
 
+/// A value to resolve or reject a promise with, materialized in V8 by the
+/// runtime loop. Used by [`OpResult::JsValue`] so async class methods can
+/// hand back arbitrary V8 chunks (not just UTF-8 strings).
+///
+/// Per streams design D-3: the existing `OpResult::Completed.value: String`
+/// channel is wrong for streams (it round-trips chunks through UTF-8 and
+/// silently mangles binary). Either we add this variant or maintain an
+/// out-of-band registry; the variant is simpler and reuses the existing
+/// dispatch loop in `runtime.rs`.
+pub enum ResolveValue {
+    /// Resolve with `undefined`.
+    Undefined,
+    /// Resolve with the given V8 value.
+    JsGlobal(v8::Global<v8::Value>),
+    /// Resolve with a Uint8Array view over the given bytes (zero-extra-copy:
+    /// the bytes are moved into a fresh ArrayBuffer at dispatch time).
+    Bytes(Vec<u8>),
+    /// Reject with the given V8 value.
+    Reject(v8::Global<v8::Value>),
+}
+
 /// Result produced by a spawned async op future.
+#[allow(missing_debug_implementations)]
 pub enum OpResult {
     /// A regular async op finished — resolve its promise with `value`.
     Completed {
@@ -607,6 +629,20 @@ pub enum OpResult {
     Failed {
         op_id: u32,
         error: String,
+        request_id: Option<u64>,
+    },
+    /// A class-method async op finished — resolve/reject with a V8 value.
+    ///
+    /// Used by `#[v8_async_method]` and any direct caller that needs to
+    /// hand back a real JS value (object, typed array, Promise, …) rather
+    /// than a UTF-8 string. The resolver is stored directly on the
+    /// variant (vs the `pending_resolvers` map keyed by op-id) so the
+    /// runtime loop can resolve it without an extra lookup.
+    ///
+    /// Streams design §VII.5 / D-3.
+    JsValue {
+        resolver: v8::Global<v8::PromiseResolver>,
+        value: ResolveValue,
         request_id: Option<u64>,
     },
     /// A streaming body chunk arrived.

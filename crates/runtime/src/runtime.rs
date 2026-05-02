@@ -93,7 +93,8 @@ use crate::http::{self, ResponseInfo, SettledResult, HTTP_CREATE_REQUEST_JS};
 use crate::modules::ModuleEntry;
 use crate::plugin::NativePlugin;
 use crate::state::{
-    DispatchResult, OpResult, RuntimeState, SharedState, SpawnedTimer, TimerResult,
+    DispatchResult, OpResult, ResolveValue, RuntimeState, SharedState, SpawnedTimer,
+    TimerResult,
 };
 
 use crate::channel::{
@@ -1763,6 +1764,80 @@ impl RuntimeInner {
                 self.cleanup_cancelled_requests();
                 self.clear_executing_request();
 
+                self.drain_new_tasks_into(work);
+            }
+            OpResult::JsValue { resolver, value, request_id } => {
+                // Class-method async result: resolve/reject the bound resolver
+                // with a real V8 value. Streams design D-3 / §VII.5.
+                if let Some(rid) = request_id {
+                    let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
+                    let mut s = self.state.borrow_mut();
+                    s.executing_request_id = Some(rid);
+                    s.executing_request_cancel = cancel;
+                }
+
+                let start = Instant::now();
+
+                self.arm_cpu_timer();
+                let settled_results = enter_v8!(self, |scope| {
+                    let r = v8::Local::new(scope, &resolver);
+                    match value {
+                        ResolveValue::Undefined => {
+                            r.resolve(scope, v8::undefined(scope).into());
+                        }
+                        ResolveValue::JsGlobal(g) => {
+                            let v = v8::Local::new(scope, &g);
+                            r.resolve(scope, v);
+                        }
+                        ResolveValue::Bytes(bytes) => {
+                            let len = bytes.len();
+                            let ab = v8::ArrayBuffer::new(scope, len);
+                            let store = ab.get_backing_store();
+                            for (i, &b) in bytes.iter().enumerate() {
+                                store[i].set(b);
+                            }
+                            let u8a = v8::Uint8Array::new(scope, ab, 0, len).unwrap();
+                            r.resolve(scope, u8a.into());
+                        }
+                        ResolveValue::Reject(g) => {
+                            let v = v8::Local::new(scope, &g);
+                            r.reject(scope, v);
+                        }
+                    }
+                    scope.perform_microtask_checkpoint();
+                    collect_settled_promises(scope, &mut self.pending_requests)
+                });
+                self.disarm_cpu_timer();
+
+                if self.check_v8_terminated() {
+                    if let Some(rid) = request_id {
+                        if let Some(req) = self.pending_requests.remove(&rid) {
+                            req.reply_fetch.send(Err("CPU time limit exceeded".into()));
+                        }
+                    }
+                    self.clear_executing_request();
+                    self.drain_new_tasks_into(work);
+                    return;
+                }
+
+                let cpu_elapsed = start.elapsed();
+
+                if let Some(rid) = request_id {
+                    if let Some(req) = self.pending_requests.get_mut(&rid) {
+                        req.cpu_accumulated += cpu_elapsed;
+                    }
+                }
+
+                for (id, req, settled) in settled_results {
+                    self.send_settled_reply_any(id, req, settled, cpu_elapsed);
+                }
+
+                if let Some(rid) = request_id {
+                    self.check_cpu_limit(rid);
+                }
+
+                self.cleanup_cancelled_requests();
+                self.clear_executing_request();
                 self.drain_new_tasks_into(work);
             }
             OpResult::StreamChunk { stream_id, data, done } => {

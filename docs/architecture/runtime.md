@@ -83,13 +83,14 @@ Modules come from a `Vec<ModuleEntry>` (specifier + source). Today every deploy 
 
 `init.rs` evaluates a stack of polyfills before user code:
 
-- WHATWG Streams (vendored `web-streams-polyfill` v3.3.3 — fills WHATWG gaps that our internal byte-fast-path doesn't cover)
+- WHATWG Streams (native — see `docs/proposals/streams-native.md`; ReadableStream, WritableStream, TransformStream, *Controller, *Reader, *Writer, BYOBReader, BYOBRequest, ByteLengthQueuingStrategy, CountQueuingStrategy, async-iter prototype patches)
+- `TextEncoderStream` / `TextDecoderStream` (small JS wrapper over native TransformStream + TextEncoder/TextDecoder, in `embed/text-streams.js`)
 - TextEncoder/Decoder, Headers, URL, URLSearchParams, fetch, Request, Response
 - WebSocket (RFC 6455)
 - WebCrypto subset
 - Node compat shims (`process.versions`, `process.nextTick`, `AbortSignal.any`, ICU data)
 
-The byte fast-path through `__streams` native slot stays end-to-end on the production HTTP wire — polyfill is the cold-path correctness layer.
+Stream chunks moving onto an HTTP wire go through the kernel-callable `__zsBeginStreamForward(response)` helper in `fetch.js`: it locks the body via `getReader()` and pumps each chunk into a Rust StreamState identified by `response._streamId`. `inspect_response` reads that id and forwards to the TCP writer.
 
 ## Bench infrastructure
 

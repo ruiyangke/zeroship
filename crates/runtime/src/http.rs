@@ -18,11 +18,11 @@ use crate::state::SharedState;
 // runs the same ~8 property accesses per response.
 static K_STATUS: v8::OneByteConst = v8::String::create_external_onebyte_const(b"status");
 static K_HEADERS: v8::OneByteConst = v8::String::create_external_onebyte_const(b"headers");
-static K_BODY: v8::OneByteConst = v8::String::create_external_onebyte_const(b"body");
 static K_BODY_TEXT: v8::OneByteConst = v8::String::create_external_onebyte_const(b"_bodyText");
 static K_IS_STREAM: v8::OneByteConst = v8::String::create_external_onebyte_const(b"_isStreamBody");
 static K_WEBSOCKET: v8::OneByteConst = v8::String::create_external_onebyte_const(b"webSocket");
 static K_ID: v8::OneByteConst = v8::String::create_external_onebyte_const(b"_id");
+static K_STREAM_ID: v8::OneByteConst = v8::String::create_external_onebyte_const(b"_streamId");
 static K_LENGTH: v8::OneByteConst = v8::String::create_external_onebyte_const(b"length");
 static K_ZS_RESPONSE: v8::OneByteConst = v8::String::create_external_onebyte_const(b"__zsResponse");
 static K_MESSAGE: v8::OneByteConst = v8::String::create_external_onebyte_const(b"message");
@@ -198,14 +198,37 @@ pub fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Va
         .map(|v| v.boolean_value(scope))
         .unwrap_or(false);
     if is_stream {
-        // Stream ID is on the ReadableStream body: response.body._id
-        let body_key = key(scope, &K_BODY);
-        let id_key = key(scope, &K_ID);
-        let stream_id = obj.get(scope, body_key.into())
-            .and_then(|v| v.to_object(scope))
-            .and_then(|body_obj| body_obj.get(scope, id_key.into()))
-            .and_then(|v| v.uint32_value(scope))
-            .unwrap_or(0);
+        // Stream ID is on the Response itself: `response._streamId`.
+        //
+        // - If `_streamId >= 0`: already allocated (e.g. fetch-response body
+        //   that wraps a Rust-pushed stream_id, or a Response inspected twice).
+        // - If `_streamId === -1` (sentinel): the Response holds an
+        //   un-pumped ReadableStream. Call `__zsBeginStreamForward(response)`
+        //   to lock the body, allocate a streamId, and launch the pump.
+        //
+        // Reading `response._streamId` rather than `response.body._id`
+        // keeps the kernel free of any reach into stream-class internals.
+        // The forward helper duck-types on `getReader()` so it works
+        // against native ReadableStream, polyfill streams, and any
+        // spec-conformant class.
+        let stream_id_key = key(scope, &K_STREAM_ID);
+        let raw = obj.get(scope, stream_id_key.into());
+        let needs_pump = raw.map(|v| v.int32_value(scope).unwrap_or(0) < 0).unwrap_or(true);
+        let stream_id: u32 = if needs_pump {
+            // Call globalThis.__zsBeginStreamForward(response) to lock the
+            // body and start the pump. Returns the allocated streamId.
+            let global = scope.get_current_context().global(scope);
+            let fn_key = v8::String::new(scope, "__zsBeginStreamForward").unwrap();
+            let fn_v = global.get(scope, fn_key.into())
+                .ok_or_else(|| "__zsBeginStreamForward missing".to_string())?;
+            let forward_fn = v8::Local::<v8::Function>::try_from(fn_v)
+                .map_err(|_| "__zsBeginStreamForward not a function".to_string())?;
+            let result = forward_fn.call(scope, v8::undefined(scope).into(), &[obj.into()])
+                .ok_or_else(|| "__zsBeginStreamForward threw".to_string())?;
+            result.uint32_value(scope).unwrap_or(0)
+        } else {
+            raw.and_then(|v| v.uint32_value(scope)).unwrap_or(0)
+        };
 
         // Check if the stream is already fully buffered + closed.
         // This handles JS-created ReadableStreams where all chunks were

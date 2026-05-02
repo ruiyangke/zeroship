@@ -1436,3 +1436,147 @@ fn reject_shared_throws_for_bare_sab_arg() {
         "bare SAB arg must throw TypeError; got {parsed}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// [EnforceRange] u64 extraction (streams §XIV.8) — newtype EnforceRangeU64
+// ---------------------------------------------------------------------------
+//
+// WebIDL §3.2.10 [EnforceRange] unsigned long long: convert to Number; reject
+// NaN, ±∞, negative, and any value larger than 2^53-1 (Number precision
+// boundary) with TypeError. WPT readable-byte-streams/read-min.any.js tests
+// MAX_SAFE_INTEGER + 1 must throw.
+//
+// The streams design (§XIV.8) requires this extraction for BYOBReader's
+// `min` parameter and for BYOBRequest.respond(bytesWritten).
+
+mod enforce_range_u64 {
+    use super::*;
+    use zeroship_runtime::EnforceRangeU64;
+
+    pub struct Counter {
+        pub last: u64,
+    }
+
+    impl Default for Counter {
+        fn default() -> Self {
+            Counter { last: 0 }
+        }
+    }
+
+    #[v8_class]
+    impl Counter {
+        #[v8_method]
+        fn set(&mut self, n: EnforceRangeU64) -> f64 {
+            self.last = n.into();
+            self.last as f64
+        }
+    }
+}
+
+#[test]
+fn enforce_range_u64_accepts_safe_integer() {
+    // Number.MAX_SAFE_INTEGER = 2^53 - 1 = 9007199254740991. Within range
+    // is fine and round-trips cleanly through Number.
+    let s = run_in_v8(
+        |scope, global| install_class::<enforce_range_u64::Counter>(
+            enforce_range_u64::Counter::install, "Counter", scope, global,
+        ),
+        r#"
+        const c = new Counter();
+        c.set(Number.MAX_SAFE_INTEGER);
+        "#,
+        |val, scope| val.number_value(scope).unwrap(),
+    );
+    assert_eq!(s as u64, (1u64 << 53) - 1);
+}
+
+#[test]
+fn enforce_range_u64_throws_on_negative() {
+    let s = run_in_v8(
+        |scope, global| install_class::<enforce_range_u64::Counter>(
+            enforce_range_u64::Counter::install, "Counter", scope, global,
+        ),
+        r#"
+        const c = new Counter();
+        let kind;
+        try { c.set(-1); }
+        catch (e) { kind = e.constructor.name; }
+        kind || "no-throw";
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "TypeError");
+}
+
+#[test]
+fn enforce_range_u64_throws_on_nan() {
+    let s = run_in_v8(
+        |scope, global| install_class::<enforce_range_u64::Counter>(
+            enforce_range_u64::Counter::install, "Counter", scope, global,
+        ),
+        r#"
+        const c = new Counter();
+        let kind;
+        try { c.set(NaN); }
+        catch (e) { kind = e.constructor.name; }
+        kind || "no-throw";
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "TypeError");
+}
+
+#[test]
+fn enforce_range_u64_throws_on_infinity() {
+    let s = run_in_v8(
+        |scope, global| install_class::<enforce_range_u64::Counter>(
+            enforce_range_u64::Counter::install, "Counter", scope, global,
+        ),
+        r#"
+        const c = new Counter();
+        let kind;
+        try { c.set(Infinity); }
+        catch (e) { kind = e.constructor.name; }
+        kind || "no-throw";
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "TypeError");
+}
+
+#[test]
+fn enforce_range_u64_throws_above_max_safe_integer() {
+    // MAX_SAFE_INTEGER + 1 = 2^53 cannot be represented precisely as a JS
+    // Number. WPT requires TypeError per spec [EnforceRange] semantics —
+    // we reject anything that would lose precision through Number.
+    let s = run_in_v8(
+        |scope, global| install_class::<enforce_range_u64::Counter>(
+            enforce_range_u64::Counter::install, "Counter", scope, global,
+        ),
+        r#"
+        const c = new Counter();
+        let kind;
+        try { c.set(Number.MAX_SAFE_INTEGER + 1); }
+        catch (e) { kind = e.constructor.name; }
+        kind || "no-throw";
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "TypeError");
+}
+
+#[test]
+fn enforce_range_u64_accepts_zero() {
+    // 0 is a valid value at the boundary.
+    let s = run_in_v8(
+        |scope, global| install_class::<enforce_range_u64::Counter>(
+            enforce_range_u64::Counter::install, "Counter", scope, global,
+        ),
+        r#"
+        const c = new Counter();
+        c.set(0);
+        "#,
+        |val, scope| val.number_value(scope).unwrap(),
+    );
+    assert_eq!(s, 0.0);
+}
