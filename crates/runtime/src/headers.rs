@@ -865,6 +865,19 @@ fn iter_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Func
 /// `Headers::install` first, then patch the prototype's keys/values/
 /// entries/[Symbol.iterator] methods to point at hand-rolled callbacks
 /// that capture `this` per call.
+/// Per-isolate cache of the Headers FunctionTemplate + prototype.
+///
+/// Set from `install_global`; consumed by the kernel-side fast-path
+/// Request builder in `fetch_request::build_kernel_request` so it can
+/// allocate a Headers wrapper without resolving `globalThis.Headers` and
+/// without invoking the spec constructor (which walks the WebIDL
+/// sequence/record dispatch + per-pair validation — overkill when the
+/// kernel already has a clean header list).
+pub struct HeadersTemplateSlot {
+    pub class_tmpl: v8::Global<v8::FunctionTemplate>,
+    pub prototype: v8::Global<v8::Object>,
+}
+
 pub fn install_global<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     global: v8::Local<v8::Object>,
@@ -901,6 +914,80 @@ pub fn install_global<'s>(
 
     let key = v8::String::new(scope, "Headers").unwrap();
     global.set(scope, key.into(), class_fn.into());
+
+    // Stash the template + prototype for the kernel-side fast-path
+    // Request builder. See `HeadersTemplateSlot`.
+    let class_tmpl_g = v8::Global::new(scope, tmpl);
+    let proto_g = v8::Global::new(scope, proto);
+    scope.set_slot(HeadersTemplateSlot {
+        class_tmpl: class_tmpl_g,
+        prototype: proto_g,
+    });
+}
+
+/// Build a Headers wrapper directly from a list of (name, value) byte
+/// pairs that have already been validated upstream (e.g. by the HTTP
+/// parser). Skips:
+///   - the `globalThis.Headers` lookup,
+///   - WebIDL sequence-vs-record dispatch in the constructor,
+///   - per-pair `is_header_name` / `is_header_value` validation,
+///   - normalize-then-validate algorithms in `append`.
+///
+/// The kernel uses this for the slow-path Request build — the upstream
+/// HTTP layer already enforced header rules at parse time, so re-doing
+/// them in V8 is wasted work. List ordering is preserved from the
+/// caller; case is preserved per Fetch §2.2.1 (insertion order until
+/// sort-and-combine fires on iteration).
+///
+/// Safety / correctness: the returned wrapper is indistinguishable from
+/// one produced by `new Headers(record)` — internal field 0 holds a
+/// Box<Headers> with the same shape, prototype is the user-visible
+/// `Headers.prototype`. Mutator methods (set/append/delete) all work as
+/// expected.
+pub fn build_kernel_headers<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    pairs: &[(String, String)],
+) -> Option<v8::Local<'s, v8::Object>> {
+    let (class_tmpl_g, proto_g) = {
+        let slot = scope.get_slot::<HeadersTemplateSlot>()?;
+        (slot.class_tmpl.clone(), slot.prototype.clone())
+    };
+    let class_tmpl = v8::Local::new(scope, class_tmpl_g);
+    let inst_tmpl = class_tmpl.instance_template(scope);
+    let obj = inst_tmpl.new_instance(scope)?;
+    let proto = v8::Local::new(scope, proto_g);
+    obj.set_prototype(scope, proto.into());
+
+    // Build the Box<Headers> directly. The list field stores
+    // (name_bytes, value_bytes) pairs in insertion order. We rely on
+    // the upstream HTTP parser having already accepted these, so we
+    // skip per-pair validation here.
+    let mut headers = Headers::default();
+    for (n, v) in pairs {
+        // list_append_unchecked preserves insertion order + casing.
+        // Fetch §2.2.1 `append` step 1's "reuse casing of first
+        // byte-case-insensitively-matching name" still happens via
+        // the underlying list_append; what we skip is the
+        // normalize_value + per-byte validation on `name` and `value`
+        // — already enforced upstream by the HTTP parser.
+        headers.list_append_unchecked(n.as_bytes().to_vec(), v.as_bytes().to_vec());
+    }
+
+    let boxed = Box::new(headers);
+    let raw = Box::into_raw(boxed);
+    let raw_addr = raw as usize;
+    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
+    obj.set_internal_field(0, ext.into());
+
+    let weak = v8::Weak::with_guaranteed_finalizer(
+        scope,
+        obj,
+        Box::new(move || unsafe {
+            drop(Box::from_raw(raw_addr as *mut Headers));
+        }),
+    );
+    std::mem::forget(weak);
+    Some(obj)
 }
 
 /// Hand-rolled `Headers.prototype.forEach(callback, thisArg?)` per
