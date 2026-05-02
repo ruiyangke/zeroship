@@ -103,7 +103,7 @@ The "Missing concepts" the critic flagged — per-app WebSocket metering,
 worker-shutdown drain protocol, sticky routing for outbound `new
 WebSocket(url)` on multi-node, TLS root-trust + ALPN config,
 WebSocketStream-deprecated-form enumeration — get explicit Open
-Questions in §XVII (XVII.11 through XVII.16).
+Questions in §XVII (XVII.4b, XVII.10b through XVII.10f).
 
 **Score target after v2 revision:** ≥80 (production-ready). Remaining
 items in §XVII are policy choices, not spec defects.
@@ -340,6 +340,7 @@ is illustrative.
 | **D-25** | Polyfill removal cadence: three landings — (1) ship native behind feature flag `runtime_native_websocket`, polyfill remains default; (2) flip default to native, polyfill remains as fallback; (3) delete polyfill JS file + the five `__ws*` callbacks in `crates/runtime/src/websocket.rs`. The native cutover (step 2) ALSO renames `crates/runtime/src/websocket.rs` to `crates/runtime/src/websocket/legacy.rs` to mark it deprecated; the cutover re-points the gateway WebSocket coupling logic to the new native module. Same cadence as streams D-19, fetch D-23. | Risk control. | §XIV |
 | **D-26** | `ErrorEvent` IDL: NOT shipped natively in v1. The spec §3.1 step "fire a connection-failed event" uses a plain `Event("error")`, not `ErrorEvent`. (HTML's `ErrorEvent` is for script-load and uncaught-exception events — different shape.) workerd has its own `ErrorEvent` (`workerd/api/events.h`) that some Cloudflare Workers code uses; we match the SPEC default (plain Event), not workerd's extension. Existing app code that does `socket.addEventListener('error', e => e.message)` reads `undefined` — same as the polyfill's current behaviour at `embed/websocket.js:111-115`. | Spec compliance over workerd-extension-compat. ErrorEvent is a follow-up if a real creator app needs it (cheap; ~80 LOC). | §III, §V.5 |
 | **D-27** | Sec-WebSocket-Key generation: 16 random bytes, base64-encoded (`base64::engine::general_purpose::STANDARD`). Random source: `aws_lc_rs::rand::fill` (already used by `crypto.getRandomValues`). The `Sec-WebSocket-Accept` server response is verified by computing `base64(SHA1(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))` and comparing to the received header value byte-by-byte. The GUID is the literal RFC 6455 §1.3 magic. | Spec; mismatch fails the connection per RFC 6455 §4.1 step 6 of the response checks. | §V.3, §IX.3 |
+| **D-28** | Extra `WebSocketInit` dictionary members beyond `signal`: `origin`, `maxMessageSize`, `maxFrameSize`, `pingIntervalMs`. **`origin`** — opt-in only per RFC 6455 §10.2 (https://datatracker.ietf.org/doc/html/rfc6455#section-10.2); default null = no Origin header on the wire. **`maxMessageSize`** — pinned via `tungstenite::WebSocketConfig`; default 4 MiB; tungstenite's 64 MiB default would let a malicious server OOM the worker. **`maxFrameSize`** — default 1 MiB. **`pingIntervalMs`** — client-side ping keepalive (tungstenite auto-replies to incoming Pings but does NOT send periodic Pings); default 30 000 ms (matches undici, workerd); 0 disables. (addresses critic CRITICAL #3 — Origin opt-in; MAJORs #22, #23 — size + ping pinning.) | Spec compliance + production-grade defence-in-depth. | §IV.3 |
 
 ## I. Architecture overview
 
@@ -3579,17 +3580,22 @@ cyper later flips features.
 
 ### XVII.10f. WebSocketStream deprecated forms
 
-**Picked:** v1 throws ReferenceError on `new WebSocketStream(...)`.
-The deprecated Chrome ship (which exposed `WebSocketStream` returning
-a stream of strings) is not worth shimming.
+**Picked:** the v1 implementation throws ReferenceError on
+`new WebSocketStream(...)`. The deprecated Chrome ship (which exposed
+an early `WebSocketStream` returning a stream of strings) is not
+worth shimming — it predates the live spec text and was never
+shipped beyond Chrome's experimental flag.
 
-**Defer:** v2 adds the live spec'd `WebSocketStream` (per
+**Defer:** the v2 implementation (post this design's v1 ship) adds
+the live-spec'd `WebSocketStream` per
 https://websockets.spec.whatwg.org/#websocketstream and the
-ricea/websocketstream-explainer).
+ricea/websocketstream-explainer.
 
 The runtime's global registration explicitly does NOT install
 `WebSocketStream`; AI-builder code that emits it gets a clear
-ReferenceError with a hint pointing to `new WebSocket(...)`.
+ReferenceError with a hint pointing to `new WebSocket(...)`. The
+hint message is statically baked into the runtime's
+`global_referenceerror_messages` map.
 
 (addresses critic missing-concept #8)
 
@@ -3614,7 +3620,8 @@ uniformly.
 single tenant; the gateway's existing CHWBL routing layer holds the
 cross-tenant budget (per `crates/gateway/src/dispatch.rs`). The cap
 above is a runtime self-defence number; the gateway-side per-account
-budget is a separate concern handled in §XVII.11.
+budget is the gateway's responsibility (out of scope here; tracked in
+the gateway's own rate-limit ADR).
 
 ## XVIII. Summary
 
@@ -3628,7 +3635,7 @@ client-side `new WebSocket(url)` path with the existing server-side
 `#[v8_class] WebSocketImpl`. Three new V8 classes ship: `WebSocket`,
 `MessageEvent`, `CloseEvent`. No new macro extensions are required.
 
-Estimated implementation cost: 118 industry-hours (~3 user-hours
+Estimated implementation cost: 188 industry-hours (~4.5 user-hours
 focused) across 10 ordered steps; three-landing polyfill cutover
 mirrors the streams and fetch patterns. WPT target: ~85 of ~110
 files in `websockets/`, with the genuine browser-only / WebSocketStream
