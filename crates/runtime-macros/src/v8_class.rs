@@ -2,9 +2,10 @@
 //! ObjectTemplate-backed class.
 //!
 //! Walks the impl block, collects methods marked with `#[v8_method]`,
-//! `#[v8_getter]`, `#[v8_setter]`, `#[v8_constructor]`, and emits a
-//! `Self::install(scope) -> v8::Local<v8::FunctionTemplate>` function
-//! plus per-method callbacks.
+//! `#[v8_async_method]`, `#[v8_getter]`, `#[v8_setter]`,
+//! `#[v8_constructor]`, and emits a `Self::install(scope) ->
+//! v8::Local<v8::FunctionTemplate>` function plus per-method
+//! callbacks.
 //!
 //! Instance state lives in the V8 object's internal field (slot 0): a
 //! `Box<Self>` is stored as `External` and reclaimed via a guaranteed
@@ -16,15 +17,20 @@
 //! Result<T, OpError>, plus `v8::Local<v8::Value>` passthrough for
 //! union-typed args).
 //!
+//! ### Async methods (`#[v8_async_method]`)
+//!
+//! Async-marked methods compile to a sync V8 callback that allocates a
+//! `v8::PromiseResolver`, spawns the user's `async fn` body via
+//! `state.spawned_ops`, and returns the Promise immediately. The pump
+//! resolves (or rejects) the bound resolver from `OpResult::JsValue`
+//! when the future settles. `&mut self` async methods are rejected at
+//! compile time — borrow across `.await` is unsound under V8 re-entry.
+//! Use `&self` with `Cell` / `RefCell` for state that needs to mutate
+//! inside the body. See `gen_async_method_callback`'s doc comment for
+//! the borrow-safety contract.
+//!
 //! ## Known gaps (deferred until a real consumer needs them)
 //!
-//! - **Async methods.** `async fn foo(&self, ...) -> T` would need to
-//!   spawn the future via SharedState and return a Promise. The
-//!   existing `#[zeroship_op(async)]` does this for free functions;
-//!   port that pattern when fetch grows methods that await.
-//! - **Inheritance.** No `#[v8_inherit(BaseClass)]` yet — needed for
-//!   the `EventTarget` chain (WebSocket / EventSource extend it).
-//!   `FunctionTemplate::inherit` is the underlying primitive.
 //! - **Same-name getter+setter pairing.** Defining `#[v8_getter]
 //!   value(&self)` and `#[v8_setter] value(&mut self, v)` at once is
 //!   illegal in Rust (duplicate method names) and the install code

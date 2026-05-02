@@ -27,6 +27,13 @@
 //!
 //!     #[v8_method]
 //!     fn set(&mut self, name: String, value: String) -> Result<(), OpError> { ... }
+//!
+//!     // Async methods compile to a Promise-returning sync V8 callback
+//!     // that spawns the body via state.spawned_ops. &mut self is
+//!     // rejected at compile time — use &self + Cell/RefCell for state
+//!     // that needs to mutate inside the body.
+//!     #[v8_async_method]
+//!     async fn fetch_remote(&self, url: String) -> Result<Vec<u8>, OpError> { ... }
 //! }
 //! ```
 //!
