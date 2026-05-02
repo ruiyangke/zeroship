@@ -8,17 +8,21 @@
 // looking data while the schema gaps are tracked in ISSUES.md
 // (ISS-14 through ISS-18).
 //
-// Storage shape: a module-level `Map<appId, …>` per resource. Survives
-// only the lifetime of the V8 isolate / dev process. When the worker
-// restarts, state vanishes — that's intentional, the production
-// implementation lives behind the `Fix path` notes in each ISSUES
-// entry.
+// Storage shape: KV-backed via `_persist.ts`. The native `@zeroship/kv`
+// primitive lives in the V8 worker process, which the vite-plugin keeps
+// running across HMR module re-evaluations — so writes survive "save
+// the file → dev refreshes the bundle". They DO vanish on a hard worker
+// restart, which is consistent with "dev only, single worker" semantics
+// of the in-memory KV backend. Production lands a real backing table
+// per the `Fix path` notes in each ISSUES entry.
 //
 // Wire convention: every export takes ONE object input (per the
 // builder's single-input RPC wire — see `apps/zeroship-builder/src/
 // server/sandbox.ts` header for the long form). That keeps the
 // `vite-plugin` `args[0]`-only forwarding honest even when we add
 // `addIssue({appId, title, description})`.
+
+import { persistGet, persistSet } from "./_persist.js";
 
 // ─── issue store (ISS-14) ───────────────────────────────────────
 
@@ -40,18 +44,18 @@ export interface Issue {
   comments: Array<{ author: string; body: string; at: string }>;
 }
 
-// One entry per appId. Seeded lazily on first read so every fresh app
-// gets a starter issue list — that keeps the canvas from looking
-// broken on a brand-new project before the PM agent has done anything.
-const ISSUES = new Map<string, Issue[]>();
+// KV key shape — namespaced per appId so different projects don't
+// step on each other's issue lists.
+const issuesKey = (appId: string) => `issues:${appId}`;
 
 function nowIso(): string {
   return new Date().toISOString();
 }
 
 function nextId(): string {
-  // Cheap unique id — no uuid lib available server-side here, and this
-  // module disappears on isolate eviction anyway.
+  // Cheap unique id — no uuid lib available server-side here. Random
+  // suffix only needs to be stable for the lifetime of the issue (no
+  // cross-tenant collision risk; keys are namespaced by appId).
   return `iss_${Math.random().toString(36).slice(2, 10)}`;
 }
 
@@ -109,11 +113,17 @@ function seedIssues(appId: string): Issue[] {
   void appId;
 }
 
-function ensureSeed(appId: string): Issue[] {
-  const existing = ISSUES.get(appId);
-  if (existing) return existing;
+/**
+ * Read-or-seed: pull the per-appId issue list from KV; if missing,
+ * synthesise the starter set, persist it, and return. Keeps the canvas
+ * from rendering an empty list on a brand-new project before the PM
+ * agent has filed anything.
+ */
+async function loadIssuesOrSeed(appId: string): Promise<Issue[]> {
+  const existing = await persistGet<Issue[] | null>(issuesKey(appId), null);
+  if (existing && Array.isArray(existing)) return existing;
   const seeded = seedIssues(appId);
-  ISSUES.set(appId, seeded);
+  await persistSet(issuesKey(appId), seeded);
   return seeded;
 }
 
@@ -121,7 +131,7 @@ export interface ListIssuesInput { appId: string }
 export interface ListIssuesResult { issues: Issue[] }
 
 export async function listIssues(input: ListIssuesInput): Promise<ListIssuesResult> {
-  const issues = ensureSeed(input.appId);
+  const issues = await loadIssuesOrSeed(input.appId);
   // Return a shallow copy so the caller can't mutate our store by
   // accident through a shared reference.
   return { issues: issues.map((i) => ({ ...i, comments: [...i.comments] })) };
@@ -137,7 +147,7 @@ export interface AddIssueInput {
 }
 
 export async function addIssue(input: AddIssueInput): Promise<{ issue: Issue }> {
-  const list = ensureSeed(input.appId);
+  const list = await loadIssuesOrSeed(input.appId);
   const now = nowIso();
   const issue: Issue = {
     id: nextId(),
@@ -152,19 +162,21 @@ export async function addIssue(input: AddIssueInput): Promise<{ issue: Issue }> 
   };
   // Newest first — matches the spec §9.8 mock where the most recent
   // issue sits at the top of the list.
-  list.unshift(issue);
+  const next = [issue, ...list];
+  await persistSet(issuesKey(input.appId), next);
   return { issue };
 }
 addIssue.config = { id: "agents.addIssue" };
 
 // ─── quality scorecard (ISS-16) ─────────────────────────────────
 //
-// Spec §11.1 names seven quality dimensions; we expose a hardcoded
-// snapshot per appId here. The Critic loop is supposed to populate
-// this Map as it scores each build, but the wiring isn't in place yet
-// (see ISSUES.md ISS-16). For now every appId gets the same "freshly
-// scaffolded" scorecard plus a per-app rationale that mentions the
-// app id so the canvas at least feels app-specific.
+// Spec §11.1 names seven quality dimensions. KV-backed per appId via
+// `_persist.ts`. The Critic loop now writes here on every round (see
+// `_middleware.ts` data-critic-round handler — the middleware fires
+// `setQualityScores` via `waitUntil()` after extracting the round
+// payload). HealthCanvas reads via `getQualityScores`. Fresh apps
+// without a Critic round yet fall back to the default snapshot so
+// the grid never renders blank.
 
 export type QualityGrade =
   | "A+" | "A" | "A-"
@@ -186,7 +198,7 @@ export interface QualityScores {
   last_run_at: string | null;
 }
 
-const QUALITY: Map<string, QualityScores> = new Map();
+const qualityKey = (appId: string) => `quality:${appId}`;
 
 function defaultScores(): QualityScores {
   return {
@@ -244,19 +256,26 @@ export interface GetQualityScoresInput { appId: string }
 export async function getQualityScores(
   input: GetQualityScoresInput,
 ): Promise<QualityScores> {
-  let scores = QUALITY.get(input.appId);
-  if (!scores) {
-    scores = defaultScores();
-    QUALITY.set(input.appId, scores);
-  }
-  // Defensive copy — dimensions array is shared otherwise.
+  const scores = await persistGet<QualityScores | null>(
+    qualityKey(input.appId),
+    null,
+  );
+  const safe = scores ?? defaultScores();
+  // Defensive copy — caller shouldn't mutate KV-cached values.
   return {
-    overall: scores.overall,
-    last_run_at: scores.last_run_at,
-    dimensions: scores.dimensions.map((d) => ({ ...d })),
+    overall: safe.overall,
+    last_run_at: safe.last_run_at,
+    dimensions: safe.dimensions.map((d) => ({ ...d })),
   };
 }
 getQualityScores.config = { id: "agents.getQualityScores" };
+
+// Note: the writer side of the quality scorecard (the function the
+// chat middleware calls after every Critic round) lives in
+// `_agent_writes.ts` so it stays out of the public RPC surface. Per
+// ISS-02, every export from this file becomes a network endpoint via
+// `server.ts`'s `export *`; we want `setQualityFromCritic` to be
+// server-internal only.
 
 // ─── data canvas stubs (ISS-20 → ISS-25) ────────────────────────
 //
@@ -540,7 +559,7 @@ export interface BackupEntry {
   at: string;
 }
 
-const BACKUPS = new Map<string, BackupEntry[]>();
+const backupsKey = (appId: string) => `backups:${appId}`;
 
 function seedBackups(): BackupEntry[] {
   return [
@@ -568,13 +587,15 @@ function seedBackups(): BackupEntry[] {
   ];
 }
 
-function ensureBackups(appId: string): BackupEntry[] {
-  let list = BACKUPS.get(appId);
-  if (!list) {
-    list = seedBackups();
-    BACKUPS.set(appId, list);
-  }
-  return list;
+async function loadBackupsOrSeed(appId: string): Promise<BackupEntry[]> {
+  const existing = await persistGet<BackupEntry[] | null>(
+    backupsKey(appId),
+    null,
+  );
+  if (existing && Array.isArray(existing)) return existing;
+  const seeded = seedBackups();
+  await persistSet(backupsKey(appId), seeded);
+  return seeded;
 }
 
 export interface ListBackupsInput { appId: string }
@@ -583,7 +604,7 @@ export interface ListBackupsResult { backups: BackupEntry[] }
 export async function listBackups(
   input: ListBackupsInput,
 ): Promise<ListBackupsResult> {
-  const list = ensureBackups(input.appId);
+  const list = await loadBackupsOrSeed(input.appId);
   return { backups: list.map((b) => ({ ...b })) };
 }
 listBackups.config = { id: "agents.listBackups" };
@@ -594,7 +615,7 @@ export interface TriggerBackupResult { backup: BackupEntry }
 export async function triggerBackup(
   input: TriggerBackupInput,
 ): Promise<TriggerBackupResult> {
-  const list = ensureBackups(input.appId);
+  const list = await loadBackupsOrSeed(input.appId);
   const entry: BackupEntry = {
     id: `bk_${Math.random().toString(36).slice(2, 10)}`,
     label: "Manual snapshot",
@@ -605,7 +626,8 @@ export async function triggerBackup(
     at: nowIso(),
   };
   // Newest first matches the spec §9.3.5 mock.
-  list.unshift(entry);
+  const next = [entry, ...list];
+  await persistSet(backupsKey(input.appId), next);
   return { backup: { ...entry } };
 }
 triggerBackup.config = { id: "agents.triggerBackup" };
@@ -637,7 +659,13 @@ export interface MediaEntry {
   uploaded_at: string;
 }
 
-const MEDIA = new Map<string, MediaEntry[]>();
+const mediaKey = (appId: string) => `media:${appId}`;
+
+// Cap inline base64 uploads at 1 MB so a stray "drag-everything-onto-
+// the-canvas" doesn't blow up the KV store. Real Storage backend (per
+// ISS-26 fix path) lives behind a control-plane endpoint and accepts
+// arbitrary sizes via streaming multipart.
+const MAX_UPLOAD_BYTES = 1_048_576;
 
 function seedMedia(): MediaEntry[] {
   // Three editorial sample tiles so the canvas isn't an empty rectangle
@@ -672,13 +700,12 @@ function seedMedia(): MediaEntry[] {
   ];
 }
 
-function ensureMedia(appId: string): MediaEntry[] {
-  let list = MEDIA.get(appId);
-  if (!list) {
-    list = seedMedia();
-    MEDIA.set(appId, list);
-  }
-  return list;
+async function loadMediaOrSeed(appId: string): Promise<MediaEntry[]> {
+  const existing = await persistGet<MediaEntry[] | null>(mediaKey(appId), null);
+  if (existing && Array.isArray(existing)) return existing;
+  const seeded = seedMedia();
+  await persistSet(mediaKey(appId), seeded);
+  return seeded;
 }
 
 export interface ListMediaInput { appId: string }
@@ -687,7 +714,7 @@ export interface ListMediaResult { items: MediaEntry[] }
 export async function listMedia(
   input: ListMediaInput,
 ): Promise<ListMediaResult> {
-  const list = ensureMedia(input.appId);
+  const list = await loadMediaOrSeed(input.appId);
   return { items: list.map((m) => ({ ...m })) };
 }
 listMedia.config = { id: "agents.listMedia" };
@@ -704,7 +731,7 @@ export interface UploadMediaResult { item: MediaEntry }
 export async function uploadMedia(
   input: UploadMediaInput,
 ): Promise<UploadMediaResult> {
-  const list = ensureMedia(input.appId);
+  const list = await loadMediaOrSeed(input.appId);
   // Best-effort byte length — `Buffer` is available in the V8 runtime
   // via the node-compat shim, but we fall back to the base64 string
   // length × 3/4 if not. Either way the size is approximate.
@@ -713,6 +740,12 @@ export async function uploadMedia(
     size = Buffer.from(input.base64, "base64").byteLength;
   } catch {
     size = Math.floor((input.base64.length * 3) / 4);
+  }
+  if (size > MAX_UPLOAD_BYTES) {
+    throw new Error(
+      `File too large for the V1 KV-backed media store (${size} bytes; cap is ${MAX_UPLOAD_BYTES}). ` +
+        `Real Storage backend with streaming uploads is tracked as ISS-26.`,
+    );
   }
   const key = `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const entry: MediaEntry = {
@@ -726,7 +759,8 @@ export async function uploadMedia(
     url: `data:${input.contentType || "application/octet-stream"};base64,${input.base64}`,
     uploaded_at: nowIso(),
   };
-  list.unshift(entry);
+  const next = [entry, ...list];
+  await persistSet(mediaKey(input.appId), next);
   return { item: { ...entry } };
 }
 uploadMedia.config = { id: "agents.uploadMedia" };
@@ -740,9 +774,9 @@ export interface DeleteMediaResult { ok: true }
 export async function deleteMedia(
   input: DeleteMediaInput,
 ): Promise<DeleteMediaResult> {
-  const list = ensureMedia(input.appId);
-  const idx = list.findIndex((m) => m.key === input.key);
-  if (idx >= 0) list.splice(idx, 1);
+  const list = await loadMediaOrSeed(input.appId);
+  const next = list.filter((m) => m.key !== input.key);
+  await persistSet(mediaKey(input.appId), next);
   return { ok: true };
 }
 deleteMedia.config = { id: "agents.deleteMedia" };
