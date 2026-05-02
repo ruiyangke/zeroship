@@ -1,7 +1,7 @@
 //! Run the W3C Web Platform Tests for `Blob` and `File` against the
 //! native impl. Source: https://github.com/web-platform-tests/wpt
 //! (FileAPI/blob and FileAPI/file). Files are vendored under
-//! `tests/wpt/FileAPI/`.
+//! `crates/runtime/tests/wpt/FileAPI/`.
 //!
 //! Pattern mirrors `wpt_headers.rs` — minimal testharness.js shim,
 //! one V8 isolate per file, per-test pass/skip/fail tally. The Rust
@@ -427,31 +427,31 @@ fn parse_results(json: &str) -> Vec<TestResult> {
 const WPT_FILES: &[(&str, &str)] = &[
     (
         "Blob-constructor",
-        include_str!("../../../tests/wpt/FileAPI/blob/Blob-constructor.any.js"),
+        include_str!("wpt/FileAPI/blob/Blob-constructor.any.js"),
     ),
     (
         "Blob-slice",
-        include_str!("../../../tests/wpt/FileAPI/blob/Blob-slice.any.js"),
+        include_str!("wpt/FileAPI/blob/Blob-slice.any.js"),
     ),
     (
         "Blob-text",
-        include_str!("../../../tests/wpt/FileAPI/blob/Blob-text.any.js"),
+        include_str!("wpt/FileAPI/blob/Blob-text.any.js"),
     ),
     (
         "Blob-array-buffer",
-        include_str!("../../../tests/wpt/FileAPI/blob/Blob-array-buffer.any.js"),
+        include_str!("wpt/FileAPI/blob/Blob-array-buffer.any.js"),
     ),
     (
         "Blob-bytes",
-        include_str!("../../../tests/wpt/FileAPI/blob/Blob-bytes.any.js"),
+        include_str!("wpt/FileAPI/blob/Blob-bytes.any.js"),
     ),
     (
         "Blob-stream",
-        include_str!("../../../tests/wpt/FileAPI/blob/Blob-stream.any.js"),
+        include_str!("wpt/FileAPI/blob/Blob-stream.any.js"),
     ),
     (
         "File-constructor",
-        include_str!("../../../tests/wpt/FileAPI/file/File-constructor.any.js"),
+        include_str!("wpt/FileAPI/file/File-constructor.any.js"),
     ),
 ];
 

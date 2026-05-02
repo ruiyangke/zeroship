@@ -1,6 +1,6 @@
 //! Run the W3C Web Platform Tests for `Headers` against the native impl.
 //! Source: https://github.com/web-platform-tests/wpt (fetch/api/headers).
-//! Files are vendored under `tests/wpt/fetch/api/headers/`.
+//! Files are vendored under `crates/runtime/tests/wpt/fetch/api/headers/`.
 //!
 //! Mirrors `wpt_text_encoding.rs` — we provide a minimal testharness.js
 //! shim, run each file in a fresh V8 isolate, and report per-test
@@ -317,35 +317,35 @@ fn parse_results(json: &str) -> Vec<TestResult> {
 const WPT_FILES: &[(&str, &str)] = &[
     (
         "headers-basic",
-        include_str!("../../../tests/wpt/fetch/api/headers/headers-basic.any.js"),
+        include_str!("wpt/fetch/api/headers/headers-basic.any.js"),
     ),
     (
         "headers-casing",
-        include_str!("../../../tests/wpt/fetch/api/headers/headers-casing.any.js"),
+        include_str!("wpt/fetch/api/headers/headers-casing.any.js"),
     ),
     (
         "headers-combine",
-        include_str!("../../../tests/wpt/fetch/api/headers/headers-combine.any.js"),
+        include_str!("wpt/fetch/api/headers/headers-combine.any.js"),
     ),
     (
         "headers-errors",
-        include_str!("../../../tests/wpt/fetch/api/headers/headers-errors.any.js"),
+        include_str!("wpt/fetch/api/headers/headers-errors.any.js"),
     ),
     (
         "headers-normalize",
-        include_str!("../../../tests/wpt/fetch/api/headers/headers-normalize.any.js"),
+        include_str!("wpt/fetch/api/headers/headers-normalize.any.js"),
     ),
     (
         "headers-record",
-        include_str!("../../../tests/wpt/fetch/api/headers/headers-record.any.js"),
+        include_str!("wpt/fetch/api/headers/headers-record.any.js"),
     ),
     (
         "header-setcookie",
-        include_str!("../../../tests/wpt/fetch/api/headers/header-setcookie.any.js"),
+        include_str!("wpt/fetch/api/headers/header-setcookie.any.js"),
     ),
     (
         "headers-structure",
-        include_str!("../../../tests/wpt/fetch/api/headers/headers-structure.any.js"),
+        include_str!("wpt/fetch/api/headers/headers-structure.any.js"),
     ),
     // Skipped in v1 (need Request/Response):
     //   - header-values.any.js          — every test uses fetch/XHR

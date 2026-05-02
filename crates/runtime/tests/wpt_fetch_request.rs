@@ -1,7 +1,7 @@
 //! Run W3C Web Platform Tests for `Request` against the native impl.
 //!
 //! Source: https://github.com/web-platform-tests/wpt/tree/master/fetch/api/request
-//! Files vendored at `tests/wpt/fetch/api/request/`.
+//! Files vendored at `crates/runtime/tests/wpt/fetch/api/request/`.
 //!
 //! Mirrors the `wpt_form_data.rs` pattern: minimal testharness.js shim,
 //! per-file V8 isolate, per-test pass/fail/skip. The Rust `#[test]`
@@ -486,7 +486,7 @@ fn parse_results(json: &str) -> Vec<TestResult> {
 }
 
 // request-consume.any.js needs resources/utils.js loaded first.
-const RESOURCES_UTILS_JS: &str = include_str!("../../../tests/wpt/fetch/api/resources/utils.js");
+const RESOURCES_UTILS_JS: &str = include_str!("wpt/fetch/api/resources/utils.js");
 
 // Selection: covers the parts of the spec our v1 implements (init,
 // disturbed semantics, forbidden methods, stream-as-body). We omit:
@@ -499,23 +499,23 @@ const RESOURCES_UTILS_JS: &str = include_str!("../../../tests/wpt/fetch/api/reso
 const WPT_FILES: &[(&str, &[&str])] = &[
     (
         "request-init-002",
-        &[include_str!("../../../tests/wpt/fetch/api/request/request-init-002.any.js")],
+        &[include_str!("wpt/fetch/api/request/request-init-002.any.js")],
     ),
     (
         "request-disturbed",
-        &[include_str!("../../../tests/wpt/fetch/api/request/request-disturbed.any.js")],
+        &[include_str!("wpt/fetch/api/request/request-disturbed.any.js")],
     ),
     (
         "request-consume-empty",
-        &[include_str!("../../../tests/wpt/fetch/api/request/request-consume-empty.any.js")],
+        &[include_str!("wpt/fetch/api/request/request-consume-empty.any.js")],
     ),
     (
         "forbidden-method",
-        &[include_str!("../../../tests/wpt/fetch/api/request/forbidden-method.any.js")],
+        &[include_str!("wpt/fetch/api/request/forbidden-method.any.js")],
     ),
     (
         "request-init-stream",
-        &[include_str!("../../../tests/wpt/fetch/api/request/request-init-stream.any.js")],
+        &[include_str!("wpt/fetch/api/request/request-init-stream.any.js")],
     ),
     // basic/historical.any.js exercises the Request / Response / Headers
     // surface (no fetch() needed). Tests removed-API absence:
@@ -526,7 +526,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[
     // surface check that fits this runner's V8-only harness.
     (
         "historical",
-        &[include_str!("../../../tests/wpt/fetch/api/basic/historical.any.js")],
+        &[include_str!("wpt/fetch/api/basic/historical.any.js")],
     ),
 ];
 

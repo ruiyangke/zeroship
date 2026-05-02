@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Initialize sparse-checkout for the tests/wpt submodule.
+# Initialize sparse-checkout for the crates/runtime/tests/wpt submodule.
 #
 # Run once after a fresh clone:
 #   git clone --recurse-submodules --shallow-submodules <repo>
-#   ./tests/setup-wpt.sh
+#   ./crates/runtime/tests/setup-wpt.sh
 #
 # Or, if you cloned without --recurse-submodules:
 #   git submodule update --init --depth=1
-#   ./tests/setup-wpt.sh
+#   ./crates/runtime/tests/setup-wpt.sh
 #
 # This trims the working tree to ~9MB (vs the full WPT ~2GB) by checking
 # out only the suites our runtime exercises: fetch, streams, encoding
@@ -35,5 +35,5 @@ git sparse-checkout set \
     "/resources/" \
     "/common/"
 
-echo "tests/wpt sparse-checkout configured. Working tree:"
+echo "crates/runtime/tests/wpt sparse-checkout configured. Working tree:"
 du -sh .
