@@ -113,6 +113,30 @@ pub fn v8_inherit_intrinsic(_attr: TokenStream, item: TokenStream) -> TokenStrea
     item
 }
 
+/// Impl-block-level marker attribute: chain the class's FunctionTemplate
+/// to a base class's FunctionTemplate via `FunctionTemplate::inherit`.
+/// Used for spec-mandated DOM-class inheritance, e.g.
+/// `AbortSignal : EventTarget` (DOM §3.3) — without this the
+/// `signal instanceof EventTarget === true` check fails.
+///
+/// Usage:
+/// ```ignore
+/// #[v8_class]
+/// #[v8_inherit(EventTarget)]
+/// impl AbortSignal { /* ... */ }
+/// ```
+///
+/// Codegen calls `__ctor_tmpl.inherit(BaseClass::install(scope))` after
+/// reserving internal-field slots; the base class's `install` is invoked
+/// fresh per realm, which is fine because the template chain is per-
+/// realm anyway. Per design fetch-native §XIV.1, this is the only
+/// `#[v8_inherit]` user in v1; future users include WebSocket /
+/// EventSource / MessagePort / XMLHttpRequest.
+#[proc_macro_attribute]
+pub fn v8_inherit(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
 /// Argument-level marker attribute consumed by `#[v8_class]`: when
 /// applied to a `Vec<u8>` parameter, the macro emits a SAB-rejection
 /// guard *before* extracting the bytes. A SharedArrayBuffer-backed

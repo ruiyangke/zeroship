@@ -12,7 +12,8 @@
 # This trims the working tree to ~9MB (vs the full WPT ~2GB) by checking
 # out only the suites our runtime exercises: fetch, streams, encoding
 # (excluding the legacy multi-byte fixtures we don't need), compression,
-# plus the testharness in resources/ and common/.
+# dom/{abort,events} (DOM EventTarget + AbortSignal), plus the testharness
+# in resources/ and common/.
 set -euo pipefail
 
 cd "$(dirname "$0")/wpt"
@@ -26,6 +27,10 @@ git sparse-checkout set \
     "/encoding/resources/" \
     "/encoding/streams/" \
     "/compression/" \
+    "/dom/abort/" \
+    "/dom/events/" \
+    "/xhr/formdata/" \
+    "/FileAPI/" \
     "/url/" \
     "/resources/" \
     "/common/"

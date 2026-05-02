@@ -242,6 +242,11 @@ pub struct RuntimeState {
     pub next_timer_id: u32,
     /// Maps timer-id -> request-id that owns it (for per-request cleanup).
     pub timer_owner: HashMap<u32, u64>,
+    /// AbortSignal.timeout's strong-ref pin map (DOM §3.3 step 3 — for
+    /// the duration of the timeout, the signal must be retained even
+    /// if no JS reference exists). Keyed by the signal's timer ID;
+    /// removed when the timer fires (in `dom::abort_signal::run_abort_steps`).
+    pub timeout_pinned_signals: HashMap<u32, v8::Global<v8::Object>>,
 
     /// Active ReadableStream instances, keyed by stream-id.
     pub streams: HashMap<u32, StreamState>,
@@ -424,6 +429,7 @@ impl RuntimeState {
             timer_callbacks: HashMap::new(),
             next_timer_id: 1,
             timer_owner: HashMap::new(),
+            timeout_pinned_signals: HashMap::new(),
 
             streams: HashMap::new(),
             next_stream_id: 1,
