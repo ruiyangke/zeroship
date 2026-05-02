@@ -680,8 +680,26 @@ pub fn load_polyfills_and_modules(
 ) -> Result<v8::Global<v8::Value>, String> {
     setup_globals(scope);
 
-    // Load polyfills
-    for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, NODE_GLOBALS_JS, EVENTS_JS, BLOB_JS, FORMDATA_JS, WEBSOCKET_JS] {
+    // Order matters here:
+    //
+    //   1. Load fetch.js / events.js / formdata.js / blob.js polyfills
+    //      first. With the native gate ON they're shadowed below; with
+    //      the gate OFF (legacy build) they remain in charge.
+    //   2. install_dom installs native DOM (EventTarget / Event /
+    //      AbortController / AbortSignal / FormData / Request / Response /
+    //      fetch). MUST run AFTER fetch.js / events.js / formdata.js so
+    //      their unconditional `globalThis.X = X` assignments don't
+    //      overwrite the native install.
+    //   3. Load WEBSOCKET_JS LAST so its `WebSocket.prototype =
+    //      Object.create(EventTarget.prototype)` captures the NATIVE
+    //      EventTarget prototype (not the polyfill's). Otherwise
+    //      `WebSocket` instances inherit polyfill `addEventListener`
+    //      which expects `this._listeners`, but `EventTarget.call(this)`
+    //      runs the native constructor that doesn't set that field —
+    //      `addEventListener` then throws "Cannot read properties of
+    //      undefined (reading 'message')" on the first server frame.
+    //   4. Native Headers / Streams / TextEncoderStream wrappers.
+    for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, NODE_GLOBALS_JS, EVENTS_JS, BLOB_JS, FORMDATA_JS] {
         let code = v8::String::new(scope, polyfill).unwrap();
         let script = v8::Script::compile(scope, code, None).unwrap();
         script.run(scope).unwrap();
@@ -711,10 +729,22 @@ pub fn load_polyfills_and_modules(
     }
 
     // Native DOM (EventTarget / Event / AbortController / AbortSignal /
-    // FormData) gated on `ZEROSHIP_NATIVE_FETCH=1` (D-23 landing-1). MUST
-    // run AFTER fetch.js or the polyfill's unconditional re-assignment of
-    // AbortController/AbortSignal would clobber the native install.
+    // FormData / Request / Response / fetch) gated on
+    // `ZEROSHIP_NATIVE_FETCH=1` (D-23 landing-1). MUST run AFTER fetch.js /
+    // events.js / formdata.js or their unconditional re-assignment would
+    // clobber the native install — and BEFORE websocket.js so
+    // `WebSocket.prototype = Object.create(EventTarget.prototype)` picks
+    // up the native EventTarget prototype.
     install_dom(scope);
+
+    // WebSocket polyfill — loaded LAST so its prototype chain references
+    // whichever EventTarget is in charge: native when the gate is set,
+    // polyfill events.js otherwise.
+    {
+        let code = v8::String::new(scope, WEBSOCKET_JS).unwrap();
+        let script = v8::Script::compile(scope, code, None).unwrap();
+        script.run(scope).unwrap();
+    }
 
     // Wrap the user's module graph in the bootstrap entry.
     //

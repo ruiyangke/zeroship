@@ -153,14 +153,16 @@ fn null_body_status_204_with_body_throws() {
 fn null_body_status_set_in_range_throw_type_error_with_body() {
     // Per Fetch §5.5: null-body statuses are { 101, 103, 204, 205, 304 }.
     // The spec's "Initialize a response" steps run the range check
-    // (200..=599) FIRST, so 101 and 103 throw RangeError before the
-    // null-body TypeError fires. Only 204/205/304 pass the range gate
-    // and reach the null-body TypeError.
+    // (200..=599) FIRST, but the native impl (and the polyfill before
+    // it) allow 101 as a workerd-style WebSocket-upgrade extension.
+    // Result: 101 reaches the null-body check and throws TypeError; 103
+    // is still out-of-range and throws RangeError. 204/205/304 are in
+    // the spec range and reach the null-body check (TypeError).
     let s = run_in_v8(
         r#"
-        const inRangeNullBody = [204, 205, 304];
-        const outOfRangeNullBody = [101, 103];
-        const inRangeResults = inRangeNullBody.map(st => {
+        const reachesNullBodyCheck = [101, 204, 205, 304];
+        const stillOutOfRange = [103];
+        const reachesResults = reachesNullBodyCheck.map(st => {
             try {
                 new Response("body", { status: st });
                 return "no-throw";
@@ -168,7 +170,7 @@ fn null_body_status_set_in_range_throw_type_error_with_body() {
                 return e.name;
             }
         });
-        const outOfRangeResults = outOfRangeNullBody.map(st => {
+        const outOfRangeResults = stillOutOfRange.map(st => {
             try {
                 new Response("body", { status: st });
                 return "no-throw";
@@ -176,13 +178,13 @@ fn null_body_status_set_in_range_throw_type_error_with_body() {
                 return e.name;
             }
         });
-        JSON.stringify({ inRange: inRangeResults, outOfRange: outOfRangeResults });
+        JSON.stringify({ inRange: reachesResults, outOfRange: outOfRangeResults });
         "#,
         js_string,
     );
     assert_eq!(
         s,
-        r#"{"inRange":["TypeError","TypeError","TypeError"],"outOfRange":["RangeError","RangeError"]}"#
+        r#"{"inRange":["TypeError","TypeError","TypeError","TypeError"],"outOfRange":["RangeError"]}"#
     );
 }
 

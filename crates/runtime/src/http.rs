@@ -36,50 +36,30 @@ fn key<'s>(scope: &mut v8::PinScope<'s, '_>, k: &'static v8::OneByteConst) -> v8
     v8::String::new_from_onebyte_const(scope, k).unwrap()
 }
 
-// Note: a Rust-native Request builder (Tier 1) was prototyped here — it
-// used cached `Request.prototype` / `Headers.prototype` globals and built
-// the Request via direct V8 Object API (set_prototype + obj.set per field).
-// Bench result: 3-4% SLOWER than the JS helper. Each Rust→V8 FFI crossing
-// (~50-80ns via rusty_v8) exceeds the savings from skipping JS bytecode
-// interpretation, since the JS helper's inline field sets get JIT-inlined
-// into a stable hidden class after warmup. For Request-like shapes with
-// ≤10 fields, the JS helper wins.
-//
-// Getting faster than the JS helper in pure Rust would need `v8::FunctionTemplate`
-// with `InstanceTemplate::set_internal_field_count(N)` — internal-field
-// slots bypass the named-property path entirely. That's "Tier 2" and
-// requires accessor callbacks for user-facing getters (url, method, etc.),
-// which incur their own FFI cost on JS reads.
-
 // ---------------------------------------------------------------------------
 // HTTP helper constants
 // ---------------------------------------------------------------------------
 
 /// JS helper compiled once: constructs a `Request` from Rust-supplied params.
 ///
-/// Skips `new Request(url, init)` — that path is ~12 field sets inside a
-/// constructor with `input instanceof Request` branches we never take.
-/// We build the Request shape directly via `Object.create(Request.prototype)`
-/// and inline-set the same fields. Same user-visible semantics (same
-/// prototype chain → same `request.text()` / `request.json()` behaviour),
-/// measurably less work per hot request.
+/// Goes through the public spec constructor `new Request(url, init)`. The
+/// previous shape-direct path (`Object.create(Request.prototype) + obj.set
+/// per field`) only worked against the JS polyfill — the native Request
+/// (`#[v8_class]` with internal field 0 holding `Box<RequestState>`) rejects
+/// `Object.create(prototype)` because the resulting instance has a null
+/// internal field, and the first getter call throws "Illegal invocation".
+///
+/// Per D-22, the JSON header marshalling is retired with the polyfill in
+/// landing 2: native `fetch()` builds Request objects directly inside V8,
+/// no JSON intermediate. This helper remains for the kernel's slow-path
+/// `default.fetch` dispatch where Rust passes raw header bytes; once the
+/// dispatch path itself moves to native (post-D-23), this constant goes
+/// away too.
 ///
 /// Fast paths still preserved:
 ///   - Skips `JSON.parse` when `headersJson` is empty or `"[]"`.
-///   - Skips `_bodyText` copy when body is empty or method is GET/HEAD.
-///
-/// Note: headers go through `new Headers(arrayOfPairs)` rather than the
-/// previous `Object.create(Headers.prototype) + _map = ...` shortcut.
-/// Native Headers stores its list in a Box<HeaderList> behind an internal
-/// V8 field — `Object.create(prototype)` produces an instance with an
-/// empty internal field, and any subsequent method call throws "Illegal
-/// invocation". The constructor path is the only way to populate the
-/// internal field, and it works identically against the JS polyfill.
+///   - Skips body copy when body is empty or method is GET/HEAD.
 pub const HTTP_CREATE_REQUEST_JS: &str = r#"(function(method, url, headersJson, body) {
-    var req = Object.create(Request.prototype);
-    req.url = url;
-    req.method = method;
-    if (body && method !== "GET" && method !== "HEAD") req._bodyText = body;
     // "[]" is 2 chars; anything longer means at least one real header.
     var pairs;
     if (headersJson && headersJson.length > 2) {
@@ -87,8 +67,14 @@ pub const HTTP_CREATE_REQUEST_JS: &str = r#"(function(method, url, headersJson, 
     } else {
         pairs = [];
     }
-    req.headers = new Headers(pairs);
-    return req;
+    // Build init lazily — body is only included for methods that allow one.
+    var init;
+    if (body && method !== "GET" && method !== "HEAD") {
+        init = { method: method, headers: pairs, body: body };
+    } else {
+        init = { method: method, headers: pairs };
+    }
+    return new Request(url, init);
 })"#;
 
 // ---------------------------------------------------------------------------
@@ -423,23 +409,29 @@ pub fn extract_response_headers(scope: &mut v8::PinScope, response_obj: v8::Loca
     result
 }
 
-/// Fast test for a V8 value produced by the Response polyfill.
+/// Fast test for a V8 value that should flow through `inspect_response`
+/// instead of the JSON-wrap path.
 ///
-/// The polyfill tags `Response.prototype` with `__zsResponse = 1` (see
-/// `embed/fetch.js`). Any instance — user-constructed, async-generator
-/// wrap, `Response.json/error/redirect` — inherits the tag. Plain handler
-/// returns (`{ status, url }`, primitives, arrays) don't.
+/// Native Response: detected via internal-field 0 holding a non-null
+/// Box<ResponseState> (the macro-emitted brand).
 ///
-/// One property read per async RPC settlement. The previous probe did two
-/// reads (`status` + `headers`) plus two V8 string interns on every call,
-/// which showed up in `perf` under fetch-heavy load because fetchExternal
-/// resolves to `{ status, url }` — `status` is numeric, so the first read
-/// passed and the second always fired. V8's inline cache turns the single
-/// lookup into a hidden-class check after warmup.
+/// Polyfill Response (deleted in D-23 landing 3): detected via the
+/// `__zsResponse = 1` tag on `Response.prototype` (see `embed/fetch.js`).
+/// Plain handler returns (`{ status, url }`, primitives, arrays) don't
+/// match either.
+///
+/// Two reads in the worst case (native check + polyfill probe). V8's
+/// inline cache turns each lookup into a hidden-class check after warmup,
+/// and the polyfill probe goes away with the polyfill in landing 3.
 pub fn looks_like_response(scope: &mut v8::PinScope, val: v8::Local<v8::Value>) -> bool {
-    // Fast reject: primitives and null can't inherit a prototype tag.
+    // Fast reject: primitives and null can't carry brands.
     if !val.is_object() { return false; }
     let Some(obj) = val.to_object(scope) else { return false; };
+    // Native Response brand — internal-field-backed.
+    if crate::fetch_response::is_native_response(scope, obj) {
+        return true;
+    }
+    // Polyfill prototype tag (deleted in D-23 landing 3).
     let k = key(scope, &K_ZS_RESPONSE);
     match obj.get(scope, k.into()) {
         Some(v) => v.is_true() || v.uint32_value(scope) == Some(1),

@@ -339,13 +339,18 @@ fn response_constructor_callback(
         v8::Local::<v8::Object>::try_from(init_v).ok()
     };
 
-    // Step 1: status (default 200). Range 200..=599.
+    // Step 1: status (default 200). Spec allows 200..=599; we additionally
+    // allow 101 as a workerd-style extension for the WebSocket upgrade
+    // path — the gateway returns `new Response(null, { status: 101,
+    // webSocket: client })` from the user's `fetch` handler. The polyfill
+    // had the same carve-out (`embed/fetch.js:246-249`).
     if let Some(init) = init_obj {
         let key = v8::String::new(scope, "status").unwrap();
         if let Some(s_v) = init.get(scope, key.into()) {
             if !s_v.is_undefined() {
                 let n = s_v.number_value(scope).unwrap_or(0.0);
-                if n.is_nan() || n < 200.0 || n > 599.0 {
+                let in_range = n == 101.0 || (n >= 200.0 && n <= 599.0);
+                if n.is_nan() || !in_range {
                     let m = v8::String::new(scope, "Invalid status code").unwrap();
                     let exc = v8::Exception::range_error(scope, m);
                     scope.throw_exception(exc);
