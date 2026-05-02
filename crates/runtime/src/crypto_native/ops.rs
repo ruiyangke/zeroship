@@ -281,9 +281,24 @@ pub fn derive_bits<'s>(
     base_key: v8::Local<v8::Value>,
     length: v8::Local<v8::Value>,
 ) -> Result<Vec<u8>, OpError> {
+    derive_bits_inner(scope, alg, base_key, length, KeyUsage::DeriveBits)
+}
+
+/// Shared inner. `required_usage` differs depending on whether we were
+/// invoked from `subtle.deriveBits()` (DeriveBits) or `subtle.deriveKey()`
+/// (DeriveKey) — see W3C WebCrypto §14.3.7 step 8 vs §14.3.8 step 6.
+/// Both go through the deriveBits operation algorithmically, but the
+/// caller's required usage on baseKey differs.
+fn derive_bits_inner<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    alg: v8::Local<v8::Value>,
+    base_key: v8::Local<v8::Value>,
+    length: v8::Local<v8::Value>,
+    required_usage: KeyUsage,
+) -> Result<Vec<u8>, OpError> {
     let (head, alg_obj) = registry::normalize_head(scope, Operation::DeriveBits, alg)?;
     let key_state = crypto_key::require(scope, base_key)?;
-    key_state.check_usage(KeyUsage::DeriveBits)?;
+    key_state.check_usage(required_usage)?;
     if !alg_matches_key(head.name, key_state) {
         return Err(OpError::dom(
             "InvalidAccessError",
@@ -321,14 +336,17 @@ pub fn derive_key<'s>(
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {
     // §14.3.7 deriveKey orchestration: get-key-length on the derived
     // algorithm to figure out how many bits to derive, then call
-    // deriveBits, then importKey on the derived bytes.
+    // deriveBits, then importKey on the derived bytes. The required
+    // usage on baseKey is "deriveKey" (NOT "deriveBits") per §14.3.8
+    // step 6 — the operation algorithmically uses derive-bits but the
+    // user-facing usage gate differs.
     let (_, _) = registry::normalize_head(scope, Operation::DeriveBits, alg)?;
     let length_bits = compute_derived_key_length(scope, derived_key_alg)?;
 
     // Build a Number length argument and call deriveBits with it.
     let length_v: v8::Local<v8::Value> =
         v8::Integer::new_from_unsigned(scope, length_bits).into();
-    let bits = derive_bits(scope, alg, base_key, length_v)?;
+    let bits = derive_bits_inner(scope, alg, base_key, length_v, KeyUsage::DeriveKey)?;
 
     // Wrap as a fake ArrayBuffer for importKey "raw".
     let ab = v8::ArrayBuffer::new(scope, bits.len());
