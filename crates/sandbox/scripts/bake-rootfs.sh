@@ -171,18 +171,25 @@ patchelf --remove-rpath "${PATCHED_BIN}"
 # ---- capability-token verification (fail-loud) ----
 
 echo "[bake] verifying capability tokens are present in the patched binary"
-if ! strings "${PATCHED_BIN}" | grep -qE 'proxy\.http-v1'; then
+# NOTE: extract strings to a temp file rather than `strings | grep -q`, because
+# `set -o pipefail` + `grep -q` race: grep closes its stdin on first match,
+# strings gets SIGPIPE, the pipeline status is non-zero, and the `if !` arm
+# fires a false-negative FATAL. Materializing the strings output sidesteps it.
+STRINGS_OUT="${WORK_DIR}/strings.txt"
+strings "${PATCHED_BIN}" > "${STRINGS_OUT}"
+if ! grep -qE 'proxy\.http-v1' "${STRINGS_OUT}"; then
     echo "FATAL: 'proxy.http-v1' capability token not found in ${SRC_BIN}" >&2
     echo "       The binary you are baking is older than the preview-URLs feature." >&2
     echo "       Rebuild from this worktree (or pass --build) and retry." >&2
     exit 1
 fi
-if ! strings "${PATCHED_BIN}" | grep -qE 'auth\.ed25519-v1\.1'; then
+if ! grep -qE 'auth\.ed25519-v1\.1' "${STRINGS_OUT}"; then
     echo "FATAL: 'auth.ed25519-v1.1' capability token not found in ${SRC_BIN}" >&2
     echo "       The binary you are baking is older than the preview-URLs feature." >&2
     echo "       Rebuild from this worktree (or pass --build) and retry." >&2
     exit 1
 fi
+rm -f "${STRINGS_OUT}"
 
 # ---- mount the rootfs ----
 
