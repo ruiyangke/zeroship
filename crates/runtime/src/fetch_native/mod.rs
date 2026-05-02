@@ -97,6 +97,83 @@ pub fn unpack_pending(bytes: &[u8]) -> Option<u64> {
 }
 
 // ===========================================================================
+// Cached admission-control error objects
+// ===========================================================================
+//
+// Two pre-built plain objects (one per limit) cached as v8::Globals in an
+// isolate-scoped slot. The bench shows ~13% of CPU spent in
+// `v8::Exception::RangeError`'s stack-capture chain when admission fires
+// at ~50K rejections/s. Building the error once and rejecting all
+// subsequent over-quota promises with the same object reduces that to
+// one `v8::Local::new` (Global → Local handle resurrect) per rejection.
+
+#[derive(Copy, Clone)]
+enum AdmissionLimit {
+    Ops,
+    Fetches,
+}
+
+struct AdmissionErrors {
+    ops: v8::Global<v8::Object>,
+    fetches: v8::Global<v8::Object>,
+}
+
+/// Build a plain object with `.name = "RangeError"` and `.message = msg`.
+/// Skips V8's Error class so no stack trace is captured.
+fn build_admission_error<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    msg: &str,
+) -> v8::Local<'s, v8::Object> {
+    let obj = v8::Object::new(scope);
+    let name_key = v8::String::new(scope, "name").unwrap();
+    let name_val = v8::String::new(scope, "RangeError").unwrap();
+    obj.set(scope, name_key.into(), name_val.into());
+
+    let msg_key = v8::String::new(scope, "message").unwrap();
+    let msg_val = v8::String::new(scope, msg).unwrap();
+    obj.set(scope, msg_key.into(), msg_val.into());
+
+    // Set `.status = 503` so `v8_exception_to_status` returns 503
+    // instead of falling back to 500. The bench server's dispatcher
+    // honors this for the HTTP response code.
+    let status_key = v8::String::new(scope, "status").unwrap();
+    let status_val = v8::Integer::new_from_unsigned(scope, 503);
+    obj.set(scope, status_key.into(), status_val.into());
+    obj
+}
+
+fn cached_admission_error<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    limit: AdmissionLimit,
+) -> v8::Local<'s, v8::Object> {
+    if scope.get_slot::<AdmissionErrors>().is_none() {
+        let ops = build_admission_error(
+            scope,
+            &format!("Too many concurrent async operations (limit: {MAX_PENDING_OPS})"),
+        );
+        let fetches = build_admission_error(
+            scope,
+            &format!("Too many concurrent fetches (limit: {MAX_PENDING_FETCHES})"),
+        );
+        let ops_g = v8::Global::new(scope, ops);
+        let fetches_g = v8::Global::new(scope, fetches);
+        scope.set_slot(AdmissionErrors {
+            ops: ops_g,
+            fetches: fetches_g,
+        });
+    }
+    // Resurrect the matching Global into a Local for rejection.
+    let g = {
+        let slot = scope.get_slot::<AdmissionErrors>().unwrap();
+        match limit {
+            AdmissionLimit::Ops => slot.ops.clone(),
+            AdmissionLimit::Fetches => slot.fetches.clone(),
+        }
+    };
+    v8::Local::new(scope, g)
+}
+
+// ===========================================================================
 // install_fetch_global — wire `fetch` onto globalThis (D-22)
 // ===========================================================================
 
@@ -222,37 +299,37 @@ fn fetch_callback(
         None
     };
 
-    // Admission control.
+    // Admission control. Both rejections use a CACHED, error-shaped plain
+    // object instead of `v8::Exception::range_error` — building a real
+    // RangeError captures a full stack trace (`CaptureSimpleStackTrace` +
+    // `Translated*` deopt frames) and registering a lazy `.stack` getter,
+    // which together cost ~13% of CPU in the saturated fetchEcho bench
+    // (one rejection per dropped request). A plain object with `.name`
+    // and `.message` round-trips through dispatch's
+    // `v8_exception_to_{message,name,stack}` helpers identically — they
+    // do `Object::Get(scope, "<key>")` and accept any value with the
+    // right shape — but skips the V8 Error machinery entirely.
+    //
+    // Wire shape change vs the prior RangeError: `.stack` is absent, so
+    // the JSON error body shrinks (no `"stack":"..."` field). The
+    // `.name` is still `"RangeError"` so SDKs that switch on
+    // `err.name === "RangeError"` keep working. This is a load-shedding
+    // signal — no stack helps debugging anyway since the throw site is
+    // always the same admission gate.
     {
         let s = state.borrow();
         let in_flight_ops = s.pending_resolvers.len() + s.spawned_ops.len();
         if in_flight_ops >= MAX_PENDING_OPS {
             drop(s);
-            let m = v8::String::new(
-                scope,
-                &format!(
-                    "Too many concurrent async operations (limit: {})",
-                    MAX_PENDING_OPS
-                ),
-            )
-            .unwrap();
-            let exc = v8::Exception::range_error(scope, m);
-            resolver.reject(scope, exc);
+            let exc = cached_admission_error(scope, AdmissionLimit::Ops);
+            resolver.reject(scope, exc.into());
             rv.set(promise.into());
             return;
         }
         if s.in_flight_fetches >= MAX_PENDING_FETCHES {
             drop(s);
-            let m = v8::String::new(
-                scope,
-                &format!(
-                    "Too many concurrent fetches (limit: {})",
-                    MAX_PENDING_FETCHES
-                ),
-            )
-            .unwrap();
-            let exc = v8::Exception::range_error(scope, m);
-            resolver.reject(scope, exc);
+            let exc = cached_admission_error(scope, AdmissionLimit::Fetches);
+            resolver.reject(scope, exc.into());
             rv.set(promise.into());
             return;
         }
