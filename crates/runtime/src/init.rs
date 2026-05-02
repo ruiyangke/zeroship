@@ -3,7 +3,7 @@
 //! Consolidates everything needed to boot an isolate:
 //! - `init_v8()` — one-time V8 platform init
 //! - `setup_globals()` — console, timers, fetch, URL, KV, crypto, env, streams
-//! - Polyfill constants (`FETCH_JS`, `URL_JS`, `CRYPTO_JS`, `STREAMS_JS`, `EVENTS_JS`)
+//! - Polyfill constants (`FETCH_JS`, `CRYPTO_JS`, `STREAMS_JS`, `EVENTS_JS`)
 //! - Result types (`RequestResult`, `HttpResult`)
 
 use std::time::Duration;
@@ -94,9 +94,6 @@ pub struct HttpResult {
 
 /// Embedded Fetch API polyfill -- loaded after globals are set up.
 pub const FETCH_JS: &str = include_str!("embed/fetch.js");
-
-/// Embedded URL/URLSearchParams polyfill backed by ada-url native parser.
-pub const URL_JS: &str = include_str!("embed/url.js");
 
 /// Embedded crypto polyfill (getRandomValues, SubtleCrypto.digest, base64 helpers).
 pub const CRYPTO_JS: &str = include_str!("embed/crypto.js");
@@ -693,7 +690,12 @@ pub fn load_polyfills_and_modules(
     //      `addEventListener` then throws "Cannot read properties of
     //      undefined (reading 'message')" on the first server frame.
     //   4. Native Headers / Streams / TextEncoderStream wrappers.
-    for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, NODE_GLOBALS_JS] {
+    // Native URL + URLSearchParams (ada-url backed). Install BEFORE the
+    // fetch.js polyfill so its DOMException + stream-bridge code sees the
+    // native URL class.
+    install_url_native(scope);
+
+    for polyfill in [FETCH_JS, CRYPTO_JS, NODE_GLOBALS_JS] {
         let code = v8::String::new(scope, polyfill).unwrap();
         let script = v8::Script::compile(scope, code, None).unwrap();
         script.run(scope).unwrap();
@@ -1422,16 +1424,8 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
         global.set(scope, key.into(), f.into());
     }
 
-    // __urlParse / __urlCanParse (native URL parser via ada-url)
-    {
-        let f = v8::Function::new(scope, crate::url::url_parse_callback).unwrap();
-        let key = v8::String::new(scope, "__urlParse").unwrap();
-        global.set(scope, key.into(), f.into());
-
-        let f = v8::Function::new(scope, crate::url::url_can_parse_callback).unwrap();
-        let key = v8::String::new(scope, "__urlCanParse").unwrap();
-        global.set(scope, key.into(), f.into());
-    }
+    // (URL parsing is now part of native URL — see install_url_native.
+    // __urlParse / __urlCanParse callbacks are no longer needed.)
 
     // crypto namespace (randomUUID + native helpers for SubtleCrypto)
     {
@@ -1827,6 +1821,19 @@ pub fn install_native_streams(scope: &mut v8::PinScope) {
 pub fn install_blob_native(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
     crate::blob_native::install_globals(scope, global);
+}
+
+/// Install native `URL` + `URLSearchParams` (ada-url backed) onto
+/// `globalThis`. Replaces the legacy `embed/url.js` polyfill (deleted).
+/// Spec gaps closed: spec-correct setters (host parser / IPv6 brackets
+/// / IDNA via ada-url's mutation API), live two-way sync between
+/// `url.search` and `url.searchParams`, `URL.parse(input, base?)` static
+/// method (newer spec), `URLSearchParams.{has,delete}(name, value?)`
+/// 2-arg forms, USVString conversion replacing lone surrogates with
+/// U+FFFD.
+pub fn install_url_native(scope: &mut v8::PinScope) {
+    let global = scope.get_current_context().global(scope);
+    crate::url_native::install_globals(scope, global);
 }
 
 // ===========================================================================

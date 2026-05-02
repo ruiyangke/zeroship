@@ -31,6 +31,7 @@ git sparse-checkout set \
     "/dom/events/" \
     "/xhr/formdata/" \
     "/FileAPI/" \
+    "/url/" \
     "/resources/" \
     "/common/"
 

@@ -269,21 +269,34 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // (lines 28–34) calls this out: a `#[v8_name = "x"]` rename
     // colliding with another method literally named `x` would silently
     // double-install on the prototype. Catch it at compile time.
+    //
+    // Exception: a (Getter, Setter) pair under the same JS name is
+    // legal — that's how WebIDL `attribute` accessors work (e.g.
+    // `URL.href`'s getter+setter pair). The install codegen detects
+    // this and emits a single `set_accessor_property` with both
+    // templates rather than two separate calls.
     let mut seen: HashMap<String, &ClassMethod> = HashMap::new();
     for m in &methods {
         if m.kind == MethodKind::Constructor {
             continue;
         }
-        if seen.insert(m.js_name.clone(), m).is_some() {
-            return syn::Error::new_spanned(
-                &m.func.sig.ident,
-                format!(
-                    "#[v8_class]: duplicate JS-visible method name `{}` (rename one with #[v8_name])",
-                    m.js_name,
-                ),
-            )
-            .to_compile_error()
-            .into();
+        if let Some(prev) = seen.insert(m.js_name.clone(), m) {
+            let pair_ok = matches!(
+                (prev.kind, m.kind),
+                (MethodKind::Getter, MethodKind::Setter)
+                    | (MethodKind::Setter, MethodKind::Getter)
+            );
+            if !pair_ok {
+                return syn::Error::new_spanned(
+                    &m.func.sig.ident,
+                    format!(
+                        "#[v8_class]: duplicate JS-visible method name `{}` (rename one with #[v8_name])",
+                        m.js_name,
+                    ),
+                )
+                .to_compile_error()
+                .into();
+            }
         }
     }
 
@@ -403,45 +416,90 @@ fn gen_install(
     let constructor_callback_ident = format_ident!("__{}_constructor_callback", class_ty);
 
     // Per-method prototype installation lines.
-    let proto_sets: Vec<TokenStream2> = methods
-        .iter()
-        .map(|m| {
+    //
+    // Accessors with matching JS names (one getter + one setter) are
+    // combined into a single `set_accessor_property` call with both
+    // templates. V8 rejects two separate calls for the same key —
+    // each call replaces the previous one's slot, so the second call
+    // wipes out the first. The pair-detection runs over the full
+    // method list to find getter↔setter siblings.
+    //
+    // Build a name → (getter_cb?, setter_cb?, sample_method) map so we
+    // can short-circuit duplicate emit cycles.
+    let mut accessor_pairs: HashMap<String, (Option<TokenStream2>, Option<TokenStream2>)> =
+        HashMap::new();
+    for m in methods {
+        if matches!(m.kind, MethodKind::Getter | MethodKind::Setter) {
             let name = &m.func.sig.ident;
             let cb = method_callback_ident(class_ty, name);
+            let entry = accessor_pairs.entry(m.js_name.clone()).or_default();
+            match m.kind {
+                MethodKind::Getter => entry.0 = Some(quote! { #cb }),
+                MethodKind::Setter => entry.1 = Some(quote! { #cb }),
+                _ => {}
+            }
+        }
+    }
+
+    // Track which accessor names have been emitted so we don't emit
+    // them twice (once per ClassMethod entry).
+    let mut emitted_accessors: HashSet<String> = HashSet::new();
+
+    let proto_sets: Vec<TokenStream2> = methods
+        .iter()
+        .filter_map(|m| {
             let js_name = m.js_name.clone();
             match m.kind {
-                MethodKind::Method => quote! {
-                    {
-                        let __key = v8::String::new(scope, #js_name).unwrap();
-                        let __fn_tmpl = v8::FunctionTemplate::new(scope, #cb);
-                        __proto.set(__key.into(), __fn_tmpl.into());
+                MethodKind::Method => {
+                    let name = &m.func.sig.ident;
+                    let cb = method_callback_ident(class_ty, name);
+                    Some(quote! {
+                        {
+                            let __key = v8::String::new(scope, #js_name).unwrap();
+                            let __fn_tmpl = v8::FunctionTemplate::new(scope, #cb);
+                            __proto.set(__key.into(), __fn_tmpl.into());
+                        }
+                    })
+                }
+                MethodKind::Getter | MethodKind::Setter => {
+                    if !emitted_accessors.insert(js_name.clone()) {
+                        return None;
                     }
-                },
-                MethodKind::Getter => quote! {
-                    {
-                        let __key = v8::String::new(scope, #js_name).unwrap();
-                        let __getter_tmpl = v8::FunctionTemplate::new(scope, #cb);
-                        __proto.set_accessor_property(
-                            __key.into(),
-                            Some(__getter_tmpl.into()),
-                            None,
-                            v8::PropertyAttribute::NONE,
-                        );
-                    }
-                },
-                MethodKind::Setter => quote! {
-                    {
-                        let __key = v8::String::new(scope, #js_name).unwrap();
-                        let __setter_tmpl = v8::FunctionTemplate::new(scope, #cb);
-                        __proto.set_accessor_property(
-                            __key.into(),
-                            None,
-                            Some(__setter_tmpl.into()),
-                            v8::PropertyAttribute::NONE,
-                        );
-                    }
-                },
-                MethodKind::Constructor => quote! {},
+                    let pair = accessor_pairs.get(&js_name);
+                    let (getter_opt, setter_opt) = pair.cloned().unwrap_or_default();
+                    let getter_tokens = match getter_opt {
+                        Some(cb) => quote! {
+                            let __getter_tmpl = v8::FunctionTemplate::new(scope, #cb);
+                            let __getter_arg: Option<v8::Local<v8::FunctionTemplate>> = Some(__getter_tmpl);
+                        },
+                        None => quote! {
+                            let __getter_arg: Option<v8::Local<v8::FunctionTemplate>> = None;
+                        },
+                    };
+                    let setter_tokens = match setter_opt {
+                        Some(cb) => quote! {
+                            let __setter_tmpl = v8::FunctionTemplate::new(scope, #cb);
+                            let __setter_arg: Option<v8::Local<v8::FunctionTemplate>> = Some(__setter_tmpl);
+                        },
+                        None => quote! {
+                            let __setter_arg: Option<v8::Local<v8::FunctionTemplate>> = None;
+                        },
+                    };
+                    Some(quote! {
+                        {
+                            let __key = v8::String::new(scope, #js_name).unwrap();
+                            #getter_tokens
+                            #setter_tokens
+                            __proto.set_accessor_property(
+                                __key.into(),
+                                __getter_arg,
+                                __setter_arg,
+                                v8::PropertyAttribute::NONE,
+                            );
+                        }
+                    })
+                }
+                MethodKind::Constructor => None,
             }
         })
         .collect();
@@ -854,16 +912,19 @@ fn gen_box_and_install_finalizer(class_ty: &syn::Ident) -> TokenStream2 {
 /// Build the per-arg extraction code, treating `&mut v8::PinScope` (or
 /// any `PinScope`-typed reference) as a "synthetic" arg that consumes
 /// no JS index. The synthetic arg is reborrowed from the callback's
-/// own `scope` so user methods can pass it on to v8 ops without
-/// fighting the borrow checker.
+/// own `scope` AFTER all JS-arg extractions complete, so user methods
+/// can pass it on to v8 ops without fighting the borrow checker —
+/// crucially, the reborrow happens after the extractions release any
+/// implicit borrows that `args.get(idx)` keeps alive (the returned
+/// `Local<'s, Value>` borrows from `args`, whose lifetime can unify
+/// with `scope`'s in inference; reborrowing `scope` mutably while a
+/// `Local<'s>` is alive triggers E0502 — see commit 4c41d... for
+/// the regression test case).
 ///
 /// Concrete output for `fn decode(&mut self, scope: &mut PinScope, n:
 /// u32)` is:
-///   let scope = &mut *scope;        // reborrow, shadows callback param
 ///   let n: u32 = args.get(0).uint32_value(scope).unwrap_or(0);
-///
-/// Synthetic args are emitted FIRST so the reborrowed `scope` is
-/// available to subsequent JS-arg extractions.
+///   let scope = &mut *scope;        // synthetic reborrow, shadows param
 ///
 /// `reject_shared_names` is the set of parameter names whose JS-side
 /// argument must reject SharedArrayBuffer-backed views with
@@ -877,16 +938,10 @@ fn gen_param_extractions(
     let mut out = Vec::with_capacity(params.len());
     let mut js_idx: usize = 0;
 
-    // Emit reborrows for synthetic params first (they don't consume
-    // JS indices and they need to be in scope before extractions).
-    for p in params.iter() {
-        if is_pin_scope_ref(&p.ty) {
-            let name = &p.name;
-            out.push(quote! { let #name = &mut *scope; });
-        }
-    }
-    // Then emit JS-arg extractions in declared order, skipping
-    // synthetics.
+    // Emit JS-arg extractions FIRST in declared order (skipping
+    // synthetic PinScope refs). These use the original `scope` param,
+    // so no shadow reborrow is alive yet — `args.get(idx)` is free to
+    // produce Locals whose lifetime unifies with the param `scope`.
     for p in params.iter() {
         if is_pin_scope_ref(&p.ty) {
             continue;
@@ -928,6 +983,25 @@ fn gen_param_extractions(
         }
         out.push(gen_extract(js_idx, &p.name, &p.ty));
         js_idx += 1;
+    }
+
+    // The user method takes the synthetic param BY NAME — usually
+    // literally `scope`, but could be any identifier. If the user
+    // chose a name OTHER than `scope`, we need to rebind it so the
+    // call-site can pass it through. For the common case (`scope`),
+    // shadowing is unnecessary because the callback parameter is
+    // already named `scope` and the user method body refers to it
+    // verbatim. Skip the shadowing in that case to avoid borrow-check
+    // conflicts when JS args' Locals are still alive (their lifetime
+    // unifies with `scope`'s, and a mutable reborrow while a Local is
+    // alive is E0502).
+    for p in params.iter() {
+        if is_pin_scope_ref(&p.ty) {
+            let name = &p.name;
+            if name != "scope" {
+                out.push(quote! { let #name = &mut *scope; });
+            }
+        }
     }
 
     out
