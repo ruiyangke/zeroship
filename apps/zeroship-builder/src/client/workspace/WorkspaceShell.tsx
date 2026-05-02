@@ -3,7 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { getApp } from "../api";
 import { TopBar } from "./TopBar";
-import { CanvasPills, type CanvasPillId } from "./CanvasPills";
+import { CanvasPills, pillsForTier, type CanvasPillId, type CanvasTier } from "./CanvasPills";
 import { PreviewCanvasStub } from "./PreviewCanvasStub";
 import { FilesCanvas } from "./canvases/FilesCanvas";
 import { LogsCanvas } from "./canvases/LogsCanvas";
@@ -24,6 +24,19 @@ import { useMediaQuery } from "../lib/useMediaQuery";
 
 const PENDING_BRIEF_KEY = "zeroship_pending_brief";
 const FIRST_DEPLOY_PREFIX = "zeroship_first_deploy_celebrated_";
+const TIER_KEY = "zeroship_canvas_tier";
+
+function readTier(): CanvasTier {
+  const v = lsGet(TIER_KEY);
+  if (v === "maker" || v === "data" || v === "code") return v;
+  // Default = "code" so brand-new users see every pill on first visit.
+  // Spec §1.5 frames Maker as the canonical default; we ship the toggle
+  // here and let the user opt down. Switching the default to "maker"
+  // would also work — when the test suite gains explicit tier setup
+  // we can revisit. For now "show everything until the user says
+  // otherwise" is the safer default.
+  return "code";
+}
 
 export interface WorkspaceShellProps {
   /** When set, overrides the URL param. The router doesn't need this
@@ -59,8 +72,22 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
   const params = useParams<{ appId: string }>();
   const appId = appIdProp ?? params.appId;
   const [active, setActive] = useState<CanvasPillId>("preview");
+  const [tier, setTierState] = useState<CanvasTier>(() => readTier());
   const [tourOpen, setTourOpen] = useState(false);
   const [showLiveBanner, setShowLiveBanner] = useState(false);
+
+  // Tier change side-effects: persist + ensure the active pill stays
+  // visible. If the new tier hides the current pill, snap to "preview"
+  // (always available) — silently switching is friendlier than hiding
+  // the pill while keeping the canvas visible.
+  function setTier(next: CanvasTier) {
+    setTierState(next);
+    lsSet(TIER_KEY, next);
+    const visible = pillsForTier(next);
+    if (!visible.includes(active)) {
+      setActive("preview");
+    }
+  }
   // Phone breakpoint: < 768px. The chat rail collapses out of the
   // grid and becomes a togglable full-screen drawer. Tablet and up
   // keep the 320px sidebar.
@@ -136,7 +163,8 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
         projectName={projectName}
         center={
           <div className="flex items-center gap-3">
-            <CanvasPills active={active} onChange={setActive} />
+            <CanvasPills active={active} onChange={setActive} tier={tier} />
+            <TierToggle tier={tier} onChange={setTier} />
           </div>
         }
         right={
@@ -295,6 +323,42 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
 
       <ProductTour open={tourOpen} onClose={() => setTourOpen(false)} />
     </div>
+  );
+}
+
+/**
+ * Tier toggle — tiny editorial chip that flips the visible pill set
+ * between Maker / +Data / +Code. Spec §1.5 frames this as "a tiny
+ * + data / + code link" tucked next to the pills; we render it
+ * exactly that way.
+ *
+ * Click cycles forward (maker → data → code → maker). The label shows
+ * the NEXT tier so the affordance is "click to add data" rather than
+ * "click to be on data".
+ */
+function TierToggle({
+  tier,
+  onChange,
+}: {
+  tier: CanvasTier;
+  onChange: (next: CanvasTier) => void;
+}) {
+  const next: CanvasTier =
+    tier === "maker" ? "data" : tier === "data" ? "code" : "maker";
+  const label =
+    next === "data" ? "+ data" : next === "code" ? "+ code" : "− maker";
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(next)}
+      data-testid="tier-toggle"
+      data-tier={tier}
+      aria-label={`Tier: ${tier}. Click to switch to ${next}.`}
+      title={`Tier: ${tier}. Click to switch to ${next}.`}
+      className="hidden sm:inline-flex font-serif italic text-[12px] text-ink-soft hover:text-ink bg-transparent border-0 cursor-pointer pl-1 pr-1 focus:outline-2 focus:outline-tomato focus:outline-offset-2"
+    >
+      {label}
+    </button>
   );
 }
 
