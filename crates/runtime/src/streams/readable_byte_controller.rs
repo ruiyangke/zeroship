@@ -705,6 +705,9 @@ pub fn readable_byte_stream_controller_enqueue_cloned_chunk_to_queue(
 /// `ReadableByteStreamControllerEnqueueDetachedPullIntoToQueue` — §3.11.x.
 /// Move the front pending pull-into onto the controller's queue (used
 /// when the reader was released mid-fill — `readerType == None`).
+/// Spec uses `EnqueueClonedChunkToQueue` (cloning bytes into a fresh
+/// buffer) so the originally-buffered descriptor's ownership stays
+/// distinct from the queue entry.
 pub fn readable_byte_stream_controller_enqueue_detached_pull_into_to_queue(
     scope: &mut v8::PinScope,
     controller: v8::Local<v8::Object>,
@@ -718,7 +721,7 @@ pub fn readable_byte_stream_controller_enqueue_detached_pull_into_to_queue(
     };
     debug_assert!(d.reader_type == ReaderType::None);
     if d.bytes_filled > 0 {
-        readable_byte_stream_controller_enqueue_chunk_to_queue(
+        let _ = readable_byte_stream_controller_enqueue_cloned_chunk_to_queue(
             scope,
             controller,
             &d.buffer,
@@ -1179,16 +1182,29 @@ pub fn readable_byte_stream_controller_pull_into<'s>(
                 &mut descriptor,
             );
         if ready {
-            // Commit.
+            // Spec order:
+            //   1. Build the view (ConvertPullIntoDescriptor — no state check).
+            //   2. HandleQueueDrain (may transition state to closed if queue
+            //      is empty AND closeRequested).
+            //   3. Resolve the read with {value: view, done: false}.
+            // We do NOT route through CommitPullIntoDescriptor here because
+            // its done-flag depends on stream state; in this fast path we
+            // know the descriptor was filled from the queue (so done=false
+            // even if the stream subsequently closes).
+            let view = build_view_from_descriptor(scope, &descriptor);
             readable_byte_stream_controller_handle_queue_drain(scope, controller);
-            // Add the request to BYOB reader's queue then commit.
-            crate::streams::readable_byob_reader::add_read_into_request(
+            let view_v: v8::Local<v8::Value> = match view {
+                Some(v) => v.into(),
+                None => v8::undefined(scope).into(),
+            };
+            // Deliver the chunk to the read-into request directly. We
+            // pass `done=false` because the descriptor was filled from
+            // the queue.
+            crate::streams::readable_byob_reader::resolve_read_into_request_chunk(
                 scope,
-                stream,
                 read_into_request,
+                view_v,
             );
-            // Use the just-filled descriptor (NOT pushed onto pending).
-            readable_byte_stream_controller_commit_pull_into_descriptor(scope, stream, &descriptor);
             return;
         }
         // Not ready; if closeRequested, error and return.

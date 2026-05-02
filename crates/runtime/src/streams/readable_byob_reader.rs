@@ -217,6 +217,17 @@ pub fn resolve_read_into_request_done<'s>(
     fulfill_read_into_close(scope, request, chunk);
 }
 
+/// Resolve a single read-into request as `{value: view, done: false}`.
+/// Used by `pull_into`'s queue-fast-path: the bytes came from the
+/// queue, so the read is non-final regardless of subsequent close.
+pub fn resolve_read_into_request_chunk<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    request: ReadIntoRequest,
+    chunk: v8::Local<'s, v8::Value>,
+) {
+    fulfill_read_into_chunk(scope, request, chunk);
+}
+
 /// Reject a single pending read-into request with the given error.
 pub fn error_read_into_request<'s>(
     scope: &mut v8::PinScope<'s, '_>,
