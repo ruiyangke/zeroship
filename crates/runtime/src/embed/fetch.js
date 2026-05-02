@@ -666,23 +666,13 @@
     }
     var stream = response.body;
 
-    // Polyfill-skeleton fast path: if the stream exposes `_id`, it is
-    // backed by a Rust-side StreamState that the user's controller writes
-    // to directly via `__streams.enqueue(_id, ...)`. The wire forwarder
-    // can attach to that StreamState immediately — no pump, no second
-    // copy, no race against the skeleton's internal _valueWaiter dispatch
-    // (which clobbers a final `[DONE]` chunk if a recursive read parks
-    // between enqueue+close). This keeps the pre-cutover semantics until
-    // D-19 step 2 removes the skeleton entirely.
-    if (typeof stream._id === "number") {
-      response._streamId = stream._id;
-      return stream._id;
-    }
-
-    // Native / spec-conformant fallback: lock the stream and pump via
-    // `getReader().read()` into a freshly-allocated StreamState. Works
-    // against native ReadableStream, polyfill `__zsPolyfillReadableStream`,
-    // and any user-defined class implementing the surface.
+    // Lock the stream via `getReader()` and pump chunks through
+    // `__streams.{enqueue,close,error}` into a freshly-allocated
+    // StreamState. Works against any class implementing the spec
+    // ReadableStream surface — native ReadableStream is the only such
+    // class shipped by the runtime now, but user-defined classes that
+    // expose `getReader()` (e.g. third-party SDK adapters) flow through
+    // unchanged.
     var streamId = __streams.create();
     response._streamId = streamId;
     var reader = stream.getReader();
