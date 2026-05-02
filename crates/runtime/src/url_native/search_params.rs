@@ -509,7 +509,17 @@ fn fill_from_iterable(
 
 /// Iterate `obj`'s own enumerable properties, mapping each to a
 /// (name, value) pair of USVStrings. Per WebIDL `record<USVString,
-/// USVString>`.
+/// USVString>` (§3.10 conversion):
+///
+///   - Result is an "ordered map" (Map in JS).
+///   - For each key/value pair in init: `result[key] = value`.
+///   - Insertion order is preserved by the FIRST insertion of a
+///     given key; subsequent assignments update value in place.
+///
+/// USVString conversion replaces lone surrogates with U+FFFD —
+/// which means two distinct JS keys (`"\uD835x"` and `"\uD83Dx"`)
+/// can collide on `"\uFFFDx"`. Spec resolution: dedup by USV-key,
+/// last-write-wins for value, FIRST-insertion-wins for position.
 fn fill_from_record(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,
@@ -526,6 +536,11 @@ fn fill_from_record(
         .ok_or_else(|| OpError::type_error("Failed to enumerate own keys"))?;
 
     let enumerable_key = v8::String::new(scope, "enumerable").unwrap();
+
+    // Order-preserving map: index of (key) in `out`. None means
+    // not-yet-inserted.
+    let mut key_index: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
 
     for i in 0..keys.length() {
         let key_v = keys
@@ -557,7 +572,14 @@ fn fill_from_record(
             .ok_or_else(|| OpError::type_error("Property get threw"))?;
         let value = read_usv_string(scope, value_v)
             .ok_or_else(|| OpError::type_error("Cannot convert value to USVString"))?;
-        out.push((name, value));
+
+        if let Some(&idx) = key_index.get(&name) {
+            // Existing key — update value in place.
+            out[idx].1 = value;
+        } else {
+            key_index.insert(name.clone(), out.len());
+            out.push((name, value));
+        }
     }
     Ok(())
 }
