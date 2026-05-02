@@ -18,15 +18,8 @@ use crate::state::SharedState;
 // runs the same ~8 property accesses per response.
 static K_STATUS: v8::OneByteConst = v8::String::create_external_onebyte_const(b"status");
 static K_HEADERS: v8::OneByteConst = v8::String::create_external_onebyte_const(b"headers");
-static K_BODY_TEXT: v8::OneByteConst = v8::String::create_external_onebyte_const(b"_bodyText");
-static K_IS_STREAM: v8::OneByteConst = v8::String::create_external_onebyte_const(b"_isStreamBody");
-static K_WEBSOCKET: v8::OneByteConst = v8::String::create_external_onebyte_const(b"webSocket");
 static K_ID: v8::OneByteConst = v8::String::create_external_onebyte_const(b"_id");
-static K_STREAM_ID: v8::OneByteConst = v8::String::create_external_onebyte_const(b"_streamId");
-static K_LENGTH: v8::OneByteConst = v8::String::create_external_onebyte_const(b"length");
-static K_ZS_RESPONSE: v8::OneByteConst = v8::String::create_external_onebyte_const(b"__zsResponse");
 static K_MESSAGE: v8::OneByteConst = v8::String::create_external_onebyte_const(b"message");
-static K_ZS_HEADERS_ARR: v8::OneByteConst = v8::String::create_external_onebyte_const(b"_zsHeadersArr");
 static K_DONE: v8::OneByteConst = v8::String::create_external_onebyte_const(b"done");
 static K_VALUE: v8::OneByteConst = v8::String::create_external_onebyte_const(b"value");
 static K_NEXT: v8::OneByteConst = v8::String::create_external_onebyte_const(b"next");
@@ -141,12 +134,12 @@ pub enum SettledResult {
 
 /// Inspect a V8 Response object and extract status, headers, body / stream info.
 ///
-/// Native vs polyfill: when the value is a native Response (Box<ResponseState>
-/// in internal field 0 — see `crate::fetch_response`), the kernel reads body
-/// state through the public `try_native_response_body` surface. Otherwise it
-/// falls back to the polyfill's underscore-prefixed expandos (`_isStreamBody`,
-/// `_streamId`, `_bodyText`). The polyfill probe goes away in D-23 landing 3
-/// when `embed/fetch.js` is deleted.
+/// Per D-23 step 3 the polyfill is gone — every Response that reaches this
+/// inspector is either a native `#[v8_class]` Response (Box<ResponseState>
+/// in internal field 0 — see `crate::fetch_response`) or a duck-typed
+/// `{ status, ... }` plain object the user returned from a handler. The
+/// native case is the hot path; the duck-type case falls through to the
+/// "wrap as plain text" branch below.
 pub fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Value>) -> Result<ResponseInfo, String> {
     let obj = match response_val.to_object(scope) {
         Some(o) => o,
@@ -167,14 +160,15 @@ pub fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Va
         });
     }
 
-    // Extract headers from response.headers (native or polyfill)
+    // Extract headers from response.headers (native Headers iterates via
+    // the WebIDL `iterable<>` mixin).
     let headers = extract_response_headers(scope, obj);
 
     // WebSocket upgrade: status 101 with a `webSocket` property. The
     // gateway path stashes the client WebSocket Global on the Response;
-    // we ferry the `id` (a `#[v8_class]` field) through to the kernel.
+    // we ferry the `id` (set by `__wsAccept` / `__wsLinkPair`) through
+    // to the kernel.
     if status == 101 {
-        // Native Response: read webSocket via the typed accessor.
         if let Some(ws_g) = crate::fetch_response::try_native_response_websocket(scope, obj) {
             let ws_obj = v8::Local::new(scope, ws_g);
             let id_key = key(scope, &K_ID);
@@ -183,64 +177,15 @@ pub fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Va
                 .unwrap_or(0);
             return Ok(ResponseInfo::WebSocket { ws_id, headers });
         }
-        // Polyfill fallback (deleted in D-23 landing 3).
-        let ws_key = key(scope, &K_WEBSOCKET);
-        if let Some(ws_val) = obj.get(scope, ws_key.into()) {
-            if !ws_val.is_undefined() && !ws_val.is_null() {
-                if let Some(ws_obj) = ws_val.to_object(scope) {
-                    let id_key = key(scope, &K_ID);
-                    let ws_id = ws_obj.get(scope, id_key.into())
-                        .and_then(|v| v.uint32_value(scope))
-                        .unwrap_or(0);
-                    return Ok(ResponseInfo::WebSocket { ws_id, headers });
-                }
-            }
-        }
     }
 
-    // Native Response fast path. When the wrapper has a Box<ResponseState>
-    // in internal field 0, read the body through the public surface — no
-    // reach into either impl's privates. The polyfill path below is the
-    // fallback for `embed/fetch.js`-constructed Responses (deleted in D-23
-    // landing 3 when the polyfill is gone).
+    // Native Response: read body via the public surface (D-23). For
+    // duck-typed `{ status, ... }` plain objects, fall through with an
+    // empty body.
     if let Some(view) = crate::fetch_response::try_native_response_body(scope, obj) {
         return inspect_native_response(scope, obj, status, headers, view);
     }
-
-    // ---- Polyfill path (deleted with embed/fetch.js in landing 3) ----
-    let is_stream_key = key(scope, &K_IS_STREAM);
-    let is_stream = obj.get(scope, is_stream_key.into())
-        .map(|v| v.boolean_value(scope))
-        .unwrap_or(false);
-    if is_stream {
-        // Stream ID is on the Response itself: `response._streamId`.
-        //
-        // - If `_streamId >= 0`: already allocated (e.g. fetch-response body
-        //   that wraps a Rust-pushed stream_id, or a Response inspected twice).
-        // - If `_streamId === -1` (sentinel): the Response holds an
-        //   un-pumped ReadableStream. Call `__zsBeginStreamForward(response)`
-        //   to lock the body, allocate a streamId, and launch the pump.
-        //
-        // Reading `response._streamId` rather than `response.body._id`
-        // keeps the kernel free of any reach into stream-class internals.
-        // The forward helper duck-types on `getReader()` so it works
-        // against native ReadableStream, polyfill streams, and any
-        // spec-conformant class.
-        let stream_id_key = key(scope, &K_STREAM_ID);
-        let raw = obj.get(scope, stream_id_key.into());
-        let needs_pump = raw.map(|v| v.int32_value(scope).unwrap_or(0) < 0).unwrap_or(true);
-        let stream_id: u32 = if needs_pump {
-            forward_stream(scope, obj)?
-        } else {
-            raw.and_then(|v| v.uint32_value(scope)).unwrap_or(0)
-        };
-        return classify_stream(scope, status, headers, stream_id);
-    }
-    let body_key = key(scope, &K_BODY_TEXT);
-    let body = obj.get(scope, body_key.into())
-        .map(|v| v.to_rust_string_lossy(scope))
-        .unwrap_or_default();
-    Ok(ResponseInfo::Complete { status, headers, body })
+    Ok(ResponseInfo::Complete { status, headers, body: String::new() })
 }
 
 /// Read a native Response body via the public surface (no polyfill probes).
@@ -330,54 +275,18 @@ fn classify_stream(
     }
 }
 
-/// Extract headers from a Response object.
+/// Extract headers from a Response object via the WebIDL `iterable<>`
+/// mixin (`Headers.prototype[Symbol.iterator]()` per WHATWG Fetch §2.2).
 ///
-/// Fast path: if the Response has a pre-built `_zsHeadersArr` property
-/// (populated by `Response.json` and the future Response constructor
-/// fast-path), read it directly — one property lookup + array iteration.
-/// Skips the Headers instance, the iterable walk, `get_own_property_names`,
-/// and the name/value iteration (~8-12 V8 ops per request).
-///
-/// Slow path: walk `response.headers` via `[Symbol.iterator]()`. This
-/// works against both the JS polyfill Headers (which stored a `_map`
-/// behind the curtain) and the native Headers IDL surface — both expose
-/// `entries()`-style iteration per WHATWG Fetch §2.2.
+/// Native Headers ships this surface; the previous polyfill `_zsHeadersArr`
+/// fast path was retired with `embed/fetch.js` in D-23 landing 3.
 pub fn extract_response_headers(scope: &mut v8::PinScope, response_obj: v8::Local<v8::Object>) -> Vec<(String, String)> {
     let mut result = Vec::new();
 
-    // --- Fast path: _zsHeadersArr ---
-    let fast_key = key(scope, &K_ZS_HEADERS_ARR);
-    if let Some(fast_val) = response_obj.get(scope, fast_key.into()) {
-        if fast_val.is_array() {
-            if let Some(arr_obj) = fast_val.to_object(scope) {
-                let len_key = key(scope, &K_LENGTH);
-                let len = arr_obj.get(scope, len_key.into())
-                    .and_then(|v| v.uint32_value(scope))
-                    .unwrap_or(0);
-                for i in 0..len {
-                    let Some(pair_val) = arr_obj.get_index(scope, i) else { continue };
-                    let Some(pair_obj) = pair_val.to_object(scope) else { continue };
-                    let Some(name_val) = pair_obj.get_index(scope, 0) else { continue };
-                    let Some(val_val) = pair_obj.get_index(scope, 1) else { continue };
-                    result.push((
-                        name_val.to_rust_string_lossy(scope),
-                        val_val.to_rust_string_lossy(scope),
-                    ));
-                }
-                return result;
-            }
-        }
-    }
-
-    // --- Slow path: iterate response.headers via Symbol.iterator ---
     let headers_key = key(scope, &K_HEADERS);
     let Some(headers_val) = response_obj.get(scope, headers_key.into()) else { return result };
     let Some(headers_obj) = headers_val.to_object(scope) else { return result };
 
-    // headers[Symbol.iterator]() — the WebIDL `iterable<>` mixin
-    // surface. Polyfill Headers also exposes this via
-    // `Headers.prototype[Symbol.iterator] = entries`, so the call site
-    // is identical for both implementations.
     let sym_iter = v8::Symbol::get_iterator(scope);
     let Some(iter_fn_val) = headers_obj.get(scope, sym_iter.into()) else { return result };
     let Ok(iter_fn) = v8::Local::<v8::Function>::try_from(iter_fn_val) else { return result };
@@ -413,30 +322,18 @@ pub fn extract_response_headers(scope: &mut v8::PinScope, response_obj: v8::Loca
 /// instead of the JSON-wrap path.
 ///
 /// Native Response: detected via internal-field 0 holding a non-null
-/// Box<ResponseState> (the macro-emitted brand).
+/// Box<ResponseState> (the macro-emitted brand). Plain handler returns
+/// (`{ status, url }`, primitives, arrays) don't carry the brand.
 ///
-/// Polyfill Response (deleted in D-23 landing 3): detected via the
-/// `__zsResponse = 1` tag on `Response.prototype` (see `embed/fetch.js`).
-/// Plain handler returns (`{ status, url }`, primitives, arrays) don't
-/// match either.
-///
-/// Two reads in the worst case (native check + polyfill probe). V8's
-/// inline cache turns each lookup into a hidden-class check after warmup,
-/// and the polyfill probe goes away with the polyfill in landing 3.
+/// One internal-field probe per async RPC settlement. V8's inline cache
+/// turns the lookup into a hidden-class check after warmup. The
+/// previous polyfill probe (`__zsResponse` prototype tag from
+/// `embed/fetch.js`) was retired with the polyfill in D-23 landing 3.
 pub fn looks_like_response(scope: &mut v8::PinScope, val: v8::Local<v8::Value>) -> bool {
     // Fast reject: primitives and null can't carry brands.
     if !val.is_object() { return false; }
     let Some(obj) = val.to_object(scope) else { return false; };
-    // Native Response brand — internal-field-backed.
-    if crate::fetch_response::is_native_response(scope, obj) {
-        return true;
-    }
-    // Polyfill prototype tag (deleted in D-23 landing 3).
-    let k = key(scope, &K_ZS_RESPONSE);
-    match obj.get(scope, k.into()) {
-        Some(v) => v.is_true() || v.uint32_value(scope) == Some(1),
-        None => false,
-    }
+    crate::fetch_response::is_native_response(scope, obj)
 }
 
 /// Extract the result of a settled promise. All dispatch goes through
