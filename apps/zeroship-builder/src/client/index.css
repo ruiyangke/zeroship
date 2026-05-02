@@ -171,3 +171,18 @@ select:focus-visible {
 .reveal.d-1 {
   animation-delay: 120ms;
 }
+
+/* ─── shiki host — syntax-highlighted file viewer ──────────────────
+   shiki emits <pre><code> with inline styles for tokens. We strip the
+   default <pre> margin/padding/background so our canvas chrome owns
+   the layout, while keeping shiki's per-token colours intact.       */
+.shiki-host pre.shiki {
+  margin: 0;
+  padding: 0;
+  background: transparent !important;
+  white-space: pre;
+  overflow-x: auto;
+}
+.shiki-host code {
+  font: inherit;
+}

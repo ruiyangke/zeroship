@@ -9,9 +9,57 @@
 // `readSandboxFile({appId, path})` — read-only by design (Builder is
 // the only writer; users edit by talking to the chat rail).
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { listSandboxFiles, readSandboxFile, type FileEntry } from "../../api";
+
+// ─── shiki: lazy-loaded singleton highlighter ──────────────────────
+//
+// We import shiki only when the first file opens, then cache the
+// `codeToHtml` function for the rest of the session. Loading it eagerly
+// would pull a multi-MB WASM blob into the initial bundle for users who
+// never touch the files canvas.
+
+type CodeToHtml = (
+  code: string,
+  options: { lang: string; theme: string },
+) => Promise<string>;
+
+let shikiPromise: Promise<CodeToHtml> | null = null;
+
+function loadShiki(): Promise<CodeToHtml> {
+  if (!shikiPromise) {
+    shikiPromise = import("shiki").then((m) => m.codeToHtml as CodeToHtml);
+  }
+  return shikiPromise;
+}
+
+const EXT_TO_LANG: Record<string, string> = {
+  ts: "typescript",
+  tsx: "typescript",
+  js: "javascript",
+  jsx: "javascript",
+  mjs: "javascript",
+  cjs: "javascript",
+  py: "python",
+  rs: "rust",
+  md: "markdown",
+  mdx: "markdown",
+  json: "json",
+  css: "css",
+  html: "html",
+  htm: "html",
+  yml: "yaml",
+  yaml: "yaml",
+  toml: "toml",
+  sh: "shell",
+  bash: "shell",
+};
+
+function langFromPath(path: string): string {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  return EXT_TO_LANG[ext] ?? "text";
+}
 
 export interface FilesCanvasProps {
   appId: string;
@@ -315,7 +363,7 @@ function FileViewer({
             couldn't read file
           </div>
         ) : (
-          <CodeView code={content ?? ""} />
+          <CodeView code={content ?? ""} path={path} />
         )}
       </div>
       <div className="border-t border-rule px-5 py-2 font-serif italic text-[12px] text-pencil">
@@ -325,11 +373,12 @@ function FileViewer({
   );
 }
 
-function CodeView({ code }: { code: string }) {
-  const lines = code.split("\n");
-  return (
+function CodeView({ code, path }: { code: string; path: string }) {
+  // Plain (un-highlighted) line-numbered view used for the "text" lang
+  // and as the synchronous fallback while shiki spins up its WASM.
+  const fallback = (
     <div>
-      {lines.map((line, i) => (
+      {code.split("\n").map((line, i) => (
         <div key={i} className="whitespace-pre">
           <span
             className="inline-block w-9 pr-3 text-right select-none font-mono text-[11px]"
@@ -341,6 +390,43 @@ function CodeView({ code }: { code: string }) {
         </div>
       ))}
     </div>
+  );
+
+  const lang = useMemo(() => langFromPath(path), [path]);
+  const [html, setHtml] = useState<string | null>(null);
+
+  useEffect(() => {
+    setHtml(null);
+    if (lang === "text" || !code) return;
+    let cancelled = false;
+    loadShiki()
+      .then((codeToHtml) =>
+        codeToHtml(code, { lang, theme: "github-light" }),
+      )
+      .then((rendered) => {
+        if (!cancelled) setHtml(rendered);
+      })
+      .catch(() => {
+        // Highlighting failed (unsupported lang, WASM blocked, etc).
+        // Leave `html` null so the fallback renders.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [code, lang]);
+
+  if (!html) return fallback;
+
+  // shiki returns a <pre><code>…</code></pre> wrapper. We let it apply
+  // its own colours/background, but reset its margins and pin our font
+  // sizing so it harmonises with the rest of the canvas.
+  return (
+    <div
+      className="shiki-host font-mono text-[12.5px] leading-[1.65]"
+      data-lang={lang}
+      // shiki produces trusted HTML from a static theme; safe to inject.
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
   );
 }
 
