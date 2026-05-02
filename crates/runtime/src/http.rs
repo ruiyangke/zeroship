@@ -213,30 +213,17 @@ fn inspect_native_response(
         }
         NativeResponseBody::Stream => {
             // Lock the body's ReadableStream and start the body pump.
-            // `__zsBeginStreamForward` (in `embed/fetch.js`) reads
-            // `response.body` (native getter), allocates a Rust-side
-            // StreamState via `__streams.create()`, stamps the id on
-            // `response._streamId` for idempotence, and pumps each
-            // chunk into the StreamState. Native Response objects are
-            // extensible, so the expando write succeeds.
-            let stream_id = forward_stream(scope, obj)?;
+            // The Rust-side forwarder (replaces the legacy JS pump in
+            // `__zsBeginStreamForward`) reads `response.body`, calls
+            // `getReader()` on it, and drives the read loop via Rust
+            // promise reactions. Each chunk lands in a per-stream
+            // forwarder (registered on SharedState by `stream_id`),
+            // which buffers until the kernel attaches a `direct_writer`
+            // in `build_fetch_outcome`.
+            let stream_id = crate::streams::response_forwarder::begin_forward(scope, obj)?;
             classify_stream(scope, status, headers, stream_id)
         }
     }
-}
-
-/// Call `globalThis.__zsBeginStreamForward(response)` and return the
-/// allocated stream id. Used by both the native and polyfill paths.
-fn forward_stream(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> Result<u32, String> {
-    let global = scope.get_current_context().global(scope);
-    let fn_key = v8::String::new(scope, "__zsBeginStreamForward").unwrap();
-    let fn_v = global.get(scope, fn_key.into())
-        .ok_or_else(|| "__zsBeginStreamForward missing".to_string())?;
-    let forward_fn = v8::Local::<v8::Function>::try_from(fn_v)
-        .map_err(|_| "__zsBeginStreamForward not a function".to_string())?;
-    let result = forward_fn.call(scope, v8::undefined(scope).into(), &[obj.into()])
-        .ok_or_else(|| "__zsBeginStreamForward threw".to_string())?;
-    Ok(result.uint32_value(scope).unwrap_or(0))
 }
 
 /// After a stream id is allocated, decide whether the body is already
@@ -252,25 +239,22 @@ fn classify_stream(
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")
         .clone();
-    let s = state.borrow();
-    let stream_closed = s.streams.get(&stream_id).map(|ss| ss.closed).unwrap_or(false);
+
+    let stream_closed = crate::streams::response_forwarder::is_closed(&state, stream_id);
 
     if stream_closed {
-        // Stream is closed — collect buffered chunks as complete body.
-        let body_text = s.streams.get(&stream_id)
-            .map(|ss| {
-                ss.buffer.iter()
-                    .map(|b| String::from_utf8_lossy(b).to_string())
-                    .collect::<String>()
-            })
-            .unwrap_or_default();
-        drop(s);
-        // Clean up the stream state
-        state.borrow_mut().streams.remove(&stream_id);
+        // Stream sync-completed in start() — collect buffered chunks
+        // as a complete body and discard the forwarder.
+        let chunks = crate::streams::response_forwarder::drain_into_complete(&state, stream_id);
+        let body_text = chunks
+            .iter()
+            .map(|b| String::from_utf8_lossy(b).to_string())
+            .collect::<String>();
         Ok(ResponseInfo::Complete { status, headers, body: body_text })
     } else {
-        drop(s);
-        // Stream still open — return as streaming (chunks arrive via timers/async ops)
+        // Stream still open — return as streaming. The runtime will
+        // attach a direct writer in build_fetch_outcome; chunks
+        // already buffered in the forwarder will be drained then.
         Ok(ResponseInfo::Stream { status, headers, stream_id })
     }
 }

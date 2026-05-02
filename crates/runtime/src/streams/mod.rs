@@ -40,6 +40,11 @@ pub use legacy_bridge::{
     stream_enqueue_callback, stream_error_callback, stream_read_callback,
 };
 
+// Rust-side response-body forwarder — replaces the JS pump in
+// `__zsBeginStreamForward`. Used by `http::inspect_response` and
+// `runtime::build_fetch_outcome`.
+pub mod response_forwarder;
+
 // Native classes & primitives — installed unconditionally per D-19.
 pub mod algorithms;
 pub mod async_iter;

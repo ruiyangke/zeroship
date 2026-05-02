@@ -1537,26 +1537,16 @@ impl RuntimeInner {
             }
             ResponseInfo::Stream { status, headers, stream_id } => {
                 let (writer, reader) = channel::stream_buffer();
-
-                // Attach the writer directly to the stream state so future
-                // enqueue() calls from JS write straight to the TCP-bound
-                // channel — no buffer, no pump cycle. (Mirrors
-                // `build_http_outcome`.)
-                {
-                    let mut s = self.state.borrow_mut();
-                    if let Some(stream) = s.streams.get_mut(&stream_id) {
-                        for chunk in stream.buffer.drain(..) {
-                            let _ = writer.push(chunk);
-                        }
-                        if stream.closed {
-                            writer.close();
-                        } else {
-                            stream.direct_writer = Some(writer);
-                        }
-                    } else {
-                        writer.close();
-                    }
-                }
+                // Hand the writer to the response forwarder. It drains
+                // any chunks buffered between `begin_forward` and now,
+                // then either closes the writer (if the body already
+                // completed) or stashes the writer so future chunks
+                // pump straight to the TCP-bound channel.
+                crate::streams::response_forwarder::attach_writer(
+                    &self.state,
+                    stream_id,
+                    writer,
+                );
                 crate::FetchOutcome::Stream { status, headers, body_reader: reader, logs }
             }
             ResponseInfo::WebSocket { ws_id, headers } => {

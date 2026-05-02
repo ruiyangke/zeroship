@@ -253,6 +253,15 @@ pub struct RuntimeState {
     /// Monotonically increasing stream-id counter.
     pub next_stream_id: u32,
 
+    /// Response-body forwarders — Rust-side replacements for the legacy
+    /// JS pump in `__zsBeginStreamForward`. Keyed by stream-id (shared
+    /// counter with `streams`). Populated by
+    /// `streams::response_forwarder::begin_forward` when the kernel's
+    /// `inspect_response` decides a Response with a ReadableStream body
+    /// should ship to the wire; drained via `attach_writer` /
+    /// `is_closed` / `drain_into_complete` in `runtime.rs`.
+    pub response_forwarders: HashMap<u32, crate::streams::response_forwarder::ResponseForwarder>,
+
     /// Futures for in-flight async ops (fetch, kv, ...).
     pub spawned_ops: Vec<Pin<Box<dyn Future<Output = OpResult>>>>,
     /// Timers queued to be armed on the next event-loop iteration.
@@ -431,6 +440,7 @@ impl RuntimeState {
 
             streams: HashMap::new(),
             next_stream_id: 1,
+            response_forwarders: HashMap::new(),
 
             spawned_ops: Vec::new(),
             spawned_timers: Vec::new(),
