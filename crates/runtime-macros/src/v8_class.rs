@@ -838,7 +838,6 @@ fn gen_install(
     // call writes the slot; subsequent calls in the same isolate
     // return the cached `Local` reborrow.
     let install_slot_ty = format_ident!("__InstallSlot_{}", class_ty);
-    let brand_slot_ty = format_ident!("__BrandSlot_{}", class_ty);
 
     quote! {
         /// Install this class on the given V8 scope, returning the
