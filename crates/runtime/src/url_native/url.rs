@@ -444,9 +444,8 @@ fn parse_callback(
 ) {
     // C4: URL.parse must NEVER throw per §4.6. Every V8-fallible step
     // (USVString conversion via `to_string`, which throws for Symbol;
-    // `new_instance` for the URL constructor, which can fail with OOM
-    // etc.) runs inside a TryCatch. On any thrown exception we drop
-    // it and return null.
+    // wrapper allocation, which can fail with OOM) runs inside a
+    // TryCatch. On any thrown exception we drop it and return null.
 
     // Step 1: ToUSVString on input + base under a TryCatch. Symbol
     // args throw inside `to_string`; the TryCatch absorbs that.
@@ -471,48 +470,30 @@ fn parse_callback(
         return;
     };
 
-    // Pre-validate so we don't pay the construct-and-rollback price on
-    // the hot failure path (callers like Workers' router routinely call
-    // URL.parse on speculative inputs).
-    if !ada_url::Url::can_parse(&input, base.as_deref()) {
-        rv.set(v8::null(scope).into());
-        return;
-    }
-
-    // Look up the URL class function via the per-isolate slot. Set by
-    // `install_globals` — invariant: search_params_getter_callback /
-    // parse_callback only fire after the slot is populated.
-    let slot = match scope.get_slot::<crate::url_native::UrlNativeSlot>() {
-        Some(s) => s,
-        None => {
+    // M6: parse ONCE — pre-fix called both `can_parse` (parse 1) and
+    // `new_instance` (parse 2 inside the macro-emitted constructor)
+    // on the success path. Now we parse directly via
+    // `ada_url::Url::parse`; on failure return null without entering
+    // V8 land at all.
+    let parsed = match ada_url::Url::parse(&input, base.as_deref()) {
+        Ok(u) => u,
+        Err(_) => {
             rv.set(v8::null(scope).into());
             return;
         }
     };
-    let url_fn = v8::Local::new(scope, &slot.url_class_fn);
 
-    // Construct via `new URL(input, base?)`. Per spec the constructor
-    // throws TypeError on parse failure; we already validated above so
-    // this path always succeeds in normal conditions. Internal field
-    // 0 (the boxed URL) is populated automatically by the
-    // macro-emitted constructor. Wrap in a TryCatch so any V8
-    // internal failure (OOM, isolate teardown) doesn't propagate as a
-    // thrown exception — URL.parse must honor its "never throws"
-    // contract.
-    let input_v = v8::String::new(scope, &input).unwrap();
-    let argv: Vec<v8::Local<v8::Value>> = if let Some(b) = base.as_deref() {
-        vec![input_v.into(), v8::String::new(scope, b).unwrap().into()]
-    } else {
-        vec![input_v.into()]
-    };
-    let new_inst_global: Option<v8::Global<v8::Object>> = {
+    // Wrap the parsed URL in a fresh JS object using URL's instance
+    // template (same code path the macro-emitted constructor uses,
+    // minus the redundant parse). We stamp internal field 0 with an
+    // External pointing at a fresh Box<URL>, and register the same
+    // weak finalizer so the Box is freed on GC.
+    let inst_global: Option<v8::Global<v8::Object>> = {
         v8::tc_scope!(let tc, scope);
-        match url_fn.new_instance(tc, &argv) {
-            Some(o) => Some(v8::Global::new(tc, o)),
-            None => None,
-        }
+        wrap_parsed_url(tc, parsed)
     };
-    match new_inst_global {
+
+    match inst_global {
         Some(g) => {
             let local = v8::Local::new(scope, &g);
             rv.set(local.into());
@@ -521,6 +502,61 @@ fn parse_callback(
             rv.set(v8::null(scope).into());
         }
     }
+}
+
+/// Helper for `URL.parse` (M6): allocate a JS object on URL's instance
+/// template, install the boxed URL in internal field 0, and register
+/// the GC finalizer. Returns `None` on any V8 failure (the caller
+/// should pass null back).
+///
+/// Mirrors the macro-emitted `gen_box_and_install_finalizer` flow but
+/// is invoked outside a constructor callback, so we manually attach
+/// the prototype.
+fn wrap_parsed_url(
+    scope: &mut v8::PinScope,
+    parsed: ada_url::Url,
+) -> Option<v8::Global<v8::Object>> {
+    let url_tmpl = URL::install(scope);
+    let inst_tmpl = url_tmpl.instance_template(scope);
+    let inst = inst_tmpl.new_instance(scope)?;
+
+    // The instance template alone doesn't establish the prototype
+    // chain (FunctionTemplate::get_function() does that for `new
+    // T(...)` instances); set the prototype manually so
+    // `Object.getPrototypeOf(URL.parse(...)) === URL.prototype` and
+    // `instanceof` checks work.
+    let class_fn = url_tmpl.get_function(scope)?;
+    let proto_key = v8::String::new(scope, "prototype").unwrap();
+    let proto_v = class_fn.get(scope, proto_key.into())?;
+    inst.set_prototype(scope, proto_v);
+
+    // Install the boxed URL.
+    let boxed = Box::new(URL {
+        inner: parsed,
+        search_params: None,
+    });
+    let raw_ptr = Box::into_raw(boxed);
+    let raw_addr = raw_ptr as usize;
+    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
+    inst.set_internal_field(0, ext.into());
+
+    // SAFETY: raw_addr was Box::into_raw'd from Box<URL>; the
+    // finalizer drops the Box exactly once when V8 reclaims the
+    // wrapper. Same pattern the macro emits in
+    // gen_box_and_install_finalizer.
+    let weak = v8::Weak::with_guaranteed_finalizer(
+        scope,
+        inst,
+        Box::new(move || unsafe {
+            drop(Box::from_raw(raw_addr as *mut URL));
+        }),
+    );
+    // Dropping the Weak deregisters the finalizer; with_guaranteed_
+    // finalizer fires on GC or isolate teardown regardless, so leak
+    // the WeakData (~32 bytes per instance).
+    std::mem::forget(weak);
+
+    Some(v8::Global::new(scope, inst))
 }
 
 /// `url.searchParams` getter. Lazily instantiate a URLSearchParams JS
