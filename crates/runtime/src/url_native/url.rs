@@ -552,8 +552,10 @@ fn search_params_getter_callback(
     };
 
     // Replace the constructor's stand-alone URLSearchParams with one
-    // bound to this URL. The old Box is freed by reading out the
-    // External and reconstituting it.
+    // bound to this URL. We modify the existing Box's contents in
+    // place rather than swapping pointers — that way the macro's
+    // weak-finalizer (which captured the original raw_addr) frees the
+    // right thing.
     let old_ext = match sp_obj
         .get_internal_field(scope, 0)
         .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
@@ -562,22 +564,18 @@ fn search_params_getter_callback(
         None => return, // shouldn't happen — internal field count = 1
     };
     let old_raw = old_ext.value() as *mut URLSearchParams;
-    // SAFETY: this Box was created by the macro's constructor finalizer
-    // path; we replace it with a new one bound to the URL. The
-    // weak-finalizer registered on `sp_obj` will eventually run with
-    // its closure still pointing at OLD raw_addr (captured by-value in
-    // the macro), but we drop the old Box here ourselves and replace
-    // the field with a new External — the macro's finalizer would
-    // otherwise leak. We reset the External pointer to the new Box, so
-    // the macro's finalizer-closure (capturing `raw_addr`) double-frees
-    // the old Box. To prevent that we must drop the old Box AFTER we
-    // re-stamp the field, but the closure still holds the old addr by
-    // value... so:
-    //
-    // Simpler fix: don't replace at all. Modify the existing Box's
-    // contents in place to include parent_url.
+    // SAFETY: old_raw is the Box allocated by the URLSearchParams
+    // macro-emitted constructor; we mutate its contents in place. No
+    // other &mut to this Box exists.
     let sp_inst: &mut URLSearchParams = unsafe { &mut *old_raw };
-    *sp_inst = URLSearchParams::bound_to(v8::Global::new(scope, this_obj));
+    // C1: SP holds a Weak<Object> to its parent URL — not a strong
+    // Global. The URL keeps a strong Global to the SP wrapper (forward
+    // direction, below) for [SameObject], but the back reference is
+    // weak so the cycle is breakable. When the URL is GC'd the Weak
+    // fails to upgrade and the SP transparently falls back to
+    // standalone semantics.
+    let parent_weak = v8::Weak::new(scope, this_obj);
+    *sp_inst = URLSearchParams::bound_to(parent_weak);
 
     // Cache the SP wrapper Global on the URL so [SameObject] holds.
     let cached = v8::Global::new(scope, sp_obj);
