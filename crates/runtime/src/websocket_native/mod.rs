@@ -783,6 +783,36 @@ impl WebSocketImpl {
         Ok(())
     }
 
+    /// Privileged close path — skips the WHATWG-mandated user-facing
+    /// code validation (which restricts user code to 1000 OR 3000-4999).
+    /// Used by the bootstrap (`init.rs`) where 1011 (server error) is
+    /// the semantically correct wire code for `dispatchSubscription`'s
+    /// internal failure paths. Not exposed on the JS prototype — the
+    /// bootstrap reaches it through the `__wsServerClose` global.
+    pub fn close_internal(&self, scope: &mut v8::PinScope, code: u16, reason: String) {
+        use ReadyState::*;
+        match self.ready_state.get() {
+            Closing | Closed => return,
+            Connecting => {
+                self.ready_state.set(Closing);
+                #[cfg(feature = "runtime_native_websocket")]
+                if let Some(state_handle) = scope.get_slot::<crate::state::SharedState>() {
+                    let state = state_handle.clone();
+                    network::cancel_native_ws(&state, self.ws_id.get(), reason);
+                }
+            }
+            Open => {
+                self.ready_state.set(Closing);
+                let frame = WsFrame::Close {
+                    code: Some(code),
+                    reason,
+                };
+                self.send_queue.borrow_mut().push_back(frame);
+                self.flush_to_network(scope);
+            }
+        }
+    }
+
     /// `socket.accept()` — workerd extension (D-21). Required by
     /// `WebSocketPair[1]` to begin local message delivery; throws
     /// TypeError on a client-side socket. Transitions readyState
@@ -971,6 +1001,34 @@ pub fn install_global<'s>(
     install_websocket_constants(scope, class_fn);
     let key = v8::String::new(scope, "WebSocket").unwrap();
     global.set(scope, key.into(), class_fn.into());
+}
+
+/// `__wsServerClose(wsObj, code, reason)` — privileged close that
+/// bypasses the WHATWG-mandated user-facing code restriction (1000 OR
+/// 3000-4999). The bootstrap (`init.rs`) uses this to issue protocol
+/// codes like 1011 (server error) which user code cannot legitimately
+/// pass to `socket.close()`.
+///
+/// Semantics: identical to `socket.close(code, reason)` minus the
+/// validation step. No-op if `wsObj` isn't a native WebSocket.
+pub fn ws_server_close_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let Ok(obj) = v8::Local::<v8::Object>::try_from(args.get(0)) else {
+        return;
+    };
+    let code = args.get(1).uint32_value(scope).unwrap_or(1000) as u16;
+    let reason = if args.get(2).is_undefined() {
+        String::new()
+    } else {
+        args.get(2).to_rust_string_lossy(scope)
+    };
+    let Some(impl_) = websocket_from_obj(scope, obj) else {
+        return;
+    };
+    impl_.close_internal(scope, code, reason);
 }
 
 // ---------------------------------------------------------------------------

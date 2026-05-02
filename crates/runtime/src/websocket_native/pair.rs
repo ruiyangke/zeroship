@@ -115,26 +115,11 @@ pub fn deliver_to_peer(
 }
 
 /// Push an event onto a specific ws_id's queue and wake the pump.
-/// Mirrors `network::push_event` but without the "this is the local
-/// receive loop's task" tracking.
+/// Mirrors `network::push_event` but for pair sockets. Delegates to
+/// the public `network::push_event_pub` so the test event-log
+/// instrumentation captures pair traffic too.
 fn push_peer_event(state: &SharedState, ws_id: u32, event: WsEvent) {
-    let Some(ws) = network::lookup_native_ws_state(state, ws_id) else {
-        return;
-    };
-    ws.borrow_mut().events.push_back(event);
-
-    // Push a one-shot future that resolves to `OpResult::WebSocketEvent`.
-    let id = ws_id;
-    let fut: std::pin::Pin<Box<dyn std::future::Future<Output = crate::state::OpResult>>> =
-        Box::pin(async move { crate::state::OpResult::WebSocketEvent { ws_id: id } });
-    {
-        let mut s = state.borrow_mut();
-        s.spawned_ops.push(fut);
-    }
-    let notify = state.borrow().pump_notify_tx.clone();
-    if let Some(mut tx) = notify {
-        let _ = tx.try_send(());
-    }
+    network::push_event_pub(state, ws_id, event);
 }
 
 /// Mint two paired native sockets — `WebSocketPair[0]` and `[1]`.

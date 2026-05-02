@@ -355,7 +355,7 @@ async function _zsRunSubscriptionGen(gen, ws) {
             } catch (err) {
                 if (ws.readyState === 1) {
                     try { ws.send(JSON.stringify({ t: "error", error: _zsSubError(err) })); } catch (_) {}
-                    try { ws.close(1011, ""); } catch (_) {}
+                    try { (typeof __wsServerClose === "function" ? __wsServerClose(ws, 1011, "") : ws.close(1011, "")); } catch (_) {}
                 }
                 return;
             }
@@ -381,7 +381,7 @@ async function _zsRunSubscriptionGen(gen, ws) {
         // Defensive: any unexpected throw above bubbles here.
         if (ws && ws.readyState === 1) {
             try { ws.send(JSON.stringify({ t: "error", error: _zsSubError(err) })); } catch (_) {}
-            try { ws.close(1011, ""); } catch (_) {}
+            try { (typeof __wsServerClose === "function" ? __wsServerClose(ws, 1011, "") : ws.close(1011, "")); } catch (_) {}
         }
     }
 }
@@ -416,7 +416,7 @@ async function dispatchSubscription(methodName, input, ws) {
     } catch (err) {
         if (ws && ws.readyState === 1 /* OPEN */) {
             try { ws.send(JSON.stringify({ t: "error", error: _zsSubError(err) })); } catch (_) {}
-            try { ws.close(1011, ""); } catch (_) {}
+            try { (typeof __wsServerClose === "function" ? __wsServerClose(ws, 1011, "") : ws.close(1011, "")); } catch (_) {}
         }
     }
 }
@@ -1526,6 +1526,22 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
         let f = v8::Function::new(scope, crate::websocket::ws_close_callback).unwrap();
         let key = v8::String::new(scope, "__wsClose").unwrap();
         global.set(scope, key.into(), f.into());
+
+        // Privileged server-side close (bypasses WHATWG user-API code
+        // validation) — used by the bootstrap below to issue
+        // protocol-level codes like 1011 (server error). Only the
+        // bootstrap and other privileged native code reach this; user
+        // app code should keep using `socket.close(code, reason)`.
+        #[cfg(feature = "runtime_native_websocket")]
+        {
+            let f = v8::Function::new(
+                scope,
+                crate::websocket_native::ws_server_close_callback,
+            )
+            .unwrap();
+            let key = v8::String::new(scope, "__wsServerClose").unwrap();
+            global.set(scope, key.into(), f.into());
+        }
     }
 
     // env namespace

@@ -106,7 +106,7 @@ use crate::state::{OpResult, SharedState};
 // ---------------------------------------------------------------------------
 
 /// Per-WS event delivered from the network task to the V8 pump arm.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum WsEvent {
     /// Handshake completed. Fires `open` event on the wrapper.
     Open {
@@ -141,6 +141,12 @@ pub struct NativeWsState {
     /// Sender end of the writer channel. `None` until the connect task
     /// has finished the handshake.
     pub send_tx: Option<mpsc::UnboundedSender<WsFrame>>,
+    /// Cumulative event log for test inspection. Every event pushed
+    /// onto `events` is also appended here BEFORE dispatch drains it.
+    /// Empty in production builds; only the tests crate populates it
+    /// because it's `RefCell<None>` by default and needs an explicit
+    /// opt-in via `enable_event_log()` (called by test setup).
+    pub event_log: Option<Vec<WsEvent>>,
 }
 
 impl NativeWsState {
@@ -155,6 +161,7 @@ impl NativeWsState {
             full: Rc::new(Cell::new(false)),
             is_pair: false,
             send_tx: None,
+            event_log: None,
         }
     }
 
@@ -162,6 +169,18 @@ impl NativeWsState {
         NativeWsState {
             is_pair: true,
             ..NativeWsState::new()
+        }
+    }
+
+    /// Test helper: enable cumulative event-log capture. Every event
+    /// pushed onto `events` is also appended to `event_log` BEFORE
+    /// dispatch drains it. Production code never calls this; the
+    /// integration test in `tests/subscription.rs` flips this on for
+    /// each test isolate to inspect event flow without racing the
+    /// pump's dispatch.
+    pub fn enable_event_log(&mut self) {
+        if self.event_log.is_none() {
+            self.event_log = Some(Vec::new());
         }
     }
 }
@@ -203,11 +222,25 @@ pub fn lookup_native_ws_state(
 }
 
 fn push_event(state: &SharedState, ws_id: u32, event: WsEvent) {
+    push_event_pub(state, ws_id, event);
+}
+
+/// Public test-facing event push: identical to `push_event` but
+/// callable from outside the crate. Used by the subscription test
+/// suite to simulate inbound frames on the server-side WS.
+pub fn push_event_pub(state: &SharedState, ws_id: u32, event: WsEvent) {
     let ws = match lookup_native_ws_state(state, ws_id) {
         Some(w) => w,
         None => return,
     };
-    ws.borrow_mut().events.push_back(event);
+    {
+        let mut s = ws.borrow_mut();
+        // Mirror into the cumulative event log if a test enabled it.
+        if let Some(log) = s.event_log.as_mut() {
+            log.push(event.clone());
+        }
+        s.events.push_back(event);
+    }
 
     let id = ws_id;
     let fut: std::pin::Pin<Box<dyn std::future::Future<Output = OpResult>>> =
