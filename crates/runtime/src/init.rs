@@ -104,7 +104,12 @@ pub const CRYPTO_JS: &str = include_str!("embed/crypto.js");
 
 /// Embedded WebSocket/WebSocketPair polyfill (depends on the native
 /// EventTarget installed by `install_dom`).
-pub const WEBSOCKET_JS: &str = include_str!("embed/websocket.js");
+// websocket polyfill JS deleted in cutover landing 3 (D-25): the
+// native WebSocket / WebSocketPair classes + native MessageEvent /
+// CloseEvent / EventTarget are the sole providers. The previous
+// `embed/websocket.js` polyfill is gone; if a future emergency
+// requires a rollback, restore from `git log --diff-filter=D --
+// crates/runtime/src/embed/websocket.js`.
 
 /// Node-shaped globals the runtime doesn't already install: a lazy
 /// `globalThis.Buffer` stub (configurable getter so unenv's
@@ -741,13 +746,9 @@ pub fn load_polyfills_and_modules(
         crate::websocket_native::pair::install_global(scope, global);
     }
 
-    // WebSocket polyfill — loaded LAST so its prototype chain references
-    // the native EventTarget (install_dom installed it just above).
-    {
-        let code = v8::String::new(scope, WEBSOCKET_JS).unwrap();
-        let script = v8::Script::compile(scope, code, None).unwrap();
-        script.run(scope).unwrap();
-    }
+    // WebSocket polyfill JS deleted in cutover landing 3. The native
+    // class above is the sole provider; building with
+    // `--no-default-features` (polyfill mode) is no longer supported.
 
     // Wrap the user's module graph in the bootstrap entry.
     //
@@ -1505,43 +1506,24 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
     // forwarder owns the wire pump now — see
     // `crate::streams::response_forwarder`.)
 
-    // WebSocket native callbacks
+    // WebSocket native callbacks. Cutover landing 3: the 5
+    // polyfill-driving globals (`__wsCreatePair` / `__wsLinkPair` /
+    // `__wsAccept` / `__wsSend` / `__wsClose`) are gone — all
+    // WebSocket traffic flows through the native class above.
+    //
+    // `__wsServerClose` is the privileged server-side close that
+    // bypasses the WHATWG user-API code restriction (1000 OR
+    // 3000-4999). Used by the bootstrap to issue protocol-level
+    // codes like 1011 (server error). Only the bootstrap reaches
+    // this; user app code keeps using `socket.close(code, reason)`.
     {
-        let f = v8::Function::new(scope, crate::websocket::ws_create_pair_callback).unwrap();
-        let key = v8::String::new(scope, "__wsCreatePair").unwrap();
+        let f = v8::Function::new(
+            scope,
+            crate::websocket_native::ws_server_close_callback,
+        )
+        .unwrap();
+        let key = v8::String::new(scope, "__wsServerClose").unwrap();
         global.set(scope, key.into(), f.into());
-
-        let f = v8::Function::new(scope, crate::websocket::ws_link_pair_callback).unwrap();
-        let key = v8::String::new(scope, "__wsLinkPair").unwrap();
-        global.set(scope, key.into(), f.into());
-
-        let f = v8::Function::new(scope, crate::websocket::ws_accept_callback).unwrap();
-        let key = v8::String::new(scope, "__wsAccept").unwrap();
-        global.set(scope, key.into(), f.into());
-
-        let f = v8::Function::new(scope, crate::websocket::ws_send_callback).unwrap();
-        let key = v8::String::new(scope, "__wsSend").unwrap();
-        global.set(scope, key.into(), f.into());
-
-        let f = v8::Function::new(scope, crate::websocket::ws_close_callback).unwrap();
-        let key = v8::String::new(scope, "__wsClose").unwrap();
-        global.set(scope, key.into(), f.into());
-
-        // Privileged server-side close (bypasses WHATWG user-API code
-        // validation) — used by the bootstrap below to issue
-        // protocol-level codes like 1011 (server error). Only the
-        // bootstrap and other privileged native code reach this; user
-        // app code should keep using `socket.close(code, reason)`.
-        #[cfg(feature = "runtime_native_websocket")]
-        {
-            let f = v8::Function::new(
-                scope,
-                crate::websocket_native::ws_server_close_callback,
-            )
-            .unwrap();
-            let key = v8::String::new(scope, "__wsServerClose").unwrap();
-            global.set(scope, key.into(), f.into());
-        }
     }
 
     // env namespace

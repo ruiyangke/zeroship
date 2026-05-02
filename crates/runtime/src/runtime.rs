@@ -2124,51 +2124,79 @@ impl RuntimeInner {
     }
 
     /// Enter V8 to deliver a WebSocket message to the server-side WebSocket.
-    /// Uses cached V8 handles (resolved at accept time) for zero-lookup dispatch.
+    /// With the native impl on, pushes a `WsEvent::MessageText` onto the
+    /// per-WS event queue and the V8 dispatch arm fires a MessageEvent
+    /// through `dom::event_target::dispatch_event`.
     pub fn enter_v8_for_ws_message(&mut self, ws_id: u32, data: &str) {
-        // Borrow cached handles before entering V8 (can't borrow state inside enter_v8!).
-        let cached = {
-            let s = self.state.borrow();
-            s.websockets.get(&ws_id).and_then(|ws| {
-                ws.cached_handles.as_ref().map(|h| (h.ws_obj.clone(), h.on_message.clone()))
-            })
-        };
-        enter_v8!(self, |scope| {
-            if let Some((ws_obj_global, on_message_global)) = cached {
-                let ws_val: v8::Local<v8::Value> = v8::Local::new(scope, &ws_obj_global).into();
-                let func = v8::Local::new(scope, &on_message_global);
-                let data_val: v8::Local<v8::Value> = v8::String::new(scope, data).unwrap().into();
-                func.call(scope, ws_val, &[data_val]);
-            } else {
-                // Fallback to dynamic lookup (shouldn't happen in normal flow).
-                let data_val: v8::Local<v8::Value> = v8::String::new(scope, data).unwrap().into();
-                call_ws_method(scope, ws_id, "_onMessage", &[data_val]);
-            }
-        });
+        #[cfg(feature = "runtime_native_websocket")]
+        {
+            use crate::websocket_native::network as nw;
+            let state = self.state.clone();
+            nw::push_event_pub(&state, ws_id, nw::WsEvent::MessageText(data.to_string()));
+            return;
+        }
+        #[cfg(not(feature = "runtime_native_websocket"))]
+        {
+            // Polyfill path: cached `_onMessage` direct call.
+            let cached = {
+                let s = self.state.borrow();
+                s.websockets.get(&ws_id).and_then(|ws| {
+                    ws.cached_handles.as_ref().map(|h| (h.ws_obj.clone(), h.on_message.clone()))
+                })
+            };
+            enter_v8!(self, |scope| {
+                if let Some((ws_obj_global, on_message_global)) = cached {
+                    let ws_val: v8::Local<v8::Value> = v8::Local::new(scope, &ws_obj_global).into();
+                    let func = v8::Local::new(scope, &on_message_global);
+                    let data_val: v8::Local<v8::Value> = v8::String::new(scope, data).unwrap().into();
+                    func.call(scope, ws_val, &[data_val]);
+                } else {
+                    let data_val: v8::Local<v8::Value> = v8::String::new(scope, data).unwrap().into();
+                    call_ws_method(scope, ws_id, "_onMessage", &[data_val]);
+                }
+            });
+        }
     }
 
     /// Enter V8 to deliver a WebSocket close to the server-side WebSocket.
-    /// Uses cached V8 handles for zero-lookup dispatch.
     pub fn enter_v8_for_ws_close(&mut self, ws_id: u32, code: u16, reason: &str) {
-        let cached = {
-            let s = self.state.borrow();
-            s.websockets.get(&ws_id).and_then(|ws| {
-                ws.cached_handles.as_ref().map(|h| (h.ws_obj.clone(), h.on_close.clone()))
-            })
-        };
-        enter_v8!(self, |scope| {
-            if let Some((ws_obj_global, on_close_global)) = cached {
-                let ws_val: v8::Local<v8::Value> = v8::Local::new(scope, &ws_obj_global).into();
-                let func = v8::Local::new(scope, &on_close_global);
-                let code_val: v8::Local<v8::Value> = v8::Integer::new(scope, code as i32).into();
-                let reason_val: v8::Local<v8::Value> = v8::String::new(scope, reason).unwrap().into();
-                func.call(scope, ws_val, &[code_val, reason_val]);
-            } else {
-                let code_val: v8::Local<v8::Value> = v8::Integer::new(scope, code as i32).into();
-                let reason_val: v8::Local<v8::Value> = v8::String::new(scope, reason).unwrap().into();
-                call_ws_method(scope, ws_id, "_onClose", &[code_val, reason_val]);
-            }
-        });
+        #[cfg(feature = "runtime_native_websocket")]
+        {
+            use crate::websocket_native::network as nw;
+            let state = self.state.clone();
+            nw::push_event_pub(
+                &state,
+                ws_id,
+                nw::WsEvent::Close {
+                    code,
+                    reason: reason.to_string(),
+                    was_clean: code == 1000,
+                },
+            );
+            return;
+        }
+        #[cfg(not(feature = "runtime_native_websocket"))]
+        {
+            let cached = {
+                let s = self.state.borrow();
+                s.websockets.get(&ws_id).and_then(|ws| {
+                    ws.cached_handles.as_ref().map(|h| (h.ws_obj.clone(), h.on_close.clone()))
+                })
+            };
+            enter_v8!(self, |scope| {
+                if let Some((ws_obj_global, on_close_global)) = cached {
+                    let ws_val: v8::Local<v8::Value> = v8::Local::new(scope, &ws_obj_global).into();
+                    let func = v8::Local::new(scope, &on_close_global);
+                    let code_val: v8::Local<v8::Value> = v8::Integer::new(scope, code as i32).into();
+                    let reason_val: v8::Local<v8::Value> = v8::String::new(scope, reason).unwrap().into();
+                    func.call(scope, ws_val, &[code_val, reason_val]);
+                } else {
+                    let code_val: v8::Local<v8::Value> = v8::Integer::new(scope, code as i32).into();
+                    let reason_val: v8::Local<v8::Value> = v8::String::new(scope, reason).unwrap().into();
+                    call_ws_method(scope, ws_id, "_onClose", &[code_val, reason_val]);
+                }
+            });
+        }
     }
 
     fn cleanup_cancelled_requests(&mut self) {

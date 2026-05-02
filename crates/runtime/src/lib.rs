@@ -88,7 +88,11 @@ pub mod crypto;
 pub mod streams;
 pub mod structured_clone;
 pub mod url_native;
-pub mod websocket;
+// `pub mod websocket;` (the polyfill V8 callback module — __wsCreatePair
+// / __wsLinkPair / __wsAccept / __wsSend / __wsClose) was deleted in
+// cutover landing 3 (D-25). All WebSocket traffic now flows through
+// the native class; see `websocket_native::pair` /
+// `websocket_native::network` for the replacements.
 pub mod websocket_native;
 pub mod channel;
 pub mod runtime;
