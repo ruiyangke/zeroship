@@ -512,7 +512,7 @@ pub fn materialise_pending<'s>(
 /// patch url / redirected (which the constructor doesn't accept).
 fn build_response_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    alg: AlgorithmResponse,
+    mut alg: AlgorithmResponse,
 ) -> v8::Local<'s, v8::Object> {
     let global = scope.get_current_context().global(scope);
     let class_key = v8::String::new(scope, "Response").unwrap();
@@ -547,17 +547,28 @@ fn build_response_object<'s>(
 
     // Body — Uint8Array view over the bytes. Status-table null-body
     // statuses (101/103/204/205/304) get null instead.
+    //
+    // FIX A (perf): use `new_backing_store_from_vec` so the Vec's
+    // allocation is moved into V8 as the ArrayBuffer backing store —
+    // zero-copy. The previous loop did `store[i].set(b)` for every
+    // byte, which on a ~15-byte JSON response is fine but on any
+    // realistic response is the dominant cost of fetch().
     let body_v: v8::Local<v8::Value> = if matches!(alg.status, 101 | 103 | 204 | 205 | 304) {
         v8::null(scope).into()
     } else {
-        let len = alg.body.len();
-        let ab = v8::ArrayBuffer::new(scope, len);
-        let store = ab.get_backing_store();
-        for (i, &b) in alg.body.iter().enumerate() {
-            store[i].set(b);
+        let body_vec = std::mem::take(&mut alg.body);
+        let len = body_vec.len();
+        if len == 0 {
+            // Empty body — give Response constructor `null` so it
+            // produces an empty stream. Avoids constructing a
+            // zero-length ArrayBuffer just to throw away.
+            v8::null(scope).into()
+        } else {
+            let store = v8::ArrayBuffer::new_backing_store_from_vec(body_vec).make_shared();
+            let ab = v8::ArrayBuffer::with_backing_store(scope, &store);
+            let u8a = v8::Uint8Array::new(scope, ab, 0, len).unwrap();
+            u8a.into()
         }
-        let u8a = v8::Uint8Array::new(scope, ab, 0, len).unwrap();
-        u8a.into()
     };
 
     let result = class_fn.new_instance(scope, &[body_v, init.into()]).unwrap();
