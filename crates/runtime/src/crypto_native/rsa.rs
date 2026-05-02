@@ -117,32 +117,11 @@ pub fn sign_pss<'s>(
             "RSA-PSS with SHA-1 not supported",
         ));
     }
-    let alg: &'static dyn aws_lc_rs::signature::RsaEncoding = match hash {
-        HashAlgo::Sha256 => &aws_lc_rs::signature::RSA_PSS_SHA256,
-        HashAlgo::Sha384 => &aws_lc_rs::signature::RSA_PSS_SHA384,
-        HashAlgo::Sha512 => &aws_lc_rs::signature::RSA_PSS_SHA512,
-        HashAlgo::Sha1 => unreachable!(),
-    };
-    if salt_len as usize != hash.digest_len() {
-        // aws-lc-rs's high-level PSS uses digest-length salt; for
-        // variable salts we'd need the lower FFI surface. Document
-        // and reject explicitly rather than silently misbehave.
-        return Err(OpError::dom(
-            "NotSupportedError",
-            format!(
-                "RSA-PSS variable saltLength not supported in v1 (requested {salt_len}, expected {})",
-                hash.digest_len()
-            ),
-        ));
-    }
-    let key_pair = aws_lc_rs::signature::RsaKeyPair::from_pkcs8(pkcs8)
-        .map_err(|_| OpError::dom("DataError", "RSA private key load"))?;
-    let mut sig = vec![0u8; key_pair.public_modulus_len()];
-    let rng = aws_lc_rs::rand::SystemRandom::new();
-    key_pair
-        .sign(alg, &rng, data, &mut sig)
-        .map_err(|_| OpError::dom("OperationError", "RSA-PSS sign failed"))?;
-    Ok(sig)
+    // Drop down to aws-lc-sys for variable salt length. The high-level
+    // aws-lc-rs `signature::RSA_PSS_*` algorithms hard-code salt =
+    // digest length, so any caller-specified saltLength other than
+    // hLen would otherwise round-trip incorrectly.
+    super::rsa_pss_variable_salt::sign_with_salt(pkcs8, hash, data, salt_len as i32)
 }
 
 pub fn verify_pss<'s>(
@@ -163,20 +142,14 @@ pub fn verify_pss<'s>(
         _ => return Err(OpError::dom("InvalidAccessError", "RSA: missing public")),
     };
     let hash = require_rsa_hash(key)?;
-    let _salt_len = read_salt_length(scope, alg_obj)?;
-    let alg: &dyn aws_lc_rs::signature::VerificationAlgorithm = match hash {
-        HashAlgo::Sha256 => &aws_lc_rs::signature::RSA_PSS_2048_8192_SHA256,
-        HashAlgo::Sha384 => &aws_lc_rs::signature::RSA_PSS_2048_8192_SHA384,
-        HashAlgo::Sha512 => &aws_lc_rs::signature::RSA_PSS_2048_8192_SHA512,
-        _ => {
-            return Err(OpError::dom(
-                "NotSupportedError",
-                "RSA-PSS hash not supported",
-            ));
-        }
-    };
-    let unparsed = aws_lc_rs::signature::UnparsedPublicKey::new(alg, spki.as_slice());
-    Ok(unparsed.verify(data, sig).is_ok())
+    if matches!(hash, HashAlgo::Sha1) {
+        return Err(OpError::dom(
+            "NotSupportedError",
+            "RSA-PSS with SHA-1 not supported",
+        ));
+    }
+    let salt_len = read_salt_length(scope, alg_obj)?;
+    super::rsa_pss_variable_salt::verify_with_salt(spki, hash, data, sig, salt_len as i32)
 }
 
 fn read_salt_length(

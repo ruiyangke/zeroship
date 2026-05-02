@@ -815,3 +815,159 @@ fn ed25519_generate_jwk_round_trip() {
     );
     assert!(ok, "Ed25519 JWK round-trip yields the same deterministic signature");
 }
+
+// =============================================================================
+// RSA-PSS variable salt length (Blocker 3)
+// =============================================================================
+//
+// aws-lc-rs's high-level path fixes salt = digest length. We drop down
+// to aws-lc-sys EVP_* for caller-specified saltLength. A salt of 0 is
+// deterministic (RFC 3447 §9.1.1); other salts are randomized.
+
+#[test]
+fn rsa_pss_sign_verify_salt_zero_round_trip() {
+    // 2048-bit keygen takes a moment; keep this single-threaded.
+    let ok = run_js(
+        r#"
+        (async () => {
+            const kp = await crypto.subtle.generateKey(
+                {
+                    name: "RSA-PSS",
+                    modulusLength: 2048,
+                    publicExponent: new Uint8Array([1, 0, 1]),
+                    hash: "SHA-256",
+                },
+                true, ["sign", "verify"]);
+            const data = new TextEncoder().encode("pss-salt-zero");
+            const sig = await crypto.subtle.sign(
+                { name: "RSA-PSS", saltLength: 0 }, kp.privateKey, data);
+            const v = await crypto.subtle.verify(
+                { name: "RSA-PSS", saltLength: 0 }, kp.publicKey, sig, data);
+            return v;
+        })();
+        "#,
+        |v, scope| {
+            let p: v8::Local<v8::Promise> = v.try_into().unwrap();
+            for _ in 0..64 {
+                scope.perform_microtask_checkpoint();
+            }
+            let result = p.result(scope);
+            result.boolean_value(scope)
+        },
+    );
+    assert!(ok, "RSA-PSS saltLength=0 sign/verify round-trip");
+}
+
+#[test]
+fn rsa_pss_sign_verify_salt_digest_len() {
+    let ok = run_js(
+        r#"
+        (async () => {
+            const kp = await crypto.subtle.generateKey(
+                {
+                    name: "RSA-PSS",
+                    modulusLength: 2048,
+                    publicExponent: new Uint8Array([1, 0, 1]),
+                    hash: "SHA-256",
+                },
+                true, ["sign", "verify"]);
+            const data = new TextEncoder().encode("pss-salt-32");
+            const sig = await crypto.subtle.sign(
+                { name: "RSA-PSS", saltLength: 32 }, kp.privateKey, data);
+            return await crypto.subtle.verify(
+                { name: "RSA-PSS", saltLength: 32 }, kp.publicKey, sig, data);
+        })();
+        "#,
+        |v, scope| {
+            let p: v8::Local<v8::Promise> = v.try_into().unwrap();
+            for _ in 0..64 {
+                scope.perform_microtask_checkpoint();
+            }
+            let result = p.result(scope);
+            result.boolean_value(scope)
+        },
+    );
+    assert!(ok, "RSA-PSS saltLength=hLen=32 sign/verify round-trip");
+}
+
+#[test]
+fn rsa_pss_salt_zero_is_deterministic() {
+    // When saltLength=0, PSS is deterministic — same input → same
+    // signature byte-for-byte (RFC 3447 §9.1.1, salt of length 0).
+    let r = run_js(
+        r#"
+        (async () => {
+            const kp = await crypto.subtle.generateKey(
+                {
+                    name: "RSA-PSS",
+                    modulusLength: 2048,
+                    publicExponent: new Uint8Array([1, 0, 1]),
+                    hash: "SHA-256",
+                },
+                true, ["sign", "verify"]);
+            const data = new TextEncoder().encode("determinism");
+            const s1 = new Uint8Array(await crypto.subtle.sign(
+                { name: "RSA-PSS", saltLength: 0 }, kp.privateKey, data));
+            const s2 = new Uint8Array(await crypto.subtle.sign(
+                { name: "RSA-PSS", saltLength: 0 }, kp.privateKey, data));
+            if (s1.length !== s2.length) return "len-mismatch";
+            for (let i = 0; i < s1.length; i++) if (s1[i] !== s2[i]) return "byte-mismatch";
+            return "deterministic";
+        })();
+        "#,
+        |v, scope| {
+            let p: v8::Local<v8::Promise> = v.try_into().unwrap();
+            for _ in 0..64 {
+                scope.perform_microtask_checkpoint();
+            }
+            let result = p.result(scope);
+            result.to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "deterministic");
+}
+
+#[test]
+fn rsa_pss_salt_random_differs_run_to_run() {
+    // saltLength > 0 — output should differ between runs (random salt).
+    let r = run_js(
+        r#"
+        (async () => {
+            const kp = await crypto.subtle.generateKey(
+                {
+                    name: "RSA-PSS",
+                    modulusLength: 2048,
+                    publicExponent: new Uint8Array([1, 0, 1]),
+                    hash: "SHA-256",
+                },
+                true, ["sign", "verify"]);
+            const data = new TextEncoder().encode("random-salt");
+            const s1 = new Uint8Array(await crypto.subtle.sign(
+                { name: "RSA-PSS", saltLength: 32 }, kp.privateKey, data));
+            const s2 = new Uint8Array(await crypto.subtle.sign(
+                { name: "RSA-PSS", saltLength: 32 }, kp.privateKey, data));
+            // Both must verify
+            const v1 = await crypto.subtle.verify(
+                { name: "RSA-PSS", saltLength: 32 }, kp.publicKey, s1, data);
+            const v2 = await crypto.subtle.verify(
+                { name: "RSA-PSS", saltLength: 32 }, kp.publicKey, s2, data);
+            if (!v1 || !v2) return "verify-failed";
+            if (s1.length !== s2.length) return "len-mismatch";
+            // Probability that two independent random salts produce the
+            // same signature is negligible.
+            let same = true;
+            for (let i = 0; i < s1.length; i++) if (s1[i] !== s2[i]) { same = false; break; }
+            return same ? "all-same" : "differ";
+        })();
+        "#,
+        |v, scope| {
+            let p: v8::Local<v8::Promise> = v.try_into().unwrap();
+            for _ in 0..64 {
+                scope.perform_microtask_checkpoint();
+            }
+            let result = p.result(scope);
+            result.to_rust_string_lossy(scope)
+        },
+    );
+    assert_eq!(r, "differ");
+}

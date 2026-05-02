@@ -39,6 +39,11 @@
 /// privateKey-OCTET-STRING-contents). The OID bytes returned are the
 /// raw OID octets (without the OBJECT IDENTIFIER tag/length).
 ///
+/// Accepts PKCS#8 v1 (RFC 5208 — version 0) and v2 (RFC 5958 — version
+/// 1, which adds an `attributes [0]` and `publicKey [1]` implicit). The
+/// `[0]` and `[1]` tags after the privateKey OCTET STRING are tolerated
+/// and skipped.
+///
 /// On any structural mismatch returns `None`.
 pub fn parse_pkcs8_private_key_info(input: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     let (top, rest) = read_tlv(input)?;
@@ -50,9 +55,9 @@ pub fn parse_pkcs8_private_key_info(input: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> 
     }
     let body = top.value;
 
-    // version INTEGER 0
+    // version INTEGER 0 (RFC 5208) or 1 (RFC 5958)
     let (ver, body) = read_tlv(body)?;
-    if ver.tag != 0x02 || ver.value != [0x00] {
+    if ver.tag != 0x02 || (ver.value != [0x00] && ver.value != [0x01]) {
         return None;
     }
 
@@ -67,7 +72,8 @@ pub fn parse_pkcs8_private_key_info(input: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> 
     }
     let oid = oid_tlv.value.to_vec();
 
-    // privateKey OCTET STRING
+    // privateKey OCTET STRING. Trailing v2 fields ([0] attributes, [1]
+    // publicKey) are not consumed — caller doesn't need them.
     let (priv_oct, _) = read_tlv(body)?;
     if priv_oct.tag != 0x04 {
         return None;
@@ -323,6 +329,28 @@ mod tests {
 
         let extracted = extract_ec_raw_d(&pkcs8, 32).unwrap();
         assert_eq!(extracted, raw_d.to_vec());
+    }
+
+    /// aws-lc-rs's Ed25519 keygen produces PKCS#8 v2 (version=1, with
+    /// public key as a [1] implicit tagged BIT STRING after the
+    /// privateKey OCTET STRING). The walker must accept it.
+    #[test]
+    fn extract_cfrg_seed_real_aws_lc_rs_key() {
+        let rng = aws_lc_rs::rand::SystemRandom::new();
+        let pkcs8 = aws_lc_rs::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let bytes = pkcs8.as_ref();
+        let seed = extract_cfrg_raw_seed(bytes).expect("Ed25519 PKCS#8 walk failed");
+        assert_eq!(seed.len(), 32);
+        assert!(seed.iter().any(|&b| b != 0));
+        // Reload via aws-lc-rs and check that the public point we
+        // derive matches what aws-lc-rs returned (sanity check that
+        // the seed we extracted is the "right" one).
+        let kp = aws_lc_rs::signature::Ed25519KeyPair::from_pkcs8(bytes).unwrap();
+        use aws_lc_rs::signature::KeyPair as _;
+        // Re-import seed via from_seed_unchecked + check public
+        // equality.
+        let kp2 = aws_lc_rs::signature::Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
+        assert_eq!(kp.public_key().as_ref(), kp2.public_key().as_ref());
     }
 
     #[test]
