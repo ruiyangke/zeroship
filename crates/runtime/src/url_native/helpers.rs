@@ -156,6 +156,10 @@ pub fn url_encoded_serialize(pairs: &[(String, String)]) -> String {
 }
 
 fn url_encoded_serialize_byte(bytes: &[u8], out: &mut String) {
+    // M10: avoid per-byte `format!("{:02X}", b)` allocation. Hex
+    // lookup against a static table writes 2 ASCII chars per
+    // percent-encoded byte with zero allocation.
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     for &b in bytes {
         if b == 0x20 {
             out.push('+');
@@ -165,7 +169,8 @@ fn url_encoded_serialize_byte(bytes: &[u8], out: &mut String) {
             out.push(b as char);
         } else {
             out.push('%');
-            out.push_str(&format!("{:02X}", b));
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0F) as usize] as char);
         }
     }
 }
@@ -215,12 +220,29 @@ pub fn url_encoded_parse(input: &str) -> Vec<(String, String)> {
         let name_decoded = percent_decode(&name_replaced);
         let value_decoded = percent_decode(&value_replaced);
 
+        // M11: avoid forced allocation when the bytes are valid UTF-8.
+        // `String::from_utf8_lossy` returns a `Cow::Borrowed` for ASCII-
+        // clean / UTF-8-clean input, but `.into_owned()` then copies
+        // the borrowed slice. `String::from_utf8` reuses the Vec
+        // directly when valid; on invalid UTF-8 we fall back to the
+        // lossy path.
         out.push((
-            String::from_utf8_lossy(&name_decoded).into_owned(),
-            String::from_utf8_lossy(&value_decoded).into_owned(),
+            from_utf8_or_lossy(name_decoded),
+            from_utf8_or_lossy(value_decoded),
         ));
     }
     out
+}
+
+/// Take ownership of a byte vector as a String. If the bytes are valid
+/// UTF-8 the Vec is consumed in-place (no allocation). Otherwise
+/// `from_utf8_lossy` produces a Cow<&str> with U+FFFD substitution and
+/// we materialise it to an owned String.
+fn from_utf8_or_lossy(bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(e) => String::from_utf8_lossy(&e.into_bytes()).into_owned(),
+    }
 }
 
 /// UTF-8 percent-decode per https://url.spec.whatwg.org/#percent-decode

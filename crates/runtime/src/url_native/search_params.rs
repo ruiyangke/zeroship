@@ -43,52 +43,98 @@ pub struct URLSearchParams {
     /// Insertion-ordered (name, value) pairs.
     ///
     /// In bound mode this is repopulated from the parent URL on every
-    /// read — see `with_entries_mut`/`with_entries_ref`.
+    /// read — see `sync_from_parent` / `flush_to_parent`.
     entries: Vec<(String, String)>,
-    /// `Some(global)` iff this URLSearchParams is bound to a URL via
+    /// `Some(weak)` iff this URLSearchParams is bound to a URL via
     /// `url.searchParams`. `None` for standalone instances.
-    parent_url: Option<v8::Global<v8::Object>>,
+    ///
+    /// Stored as a `Weak<Object>` (NOT a `Global<Object>`) to break the
+    /// reference cycle URL ↔ SP. The URL holds a strong `Global` to its
+    /// SP wrapper (forward direction; needed for `[SameObject]` cache);
+    /// the SP holds a weak back-reference. When the URL is GC'd the
+    /// weak fails to upgrade and the SP transparently falls back to
+    /// standalone semantics (sync/flush become no-ops).
+    parent_url: Option<v8::Weak<v8::Object>>,
+    /// Cache of the parent's last-observed `inner.search()`. Skipping
+    /// the re-parse when the search hasn't changed turns iterator
+    /// for-of from O(n²) to O(n) (see C3).
+    last_seen_search: String,
 }
 
 impl URLSearchParams {
     /// Build a `URLSearchParams` already bound to a URL JS wrapper. The
     /// parent's `internal_field(0)` must hold a `Box<URL>`.
-    pub fn bound_to(parent: v8::Global<v8::Object>) -> Self {
+    ///
+    /// Takes a `Weak<Object>` rather than a `Global<Object>` to avoid
+    /// the cycle leak documented on `parent_url`.
+    pub fn bound_to(parent: v8::Weak<v8::Object>) -> Self {
         URLSearchParams {
             entries: Vec::new(),
             parent_url: Some(parent),
+            last_seen_search: String::new(),
         }
     }
 
     /// Helper: in bound mode, re-read entries from the parent URL's
-    /// search component before any access. Standalone returns
-    /// `&self.entries` as-is.
+    /// search component before any access. Standalone (no parent, or
+    /// parent already GC'd) returns `&self.entries` as-is.
+    ///
+    /// Caches `last_seen_search` so back-to-back reads (notably the
+    /// iterator's `next()` per C3) skip the re-parse when the parent's
+    /// search hasn't changed. The cache also covers the orphan case:
+    /// once the weak fails to upgrade, `entries` keeps whatever it had
+    /// at last sync — effectively detaching to standalone.
     fn sync_from_parent(&mut self, scope: &mut v8::PinScope) {
-        let Some(parent_global) = &self.parent_url else {
+        let Some(parent_weak) = &self.parent_url else {
             return;
         };
-        let parent = v8::Local::new(scope, parent_global);
-        let Some(url_inst) = url_from_object(parent, scope) else {
+        let Some(parent) = parent_weak.to_local(scope) else {
+            // Parent URL has been GC'd. Behave as standalone: keep
+            // current entries, no further sync.
             return;
         };
+        // SAFETY: parent's internal field 0 was set by the URL
+        // constructor (or URL::install_search_params_global); the Weak
+        // upgrade keeps the wrapper alive for this scope, which keeps
+        // the Box<URL> alive (its finalizer runs only after GC). No
+        // concurrent &mut URL alias exists for the duration of this
+        // local borrow — V8 is single-threaded per isolate.
+        let url_ptr = match url_ptr_from_object(parent, scope) {
+            Some(p) => p,
+            None => return,
+        };
+        let url_inst: &mut URL = unsafe { &mut *url_ptr };
         let search = url_inst.inner.search();
+        if search == self.last_seen_search {
+            // Parent hasn't changed since last sync — skip re-parse.
+            return;
+        }
         // Strip the leading "?" if present (search() returns it
         // included; the urlencoded parser doesn't expect it).
         let stripped = search.strip_prefix('?').unwrap_or(search);
         self.entries = url_encoded_parse(stripped);
+        self.last_seen_search = search.to_string();
     }
 
     /// Helper: in bound mode, serialize current entries and push back
     /// to the parent URL's search component via ada-url's
-    /// `set_search`. Standalone is a no-op.
-    fn flush_to_parent(&self, scope: &mut v8::PinScope) {
-        let Some(parent_global) = &self.parent_url else {
+    /// `set_search`. Standalone (parent GC'd or never bound) is a
+    /// no-op.
+    fn flush_to_parent(&mut self, scope: &mut v8::PinScope) {
+        let Some(parent_weak) = &self.parent_url else {
             return;
         };
-        let parent = v8::Local::new(scope, parent_global);
-        let Some(url_inst) = url_from_object(parent, scope) else {
+        let Some(parent) = parent_weak.to_local(scope) else {
+            // Parent URL has been GC'd. Mutations are still applied to
+            // self.entries; just don't fail trying to write back.
             return;
         };
+        let url_ptr = match url_ptr_from_object(parent, scope) {
+            Some(p) => p,
+            None => return,
+        };
+        // SAFETY: see sync_from_parent.
+        let url_inst: &mut URL = unsafe { &mut *url_ptr };
         if self.entries.is_empty() {
             // Per §6.2 step 5: if the serialization is the empty
             // string, set the URL's query to null (clears it).
@@ -100,26 +146,86 @@ impl URLSearchParams {
             // raw (matches the spec call site).
             url_inst.inner.set_search(Some(&serialized));
         }
+        // Cache what the parent now holds so the next sync_from_parent
+        // can short-circuit (the urlencoded round-trip is lossy on `+`
+        // vs `%20` so we read it back rather than caching the
+        // serialized form we just wrote).
+        self.last_seen_search = url_inst.inner.search().to_string();
     }
 }
 
-/// Reach into a V8 object's internal field 0 and recover the boxed
-/// `URL` if present. Returns `None` for non-URL receivers.
+/// Brand check: walk `obj`'s prototype chain looking for the cached
+/// `URLSearchParams.prototype`. Returns true iff the receiver is a real
+/// URLSearchParams instance.
 ///
-/// SAFETY: the External pointer was set by `URL::install`'s constructor
-/// callback (or by `URL::bind_search_params`). The Global keeps the
-/// wrapper alive, which keeps the Box<URL> alive (the finalizer runs
-/// only after GC). This function dereferences for the lifetime of the
-/// returned reference; no concurrent access (V8 is single-threaded per
-/// isolate, AGENTS.md key invariant).
-pub(crate) fn url_from_object<'a>(
+/// M4/M5 — `URLSearchParams.prototype.entries.call(headers)` was
+/// type-unsafe pre-fix because the only check was "internal field 0 is
+/// an External", which any `#[v8_class]` instance with one internal
+/// field would pass. Reinterpreting a Headers Box as a URLSearchParams
+/// Box was UB. This brand check prevents that: the receiver must have
+/// our specific URLSearchParams.prototype somewhere on its prototype
+/// chain.
+///
+/// Note: this is a system-wide macro gap; the broader fix lives in the
+/// `#[v8_class]` callback codegen (see runtime-macros/TODO.md). For
+/// now we apply it locally to the URLSearchParams iterator factories
+/// and forEach.
+fn is_url_search_params(obj: v8::Local<v8::Object>, scope: &mut v8::PinScope) -> bool {
+    let Some(slot) = scope.get_slot::<crate::url_native::UrlNativeSlot>() else {
+        return false;
+    };
+    let expected_proto = v8::Local::new(scope, &slot.search_params_prototype);
+    // Walk the [[Prototype]] chain. Stop at null or after a depth cap.
+    let mut current: v8::Local<v8::Value> = obj.get_prototype(scope).unwrap_or_else(|| v8::null(scope).into());
+    for _ in 0..32 {
+        if current.is_null_or_undefined() {
+            return false;
+        }
+        // V8 compares by pointer identity for the same Local; our
+        // expected_proto is the prototype Function created at install
+        // time, so any genuine URLSearchParams instance has it on its
+        // chain.
+        if let Ok(co) = v8::Local::<v8::Object>::try_from(current) {
+            if co == expected_proto {
+                return true;
+            }
+            current = co.get_prototype(scope).unwrap_or_else(|| v8::null(scope).into());
+        } else {
+            return false;
+        }
+    }
+    false
+}
+
+/// Reach into a V8 object's internal field 0 and recover the raw
+/// pointer to the boxed `URL` if present. Returns `None` for non-URL
+/// receivers.
+///
+/// SAFETY contract for callers (C2):
+///   - The External pointer was set by `URL::install`'s constructor
+///     callback (or by `URL::install_search_params_global`).
+///   - The caller must hold a Local (or some other liveness anchor)
+///     keeping the parent V8 wrapper alive for the duration of any
+///     deref. The wrapper's strong reference keeps the Box<URL> alive
+///     (its weak finalizer runs only after GC).
+///   - No concurrent `&mut URL` may exist for the local borrow's
+///     lifetime. V8 is single-threaded per isolate (AGENTS.md key
+///     invariant), so the only risk is reentrance within this thread —
+///     callers must not call back into JS while the borrow is live.
+///
+/// The previous API returned `&'a mut URL` with an unbounded `'a`
+/// generic; that allowed callers to synthesize any lifetime, including
+/// `'static`, completely independent of the actual liveness of `obj`.
+/// Returning a raw pointer forces the unsafe `&mut *` at each use site
+/// where the safety conditions can be reasoned about locally.
+pub(crate) fn url_ptr_from_object(
     obj: v8::Local<v8::Object>,
     scope: &mut v8::PinScope,
-) -> Option<&'a mut URL> {
+) -> Option<*mut URL> {
     let ext = obj
         .get_internal_field(scope, 0)
         .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
-    Some(unsafe { &mut *(ext.value() as *mut URL) })
+    Some(ext.value() as *mut URL)
 }
 
 // ---------------------------------------------------------------------------
@@ -152,7 +258,19 @@ impl URLSearchParams {
         // (Array, Map, custom iterables) takes the sequence path; only
         // plain objects fall through to the record path. The string
         // path is the catch-all.
-        if init.is_object() && !init.is_array_buffer() && !init.is_array_buffer_view() {
+        //
+        // C5: Per WebIDL §3.10 record conversion, ANY non-iterable
+        // object goes through the record path. The previous code
+        // excluded ArrayBuffer/ArrayBufferView from the object branch,
+        // forcing them into the string path where ToString produced
+        // "[object ArrayBuffer]" or similar — non-spec garbage. The
+        // correct behaviour:
+        //   - Plain ArrayBuffer (no @@iterator): record path → empty
+        //     (no own enumerable string-keyed properties).
+        //   - Typed-array views (Uint8Array etc.) ARE iterable via
+        //     @@iterator (yielding numbers), so they take the sequence
+        //     path and fail naturally on the per-pair length check.
+        if init.is_object() {
             let obj: v8::Local<v8::Object> = match init.try_into() {
                 Ok(o) => o,
                 Err(_) => return Ok(sp),
@@ -596,7 +714,11 @@ pub enum IterKind {
 }
 
 pub struct URLSearchParamsIterator {
-    parent: Option<v8::Global<v8::Object>>,
+    /// Weak reference to the parent URLSearchParams JS wrapper. Held
+    /// weakly (not as a strong `Global`) so an iterator never extends
+    /// the lifetime of the SP it iterates — see M3. If the SP is
+    /// GC'd before the iterator runs, `next()` simply yields `done`.
+    parent: Option<v8::Weak<v8::Object>>,
     index: usize,
     kind: IterKind,
 }
@@ -620,11 +742,15 @@ impl URLSearchParamsIterator {
         &mut self,
         scope: &mut v8::PinScope<'s, '_>,
     ) -> v8::Local<'s, v8::Value> {
-        let parent_global = match &self.parent {
-            Some(g) => g,
+        let parent_weak = match &self.parent {
+            Some(w) => w,
             None => return iter_result_done(scope),
         };
-        let parent = v8::Local::new(scope, parent_global);
+        let parent = match parent_weak.to_local(scope) {
+            Some(p) => p,
+            // Parent SP has been GC'd — terminate the iterator cleanly.
+            None => return iter_result_done(scope),
+        };
         let ext = match parent
             .get_internal_field(scope, 0)
             .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
@@ -632,10 +758,16 @@ impl URLSearchParamsIterator {
             Some(e) => e,
             None => return iter_result_done(scope),
         };
+        // SAFETY: parent (Local<Object>) keeps the SP wrapper alive for
+        // this scope, which keeps the Box<URLSearchParams> alive (the
+        // finalizer runs only after GC). No concurrent &mut alias to
+        // this Box exists — we don't reenter JS until after the local
+        // borrow expires at end-of-method.
         let sp: &mut URLSearchParams = unsafe { &mut *(ext.value() as *mut URLSearchParams) };
 
         // Always re-sync from the parent URL on each next() to honor
-        // §6.1's live-iteration semantics.
+        // §6.1's live-iteration semantics. With the last_seen_search
+        // cache (C3), unchanged parents short-circuit to no work.
         sp.sync_from_parent(scope);
 
         let (n, v) = {
@@ -730,6 +862,14 @@ fn for_each_callback(
     _rv: v8::ReturnValue,
 ) {
     let this_obj = args.this();
+    // M5 brand check: `URLSearchParams.prototype.forEach.call(headers)`
+    // would otherwise reinterpret the Headers Box as URLSearchParams.
+    if !is_url_search_params(this_obj, scope) {
+        let msg = v8::String::new(scope, "Illegal invocation").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    }
     let sp: &mut URLSearchParams = match this_obj
         .get_internal_field(scope, 0)
         .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
@@ -804,19 +944,15 @@ fn iter_factory_callback(
     mut rv: v8::ReturnValue,
 ) {
     let this_obj = args.this();
-    // Verify `this` is a URLSearchParams instance.
-    let _check_ptr = match this_obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-    {
-        Some(e) => e.value() as *mut URLSearchParams,
-        None => {
-            let msg = v8::String::new(scope, "Illegal invocation").unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
-            return;
-        }
-    };
+    // M4 brand check: real URLSearchParams instance only — otherwise
+    // `URLSearchParams.prototype.entries.call(headers)` would
+    // reinterpret arbitrary memory as a URLSearchParams Box.
+    if !is_url_search_params(this_obj, scope) {
+        let msg = v8::String::new(scope, "Illegal invocation").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    }
 
     let kind = {
         let raw = args.data();
@@ -848,9 +984,13 @@ fn iter_factory_callback(
     let it_proto_v = it_class_fn.get(scope, proto_key.into()).unwrap();
     it_obj.set_prototype(scope, it_proto_v);
 
-    let parent_global = v8::Global::new(scope, this_obj);
+    // Hold the parent URLSearchParams weakly: if it's GC'd before the
+    // iterator's next() runs, we yield {done:true} (see M3). This also
+    // prevents iterators from extending any URL↔SP cycle (which is
+    // already broken at the SP→URL link by C1 — defense in depth).
+    let parent_weak = v8::Weak::new(scope, this_obj);
     let boxed = Box::new(URLSearchParamsIterator {
-        parent: Some(parent_global),
+        parent: Some(parent_weak),
         index: 0,
         kind,
     });

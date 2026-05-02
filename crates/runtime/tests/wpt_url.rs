@@ -456,6 +456,29 @@ const WPT_FILES: &[WptFile] = &[
         source: include_str!("wpt/url/url-setters.any.js"),
         fixture: &[("resources/setters_tests.json", SETTERS_TESTS_JSON)],
     },
+    // M2: previously omitted files. All inline (no fixture) except
+    // url-origin which uses urltestdata.json.
+    WptFile {
+        name: "url-setters-stripping",
+        source: include_str!("wpt/url/url-setters-stripping.any.js"),
+        fixture: &[],
+    },
+    WptFile {
+        name: "url-searchparams",
+        source: include_str!("wpt/url/url-searchparams.any.js"),
+        fixture: &[],
+    },
+    WptFile {
+        name: "url-origin",
+        source: include_str!("wpt/url/url-origin.any.js"),
+        fixture: &[
+            ("resources/urltestdata.json", URLTESTDATA_JSON),
+            (
+                "resources/urltestdata-javascript-only.json",
+                URLTESTDATA_JS_ONLY_JSON,
+            ),
+        ],
+    },
 ];
 
 #[derive(Default, Debug)]
@@ -522,17 +545,22 @@ fn wpt_url_compliance() {
     let pct = (totals.pass * 100) / total_run;
     eprintln!("  pass rate: {pct}% (target ≥ 85%)");
 
+    // m4: print every failure name so a regression isn't truncated
+    // from the report. The detail (error message) is capped at 50
+    // entries to keep CI output readable, but the names always
+    // appear so the developer can see *which* test regressed.
     if !failures.is_empty() {
         eprintln!("\n=== Failures ({}) ===", failures.len());
-        for (file, r) in failures.iter().take(50) {
+        for (i, (file, r)) in failures.iter().enumerate() {
             let detail = match &r.outcome {
                 Outcome::Fail(s) => s.as_str(),
                 _ => "?",
             };
-            eprintln!("  [{file}] {}: {detail}", r.name);
-        }
-        if failures.len() > 50 {
-            eprintln!("  … and {} more", failures.len() - 50);
+            if i < 50 {
+                eprintln!("  [{file}] {}: {detail}", r.name);
+            } else {
+                eprintln!("  [{file}] {}", r.name);
+            }
         }
     }
 
