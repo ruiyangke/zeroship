@@ -634,6 +634,51 @@ mod tests {
         assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
+    /// **Wire-shape stability** — the controller's stale-tenant
+    /// detection (FM-A in nomad_ch.rs / k8s.rs) reads
+    /// `pubkey_fingerprint` by string-keyed `serde_json::Value`
+    /// access. A rename here (e.g. to `pubkey_fp`, `key_fp`,
+    /// `controller_pubkey_fingerprint`) would silently break that
+    /// check — wait_for_agent_livez would unwrap to None and fall
+    /// into the legacy-agent path, undoing FM-A. The stable contract
+    /// is: the EXACT key name `pubkey_fingerprint`, a string, 16
+    /// hex chars (first 8 bytes of SHA-256(pubkey) hex-encoded).
+    /// If any field has to change, treat it as a wire-protocol
+    /// breakage: bump PROTOCOL_VERSION + add a new capability +
+    /// keep the old field for one release.
+    #[ntex::test]
+    async fn version_pubkey_fingerprint_field_name_is_stable_contract() {
+        let (state, _d) = make_state("ver_stable");
+        let app = make_app!(state);
+        let req = signed("GET", "/version").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        // The exact field name controllers depend on:
+        let fp_value = body
+            .get("pubkey_fingerprint")
+            .expect(
+                "WIRE-CONTRACT BREAKAGE: /version no longer emits \
+                 `pubkey_fingerprint` — the controller's stale-tenant \
+                 detection reads this exact key. If you really must \
+                 rename, bump PROTOCOL_VERSION and update both K8s \
+                 and nomad-ch backends in the same commit.",
+            );
+        let fp = fp_value
+            .as_str()
+            .expect("WIRE-CONTRACT: pubkey_fingerprint must be a string");
+        assert_eq!(
+            fp.len(),
+            16,
+            "WIRE-CONTRACT: pubkey_fingerprint must be exactly 16 hex \
+             chars (8 bytes of SHA-256(pubkey) hex-encoded)"
+        );
+        assert!(
+            fp.chars().all(|c| c.is_ascii_hexdigit()),
+            "WIRE-CONTRACT: pubkey_fingerprint must be hex (got {fp:?})"
+        );
+    }
+
     // ─── Auth: 401 on missing / replayed / tampered ───────────
 
     #[ntex::test]

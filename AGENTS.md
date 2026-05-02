@@ -24,6 +24,7 @@ This file is the AI-agent landing page. Read the **task router** below first.
 | **Benchmarks** | `crates/runtime/benches/` · `docs/reference/zerobench.md` · `docs/benchmarks/` |
 | **Local dev setup** | `docs/runbooks/local-dev.md` |
 | **Multi-node / Docker Compose** | `docs/runbooks/docker-compose.md` |
+| **Nomad + Cloud Hypervisor sandbox backend** | `docs/runbooks/sandbox-nomad-ch.md` · `crates/sandbox/src/backend/nomad_ch.rs` · `crates/sandbox/scripts/nomad-vm-wrapper.sh` |
 | **Why we made decision X** | `docs/decisions/` (date-prefixed ADRs, immutable once landed) |
 | **Pre-ship proposals** | `docs/proposals/` (active, may not have shipped) |
 | **AI-builder competitive landscape** | `docs/research/ai-builder-features.md` |
