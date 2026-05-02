@@ -7,37 +7,18 @@ var CONNECTING = 0, OPEN = 1, CLOSING = 2, CLOSED = 3;
 // Global registry so native code can find WebSocket objects by ID
 var __wsRegistry = Object.create(null);
 
-// Build a MessageEvent-shaped Event by constructing a native Event and
-// attaching the MessageEvent-specific fields as expandos. Native
-// EventTarget is `#[v8_class]` with brand-checked dispatch — only real
-// Event instances (with internal field 0 holding `Box<EventState>`)
-// survive `dispatchEvent`.
-//
-// The pre-cutover `function MessageEvent(type, init) { Event.call(this, …) }`
-// pattern broke under the native classes because:
-//
-//   - `Event.call(this, …)` on a wrapper with no internal-field slot
-//     either no-ops or panics depending on the V8 build.
-//   - Native dispatchEvent's brand check rejects the resulting object
-//     ("event is not an Event instance").
-//
-// Building via the constructor produces a real Event whose internal
-// state is correctly initialised; expandos give us the MessageEvent
-// surface (`data`, `origin`, `lastEventId`) without inheritance.
+// MessageEvent / CloseEvent are now NATIVE classes installed by
+// `dom::install_globals` (see `dom/message_event.rs`,
+// `dom/close_event.rs`). The polyfill below uses the native
+// constructors so dispatched events pass `instanceof MessageEvent`
+// and `instanceof CloseEvent` correctly. The previous expando-based
+// builders broke `instanceof` and silently corrupted `data` identity.
 function makeMessageEvent(type, init) {
-    var ev = new Event(type, init);
-    ev.data = init && init.data !== undefined ? init.data : null;
-    ev.origin = init && init.origin || "";
-    ev.lastEventId = "";
-    return ev;
+    return new MessageEvent(type, init);
 }
 
 function makeCloseEvent(type, init) {
-    var ev = new Event(type, init);
-    ev.code = init && init.code !== undefined ? init.code : 0;
-    ev.reason = init && init.reason || "";
-    ev.wasClean = init && init.wasClean || false;
-    return ev;
+    return new CloseEvent(type, init);
 }
 
 // WebSocket subclasses EventTarget via direct prototype delegation —
@@ -114,24 +95,8 @@ WebSocket.prototype._onError = function(message) {
     if (typeof this.onerror === "function") this.onerror({ type: "error", message: message });
 };
 
-// MessageEvent class — construct via `new MessageEvent(type, init)`.
-// Re-exported for instanceof / type-checking. Since `makeMessageEvent`
-// returns a plain Event with expandos (not an Event subclass), the
-// returned event is `instanceof Event === true` but
-// `instanceof MessageEvent === false`. The contract we promise is
-// Cloudflare's MessageEvent shape (`data` / `origin` / `lastEventId`).
-function MessageEvent(type, init) {
-    return makeMessageEvent(type, init);
-}
-MessageEvent.prototype = Object.create(Event.prototype);
-MessageEvent.prototype.constructor = MessageEvent;
-
-// CloseEvent — same pattern as MessageEvent.
-function CloseEvent(type, init) {
-    return makeCloseEvent(type, init);
-}
-CloseEvent.prototype = Object.create(Event.prototype);
-CloseEvent.prototype.constructor = CloseEvent;
+// MessageEvent / CloseEvent are installed as native #[v8_class] types
+// by `dom::install_globals` — no polyfill class definitions here.
 
 // WebSocketPair
 function WebSocketPair() {
@@ -159,8 +124,7 @@ function WebSocketPair() {
 
 globalThis.WebSocket = WebSocket;
 globalThis.WebSocketPair = WebSocketPair;
-globalThis.MessageEvent = MessageEvent;
-globalThis.CloseEvent = CloseEvent;
+// MessageEvent / CloseEvent are installed natively by dom::install_globals.
 globalThis.__wsRegistry = __wsRegistry;
 
 })(globalThis);

@@ -39,11 +39,13 @@
 
 pub mod abort_controller;
 pub mod abort_signal;
+pub mod close_event;
 pub mod custom_event;
 pub mod event;
 pub mod event_target;
 pub mod exception;
 pub mod form_data;
+pub mod message_event;
 
 /// Install the DOM primitives on `globalThis` in the spec-mandated
 /// order: DOMException → EventTarget → Event → CustomEvent →
@@ -66,6 +68,21 @@ pub fn install_globals<'s>(
         global,
         "CustomEvent",
         custom_event::CustomEvent::install,
+    );
+    // MessageEvent / CloseEvent inherit Event via #[v8_inherit(Event)] —
+    // installed AFTER Event for the same `__InstallSlot_Event`-cache
+    // reason as CustomEvent.
+    install_class(
+        scope,
+        global,
+        "MessageEvent",
+        message_event::MessageEventState::install,
+    );
+    install_class(
+        scope,
+        global,
+        "CloseEvent",
+        close_event::CloseEventState::install,
     );
     abort_signal::install_global(scope, global);
     abort_controller::install_global(scope, global);
