@@ -21,7 +21,6 @@ pub mod fetch_outcome;
 pub mod modules;
 pub mod crypto;
 pub mod streams;
-pub mod url;
 pub mod url_native;
 pub mod websocket;
 pub mod channel;
