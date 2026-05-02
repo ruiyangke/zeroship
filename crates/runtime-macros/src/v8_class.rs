@@ -79,6 +79,14 @@ struct ClassMethod<'a> {
     /// `#[v8_name = "..."]` on the method. Lets us install
     /// `delete_(&mut self)` under the JS name `delete`, etc.
     js_name: String,
+    /// `#[v8_getter(same_object)]` — WebIDL `[SameObject]` semantics:
+    /// the getter must return THE SAME JS object across reads on the
+    /// same wrapper instance. The macro caches via a V8 private symbol
+    /// keyed by `__zs_same_object_<ClassTy>_<getter>`. User method
+    /// returns `v8::Global<v8::Object>` (minted on first call); macro
+    /// stashes it on the wrapper instance and returns the cached Local
+    /// thereafter. Only meaningful for `MethodKind::Getter`.
+    same_object: bool,
 }
 
 fn classify(func: &ImplItemFn) -> Option<MethodKind> {
@@ -101,6 +109,40 @@ fn classify(func: &ImplItemFn) -> Option<MethodKind> {
         }
     }
     None
+}
+
+/// Read `#[v8_getter(same_object)]` from a method's attributes.
+/// Returns true if the bare-identifier `same_object` appears in the
+/// list form. Used to opt the getter into WebIDL `[SameObject]`
+/// caching semantics — see `gen_same_object_getter_callback`.
+///
+/// The list form is `#[v8_getter(same_object)]`. `#[v8_getter]`
+/// (no list) is the default, no caching.
+fn extract_same_object(attrs: &[Attribute]) -> bool {
+    for attr in attrs {
+        if !attr.path().is_ident("v8_getter") {
+            continue;
+        }
+        if let Ok(idents) = attr.parse_args_with(|input: syn::parse::ParseStream| {
+            let mut acc: Vec<syn::Ident> = Vec::new();
+            while !input.is_empty() {
+                let id: syn::Ident = input.parse()?;
+                acc.push(id);
+                if input.is_empty() {
+                    break;
+                }
+                let _: syn::Token![,] = input.parse()?;
+            }
+            Ok(acc)
+        }) {
+            for id in idents {
+                if id == "same_object" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Read `#[v8_name = "literal"]` from a method's attributes. Returns
@@ -308,11 +350,15 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     .into();
                 }
 
+                let same_object_flag =
+                    matches!(kind, MethodKind::Getter) && extract_same_object(&func.attrs);
+
                 methods.push(ClassMethod {
                     kind,
                     func,
                     mut_receiver: mut_recv,
                     js_name,
+                    same_object: same_object_flag,
                 });
             }
         }
@@ -362,11 +408,13 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // Per-method callback fns. Async methods take a different codegen
     // path (spawn a future via `state.spawned_ops` and return a Promise
     // immediately) but install on the prototype identically — async vs
-    // sync is opaque to V8.
+    // sync is opaque to V8. SameObject getters have their own codegen
+    // path that wraps the user method with private-symbol caching.
     let callbacks: Vec<TokenStream2> = regular
         .iter()
         .map(|m| match m.kind {
             MethodKind::AsyncMethod => gen_async_method_callback(class_ty, m),
+            MethodKind::Getter if m.same_object => gen_same_object_getter_callback(class_ty, m),
             _ => gen_method_callback(class_ty, m),
         })
         .collect();
@@ -933,6 +981,156 @@ fn gen_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
 
             #(#extractions)*
             #call_return
+        }
+    }
+}
+
+/// Codegen for `#[v8_getter(same_object)]` — WebIDL `[SameObject]`
+/// semantics.
+///
+/// `Request.headers`, `Response.headers`, `URL.searchParams`, and
+/// several other WebIDL accessors must return THE SAME JS object across
+/// reads on the same instance:
+///
+/// ```js
+/// const h = req.headers;
+/// h === req.headers;   // true
+/// h === req.headers;   // still true (no fresh object minted)
+/// ```
+///
+/// Without caching, each access would mint a fresh wrapper, breaking
+/// userland code that uses `===` identity (e.g. comparing iterators,
+/// caching the headers reference, etc.).
+///
+/// Implementation strategy:
+///
+/// - Cache on a per-instance V8 Private symbol named
+///   `__zs_same_object_<ClassTy>_<getter>`. The symbol is class-scoped
+///   so two classes with `headers` getters don't collide on a single
+///   shared name (interning of Privates by name across the isolate is
+///   irrelevant since reads/writes are per-Object — but the explicit
+///   class-prefix is self-documenting).
+///
+/// - On callback entry: brand check; recover the boxed instance; look
+///   up the private symbol on `args.this()`. If present and not
+///   `undefined`, return it as the rv and short-circuit (no user
+///   method called).
+///
+/// - On cache miss: invoke the user's `&self`/`&mut self` method,
+///   which returns a `v8::Global<v8::Object>`. Convert to Local,
+///   stash on the wrapper instance via `set_private`, return the
+///   Local as rv.
+///
+/// User method shape:
+/// ```ignore
+/// #[v8_getter(same_object)]
+/// fn headers(&self, scope: &mut v8::PinScope) -> v8::Global<v8::Object> {
+///     // mint and return — invoked at most ONCE per instance lifetime.
+/// }
+/// ```
+///
+/// The user method receives a synthetic `&mut PinScope` (so it can
+/// build the Object) and returns `Global<Object>`. The macro doesn't
+/// pass any positional JS args (getters take none) — the user method
+/// can have only `&self` (or `&mut self`) and the optional `scope`
+/// param.
+///
+/// We don't migrate existing classes to this attribute in this PR
+/// (Request.headers, Response.headers, URL.searchParams continue to
+/// hand-roll their own private-symbol stash for now). The smoke test
+/// in `tests/v8_same_object_smoke.rs` proves the macro wiring works.
+fn gen_same_object_getter_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
+    let method_name = &m.func.sig.ident;
+    let callback_name = method_callback_ident(class_ty, method_name);
+
+    // Skip the receiver param when extracting JS args. Getters take
+    // no positional args; the only param shape we expect is `&self`
+    // (+ optional synthetic `scope`). Extractions are emitted but
+    // typically empty.
+    let params = parse_params_skipping_self(m.func);
+    let reject_shared_names = extract_reject_shared(&m.func.attrs);
+    let extractions = gen_param_extractions(&params, &reject_shared_names);
+    let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
+    let receiver_ref = if m.mut_receiver {
+        quote! { &mut *__instance }
+    } else {
+        quote! { &*__instance }
+    };
+
+    let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
+    let private_name = format!("__zs_same_object_{}_{}", class_ty, method_name);
+
+    quote! {
+        #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
+        pub(crate) fn #callback_name(
+            scope: &mut v8::PinScope,
+            args: v8::FunctionCallbackArguments,
+            mut rv: v8::ReturnValue,
+        ) {
+            // 1. Brand check before touching internal fields. Same
+            //    contract as every other generated callback — see
+            //    `__brand_check_<ClassTy>`'s doc-comment.
+            let __this = args.this();
+            if !#brand_check_fn(scope, __this) {
+                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                let __exc = v8::Exception::type_error(scope, __msg);
+                scope.throw_exception(__exc);
+                return;
+            }
+
+            // 2. Resolve the per-instance Private symbol for this
+            //    getter. `Private::for_api` is interned by name across
+            //    the isolate, so the lookup is O(1) after the first
+            //    call — V8 returns the same symbol object on repeat
+            //    reads with the same name.
+            let __key_str = v8::String::new(scope, #private_name).unwrap();
+            let __priv = v8::Private::for_api(scope, Some(__key_str));
+
+            // 3. Cache hit short-circuit: if the wrapper has already
+            //    minted a Same-Object value, return it without calling
+            //    user code. `get_private` returns Some(undefined) when
+            //    the slot was never written, so we filter both None
+            //    and undefined paths.
+            if let Some(__cached) = __this.get_private(scope, __priv) {
+                if !__cached.is_undefined() {
+                    rv.set(__cached);
+                    return;
+                }
+            }
+
+            // 4. Cache miss: recover Box<Self>, mint the value, stash,
+            //    return.
+            let __ext = match __this.get_internal_field(scope, 0)
+                .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
+            {
+                Some(e) => e,
+                None => {
+                    let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                    let __exc = v8::Exception::type_error(scope, __msg);
+                    scope.throw_exception(__exc);
+                    return;
+                }
+            };
+            let __instance = unsafe { &mut *(__ext.value() as *mut #class_ty) };
+
+            #(#extractions)*
+
+            // The user method returns a `v8::Global<v8::Object>` — we
+            // own it after the call returns, so we can both stash it
+            // (by re-Localising) and use the same Local for the rv.
+            let __value: ::v8::Global<::v8::Object> =
+                <#class_ty>::#method_name(#receiver_ref, #(#call_args),*);
+            let __local: ::v8::Local<::v8::Object> = ::v8::Local::new(scope, &__value);
+
+            // Stash on the wrapper. `set_private` is fallible (returns
+            // None on context teardown); we ignore the result — the
+            // worst case is the cache stays empty and the user method
+            // runs again, which is observable but not unsound. The
+            // user method should be idempotent on its own state for
+            // the same reason.
+            let _ = __this.set_private(scope, __priv, __local.into());
+
+            rv.set(__local.into());
         }
     }
 }
