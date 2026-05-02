@@ -101,16 +101,14 @@ pub fn unpack_pending(bytes: &[u8]) -> Option<u64> {
 // ===========================================================================
 
 /// Install the native `fetch()` callback onto `globalThis.fetch`,
-/// shadowing whatever the JS polyfill set up. Gated by
-/// `ZEROSHIP_NATIVE_FETCH=1` per design landing-1 cadence.
+/// shadowing whatever the JS polyfill set up. Per D-23 step 2c, the
+/// native fetch is now the default — no env-var gate.
 ///
 /// Run AFTER `install_dom` (which installs Request/Response/AbortSignal
 /// natively) so the native fetch can read native Request internals
-/// directly.
+/// directly. Run AFTER `embed/fetch.js` so the polyfill's
+/// `globalThis.fetch = fetch` is overwritten.
 pub fn install_fetch_global(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
-    if std::env::var_os("ZEROSHIP_NATIVE_FETCH").is_none() {
-        return;
-    }
     let tmpl = v8::FunctionTemplate::new(scope, fetch_callback);
     let func = tmpl.get_function(scope).unwrap();
     let key = v8::String::new(scope, "fetch").unwrap();

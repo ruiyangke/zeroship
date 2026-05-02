@@ -1773,20 +1773,19 @@ pub fn install_headers(scope: &mut v8::PinScope) {
 }
 
 /// Install native DOM primitives (EventTarget, Event, AbortController,
-/// AbortSignal, FormData) on `globalThis`. Gated by
-/// `ZEROSHIP_NATIVE_FETCH=1` per design landing-1 cadence (D-23). When
-/// the env var is set, the native classes shadow whatever the JS
-/// polyfills (fetch.js / formdata.js) installed earlier; when unset,
-/// this is a no-op and the polyfills remain in charge.
+/// AbortSignal, FormData) plus Request / Response / fetch on
+/// `globalThis`. Per D-23 step 2c the native cutover is now the
+/// default — no env-var gate.
 ///
-/// Called AFTER fetch.js / formdata.js run so the polyfills'
+/// Called AFTER fetch.js / formdata.js / events.js run so the polyfills'
 /// unconditional `globalThis.X = X` assignments don't overwrite our
-/// native install. (The polyfills do no `if (!exists)` guard.)
-/// See `embed/fetch.js:644-649` and `embed/formdata.js`.
+/// native install. The polyfills are deleted in D-23 step 3.
+///
+/// Called BEFORE websocket.js so its
+/// `WebSocket.prototype = Object.create(EventTarget.prototype)` reads
+/// the NATIVE EventTarget prototype — required for the polyfill's
+/// `addEventListener` / `dispatchEvent` calls to land on native code.
 pub fn install_dom(scope: &mut v8::PinScope) {
-    if std::env::var_os("ZEROSHIP_NATIVE_FETCH").is_none() {
-        return;
-    }
     let global = scope.get_current_context().global(scope);
     crate::dom::install_globals(scope, global);
     // Native Request + Response: install AFTER dom (which gives us

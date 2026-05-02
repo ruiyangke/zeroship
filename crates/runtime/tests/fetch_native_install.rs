@@ -1,12 +1,20 @@
 //! Smoke tests for the `globalThis.fetch` install path.
 //!
-//! Verifies that when `ZEROSHIP_NATIVE_FETCH=1` is set:
-//!   1. `install_fetch_global` replaces the polyfill `fetch` with our
-//!      hand-rolled callback.
-//!   2. The native `fetch()` synchronously rejects with a TypeError
-//!      when called with a pre-aborted AbortSignal.
-//!   3. `fetch("data:text/plain,hi")` returns a Response that resolves
-//!      to text "hi" via response.text().
+//! Per D-23 step 2c the native install is unconditional — these tests
+//! exercise the hand-rolled callback directly without flipping any
+//! env-var gate. The historical `ZEROSHIP_NATIVE_FETCH` set call
+//! survives below because some sister tests share the same `init_v8`
+//! state and a stale unset would change behaviour for them; the call
+//! is now a no-op for `install_fetch_global` itself.
+//!
+//! Coverage:
+//!   1. `install_fetch_global` registers `globalThis.fetch` as a
+//!      function.
+//!   2. `fetch("data:...")` returns a Promise (resolves async via the
+//!      pump, which we don't drive here).
+//!   3. The native `fetch()` synchronously rejects with the abort
+//!      reason when called with a pre-aborted AbortSignal.
+//!   4. 1-arg and 2-arg call shapes are both accepted.
 //!
 //! Async tests (real network round-trips) live in `fetch_native.rs`
 //! and run against a live HTTP fixture.
@@ -37,7 +45,10 @@ fn run_in_v8<F, R>(src: &str, f: F) -> R
 where
     F: FnOnce(v8::Local<v8::Value>, &mut v8::PinScope) -> R,
 {
-    // Set the gate BEFORE init_v8 so install_fetch_global trips it.
+    // The gate is gone after D-23 step 2c — install_fetch_global is
+    // unconditional. The set_var call is a no-op kept for symmetry with
+    // legacy tests that may still reference the var via shared
+    // process-wide state.
     unsafe { std::env::set_var("ZEROSHIP_NATIVE_FETCH", "1"); }
     init_v8();
     let mut isolate = v8::Isolate::new(v8::CreateParams::default());
@@ -55,7 +66,7 @@ where
 }
 
 #[test]
-fn fetch_global_installed_when_gate_set() {
+fn fetch_global_installed() {
     let s = run_in_v8(
         r#"
         typeof globalThis.fetch === "function";
