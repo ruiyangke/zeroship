@@ -255,6 +255,17 @@ fn body_getter<T: Body + BodyMarker + 'static>(
 /// `Ok` with the empty/has-body classification, or `Err` with the
 /// pending Global promise. The caller localizes the Global at the
 /// top-level callback's scope.
+///
+/// FIX C: when the body has a `BodySource::Bytes(rc)` (or other
+/// rewindable bytes variant) AND the stream has not been disturbed
+/// or locked, we return `PreFlight::Bytes(rc)` — the consumer skips
+/// the JS-visible reader.read() pump entirely and hands the bytes to
+/// the per-kind decoder synchronously. Saves ~5 V8↔Rust hops + 3
+/// Promise allocations per body consume on the fast path. Spec
+/// behaviour matches: we still set the body-used marker AND flip
+/// the stream's `disturbed` flag, so observers (`bodyUsed` getter,
+/// subsequent `getReader()`) see the same state as if the stream
+/// had been read.
 fn pre_flight<T: Body + BodyMarker + 'static>(
     scope: &mut v8::PinScope,
     this: v8::Local<v8::Object>,
@@ -274,9 +285,15 @@ fn pre_flight<T: Body + BodyMarker + 'static>(
     let stream_global = match &body.stream {
         Some(g) => g.clone(),
         None => {
+            // Body is null even if a source is somehow present —
+            // matches the original behaviour of returning empty bytes.
             return Ok(PreFlight::EmptyBody);
         }
     };
+
+    // Snapshot the source for the fast-path probe. Cheap (Rc clone
+    // on Bytes/Blob/UrlSearchParams/FormData; nothing on Stream/None).
+    let source_snapshot = body.source.clone();
 
     // bodyUsed?
     let stream_local = v8::Local::new(scope, stream_global.clone());
@@ -291,13 +308,48 @@ fn pre_flight<T: Body + BodyMarker + 'static>(
     // Mark used per Fetch §3.5 step 1 (set body's stream to disturbed).
     set_body_used_marker(scope, this);
 
+    // Fast path: rewindable byte source + fresh stream → return the
+    // bytes directly. Also flip the stream's `disturbed` flag so
+    // `bodyUsed` reads true on the spec-compliant path too.
+    if let Some(rc) = source_bytes_for_fast_path(source_snapshot) {
+        // Best-effort disturb flag flip on the native stream. For
+        // JS-built streams (no RSState in internal field 0) the
+        // disturb flag isn't ours to flip; the wrapper symbol still
+        // makes `bodyUsed` return true.
+        let _ = crate::streams::readable::with_rs_state(scope, stream_local, |s| {
+            s.disturbed.set(true);
+        });
+        return Ok(PreFlight::Bytes(rc));
+    }
+
     Ok(PreFlight::HasBody { stream_global })
+}
+
+/// Returns Some(rc) when the body source is a rewindable byte
+/// sequence safe to drain directly. Stream → None (no fast path).
+fn source_bytes_for_fast_path(
+    source: Option<crate::fetch_body::body::BodySource>,
+) -> Option<Rc<Vec<u8>>> {
+    use crate::fetch_body::body::BodySource;
+    match source {
+        Some(BodySource::Bytes(rc))
+        | Some(BodySource::Blob(rc, _))
+        | Some(BodySource::UrlSearchParams(rc))
+        | Some(BodySource::FormData(rc, _)) => Some(rc),
+        Some(BodySource::Stream) | None => None,
+    }
 }
 
 enum PreFlight {
     /// Body is null — return empty bytes.
     EmptyBody,
-    /// Body has a stream; consumer should read it.
+    /// FIX C fast path: body has a rewindable byte source AND the
+    /// stream is fresh. The consumer can drain directly without going
+    /// through reader.read().
+    Bytes(Rc<Vec<u8>>),
+    /// Body has a stream that must be read via the JS reader (because
+    /// the user-supplied a ReadableStream, or the source was already
+    /// consumed and re-tee'd). Consumer falls back to read_all_bytes.
     HasBody {
         stream_global: v8::Global<v8::Object>,
     },
@@ -353,6 +405,15 @@ fn consumer_text<T: Body + BodyMarker + 'static>(
             resolver.resolve(scope, empty.into());
             rv.set(promise.into());
         }
+        PreFlight::Bytes(rc) => {
+            // FIX C fast path — UTF-8 decode the source bytes inline.
+            let resolver = v8::PromiseResolver::new(scope).unwrap();
+            let promise = resolver.get_promise(scope);
+            let s = String::from_utf8_lossy(&rc).into_owned();
+            let v = v8::String::new(scope, &s).unwrap();
+            resolver.resolve(scope, v.into());
+            rv.set(promise.into());
+        }
         PreFlight::HasBody { stream_global } => {
             let stream_local = v8::Local::new(scope, stream_global);
             let bytes_promise = match read_all_bytes(scope, stream_local) {
@@ -401,6 +462,13 @@ fn consumer_json<T: Body + BodyMarker + 'static>(
             resolver.reject(scope, exc);
             rv.set(promise.into());
         }
+        PreFlight::Bytes(rc) => {
+            // FIX C fast path — JSON.parse the source bytes inline.
+            let resolver = v8::PromiseResolver::new(scope).unwrap();
+            let promise = resolver.get_promise(scope);
+            settle_json_from_bytes(scope, resolver, &rc);
+            rv.set(promise.into());
+        }
         PreFlight::HasBody { stream_global } => {
             let stream_local = v8::Local::new(scope, stream_global);
             let bytes_promise = match read_all_bytes(scope, stream_local) {
@@ -417,6 +485,45 @@ fn consumer_json<T: Body + BodyMarker + 'static>(
             };
             let outer = map_promise_with(scope, bytes_promise, MapKind::Json);
             rv.set(outer.into());
+        }
+    }
+}
+
+/// Parse `bytes` as UTF-8 then JSON, settle `resolver` accordingly.
+/// Used by the FIX C fast path for `consumer_json`. Mirrors the
+/// MapKind::Json branch in `settle_outer`.
+fn settle_json_from_bytes(
+    scope: &mut v8::PinScope,
+    resolver: v8::Local<v8::PromiseResolver>,
+    bytes: &[u8],
+) {
+    let s = String::from_utf8_lossy(bytes).into_owned();
+    let json_str = match v8::String::new(scope, &s) {
+        Some(v) => v,
+        None => {
+            let exc = build_syntax_error(scope, "Invalid JSON input string");
+            resolver.reject(scope, exc);
+            return;
+        }
+    };
+    let parsed: Option<v8::Global<v8::Value>> = {
+        v8::tc_scope!(let tc, scope);
+        match v8::json::parse(tc, json_str) {
+            Some(v) => Some(v8::Global::new(tc, v)),
+            None => {
+                let _ = tc.exception();
+                None
+            }
+        }
+    };
+    match parsed {
+        Some(g) => {
+            let v = v8::Local::new(scope, g);
+            resolver.resolve(scope, v);
+        }
+        None => {
+            let exc = build_syntax_error(scope, "Invalid JSON in body");
+            resolver.reject(scope, exc);
         }
     }
 }
@@ -444,6 +551,27 @@ fn consumer_array_buffer<T: Body + BodyMarker + 'static>(
             let resolver = v8::PromiseResolver::new(scope).unwrap();
             let promise = resolver.get_promise(scope);
             let store = v8::ArrayBuffer::new_backing_store_from_vec(Vec::new()).make_shared();
+            let ab = v8::ArrayBuffer::with_backing_store(scope, &store);
+            resolver.resolve(scope, ab.into());
+            rv.set(promise.into());
+        }
+        PreFlight::Bytes(rc) => {
+            // FIX C fast path. Try to take ownership of the Vec
+            // (cheap if no aliases — common for response bodies);
+            // fall back to clone if other Rc holders exist.
+            let resolver = v8::PromiseResolver::new(scope).unwrap();
+            let promise = resolver.get_promise(scope);
+            let bytes = match Rc::try_unwrap(rc) {
+                Ok(v) => v,
+                Err(rc) => (*rc).clone(),
+            };
+            if bytes.len() > MAX_ARRAY_BUFFER_BYTES {
+                let exc = build_range_error(scope, "Body too large for ArrayBuffer (>2GB)");
+                resolver.reject(scope, exc);
+                rv.set(promise.into());
+                return;
+            }
+            let store = v8::ArrayBuffer::new_backing_store_from_vec(bytes).make_shared();
             let ab = v8::ArrayBuffer::with_backing_store(scope, &store);
             resolver.resolve(scope, ab.into());
             rv.set(promise.into());
@@ -496,6 +624,27 @@ fn consumer_bytes<T: Body + BodyMarker + 'static>(
             resolver.resolve(scope, view.into());
             rv.set(promise.into());
         }
+        PreFlight::Bytes(rc) => {
+            // FIX C fast path.
+            let resolver = v8::PromiseResolver::new(scope).unwrap();
+            let promise = resolver.get_promise(scope);
+            let bytes = match Rc::try_unwrap(rc) {
+                Ok(v) => v,
+                Err(rc) => (*rc).clone(),
+            };
+            if bytes.len() > MAX_ARRAY_BUFFER_BYTES {
+                let exc = build_range_error(scope, "Body too large for Uint8Array (>2GB)");
+                resolver.reject(scope, exc);
+                rv.set(promise.into());
+                return;
+            }
+            let len = bytes.len();
+            let store = v8::ArrayBuffer::new_backing_store_from_vec(bytes).make_shared();
+            let ab = v8::ArrayBuffer::with_backing_store(scope, &store);
+            let view = v8::Uint8Array::new(scope, ab, 0, len).unwrap();
+            resolver.resolve(scope, view.into());
+            rv.set(promise.into());
+        }
         PreFlight::HasBody { stream_global } => {
             let stream_local = v8::Local::new(scope, stream_global);
             let bytes_promise = match read_all_bytes(scope, stream_local) {
@@ -542,8 +691,9 @@ fn consumer_blob<T: Body + BodyMarker + 'static>(
             return;
         }
     };
-    // Body is now marked used (or empty). Reject with TypeError —
-    // Blob class is the next chunk.
+    // Body is now marked used (or empty). Pre-flight may have
+    // returned a Bytes fast-path payload — drop it; blob() rejects
+    // with TypeError because we ship no native Blob class in v1.
     let _ = pre;
     let resolver = v8::PromiseResolver::new(scope).unwrap();
     let promise = resolver.get_promise(scope);
@@ -610,6 +760,27 @@ fn consumer_form_data<T: Body + BodyMarker + 'static>(
             let resolver = v8::PromiseResolver::new(scope).unwrap();
             let promise = resolver.get_promise(scope);
             let fd = build_empty_form_data(scope);
+            resolver.resolve(scope, fd.into());
+            rv.set(promise.into());
+        }
+        PreFlight::Bytes(rc) => {
+            // FIX C fast path — parse urlencoded directly.
+            let resolver = v8::PromiseResolver::new(scope).unwrap();
+            let promise = resolver.get_promise(scope);
+            let fd = build_empty_form_data(scope);
+            let s = String::from_utf8_lossy(&rc).into_owned();
+            for pair in s.split('&') {
+                if pair.is_empty() {
+                    continue;
+                }
+                let (name, value) = match pair.find('=') {
+                    Some(i) => (&pair[..i], &pair[i + 1..]),
+                    None => (pair, ""),
+                };
+                let name = url_decode_form(name);
+                let value = url_decode_form(value);
+                form_data_append(scope, fd, &name, &value);
+            }
             resolver.resolve(scope, fd.into());
             rv.set(promise.into());
         }
