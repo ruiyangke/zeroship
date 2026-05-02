@@ -155,6 +155,8 @@ async fn restart_with_unreachable_agent_keeps_sealed_records() {
         agent_url: None,
         pubkey_fp: fp,
         created_at_secs: 1_700_000_000,
+            preview_secrets: None,
+            preview_audit: Vec::new(),
     };
     let sealed_path = seal(id, &sealed, &sealed_dir, &aead_key).unwrap();
     assert!(sealed_path.starts_with(&sealed_dir));
@@ -230,6 +232,8 @@ async fn restart_with_mismatched_agent_deletes_sealed_record_and_records_outcome
         agent_url: Some(agent_url),
         pubkey_fp: our_fp,
         created_at_secs: 1_700_000_000,
+            preview_secrets: None,
+            preview_audit: Vec::new(),
     };
     let sealed_path = seal(id, &sealed, &sealed_dir, &aead_key).unwrap();
     assert!(sealed_path.exists());
@@ -276,6 +280,8 @@ async fn restart_with_matching_agent_rehydrates_for_supported_backend() {
         agent_url: None,
         pubkey_fp: fp.clone(),
         created_at_secs: 1_700_000_000,
+            preview_secrets: None,
+            preview_audit: Vec::new(),
     };
     let auth = backend
         .restore_from_sealed(id, &sealed)

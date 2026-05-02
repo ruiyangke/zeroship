@@ -502,6 +502,8 @@ impl K8sBackend {
                 agent_url: Some(agent_url_for_seal),
                 pubkey_fp: key_fp.clone(),
                 created_at_secs: now,
+                preview_secrets: None,
+                preview_audit: Vec::new(),
             };
             if let Err(e) = persist.seal(sandbox_id, &record).await {
                 eprintln!(

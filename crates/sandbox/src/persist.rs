@@ -77,7 +77,16 @@ use zeroship_sandbox_agent::sig;
 /// version than this binary understands is treated as corrupt and
 /// surfaced via the operator's "unknown record" runbook — never
 /// silently downgraded.
-pub const SEAL_VERSION: u8 = 1;
+///
+/// **v1 → v2 (Phase 3, preview-share tokens).** v2 adds
+/// [`SealedAuth::preview_secrets`] — the per-sandbox ring of
+/// `(current, previous?)` 32-byte HMAC secrets used to sign share
+/// tokens. v1 records (no preview_secret) are still accepted: they
+/// load with `preview_secrets: None`, share-token mint is a no-op
+/// from-fresh, and the controller mints a fresh ring on the next
+/// `POST .../share` mint. The on-disk record is rewritten as v2 the
+/// next time the sandbox is sealed.
+pub const SEAL_VERSION: u8 = 2;
 
 /// Length of the truncated SHA-256 digest used as the filename. 16
 /// bytes → 32 hex chars. See module doc for the collision argument.
@@ -126,6 +135,69 @@ pub struct SealedAuth {
     /// at `agent_url` is the one we minted keys for.
     pub pubkey_fp: String,
     pub created_at_secs: u64,
+    /// Phase-3 preview-share-token secret ring. `None` for v1 records;
+    /// `Some` once the controller has minted at least one share-token
+    /// secret for this sandbox. The on-wire JSON omits the field
+    /// entirely (via `skip_serializing_if`) for v1 round-trips.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_secrets: Option<SealedPreviewSecrets>,
+    /// Phase-3 preview-share audit table. Empty `Vec` is treated the
+    /// same as a missing field (v1) — the controller boots with no
+    /// audit history and re-fills as new tokens are minted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preview_audit: Vec<SealedAuditEntry>,
+}
+
+/// On-disk form of the per-sandbox HMAC secret ring used to sign
+/// preview share tokens. Mirrors [`crate::registry::PreviewSecrets`]
+/// — the registry holds the live in-memory copy; this is the
+/// sealed-record snapshot.
+///
+/// **Field stability.** This struct is part of the v2 sealed-record
+/// wire format. Adding a field is OK only if it's `Option<…>` with
+/// `serde(default)`; removing or renaming a field is a wire-incompat
+/// change that requires a SEAL_VERSION bump. Audit-table entries
+/// ([`SealedAuditEntry`]) are NOT in this struct — they live in
+/// [`SealedAuth::preview_audit`] alongside the ring so a corrupt-ring
+/// recovery doesn't lose audit history.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SealedPreviewSecrets {
+    /// Monotonically-increasing version counter. Each rotate bumps
+    /// this by 1; tokens carry the value in their `sv` claim.
+    pub sv_current: u32,
+    pub current: [u8; 32],
+    /// Previous-version secret, retained during the rotation grace
+    /// window. `None` after explicit `DELETE` (zero-grace path) or
+    /// before the first rotation.
+    pub previous: Option<[u8; 32]>,
+    /// Unix-seconds at which the previous secret ages out. `None`
+    /// when `previous` is `None`. Validators ignore the previous
+    /// secret past this point even if `previous` is `Some` (covers
+    /// the controller-restart case where the in-memory grace timer
+    /// wouldn't otherwise survive).
+    pub grace_until_unix: Option<u64>,
+}
+
+/// On-disk audit-log entry per minted share token. The token bytes
+/// themselves are NEVER persisted — only the metadata the creator
+/// dashboard surfaces via `GET .../share`. Bounded by the per-sandbox
+/// mint rate-limit (100/day default) and the explicit-DELETE
+/// rotate-and-clear-audit semantics.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SealedAuditEntry {
+    pub token_id: String,
+    pub port: u16,
+    pub issued_at_unix: u64,
+    pub expires_at_unix: u64,
+    pub scope: String,
+    pub secret_version: u32,
+    /// Issuer typed-id (creator's `usr_…`), if known at mint-time.
+    /// `None` for legacy / dev-mode mints where the controller didn't
+    /// surface a typed-id principal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iss: Option<String>,
+    pub last_used_at_unix: u64,
+    pub use_count: u64,
 }
 
 impl SealedAuth {
@@ -158,6 +230,8 @@ impl SealedAuth {
             agent_url,
             pubkey_fp: auth.pubkey_fp.clone(),
             created_at_secs,
+            preview_secrets: None,
+            preview_audit: Vec::new(),
         }
     }
 
@@ -169,11 +243,16 @@ impl SealedAuth {
         &self,
         agent_url: String,
     ) -> Result<SandboxAuth, String> {
-        if self.version != SEAL_VERSION {
+        // v1 → v2: preview_secrets is None (legacy); the controller
+        // mints fresh on next share-mint. v2 records carry the ring.
+        // Anything > SEAL_VERSION is rejected by `unseal_one` already,
+        // so this branch only needs to guard against unknown LOWER
+        // versions (none today; v1 is the floor).
+        if self.version == 0 || self.version > SEAL_VERSION {
             return Err(format!(
                 "sealed record version {} not understood by this binary \
-                 (binary supports v{})",
-                self.version, SEAL_VERSION
+                 (binary supports v1..=v{SEAL_VERSION})",
+                self.version
             ));
         }
         let signing_key = Arc::new(SigningKey::from_bytes(&self.signing_key_bytes));
@@ -683,6 +762,8 @@ mod tests {
             agent_url: None,
             pubkey_fp: fp,
             created_at_secs: 1_700_000_000,
+            preview_secrets: None,
+            preview_audit: Vec::new(),
         };
         (auth, sk_bytes)
     }
@@ -863,6 +944,61 @@ mod tests {
             err.to_string().contains("schema-version"),
             "expected schema-version mention; got {err}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// v1 → v2 backward compat: a record written by an older binary
+    /// (no `preview_secrets`, no `preview_audit`) must read back with
+    /// the new fields defaulted, NOT fail. The next seal rewrites at
+    /// SEAL_VERSION (v2).
+    #[test]
+    fn v1_record_loads_with_default_preview_fields() {
+        let dir = fresh_dir("v1-compat");
+        let key = fresh_key(0x44);
+        let id = Uuid::now_v7();
+        let (auth, _) = make_auth(id);
+        // Hand-craft the v1 JSON (no preview_secrets / preview_audit).
+        let v1_json = serde_json::json!({
+            "version": 1u8,
+            "sandbox_id": auth.sandbox_id,
+            "user_id": auth.user_id,
+            "project_id": auth.project_id,
+            "backend": auth.backend,
+            "signing_key_bytes": auth.signing_key_bytes,
+            "vm_index": auth.vm_index,
+            "agent_url": auth.agent_url,
+            "pubkey_fp": auth.pubkey_fp,
+            "created_at_secs": auth.created_at_secs,
+        });
+        let parsed: SealedAuth = serde_json::from_value(v1_json).expect("parse v1");
+        assert_eq!(parsed.version, 1);
+        assert!(parsed.preview_secrets.is_none(), "v1 has no ring");
+        assert!(parsed.preview_audit.is_empty(), "v1 has no audit");
+
+        // Seal+unseal a hand-rolled v1 record on disk: write the v1
+        // JSON through the AEAD layer, then unseal_one must accept.
+        let v1_bytes = serde_json::to_vec(&parsed).unwrap();
+        let filename = seal_filename_for(id);
+        let path = dir.join(&filename);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut nonce_bytes = [0u8; NONCE_LEN];
+        File::open("/dev/urandom").unwrap().read_exact(&mut nonce_bytes).unwrap();
+        let nonce = XNonce::from(nonce_bytes);
+        let aad = filename.trim_end_matches(".sealed").as_bytes();
+        let ct = key
+            .cipher()
+            .encrypt(&nonce, Payload { msg: &v1_bytes, aad })
+            .unwrap();
+        let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
+        out.extend_from_slice(&nonce_bytes);
+        out.extend_from_slice(&ct);
+        std::fs::write(&path, &out).unwrap();
+
+        let got = unseal_one(&path, &key).expect("v1 record must load");
+        assert_eq!(got.version, 1);
+        assert!(got.preview_secrets.is_none());
+        assert!(got.preview_audit.is_empty());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

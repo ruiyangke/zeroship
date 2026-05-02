@@ -210,6 +210,21 @@ async fn process_record(
                 Ok(auth) => {
                     let info = build_restored_info(sandbox_id, &sealed, backend.name());
                     registry.insert_with_auth(sandbox_id, info, auth);
+                    // Phase-3 (preview-URL § II.4): rehydrate the
+                    // share-token secret ring + audit table from the
+                    // sealed record so cookies minted before the
+                    // restart still validate. Ignored for v1 records
+                    // (preview_secrets == None, preview_audit empty).
+                    let secrets = sealed
+                        .preview_secrets
+                        .as_ref()
+                        .map(crate::registry::PreviewSecrets::from_sealed);
+                    let audit = sealed
+                        .preview_audit
+                        .iter()
+                        .map(crate::registry::PreviewAuditEntry::from_sealed)
+                        .collect();
+                    registry.restore_preview_state(sandbox_id, secrets, audit);
                     eprintln!(
                         "[sandbox/restore] restored sandbox={sandbox_id} \
                          user={} project={} backend={} agent_url={}",
@@ -606,6 +621,8 @@ mod tests {
             agent_url: None,
             pubkey_fp: fp,
             created_at_secs: 1_700_000_000,
+            preview_secrets: None,
+            preview_audit: Vec::new(),
         };
         seal(id, &sealed, &sealed_dir, &key).unwrap();
 
@@ -683,6 +700,8 @@ mod tests {
             agent_url: Some(agent_url),
             pubkey_fp: our_fp,
             created_at_secs: 1_700_000_000,
+            preview_secrets: None,
+            preview_audit: Vec::new(),
         };
         let sealed_path = seal(id, &sealed, &sealed_dir, &key).unwrap();
 
@@ -738,6 +757,8 @@ mod tests {
             agent_url: None,
             pubkey_fp: fp.clone(),
             created_at_secs: 1_700_000_000,
+            preview_secrets: None,
+            preview_audit: Vec::new(),
         };
         let auth = backend.restore_from_sealed(id, &sealed).await.expect("rehydrate");
         // agent_url derived from vm_index + subnet octet.
@@ -771,6 +792,8 @@ mod tests {
             agent_url: None,
             pubkey_fp: sig::pubkey_fingerprint(&sk.verifying_key()),
             created_at_secs: 0,
+            preview_secrets: None,
+            preview_audit: Vec::new(),
         };
         let err = backend
             .restore_from_sealed(id, &sealed)
@@ -801,6 +824,8 @@ mod tests {
             agent_url: Some("http://127.0.0.1:1".into()),
             pubkey_fp: fp,
             created_at_secs: 0,
+            preview_secrets: None,
+            preview_audit: Vec::new(),
         };
         let path = seal(id, &sealed, &sealed_dir, &key).unwrap();
         let backend = Backend::K8s(

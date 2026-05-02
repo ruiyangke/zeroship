@@ -743,6 +743,8 @@ impl NomadCHBackend {
                 agent_url: None,
                 pubkey_fp: key_fp.clone(),
                 created_at_secs: now,
+                preview_secrets: None,
+                preview_audit: Vec::new(),
             };
             if let Err(e) = persist.seal(sandbox_id, &record).await {
                 eprintln!(

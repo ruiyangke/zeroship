@@ -276,6 +276,8 @@ impl DockerBackend {
                 agent_url: Some(url.clone()),
                 pubkey_fp,
                 created_at_secs: now,
+                preview_secrets: None,
+                preview_audit: Vec::new(),
             };
             if let Err(e) = persist.seal(sandbox_id, &record).await {
                 eprintln!(
