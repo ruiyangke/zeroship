@@ -154,6 +154,13 @@ pub enum SettledResult {
 // ---------------------------------------------------------------------------
 
 /// Inspect a V8 Response object and extract status, headers, body / stream info.
+///
+/// Native vs polyfill: when the value is a native Response (Box<ResponseState>
+/// in internal field 0 — see `crate::fetch_response`), the kernel reads body
+/// state through the public `try_native_response_body` surface. Otherwise it
+/// falls back to the polyfill's underscore-prefixed expandos (`_isStreamBody`,
+/// `_streamId`, `_bodyText`). The polyfill probe goes away in D-23 landing 3
+/// when `embed/fetch.js` is deleted.
 pub fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Value>) -> Result<ResponseInfo, String> {
     let obj = match response_val.to_object(scope) {
         Some(o) => o,
@@ -177,8 +184,20 @@ pub fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Va
     // Extract headers from response.headers (native or polyfill)
     let headers = extract_response_headers(scope, obj);
 
-    // WebSocket upgrade: status 101 with a `webSocket` property
+    // WebSocket upgrade: status 101 with a `webSocket` property. The
+    // gateway path stashes the client WebSocket Global on the Response;
+    // we ferry the `id` (a `#[v8_class]` field) through to the kernel.
     if status == 101 {
+        // Native Response: read webSocket via the typed accessor.
+        if let Some(ws_g) = crate::fetch_response::try_native_response_websocket(scope, obj) {
+            let ws_obj = v8::Local::new(scope, ws_g);
+            let id_key = key(scope, &K_ID);
+            let ws_id = ws_obj.get(scope, id_key.into())
+                .and_then(|v| v.uint32_value(scope))
+                .unwrap_or(0);
+            return Ok(ResponseInfo::WebSocket { ws_id, headers });
+        }
+        // Polyfill fallback (deleted in D-23 landing 3).
         let ws_key = key(scope, &K_WEBSOCKET);
         if let Some(ws_val) = obj.get(scope, ws_key.into()) {
             if !ws_val.is_undefined() && !ws_val.is_null() {
@@ -193,6 +212,16 @@ pub fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Va
         }
     }
 
+    // Native Response fast path. When the wrapper has a Box<ResponseState>
+    // in internal field 0, read the body through the public surface — no
+    // reach into either impl's privates. The polyfill path below is the
+    // fallback for `embed/fetch.js`-constructed Responses (deleted in D-23
+    // landing 3 when the polyfill is gone).
+    if let Some(view) = crate::fetch_response::try_native_response_body(scope, obj) {
+        return inspect_native_response(scope, obj, status, headers, view);
+    }
+
+    // ---- Polyfill path (deleted with embed/fetch.js in landing 3) ----
     let is_stream_key = key(scope, &K_IS_STREAM);
     let is_stream = obj.get(scope, is_stream_key.into())
         .map(|v| v.boolean_value(scope))
@@ -215,55 +244,103 @@ pub fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Va
         let raw = obj.get(scope, stream_id_key.into());
         let needs_pump = raw.map(|v| v.int32_value(scope).unwrap_or(0) < 0).unwrap_or(true);
         let stream_id: u32 = if needs_pump {
-            // Call globalThis.__zsBeginStreamForward(response) to lock the
-            // body and start the pump. Returns the allocated streamId.
-            let global = scope.get_current_context().global(scope);
-            let fn_key = v8::String::new(scope, "__zsBeginStreamForward").unwrap();
-            let fn_v = global.get(scope, fn_key.into())
-                .ok_or_else(|| "__zsBeginStreamForward missing".to_string())?;
-            let forward_fn = v8::Local::<v8::Function>::try_from(fn_v)
-                .map_err(|_| "__zsBeginStreamForward not a function".to_string())?;
-            let result = forward_fn.call(scope, v8::undefined(scope).into(), &[obj.into()])
-                .ok_or_else(|| "__zsBeginStreamForward threw".to_string())?;
-            result.uint32_value(scope).unwrap_or(0)
+            forward_stream(scope, obj)?
         } else {
             raw.and_then(|v| v.uint32_value(scope)).unwrap_or(0)
         };
+        return classify_stream(scope, status, headers, stream_id);
+    }
+    let body_key = key(scope, &K_BODY_TEXT);
+    let body = obj.get(scope, body_key.into())
+        .map(|v| v.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+    Ok(ResponseInfo::Complete { status, headers, body })
+}
 
-        // Check if the stream is already fully buffered + closed.
-        // This handles JS-created ReadableStreams where all chunks were
-        // enqueued synchronously in start().
-        let state: SharedState = scope
-            .get_slot::<SharedState>()
-            .expect("RuntimeState not in isolate slot")
-            .clone();
-        let s = state.borrow();
-        let stream_closed = s.streams.get(&stream_id).map(|ss| ss.closed).unwrap_or(false);
-
-        if stream_closed {
-            // Stream is closed — collect buffered chunks as complete body.
-            let body_text = s.streams.get(&stream_id)
-                .map(|ss| {
-                    ss.buffer.iter()
-                        .map(|b| String::from_utf8_lossy(b).to_string())
-                        .collect::<String>()
-                })
-                .unwrap_or_default();
-            drop(s);
-            // Clean up the stream state
-            state.borrow_mut().streams.remove(&stream_id);
-            Ok(ResponseInfo::Complete { status, headers, body: body_text })
-        } else {
-            drop(s);
-            // Stream still open — return as streaming (chunks arrive via timers/async ops)
-            Ok(ResponseInfo::Stream { status, headers, stream_id })
+/// Read a native Response body via the public surface (no polyfill probes).
+fn inspect_native_response(
+    scope: &mut v8::PinScope,
+    obj: v8::Local<v8::Object>,
+    status: u16,
+    headers: Vec<(String, String)>,
+    view: crate::fetch_response::NativeResponseBody,
+) -> Result<ResponseInfo, String> {
+    use crate::fetch_response::NativeResponseBody;
+    match view {
+        NativeResponseBody::Empty => Ok(ResponseInfo::Complete {
+            status,
+            headers,
+            body: String::new(),
+        }),
+        NativeResponseBody::Bytes(rc) => {
+            // Materialise as UTF-8 text. The wire path treats body as
+            // a String (matching the polyfill's _bodyText semantics);
+            // binary bodies survive lossy conversion because the
+            // resulting Rust String is round-tripped to bytes when
+            // sent on the wire.
+            let body = String::from_utf8_lossy(&rc).into_owned();
+            Ok(ResponseInfo::Complete { status, headers, body })
         }
-    } else {
-        let body_key = key(scope, &K_BODY_TEXT);
-        let body = obj.get(scope, body_key.into())
-            .map(|v| v.to_rust_string_lossy(scope))
+        NativeResponseBody::Stream => {
+            // Lock the native ReadableStream on the Response and start
+            // the body pump. `__zsBeginStreamForward` reads `response.body`
+            // (native getter) and `response._streamId` (allowed expando),
+            // then sets `response._streamId` to the freshly-allocated id.
+            // Native Response objects are extensible — the assignment
+            // succeeds.
+            let stream_id = forward_stream(scope, obj)?;
+            classify_stream(scope, status, headers, stream_id)
+        }
+    }
+}
+
+/// Call `globalThis.__zsBeginStreamForward(response)` and return the
+/// allocated stream id. Used by both the native and polyfill paths.
+fn forward_stream(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> Result<u32, String> {
+    let global = scope.get_current_context().global(scope);
+    let fn_key = v8::String::new(scope, "__zsBeginStreamForward").unwrap();
+    let fn_v = global.get(scope, fn_key.into())
+        .ok_or_else(|| "__zsBeginStreamForward missing".to_string())?;
+    let forward_fn = v8::Local::<v8::Function>::try_from(fn_v)
+        .map_err(|_| "__zsBeginStreamForward not a function".to_string())?;
+    let result = forward_fn.call(scope, v8::undefined(scope).into(), &[obj.into()])
+        .ok_or_else(|| "__zsBeginStreamForward threw".to_string())?;
+    Ok(result.uint32_value(scope).unwrap_or(0))
+}
+
+/// After a stream id is allocated, decide whether the body is already
+/// closed (sync-enqueued in start()) or still open (returns Stream so
+/// chunks can flow async).
+fn classify_stream(
+    scope: &mut v8::PinScope,
+    status: u16,
+    headers: Vec<(String, String)>,
+    stream_id: u32,
+) -> Result<ResponseInfo, String> {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    let s = state.borrow();
+    let stream_closed = s.streams.get(&stream_id).map(|ss| ss.closed).unwrap_or(false);
+
+    if stream_closed {
+        // Stream is closed — collect buffered chunks as complete body.
+        let body_text = s.streams.get(&stream_id)
+            .map(|ss| {
+                ss.buffer.iter()
+                    .map(|b| String::from_utf8_lossy(b).to_string())
+                    .collect::<String>()
+            })
             .unwrap_or_default();
-        Ok(ResponseInfo::Complete { status, headers, body })
+        drop(s);
+        // Clean up the stream state
+        state.borrow_mut().streams.remove(&stream_id);
+        Ok(ResponseInfo::Complete { status, headers, body: body_text })
+    } else {
+        drop(s);
+        // Stream still open — return as streaming (chunks arrive via timers/async ops)
+        Ok(ResponseInfo::Stream { status, headers, stream_id })
     }
 }
 

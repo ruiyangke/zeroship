@@ -31,7 +31,7 @@
 
 use std::cell::RefCell;
 
-use crate::fetch_body::body::{Body, BodyImpl};
+use crate::fetch_body::body::{Body, BodyImpl, BodySource};
 use crate::fetch_body::consumers::{install_body_methods, BodyMarker};
 use crate::fetch_body::extract::extract_body;
 
@@ -132,6 +132,97 @@ fn state_ptr(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> Option<*mu
         return None;
     }
     Some(ptr)
+}
+
+// ---------------------------------------------------------------------------
+// Public surface used by `crate::http::inspect_response` (D-23 landing 2a).
+//
+// The kernel inspects a Response object after the user's handler resolves.
+// During the cutover from JS polyfill to native, `inspect_response` must
+// work against either implementation. The polyfill exposed body state via
+// the underscore-prefixed properties `_bodyText`, `_isStreamBody`,
+// `_streamId`. The native class hides those behind internal field 0.
+//
+// `try_native_response_body` returns a structured view of the body so the
+// kernel can avoid reaching into either impl's privates: when this returns
+// `Some(view)`, the value is a native Response and the kernel reads the
+// view directly; when it returns `None`, the value is either the polyfill
+// shape (kernel's existing slow-path field reads still apply) or not a
+// Response at all (kernel falls through to its plain-value handler).
+// ---------------------------------------------------------------------------
+
+/// Body view emitted by `try_native_response_body`. The kernel handles
+/// each variant differently:
+///
+///   - `Empty`: respond with an empty body (no Content-Length set by us).
+///   - `Bytes(Vec<u8>)`: rewindable buffered body — read once, ship it.
+///   - `Stream`: a user-visible ReadableStream — the kernel calls
+///     `__zsBeginStreamForward(response)` to lock + pump the stream
+///     into a Rust StreamState.
+pub enum NativeResponseBody {
+    /// Body is conceptually `null` (no Content-Length, empty body).
+    Empty,
+    /// Buffered bytes — extracted from `BodySource::Bytes/Blob/
+    /// UrlSearchParams/FormData`. Cheap clone via Rc.
+    Bytes(std::rc::Rc<Vec<u8>>),
+    /// Body source is a user-supplied ReadableStream. Kernel must call
+    /// `__zsBeginStreamForward(response)` to start pumping into a
+    /// Rust-side StreamState.
+    Stream,
+}
+
+/// True iff `obj` is an instance of the native Response class (i.e.
+/// has a non-null Box<ResponseState> in internal field 0). Returns
+/// `false` for the JS polyfill Response, plain objects, and primitives.
+pub fn is_native_response(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
+    state_ptr(scope, obj).is_some()
+}
+
+/// Inspect a native Response's body for the kernel's wire path. Returns
+/// `None` if `obj` is not a native Response (kernel falls back to the
+/// polyfill probe path).
+///
+/// Stream classification: a body is `Stream` iff `BodySource::Stream`,
+/// i.e. the user passed a ReadableStream to `new Response(...)`. All
+/// other rewindable sources collapse to `Bytes`.
+pub fn try_native_response_body(
+    scope: &mut v8::PinScope,
+    obj: v8::Local<v8::Object>,
+) -> Option<NativeResponseBody> {
+    let raw = state_ptr(scope, obj)?;
+    let state: &ResponseState = unsafe { &*raw };
+    let body = state.body.borrow();
+
+    if body.is_null() {
+        return Some(NativeResponseBody::Empty);
+    }
+
+    match body.source.clone() {
+        Some(BodySource::Bytes(rc))
+        | Some(BodySource::Blob(rc, _))
+        | Some(BodySource::UrlSearchParams(rc))
+        | Some(BodySource::FormData(rc, _)) => Some(NativeResponseBody::Bytes(rc)),
+        Some(BodySource::Stream) => Some(NativeResponseBody::Stream),
+        None => {
+            // BodyImpl with stream but no source — shouldn't happen in
+            // practice (extract_body always sets one or the other), but
+            // treat as Stream for safety: the kernel will call
+            // __zsBeginStreamForward and pump whatever's there.
+            Some(NativeResponseBody::Stream)
+        }
+    }
+}
+
+/// Read the native Response's `webSocket` extension as a Global. Returns
+/// `None` if `obj` is not a native Response or the slot is unset. Used by
+/// `inspect_response` to surface WebSocket upgrade responses.
+pub fn try_native_response_websocket(
+    scope: &mut v8::PinScope,
+    obj: v8::Local<v8::Object>,
+) -> Option<v8::Global<v8::Object>> {
+    let raw = state_ptr(scope, obj)?;
+    let state: &ResponseState = unsafe { &*raw };
+    state.web_socket.borrow().clone()
 }
 
 // ---------------------------------------------------------------------------
