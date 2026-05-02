@@ -60,6 +60,12 @@ pub struct DockerBackend {
     /// Per-sandbox bookkeeping. Keyed by sandbox_id; populated on
     /// `create`, dropped on `stop`.
     pub(crate) state: Arc<RwLock<HashMap<Uuid, DockerSandbox>>>,
+    /// Sealed-record persistence (preview-URL § II.0 §4). `None` when
+    /// `SANDBOX_PERSIST_AUTH` is unset — backend operates exactly as
+    /// it did pre-Phase-0. When `Some`, `create()` seals the per-
+    /// sandbox auth on success and `stop()` deletes the file. Both
+    /// are best-effort: a seal/delete failure is logged, never fatal.
+    pub(crate) persist: Option<Arc<crate::persist::Persistence>>,
 }
 
 /// Per-sandbox bookkeeping for the Docker backend. The
@@ -110,10 +116,11 @@ impl std::fmt::Debug for DockerSandbox {
 }
 
 impl DockerBackend {
-    pub fn new(cfg: SandboxConfig) -> Self {
+    pub fn new(cfg: SandboxConfig, persist: Option<Arc<crate::persist::Persistence>>) -> Self {
         Self {
             cfg,
             state: Arc::new(RwLock::new(HashMap::new())),
+            persist,
         }
     }
 
@@ -238,10 +245,46 @@ impl DockerBackend {
                 container_name: container_name.clone(),
                 workspace_path: workspace.clone(),
                 host_keys_dir: host_keys_dir_opt,
-                signing_key: signing_key_opt,
-                agent_url: agent_url_opt,
+                signing_key: signing_key_opt.clone(),
+                agent_url: agent_url_opt.clone(),
             },
         );
+
+        // Seal the per-sandbox auth to disk (preview-URL § II.0 §4).
+        // BEST-EFFORT: a seal failure does NOT fail create(). Only
+        // the agent-launch path produces a sealable record (signing
+        // key + agent_url both present); when `docker inspect`
+        // couldn't resolve the container IP, we skip the seal — that
+        // sandbox can't be restored after restart anyway because
+        // there's nothing to probe. Docker records seal `agent_url`
+        // (the bridge IP) since it's not deterministic from any
+        // controller-side identifier.
+        if let (Some(persist), Some(sk), Some(url)) = (
+            &self.persist,
+            signing_key_opt.as_ref(),
+            agent_url_opt.as_ref(),
+        ) {
+            let pubkey_fp = sig::pubkey_fingerprint(&sk.verifying_key());
+            let record = crate::persist::SealedAuth {
+                version: crate::persist::SEAL_VERSION,
+                sandbox_id: sandbox_id.to_string(),
+                user_id: user_id.to_string(),
+                project_id: project_id.to_string(),
+                backend: "docker".to_string(),
+                signing_key_bytes: sk.to_bytes(),
+                vm_index: None,
+                agent_url: Some(url.clone()),
+                pubkey_fp,
+                created_at_secs: now,
+            };
+            if let Err(e) = persist.seal(sandbox_id, &record).await {
+                eprintln!(
+                    "[sandbox/docker] persist.seal failed sandbox={sandbox_id} \
+                     container={container_name} (non-fatal; sandbox live, \
+                     restart-restore unavailable for this record): {e}"
+                );
+            }
+        }
 
         Ok(SandboxInfo {
             sandbox_id: sandbox_id.to_string(),
@@ -274,7 +317,19 @@ impl DockerBackend {
                 }
             }
         }
-        stop_container(&sandbox.container_name).await
+        let stop_res = stop_container(&sandbox.container_name).await;
+
+        // Delete the sealed record (preview-URL § II.0 §4). BEST-EFFORT:
+        // delete failures are logged but never fail stop().
+        if let Some(persist) = &self.persist {
+            if let Err(e) = persist.delete(sandbox_id).await {
+                eprintln!(
+                    "[sandbox/docker] persist.delete failed sandbox={sandbox_id} \
+                     (non-fatal): {e}"
+                );
+            }
+        }
+        stop_res
     }
 
     pub async fn exec(
@@ -744,7 +799,7 @@ mod tests {
             create_retry_max: 2,
             create_retry_total_timeout_secs: 90,
         };
-        let backend = DockerBackend::new(cfg);
+        let backend = DockerBackend::new(cfg, None);
         let id = Uuid::now_v7();
 
         // Unknown sandbox → "not found".

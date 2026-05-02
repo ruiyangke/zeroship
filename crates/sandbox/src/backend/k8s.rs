@@ -75,6 +75,10 @@ pub struct K8sBackend {
     /// optionally by a background re-probe. `false` = backend not
     /// usable; consumers can route around or page out.
     healthy: Arc<AtomicBool>,
+    /// Sealed-record persistence (preview-URL § II.0 §4). See
+    /// [`crate::persist::Persistence`]. `None` when
+    /// `SANDBOX_PERSIST_AUTH` is unset.
+    persist: Option<Arc<crate::persist::Persistence>>,
 }
 
 /// Free-list-backed port allocator for `kubectl port-forward`.
@@ -170,7 +174,10 @@ impl std::fmt::Debug for K8sSandbox {
 }
 
 impl K8sBackend {
-    pub fn new(cfg: SandboxConfig) -> Result<Self, String> {
+    pub fn new(
+        cfg: SandboxConfig,
+        persist: Option<Arc<crate::persist::Persistence>>,
+    ) -> Result<Self, String> {
         let ports = PortAllocator::new(cfg.k8s.port_forward_start);
         Ok(Self {
             cfg,
@@ -178,6 +185,7 @@ impl K8sBackend {
             ports: Arc::new(Mutex::new(ports)),
             creating_users: Arc::new(Mutex::new(HashSet::new())),
             healthy: Arc::new(AtomicBool::new(false)),
+            persist,
         })
     }
 
@@ -455,6 +463,8 @@ impl K8sBackend {
 
         // 7. Commit. Take the port-forward back out of the guard.
         let port_forward = guard.port_forward.take();
+        let agent_url_for_seal = agent_url.clone();
+        let signing_key_for_seal = signing_key.clone();
         let sandbox = K8sSandbox {
             user_id: user_id.to_string(),
             pod_name: pod_name.to_string(),
@@ -472,6 +482,36 @@ impl K8sBackend {
         self.state.write().unwrap().insert(sandbox_id, sandbox);
 
         let now = unix_now();
+
+        // Seal the per-sandbox auth to disk (preview-URL § II.0 §4).
+        // BEST-EFFORT: a seal failure does NOT fail create(). K8s
+        // records seal `agent_url` directly because it's not a
+        // deterministic function of any controller-side index — it's
+        // either the Pod IP (in-cluster) or a port-forward loopback
+        // address (dev). The restart-restore path (when implemented
+        // for k8s — see TODO in restore_from_sealed) reads it back.
+        if let Some(persist) = &self.persist {
+            let record = crate::persist::SealedAuth {
+                version: crate::persist::SEAL_VERSION,
+                sandbox_id: sandbox_id.to_string(),
+                user_id: user_id.to_string(),
+                project_id: project_id.to_string(),
+                backend: "k8s".to_string(),
+                signing_key_bytes: signing_key_for_seal.to_bytes(),
+                vm_index: None,
+                agent_url: Some(agent_url_for_seal),
+                pubkey_fp: key_fp.clone(),
+                created_at_secs: now,
+            };
+            if let Err(e) = persist.seal(sandbox_id, &record).await {
+                eprintln!(
+                    "[sandbox/k8s] persist.seal failed sandbox={sandbox_id} \
+                     pod={pod_name} (non-fatal; sandbox live, restart-restore \
+                     unavailable for this record): {e}"
+                );
+            }
+        }
+
         Ok(SandboxInfo {
             sandbox_id: sandbox_id.to_string(),
             user_id: user_id.to_string(),
@@ -539,6 +579,18 @@ impl K8sBackend {
         //    user races a Multi-Attach error. Best-effort: 30s.
         if let Err(e) = wait_for_pod_gone(&pod_name, &ns, Duration::from_secs(30)).await {
             errs.push(format!("wait_for_pod_gone({pod_name}): {e}"));
+        }
+
+        // 5. Delete the sealed record (preview-URL § II.0 §4).
+        //    BEST-EFFORT: delete failures are logged but never fail
+        //    stop().
+        if let Some(persist) = &self.persist {
+            if let Err(e) = persist.delete(sandbox_id).await {
+                eprintln!(
+                    "[sandbox/k8s] persist.delete failed sandbox={sandbox_id} \
+                     pod={pod_name} (non-fatal): {e}"
+                );
+            }
         }
 
         if errs.is_empty() {
