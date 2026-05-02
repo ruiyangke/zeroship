@@ -1,6 +1,6 @@
 //! Reusable compio HTTP server for zeroship.
 //!
-//! Extracted from `server.rs` (the v8-server-compio binary) so that both the
+//! Extracted from `server.rs` (the zeroship-bench-server binary) so that both the
 //! benchmark binary and the CLI (`zeroship serve`) can share the same server
 //! logic.
 //!

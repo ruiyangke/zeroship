@@ -1,6 +1,6 @@
 //! Benchmark HTTP server for V8 runtime using compio (io_uring).
 //!
-//! This is the v8-server-compio binary. It loads the embedded `scenarios.js`
+//! This is the zeroship-bench-server binary. It loads the embedded `scenarios.js`
 //! as a single ES module and starts the compio HTTP server via the shared
 //! `zeroship_runtime::serve` module.
 

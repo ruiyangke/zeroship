@@ -65,9 +65,9 @@ echo 'export function ping() { return "pong"; }' > /tmp/zeroship-bench-app/index
     --control=http://localhost:9090 --key=bm > /dev/null 2>&1
 
 # Baseline
-"$BIN/v8-server-compio" --port=5100 --workers=1 > /dev/null 2>&1 &
+"$BIN/zeroship-bench-server" --port=5100 --workers=1 > /dev/null 2>&1 &
 PIDS+=($!)
-"$BIN/v8-server-compio" --port=5101 --workers=$CORES > /dev/null 2>&1 &
+"$BIN/zeroship-bench-server" --port=5101 --workers=$CORES > /dev/null 2>&1 &
 PIDS+=($!)
 sleep 4
 
