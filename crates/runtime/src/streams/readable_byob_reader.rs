@@ -365,12 +365,26 @@ pub fn acquire_readable_stream_byob_reader<'s>(
                 .to_string(),
         );
     }
+    // Use the GLOBAL ReadableStreamBYOBReader class so `instanceof`
+    // checks work. Fall back to a local template if global isn't set
+    // (e.g., in tests that haven't installed the streams namespace).
+    let global = scope.get_current_context().global(scope);
+    let class_name = v8::String::new(scope, "ReadableStreamBYOBReader").unwrap();
+    let class_v = global.get(scope, class_name.into()).unwrap_or_else(|| v8::undefined(scope).into());
+    let class_fn = if let Ok(f) = v8::Local::<v8::Function>::try_from(class_v) {
+        f
+    } else {
+        let tmpl = reader_class_template(scope);
+        tmpl.get_function(scope).unwrap()
+    };
+    // Create instance via class_fn's instance template (we need internal
+    // fields). Get the FunctionTemplate by calling the matching helper.
     let tmpl = reader_class_template(scope);
     let inst_tmpl = tmpl.instance_template(scope);
     let reader_obj = inst_tmpl
         .new_instance(scope)
         .ok_or_else(|| "alloc BYOB reader instance".to_string())?;
-    let class_fn = tmpl.get_function(scope).unwrap();
+    // Set prototype to the global class's prototype so instanceof works.
     let proto_key = v8::String::new(scope, "prototype").unwrap();
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     reader_obj.set_prototype(scope, proto_v);
