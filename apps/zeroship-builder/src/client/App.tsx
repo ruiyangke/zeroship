@@ -16,6 +16,7 @@ import ForgotPassword from "./pages/ForgotPassword";
 import { Account } from "./pages/Account";
 import { OnboardingIntent } from "./pages/OnboardingIntent";
 import { AuthGuard } from "./auth/AuthGuard";
+import { DevEventsBadge } from "./components/DevEventsBadge";
 
 export default function App() {
   return (
@@ -71,6 +72,11 @@ export default function App() {
         {/* Catch-all stays last so explicit routes match first. */}
         <Route path="*" element={<AuthGuard><WorkspaceShell /></AuthGuard>} />
       </Routes>
+      {/* Dev-only floating analytics inspector. Renders nothing in
+          production builds (the component itself short-circuits on
+          `import.meta.env.DEV`). Helps verify telemetry firing without
+          opening the console. */}
+      <DevEventsBadge />
     </BrowserRouter>
   );
 }
