@@ -282,10 +282,24 @@ RFC 7578 (multipart/form-data).
 Draft v1 — **complete implementation** on `feature/fetch-native`.
 Foundation chunks all shipped: DOM (EventTarget + AbortSignal +
 FormData), Body + Request + Response, fetch() core and algorithms.
-D-23 polyfill cutover landings 1/2/3 DONE — `embed/fetch.js`,
-`embed/formdata.js`, `embed/events.js` all deleted; native is the
-only fetch / Body / Request / Response / FormData / EventTarget /
-Event / AbortController / AbortSignal in the runtime.
+
+**D-23 polyfill cutover landings 1/2/3 — DONE:**
+
+| Landing | Commit | Action |
+|---------|--------|--------|
+| 1 | `e282ce61` | native behind `ZEROSHIP_NATIVE_FETCH=1` |
+| 2a | `87e451ed` | refactor inspect_response off polyfill body fields |
+| 2b | `90b2d80e` | refactor HTTP_CREATE_REQUEST_JS to native Request |
+| 2c | `05bf1624` | flip default; native fetch unconditional |
+| 3a | `9445c50f` | slim fetch.js to DOMException + stream-bridge (705→154 LOC) |
+| 3b | `d45800c8` | delete formdata.js polyfill (~250 LOC removed) |
+| 3c | `934e51f8` | slim events.js to CustomEvent shim (73→25 LOC) |
+
+Net polyfill LOC removed: ~1,000. The remaining JS embed code is the
+DOMException polyfill + `__zsBeginStreamForward` kernel-bridge helper
+in fetch.js (154 LOC), the CustomEvent shim in events.js (25 LOC), and
+the unchanged blob.js / crypto.js / node-globals.js / text-streams.js /
+url.js / websocket.js — none of which are fetch concerns.
 
 **Landed (feature/fetch-native, foundation):**
 
