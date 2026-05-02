@@ -1491,10 +1491,16 @@ pub fn spawn_establish_a_websocket_connection(
     let request_id = current_request_id(scope);
     let cancel_flag = current_cancel_flag(scope);
 
+    // The constructor passes the full WebSocketInit dict here so the
+    // handshake can honour origin / maxMessageSize / maxFrameSize /
+    // pingIntervalMs (per D-28).
+    let init = read_websocket_init(scope);  // origin, sizes, ping interval
+    let config = init.to_tungstenite_config();
+
     let task = Box::pin(async move {
         // Step 1 of §4.1: Convert `ws`/`wss` to `http`/`https` for the fetch.
         // Step 2-10: build the request (handled in handshake.rs).
-        match handshake::run_client_handshake(url, protocols).await {
+        match handshake::run_client_handshake(url, protocols, init.origin, config).await {
             Ok(handshake::Established { ws_stream, protocol, extensions }) => {
                 // Push Open event first so JS sees state transition before
                 // any messages arrive.
