@@ -368,9 +368,9 @@ fn parse_results(json: &str) -> Vec<TestResult> {
     }
 }
 
-const TEST_UTILS: &str = include_str!("../../../tests/wpt/streams/resources/test-utils.js");
-const RECORDING_STREAMS: &str = include_str!("../../../tests/wpt/streams/resources/recording-streams.js");
-const RS_UTILS: &str = include_str!("../../../tests/wpt/streams/resources/rs-utils.js");
+const TEST_UTILS: &str = include_str!("wpt/streams/resources/test-utils.js");
+const RECORDING_STREAMS: &str = include_str!("wpt/streams/resources/recording-streams.js");
+const RS_UTILS: &str = include_str!("wpt/streams/resources/rs-utils.js");
 
 const WPT_FILES: &[(&str, &[&str])] = &[(
     "async-iterator",
@@ -378,7 +378,7 @@ const WPT_FILES: &[(&str, &[&str])] = &[(
         TEST_UTILS,
         RS_UTILS,
         RECORDING_STREAMS,
-        include_str!("../../../tests/wpt/streams/readable-streams/async-iterator.any.js"),
+        include_str!("wpt/streams/readable-streams/async-iterator.any.js"),
     ],
 )];
 

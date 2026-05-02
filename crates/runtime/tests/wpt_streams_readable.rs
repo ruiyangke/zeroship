@@ -1,6 +1,6 @@
 //! WPT runner for `streams/readable-streams/`.
 //! Source: https://github.com/web-platform-tests/wpt
-//! Files vendored under `tests/wpt/streams/`.
+//! Files vendored under `crates/runtime/tests/wpt/streams/`.
 //!
 //! Mirrors the `wpt_headers.rs` pattern: minimal testharness.js shim,
 //! per-file isolate, per-test pass/fail/skip classification. The Rust
@@ -411,14 +411,14 @@ fn parse_results(json: &str) -> Vec<TestResult> {
     }
 }
 
-const RS_UTILS: &str = include_str!("../../../tests/wpt/streams/resources/rs-utils.js");
-const TEST_UTILS: &str = include_str!("../../../tests/wpt/streams/resources/test-utils.js");
+const RS_UTILS: &str = include_str!("wpt/streams/resources/rs-utils.js");
+const TEST_UTILS: &str = include_str!("wpt/streams/resources/test-utils.js");
 
 const WPT_FILES: &[(&str, &[&str])] = &[
     (
         "constructor",
         &[include_str!(
-            "../../../tests/wpt/streams/readable-streams/constructor.any.js"
+            "wpt/streams/readable-streams/constructor.any.js"
         )],
     ),
     (
@@ -426,14 +426,14 @@ const WPT_FILES: &[(&str, &[&str])] = &[
         &[
             TEST_UTILS,
             RS_UTILS,
-            include_str!("../../../tests/wpt/streams/readable-streams/general.any.js"),
+            include_str!("wpt/streams/readable-streams/general.any.js"),
         ],
     ),
     (
         "default-reader",
         &[
             RS_UTILS,
-            include_str!("../../../tests/wpt/streams/readable-streams/default-reader.any.js"),
+            include_str!("wpt/streams/readable-streams/default-reader.any.js"),
         ],
     ),
 ];
