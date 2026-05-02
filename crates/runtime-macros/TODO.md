@@ -83,6 +83,24 @@ so we can grep back through the rationale.
   - Lands: commit `3cb0fe11` (codegen + 4 smoke tests in
     `tests/v8_same_object_smoke.rs`).
 
+- **`[NewObject]` semantic — confirmed: default IS no-cache** (audit
+  only, no codegen change). The TODO entry implied the macro was
+  caching default getter results and asked for an opt-out attribute.
+  Reading `gen_method_callback` (the path every non-`same_object`
+  getter takes) shows the user method runs unconditionally on each
+  read and `gen_call_return` sets `rv` directly — no Private-symbol
+  stash, no instance-scoped cache. The implicit default IS therefore
+  WebIDL `[NewObject]`. Caching is the OPT-IN: `#[v8_getter(same_object)]`
+  (commit `3cb0fe11`). No new attribute required.
+  - Smoke test `tests/v8_new_object_smoke.rs` (2 tests) demonstrates
+    that a default `#[v8_getter]` returning `v8::Local<v8::Value>`
+    mints a fresh JS Object on every read (`a !== b`) and runs the
+    user method N times for N reads. Pairs with the existing
+    `tests/v8_same_object_smoke.rs` to document both halves of the
+    contract.
+  - Lands: commit `<TBD-newobject>` (smoke test only, no codegen
+    delta).
+
 - **`[Clamp]` integer coercion** — `ClampU16` / `ClampU32` / `ClampI32`
   / `ClampU64` / `ClampI64` newtypes in `zeroship_runtime::clamp`
   implement WebIDL `[Clamp]` ConvertToInt: NaN → 0, < min → min, > max
@@ -98,7 +116,7 @@ so we can grep back through the rationale.
     unsigned long`), Blob.slice (`[Clamp] long long`), WebSocket close
     code (`[Clamp] unsigned short` — currently hand-rolled in
     `websocket_native::algorithms::clamp_unsigned_short`).
-  - Lands: commit `<TBD-clamp>` (codegen + 5 smoke tests in
+  - Lands: commit `dc26721d` (codegen + 5 smoke tests in
     `tests/v8_clamp_smoke.rs`).
 
 ## Open
@@ -126,12 +144,6 @@ getters) require a code edit in `lib.rs::gen_scalar_set`. A trait-based
 dispatch (similar to `IntoResolveValue`) would let users opt in by
 implementing the trait, but the existing list covers every fetch /
 streams / WebSocket / WebCrypto consumer.
-
-### `[NewObject]` semantic
-
-WebIDL marker for getters that must return a fresh object per access
-(`Response.json(data)`, future Crypto methods). Macro currently caches;
-needs an opt-out attribute.
 
 ### Reentrancy guard on `&mut self`
 
