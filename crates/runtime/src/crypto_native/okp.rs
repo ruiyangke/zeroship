@@ -151,10 +151,47 @@ pub fn import_ed25519<'s>(
         KeyFormat::Jwk => {
             super::jwk::import_ed25519(scope, key_data, extractable, usages)
         }
-        _ => Err(OpError::dom(
-            "NotSupportedError",
-            "Ed25519 import: 'raw' or 'jwk' supported (spki/pkcs8 deferred)",
-        )),
+        KeyFormat::Spki => {
+            let bytes = read_buffer_source(scope, key_data)?;
+            let raw_x = parse_cfrg_spki(&bytes, ED25519_OID).ok_or_else(|| {
+                OpError::dom("DataError", "Ed25519 SPKI parse failed")
+            })?;
+            let state = CryptoKeyState {
+                key_type: KeyType::Public,
+                extractable,
+                algorithm: KeyAlgorithm::Ed25519,
+                usages: usages.to_vec(),
+                material: KeyMaterial::Ed25519Public {
+                    spki_der: bytes,
+                    raw_x,
+                },
+            };
+            Ok(crypto_key::build(scope, state))
+        }
+        KeyFormat::Pkcs8 => {
+            let bytes = read_buffer_source(scope, key_data)?;
+            // Validate via aws-lc-rs (also rejects wrong-curve keys).
+            let kp = aws_lc_rs::signature::Ed25519KeyPair::from_pkcs8(&bytes)
+                .map_err(|_| OpError::dom("DataError", "Ed25519 PKCS#8 parse failed"))?;
+            use aws_lc_rs::signature::KeyPair as _;
+            let mut raw_x = [0u8; 32];
+            raw_x.copy_from_slice(kp.public_key().as_ref());
+            let raw_d = super::der::extract_cfrg_raw_seed(&bytes).ok_or_else(|| {
+                OpError::dom("DataError", "Ed25519 PKCS#8 seed extract failed")
+            })?;
+            let state = CryptoKeyState {
+                key_type: KeyType::Private,
+                extractable,
+                algorithm: KeyAlgorithm::Ed25519,
+                usages: usages.to_vec(),
+                material: KeyMaterial::Ed25519Private {
+                    pkcs8_der: bytes,
+                    raw_d,
+                    raw_x,
+                },
+            };
+            Ok(crypto_key::build(scope, state))
+        }
     }
 }
 
@@ -179,11 +216,85 @@ pub fn export_ed25519<'s>(
             Ok(vec_to_uint8array(scope, raw_x))
         }
         KeyFormat::Jwk => super::jwk::export_ed25519(scope, key),
-        _ => Err(OpError::dom(
-            "NotSupportedError",
-            "Ed25519 export 'spki'/'pkcs8' deferred (use 'raw' or 'jwk')",
-        )),
+        KeyFormat::Spki => {
+            let raw_x = match &key.material {
+                KeyMaterial::Ed25519Public { spki_der, raw_x } => {
+                    if !spki_der.is_empty() {
+                        return Ok(vec_to_uint8array(scope, spki_der));
+                    }
+                    raw_x
+                }
+                _ => {
+                    return Err(OpError::dom(
+                        "InvalidAccessError",
+                        "Ed25519 SPKI export requires a public key",
+                    ));
+                }
+            };
+            let der = build_cfrg_spki(ED25519_OID, raw_x);
+            Ok(vec_to_uint8array(scope, &der))
+        }
+        KeyFormat::Pkcs8 => match &key.material {
+            KeyMaterial::Ed25519Private { pkcs8_der, .. } => {
+                Ok(vec_to_uint8array(scope, pkcs8_der))
+            }
+            _ => Err(OpError::dom(
+                "InvalidAccessError",
+                "Ed25519 PKCS#8 export requires a private key",
+            )),
+        },
     }
+}
+
+const ED25519_OID: &[u8] = &[0x2b, 0x65, 0x70]; // 1.3.101.112
+const X25519_OID: &[u8] = &[0x2b, 0x65, 0x6e]; // 1.3.101.110
+
+/// Parse a CFRG SubjectPublicKeyInfo (RFC 8410 §4) and return the raw
+/// 32-byte public key. `expected_oid` is the curve OID octets (Ed25519
+/// or X25519).
+fn parse_cfrg_spki(spki: &[u8], expected_oid: &[u8]) -> Option<[u8; 32]> {
+    use super::der::read_tlv_pub;
+    let (top, rest) = read_tlv_pub(spki)?;
+    if !rest.is_empty() || top.tag != 0x30 {
+        return None;
+    }
+    let body = top.value;
+    let (alg_id, body) = read_tlv_pub(body)?;
+    if alg_id.tag != 0x30 {
+        return None;
+    }
+    let (oid, _) = read_tlv_pub(alg_id.value)?;
+    if oid.tag != 0x06 || oid.value != expected_oid {
+        return None;
+    }
+    let (bit_string, _) = read_tlv_pub(body)?;
+    if bit_string.tag != 0x03 || bit_string.value.len() != 33 || bit_string.value[0] != 0 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bit_string.value[1..]);
+    Some(out)
+}
+
+fn build_cfrg_spki(curve_oid: &[u8], raw_x: &[u8; 32]) -> Vec<u8> {
+    // SubjectPublicKeyInfo:
+    //   SEQUENCE {
+    //     SEQUENCE { OID curve_oid }
+    //     BIT STRING (33 bytes: 0x00 unused-bits + 32 raw_x)
+    //   }
+    let mut alg_id = vec![0x06];
+    alg_id.push(curve_oid.len() as u8);
+    alg_id.extend_from_slice(curve_oid);
+    let mut alg_id_seq = vec![0x30, alg_id.len() as u8];
+    alg_id_seq.extend_from_slice(&alg_id);
+    let mut bit_string = vec![0x03, 33u8, 0u8];
+    bit_string.extend_from_slice(raw_x);
+    let mut body = Vec::new();
+    body.extend_from_slice(&alg_id_seq);
+    body.extend_from_slice(&bit_string);
+    let mut out = vec![0x30, body.len() as u8];
+    out.extend_from_slice(&body);
+    out
 }
 
 // -----------------------------------------------------------------------------
@@ -382,10 +493,57 @@ pub fn import_x25519<'s>(
             Ok(crypto_key::build(scope, state))
         }
         KeyFormat::Jwk => super::jwk::import_x25519(scope, key_data, extractable, usages),
-        _ => Err(OpError::dom(
-            "NotSupportedError",
-            "X25519 import 'spki'/'pkcs8' deferred (use 'raw' or 'jwk')",
-        )),
+        KeyFormat::Spki => {
+            let bytes = read_buffer_source(scope, key_data)?;
+            let raw_x = parse_cfrg_spki(&bytes, X25519_OID).ok_or_else(|| {
+                OpError::dom("DataError", "X25519 SPKI parse failed")
+            })?;
+            let state = CryptoKeyState {
+                key_type: KeyType::Public,
+                extractable,
+                algorithm: KeyAlgorithm::X25519,
+                usages: usages.to_vec(),
+                material: KeyMaterial::X25519Public {
+                    spki_der: bytes,
+                    raw_x,
+                },
+            };
+            Ok(crypto_key::build(scope, state))
+        }
+        KeyFormat::Pkcs8 => {
+            let bytes = read_buffer_source(scope, key_data)?;
+            let raw_d = super::der::extract_cfrg_raw_seed(&bytes).ok_or_else(|| {
+                OpError::dom("DataError", "X25519 PKCS#8 seed extract failed")
+            })?;
+            // Derive the public from the seed via aws-lc-rs round-trip.
+            let pkcs8_full = build_x25519_pkcs8_from_seed(&raw_d);
+            let priv_key = aws_lc_rs::agreement::PrivateKey::from_private_key_der(
+                &aws_lc_rs::agreement::X25519,
+                &pkcs8_full,
+            )
+            .map_err(|_| OpError::dom("DataError", "X25519 reload via aws-lc-rs failed"))?;
+            let public = priv_key
+                .compute_public_key()
+                .map_err(|_| OpError::dom("DataError", "X25519 public derive failed"))?;
+            let pb = public.as_ref();
+            if pb.len() != 32 {
+                return Err(OpError::dom("DataError", "X25519 public not 32 bytes"));
+            }
+            let mut raw_x = [0u8; 32];
+            raw_x.copy_from_slice(pb);
+            let state = CryptoKeyState {
+                key_type: KeyType::Private,
+                extractable,
+                algorithm: KeyAlgorithm::X25519,
+                usages: usages.to_vec(),
+                material: KeyMaterial::X25519Private {
+                    pkcs8_der: bytes,
+                    raw_d,
+                    raw_x,
+                },
+            };
+            Ok(crypto_key::build(scope, state))
+        }
     }
 }
 
@@ -410,10 +568,33 @@ pub fn export_x25519<'s>(
             Ok(vec_to_uint8array(scope, raw_x))
         }
         KeyFormat::Jwk => super::jwk::export_x25519(scope, key),
-        _ => Err(OpError::dom(
-            "NotSupportedError",
-            "X25519 export 'spki'/'pkcs8' deferred (use 'raw' or 'jwk')",
-        )),
+        KeyFormat::Spki => {
+            let raw_x = match &key.material {
+                KeyMaterial::X25519Public { spki_der, raw_x } => {
+                    if !spki_der.is_empty() {
+                        return Ok(vec_to_uint8array(scope, spki_der));
+                    }
+                    raw_x
+                }
+                _ => {
+                    return Err(OpError::dom(
+                        "InvalidAccessError",
+                        "X25519 SPKI export requires a public key",
+                    ));
+                }
+            };
+            let der = build_cfrg_spki(X25519_OID, raw_x);
+            Ok(vec_to_uint8array(scope, &der))
+        }
+        KeyFormat::Pkcs8 => match &key.material {
+            KeyMaterial::X25519Private { pkcs8_der, .. } => {
+                Ok(vec_to_uint8array(scope, pkcs8_der))
+            }
+            _ => Err(OpError::dom(
+                "InvalidAccessError",
+                "X25519 PKCS#8 export requires a private key",
+            )),
+        },
     }
 }
 

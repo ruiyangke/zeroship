@@ -37,16 +37,17 @@ pub fn sign_pkcs1(key: &CryptoKeyState, data: &[u8]) -> Result<Vec<u8>, OpError>
         }
     };
     let hash = require_rsa_hash(key)?;
+    // SHA-1 RSA-PKCS1 signing isn't on aws-lc-rs's high-level path —
+    // drop down to aws-lc-sys for that one case. SHA-256/384/512
+    // stay on the high-level fast path.
+    if matches!(hash, HashAlgo::Sha1) {
+        return super::rsa_pss_variable_salt::pkcs1_sign(pkcs8, hash, data);
+    }
     let alg: &'static dyn aws_lc_rs::signature::RsaEncoding = match hash {
-        HashAlgo::Sha1 => {
-            return Err(OpError::dom(
-                "NotSupportedError",
-                "RSA-PKCS1 sign with SHA-1 not supported",
-            ));
-        }
         HashAlgo::Sha256 => &aws_lc_rs::signature::RSA_PKCS1_SHA256,
         HashAlgo::Sha384 => &aws_lc_rs::signature::RSA_PKCS1_SHA384,
         HashAlgo::Sha512 => &aws_lc_rs::signature::RSA_PKCS1_SHA512,
+        HashAlgo::Sha1 => unreachable!(),
     };
     let key_pair = aws_lc_rs::signature::RsaKeyPair::from_pkcs8(pkcs8)
         .map_err(|_| OpError::dom("DataError", "RSA private key load"))?;
@@ -79,11 +80,19 @@ pub fn verify_pkcs1(
         }
     };
     let hash = require_rsa_hash(key)?;
+    // The 1024-8192 algorithms cover the full WebCrypto-permissible
+    // range; 2048-8192 would reject 1024-bit test vectors. SHA-1 is
+    // legacy-only per aws-lc-rs naming but the WebCrypto spec
+    // requires it for back-compat with older deployments.
+    // The 1024-8192 algorithms cover the SHA-1/256/512 cases; the
+    // SHA-384 path only has the 2048-8192 variant (will reject keys
+    // <2048 bits when SHA-384 is paired). aws-lc-rs's surface; the
+    // WebCrypto spec range is the same.
     let alg: &dyn aws_lc_rs::signature::VerificationAlgorithm = match hash {
-        HashAlgo::Sha1 => &aws_lc_rs::signature::RSA_PKCS1_2048_8192_SHA1_FOR_LEGACY_USE_ONLY,
-        HashAlgo::Sha256 => &aws_lc_rs::signature::RSA_PKCS1_2048_8192_SHA256,
+        HashAlgo::Sha1 => &aws_lc_rs::signature::RSA_PKCS1_1024_8192_SHA1_FOR_LEGACY_USE_ONLY,
+        HashAlgo::Sha256 => &aws_lc_rs::signature::RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY,
         HashAlgo::Sha384 => &aws_lc_rs::signature::RSA_PKCS1_2048_8192_SHA384,
-        HashAlgo::Sha512 => &aws_lc_rs::signature::RSA_PKCS1_2048_8192_SHA512,
+        HashAlgo::Sha512 => &aws_lc_rs::signature::RSA_PKCS1_1024_8192_SHA512_FOR_LEGACY_USE_ONLY,
     };
     let unparsed = aws_lc_rs::signature::UnparsedPublicKey::new(alg, spki.as_slice());
     Ok(unparsed.verify(data, sig).is_ok())
@@ -111,16 +120,11 @@ pub fn sign_pss<'s>(
     };
     let hash = require_rsa_hash(key)?;
     let salt_len = read_salt_length(scope, alg_obj)?;
-    if matches!(hash, HashAlgo::Sha1) {
-        return Err(OpError::dom(
-            "NotSupportedError",
-            "RSA-PSS with SHA-1 not supported",
-        ));
-    }
     // Drop down to aws-lc-sys for variable salt length. The high-level
     // aws-lc-rs `signature::RSA_PSS_*` algorithms hard-code salt =
     // digest length, so any caller-specified saltLength other than
-    // hLen would otherwise round-trip incorrectly.
+    // hLen would otherwise round-trip incorrectly. The SHA-1 path is
+    // also routed here (aws-lc-rs has no SHA-1 PSS sign at all).
     super::rsa_pss_variable_salt::sign_with_salt(pkcs8, hash, data, salt_len as i32)
 }
 
@@ -142,12 +146,6 @@ pub fn verify_pss<'s>(
         _ => return Err(OpError::dom("InvalidAccessError", "RSA: missing public")),
     };
     let hash = require_rsa_hash(key)?;
-    if matches!(hash, HashAlgo::Sha1) {
-        return Err(OpError::dom(
-            "NotSupportedError",
-            "RSA-PSS with SHA-1 not supported",
-        ));
-    }
     let salt_len = read_salt_length(scope, alg_obj)?;
     super::rsa_pss_variable_salt::verify_with_salt(spki, hash, data, sig, salt_len as i32)
 }
@@ -232,14 +230,13 @@ pub fn decrypt_oaep<'s>(
 }
 
 fn oaep_algorithm(hash: HashAlgo) -> Result<&'static aws_lc_rs::rsa::OaepAlgorithm, OpError> {
+    // SHA-1 RSA-OAEP is a legacy use; the WebCrypto spec still
+    // requires support per §28 (RSA-OAEP).
     match hash {
+        HashAlgo::Sha1 => Ok(&aws_lc_rs::rsa::OAEP_SHA1_MGF1SHA1),
         HashAlgo::Sha256 => Ok(&aws_lc_rs::rsa::OAEP_SHA256_MGF1SHA256),
         HashAlgo::Sha384 => Ok(&aws_lc_rs::rsa::OAEP_SHA384_MGF1SHA384),
         HashAlgo::Sha512 => Ok(&aws_lc_rs::rsa::OAEP_SHA512_MGF1SHA512),
-        HashAlgo::Sha1 => Err(OpError::dom(
-            "NotSupportedError",
-            "RSA-OAEP with SHA-1 not supported",
-        )),
     }
 }
 

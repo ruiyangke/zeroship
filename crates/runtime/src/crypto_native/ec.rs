@@ -374,11 +374,137 @@ pub fn import_key<'s>(
         KeyFormat::Jwk => {
             super::jwk::import_ec(scope, alg, curve, key_data, extractable, usages)
         }
-        _ => Err(OpError::dom(
-            "NotSupportedError",
-            "EC import via 'spki'/'pkcs8' not yet supported (use 'raw' or 'jwk')",
-        )),
+        KeyFormat::Spki => import_spki(scope, alg, curve, key_data, extractable, usages),
+        KeyFormat::Pkcs8 => import_pkcs8(scope, alg, curve, key_data, extractable, usages),
     }
+}
+
+fn import_spki<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    alg: AlgorithmName,
+    curve: NamedCurve,
+    key_data: v8::Local<v8::Value>,
+    extractable: bool,
+    usages: &[KeyUsage],
+) -> Result<v8::Local<'s, v8::Object>, OpError> {
+    let bytes = read_buffer_source(scope, key_data)?;
+    // SPKI is `SubjectPublicKeyInfo ::= SEQUENCE { algorithm
+    // AlgorithmIdentifier, subjectPublicKey BIT STRING }`. Extract the
+    // BIT STRING contents (the uncompressed point) by walking the DER.
+    let raw_xy = parse_ec_spki(&bytes, curve).ok_or_else(|| {
+        OpError::dom("DataError", "EC SPKI parse failed")
+    })?;
+    let state = CryptoKeyState {
+        key_type: KeyType::Public,
+        extractable,
+        algorithm: KeyAlgorithm::Ec(EcKeyAlgorithm {
+            name: alg.canonical(),
+            named_curve: curve,
+        }),
+        usages: usages.to_vec(),
+        material: KeyMaterial::EcPublic {
+            spki_der: bytes,
+            raw_xy,
+        },
+    };
+    Ok(crypto_key::build(scope, state))
+}
+
+fn import_pkcs8<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    alg: AlgorithmName,
+    curve: NamedCurve,
+    key_data: v8::Local<v8::Value>,
+    extractable: bool,
+    usages: &[KeyUsage],
+) -> Result<v8::Local<'s, v8::Object>, OpError> {
+    let bytes = read_buffer_source(scope, key_data)?;
+    // Validate by reloading via aws-lc-rs (also catches algorithm/
+    // curve-OID mismatches). Then walk the PKCS#8 to extract raw d.
+    let signing_alg = match curve {
+        NamedCurve::P256 => &aws_lc_rs::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+        NamedCurve::P384 => &aws_lc_rs::signature::ECDSA_P384_SHA384_FIXED_SIGNING,
+        NamedCurve::P521 => &aws_lc_rs::signature::ECDSA_P521_SHA512_FIXED_SIGNING,
+    };
+    let key_pair = aws_lc_rs::signature::EcdsaKeyPair::from_pkcs8(signing_alg, &bytes)
+        .map_err(|_| OpError::dom("DataError", "EC PKCS#8 parse failed"))?;
+    use aws_lc_rs::signature::KeyPair as _;
+    let raw_xy = key_pair.public_key().as_ref().to_vec();
+    let n = curve.order_len();
+    let raw_d = super::der::extract_ec_raw_d(&bytes, n)
+        .ok_or_else(|| OpError::dom("DataError", "EC PKCS#8 scalar extract failed"))?;
+    let state = CryptoKeyState {
+        key_type: KeyType::Private,
+        extractable,
+        algorithm: KeyAlgorithm::Ec(EcKeyAlgorithm {
+            name: alg.canonical(),
+            named_curve: curve,
+        }),
+        usages: usages.to_vec(),
+        material: KeyMaterial::EcPrivate {
+            pkcs8_der: bytes,
+            raw_d,
+            raw_xy,
+        },
+    };
+    Ok(crypto_key::build(scope, state))
+}
+
+/// Walk SubjectPublicKeyInfo to extract the EC public point. Strict
+/// shape: SEQUENCE { SEQUENCE { ecPublicKey-OID, curve-OID }, BIT
+/// STRING uncompressed-point }.
+fn parse_ec_spki(spki: &[u8], curve: NamedCurve) -> Option<Vec<u8>> {
+    use super::der::*;
+    // For brevity reuse the public TLV walker via repeat parses.
+    let (top, rest) = read_tlv_pub(spki)?;
+    if !rest.is_empty() || top.tag != 0x30 {
+        return None;
+    }
+    let body = top.value;
+    let (alg_id, body) = read_tlv_pub(body)?;
+    if alg_id.tag != 0x30 {
+        return None;
+    }
+    // alg-id contents: ecPublicKey OID + curve OID. We don't strictly
+    // validate the curve OID against the named-curve here (caller
+    // already specified it), but we do require ecPublicKey first.
+    let (oid_alg, params) = read_tlv_pub(alg_id.value)?;
+    if oid_alg.tag != 0x06 {
+        return None;
+    }
+    // ecPublicKey OID = 1.2.840.10045.2.1
+    if oid_alg.value != [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01] {
+        return None;
+    }
+    // Validate the curve OID matches.
+    if !params.is_empty() {
+        let (oid_curve, _) = read_tlv_pub(params)?;
+        if oid_curve.tag != 0x06 {
+            return None;
+        }
+        let expected = match curve {
+            NamedCurve::P256 => &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07][..],
+            NamedCurve::P384 => &[0x2b, 0x81, 0x04, 0x00, 0x22][..],
+            NamedCurve::P521 => &[0x2b, 0x81, 0x04, 0x00, 0x23][..],
+        };
+        if oid_curve.value != expected {
+            return None;
+        }
+    }
+    let (bit_string, _) = read_tlv_pub(body)?;
+    if bit_string.tag != 0x03 || bit_string.value.is_empty() {
+        return None;
+    }
+    // First byte is unused-bits count (0 for X.509 keys).
+    if bit_string.value[0] != 0 {
+        return None;
+    }
+    let point = &bit_string.value[1..];
+    let n = curve.order_len();
+    if point.len() != 1 + 2 * n || point[0] != 0x04 {
+        return None;
+    }
+    Some(point.to_vec())
 }
 
 pub fn export_key<'s>(
@@ -402,10 +528,72 @@ pub fn export_key<'s>(
             Ok(vec_to_uint8array(scope, raw_xy))
         }
         KeyFormat::Jwk => super::jwk::export_ec(scope, key),
-        _ => Err(OpError::dom(
-            "NotSupportedError",
-            "EC export 'spki'/'pkcs8' not yet supported (use 'raw' or 'jwk')",
-        )),
+        KeyFormat::Spki => {
+            let curve = require_ec_curve(key)?;
+            match &key.material {
+                KeyMaterial::EcPublic { spki_der, raw_xy } => {
+                    if !spki_der.is_empty() {
+                        Ok(vec_to_uint8array(scope, spki_der))
+                    } else {
+                        let der = build_ec_spki(curve, raw_xy)?;
+                        Ok(vec_to_uint8array(scope, &der))
+                    }
+                }
+                _ => Err(OpError::dom(
+                    "InvalidAccessError",
+                    "EC SPKI export requires a public key",
+                )),
+            }
+        }
+        KeyFormat::Pkcs8 => match &key.material {
+            KeyMaterial::EcPrivate { pkcs8_der, .. } => Ok(vec_to_uint8array(scope, pkcs8_der)),
+            _ => Err(OpError::dom(
+                "InvalidAccessError",
+                "EC PKCS#8 export requires a private key",
+            )),
+        },
+    }
+}
+
+/// Hand-build an X.509 SubjectPublicKeyInfo for an EC public point.
+fn build_ec_spki(curve: NamedCurve, raw_xy: &[u8]) -> Result<Vec<u8>, OpError> {
+    let oid_curve: &[u8] = match curve {
+        NamedCurve::P256 => &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07],
+        NamedCurve::P384 => &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22],
+        NamedCurve::P521 => &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23],
+    };
+    let oid_ec_public: &[u8] = &[0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
+    let mut alg_id = Vec::new();
+    alg_id.extend_from_slice(oid_ec_public);
+    alg_id.extend_from_slice(oid_curve);
+    let mut alg_id_seq = vec![0x30];
+    alg_id_seq.extend_from_slice(&der_len(alg_id.len()));
+    alg_id_seq.extend_from_slice(&alg_id);
+
+    let mut bit_string_payload = vec![0u8]; // unused-bits=0
+    bit_string_payload.extend_from_slice(raw_xy);
+    let mut bit_string = vec![0x03];
+    bit_string.extend_from_slice(&der_len(bit_string_payload.len()));
+    bit_string.extend_from_slice(&bit_string_payload);
+
+    let mut body = Vec::new();
+    body.extend_from_slice(&alg_id_seq);
+    body.extend_from_slice(&bit_string);
+    let mut out = vec![0x30];
+    out.extend_from_slice(&der_len(body.len()));
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+fn der_len(n: usize) -> Vec<u8> {
+    if n < 0x80 {
+        vec![n as u8]
+    } else if n < 0x100 {
+        vec![0x81, n as u8]
+    } else if n < 0x10000 {
+        vec![0x82, (n >> 8) as u8, n as u8]
+    } else {
+        vec![0x83, (n >> 16) as u8, (n >> 8) as u8, n as u8]
     }
 }
 

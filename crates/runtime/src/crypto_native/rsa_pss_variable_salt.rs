@@ -1,13 +1,20 @@
-//! RSA-PSS sign/verify with caller-specified saltLength.
+//! Low-level RSA EVP_DigestSign / EVP_DigestVerify wrappers.
 //!
-//! `aws_lc_rs::signature::RSA_PSS_*` fixes the salt length to the
-//! digest length. The WebCrypto `RsaPssParams.saltLength` IDL member
-//! is in bytes and may be 0..=(emLen − hLen − 2) (RFC 3447 §9.1.1).
-//! We drop down to `aws_lc_sys` to set a custom salt length.
+//! The `aws_lc_rs::signature::RSA_PSS_*` / `RSA_PKCS1_SHA*` paths used
+//! to be sufficient, but two cases need lower-level access:
+//!
+//! 1. **RSA-PSS variable saltLength** — aws-lc-rs hard-codes salt =
+//!    digest length. The WebCrypto `RsaPssParams.saltLength` lets
+//!    callers pick anything in 0..=(emLen − hLen − 2) per RFC 3447
+//!    §9.1.1.
+//! 2. **RSA-PKCS1-v1_5 / RSA-PSS with SHA-1** — aws-lc-rs only
+//!    exposes `RSA_PKCS1_*_SHA1_FOR_LEGACY_USE_ONLY` for *verify*; no
+//!    SHA-1 path for *sign*. The WebCrypto spec still requires SHA-1
+//!    for RSASSA-PKCS1-v1_5 (§22) and RSA-PSS (§24).
 //!
 //! Per `docs/proposals/webcrypto-native.md` D-16.
 //!
-//! Surface kept minimal: two safe entry points, both convert FFI
+//! Surface kept minimal: a few safe entry points, all convert FFI
 //! failures to `OpError::dom("OperationError", _)`.
 
 #![allow(unsafe_code)]
@@ -120,6 +127,86 @@ pub fn verify_with_salt(
             // Spec says verify just returns false on bad signature; do
             // NOT raise an exception. (RFC 3447 §8.1.2 — signature is
             // EM-recovered, padding mismatch is a "no" not an error.)
+            Ok(false)
+        } else {
+            Err(op_err("EVP_DigestVerifyFinal"))
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// RSASSA-PKCS1-v1_5 sign / verify (used for SHA-1 — aws-lc-rs only
+// has SHA-1 verify, no SHA-1 sign).
+// -----------------------------------------------------------------------------
+
+pub fn pkcs1_sign(pkcs8_der: &[u8], hash: HashAlgo, data: &[u8]) -> Result<Vec<u8>, OpError> {
+    unsafe {
+        let pkey = parse_pkcs8(pkcs8_der)?;
+        let _guard = PkeyGuard(pkey);
+
+        let md = md_for(hash)?;
+        let md_ctx = sys::EVP_MD_CTX_new();
+        if md_ctx.is_null() {
+            return Err(op_err("EVP_MD_CTX_new"));
+        }
+        let _ctx_guard = MdCtxGuard(md_ctx);
+
+        let mut pctx: *mut sys::EVP_PKEY_CTX = std::ptr::null_mut();
+        if sys::EVP_DigestSignInit(md_ctx, &mut pctx, md, std::ptr::null_mut(), pkey) != 1 {
+            return Err(op_err("EVP_DigestSignInit"));
+        }
+        if sys::EVP_PKEY_CTX_set_rsa_padding(pctx, sys::RSA_PKCS1_PADDING) != 1 {
+            return Err(op_err("set_rsa_padding(PKCS1)"));
+        }
+
+        if sys::EVP_DigestSignUpdate(md_ctx, data.as_ptr() as *const _, data.len()) != 1 {
+            return Err(op_err("EVP_DigestSignUpdate"));
+        }
+        let mut sig_len: usize = 0;
+        if sys::EVP_DigestSignFinal(md_ctx, std::ptr::null_mut(), &mut sig_len) != 1 {
+            return Err(op_err("EVP_DigestSignFinal(probe)"));
+        }
+        let mut sig = vec![0u8; sig_len];
+        if sys::EVP_DigestSignFinal(md_ctx, sig.as_mut_ptr(), &mut sig_len) != 1 {
+            return Err(op_err("EVP_DigestSignFinal"));
+        }
+        sig.truncate(sig_len);
+        Ok(sig)
+    }
+}
+
+pub fn pkcs1_verify(
+    spki_der: &[u8],
+    hash: HashAlgo,
+    data: &[u8],
+    sig: &[u8],
+) -> Result<bool, OpError> {
+    unsafe {
+        let pkey = parse_spki(spki_der)?;
+        let _guard = PkeyGuard(pkey);
+
+        let md = md_for(hash)?;
+        let md_ctx = sys::EVP_MD_CTX_new();
+        if md_ctx.is_null() {
+            return Err(op_err("EVP_MD_CTX_new"));
+        }
+        let _ctx_guard = MdCtxGuard(md_ctx);
+
+        let mut pctx: *mut sys::EVP_PKEY_CTX = std::ptr::null_mut();
+        if sys::EVP_DigestVerifyInit(md_ctx, &mut pctx, md, std::ptr::null_mut(), pkey) != 1 {
+            return Err(op_err("EVP_DigestVerifyInit"));
+        }
+        if sys::EVP_PKEY_CTX_set_rsa_padding(pctx, sys::RSA_PKCS1_PADDING) != 1 {
+            return Err(op_err("set_rsa_padding(PKCS1)"));
+        }
+
+        if sys::EVP_DigestVerifyUpdate(md_ctx, data.as_ptr() as *const _, data.len()) != 1 {
+            return Err(op_err("EVP_DigestVerifyUpdate"));
+        }
+        let r = sys::EVP_DigestVerifyFinal(md_ctx, sig.as_ptr(), sig.len());
+        if r == 1 {
+            Ok(true)
+        } else if r == 0 {
             Ok(false)
         } else {
             Err(op_err("EVP_DigestVerifyFinal"))

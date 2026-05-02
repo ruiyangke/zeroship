@@ -164,9 +164,17 @@ pub fn extract_cfrg_raw_seed(pkcs8: &[u8]) -> Option<[u8; 32]> {
 // Internals
 // -----------------------------------------------------------------------------
 
-struct Tlv<'a> {
-    tag: u8,
-    value: &'a [u8],
+/// Parsed DER tag-length-value triple. Public so siblings (ec, okp,
+/// rsa) can write small structural walkers.
+pub struct Tlv<'a> {
+    pub tag: u8,
+    pub value: &'a [u8],
+}
+
+/// Re-exported `read_tlv` for siblings to use without paying the
+/// abstraction tax of a separate utility module.
+pub fn read_tlv_pub(input: &[u8]) -> Option<(Tlv<'_>, &[u8])> {
+    read_tlv(input)
 }
 
 /// Read a single DER TLV. Returns the parsed TLV and the trailing
