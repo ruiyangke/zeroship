@@ -178,6 +178,22 @@ pub fn vec_to_uint8array<'s>(
     arr.into()
 }
 
+/// Build a fresh `ArrayBuffer` (not a Uint8Array view) from a byte
+/// slice. Per W3C WebCrypto §17.4 (exportKey) and similar, the output
+/// type is always an ArrayBuffer for raw/spki/pkcs8 formats.
+pub fn vec_to_arraybuffer<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    bytes: &[u8],
+) -> v8::Local<'s, v8::Value> {
+    let len = bytes.len();
+    let ab = v8::ArrayBuffer::new(scope, len);
+    let store = ab.get_backing_store();
+    for (i, &b) in bytes.iter().enumerate() {
+        store[i].set(b);
+    }
+    ab.into()
+}
+
 /// Build a fresh `Uint8Array` from owned bytes, returning the array
 /// type rather than a generic Value. Used where the call-site needs
 /// the typed Local for further set_index etc.

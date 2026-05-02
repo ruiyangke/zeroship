@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use super::crypto_key;
-use super::helpers::{read_buffer_source, vec_to_uint8array};
+use super::helpers::{read_buffer_source, vec_to_arraybuffer};
 use super::key_material::{
     CryptoKeyState, KeyAlgorithm, KeyFormat, KeyMaterial, KeyType, KeyUsage,
 };
@@ -226,14 +226,14 @@ pub fn export_ed25519<'s>(
                 KeyMaterial::Ed25519Private { raw_x, .. } => raw_x,
                 _ => return Err(OpError::dom("OperationError", "Not Ed25519")),
             };
-            Ok(vec_to_uint8array(scope, raw_x))
+            Ok(vec_to_arraybuffer(scope, raw_x))
         }
         KeyFormat::Jwk => super::jwk::export_ed25519(scope, key),
         KeyFormat::Spki => {
             let raw_x = match &key.material {
                 KeyMaterial::Ed25519Public { spki_der, raw_x } => {
                     if !spki_der.is_empty() {
-                        return Ok(vec_to_uint8array(scope, spki_der));
+                        return Ok(vec_to_arraybuffer(scope, spki_der));
                     }
                     raw_x
                 }
@@ -245,11 +245,11 @@ pub fn export_ed25519<'s>(
                 }
             };
             let der = build_cfrg_spki(ED25519_OID, raw_x);
-            Ok(vec_to_uint8array(scope, &der))
+            Ok(vec_to_arraybuffer(scope, &der))
         }
         KeyFormat::Pkcs8 => match &key.material {
             KeyMaterial::Ed25519Private { pkcs8_der, .. } => {
-                Ok(vec_to_uint8array(scope, pkcs8_der))
+                Ok(vec_to_arraybuffer(scope, pkcs8_der))
             }
             _ => Err(OpError::dom(
                 "InvalidAccessError",
@@ -342,6 +342,14 @@ pub fn x25519_derive_bits<'s>(
             "X25519 'public' key must be X25519",
         ));
     }
+    // The "public" key parameter must actually be a public key per
+    // spec §35.6.1 step 4.
+    if pub_state.key_type != KeyType::Public {
+        return Err(OpError::dom(
+            "InvalidAccessError",
+            "X25519 'public' key parameter must be a public key",
+        ));
+    }
     let priv_d = match &key.material {
         KeyMaterial::X25519Private { raw_d, .. } => raw_d,
         _ => {
@@ -353,7 +361,6 @@ pub fn x25519_derive_bits<'s>(
     };
     let pub_x = match &pub_state.material {
         KeyMaterial::X25519Public { raw_x, .. } => raw_x,
-        KeyMaterial::X25519Private { raw_x, .. } => raw_x,
         _ => {
             return Err(OpError::dom(
                 "InvalidAccessError",
@@ -586,14 +593,14 @@ pub fn export_x25519<'s>(
                 KeyMaterial::X25519Private { raw_x, .. } => raw_x,
                 _ => return Err(OpError::dom("OperationError", "Not X25519")),
             };
-            Ok(vec_to_uint8array(scope, raw_x))
+            Ok(vec_to_arraybuffer(scope, raw_x))
         }
         KeyFormat::Jwk => super::jwk::export_x25519(scope, key),
         KeyFormat::Spki => {
             let raw_x = match &key.material {
                 KeyMaterial::X25519Public { spki_der, raw_x } => {
                     if !spki_der.is_empty() {
-                        return Ok(vec_to_uint8array(scope, spki_der));
+                        return Ok(vec_to_arraybuffer(scope, spki_der));
                     }
                     raw_x
                 }
@@ -605,11 +612,11 @@ pub fn export_x25519<'s>(
                 }
             };
             let der = build_cfrg_spki(X25519_OID, raw_x);
-            Ok(vec_to_uint8array(scope, &der))
+            Ok(vec_to_arraybuffer(scope, &der))
         }
         KeyFormat::Pkcs8 => match &key.material {
             KeyMaterial::X25519Private { pkcs8_der, .. } => {
-                Ok(vec_to_uint8array(scope, pkcs8_der))
+                Ok(vec_to_arraybuffer(scope, pkcs8_der))
             }
             _ => Err(OpError::dom(
                 "InvalidAccessError",

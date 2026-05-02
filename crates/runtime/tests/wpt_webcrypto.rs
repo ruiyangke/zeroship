@@ -763,7 +763,7 @@ const MUST_PASS: &[WptFile] = &[
     WptFile { name: "derive_bits_keys/ecdh_keys", sources: &[HELPERS, ECDH_KEYS_RUN, ECDH_KEYS_TOP] },
     WptFile { name: "derive_bits_keys/ecdh_bits", sources: &[HELPERS, ECDH_BITS_RUN, ECDH_BITS_TOP] },
     WptFile { name: "derive_bits_keys/cfrg_curves_bits_curve25519", sources: &[HELPERS, CFRG_BITS_FIXTURES, CFRG_BITS_RUN, CFRG_25519_BITS_TOP] },
-    WptFile { name: "derive_bits_keys/cfrg_curves_keys_curve25519", sources: &[HELPERS, CFRG_KEYS_RUN, CFRG_25519_KEYS_TOP] },
+    WptFile { name: "derive_bits_keys/cfrg_curves_keys_curve25519", sources: &[HELPERS, CFRG_BITS_FIXTURES, CFRG_KEYS_RUN, CFRG_25519_KEYS_TOP] },
 
     // import_export
     WptFile { name: "import_export/rsa_importKey", sources: &[HELPERS, RSA_IMPORT_TOP] },

@@ -5,7 +5,7 @@
 #![allow(dead_code)]
 
 use super::crypto_key;
-use super::helpers::{read_buffer_source, vec_to_uint8array};
+use super::helpers::{read_buffer_source, vec_to_arraybuffer};
 use super::key_material::{
     CryptoKeyState, HashAlgo, KeyAlgorithm, KeyFormat, KeyMaterial, KeyType, KeyUsage,
     RsaHashedKeyAlgorithm, RsaPrivateComponents, RsaPublicComponents,
@@ -494,11 +494,11 @@ pub fn export_key<'s>(
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
     match format {
         KeyFormat::Spki => match &key.material {
-            KeyMaterial::RsaPublic { spki_der, .. } => Ok(vec_to_uint8array(scope, spki_der)),
+            KeyMaterial::RsaPublic { spki_der, .. } => Ok(vec_to_arraybuffer(scope, spki_der)),
             _ => Err(OpError::dom("InvalidAccessError", "RSA: not a public key")),
         },
         KeyFormat::Pkcs8 => match &key.material {
-            KeyMaterial::RsaPrivate { pkcs8_der, .. } => Ok(vec_to_uint8array(scope, pkcs8_der)),
+            KeyMaterial::RsaPrivate { pkcs8_der, .. } => Ok(vec_to_arraybuffer(scope, pkcs8_der)),
             _ => Err(OpError::dom("InvalidAccessError", "RSA: not a private key")),
         },
         KeyFormat::Jwk => super::jwk::export_rsa(scope, key),

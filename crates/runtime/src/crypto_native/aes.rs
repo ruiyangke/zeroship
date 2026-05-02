@@ -5,7 +5,7 @@
 
 use super::crypto_key;
 use super::helpers::{
-    read_buffer_source, read_optional_buffer_source, vec_to_uint8array,
+    read_buffer_source, read_optional_buffer_source, vec_to_arraybuffer,
 };
 use super::key_material::{
     AesKeyAlgorithm, CryptoKeyState, KeyAlgorithm, KeyFormat, KeyMaterial, KeyType, KeyUsage,
@@ -801,7 +801,7 @@ pub fn export_key<'s>(
         _ => return Err(OpError::dom("OperationError", "Not an AES key")),
     };
     match format {
-        KeyFormat::Raw => Ok(vec_to_uint8array(scope, raw)),
+        KeyFormat::Raw => Ok(vec_to_arraybuffer(scope, raw)),
         KeyFormat::Jwk => super::jwk::export_aes(scope, key, raw),
         _ => Err(OpError::dom(
             "NotSupportedError",

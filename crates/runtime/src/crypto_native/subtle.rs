@@ -12,7 +12,7 @@
 
 use super::digest;
 use super::helpers::{
-    read_buffer_source, reject_now, resolve_now, vec_to_uint8array,
+    read_buffer_source, reject_now, resolve_now, vec_to_arraybuffer,
 };
 use super::key_material::KeyFormat;
 use crate::state::OpError;
@@ -49,7 +49,7 @@ impl SubtleCrypto {
             Err(e) => return reject_now(scope, e).into(),
         };
         let out = digest::digest_bytes(hash, &data_bytes);
-        let ua = vec_to_uint8array(scope, &out);
+        let ua = vec_to_arraybuffer(scope, &out);
         resolve_now(scope, ua).into()
     }
 
@@ -65,7 +65,7 @@ impl SubtleCrypto {
     ) -> v8::Local<'s, v8::Value> {
         match super::ops::encrypt(scope, alg, key, data) {
             Ok(bytes) => {
-                let ua = vec_to_uint8array(scope, &bytes);
+                let ua = vec_to_arraybuffer(scope, &bytes);
                 resolve_now(scope, ua).into()
             }
             Err(e) => reject_now(scope, e).into(),
@@ -82,7 +82,7 @@ impl SubtleCrypto {
     ) -> v8::Local<'s, v8::Value> {
         match super::ops::decrypt(scope, alg, key, data) {
             Ok(bytes) => {
-                let ua = vec_to_uint8array(scope, &bytes);
+                let ua = vec_to_arraybuffer(scope, &bytes);
                 resolve_now(scope, ua).into()
             }
             Err(e) => reject_now(scope, e).into(),
@@ -99,7 +99,7 @@ impl SubtleCrypto {
     ) -> v8::Local<'s, v8::Value> {
         match super::ops::sign(scope, alg, key, data) {
             Ok(bytes) => {
-                let ua = vec_to_uint8array(scope, &bytes);
+                let ua = vec_to_arraybuffer(scope, &bytes);
                 resolve_now(scope, ua).into()
             }
             Err(e) => reject_now(scope, e).into(),
@@ -218,7 +218,7 @@ impl SubtleCrypto {
     ) -> v8::Local<'s, v8::Value> {
         match super::ops::derive_bits(scope, alg, base_key, length) {
             Ok(bytes) => {
-                let ua = vec_to_uint8array(scope, &bytes);
+                let ua = vec_to_arraybuffer(scope, &bytes);
                 resolve_now(scope, ua).into()
             }
             Err(e) => reject_now(scope, e).into(),
@@ -276,7 +276,7 @@ impl SubtleCrypto {
         };
         match super::ops::wrap_key(scope, format_enum, key, wrapping_key, wrap_alg) {
             Ok(bytes) => {
-                let ua = vec_to_uint8array(scope, &bytes);
+                let ua = vec_to_arraybuffer(scope, &bytes);
                 resolve_now(scope, ua).into()
             }
             Err(e) => reject_now(scope, e).into(),

@@ -4,7 +4,7 @@
 #![allow(dead_code)]
 
 use super::crypto_key;
-use super::helpers::{read_buffer_source, vec_to_uint8array};
+use super::helpers::{read_buffer_source, vec_to_arraybuffer};
 use super::key_material::{
     CryptoKeyState, EcKeyAlgorithm, HashAlgo, KeyAlgorithm, KeyFormat, KeyMaterial, KeyType,
     KeyUsage, NamedCurve,
@@ -192,6 +192,14 @@ pub fn ecdh_derive_bits<'s>(
         return Err(OpError::dom(
             "InvalidAccessError",
             "ECDH 'public' key must be a public key",
+        ));
+    }
+    // The public key's algorithm must be ECDH (not e.g. ECDSA).
+    // Spec §24.6.1 step 4 — InvalidAccessError otherwise.
+    if pub_state.algorithm.name() != AlgorithmName::Ecdh.canonical() {
+        return Err(OpError::dom(
+            "InvalidAccessError",
+            "ECDH 'public' key algorithm must be ECDH",
         ));
     }
     let pub_curve = require_ec_curve(pub_state)?;
@@ -578,7 +586,7 @@ pub fn export_key<'s>(
                     "EC private keys cannot export 'raw'",
                 ));
             }
-            Ok(vec_to_uint8array(scope, raw_xy))
+            Ok(vec_to_arraybuffer(scope, raw_xy))
         }
         KeyFormat::Jwk => super::jwk::export_ec(scope, key),
         KeyFormat::Spki => {
@@ -586,10 +594,10 @@ pub fn export_key<'s>(
             match &key.material {
                 KeyMaterial::EcPublic { spki_der, raw_xy } => {
                     if !spki_der.is_empty() {
-                        Ok(vec_to_uint8array(scope, spki_der))
+                        Ok(vec_to_arraybuffer(scope, spki_der))
                     } else {
                         let der = build_ec_spki(curve, raw_xy)?;
-                        Ok(vec_to_uint8array(scope, &der))
+                        Ok(vec_to_arraybuffer(scope, &der))
                     }
                 }
                 _ => Err(OpError::dom(
@@ -599,7 +607,7 @@ pub fn export_key<'s>(
             }
         }
         KeyFormat::Pkcs8 => match &key.material {
-            KeyMaterial::EcPrivate { pkcs8_der, .. } => Ok(vec_to_uint8array(scope, pkcs8_der)),
+            KeyMaterial::EcPrivate { pkcs8_der, .. } => Ok(vec_to_arraybuffer(scope, pkcs8_der)),
             _ => Err(OpError::dom(
                 "InvalidAccessError",
                 "EC PKCS#8 export requires a private key",
