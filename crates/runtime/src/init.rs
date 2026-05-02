@@ -3,7 +3,7 @@
 //! Consolidates everything needed to boot an isolate:
 //! - `init_v8()` — one-time V8 platform init
 //! - `setup_globals()` — console, timers, fetch, URL, KV, crypto, env, streams
-//! - Polyfill constants (`FETCH_JS`, `URL_JS`, `CRYPTO_JS`, `STREAMS_JS`, `EVENTS_JS`, `BLOB_JS`, `FORMDATA_JS`)
+//! - Polyfill constants (`FETCH_JS`, `URL_JS`, `CRYPTO_JS`, `STREAMS_JS`, `EVENTS_JS`, `BLOB_JS`)
 //! - Result types (`RequestResult`, `HttpResult`)
 
 use std::time::Duration;
@@ -112,9 +112,6 @@ pub const EVENTS_JS: &str = include_str!("embed/events.js");
 
 /// Embedded Blob/File polyfill.
 pub const BLOB_JS: &str = include_str!("embed/blob.js");
-
-/// Embedded FormData polyfill.
-pub const FORMDATA_JS: &str = include_str!("embed/formdata.js");
 
 /// Embedded WebSocket/WebSocketPair polyfill (depends on events.js for EventTarget).
 pub const WEBSOCKET_JS: &str = include_str!("embed/websocket.js");
@@ -680,8 +677,26 @@ pub fn load_polyfills_and_modules(
 ) -> Result<v8::Global<v8::Value>, String> {
     setup_globals(scope);
 
-    // Load polyfills
-    for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, NODE_GLOBALS_JS, EVENTS_JS, BLOB_JS, FORMDATA_JS, WEBSOCKET_JS] {
+    // Order matters here:
+    //
+    //   1. Load fetch.js / events.js / formdata.js / blob.js polyfills
+    //      first. With the native gate ON they're shadowed below; with
+    //      the gate OFF (legacy build) they remain in charge.
+    //   2. install_dom installs native DOM (EventTarget / Event /
+    //      AbortController / AbortSignal / FormData / Request / Response /
+    //      fetch). MUST run AFTER fetch.js / events.js / formdata.js so
+    //      their unconditional `globalThis.X = X` assignments don't
+    //      overwrite the native install.
+    //   3. Load WEBSOCKET_JS LAST so its `WebSocket.prototype =
+    //      Object.create(EventTarget.prototype)` captures the NATIVE
+    //      EventTarget prototype (not the polyfill's). Otherwise
+    //      `WebSocket` instances inherit polyfill `addEventListener`
+    //      which expects `this._listeners`, but `EventTarget.call(this)`
+    //      runs the native constructor that doesn't set that field —
+    //      `addEventListener` then throws "Cannot read properties of
+    //      undefined (reading 'message')" on the first server frame.
+    //   4. Native Headers / Streams / TextEncoderStream wrappers.
+    for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, NODE_GLOBALS_JS, BLOB_JS] {
         let code = v8::String::new(scope, polyfill).unwrap();
         let script = v8::Script::compile(scope, code, None).unwrap();
         script.run(scope).unwrap();
@@ -706,6 +721,32 @@ pub fn load_polyfills_and_modules(
     // `setup_globals`) are present.
     {
         let code = v8::String::new(scope, TEXT_STREAMS_JS).unwrap();
+        let script = v8::Script::compile(scope, code, None).unwrap();
+        script.run(scope).unwrap();
+    }
+
+    // Native DOM (EventTarget / Event / AbortController / AbortSignal /
+    // FormData / Request / Response / fetch) gated on
+    // `ZEROSHIP_NATIVE_FETCH=1` (D-23 landing-1). MUST run AFTER fetch.js /
+    // events.js / formdata.js or their unconditional re-assignment would
+    // clobber the native install — and BEFORE websocket.js so
+    // `WebSocket.prototype = Object.create(EventTarget.prototype)` picks
+    // up the native EventTarget prototype.
+    install_dom(scope);
+
+    // CustomEvent shim — extends native Event with a `.detail` field. Pure
+    // JS for now (~25 LOC); deletes when CustomEvent goes native. Loads
+    // AFTER install_dom so `globalThis.Event` is the native class.
+    {
+        let code = v8::String::new(scope, EVENTS_JS).unwrap();
+        let script = v8::Script::compile(scope, code, None).unwrap();
+        script.run(scope).unwrap();
+    }
+
+    // WebSocket polyfill — loaded LAST so its prototype chain references
+    // the native EventTarget (install_dom installed it just above).
+    {
+        let code = v8::String::new(scope, WEBSOCKET_JS).unwrap();
         let script = v8::Script::compile(scope, code, None).unwrap();
         script.run(scope).unwrap();
     }
@@ -1734,6 +1775,32 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
 pub fn install_headers(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
     crate::headers::install_global(scope, global);
+}
+
+/// Install native DOM primitives (EventTarget, Event, AbortController,
+/// AbortSignal, FormData) plus Request / Response / fetch on
+/// `globalThis`. Per D-23 step 2c the native cutover is now the
+/// default — no env-var gate.
+///
+/// Called AFTER fetch.js / formdata.js / events.js run so the polyfills'
+/// unconditional `globalThis.X = X` assignments don't overwrite our
+/// native install. The polyfills are deleted in D-23 step 3.
+///
+/// Called BEFORE websocket.js so its
+/// `WebSocket.prototype = Object.create(EventTarget.prototype)` reads
+/// the NATIVE EventTarget prototype — required for the polyfill's
+/// `addEventListener` / `dispatchEvent` calls to land on native code.
+pub fn install_dom(scope: &mut v8::PinScope) {
+    let global = scope.get_current_context().global(scope);
+    crate::dom::install_globals(scope, global);
+    // Native Request + Response: install AFTER dom (which gives us
+    // FormData / AbortSignal that the constructors need to resolve via
+    // globalThis). MUST run after fetch.js + formdata.js so the
+    // polyfill's unconditional re-assignment of Request/Response
+    // doesn't clobber the native install.
+    crate::fetch_request::install_global(scope, global);
+    crate::fetch_response::install_global(scope, global);
+    crate::fetch_native::install_fetch_global(scope, global);
 }
 
 /// Install native WHATWG Streams classes onto `globalThis`. Called

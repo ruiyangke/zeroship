@@ -35,12 +35,18 @@ fn readable_stream_sync_enqueue() {
 
 #[test]
 fn readable_stream_response_text_method() {
+    // Per WHATWG Fetch §3.5, the body's stream chunks must be BufferSource.
+    // The polyfill consumer accepted string chunks via implicit TextEncoder;
+    // the native consumer (spec-faithful) rejects non-BufferSource chunks
+    // with TypeError per `body_stream::append_chunk`. Tests now explicitly
+    // encode when they want bytes, matching the upstream spec contract.
     let r = dispatch(m(r#"
         export async function test() {
+            var enc = new TextEncoder();
             var stream = new ReadableStream({
                 start(controller) {
-                    controller.enqueue("abc");
-                    controller.enqueue("def");
+                    controller.enqueue(enc.encode("abc"));
+                    controller.enqueue(enc.encode("def"));
                     controller.close();
                 }
             });

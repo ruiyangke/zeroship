@@ -1790,14 +1790,24 @@ impl RuntimeInner {
                             r.resolve(scope, v);
                         }
                         ResolveValue::Bytes(bytes) => {
-                            let len = bytes.len();
-                            let ab = v8::ArrayBuffer::new(scope, len);
-                            let store = ab.get_backing_store();
-                            for (i, &b) in bytes.iter().enumerate() {
-                                store[i].set(b);
+                            // Native-fetch marker — bytes encode a
+                            // pending registry id; materialise the
+                            // Response (or rejection) inside V8.
+                            if let Some(id) = crate::fetch_native::unpack_pending(&bytes) {
+                                match crate::fetch_native::materialise_pending(scope, id) {
+                                    Ok(v) => { r.resolve(scope, v); }
+                                    Err(v) => { r.reject(scope, v); }
+                                }
+                            } else {
+                                let len = bytes.len();
+                                let ab = v8::ArrayBuffer::new(scope, len);
+                                let store = ab.get_backing_store();
+                                for (i, &b) in bytes.iter().enumerate() {
+                                    store[i].set(b);
+                                }
+                                let u8a = v8::Uint8Array::new(scope, ab, 0, len).unwrap();
+                                r.resolve(scope, u8a.into());
                             }
-                            let u8a = v8::Uint8Array::new(scope, ab, 0, len).unwrap();
-                            r.resolve(scope, u8a.into());
                         }
                         ResolveValue::Reject(g) => {
                             let v = v8::Local::new(scope, &g);

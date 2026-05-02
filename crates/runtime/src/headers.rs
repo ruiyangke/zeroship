@@ -55,6 +55,21 @@ use zeroship_runtime_macros::{
 // Headers struct
 // ---------------------------------------------------------------------------
 
+/// Fetch §2.2 "headers guard". Per Fetch's `validate` algorithm:
+///
+///   * `None` (= Fetch's "none" guard): no restrictions.
+///   * `Immutable` (= Fetch's "immutable" guard): every mutator throws
+///     TypeError. Set on `Response.error()` headers per Fetch §6.2.4.
+///
+/// The `request` / `response` guards (forbidden-header-name filtering)
+/// are deferred — see fetch-native v2 D-17.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HeadersGuard {
+    #[default]
+    None,
+    Immutable,
+}
+
 #[derive(Default)]
 pub struct Headers {
     /// (name, value) byte pairs in insertion order. Names preserve the
@@ -66,6 +81,9 @@ pub struct Headers {
     /// the cache absorbs the per-`next()` cost when there's no
     /// mutation. None on construction; populated lazily.
     sorted_cache: Option<Vec<(Vec<u8>, Vec<u8>)>>,
+    /// Fetch §2.2 "guard". Default `None` (no restriction). See
+    /// HeadersGuard.
+    guard: HeadersGuard,
 }
 
 // ---------------------------------------------------------------------------
@@ -134,24 +152,55 @@ impl Headers {
     ///      response-header name: return false.
     ///   5. Return true.
     ///
-    /// v1 has no guards (see design "No `guard` field in v1"). Steps
-    /// 2-4 are unreachable; the function returns Ok(true) or throws.
-    /// The shape is preserved so guard-bearing v2 is a single `match`
-    /// branch addition.
+    /// v1 enforces step 1 (always) and step 2 (immutable guard, used
+    /// for `Response.error()`). Steps 3-4 (request/response guards)
+    /// are deferred per design D-17 — they only filter, never throw,
+    /// so future guard expansion stays back-compatible.
     fn validate(&self, name: &[u8], value: &[u8]) -> Result<bool, OpError> {
         if !is_header_name(name) || !is_header_value(value) {
             return Err(OpError::type_error("Invalid header name or value"));
         }
+        if matches!(self.guard, HeadersGuard::Immutable) {
+            return Err(OpError::type_error(
+                "Cannot mutate Headers with immutable guard",
+            ));
+        }
         Ok(true)
     }
 
-    /// Fetch §2.2.1 step 1 of delete/has/get: validate(name, "").
-    /// Empty value is a valid header value (no leading/trailing ws,
-    /// no NUL/LF/CR), so this only checks the name and (in v2) the
-    /// immutable guard.
-    fn validate_name_only(&self, name: &[u8]) -> Result<(), OpError> {
-        self.validate(name, b"")?;
+    /// Like `validate` but for delete (which validates name only). Per
+    /// Fetch §2.2.1 `dom-headers-delete` step 1, delete validates
+    /// (name, "") — that empty value is a valid header value, so this
+    /// is just a name-name check + the guard check.
+    fn validate_for_delete(&self, name: &[u8]) -> Result<bool, OpError> {
+        self.validate(name, b"")
+    }
+
+    /// Name-only well-formedness check used by `get` / `has`. Per
+    /// Fetch §2.2.1 these are queries — they do NOT check the
+    /// immutable guard (the spec validate step is only used by
+    /// mutators).
+    fn validate_query_name(&self, name: &[u8]) -> Result<(), OpError> {
+        if !is_header_name(name) {
+            return Err(OpError::type_error("Invalid header name"));
+        }
         Ok(())
+    }
+
+    /// Set the headers' guard. Used by Response.error() and other
+    /// callers that need to seal headers post-construction.
+    pub fn set_guard(&mut self, g: HeadersGuard) {
+        self.guard = g;
+    }
+
+    /// Append a header bypassing validation/guard checks. Used by
+    /// internal callers (response builders) that need to populate
+    /// headers from network data even on guarded instances. The data
+    /// must already be validated (e.g., parsed from cyper response).
+    #[allow(dead_code)]
+    pub fn list_append_unchecked(&mut self, name: Vec<u8>, value: Vec<u8>) {
+        self.list_append(name, value);
+        self.invalidate_sort_cache();
     }
 
     /// "to append a header" §2.2.1: if list contains a header byte-case-
@@ -563,13 +612,14 @@ impl Headers {
     }
 
     /// `delete(name: ByteString)` — Fetch §2.2.1 `dom-headers-delete`.
-    /// Step 1: validate(name, "") — throws on bad name.
+    /// Step 1: validate(name, "") — throws on bad name AND on
+    /// immutable guard.
     /// Renamed at JS surface from `delete_` to `delete` because the
     /// latter is a Rust keyword.
     #[v8_method]
     #[v8_name = "delete"]
     fn delete_(&mut self, name: ByteString) -> Result<(), OpError> {
-        if !self.validate(name.as_slice(), b"")? {
+        if !self.validate_for_delete(name.as_slice())? {
             return Ok(());
         }
         self.list_delete(name.as_slice());
@@ -579,19 +629,20 @@ impl Headers {
 
     /// `get(name: ByteString) -> ByteString?` — Fetch §2.2.1
     /// `dom-headers-get`. Validate name, then return the joined value
-    /// (set-cookie joins too — un-joined is via `getSetCookie`).
+    /// (set-cookie joins too — un-joined is via `getSetCookie`). Read
+    /// path: does NOT check the immutable guard.
     #[v8_method]
     fn get(&self, name: ByteString) -> Result<Option<Vec<u8>>, OpError> {
-        self.validate_name_only(name.as_slice())?;
+        self.validate_query_name(name.as_slice())?;
         Ok(self.list_get(name.as_slice()))
     }
 
     /// `has(name: ByteString) -> boolean` — Fetch §2.2.1
     /// `dom-headers-has`. Validate name then byte-case-insensitive
-    /// existence check.
+    /// existence check. Read path: does NOT check the immutable guard.
     #[v8_method]
     fn has(&self, name: ByteString) -> Result<bool, OpError> {
-        self.validate_name_only(name.as_slice())?;
+        self.validate_query_name(name.as_slice())?;
         Ok(self
             .list
             .iter()
@@ -989,4 +1040,33 @@ fn iter_factory_callback(
     std::mem::forget(weak);
 
     rv.set(it_obj.into());
+}
+
+// ---------------------------------------------------------------------------
+// External callers: project a Headers wrapper to its native struct
+// ---------------------------------------------------------------------------
+
+/// Set the guard on a Headers V8 wrapper. Caller must guarantee that
+/// `headers_obj` is a Headers wrapper (typically because they just
+/// minted it via the global constructor).
+///
+/// Used by `Response.error()` to seal its empty headers per Fetch
+/// §6.2.4 step 4: "Set response's headers' guard to immutable."
+pub fn seal_immutable(scope: &mut v8::PinScope, headers_obj: v8::Local<v8::Object>) {
+    let ext_v = match headers_obj.get_internal_field(scope, 0) {
+        Some(v) => v,
+        None => return,
+    };
+    let ext: v8::Local<v8::External> = match ext_v.try_into() {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let ptr = ext.value() as *mut Headers;
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: the V8 wrapper owns the Box<Headers> via External; we
+    // hold a transient `&mut` borrow only for the duration of this
+    // call.
+    unsafe { (*ptr).set_guard(HeadersGuard::Immutable) };
 }
