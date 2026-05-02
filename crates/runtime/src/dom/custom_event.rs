@@ -153,6 +153,8 @@ impl CustomEvent {
     /// `customEvent.initCustomEvent(type, bubbles?, cancelable?, detail?)`
     /// — DOM §2.4, legacy method preserved for spec parity. No-op if the
     /// event has already been dispatched (matches `Event.initEvent`).
+    /// `type` is a required arg per IDL — calling without it must throw
+    /// TypeError (WPT `dom/events/CustomEvent.html` subtest 2).
     #[v8_method]
     #[v8_name = "initCustomEvent"]
     fn init_custom_event(
@@ -163,6 +165,16 @@ impl CustomEvent {
         cancelable: v8::Local<v8::Value>,
         detail: v8::Local<v8::Value>,
     ) -> Result<(), OpError> {
+        // Required arg per WebIDL: throw TypeError when called with no
+        // args. (WebIDL marks missing required args as a TypeError; the
+        // macro can't see arg-count from a `Local<Value>` shape, so we
+        // detect "no arg" via `is_undefined()` — the same heuristic
+        // Event::new uses for its required `type` arg.)
+        if ty.is_undefined() {
+            return Err(OpError::type_error(
+                "initCustomEvent(): missing required 'type' argument",
+            ));
+        }
         // Per DOM "If this's dispatch flag is set, then return."
         if self.event.dispatch_flag.get() {
             return Ok(());
