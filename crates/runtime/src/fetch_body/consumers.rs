@@ -131,12 +131,13 @@ fn body_used_getter<T: Body + BodyMarker + 'static>(
     // is disturbed. Disturbed isn't directly observable from JS in a
     // single getter, so we additionally check the wrapper's
     // `__zsBodyUsed` private symbol set by consumers.
-    let used = match &body.stream {
+    let stream_clone = body.stream.borrow().clone();
+    let used = match stream_clone {
         Some(stream_global) => {
-            let stream = v8::Local::new(scope, stream_global.clone());
+            let stream = v8::Local::new(scope, stream_global);
             stream_disturbed_or_used(scope, this, stream)
         }
-        None => false,
+        None => check_used_marker(scope, this),
     };
     rv.set(v8::Boolean::new(scope, used).into());
 }
@@ -230,12 +231,42 @@ fn body_getter<T: Body + BodyMarker + 'static>(
         rv.set(v8::null(scope).into());
         return;
     };
-    match &body.stream {
-        Some(g) => {
-            let stream_local = v8::Local::new(scope, g.clone());
-            rv.set(stream_local.into());
+    // FIX B: lazy stream materialization. When the body has a
+    // rewindable byte source but no stream yet (response from
+    // native fetch + extract_body's lazy path), build the stream
+    // on first access and cache it.
+    let already_have_stream = body.stream.borrow().clone();
+    if let Some(g) = already_have_stream {
+        let stream_local = v8::Local::new(scope, g);
+        rv.set(stream_local.into());
+        return;
+    }
+    let source_snapshot = body.source.clone();
+    match source_snapshot {
+        Some(crate::fetch_body::body::BodySource::Bytes(rc))
+        | Some(crate::fetch_body::body::BodySource::Blob(rc, _))
+        | Some(crate::fetch_body::body::BodySource::UrlSearchParams(rc))
+        | Some(crate::fetch_body::body::BodySource::FormData(rc, _)) => {
+            // Materialize. If the wrapper was already consumed via
+            // a fast-path consumer (set_body_used_marker), we still
+            // build a stream so observation of `.body` returns a
+            // ReadableStream — but mark it disturbed/closed.
+            let stream_global = crate::fetch_body::extract::build_byte_stream(scope, rc);
+            // Store back into the BodyImpl's RefCell.
+            let local = v8::Local::new(scope, stream_global.clone());
+
+            // If already used (fast path consumed already), flip
+            // the disturbed flag on the new stream too so the spec
+            // observable state is consistent.
+            if check_used_marker(scope, this) {
+                let _ = crate::streams::readable::with_rs_state(scope, local, |s| {
+                    s.disturbed.set(true);
+                });
+            }
+            *body.stream.borrow_mut() = Some(stream_global);
+            rv.set(local.into());
         }
-        None => {
+        Some(crate::fetch_body::body::BodySource::Stream) | None => {
             rv.set(v8::null(scope).into());
         }
     }
@@ -281,23 +312,31 @@ fn pre_flight<T: Body + BodyMarker + 'static>(
         }
     };
 
-    // Empty-body short-circuit.
-    let stream_global = match &body.stream {
-        Some(g) => g.clone(),
-        None => {
-            // Body is null even if a source is somehow present —
-            // matches the original behaviour of returning empty bytes.
-            return Ok(PreFlight::EmptyBody);
-        }
-    };
-
     // Snapshot the source for the fast-path probe. Cheap (Rc clone
     // on Bytes/Blob/UrlSearchParams/FormData; nothing on Stream/None).
     let source_snapshot = body.source.clone();
 
-    // bodyUsed?
-    let stream_local = v8::Local::new(scope, stream_global.clone());
-    if stream_disturbed_or_used(scope, this, stream_local) {
+    // Empty-body short-circuit. Body is conceptually null when
+    // both the stream and source are absent (FIX B's lazy-stream
+    // path keeps stream=None even when source is present).
+    let stream_global: Option<v8::Global<v8::Object>> = body.stream.borrow().clone();
+    if stream_global.is_none() && source_snapshot.is_none() {
+        return Ok(PreFlight::EmptyBody);
+    }
+
+    // bodyUsed? When the stream exists, ask it. When the stream has
+    // not been materialized yet (FIX B), the only way `bodyUsed`
+    // could be true is via the wrapper's `__zsBodyUsed` symbol.
+    if let Some(stream_g) = &stream_global {
+        let stream_local = v8::Local::new(scope, stream_g.clone());
+        if stream_disturbed_or_used(scope, this, stream_local) {
+            return Err(rejected_promise_global(
+                scope,
+                ErrorKind::Type,
+                &format!("{} body has already been consumed", T::CLASS_LABEL),
+            ));
+        }
+    } else if check_used_marker(scope, this) {
         return Err(rejected_promise_global(
             scope,
             ErrorKind::Type,
@@ -312,15 +351,21 @@ fn pre_flight<T: Body + BodyMarker + 'static>(
     // bytes directly. Also flip the stream's `disturbed` flag so
     // `bodyUsed` reads true on the spec-compliant path too.
     if let Some(rc) = source_bytes_for_fast_path(source_snapshot) {
-        // Best-effort disturb flag flip on the native stream. For
-        // JS-built streams (no RSState in internal field 0) the
-        // disturb flag isn't ours to flip; the wrapper symbol still
-        // makes `bodyUsed` return true.
-        let _ = crate::streams::readable::with_rs_state(scope, stream_local, |s| {
-            s.disturbed.set(true);
-        });
+        if let Some(stream_g) = &stream_global {
+            let stream_local = v8::Local::new(scope, stream_g.clone());
+            let _ = crate::streams::readable::with_rs_state(scope, stream_local, |s| {
+                s.disturbed.set(true);
+            });
+        }
         return Ok(PreFlight::Bytes(rc));
     }
+
+    // Stream-only path (user-supplied ReadableStream): require the
+    // stream to be present; otherwise treat as empty (defensive —
+    // shouldn't happen in practice).
+    let Some(stream_global) = stream_global else {
+        return Ok(PreFlight::EmptyBody);
+    };
 
     Ok(PreFlight::HasBody { stream_global })
 }

@@ -508,11 +508,34 @@ pub fn materialise_pending<'s>(
     }
 }
 
-/// Build a JS Response object via `new Response(body, init)`, then
-/// patch url / redirected (which the constructor doesn't accept).
+/// Build a JS Response object directly from algorithm output.
+///
+/// FIX B (perf): instead of running `new Response(body, init)` which
+/// re-extracts the body bytes (Uint8Array → Vec<u8> ptr::copy →
+/// Rc<Vec<u8>> + builds a JS ReadableStream wrapping the bytes), we:
+///
+///   1. Construct the Response wrapper with `null` body so the JS
+///      constructor takes the cheap null-body path (no extract_body
+///      run, no stream wrapper alloc).
+///   2. Move the bytes from `alg.body` into a fresh BodyImpl with
+///      `BodySource::Bytes(rc)` and `stream: None`. The body() getter
+///      and consumer fast paths (FIX C) read source directly.
+///   3. Patch url + redirected as before.
+///
+/// Lazy stream materialization: when the user code reads
+/// `response.body` (rare in benchmarks; common for streaming),
+/// the body getter (added below) lazily builds the JS stream
+/// wrapper on first access.
+///
+/// Eliminates per-fetch:
+///   - 1 ArrayBuffer + Uint8Array alloc (the body argument)
+///   - 1 v8::Function::new_instance JS->JS hop (Response ctor)
+///   - 1 extract_body run (read_buffer_source_bytes copy of body
+///     bytes, build_byte_stream wrapper alloc)
+///   - 1 ReadableStream constructor invocation
 fn build_response_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    mut alg: AlgorithmResponse,
+    alg: AlgorithmResponse,
 ) -> v8::Local<'s, v8::Object> {
     let global = scope.get_current_context().global(scope);
     let class_key = v8::String::new(scope, "Response").unwrap();
@@ -545,44 +568,51 @@ fn build_response_object<'s>(
         init.set(scope, key.into(), arr.into());
     }
 
-    // Body — Uint8Array view over the bytes. Status-table null-body
-    // statuses (101/103/204/205/304) get null instead.
-    //
-    // FIX A (perf): use `new_backing_store_from_vec` so the Vec's
-    // allocation is moved into V8 as the ArrayBuffer backing store —
-    // zero-copy. The previous loop did `store[i].set(b)` for every
-    // byte, which on a ~15-byte JSON response is fine but on any
-    // realistic response is the dominant cost of fetch().
-    let body_v: v8::Local<v8::Value> = if matches!(alg.status, 101 | 103 | 204 | 205 | 304) {
-        v8::null(scope).into()
-    } else {
-        let body_vec = std::mem::take(&mut alg.body);
-        let len = body_vec.len();
-        if len == 0 {
-            // Empty body — give Response constructor `null` so it
-            // produces an empty stream. Avoids constructing a
-            // zero-length ArrayBuffer just to throw away.
-            v8::null(scope).into()
-        } else {
-            let store = v8::ArrayBuffer::new_backing_store_from_vec(body_vec).make_shared();
-            let ab = v8::ArrayBuffer::with_backing_store(scope, &store);
-            let u8a = v8::Uint8Array::new(scope, ab, 0, len).unwrap();
-            u8a.into()
-        }
-    };
+    // Step 1: construct with null body so the constructor takes
+    // the cheap null-body path. We patch the body in step 2.
+    let null_body = v8::null(scope);
+    let result = class_fn
+        .new_instance(scope, &[null_body.into(), init.into()])
+        .unwrap();
 
-    let result = class_fn.new_instance(scope, &[body_v, init.into()]).unwrap();
-
-    // Patch url / redirected directly via state pointer (Response
-    // constructor doesn't accept those in init).
-    if let Some(raw) = response_state_ptr(scope, result) {
+    // Step 2: install the Rust-side body directly. Skips
+    // extract_body's bytes copy + ReadableStream construction.
+    if let Some(raw) = response_state_ptr_mut(scope, result) {
         // SAFETY: pointer stable for the lifetime of the wrapper.
         let state: &crate::fetch_response::ResponseState = unsafe { &*raw };
         *state.url.borrow_mut() = alg.url;
         *state.redirected.borrow_mut() = alg.redirected;
+
+        // Null-body status set: leave the body as null per spec.
+        if !matches!(alg.status, 101 | 103 | 204 | 205 | 304) {
+            let len = alg.body.len() as u64;
+            let body_rc = std::rc::Rc::new(alg.body);
+            *state.body.borrow_mut() = crate::fetch_body::body::BodyImpl {
+                // Stream stays None until first observation; the body
+                // getter materializes a ReadableStream from `source`
+                // on demand. Keeps the fast path zero-stream-alloc.
+                stream: std::cell::RefCell::new(None),
+                source: Some(crate::fetch_body::body::BodySource::Bytes(body_rc)),
+                length: Some(len),
+            };
+        }
     }
 
     result
+}
+
+fn response_state_ptr_mut<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<'s, v8::Object>,
+) -> Option<*mut crate::fetch_response::ResponseState> {
+    let ext = obj
+        .get_internal_field(scope, 0)
+        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
+    let ptr = ext.value() as *mut crate::fetch_response::ResponseState;
+    if ptr.is_null() {
+        return None;
+    }
+    Some(ptr)
 }
 
 fn response_state_ptr<'s>(

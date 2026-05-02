@@ -19,6 +19,7 @@
 //!   for FormData entries that include Blob/File parts (the length
 //!   depends on multipart serialization which we defer in v1).
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 // ---------------------------------------------------------------------------
@@ -74,15 +75,21 @@ impl BodySource {
 /// is only consulted by extract_body / clone / redirect-rewind. The
 /// `length` is read by Content-Length sets (extract_body sets it on
 /// the request's headers when the source has a known size).
+///
+/// FIX B (perf): the `stream` field is a `RefCell` so we can lazily
+/// materialize the JS ReadableStream wrapper on first observation of
+/// `.body` — fetched responses get `stream: RefCell::new(None)` +
+/// `source: Some(Bytes)`, and consumer fast paths drain the source
+/// without ever building a stream. The body getter materializes one
+/// only when JS code reads `response.body`.
 #[allow(missing_debug_implementations)]
 pub struct BodyImpl {
     /// JS-visible ReadableStream that exposes the body bytes. None
-    /// means the body is conceptually `null` (e.g. `new Response()`,
-    /// `new Request("...")` with no body).
-    ///
-    /// When non-None, the stream is created during extract_body and
-    /// fed by the source (or directly by user-supplied stream).
-    pub stream: Option<v8::Global<v8::Object>>,
+    /// means either:
+    ///   - body is conceptually `null` (then `source` is None too), OR
+    ///   - body has a rewindable source but the stream has not been
+    ///     materialized yet (FIX B lazy-stream path).
+    pub stream: RefCell<Option<v8::Global<v8::Object>>>,
     /// Cheap-clone source snapshot. None for null-body cases.
     pub source: Option<BodySource>,
     /// Known byte length for Content-Length headers. None when:
@@ -96,7 +103,7 @@ pub struct BodyImpl {
 impl Default for BodyImpl {
     fn default() -> Self {
         BodyImpl {
-            stream: None,
+            stream: RefCell::new(None),
             source: None,
             length: None,
         }
@@ -110,9 +117,11 @@ impl BodyImpl {
     }
 
     /// True iff this body is conceptually null (per Fetch §3.1, a body
-    /// is null when `[[body]]` is null).
+    /// is null when `[[body]]` is null). For the FIX B lazy-stream
+    /// case, a body with `stream: None` but `source: Some(...)` is
+    /// NOT null — the stream just hasn't been materialized yet.
     pub fn is_null(&self) -> bool {
-        self.stream.is_none()
+        self.stream.borrow().is_none() && self.source.is_none()
     }
 }
 

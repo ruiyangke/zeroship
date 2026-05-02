@@ -659,7 +659,7 @@ fn response_clone_callback(
     let Some(raw) = brand_check(scope, this) else { return };
     let state: &ResponseState = unsafe { &*raw };
 
-    if let Some(stream_g) = state.body.borrow().stream.clone() {
+    if let Some(stream_g) = state.body.borrow().stream.borrow().clone() {
         let stream = v8::Local::new(scope, stream_g);
         let key = v8::String::new(scope, "locked").unwrap();
         if let Some(v) = stream.get(scope, key.into()) {
@@ -681,18 +681,17 @@ fn response_clone_callback(
     let class_fn: v8::Local<v8::Function> = class_v.try_into().unwrap();
 
     // Body: tee if stream-bodied, re-build from source otherwise.
-    let body_is_stream = state.body.borrow().stream.is_some()
-        && matches!(
-            state.body.borrow().source,
-            Some(crate::fetch_body::body::BodySource::Stream)
-        );
+    let body_is_stream = matches!(
+        state.body.borrow().source,
+        Some(crate::fetch_body::body::BodySource::Stream)
+    ) && state.body.borrow().stream.borrow().is_some();
 
     let body_arg: v8::Local<v8::Value> = if body_is_stream {
-        let stream_g = state.body.borrow().stream.clone().unwrap();
+        let stream_g = state.body.borrow().stream.borrow().clone().unwrap();
         let stream = v8::Local::new(scope, stream_g);
         match tee_stream(scope, stream) {
             Some((left, right)) => {
-                state.body.borrow_mut().stream = Some(v8::Global::new(scope, left));
+                *state.body.borrow().stream.borrow_mut() = Some(v8::Global::new(scope, left));
                 right.into()
             }
             None => {
