@@ -101,14 +101,11 @@ pub const URL_JS: &str = include_str!("embed/url.js");
 /// Embedded crypto polyfill (getRandomValues, SubtleCrypto.digest, base64 helpers).
 pub const CRYPTO_JS: &str = include_str!("embed/crypto.js");
 
-/// Vendored web-streams-polyfill v3.3.3. Provides spec-correct WritableStream,
-/// TransformStream, ByteLengthQueuingStrategy, CountQueuingStrategy,
-/// ReadableStreamBYOBReader, plus tee/pipeTo/pipeThrough on our ReadableStream.
-///
-/// Step-3 cutover deletes this file; native (D-19) takes over. The remaining
-/// references to `__zsPolyfillReadableStream` (in fetch.js's body bridge) are
-/// removed in step 3 alongside the file itself.
-pub const STREAMS_POLYFILL_JS: &str = include_str!("embed/streams-polyfill.js");
+/// `TextEncoderStream` / `TextDecoderStream` — WHATWG Encoding §7.1/§7.2.
+/// Thin TransformStream wrappers around TextEncoder/TextDecoder; ~50 LOC of
+/// JS rather than a separate native class. Loaded AFTER native streams +
+/// the encoding classes are installed.
+pub const TEXT_STREAMS_JS: &str = include_str!("embed/text-streams.js");
 
 /// Embedded Event/CustomEvent/EventTarget polyfill.
 pub const EVENTS_JS: &str = include_str!("embed/events.js");
@@ -684,7 +681,7 @@ pub fn load_polyfills_and_modules(
     setup_globals(scope);
 
     // Load polyfills
-    for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, STREAMS_POLYFILL_JS, NODE_GLOBALS_JS, EVENTS_JS, BLOB_JS, FORMDATA_JS, WEBSOCKET_JS] {
+    for polyfill in [FETCH_JS, URL_JS, CRYPTO_JS, NODE_GLOBALS_JS, EVENTS_JS, BLOB_JS, FORMDATA_JS, WEBSOCKET_JS] {
         let code = v8::String::new(scope, polyfill).unwrap();
         let script = v8::Script::compile(scope, code, None).unwrap();
         script.run(scope).unwrap();
@@ -696,17 +693,22 @@ pub fn load_polyfills_and_modules(
     // construction.
     install_headers(scope);
 
-    // Native WHATWG Streams (D-19 step 2, design
-    // `docs/proposals/streams-native.md`). The 358-LOC value-path
-    // skeleton in `embed/streams.js` is gone; native ReadableStream,
-    // WritableStream, TransformStream, *Controller, *Reader, *Writer,
-    // BYOBReader, BYOBRequest, and the async-iter prototype patches
-    // are the only implementation. The vendored web-streams-polyfill
-    // still loads above so its TextEncoderStream/TextDecoderStream
-    // helpers and tee/pipeTo/pipeThrough wrappers stay available
-    // until step 3 deletes them too. Native install runs AFTER the
-    // polyfill so its global assignments get clobbered.
+    // Native WHATWG Streams (D-19, design
+    // `docs/proposals/streams-native.md`). ReadableStream, WritableStream,
+    // TransformStream, *Controller, *Reader, *Writer, BYOBReader,
+    // BYOBRequest, and the async-iter prototype patches are all
+    // native-backed.
     install_native_streams(scope);
+
+    // TextEncoderStream / TextDecoderStream — pure-JS TransformStream
+    // wrappers, ~50 LOC. Loaded AFTER native streams install so
+    // `globalThis.TransformStream` (and TextEncoder/TextDecoder from
+    // `setup_globals`) are present.
+    {
+        let code = v8::String::new(scope, TEXT_STREAMS_JS).unwrap();
+        let script = v8::Script::compile(scope, code, None).unwrap();
+        script.run(scope).unwrap();
+    }
 
     // Wrap the user's module graph in the bootstrap entry.
     //
@@ -1735,16 +1737,13 @@ pub fn install_headers(scope: &mut v8::PinScope) {
 }
 
 /// Install native WHATWG Streams classes onto `globalThis`. Called
-/// from `load_polyfills_and_modules` after the vendored
-/// web-streams-polyfill has run — its global assignments get clobbered
-/// by the native install, which is intentional per D-19 step 2.
+/// from `load_polyfills_and_modules`.
 ///
 /// Native covers ReadableStream, WritableStream, TransformStream,
 /// *DefaultController, *DefaultWriter, *DefaultReader, BYOBReader,
-/// BYOBRequest, the async-iter prototype patches, ByteLengthQueuingStrategy,
-/// and CountQueuingStrategy. The polyfill's TextEncoderStream /
-/// TextDecoderStream helpers and the legacy tee/pipeTo/pipeThrough
-/// wrappers stay alive until step 3 deletes the polyfill outright.
+/// BYOBRequest, the async-iter prototype patches,
+/// ByteLengthQueuingStrategy, and CountQueuingStrategy. See
+/// `docs/proposals/streams-native.md` for the design (D-19 cutover).
 pub fn install_native_streams(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
     crate::streams::install_native_streams(scope, global);
