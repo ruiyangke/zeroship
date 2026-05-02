@@ -6,15 +6,31 @@
 
 import { CONTROL_URL, CONTROL_KEY } from "./env";
 import { getRequest } from "./request-context";
+import { persistGet, persistSet } from "./_persist.js";
 
-// ─── archive: in-memory stub (ISS-19) ────────────────────────────
+// ─── archive: KV-backed stub (ISS-19) ────────────────────────────
 //
 // The control plane has no `archived` column / endpoint yet. Until
-// then, archive state lives in this module-level Set for the dev
-// process. It's lost on restart and not shared across nodes — fine
-// for V1 UI, documented in ISSUES.md as ISS-19. Persistence + filter
-// support land with the spec §8.3 follow-up.
-const archivedApps = new Set<string>();
+// then, archive state lives in KV (per-user list of archived appIds).
+// V1 dev: KV is the in-memory plugin in the V8 worker — survives HMR
+// module reloads, vanishes on hard worker restart. Production lands a
+// real `archived_at` column per ISS-19's fix path.
+//
+// Scoping: per current user. The dev synthetic user is a single id
+// (`usr_dev`), so the dashboard always reads the same list during dev.
+// In prod the `getRequest()` cookie carries the session and the
+// auth-cookie hash gates per-user reads — mirror that here when the
+// real auth wire is on.
+const ARCHIVE_KEY = "archive-set:usr_dev";
+
+async function loadArchive(): Promise<Set<string>> {
+  const list = await persistGet<string[] | null>(ARCHIVE_KEY, null);
+  return new Set(list ?? []);
+}
+
+async function saveArchive(set: Set<string>): Promise<void> {
+  await persistSet(ARCHIVE_KEY, [...set]);
+}
 
 export interface AppRecord {
   id: string;
@@ -57,31 +73,41 @@ async function proxy<T>(
 }
 
 export async function listApps(): Promise<AppRecord[]> {
-  const apps = await proxy<AppRecord[]>("/api/apps");
-  return apps.map((a) => ({ ...a, archived: archivedApps.has(a.id) }));
+  const [apps, archive] = await Promise.all([
+    proxy<AppRecord[]>("/api/apps"),
+    loadArchive(),
+  ]);
+  return apps.map((a) => ({ ...a, archived: archive.has(a.id) }));
 }
 listApps.config = { id: "apps.listApps" };
 
 export async function getApp(id: string): Promise<AppRecord> {
-  const app = await proxy<AppRecord>(`/api/apps/${encodeURIComponent(id)}`);
-  return { ...app, archived: archivedApps.has(app.id) };
+  const [app, archive] = await Promise.all([
+    proxy<AppRecord>(`/api/apps/${encodeURIComponent(id)}`),
+    loadArchive(),
+  ]);
+  return { ...app, archived: archive.has(app.id) };
 }
 getApp.config = { id: "apps.getApp" };
 
 /**
- * Soft-delete an app. Tracked in the module-level Set above (ISS-19);
- * the control plane has no `archived` column yet, so this is a UI-only
- * filter for now. Returns the new state so the client can update its
- * cache without a refetch round-trip.
+ * Soft-delete an app. Tracked in KV per-user (see ARCHIVE_KEY above)
+ * until the control plane gains a real `archived_at` column (ISS-19).
+ * Returns the new state so the client can update its cache without a
+ * refetch round-trip.
  */
 export async function archiveApp(input: { appId: string }): Promise<{ archived: boolean }> {
-  archivedApps.add(input.appId);
+  const archive = await loadArchive();
+  archive.add(input.appId);
+  await saveArchive(archive);
   return { archived: true };
 }
 archiveApp.config = { id: "apps.archiveApp" };
 
 export async function unarchiveApp(input: { appId: string }): Promise<{ archived: boolean }> {
-  archivedApps.delete(input.appId);
+  const archive = await loadArchive();
+  archive.delete(input.appId);
+  await saveArchive(archive);
   return { archived: false };
 }
 unarchiveApp.config = { id: "apps.unarchiveApp" };
