@@ -40,6 +40,7 @@ export function AdminApps() {
           draft · {(apps ?? []).filter((a) => !a.deploy_hash).length}
         </FilterPill>
         <input
+          aria-label="Search apps"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Search by name or ID…"

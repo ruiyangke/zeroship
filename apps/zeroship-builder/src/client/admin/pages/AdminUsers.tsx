@@ -28,6 +28,7 @@ export function AdminUsers() {
         <FilterPill>paying · 0</FilterPill>
         <FilterPill>free · 1</FilterPill>
         <input
+          aria-label="Search users"
           placeholder="Search by email, name, ID…"
           className="ml-auto px-3 py-1.5 border border-rule bg-white font-serif text-[13px] min-w-[260px] outline-none focus:border-ink"
         />

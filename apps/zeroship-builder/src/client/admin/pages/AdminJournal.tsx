@@ -62,6 +62,7 @@ export function AdminJournal() {
         <FilterPill active={filter === "warn"} onClick={() => setFilter("warn")}>warn</FilterPill>
         <FilterPill active={filter === "error"} onClick={() => setFilter("error")}>error</FilterPill>
         <input
+          aria-label="Filter journal entries"
           placeholder="Filter by app, request id…"
           className="ml-auto px-3 py-1.5 border border-rule bg-white font-serif text-[13px] min-w-[260px] outline-none focus:border-ink"
         />

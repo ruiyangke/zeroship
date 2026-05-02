@@ -97,6 +97,7 @@ export function LogsCanvas({ appId }: LogsCanvasProps) {
         </div>
         <input
           data-testid="logs-search"
+          aria-label="Search logs"
           placeholder="search…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
