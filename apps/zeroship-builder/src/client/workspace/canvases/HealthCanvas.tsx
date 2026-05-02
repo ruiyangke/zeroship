@@ -7,11 +7,16 @@
 //      from the Critic stub via `getQualityScores({appId})`.
 //   3. Incidents — empty state for V1 (no incidents table yet, see
 //      ISSUES.md ISS-17).
-//   4. Performance — placeholder boxes (no metering yet, ISS-18).
+//   4. Performance — defensive log-line parsing for request rate /
+//      error rate / p95 latency. Polls `getAppLogs(appId)` every 5s
+//      and keeps a 24-tick rolling history per metric. Hand-rolled
+//      SVG sparkline (no chart lib). Structured metering still
+//      pending (ISS-18 partial).
 
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
+  getAppLogs,
   getQualityScores,
   sreMonitor,
   type AppRecord,
@@ -36,7 +41,7 @@ export function HealthCanvas({ appId, app }: HealthCanvasProps) {
         <div className="h-12" />
         <Incidents appId={appId} />
         <div className="h-12" />
-        <Performance />
+        <Performance appId={appId} />
       </div>
     </div>
   );
@@ -301,8 +306,107 @@ function FindingCard({ finding }: { finding: SREFindingItem }) {
 }
 
 // ─── 2d · Performance ──────────────────────────────────────────
+//
+// Real perf signals derived from log lines (best-effort; the log
+// format isn't strict). We poll `getAppLogs(appId)` every PERF_POLL_MS
+// and on each tick:
+//   - count HTTP method occurrences → "requests in window" (per-min
+//     extrapolated from total lines)
+//   - count error keywords / total lines → error rate %
+//   - extract `<n>ms` numbers → p50 / p95
+// The latest values feed three KPI tiles; a 24-tick rolling history
+// per metric powers a hand-rolled SVG sparkline. When no logs (or no
+// matching lines), tiles render the original "connect a deploy"
+// placeholder per spec §26 voice.
 
-function Performance() {
+const PERF_POLL_MS = 5_000;
+const PERF_HISTORY = 24;
+const HTTP_METHOD_RE = /\b(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b/i;
+const ERROR_RE = /\b(error|exception|failed|panic|fatal)\b/i;
+// Match "12ms", "12 ms", "1234ms" — but bound the digit run so we
+// don't mistake a 9-digit timestamp for latency. Capture the number.
+const LATENCY_RE = /\b(\d{1,5})\s?ms\b/gi;
+
+interface PerfSnapshot {
+  rpm: number;       // requests-per-minute (approx, from window)
+  errorRate: number; // 0..100
+  p50: number;       // ms (NaN if no samples)
+  p95: number;       // ms (NaN if no samples)
+  hasData: boolean;  // any signal at all this tick
+}
+
+function parsePerf(lines: string[]): PerfSnapshot {
+  if (!lines || lines.length === 0) {
+    return { rpm: 0, errorRate: 0, p50: NaN, p95: NaN, hasData: false };
+  }
+  let requests = 0;
+  let errors = 0;
+  const latencies: number[] = [];
+  for (const line of lines) {
+    if (HTTP_METHOD_RE.test(line)) requests += 1;
+    if (ERROR_RE.test(line)) errors += 1;
+    // Reset regex global state per line.
+    LATENCY_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = LATENCY_RE.exec(line)) !== null) {
+      const n = Number(m[1]);
+      // 0ms is a valid sample; cap at 60s to discard nonsense.
+      if (Number.isFinite(n) && n >= 0 && n <= 60_000) latencies.push(n);
+    }
+  }
+  // The control plane caps log slices, so "rpm" is really "requests
+  // observed in the most recent slice". We label it accordingly in
+  // the tile rather than over-claim a per-minute rate.
+  const errorRate = lines.length > 0 ? (errors / lines.length) * 100 : 0;
+  let p50 = NaN;
+  let p95 = NaN;
+  if (latencies.length > 0) {
+    latencies.sort((a, b) => a - b);
+    p50 = latencies[Math.floor(latencies.length * 0.5)];
+    p95 = latencies[Math.floor(latencies.length * 0.95)] ?? latencies[latencies.length - 1];
+  }
+  const hasData = requests > 0 || errors > 0 || latencies.length > 0;
+  return { rpm: requests, errorRate, p50, p95, hasData };
+}
+
+function Performance({ appId }: { appId: string }) {
+  const { data: lines } = useQuery({
+    queryKey: ["health-perf-logs", appId],
+    // Tolerate 404 (no logs yet) and other transient failures — perf
+    // tiles should degrade to placeholder, not blow up.
+    queryFn: () => getAppLogs(appId).catch(() => [] as string[]),
+    refetchInterval: PERF_POLL_MS,
+    retry: false,
+  });
+
+  const snapshot = useMemo(() => parsePerf(lines ?? []), [lines]);
+
+  // 24-tick rolling history per metric for the sparklines. We push on
+  // every refetch (not every render) — guard with a ref to the last
+  // log-array reference so re-renders from sibling state don't add
+  // duplicate points.
+  const lastSeenRef = useRef<string[] | null>(null);
+  const [history, setHistory] = useState<{
+    rpm: number[];
+    errorRate: number[];
+    p95: number[];
+  }>({ rpm: [], errorRate: [], p95: [] });
+
+  useEffect(() => {
+    if (!lines) return;
+    if (lines === lastSeenRef.current) return;
+    lastSeenRef.current = lines;
+    setHistory((h) => ({
+      rpm: [...h.rpm, snapshot.rpm].slice(-PERF_HISTORY),
+      errorRate: [...h.errorRate, snapshot.errorRate].slice(-PERF_HISTORY),
+      // Render p95 series; substitute 0 for NaN so the polyline stays
+      // valid. The tile's own value formatter handles NaN separately.
+      p95: [...h.p95, Number.isFinite(snapshot.p95) ? snapshot.p95 : 0].slice(
+        -PERF_HISTORY,
+      ),
+    }));
+  }, [lines, snapshot.rpm, snapshot.errorRate, snapshot.p95]);
+
   return (
     <section data-testid="health-performance-section">
       <header className="mb-4">
@@ -310,36 +414,116 @@ function Performance() {
           Performance
         </h2>
         <p className="font-serif text-[14px] text-ink-soft leading-[1.55]">
-          Live latency, error rate, and request volume. Connect a deploy
-          to see real numbers — metering wiring is on the way.
+          Live latency, error rate, and request volume — derived from the
+          log stream. Numbers refresh every 5s.
         </p>
       </header>
       <div className="grid gap-3 grid-cols-1 sm:grid-cols-3">
-        <PerfTile label="p95 latency · 24h" testid="health-perf-latency" />
-        <PerfTile label="error rate · 24h" testid="health-perf-errors" />
-        <PerfTile label="requests · 24h" testid="health-perf-rps" />
+        <PerfTile
+          label="p95 latency"
+          testid="health-perf-latency"
+          value={
+            Number.isFinite(snapshot.p95) ? `${Math.round(snapshot.p95)}ms` : null
+          }
+          series={history.p95}
+          empty={!snapshot.hasData}
+        />
+        <PerfTile
+          label="error rate"
+          testid="health-perf-errors"
+          value={snapshot.hasData ? `${snapshot.errorRate.toFixed(1)}%` : null}
+          series={history.errorRate}
+          empty={!snapshot.hasData}
+        />
+        <PerfTile
+          label="requests · window"
+          testid="health-perf-rps"
+          value={snapshot.hasData ? String(snapshot.rpm) : null}
+          series={history.rpm}
+          empty={!snapshot.hasData}
+        />
       </div>
       <div className="mt-3 font-serif italic text-[12px] text-pencil">
-        Metering pipeline tracked as ISS-18.
+        Best-effort signals from log text. Structured metering tracked as ISS-18.
       </div>
     </section>
   );
 }
 
-function PerfTile({ label, testid }: { label: string; testid: string }) {
+function PerfTile({
+  label,
+  testid,
+  value,
+  series,
+  empty,
+}: {
+  label: string;
+  testid: string;
+  value: string | null;
+  series: number[];
+  empty: boolean;
+}) {
   return (
     <div
       data-testid={testid}
-      className="border border-rule-2 bg-paper-2/40 px-4 py-5"
+      className={
+        "border px-4 py-5 " +
+        (empty ? "border-rule-2 bg-paper-2/40" : "border-ink/30 bg-paper")
+      }
     >
       <div className="label-uc mb-2">{label}</div>
-      <div className="font-serif italic font-medium text-[28px] text-pencil mb-1">
-        —
+      <div
+        className={
+          "font-serif italic font-medium text-[28px] mb-1 " +
+          (empty ? "text-pencil" : "text-ink")
+        }
+      >
+        {value ?? "—"}
       </div>
-      <div className="font-serif italic text-[12px] text-pencil leading-[1.4]">
-        Connect a deploy to see live performance.
-      </div>
+      {empty ? (
+        <div className="font-serif italic text-[12px] text-pencil leading-[1.4]">
+          Connect a deploy to see live performance.
+        </div>
+      ) : (
+        <Sparkline values={series} testid={`${testid}-spark`} />
+      )}
     </div>
+  );
+}
+
+// Hand-rolled SVG sparkline — no chart lib. Maps `values` linearly
+// onto a 100×30 viewBox, polyline only. Single point renders as a
+// flat line. Empty input renders nothing (caller already handled
+// empty state).
+function Sparkline({ values, testid }: { values: number[]; testid?: string }) {
+  if (values.length === 0) return null;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const stepX = values.length > 1 ? 100 / (values.length - 1) : 0;
+  const points = values
+    .map((v, i) => {
+      const x = i * stepX;
+      // Invert y so larger values sit higher.
+      const y = 28 - ((v - min) / span) * 26;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  return (
+    <svg
+      data-testid={testid}
+      viewBox="0 0 100 30"
+      preserveAspectRatio="none"
+      className="w-full h-8 text-ink/60"
+    >
+      <polyline
+        points={points}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        vectorEffect="non-scaling-stroke"
+      />
+    </svg>
   );
 }
 

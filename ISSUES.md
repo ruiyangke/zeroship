@@ -584,11 +584,12 @@ A trailing italic line points readers at this issue.
 
 ---
 
-## ISS-18 · Performance metering pipeline missing — HealthCanvas shows placeholders
+## ISS-18 · Performance metering pipeline missing — HealthCanvas signals derived from log lines
 
-**Status:** open
-**Severity:** medium — the HealthCanvas Performance section is fully
-gated on metering data that doesn't flow from the worker yet.
+**Status:** partial — sparklines wired from log-text parsing; structured metering still pending
+**Severity:** medium — the HealthCanvas Performance section now shows
+real numbers, but they're derived from defensive log-line parsing
+rather than a structured metering pipeline.
 **First observed:** 2026-05-01, building the Health canvas.
 **Component:** `crates/runtime` (instrumentation) + `crates/control`
 (aggregation API)
@@ -605,12 +606,25 @@ has the `zeroship.meter.*` primitive in `crates/plugin-*` but:
 - There's no time-series store wired up (Prometheus / VictoriaMetrics /
   ClickHouse — choice deferred).
 
-### Workaround in use
+### Current mitigation (2026-05-01)
 
-HealthCanvas Performance section renders three placeholder tiles
-(p95 latency · error rate · requests, all 24h) with em-dashes and
-the hint "Connect a deploy to see live performance." A trailing
-italic line points at this issue.
+HealthCanvas Performance section now polls `getAppLogs(appId)` every
+5s and derives three signals from log text using loose regexes:
+
+- **requests** — count of lines matching `\b(GET|POST|PUT|…)\b`
+- **error rate** — count of lines matching `\b(error|exception|failed|panic|fatal)\b` ÷ total lines
+- **p95 latency** — extracts `\b(\d{1,5})\s?ms\b` numbers, sorts, picks the 95th-percentile sample
+
+A 24-tick rolling history per metric powers a hand-rolled SVG
+sparkline (no chart library — single `<polyline>` in a 100×30
+viewBox). When no log lines match (or the slice is empty), tiles
+fall back to the original "Connect a deploy to see live performance"
+placeholder.
+
+The data quality is bound by the log format. Apps that don't log in
+a method/latency-ms style will show zeros / em-dashes; that's by
+design — better to show nothing than to fabricate numbers. Structured
+metering (the proper fix below) replaces this once landed.
 
 ### Fix path
 
