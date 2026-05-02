@@ -49,7 +49,11 @@ impl Default for URL {
             // `#[v8_class]`-generated default constructor (which is
             // never reached on the JS surface because `new URL()` calls
             // the user-defined constructor with at least the input arg).
-            inner: ada_url::Url::parse("about:blank", None).unwrap(),
+            // m3: explicit-message expect so a future regression in ada-url's
+            // about:blank handling fails loud at boot rather than as a
+            // generic `unwrap` panic.
+            inner: ada_url::Url::parse("about:blank", None)
+                .expect("ada-url must always parse 'about:blank'"),
             search_params: None,
         }
     }
@@ -109,7 +113,11 @@ impl URL {
                 inner,
                 search_params: None,
             }),
-            Err(_) => Err(OpError::type_error(format!("Invalid URL: {input_s}"))),
+            // m1: do NOT echo the input into the error message — Chrome /
+            // Firefox / Node use a fixed message ("Invalid URL"), and
+            // echoing the input risks leaking sensitive data (e.g.
+            // tokens embedded in URLs) into logs.
+            Err(_) => Err(OpError::type_error("Invalid URL")),
         }
     }
 
@@ -165,8 +173,9 @@ impl URL {
     ) -> Result<(), OpError> {
         let s = read_usv_string(scope, value)
             .ok_or_else(|| OpError::type_error("Cannot convert href to USVString"))?;
+        // m1: don't echo `s` into the error message — see URL::new.
         if self.inner.set_href(&s).is_err() {
-            return Err(OpError::type_error(format!("Invalid URL: {s}")));
+            return Err(OpError::type_error("Invalid URL"));
         }
         // Per spec the SameObject searchParams object stays valid; only
         // its underlying list gets repopulated. Bound mode re-syncs on
