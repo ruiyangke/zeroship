@@ -63,6 +63,13 @@ pub struct TSControllerState {
     pub flush_algorithm: AlgorithmFn,
     /// Cancel algorithm: `(reason) -> Promise<undefined>`.
     pub cancel_algorithm: AlgorithmFn,
+    /// `[[finishPromise]]` — shared across the three terminal paths
+    /// (sink.close, sink.abort, source.cancel). Spec §5.4.6.{8,9,10}:
+    /// each algorithm's first step is "if [[finishPromise]] is not
+    /// undefined → return [[finishPromise]]". Only the Promise is
+    /// cached; the Resolver is owned by whichever path FIRST allocated
+    /// it (and only that path settles it).
+    pub finish_promise: RefCell<Option<v8::Global<v8::Promise>>>,
 }
 
 impl TSControllerState {
@@ -75,8 +82,45 @@ impl TSControllerState {
             transform_algorithm,
             flush_algorithm,
             cancel_algorithm,
+            finish_promise: RefCell::new(None),
         }
     }
+}
+
+/// `EnsureFinishPromise(controller)`: per spec §5.4.6.{8,9,10} step 2.
+///
+/// If `[[finishPromise]]` is already set, return the cached Promise and
+/// `None` (the prior caller owns the resolver). Otherwise allocate a new
+/// pending Promise + Resolver pair, cache the Promise (so subsequent
+/// callers see the same identity), and return both.
+///
+/// Returns `(promise, resolver_or_none)`:
+/// - `resolver_or_none = Some(resolver)` if THIS call created the slot —
+///   the caller MUST settle it.
+/// - `resolver_or_none = None` if another in-flight call already owns
+///   the resolver — the caller MUST NOT settle (the prior caller will).
+fn ensure_finish_promise<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    controller: v8::Local<v8::Object>,
+) -> Option<(v8::Local<'s, v8::Promise>, Option<v8::Local<'s, v8::PromiseResolver>>)> {
+    // Fast path: already cached.
+    let existing = with_state(scope, controller, |s| s.finish_promise.borrow().clone()).flatten();
+    if let Some(p_g) = existing {
+        return Some((v8::Local::new(scope, &p_g), None));
+    }
+
+    // Allocate; cache promise; the resolver is returned to the caller for
+    // settling and is NOT cached (only the Promise is — for identity in
+    // subsequent callers).
+    let resolver = v8::PromiseResolver::new(scope)?;
+    let promise = resolver.get_promise(scope);
+    let promise_g = v8::Global::new(scope, promise);
+
+    with_state(scope, controller, |s| {
+        *s.finish_promise.borrow_mut() = Some(promise_g);
+    });
+
+    Some((promise, Some(resolver)))
 }
 
 // ---------------------------------------------------------------------------
@@ -538,28 +582,12 @@ pub fn transform_stream_default_sink_write<'s>(
 /// Spec:
 ///  1. controller = stream.[[controller]].
 ///  2. If controller.[[finishPromise]] is not undefined → return finishPromise.
-///  3. ws = stream.[[writable]]. // the spec uses for assertion purposes.
-///  4. controller.[[finishPromise]] = a new pending promise (resolver_g stored).
+///  3. ws = stream.[[writable]]. // assertion
+///  4. controller.[[finishPromise]] = a new pending promise (resolver stored).
 ///  5. cancelPromise = controller.[[cancelAlgorithm]](reason).
 ///  6. ClearAlgorithms.
-///  7. cancelPromise.then(
-///       _ => {
-///         if ws.state === "errored": reject finishPromise with ws.storedError;
-///         else: ReadableStreamDefaultControllerError(rs.controller, reason);
-///               resolve finishPromise.
-///       },
-///       reason2 => {
-///         ReadableStreamDefaultControllerError(rs.controller, reason2);
-///         reject finishPromise.
-///       }
-///     ).
+///  7. cancelPromise.then(...) → settle finishPromise.
 ///  8. Return finishPromise.
-///
-/// In our v1 we collapse step 7 to a simpler equivalent: invoke cancel,
-/// react inline. We DO NOT cache finishPromise across simultaneous abort+
-/// close calls; the spec algorithm for the "second caller returns same
-/// promise" pattern lives behind a priv-sym slot we'll add when pipeTo
-/// lands. Tests in this dispatch don't exercise that path.
 pub fn transform_stream_default_sink_abort<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     stream: v8::Local<v8::Object>,
@@ -569,6 +597,18 @@ pub fn transform_stream_default_sink_abort<'s>(
     let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) else {
         return algorithms::resolved_undefined_promise(scope);
     };
+
+    // Step 2/4: reuse cached finish promise if any; otherwise allocate.
+    let (result_promise, result_resolver) = match ensure_finish_promise(scope, controller) {
+        Some(t) => t,
+        None => return algorithms::resolved_undefined_promise(scope),
+    };
+    let Some(result_resolver) = result_resolver else {
+        // Another in-flight terminal call already owns the resolver. Just
+        // return the shared Promise — they'll settle it.
+        return result_promise;
+    };
+
     let snap = with_state(scope, controller, |s| algorithm_snapshot(&s.cancel_algorithm))
         .flatten();
     transform_stream_default_controller_clear_algorithms(scope, controller);
@@ -579,12 +619,8 @@ pub fn transform_stream_default_sink_abort<'s>(
 
     let stream_g = v8::Global::new(scope, stream);
     let reason_g = v8::Global::new(scope, reason);
-
-    let result_resolver = v8::PromiseResolver::new(scope).unwrap();
-    let result_promise = result_resolver.get_promise(scope);
     let result_resolver_g = v8::Global::new(scope, result_resolver);
     let result_resolver_g2 = result_resolver_g.clone();
-
     let stream_g2 = stream_g.clone();
     let reason_g2 = reason_g.clone();
 
@@ -636,7 +672,6 @@ pub fn transform_stream_default_sink_abort<'s>(
             }
             let resolver = v8::Local::new(scope, &result_resolver_g2);
             resolver.reject(scope, exc);
-            // Suppress unused warnings on reason_g2.
             let _ = &reason_g2;
         })),
     );
@@ -668,6 +703,15 @@ pub fn transform_stream_default_sink_close<'s>(
         return algorithms::resolved_undefined_promise(scope);
     };
 
+    // Spec §5.4.6.9 step 2: shared finishPromise.
+    let (result_promise, result_resolver) = match ensure_finish_promise(scope, controller) {
+        Some(t) => t,
+        None => return algorithms::resolved_undefined_promise(scope),
+    };
+    let Some(result_resolver) = result_resolver else {
+        return result_promise;
+    };
+
     let snap = with_state(scope, controller, |s| algorithm_snapshot(&s.flush_algorithm))
         .flatten();
     transform_stream_default_controller_clear_algorithms(scope, controller);
@@ -679,8 +723,6 @@ pub fn transform_stream_default_sink_close<'s>(
 
     let stream_g = v8::Global::new(scope, stream);
     let stream_g2 = stream_g.clone();
-    let result_resolver = v8::PromiseResolver::new(scope).unwrap();
-    let result_promise = result_resolver.get_promise(scope);
     let result_resolver_g = v8::Global::new(scope, result_resolver);
     let result_resolver_g2 = result_resolver_g.clone();
 
@@ -762,6 +804,16 @@ pub fn transform_stream_default_source_cancel<'s>(
     let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) else {
         return algorithms::resolved_undefined_promise(scope);
     };
+
+    // Spec §5.4.6.10 step 2: shared finishPromise.
+    let (result_promise, result_resolver) = match ensure_finish_promise(scope, controller) {
+        Some(t) => t,
+        None => return algorithms::resolved_undefined_promise(scope),
+    };
+    let Some(result_resolver) = result_resolver else {
+        return result_promise;
+    };
+
     let snap = with_state(scope, controller, |s| algorithm_snapshot(&s.cancel_algorithm))
         .flatten();
     transform_stream_default_controller_clear_algorithms(scope, controller);
@@ -774,8 +826,6 @@ pub fn transform_stream_default_source_cancel<'s>(
     let stream_g2 = stream_g.clone();
     let reason_g = v8::Global::new(scope, reason);
     let reason_g2 = reason_g.clone();
-    let result_resolver = v8::PromiseResolver::new(scope).unwrap();
-    let result_promise = result_resolver.get_promise(scope);
     let result_resolver_g = v8::Global::new(scope, result_resolver);
     let result_resolver_g2 = result_resolver_g.clone();
 
