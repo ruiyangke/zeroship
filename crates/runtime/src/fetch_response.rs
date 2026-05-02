@@ -200,8 +200,8 @@ pub fn try_native_response_body(
         None => {
             // BodyImpl with stream but no source — shouldn't happen in
             // practice (extract_body always sets one or the other), but
-            // treat as Stream for safety: the kernel will call
-            // __zsBeginStreamForward and pump whatever's there.
+            // treat as Stream for safety: the kernel will run the
+            // response forwarder and pump whatever's there.
             Some(NativeResponseBody::Stream)
         }
     }
