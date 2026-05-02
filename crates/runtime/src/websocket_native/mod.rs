@@ -19,6 +19,10 @@ pub mod algorithms;
 pub mod constants;
 
 #[cfg(feature = "runtime_native_websocket")]
+pub mod frame_reader;
+#[cfg(feature = "runtime_native_websocket")]
+pub mod frame_writer;
+#[cfg(feature = "runtime_native_websocket")]
 pub mod handshake;
 #[cfg(feature = "runtime_native_websocket")]
 pub mod network;
