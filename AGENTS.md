@@ -205,16 +205,16 @@ cargo test -p zeroship-gateway
 cargo test -p zeroship-runtime --lib
 cargo test -p compio-postgres -- --test-threads=1   # needs DB
 
-# Web Platform Tests (WPT) — pulled directly from a shallow git
-# submodule at crates/runtime/tests/wpt/ (co-located with the runners
-# that consume it). depth=1 is enough — the submodule pack is ~119 MB
-# regardless of working-tree filtering, so sparse-checkout adds
-# complexity without saving disk space. The `crates/runtime/tests/
+# Web Platform Tests (WPT) — fetched on demand by setup-wpt.sh, NOT
+# tracked in git. The script shallow-clones a pinned commit into
+# crates/runtime/tests/wpt/ (gitignored). The `crates/runtime/tests/
 # wpt_*.rs` runners `include_str!` upstream files verbatim (test
 # files stay pristine — any shims/skips/sentinels live in the Rust
 # runner code).
 # After cloning the repo:
-git submodule update --init --depth=1               # ~140 MB .git pack, ~930 MB working tree
+./crates/runtime/tests/setup-wpt.sh                 # ~930 MB working tree at depth=1
+# Bump the pin via WPT_COMMIT env var; default is the last-known-good
+# commit baked into setup-wpt.sh. Re-run after pulling if the pin moves.
 
 # E2E + benchmarks
 ./tests/e2e_platform.sh

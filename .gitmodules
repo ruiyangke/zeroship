@@ -1,4 +1,0 @@
-[submodule "tests/wpt"]
-	path = crates/runtime/tests/wpt
-	url = https://github.com/web-platform-tests/wpt.git
-	shallow = true

@@ -13,3 +13,7 @@ perf.data
 perf-compio.data
 .worktrees/
 .superpowers/
+
+# WPT is fetched on demand by crates/runtime/tests/setup-wpt.sh, not
+# tracked. Keeps .git small (the WPT depth=1 pack is ~140 MB).
+crates/runtime/tests/wpt/
