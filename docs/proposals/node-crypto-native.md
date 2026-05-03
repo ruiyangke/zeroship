@@ -115,7 +115,7 @@ Post-completion: file as a date-prefixed ADR under `docs/decisions/` (mirroring 
 | **D-N7** | Buffer integration: accept inputs as a union of `Buffer | Uint8Array | DataView | ArrayBuffer | TypedArray | string`, materialise to `Vec<u8>` (or `&[u8]` when the lifetime works) at the entry point. Return `Buffer` from APIs Node specifies as returning Buffer (almost everything binary), `string` from APIs Node specifies as returning string (`digest('hex')`, `Sign.sign(privateKey, 'base64')`). The Buffer materialisation calls into unenv's Buffer (`new Buffer(arrayBuffer, byteOffset, byteLength)` via the `Buffer.from` static — same as the JS shim does today, but lifted into a single Rust helper). Buffer detection is loose: any Uint8Array works as a Buffer for input purposes (matches Node's behaviour — Node never type-checks input shapes; any TypedArray with the right bytes is fine). For OUTPUT, we mint Buffer instances by calling `Buffer.from(uint8Array)` via the V8 boundary. | Native-implementing Buffer ourselves would be a 600 LOC project (Buffer is a bigger surface than CryptoKey: alloc/allocUnsafe, write/writeBigInt64BE/writeUInt8/.., readDoubleBE/.., toString with 7 encodings, equals/compare/indexOf, subarray, slice, swap16/32/64, the encoding registry...). unenv's Buffer is correct enough that npm packages don't crash on it. The cost of a `Buffer.from(...)` round-trip per crypto call is ~100 ns — invisible next to a 5 µs hash. We document this as the v1 trade; a future Buffer-native ADR may revisit. | §III |
 | **D-N8** | Error mapping: a single `OpError` enum (the existing one, extended with a `NodeError(code: &'static str)` variant) routes to the right surface at throw time. The macro's `gen_throw_error` arm checks the variant: `NodeError(code)` constructs a JS Error / TypeError / RangeError (per a small table) and sets `error.code = code`; the existing `DomException(name)` arm stays for the WebCrypto surface. The kernel returns `KernelError`, which is mapped to either `OpError::DomException` (when called from `crypto_native/`) or `OpError::NodeError` (when called from `crypto_node/`) at the surface boundary. | Node's `e.code` is the contract npm packages check (`if (e.code === "ERR_CRYPTO_OPERATION_FAILED") retry()`). Throwing a generic Error breaks them. The kernel can't decide which surface to throw for — the surface knows. So map at the boundary. workerd does the same shape (`KJ_REQUIRE(...)` + per-surface adapter). | §VII |
 | **D-N9** | `Hash` class: `update(data, inputEncoding?)` returns `this` for chaining; `digest(outputEncoding?)` returns `Buffer` if no encoding else string in the requested encoding (`hex` / `base64` / `base64url` / `latin1` / `binary`). `copy(options?)` returns a fresh Hash with the same in-progress state. Throws `ERR_CRYPTO_HASH_FINALIZED` on any post-`digest()` update. Backed by `kernel::DigestContext`. | Direct Node parity. The encoding registry is small (5 named output encodings + 6 named input encodings = 11 strings); a phf::Map keyed on encoding string drives the conversion. | §V.2 |
-| **D-N10** | `Hmac` class: `update(data, inputEncoding?)` and `digest(outputEncoding?)` mirror Hash; `copy(options?)` is intentionally absent on Hmac in Node (hmac.copy doesn't exist) — we match. Backed by `kernel::HmacContext`. | Node has Hash.copy but not Hmac.copy (a quirk of OpenSSL EVP_MD_CTX vs HMAC_CTX). Some npm packages (older `passport-jwt` versions) crash if Hmac has a `.copy` method that throws when called the way Hash.copy works — they assume same shape. We match Node's omission exactly. | §V.3 |
+| **D-N10** | `Hmac` class: `update(data, inputEncoding?)` and `digest(outputEncoding?)` mirror Hash; `copy(options?)` is intentionally absent on Hmac in Node (`hmac.copy` doesn't exist) — we match. Backed by `kernel::HmacContext`. (**counter-citation against critic CRITICAL #10**: critic claimed Node v17+ added `Hmac.prototype.copy`. Verified against https://github.com/nodejs/node/blob/main/lib/internal/crypto/hash.js — only `Hash.prototype.copy` is defined; the `Hmac` class extends `Hash` for `update` / `digest` / `_transform` / `_flush` via prototype assignment but `copy` is NOT among the inherited methods. Verified against https://nodejs.org/api/crypto.html#class-hmac — the documented method list is `digest`, `update`. v1's omission was correct; we keep it.) | Node has Hash.copy but not Hmac.copy (a quirk of OpenSSL EVP_MD_CTX vs HMAC_CTX). Some npm packages (older `passport-jwt` versions) crash if Hmac has a `.copy` method that throws when called the way Hash.copy works — they assume same shape. We match Node's omission exactly. | §V.3 |
 | **D-N11** | `Cipher` / `Decipher` classes: `update(data, inputEncoding?, outputEncoding?)` returns Buffer (or string if outputEncoding); `final(outputEncoding?)` flushes the last block + tag; `setAAD(buffer, options?)` for GCM/CCM AAD; `setAuthTag(buffer)` for Decipher post-data tag inject; `getAuthTag()` for Cipher post-final tag emit; `setAutoPadding(boolean)` for CBC PKCS#7 control. Backed by `kernel::CipherContext`. The class is created via `crypto.createCipheriv(algorithm, key, iv, options?)` factories — `createCipher` (deprecated, derives key from password) is intentionally NOT shipped (Node deprecated it because the KDF is broken; a creator app calling `createCipher` deserves the failure). | Direct Node parity for `createCipheriv`. Skipping `createCipher` is the workerd / Deno consensus — the deprecated API has weak KDF properties (EVP_BytesToKey single-iteration MD5). Throwing `ERR_CRYPTO_DEPRECATED_API` with a doc URL to switch to `createCipheriv` is the right move. | §V.4 |
 | **D-N12** | `Sign` / `Verify` classes: `update(data, inputEncoding?)` and `sign(privateKey, outputEncoding?)` / `verify(publicKey, signature, signatureEncoding?)`. Internally compute the digest streaming-style, then run the asymmetric op once at finalisation. Accept `privateKey` / `publicKey` as `KeyObject`, `CryptoKey`, PEM string, DER Buffer, or `{ key, format, type, passphrase }` options object — Node's union type. The encoding helper at the boundary materialises any of these to a kernel-friendly key handle. | Sign / Verify are the "DigestSign" pattern in OpenSSL (EVP_DigestSignInit + Update + Final). The streaming API saves the user from buffering the message; the kernel's `SignContext` mirrors EVP_DigestSignContext. | §V.5 |
 | **D-N13** | `KeyObject` / `PublicKeyObject` / `PrivateKeyObject` / `SecretKeyObject`: parent + three subclasses (`#[v8_inherit]`). Parent has `.type` (returns "secret" / "public" / "private"), `.asymmetricKeyType` (returns null for secret), `.asymmetricKeyDetails` (algorithm-specific dict), `.symmetricKeySize` (bytes for secret; null for asymmetric), `.export(options) -> Buffer | string | object`, `.equals(other)`. Subclasses add nothing functional — they exist for `instanceof` discrimination. Internal-field 0 holds `Box<KeyObjectState>` carrying an `Arc<KeyMaterial>`. The static `KeyObject.from(cryptoKey)` constructor accepts a `CryptoKey` and clones the Arc. | Node's type model verbatim. Some npm packages (older `jose`, `node-forge`) check `instanceof PrivateKeyObject` to distinguish privates; missing the subclass means those checks fail. | §IV |
@@ -769,7 +769,7 @@ The `emit_deprecation_warning_once` helper memoises per (isolate, deprecation-co
 | `KeyObject` (class) | 1 | `crypto_node/key_object.rs::KeyObject` | sync | C |
 | `KeyObject.from(cryptoKey)` (static) | 1 | bridge to existing CryptoKey via Arc share (D-N4) | sync | C |
 | `KeyObject.prototype.export(options) -> Buffer | string | object` | 1 | `kernel::pem::emit` / `kernel::der::emit` / `kernel::jwk::export` | sync | C |
-| `KeyObject.prototype.equals(other) -> boolean` | 1 | constant-time compare of material via `aws_lc_rs::constant_time` | sync | C |
+| `KeyObject.prototype.equals(other) -> boolean` (addresses critic CRITICAL #13: `type` first, length pre-check non-CT, then constant-time material compare; rejects "same logical key, different stored encoding" mismatch consistently) | 1 | see §IV.7a | sync | C |
 | `KeyObject.prototype.type` (getter) | 1 | direct field read | sync | C |
 | `KeyObject.prototype.asymmetricKeyType` (getter) | 1 | derived from `KeyMaterial` enum variant | sync | C |
 | `KeyObject.prototype.asymmetricKeyDetails` (getter) | 1 | derived from `KeyMaterial` enum variant | sync | C |
@@ -1338,6 +1338,40 @@ pub struct RsaPrivateComponents {
 `zeroize::Zeroizing<Vec<u8>>` has `Drop` that calls `.zeroize()` (volatile-write zeros, compiler-fence). Already a transitive dep via aws-lc-rs.
 
 The Arc<KeyMaterial> share means zeroize fires when the LAST reference drops — which happens when both the CryptoKey and KeyObject wrappers are GC'd. Browser-side WeakRef-tracking libraries that hold references will keep the bytes alive; that's the documented contract of holding a key handle.
+
+### IV.7a. `keyObject.equals(other)` semantics (addresses critic CRITICAL #13, MAJOR #20)
+
+Per https://nodejs.org/api/crypto.html#keyobjectequalsotherkeyobject:
+> Returns: `<boolean>` `true` or `false` depending on whether the keys have **exactly the same type, value, and parameters**. This method is not constant time.
+
+Note Node's spec says "not constant time" for the OUTER equality check, but the byte compare itself uses constant-time primitives. The cited "exact type, value, parameters" implies three checks:
+
+1. **Type equality**: `this.type === other.type` (cheap, non-CT).
+2. **Algorithm-parameter equality**: e.g. for asymmetric keys, `asymmetricKeyType` plus relevant fields of `asymmetricKeyDetails`. For RSA: same modulus + same publicExponent. For EC: same namedCurve. For symmetric: same byte length.
+3. **Material byte equality**: the underlying bytes (for symmetric: raw bytes; for asymmetric: the canonical SPKI/PKCS8 DER form). Length pre-check is non-CT (MAJOR #20 — `aws_lc_rs::constant_time::verify_slices_are_equal` returns Err if lengths differ; we explicitly check first to avoid reaching the constant-time path with mismatched lengths).
+
+Implementation:
+
+```rust
+fn equals(&self, scope: &mut v8::PinScope, other: v8::Local<v8::Value>) -> Result<bool, OpError> {
+    let Some(other_state) = downcast_keyobject(scope, other) else { return Ok(false); };
+    if self.key_type != other_state.key_type { return Ok(false); }
+    // Compare algorithm-parameter equality (the asymmetricKeyType/details/symmetricKeySize).
+    if !same_algorithm_parameters(&self.material, &other_state.material) { return Ok(false); }
+    // Materialise both keys to a canonical byte form for constant-time compare.
+    // For symmetric: the raw bytes. For asymmetric: the canonical PKCS#8 (private)
+    // or SPKI (public) DER. Two RSA keys exported as PKCS1 vs PKCS8 of the same
+    // underlying material will compare equal because we compare their canonical form.
+    let a = canonical_bytes(&self.material);
+    let b = canonical_bytes(&other_state.material);
+    if a.len() != b.len() { return Ok(false); }      // length pre-check (non-CT)
+    Ok(aws_lc_rs::constant_time::verify_slices_are_equal(&a, &b).is_ok())
+}
+```
+
+The CRITICAL #13 concern that "two RSA keys exported as PKCS1 vs PKCS8 of the same key compare false" is resolved by canonicalising to PKCS#8/SPKI before comparing. Node does the same — `KeyObject` internally normalises so equality of "logical key material" works.
+
+For public-vs-private same-key-pair, Node's spec correctly returns false (they have different `type`), so step 1 catches that.
 
 ## V. Streaming primitives
 
@@ -2047,39 +2081,68 @@ Cipher.update produces output bytes equal to input bytes (modulo block padding f
 ### VI.5. The `randomBytes` async path (D-N17)
 
 ```rust
-pub fn random_bytes_sync<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    size: u32,
-) -> Result<v8::Local<'s, v8::Value>, OpError> {
-    if size > 2147483647 {
+/// (addresses critic CRITICAL #11 + minor m-7): the `size` parameter takes
+/// `i32` so negative-input validation matches Node (which throws `RangeError`
+/// on negative size) and the upper bound is `Buffer.kMaxLength = 0x7fffffff`
+/// per https://nodejs.org/api/crypto.html#cryptorandombytessize-callback.
+/// Validation lives in a single `validate_random_size` helper used by both
+/// sync and async paths (m-7).
+fn validate_random_size(size: i32) -> Result<usize, OpError> {
+    if size < 0 {
+        return Err(OpError::node("ERR_OUT_OF_RANGE",
+            "size must be a non-negative integer"));
+    }
+    // Buffer.kMaxLength = 2^31 - 1 = 0x7FFFFFFF. Node's randomBytes uses the
+    // same limit because the result is a Buffer.
+    if size > 0x7FFFFFFF {
         return Err(OpError::node("ERR_OUT_OF_RANGE",
             "size must be ≤ 2^31-1"));
     }
-    let mut out = vec![0u8; size as usize];
+    Ok(size as usize)
+}
+
+pub fn random_bytes_sync<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    size: i32,
+) -> Result<v8::Local<'s, v8::Value>, OpError> {
+    let n = validate_random_size(size)?;
+    let mut out = vec![0u8; n];
     crate::crypto::fast_random(&mut out);
     Ok(buffer::emit_buffer(scope, &out).into())
 }
 
-pub async fn random_bytes_async(size: u32) -> Result<Vec<u8>, OpError> {
-    if size > 2147483647 {
-        return Err(OpError::node("ERR_OUT_OF_RANGE", "size must be ≤ 2^31-1"));
-    }
+pub async fn random_bytes_async(size: i32) -> Result<Vec<u8>, OpError> {
+    let n = validate_random_size(size)?;
     compio::runtime::spawn_blocking(move || {
-        let mut out = vec![0u8; size as usize];
+        let mut out = vec![0u8; n];
         crate::crypto::fast_random(&mut out);
         Ok::<_, OpError>(out)
-    }).await.map_err(|e| OpError::node("ERR_CRYPTO_OPERATION_FAILED", format!("{e:?}")))?
+    }).await
+      .map_err(|e| OpError::node("ERR_CRYPTO_OPERATION_FAILED", format!("{e:?}")))
+      .and_then(|r| r)
 }
 
 // randomInt: rejection sampling.
+//
+// (addresses critic MAJOR #10 + minor m-15): Node's `randomInt(min, max)` per
+// https://nodejs.org/api/crypto.html#cryptorandomintmin-max-callback enforces
+// `max - min` ≤ `2^48` minus 1 = 281_474_976_710_655 (`0xFFFFFFFFFFFF`). v1
+// used `> 2^48` which is off-by-one (allows range == 2^48). Fixed: use `>=`.
+//
+// `max == min` is also illegal (range zero); we keep the existing guard. The
+// `randomInt(5, 5)` case (m-15) hits the `max <= min` check first and returns
+// ERR_OUT_OF_RANGE before any bit-mask logic, so the bits=0 / mask=0 corner is
+// unreachable.
 pub fn random_int_sync(min: i64, max: i64) -> Result<i64, OpError> {
     if max <= min {
         return Err(OpError::node("ERR_OUT_OF_RANGE",
             "max must be greater than min"));
     }
-    if max - min > 2_i64.pow(48) {
+    // Node's actual cap is 2^48 - 1.  `>=` instead of `>` per
+    // https://github.com/nodejs/node/blob/main/lib/internal/crypto/random.js.
+    if (max - min) >= (1_i64 << 48) {
         return Err(OpError::node("ERR_OUT_OF_RANGE",
-            "max - min must be ≤ 2^48"));
+            "max - min must be < 2^48"));
     }
     let range = (max - min) as u64;
     // Find next power-of-2 >= range, sample bits, reject if >= range.
