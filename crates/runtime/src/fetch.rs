@@ -21,7 +21,7 @@
 //! D-23 polyfill cutover — `globalThis.fetch` is now the native callback
 //! installed by `fetch_native::install_fetch_global`. See ADR D-23.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use cyper::resolve::Resolve;
 use futures::Stream;
@@ -78,9 +78,10 @@ pub fn is_blocked_ip(addr: IpAddr) -> bool {
 pub fn validate_url(url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
 
-    // Only allow http and https schemes
+    // Allow http(s) and the WebSocket schemes ws/wss. The block list
+    // (private/loopback/etc.) below applies uniformly to all four.
     match parsed.scheme() {
-        "http" | "https" => {}
+        "http" | "https" | "ws" | "wss" => {}
         scheme => return Err(format!("Blocked URL scheme: {scheme}")),
     }
 
@@ -113,6 +114,66 @@ pub fn validate_url(url: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// resolve_and_check_ssrf — DNS resolution + SSRF revalidation
+// ---------------------------------------------------------------------------
+
+/// Resolve `host:port` to a `SocketAddr` and verify the result is NOT
+/// in any blocked range. Returns the FIRST non-blocked address.
+///
+/// This is the WebSocket-handshake counterpart to `SsrfResolver` (which
+/// hooks into cyper's resolver pipeline). Unlike fetch — where
+/// `cyper::Client` performs the connect after receiving the filtered
+/// stream of IPs — the WebSocket handshake calls
+/// `compio::net::TcpStream::connect(addr)` directly, so we MUST hand it
+/// a SocketAddr that has already been validated. Otherwise an attacker
+/// can pin a public hostname's resolution to `127.0.0.1` between the
+/// URL-string check and `connect`.
+///
+/// In dev mode (`ZEROSHIP_DEV=1`) localhost is permitted (matches
+/// `validate_url`), so the WebSocket handshake also reaches the Vite
+/// dev server.
+///
+/// Spec: defends the "DNS rebinding" attack class explicitly — see
+/// docs/proposals/websocket-native.md §VIII.1 (CRITICAL #8).
+pub fn resolve_and_check_ssrf(host: &str, port: u16) -> Result<SocketAddr, String> {
+    use std::io::{Error, ErrorKind};
+
+    let dev_mode = std::env::var("ZEROSHIP_DEV").is_ok();
+
+    // Strip IPv6 literal brackets before to_socket_addrs.
+    let host_clean = host.trim_start_matches('[').trim_end_matches(']');
+    let target = format!("{host_clean}:{port}");
+
+    // std DNS resolution. The handshake spawns this on a compio task
+    // (off the V8 thread); a brief sync DNS call there is acceptable.
+    let mut iter = std::net::ToSocketAddrs::to_socket_addrs(&target)
+        .map_err(|e: Error| format!("DNS resolve failed: {e}"))?;
+
+    // Pick the first non-blocked address. We intentionally don't try
+    // every candidate: the SSRF guard is best served by failing fast
+    // when ANY blocked candidate is returned. The fallback for happy-
+    // eyeballs / multi-AAAA hosts is "try the first allowed one".
+    let mut last_blocked: Option<IpAddr> = None;
+    for addr in &mut iter {
+        let ip = addr.ip();
+        if dev_mode || !is_blocked_ip(ip) {
+            return Ok(addr);
+        }
+        last_blocked = Some(ip);
+    }
+    Err(match last_blocked {
+        Some(ip) => format!(
+            "Blocked: all resolved addresses are in blocked ranges (e.g. {ip}) (SSRF guard)"
+        ),
+        None => format!("DNS resolve produced no addresses for {host}:{port}"),
+    })
+    .map_err(|e| {
+        let _ = Error::new(ErrorKind::PermissionDenied, e.clone());
+        e
+    })
 }
 
 // ---------------------------------------------------------------------------

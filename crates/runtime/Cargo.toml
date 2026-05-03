@@ -42,6 +42,16 @@ futures = { workspace = true }
 # compio event loop
 compio = { workspace = true, features = ["time", "macros", "bytes"] }
 
+# Native WebSocket framer (RFC 6455 — in-tree decoder/encoder + raw
+# compio TCP / compio-tls TLS. compio-ws kept ONLY for its TLS connector
+# helper; we hand-roll the HTTP handshake so the framer owns the
+# leftover bytes after the 101 response.)
+compio-ws = { workspace = true, optional = true }
+compio-tls = { workspace = true, optional = true }
+# Native trust roots for the wss:// handshake. Direct dep — used in
+# `websocket_native::handshake::build_tls_connector`.
+rustls-native-certs = { version = "0.8", optional = true }
+
 # HTTP client (fetch)
 cyper = { workspace = true }
 http = { workspace = true }
@@ -67,6 +77,31 @@ path = "src/server.rs"
 [[bin]]
 name = "echo-server"
 path = "src/echo_server.rs"
+
+[features]
+# Cutover landing 2: the native WebSocket impl is on by default.
+# The polyfill's `WebSocket` and `WebSocketPair` JS classes still install
+# but only wire to the native plumbing via `__nativeWebSocket` detection
+# in `embed/websocket.js`. Tests that reach into the polyfill's per-WS
+# state (state.websockets HashMap) and were not yet migrated to native
+# can opt out via `--no-default-features`.
+default = ["runtime_native_websocket"]
+# Per docs/proposals/websocket-native.md D-25 (cutover cadence):
+#  Landing 1: native behind feature flag, polyfill default — current.
+#  Landing 2: flip default to native; polyfill remains as fallback.
+#  Landing 3: delete polyfill.
+# When OFF: the JS polyfill at `embed/websocket.js` provides
+# `globalThis.WebSocket`; native classes are NOT installed.
+# When ON: native classes install BEFORE the polyfill runs, and the
+# polyfill detects this and skips its WebSocket assignment.
+runtime_native_websocket = ["dep:compio-ws", "dep:compio-tls", "dep:rustls-native-certs"]
+# Strict-throws path for `binaryType` setter on unknown values. v2 D-7
+# default is silent-no-op (matches undici, workerd, the WPT test); the
+# strict path is preserved behind this feature only for WPT-update tracking.
+runtime_websocket_strict_enum = []
+# Emergency rollback to the polyfill once cutover landing 3 has shipped
+# (delete polyfill); reserved.
+runtime_legacy_websocket = []
 
 [lints]
 workspace = true

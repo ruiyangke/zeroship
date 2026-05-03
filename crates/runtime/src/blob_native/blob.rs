@@ -209,6 +209,30 @@ pub fn is_blob_instance_public(scope: &mut v8::PinScope, obj: v8::Local<v8::Obje
     is_blob_instance(scope, obj)
 }
 
+/// Return the size (in bytes) of a Blob. Returns 0 if the object isn't
+/// a Blob (callers should brand-check first via `is_blob_instance_public`).
+///
+/// Used by `WebSocket.send(blob)` to bump bufferedAmount synchronously
+/// — per WHATWG §3.1 step 4 + critic MAJOR #6.
+pub fn blob_size_public(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> u64 {
+    if !is_blob_instance(scope, obj) {
+        return 0;
+    }
+    let Some(ext) = obj
+        .get_internal_field(scope, 0)
+        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
+    else {
+        return 0;
+    };
+    let ptr = ext.value() as *const Blob;
+    if ptr.is_null() {
+        return 0;
+    }
+    // SAFETY: the External points at a Box<Blob> created in
+    // `wrap_blob_in_v8`; the boxed state lives for the wrapper's lifetime.
+    unsafe { (*ptr).len as u64 }
+}
+
 /// True if `obj` is an instance of `globalThis.File`. Used by FormData
 /// to distinguish a File from a plain Blob when storing values.
 pub fn is_file_instance_public(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {

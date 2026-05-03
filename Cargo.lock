@@ -848,6 +848,7 @@ dependencies = [
  "compio-log",
  "compio-net",
  "compio-tls",
+ "rustls-native-certs",
  "tungstenite",
 ]
 
@@ -6449,6 +6450,8 @@ dependencies = [
  "base64 0.22.1",
  "brotli",
  "compio",
+ "compio-tls",
+ "compio-ws",
  "cyper",
  "deno_core_icudata",
  "encoding_rs",
@@ -6460,6 +6463,7 @@ dependencies = [
  "libc",
  "mimalloc",
  "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "sha1",
