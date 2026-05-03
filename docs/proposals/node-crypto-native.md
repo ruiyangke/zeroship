@@ -124,7 +124,7 @@ Post-completion: file as a date-prefixed ADR under `docs/decisions/` (mirroring 
 | **D-N16** | webcrypto bridge — object identity. `import("node:crypto")` yields an exports object whose `.webcrypto` property IS the same `Crypto` instance that's installed at `globalThis.crypto`. The synthetic module's installer code reads `globalThis.crypto` once at module-evaluate time and assigns the reference directly; subsequent reads return the same `Crypto` instance. `subtle` is `globalThis.crypto.subtle`. `getRandomValues` is `globalThis.crypto.getRandomValues.bind(globalThis.crypto)` (Node binds; we follow). | Node's `crypto.webcrypto === globalThis.crypto` is a cross-codebase invariant — JOSE libraries assume it. Returning a copy would silently break `WeakMap`-based key tracking (libraries that keep a `WeakMap<CryptoKey, ...>` would lose entries on the boundary). | §VIII |
 | **D-N17** | Random: `randomBytes(size, callback?) -> Buffer | void` (callback variant returns Buffer to callback async; sync variant returns Buffer). `randomFillSync(buffer, offset?, size?) -> Buffer`. `randomFill(buffer, offset?, size?, callback) -> void` (always callback). `randomInt(min, max, callback?) -> number` (uniform distribution via rejection sampling, not the JS-shim's modulo bias). `randomUUID(options?)` — same as `globalThis.crypto.randomUUID`. `getRandomValues` re-export. All sync; `randomBytes(N)` for very large N (e.g. > 1 MB) goes async via callback if present, sync otherwise — matches Node. | The randomInt rejection-sampling fix corrects a subtle bias in the JS shim (line 109-117 of node-compat.ts: `range > 2^32` causes silent bias). Node uses the same rejection-sampling technique we will. | §VI.5 |
 | **D-N18** | Algorithm name canonicalisation: node:crypto names are case-insensitive but inconsistent ("sha256" vs "SHA-256" vs "RSA-SHA256"). The kernel uses spec-canonical names ("SHA-256", "RSA-PSS"); the surface adapter maps node:crypto inputs via a phf::Map: `"sha256" -> SHA-256`, `"sha-256" -> SHA-256`, `"sha384" -> SHA-384`, ..., `"rsa-sha256" -> SignAlg::RsaPkcs1Sha256`, etc. Names not in the table → `ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM`. | Node's getHashes() returns ~50 names (because OpenSSL aliases everything). We support the 4 SHA digests + their aliases + ChaCha20-Poly1305 + the 11 cipher modes + 6 sign algorithms — total ~25 algorithm names. The map is small. | §IX |
-| **D-N19** | `KeyObject.export(options)` accepts `{ format: 'pem' | 'der' | 'jwk', type: 'pkcs1' | 'pkcs8' | 'spki' | 'sec1', cipher?: string, passphrase?: Buffer }`. PEM emission uses the kernel's PEM emitter (the inverse of D-N14's parser). `cipher` + `passphrase` for encrypted PKCS#8 export uses aws-lc-rs's `EncryptedPrivateKeyInfo::serialize_with_password`. JWK export reuses `crypto_native/jwk.rs::export_*`. | Direct Node parity. The cipher options matrix (`{ cipher: 'aes-256-cbc', passphrase: Buffer.from('...') }`) is what passport / saml / openid-client libraries use to round-trip encrypted private keys. | §IV.6 |
+| **D-N19** | `KeyObject.export(options)` accepts `{ format: 'pem' \| 'der' \| 'jwk', type: 'pkcs1' \| 'pkcs8' \| 'spki' \| 'sec1', cipher?: string, passphrase?: Buffer }`. PEM emission uses the kernel's PEM emitter (the inverse of D-N14's parser). `cipher` + `passphrase` for encrypted PKCS#8 export goes through `crypto_kernel/pkcs8_enc.rs` (D-N33 — drop to `aws-lc-sys` because high-level `aws-lc-rs` does not expose this surface). JWK export reuses `crypto_native/jwk.rs::export_*`. | Direct Node parity. The cipher options matrix (`{ cipher: 'aes-256-cbc', passphrase: Buffer.from('...') }`) is what passport / saml / openid-client libraries use to round-trip encrypted private keys. (addresses critic MAJOR #16: v1 cited an invented `EncryptedPrivateKeyInfo::serialize_with_password` API; corrected.) | §IV.6, §IV.4a |
 | **D-N20** | X.509: Stage 1 ships a stub class that throws `ERR_CRYPTO_UNSUPPORTED_OPERATION` on construction, with a clear message pointing at the Stage 2 ADR. Stage 2 ships parsing-only (constructor + readonly properties). Full chain verification defers to a future `@zeroship/x509-verify` npm package wrapping BoringSSL's `X509_verify_cert`. | Most npm packages that touch X509 (jsonwebtoken's JWKS endpoints, Apple Sign-In, Google's JWT checking) do their own verify on top of `X509Certificate.publicKey` — they don't call `.verify()` directly. Stage 2 parsing-only covers ~80% of usage. | §X |
 | **D-N21** | DH: Stage 1 ships only the named groups (`crypto.getDiffieHellman('modp14')` etc.). Stage 2 adds `crypto.createDiffieHellman(prime, generator)` via aws-lc-sys's lower FFI (`DH_set0_pqg`). Stage 1 errors on the unnamed-group factory with `ERR_CRYPTO_UNSUPPORTED_OPERATION`. `crypto.createECDH` ships in Stage 1 (aws-lc-rs's `agreement::*` has the curves). | DH (vs ECDH) is rare in modern apps — TLS 1.3 deprecated DHE in favour of ECDHE. Most uses we'll see in npm are SCRAM / SSH-key-exchange, both of which use named groups. Generic DH is the long tail. | §X |
 | **D-N22** | Legacy ciphers (DES, 3DES, Blowfish, Cast5, RC4, IDEA): NOT in Stage 1. Stage 2 ships them under the `--legacy-crypto` runtime flag (off by default). Without the flag, `createCipheriv('des-cbc', ...)` errors with `ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM` and a message pointing at the flag. Node ships these unconditionally (they're behind OpenSSL's `OPENSSL_NO_LEGACY` macro, which Node defines off). aws-lc-rs has DES via `cipher::TDES_*` but not Blowfish / Cast5 / RC4 / IDEA. We'd need aws-lc-sys raw for those. | Most modern apps don't touch these. The few that do are interfacing with truly legacy systems (POS terminals, ancient SAML providers); a runtime flag rather than blanket support reduces our attack surface. | §X |
@@ -918,7 +918,7 @@ That's 16 algorithms shared across both surfaces.
 | **DH (modp1..modp18, ffdhe2048..ffdhe8192)** | Named-group DH | aws-lc-sys raw FFI | E |
 | **DH arbitrary primes** | Generic DH | aws-lc-sys raw FFI | E |
 | **Brainpool curves** (`brainpoolP256r1`, `brainpoolP384r1`, `brainpoolP512r1`) | Niche EU / German banking | aws-lc-sys raw FFI | E |
-| **secp256k1** | Bitcoin / Ethereum signing | aws-lc-rs has it via `signature::ECDSA_K256_*` | C |
+| **secp256k1** | Bitcoin / Ethereum signing | aws-lc-rs `signature::ECDSA_P256K1_SHA256_{ASN1,FIXED}` (and `_SIGNING` variants) — note the actual constant name is `P256K1` not `K256`. (addresses critic CRITICAL #14: critic flagged the v1 `ECDSA_K256` as invented; the API exists but under the `P256K1` name.) | C |
 
 Stage 1 coverage: SHA family + AES-{CBC,CTR,GCM,KW,OCB} + ChaCha20-Poly1305 + RSA + ECDSA + Ed25519 + X25519 + ECDH + PBKDF2 + scrypt + HKDF + MD5 + secp256k1.
 
@@ -1165,7 +1165,28 @@ pub fn encode(label: &str, bytes: &[u8]) -> String { /* emit RFC 7468 PEM */ }
 
 PEM decoding is ~80 LOC of Rust (RFC 7468 is a tiny spec; `-----BEGIN <label>-----`, base64 body, `-----END <label>-----`). No dependency added.
 
-For encrypted PKCS#8 (`{ passphrase: Buffer.from('hunter2') }`), the parser dispatches to aws-lc-rs's `EncryptedPrivateKeyInfo::from_bytes(der).decrypt(passphrase)` (returns plaintext PKCS#8), then re-runs the unencrypted parser.
+For encrypted PKCS#8 (`{ passphrase: Buffer.from('hunter2') }`), see §IV.4a (encrypted PKCS#8 path). v1 specified an `EncryptedPrivateKeyInfo::from_bytes(...).decrypt(passphrase)` call on `aws-lc-rs`; that API **does not exist in `aws-lc-rs` 1.x** (verified against https://docs.rs/aws-lc-rs/latest/aws_lc_rs/ — the encoding module exposes only `Pkcs8V1Der` / `Pkcs8V2Der` byte wrappers, no encryption). v2 drops to `aws-lc-sys` raw FFI — see new D-N33 below.
+
+### IV.4a. Encrypted PKCS#8 import / export (D-N33, addresses critic CRITICAL #7, MAJOR #12, MAJOR #16)
+
+The high-level `aws-lc-rs` does not expose PBES2/PBKDF2-encrypted PKCS#8. We implement a thin `crypto_kernel/pkcs8_enc.rs` (~250 LOC) that:
+
+- **Decrypt path** (used by `createPrivateKey({ key, passphrase })`): parse the outer `EncryptedPrivateKeyInfo` (RFC 5958 §3) ASN.1 DER by hand to extract the PBES2 parameters (PBKDF2 salt, iteration count, prf OID) and the inner cipher OID + IV. Derive the KEK via `aws_lc_rs::pbkdf2`. Run the inner cipher in decrypt mode via `aws_lc_rs::cipher::DecryptingKey`. Return the plaintext PKCS#8 DER for re-parsing.
+- **Encrypt path** (used by `KeyObject.export({ format: 'pem'|'der', cipher, passphrase })`): build the PBES2 parameter ASN.1 by hand (salt = 16 random bytes; iter = 2048 by Node default; cipher per the user's `cipher` option). Run the chosen cipher in encrypt mode. Wrap the result in the `EncryptedPrivateKeyInfo` ASN.1 envelope.
+
+Total cost: ~250 LOC of bespoke ASN.1 DER walker + envelope builder. The DER walker reuses the existing `crypto_kernel/der.rs` (moved from `crypto_native/`).
+
+**Cipher whitelist for encrypted PKCS#8** (addresses critic MAJOR #17 — Node's actual list per https://nodejs.org/api/crypto.html#keyobjectexportoptions and OpenSSL's `PKCS8_encrypt` table):
+
+```
+aes-128-cbc, aes-192-cbc, aes-256-cbc       ← Stage C (default-on)
+aes-128-ecb, aes-256-ecb                    ← Stage E, gated on --legacy-crypto
+des-ede3-cbc, des-ede3-ecb                  ← Stage E, gated on --legacy-crypto
+```
+
+ECB ciphers as the inner cipher of an encrypted private key are particularly hairy (block-aligned padding ambiguity); we accept only when explicitly enabled.
+
+**Why not high-level aws-lc-rs?** Verified against https://docs.rs/aws-lc-rs/latest/aws_lc_rs/encoding/index.html: the module exposes `Pkcs8V1Der<'a>` and `Pkcs8V2Der<'a>` as serialized byte wrappers but does NOT expose any `EncryptedPrivateKeyInfo` type or `serialize_with_password` method. We've audited `aws-lc-sys` (the low-level binding) for `PKCS8_decrypt` / `PKCS8_encrypt_pbe` — both are present and stable. We use those.
 
 ### IV.5. `KeyObject.from(cryptoKey)` static (D-N4)
 
@@ -1843,15 +1864,57 @@ fn parse_sign_key_input(
     let km = parse_private_key_input(scope, opts.key)?;
     let padding = match opts.padding {
         Some(RSA_PKCS1_PSS_PADDING) =>
-            SignPadding::RsaPss { salt_length: opts.salt_length.unwrap_or_else(|| {
-                // Node default: equal to digest length
-                hash_digest_len(self.hash) as u32
-            })},
+            SignPadding::RsaPss {
+                // (addresses critic CRITICAL #8 + new D-N34): translate the
+                // saltLength SENTINELS to absolute byte counts BEFORE the
+                // kernel call. Per https://nodejs.org/api/crypto.html#sign-sign:
+                //   * RSA_PSS_SALTLEN_DIGEST  = -1  → equal to digest length (Node + OpenSSL default)
+                //   * RSA_PSS_SALTLEN_MAX_SIGN = -2 → maximum permissible (k - hLen - 2)
+                //                                    where k = ceil(modulus_bits / 8)
+                //   * RSA_PSS_SALTLEN_AUTO     = -2 (verify only) → derive from sig
+                //   * any non-negative integer → use as-is
+                // v1 propagated `-1` / `-2` as a literal usize, which would either
+                // panic on cast or send garbage to OpenSSL.
+                salt_length: normalise_pss_salt_length(
+                    opts.salt_length,
+                    self.hash,
+                    rsa_modulus_bytes(&km),
+                )?,
+            },
         Some(RSA_PKCS1_PADDING) | None => SignPadding::Default,
         Some(other) => return Err(OpError::node("ERR_INVALID_ARG_VALUE",
             format!("Unknown padding constant: {}", other))),
     };
     Ok((Arc::new(km), padding))
+}
+
+/// Resolve the user-supplied saltLength (which may be a sentinel) to an
+/// absolute byte count. Sentinels per
+/// https://nodejs.org/api/crypto.html#cryptoconstants and OpenSSL's
+/// `RSA_PSS_SALTLEN_*` macros.
+///
+/// (D-N34) Always normalised to a `usize` BEFORE the kernel boundary so the
+/// kernel never sees negative sentinels — this isolates the OpenSSL/aws-lc-rs
+/// FFI from sentinel handling.
+fn normalise_pss_salt_length(
+    user_value: Option<i32>,
+    hash: HashAlgo,
+    modulus_bytes: usize,
+) -> Result<usize, OpError> {
+    let h_len = digest_len_bytes(hash);
+    match user_value {
+        None | Some(-1) /* RSA_PSS_SALTLEN_DIGEST */ => Ok(h_len),
+        Some(-2) /* RSA_PSS_SALTLEN_MAX_SIGN / AUTO */ => {
+            // For sign: emBits = modulusBits - 1; sLen_max = emLen - hLen - 2.
+            // Approximation: emLen = modulus_bytes when modulus_bits is a multiple of 8.
+            modulus_bytes.checked_sub(h_len + 2)
+                .ok_or_else(|| OpError::node("ERR_OUT_OF_RANGE",
+                    "RSA modulus too small for PSS with this hash"))
+        }
+        Some(n) if n >= 0 => Ok(n as usize),
+        Some(other) => Err(OpError::node("ERR_INVALID_ARG_VALUE",
+            format!("Invalid saltLength sentinel: {}", other))),
+    }
 }
 ```
 
@@ -2823,18 +2886,36 @@ export function secureHeapUsed() { return _zsc.secureHeapUsed(); }
 export const webcrypto = _g.crypto;
 export const subtle = _g.crypto.subtle;
 
-// Constants.
+// Constants. (addresses critic CRITICAL #8 + missing concept #24): Node's
+// `crypto.constants` exposes ~70 OpenSSL constants per
+// https://nodejs.org/api/crypto.html#crypto-constants. v1 listed only 10.
+// v2 ships the Tier-1 set in Stage B, then expands in Stage E. The full set
+// is in §X.6 below.
+//
+// SaltLength sentinels are negative by Node convention and require translation
+// via normalise_pss_salt_length() in parse_sign_key_input (see §V.5). Direct
+// kernel calls never see negatives.
+//   - RSA_PSS_SALTLEN_DIGEST  = -1 → equal to digest length (default).
+//   - RSA_PSS_SALTLEN_MAX_SIGN = -2 → maximum permissible salt for signing.
+//   - RSA_PSS_SALTLEN_AUTO    = -2 → verify-only: auto-derive from signature.
+// `MAX_SIGN` and `AUTO` share the value `-2`; the operation context decides
+// which interpretation applies.
 export const constants = {
+    // RSA padding (Tier 1).
     RSA_PKCS1_PADDING: 1,
-    RSA_NO_PADDING: 3,
+    RSA_NO_PADDING: 3,                  // footgun: raw RSA without padding is insecure
     RSA_PKCS1_OAEP_PADDING: 4,
     RSA_PKCS1_PSS_PADDING: 6,
     RSA_PSS_SALTLEN_DIGEST: -1,
     RSA_PSS_SALTLEN_MAX_SIGN: -2,
     RSA_PSS_SALTLEN_AUTO: -2,
+
+    // EC point conversion.
     POINT_CONVERSION_COMPRESSED: 2,
     POINT_CONVERSION_UNCOMPRESSED: 4,
     POINT_CONVERSION_HYBRID: 6,
+
+    // SSL_OP_* and DH_CHECK_* and ENGINE_METHOD_* — Stage E (see §X.6).
 };
 
 // Default export — Node packages use both named and default imports.
